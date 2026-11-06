@@ -24,7 +24,9 @@
 #include "march_http_parse_simd.h"
 #include "march_http_response.h"
 #include "march_scheduler.h"   /* march_sched_run_on_sched_stack */
-#include "march_https.h"       /* g_march_https: phase timeouts */
+#include "march_https.h"       /* g_march_https: phase timeouts, plain listener */
+#include "march_tls_session.h"  /* per-connection TLS */
+#include "march_tls_server.h"   /* the certificate slot, fd -> session registry */
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -213,7 +215,14 @@ extern _Atomic int g_http_shutdown;
 typedef struct {
     int    listener_fd;   /* SO_REUSEPORT fd owned by this thread */
     void  *pipeline;      /* March closure (Conn → Conn) */
+    int    is_tls;        /* listener_fd serves HTTPS */
+    int    plain_fd;      /* extra plain-HTTP listener, -1 if none */
+    void  *plain_pipeline;
 } evloop_thread_arg_t;
+
+/* epoll user data for the two listeners (a conn_state_t pointer otherwise). */
+#define EVLOOP_MAIN_LISTENER  ((void *)1)
+#define EVLOOP_PLAIN_LISTENER ((void *)2)
 
 /* ── Create a SO_REUSEPORT listener ───────────────────────────────────── */
 
@@ -250,7 +259,7 @@ static int create_reuseport_listener(int port) {
 
 /* ── Accept a new connection ──────────────────────────────────────────── */
 
-static void accept_connections(int listener_fd, int evfd) {
+static void accept_connections(int listener_fd, int evfd, int is_tls, void *pipeline) {
     /* Accept in a loop — edge-triggered kqueue/epoll may batch multiple
      * ready connections into a single event. */
     for (;;) {
@@ -278,9 +287,22 @@ static void accept_connections(int listener_fd, int evfd) {
         /* Allocate per-connection state. */
         conn_state_t *c = conn_state_alloc();
         if (!c) { close(cfd); continue; }
-        c->fd    = cfd;
-        c->phase = CONN_PHASE_READING;
-        conn_set_phase(c, PH_IDLE);
+        c->fd       = cfd;
+        c->phase    = CONN_PHASE_READING;
+        c->pipeline = pipeline;
+        if (is_tls) {
+            /* The session takes its own reference to the current context;
+             * a later certificate swap leaves this connection's alone. */
+            SSL_CTX *ctx = mts_slot_acquire();
+            march_tls_session_t *s = ctx ? mts_new_server(ctx) : NULL;
+            if (ctx) SSL_CTX_free(ctx);
+            if (!s) { close(cfd); conn_state_free(c); continue; }
+            c->tls = s;
+            mts_registry_put(cfd, s);
+            conn_set_phase(c, PH_HANDSHAKE);
+        } else {
+            conn_set_phase(c, PH_IDLE);
+        }
 
         /* Register for readability. */
 #if EVLOOP_USE_KQUEUE
@@ -333,6 +355,17 @@ static void arm_read(int evfd, conn_state_t *c) {
 
 static void close_conn(int evfd, conn_state_t *c) {
     heap_remove(c);
+    if (c->tls) {
+        /* One best-effort close_notify, then forget the session BEFORE the
+         * fd is closed: a new connection reusing the number must never find
+         * this session in the registry. */
+        mts_shutdown(c->tls);
+        (void)march_tls_flush(c, NULL);
+        mts_registry_take(c->fd);
+        mts_free(c->tls);
+        c->tls = NULL;
+        march_tls_conn_free_out(c);
+    }
 #if EVLOOP_USE_KQUEUE
     /* kqueue automatically removes filters when fd is closed. */
     (void)evfd;
@@ -357,6 +390,7 @@ static void sweep_deadlines(int evfd) {
  * request's headers are still arriving: the header deadline runs from the
  * first byte and is NOT moved by later bytes (a slowloris drip). */
 static void update_read_phase(conn_state_t *c, int got_bytes, int dispatched) {
+    if (c->tls && !mts_is_established(c->tls)) return;   /* still PH_HANDSHAKE */
     if (c->rbuf_len == 0) {
         if (c->timed_phase != PH_IDLE || got_bytes) conn_set_phase(c, PH_IDLE);
         return;
@@ -440,18 +474,52 @@ static void evloop_defer_write(int evfd, conn_state_t *c,
 
 /* ── Handle a readable connection ─────────────────────────────────────── */
 
-static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
+/* Send a TLS connection's pending ciphertext. Returns 1 when all of it is
+ * out; 0 when the rest waits for writability (the connection is now in the
+ * write phase, armed for write, and keeps [keep_alive] for when it drains);
+ * -1 after closing the connection on an error. */
+static int tls_send_or_defer(int evfd, conn_state_t *c, int keep_alive) {
+    io_result_t f = march_tls_flush(c, NULL);
+    if (f == IO_COMPLETE) return 1;
+    if (f == IO_ERROR) { close_conn(evfd, c); return -1; }
+    c->keep_alive = keep_alive;
+    c->phase      = CONN_PHASE_WRITING;
+    if (mts_is_established(c->tls)) conn_set_phase(c, PH_WRITE);
+    arm_write(evfd, c);
+    return 0;
+}
+
+/* Write a batch: plaintext connections writev it; TLS ones encrypt it into
+ * the session (the bytes are copied, so the batch is "all written" and its
+ * results may be released) and send it later with tls_send_or_defer. */
+static ssize_t conn_out(conn_state_t *c, struct iovec *iov, int n) {
+    if (!c->tls) return writev(c->fd, iov, n);
+    if (march_tls_write_iov(c, iov, n) != 0) { errno = EIO; return -1; }
+    size_t total = 0;
+    for (int i = 0; i < n; i++) total += iov[i].iov_len;
+    return (ssize_t)total;
+}
+
+static void handle_read(int evfd, conn_state_t *c) {
+    void       *pipeline = c->pipeline;
     size_t      before = c->rbuf_len;
     io_result_t r = march_recv_nonblocking(c);
     int         got_bytes = c->rbuf_len > before;
 
-    if (r == IO_PARTIAL) {
-        update_read_phase(c, got_bytes, 0);
+    if (r == IO_ERROR) {
+        close_conn(evfd, c);
         return;
     }
 
-    if (r == IO_ERROR) {
-        close_conn(evfd, c);
+    /* TLS: send what the session produced (handshake messages, tickets). */
+    if (c->tls) {
+        int s = tls_send_or_defer(evfd, c, 1);
+        if (s < 0) return;
+        if (s == 0) return;               /* resumes from handle_write */
+    }
+
+    if (r == IO_PARTIAL) {
+        update_read_phase(c, got_bytes, 0);
         return;
     }
 
@@ -521,8 +589,9 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
             void *result_conn = fn(pipeline, conn);
 
             if (!result_conn) {
-                if (batch_n > 0) { writev(c->fd, batch_iov, batch_n); }
-                march_http_send_response(c->fd, 500, make_nil(),
+                if (batch_n > 0) { conn_out(c, batch_iov, batch_n); }
+                if (c->tls) (void)march_tls_flush(c, NULL);
+                else march_http_send_response(c->fd, 500, make_nil(),
                     march_string_lit("Internal Server Error", 21));
                 march_http_release_conns(done_conns, &done_n);
                 close_conn(evfd, c);
@@ -537,6 +606,15 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
             char    *rc_p        = (char *)result_conn;
             void    *upgrade_val = *(void **)(rc_p + 112);
             int32_t  upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
+            if (upgrade_tag == 1 && c->tls) {
+                /* wss:// is wired up separately (Task 9 of the HTTPS plan);
+                 * until then an upgrade over TLS is refused by closing. */
+                march_http_release_conns(done_conns, &done_n);
+                march_http_release_conn(result_conn);
+                close_conn(evfd, c);
+                batch_ok = 0;
+                break;
+            }
             if (upgrade_tag == 1) {
                 if (batch_n > 0) { writev(c->fd, batch_iov, batch_n); }
 
@@ -588,7 +666,7 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
 
             /* Overflow guard: flush early if batch is near capacity. */
             if (batch_n + MARCH_RESPONSE_MAX_IOVEC > CONN_BATCH_IOV_MAX) {
-                writev(c->fd, batch_iov, batch_n);
+                conn_out(c, batch_iov, batch_n);
                 batch_n            = 0;
                 march_http_release_conns(done_conns, &done_n);
                 bresp.scratch_used = 0;
@@ -608,6 +686,17 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
 
         if (!batch_ok) return;
         if (batch_n == 0) continue;
+
+        if (c->tls) {
+            ssize_t w = conn_out(c, batch_iov, batch_n);
+            /* Encrypted (copied) into the session: the results are done. */
+            march_http_release_conns(done_conns, &done_n);
+            if (w < 0) { close_conn(evfd, c); return; }
+            int s = tls_send_or_defer(evfd, c, batch_keep_alive);
+            if (s <= 0) return;
+            if (!batch_keep_alive) { close_conn(evfd, c); return; }
+            continue;
+        }
 
         /* ── Single non-blocking writev for the entire batch ─────── */
         ssize_t nsent = writev(c->fd, batch_iov, batch_n);
@@ -667,8 +756,22 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
 /* ── Handle a writable connection ─────────────────────────────────────── */
 
 static void handle_write(int evfd, conn_state_t *c) {
-    /* This path is used when we switch to non-blocking writes (Phase 3).
-     * For now, responses are sent synchronously in handle_read. */
+    if (c->tls) {
+        size_t sent = 0;
+        io_result_t f = march_tls_flush(c, &sent);
+        if (f == IO_PARTIAL) {
+            if (sent && mts_is_established(c->tls)) conn_set_phase(c, PH_WRITE);
+            return;
+        }
+        if (f == IO_ERROR || !c->keep_alive) { close_conn(evfd, c); return; }
+        c->phase = CONN_PHASE_READING;
+        if (mts_is_established(c->tls)) conn_set_phase(c, PH_IDLE);
+        arm_read(evfd, c);
+        /* Requests already decrypted, or ciphertext already fed, raise no
+         * new readable edge: serve them now. */
+        if (c->rbuf_len > 0 || mts_has_input(c->tls)) handle_read(evfd, c);
+        return;
+    }
     int         pos_before = c->wbuf_pos;
     size_t      len_before = c->wbuf_pos < c->wbuf_count ? c->wbuf[c->wbuf_pos].iov_len : 0;
     io_result_t r = march_send_nonblocking(c);
@@ -690,21 +793,26 @@ static void handle_write(int evfd, conn_state_t *c) {
     /* The deferred write has drained: release the results it referenced. */
     march_http_release_conns(c->pending_release, &c->pending_release_n);
 
-    /* Response sent + keep-alive: reset for next request. */
+    /* Response sent + keep-alive: back to reading. Pipelined requests that
+     * arrived behind the deferred batch are still in rbuf (they used to be
+     * discarded here) and raise no new readable edge: serve them now. */
     c->phase     = CONN_PHASE_READING;
-    c->rbuf_len  = 0;
     c->wbuf_count = 0;
     c->wbuf_pos   = 0;
     conn_set_phase(c, PH_IDLE);
     arm_read(evfd, c);
+    if (c->rbuf_len > 0) handle_read(evfd, c);
 }
 
 /* ── Event loop (one per thread) ──────────────────────────────────────── */
 
 static void *evloop_run(void *arg) {
     evloop_thread_arg_t *targ = (evloop_thread_arg_t *)arg;
-    int    listener_fd = targ->listener_fd;
-    void  *pipeline    = targ->pipeline;
+    int    listener_fd    = targ->listener_fd;
+    void  *pipeline       = targ->pipeline;
+    int    is_tls         = targ->is_tls;
+    int    plain_fd       = targ->plain_fd;
+    void  *plain_pipeline = targ->plain_pipeline;
     free(targ);
 
     /* This OS thread runs compiled March code outside the scheduler — force
@@ -724,6 +832,10 @@ static void *evloop_run(void *arg) {
     struct kevent lev;
     EV_SET(&lev, listener_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
     kevent(evfd, &lev, 1, NULL, 0, NULL);
+    if (plain_fd >= 0) {
+        EV_SET(&lev, plain_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+        kevent(evfd, &lev, 1, NULL, 0, NULL);
+    }
 
     struct kevent events[EVLOOP_MAX_EVENTS];
 #elif EVLOOP_USE_EPOLL
@@ -736,8 +848,13 @@ static void *evloop_run(void *arg) {
 
     struct epoll_event lev;
     lev.events  = EPOLLIN | EPOLLET;
-    lev.data.ptr = NULL;  /* NULL = listener sentinel */
+    lev.data.ptr = EVLOOP_MAIN_LISTENER;
     epoll_ctl(evfd, EPOLL_CTL_ADD, listener_fd, &lev);
+    if (plain_fd >= 0) {
+        lev.events  = EPOLLIN | EPOLLET;
+        lev.data.ptr = EVLOOP_PLAIN_LISTENER;
+        epoll_ctl(evfd, EPOLL_CTL_ADD, plain_fd, &lev);
+    }
 
     struct epoll_event events[EVLOOP_MAX_EVENTS];
 #endif
@@ -765,7 +882,11 @@ static void *evloop_run(void *arg) {
             conn_state_t  *c     = (conn_state_t *)events[i].udata;
 
             if (ident == listener_fd) {
-                accept_connections(listener_fd, evfd);
+                accept_connections(listener_fd, evfd, is_tls, pipeline);
+                continue;
+            }
+            if (plain_fd >= 0 && ident == plain_fd) {
+                accept_connections(plain_fd, evfd, 0, plain_pipeline);
                 continue;
             }
 
@@ -777,16 +898,19 @@ static void *evloop_run(void *arg) {
             if (!c) continue;
 
             if (events[i].filter == EVFILT_READ) {
-                handle_read(evfd, c, pipeline);
+                handle_read(evfd, c);
             } else if (events[i].filter == EVFILT_WRITE) {
                 handle_write(evfd, c);
             }
 #elif EVLOOP_USE_EPOLL
             conn_state_t *c = (conn_state_t *)events[i].data.ptr;
 
-            if (c == NULL) {
-                /* Listener fd sentinel. */
-                accept_connections(listener_fd, evfd);
+            if (c == EVLOOP_MAIN_LISTENER) {
+                accept_connections(listener_fd, evfd, is_tls, pipeline);
+                continue;
+            }
+            if (c == EVLOOP_PLAIN_LISTENER) {
+                accept_connections(plain_fd, evfd, 0, plain_pipeline);
                 continue;
             }
 
@@ -797,7 +921,7 @@ static void *evloop_run(void *arg) {
             }
 
             if (ev & EPOLLIN) {
-                handle_read(evfd, c, pipeline);
+                handle_read(evfd, c);
             }
             if (ev & EPOLLOUT) {
                 handle_write(evfd, c);
@@ -808,6 +932,7 @@ static void *evloop_run(void *arg) {
     }
 
     close(listener_fd);
+    if (plain_fd >= 0) close(plain_fd);
     close(evfd);
     return NULL;
 }
@@ -838,17 +963,28 @@ static void evloop_spawn_all(void *argp) {
                     i, strerror(errno));
             continue;
         }
+        int pfd = -1;
+        if (g_march_https.plain_port > 0 && g_march_https.plain_pipeline) {
+            pfd = create_reuseport_listener(g_march_https.plain_port);
+            if (pfd < 0)
+                fprintf(stderr, "march: plain listener[%d] on port %d failed: %s\n",
+                        i, g_march_https.plain_port, strerror(errno));
+        }
 
         evloop_thread_arg_t *arg = malloc(sizeof(evloop_thread_arg_t));
-        if (!arg) { close(lfd); continue; }
-        arg->listener_fd = lfd;
-        arg->pipeline    = s->pipeline;
+        if (!arg) { close(lfd); if (pfd >= 0) close(pfd); continue; }
+        arg->listener_fd    = lfd;
+        arg->pipeline       = s->pipeline;
+        arg->is_tls         = g_march_https.tls;
+        arg->plain_fd       = pfd;
+        arg->plain_pipeline = g_march_https.plain_pipeline;
 
         if (pthread_create(&s->threads[s->started], NULL, evloop_run, arg) != 0) {
             fprintf(stderr, "march: evloop thread[%d] create failed: %s\n",
                     i, strerror(errno));
             free(arg);
             close(lfd);
+            if (pfd >= 0) close(pfd);
             continue;
         }
         s->started++;
@@ -860,8 +996,11 @@ void march_evloop_server_listen(int port, void *pipeline) {
     if (ncpus <= 0) ncpus = 4;
     int nthreads = (int)ncpus;
 
-    fprintf(stderr, "march: event-loop server starting on port %d "
-            "(%d threads, SO_REUSEPORT)\n", port, nthreads);
+    fprintf(stderr, "march: event-loop server starting on port %d%s "
+            "(%d threads, SO_REUSEPORT)\n", port,
+            g_march_https.tls ? " (HTTPS)" : "", nthreads);
+    if (g_march_https.plain_port > 0 && g_march_https.plain_pipeline)
+        fprintf(stderr, "march: plain HTTP listener on port %d\n", g_march_https.plain_port);
 
     pthread_t *threads = malloc(sizeof(pthread_t) * (size_t)nthreads);
     if (!threads) {

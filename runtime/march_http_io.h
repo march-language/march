@@ -48,6 +48,8 @@ typedef enum {
 /* Maximum pipelined requests parsed from a single buffer slice. */
 #define EVLOOP_PIPELINE_BATCH 32
 
+typedef struct march_tls_session march_tls_session_t;   /* march_tls_session.h */
+
 typedef struct conn_state conn_state_t;
 struct conn_state {
     int           fd;
@@ -94,6 +96,16 @@ struct conn_state {
     int           timed_phase;
     int           heap_pos;
 
+    /* ── TLS and listener (march_http_evloop.c) ─────────────────────── */
+    /* tls is NULL for a plain connection, which then never touches the
+     * fields below it. For a TLS connection, rbuf holds DECRYPTED bytes;
+     * response plaintext is encrypted into the session and its ciphertext
+     * collected in cout, which this connection owns until it is sent. */
+    march_tls_session_t *tls;
+    char         *cout;
+    size_t        cout_len, cout_pos, cout_cap;
+    void         *pipeline;              /* the accepting listener's pipeline */
+
     /* ── Free-list link ─────────────────────────────────────────────── */
     conn_state_t *next_free;
 };
@@ -121,6 +133,20 @@ io_result_t march_recv_nonblocking(conn_state_t *c);
  *   IO_PARTIAL  — got EAGAIN, need to wait for writability
  *   IO_ERROR    — fatal write error */
 io_result_t march_send_nonblocking(conn_state_t *c);
+
+/* ── TLS edges ────────────────────────────────────────────────────────── */
+
+/* Encrypt the plaintext in iov[0..n) into c->tls; 0 ok, -1 on a TLS error.
+ * The bytes are copied: the caller may release them immediately. */
+int march_tls_write_iov(conn_state_t *c, const struct iovec *iov, int n);
+
+/* Collect the session's pending ciphertext into c->cout and send what the
+ * socket takes. IO_COMPLETE when nothing is left, IO_PARTIAL on EAGAIN,
+ * IO_ERROR on a send error. *sent (may be NULL) gets the bytes sent. */
+io_result_t march_tls_flush(conn_state_t *c, size_t *sent);
+
+/* Release c->cout (on close or detach). */
+void march_tls_conn_free_out(conn_state_t *c);
 
 /* ── Connection state pool (per-thread) ──────────────────────────────── */
 
