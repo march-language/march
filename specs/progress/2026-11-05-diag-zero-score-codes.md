@@ -26,3 +26,11 @@ New explain pages: `specs/lang/errors/role_grant_exceeded.md` and `division_by_z
 `protocol_invalid.md` gains the `choose` case. Corpus: 11 `.expected` files (the three messages and
 the new explain pointers). One-turn: 13/18 → 17/18; `overlapping_impl_1` is an intent-check limit
 (the correct fix renames a declared type), recorded in the metric file.
+
+Error tour (`docs/error-messages.md`, regenerated with `scripts/gen-error-tour.py`): `29-role-grant`
+shows the new help and its prose explains the body's new parameter. Two new examples,
+`35-step-after-choose` (section 8, also in the playground) and `36-division-pattern` (section 9).
+The error reference gains `protocol_invalid`, `protocol_same_participants`, `role_grant_exceeded`
+and `division_by_zero`. No example for `overlapping_impl` (it names the other impl only as
+`file:line:col` and suggests a newtype even for an accidental duplicate) or
+`protocol_same_participants` (a hint, and every corpus case's real error is another one).

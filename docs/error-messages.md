@@ -1227,6 +1227,53 @@ The message explains why the step is unreachable, and a label points at the loop
 never ends.
 <button class="ep-try" data-error-example="26-step-after-loop">Try it</button>
 
+<a id="step-after-choose"></a>
+
+### A step after a branch that loops forever
+
+<!-- error-tour: 35-step-after-choose -->
+```march
+mod Main do
+  type A = A
+  type B = B
+
+  protocol Batch do
+    choose by A:
+      more -> loop do A -> B : Int end
+      done -> A -> B : Bool
+    end
+    B -> A : Bool
+  end
+
+  fn main() do
+    ()
+  end
+end
+```
+
+```text
+-- PROTOCOL --------------------- step-after-choose.march
+
+Protocol `Batch`: this step can never run in the `choose` branch that ends in a `loop` — the steps after a `choose` are projected into EVERY branch. Move it into the `done` branch, after its last step. A branch with several steps lists them on the lines after `done ->`, one per line, indented under the label (no `do`/`end`). [protocol_invalid]
+
+10 |     B -> A : Bool
+         ^
+
+
+    this `loop` repeats forever:
+
+7 |       more -> loop do A -> B : Int end
+                          ^
+    run `march --explain protocol_invalid`
+```
+<!-- /error-tour -->
+
+The steps after a `choose` run at the end of every branch, so the `more` branch, which
+loops forever, can never reach `B -> A : Bool`. The message names the branch that can
+(`done`) and shows how a branch with several steps is written: one step per line under
+`done ->`, with no `do`/`end`.
+<button class="ep-try" data-error-example="35-step-after-choose">Try it</button>
+
 <a id="may-crash"></a>
 
 ### A crash nobody handles
@@ -1373,7 +1420,7 @@ end
 -- CAPABILITY -------------------------- role-grant.march
 
 The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)` (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
-help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
 
 21 |     let _ = file_write("/tmp/n", int_to_string(n))
                  ^^^^^^^^^^
@@ -1398,12 +1445,15 @@ help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remov
 
 9 |     role Cons needs IO.Console
         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain role_grant_exceeded`
 ```
 <!-- /error-tour -->
 
 A role can carry its own capability grant. The file write is two calls deep, and the
 error traces the path from the role's body to `file_write`, then shows the grant it
-breaks.
+breaks. The help writes out the widened `role Cons needs` line. It also gives the body's
+new parameter list: the body takes one `Cap` for each capability in the grant, so
+widening the grant adds a parameter too.
 
 ---
 
@@ -1615,12 +1665,56 @@ Use `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of 
 
 6 |     10 / d
         ^^^^^^
+
+    run `march --explain division_by_zero`
 ```
 <!-- /error-tour -->
 
 `cap no_panic` is a promise the module makes, so a divisor that might be zero is an error.
 The refinement on `d` holds for every integer, zero included, so it proves nothing. The
 message offers two ways out.
+
+<a id="division-pattern"></a>
+
+### Dividing by a value from a pattern
+
+<!-- error-tour: 36-division-pattern -->
+```march
+mod Main do
+  needs IO.Console
+  cap no_panic
+
+  type Stats = Stats(Int, Int)
+
+  fn average(s : Stats) : Int do
+    match s do
+      Stats(total, count) -> total / count
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(average(Stats(10, 2))))
+  end
+end
+```
+
+```text
+-- REFINEMENT -------------------- division-pattern.march
+
+division by `count` in `cap no_panic` module may be by zero — no refinement proves `count ≠ 0`. [division_by_zero]
+
+`count` is not a function parameter, so no refinement annotation reaches it. Guard the division instead, which the checker reads as proof: `if count == 0 do <fallback> else ... / count end`. Or use `Math.checked_div` or `Math.checked_mod`, which return `Option(Int)` instead of panicking.
+
+9 |       Stats(total, count) -> total / count
+                                 ^^^^^^^^^^^^^
+
+    run `march --explain division_by_zero`
+```
+<!-- /error-tour -->
+
+Here the divisor comes out of a pattern, not a parameter, so there is no annotation to
+add. The message says so and gives the fix that always works: a guard. The checker reads
+`if count == 0 do ... else ... end`, so the division in the `else` branch is proved.
 
 ---
 
@@ -1636,5 +1730,5 @@ Every code that has a `march --explain` page also has one on this site:
 | Capabilities | [`cap_grant`]({{ site.baseurl }}/docs/errors/cap_grant/) · [`cap_needs`]({{ site.baseurl }}/docs/errors/cap_needs/) · [`cap_ceiling`]({{ site.baseurl }}/docs/errors/cap_ceiling/) · [`cap_grant_exceeded`]({{ site.baseurl }}/docs/errors/cap_grant_exceeded/) · [`cap_widen`]({{ site.baseurl }}/docs/errors/cap_widen/) · [`cap_deserialize`]({{ site.baseurl }}/docs/errors/cap_deserialize/) · [`io_not_allowed`]({{ site.baseurl }}/docs/errors/io_not_allowed/) · [`proof_cap_mint_private`]({{ site.baseurl }}/docs/errors/proof_cap_mint_private/) · [`proof_cap_return`]({{ site.baseurl }}/docs/errors/proof_cap_return/) |
 | Linearity | [`linear_used_twice`]({{ site.baseurl }}/docs/errors/linear_used_twice/) · [`linear_never_used`]({{ site.baseurl }}/docs/errors/linear_never_used/) · [`linear_discarded`]({{ site.baseurl }}/docs/errors/linear_discarded/) · [`linear_generic_param`]({{ site.baseurl }}/docs/errors/linear_generic_param/) |
 | Actors | [`spawn_not_actor`]({{ site.baseurl }}/docs/errors/spawn_not_actor/) · [`send_wrong_actor`]({{ site.baseurl }}/docs/errors/send_wrong_actor/) · [`actor_handler_state_type`]({{ site.baseurl }}/docs/errors/actor_handler_state_type/) · [`supervise_field_missing`]({{ site.baseurl }}/docs/errors/supervise_field_missing/) · [`codec_missing`]({{ site.baseurl }}/docs/errors/codec_missing/) |
-| Sessions and protocols | [`session_state_mismatch`]({{ site.baseurl }}/docs/errors/session_state_mismatch/) · [`protocol_step_order`]({{ site.baseurl }}/docs/errors/protocol_step_order/) |
-| Refinements and proofs | [`refinement_violated`]({{ site.baseurl }}/docs/errors/refinement_violated/) · [`termination_unproved`]({{ site.baseurl }}/docs/errors/termination_unproved/) · [`invalid_decreases`]({{ site.baseurl }}/docs/errors/invalid_decreases/) · [`predicate_eq_structural`]({{ site.baseurl }}/docs/errors/predicate_eq_structural/) · [`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/) · [`invalid_lemma`]({{ site.baseurl }}/docs/errors/invalid_lemma/) · [`lemma_unproved`]({{ site.baseurl }}/docs/errors/lemma_unproved/) · [`lemma_unproved_call`]({{ site.baseurl }}/docs/errors/lemma_unproved_call/) · [`lemma_argument_impure`]({{ site.baseurl }}/docs/errors/lemma_argument_impure/) · [`diverges_conflict`]({{ site.baseurl }}/docs/errors/diverges_conflict/) · [`solver_unavailable`]({{ site.baseurl }}/docs/errors/solver_unavailable/) · [`solver_version_mismatch`]({{ site.baseurl }}/docs/errors/solver_version_mismatch/) |
+| Sessions and protocols | [`session_state_mismatch`]({{ site.baseurl }}/docs/errors/session_state_mismatch/) · [`protocol_step_order`]({{ site.baseurl }}/docs/errors/protocol_step_order/) · [`protocol_invalid`]({{ site.baseurl }}/docs/errors/protocol_invalid/) · [`protocol_same_participants`]({{ site.baseurl }}/docs/errors/protocol_same_participants/) · [`role_grant_exceeded`]({{ site.baseurl }}/docs/errors/role_grant_exceeded/) |
+| Refinements and proofs | [`refinement_violated`]({{ site.baseurl }}/docs/errors/refinement_violated/) · [`division_by_zero`]({{ site.baseurl }}/docs/errors/division_by_zero/) · [`termination_unproved`]({{ site.baseurl }}/docs/errors/termination_unproved/) · [`invalid_decreases`]({{ site.baseurl }}/docs/errors/invalid_decreases/) · [`predicate_eq_structural`]({{ site.baseurl }}/docs/errors/predicate_eq_structural/) · [`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/) · [`invalid_lemma`]({{ site.baseurl }}/docs/errors/invalid_lemma/) · [`lemma_unproved`]({{ site.baseurl }}/docs/errors/lemma_unproved/) · [`lemma_unproved_call`]({{ site.baseurl }}/docs/errors/lemma_unproved_call/) · [`lemma_argument_impure`]({{ site.baseurl }}/docs/errors/lemma_argument_impure/) · [`diverges_conflict`]({{ site.baseurl }}/docs/errors/diverges_conflict/) · [`solver_unavailable`]({{ site.baseurl }}/docs/errors/solver_unavailable/) · [`solver_version_mismatch`]({{ site.baseurl }}/docs/errors/solver_version_mismatch/) |

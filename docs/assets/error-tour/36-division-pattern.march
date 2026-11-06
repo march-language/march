@@ -1,0 +1,16 @@
+mod Main do
+  needs IO.Console
+  cap no_panic
+
+  type Stats = Stats(Int, Int)
+
+  fn average(s : Stats) : Int do
+    match s do
+      Stats(total, count) -> total / count
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(average(Stats(10, 2))))
+  end
+end

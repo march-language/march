@@ -79,3 +79,4 @@ See also: [refinement types](../refinement-types.md).
 ## See it in the error tour
 
 - [Division in a module that promised not to panic]({{ site.baseurl }}/docs/error-messages/#division-no-panic)
+- [Dividing by a value from a pattern]({{ site.baseurl }}/docs/error-messages/#division-pattern)

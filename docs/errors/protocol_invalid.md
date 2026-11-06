@@ -88,3 +88,4 @@ See also: [repetition: `loop`](../session-types.md#repetition-loop).
 ## See it in the error tour
 
 - [A step that can never run]({{ site.baseurl }}/docs/error-messages/#step-after-loop)
+- [A step after a branch that loops forever]({{ site.baseurl }}/docs/error-messages/#step-after-choose)

@@ -373,6 +373,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- The Error Messages tour shows two more examples: a protocol step stranded after a `choose`
+  branch that loops forever, and a division by a value from a pattern. The role-grant example
+  explains its new help, and the error reference lists `protocol_invalid`,
+  `protocol_same_participants`, `role_grant_exceeded` and `division_by_zero`.
+
 - **The Type System chapter is restructured for first readers** ([Type System](docs/types.md)),
   like Pattern Matching, Interfaces and Capabilities: a plain opener, a which-type-do-I-need
   table, a how-it-fits table, a grouped index, everyday types before the advanced ones, and
