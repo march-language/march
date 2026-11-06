@@ -1198,6 +1198,20 @@
  (deps    (file test_tls_session_runner))
  (action  (run ./test_tls_session_runner)))
 
+; ── HTTPS certificate slot, poller and fd registry ─────────────────────
+(rule
+ (targets test_tls_server_runner)
+ (deps    test_tls_server.c
+          ../runtime/march_tls_server.c
+          ../runtime/march_tls_server.h
+          ../runtime/march_tls_session.h)
+ (action  (system "%{cc} -std=gnu11 -Wall -Wextra -I../runtime -O1 -o %{targets} test_tls_server.c ../runtime/march_tls_server.c $(pkg-config --cflags --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lpthread")))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_tls_server_runner))
+ (action  (run ./test_tls_server_runner)))
+
 ; ── Zero-copy response builder tests ────────────────────────────────────
 (rule
  (targets test_http_response_runner)
