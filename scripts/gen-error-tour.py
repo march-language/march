@@ -10,6 +10,8 @@ page marks each example's place with
     ...
     <!-- /error-tour -->
 
+(or `<!-- error-tour: <name> --why-copies -->` for an example whose output comes from
+that report instead of `--check`)
 and this script rewrites what lies between the two markers: a ```march block with the
 program and a ```text block with what `march --check` prints, so the page shows what
 the compiler says today rather than what someone once pasted. Everything outside the
@@ -43,10 +45,14 @@ import tempfile
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PAGE = os.path.join(ROOT, "docs", "error-messages.md")
 SRC_DIR = os.path.join(ROOT, "docs", "assets", "error-tour")
-MARKER = re.compile(r"(<!-- error-tour: ([\w-]+) -->\n)(.*?)(<!-- /error-tour -->)", re.S)
+MARKER = re.compile(r"(<!-- error-tour: ([\w-]+)((?: --[\w-]+)*) -->\n)(.*?)(<!-- /error-tour -->)", re.S)
+# Flags an example's marker may name in place of the default `--check`, as in
+# `<!-- error-tour: 35-copy-shared --why-copies -->`: reports that are not part of
+# an ordinary check. The playground only checks, so such an example is not listed in it.
+ALLOWED_FLAGS = {"--why-copies"}
 
 
-def check_output(march_bin, name, home):
+def check_output(march_bin, name, home, flags=()):
     src = os.path.join(SRC_DIR, name + ".march")
     if not os.path.exists(src):
         sys.exit(f"error: {PAGE} names example `{name}`, but {src} does not exist")
@@ -55,7 +61,8 @@ def check_output(march_bin, name, home):
     try:
         shutil.copy(src, os.path.join(work, shown))
         env = dict(os.environ, HOME=home)
-        proc = subprocess.run([march_bin, "--check", shown], cwd=work, env=env,
+        mode = list(flags) or ["--check"]
+        proc = subprocess.run([march_bin, *mode, shown], cwd=work, env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     finally:
         shutil.rmtree(work)
@@ -68,9 +75,13 @@ def render(page, march_bin):
     home = tempfile.mkdtemp(prefix="error-tour-home-")
     try:
         def fill(m):
-            program, output = check_output(march_bin, m.group(2), home)
+            flags = m.group(3).split()
+            bad = [f for f in flags if f not in ALLOWED_FLAGS]
+            if bad:
+                sys.exit(f"error: {PAGE}: example `{m.group(2)}` names unknown flag(s) {bad}")
+            program, output = check_output(march_bin, m.group(2), home, flags)
             return (m.group(1) + "```march\n" + program + "```\n\n"
-                    + "```text\n" + output + "```\n" + m.group(4))
+                    + "```text\n" + output + "```\n" + m.group(5))
         return MARKER.sub(fill, page)
     finally:
         shutil.rmtree(home)

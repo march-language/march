@@ -1624,6 +1624,64 @@ message offers two ways out.
 
 ---
 
+## 10. Performance: why a copy happens
+
+March updates a list or a tree in place when the function rebuilding it holds the only
+reference to it. When something else still holds the value, the function allocates a new
+copy instead: the program is still correct, only slower. Nothing in an ordinary check
+says so, because nothing is wrong. `march --why-copies` is the report you ask for when
+you want to know. The playground only checks programs, so it can't show this one.
+
+<a id="copy-shared"></a>
+
+### A list that is used again after `List.map`
+
+<!-- error-tour: 35-copy-shared --why-copies -->
+```march
+mod Main do
+  needs IO.Console
+
+  fn inc_all(xs : List(Int)) : List(Int) do
+    let ys = List.map(xs, fn x -> x + 1)
+    let n = List.length(xs)
+    List.append(ys, [n])
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(List.length(inc_all([1, 2, 3]))))
+  end
+end
+```
+
+```text
+-- WARNING: COPY ---------------------- copy-shared.march
+
+`List.map` builds a new copy instead of reusing `xs` in place, because `xs` is used again afterwards. [copy_shared]
+A function can update a value in place only when it holds the only reference to it; make this call the last use of `xs` and `List.map` reuses its memory instead of allocating.
+help: move `let n = List.length(xs)` above the call.
+
+5 |     let ys = List.map(xs, fn x -> x + 1)
+                          ^^
+
+
+    `xs` is used again here, so it is still shared when `List.map` runs:
+
+6 |     let n = List.length(xs)
+                            ^^
+    run `march --explain copy_shared`
+```
+<!-- /error-tour -->
+
+`List.map` could have rewritten `xs`'s cells in place, but `List.length(xs)` on the next
+line still needs the old list, so it built a new one. The warning points at both lines and
+offers the fix: take the length first. The fix appears only when moving the later line is
+safe (it is the value's only later use and has no side effects); `forge fix` can apply it.
+The same report names two other reasons a value stays shared: it is also passed to the
+enclosing call, or a closure captured it. See the
+[memory model]({{ site.baseurl }}/docs/memory-model/#when-reuse-fires-vs-falls-back).
+
+---
+
 ## Error reference
 
 Every code that has a `march --explain` page also has one on this site:
@@ -1638,3 +1696,4 @@ Every code that has a `march --explain` page also has one on this site:
 | Actors | [`spawn_not_actor`]({{ site.baseurl }}/docs/errors/spawn_not_actor/) · [`send_wrong_actor`]({{ site.baseurl }}/docs/errors/send_wrong_actor/) · [`actor_handler_state_type`]({{ site.baseurl }}/docs/errors/actor_handler_state_type/) · [`supervise_field_missing`]({{ site.baseurl }}/docs/errors/supervise_field_missing/) · [`codec_missing`]({{ site.baseurl }}/docs/errors/codec_missing/) |
 | Sessions and protocols | [`session_state_mismatch`]({{ site.baseurl }}/docs/errors/session_state_mismatch/) · [`protocol_step_order`]({{ site.baseurl }}/docs/errors/protocol_step_order/) |
 | Refinements and proofs | [`refinement_violated`]({{ site.baseurl }}/docs/errors/refinement_violated/) · [`termination_unproved`]({{ site.baseurl }}/docs/errors/termination_unproved/) · [`invalid_decreases`]({{ site.baseurl }}/docs/errors/invalid_decreases/) · [`predicate_eq_structural`]({{ site.baseurl }}/docs/errors/predicate_eq_structural/) · [`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/) · [`invalid_lemma`]({{ site.baseurl }}/docs/errors/invalid_lemma/) · [`lemma_unproved`]({{ site.baseurl }}/docs/errors/lemma_unproved/) · [`lemma_unproved_call`]({{ site.baseurl }}/docs/errors/lemma_unproved_call/) · [`lemma_argument_impure`]({{ site.baseurl }}/docs/errors/lemma_argument_impure/) · [`diverges_conflict`]({{ site.baseurl }}/docs/errors/diverges_conflict/) · [`solver_unavailable`]({{ site.baseurl }}/docs/errors/solver_unavailable/) · [`solver_version_mismatch`]({{ site.baseurl }}/docs/errors/solver_version_mismatch/) |
+| Performance | [`copy_shared`]({{ site.baseurl }}/docs/errors/copy_shared/) |

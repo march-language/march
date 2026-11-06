@@ -1,0 +1,15 @@
+-- MARCH-MODE: why-copies
+-- No copy: the map is the last use of `xs`, so it reuses the list in place.
+mod Main do
+  needs IO.Console
+
+  fn inc_all(xs : List(Int)) : List(Int) do
+    let n = List.length(xs)
+    let ys = List.map(xs, fn x -> x + 1)
+    List.append(ys, [n])
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(List.length(inc_all([1, 2, 3]))))
+  end
+end

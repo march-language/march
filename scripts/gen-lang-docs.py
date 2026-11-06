@@ -96,7 +96,7 @@ def error_pages():
 # is left as it is.
 TOUR_PAGE = "docs/error-messages.md"
 TOUR_URL = "{{ site.baseurl }}/docs/error-messages/"
-TOUR_MARKER_RE = re.compile(r"^<!-- error-tour: ([\w-]+) -->$")
+TOUR_MARKER_RE = re.compile(r"^<!-- error-tour: ([\w-]+)(?: --[\w-]+)* -->$")
 TOUR_ANCHOR_RE = re.compile(r'^<a id="([\w-]+)"></a>$')
 TOUR_CODE_RE = re.compile(r"\[([a-z][a-z0-9_]*)\]\s*$")
 
