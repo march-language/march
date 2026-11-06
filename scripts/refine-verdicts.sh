@@ -7,7 +7,15 @@
 # Runs `march --check --refine-report-sites=all` over test/native/*.march and
 # specs/lang/types/{accept,reject}/*.march (every run also reports the
 # stdlib's own obligations), each fixture from a fresh cwd with a private
-# HOME so no cache answers for z3.  Keeps only the per-site verdict lines
+# HOME so no cache from before this run answers for z3.  The fixtures share
+# one verdict cache, a fresh OUT/vc.XXXXXX, linked in as each cwd's
+# .march/cas/vc: every
+# fixture re-reports the stdlib's obligations, so without it the run asks z3
+# the same ~1.4k queries ~230k times (twice the wall time; on CI's x86 leg,
+# runs that brushed the step's 30-minute limit).  A cached answer is this
+# run's own, from this z3 on this platform under these limits (all in the
+# key), so the verdicts are byte-identical to a cold run's, and every distinct
+# query is still proved on every platform.  Keeps only the per-site verdict lines
 # (verdict, origin, file:line:col, kind, callee, predicate), with paths made
 # repo-relative, prefixed by the fixture, sorted, in OUT/verdicts.txt.
 #
@@ -38,17 +46,20 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 rm -rf "$OUT/cwd" "$OUT/parts" "$OUT/home"
 mkdir -p "$OUT/cwd" "$OUT/parts" "$OUT/home"
+# A fresh directory per run, so no earlier run's verdicts are served.
+VC="$(mktemp -d "$OUT/vc.XXXXXX")"
 export HOME="$OUT/home"
 unset XDG_CACHE_HOME MARCH_REFINE_Z3_LOG MARCH_REFINE_RLIMIT_LOG
 if [ -n "$RLIMIT" ]; then export MARCH_REFINE_RLIMIT="$RLIMIT"; else unset MARCH_REFINE_RLIMIT; fi
 JOBS="${MARCH_ORACLE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
-export EXE ROOT OUT
+export EXE ROOT OUT VC
 
 one() {
   f="$1"
   tag="$(basename "$(dirname "$f")")_$(basename "$f" .march)"
   d="$OUT/cwd/$tag"
-  mkdir -p "$d"
+  mkdir -p "$d/.march/cas"
+  ln -s "$VC" "$d/.march/cas/vc"
   (cd "$d" && "$EXE" --check --refine-report-sites=all "$f" 2>&1 || true) \
     | grep -E $'^(proved|violated|trusted|skipped[^\t]*)\t' \
     | ROOT="$ROOT" TAG="$tag" perl -pe '

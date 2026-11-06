@@ -86,17 +86,42 @@ let jobs =
   | _ -> 8
 
 type result = { code : int; err : string; json : string;
-                mutable after : (int * string) option
+                mutable after : (int * string) option;
                 (** exit code and stderr of `--check` on the program with
-                    every fix applied; [None] when it has no fix. *) }
+                    every fix applied; [None] when it has no fix. *)
+                mutable after_json : string
+                (** the [--check-json] of that same fixed program. *) }
 
-let script ~dir ~rel =
+(* A program carrying a [-- MARCH-MODE:] line is not checked with [--check]:
+   - [why-copies]: [--why-copies] / [--why-copies-json], the Perceus copy
+     report (specs/2026-11-05-why-copies-design.md);
+   - [run]: the program is RUN (interpreted) and its stderr pinned: a
+     run-time failure report (panic, run-time error, actor crash).  There is
+     no JSON form, so its [.json.expected] is empty. *)
+let why_copies_marker = "-- MARCH-MODE: why-copies"
+let run_marker = "-- MARCH-MODE: run"
+
+let has_sub s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+  go 0
+
+let script ~dir ~rel ~src =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let home = Filename.quote (Lazy.force private_home) in
+  let rel = Filename.quote rel in
+  let human, json =
+    if has_sub src run_marker then
+      Printf.sprintf "HOME=%s %s %s" home exe rel, "true"
+    else
+      let h, j = if has_sub src why_copies_marker
+        then "--why-copies", "--why-copies-json" else "--check", "--check-json" in
+      Printf.sprintf "HOME=%s %s %s %s" home exe h rel,
+      Printf.sprintf "HOME=%s %s %s %s" home exe j rel in
   Printf.sprintf
-    "cd %s && HOME=%s %s --check %s > check.out 2> check.err; echo $? > check.code; \
-     HOME=%s %s --check-json %s > json.out 2> /dev/null; true"
-    (Filename.quote dir) home exe (Filename.quote rel) home exe (Filename.quote rel)
+    "cd %s && %s > check.out 2> check.err; echo $? > check.code; \
+     %s > json.out 2> /dev/null; true"
+    (Filename.quote dir) human json
 
 (* [run_jobs sources]: every (name, program text) checked in parallel;
    returns name -> result. *)
@@ -112,7 +137,7 @@ let run_jobs (sources : (string * string) list) : (string, result) Hashtbl.t =
     write_file (Filename.concat edir (name ^ ".march")) src;
     let rel = "errors/" ^ name ^ ".march" in
     let pid =
-      Unix.create_process "/bin/sh" [| "/bin/sh"; "-c"; script ~dir:tmp ~rel |]
+      Unix.create_process "/bin/sh" [| "/bin/sh"; "-c"; script ~dir:tmp ~rel ~src |]
         Unix.stdin Unix.stdout Unix.stderr in
     Hashtbl.replace running pid (name, tmp)
   in
@@ -123,7 +148,7 @@ let run_jobs (sources : (string * string) list) : (string, result) Hashtbl.t =
     let code = int_of_string (String.trim (read_file (f "check.code"))) in
     Hashtbl.replace results name
       { code; err = read_file (f "check.err"); json = read_file (f "json.out");
-        after = None };
+        after = None; after_json = "" };
     (try rm_rf tmp with _ -> ())
   in
   while not (Queue.is_empty pending) || Hashtbl.length running > 0 do
@@ -215,7 +240,8 @@ let run_all (names : string list) : (string, result) Hashtbl.t =
   in
   let after = run_jobs fixed in
   Hashtbl.iter (fun n (r : result) ->
-      (Hashtbl.find results n).after <- Some (r.code, r.err)) after;
+      let o = Hashtbl.find results n in
+      o.after <- Some (r.code, r.err); o.after_json <- r.json) after;
   results
 
 (* ── Fixes as diffs ────────────────────────────────────────────────────── *)
@@ -587,9 +613,40 @@ let check_hints name json =
    reach exit 0 fails too, so a stale marker can't hide a later regression. *)
 let fix_partial_marker = "-- EXPECT-FIX-PARTIAL:"
 
+(* The error diagnostics of a [--check-json] run, as (slug, has a fix). *)
+let errors_of_json json : (string * bool) list =
+  let open Yojson.Safe.Util in
+  lines_of json
+  |> List.filter_map (fun l ->
+      match Yojson.Safe.from_string l with
+      | j when (try member "severity" j |> to_string = "error" with _ -> false) ->
+        let code = try member "code" j |> to_string with _ -> "" in
+        let slug = match String.index_opt code ':' with
+          | Some i -> String.sub code 0 i | None -> code in
+        Some (slug, member "fix" j <> `Null)
+      | _ -> None
+      | exception _ -> None)
+
+(* A program can carry an error that has no machine fix beside one that has
+   (a refinement violation in a `main` that also forgot its grant).  Its
+   fixes cannot reach exit 0, and need not: they pass when every error left
+   after applying them is one of the errors that offered no fix, so each
+   fix cleared what it was about and broke nothing else. *)
+let fixes_did_their_part (r : result) =
+  let before = errors_of_json r.json in
+  let unfixed = List.filter_map (fun (s, f) -> if f then None else Some s) before in
+  unfixed <> []
+  && List.for_all (fun (s, _) -> List.mem s unfixed) (errors_of_json r.after_json)
+
 let check_fix_fixes ~src name (r : result) =
   let partial = contains src fix_partial_marker in
+  (* A copy report exits 0 either way: its fix must make the copy go away. *)
+  (match r.after with
+   | Some (_, err) when contains src why_copies_marker && contains err "[copy_shared]" ->
+     Alcotest.failf "%s: applying its fixes still reports a copy" name
+   | _ -> ());
   match r.after with
+  | Some (code, _) when code <> 0 && not partial && fixes_did_their_part r -> ()
   | Some (code, _) when code <> 0 && not partial ->
     Alcotest.failf "%s: applying its machine fixes leaves the program rejected \
                     (exit %d). Fix the fix, or mark the case with %S and the \

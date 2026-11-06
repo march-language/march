@@ -1,17 +1,29 @@
 exit: 1
 -- REFINEMENT -------- errors/refinement_violated_8.march
 
-refinement violation: argument `xs` of `inner` does not satisfy precondition `len(_) > 0` (e.g. ys = []) [refinement_violated]
-note: guard the call (e.g. `if len(ys) > 0 do …`) or pass a value known to satisfy it
+refinement violation: argument `xs` of `inner` does not satisfy precondition `len(_) > 0` [refinement_violated]
+for example, when `ys` is `[]`
+note: guard the call (e.g. `if len(ys) > 0 do inner(ys) else … end`) or pass a value known to satisfy it
 
 34 |       inner(ys)
            ^^^^^^^^^
 
+    running `inner([])` panics: "empty"
 
-    this argument must satisfy `len(_) > 0`:
+    this argument must satisfy `len(ys) > 0`:
 
 34 |       inner(ys)
                  ^^
+
+    `ys` comes from here, where `len(ys) >= 0` is known:
+
+32 |   fn outer(ys : {List(Int) | len(_) >= 0}) : Int do
+                ^^
+
+    the call is reached only when this is true:
+
+33 |     if List.length(ys) == 0 do
+            ^^^^^^^^^^^^^^^^^^^^
     run `march --explain refinement_violated`
 
 

@@ -317,6 +317,19 @@ let division_suggestion =
    instead of panicking, or annotate the divisor parameter with \
    `{v : Int | v != 0}` (or `v > 0`) to prove it is safe."
 
+(* The divisor is a local -- a pattern binder or a `let` -- not a parameter,
+   so "annotate the divisor parameter" names an edit that does not exist: a
+   one-turn answer refined the constructor field instead and stayed rejected.
+   A guard is the fix that always applies, because the checker reads `if`
+   conditions ([path_proves_nonzero]), so say that and spell it out. *)
+let local_division_suggestion (var : string) =
+  Printf.sprintf
+    "\n\n`%s` is not a function parameter, so no refinement annotation reaches it. \
+     Guard the division instead, which the checker reads as proof: \
+     `if %s == 0 do <fallback> else ... / %s end`. Or use `Math.checked_div` or \
+     `Math.checked_mod`, which return `Option(Int)` instead of panicking."
+    var var var
+
 (* Syntactically check whether path conditions prove [var] ≠ 0.
 
    NEGATED conditions count.  `path` carries `(cond, negated)`, where `negated`
@@ -470,7 +483,7 @@ and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
               (Printf.sprintf
                  "division by `%s` in `cap no_panic` module may be by zero — \
                   bound expression cannot be verified non-zero.%s"
-                 var_name division_suggestion)
+                 var_name (local_division_suggestion var_name))
           | Some rhs_term ->
             let param_decls =
               List.map (fun (n, _, _) -> (n, Smt.SInt)) params
@@ -495,13 +508,13 @@ and check_var_divisor_inner ~root errctx span var_name all_params (c : dctx) =
                  (Printf.sprintf
                     "division by `%s` in `cap no_panic` module may be by zero — \
                      cannot prove bound expression is non-zero.%s"
-                    var_name division_suggestion)))
+                    var_name (local_division_suggestion var_name))))
        | None ->
          Err.error ~code:Err.Code.division_by_zero errctx ~span
            (Printf.sprintf
               "division by `%s` in `cap no_panic` module may be by zero — \
                no refinement proves `%s ≠ 0`.%s"
-              var_name var_name division_suggestion))
+              var_name var_name (local_division_suggestion var_name)))
   | Some (_, bdr, pred) ->
     (* Two z3-free fast paths first, so the obvious cases still discharge on a
        machine with no solver. *)

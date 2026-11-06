@@ -29,16 +29,38 @@ Function `ins` is structurally recursive but not tail-recursive. If the recursiv
 -- REFINEMENT --------- errors/non_tail_recursion_1.march
 
 refinement violation: argument `t` of `needEmpty` does not satisfy precondition `size(t) < 1` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `ins(Leaf, 5)` can never satisfy `size(t) < 1`; pass a value that does
 
 44 |     println(int_to_string(needEmpty(ins(Leaf, 5))))
                                ^^^^^^^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `size(t) < 1`:
+    this argument must satisfy `size(ins(Leaf, 5)) < 1`:
 
 44 |     println(int_to_string(needEmpty(ins(Leaf, 5))))
                                          ^^^^^^^^^^^^
     run `march --explain refinement_violated`
 
 
+-- CAPABILITY --------- errors/non_tail_recursion_1.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+43 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+
+fix [cap_grant]:
+@@ lines 43-43 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `t` of `needEmpty` does not satisfy precondition `size(t) < 1` [refinement_violated]

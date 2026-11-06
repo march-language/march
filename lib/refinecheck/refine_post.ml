@@ -1270,7 +1270,21 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
               (match first with Refine.Refuted _ -> emit_error (); true | _ -> false)
             else
               (match Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not goal } with
-               | Refine.Verified -> emit_error (); true
+               | Refine.Verified ->
+                 (* A definite violation: the verdict is settled, so the model
+                    is run only to SHOW it ("but bad(-1) returns -1."), the
+                    way a confirmed refutation below is shown (plan 2026-11-02
+                    §F4).  Uncharged: display must not move a later verdict. *)
+                 (match fn_name, first with
+                  | Some fname, Refine.Refuted model when emit ->
+                    (match
+                       Witness.uncharged (fun () ->
+                           Witness.confirm_post ~fn_name:fname ~fn_params ~binder ~ret_pred ~model)
+                     with
+                     | Some witness -> emit_witness_error witness
+                     | None -> emit_error ())
+                  | _ -> emit_error ());
+                 true
                | _ ->
                  (* Refuted-for-SOME-input: the positive discharge's model is a
                     candidate counterexample.  It only counts once the

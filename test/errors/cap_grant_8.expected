@@ -2,16 +2,38 @@ exit: 1
 -- REFINEMENT ------------------ errors/cap_grant_8.march
 
 refinement violation: argument `c` of `serve` does not satisfy precondition `v.port >= 1` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `{ port: 0 }` can never satisfy `c.port >= 1`; pass a value that does
 
 12 |     println(int_to_string(serve({ port: 0 })))
                                ^^^^^^^^^^^^^^^^^^
 
 
-    this argument must satisfy `v.port >= 1`:
+    this argument must satisfy `c.port >= 1`:
 
 12 |     println(int_to_string(serve({ port: 0 })))
                                      ^^^^^^^^^^^
     run `march --explain refinement_violated`
 
 
+-- CAPABILITY ------------------ errors/cap_grant_8.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+11 |   fn main() do
+       ^^^^^^^^^^^^
+
+    run `march --explain cap_grant`
+
+
+
+fix [cap_grant]:
+@@ lines 11-11 @@
+-  fn main() do
++  fn main(_cap_console : Cap(IO.Console)) do
+
+after fix: exit 1
+refinement violation: argument `c` of `serve` does not satisfy precondition `v.port >= 1` [refinement_violated]

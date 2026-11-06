@@ -1,0 +1,26 @@
+exit: 1
+-- RUNTIME ------------------------- errors/panic_1.march
+
+The program panicked: unknown product code: zz [panic]
+
+11 |     _ -> panic("unknown product code: " ++ code)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Calls inside the standard library are left out; set MARCH_BACKTRACE=full to see them.
+
+    `price` was called here:
+
+16 |     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+                                                       ^^^^^^^^
+
+    `List.fold_left` was called here:
+
+16 |     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `total` was called here:
+
+20 |     println(int_to_string(total(["a", "zz"])))
+                               ^^^^^^^^^^^^^^^^^^
+
+

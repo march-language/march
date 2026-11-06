@@ -1,0 +1,25 @@
+exit: 1
+-- LINEARITY ---------- errors/linear_used_twice_32.march
+
+The linear value `st4` is used more than once here. [linear_used_twice]
+Linear values must be consumed exactly once — they cannot be copied or ignored.
+
+21 |         Relay_A.recv_Fourth(s, st4, fn (_again, st5) -> Relay_A.close(s, st5))))
+                                    ^^^
+
+    This is a protocol state, and the first use closed the conversation: no step can follow `close`.
+    The conversation so far, in protocol `Relay`:
+
+      … 2 earlier steps
+      reply:  C -> A : Bool     done
+      third:  A -> B : String   done
+      fourth: B -> A : Bool     done   <- `A` tried this again
+      (end of conversation)     <- `A` can only close here
+
+    `st4` was already consumed here:
+
+20 |         let _done = Relay_A.close(s, st4)
+                                          ^^^
+    run `march --explain linear_used_twice`
+
+

@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: if k >= 0 do f(k) else … end
+mod Main do
+  -- §F4: a call through a refined function-typed parameter. Its parameter
+  -- has no name of its own, so the message says "the argument passed to
+  -- `f`" and the guard is written over `k`, never over `_`.
+  fn ap(f : ({Int | _ >= 0}) -> Int, k : Int) : Int do
+    if k < 0 do f(k) else 0 end
+  end
+end

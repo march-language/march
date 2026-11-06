@@ -24,6 +24,36 @@ mod Main do
 end
 ```
 
+## Reading the message
+
+The headline names the argument and the callee's precondition as it was
+declared. Below it:
+
+- **The failing value.** A literal or a closed expression is labelled with its
+  value (`` `b` is `0` here ``), and the note says it can never satisfy the
+  precondition read over the parameter's name (`b != 0`). When the argument is
+  built from names, the line ``for example, when `d` is `0` `` gives the values
+  the solver found (re-checked against the precondition in the interpreter
+  whenever they can be).
+- **Where it came from.** A label on each name's binding (a parameter or a
+  `let`), with what is known about it when it carries a refinement, and a label
+  on the `if` condition the call sits behind ("the call is reached only when
+  this is true").
+- **What happens.** When every argument has a concrete value and the callee
+  does nothing the checker refuses to run (I/O, the clock, randomness), the
+  call is run once in the interpreter, with a step limit, and a failure is
+  reported in one line: ``running `safe_div(10, 0)` panics: division by zero``.
+  A call that returns, runs out of steps or is refused adds nothing. This
+  never changes whether the program is accepted.
+
+```
+refinement violation: argument `b` of `safe_div` does not satisfy precondition `_ != 0`
+for example, when `d` is `0`
+note: guard the call (e.g. `if d != 0 do safe_div(10, d) else … end`) or pass a value known to satisfy it
+
+    running `safe_div(10, 0)` panics: division by zero
+```
+
 ## The fix
 
 Pass a value that satisfies the predicate, or guard the call so the value

@@ -49,10 +49,6 @@ CHAPTERS = {
     "capabilities.md": "capabilities.md",
     "capability-enforcement.md": "capability-enforcement.md",
     "capability-threat-model.md": "capability-threat-model.md",
-    "claim-capabilities.md": "claim-capabilities.md",
-    "claim-deploys.md": "claim-deploys.md",
-    "claim-performance.md": "claim-performance.md",
-    "claim-refinements.md": "claim-refinements.md",
     "compatibility.md": "compatibility.md",
     "choreography.md": "choreography.md",
     "clustering.md": "clustering.md",
@@ -96,7 +92,7 @@ def error_pages():
 # is left as it is.
 TOUR_PAGE = "docs/error-messages.md"
 TOUR_URL = "{{ site.baseurl }}/docs/error-messages/"
-TOUR_MARKER_RE = re.compile(r"^<!-- error-tour: ([\w-]+) -->$")
+TOUR_MARKER_RE = re.compile(r"^<!-- error-tour: ([\w-]+)(?: --[\w-]+)* -->$")
 TOUR_ANCHOR_RE = re.compile(r'^<a id="([\w-]+)"></a>$')
 TOUR_CODE_RE = re.compile(r"\[([a-z][a-z0-9_]*)\]\s*$")
 
