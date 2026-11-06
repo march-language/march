@@ -41,6 +41,14 @@ git log is authoritative for exact commits.
 
   In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
   have a machine-applicable one.
+- **Stdlib laws for `List.sum_int` and `List.product_int`, and a result type on `List.length`.**
+  `List.sum_int_append(xs, ys)` proves `sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)`,
+  `List.sum_int_reverse(xs)` proves `sum_int(reverse(xs)) == sum_int(xs)`, and
+  `product_int_append` / `product_int_reverse` do the same for products. `List.length(xs)` now
+  has the proved type `{Int | _ == len(xs)}`. The loops of `length`, `sum_int`, `product_int`,
+  `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
+  them; what they compute is unchanged.
+
 - **`forge hot-reload check` / `march --check --guarantees` say what a build guarantees.**
   One block per actor and protocol, each line labelled `proved`, `violated`, `not proved`,
   `not checked`, `checked (compiler)` or `assumed`, with what it rests on: state refinements,
