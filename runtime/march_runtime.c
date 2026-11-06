@@ -2955,11 +2955,10 @@ int32_t march_test_report(void) {
  * returns Ok(result) on success or Err(msg) if the call panics (march_panic,
  * a failing assert, division by zero, match failure, etc.).
  *
- * The thunk MUST return an immediate (Bool) — the Ok field is stored in the
- * uniform low-bit-tagged representation ((n << 1) | 1), matching how
- * compiled March reads polymorphic ADT fields.  The Bool-only contract is
- * enforced by the typechecker signature; widening it back to a generic
- * (Bool -> a) would require distinguishing immediate from heap results here.
+ * The thunk returns a Bool in the closure ABI's uniform representation:
+ * an apply function returns `ptr`, and a Bool comes back already tagged
+ * ((b << 1) | 1, so false = 1 and true = 3).  It is stored in the Ok field
+ * verbatim, exactly as __try_call_val stores its value.
  *
  * The closure is a "fn _ -> body" workaround for (Unit -> a): the argument
  * is ignored by the lambda body, so we pass 1 (true).
@@ -3049,14 +3048,14 @@ void *march_try_call(void *thunk) {
     void     **field  = (void **)(result + 16);
     if (!panicked) {
         hdr->tag = 0;                              /* Ok */
-        /* The Ok field is a polymorphic ADT slot, so immediates must use the
-           uniform low-bit tag representation ((n << 1) | 1) that compiled
-           March emits when reading it back (ptrtoint + ashr 1).  The thunk
-           returns a raw Bool (0/1) — __try_call's March type is
-           (Bool -> Bool) -> Result(Bool, String), enforced by the
-           typechecker, so the result here is ALWAYS an immediate; storing a
-           heap pointer through this path would corrupt it. */
-        *field   = (void *)((((intptr_t)ok_result) << 1) | 1);
+        /* The Ok field is a polymorphic ADT slot holding the uniform
+           low-bit tag representation ((n << 1) | 1).  The apply function
+           already returns the Bool in that form (closures return `ptr`), so
+           it is stored verbatim.  Tagging it a second time (as this did
+           until 2026-11-05) turned `false` (1) into 3, which reads back as
+           `true`: every compiled property that returned `false` without
+           panicking passed. */
+        *field   = (void *)ok_result;
     } else {
         hdr->tag = 1;                              /* Err */
         *field   = err_str;

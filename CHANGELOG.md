@@ -408,6 +408,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
+  (what `forge test` runs) treated a property that returned `false` as passing. Only a
+  property that panicked or failed an `assert` was caught. Under `march test` it already
+  failed. A compiled suite with such a property used to pass and now fails.
 - **The interpreter no longer runs another actor's message.** A variant, or another
   actor's message of the same name, sent to an actor ran that actor's handler under
   `march file.march`, while compiled code dropped it. The interpreter now drops it too,
