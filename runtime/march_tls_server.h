@@ -48,7 +48,11 @@ int  mts_poller_start(int poll_secs);     /* detached pthread; 0 ok */
 /* The registry is implemented in march_https.c (always linked: it needs no
  * OpenSSL, and the HTTP runtime uses it on every close). */
 void mts_registry_put(int fd, march_tls_session_t *s);
-march_tls_session_t *mts_registry_get(int fd);
+march_tls_session_t *mts_registry_get(int fd);   /* bare pointer; for "is this fd TLS" only */
+/* The session on [fd] with a reference taken (release with mts_free), or
+ * NULL; with gen != 0, only if it is that session (a WebSocket names its
+ * session by generation, so a reused fd number never finds another one). */
+march_tls_session_t *mts_registry_acquire(int fd, uint32_t gen);
 march_tls_session_t *mts_registry_take(int fd);
 
 #endif

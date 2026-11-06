@@ -85,11 +85,38 @@ ACME plug is `HttpAcme.webroot` (`stdlib/http_acme.march`, `needs IO.FileRead`).
   heap-use-after-free at startup that the macOS suite could not see). Worked around in the
   stdlib; filed as `specs/todos/2026-11-06-closure-borrowed-tail-call-uaf.md`.
 
+## Final review fixes (2026-11-06)
+
+A whole-branch review found, and the Linux ASAN container reproduced on the pool server before
+the fixes:
+
+- A task sending on a `wss://` socket after its handler returned could use the freed TLS
+  session, or, once the fd number was reused, write into another client's session (the shipped
+  example's ticker does this). Sessions are now refcounted; a `WsSocket` carries
+  fd | session-generation << 32, so a lookup finds only its own session; the server closing a
+  WebSocket marks it closed, shuts the socket down and waits for in-flight operations before
+  closing the fd (`march_ws_tls_teardown`). A late send gets an error.
+- Two tasks pushing to one socket deadlocked: the send lock (a pthread mutex) was held while
+  the sender parked. Sends now queue their ciphertext and one sender at a time drains it with
+  no lock held across the wait (`mts_ws_send`); frames keep their order.
+- An upgrade behind a large response made the event-loop thread wait on the client (another
+  client on the thread got nothing for 20 s+). The upgrade now waits in the loop's write phase
+  and the 101 is sent from the WebSocket thread; `detach_conn` also deletes the write filter,
+  which otherwise fired for a recycled connection and closed the WebSocket's fd.
+- A TLS connection kept its memory BIOs at their peak size (one large response = that much
+  memory until the connection closed); a drained BIO over 256 KiB is replaced.
+- The pool waits first only on an idle keep-alive connection and reads first otherwise.
+
+Tests: `buffers_shrink_after_large_transfer` (C unit), and the `wss lifetime` groups (event loop
+and pool, two scheduler threads and one loop thread): `wss_send_after_close`,
+`wss_two_pushers`, `wss_upgrade_behind_slow_reader`. Final ASAN run on Linux: 17/17 groups.
+
 ## Benchmark and downstream
 
-- `specs/benchmarks.md`, "HTTPS server and phase deadlines": plain HTTP CPU per request within
-  noise of base (+2%), HTTPS keep-alive ~6 µs/request more, on a loaded macOS box. The Run 5
-  Linux measurement is still owed.
+- `specs/benchmarks.md`, "HTTPS server and phase deadlines": event-loop plain HTTP CPU per
+  request within noise of base (+2%), HTTPS keep-alive ~6 µs/request more, the thread pool +5%
+  (the deadlines' extra `poll`), on a loaded macOS box. The Run 5 Linux measurement is still
+  owed.
 - forgepm, built with this branch's compiler from a scratch copy, stops on one error that the
   merge-base compiler gives too (`bastion/0.3.1/lib/view/js.march:209: Unknown module JS`); no
   new error. Before the capability change above it also failed with `import_cap_missing` in

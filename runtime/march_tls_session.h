@@ -14,6 +14,7 @@
 #define MARCH_TLS_SESSION_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <openssl/ssl.h>
 
 typedef struct march_tls_session march_tls_session_t;
@@ -26,7 +27,13 @@ typedef enum {
 } mts_rc;
 
 march_tls_session_t *mts_new_server(SSL_CTX *ctx);   /* NULL on failure; takes its own ref on ctx */
+/* A session starts with one reference (its server connection's); mts_free
+ * drops one, and the last one frees it. mts_retain takes another (a
+ * registry lookup does, so a session never disappears under a WebSocket
+ * operation that found it). */
 void   mts_free(march_tls_session_t *s);
+void   mts_retain(march_tls_session_t *s);
+uint32_t mts_gen(const march_tls_session_t *s);       /* unique per process, never 0 */
 int    mts_feed(march_tls_session_t *s, const void *buf, size_t n);  /* 0 ok, -1 fail */
 mts_rc mts_handshake(march_tls_session_t *s);
 int    mts_is_established(const march_tls_session_t *s);
@@ -37,6 +44,16 @@ size_t mts_take_out(march_tls_session_t *s, void *buf, size_t cap);
 int    mts_has_input(march_tls_session_t *s);
 void   mts_shutdown(march_tls_session_t *s);
 const char *mts_error(const march_tls_session_t *s);
+size_t mts_buffer_capacity(march_tls_session_t *s);   /* bytes the BIOs hold allocated (tests) */
+
+/* WebSocket (wss://) state; these lock internally (march_tls_session.c). */
+void mts_ws_begin(march_tls_session_t *s);
+int  mts_ws_enter(march_tls_session_t *s);   /* 1: usable, now counted as touching the fd */
+void mts_ws_leave(march_tls_session_t *s);
+void mts_ws_close(march_tls_session_t *s);   /* no WebSocket operation starts after this */
+int  mts_ws_fd_busy(march_tls_session_t *s);
+int  mts_ws_send(march_tls_session_t *s, const void *a, size_t al, const void *b, size_t bl,
+                 int (*send_all)(int fd, const void *buf, size_t n), int fd);
 
 void mts_lock(march_tls_session_t *s);
 void mts_unlock(march_tls_session_t *s);

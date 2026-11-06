@@ -1553,3 +1553,9 @@ comparison: plain is within noise of base (+2%), and TLS on a keep-alive connect
 6 µs per request on top. New-connection-per-request HTTPS (dominated by the handshake) was not
 measured.
 
+Thread pool (`MARCH_HTTP_EVLOOP=0`), same method with `-c64`, three runs each, load average
+~48: base 35.2 µs/request, new 36.9 µs/request (+5%). That is the price of enforced deadlines in
+this mode: the socket is non-blocking and an idle keep-alive connection waits in `poll` before
+its `recv` (two syscalls where the base made one blocking `recv`, whose fixed 10 s SO_RCVTIMEO is
+gone). Reading first on every pass instead measured +6%.
+

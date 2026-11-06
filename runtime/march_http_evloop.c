@@ -47,32 +47,23 @@
 /* ── WebSocket upgrade thread ─────────────────────────────────────────── */
 
 typedef struct {
-    int   fd;
-    void *ws_closure;   /* March closure: WsSocket -> Unit */
+    int                  fd;
+    march_tls_session_t *tls;          /* NULL for plain */
+    int64_t              ws_value;     /* the WsSocket Int (march_ws_sock_value) */
+    void                *ws_closure;   /* March closure: WsSocket -> Unit */
+    char                *key;          /* Sec-WebSocket-Key */
+    size_t               key_len;
 } ws_upgrade_arg_t;
 
-/* Close a WebSocket connection's fd; for wss://, first take its TLS session
- * out of the registry (before the fd number can be reused), send a
- * close_notify if the socket takes it at once, and free it. */
-static void ws_close_fd(int fd) {
-    march_tls_session_t *s = mts_registry_take(fd);
-    if (s) {
-        mts_shutdown(s);
-        char out[4096];
-        size_t n = mts_take_out(s, out, sizeof out);
-        if (n > 0) (void)send(fd, out, n, MSG_DONTWAIT);
-        mts_free(s);
-    }
-    close(fd);
-}
-
-/* Thread that runs the blocking WebSocket handler after upgrade.
- * Takes ownership of fd; closes it on exit. */
+/* Thread that sends the 101 and runs the blocking WebSocket handler.
+ * Owns the fd (and the TLS session) and closes them on exit, once no other
+ * task is using the socket (march_ws_tls_teardown). */
 static void *ws_handler_thread(void *arg) {
     ws_upgrade_arg_t *a = (ws_upgrade_arg_t *)arg;
     int   fd         = a->fd;
+    march_tls_session_t *tls = a->tls;
+    int64_t ws_value = a->ws_value;
     void *ws_closure = a->ws_closure;
-    free(a);
 
     /* This OS thread runs compiled March code outside the scheduler — force
      * atomic "local" refcounts so it doesn't race shared closures/constants. */
@@ -82,16 +73,16 @@ static void *ws_handler_thread(void *arg) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
-    /* Allocate WsSocket(fd) march heap value.
-     * Layout: header(16) + fd field(8) = 24 bytes. tag=0, field[0]=fd. */
-    void *ws_sock = march_alloc(24);
-    *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+    march_ws_send_101(ws_value, a->key, a->key_len);
+    free(a->key);
+    free(a);
 
-    /* Invoke closure: fn_ptr(closure, ws_sock).
-     * March closure layout: [rc(8)|tag(4)|pad(4)|fn_ptr@16|captures...] */
+    /* WsSocket(value): header(16) + one Int field. */
+    void *ws_sock = march_alloc(24);
+    *(int64_t *)((char *)ws_sock + 16) = ws_value;
     call_closure1(ws_closure, ws_sock);
 
-    ws_close_fd(fd);
+    march_ws_tls_teardown(fd, tls);
     return NULL;
 }
 
@@ -370,6 +361,10 @@ static void arm_read(int evfd, conn_state_t *c) {
 
 static void close_conn(int evfd, conn_state_t *c) {
     heap_remove(c);
+    if (c->ws_closure) { march_decrc(c->ws_closure); c->ws_closure = NULL; }
+    free(c->ws_key);
+    c->ws_key = NULL;
+    c->ws_pending = 0;
     if (c->tls) {
         /* One best-effort close_notify, then forget the session BEFORE the
          * fd is closed: a new connection reusing the number must never find
@@ -444,11 +439,17 @@ static void park_pending(conn_state_t *c, void **conns, int *n) {
 static void detach_conn(int evfd, conn_state_t *c) {
     heap_remove(c);                          /* a WebSocket is not timed here */
 #if EVLOOP_USE_KQUEUE
-    /* Explicitly delete the kqueue read filter.  We are NOT closing the fd,
-     * so kqueue won't remove the filter automatically. */
+    /* Explicitly delete both kqueue filters.  We are NOT closing the fd, so
+     * kqueue won't remove them automatically, and a WebSocket handed off
+     * from the write phase (a wss:// upgrade waiting for its earlier
+     * responses to drain) still has its write filter, whose events would
+     * otherwise arrive for a recycled conn_state_t. Deleted one at a time:
+     * a missing filter fails its own change only. */
     struct kevent ev;
     EV_SET(&ev, c->fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
     kevent(evfd, &ev, 1, NULL, 0, NULL);   /* ignore error — filter may be gone */
+    EV_SET(&ev, c->fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    kevent(evfd, &ev, 1, NULL, 0, NULL);
 #elif EVLOOP_USE_EPOLL
     epoll_ctl(evfd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
@@ -456,6 +457,43 @@ static void detach_conn(int evfd, conn_state_t *c) {
     march_tls_conn_free_out(c);
     march_http_release_conns(c->pending_release, &c->pending_release_n);
     conn_state_free(c);
+}
+
+/* Hand an upgraded connection to a WebSocket handler thread: the loop
+ * forgets it (the TLS session stays registered under the fd, now in
+ * WebSocket mode) and the thread sends the 101 and runs the handler. */
+static void evloop_ws_handoff(int evfd, conn_state_t *c) {
+    int   fd  = c->fd;
+    march_tls_session_t *tls = c->tls;
+    void *clo = c->ws_closure;
+    char *key = c->ws_key;
+    size_t klen = c->ws_key_len;
+    c->tls = NULL;
+    c->ws_closure = NULL;
+    c->ws_key = NULL;
+    c->ws_pending = 0;
+    detach_conn(evfd, c);
+    if (tls) mts_ws_begin(tls);
+    ws_upgrade_arg_t *targ = malloc(sizeof(*targ));
+    if (targ) {
+        targ->fd         = fd;
+        targ->tls        = tls;
+        targ->ws_value   = march_ws_sock_value(fd, tls);
+        targ->ws_closure = clo;
+        targ->key        = key;
+        targ->key_len    = klen;
+        pthread_t tid;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        int rc = pthread_create(&tid, &attr, ws_handler_thread, targ);
+        pthread_attr_destroy(&attr);
+        if (rc == 0) return;
+        free(targ);
+    }
+    free(key);
+    march_decrc(clo);
+    march_ws_tls_teardown(fd, tls);
 }
 
 /* ── Defer a partial/EAGAIN write to handle_write ─────────────────────── */
@@ -503,23 +541,6 @@ static int tls_send_or_defer(int evfd, conn_state_t *c, int keep_alive) {
     if (mts_is_established(c->tls)) conn_set_phase(c, PH_WRITE);
     arm_write(evfd, c);
     return 0;
-}
-
-/* Before a wss:// handoff: send every byte of ciphertext still owed on this
- * connection, waiting for writability up to progress_secs. 1 when done. */
-static int tls_drain_before_handoff(conn_state_t *c) {
-    int64_t deadline = now_ms() + (int64_t)g_march_https.progress_secs * 1000;
-    for (;;) {
-        size_t sent = 0;
-        io_result_t f = march_tls_flush(c, &sent);
-        if (f == IO_COMPLETE) return 1;
-        if (f == IO_ERROR) return 0;
-        if (sent) deadline = now_ms() + (int64_t)g_march_https.progress_secs * 1000;
-        int64_t left = deadline - now_ms();
-        if (left <= 0) return 0;
-        struct pollfd p = { c->fd, POLLOUT, 0 };
-        if (poll(&p, 1, (int)left) < 0 && errno != EINTR) return 0;
-    }
 }
 
 /* Write a batch: plaintext connections writev it; TLS ones encrypt it into
@@ -640,61 +661,49 @@ static void handle_read(int evfd, conn_state_t *c) {
             void    *upgrade_val = *(void **)(rc_p + 112);
             int32_t  upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
             if (upgrade_tag == 1) {
-                if (c->tls) {
-                    /* wss://: the session stays registered under the fd and
-                     * moves to the WebSocket thread with it. Earlier responses
-                     * of this batch go out first, then the 101. */
-                    if (batch_n > 0) conn_out(c, batch_iov, batch_n);
-                    if (!tls_drain_before_handoff(c)) {
-                        march_http_release_conns(done_conns, &done_n);
-                        march_http_release_conn(result_conn);
-                        close_conn(evfd, c);
-                        batch_ok = 0;
-                        break;
-                    }
-                    c->tls = NULL;                 /* owned via the registry now */
-                } else if (batch_n > 0) {
-                    writev(c->fd, batch_iov, batch_n);
-                }
-
+                /* WebSocket upgrade. The handler runs on its own thread with
+                 * the fd; this loop thread never waits on the client: the
+                 * 101 is sent from the handler thread, and over TLS the
+                 * batch's earlier responses drain first through the normal
+                 * write phase (ws_pending, finished in handle_write). */
                 void *ws_closure = *(void **)((char *)upgrade_val + 16);
-                void *ws_key     = find_ws_key_header(*(void **)(rc_p + 56));
-                /* The WS thread's call consumes one closure reference; the
-                 * result's `upgrade` field still owns another, released with
-                 * the result below (after the handshake, which reads ws_key
-                 * out of the result's request headers). */
-                march_incrc(ws_closure);
-
-                int ws_fd = c->fd;
-                /* Remove fd from event loop before spawning the thread. */
-                detach_conn(evfd, c);
-
-                if (ws_key) {
-                    march_ws_handshake((int64_t)ws_fd, ws_key);
-
-                    ws_upgrade_arg_t *targ = malloc(sizeof(*targ));
-                    if (targ) {
-                        targ->fd         = ws_fd;
-                        targ->ws_closure = ws_closure;
-                        pthread_t tid;
-                        pthread_attr_t attr;
-                        pthread_attr_init(&attr);
-                        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-                        if (pthread_create(&tid, &attr, ws_handler_thread, targ) != 0) {
-                            free(targ);
-                            ws_close_fd(ws_fd);
-                        }
-                        pthread_attr_destroy(&attr);
-                    } else {
-                        ws_close_fd(ws_fd);
-                    }
-                } else {
-                    ws_close_fd(ws_fd);
+                march_string *ws_key = (march_string *)find_ws_key_header(*(void **)(rc_p + 56));
+                if (!ws_key || ws_key->len <= 0 || ws_key->len > 256) {
+                    march_http_release_conns(done_conns, &done_n);
+                    march_http_release_conn(result_conn);
+                    close_conn(evfd, c);
+                    batch_ok = 0;
+                    break;
                 }
+                c->ws_key = malloc((size_t)ws_key->len);
+                if (!c->ws_key) {
+                    march_http_release_conns(done_conns, &done_n);
+                    march_http_release_conn(result_conn);
+                    close_conn(evfd, c);
+                    batch_ok = 0;
+                    break;
+                }
+                memcpy(c->ws_key, ws_key->data, (size_t)ws_key->len);
+                c->ws_key_len = (size_t)ws_key->len;
+                /* The WS thread's call consumes one closure reference; the
+                 * result's `upgrade` field owns another, released with the
+                 * result just below. */
+                march_incrc(ws_closure);
+                c->ws_closure = ws_closure;
 
+                if (batch_n > 0) {
+                    if (c->tls) conn_out(c, batch_iov, batch_n);
+                    else writev(c->fd, batch_iov, batch_n);
+                }
                 march_http_release_conns(done_conns, &done_n);
                 march_http_release_conn(result_conn);
                 batch_ok = 0;
+                if (c->tls) {
+                    int sent = tls_send_or_defer(evfd, c, 1);
+                    if (sent < 0) break;                 /* closed */
+                    if (sent == 0) { c->ws_pending = 1; break; }
+                }
+                evloop_ws_handoff(evfd, c);
                 break;
             }
 
@@ -802,7 +811,9 @@ static void handle_write(int evfd, conn_state_t *c) {
             if (sent && mts_is_established(c->tls)) conn_set_phase(c, PH_WRITE);
             return;
         }
-        if (f == IO_ERROR || !c->keep_alive) { close_conn(evfd, c); return; }
+        if (f == IO_ERROR) { close_conn(evfd, c); return; }
+        if (c->ws_pending) { evloop_ws_handoff(evfd, c); return; }
+        if (!c->keep_alive) { close_conn(evfd, c); return; }
         c->phase = CONN_PHASE_READING;
         if (mts_is_established(c->tls)) conn_set_phase(c, PH_IDLE);
         arm_read(evfd, c);
@@ -1056,6 +1067,10 @@ void march_evloop_server_listen(int port, void *pipeline) {
     long ncpus = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpus <= 0) ncpus = 4;
     int nthreads = (int)ncpus;
+    /* MARCH_HTTP_EVLOOP_THREADS: a fixed loop-thread count (tests use 1 to
+     * show that one slow client never stalls the others on its thread). */
+    const char *nt = getenv("MARCH_HTTP_EVLOOP_THREADS");
+    if (nt && atoi(nt) > 0) nthreads = atoi(nt);
 
     fprintf(stderr, "march: event-loop server starting on port %d%s "
             "(%d threads, SO_REUSEPORT)\n", port,

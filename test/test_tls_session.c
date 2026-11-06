@@ -263,6 +263,36 @@ static void t_shutdown_queues_close_notify(SSL_CTX *ctx) {
     printf("ok %s\n", g_case);
 }
 
+static void t_buffers_shrink_after_large_transfer(SSL_CTX *ctx) {
+    g_case = "buffers_shrink_after_large_transfer";
+    enum { N = 4 * 1024 * 1024 };
+    unsigned char *big = malloc(N), *dst = malloc(N + 16);
+    fill_pattern(big, N);
+    march_tls_session_t *s = mts_new_server(ctx);
+    client_t c = client_new();
+    handshake(s, &c, 0);
+    /* Server -> client: 4 MiB encrypted in one go, then all taken out. */
+    CHECK(mts_write(s, big, N) == 0, "mts_write 4 MiB");
+    pump(s, &c, 0);
+    CHECK(client_read_all(&c, dst, N) == N && memcmp(big, dst, N) == 0, "client read 4 MiB");
+    /* Client -> server: 4 MiB fed in one go, then all read. */
+    size_t off = 0, w = 0;
+    while (off < N) { CHECK(SSL_write_ex(c.ssl, big + off, N - off, &w) == 1, "client write"); off += w; }
+    pump(s, &c, 0);
+    size_t got = 0;
+    for (;;) {
+        size_t k = 0;
+        mts_rc rc = mts_read(s, dst + got, N + 16 - got, &k);
+        got += k;
+        if (rc == MTS_NEED_INPUT) break;
+        CHECK(rc == MTS_DONE, "mts_read rc");
+    }
+    CHECK(got == N, "server read 4 MiB");
+    CHECK(mts_buffer_capacity(s) < 1024 * 1024, "buffers still hold the peak after draining");
+    SSL_free(c.ssl); mts_free(s); free(big); free(dst);
+    printf("ok %s\n", g_case);
+}
+
 int main(void) {
     make_cert();
     SSL_CTX *ctx = server_ctx();
@@ -274,6 +304,7 @@ int main(void) {
     t_close_notify_is_eof(ctx);
     t_garbage_fails(ctx);
     t_shutdown_queues_close_notify(ctx);
+    t_buffers_shrink_after_large_transfer(ctx);
     SSL_CTX_free(ctx);
     printf("all tls session tests passed\n");
     return 0;

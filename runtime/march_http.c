@@ -2236,7 +2236,7 @@ static void *connection_thread(void *arg) {
      * HttpServer.scheme and WebSocket I/O, then the handshake. */
     pconn_t pc = { fd, NULL };
     int     running = 1;
-    int     maybe_buffered = 0;   /* TLS: plaintext may wait in the session */
+    int     ws_handed = 0;        /* the TLS session went to a WebSocket handler */
     if (is_tls) {
         pc.tls = mts_new_from_slot();
         if (!pc.tls) {
@@ -2244,9 +2244,6 @@ static void *connection_thread(void *arg) {
         } else {
             mts_registry_put(fd, pc.tls);
             if (tls_handshake(&pc) != 0) running = 0;
-            /* The client's first request may have come in the same flight
-             * as its Finished message: it is in the session already. */
-            maybe_buffered = 1;
             t_idle = march_now_ms();
         }
     }
@@ -2353,9 +2350,13 @@ static void *connection_thread(void *arg) {
                                sends or closes. */
                             int fl = fcntl(fd, F_GETFL, 0);
                             if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
-                            march_ws_handshake((int64_t)fd, ws_key);
+                            /* wss://: the WsSocket names its session (see
+                             * march_ws_sock_value). */
+                            if (pc.tls) { mts_ws_begin(pc.tls); ws_handed = 1; }
+                            int64_t ws_v = march_ws_sock_value(fd, pc.tls);
+                            march_ws_handshake(ws_v, ws_key);
                             void *ws_sock = march_alloc(16 + 8);
-                            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+                            *(int64_t *)((char *)ws_sock + 16) = ws_v;
                             /* The call consumes one closure reference; the
                              * result's `upgrade` still owns another. */
                             march_incrc(ws_closure);
@@ -2467,18 +2468,29 @@ static void *connection_thread(void *arg) {
             deadline = t_last + (int64_t)g_march_https.progress_secs * 1000;
         else
             deadline = t_first + (int64_t)g_march_https.header_secs * 1000;
-        if (!maybe_buffered && !conn_wait(fd, 0, deadline)) break;   /* deadline passed */
-        maybe_buffered = 0;
+        /* Mid-request, read first and wait only when there is nothing, so
+         * pipelined or already-readable bytes cost no poll and a TLS
+         * session's buffered plaintext (which raises no readiness) is read
+         * at once. On an idle keep-alive connection the next request has
+         * usually not arrived yet, so wait first: one poll and one recv
+         * rather than recv, EAGAIN, poll, recv. The deadline is checked on
+         * every pass, so bytes that keep trickling in do not extend a header
+         * or body deadline. */
+        if (march_now_ms() >= deadline) break;
+        if (buf_len == 0 && !(pc.tls && mts_has_input(pc.tls)) &&
+            !conn_wait(fd, 0, deadline))
+            break;                                         /* idle deadline */
         ssize_t n = pconn_recv(&pc, buf + buf_len, space);
         if (n < 0) {
             int e = errno;
-            if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK) continue;
+            if (e == EINTR) continue;
+            if (e == EAGAIN || e == EWOULDBLOCK) {
+                if (!conn_wait(fd, 0, deadline)) break;   /* deadline passed */
+                continue;
+            }
             break;
         }
         if (n == 0) break;  /* EOF */
-        /* A TLS read that filled the space may have left more plaintext
-         * decrypted in the session, which no socket readiness will report. */
-        if (pc.tls && (size_t)n == space) maybe_buffered = 1;
         int64_t now = march_now_ms();
         if (buf_len == 0) t_first = now;
         t_last = now;
@@ -2486,6 +2498,10 @@ static void *connection_thread(void *arg) {
     }
 
     free(buf);
+    if (ws_handed) {
+        march_ws_tls_teardown(fd, pc.tls);   /* waits out other tasks' sends */
+        return NULL;
+    }
     if (pc.tls) {
         /* Forget the session before the fd number can be reused. */
         mts_shutdown(pc.tls);
@@ -2995,33 +3011,12 @@ void march_http_server_wait(int64_t handle) {
 
 /* ── WebSocket builtins ───────────────────────────────────────────────── */
 
-static int ws_send_bufs(int fd, const void *a, size_t al, const void *b, size_t bl);
+void march_ws_send_101(int64_t v, const char *key, size_t key_len);
 
 void march_ws_handshake(int64_t fd, void *key_string) {
     if (!key_string) return;
     march_string *key = (march_string *)key_string;
-    const char *magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    size_t magic_len = 36;
-    size_t total = (size_t)key->len + magic_len;
-    char *concat = (char *)alloca(total);
-    memcpy(concat, key->data, (size_t)key->len);
-    memcpy(concat + key->len, magic, magic_len);
-
-    uint8_t hash[20];
-    sha1((const uint8_t *)concat, total, hash);
-
-    char b64[32];
-    base64_encode(hash, 20, b64, sizeof(b64));
-
-    char resp[256];
-    int n = snprintf(resp, sizeof(resp),
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: %s\r\n\r\n",
-        b64);
-    if (n > 0)
-        (void)ws_send_bufs((int)fd, resp, (size_t)n, NULL, 0);
+    march_ws_send_101(fd, key->data, (size_t)key->len);
 }
 
 /* recv_all_bytes: read exactly `n` bytes from fd into buf. Returns 0 on
@@ -3050,23 +3045,50 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
 
 /* ── WebSocket I/O over TLS (wss://) ──────────────────────────────────── */
 /*
- * A WsSocket is only an fd, so the WebSocket functions find a wss://
- * connection's TLS session in the fd registry (march_tls_server.c); a plain
- * connection has none and keeps the raw socket path. A handler blocked in
- * recv and another task sending on the same socket share the session:
+ * A WsSocket carries one Int. For a plain connection it is the fd; for a
+ * wss:// connection it is fd | (session generation << 32), so a WebSocket
+ * names its own TLS session and a reused fd number never finds another one
+ * (march_ws_sock_value). Every operation on a wss:// socket takes a
+ * reference to the session from the registry, checks it is still a live
+ * WebSocket and counts itself as touching the fd (mts_ws_enter) for as long
+ * as it does; the server closing the connection marks the session closed,
+ * shuts the socket down and waits for those operations to finish before it
+ * closes the fd (march_ws_tls_teardown). So a task that sends after its
+ * handler returned gets an error, never a freed session or someone else's
+ * connection.
  *
- *   recv: wait for the socket WITHOUT any lock, then lock -> feed -> read
- *         -> unlock (already-decrypted bytes are served before waiting);
- *   send: send_lock -> lock -> encrypt + take the ciphertext -> unlock ->
- *         send it all -> send_unlock (one sender's frames never interleave
- *         with another's on the wire, and the reader is never held up by a
- *         slow send).
- *
- * The session lives until the connection's fd is closed by its server.
+ * Sends queue their ciphertext and one sender at a time drains the queue,
+ * holding no lock while it waits for the socket (mts_ws_send), so a parked
+ * sender never blocks another thread on a mutex and frames keep their
+ * order. Reads wait for the socket without any lock and feed/read under
+ * the session lock.
  */
-static int ws_recv_exact(int fd, uint8_t *buf, size_t n) {
-    march_tls_session_t *s = mts_registry_get(fd);
-    if (!s) return recv_exact(fd, buf, n);
+#define WS_FD(v)   ((int)((int64_t)(v) & 0xffffffff))
+#define WS_GEN(v)  ((uint32_t)(((uint64_t)(int64_t)(v)) >> 32))
+
+int64_t march_ws_sock_value(int fd, march_tls_session_t *s) {
+    return s ? ((int64_t)fd | ((int64_t)mts_gen(s) << 32)) : (int64_t)fd;
+}
+
+/* The live wss:// session [v] names, referenced and counted as touching the
+ * fd (release with ws_session_done), or NULL when it is gone. */
+static march_tls_session_t *ws_session_begin(int64_t v) {
+    march_tls_session_t *s = mts_registry_acquire(WS_FD(v), WS_GEN(v));
+    if (!s) return NULL;
+    if (!mts_ws_enter(s)) { mts_free(s); return NULL; }
+    return s;
+}
+
+static void ws_session_done(march_tls_session_t *s) {
+    mts_ws_leave(s);
+    mts_free(s);
+}
+
+static int ws_recv_exact(int64_t v, uint8_t *buf, size_t n) {
+    if (WS_GEN(v) == 0) return recv_exact(WS_FD(v), buf, n);
+    march_tls_session_t *s = ws_session_begin(v);
+    if (!s) return -1;
+    int fd = WS_FD(v), rc = 0;
     size_t got = 0;
     while (got < n) {
         size_t k = 0;
@@ -3075,8 +3097,8 @@ static int ws_recv_exact(int fd, uint8_t *buf, size_t n) {
         mts_unlock(s);
         got += k;
         if (k > 0) continue;
-        if (r == MTS_EOF || r == MTS_FAIL) return -1;
-        if (march_sched_wait_fd(fd, 0, 0) < 0) return -1;
+        if (r == MTS_EOF || r == MTS_FAIL) { rc = -1; break; }
+        if (march_sched_wait_fd(fd, 0, 0) < 0) { rc = -1; break; }
         char tmp[16384];
         sigset_t saved;
         march_block_preempt(&saved);
@@ -3084,36 +3106,78 @@ static int ws_recv_exact(int fd, uint8_t *buf, size_t n) {
         int e = m < 0 ? march_errno_now() : 0;     /* parked above */
         march_unblock_preempt(&saved);
         if (m < 0 && (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)) continue;
-        if (m <= 0) return -1;
+        if (m <= 0) { rc = -1; break; }
         mts_lock(s);
         int f = mts_feed(s, tmp, (size_t)m);
         mts_unlock(s);
-        if (f != 0) return -1;
+        if (f != 0) { rc = -1; break; }
     }
-    return 0;
+    ws_session_done(s);
+    return rc;
+}
+
+static int ws_send_all_cb(int fd, const void *buf, size_t n) {
+    return send_all_parked(fd, (const char *)buf, n, NULL) < 0 ? -1 : 0;
 }
 
 /* Send a then b (either may be empty) as one unit. 0 ok, -1 on failure. */
-static int ws_send_bufs(int fd, const void *a, size_t al, const void *b, size_t bl) {
-    march_tls_session_t *s = mts_registry_get(fd);
-    if (!s) {
+static int ws_send_bufs(int64_t v, const void *a, size_t al, const void *b, size_t bl) {
+    int fd = WS_FD(v);
+    if (WS_GEN(v) == 0) {
         if (al && send_all_parked(fd, (const char *)a, al, NULL) < 0) return -1;
         if (bl && send_all_parked(fd, (const char *)b, bl, NULL) < 0) return -1;
         return 0;
     }
-    mts_send_lock(s);
-    mts_lock(s);
-    int ok = (al == 0 || mts_write(s, a, al) == 0) && (bl == 0 || mts_write(s, b, bl) == 0);
-    size_t n = ok ? mts_out_len(s) : 0;
-    char *out = n ? (char *)malloc(n) : NULL;
-    if (out) n = mts_take_out(s, out, n);
-    mts_unlock(s);
-    int rc = -1;
-    if (ok && n == 0) rc = 0;
-    else if (ok && out) rc = send_all_parked(fd, out, n, NULL) < 0 ? -1 : 0;
-    free(out);
-    mts_send_unlock(s);
+    march_tls_session_t *s = mts_registry_acquire(fd, WS_GEN(v));
+    if (!s) return -1;
+    int rc = mts_ws_send(s, a, al, b, bl, ws_send_all_cb, fd);
+    mts_free(s);
     return rc;
+}
+
+/* Close a wss:// connection handed to a WebSocket: no operation starts
+ * after mts_ws_close; shutdown(2) wakes any that is waiting on the socket;
+ * the fd is closed only once none is touching it (bounded wait, 5 s). The
+ * session is freed when its last reference goes. A plain connection is
+ * just closed. */
+void march_ws_tls_teardown(int fd, march_tls_session_t *s) {
+    if (s) {
+        mts_registry_take(fd);
+        mts_ws_close(s);
+        if (mts_ws_fd_busy(s)) {
+            shutdown(fd, SHUT_RDWR);
+            for (int i = 0; i < 5000 && mts_ws_fd_busy(s); i++) march_sleep_ms(1);
+        } else {
+            mts_shutdown(s);                    /* best-effort close_notify */
+            char out[4096];
+            size_t n = mts_take_out(s, out, sizeof out);
+            if (n > 0) (void)send(fd, out, n, MSG_DONTWAIT);
+        }
+        mts_free(s);
+    }
+    close(fd);
+}
+
+/* The 101 response for a WebSocket upgrade, sent on [v] (a WsSocket value). */
+void march_ws_send_101(int64_t v, const char *key, size_t key_len) {
+    const char *magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    size_t magic_len = 36;
+    if (key_len > 256) return;
+    char concat[256 + 36];
+    memcpy(concat, key, key_len);
+    memcpy(concat + key_len, magic, magic_len);
+    uint8_t hash[20];
+    sha1((const uint8_t *)concat, key_len + magic_len, hash);
+    char b64[32];
+    base64_encode(hash, 20, b64, sizeof(b64));
+    char resp[256];
+    int n = snprintf(resp, sizeof(resp),
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: %s\r\n\r\n",
+        b64);
+    if (n > 0) (void)ws_send_bufs(v, resp, (size_t)n, NULL, 0);
 }
 
 /* WsFrame tag layout (matches March declaration order):
@@ -3125,7 +3189,7 @@ static int ws_send_bufs(int fd, const void *a, size_t al, const void *b, size_t 
  */
 
 void *march_ws_recv(int64_t fd) {
-    int sock = (int)fd;
+    int64_t sock = fd;                  /* a WsSocket value: see WS_FD */
     uint8_t hdr2[2];
     /* Declared before any `goto closed` so the cleanup free() at the label
        never sees an uninitialized pointer — the header/length/mask read
@@ -3251,7 +3315,7 @@ closed:
 /* Send a WebSocket frame to fd (server→client, unmasked). */
 void march_ws_send(int64_t fd, void *frame) {
     if (!frame) return;
-    int sock = (int)fd;
+    int64_t sock = fd;                  /* a WsSocket value: see WS_FD */
 
     int32_t tag = *(int32_t *)((char *)frame + 8);
 
@@ -3334,7 +3398,7 @@ void march_ws_send(int64_t fd, void *frame) {
  *   Timeout          → tag 2, no fields
  */
 void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
-    int ws_fd = (int)socket_fd;
+    int ws_fd = WS_FD(socket_fd);
 
     /* pipe_rd is an int64 field inside a March heap object, or NULL */
     int pipe_fd = -1;
@@ -3351,17 +3415,24 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
     int fds[2] = { ws_fd, pipe_fd >= 0 ? pipe_fd : ws_fd };
     int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
     int pipe_ready = 0, ws_ready = 0;
-    /* wss://: bytes the session already holds raise no socket readiness. */
-    march_tls_session_t *wss = mts_registry_get(ws_fd);
-    if (wss) {
-        mts_lock(wss);
-        ws_ready = mts_has_input(wss);
-        mts_unlock(wss);
+    /* wss://: bytes the session already holds raise no socket readiness, and
+     * a session that is gone reads as ready so the recv below reports the
+     * close. The session stays counted as touching the fd while we wait. */
+    march_tls_session_t *wss = NULL;
+    if (WS_GEN(socket_fd) != 0) {
+        wss = ws_session_begin(socket_fd);
+        if (!wss) ws_ready = 1;
+        else {
+            mts_lock(wss);
+            ws_ready = mts_has_input(wss);
+            mts_unlock(wss);
+        }
     }
     for (; !ws_ready;) {
         int w = march_sched_wait_fds(fds, pipe_fd >= 0 ? 2 : 1, deadline);
         if (w <= 0) {
             /* Timeout, or an error: both were "Timeout" before. */
+            if (wss) ws_session_done(wss);
             void *t = march_alloc(16);
             *(int32_t *)((char *)t + 8) = 2;
             return t;
@@ -3374,12 +3445,15 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
         pipe_ready = prc > 0 && pipe_fd >= 0 && pfds[1].revents != 0;
         if (ws_ready || pipe_ready) break;
         if (deadline > 0 && march_now_ms() >= deadline) {
+            if (wss) ws_session_done(wss);
             void *t = march_alloc(16);
             *(int32_t *)((char *)t + 8) = 2;
             return t;
         }
         /* stale hint: wait again */
     }
+
+    if (wss) ws_session_done(wss);
 
     /* Check actor pipe first (prioritise actor messages) */
     if (pipe_ready) {

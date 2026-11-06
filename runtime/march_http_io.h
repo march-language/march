@@ -106,6 +106,13 @@ struct conn_state {
     size_t        cout_len, cout_pos, cout_cap;
     void         *pipeline;              /* the accepting listener's pipeline */
 
+    /* A WebSocket upgrade waiting for this connection's earlier responses
+     * to drain before the fd goes to its handler thread (TLS only). */
+    int           ws_pending;
+    void         *ws_closure;            /* one reference, for the handler call */
+    char         *ws_key;                /* Sec-WebSocket-Key, malloc'd copy */
+    size_t        ws_key_len;
+
     /* ── Free-list link ─────────────────────────────────────────────── */
     conn_state_t *next_free;
 };

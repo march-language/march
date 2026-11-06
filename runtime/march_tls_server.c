@@ -359,4 +359,12 @@ const march_tls_ops_t mts_real_ops = {
     .send_unlock     = mts_send_unlock,
     .slot_generation = mts_slot_generation,
     .poller_start    = mts_poller_start,
+    .retain          = mts_retain,
+    .gen             = mts_gen,
+    .ws_begin        = mts_ws_begin,
+    .ws_enter        = mts_ws_enter,
+    .ws_leave        = mts_ws_leave,
+    .ws_close        = mts_ws_close,
+    .ws_fd_busy      = mts_ws_fd_busy,
+    .ws_send         = mts_ws_send,
 };

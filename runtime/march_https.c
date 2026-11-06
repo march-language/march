@@ -87,6 +87,17 @@ march_tls_session_t *mts_registry_get(int fd) {
     return s;
 }
 
+march_tls_session_t *mts_registry_acquire(int fd, uint32_t gen) {
+    march_tls_session_t *s = NULL;
+    pthread_mutex_lock(&g_reg_mu);
+    if (fd >= 0 && (size_t)fd < g_reg_cap) s = g_reg[fd];
+    /* Only sessions exist in the registry once the ops table is installed. */
+    if (s && gen != 0 && g_march_tls_ops->gen(s) != gen) s = NULL;
+    if (s) g_march_tls_ops->retain(s);
+    pthread_mutex_unlock(&g_reg_mu);
+    return s;
+}
+
 march_tls_session_t *mts_registry_take(int fd) {
     march_tls_session_t *s = NULL;
     pthread_mutex_lock(&g_reg_mu);

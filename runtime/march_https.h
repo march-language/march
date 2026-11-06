@@ -8,6 +8,7 @@
 #ifndef MARCH_HTTPS_H
 #define MARCH_HTTPS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct {
@@ -33,6 +34,14 @@ void    march_http_server_set_timeouts(int64_t handshake_secs, int64_t header_se
 void   *march_http_server_reload_tls(int64_t kind, void *a, void *b);
 void    march_http_server_plain_listener(int64_t port, void *pipeline);
 int64_t march_http_conn_is_tls(int64_t fd);
+
+/* WebSocket handoff of a connection that may be TLS (march_http.c). The
+ * WsSocket Int for fd and its session (s may be NULL for plain), and the
+ * teardown that closes it once no WebSocket operation is using the fd. */
+typedef struct march_tls_session march_tls_session_t;
+int64_t march_ws_sock_value(int fd, march_tls_session_t *s);
+void    march_ws_tls_teardown(int fd, march_tls_session_t *s);
+void    march_ws_send_101(int64_t v, const char *key, size_t key_len);
 
 /* Called by march_http_server_listen: starts the certificate file poller
  * (once) for a TlsFiles server with a nonzero poll interval. */

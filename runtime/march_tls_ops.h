@@ -41,6 +41,15 @@ typedef struct {
     void   (*send_unlock)(march_tls_session_t *);
     uint64_t (*slot_generation)(void);
     int    (*poller_start)(int);
+    void   (*retain)(march_tls_session_t *);
+    uint32_t (*gen)(const march_tls_session_t *);
+    void   (*ws_begin)(march_tls_session_t *);
+    int    (*ws_enter)(march_tls_session_t *);
+    void   (*ws_leave)(march_tls_session_t *);
+    void   (*ws_close)(march_tls_session_t *);
+    int    (*ws_fd_busy)(march_tls_session_t *);
+    int    (*ws_send)(march_tls_session_t *, const void *, size_t, const void *, size_t,
+                      int (*)(int, const void *, size_t), int);
 } march_tls_ops_t;
 
 /* Defined in march_https.c (always linked); set by march_https_tls.c. */
@@ -68,6 +77,14 @@ extern const march_tls_ops_t mts_real_ops;
 #define mts_unlock(...)         (g_march_tls_ops->unlock(__VA_ARGS__))
 #define mts_send_lock(...)      (g_march_tls_ops->send_lock(__VA_ARGS__))
 #define mts_send_unlock(...)    (g_march_tls_ops->send_unlock(__VA_ARGS__))
+#define mts_retain(...)         (g_march_tls_ops->retain(__VA_ARGS__))
+#define mts_gen(...)            (g_march_tls_ops->gen(__VA_ARGS__))
+#define mts_ws_begin(...)       (g_march_tls_ops->ws_begin(__VA_ARGS__))
+#define mts_ws_enter(...)       (g_march_tls_ops->ws_enter(__VA_ARGS__))
+#define mts_ws_leave(...)       (g_march_tls_ops->ws_leave(__VA_ARGS__))
+#define mts_ws_close(...)       (g_march_tls_ops->ws_close(__VA_ARGS__))
+#define mts_ws_fd_busy(...)     (g_march_tls_ops->ws_fd_busy(__VA_ARGS__))
+#define mts_ws_send(...)        (g_march_tls_ops->ws_send(__VA_ARGS__))
 #endif
 
 #endif

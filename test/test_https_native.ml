@@ -557,10 +557,45 @@ let https_server_src = {|mod HttpsE2e do
     ws_echo_loop(socket)
   end
 
+  -- A task that keeps sending after its handler returned (the connection
+  -- is closed and its fd may be reused by then).
+  fn late_loop(socket, i) do
+    if i > 100 do ()
+    else
+      sleep_ms(20)
+      WebSocket.send_frame(socket, TextFrame("late " ++ int_to_string(i)))
+      late_loop(socket, i + 1)
+    end
+  end
+
+  fn ws_late(socket) do
+    let _t = Task.async(fn () -> late_loop(socket, 1))
+    match WebSocket.recv(socket) do
+    _ -> ()
+    end
+  end
+
+  fn big_push(socket, tag, i) do
+    if i > 200 do ()
+    else
+      WebSocket.send_frame(socket, TextFrame(tag ++ " " ++ int_to_string(i) ++ " " ++ string_repeat("p", 4000)))
+      big_push(socket, tag, i + 1)
+    end
+  end
+
+  -- Two tasks push 200 large frames each to a client that is not reading.
+  fn ws_push2(socket) do
+    let _a = Task.async(fn () -> big_push(socket, "A", 1))
+    let _b = Task.async(fn () -> big_push(socket, "B", 1))
+    ws_echo_loop(socket)
+  end
+
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do
     (:get, Cons("ws", Nil)) -> WebSocket.upgrade(conn, fn s -> ws_echo_loop(s))
     (:get, Cons("wspush", Nil)) -> WebSocket.upgrade(conn, fn s -> ws_push(s))
+    (:get, Cons("wslate", Nil)) -> WebSocket.upgrade(conn, fn s -> ws_late(s))
+    (:get, Cons("wspush2", Nil)) -> WebSocket.upgrade(conn, fn s -> ws_push2(s))
     (:get, Cons("echo", Nil)) -> conn |> HttpServer.text(200, "echo:" ++ HttpServer.query_string(conn))
     (:get, Cons("scheme", Nil)) -> conn |> HttpServer.text(200, HttpServer.scheme(conn))
     (:get, Cons("big", Cons(n, Nil))) ->
@@ -859,6 +894,85 @@ let w_plain_unchanged (h : https_env) =
   done;
   close_quietly fd
 
+(* C1: a task sends after its handler returned while new TLS connections
+   take the freed fd numbers; every new connection must be served intact. *)
+let w_send_after_close (h : https_env) =
+  let fd = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  let _pending = ws_upgrade h.ctx fd "/wslate" in
+  ws_send_text h.ctx fd "go";               (* the handler returns on it *)
+  Unix.sleepf 0.1;
+  tls_close fd;
+  for i = 1 to 40 do
+    let c = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+    one_shot h c (Printf.sprintf "send_after_close churn %d/40" i) "/echo?c=1" ~status:200 ~body:"echo:c=1";
+    tls_close c
+  done;
+  Unix.sleepf 2.5                           (* the late sender runs out *)
+
+(* I1: two pushers, a client that reads nothing for 2 s. All 400 frames
+   arrive, each pusher's in order. With one scheduler thread a sender that
+   parks holding a lock deadlocks the other. *)
+let w_two_pushers (h : https_env) =
+  let fd = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  let pending = ws_upgrade h.ctx fd "/wspush2" in
+  Unix.sleepf 2.0;
+  let next = Hashtbl.create 2 in
+  Hashtbl.replace next "A" 1; Hashtbl.replace next "B" 1;
+  let deadline = Unix.gettimeofday () +. 30. in
+  for _ = 1 to 400 do
+    match ws_read_frame h.ctx fd pending ~deadline with
+    | (1, got) ->
+      (match String.split_on_char ' ' got with
+       | tag :: n :: _ when Hashtbl.mem next tag ->
+         let want = Hashtbl.find next tag in
+         if int_of_string_opt n <> Some want then
+           h.ctx.bail (Printf.sprintf "two_pushers: %s frame %s, want %d" tag n want);
+         Hashtbl.replace next tag (want + 1)
+       | _ -> h.ctx.bail (Printf.sprintf "two_pushers: unexpected frame %S"
+                            (String.sub got 0 (min 40 (String.length got)))))
+    | (op, _) -> h.ctx.bail (Printf.sprintf "two_pushers: opcode %d" op)
+  done;
+  tls_close fd
+
+(* I2: a client stalled behind a 16 MiB response (more than every buffer between that ends in an upgrade
+   must not stall others on its loop thread (the event loop runs one thread
+   here); once it reads, its WebSocket works. *)
+let w_upgrade_behind_slow_reader (h : https_env) =
+  let x = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  h.ctx.send x (get_req "/big/16777216"
+                ^ Printf.sprintf "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+                                  Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n\
+                                  Sec-WebSocket-Version: 13\r\n\r\n" ws_key);
+  Unix.sleepf 0.5;
+  let t0 = Unix.gettimeofday () in
+  let y = tls_connect_or_bail h.ctx ~ca:h.pki.ca () in
+  one_shot h y "upgrade_behind_slow_reader: another client" "/echo?y=1" ~status:200 ~body:"echo:y=1";
+  tls_close y;
+  let took = Unix.gettimeofday () -. t0 in
+  if took > 5. then
+    h.ctx.bail (Printf.sprintf "upgrade_behind_slow_reader: another client waited %.1fs" took);
+  let pending = ref "" in
+  let (st, body, _) = h.ctx.read_response x pending ~deadline:(Unix.gettimeofday () +. 20.) in
+  if st <> 200 || String.length body <> 16777216 then
+    h.ctx.bail (Printf.sprintf "upgrade_behind_slow_reader: /big gave %d, %d bytes" st (String.length body));
+  let deadline = Unix.gettimeofday () +. 20. in
+  let rec head () =
+    match Test_http_native.find_from !pending "\r\n\r\n" 0 with
+    | Some i -> i
+    | None -> ws_fill h.ctx x pending (String.length !pending + 1) ~deadline; head () in
+  let i = head () in
+  if not (contains (String.sub !pending 0 i) ws_accept) then
+    h.ctx.bail "upgrade_behind_slow_reader: no 101 after the response";
+  pending := String.sub !pending (i + 4) (String.length !pending - i - 4);
+  ws_send_text h.ctx x "after";
+  ws_expect_text h.ctx x pending "upgrade_behind_slow_reader echo" "after";
+  tls_close x
+
+let ws_lifetime_cases =
+  [ ("wss_send_after_close", w_send_after_close);
+    ("wss_two_pushers", w_two_pushers);
+    ("wss_upgrade_behind_slow_reader", w_upgrade_behind_slow_reader) ]
+
 let https_cases =
   [ ("https_basic", h_basic);
     ("https_keepalive_65", h_keepalive_65);
@@ -877,7 +991,7 @@ let https_cases =
     ("wss_concurrent_push", w_concurrent_push);
     ("ws_plain_unchanged", w_plain_unchanged) ]
 
-let run_https ~mode ~evloop ~extra_env () =
+let run_https_cases ~cases ~tag ~mode ~evloop ~extra_env () =
   let dir = fresh_dir ("pki" ^ mode) in
   let pki = make_pki ~dir ~name:"a" () in
   let plain_port = Test_http_native.pick_free_port () in
@@ -885,10 +999,20 @@ let run_https ~mode ~evloop ~extra_env () =
       [| "MARCH_TEST_CERT=" ^ pki.cert; "MARCH_TEST_KEY=" ^ pki.key;
          Printf.sprintf "MARCH_TEST_PLAIN_PORT=%d" plain_port |] in
   Fun.protect ~finally:reap_s_clients (fun () ->
-    Test_http_native.with_compiled_server ~extra_env ~variant:("https, " ^ mode)
-      ~slug:("https" ^ mode) ~evloop ~server_src:https_server_src (fun ctx ->
+    Test_http_native.with_compiled_server ~extra_env ~variant:(tag ^ ", " ^ mode)
+      ~slug:(tag ^ mode) ~evloop ~server_src:https_server_src (fun ctx ->
         let h = { ctx; pki; plain_port } in
-        List.iter (fun (name, f) -> f h; assert_alive ctx name) https_cases))
+        List.iter (fun (name, f) -> f h; assert_alive ctx name) cases))
+
+let run_https = run_https_cases ~cases:https_cases ~tag:"https"
+
+(* Two scheduler threads (main's green thread holds one: pthread_join on the
+   event loop, select in the pool, so tasks get exactly one) and one loop
+   thread: what a lock held across a park, or a loop thread waiting on one
+   client, turns into a hang. *)
+let run_ws_lifetime ~mode ~evloop ~extra_env () =
+  run_https_cases ~cases:ws_lifetime_cases ~tag:"wsl" ~mode ~evloop
+    ~extra_env:(Array.append extra_env [| "MARCH_NUM_SCHEDULERS=2"; "MARCH_HTTP_EVLOOP_THREADS=1" |]) ()
 
 (* ── Rotation, reload_tls, bootstrap, expired startup ─────────────────── *)
 
@@ -1155,6 +1279,11 @@ let suites =
       @ List.map (fun (mode, evloop, extra_env) ->
           Alcotest.test_case ("https: " ^ mode) `Quick
             (run_https ~mode ~evloop ~extra_env)) modes
+      (* Not sequential mode: it serves one connection at a time by design,
+         so a client behind a stalled one waits there. *)
+      @ List.map (fun (mode, evloop) ->
+          Alcotest.test_case ("wss lifetime: " ^ mode) `Quick
+            (run_ws_lifetime ~mode ~evloop ~extra_env:[||])) rotation_modes
       @ List.concat_map (fun (mode, evloop) ->
           [ Alcotest.test_case ("rotation: " ^ mode) `Quick (run_rotation ~mode ~evloop);
             Alcotest.test_case ("bootstrap: " ^ mode) `Quick (run_bootstrap ~mode ~evloop);
