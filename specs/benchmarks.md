@@ -1534,3 +1534,22 @@ whose `fib(n-1) + fib(n-2)` is the worst case) after any change to Int arithmeti
 codegen. First measurement, base vs trap, interleaved on a loaded box (minimum of
 15): fib 420 → 499 ms, index_loop 651 → 690 ms, list_ops 42 → 41 ms. Detail in
 `specs/progress/2026-10-30-int-overflow-trap.md`.
+
+## HTTPS server and phase deadlines (2026-11-06, macOS, loaded box)
+
+A spot check, not a Run: the Run 5 method (quiet Linux box, wrk `-c256`, order-swapped) is
+still owed for this change. macOS/arm64 with load average ~40 from other sessions, event-loop
+server, `Hello, World!` route, `wrk -t4 -c256 -d8s`, base (merge-base `3817a85`) and new
+interleaved; CPU is the server's user+sys over the run.
+
+| binary | req/s | CPU-µs/request |
+|---|---|---|
+| plain, base | 30,788 / 32,976 | 25.0 / 24.3 |
+| plain, new (deadline heap) | 27,551 / 31,869 | 25.0 / 25.5 |
+| HTTPS keep-alive, new | 31,760 / 30,554 | 30.7 / 30.9 |
+
+Throughput is pinned near macOS loopback's ~30k req/s either way, so CPU per request is the
+comparison: plain is within noise of base (+2%), and TLS on a keep-alive connection costs about
+6 µs per request on top. New-connection-per-request HTTPS (dominated by the handshake) was not
+measured.
+

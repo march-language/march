@@ -114,6 +114,84 @@ Request-response handler with Plug-style middleware pipeline.
 - `max_connections(server, n)`, `idle_timeout(server, secs)` (lines 207-217): Configure
 - `listen(server)` (line 221): Start blocking server (calls `http_server_listen` builtin)
 
+### HTTPS (`HttpServer.tls`)
+
+`HttpServer` serves HTTP/1.1 over TLS on both server implementations, with
+`wss://`, certificate rotation without a restart, and per-phase timeouts.
+Design: `specs/2026-11-05-https-server-design.md`; it needs a compiled build
+(the interpreter refuses an HTTPS `listen` with a message saying so).
+
+```march
+HttpServer.new(443)
+|> HttpServer.tls(HttpServer.TlsFiles(
+     "/etc/letsencrypt/live/example.com/fullchain.pem",
+     "/etc/letsencrypt/live/example.com/privkey.pem"))
+|> HttpServer.plain_listener(80, [HttpAcme.webroot("/var/www/acme"),
+                                  HttpServer.redirect_to_https(443)])
+|> HttpServer.plug(router)
+|> HttpServer.listen()
+```
+
+- **Certificate source**: `TlsFiles(cert_path, key_path)` (PEM files: the full
+  chain, leaf first, and its key) or `TlsPem(cert, key)` (the text itself).
+- **Startup**: a missing, unreadable or mismatched pair stops `listen` before
+  anything is bound (`HttpServer.listen: <file>: <reason>`, nonzero exit). An
+  expired certificate is served with a warning. `tls_wait_for_cert(server)`
+  is the bootstrap mode for a first certificate: missing files are not fatal,
+  the plain listener and the poller start, and the HTTPS port is bound when the
+  first valid pair is installed.
+- **Rotation**: with `TlsFiles`, the pair is re-read every `tls_poll_interval`
+  seconds (default 60, `0` = off) and installed when its content changed. A
+  pair that does not load, does not match or has expired is refused once
+  (`march: https: refused certificate …`) and the current one stays.
+  `HttpServer.reload_tls(src)` does the same on demand and returns the reason
+  as `Err`. New connections get the new certificate; open ones keep theirs.
+- **Timeouts** (both server modes): `tls_handshake_timeout` (10 s),
+  `idle_timeout` (60 s, keep-alive with no request; previously ignored by the
+  event loop and fixed at 10 s on the pool), `header_timeout` (30 s from a
+  request's first byte), `progress_timeout` (30 s without progress reading a
+  body or writing a response; a slow transfer that keeps moving is never cut).
+  An upgraded WebSocket is not subject to them.
+- **TLS settings**: TLS 1.2 minimum, OpenSSL's default ciphers, the hybrid
+  post-quantum group first (as `Tls` clients), ALPN `http/1.1`, renegotiation
+  off, no early data, one certificate (no SNI selection: a client that sends no
+  server name gets it too).
+- **`plain_listener(server, port, plugs)`**: a second, plain-HTTP port served by
+  the same `listen` with its own pipeline. `redirect_to_https(port)` (301 for
+  GET/HEAD, 308 otherwise, 400 without `Host`), `HttpAcme.webroot(dir)` (serves
+  certbot `--webroot` challenge files; tokens outside base64url are 404) and
+  `acme_responder(lookup)` (challenges from memory) are the plugs for it.
+- **`scheme(conn)`**: `"https"` for a connection that arrived over TLS.
+- **Capabilities**: serving HTTPS and `reload_tls` need `IO.NetListen`;
+  `HttpAcme.webroot` needs `IO.FileRead`. `HttpServer` declares no `needs` beyond
+  `IO.NetListen`, so modules that import it declare nothing new.
+
+Runtime: `runtime/march_tls_session.c` (one TLS session over OpenSSL memory
+BIOs, driven by each server's own socket I/O), `runtime/march_tls_server.c`
+(the certificate slot, the poller, and the fd → session registry the
+WebSocket functions use for `wss://`), `runtime/march_https.c` (the builtins
+and the process-wide configuration). One HTTPS server per process.
+
+#### Deploying with certbot
+
+1. **First certificate.** Either stop the server and run
+   `certbot certonly --standalone -d example.com` once, or start the server in
+   bootstrap mode (`tls_wait_for_cert()`, with `plain_listener(80, [HttpAcme.webroot(dir), …])`)
+   and run `certbot certonly --webroot -w <dir> -d example.com`; the HTTPS port
+   opens within one poll interval of certbot writing the files.
+2. **Renewals** need nothing: `certbot renew` (its timer) replaces the files and
+   the poller installs them. No `--deploy-hook` restart is needed.
+3. **Docker**: mount the whole `/etc/letsencrypt` directory, not the `live/`
+   files: `live/` holds symlinks into `archive/`, which must resolve inside the
+   container.
+4. **Ports 443/80** need root, `CAP_NET_BIND_SERVICE`
+   (`setcap cap_net_bind_service=+ep <binary>`), or a port mapping
+   (`-p 443:8443 -p 80:8080`) to an unprivileged port.
+5. Build with `march --compile` / `forge build`; `forge run` (the interpreter)
+   does not serve HTTPS.
+
+`examples/https_hello.march` is a complete server in this shape.
+
 ### WebSocket Module (`stdlib/websocket.march`)
 
 WebSocket frame handling and multiplexed I/O.
@@ -371,6 +449,10 @@ Performance benchmarks under `bench/`:
 - Count bytes without buffering
 - Chunked transfer encoding handling
 
+**https_hello.march**: HTTPS with a certbot certificate
+- `tls(TlsFiles(...))` in bootstrap mode, plain port 80 answering ACME challenges and redirecting
+- `POST /upload` echoes the byte count; `/ws` is a `wss://` echo that also pushes `tick <n>`
+
 **counter_server.march**: Actor + HTTP server integration
 - Spawned actor manages counter state
 - GET /count, POST /increment, POST /decrement
@@ -412,7 +494,7 @@ Performance benchmarks under `bench/`:
 2. **WebSocket Frame Size**: Limited to 16MB per frame
 3. **No Trailers**: HTTP/1.1 trailers not supported
 4. **No Proxy Support**: No CONNECT method or proxy-related handling
-5. **TLS client-side focus**: `march_tls.c` provides both `march_tls_connect` (client) and `march_tls_accept` (server); the high-level stdlib surface is primarily client-oriented (`Tls.https_get` / `Tls.connect`)
+5. **HTTPS server: one certificate, one server per process**: no SNI-based certificate selection, no client certificates (mTLS), and one HTTPS `listen` per process (see "HTTPS" above)
 
 ## Future Enhancements
 

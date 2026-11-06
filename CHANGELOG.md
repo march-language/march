@@ -21,6 +21,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **HTTPS for `HttpServer`.** `HttpServer.tls(server, TlsFiles(cert, key))` (or `TlsPem`)
+  serves HTTP/1.1 over TLS on both server modes, with `wss://` through the unchanged
+  `WebSocket` API. Certificates rotate without a restart: `TlsFiles` are re-read every
+  `tls_poll_interval` seconds (default 60) and `HttpServer.reload_tls(src)` installs a pair on
+  demand; a pair that doesn't load, doesn't match or has expired is refused and the current
+  one stays. `tls_wait_for_cert` starts without a certificate so the first one can be obtained
+  through the server itself. `plain_listener(server, port, plugs)` serves a second, plain-HTTP
+  port from the same `listen`, with `redirect_to_https`, `HttpAcme.webroot` (certbot
+  `--webroot`) and `acme_responder` as plugs for it; `scheme(conn)` says which one a request came in on.
+  New timeouts `tls_handshake_timeout`, `header_timeout` and `progress_timeout`. Needs a
+  compiled build. Deployment notes: `specs/features/http-and-networking.md`, and
+  `examples/https_hello.march`.
+
 - **A refinement on a field of an anonymous-record parameter is now checked.** In
   `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
   establish it. Before, the refinement was ignored on both sides. Likewise
@@ -171,6 +184,14 @@ git log is authoritative for exact commits.
   are unaffected.
 
 ### Changed
+
+- **`HttpServer.idle_timeout` is enforced on both server modes,** and requests have
+  deadlines. The event loop ignored `idle_timeout` and the thread pool used a fixed 10 s;
+  both now close a keep-alive connection after the configured value (60 s by default). A
+  request whose headers take longer than `header_timeout` (30 s from the first byte) is
+  closed, and so is a body upload or a response write that makes no progress for
+  `progress_timeout` (30 s); a slow transfer that keeps moving is never cut. An upgraded
+  WebSocket is not subject to them.
 
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
@@ -340,6 +361,10 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **`Tls.server_ctx` no longer leaks its ALPN buffer** when the context is freed.
+- **The event-loop HTTP server no longer drops pipelined requests** that arrive while a large
+  response is still being written; they are served once the write finishes.
 
 - **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
   {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a

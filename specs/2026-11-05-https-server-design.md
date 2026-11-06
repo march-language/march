@@ -167,12 +167,13 @@ HttpServer.new(443)
   files fail fast as above. The deployment recipe documents both routes (`certbot --standalone`
   before first start, or bootstrap mode with `--webroot`).
 
-Capabilities: `reload_tls` follows the `tls_server_ctx` precedent and needs
-`IO.NetConnect.TLS`. Serving HTTPS from `listen` needs only `IO.NetListen`: capabilities are
-checked by reachability from `main`, and `listen` reaches the TLS configuration on every
-server, plain ones included, so classifying it `IO.NetConnect.TLS` would have stopped every
-existing plain-HTTP program from compiling (revised during implementation, 2026-11-06; the
-first draft required both). `scheme` needs nothing.
+Capabilities (revised during implementation, 2026-11-06; the first draft required
+`IO.NetConnect.TLS` too): serving HTTPS and `reload_tls` need `IO.NetListen`. Capabilities are
+checked by reachability from `main`, and `listen` reaches the TLS configuration on every server,
+plain ones included; and a module that imports `HttpServer` must declare every module-level
+`needs` `HttpServer` has (`import_cap_missing`), which Bastion and forgepm do not, so
+`HttpServer` keeps `needs IO.NetListen` alone. The file-reading ACME plug is therefore
+`HttpAcme.webroot` in a module of its own (`needs IO.FileRead`). `scheme` needs nothing.
 
 **Interpreter (my call).** `forge run` uses the interpreter, whose HTTP server is a separate
 OCaml implementation (`lib/eval/eval_builtins.ml`) with stub TLS builtins. It must never
