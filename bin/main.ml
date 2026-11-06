@@ -3143,8 +3143,8 @@ let run_test_cmd args =
     List.iter (fun (filename, failures) ->
       Printf.printf "%s\n" filename;
       List.iter (fun (name, msg) ->
-        Printf.printf "  FAIL: \"%s\"\n    %s\n\n" name
-          (String.concat "\n    " (String.split_on_char '\n' msg))
+        Printf.printf "  FAIL: \"%s\"\n%s\n\n" name
+          (March_eval.Eval.indent_lines "    " msg)
       ) failures
     ) (List.rev !all_file_failures)
   end;

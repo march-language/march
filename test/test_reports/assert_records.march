@@ -1,0 +1,13 @@
+-- Golden failure report for a plain (non-derived-Show) record
+-- (test/run_test_reports.ml).  Its own file: with a second record type in
+-- the same program, compiled `==` on two records calls the other type's
+-- equality (specs/todos/2026-11-05-compiled-record-eq-helper-collision.md).
+mod AssertRecords do
+  type Point = { x : Int, y : Int }
+  derive Eq for Point
+
+  test "plain record field" do
+    let p : Point = { x: 1, y: 2 }
+    assert (p == { x: 1, y: 3 })
+  end
+end

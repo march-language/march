@@ -2788,7 +2788,10 @@ int64_t march_checked_shr(int64_t a, int64_t n) {
    binaries are single-threaded during test execution. */
 jmp_buf  march_test_jmp_buf;
 int      march_test_in_test  = 0;
-char     march_test_fail_buf[4096];
+/* 16 KiB: a failed assertion's report (march_assert_fail) carries a
+   source line, both values and a caret line each, and a property failure
+   (stdlib/check.march) nests one inside its own. */
+char     march_test_fail_buf[16384];
 
 static int  test_verbose    = 0;
 static char test_filter[256] = "";
@@ -2813,6 +2816,53 @@ void march_test_init(int32_t argc, char **argv) {
             strncpy(test_filter, argv[i] + 9, sizeof(test_filter) - 1);
             test_filter[sizeof(test_filter) - 1] = '\0';
         }
+    }
+}
+
+/* The running test's panic header (march_test_header): a rendered
+   `-- TEST FAILURE --` report pointing at its `test "..."` line, with \x01
+   where the panic message goes (lib/errors/test_report.ml, panic_header).
+   The test body sets it first thing (Lower_tests); march_test_run clears
+   it before each test. */
+static const char *test_cur_header = NULL;
+static int64_t     test_cur_header_len = 0;
+
+void *march_test_header(void *header) {
+    march_string *s = (march_string *)header;
+    test_cur_header = s ? s->data : NULL;
+    test_cur_header_len = s ? s->len : 0;
+    return NULL;
+}
+
+/* The message a failed test reports: a rendered report as it is, any
+   other panic message put into the test's panic header. */
+static char *test_failure_message(void) {
+    const char *fail = march_test_fail_buf[0] ? march_test_fail_buf : "assertion failed";
+    if (strncmp(fail, "-- TEST FAILURE ", 16) == 0 || !test_cur_header)
+        return strdup(fail);
+    const char *hole = memchr(test_cur_header, '\x01', (size_t)test_cur_header_len);
+    if (!hole) return strdup(fail);
+    size_t pre = (size_t)(hole - test_cur_header);
+    size_t post = (size_t)test_cur_header_len - pre - 1;
+    size_t fl = strlen(fail);
+    char *m = (char *)malloc(pre + fl + post + 1);
+    memcpy(m, test_cur_header, pre);
+    memcpy(m + pre, fail, fl);
+    memcpy(m + pre + fl, hole + 1, post);
+    m[pre + fl + post] = '\0';
+    return m;
+}
+
+/* Print [msg] with every non-empty line indented by [indent]. */
+static void test_print_indented(const char *indent, const char *msg) {
+    const char *p = msg;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (n > 0) printf("%s%.*s", indent, (int)n, p);
+        printf("\n");
+        if (!nl) break;
+        p = nl + 1;
     }
 }
 
@@ -2875,6 +2925,8 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
     if (setup) setup();
 
     march_test_fail_buf[0] = '\0';
+    test_cur_header = NULL;
+    test_cur_header_len = 0;
     march_test_in_test = 1;
     march_panic_handled = 1;   /* a failing test is not a crash to report */
     void *frame_mark = march_frame_mark();
@@ -2896,8 +2948,10 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
         march_test_in_test = 0;
         march_panic_handled = 0;
         /* Test failed (panic / assertion) */
+        char *msg = test_failure_message();
         if (test_verbose) {
-            printf("  \xe2\x9c\x97 %s\n    %s\n", name, march_test_fail_buf);
+            printf("  \xe2\x9c\x97 %s\n", name);
+            test_print_indented("    ", msg);
             fflush(stdout);
         } else {
             printf("F");
@@ -2905,10 +2959,9 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
         }
         if (test_failure_count < MARCH_TEST_MAX_FAILURES) {
             test_failure_names[test_failure_count] = strdup(name);
-            test_failure_msgs[test_failure_count]  = strdup(
-                march_test_fail_buf[0] ? march_test_fail_buf : "assertion failed");
+            test_failure_msgs[test_failure_count]  = msg;
             test_failure_count++;
-        }
+        } else free(msg);
         test_failed++;
     }
 }
@@ -2919,8 +2972,9 @@ int32_t march_test_report(void) {
     if (test_failed > 0 && !test_verbose) {
         printf("\n%d failure(s):\n\n", test_failure_count);
         for (int i = 0; i < test_failure_count; i++) {
-            printf("FAIL: \"%s\"\n  %s\n\n",
-                   test_failure_names[i], test_failure_msgs[i]);
+            printf("FAIL: \"%s\"\n", test_failure_names[i]);
+            test_print_indented("  ", test_failure_msgs[i]);
+            printf("\n");
             free(test_failure_names[i]);
             free(test_failure_msgs[i]);
         }
@@ -2941,6 +2995,641 @@ int32_t march_test_report(void) {
     return code;
 }
 
+/* ── Test-failure reports: march_assert_fail ─────────────────────────────── */
+/*
+ * __assert_fail(meta, left, right): a failed `assert` in compiled code.
+ * Lowering (Lower_expr's EAssert arm) rendered the report's header at
+ * compile time, the source line and caret included, and passes it in [meta]
+ * with the operator, both sides' source text and a quoting flag per side,
+ * separated by \x1f.  [left] / [right] are the operands' `to_string`.  This
+ * builds the body below the header and panics with the whole report.
+ *
+ * The parser, differ and renderer are a line-for-line port of
+ * lib/errors/test_report.ml, which the interpreter runs; the two must print
+ * byte for byte the same (test/run_test_reports.ml runs every golden case
+ * both ways).  Change one, change the other.
+ *
+ * Only reached when an assertion has already failed, so it favours plain
+ * code over speed and frees what it allocates before panicking.
+ */
+
+typedef struct { char *p; size_t len, cap; } tr_buf;
+
+static void tr_add_n(tr_buf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 64;
+        while (b->len + n + 1 > cap) cap *= 2;
+        b->p = (char *)realloc(b->p, cap);
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+}
+static void tr_add(tr_buf *b, const char *s) { tr_add_n(b, s, strlen(s)); }
+static char *tr_take(tr_buf *b) {
+    if (!b->p) { tr_add_n(b, "", 0); }
+    char *p = b->p; b->p = NULL; b->len = b->cap = 0; return p;
+}
+static char *tr_dup_n(const char *s, size_t n) {
+    char *p = (char *)malloc(n + 1);
+    memcpy(p, s, n); p[n] = '\0'; return p;
+}
+
+#define TR_ELLIPSIS "\xe2\x80\xa6"
+#define TR_ELIDE_OVER 60
+
+static int tr_cont(char c) { return ((unsigned char)c & 0xc0) == 0x80; }
+
+static int tr_width(const char *s) {
+    int w = 0;
+    for (; *s; s++) if (!tr_cont(*s)) w++;
+    return w;
+}
+
+/* test_report.ml's [clip]: at most [max] columns, the last an ellipsis. */
+static char *tr_clip(const char *s, int max) {
+    if (tr_width(s) <= max) return tr_dup_n(s, strlen(s));
+    tr_buf b = {0};
+    int w = 0;
+    size_t i = 0, n = strlen(s);
+    while (i < n && (w < max - 1 || tr_cont(s[i]))) {
+        if (!tr_cont(s[i])) w++;
+        tr_add_n(&b, s + i, 1);
+        i++;
+    }
+    tr_add(&b, TR_ELLIPSIS);
+    return tr_take(&b);
+}
+
+/* test_report.ml's [quote]. */
+static char *tr_quote(const char *s, size_t n) {
+    tr_buf b = {0};
+    tr_add(&b, "\"");
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        char tmp[8];
+        switch (c) {
+        case '"':  tr_add(&b, "\\\""); break;
+        case '\\': tr_add(&b, "\\\\"); break;
+        case '\n': tr_add(&b, "\\n"); break;
+        case '\t': tr_add(&b, "\\t"); break;
+        case '\r': tr_add(&b, "\\r"); break;
+        default:
+            if (c < 0x20 || c == 0x7f) {
+                snprintf(tmp, sizeof tmp, "\\x%02x", c);
+                tr_add(&b, tmp);
+            } else tr_add_n(&b, (const char *)&s[i], 1);
+        }
+    }
+    tr_add(&b, "\"");
+    return tr_take(&b);
+}
+
+typedef enum { TR_LEAF, TR_STR, TR_LIST, TR_TUPLE, TR_RECORD, TR_CTOR } tr_kind;
+
+typedef struct tr_node {
+    tr_kind kind;
+    char *text;               /* LEAF/STR: the text; CTOR/RECORD: the name ("" none) */
+    const char *sep;          /* RECORD: ": " or " = " */
+    int n;
+    struct tr_node **items;
+    char **keys;              /* RECORD */
+} tr_node;
+
+static tr_node *tr_new(tr_kind k) {
+    tr_node *v = (tr_node *)calloc(1, sizeof(tr_node));
+    v->kind = k; return v;
+}
+
+static void tr_free(tr_node *v) {
+    if (!v) return;
+    for (int i = 0; i < v->n; i++) {
+        tr_free(v->items[i]);
+        if (v->keys) free(v->keys[i]);
+    }
+    free(v->items); free(v->keys); free(v->text); free(v);
+}
+
+static void tr_push(tr_node *v, tr_node *item, char *key) {
+    v->items = (tr_node **)realloc(v->items, sizeof(tr_node *) * (size_t)(v->n + 1));
+    v->items[v->n] = item;
+    if (v->kind == TR_RECORD) {
+        v->keys = (char **)realloc(v->keys, sizeof(char *) * (size_t)(v->n + 1));
+        v->keys[v->n] = key;
+    }
+    v->n++;
+}
+
+typedef struct { const char *s; size_t n, pos; int bad; } tr_parser;
+
+static int tr_is_delim(char c) {
+    return c == ',' || c == '(' || c == ')' || c == '[' || c == ']'
+        || c == '{' || c == '}' || c == '"';
+}
+
+static int tr_is_ident(const char *s) {
+    if (!*s) return 0;
+    if (!(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
+    for (const char *p = s; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.')) return 0;
+    return 1;
+}
+
+/* OCaml's String.trim: ' ', '\012', '\n', '\r', '\t'. */
+static int tr_is_trim(char c) {
+    return c == ' ' || c == '\012' || c == '\n' || c == '\r' || c == '\t';
+}
+static char *tr_trim_dup(const char *s, size_t n) {
+    size_t a = 0, b = n;
+    while (a < b && tr_is_trim(s[a])) a++;
+    while (b > a && tr_is_trim(s[b - 1])) b--;
+    return tr_dup_n(s + a, b - a);
+}
+
+static void tr_skip(tr_parser *p) { while (p->pos < p->n && p->s[p->pos] == ' ') p->pos++; }
+static int tr_peek(tr_parser *p) { return p->pos < p->n ? (unsigned char)p->s[p->pos] : -1; }
+
+static tr_node *tr_value(tr_parser *p);
+
+/* Items up to [close]; NULL on an unreadable sequence. */
+static tr_node *tr_seq(tr_parser *p, tr_kind k, char close) {
+    tr_node *v = tr_new(k);
+    tr_skip(p);
+    if (tr_peek(p) == close) { p->pos++; return v; }
+    for (;;) {
+        tr_node *x = tr_value(p);
+        if (!x) { tr_free(v); return NULL; }
+        tr_push(v, x, NULL);
+        tr_skip(p);
+        int c = tr_peek(p);
+        if (c == ',') { p->pos++; continue; }
+        if (c == close) { p->pos++; return v; }
+        tr_free(v); return NULL;
+    }
+}
+
+static tr_node *tr_fields(tr_parser *p, char *name) {
+    tr_node *v = tr_new(TR_RECORD);
+    v->text = name;
+    v->sep = NULL;
+    tr_skip(p);
+    if (tr_peek(p) == '}') { p->pos++; v->sep = ": "; return v; }
+    for (;;) {
+        tr_skip(p);
+        size_t start = p->pos;
+        while (p->pos < p->n && p->s[p->pos] != ':' && p->s[p->pos] != '='
+               && !tr_is_delim(p->s[p->pos])) p->pos++;
+        int c = tr_peek(p);
+        const char *this_sep = c == ':' ? ": " : c == '=' ? " = " : NULL;
+        if (!this_sep || (v->sep && strcmp(v->sep, this_sep) != 0)) { tr_free(v); return NULL; }
+        v->sep = this_sep;
+        char *key = tr_trim_dup(p->s + start, p->pos - start);
+        if (!tr_is_ident(key)) { free(key); tr_free(v); return NULL; }
+        p->pos++;
+        tr_node *x = tr_value(p);
+        if (!x) { free(key); tr_free(v); return NULL; }
+        tr_push(v, x, key);
+        tr_skip(p);
+        c = tr_peek(p);
+        if (c == ',') { p->pos++; continue; }
+        if (c == '}') { p->pos++; return v; }
+        tr_free(v); return NULL;
+    }
+}
+
+static tr_node *tr_value(tr_parser *p) {
+    tr_skip(p);
+    int c = tr_peek(p);
+    if (c < 0) return NULL;
+    if (c == '"') {
+        size_t start = p->pos;
+        p->pos++;
+        while (p->pos < p->n && p->s[p->pos] != '"') {
+            if (p->s[p->pos] == '\\') p->pos++;
+            p->pos++;
+        }
+        if (p->pos >= p->n) return NULL;
+        p->pos++;
+        tr_node *v = tr_new(TR_STR);
+        v->text = tr_dup_n(p->s + start, p->pos - start);
+        return v;
+    }
+    if (c == '[') { p->pos++; return tr_seq(p, TR_LIST, ']'); }
+    if (c == '(') {
+        p->pos++;
+        tr_node *v = tr_seq(p, TR_TUPLE, ')');
+        if (v && v->n == 0) { v->kind = TR_LEAF; v->text = tr_dup_n("()", 2); }
+        return v;
+    }
+    if (c == '{') { p->pos++; return tr_fields(p, tr_dup_n("", 0)); }
+    if (tr_is_delim((char)c)) return NULL;
+    size_t start = p->pos;
+    while (p->pos < p->n && !tr_is_delim(p->s[p->pos])) p->pos++;
+    char *text = tr_trim_dup(p->s + start, p->pos - start);
+    if (!*text) { free(text); return NULL; }
+    if (p->pos < p->n && p->s[p->pos] == '(' && tr_is_ident(text)) {
+        p->pos++;
+        tr_node *v = tr_seq(p, TR_CTOR, ')');
+        if (!v) { free(text); return NULL; }
+        v->text = text;
+        return v;
+    }
+    if (p->pos < p->n && p->s[p->pos] == '{' && tr_is_ident(text)) {
+        p->pos++;
+        return tr_fields(p, text);
+    }
+    tr_node *v = tr_new(TR_LEAF);
+    v->text = text;
+    return v;
+}
+
+static tr_node *tr_parse(const char *s) {
+    tr_parser p = { s, strlen(s), 0, 0 };
+    tr_node *v = tr_value(&p);
+    if (v) {
+        tr_skip(&p);
+        if (p.pos == p.n) return v;
+        tr_free(v);
+    }
+    v = tr_new(TR_LEAF);
+    v->text = tr_dup_n(s, strlen(s));
+    return v;
+}
+
+static int tr_eq(const tr_node *a, const tr_node *b) {
+    if (a->kind != b->kind || a->n != b->n) return 0;
+    if ((a->text || b->text) && (!a->text || !b->text || strcmp(a->text, b->text) != 0)) return 0;
+    if (a->kind == TR_RECORD && strcmp(a->sep, b->sep) != 0) return 0;
+    for (int i = 0; i < a->n; i++) {
+        if (a->keys && strcmp(a->keys[i], b->keys[i]) != 0) return 0;
+        if (!tr_eq(a->items[i], b->items[i])) return 0;
+    }
+    return 1;
+}
+
+static void tr_print_to(tr_buf *b, const tr_node *v) {
+    switch (v->kind) {
+    case TR_LEAF: case TR_STR: tr_add(b, v->text); return;
+    case TR_LIST: case TR_TUPLE: case TR_CTOR:
+        if (v->kind == TR_CTOR) { tr_add(b, v->text); tr_add(b, "("); }
+        else tr_add(b, v->kind == TR_LIST ? "[" : "(");
+        for (int i = 0; i < v->n; i++) {
+            if (i > 0) tr_add(b, ", ");
+            tr_print_to(b, v->items[i]);
+        }
+        tr_add(b, v->kind == TR_LIST ? "]" : ")");
+        return;
+    case TR_RECORD:
+        if (v->text[0]) { tr_add(b, v->text); tr_add(b, " "); }
+        tr_add(b, "{ ");
+        for (int i = 0; i < v->n; i++) {
+            if (i > 0) tr_add(b, ", ");
+            tr_add(b, v->keys[i]); tr_add(b, v->sep);
+            tr_print_to(b, v->items[i]);
+        }
+        tr_add(b, " }");
+        return;
+    }
+}
+static char *tr_print(const tr_node *v) { tr_buf b = {0}; tr_print_to(&b, v); return tr_take(&b); }
+
+/* A path step: an index into a list / tuple / constructor, or a field. */
+typedef struct { int is_field; int idx; const char *field; } tr_step;
+typedef enum { TRK_WHOLE, TRK_CHARS, TRK_LENGTH } tr_dkind;
+typedef struct {
+    tr_step steps[64]; int nsteps;
+    tr_dkind kind; int chars; int nl, nr;
+} tr_diff;
+
+/* test_report.ml's [first_diff]; [a] and [b] differ.  A path deeper than 64
+   steps stops there and marks the whole part. */
+static void tr_first_diff(const tr_node *a, const tr_node *b, tr_diff *d) {
+    if (d->nsteps >= 64) { d->kind = TRK_WHOLE; return; }
+    int same_shape =
+        (a->kind == TR_LIST && b->kind == TR_LIST)
+        || (a->kind == TR_TUPLE && b->kind == TR_TUPLE && a->n == b->n)
+        || (a->kind == TR_CTOR && b->kind == TR_CTOR && a->n == b->n
+            && strcmp(a->text, b->text) == 0);
+    if (same_shape) {
+        int m = a->n < b->n ? a->n : b->n;
+        for (int i = 0; i < m; i++) {
+            if (!tr_eq(a->items[i], b->items[i])) {
+                d->steps[d->nsteps].is_field = 0;
+                d->steps[d->nsteps].idx = i;
+                d->steps[d->nsteps].field = NULL;
+                d->nsteps++;
+                tr_first_diff(a->items[i], b->items[i], d);
+                return;
+            }
+        }
+        /* Only a list can get here (equal-length tuples / constructors that
+           differ have a differing item). */
+        d->kind = TRK_LENGTH; d->nl = a->n; d->nr = b->n;
+        return;
+    }
+    if (a->kind == TR_RECORD && b->kind == TR_RECORD && a->n == b->n
+        && strcmp(a->text, b->text) == 0) {
+        int keys_same = 1;
+        for (int i = 0; i < a->n; i++)
+            if (strcmp(a->keys[i], b->keys[i]) != 0) { keys_same = 0; break; }
+        if (keys_same) {
+            for (int i = 0; i < a->n; i++) {
+                if (!tr_eq(a->items[i], b->items[i])) {
+                    d->steps[d->nsteps].is_field = 1;
+                    d->steps[d->nsteps].idx = i;
+                    d->steps[d->nsteps].field = a->keys[i];
+                    d->nsteps++;
+                    tr_first_diff(a->items[i], b->items[i], d);
+                    return;
+                }
+            }
+            d->kind = TRK_WHOLE;  /* only the separators differ */
+            return;
+        }
+    }
+    if (a->kind == TR_STR && b->kind == TR_STR) {
+        size_t la = strlen(a->text), lb = strlen(b->text);
+        size_t n = la < lb ? la : lb, i = 0;
+        while (i < n && a->text[i] == b->text[i]) i++;
+        while (i > 0 && tr_cont(a->text[i])) i--;
+        d->kind = TRK_CHARS; d->chars = (int)i;
+        return;
+    }
+    d->kind = TRK_WHOLE;
+}
+
+static char *tr_path_text(const tr_diff *d, const tr_node *root) {
+    tr_buf b = {0};
+    const tr_node *v = root;
+    for (int i = 0; i < d->nsteps; i++) {
+        char tmp[32];
+        if (d->steps[i].is_field) { tr_add(&b, "."); tr_add(&b, d->steps[i].field); }
+        else if (v->kind == TR_LIST) { snprintf(tmp, sizeof tmp, "[%d]", d->steps[i].idx); tr_add(&b, tmp); }
+        else break;  /* a constructor or tuple argument: the carets show the rest */
+        v = v->items[d->steps[i].idx];
+    }
+    return tr_take(&b);
+}
+
+typedef struct {
+    tr_buf b; int col; int mcol, mwidth; int elide;
+    const tr_diff *d; int longer;
+} tr_render;
+
+static void tr_r_add(tr_render *r, const char *s) { tr_add(&r->b, s); r->col += tr_width(s); }
+static void tr_r_add_n(tr_render *r, const char *s, size_t n) {
+    char *t = tr_dup_n(s, n); tr_r_add(r, t); free(t);
+}
+static void tr_r_marked(tr_render *r, const char *s) {
+    int c = r->col; tr_r_add(r, s);
+    int w = tr_width(s);
+    r->mcol = c; r->mwidth = w > 1 ? w : 1;
+}
+static void tr_r_print(tr_render *r, const tr_node *v) {
+    char *s = tr_print(v); tr_r_add(r, s); free(s);
+}
+
+static void tr_r_str(tr_render *r, const char *s, int i) {
+    int n = (int)strlen(s);
+    if (!r->elide || tr_width(s) <= TR_ELIDE_OVER) {
+        tr_r_add_n(r, s, (size_t)i);
+        int j = i + 1;
+        while (j < n && tr_cont(s[j])) j++;
+        char *m = tr_dup_n(s + i, (size_t)(j - i)); tr_r_marked(r, m); free(m);
+        tr_r_add_n(r, s + j, (size_t)(n - j));
+        return;
+    }
+    int back = i, cols = 0;
+    while (back > 1 && cols < 20) { back--; if (!tr_cont(s[back])) cols++; }
+    int fwd = i, fcols = 0;
+    while (fwd < n - 1 && fcols < 30) { fwd++; if (fwd < n && !tr_cont(s[fwd])) fcols++; }
+    while (fwd < n && tr_cont(s[fwd])) fwd++;
+    /* Only the closing quote left: show it rather than an ellipsis. */
+    if (fwd >= n - 1) fwd = n;
+    tr_r_add(r, back > 1 ? "\"" TR_ELLIPSIS : "\"");
+    tr_r_add_n(r, s + back, (size_t)(i - back));
+    int j = i + 1;
+    while (j < n && tr_cont(s[j])) j++;
+    if (j > n) j = n;
+    char *m = tr_dup_n(s + i, (size_t)(j - i)); tr_r_marked(r, m); free(m);
+    int stop = j > fwd ? j : fwd;
+    tr_r_add_n(r, s + j, (size_t)(stop - j));
+    if (stop < n) tr_r_add(r, TR_ELLIPSIS "\"");
+}
+
+static void tr_r_target(tr_render *r, const tr_node *v) {
+    const tr_diff *d = r->d;
+    if (d->kind == TRK_CHARS && v->kind == TR_STR) { tr_r_str(r, v->text, d->chars); return; }
+    if (d->kind == TRK_LENGTH && v->kind == TR_LIST) {
+        int common = d->nl < d->nr ? d->nl : d->nr;
+        tr_r_add(r, "[");
+        if (!r->longer) {
+            if (r->elide && v->n > 0) tr_r_add(r, TR_ELLIPSIS);
+            else for (int j = 0; j < v->n; j++) { if (j > 0) tr_r_add(r, ", "); tr_r_print(r, v->items[j]); }
+            tr_r_marked(r, "]");
+            return;
+        }
+        if (common > 0) {
+            if (r->elide) tr_r_add(r, TR_ELLIPSIS ", ");
+            else for (int j = 0; j < common && j < v->n; j++) { tr_r_print(r, v->items[j]); tr_r_add(r, ", "); }
+        }
+        tr_buf e = {0};
+        if (r->elide) {
+            if (v->n > common) {
+                char *p = tr_print(v->items[common]);
+                char *c = tr_clip(p, TR_ELIDE_OVER);
+                tr_add(&e, c); free(c); free(p);
+                if (v->n > common + 1) tr_add(&e, ", " TR_ELLIPSIS);
+            }
+        } else {
+            for (int j = common; j < v->n; j++) {
+                if (j > common) tr_add(&e, ", ");
+                tr_print_to(&e, v->items[j]);
+            }
+        }
+        char *et = tr_take(&e);
+        tr_r_marked(r, et); free(et);
+        tr_r_add(r, "]");
+        return;
+    }
+    char *p = tr_print(v);
+    if (r->elide) { char *c = tr_clip(p, TR_ELIDE_OVER); free(p); p = c; }
+    tr_r_marked(r, p); free(p);
+}
+
+static void tr_r_go(tr_render *r, const tr_node *v, int step) {
+    const tr_diff *d = r->d;
+    if (step >= d->nsteps) { tr_r_target(r, v); return; }
+    const tr_step *s = &d->steps[step];
+    int i = s->idx;
+    if (i < 0 || i >= v->n) { tr_r_target(r, v); return; }
+    if (v->kind == TR_RECORD && s->is_field) {
+        if (v->text[0]) { tr_r_add(r, v->text); tr_r_add(r, " "); }
+        tr_r_add(r, "{ ");
+        if (r->elide) {
+            if (i > 0) tr_r_add(r, TR_ELLIPSIS ", ");
+            tr_r_add(r, v->keys[i]); tr_r_add(r, v->sep);
+            tr_r_go(r, v->items[i], step + 1);
+            if (i < v->n - 1) tr_r_add(r, ", " TR_ELLIPSIS);
+        } else {
+            for (int j = 0; j < v->n; j++) {
+                if (j > 0) tr_r_add(r, ", ");
+                tr_r_add(r, v->keys[j]); tr_r_add(r, v->sep);
+                if (j == i) tr_r_go(r, v->items[j], step + 1);
+                else tr_r_print(r, v->items[j]);
+            }
+        }
+        tr_r_add(r, " }");
+        return;
+    }
+    if (!s->is_field && (v->kind == TR_LIST || v->kind == TR_TUPLE || v->kind == TR_CTOR)) {
+        if (v->kind == TR_CTOR) { tr_r_add(r, v->text); tr_r_add(r, "("); }
+        else tr_r_add(r, v->kind == TR_LIST ? "[" : "(");
+        if (r->elide) {
+            if (i > 0) tr_r_add(r, TR_ELLIPSIS ", ");
+            tr_r_go(r, v->items[i], step + 1);
+            if (i < v->n - 1) tr_r_add(r, ", " TR_ELLIPSIS);
+        } else {
+            for (int j = 0; j < v->n; j++) {
+                if (j > 0) tr_r_add(r, ", ");
+                if (j == i) tr_r_go(r, v->items[j], step + 1);
+                else tr_r_print(r, v->items[j]);
+            }
+        }
+        tr_r_add(r, v->kind == TR_LIST ? "]" : ")");
+        return;
+    }
+    tr_r_target(r, v);
+}
+
+static void tr_line(tr_buf *b, const char *s) { tr_add(b, s); tr_add(b, "\n"); }
+
+static void tr_label(tr_buf *b, const char *side, const char *src, const char *printed) {
+    /* squash: drop spaces, compare */
+    tr_buf x = {0}, y = {0};
+    for (const char *p = src; *p; p++) if (*p != ' ') tr_add_n(&x, p, 1);
+    for (const char *p = printed; *p; p++) if (*p != ' ') tr_add_n(&y, p, 1);
+    char *xs = tr_take(&x), *ys = tr_take(&y);
+    tr_add(b, "    ");
+    tr_add(b, side);
+    if (src[0] && strcmp(xs, ys) != 0) { tr_add(b, " `"); tr_add(b, src); tr_add(b, "`"); }
+    tr_add(b, "\n");
+    free(xs); free(ys);
+}
+
+static void tr_value_line(tr_buf *b, const char *v, int max) {
+    char *c = tr_clip(v, max);
+    tr_add(b, "        "); tr_add(b, c); tr_add(b, "\n");
+    free(c);
+}
+
+/* test_report.ml's [compare_body]. */
+static char *tr_compare_body(const char *op, const char *lsrc, const char *rsrc,
+                             const char *l, const char *r) {
+    tr_buf b = {0};
+    if (strcmp(op, "!=") == 0) {
+        tr_line(&b, "    Both sides are:");
+        tr_value_line(&b, l, 200);
+    } else if (strcmp(op, "==") == 0 && strcmp(l, r) != 0) {
+        tr_node *lt = tr_parse(l), *rt = tr_parse(r);
+        if (tr_eq(lt, rt)) {
+            tr_label(&b, "left", lsrc, l);  tr_value_line(&b, l, 200);
+            tr_label(&b, "right", rsrc, r); tr_value_line(&b, r, 200);
+        } else {
+            tr_diff d; memset(&d, 0, sizeof d);
+            tr_first_diff(lt, rt, &d);
+            int elide = tr_width(l) > TR_ELIDE_OVER || tr_width(r) > TR_ELIDE_OVER;
+            int nl = d.kind == TRK_LENGTH ? d.nl : 0, nr = d.kind == TRK_LENGTH ? d.nr : 0;
+            for (int side = 0; side < 2; side++) {
+                tr_render rr; memset(&rr, 0, sizeof rr);
+                rr.elide = elide; rr.d = &d;
+                rr.longer = side == 0 ? nl > nr : nr > nl;
+                rr.mwidth = 1;
+                tr_r_go(&rr, side == 0 ? lt : rt, 0);
+                char *text = tr_take(&rr.b);
+                tr_label(&b, side == 0 ? "left" : "right", side == 0 ? lsrc : rsrc,
+                         side == 0 ? l : r);
+                tr_add(&b, "        "); tr_add(&b, text); tr_add(&b, "\n");
+                tr_add(&b, "        ");
+                for (int k = 0; k < rr.mcol; k++) tr_add(&b, " ");
+                for (int k = 0; k < rr.mwidth; k++) tr_add(&b, "^");
+                tr_add(&b, "\n");
+                free(text);
+            }
+            char *where = tr_path_text(&d, lt);
+            char tmp[512];
+            if (d.kind == TRK_LENGTH) {
+                tr_buf what = {0};
+                if (!where[0]) tr_add(&what, "The left list");
+                else { tr_add(&what, "`"); tr_add(&what, where); tr_add(&what, "` on the left"); }
+                char *w = tr_take(&what);
+                tr_line(&b, "");
+                tr_add(&b, "    "); tr_add(&b, w);
+                snprintf(tmp, sizeof tmp, " has %d element%s; on the right it has %d.",
+                         d.nl, d.nl == 1 ? "" : "s", d.nr);
+                tr_line(&b, tmp);
+                free(w);
+            } else if (where[0]) {
+                tr_line(&b, "");
+                tr_add(&b, "    They first differ at `"); tr_add(&b, where); tr_line(&b, "`.");
+            }
+            free(where);
+        }
+        tr_free(lt); tr_free(rt);
+    } else {
+        tr_label(&b, "left", lsrc, l);  tr_value_line(&b, l, 200);
+        tr_label(&b, "right", rsrc, r); tr_value_line(&b, r, 200);
+        if (strcmp(op, "==") == 0) {
+            tr_line(&b, "");
+            tr_line(&b, "    They print the same, so they differ in something printing");
+            tr_line(&b, "    does not show: a custom `Eq` impl, or a Float NaN.");
+        }
+    }
+    if (b.len > 0 && b.p[b.len - 1] == '\n') b.p[--b.len] = '\0';
+    return tr_take(&b);
+}
+
+/* Split [s] at the \x1f separators into at most [max] NUL-terminated copies. */
+static int tr_split(const char *s, size_t n, char **out, int max) {
+    int k = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= n && k < max; i++) {
+        if (i == n || s[i] == '\x1f') {
+            out[k++] = tr_dup_n(s + start, i - start);
+            start = i + 1;
+        }
+    }
+    return k;
+}
+
+void march_assert_fail(void *meta, void *left, void *right) {
+    march_string *ms = (march_string *)meta;
+    char *parts[5] = { NULL, NULL, NULL, NULL, NULL };
+    int k = tr_split(ms->data, (size_t)ms->len, parts, 5);
+    for (int i = k; i < 5; i++) parts[i] = tr_dup_n("", 0);
+    const char *header = parts[0], *op = parts[1], *lsrc = parts[2],
+               *rsrc = parts[3], *flags = parts[4];
+    tr_buf b = {0};
+    tr_add(&b, header);
+    if (op[0]) {
+        march_string *ls = (march_string *)left, *rs = (march_string *)right;
+        char *l = (flags[0] == 'q') ? tr_quote(ls->data, (size_t)ls->len)
+                                    : tr_dup_n(ls->data, (size_t)ls->len);
+        char *r = (flags[0] && flags[1] == 'q') ? tr_quote(rs->data, (size_t)rs->len)
+                                                : tr_dup_n(rs->data, (size_t)rs->len);
+        char *body = tr_compare_body(op, lsrc, rsrc, l, r);
+        tr_add(&b, "\n\n");
+        tr_add(&b, body);
+        free(body); free(l); free(r);
+    }
+    for (int i = 0; i < 5; i++) free(parts[i]);
+    char *msg = tr_take(&b);
+    void *s = march_string_lit(msg, (int64_t)strlen(msg));
+    free(msg);
+    march_panic(s);
+}
+
 /* ── __try_call (C: march_try_call) ─────────────────────────────────────── */
 /*
  * __try_call : (Bool -> Bool) -> Result(Bool, String)
@@ -2955,11 +3644,10 @@ int32_t march_test_report(void) {
  * returns Ok(result) on success or Err(msg) if the call panics (march_panic,
  * a failing assert, division by zero, match failure, etc.).
  *
- * The thunk MUST return an immediate (Bool) — the Ok field is stored in the
- * uniform low-bit-tagged representation ((n << 1) | 1), matching how
- * compiled March reads polymorphic ADT fields.  The Bool-only contract is
- * enforced by the typechecker signature; widening it back to a generic
- * (Bool -> a) would require distinguishing immediate from heap results here.
+ * The thunk returns a Bool in the closure ABI's uniform representation:
+ * an apply function returns `ptr`, and a Bool comes back already tagged
+ * ((b << 1) | 1, so false = 1 and true = 3).  It is stored in the Ok field
+ * verbatim, exactly as __try_call_val stores its value.
  *
  * The closure is a "fn _ -> body" workaround for (Unit -> a): the argument
  * is ignored by the lambda body, so we pass 1 (true).
@@ -3049,14 +3737,14 @@ void *march_try_call(void *thunk) {
     void     **field  = (void **)(result + 16);
     if (!panicked) {
         hdr->tag = 0;                              /* Ok */
-        /* The Ok field is a polymorphic ADT slot, so immediates must use the
-           uniform low-bit tag representation ((n << 1) | 1) that compiled
-           March emits when reading it back (ptrtoint + ashr 1).  The thunk
-           returns a raw Bool (0/1) — __try_call's March type is
-           (Bool -> Bool) -> Result(Bool, String), enforced by the
-           typechecker, so the result here is ALWAYS an immediate; storing a
-           heap pointer through this path would corrupt it. */
-        *field   = (void *)((((intptr_t)ok_result) << 1) | 1);
+        /* The Ok field is a polymorphic ADT slot holding the uniform
+           low-bit tag representation ((n << 1) | 1).  The apply function
+           already returns the Bool in that form (closures return `ptr`), so
+           it is stored verbatim.  Tagging it a second time (as this did
+           until 2026-11-05) turned `false` (1) into 3, which reads back as
+           `true`: every compiled property that returned `false` without
+           panicking passed. */
+        *field   = (void *)ok_result;
     } else {
         hdr->tag = 1;                              /* Err */
         *field   = err_str;

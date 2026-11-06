@@ -1,0 +1,178 @@
+FAIL: "assert == nested record, list and variant"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+18 |       assert (user == expected)
+                   ^^^^^^^^^^^^^^^^
+
+    left `user`
+        User { name = ann, tags = [Admin, Owner(1), Guest] }
+                                                ^
+    right `expected`
+        User { name = ann, tags = [Admin, Owner(2), Guest] }
+                                                ^
+
+    They first differ at `.tags[1]`.
+
+FAIL: "assert == strings"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+22 |       assert ("hello world" == "hello word")
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    left
+        "hello world"
+                  ^
+    right
+        "hello word"
+                  ^
+
+FAIL: "assert == a long string shows a window"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+27 |       assert (got == "the quick brown fox jumps over the lazy cat and keeps running far away")
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    left `got`
+        "…jumps over the lazy dog and keeps running far away"
+                              ^
+    right
+        "…jumps over the lazy cat and keeps running far away"
+                              ^
+
+FAIL: "assert == list is shorter"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+32 |       assert (xs == [1, 2, 3, 4])
+                   ^^^^^^^^^^^^^^^^^^
+
+    left `xs`
+        [1, 2, 3]
+                ^
+    right
+        [1, 2, 3, 4]
+                  ^
+
+    The left list has 3 elements; on the right it has 4.
+
+FAIL: "assert == list is longer"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+37 |       assert (xs == [1, 2, 3])
+                   ^^^^^^^^^^^^^^^
+
+    left `xs`
+        [1, 2, 3, 4, 5]
+                  ^^^^
+    right
+        [1, 2, 3]
+                ^
+
+    The left list has 5 elements; on the right it has 3.
+
+FAIL: "assert == a long list is elided"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+43 |       assert (xs == ys)
+                   ^^^^^^^^
+
+    left `xs`
+        […, 170, …]
+            ^^^
+    right `ys`
+        […, 171, …]
+            ^^^
+
+    They first differ at `[17]`.
+
+FAIL: "assert == tuples"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+47 |       assert ((1, "a", true) == (1, "a", false))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    left
+        (1, a, true)
+               ^^^^
+    right
+        (1, a, false)
+               ^^^^^
+
+FAIL: "assert == options in a list"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+51 |       assert ([Some(1), None, Some(3)] == [Some(1), Some(2), Some(3)])
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    left
+        [Some(1), None, Some(3)]
+                  ^^^^
+    right
+        [Some(1), Some(2), Some(3)]
+                  ^^^^^^^
+
+    They first differ at `[1]`.
+
+FAIL: "assert == different constructors"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+55 |       assert (Owner(1) == Guest)
+                   ^^^^^^^^^^^^^^^^^
+
+    left
+        Owner(1)
+        ^^^^^^^^
+    right
+        Guest
+        ^^^^^
+
+FAIL: "other comparisons not equal"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `!=` are equal. [assert_failed]
+
+62 |       assert (xs != [1, 2])
+                   ^^^^^^^^^^^^
+
+    Both sides are:
+        [1, 2]
+
+FAIL: "other comparisons less than"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+This `<` comparison is false. [assert_failed]
+
+67 |       assert (a * 2 < 10)
+                   ^^^^^^^^^^
+
+    left `a * 2`
+        14
+    right
+        10
+
+FAIL: "other comparisons plain condition"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+This assertion is false. [assert_failed]
+
+72 |       assert List.is_empty(xs)
+                  ^^^^^^^^^^^^^^^^^
+
+exit 1

@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
+  panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
+  the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
+  both sides by their source text and marks the first difference: the element, field or
+  argument, a list length mismatch, or a string's first differing character. A long value
+  is elided to the path to the difference (`[…, 170, …]`). A failing property shows the run,
+  the shrunk input by the property's parameter name (`xs = [0, 1]`; `a = 39`, `b = 11` for
+  a `match`ed tuple), why it failed (with the inner assertion's report) and the seed to
+  replay. Before, compiled tests printed only `assertion failed`. The `FAIL: "name"` lines,
+  the summary lines and exit codes are unchanged.
 - `march --why-copies FILE` lists each place in your code where a function builds a new copy
   of a list or tree instead of reusing it in place, because the value is still shared: used
   again afterwards, also passed to the enclosing call, or captured by a closure. Each is a
@@ -227,6 +237,9 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `Gen.one_of` shrinks toward its earlier alternatives (list the simplest generator first).
+  The generated values are unchanged; only a failing property's shrunk counterexample can
+  differ.
 - Diagnostics: a `main` that performs IO without declaring a capability is now reported even
   when the program has another error, listed after that error, so both can be fixed in one pass.
   It used to stay hidden until the other error was fixed, then appear as a new error. The error
@@ -474,6 +487,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
+  (what `forge test` runs) treated a property that returned `false` as passing. Only a
+  property that panicked or failed an `assert` was caught. Under `march test` it already
+  failed. A compiled suite with such a property used to pass and now fails.
 - **More function bodies can be used in proofs.** A `match` used as a value (an argument or an
   operand) is now unfolded. A divisor shown non-zero only by arithmetic, such as
   `b : {Int | b * b > 0}`, now counts. A step through `if pos(n) do … end`, where `pos` is your

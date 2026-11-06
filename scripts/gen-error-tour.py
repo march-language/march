@@ -11,8 +11,9 @@ page marks each example's place with
     <!-- /error-tour -->
 
 (or `<!-- error-tour: <name> --why-copies -->` for an example whose output comes from
-that report instead of `--check`, or `<!-- error-tour: <name> --run -->` for one that is
-run, showing the run-time failure it prints)
+that report instead of `--check`, `<!-- error-tour: <name> --run -->` for one that is
+run, showing the run-time failure it prints, or `<!-- error-tour: <name> --test -->` for a
+test module run with `march test` (seed fixed at 42), showing its failing tests' reports)
 and this script rewrites what lies between the two markers: a ```march block with the
 program and a ```text block with what `march --check` prints, so the page shows what
 the compiler says today rather than what someone once pasted. Everything outside the
@@ -51,8 +52,31 @@ MARKER = re.compile(r"(<!-- error-tour: ([\w-]+)((?: --[\w-]+)*) -->\n)(.*?)(<!-
 # `<!-- error-tour: 35-copy-shared --why-copies -->`: reports that are not part of
 # an ordinary check. The playground only checks, so such an example is not listed in it.
 # `--run` is not a compiler flag: it means run the program (interpreted) and show what
-# it prints on stderr, for the run-time failure reports.
-ALLOWED_FLAGS = {"--why-copies", "--run"}
+# it prints on stderr, for the run-time failure reports. `--test` is not one either: it
+# means run the test module with `march test` (MARCH_PROP_SEED=42, so a property's
+# counterexample is fixed) and show its `FAIL:` reports.
+ALLOWED_FLAGS = {"--why-copies", "--run", "--test"}
+
+
+def failure_reports(out):
+    """The `FAIL: "<test>"` blocks of a `march test` run, de-indented (the
+    same extraction as test/run_test_reports.ml)."""
+    lines, blocks, i = out.split("\n"), [], 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith('FAIL: "'):
+            k = len(line) - len(line.lstrip(" "))
+            body, i = [line.strip()], i + 1
+            while i < len(lines) and (lines[i] == "" or
+                                      len(lines[i]) - len(lines[i].lstrip(" ")) > k):
+                body.append(lines[i][k + 2:])
+                i += 1
+            while body and body[-1] == "":
+                body.pop()
+            blocks.append("\n".join(body))
+        else:
+            i += 1
+    return "\n\n".join(blocks)
 
 
 def check_output(march_bin, name, home, flags=()):
@@ -64,13 +88,19 @@ def check_output(march_bin, name, home, flags=()):
     try:
         shutil.copy(src, os.path.join(work, shown))
         env = dict(os.environ, HOME=home)
-        mode = [f for f in flags if f != "--run"] if flags else ["--check"]
-        run = "--run" in flags
-        proc = subprocess.run([march_bin, *mode, shown], cwd=work, env=env,
-                              stdout=subprocess.DEVNULL if run else subprocess.PIPE,
-                              stderr=subprocess.PIPE if run else subprocess.STDOUT, text=True)
-        if run:
-            proc.stdout = proc.stderr
+        if "--test" in flags:
+            env["MARCH_PROP_SEED"] = "42"
+            proc = subprocess.run([march_bin, "test", shown], cwd=work, env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            proc.stdout = failure_reports(proc.stdout)
+        else:
+            mode = [f for f in flags if f != "--run"] if flags else ["--check"]
+            run = "--run" in flags
+            proc = subprocess.run([march_bin, *mode, shown], cwd=work, env=env,
+                                  stdout=subprocess.DEVNULL if run else subprocess.PIPE,
+                                  stderr=subprocess.PIPE if run else subprocess.STDOUT, text=True)
+            if run:
+                proc.stdout = proc.stderr
     finally:
         shutil.rmtree(work)
     with open(src) as f:

@@ -24,6 +24,7 @@ let actor_init_arity = "actor_init_arity"
 let ambiguous_constructor = "ambiguous_constructor"
 let annotated_tyvar_fixed = "annotated_tyvar_fixed"
 let arity_mismatch = "arity_mismatch"
+let assert_failed = "assert_failed"
 let attribute_no_effect = "attribute_no_effect"
 let builtin_arity = "builtin_arity"
 let cap_bound = "cap_bound"
@@ -129,6 +130,7 @@ let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
 let proof_cap_mint_private = "proof_cap_mint_private"
 let proof_cap_return = "proof_cap_return"
+let property_failed = "property_failed"
 let protocol_crash_branches = "protocol_crash_branches"
 let protocol_empty = "protocol_empty"
 let protocol_expand_invalid = "protocol_expand_invalid"
@@ -187,6 +189,7 @@ let template_fragment_position = "template_fragment_position"
 let template_unsafe_interpolation = "template_unsafe_interpolation"
 let template_unterminated = "template_unterminated"
 let termination_unproved = "termination_unproved"
+let test_panicked = "test_panicked"
 let then_keyword = "then_keyword"
 let transition_via_mismatch = "transition_via_mismatch"
 let trusted_linear_invalid = "trusted_linear_invalid"
@@ -230,6 +233,7 @@ let all = [
   ambiguous_constructor;
   annotated_tyvar_fixed;
   arity_mismatch;
+  assert_failed;
   attribute_no_effect;
   builtin_arity;
   cap_bound;
@@ -335,6 +339,7 @@ let all = [
   proof_cap_foreign;
   proof_cap_mint_private;
   proof_cap_return;
+  property_failed;
   protocol_crash_branches;
   protocol_empty;
   protocol_expand_invalid;
@@ -393,6 +398,7 @@ let all = [
   template_unsafe_interpolation;
   template_unterminated;
   termination_unproved;
+  test_panicked;
   then_keyword;
   transition_via_mismatch;
   trusted_linear_invalid;
@@ -526,6 +532,10 @@ let category_table : (string * string list) list = [
   "COPY", [ copy_shared ];
   "RUNTIME", [ panic; runtime_error; actor_crashed ];
   "UNUSED", [ unused_binding; unused_import ];
+  (* Not compile errors: a failing `assert`, `Check.all` property or test
+     body, rendered by the test runners (lib/errors/test_report.ml) through
+     the same renderer, so a failed test reads like a diagnostic. *)
+  "TEST FAILURE", [ assert_failed; property_failed; test_panicked ];
   "PROGRAM", [
     attribute_no_effect; compiled_unsupported; internal_error; main_and_app;
     redundant_csrf_token; stdlib_internal; unknown_attribute ];

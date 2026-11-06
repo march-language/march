@@ -252,6 +252,9 @@ let scalar_builtins = [
   "panic"; "panic_"; "todo_"; "unreachable_"; "process_exit";
   (* Stores a literal's address and a line on the proc; allocates nothing. *)
   "__panic_site";
+  (* A failed assert's report: it allocates only on its way to a panic, and
+     never returns.  __test_header stores a literal's address. *)
+  "__assert_fail"; "__test_header";
   (* Reference counting and freeing, not allocating: [Drop.run] synthesizes a
      call to [march_decrc_freed] inside every generated __drop$T helper, so
      without this entry any function that drops an owned value fails. *)

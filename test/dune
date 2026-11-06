@@ -14732,6 +14732,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
  (action (run %{test} -e)))
 
+; Golden test-failure reports (lib/errors/test_report.ml): every
+; test/test_reports/*.march (all of whose tests fail on purpose) run with
+; `march test` and compiled with --compile --test; both runs' failure blocks
+; must equal <name>.expected. Regenerate with
+; UPDATE_TEST_REPORTS=1 ./_build/default/test/run_test_reports.exe -e (see the
+; header of test/run_test_reports.ml).
+(test
+ (name run_test_reports)
+ (enabled_if (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1))   ; see "CI sharding" above
+ (modules run_test_reports)
+ (libraries march_test_helpers alcotest unix)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree test_reports))
+ (action (run %{test} -e)))
+
 ;  Nested constructor pattern on a ctor name a stdlib type also declares
 ; (specs/progress/2026-10-07-nested-pattern-ctor-name-collision-miscompile.md).
 ; A user `type Tree = Leaf | Node(..)` collides with stdlib OrderedMap.Tree's

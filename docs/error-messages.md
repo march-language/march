@@ -2064,6 +2064,126 @@ no report is printed.
 
 ---
 
+## 12. Test failures
+
+A failing test is reported the same way, by `march test` and by `forge test` (which runs
+the tests compiled; both print the same report). These are run-time failures, not compiler
+errors, so the playground can't show them: it only checks programs. Install March and run
+`march test` on the examples to try them.
+
+<a id="assert-diff"></a>
+
+### An `assert ==` that fails
+
+<!-- error-tour: 35-assert-diff --test -->
+```march
+mod Main do
+  type Role = Admin | Guest | Owner(Int)
+  type User = { name : String, tags : List(Role) }
+  derive Eq, Show for Role
+  derive Eq, Show for User
+
+  pfn load_user() : User do
+    { name: "ann", tags: [Admin, Owner(1), Guest] }
+  end
+
+  test "the loaded user" do
+    let user = load_user()
+    let expected = { name: "ann", tags: [Admin, Owner(2), Guest] }
+    assert (user == expected)
+  end
+end
+```
+
+```text
+FAIL: "the loaded user"
+-- TEST FAILURE ----------------------- assert-diff.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+14 |     assert (user == expected)
+                 ^^^^^^^^^^^^^^^^
+
+    left `user`
+        User { name = ann, tags = [Admin, Owner(1), Guest] }
+                                                ^
+    right `expected`
+        User { name = ann, tags = [Admin, Owner(2), Guest] }
+                                                ^
+
+    They first differ at `.tags[1]`.
+```
+<!-- /error-tour -->
+
+Each side is labelled with the expression that produced it, and the carets mark where the
+two values first differ, not just that they differ. A value too long for one line is
+shown only along the path to the difference, with everything else as `…`; a list of the
+wrong length and a string that differs partway through are pointed at the same way.
+
+<a id="property-counterexample"></a>
+
+### A property that fails
+
+<!-- error-tour: 36-property-counterexample --test -->
+```march
+mod Main do
+  needs IO.Process, IO.Clock
+
+  pfn total(a : Int, b : Int) : Int do
+    a + b
+  end
+
+  test "sums stay under 50" do
+    Check.all(Gen.tuple2(Gen.int(0, 100), Gen.int(0, 100)), fn pair ->
+      match pair do
+      (a, b) ->
+        assert (total(a, b) < 50)
+        true
+      end
+    )
+  end
+end
+```
+
+```text
+FAIL: "sums stay under 50"
+-- TEST FAILURE ----------- property-counterexample.march
+
+This property does not hold. [property_failed]
+
+ 9 |     Check.all(Gen.tuple2(Gen.int(0, 100), Gen.int(0, 100)), fn pair ->
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    It failed on run 1 of 100.
+
+    Smallest failing input (shrunk in 3 steps from `(98, 11)`):
+
+        a = 39
+        b = 11
+
+    It failed this assertion:
+
+    This `<` comparison is false. [assert_failed]
+
+    12 |         assert (total(a, b) < 50)
+                         ^^^^^^^^^^^^^^^^
+
+        left `total(a, b)`
+            50
+        right
+            50
+
+    Seed 42: replay it with `forge test --seed=42`.
+```
+<!-- /error-tour -->
+
+`Check.all` tries the property on 100 generated inputs. When one fails, it shrinks it to a
+smallest input that still fails and names each part by the property's own parameters
+(`a` and `b`, which the `match` takes apart). Then it shows the failed assertion inside
+it. The seed reproduces the run: `forge test --seed=42`.
+
+---
+
 ## Error reference
 
 Every code that has a `march --explain` page also has one on this site:
