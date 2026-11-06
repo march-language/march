@@ -17,13 +17,14 @@ help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_fil
 
 23 |   fn main(cap : Cap(IO.Console)) : () do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+23 -   fn main(cap : Cap(IO.Console)) : () do
+23 +   fn main(cap : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+
     run `march --explain cap_grant_exceeded`
 
 
-
-fix [cap_grant_exceeded] (machine-applicable):
-@@ lines 23-23 @@
--  fn main(cap : Cap(IO.Console)) : () do
-+  fn main(cap : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
 
 after fix: exit 0

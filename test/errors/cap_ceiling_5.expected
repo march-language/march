@@ -7,13 +7,14 @@ help: add `needs IO.FileRead` to the module body.
 5 |     needs IO.Console
         ^^^^^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+5 |     needs IO.Console
+6 +     needs IO.FileRead
+
     run `march --explain cap_ceiling`
 
 
-
-fix [cap_ceiling:IO.FileRead] (machine-applicable):
-@@ after line 5 @@
-     needs IO.Console
-+    needs IO.FileRead
 
 after fix: exit 0

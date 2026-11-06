@@ -19,9 +19,9 @@ hint: add `needs IO.Foreign` to the module body.
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
+    possible fix (a guess: check it before applying it):
+
+16 | mod NoFFI do
+17 +   needs IO.Foreign
 
 
-fix [extern_needs_foreign] (maybe-incorrect):
-@@ after line 16 @@
- mod NoFFI do
-+  needs IO.Foreign

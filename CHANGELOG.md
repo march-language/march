@@ -27,8 +27,11 @@ git log is authoritative for exact commits.
   `--check-json` applies it to a copy of the file and checks the copy. Unless its own
   error went away and nothing new appeared, the fix is printed as `maybe-incorrect`.
   `forge fix` applies only machine-applicable fixes, and the language server marks only
-  those as the preferred quick fix. The others are labelled "a guess: check it" or "fill in
-  the placeholder".
+  those as the preferred quick fix, after re-checking each one on a copy of the buffer.
+  The others are labelled "a guess: check it" or "fill in the placeholder".
+- **`march --check` shows each fix under its error,** as the lines it changes
+  (`4 - old`, `4 + new`), headed by its tier. Until now only `--check-json`, the editor
+  and `forge fix` saw fixes.
 - **More errors come with a fix:**
   - an unknown name, qualified name, constructor or record field, when the message
     suggests exactly one replacement (a guess when another candidate is as close);

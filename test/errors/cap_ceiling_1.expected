@@ -9,13 +9,14 @@ hint: add this to the module body —
           ^^^^^^^
 
     reached from `main`: main → show
+
+    fix (`forge fix` applies it):
+
+3 |   mod Report do
+4 +   needs IO.Console
+
     run `march --explain cap_needs`
 
 
-
-fix [cap_needs:IO.Console] (machine-applicable):
-@@ after line 3 @@
-   mod Report do
-+  needs IO.Console
 
 after fix: exit 0

@@ -8,13 +8,14 @@ A remote message crosses the network as JSON, and its type's name is its wire ta
                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     Add `derive Json for Ping` next to its declaration.
+
+    fix (`forge fix` applies it):
+
+11 |   type Ping = { n : Int }
+12 +   derive Json for Ping
+
     run `march --explain codec_missing`
 
 
-
-fix [codec_missing] (machine-applicable):
-@@ after line 11 @@
-   type Ping = { n : Int }
-+  derive Json for Ping
 
 after fix: exit 0

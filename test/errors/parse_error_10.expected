@@ -7,11 +7,12 @@ A `let*` binding can't have a type annotation — its type is inferred from the 
                ^
 
     let* name = expr
-    run `march --explain parse_error`
 
-fix [parse_error] (machine-applicable):
-@@ lines 5-5 @@
--    let* x : Int = a
-+    let* x = a
+    fix (`forge fix` applies it):
+
+5 -     let* x : Int = a
+5 +     let* x = a
+
+    run `march --explain parse_error`
 
 after fix: exit 0

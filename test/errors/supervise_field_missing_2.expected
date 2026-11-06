@@ -7,13 +7,14 @@ Did you mean `worker`?
 16 |       Worker wroker
                   ^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+16 -       Worker wroker
+16 +       Worker worker
+
     run `march --explain supervise_field_missing`
 
 
-
-fix [supervise_field_missing] (machine-applicable):
-@@ lines 16-16 @@
--      Worker wroker
-+      Worker worker
 
 after fix: exit 0

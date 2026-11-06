@@ -15,16 +15,16 @@ and give `main` the grant —
 
 16 |   fn main() do
               ^^
+
+    fix (`forge fix` applies it):
+
+ 6 | mod Main do
+ 7 +   needs IO.Console
+16 -   fn main() do
+16 +   fn main(_cap_console : Cap(IO.Console)) do
+
     run `march --explain cap_needs`
 
 
-
-fix [cap_needs:IO.Console] (machine-applicable):
-@@ after line 6 @@
- mod Main do
-+  needs IO.Console
-@@ lines 16-16 @@
--  fn main() do
-+  fn main(_cap_console : Cap(IO.Console)) do
 
 after fix: exit 0

@@ -8,11 +8,11 @@ Did you mean `Counter`?
                        ^^^^^^
 
 
+    fix (`forge fix` applies it):
+
+14 -     let p = spawn(Countr)
+14 +     let p = spawn(Counter)
 
 
-fix [unknown_constructor] (machine-applicable):
-@@ lines 14-14 @@
--    let p = spawn(Countr)
-+    let p = spawn(Counter)
 
 after fix: exit 0

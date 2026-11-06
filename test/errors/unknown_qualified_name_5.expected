@@ -6,13 +6,14 @@ Unknown module `Lsit`. Did you mean `List`? [unknown_qualified_name]
 10 |     Lsit.length([1, 2])
          ^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+10 -     Lsit.length([1, 2])
+10 +     List.length([1, 2])
+
     run `march --explain unknown_qualified_name`
 
 
-
-fix [unknown_qualified_name] (machine-applicable):
-@@ lines 10-10 @@
--    Lsit.length([1, 2])
-+    List.length([1, 2])
 
 after fix: exit 0

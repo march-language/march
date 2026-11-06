@@ -12,13 +12,14 @@ exit: 1
 
 11 |       choose by Cons:
                      ^^^^
+
+    fix (`forge fix` applies it):
+
+21 -       fn (_b, st2) -> prod(s, st2, next + 1))
+21 +       fn (_b, st2) -> prod(s, st2, next + 1), fn (_v, st) -> Stream_Prod.close(s, st))
+
     run `march --explain session_offer_nonexhaustive`
 
 
-
-fix [session_offer_nonexhaustive] (machine-applicable):
-@@ lines 21-21 @@
--      fn (_b, st2) -> prod(s, st2, next + 1))
-+      fn (_b, st2) -> prod(s, st2, next + 1), fn (_v, st) -> Stream_Prod.close(s, st))
 
 after fix: exit 0

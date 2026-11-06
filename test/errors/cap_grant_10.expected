@@ -26,14 +26,15 @@ or grant everything with `fn main(cap : Cap(IO))`.
 10 |   fn main() do
        ^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+10 -   fn main() do
+10 +   fn main(_cap_console : Cap(IO.Console)) do
+
     run `march --explain cap_grant`
 
 
-
-fix [cap_grant] (machine-applicable):
-@@ lines 10-10 @@
--  fn main() do
-+  fn main(_cap_console : Cap(IO.Console)) do
 
 after fix: exit 1
 refinement violation: argument `x` of `sqrtish` does not satisfy precondition `_ >= 0.0` [refinement_violated]

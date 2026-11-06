@@ -18,14 +18,15 @@ help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_fil
 10 |   fn main(c : Cap(IO.Console)) do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+10 -   fn main(c : Cap(IO.Console)) do
+10 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+
     run `march --explain cap_grant_exceeded`
 
 
-
-fix [cap_grant_exceeded] (machine-applicable):
-@@ lines 10-10 @@
--  fn main(c : Cap(IO.Console)) do
-+  fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
 
 after fix: exit 1
 `Cap(IO.Console)` cannot be widened to `Cap(IO.FileWrite)` — `cap_narrow` only attenuates, so the source capability must subsume the target. [cap_widen]

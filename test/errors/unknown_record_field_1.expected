@@ -8,11 +8,11 @@ Did you mean `count`?
                                          ^^^^^
 
 
+    fix (`forge fix` applies it):
+
+7 -     on Bump(k : Int) do { state with cuont: state.count + k } end
+7 +     on Bump(k : Int) do { state with count: state.count + k } end
 
 
-fix [unknown_record_field] (machine-applicable):
-@@ lines 7-7 @@
--    on Bump(k : Int) do { state with cuont: state.count + k } end
-+    on Bump(k : Int) do { state with count: state.count + k } end
 
 after fix: exit 0

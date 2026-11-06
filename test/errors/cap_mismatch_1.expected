@@ -30,17 +30,15 @@ exit: 1
 12 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
               ^^^^^^^^^^^^^^^^^^^^^
 
+    fix (`forge fix` applies it):
+
+ 7 | mod Main do
+ 8 +   needs IO.FileRead
+12 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
+12 +   fn main(c : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do println(read(c)) end
+12 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
+12 +   fn main(c : Cap(IO.Console)) do println(read(_cap_fileread)) end
 
 
-fix [cap_mismatch:IO.FileRead] (machine-applicable):
-@@ after line 7 @@
- mod Main do
-+  needs IO.FileRead
-@@ lines 12-12 @@
--  fn main(c : Cap(IO.Console)) do println(read(c)) end
-+  fn main(c : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do println(read(c)) end
-@@ lines 12-12 @@
--  fn main(c : Cap(IO.Console)) do println(read(c)) end
-+  fn main(c : Cap(IO.Console)) do println(read(_cap_fileread)) end
 
 after fix: exit 0

@@ -7,13 +7,14 @@ help: add `needs IO.Network` to the module body.
  7 |   fn listen(cap : Cap(IO.Network), port : Int) : Int do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+6 | mod Server do
+7 +   needs IO.Network
+
     run `march --explain cap_needs`
 
 
-
-fix [cap_needs:IO.Network] (machine-applicable):
-@@ after line 6 @@
- mod Server do
-+  needs IO.Network
 
 after fix: exit 0

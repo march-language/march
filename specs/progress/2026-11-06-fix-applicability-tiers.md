@@ -66,12 +66,49 @@ PyFiXV's validate-before-show. A wrong fix that looks certain does harm; the one
   - `no_extern_violation_1`'s stale `EXPECT-FIX-PARTIAL` marker is removed. It was the last
     line of the file, so no line numbers moved.
 
+## Follow-up the same day: fixes in the text output, re-checked in the editor
+
+- **`--check` text.** `Errors.render_fix_block` renders a diagnostic's fix under it (after
+  its labels, before the explain pointer) as the lines it changes: `N - old`, `N + new`,
+  and for an insert the line it follows (`N | ...`). The heading names the tier:
+  - "fix (`forge fix` applies it):";
+  - "fix, with a placeholder to fill in:";
+  - "possible fix (a guess: check it before applying it):".
+
+  Under `--check`, the driver runs `Fix_verify.verify` before printing, so the text shows
+  the tier `--check-json` would print. A parse error goes through `verify_parse`.
+  Builds and runs show the declared tier: re-checking would mean rerunning a compile.
+  The child run is always given `--check-json`, since its codes are read from that.
+- **Golden corpus.** The `.expected` files no longer append the runner's own diff of
+  each fix: the rendered output carries it. The `.json.expected` files still pin each
+  edit.
+- **Editor.** `Code_actions_diag.fix_holds` applies a machine-applicable fix's text edits
+  to the buffer and runs `Analysis.analyse` on the result. It uses the same rule as
+  `Fix_verify`'s individual check. A fix that fails is offered as "(a guess: check it)"
+  and is not preferred.
+  - `analyse` is reached through the `reanalyse` ref, which `Analysis` sets after
+    `include Code_actions_diag`.
+  - Verdicts are cached by the patched text's digest, so moving the cursor does not
+    re-check again.
+  - The re-analysis refreshes the checker's global tables for the patched text; the
+    server re-analyses the real buffer on its next change.
+  - Tests are in `lsp/test/test_lsp_actions.ml` ("fix tiers"): `fn _ -> 42` stays
+    preferred; `clsoe` -> `close` is demoted because it uncovers `c` used twice.
+
+- **One-turn metric** (`scripts/error-one-turn.sh`, Haiku): 375/400 (93.8%), 14 intent,
+  11 rejected. The previous run was 377/400.
+  - Showing the fix changed the prompt of 137 cases. Their answers to unchanged prompts
+    were carried over. Those 137 cases already passed 133 times before and 131 now.
+  - Two cases got worse:
+    - `cap_grant_27` became intent;
+    - `cap_grant_32` became rejected.
+  - One improved: `cap_root_broad_2` went from rejected to intent.
+  - In `cap_grant_32` the model applied the shown grant fix both times and differed only
+    on the program's second, unrelated error (`MPST.new`'s result).
+  - So in a single run the change is within noise. The cases that carry a fix were already
+    near the ceiling, since the notes describe most fixes in words.
+
 ## Not done
 
-- **Human `--check` output** still shows no fixes. Only the JSON, the editor and
-  `forge fix` see them, and the one-turn metric's prompt (`--check` text) does not
-  include them.
-- **Only `--check-json` verifies.** The LSP computes diagnostics in-process and shows the
-  tier the compiler declared, without re-checking. `--why-copies-json` and
-  `--report-contracts` fixes are not verified either.
+- `--why-copies-json` and `--report-contracts` fixes are not re-checked.
 - **`unknown_attribute`** has no fix: the AST keeps no span for an attribute.

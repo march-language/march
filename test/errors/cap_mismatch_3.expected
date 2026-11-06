@@ -24,14 +24,13 @@ exit: 1
 13 |   fn main(fr : Cap(IO.FileRead)) do
               ^^^^^^^^^^^^^^^^^^^^^^^
 
+    fix (`forge fix` applies it):
+
+13 -   fn main(fr : Cap(IO.FileRead)) do
+13 +   fn main(fr : Cap(IO.FileRead), _cap_filesystem : Cap(IO.FileSystem)) do
+14 -     let _ = tidy(fr, "/tmp/x")
+14 +     let _ = tidy(_cap_filesystem, "/tmp/x")
 
 
-fix [cap_mismatch:IO.FileSystem] (machine-applicable):
-@@ lines 13-13 @@
--  fn main(fr : Cap(IO.FileRead)) do
-+  fn main(fr : Cap(IO.FileRead), _cap_filesystem : Cap(IO.FileSystem)) do
-@@ lines 14-14 @@
--    let _ = tidy(fr, "/tmp/x")
-+    let _ = tidy(_cap_filesystem, "/tmp/x")
 
 after fix: exit 0

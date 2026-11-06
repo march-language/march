@@ -8,9 +8,9 @@ The fields I see are: cont, count
                       ^^^^^^^
 
 
+    possible fix (a guess: check it before applying it):
+
+8 -     let n : Int = r.conut
+8 +     let n : Int = r.count
 
 
-fix [unknown_record_field] (maybe-incorrect):
-@@ lines 8-8 @@
--    let n : Int = r.conut
-+    let n : Int = r.count
