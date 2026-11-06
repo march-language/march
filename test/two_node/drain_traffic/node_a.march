@@ -48,7 +48,7 @@ mod DrainTrafficA do
       Ok(h) ->
         println("node-a: up")
         Topology.place(h, [ Topology.offer_role("Order.Stock", Topology.everywhere(), 32,
-                              fn cap -> Order_Run.offer_Stock(c, h, cap, fn (s, st) -> stock(s, st))) ])
+                              fn cap -> Order_Run.offer_Stock(h, cap, fn (s, st) -> stock(s, st))) ])
         Topology.drain_on_signal(h, 1000, 4000)
         Topology.supervise_offers(h)
     end

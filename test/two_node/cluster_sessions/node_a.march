@@ -34,7 +34,7 @@ mod ClusterSessionsA do
   end
 
   pfn session(c : Cap(IO), h : Cap(ClusterNode.Live), sid : String, n : Int, out : Vault(Int)) : Int do
-    match Echo_Run.cluster_A(c, h, sid, fn (s, st) -> role_a(s, st, n, out, sid, h)) do
+    match Echo_Run.cluster_A(h, sid, fn (s, st) -> role_a(s, st, n, out, sid, h)) do
       Ok(_) -> 1
       Err(e) ->
         Vault.set(out, sid ++ "_err", 1)

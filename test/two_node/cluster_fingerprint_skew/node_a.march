@@ -60,14 +60,14 @@ mod ClusterFpSkewA do
       Ok(h) ->
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
-        let q = Q_Run.cluster_A(c, h, "s1", fn (s, st) ->
+        let q = Q_Run.cluster_A(h, "s1", fn (s, st) ->
           println("A s1: RAN THE BODY")
           Q_A.recv_Msg_B_A_1(s, Q_A.send_Msg_A_B_1(s, st, { x: 1 }), fn (_n, st2) -> Q_A.close(s, st2)))
         match q do
           Ok(_) -> println("A s1: ok")
           Err(e) -> println(verdict("A s1", Q_Run.error_message(e)))
         end
-        let r = R_Run.cluster_A(c, h, "s2", fn (s, st) ->
+        let r = R_Run.cluster_A(h, "s2", fn (s, st) ->
           println("A s2: RAN THE BODY")
           R_A.recv_Msg_B_A_1(s, R_A.send_Msg_A_B_1(s, st, 1), fn (_n, st2) -> R_A.close(s, st2)))
         match r do

@@ -54,14 +54,14 @@ mod SessionRedialB do
         if await_name(h, "session:redial-1/1", 120000) do () else panic("node-b: A never registered") end
         println("B: sees A")
         wait_file(Env.require("REDIAL_FROZEN_FILE"))
-        match Echo_Run.cluster_B(c, h, "redial-1", fn (s, st) -> role_b(s, st, true)) do
+        match Echo_Run.cluster_B(h, "redial-1", fn (s, st) -> role_b(s, st, true)) do
           Ok(_) -> println("B: cut-off session failed: false (it finished)")
           Err(e) ->
             IO.warn("B: redial-1: " ++ Echo_Run.error_message(e))
             println("B: cut-off session failed: true")
         end
         wait_file(Env.require("REDIAL_NEXT_FILE"))
-        match Echo_Run.cluster_B(c, h, "redial-2", fn (s, st) -> role_b(s, st, false)) do
+        match Echo_Run.cluster_B(h, "redial-2", fn (s, st) -> role_b(s, st, false)) do
           Ok(_) -> println("B: next session finished")
           Err(e) -> println("B: next session failed: " ++ Echo_Run.error_message(e))
         end

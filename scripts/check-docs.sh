@@ -469,6 +469,15 @@ if [ -f docs/_data/explainer.json ]; then
 else
   echo "  ok — no explainer data yet"
 fi
+# The second explainer (docs/deploy-authority.md) has its own data and its own inputs:
+# the lab app again, and the fixtures under docs/assets/explainer/authority/.
+if [ -f docs/_data/authority.json ]; then
+  if python3 scripts/gen-authority-data.py --check-inputs; then
+    echo "  ok — authority data matches examples/lab_app and its fixtures"
+  else
+    fail=1
+  fi
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then

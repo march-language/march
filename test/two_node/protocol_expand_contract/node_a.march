@@ -60,7 +60,7 @@ mod ProtocolSplit do
 
   fn start_session(c : Cap(IO), h : Cap(ClusterNode.Live), sid : String, abandoned : Int -> Bool)
       : Result(Session.Outcome, SessionNode.RunError) do
-    SessionNode.start_offered_role(c, h, "Order", Order_Msg.role_names(),
+    SessionNode.start_offered_role(h, "Order", Order_Msg.role_names(),
       Order_Msg.role_Shop(), Order_Msg.peers_Shop(), sid, abandoned, fn _ -> (), fn s -> do
         let _ = shop(s, Order_Shop.register(s, 0))
         ()
@@ -157,7 +157,7 @@ mod ProtocolSplit do
   -- formation, or failed -- the last is a LOST session.
   fn session(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
     count("started", 1)
-    match Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, 1)) do
+    match Order_Run.initiate_Buyer(h, fn (s, st) -> buyer(s, st, 1)) do
       Ok(Session.Finished) -> count("finished", 1)
       Ok(Session.Drained(k)) ->
         count("drained", 1)

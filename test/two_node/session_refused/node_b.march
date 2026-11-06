@@ -64,7 +64,7 @@ mod SessionRefusedB do
         -- Up until A's first session has ended: node-b stopping would end
         -- it too ("connection lost"), hiding a hang.
         wait_file(Env.require("REFUSED_GO_FILE"))
-        match Echo_Run.cluster_B(c, h, "refused-2", fn (s, st) -> role_b(s, st)) do
+        match Echo_Run.cluster_B(h, "refused-2", fn (s, st) -> role_b(s, st)) do
           Ok(_) -> println("B: next session finished")
           Err(e) -> println("B: next session failed: " ++ Echo_Run.error_message(e))
         end

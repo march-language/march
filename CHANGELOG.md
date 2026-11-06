@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`--refine-infer` proposes a relation a function keeps from its argument to its result.**
+  For `bump(a : Assoc(Int, Int)) : Assoc(Int, Int)`, which adds 1 to each value, a caller
+  that needs `Assoc({x : Int | true}, {y : Int | y > x})` gets the type proposed on both the
+  parameter and the result, checked as one step and written as two edits.
+- **`--refine-infer-module M`** limits inference to one module (standard library or yours),
+  with progress lines on stderr. `scripts/refine-infer-stdlib-sweep.sh` uses it to run
+  inference over the whole standard library one module at a time, in parallel: 98 seconds
+  instead of 48 minutes.
 - **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
   panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
   the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
@@ -59,6 +67,15 @@ git log is authoritative for exact commits.
   limited, and a failure is reported in one line: ``running `safe_div(10, 0)` panics:
   division by zero``. A definite `return_refinement_violated` shows the run too (`but
   bad(-1) returns -1.`). None of this changes which programs are accepted.
+- **A hot deploy checks an undecided migration on the live state before activating it.**
+  A `--hot-reload` build carries, beside each `<actor>_migrate_state` whose actor has field
+  refinements or an `@invariant`, a function that runs the migration and evaluates the new
+  contract. Before `ACTIVATE`, the reload server runs it on a copy of every live actor's
+  state. A failure refuses the deploy with the actor, its pid and the failing conjunct
+  (`ERR migration_check Counter pid:0 @invariant: not_137(count)`), and nothing changes. So
+  a migration accepted with `--accept-unproved` is still checked on the data it will meet.
+  A converted message that fails the new handler's refinements is dropped, like a `None`.
+  See docs/hot-code-reload.md, "Undecided migrations are checked on the live data".
 
 - **Hot-reload migrations are checked on every build, with a counterexample.** When an
   obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
@@ -237,14 +254,32 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Breaking:** the generated `@[endpoints]` entry points over a cluster node no longer take
+  the root capability. `<P>_Run.cluster_<R>`, `offer_<R>`, `initiate_<R>`, `offer_hosted_<R>`
+  and `cluster_hosted_<R>` take the node first: `Echo_Run.initiate_Client(node, body)`, where
+  it was `(io, node, body)`. A role with a grant line (`role Ledger needs IO.FileWrite`) takes
+  one capability per granted path after the node, which the caller supplies:
+  `Checkout_Run.offer_Ledger(node, fw, 64, body)`. A caller holding `Cap(IO)` writes
+  `cap_narrow(io)` there. To migrate, delete the first argument of each call, and add the
+  granted capabilities after the node for a role that has a grant. A program that plays its
+  roles over a cluster node therefore no longer needs `Cap(IO)` at all, and a topology pool
+  derives the capabilities its code uses: the `ingress` pool of `examples/lab_app` went from
+  `IO` to six narrow capabilities, none of them network or root. `run_<R>` and `host_<R>`,
+  which open their own connections, are unchanged. The `SessionNode` functions under these
+  (`run_cluster`, `offer_role`, `initiate`, `offer_hosted`, `start_offered_role` and the
+  hosted forms) lose their `io` parameter the same way, and `ClusterNode.with_session(node,
+  ops, body)` is the new operation they use.
+
 - `Gen.one_of` shrinks toward its earlier alternatives (list the simplest generator first).
   The generated values are unchanged; only a failing property's shrunk counterexample can
   differ.
+
 - Diagnostics: a `main` that performs IO without declaring a capability is now reported even
   when the program has another error, listed after that error, so both can be fixed in one pass.
   It used to stay hidden until the other error was fixed, then appear as a new error. The error
   corpus's fix check now accepts a program whose fixes clear every error that has one, when the
   errors left are the ones that offer no fix.
+
 - Diagnostics: three errors now say exactly what to write. `role_grant_exceeded` gives the widened
   `role R needs ...` line and the body's new parameter list (each granted capability is one more
   body parameter, so adding to the grant alone left the program rejected). `division_by_zero` on a
@@ -446,6 +481,15 @@ git log is authoritative for exact commits.
   table, a how-it-fits table, a grouped index, everyday types before the advanced ones, and
   See also in place of Next Steps. It no longer says recursive functions need annotations;
   inference handles them.
+- **Five more pages get the same first-reader layout:** [Module System](docs/modules.md),
+  [Sigils & Templating](docs/sigils.md), [Foreign Function Interface](docs/ffi.md),
+  [Stdlib Guide](docs/stdlib.md) and [Property Testing](docs/property-testing.md). Each
+  has a plain opener, a which-form table, a how-it-fits table linking the related
+  chapters, a grouped index with everyday sections first, Errors you'll see linking the
+  Error Messages tour and `--explain` pages where they apply, and See also in place of
+  Next Steps. Bodies are kept; the FFI page's first example now grants `main` the
+  capabilities it uses, so it type-checks, and the Modules page no longer describes
+  compiler internals or shows a stale error for a `ptype` constructor.
 - **Removed pages.** The four 1.0 claim pages (`claim-deploys`, `claim-capabilities`,
   `claim-performance`, `claim-refinements`), the 0.3.0, 0.4.0 and 0.5.0 upgrade guides, and
   the Findings list on the [Multi-host Lab](docs/lab.md) page. Links to them are gone; the
@@ -460,6 +504,17 @@ git log is authoritative for exact commits.
   compiler message on the page is generated by `scripts/gen-explainer-data.py` from the
   real compiler, and doc-lint fails if the lab app changes without a regeneration. A
   section on deploying to the running cluster is still to come.
+- **A second scrolling explainer, on what a deploy is allowed to do**
+  ([What a Deploy Is Allowed to Do](docs/deploy-authority.md)). It follows one dependency
+  update to the lab app, a library that starts opening a socket, past each check that asks
+  what code can reach: a module's `needs` lines, the grant on `main`, `forge deps` against
+  the committed capability file, the capabilities the compiler derives for each pool of a
+  topology, the generated firewall, `forge deploy hot`'s widening gate, and the node's own
+  policy. The pinned figures are one square per module of the program, and an animated
+  topology: roles placed on machines from the file, sessions flowing, a machine stopped,
+  and a patch stopped at each gate. The topology is a simulation, labelled as one. Every
+  count and tool message is generated by `scripts/gen-authority-data.py` from the real
+  compiler and forge; the page says which one line it quotes from the reference instead.
 - A new Error Messages tour (`/docs/error-messages/`): 34 real compiler errors, from syntax
   slips through types, capabilities, linearity, actors, session channels, protocols and
   refinements, each with what `march --check` prints today. An error playground on the page
@@ -498,6 +553,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--refine-infer` no longer skips programs that `--check` accepts.** A record named like a
+  standard-library one (`type NodeInfo`, `type Member`) left a type error inside the
+  standard library that `--check` never shows, and inference then printed only "skipped,
+  the program has errors". Inference now stops on the errors `--check` stops on, and a skip
+  names the first errors it stopped on.
+- **`forge refine --infer` prints each proposal once.** When the project does not check as
+  one unit, forge checks each file on its own and infers once over the files that check.
+  Before, it inferred once per file and printed the same proposals for every file (30 times
+  on a 31-file project).
+- **Less `--refine-infer` noise.** A recursive group with nothing to infer near it is no longer
+  noted `scc-unsupported`, and a field test such as `_.step != 0` is no longer tried on an
+  `Int` or `List` value.
 - **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
   (what `forge test` runs) treated a property that returned `false` as passing. Only a
   property that panicked or failed an `assert` was caught. Under `march test` it already

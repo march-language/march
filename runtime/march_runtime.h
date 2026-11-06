@@ -796,6 +796,17 @@ typedef struct {
  * 0 = none).  Returns the deploy's epoch (> 0), MARCH_HCR_WAIT with [wait]
  * filled when some slot has no reclaimable version or the pin table is
  * full (nothing changed), or MARCH_HCR_ERROR (nothing changed). */
+/* Hot reload M10 (live-data migration check): run [check], a patch's
+ * __migrate_check_<Actor>, on a copy of the state of every live actor on
+ * dispatch slot [slot], each on its own thread between handlers, waiting at
+ * most [timeout_ms] in all.  0: every answer held ([*n_checked] actors;
+ * [unchecked] the conjuncts the check could not evaluate, "" when none).
+ * -1: [out] says which actor failed and why ("pid:<n> <conjunct>", or
+ * "pid:<n> timeout"). */
+int march_hcr_migrate_check(uint32_t slot, void *(*check)(void *), int64_t timeout_ms,
+                            char *out, size_t outsz, int *n_checked, char *unchecked,
+                            size_t unchecked_sz);
+
 int march_hcr_activate(march_hcr_unit *units, int n, uint32_t requested_epoch,
                        int64_t soft_ms, int64_t hard_ms, march_hcr_wait *wait);
 

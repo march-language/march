@@ -31,7 +31,7 @@ mod ClusterApHostedCancelB do
   end
 
   fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : Int do
-    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, n)) do
+    match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, n)) do
       Ok(_) ->
         println("Client: session " ++ int_to_string(n) ++ " done")
         1

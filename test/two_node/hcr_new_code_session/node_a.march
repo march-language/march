@@ -68,7 +68,7 @@ mod HcrSessionA do
         Some(_) -> ()
         None ->
           Vault.set(bodies, "cur", fn (s, st) -> shop(s, st))
-          match Order_Run.offer_work_Shop(c, h, 64, fn (s, st) ->
+          match Order_Run.offer_work_Shop(h, 64, fn (s, st) ->
             match Vault.get(bodies, "cur") do
               Some(body) -> body(s, st)
               None -> panic("node-a: no Shop callback")

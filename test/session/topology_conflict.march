@@ -106,11 +106,11 @@ mod TopologyConflict do
     let tries : Vault(Int) = Vault.new("tc_tries")
     Topology.place(c, [
       Topology.role("Echo.Primary", Topology.count(1),
-                    fn () -> Echo_Run.offer_Server(io, c, 4, fn (s, st) -> serve_one(s, st))),
+                    fn () -> Echo_Run.offer_Server(c, 4, fn (s, st) -> serve_one(s, st))),
       Topology.role("Echo.Replica", Topology.everywhere(),
                     fn () -> do
                       let _ = Vault.incr(tries, "n", 1)
-                      Echo_Run.offer_Server(io, c, 4, fn (s, st) -> serve_one(s, st))
+                      Echo_Run.offer_Server(c, 4, fn (s, st) -> serve_one(s, st))
                     end) ])
     show_offers(c, "placed")
     status(c)

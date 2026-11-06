@@ -2642,11 +2642,11 @@ mod SessionNode do
   refuses it at the hello. `""` checks nothing. The generated
   `<P>_Run.cluster_<Role>` supplies the role, its peers and the fingerprint.
   """
-  fn run_cluster(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
+  fn run_cluster(node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                  fingerprint : String, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
     counted(node, fn () ->
-      run_cluster_party(io, node, my_role, peers, session, fingerprint, on_close, fn (_p, s) -> body(s), fn _ -> false,
+      run_cluster_party(node, my_role, peers, session, fingerprint, on_close, fn (_p, s) -> body(s), fn _ -> false,
                         no_holder_check))
   end
 
@@ -2692,10 +2692,10 @@ mod SessionNode do
 
   -- `run_cluster`, abandoned while still finding its peers once [abandoned]
   -- says so (an access point's session the initiator withdrew).
-  pfn run_cluster_with(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
+  pfn run_cluster_with(node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                        on_close : Int -> Unit, body : Cap(Session.Live) -> Unit, abandoned : Int -> Bool,
                        holder_ok : Int -> String -> Result((), String)) : Result(Session.Outcome, RunError) do
-    run_cluster_party(io, node, my_role, peers, session, "", on_close, fn (_p, s) -> body(s), abandoned, holder_ok)
+    run_cluster_party(node, my_role, peers, session, "", on_close, fn (_p, s) -> body(s), abandoned, holder_ok)
   end
 
   doc """
@@ -2709,31 +2709,31 @@ mod SessionNode do
   the session id to every callback. [fingerprint] is checked as for
   `run_cluster`.
   """
-  fn run_cluster_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
+  fn run_cluster_hosted(node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                         fingerprint : String, on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                         deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                         cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit) : Result(Session.Outcome, RunError) do
     counted(node, fn () ->
-      run_cluster_party(io, node, my_role, peers, session, fingerprint, on_close,
+      run_cluster_party(node, my_role, peers, session, fingerprint, on_close,
                         fn (p, s) -> host_party(p, s, host, start, deliver, cancel), fn _ -> false, no_holder_check))
   end
 
   -- `run_cluster_hosted`, abandoned while still finding its peers once
   -- [abandoned] says so (a hosted access point's session the initiator
   -- withdrew).
-  pfn run_cluster_hosted_with(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
+  pfn run_cluster_hosted_with(node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                               on_close : Int -> Unit, host : Int, start : Cap(Session.Live) -> Unit,
                               deliver : Cap(Session.Live) -> Int -> Bytes -> Int -> Unit,
                               cancel : Cap(Session.Live) -> Int -> String -> Int -> Unit,
                               abandoned : Int -> Bool, holder_ok : Int -> String -> Result((), String))
       : Result(Session.Outcome, RunError) do
-    run_cluster_party(io, node, my_role, peers, session, "", on_close,
+    run_cluster_party(node, my_role, peers, session, "", on_close,
                       fn (p, s) -> host_party(p, s, host, start, deliver, cancel), abandoned, holder_ok)
   end
 
   -- The cluster runner proper: form the party under [session], then [drive]
   -- it (a callback body, or a hosted party's setup) and serve it to its end.
-  pfn run_cluster_party(io : Cap(IO), node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
+  pfn run_cluster_party(node : Cap(ClusterNode.Live), my_role : Int, peers : List(Int), session : String,
                         fingerprint : String, on_close : Int -> Unit, drive : Party -> Cap(Session.Live) -> Unit,
                         abandoned : Int -> Bool, holder_ok : Int -> String -> Result((), String))
       : Result(Session.Outcome, RunError) do
@@ -2828,8 +2828,7 @@ mod SessionNode do
                 -- twice is harmless: the first PeerGone wins, LinkEnded is once.)
                 recheck_links(node, p)
                 let o = ops(p)
-                let s = Session.attach(io, o)
-                drive(p, s)
+                ClusterNode.with_session(node, o, fn s -> drive(p, s))
                 -- Only now, with the role driven to its first suspension and
                 -- its first handler installed, are held frames replayed (and
                 -- later ones handled as they come): one handled earlier would
@@ -3152,12 +3151,12 @@ mod SessionNode do
   gone from the registry and an initiator no longer picks it -- offer again
   to be found again.
   """
-  fn offer_role(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+  fn offer_role(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
            roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
            peers : List(Int), capacity : Int, on_close : Int -> Unit, body : Cap(Session.Live) -> Unit) : Result(Offer, RunError) do
     let holders = ap_holder_check(node, proto, roles)
     offer_with(node, proto, fingerprint, roles, compat, my_role, capacity,
-               fn (sid, abandoned) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, abandoned, holders))
+               fn (sid, abandoned) -> run_cluster_with(node, my_role, peers, sid, on_close, body, abandoned, holders))
   end
 
   doc """
@@ -3180,12 +3179,12 @@ mod SessionNode do
   preserves the ordinary offer's peer authorization and abandonment checks.
   Calling this function alone does not select a newer code epoch.
   """
-  fn start_offered_role(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String,
+  fn start_offered_role(node : Cap(ClusterNode.Live), proto : String,
                         roles : List((String, Int)), my_role : Int, peers : List(Int),
                         session : String, abandoned : Int -> Bool,
                         on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
-    run_cluster_with(io, node, my_role, peers, session, on_close, body, abandoned,
+    run_cluster_with(node, my_role, peers, session, on_close, body, abandoned,
                      ap_holder_check(node, proto, roles))
   end
 
@@ -3199,7 +3198,7 @@ mod SessionNode do
   if it dies, every session it hosts ends with `HostGone`. The generated
   `<P>_Run.offer_hosted_<Role>` supplies the protocol, role and peers.
   """
-  fn offer_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+  fn offer_hosted(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
                   roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
                   peers : List(Int), capacity : Int, on_close : Int -> Unit, host : Int,
                   start : String -> Cap(Session.Live) -> Unit,
@@ -3209,7 +3208,7 @@ mod SessionNode do
     let trace = hosted_trace_on()
     let what = proto ++ "/" ++ int_to_string(my_role) ++ " fp=" ++ fingerprint ++ " host=" ++ int_to_string(host)
     offer_with(node, proto, fingerprint, roles, compat, my_role, capacity, fn (sid, abandoned) ->
-      run_cluster_hosted_with(io, node, my_role, peers, sid, on_close, host,
+      run_cluster_hosted_with(node, my_role, peers, sid, on_close, host,
                               fn s -> do
                                 hosted_trace(trace, what, "start", sid, "")
                                 start(sid, s)
@@ -3234,7 +3233,7 @@ mod SessionNode do
   abandonment, peer authorization and callback tracing match `offer_hosted`.
   This bridge does not advance an ordinary callback's creation epoch.
   """
-  fn start_offered_hosted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+  fn start_offered_hosted(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
                          roles : List((String, Int)), my_role : Int, peers : List(Int),
                          sid : String, abandoned : Int -> Bool, on_close : Int -> Unit, host : Int,
                          start : String -> Cap(Session.Live) -> Unit,
@@ -3244,7 +3243,7 @@ mod SessionNode do
     let holders = ap_holder_check(node, proto, roles)
     let trace = hosted_trace_on()
     let what = proto ++ "/" ++ int_to_string(my_role) ++ " fp=" ++ fingerprint ++ " host=" ++ int_to_string(host)
-    run_cluster_hosted_with(io, node, my_role, peers, sid, on_close, host,
+    run_cluster_hosted_with(node, my_role, peers, sid, on_close, host,
                               fn s -> do
                                 hosted_trace(trace, what, "start", sid, "")
                                 start(sid, s)
@@ -3644,7 +3643,7 @@ mod SessionNode do
   "Proto.Role:initiate" for [my_role] and refuses otherwise; and once formed,
   every role's endpoint must be on a node certified for that role.
   """
-  fn initiate(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+  fn initiate(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
               roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
               peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
@@ -3655,10 +3654,10 @@ mod SessionNode do
     -- drain ran to its hard deadline (specs/progress/2026-10-13-topology-
     -- drain-continuous-initiators.md).
     if refusing_initiations(node) do Err(RunError.Left("draining"))
-    else counted(node, fn () -> initiate_counted(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body)) end
+    else counted(node, fn () -> initiate_counted(node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body)) end
   end
 
-  pfn initiate_counted(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+  pfn initiate_counted(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
                        roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
                        peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
@@ -3671,8 +3670,8 @@ mod SessionNode do
     match others do
       Cons(r, _) ->
         if no_offer_named(node, proto, r) do Err(NoOffer(r, "no access point is registered"))
-        else initiate_forming(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body) end
-      Nil -> initiate_forming(io, node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body)
+        else initiate_forming(node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body) end
+      Nil -> initiate_forming(node, proto, fingerprint, roles, compat, my_role, peers, others, on_close, body)
     end
   end
 
@@ -3681,7 +3680,7 @@ mod SessionNode do
     not(List.any(ClusterNode.names(node), fn name -> String.starts_with(name, prefix)))
   end
 
-  pfn initiate_forming(io : Cap(IO), node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
+  pfn initiate_forming(node : Cap(ClusterNode.Live), proto : String, fingerprint : String,
                        roles : List((String, Int)), compat : List((Int, List(String))), my_role : Int,
                        peers : List(Int), others : List(Int), on_close : Int -> Unit, body : Cap(Session.Live) -> Unit)
       : Result(Session.Outcome, RunError) do
@@ -3709,7 +3708,7 @@ mod SessionNode do
       Err((role, why, accepted)) ->
         withdraw_all(node, sid, accepted)
         Err(NoOffer(role, why))
-      Ok(_) -> run_cluster_with(io, node, my_role, peers, sid, on_close, body, fn _ -> false,
+      Ok(_) -> run_cluster_with(node, my_role, peers, sid, on_close, body, fn _ -> false,
                                 ap_holder_check(node, proto, roles))
     end
   end
