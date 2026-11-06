@@ -148,9 +148,10 @@ type server_ctx = {
   request_bytes   : meth:string -> path:string -> body:string -> keep_alive:bool -> string;
   read_response   : Unix.file_descr -> string ref -> deadline:float -> int * string * string;
   check_response  : string -> exp_status:int -> exp_body:string -> int * string * string -> unit;
+  read_log        : unit -> string;   (* the server's stdout+stderr so far *)
 }
 
-let with_compiled_server ?(extra_env = [||]) ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
+let with_compiled_server ?(extra_env = [||]) ?ready_port ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
   (* Without this, writing to a socket whose peer has just crashed kills THIS
      process with SIGPIPE — the test would die instead of reporting the dead
      server, which is the whole point of the exercise.  Ignoring it turns the
@@ -283,9 +284,14 @@ let with_compiled_server ?(extra_env = [||]) ~variant ~slug ~evloop ~server_src 
      hung server must fail in finite time rather than wedge the suite. *)
   let ready_timeout = 90.0 in
   let addr () = Unix.ADDR_INET (Unix.inet_addr_loopback, !port) in
+  (* Readiness is a connect to the main port, or to [ready_port] for a
+     server whose main port is deliberately not bound yet. *)
+  let ready_addr () = match ready_port with
+    | Some p -> Unix.ADDR_INET (Unix.inet_addr_loopback, p)
+    | None -> addr () in
   let try_connect () =
     let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-    match Unix.connect s (addr ()) with
+    match Unix.connect s (ready_addr ()) with
     | () -> (try Unix.close s with _ -> ()); true
     | exception Unix.Unix_error _ -> (try Unix.close s with _ -> ()); false
   in
@@ -491,7 +497,8 @@ let with_compiled_server ?(extra_env = [||]) ~variant ~slug ~evloop ~server_src 
       send;
       request_bytes;
       read_response;
-      check_response })
+      check_response;
+      read_log })
 
 (* ── The original exercise: 65 requests, bodies, keep-alive, pipelining ── *)
 (* Resident set size of [pid] in KiB via ps(1); identical flag on macOS and

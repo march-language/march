@@ -2770,6 +2770,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
                                void *release) {
     if (!pipeline) return;
     if (idle_timeout > 0) g_march_https.idle_secs = (int)idle_timeout;
+    march_https_on_listen();
     /* The result releaser lives for the whole server run (see
      * march_http_internal.h); the stdlib passes HttpServer.release_conn. */
     g_march_http_release_clo = release;
@@ -2797,8 +2798,10 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
     }
 
     /* ── Fallback: thread-per-connection with work queue ─────────── */
-    int64_t listen_fd = tcp_listen_raw(port);
-    if (listen_fd < 0) {
+    /* Bootstrap mode (tls_wait_for_cert, no certificate yet): the HTTPS
+     * port is bound by the accept loop once the first pair is installed. */
+    int64_t listen_fd = march_https_awaiting_cert() ? -1 : tcp_listen_raw(port);
+    if (listen_fd < 0 && !march_https_awaiting_cert()) {
         fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
                 (long long)port, strerror(errno));
         return;
@@ -2849,9 +2852,19 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         fprintf(stderr, "march: HTTPS on port %lld\n", (long long)port);
 
     while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+        if (listen_fd < 0 && !march_https_awaiting_cert()) {
+            listen_fd = tcp_listen_raw(port);
+            if (listen_fd < 0) {
+                fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
+                        (long long)port, strerror(errno));
+                break;
+            }
+            fprintf(stderr, "march: https: certificate installed; HTTPS listening on port %lld\n",
+                    (long long)port);
+        }
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET((int)listen_fd, &rfds);
+        if (listen_fd >= 0) FD_SET((int)listen_fd, &rfds);
         if (plain_fd >= 0) FD_SET((int)plain_fd, &rfds);
         int maxfd = (int)(plain_fd > listen_fd ? plain_fd : listen_fd);
         struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
@@ -2866,7 +2879,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         if (r == 0) continue;   /* timeout — check g_http_shutdown and loop */
 
         int on_plain = plain_fd >= 0 && FD_ISSET((int)plain_fd, &rfds)
-                       && !FD_ISSET((int)listen_fd, &rfds);
+                       && !(listen_fd >= 0 && FD_ISSET((int)listen_fd, &rfds));
         int64_t client_fd = tcp_accept_raw(on_plain ? plain_fd : listen_fd);
         if (client_fd < 0) continue;
 
@@ -2900,7 +2913,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         pthread_mutex_unlock(&g_pool.queue.lock);
     }
 
-    close((int)listen_fd);
+    if (listen_fd >= 0) close((int)listen_fd);
     if (plain_fd >= 0) close((int)plain_fd);
     if (!sequential) march_http_pool_stop();
 }

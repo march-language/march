@@ -18,6 +18,7 @@ typedef struct {
     int   idle_secs;        /* keep-alive idle (from listen's idle_timeout) */
     int   poll_secs;        /* certificate file poll interval; 0 = off */
     int   wait_for_cert;    /* bootstrap: missing files are not fatal */
+    int   files;            /* the certificate came from files (pollable) */
     int   plain_port;       /* extra plain-HTTP listener; 0 = none */
     void *plain_pipeline;   /* its pipeline closure (owned) */
 } march_https_config_t;
@@ -32,5 +33,14 @@ void    march_http_server_set_timeouts(int64_t handshake_secs, int64_t header_se
 void   *march_http_server_reload_tls(int64_t kind, void *a, void *b);
 void    march_http_server_plain_listener(int64_t port, void *pipeline);
 int64_t march_http_conn_is_tls(int64_t fd);
+
+/* Called by march_http_server_listen: starts the certificate file poller
+ * (once) for a TlsFiles server with a nonzero poll interval. */
+void    march_https_on_listen(void);
+
+/* 1 while an HTTPS server waits for its first certificate (bootstrap mode:
+ * tls_wait_for_cert and no pair installed yet); its HTTPS listener is
+ * bound once this turns 0. */
+int     march_https_awaiting_cert(void);
 
 #endif

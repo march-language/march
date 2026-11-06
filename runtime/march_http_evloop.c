@@ -234,6 +234,7 @@ typedef struct {
     int    is_tls;        /* listener_fd serves HTTPS */
     int    plain_fd;      /* extra plain-HTTP listener, -1 if none */
     void  *plain_pipeline;
+    int    port;          /* listener_fd's port (bound later in bootstrap mode) */
 } evloop_thread_arg_t;
 
 /* epoll user data for the two listeners (a conn_state_t pointer otherwise). */
@@ -853,6 +854,7 @@ static void *evloop_run(void *arg) {
     int    is_tls         = targ->is_tls;
     int    plain_fd       = targ->plain_fd;
     void  *plain_pipeline = targ->plain_pipeline;
+    int    port           = targ->port;
     free(targ);
 
     /* This OS thread runs compiled March code outside the scheduler — force
@@ -870,8 +872,10 @@ static void *evloop_run(void *arg) {
 
     /* Register the listener for read events. */
     struct kevent lev;
-    EV_SET(&lev, listener_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
-    kevent(evfd, &lev, 1, NULL, 0, NULL);
+    if (listener_fd >= 0) {
+        EV_SET(&lev, listener_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+        kevent(evfd, &lev, 1, NULL, 0, NULL);
+    }
     if (plain_fd >= 0) {
         EV_SET(&lev, plain_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
         kevent(evfd, &lev, 1, NULL, 0, NULL);
@@ -889,7 +893,7 @@ static void *evloop_run(void *arg) {
     struct epoll_event lev;
     lev.events  = EPOLLIN | EPOLLET;
     lev.data.ptr = EVLOOP_MAIN_LISTENER;
-    epoll_ctl(evfd, EPOLL_CTL_ADD, listener_fd, &lev);
+    if (listener_fd >= 0) epoll_ctl(evfd, EPOLL_CTL_ADD, listener_fd, &lev);
     if (plain_fd >= 0) {
         lev.events  = EPOLLIN | EPOLLET;
         lev.data.ptr = EVLOOP_PLAIN_LISTENER;
@@ -901,6 +905,23 @@ static void *evloop_run(void *arg) {
 
     /* ── Main event loop ──────────────────────────────────────────── */
     while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+        /* Bootstrap mode: bind the HTTPS listener once a certificate exists
+         * (checked at least once a second, the loop's longest wait). */
+        if (listener_fd < 0 && !march_https_awaiting_cert()) {
+            listener_fd = create_reuseport_listener(port);
+            if (listener_fd >= 0) {
+#if EVLOOP_USE_KQUEUE
+                struct kevent bev;
+                EV_SET(&bev, listener_fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+                kevent(evfd, &bev, 1, NULL, 0, NULL);
+#elif EVLOOP_USE_EPOLL
+                struct epoll_event bev;
+                bev.events   = EPOLLIN | EPOLLET;
+                bev.data.ptr = EVLOOP_MAIN_LISTENER;
+                epoll_ctl(evfd, EPOLL_CTL_ADD, listener_fd, &bev);
+#endif
+            }
+        }
 
 #if EVLOOP_USE_KQUEUE
         int wait_ms = heap_wait_ms(1000);
@@ -921,7 +942,7 @@ static void *evloop_run(void *arg) {
             int            ident = (int)events[i].ident;
             conn_state_t  *c     = (conn_state_t *)events[i].udata;
 
-            if (ident == listener_fd) {
+            if (listener_fd >= 0 && ident == listener_fd) {
                 accept_connections(listener_fd, evfd, is_tls, pipeline);
                 continue;
             }
@@ -971,7 +992,7 @@ static void *evloop_run(void *arg) {
         sweep_deadlines(evfd);
     }
 
-    close(listener_fd);
+    if (listener_fd >= 0) close(listener_fd);
     if (plain_fd >= 0) close(plain_fd);
     close(evfd);
     return NULL;
@@ -996,9 +1017,10 @@ typedef struct {
 static void evloop_spawn_all(void *argp) {
     evloop_spawn_t *s = (evloop_spawn_t *)argp;
     s->started = 0;
+    int bootstrap = march_https_awaiting_cert();
     for (int i = 0; i < s->nthreads; i++) {
-        int lfd = create_reuseport_listener(s->port);
-        if (lfd < 0) {
+        int lfd = bootstrap ? -1 : create_reuseport_listener(s->port);
+        if (lfd < 0 && !bootstrap) {
             fprintf(stderr, "march: SO_REUSEPORT listener[%d] failed: %s\n",
                     i, strerror(errno));
             continue;
@@ -1012,18 +1034,19 @@ static void evloop_spawn_all(void *argp) {
         }
 
         evloop_thread_arg_t *arg = malloc(sizeof(evloop_thread_arg_t));
-        if (!arg) { close(lfd); if (pfd >= 0) close(pfd); continue; }
+        if (!arg) { if (lfd >= 0) close(lfd); if (pfd >= 0) close(pfd); continue; }
         arg->listener_fd    = lfd;
         arg->pipeline       = s->pipeline;
         arg->is_tls         = g_march_https.tls;
         arg->plain_fd       = pfd;
         arg->plain_pipeline = g_march_https.plain_pipeline;
+        arg->port           = s->port;
 
         if (pthread_create(&s->threads[s->started], NULL, evloop_run, arg) != 0) {
             fprintf(stderr, "march: evloop thread[%d] create failed: %s\n",
                     i, strerror(errno));
             free(arg);
-            close(lfd);
+            if (lfd >= 0) close(lfd);
             if (pfd >= 0) close(pfd);
             continue;
         }

@@ -421,15 +421,24 @@ let make_pki ~dir ~name ?(days = 2) () =
         (q ca_key) name (q ca));
   sh (Printf.sprintf "openssl ecparam -name prime256v1 -genkey -noout -out %s 2>/dev/null" (q key));
   sh (Printf.sprintf "openssl req -new -key %s -subj /CN=localhost -out %s 2>/dev/null" (q key) (q csr));
-  let validity =
-    if days >= 0 then Printf.sprintf "-days %d" days
-    else begin
-      let t = Unix.gmtime (Unix.time () -. 86400.) in
-      Printf.sprintf "-not_after %04d%02d%02d%02d%02d%02dZ" (t.tm_year + 1900) (t.tm_mon + 1)
-        t.tm_mday t.tm_hour t.tm_min t.tm_sec
-    end in
-  sh (Printf.sprintf "openssl x509 -req -in %s -CA %s -CAkey %s -set_serial %d %s -extfile %s -out %s 2>/dev/null"
-        (q csr) (q ca) (q ca_key) (1000 + Random.int 1_000_000) validity (q ext) (q cert));
+  let sign validity =
+    Sys.command (Printf.sprintf
+      "openssl x509 -req -in %s -CA %s -CAkey %s -set_serial %d %s -extfile %s -out %s 2>/dev/null"
+      (q csr) (q ca) (q ca_key) (1000 + Random.int 1_000_000) validity (q ext) (q cert)) = 0
+    && (try (Unix.stat cert).Unix.st_size > 0 with Unix.Unix_error _ -> false) in
+  if days >= 0 then begin
+    if not (sign (Printf.sprintf "-days %d" days)) then Alcotest.fail "openssl x509 -req failed"
+  end else begin
+    (* An already-expired leaf: -not_after where the CLI has it (OpenSSL >=
+       3.4), else a negative -days (older releases accept it). *)
+    let stamp ago =
+      let t = Unix.gmtime (Unix.time () -. ago) in
+      Printf.sprintf "%04d%02d%02d%02d%02d%02dZ" (t.tm_year + 1900) (t.tm_mon + 1)
+        t.tm_mday t.tm_hour t.tm_min t.tm_sec in
+    if not (sign (Printf.sprintf "-not_before %s -not_after %s" (stamp 172800.) (stamp 86400.)))
+       && not (sign "-days -1") then
+      Alcotest.fail "cannot make an expired certificate with this openssl CLI"
+  end;
   { dir; ca; cert; key }
 
 (* s_client children, by the socket end handed to the test, so a close (or
@@ -862,6 +871,259 @@ let run_https ~mode ~evloop ~extra_env () =
         let h = { ctx; pki; plain_port } in
         List.iter (fun (name, f) -> f h; assert_alive ctx name) https_cases))
 
+(* ── Rotation, reload_tls, bootstrap, expired startup ─────────────────── *)
+
+let cert_serial path =
+  let ic = Unix.open_process_in (Printf.sprintf "openssl x509 -in %s -noout -serial 2>/dev/null"
+                                   (Filename.quote path)) in
+  let l = try input_line ic with End_of_file -> "" in
+  ignore (Unix.close_process_in ic);
+  String.trim l
+
+(** The serial of the leaf a NEW connection to [port] is served (no
+    verification, so an expired leaf still reports). *)
+let served_leaf_serial ~port ~ca =
+  let ic = Unix.open_process_in (Printf.sprintf
+      "openssl s_client -connect 127.0.0.1:%d -servername localhost -CAfile %s </dev/null 2>/dev/null \
+       | openssl x509 -noout -serial 2>/dev/null" port (Filename.quote ca)) in
+  let l = try input_line ic with End_of_file -> "" in
+  ignore (Unix.close_process_in ic);
+  String.trim l
+
+(* Replace a file in one step, as certbot's symlink swap does. *)
+let atomic_copy ~src ~dst =
+  let tmp = dst ^ ".tmp" in
+  write_text tmp (read_file_contents src);
+  Unix.rename tmp dst
+
+let count_sub hay needle =
+  let n = String.length needle in
+  let rec go i acc =
+    match Test_http_native.find_from hay needle i with
+    | None -> acc
+    | Some j -> go (j + n) (acc + 1) in
+  if n = 0 then 0 else go 0 0
+
+let rotate_server_src = {|mod HttpsRotate do
+  needs IO.Process
+  needs IO.NetListen
+  needs IO.NetConnect.TLS
+  needs IO.FileRead
+  needs IO.Spawn
+
+  fn env_str(name) do
+    match process_env(name) do
+    Some(s) -> s
+    None -> ""
+    end
+  end
+
+  fn env_int(name) do
+    match string_to_int(env_str(name)) do
+    Some(n) -> n
+    None -> 0
+    end
+  end
+
+  fn read_or_empty(path) do
+    match File.read(path) do
+    Ok(s) -> s
+    Err(_) -> ""
+    end
+  end
+
+  fn reload_from(cert_env, key_env) do
+    let src = HttpServer.TlsPem(read_or_empty(env_str(cert_env)), read_or_empty(env_str(key_env)))
+    match HttpServer.reload_tls(src) do
+    Ok(_) -> "ok"
+    Err(e) -> "err:" ++ e
+    end
+  end
+
+  fn race(i) do
+    if i >= 100 do ()
+    else
+      let _r = if i % 2 == 0 do reload_from("MARCH_TEST_A_CERT", "MARCH_TEST_A_KEY")
+               else reload_from("MARCH_TEST_B_CERT", "MARCH_TEST_B_KEY") end
+      sleep_ms(10)
+      race(i + 1)
+    end
+  end
+
+  fn router(conn) do
+    match HttpServer.path_info(conn) do
+    Cons("echo", Nil) -> conn |> HttpServer.text(200, "echo")
+    Cons("reload", Cons(which, Nil)) ->
+      let r = if which == "a" do reload_from("MARCH_TEST_A_CERT", "MARCH_TEST_A_KEY")
+              else if which == "b" do reload_from("MARCH_TEST_B_CERT", "MARCH_TEST_B_KEY")
+              else reload_from("MARCH_TEST_A_CERT", "MARCH_TEST_B_KEY") end end
+      conn |> HttpServer.text(200, r)
+    Cons("race", Nil) ->
+      let _t = Task.async(fn () -> race(0))
+      conn |> HttpServer.text(200, "started")
+    _ -> conn |> HttpServer.text(404, "Not Found")
+    end
+  end
+
+  fn configure(server) do
+    if env_str("MARCH_TEST_WAIT") == "1" do HttpServer.tls_wait_for_cert(server) else server end
+  end
+
+  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _t : Cap(IO.NetConnect.TLS),
+          _f : Cap(IO.FileRead), _s : Cap(IO.Spawn)) do
+    HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
+    |> HttpServer.tls(HttpServer.TlsFiles(env_str("MARCH_TEST_CERT"), env_str("MARCH_TEST_KEY")))
+    |> HttpServer.tls_poll_interval(1)
+    |> configure()
+    |> HttpServer.plain_listener(env_int("MARCH_TEST_PLAIN_PORT"), [fn c -> HttpServer.text(c, 200, "plain")])
+    |> HttpServer.plug(router)
+    |> HttpServer.listen()
+  end
+end
+|}
+
+type rot = { rctx : Test_http_native.server_ctx; bundle : string; live_cert : string; live_key : string;
+             a : pki; b : pki; c : pki; rplain : int }
+
+let wait_serial (r : rot) label want ~within =
+  let t0 = Unix.gettimeofday () in
+  let rec go () =
+    let got = served_leaf_serial ~port:r.rctx.port ~ca:r.bundle in
+    if got = want then ()
+    else if Unix.gettimeofday () -. t0 > within then
+      r.rctx.bail (Printf.sprintf "%s: served %S, want %S after %.0fs" label got want within)
+    else (Unix.sleepf 0.25; go ()) in
+  go ()
+
+let rot_get (r : rot) label path ~body =
+  let fd = tls_connect_or_bail r.rctx ~ca:r.bundle () in
+  r.rctx.send fd (r.rctx.request_bytes ~meth:"GET" ~path ~body:"" ~keep_alive:false);
+  let pending = ref "" in
+  let (st, b, _) = r.rctx.read_response fd pending ~deadline:(Unix.gettimeofday () +. 20.) in
+  tls_close fd;
+  if st <> 200 || not (body b) then r.rctx.bail (Printf.sprintf "%s: got %d %S" label st b);
+  b
+
+let r_poll_rotation (r : rot) =
+  wait_serial r "poll_rotation (start)" (cert_serial r.a.cert) ~within:2.;
+  let k = tls_connect_or_bail r.rctx ~ca:r.bundle () in
+  let pending = ref "" in
+  let ka () =
+    r.rctx.send k (get_req "/echo");
+    r.rctx.check_response "poll_rotation keep-alive" ~exp_status:200 ~exp_body:"echo"
+      (r.rctx.read_response k pending ~deadline:(Unix.gettimeofday () +. 20.)) in
+  ka ();
+  atomic_copy ~src:r.b.key ~dst:r.live_key;
+  atomic_copy ~src:r.b.cert ~dst:r.live_cert;
+  wait_serial r "poll_rotation" (cert_serial r.b.cert) ~within:4.;
+  ka ();                                    (* the old connection keeps working *)
+  tls_close k;
+  if not (contains (r.rctx.read_log ()) "installed certificate") then
+    r.rctx.bail "poll_rotation: no `installed certificate` line on stderr"
+
+let r_poll_refusal (r : rot) =
+  let refused0 = count_sub (r.rctx.read_log ()) "refused certificate" in
+  atomic_copy ~src:r.c.cert ~dst:r.live_cert;   (* C's cert with B's key *)
+  Unix.sleepf 3.0;
+  let got = served_leaf_serial ~port:r.rctx.port ~ca:r.bundle in
+  if got <> cert_serial r.b.cert then
+    r.rctx.bail (Printf.sprintf "poll_refusal: a mismatched pair replaced the certificate (served %S)" got);
+  let refused = count_sub (r.rctx.read_log ()) "refused certificate" - refused0 in
+  if refused <> 1 then
+    r.rctx.bail (Printf.sprintf "poll_refusal: `refused certificate` logged %d times over 3 polls, want once" refused);
+  atomic_copy ~src:r.c.key ~dst:r.live_key;
+  wait_serial r "poll_refusal (fixed pair)" (cert_serial r.c.cert) ~within:4.
+
+let r_reload_pem (r : rot) =
+  ignore (rot_get r "reload_tls mismatched" "/reload/bad"
+            ~body:(fun b -> contains b "err:" && contains b "do not match"));
+  let got = served_leaf_serial ~port:r.rctx.port ~ca:r.bundle in
+  if got <> cert_serial r.c.cert then
+    r.rctx.bail (Printf.sprintf "reload_tls_pem: a refused reload changed the certificate (%S)" got);
+  ignore (rot_get r "reload_tls b" "/reload/b" ~body:(fun b -> b = "ok"));
+  wait_serial r "reload_tls_pem" (cert_serial r.b.cert) ~within:1.
+
+let r_race (r : rot) =
+  ignore (rot_get r "reload_race start" "/race" ~body:(fun b -> b = "started"));
+  for i = 1 to 200 do
+    ignore (rot_get r (Printf.sprintf "reload_race connection %d/200" i) "/echo" ~body:(fun b -> b = "echo"))
+  done
+
+let rotate_env ~dir ~live_cert ~live_key ~a ~b ~plain ~wait =
+  [| "MARCH_TEST_CERT=" ^ live_cert; "MARCH_TEST_KEY=" ^ live_key;
+     "MARCH_TEST_A_CERT=" ^ a.cert; "MARCH_TEST_A_KEY=" ^ a.key;
+     "MARCH_TEST_B_CERT=" ^ b.cert; "MARCH_TEST_B_KEY=" ^ b.key;
+     Printf.sprintf "MARCH_TEST_PLAIN_PORT=%d" plain;
+     "MARCH_TEST_WAIT=" ^ (if wait then "1" else "0"); "MARCH_TEST_DIR=" ^ dir |]
+
+let run_rotation ~mode ~evloop () =
+  let dir = fresh_dir ("rot" ^ mode) in
+  let a = make_pki ~dir ~name:"a" () and b = make_pki ~dir ~name:"b" ()
+  and c = make_pki ~dir ~name:"c" () in
+  let bundle = Filename.concat dir "bundle.pem" in
+  write_text bundle (String.concat "" (List.map (fun p -> read_file_contents p.ca) [ a; b; c ]));
+  let live_cert = Filename.concat dir "live-cert.pem" and live_key = Filename.concat dir "live-key.pem" in
+  atomic_copy ~src:a.cert ~dst:live_cert;
+  atomic_copy ~src:a.key ~dst:live_key;
+  let plain = Test_http_native.pick_free_port () in
+  let extra_env = Array.append (if evloop then [||] else [||])
+      (rotate_env ~dir ~live_cert ~live_key ~a ~b ~plain ~wait:false) in
+  Fun.protect ~finally:reap_s_clients (fun () ->
+    Test_http_native.with_compiled_server ~extra_env ~variant:("rotation, " ^ mode)
+      ~slug:("rot" ^ mode) ~evloop ~server_src:rotate_server_src (fun ctx ->
+        let r = { rctx = ctx; bundle; live_cert; live_key; a; b; c; rplain = plain } in
+        List.iter (fun (name, f) -> f r; assert_alive ctx name)
+          [ ("poll_rotation", r_poll_rotation); ("poll_refusal_keeps_old", r_poll_refusal);
+            ("reload_tls_pem", r_reload_pem); ("reload_race", r_race) ]))
+
+let run_bootstrap ~mode ~evloop () =
+  let dir = fresh_dir ("boot" ^ mode) in
+  let a = make_pki ~dir ~name:"a" () in
+  let live_cert = Filename.concat dir "live-cert.pem" and live_key = Filename.concat dir "live-key.pem" in
+  let plain = Test_http_native.pick_free_port () in
+  let extra_env = rotate_env ~dir ~live_cert ~live_key ~a ~b:a ~plain ~wait:true in
+  Fun.protect ~finally:reap_s_clients (fun () ->
+    Test_http_native.with_compiled_server ~extra_env ~ready_port:plain ~variant:("bootstrap, " ^ mode)
+      ~slug:("boot" ^ mode) ~evloop ~server_src:rotate_server_src (fun ctx ->
+        let pfd = connect_port ctx plain in
+        ctx.send pfd (ctx.request_bytes ~meth:"GET" ~path:"/" ~body:"" ~keep_alive:false);
+        let pending = ref "" in
+        ctx.check_response "bootstrap plain listener" ~exp_status:200 ~exp_body:"plain"
+          (ctx.read_response pfd pending ~deadline:(Unix.gettimeofday () +. 20.));
+        close_quietly pfd;
+        if not (port_refuses ctx.port) then
+          ctx.bail "bootstrap_mode: the HTTPS port accepts connections before any certificate exists";
+        atomic_copy ~src:a.key ~dst:live_key;
+        atomic_copy ~src:a.cert ~dst:live_cert;
+        let t0 = Unix.gettimeofday () in
+        while port_refuses ctx.port do
+          if Unix.gettimeofday () -. t0 > 4. then
+            ctx.bail "bootstrap_mode: HTTPS port still closed 4s after the certificate appeared";
+          Unix.sleepf 0.2
+        done;
+        let r = { rctx = ctx; bundle = a.ca; live_cert; live_key; a; b = a; c = a; rplain = plain } in
+        ignore (rot_get r "bootstrap_mode first HTTPS request" "/echo" ~body:(fun b -> b = "echo"));
+        assert_alive ctx "bootstrap_mode"))
+
+let run_expired_startup ~mode ~evloop () =
+  let dir = fresh_dir ("exp" ^ mode) in
+  let old = make_pki ~dir ~name:"old" ~days:(-1) () in
+  let plain = Test_http_native.pick_free_port () in
+  let extra_env = rotate_env ~dir ~live_cert:old.cert ~live_key:old.key ~a:old ~b:old ~plain ~wait:false in
+  Test_http_native.with_compiled_server ~extra_env ~variant:("expired startup, " ^ mode)
+    ~slug:("exp" ^ mode) ~evloop ~server_src:rotate_server_src (fun ctx ->
+      let t0 = Unix.gettimeofday () in
+      while not (contains (ctx.read_log ()) "expired") && Unix.gettimeofday () -. t0 < 5. do
+        Unix.sleepf 0.1 done;
+      if not (contains (ctx.read_log ()) "expired") then
+        ctx.bail "expired_at_startup: no warning naming the expired certificate";
+      let got = served_leaf_serial ~port:ctx.port ~ca:old.ca in
+      if got <> cert_serial old.cert then
+        ctx.bail (Printf.sprintf "expired_at_startup: handshake did not serve the expired leaf (%S)" got);
+      assert_alive ctx "expired_at_startup_serves")
+
+let rotation_modes = [ ("evloop", true); ("pool", false) ]
+
 let suites =
   [ ( "https server (compiled, end-to-end)",
       [ Alcotest.test_case "config_errors" `Quick test_config_errors;
@@ -872,4 +1134,9 @@ let suites =
             (run_deadlines ~mode ~evloop ~extra_env)) modes
       @ List.map (fun (mode, evloop, extra_env) ->
           Alcotest.test_case ("https: " ^ mode) `Quick
-            (run_https ~mode ~evloop ~extra_env)) modes ) ]
+            (run_https ~mode ~evloop ~extra_env)) modes
+      @ List.concat_map (fun (mode, evloop) ->
+          [ Alcotest.test_case ("rotation: " ^ mode) `Quick (run_rotation ~mode ~evloop);
+            Alcotest.test_case ("bootstrap: " ^ mode) `Quick (run_bootstrap ~mode ~evloop);
+            Alcotest.test_case ("expired startup: " ^ mode) `Quick (run_expired_startup ~mode ~evloop) ])
+        rotation_modes ) ]

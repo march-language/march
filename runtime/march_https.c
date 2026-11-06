@@ -12,7 +12,7 @@
 
 march_https_config_t g_march_https = {
     .tls = 0, .handshake_secs = 10, .header_secs = 30, .progress_secs = 30,
-    .idle_secs = 60, .poll_secs = 60, .wait_for_cert = 0,
+    .idle_secs = 60, .poll_secs = 60, .wait_for_cert = 0, .files = 0,
     .plain_port = 0, .plain_pipeline = NULL,
 };
 
@@ -73,6 +73,7 @@ void *march_http_server_tls_configure(int64_t kind, void *a, void *b,
     char err[600] = "";
     g_march_https.poll_secs = poll_secs < 0 ? 0 : (int)poll_secs;
     g_march_https.wait_for_cert = wait_for_cert != 0;
+    g_march_https.files = (kind == 0);
     if (kind == 0) {
         char *cp = str_dup(a), *kp = str_dup(b);
         if (!cp || !kp) { free(cp); free(kp); return err_str("out of memory"); }
@@ -135,6 +136,22 @@ void march_http_server_plain_listener(int64_t port, void *pipeline) {
      * whole server run, like listen's pipeline. */
     g_march_https.plain_port = (int)port;
     g_march_https.plain_pipeline = pipeline;
+}
+
+void march_https_on_listen(void) {
+    static int started;
+    if (started || !g_march_https.tls) return;
+    started = 1;
+    if (g_march_https.files && g_march_https.poll_secs > 0 &&
+        mts_poller_start(g_march_https.poll_secs) != 0)
+        fprintf(stderr, "march: https: cannot start the certificate poller\n");
+    if (march_https_awaiting_cert())
+        fprintf(stderr, "march: https: no certificate yet; the HTTPS port opens "
+                        "when one is installed\n");
+}
+
+int march_https_awaiting_cert(void) {
+    return g_march_https.tls && mts_slot_generation() == 0;
 }
 
 int64_t march_http_conn_is_tls(int64_t fd) {
