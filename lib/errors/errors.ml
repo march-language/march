@@ -225,8 +225,17 @@ let sorted ctx =
      deterministic tiebreaker a non-stable sort could reorder equal-span
      diagnostics, producing display nondeterminism. *)
   let sev_rank = function Error -> 0 | Warning -> 1 | Hint -> 2 in
+  (* A [cap_grant] beside another error renders last: the other error is
+     the mistake to fix first, and the grant is what is left after it, so
+     the reader meets them in that order (one-turn metric, §M1). *)
+  let is_grant d = Code.slug_of d.code = Code.cap_grant in
+  let other_error =
+    List.exists (fun d -> d.severity = Error && not (is_grant d)) ctx.diagnostics in
+  let late d = if other_error && is_grant d then 1 else 0 in
   List.stable_sort
     (fun a b ->
+      let c = compare (late a) (late b) in
+      if c <> 0 then c else
       let c = compare a.span.start_line b.span.start_line in
       if c <> 0 then c
       else
@@ -260,9 +269,10 @@ let sorted ctx =
    - an [unbound_variable] for `y` on the arm of an [or_pattern_binding]
      error naming `y`: the name is unbound because only some alternatives
      bind it;
-   - [cap_grant] and [cap_root_broad] while any error outside the capability
-     checks exists: the grant `main` needs is computed from a program that
-     does not typecheck yet;
+   - [cap_root_broad] while any error outside the capability checks exists:
+     it is advice on a program that does not typecheck yet. [cap_grant] is
+     kept (and sorted after the other errors): hiding it cost a second turn
+     on every program that also forgot the grant (one-turn metric, §M1);
    - a [cap_ceiling:X] when a [cap_needs:X] error reports the same missing
      `needs` (it points at the use, the ceiling at the module header, and
      the two carry the same fix), or when [import_cap_missing] reports the
@@ -442,7 +452,7 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
                            (o.message :: o.notes))
                     or_pattern_msgs
                 | None -> false))
-        || ((sl = Code.cap_grant || sl = Code.cap_root_broad) && non_cap_error)
+        || (sl = Code.cap_root_broad && non_cap_error)
         || (sl = Code.session_state_mismatch && session_errors > 1
             && contains_sub d.message "expected a channel endpoint but got `")
         || (sl = Code.mint_cap_invalid
