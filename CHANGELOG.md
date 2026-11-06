@@ -217,7 +217,15 @@ git log is authoritative for exact commits.
   there as a labelled excerpt, innermost first. It replaces the `panic: ...` line and the
   numbered stack trace, for panics, `todo`, failed assertions and run-time errors such as
   division by zero. `MARCH_BACKTRACE=full` still adds the standard library's calls. The exit
-  code is unchanged. Compiled programs still print `panic: ...` alone.
+  code is unchanged.
+- A compiled program that stops on an unhandled panic or run-time error now prints a report in
+  the same style in place of the single `panic: ...` line: what happened, the `panic` / `todo` /
+  `unreachable` call's source line with a caret, then the functions it was reached through,
+  each shown by its first line. A compiled program does not record the line of each call, and
+  the report says so. Source lines are read from the path given at compile time; when the file
+  is not there the report gives `file:line`. `MARCH_BACKTRACE=full` adds the standard library's
+  functions. The exit code is unchanged. Scripts that matched `panic: ` in a compiled program's
+  stderr need the new wording (`The program panicked: ...`).
 - An unsupervised actor whose handler fails under the interpreter is now reported: the actor,
   the message it was handling with its arguments, the failing line, and its state at the time.
   The interpreter used to drop such a crash without printing anything.

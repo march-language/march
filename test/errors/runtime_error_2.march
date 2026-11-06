@@ -1,0 +1,13 @@
+-- MARCH-MODE: run-compiled
+-- EXPECT-ERROR: division by zero
+-- A division by zero compiled: no line for the division itself, only the
+-- functions it was reached through.
+mod Main do
+  needs IO.Console
+
+  fn avg(sum : Int, n : Int) : Int do sum / n end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(avg(10, List.length([]))))
+  end
+end

@@ -689,7 +689,7 @@ let test_jit_file_flushes_diagnostics () =
             "--jit warn-then-panic: expected %S in output (host buffers not \
              flushed before handing control to JIT'd code?), got:\n%s"
             needle out)
-      [ "not tail-recursive"; "checksum=55"; "panic: boom" ]
+      [ "not tail-recursive"; "checksum=55"; "The program panicked: boom" ]
   end
 
 (* Finding 2: a file with no `main` raised out of run_program as

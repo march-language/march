@@ -40,7 +40,10 @@ a compiler-emitted function table (no dladdr, so Linux too).
 
 Done since (`progress/2026-11-05-runtime-failure-reports.md`): the interpreter renders an
 unhandled failure and an unsupervised actor crash as a diagnostic with source excerpts (frames
-carry their call's span). Still open from that work, on the compiled side: item 4 above (a
-compiled panic prints `panic: <msg>` and nothing else: no location, no excerpt, no calls), and
-the same actor report compiled (message and state at the crash; a compiled unsupervised actor
+carry their call's span). Item 4 is done too
+(`progress/2026-11-06-compiled-failure-reports.md`): a compiled unhandled panic prints the
+report, with the panic call's line and caret and the functions on the stack by definition line
+(item 1, the exact line of each call, is what would make it match the interpreter's). Still
+open on the compiled side: a line for `assert`, non-exhaustive matches, `unwrap` and run-time
+errors (item 3), and the same actor report compiled (message and state at the crash; a compiled unsupervised actor
 panic exits the process, where the interpreter carries on, itself a divergence to settle).

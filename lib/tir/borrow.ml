@@ -526,7 +526,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("get_actor_field",           [true; true]);
   (* __panic_site keeps its String literal without a reference (literals are
      immortal) and reads nothing else. *)
-  ("__panic_site",              [true; true]);
+  ("__panic_site",              [true; true; true; true]);
   ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);

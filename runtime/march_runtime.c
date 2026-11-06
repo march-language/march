@@ -38,7 +38,7 @@ static void migrate_msg_free(void *mm);
  * above has already pulled in, so this test is decided by the time we get
  * here.  On musl the only casualty is the symbolic C backtrace in the opt-in
  * MARCH_DEBUG_OOM forensics below; March's own call-stack backtrace
- * (march_print_backtrace) is built from our own frame table and is
+ * (failure_report) is built from the function table and is
  * unaffected. */
 #if !defined(__linux__) || defined(__GLIBC__)
 #define MARCH_HAVE_EXECINFO 1
@@ -2038,38 +2038,6 @@ void march_frame_reset(void) {
     march_call_stack_top = NULL;
 }
 
-/* Print the current call stack to stderr.
- * Stdlib frames (file starting with "stdlib/") are hidden unless
- * MARCH_BACKTRACE=full is set. */
-static void march_print_backtrace(void) {
-    /* Cache getenv on first call so it is safe even if called from a
-       signal handler in future (getenv is not async-signal-safe). */
-    static int show_full = -1;
-    if (show_full < 0) {
-        const char *env = getenv("MARCH_BACKTRACE");
-        show_full = (env && strcmp(env, "full") == 0) ? 1 : 0;
-    }
-    march_frame_t *f = march_call_stack_top;
-    if (!f) return;
-    /* Defer printing the header until we know at least one frame is visible,
-       so an all-stdlib stack produces no output when show_full is 0. */
-    int printed = 0;
-    int i = 0;
-    while (f) {
-        int is_stdlib = strncmp(f->file, "stdlib/", 7) == 0;
-        if (show_full || !is_stdlib) {
-            if (!printed) {
-                fprintf(stderr, "\nStack trace (most recent call first):\n");
-                printed = 1;
-            }
-            fprintf(stderr, "  [%d] %-24s %s:%d\n", i++, f->fn_name, f->file, f->line);
-        }
-        f = f->prev;
-    }
-    if (printed && !show_full)
-        fprintf(stderr, "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n");
-}
-
 /* ── Panic ───────────────────────────────────────────────────────────────── */
 
 /* Forward declaration so march_panic_ext / march_todo_ext can call march_panic
@@ -2207,6 +2175,8 @@ static _Thread_local jmp_buf *diag_tl_jmp = NULL;
 
 static _Thread_local void    *diag_tl_site_file = NULL;
 static _Thread_local int64_t  diag_tl_site_line = 0;
+static _Thread_local int64_t  diag_tl_site_col = 0;
+static _Thread_local int64_t  diag_tl_site_end_col = 0;
 
 static void **diag_ctx_slot(void) {
     march_proc *p = march_sched_current();
@@ -2220,18 +2190,25 @@ static void **diag_ctx_slot(void) {
  * String literal, immortal, so it is kept without a reference.  On the proc,
  * not in TLS: the prelude wrapper between here and march_panic can reach a
  * reduction check and resume on another OS thread. */
-void *march_panic_site(void *file, int64_t line) {
+void *march_panic_site(void *file, int64_t line, int64_t col, int64_t end_col) {
     march_proc *p = march_sched_current();
-    if (p) { p->diag_site_file = file; p->diag_site_line = line; }
-    else   { diag_tl_site_file = file; diag_tl_site_line = line; }
+    if (p) {
+        p->diag_site_file = file; p->diag_site_line = line;
+        p->diag_site_col = col;   p->diag_site_end_col = end_col;
+    } else {
+        diag_tl_site_file = file; diag_tl_site_line = line;
+        diag_tl_site_col = col;   diag_tl_site_end_col = end_col;
+    }
     return NULL;
 }
 
-/* Take (and clear) the recorded site. */
-static int64_t diag_take_site(void **file) {
+/* Take (and clear) the recorded site; [col] and [end_col] are its columns. */
+static int64_t diag_take_site(void **file, int64_t *col, int64_t *end_col) {
     march_proc *p = march_sched_current();
     void   **fslot = p ? &p->diag_site_file : &diag_tl_site_file;
     int64_t *lslot = p ? &p->diag_site_line : &diag_tl_site_line;
+    *col     = p ? p->diag_site_col     : diag_tl_site_col;
+    *end_col = p ? p->diag_site_end_col : diag_tl_site_end_col;
     *file = *fslot;
     int64_t line = *lslot;
     *fslot = NULL;
@@ -2310,8 +2287,28 @@ void march_diag_proc_exit(void *ctx) {
 /* The panic's own stack as return addresses, innermost first.  Native
  * unwinding through the CFI LLVM emits: no per-call instrumentation, and
  * nothing at all is paid by a program that never reports a crash. */
+#ifdef __APPLE__
+/* macOS backtrace() follows frame pointers, which compiled March functions
+ * do not keep, so it lost every caller past the first.  The unwinder reads
+ * the compact unwind info instead (glibc's backtrace() already does). */
+#include <unwind.h>
+typedef struct { void **pcs; int n, max; } diag_unwind_acc;
+static _Unwind_Reason_Code diag_unwind_step(struct _Unwind_Context *c, void *arg) {
+    diag_unwind_acc *a = (diag_unwind_acc *)arg;
+    if (a->n >= a->max) return _URC_END_OF_STACK;
+    void *ip = (void *)_Unwind_GetIP(c);
+    if (!ip) return _URC_END_OF_STACK;
+    a->pcs[a->n++] = ip;
+    return _URC_NO_REASON;
+}
+#endif
+
 static int diag_capture_stack(void **pcs, int max) {
-#ifdef MARCH_HAVE_EXECINFO
+#if defined(__APPLE__)
+    diag_unwind_acc a = { pcs, 0, max };
+    _Unwind_Backtrace(diag_unwind_step, &a);
+    return a.n;
+#elif defined(MARCH_HAVE_EXECINFO)
     return backtrace(pcs, max);
 #else
     (void)pcs; (void)max;
@@ -2562,8 +2559,165 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len,
     free(cbs);
 }
 
+/* ── The unhandled-failure report on stderr ──────────────────────────────
+ * What an unhandled panic prints before the process exits, in the layout of
+ * a compile error (lib/errors/errors.ml's render_diagnostic) and of the
+ * interpreter's report (bin/main.ml's report_runtime_failure): header,
+ * headline with its code, the panic call's source line with a caret, then
+ * the functions it was reached through.  A compiled frame carries its
+ * function's definition line only, so the report shows where each function
+ * starts and says so.  Source lines are read from the file named at compile
+ * time; when it is not there the report gives file:line instead. */
+
+#define MARCH_REPORT_MAX_CALLS 8
+
+/* Line [line] of [file] into [buf], without its newline; 0 if unreadable. */
+static int report_source_line(const char *file, int64_t line, char *buf, size_t cap) {
+    if (!file || !*file || line <= 0) return 0;
+    FILE *f = fopen(file, "r");
+    if (!f) return 0;
+    int64_t n = 1;
+    int ok = 0;
+    while (fgets(buf, (int)cap, f)) {
+        size_t l = strlen(buf);
+        int whole = l > 0 && buf[l - 1] == '\n';
+        if (n == line) {
+            while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r')) buf[--l] = '\0';
+            ok = 1;
+            break;
+        }
+        if (whole) n++;
+    }
+    fclose(f);
+    return ok;
+}
+
+static int report_digits(int64_t n) {
+    int d = 1;
+    while (n >= 10) { n /= 10; d++; }
+    return d;
+}
+
+static int report_has_prefix(const char *msg, size_t len, const char *pre) {
+    size_t pl = strlen(pre);
+    return len >= pl && memcmp(msg, pre, pl) == 0;
+}
+
+static void failure_report(const char *msg, size_t len, void *site_file,
+                           int64_t site_line, int64_t col, int64_t end_col) {
+    static int show_full = -1;
+    if (show_full < 0) {
+        const char *env = getenv("MARCH_BACKTRACE");
+        show_full = (env && strcmp(env, "full") == 0) ? 1 : 0;
+    }
+    /* The functions on the stack, innermost first; a recursion's repeats
+     * are one entry. */
+    const march_fn_info *calls[MARCH_DIAG_MAX_FRAMES];
+    int ncalls = 0, hidden = 0;
+    if (fn_table_usable()) {
+        void *pcs[MARCH_DIAG_MAX_FRAMES];
+        int npc = diag_capture_stack(pcs, MARCH_DIAG_MAX_FRAMES);
+        for (int i = 0; i < npc; i++) {
+            const march_fn_info *e = fn_table_lookup((uintptr_t)pcs[i] - 1);
+            if (!e || !e->name || !e->file) continue;
+            if (!show_full && strncmp(e->file, "stdlib/", 7) == 0) { hidden++; continue; }
+            if (ncalls > 0 && calls[ncalls - 1] == e) continue;
+            calls[ncalls++] = e;
+        }
+    }
+    char site_path[1024];
+    site_path[0] = '\0';
+    if (site_file && site_line > 0) {
+        march_string *sf = (march_string *)site_file;
+        size_t l = (size_t)sf->len < sizeof site_path - 1 ? (size_t)sf->len : sizeof site_path - 1;
+        memcpy(site_path, sf->data, l);
+        site_path[l] = '\0';
+    }
+    const char *head_file = site_path[0] ? site_path : (ncalls > 0 ? calls[0]->file : "");
+
+    int dashes = 53 - 7 - (*head_file ? (int)strlen(head_file) + 1 : 0);
+    if (dashes < 2) dashes = 2;
+    fputs("-- RUNTIME ", stderr);
+    for (int i = 0; i < dashes; i++) fputc('-', stderr);
+    if (*head_file) fprintf(stderr, " %s", head_file);
+    fputs("\n\n", stderr);
+
+    const char *pre = PANIC_PREFIX_GET();
+    const char *code = "panic";
+    if (len == 28 && memcmp(msg, "non-exhaustive pattern match", 28) == 0) {
+        fputs("The program panicked: no pattern of this `match` matched.", stderr);
+    } else if (report_has_prefix(msg, len, "assertion failed")) {
+        fputs("An assertion failed", stderr);
+        fwrite(msg + 16, 1, len - 16, stderr);
+    } else if (report_has_prefix(msg, len, "unreachable: ")) {
+        fputs("The program reached code marked `unreachable`: ", stderr);
+        fwrite(msg + 13, 1, len - 13, stderr);
+    } else {
+        if (pre && strcmp(pre, "todo: ") == 0) fputs("The program reached a `todo`: ", stderr);
+        else if (pre) fputs("The program panicked: ", stderr);
+        else { fputs("The program stopped with a run-time error: ", stderr); code = "runtime_error"; }
+        fwrite(msg, 1, len, stderr);
+    }
+    fprintf(stderr, " [%s]\n", code);
+
+    int shown = ncalls < MARCH_REPORT_MAX_CALLS ? ncalls : MARCH_REPORT_MAX_CALLS;
+    int64_t widest = site_line;
+    for (int i = 0; i < shown; i++) if (calls[i]->line > widest) widest = calls[i]->line;
+    int gutter = report_digits(widest);
+    char text[1024];
+
+    if (site_path[0]) {
+        fputc('\n', stderr);
+        if (report_source_line(site_path, site_line, text, sizeof text)) {
+            int64_t tl = (int64_t)strlen(text);
+            fprintf(stderr, "%*lld | %s\n", gutter, (long long)site_line, text);
+            /* A negative column: the site is the enclosing function, not
+             * the failing expression (march_int_overflow), so no caret. */
+            if (col >= 0 && col <= tl) {
+                int64_t stop = (end_col > col && end_col <= tl) ? end_col : tl;
+                int64_t carets = stop - col > 0 ? stop - col : 1;
+                for (int64_t i = 0; i < gutter + 3 + col; i++) fputc(' ', stderr);
+                for (int64_t i = 0; i < carets; i++) fputc('^', stderr);
+                fputc('\n', stderr);
+            } else {
+                fputs("    The failure is inside this function.\n", stderr);
+            }
+        } else {
+            fprintf(stderr, "    at %s:%lld\n", site_path, (long long)site_line);
+        }
+    }
+    if (shown > 0) {
+        fputs("\n    It was reached through these functions, innermost first:\n\n", stderr);
+        const char *prev = head_file;
+        for (int i = 0; i < shown; i++) {
+            const march_fn_info *e = calls[i];
+            if (report_source_line(e->file, e->line, text, sizeof text)) {
+                if (strcmp(e->file, prev) != 0) fprintf(stderr, "    in %s:\n", e->file);
+                fprintf(stderr, "%*lld | %s\n", gutter, (long long)e->line, text);
+            } else {
+                fprintf(stderr, "    `%s`, defined at %s:%lld\n", e->name, e->file,
+                        (long long)e->line);
+            }
+            prev = e->file;
+        }
+        fputc('\n', stderr);
+        if (ncalls > shown)
+            fprintf(stderr, "    %d more not shown.\n", ncalls - shown);
+        fputs("    Each line is where that function starts: a compiled program does not record\n"
+              "    the line of each call, and leaves out functions the optimiser merged into\n"
+              "    their callers. Run the program with `march` instead of compiling it to see\n"
+              "    each call.\n", stderr);
+        if (hidden > 0)
+            fputs("    Functions of the standard library are left out; set MARCH_BACKTRACE=full\n"
+                  "    to see them.\n", stderr);
+    }
+    fputc('\n', stderr);
+}
+
 void march_panic(void *s) {
     march_string *ms = (march_string *)s;
+    void *report_file = NULL;
+    int64_t report_line = 0, site_col = 0, site_end_col = 0;
     /* Diagnostics (see "Diagnostics: crash observers" above).  First: a
      * panic raised by a crash observer itself, outside any try_finally of
      * the observer's own, ends that observer and nothing else. */
@@ -2575,7 +2729,7 @@ void march_panic(void *s) {
          * that longjmp left it set, and the next real crash went
          * unreported.) */
         void *site_file = NULL;
-        int64_t site_line = diag_take_site(&site_file);
+        int64_t site_line = diag_take_site(&site_file, &site_col, &site_end_col);
         int reraise = march_panic_reraise;
         march_panic_reraise = 0;
         jmp_buf **dj = diag_jmp_slot();
@@ -2587,6 +2741,8 @@ void march_panic(void *s) {
                                               : MARCH_DIAG_KIND_PANIC,
                           ms->data, (size_t)ms->len, site_file, site_line);
         }
+        report_file = site_file;
+        report_line = site_line;
     }
     /* In test mode, capture the message and longjmp back to the test runner
        instead of terminating the process. */
@@ -2630,10 +2786,8 @@ void march_panic(void *s) {
                                                         memory_order_relaxed) : 0,
                         -1, 0, ms->data, (size_t)ms->len);
     }
-    fprintf(stderr, "panic: ");
-    fwrite(ms->data, 1, (size_t)ms->len, stderr);
-    fputc('\n', stderr);
-    march_print_backtrace();
+    failure_report(ms->data, (size_t)ms->len, report_file, report_line,
+                   site_col, site_end_col);
     fflush(stderr);
     /* MARCH_CRASH_DUMP: the unsupervised panic leaves a dump (see
      * march_observe_snapshot.c; a no-op when unset). */
@@ -2756,7 +2910,7 @@ void march_int_overflow(int64_t op, const char *file, int64_t line) {
     };
     const char *m = (op >= 0 && op < 4) ? msgs[op] : msgs[0];
     if (file && line > 0)
-        march_panic_site(march_string_lit(file, (int64_t)strlen(file)), line);
+        march_panic_site(march_string_lit(file, (int64_t)strlen(file)), line, -1, 0);
     march_panic(march_string_lit(m, (int64_t)strlen(m)));
     abort();  /* march_panic does not return */
 }
