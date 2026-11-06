@@ -1444,3 +1444,68 @@ let guard_call =
     gated "guard_call_red: an undecided guard stays undecided" (fun () ->
         let out = run (guard_call_src ^ "  @[lemma]\n  fn wn(x : Int) : {Unit | wrap(x) == 2} do () end\nend\n") in
         if not (unproved out "wn" || refuted out "wn") then Alcotest.failf "wrap(0) is 1:\n%s" out) ]
+
+(* Float (D9): a function over Floats reflects, every Float operation an
+   opaque symbol.  What does not depend on a Float operation's value
+   proves; what does (`f < 1.0` at 0.5) and IEEE equality (NaN) never do. *)
+let float_body_src =
+  {|mod FB do
+  fn hk(f : Float) : Int do 3 end
+  fn cls(f : Float, n : Int) : Int do if f < 0.0 do n else n end end
+  fn twice(f : Float) : Float do f +. f end
+  fn tk(f : Float) : Int do if twice(f) < 1.0 do 1 else 1 end end
+  fn hk2(f : Float) : Int do if f < 1.0 do 1 else 2 end end
+  fn same(a : Float, b : Float) : Bool do a == b end
+|}
+
+let float_body =
+  [ gated "float_body: a function over Floats reflects" (fun () ->
+        let out =
+          run
+            (float_body_src
+           ^ "  @[lemma]\n  fn l_hk(u : Int) : {Unit | hk(1.0) == 3} do () end\n  @[lemma]\n  fn l_cls(f : Float) : {Unit | cls(f, 2) == 2} do () end\n  @[lemma]\n  fn l_tk(f : Float) : {Unit | tk(f) == 1} do () end\nend\n")
+        in
+        expect_admitted out "l_hk";
+        expect_admitted out "l_cls";
+        expect_admitted out "l_tk");
+    gated "float_body_red: Float operations stay opaque, Float == is IEEE" (fun () ->
+        let out =
+          run
+            (float_body_src
+           ^ "  @[lemma]\n  fn l_hk2(u : Int) : {Unit | hk2(0.5) == 1} do () end\n  @[lemma]\n  fn l_same(f : Float) : {Unit | same(f, f)} do () end\n  @[lemma]\n  fn l_tw(f : Float) : {Unit | twice(f) == twice(f)} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_hk2"; "l_same"; "l_tw" ]) ]
+
+(* String (D9): the opaque `$Str` with its byte length; a literal is one
+   constant per content, distinct from every other and shared with the
+   predicate's own spelling of it. *)
+let string_body_src =
+  {|mod SB do
+  fn greet(s : String) : Int do string_byte_length(s) + 1 end
+  fn lit(n : Int) : String do if n > 0 do "pos" else "negative" end end
+  fn tag(n : Int) : String do if n > 0 do "a" else "b" end end
+  fn same(a : String, b : String) : Bool do a == b end
+|}
+
+let string_body =
+  [ gated "string_body: a function over Strings reflects" (fun () ->
+        let out =
+          run
+            (string_body_src
+           ^ "  @[lemma]\n  fn l_greet(s : String) : {Unit | greet(s) > 0} do () end\n  @[lemma]\n  fn l_lit(u : Int) : {Unit | lit(1) != lit(0) && len(lit(0)) == 8} do () end\n  @[lemma]\n  fn l_tag(u : Int) : {Unit | tag(1) != tag(0) && tag(1) == \"a\"} do () end\n  @[lemma]\n  fn l_same(s : String) : {Unit | same(s, s)} do () end\nend\n")
+        in
+        expect_admitted out "l_greet";
+        expect_admitted out "l_lit";
+        expect_admitted out "l_tag";
+        expect_admitted out "l_same");
+    gated "string_body_red: a false theorem about a literal is not proved" (fun () ->
+        let out =
+          run
+            (string_body_src
+           ^ "  @[lemma]\n  fn l_bad(u : Int) : {Unit | tag(1) == tag(0)} do () end\n  @[lemma]\n  fn l_bad2(u : Int) : {Unit | tag(1) == \"b\"} do () end\n  @[lemma]\n  fn l_bad3(u : Int) : {Unit | len(lit(1)) == 8} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_bad"; "l_bad2"; "l_bad3" ]) ]

@@ -1578,7 +1578,27 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
     end
   in
   level 1 next;
-  (decls @ List.rev !lits, assumptions @ List.rev !facts)
+  (* D9: each string literal the query mentions has its byte length, and
+     two literals of different content are different strings. *)
+  let strs =
+    let acc = ref [] in
+    let rec walk (t : Smt.term) =
+      (match t with
+       | Smt.App (f, []) when Hashtbl.mem RS.str_lits f && not (List.mem f !acc) -> acc := f :: !acc
+       | _ -> ());
+      List.iter walk (Smt.children t)
+    in
+    List.iter walk ((goal :: assumptions) @ !facts);
+    List.sort compare !acc
+  in
+  let str_facts =
+    List.concat_map
+      (fun f ->
+        Smt.Eq (Smt.App (RE.strlen_fn, [ Smt.App (f, []) ]), Smt.IntLit (String.length (Hashtbl.find RS.str_lits f)))
+        :: List.filter_map (fun g -> if f < g then Some (Smt.Ne (Smt.App (f, []), Smt.App (g, []))) else None) strs)
+      strs
+  in
+  (decls @ List.rev !lits, assumptions @ List.rev !facts @ str_facts)
 
 (* ── Sorts of a signature (§3.2, §3.3) ──────────────────────────────────── *)
 
@@ -1625,6 +1645,10 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
     match T.repr t with
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
+    (* D9: the checker's Float sort, every operation on it opaque. *)
+    | T.TCon ("Float", []) -> Smt.SFloat
+    (* D9: the opaque `$Str`, with only `$strlen`. *)
+    | T.TCon ("String", []) -> RS.str_sort
     | T.TLin (_, b) -> go b
     | T.TVar r -> (
       match !r with
@@ -1689,6 +1713,8 @@ let sentinel p = Smt.Const ("$fn:" ^ p)
 let is_sentinel = function Smt.Const k -> String.starts_with ~prefix:"$fn:" k | _ -> false
 
 let is_int_ty = function Some t -> (match T.repr t with T.TCon ("Int", []) -> true | _ -> false) | None -> false
+
+let is_float_ty = function Some t -> (match T.repr t with T.TCon ("Float", []) -> true | _ -> false) | None -> false
 
 (* The most cases a `let`'s right-hand side may split a body into ([tr_case]):
    past it the body is declined, so one function's equations stay few. *)
@@ -1766,6 +1792,8 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
   match e with
   | A.ELit (A.LitInt n, _) -> Smt.IntLit n
   | A.ELit (A.LitBool b, _) -> Smt.BoolLit b
+  | A.ELit (A.LitFloat f, _) -> (match Refine_scope.float_lit_term f with Some t -> t | None -> raise Decline)
+  | A.ELit (A.LitString s, _) -> Smt.App (RS.str_lit_sym s, [])
   | A.EVar x -> (
     match List.assoc_opt x.A.txt env with Some t when not (is_sentinel t) -> t | _ -> raise Decline)
   | A.EAnnot (x, _, _) -> v x
@@ -1868,6 +1896,17 @@ and builtin c env nm args =
   | "*", [ a; A.ELit (A.LitInt k, _) ] -> Smt.MulLit (k, v a)
   | "*", [ a; b ] -> Smt.Mul (v a, v b)
   | "negate", [ a ] when is_int_ty (ty_of a) -> Smt.Neg (v a)
+  | "string_byte_length", [ a ] -> Smt.App (RE.strlen_fn, [ v a ])
+  (* D9: Float arithmetic and comparison are opaque symbols (§2.3). *)
+  | "negate", [ a ] when is_float_ty (ty_of a) -> Smt.App (RS.float_sym "fneg", [ v a ])
+  | (("+." | "-." | "*." | "/.") as op), [ a; b ] ->
+    let f = match op with "+." -> "fadd" | "-." -> "fsub" | "*." -> "fmul" | _ -> "fdiv" in
+    Smt.App (RS.float_sym f, [ v a; v b ])
+  | (("<." | "<=." | ">." | ">=." | "<" | "<=" | ">" | ">=") as op), [ a; b ] when is_float_ty (ty_of a) ->
+    let f =
+      match op with "<." | "<" -> "flt" | "<=." | "<=" -> "fle" | ">." | ">" -> "fgt" | _ -> "fge"
+    in
+    Smt.App (RS.float_sym f, [ v a; v b ])
   | (("/" | "%") as op), [ a; d ] when RE.nonzero_int_literal d <> None ->
     Refine_scope.truncating_division ~op ~nonneg_dividend:false (v a) (`Lit (Option.get (RE.nonzero_int_literal d)))
   | (("/" | "%") as op), [ a; d ] ->

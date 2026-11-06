@@ -249,12 +249,27 @@ let sort_conflict (ds : (string * Smt.sort) list) : bool =
 
    [mentions_str] deliberately stops at [strlen_fn]: `($strlen c)` is an Int and
    may be added, compared and multiplied like any other. *)
+(* A reflected symbol's signature (reflection §3.2): its `$Str` positions. *)
+let reflected_sig (f : string) : (Smt.sort list * Smt.sort) option =
+  match Reflect_state.sig_of f with
+  | Some s -> Some (s.Reflect_state.fs_params, s.Reflect_state.fs_ret)
+  | None -> None
+
+let str_sorted (s : Smt.sort) = s = Smt.sdata str_sort
+
 let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   let m = mentions_str is_str in
   match t with
   | Smt.App (f, [ _ ]) when f = strlen_fn -> false
   (* Bool-valued; its arguments' sorts are [abstract_preamble]'s concern. *)
   | Smt.App (f, _) when is_abs_sym f -> false
+  (* A reflected function (D9): a `$Str` result is a string; a string at a
+     `$Str` parameter is well sorted there. *)
+  | Smt.App (f, args) when reflected_sig f <> None ->
+    let ps, r = Option.get (reflected_sig f) in
+    str_sorted r
+    || (if List.length ps <> List.length args then List.exists m args
+        else List.exists2 (fun p a -> if str_sorted p && str_term is_str a then false else m a) ps args)
   | Smt.Const c -> is_str c
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   (* A datatype tester ranges over an ADT sort, never over `Str`; it only
@@ -275,6 +290,18 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetMem _ | Smt.SetUnion _ | Smt.SetInter _
   | Smt.SetDiff _ | Smt.SetSub _ | Smt.SetCard _ -> false
 
+(* A `$Str`-sorted term: a string constant, or a reflected function's `$Str`
+   result over well-placed arguments. *)
+and str_term (is_str : string -> bool) (t : Smt.term) : bool =
+  match t with
+  | Smt.Const c -> is_str c
+  | Smt.App (f, args) -> (
+    match reflected_sig f with
+    | Some (ps, r) when str_sorted r && List.length ps = List.length args ->
+      List.for_all2 (fun p a -> if str_sorted p then str_term is_str a else not (mentions_str is_str a)) ps args
+    | _ -> false)
+  | _ -> false
+
 (* Is [t] a set-valued term?  Used by the guards below so a set operand is
    never mistaken for an Int one. *)
 let is_set_term (sort_of : string -> Smt.sort option) (t : Smt.term) : bool =
@@ -288,10 +315,11 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   let int_side a = (not (m a)) && w a in
   match t with
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> true
-  | Smt.App (f, [ a ]) when f = strlen_fn ->
-    (match a with Smt.Const c -> is_str c | _ -> false)
+  | Smt.App (f, [ a ]) when f = strlen_fn -> str_term is_str a
   (* Declared at its arguments' own sorts by [abstract_preamble]. *)
   | Smt.App (f, _) when is_abs_sym f -> true
+  | Smt.App (f, args) when reflected_sig f <> None && List.length args = List.length (fst (Option.get (reflected_sig f))) ->
+    List.for_all2 (fun p a -> if str_sorted p then str_term is_str a else int_side a) (fst (Option.get (reflected_sig f))) args
   | Smt.App (_, args) -> List.for_all int_side args
   (* A constructor field may be a `Str` constant (a `String` payload) as
      readily as an Int term; each argument is checked on its own. *)
@@ -304,6 +332,7 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Eq (a, b) | Smt.Ne (a, b) ->
     (match a, b with
      | Smt.Const x, Smt.Const y when is_str x && is_str y -> true
+     | a, b when str_term is_str a && str_term is_str b -> true
      (* Set equality is extensional array equality; both sides are checked as
         set terms.  A set constant (`elts$xs`) is a bare [Const] here and
         passes as an "int side" — [resolve_set_sorts] is what pins its sort
@@ -405,7 +434,14 @@ let abstract_preamble (vc : Smt.vc) : string =
    would then accept `-0.0`, a divisor every bit as bad as `+0.0`.  `fp.eq` is
    IEEE equality: `+0.0 = -0.0`, and NaN equals nothing including itself. *)
 let float_term (is_float : string -> bool) (t : Smt.term) : bool =
-  match t with Smt.FloatLit _ -> true | Smt.Const c -> is_float c | _ -> false
+  match t with
+  | Smt.FloatLit _ -> true
+  | Smt.Const c -> is_float c
+  (* A reflected function's Float result (reflection D9: the checker's Float
+     sort, its body's operations opaque). *)
+  | Smt.App (f, _) -> (
+    match Reflect_state.sig_of f with Some s -> s.Reflect_state.fs_ret = Smt.SFloat | None -> false)
+  | _ -> false
 
 let rec fp_rewrite (is_float : string -> bool) (t : Smt.term) : Smt.term =
   let f = fp_rewrite is_float and fl = float_term is_float in
@@ -430,6 +466,14 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.FloatLit _ -> true
   | Smt.Const c -> is_float c
   | Smt.IntLit _ | Smt.BoolLit _ -> false
+  (* A reflected function applied to a float at a Float parameter is well
+     sorted there; its result is a float only through [float_term]. *)
+  | Smt.App (f, args) when Reflect_state.sig_of f <> None -> (
+    let ps = (Option.get (Reflect_state.sig_of f)).Reflect_state.fs_params in
+    (match Reflect_state.sig_of f with Some s -> s.Reflect_state.fs_ret = Smt.SFloat | None -> false)
+    ||
+    if List.length ps <> List.length args then List.exists m args
+    else List.exists2 (fun p a -> if p = Smt.SFloat && float_term is_float a then false else m a) ps args)
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a)
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> m a
@@ -4334,6 +4378,12 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
   let elem =
     if elem = "" && contains rdecls " Elem" && not (contains declared "(declare-sort Elem 0)") then
       "(declare-sort Elem 0)\n"
+    else elem
+  in
+  (* A reflected symbol over the opaque `$Str` (reflection D9) in a query that
+     declared no string: the sort and `$strlen` it needs. *)
+  let elem =
+    if contains rdecls "$Str" && not (contains declared "(declare-sort $Str 0)") then string_preamble ^ elem
     else elem
   in
   (* D17 (reflection §7.1): a stage-2 query names the logic hash of every

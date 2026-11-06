@@ -1408,6 +1408,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
             (fun s' c' ->
               if s' <> s then push_structural (Smt.Ne (Smt.Const c, Smt.Const c')))
             str_lit_tbl;
+          (* Stage 2: the same literal in a reflected body (D9). *)
+          if !Reflect_state.arm_on then
+            push_structural (Smt.Eq (Smt.Const c, Smt.App (Reflect_state.str_lit_sym s, [])));
           (* ...and the mirror of [declare_str_const]'s registration: if THIS
              is the empty literal, every string constant already declared
              gains its `!= "" -> len > 0` implication. *)
@@ -2680,6 +2683,11 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       (* Stage 2: `len` of a reflected call's term (`len(append(xs, ys))` in a
          lemma's theorem) is the list measure over it, which the call's
          unfolding and `$len`'s own equations meet -- the subject arm's rule. *)
+      (* …a reflected String result's (D9): its byte length. *)
+      | "len", Smt.App (f, _)
+        when !Reflect_state.arm_on && string_len_available ()
+             && (match Reflect_state.sig_of f with Some s -> s.Reflect_state.fs_ret = Reflect_state.str_sort | None -> false) ->
+        Some (Smt.App (strlen_fn, [ arg ]))
       | "len", Smt.App (f, _) when !Reflect_state.arm_on && (Reflect_state.is_sym f || Reflect_state.is_instance f) ->
         Some (Smt.App (list_len_measure, [ arg ]))
       (* …and of a list constructor term (`len(Cons(h, acc))` in an induction
