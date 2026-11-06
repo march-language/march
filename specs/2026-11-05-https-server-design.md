@@ -167,10 +167,12 @@ HttpServer.new(443)
   files fail fast as above. The deployment recipe documents both routes (`certbot --standalone`
   before first start, or bootstrap mode with `--webroot`).
 
-Capabilities (my call, following precedent): the existing `tls_server_ctx` / `tls_accept`
-builtins are classified `IO.NetConnect.TLS` (`lib/typecheck/typecheck_builtins.ml:350-352`). An
-HTTPS `listen` and `reload_tls` need `IO.NetListen` **and** `IO.NetConnect.TLS`; the new
-builtins are classified the same way. `scheme` needs nothing.
+Capabilities: `reload_tls` follows the `tls_server_ctx` precedent and needs
+`IO.NetConnect.TLS`. Serving HTTPS from `listen` needs only `IO.NetListen`: capabilities are
+checked by reachability from `main`, and `listen` reaches the TLS configuration on every
+server, plain ones included, so classifying it `IO.NetConnect.TLS` would have stopped every
+existing plain-HTTP program from compiling (revised during implementation, 2026-11-06; the
+first draft required both). `scheme` needs nothing.
 
 **Interpreter (my call).** `forge run` uses the interpreter, whose HTTP server is a separate
 OCaml implementation (`lib/eval/eval_builtins.ml`) with stub TLS builtins. It must never

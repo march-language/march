@@ -201,6 +201,24 @@ describe "HttpServer server config" do
     let _srv = HttpServer.new(4000)
     ()
   end
+
+  test "https builders return a Server" do
+    let _srv = HttpServer.new(4443)
+      |> HttpServer.tls(HttpServer.TlsFiles("/etc/cert.pem", "/etc/key.pem"))
+      |> HttpServer.tls_handshake_timeout(5)
+      |> HttpServer.tls_poll_interval(0)
+      |> HttpServer.tls_wait_for_cert()
+      |> HttpServer.header_timeout(10)
+      |> HttpServer.progress_timeout(10)
+      |> HttpServer.plain_listener(8080, [fn c -> HttpServer.text(c, 200, "plain")])
+    ()
+  end
+end
+
+describe "HttpServer scheme" do
+  test "a conn with no TLS session is http" do
+    assert (HttpServer.scheme(make_get("/")) == "http")
+  end
 end
 
 end

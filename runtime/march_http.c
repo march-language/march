@@ -16,6 +16,7 @@
  *   offset 16: char     data[]   (null-terminated)
  */
 #include "march_http.h"
+#include "march_https.h"
 #include "march_http_internal.h"
 #include "march_http_io.h"
 #include "march_preempt.h"
@@ -2550,7 +2551,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline,
                                void *release) {
     if (!pipeline) return;
-    (void)idle_timeout;
+    if (idle_timeout > 0) g_march_https.idle_secs = (int)idle_timeout;
     /* The result releaser lives for the whole server run (see
      * march_http_internal.h); the stdlib passes HttpServer.release_conn. */
     g_march_http_release_clo = release;

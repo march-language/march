@@ -1,0 +1,36 @@
+/* runtime/march_https.h — HTTPS configuration for the stdlib HTTP server.
+ *
+ * HttpServer.listen sets this process-global configuration through the
+ * builtins below, then calls the existing march_http_server_listen, which
+ * reads it. One HTTPS server per process (the spec's non-goal). The
+ * certificate itself lives in march_tls_server.c's slot.
+ * Design: specs/2026-11-05-https-server-design.md. */
+#ifndef MARCH_HTTPS_H
+#define MARCH_HTTPS_H
+
+#include <stdint.h>
+
+typedef struct {
+    int   tls;              /* 1 once tls_configure succeeded */
+    int   handshake_secs;   /* TLS handshake deadline */
+    int   header_secs;      /* first byte -> end of headers */
+    int   progress_secs;    /* body read / response write without progress */
+    int   idle_secs;        /* keep-alive idle (from listen's idle_timeout) */
+    int   poll_secs;        /* certificate file poll interval; 0 = off */
+    int   wait_for_cert;    /* bootstrap: missing files are not fatal */
+    int   plain_port;       /* extra plain-HTTP listener; 0 = none */
+    void *plain_pipeline;   /* its pipeline closure (owned) */
+} march_https_config_t;
+
+extern march_https_config_t g_march_https;   /* defaults: 0,10,30,30,60,60,0,0,NULL */
+
+/* kind 0 = files (a, b are paths), 1 = PEM text. Result(Int, String). */
+void   *march_http_server_tls_configure(int64_t kind, void *a, void *b,
+                                        int64_t poll_secs, int64_t wait_for_cert);
+void    march_http_server_set_timeouts(int64_t handshake_secs, int64_t header_secs,
+                                       int64_t progress_secs);
+void   *march_http_server_reload_tls(int64_t kind, void *a, void *b);
+void    march_http_server_plain_listener(int64_t port, void *pipeline);
+int64_t march_http_conn_is_tls(int64_t fd);
+
+#endif

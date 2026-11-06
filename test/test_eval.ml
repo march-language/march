@@ -4932,6 +4932,31 @@ end|} in
       | _ -> Alcotest.fail "bad Response shape")
    | _ -> Alcotest.fail "expected Ok(Response ...)")
 
+(* HTTPS needs the compiled server: the interpreter's HTTP server is a
+   separate OCaml implementation with no TLS, so a TLS configuration must
+   fail loudly there rather than quietly serve plain HTTP on the TLS port. *)
+let test_https_listen_needs_compiled_build () =
+  let list_mod = load_stdlib_file_for_test "list.march" in
+  let http     = load_stdlib_file_for_test "http.march" in
+  let server   = load_stdlib_file_for_test "http_server.march" in
+  let env = eval_with_stdlib [list_mod; http; server]
+    {|mod T do
+  fn run() do
+    HttpServer.new(0)
+    |> HttpServer.tls(HttpServer.TlsPem("cert", "key"))
+    |> HttpServer.listen()
+  end
+end|} in
+  match call_fn env "run" [] with
+  | _ -> Alcotest.fail "an HTTPS listen under the interpreter returned instead of failing"
+  | exception March_eval.Eval.Eval_error msg ->
+    let want = "need a compiled build" in
+    let found =
+      let n = String.length want and m = String.length msg in
+      let rec go i = i + n <= m && (String.sub msg i n = want || go (i + 1)) in
+      go 0 in
+    if not found then Alcotest.failf "wrong interpreter error: %s" msg
+
 (* ── B16 + conn-gated CSRF: ~H auto-injection ───────────────────────────────
    Every ~H literal containing a mutating <form method="post|put|patch|delete">
    gets an injected `CSRF.tag_string(conn)` call — but ONLY when a `conn`
@@ -5700,6 +5725,7 @@ let eval_suites =
           Alcotest.test_case "fetch returns Ok raw"         `Quick test_http_fetch_returns_ok_raw;
           Alcotest.test_case "fetch maps Error to Err"      `Quick test_http_fetch_maps_error;
           Alcotest.test_case "HttpTransport.request via fetch" `Quick test_http_transport_request_via_fetch;
+          Alcotest.test_case "HTTPS listen needs a compiled build" `Quick test_https_listen_needs_compiled_build;
         ] );
       ( "eval",
         [

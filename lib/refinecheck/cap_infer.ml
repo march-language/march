@@ -94,6 +94,10 @@ let cap_table : (string * string) list = [
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
   ("http_server_bind_host", "IO.NetListen");
+  ("http_server_plain_listener", "IO.NetListen");
+  ("http_server_set_timeouts",   "IO.NetListen");
+  ("http_server_tls_configure",  "IO.NetListen");
+  ("http_server_reload_tls",     "IO.NetConnect.TLS");
   (* IO.Process *)
   ("process_env",           "IO.Process");
   ("process_set_env",       "IO.Process");
