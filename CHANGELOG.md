@@ -211,6 +211,11 @@ git log is authoritative for exact commits.
 - `Gen.one_of` shrinks toward its earlier alternatives (list the simplest generator first).
   The generated values are unchanged; only a failing property's shrunk counterexample can
   differ.
+- Diagnostics: a `main` that performs IO without declaring a capability is now reported even
+  when the program has another error, listed after that error, so both can be fixed in one pass.
+  It used to stay hidden until the other error was fixed, then appear as a new error. The error
+  corpus's fix check now accepts a program whose fixes clear every error that has one, when the
+  errors left are the ones that offer no fix.
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
@@ -373,6 +378,15 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **The Type System chapter is restructured for first readers** ([Type System](docs/types.md)),
+  like Pattern Matching, Interfaces and Capabilities: a plain opener, a which-type-do-I-need
+  table, a how-it-fits table, a grouped index, everyday types before the advanced ones, and
+  See also in place of Next Steps. It no longer says recursive functions need annotations;
+  inference handles them.
+- **Removed pages.** The four 1.0 claim pages (`claim-deploys`, `claim-capabilities`,
+  `claim-performance`, `claim-refinements`), the 0.3.0, 0.4.0 and 0.5.0 upgrade guides, and
+  the Findings list on the [Multi-host Lab](docs/lab.md) page. Links to them are gone; the
+  docs index links the 0.6.0 upgrade guide.
 - **A scrolling explainer for distributed March**
   ([From a Protocol to a Cluster](docs/protocol-to-cluster.md)). It follows the lab app's
   16-line `Order` protocol a few lines at a time, then through the compiler (what the
