@@ -1509,3 +1509,71 @@ let string_body =
         List.iter
           (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
           [ "l_bad"; "l_bad2"; "l_bad3" ]) ]
+
+(* Records (§3.2): the declared record sort.  Field access is its selector,
+   a literal and an update its one constructor, a record pattern (in a
+   `match` or a `let`) its selectors. *)
+let record_body_src =
+  {|mod RB do
+  type Pt = { x : Int, y : Int }
+  fn px(p : Pt) : Int do p.x + p.y end
+  fn mk(n : Int) : Pt do { x: n, y: n + 1 } end
+  fn bump(p : Pt) : Pt do { p with x: p.x + 10 } end
+  fn sx(p : Pt) : Int do
+    let { x, y } = p
+    x - y
+  end
+  fn mx(p : Pt) : Int do match p do { x, y } -> x * 2 + y end end
+|}
+
+let record_body =
+  [ gated "record_body: functions over a record reflect" (fun () ->
+        let out =
+          run
+            (record_body_src
+           ^ "  @[lemma]\n  fn l_px(u : Int) : {Unit | px(mk(2)) == 5 && px({ x: 1, y: 2 }) == 3} do () end\n  @[lemma]\n  fn l_bump(n : Int) : {Unit | px(bump(mk(n))) == 2 * n + 11} do () end\n  @[lemma]\n  fn l_sx(n : Int) : {Unit | sx(mk(n)) == 0 - 1} do () end\n  @[lemma]\n  fn l_mx(u : Int) : {Unit | mx(mk(1)) == 4} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_px"; "l_bump"; "l_sx"; "l_mx" ]);
+    gated "record_body_red: an update that drops a field's value is not proved" (fun () ->
+        let out = run (record_body_src ^ "  @[lemma]\n  fn l_bad(n : Int) : {Unit | px(bump(mk(n))) == 2 * n + 1} do () end\nend\n") in
+        if not (unproved out "l_bad" || refuted out "l_bad") then Alcotest.failf "l_bad is false:\n%s" out) ]
+
+(* Tuples (§3.2): one datatype per arity, its constructor and selectors; a
+   tuple literal in a predicate at a tuple parameter is that constructor. *)
+let tuple_body_src =
+  {|mod TB do
+  fn sw(t : (Int, Int)) : Int do match t do (a, b) -> a - b end end
+  fn tl(n : Int) : Int do
+    let (a, b) = (n, n + 1)
+    a + b
+  end
+  fn pair(n : Int) : (Int, Int) do (n, n * 2) end
+  fn fst2(t : (Int, Int)) : Int do
+    let (a, _) = t
+    a
+  end
+  fn mixed(t : (Int, Bool)) : Int do
+    match t do
+      (n, true) -> n
+      (n, false) -> 0 - n
+    end
+  end
+|}
+
+let tuple_body =
+  [ gated "tuple_body: functions over tuples reflect" (fun () ->
+        let out =
+          run
+            (tuple_body_src
+           ^ "  @[lemma]\n  fn l_sw(u : Int) : {Unit | sw((5, 2)) == 3} do () end\n  @[lemma]\n  fn l_tl(n : Int) : {Unit | tl(n) == 2 * n + 1} do () end\n  @[lemma]\n  fn l_pair(n : Int) : {Unit | sw(pair(n)) == 0 - n && fst2(pair(n)) == n} do () end\n  @[lemma]\n  fn l_mixed(u : Int) : {Unit | mixed((3, false)) == 0 - 3} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_sw"; "l_tl"; "l_pair"; "l_mixed" ]);
+    gated "tuple_body_red: a false theorem about a tuple is not proved" (fun () ->
+        let out =
+          run
+            (tuple_body_src
+           ^ "  @[lemma]\n  fn l_bad(n : Int) : {Unit | sw(pair(n)) == n} do () end\n  @[lemma]\n  fn l_bad2(u : Int) : {Unit | mixed((3, true)) == 0 - 3} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_bad"; "l_bad2" ]) ]

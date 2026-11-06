@@ -1640,9 +1640,45 @@ let field_adt (smt : string) (i : int) : string option =
   | Some (Smt.SData (a, _)) when Hashtbl.mem RE.adt_ctors a -> Some a
   | _ -> None
 
+(* The declared record a structural record type is (records unify by their
+   fields, so the typechecker keeps no name): the ONE registered,
+   monomorphic, unconflated record whose field names are exactly [fs]'s and
+   whose declared field sorts are [fs]'s sorts ([sort]).  Anything else —
+   two declared records with one field set, a parametric record, a field of
+   another sort (an anonymous record) — is not decided here. *)
+let record_of_fields (sort : T.ty -> Smt.sort) (fs : (string * T.ty) list) : (string * string * string list) option =
+  let names = List.sort compare (List.map fst fs) in
+  let cands =
+    Hashtbl.fold
+      (fun adt cs acc ->
+        match cs with
+        | [ ctor ] -> (
+          match Hashtbl.find_opt RE.ctor_field_names ctor with
+          | Some ns when List.sort compare ns = names -> (adt, ctor, ns) :: acc
+          | _ -> acc)
+        | _ -> acc)
+      RE.adt_ctors []
+  in
+  match cands with
+  | [ (adt, ctor, ns) ]
+    when (not (Hashtbl.mem RE.ambiguous_adts adt))
+         && Option.value ~default:0 (Hashtbl.find_opt RE.adt_arity adt) = 0 -> (
+    let declared = try Hashtbl.find RE.ctor_field_sorts_poly ctor with Not_found -> [] in
+    try
+      if List.length declared <> List.length ns then None
+      else if List.for_all2 (fun n d -> sort (List.assoc n fs) = d) ns declared then Some (adt, ctor, ns)
+      else None
+    with Decline | Not_found | Invalid_argument _ -> None)
+  | _ -> None
+
 let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
   let rec go (t : T.ty) =
     match T.repr t with
+    (* A tuple (§3.2): the tuple datatype of its arity, at its instance. *)
+    | T.TTuple (_ :: _ :: _ as ts) -> Smt.SData (RE.tuple_adt (List.length ts), List.map go ts)
+    (* A record (§3.2): its declared record sort. *)
+    | T.TRecord fs -> (
+      match record_of_fields go fs with Some (adt, _, _) -> Smt.sdata adt | None -> raise Decline)
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
     (* D9: the checker's Float sort, every operation on it opaque. *)
@@ -1672,7 +1708,6 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
         | _ -> raise Decline
       in
       (match Hashtbl.find_opt RE.adt_ctors adt with
-       | Some [ ctor ] when Hashtbl.mem RE.ctor_field_names ctor -> raise Decline (* a record *)
        | Some _ ->
          let k = try Hashtbl.find RE.adt_arity adt with Not_found -> 0 in
          if k = 0 then Smt.sdata adt
@@ -1682,6 +1717,41 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
     | _ -> raise Decline
   in
   go t
+
+(* A record datatype (§3.2: the sort the checker already declares, one
+   constructor with named fields): (datatype, constructor, field names). *)
+let record_of_adt (adt : string) : (string * string * string list) option =
+  match Hashtbl.find_opt RE.adt_ctors adt with
+  | Some [ ctor ] when Hashtbl.mem RE.ctor_field_names ctor -> Some (adt, ctor, Hashtbl.find RE.ctor_field_names ctor)
+  | _ -> None
+
+let record_of_ty (t : T.ty option) : string * string * string list =
+  let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+  match Option.map strip t with
+  | Some (T.TRecord fs) -> (
+    match record_of_fields (poly_sort (ref [])) fs with Some r -> r | None -> raise Decline)
+  | _ -> (
+    match Option.bind t RE.adt_of_tc_ty with
+    | Some a when a <> RE.ambiguous_adt_sentinel -> (
+      match record_of_adt a with Some r -> r | None -> raise Decline)
+    | _ -> raise Decline)
+
+(* A subject's datatype for its patterns: a record's declared sort, else
+   [adt_of_ty]'s. *)
+let pat_adt (t : T.ty option) : string option =
+  match t with
+  | None -> None
+  | Some t -> (
+    let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
+    match strip t with
+    | T.TRecord _ -> (try let a, _, _ = record_of_ty (Some t) in Some a with Decline -> None)
+    | _ -> adt_of_ty t)
+
+(* The selector of field [i] of SMT constructor [ctor]. *)
+let field_sel (ctor : string) (i : int) (x : Smt.term) : Smt.term = Smt.App (Printf.sprintf "%s_%d" ctor i, [ x ])
+
+let index_of (n : string) (names : string list) : int =
+  match List.find_index (( = ) n) names with Some i -> i | None -> raise Decline
 
 (* ── The body translator (§3.4) ─────────────────────────────────────────── *)
 
@@ -1816,6 +1886,34 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
     if List.length ts <> List.length (try Hashtbl.find RE.ctor_field_sorts k with Not_found -> []) then
       raise Decline;
     RE.ctor_term adt k ts
+  (* A tuple: its datatype's one constructor. *)
+  | A.ETuple ((_ :: _ :: _ as xs), _) ->
+    let n = List.length xs in
+    RE.ctor_term (RE.tuple_adt n) (RE.tuple_ctor n) (List.map v xs)
+  (* Records (§3.2): the declared record sort, its selectors and its one
+     constructor.  A literal names every field exactly once. *)
+  | A.EField (x, fld, _) ->
+    let _, ctor, names = record_of_ty (c.c_ty (T.span_of_expr x)) in
+    field_sel ctor (index_of fld.A.txt names) (v x)
+  | A.ERecord (fs, sp) ->
+    let adt, ctor, names = record_of_ty (c.c_ty sp) in
+    let given = List.map (fun ((n : A.name), _) -> n.A.txt) fs in
+    if List.sort compare given <> List.sort compare names then raise Decline;
+    RE.ctor_term adt ctor
+      (List.map (fun n -> v (snd (List.find (fun ((m : A.name), _) -> m.A.txt = n) fs))) names)
+  | A.ERecordUpdate (x, fs, sp) ->
+    let adt, ctor, names = record_of_ty (c.c_ty sp) in
+    let given = List.map (fun ((n : A.name), _) -> n.A.txt) fs in
+    if List.length (List.sort_uniq compare given) <> List.length given then raise Decline;
+    List.iter (fun n -> ignore (index_of n names)) given;
+    let base = v x in
+    RE.ctor_term adt ctor
+      (List.mapi
+         (fun i n ->
+           match List.find_opt (fun ((m : A.name), _) -> m.A.txt = n) fs with
+           | Some (_, e) -> v e
+           | None -> field_sel ctor i base)
+         names)
   | A.EApp (A.EVar f, args, sp) -> (
     (* The same rule as [note] (third review C1): an ambiguous site has no
        single callee, in every branch below. *)
@@ -1954,7 +2052,18 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
         (fun (g, t) ->
           List.map (fun (g', r) -> (g @ g', r)) (tr_case c ((x.A.txt, t) :: env) (A.EBlock (rest, sp))))
         cases
-    | _ -> raise Decline)
+    (* A destructuring `let` (a record or tuple pattern): bindings only.  A
+       pattern that tests anything (a constructor, a literal) declines. *)
+    | p ->
+      let adt = pat_adt (c.c_ty (T.span_of_expr b.A.bind_expr)) in
+      let cases = tr_case c env b.A.bind_expr in
+      if List.length cases > max_let_cases then raise Decline;
+      List.concat_map
+        (fun (g, t) ->
+          let conds, binds = pat ?adt p t in
+          if conds <> [] then raise Decline;
+          List.map (fun (g', r) -> (g @ g', r)) (tr_case c (binds @ env) (A.EBlock (rest, sp))))
+        cases)
   | A.EBlock (A.ELetFn _ :: rest, sp) -> tr_case c env (A.EBlock (rest, sp))
   | A.EBlock (_, _) -> raise Decline
   | A.EIf (cnd, a, b, _) ->
@@ -1968,7 +2077,7 @@ and tr_case (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : (Smt.term
       | x -> [ tr_val c env x ]
     in
     (* Each subject's datatype, from its type, for its constructor patterns. *)
-    let adt_of x = Option.bind (c.c_ty (T.span_of_expr x)) adt_of_ty in
+    let adt_of x = pat_adt (c.c_ty (T.span_of_expr x)) in
     let adts = match scrut with A.ETuple (xs, _) -> List.map adt_of xs | x -> [ adt_of x ] in
     let tupled = match scrut with A.ETuple _ -> true | _ -> false in
     let prior = ref [] in
@@ -2014,6 +2123,30 @@ and pat ?(adt : string option) (p : A.pattern) (s : Smt.term) : Smt.term list * 
       List.mapi (fun i q -> pat ?adt:(field_adt k i) q (Smt.App (Printf.sprintf "%s_%d" k i, [ s ]))) ps
     in
     (Smt.IsCtor (k, s) :: List.concat_map fst sub, List.concat_map snd sub)
+  (* A tuple pattern: its one constructor always matches; each component's
+     sub-pattern over its selector. *)
+  | A.PatTuple ((_ :: _ :: _ as ps), _) ->
+    let n = List.length ps in
+    ignore (RE.tuple_adt n);
+    let ctor = RE.tuple_ctor n in
+    let sub = List.mapi (fun i q -> pat q (field_sel ctor i s)) ps in
+    (List.concat_map fst sub, List.concat_map snd sub)
+  (* A record pattern: its one constructor always matches; each named
+     field's sub-pattern over its selector. *)
+  | A.PatRecord (fps, _) ->
+    let _, ctor, names =
+      match adt with
+      | Some a when a <> RE.ambiguous_adt_sentinel -> (match record_of_adt a with Some r -> r | None -> raise Decline)
+      | _ -> raise Decline
+    in
+    let sub =
+      List.map
+        (fun ((n : A.name), q) ->
+          let i = index_of n.A.txt names in
+          pat ?adt:(field_adt ctor i) q (field_sel ctor i s))
+        fps
+    in
+    (List.concat_map fst sub, List.concat_map snd sub)
   | _ -> raise Decline
 
 (* The guard of an unfolding (§3.6): each parameter refinement, over the

@@ -3755,6 +3755,25 @@ let register_builtin_adts () : unit =
   Hashtbl.replace ctor_param_fields "Ok" [ Param 0 ];
   Hashtbl.replace ctor_param_fields "Err" [ Param 1 ]
 
+(* The tuple datatype of arity [n] (reflection §3.2: tuples are datatypes):
+   one constructor `$tup<n>` over the datatype's own [n] parameters, its
+   selectors `$tup<n>_<i>`.  `$` cannot occur in a March name, so neither can
+   collide with a user's.  Registered on first use (a reflected function's
+   signature or body), so a module that never reflects a tuple declares
+   nothing new. *)
+let tuple_ctor (n : int) : string = Printf.sprintf "$tup%d" n
+
+let tuple_adt (n : int) : string =
+  let adt = Printf.sprintf "$Tup%d" n in
+  if not (Hashtbl.mem adt_ctors adt) then begin
+    let ctor = tuple_ctor n in
+    Hashtbl.replace adt_ctors adt [ ctor ];
+    Hashtbl.replace adt_arity adt n;
+    set_ctor_fields adt ctor (List.init n (fun i -> Smt.SParam i));
+    Hashtbl.replace ctor_param_fields ctor (List.init n (fun i -> Param i))
+  end;
+  adt
+
 
 (* =================================================================
    Sort resolution for a finished query
