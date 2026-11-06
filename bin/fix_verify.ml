@@ -59,8 +59,9 @@ let check_patched ~patched =
     let oc = open_out_bin tmp in
     output_string oc patched;
     close_out oc;
+    (* [--check-json] whatever the run was: the codes are read from it. *)
     let args =
-      Array.append Sys.argv [| "--fix-verify-source"; tmp |] in
+      Array.append Sys.argv [| "--check-json"; "--fix-verify-source"; tmp |] in
     let prev = Sys.getenv_opt "MARCH_FIX_VERIFY" in
     Unix.putenv "MARCH_FIX_VERIFY" "0";
     let out_fd = Unix.openfile out [ Unix.O_WRONLY; Unix.O_TRUNC; Unix.O_CREAT ] 0o600 in

@@ -16,6 +16,58 @@
 open Analysis_util
 open Code_actions_ast
 
+(* [Analysis.analyse], set by [Analysis] once it is defined ([Analysis]
+   includes this module, so it cannot be called directly). *)
+let reanalyse : (filename:string -> src:string -> t) option ref = ref None
+
+(* Verdicts of [fix_holds], by the patched text's digest: a client asks for
+   code actions on every cursor move, and the answer for one text never
+   changes. *)
+let fix_verdicts : (string, bool) Hashtbl.t = Hashtbl.create 16
+
+(** The editor's half of `--check-json`'s fix verification
+    (bin/fix_verify.ml): [edits] applied to [a.src] and the result analysed
+    again.  The fix holds when the count of [code]'s diagnostics drops and no
+    other error or warning code is more frequent.  Unknown (no analyser) is
+    taken as holding, the tier the compiler declared.  The re-analysis runs
+    the checker over the patched text, which refreshes the checker's global
+    tables (protocol states, display names) for that text; the server
+    re-analyses the real buffer on its next change. *)
+let fix_holds (a : t) ~(code : string) (edits : Lsp.Types.TextEdit.t list) : bool =
+  match !reanalyse with
+  | None -> true
+  | Some analyse ->
+    let open Lsp.Types in
+    let ofs (p : Position.t) = offset_of_pos a.src p.line p.character in
+    let sorted = List.sort (fun (x : TextEdit.t) (y : TextEdit.t) ->
+        compare (ofs y.range.start) (ofs x.range.start)) edits in
+    let patched = List.fold_left (fun s (e : TextEdit.t) ->
+        let so = ofs e.range.start and eo = ofs e.range.end_ in
+        if so < 0 || eo < so || eo > String.length s then s
+        else String.sub s 0 so ^ e.newText ^ String.sub s eo (String.length s - eo))
+        a.src sorted in
+    let key = Digest.to_hex (Digest.string (a.filename ^ "\000" ^ code ^ "\000" ^ patched)) in
+    match Hashtbl.find_opt fix_verdicts key with
+    | Some v -> v
+    | None ->
+      let codes (ds : Diagnostic.t list) =
+        List.filter_map (fun (d : Diagnostic.t) ->
+            match d.severity, d.code with
+            | Some DiagnosticSeverity.Hint, _ -> None
+            | _, Some (`String c) -> Some c
+            | _ -> None) ds in
+      let count c l = List.length (List.filter (( = ) c) l) in
+      let v =
+        match analyse ~filename:a.filename ~src:patched with
+        | b ->
+          let before = codes a.diagnostics and after = codes b.diagnostics in
+          count code after < count code before
+          && List.for_all (fun c -> c = code || count c after <= count c before)
+            (List.sort_uniq compare after)
+        | exception _ -> false in
+      Hashtbl.replace fix_verdicts key v;
+      v
+
 (** Generate code actions relevant to the cursor position [line, character].
     Produces cursor- and diagnostic-driven quick fixes and refactorings;
     see [ast_code_actions] for the AST-driven refactorings (pipe, extract,
@@ -1150,6 +1202,15 @@ let code_actions_at (a : t) ~line ~character
                 a fix with no tier (an older compiler) counts as one. *)
              let tier = match List.assoc_opt "applicability" fix with
                | Some (`String t) -> t | _ -> "machine-applicable" in
+             (* A machine-applicable fix is re-checked before it is preferred,
+                as `--check-json` re-checks it before printing it. *)
+             let tier =
+               match tier, d.code with
+               | "machine-applicable", Some (`String code) ->
+                 if edits <> [] && on_any
+                    && not (fix_holds a ~code (List.map fst edits))
+                 then "maybe-incorrect" else tier
+               | _ -> tier in
              let title = match tier with
                | "machine-applicable" -> title
                | "has-placeholders" -> title ^ " (fill in the placeholder)"

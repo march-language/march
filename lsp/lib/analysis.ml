@@ -5105,6 +5105,9 @@ let () =
    with its original name and signature. *)
 include Code_actions_diag
 
+(* [Code_actions_diag.fix_holds] re-analyses a patched buffer with this. *)
+let () = reanalyse := Some analyse
+
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->
       match Hashtbl.find_opt a.def_map name with

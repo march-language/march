@@ -242,6 +242,8 @@ let ansi_dim          = "\027[2m"
 let ansi_cyan         = "\027[36m"
 let ansi_magenta      = "\027[35m"
 let ansi_bold_magenta = "\027[1;35m"
+let ansi_red          = "\027[31m"
+let ansi_green        = "\027[32m"
 
 let sev_bold_code  = function Error -> "\027[1;31m" | Warning -> "\027[1;33m" | Hint -> "\027[1;34m"
 let sev_plain_code = function Error -> "\027[31m"   | Warning -> "\027[33m"   | Hint -> "\027[34m"
@@ -698,6 +700,54 @@ let header_severity (line : string) : severity option =
       else Some Error
     else None
 
+(* A diagnostic's fix, shown under it as the lines it changes: `N - old`,
+   `N + new`, and for an inserted line the line it goes after (`N | …`).  The
+   heading says how far the fix can be trusted (its tier). *)
+let render_fix_block ~src (f : fix) : string =
+  let lines = Array.of_list (String.split_on_char '\n' src) in
+  let n = Array.length lines in
+  let get i = if i >= 1 && i <= n then lines.(i - 1) else "" in
+  let edits = List.sort compare (List.map (fun e ->
+      let k = match e with
+        | FInsert { after_line; _ } -> (after_line, max_int)
+        | FDelete { start_line; _ } -> (start_line, 0)
+        | FReplace { span; _ } -> (span.March_ast.Ast.start_line, span.March_ast.Ast.start_col)
+        | FMulti _ -> (0, 0) in
+      (k, e)) (fix_edits f.edit)) |> List.map snd in
+  let rows = List.concat_map (function
+      | FInsert { after_line; text } ->
+        (if after_line >= 1 then [ (after_line, '|', get after_line) ] else [])
+        @ List.mapi (fun i l -> (after_line + 1 + i, '+', l)) (String.split_on_char '\n' text)
+      | FDelete { start_line; end_line } ->
+        List.init (max 0 (end_line - start_line + 1)) (fun i ->
+            (start_line + i, '-', get (start_line + i)))
+      | FReplace { span; text } ->
+        let sl = span.March_ast.Ast.start_line and el = span.March_ast.Ast.end_line in
+        let first = get sl and last = get el in
+        let clamp s c = max 0 (min c (String.length s)) in
+        let sc = clamp first span.March_ast.Ast.start_col
+        and ec = clamp last span.March_ast.Ast.end_col in
+        let joined = String.sub first 0 sc ^ text ^ String.sub last ec (String.length last - ec) in
+        List.init (max 0 (el - sl + 1)) (fun i -> (sl + i, '-', get (sl + i)))
+        @ List.mapi (fun i l -> (sl + i, '+', l)) (String.split_on_char '\n' joined)
+      | FMulti _ -> []) edits in
+  if rows = [] then ""
+  else
+    let w = List.fold_left (fun m (k, _, _) -> max m (String.length (string_of_int k))) 1 rows in
+    let heading = match f.tier with
+      | Machine_applicable -> "fix (`forge fix` applies it):"
+      | Has_placeholders -> "fix, with a placeholder to fill in:"
+      | Maybe_incorrect -> "possible fix (a guess: check it before applying it):" in
+    let row (k, mark, l) =
+      let ns = string_of_int k in
+      let g = String.make (w - String.length ns) ' ' ^ ns ^ " " ^ String.make 1 mark ^ " " in
+      let painted = match mark with
+        | '-' -> paint ansi_red (g ^ l)
+        | '+' -> paint ansi_green (g ^ l)
+        | _ -> paint ansi_dim g ^ l in
+      painted in
+    "\n\n    " ^ paint ansi_dim heading ^ "\n\n" ^ String.concat "\n" (List.map row rows)
+
 let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
   let sev_str = header_title d in
   let line  = d.span.March_ast.Ast.start_line in
@@ -787,7 +837,10 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
          pad ^ paint (sev_plain_code d.severity) underline;
          notes_block ]
        @ label_blocks)
-    ^ explain_hint d
+    ^ (let fix = match d.fix with Some f -> render_fix_block ~src f | None -> ""
+       and explain = explain_hint d in
+       (* A blank line between the fix's last row and the explain pointer. *)
+       fix ^ (if fix <> "" && explain <> "" then "\n" else "") ^ explain)
   end
 
 let parse_error_diagnostic ?(filename = "") ?hint ?(code = Code.syntax_error) ~msg lexbuf =

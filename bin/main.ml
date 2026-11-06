@@ -4049,6 +4049,8 @@ let compile filename =
                  `needs IO.Console` to the module, and give `main` the grant, \
                  `fn main(_console : Cap(IO.Console))`." ] } :: rest
         | _ -> diags in
+      (* The fix is shown under the error with the tier it earned. *)
+      let diags = Fix_verify.verify_parse ~filename ~src diags in
       List.iter (fun d ->
         Printf.eprintf "%s\n"
           (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
@@ -4060,7 +4062,7 @@ let compile filename =
       if !check_json then
         List.iter (fun d ->
           print_string (March_errors.Errors.render_diagnostic_json d ^ "\n"))
-          (Fix_verify.verify_parse ~filename ~src diags);
+          diags;
       exit 1
   in
   stamp "parse";
@@ -4574,11 +4576,17 @@ let compile filename =
   (* Under --shell, only errors: they stop the session.  The program's
      warnings and refinement hints are the build's business, and a real
      project (forgepm) printed screens of them before the first prompt. *)
+  (* Under --check each fix is shown with the tier it earned on a re-check,
+     as --check-json prints it.  A build or run shows the tier the compiler
+     declared: re-checking there would rerun a compile. *)
+  let shown =
+    if !do_check && !shell_socket = None
+    then Fix_verify.verify ~src ~verifiable:is_user_file diags else diags in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d
          && (!shell_socket = None || d.severity = March_errors.Errors.Error) then
         emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
-    ) diags;
+    ) shown;
   (* --shell: the program typechecked as the node's build did; hand it to the
      remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
   (match !shell_socket with
