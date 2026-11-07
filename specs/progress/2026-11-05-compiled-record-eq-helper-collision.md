@@ -58,7 +58,9 @@ names are CamelCase by convention and no such pair has been seen.
   then Pair, record of Strings then record of Ints (the SIGSEGV), `eq()` on a
   nested record field and on a `List` of records, and the two nested tuple
   shapes. All five failed before the fix and pass after.
-- test/test_reports/assert_records.march existed only to keep the plain
-  `Point` record out of a program with `User`; its test is merged back into
-  test/test_reports/assert_values.march (now the SIGSEGV shape, guarded by the
-  `test_reports` suite interpreted and compiled) and the separate file is gone.
+- test/test_reports/assert_records.march was split out to keep the plain
+  `Point` record away from `User`. The todo asked to merge it back once this was
+  fixed, but it stays separate: the `test_reports` suite now also runs each
+  fixture on `--target js` (#1176), and `to_string` on a record without Show has
+  no JS mapping, so this file is in `js_unsupported` while `assert_values`
+  keeps its JS coverage. Its header comment now gives that reason.
