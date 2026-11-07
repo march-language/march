@@ -1061,6 +1061,13 @@ window.marchModuleIndex = {
     "Vault"
    ]
   },
+  "Session.Theory": {
+   "file": "session_theory.march",
+   "unavailable": null,
+   "uses": [
+    "Session"
+   ]
+  },
   "SessionAP": {
    "file": "session_ap.march",
    "unavailable": null,
