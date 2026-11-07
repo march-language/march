@@ -10178,6 +10178,7 @@ let test_cap_transitive_chain_error () =
 let test_cap_extern_with_needs_ok () =
   let ctx = typecheck {|mod Test do
     needs LibC
+    needs IO.Foreign
     extern "libc": Cap(LibC) do
       fn malloc(n : Int) : Int
     end

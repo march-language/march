@@ -478,6 +478,16 @@ if [ -f docs/_data/authority.json ]; then
     fail=1
   fi
 fi
+# The third (docs/one-owner.md): its inputs are the tree programs under
+# docs/assets/explainer/ownership/, the spec chapters whose phrases it quotes, and the
+# generator itself.
+if [ -f docs/_data/ownership.json ]; then
+  if python3 scripts/gen-ownership-data.py --check-inputs; then
+    echo "  ok — ownership data matches docs/assets/explainer/ownership and the pinned specs"
+  else
+    fail=1
+  fi
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then

@@ -3711,6 +3711,7 @@ end|}));
 mod QExt do
   mod List do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn length(xs: List(Int)) : Int = "march_qext_length"
     end
@@ -4224,6 +4225,7 @@ end|}));
 mod QSExt do
   mod String do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn byte_size(s: String) : Int = "march_qsext_byte_size"
     end
@@ -4497,6 +4499,7 @@ end|}));
              {|
 mod DX do
   needs LibC
+  needs IO.Foreign
   extern "libc": Cap(LibC) do
     fn string_byte_length(s: String): Int
   end
@@ -29856,7 +29859,7 @@ let () =
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
-      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests);
+      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
       ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);

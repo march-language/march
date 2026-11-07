@@ -4667,17 +4667,39 @@ let test_perceus_list_length_then_nth_incrc () =
     end
 
   end|} in
-  (* After Perceus, the `check` function must contain at least one EIncRC:
-     the inc for `xs` before the consuming List.length call (since `xs` is
-     still live at the subsequent List.nth call).  If the bug reappears, no
-     EIncRC would be emitted and List.nth would read a freed list node. *)
-  let check_fns = List.filter (fun fn ->
-    String.equal fn.March_tir.Tir.fn_name "check"
-  ) m.March_tir.Tir.tm_fns in
+  (* `xs` must still be alive at the List.nth call.  Two shapes keep it so:
+     - List.length consumes its list, and `check` has an EIncRC for `xs`
+       before the call (the shape this test was written for: a local `go`
+       closure owned the list);
+     - List.length borrows its list: neither it nor its loop releases
+       anything, so `check` needs no inc.  This is the shape since the stdlib
+       lemma sweep S2 lifted the loop to the top-level `List.length_onto`,
+       which borrow inference infers as borrowed.
+     If the bug reappears, List.length releases the list and `check` has no
+     EIncRC, and List.nth reads a freed list node. *)
+  let fns name =
+    List.filter (fun fn -> String.equal fn.March_tir.Tir.fn_name name) m.March_tir.Tir.tm_fns
+  in
+  let rec releases = function
+    | March_tir.Tir.EDecRC _ | March_tir.Tir.EAtomicDecRC _ | March_tir.Tir.EFree _
+    | March_tir.Tir.EReuse _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) | March_tir.Tir.ESeq (e1, e2) -> releases e1 || releases e2
+    | March_tir.Tir.ELetRec (fs, body) ->
+      List.exists (fun f -> releases f.March_tir.Tir.fn_body) fs || releases body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> releases b.March_tir.Tir.br_body) brs
+      || Option.fold ~none:false ~some:releases def
+    | _ -> false
+  in
+  let check_incs = List.exists (fun fn -> has_any_incrc fn.March_tir.Tir.fn_body) (fns "check") in
+  let length_fns = fns "List.length$List_String" @ fns "List.length_onto$List_String$Int" in
+  let length_borrows =
+    List.length length_fns = 2
+    && not (List.exists (fun fn -> releases fn.March_tir.Tir.fn_body) length_fns)
+  in
   Alcotest.(check bool)
-    "check has EIncRC for xs before consuming List.length call"
-    true
-    (List.exists (fun fn -> has_any_incrc fn.March_tir.Tir.fn_body) check_fns)
+    "xs stays alive across List.length: check incs xs, or List.length borrows it"
+    true (check_incs || length_borrows)
 
 (* Regression: tuple parameter used in multiple sequential pattern-match
    destructs within the caller caused RC underflow.

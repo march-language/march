@@ -622,6 +622,7 @@ window.marchModuleIndex = {
    "file": "audio.march",
    "unavailable": null,
    "uses": [
+    "IO",
     "Js.Dom"
    ]
   },
@@ -629,6 +630,7 @@ window.marchModuleIndex = {
    "file": "canvas.march",
    "unavailable": null,
    "uses": [
+    "IO",
     "Js.Dom"
    ]
   },
@@ -636,6 +638,7 @@ window.marchModuleIndex = {
    "file": "dom.march",
    "unavailable": null,
    "uses": [
+    "IO",
     "List"
    ]
   },
