@@ -57,6 +57,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
   module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
@@ -655,6 +663,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
 - Compiled record equality keeps helpers distinct for different record shapes,
   avoiding wrong comparisons and crashes when a program uses several record types.
 - Refinement diagnostics preserve predicate grouping with parentheses, including
@@ -665,6 +677,11 @@ git log is authoritative for exact commits.
 - The two-node test harness now fails when a started node has no expected-output
   file, instead of silently reporting success.
 
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,
