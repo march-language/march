@@ -65,6 +65,37 @@ let read_whole_file (path : string) : string =
   let s = really_input_string ic (in_channel_length ic) in
   close_in ic; s
 
+(* An output path that cannot be written is the user's filesystem, not a
+   compiler bug: a plain error naming the path, exit 1 (issue #1181; it used
+   to reach the catch-all handler and print an internal compiler error). *)
+let output_path_error (path : string) (reason : string) : 'a =
+  Printf.eprintf "march: error: cannot write the output %s: %s\n%!" path reason;
+  exit 1
+
+(* Make [path] writable as a build output: create its missing parent
+   directories (`-o dist/app.mjs` with no `dist/` yet), and reject up front a
+   path that is a directory or sits under a non-directory. *)
+let prepare_output_path (path : string) : unit =
+  if Sys.file_exists path && Sys.is_directory path then
+    output_path_error path "it is a directory";
+  let dir = Filename.dirname path in
+  (try mkdir_p dir with
+   | Unix.Unix_error (e, _, _) ->
+     output_path_error path
+       (Printf.sprintf "cannot create the directory %s (%s)" dir (Unix.error_message e))
+   | Sys_error msg -> output_path_error path msg);
+  if not (Sys.file_exists dir && Sys.is_directory dir) then
+    output_path_error path (dir ^ " is not a directory")
+
+(* Write [contents] to the output [path], reporting a failure as
+   [output_path_error] rather than letting [Sys_error] escape. *)
+let write_output_file (path : string) (contents : string) : unit =
+  try
+    let oc = open_out_bin path in
+    Fun.protect ~finally:(fun () -> close_out_noerr oc)
+      (fun () -> output_string oc contents; close_out oc)
+  with Sys_error msg -> output_path_error path msg
+
 let bundle_js_modules ~(src_file : string) ~(out_bin : string) : unit =
   let out_dir = Filename.dirname out_bin in
   let roots =
@@ -2826,20 +2857,34 @@ let resolve_imports ~source_file m =
      see Resolver.resolve_imports's [strict_parse] doc. *)
   March_resolver.Resolver.resolve_imports ~strict_parse:!do_test ~source_file m
 
-(** Format [filename] in-place.  Returns true if the file was changed. *)
+(** Format [filename]: [Some (changed, formatted)], or [None] when the
+    formatter's output does not parse back to the same program (a formatter
+    bug).  [None] has already been reported; the caller must not write
+    anything.  Exits on a source that does not parse. *)
 let fmt_file filename =
   let src = read_file filename in
-  let formatted =
-    match March_format.Format.format_source_result ~filename
-            ~stuck:"Parse error (cannot format)" src with
-    | Ok formatted -> formatted
-    | Error diags ->
-      List.iter (fun d ->
-        Printf.eprintf "%s\n"
-          (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
-      exit 1
+  let refuse why =
+    Printf.eprintf
+      "march fmt: %s: not formatted: %s. This is a formatter bug; the file \
+       was left unchanged.\n%!" filename why;
+    None
   in
-  formatted <> src, formatted
+  match
+    March_format.Format.format_source_result ~filename
+      ~stuck:"Parse error (cannot format)" src
+  with
+  | exception e -> refuse ("the formatter raised " ^ Printexc.to_string e)
+  | Error diags ->
+    List.iter (fun d ->
+      Printf.eprintf "%s\n"
+        (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
+    exit 1
+  | Ok formatted ->
+    (* The round-trip check (#1174, #1175): never write output that does not
+       re-parse to the same AST as the input. *)
+    match March_format.Format.verify_format ~filename ~src formatted with
+    | Ok () -> Some (formatted <> src, formatted)
+    | Error why -> refuse why
 
 (** Collect all .march files under a directory recursively.
     Tolerant of unreadable entries: a permission-denied subdirectory (whose
@@ -3197,12 +3242,21 @@ let run_fmt args =
      with End_of_file -> ());
     let src = Buffer.contents buf in
     let filename = match !targets with f :: _ -> f | [] -> "<stdin>" in
-    let formatted =
-      try March_format.Format.format_source ~filename src
-      with _ -> src
-    in
-    print_string formatted;
-    exit 0
+    (* Unparseable input is echoed unchanged (exit 0), as before.  Output
+       that fails the round-trip check is a formatter bug: the input is
+       echoed so an editor that pipes through this loses nothing, and the
+       exit code says it was not formatted. *)
+    (match March_format.Format.format_source_result ~filename src with
+     | exception _ | Error _ -> print_string src; exit 0
+     | Ok formatted ->
+       match March_format.Format.verify_format ~filename ~src formatted with
+       | Ok () -> print_string formatted; exit 0
+       | Error why ->
+         print_string src;
+         Printf.eprintf
+           "march fmt: %s: not formatted: %s. This is a formatter bug; the \
+            input is printed unchanged.\n%!" filename why;
+         exit 1)
   end;
   let targets = List.rev !targets in
   let files = List.concat_map (fun target ->
@@ -3215,21 +3269,24 @@ let run_fmt args =
     Printf.eprintf "march fmt: no files specified\n"; exit 1
   end;
   let any_changed = ref false in
+  let any_refused = ref false in
   List.iter (fun f ->
-    let changed, formatted = fmt_file f in
-    if !check_mode then begin
-      if changed then begin
-        Printf.eprintf "%s: not formatted\n" f;
-        any_changed := true
+    match fmt_file f with
+    | None -> any_refused := true
+    | Some (changed, formatted) ->
+      if !check_mode then begin
+        if changed then begin
+          Printf.eprintf "%s: not formatted\n" f;
+          any_changed := true
+        end
+      end else begin
+        if changed then begin
+          write_file f formatted;
+          Printf.printf "formatted %s\n%!" f
+        end
       end
-    end else begin
-      if changed then begin
-        write_file f formatted;
-        Printf.printf "formatted %s\n%!" f
-      end
-    end
   ) files;
-  if !check_mode && !any_changed then exit 1
+  if !any_refused || (!check_mode && !any_changed) then exit 1
   else exit 0
 
 
@@ -3554,10 +3611,10 @@ let write_impl_hashes basename (h_sccs : March_cas.Pipeline.hashed_scc list) =
      any of them (a new sibling can become reachable);
    - every recorded load-set file still exists;
    - every recorded NON-loaded sibling whose bytes changed still parses, has
-     no global-effect declaration, and none of its anchors (its module name,
-     type and constructor names: Resolver.provided_anchor_names) is a token
-     of the entry or a loaded file (Resolver.referenced_name_tokens): i.e.
-     the resolver would prune it again.
+     no global-effect declaration, and is reached by no seed of the entry or
+     a loaded file (Resolver.seed_reaches: its module name, or a type or
+     constructor name that source does not define itself): i.e. the
+     resolver would prune it again.
    Anything else falls back to today's full-directory key. *)
 
 let loadset_version = "march-loadset v1"
@@ -3636,20 +3693,30 @@ let valid_loadset ~path ~entry_real ~src ~walked : string list option =
              unlisted in
          if changed = [] then Some listed
          else begin
-           let tokens = Hashtbl.create 256 in
-           List.iter (fun t ->
-               Hashtbl.iter (fun k () -> Hashtbl.replace tokens k ())
-                 (March_resolver.Resolver.referenced_name_tokens t))
-             (src :: List.filter_map read_opt listed);
+           (* Each source's own type/ctor names do not reach a same-named
+              module (Resolver.seed_reaches); a file that no longer parses
+              keeps them all, which only errs toward the full walk. *)
+           let seeds =
+             List.map (fun (f, t) ->
+                 let own_decls =
+                   match March_parser.Parse.module_ ~filename:f t with
+                   | Ok m -> m.March_ast.Ast.mod_decls
+                   | Error _ -> [] in
+                 March_resolver.Resolver.ref_seed ~own_decls t)
+               ((entry_real, src)
+                :: List.filter_map (fun f -> Option.map (fun t -> (f, t)) (read_opt f))
+                  listed) in
            let still_pruned (f, b) =
              match March_parser.Parse.module_ ~filename:f b with
              | Error _ -> false
              | Ok m ->
                let decls = m.March_ast.Ast.mod_decls in
+               let mod_name = m.March_ast.Ast.mod_name.March_ast.Ast.txt in
+               let anchors = March_resolver.Resolver.provided_anchor_names decls in
                not (March_resolver.Resolver.has_global_effect_decl decls)
-               && not (List.exists (fun a -> Hashtbl.mem tokens a)
-                         (m.March_ast.Ast.mod_name.March_ast.Ast.txt
-                          :: March_resolver.Resolver.provided_anchor_names decls))
+               && not (List.exists (fun seed ->
+                   March_resolver.Resolver.seed_reaches seed ~mod_name ~anchors)
+                   seeds)
            in
            if List.for_all still_pruned changed then Some listed else None
          end
@@ -3740,11 +3807,13 @@ let compile filename =
   load_protocol_inputs ();
   (* --fmt: format the source file before compiling *)
   if !do_fmt then begin
-    let changed, formatted = fmt_file filename in
-    if changed then begin
-      write_file filename formatted;
-      Printf.eprintf "formatted %s\n%!" filename
-    end
+    match fmt_file filename with
+    | None -> exit 1
+    | Some (changed, formatted) ->
+      if changed then begin
+        write_file filename formatted;
+        Printf.eprintf "formatted %s\n%!" filename
+      end
   end;
   (* Early source-hash CAS: read all input bytes, compute hash, and exit
      before parsing if sources are unchanged since the last successful run.
@@ -5856,6 +5925,7 @@ let compile filename =
           else if target = March_tir.Llvm_emit.Js then basename ^ ".mjs"
           else basename
         in
+        prepare_output_path out_bin;
         (* JS target: skip LLVM/clang entirely *)
         if target = March_tir.Llvm_emit.Js then begin
           let tir_for_js = if !opt_enabled then March_tir.Opt.run tir else tir in
@@ -5864,7 +5934,16 @@ let compile filename =
              desktop entry beside its browser one) kept its C-backed externs
              alive and failed the JS build. *)
           let tir_for_js =
-            if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
+            if tir_for_js.March_tir.Tir.tm_tests <> [] then
+              (* --test: the output runs the tests, not `main` (issue
+                 #1176), so root at them and their setup blocks; rooting
+                 at `main` alone pruned every test away. *)
+              March_tir.Dce.prune_unreachable
+                ~roots:(List.map fst tir_for_js.March_tir.Tir.tm_tests
+                        @ [ March_tir.Tir_names.setup_fn_name;
+                            March_tir.Tir_names.setup_all_fn_name ])
+                tir_for_js
+            else if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
                  tir_for_js.March_tir.Tir.tm_fns
             then March_tir.Dce.prune_unreachable ~roots:[ "main" ] tir_for_js
             else tir_for_js in
@@ -5896,16 +5975,20 @@ let compile filename =
             | None -> js
             | Some map_json ->
               let map_path = Filename.concat (Filename.dirname out_bin) map_name in
-              (try
-                let oc2 = open_out map_path in
-                output_string oc2 map_json;
-                close_out oc2
-               with Sys_error _ -> ());
-              js ^ "//# sourceMappingURL=" ^ map_name ^ "\n"
+              (* The map is a debugging aid: failing to write it is a warning,
+                 and the output then names no map it cannot find. *)
+              (match
+                 let oc2 = open_out_bin map_path in
+                 Fun.protect ~finally:(fun () -> close_out_noerr oc2)
+                   (fun () -> output_string oc2 map_json; close_out oc2)
+               with
+               | () -> js ^ "//# sourceMappingURL=" ^ map_name ^ "\n"
+               | exception Sys_error msg ->
+                 Printf.eprintf "march: warning: cannot write the source map %s: %s\n%!"
+                   map_path msg;
+                 js)
           in
-          let oc = open_out out_bin in
-          output_string oc js;
-          close_out oc;
+          write_output_file out_bin js;
           (* Put every module the output imports beside it, unless
              --no-copy-runtime is given (e.g. when dune manages them). *)
           if not !no_copy_runtime then bundle_js_modules ~src_file:filename ~out_bin;
@@ -8140,7 +8223,7 @@ let () =
     ("--apply-public", Arg.Set apply_public, " With --apply: also apply proposals on public functions with no in-unit callers");
     ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
      "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
-    ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
+    ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile, or --target js for a test-runner .mjs)");
     ("--emit-io-ops", Arg.Set emit_io_ops, " Print the generated per-IO-capability dictionary module (stdlib/io_ops.march) and exit");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");

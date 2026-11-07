@@ -74,6 +74,8 @@ native_actor_theory_conformance: coverage audit (user + stdlib): 317 enforced, 0
 native_actor_theory_conformance: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_actor_tuple_match_state_leak_probe: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_actor_tuple_match_state_leak_probe: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_adt_ord_operators: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
+native_adt_ord_operators: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_drop_erased_fields: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_drop_erased_fields: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_aggregate_dupd_consume_drop: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
@@ -406,6 +408,8 @@ native_march_prefixed_local: coverage audit (user + stdlib): 317 enforced, 0 ine
 native_march_prefixed_local: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_mixed_tail_aggregate_drop: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_mixed_tail_aggregate_drop: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_module_let_value: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
+native_module_let_value: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_module_unboxed_aggregate: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_module_unboxed_aggregate: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_monitor_ack_retry_loopback: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
@@ -662,6 +666,8 @@ native_shadow_selfref_let: coverage audit (user + stdlib): 317 enforced, 0 inert
 native_shadow_selfref_let: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_shadowed_builtin_name: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_shadowed_negate_not: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
+native_shadowed_negate_not: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shell_node: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_shell_node: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_shell_node_skew: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
@@ -722,6 +728,8 @@ native_string_search_edge_cases: coverage audit (user + stdlib): 317 enforced, 0
 native_string_search_edge_cases: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_slice_clamp: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_string_slice_clamp: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+native_string_to_float_grammar: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
+native_string_to_float_grammar: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced
 native_string_to_float_option: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 native_supervisor_concurrent_child_crash: coverage audit (user + stdlib): 317 enforced, 0 inert (warned), 0 unenforced

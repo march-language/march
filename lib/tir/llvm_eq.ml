@@ -52,7 +52,15 @@ let record_eq_key ty =
   in
   "Rec$" ^ encode ty
 
-(** Mangle a TIR type to a valid LLVM identifier fragment for equality function names. *)
+(** Mangle a TIR type to a valid LLVM identifier fragment for equality function
+    names.  [ensure_adt_eq_fn] memoizes helpers BY THIS NAME, so two types with
+    different layouts must never mangle alike.  Records use [record_eq_key]
+    (#1184).  Tuples carry their arity (#1171): without it
+    [((Int, Int), Int, Int)] and [((Int, Int, Int), Int)] both read
+    [Tup_Tup_Int_x_Int_x_Int_x_Int] and shared one helper (a wrong [true]
+    natively).  Functions and raw pointers get their own forms instead of a
+    shared "Ptr", so they stay distinct when they appear inside another
+    type's name. *)
 let rec mangle_ty_for_eq : Tir.ty -> string = function
   | Tir.TInt    -> "Int"
   | Tir.TFloat  -> "Float"
@@ -65,8 +73,13 @@ let rec mangle_ty_for_eq : Tir.ty -> string = function
     n' ^ "_" ^ String.concat "_" (List.map mangle_ty_for_eq args)
   | Tir.TRecord _ as ty -> record_eq_key ty
   | Tir.TVar _   -> "Any"
-  | Tir.TTuple ts -> "Tup_" ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
-  | _            -> "Ptr"
+  | Tir.TTuple ts ->
+    Printf.sprintf "Tup%d_" (List.length ts)
+    ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
+  | Tir.TFn (ps, r) ->
+    Printf.sprintf "Fn%d_" (List.length ps)
+    ^ String.concat "_x_" (List.map mangle_ty_for_eq (ps @ [r]))
+  | Tir.TPtr t   -> "Ptr_" ^ mangle_ty_for_eq t
 
 (** LLVM load type for an ADT field: i64 for scalar types, double for float, ptr for heap. *)
 let field_load_llty : Tir.ty -> string = function

@@ -60,3 +60,24 @@ record is tracked in
 Verification: all three `record_equality` cases pass, and all thirteen
 neighboring `newtype_derived_method_crash` cases pass. The consolidated
 rendered-report corpus also passes interpreted/native parity.
+
+## Follow-up — 2026-11-07 (GitHub #1171, PR #1186)
+
+#1171 reported the same collision independently and was fixed in parallel with a
+second record mangling. On merging main the record part was dropped in favour of
+`record_eq_key` above. Two pieces of the #1171 fix were kept:
+
+- **Tuples carry their arity** (`Tup<N>_`). The old flat `Tup_` form gave
+  `((Int, Int), Int, Int)` and `((Int, Int, Int), Int)` the same name,
+  `Tup_Tup_Int_x_Int_x_Int_x_Int`, so they shared one helper and compiled `==`
+  answered `true` for unequal values. `TFn` and `TPtr` get their own forms
+  (`Fn<N>_`, `Ptr_<t>`) instead of the shared `Ptr` fallback.
+- **`assert_records` stays its own fixture.** The `test_reports` suite now also
+  runs each fixture on `--target js` (#1176), and `to_string` on a record
+  without Show has no JS mapping. So the plain-record case lives in
+  `assert_records.march` (listed in `js_unsupported`), and `assert_values`
+  keeps its JS coverage. This reverses the "merge it back" step above.
+
+The #1171 codegen tests (Pair/Triple in both orders, a String record then an Int
+record, `eq()` through a nested record and a List of records, and the two tuple
+shapes) are in `test/test_codegen.ml` beside main's `record_equality` cases.
