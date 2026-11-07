@@ -245,6 +245,13 @@ let lemma_value_uses : (A.span * string) list ref = ref []
 
 type bind = { k_var : bool;  (** a value ([false]: a local [fn]) *) k_owner : A.span  (** the unit that bound it *) }
 
+(* `reveal f` (todo 2026-11-06-proof-reveal-and-local-fuel): the [@[opaque]]
+   units that are blocked by R9 alone (every other rule passes, every callee is
+   reflected, and the unit is alone in its SCC).  [analyze] fills it; the rows
+   and every caller's verdict are unchanged, so nothing that does not say
+   `reveal` sees a difference. *)
+let revealable : (A.span, unit) Hashtbl.t = Hashtbl.create 8
+
 let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let g = t.RT.graph in
   let n = Array.length g.RT.units in
@@ -921,6 +928,16 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
           List.iter (fun v -> if refl.(v) then (refl.(v) <- false; changed := true)) members)
       g.RT.sccs
   done;
+  Hashtbl.reset revealable;
+  Array.iteri
+    (fun i (u : RT.unit_) ->
+      if List.mem "opaque" u.RT.u_attrs
+         && List.for_all (fun e -> e.ev_rule = 9 && e.ev_text = "@[opaque]") local.(i)
+         && local.(i) <> []
+         && List.for_all dep_ok deps.(i)
+         && g.RT.sccs.(g.RT.scc_of.(i)) = [ i ]
+      then Hashtbl.replace revealable u.RT.u_span ())
+    g.RT.units;
   (* ── Reasons ───────────────────────────────────────────────────────────── *)
   let memo = Hashtbl.create 64 in
   let rec reason (i : int) : blocker option =
@@ -1545,7 +1562,7 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
             (fun ((f, args) as k) ->
               let tp = Hashtbl.find templates f in
               if List.mem k !seen then false
-              else if depth >= tp.t_fuel || !count >= budget then true
+              else if depth >= RS.fuel_for ~display:tp.t_name tp.t_fuel || !count >= budget then true
               else
                 let env = List.mapi (fun i a -> (param_const i, a)) args in
                 let inst = List.map (fun (conds, res) -> (List.map (subst env) conds, subst env res)) tp.t_cases in
@@ -1585,7 +1602,7 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
       List.iter
         (fun (f, args) ->
           let tp = Hashtbl.find templates f in
-          if !count >= budget && depth < tp.t_fuel then RS.budget_hit := true;
+          if !count >= budget && depth < RS.fuel_for ~display:tp.t_name tp.t_fuel then RS.budget_hit := true;
           RS.fuel_pending := true;
           if !RS.fuel_fn = "" then RS.fuel_fn := tp.t_name;
           ignore args)
@@ -2332,9 +2349,40 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   let sym_of = Array.make (Array.length g.RT.units) None in
   let owners : (string, int) Hashtbl.t = Hashtbl.create 64 in
   let dup = ref [] in
+  (* A revealable [@[opaque]] unit gets a symbol too, but only in a program
+     that says `reveal` somewhere: anywhere else nothing changes. *)
+  let reveals =
+    let found = ref false in
+    let body e = RE.iter_all (function A.EProof (A.PReveal _, _) -> found := true | _ -> ()) e in
+    let fn (fd : A.fn_def) = List.iter (fun (c : A.fn_clause) -> body c.A.fc_body) fd.A.fn_clauses in
+    (* Every place a statement can be: functions, impl methods, actor handlers,
+       tests, an app's body (review minor). *)
+    let rec scan ds =
+      List.iter
+        (function
+          | A.DFn (fd, _) -> fn fd
+          | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> fn fd) idf.A.impl_methods
+          | A.DActor (_, _, ad, _) ->
+            body ad.A.actor_init;
+            List.iter (fun (h : A.actor_handler) -> body h.A.ah_body) (A.actor_body_handlers ad)
+          | A.DTest (t, _) -> body t.A.test_body
+          | A.DApp (app, _) -> body app.A.app_body
+          | A.DLet (_, b, _) -> body b.A.bind_expr
+          | A.DMod (_, _, inner, _) | A.DDescribe (_, inner, _) -> scan inner
+          | _ -> ())
+        ds
+    in
+    scan decls;
+    !found
+  in
+  let hidden_units = Hashtbl.create 8 in
   Array.iter
     (fun (u : RT.unit_) ->
-      if Hashtbl.mem refl_spans u.RT.u_span then begin
+      if reveals && Hashtbl.mem revealable u.RT.u_span then Hashtbl.replace hidden_units u.RT.u_id ())
+    g.RT.units;
+  Array.iter
+    (fun (u : RT.unit_) ->
+      if Hashtbl.mem refl_spans u.RT.u_span || Hashtbl.mem hidden_units u.RT.u_id then begin
         let origin = origin_of_file ~user_files u.RT.u_span.A.file in
         (* The display name is not unique on its own (an entry module's
            nested `mod X` and a library `X` both print `X.g`, review C-A):
@@ -2476,7 +2524,9 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     else
     match sym_of.(v) with
     | Some sym when Hashtbl.mem RS.syms sym && not (Hashtbl.mem axiom_tier sym) ->
-      Hashtbl.replace RS.call_sym sp sym
+      if Hashtbl.mem hidden_units v then
+        Hashtbl.replace RS.hidden_call_sym sp (sym, g.RT.units.(v).RT.u_name)
+      else Hashtbl.replace RS.call_sym sp sym
     | _ -> ()
   in
   List.iter

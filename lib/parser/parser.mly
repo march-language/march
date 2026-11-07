@@ -444,6 +444,7 @@
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
+%token CALC REVEAL
 %token DBG DOC
 %token <string> SIGIL_PREFIX
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
@@ -481,6 +482,9 @@
      prec_hole: bare ? hole; below LOWER_IDENT so ?foo shifts the ident.
      prec_atom: bare UPPER_IDENT or ATOM; below LPAREN so Foo() shifts (.
      prec_app:  expr_field pass-through; below LPAREN so f() shifts (. *)
+(* `assert assert p by h`: the inner assert takes the `by` (shift). *)
+%nonassoc prec_assert
+%nonassoc BY
 %nonassoc prec_hole
 %nonassoc LOWER_IDENT
 %nonassoc prec_atom
@@ -1837,8 +1841,9 @@ block_expr:
 
 expr:
   | e = expr_pipe { e }
-  | ASSERT; e = expr
+  | ASSERT; e = expr %prec prec_assert
     { EAssert (e, mk_span ($loc)) }
+  | p = proof_stmt { p }
   | FN; ARROW; body = lambda_body
     { ELam ([], body, mk_span ($loc)) }
   | FN; ps = lambda_params; ARROW; body = lambda_body
@@ -1944,6 +1949,38 @@ lambda_stmts:
   | LET; STAR; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
     { ELetStar (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
 
+(** Proof hints (the 2026-11-06 proof-hint todos): ghost statements the refinement
+    checker reads and erasure removes.  `by`, `calc` and `reveal` are
+    keywords; `fuel` is checked by name after `with`. *)
+proof_stmt:
+  | ASSERT; e = expr; BY; h = proof_hint
+    { EProof (PAssertBy (e, h), mk_span ($loc)) }
+  | REVEAL; f = expr_field
+    { EProof (PReveal f, mk_span ($loc)) }
+  | WITH; fuel = LOWER_IDENT; LPAREN; f = expr_field; COMMA; n = INT; RPAREN; DO; body = block_body; END
+    { if fuel <> "fuel" then
+        error_raise "I was expecting `with fuel(f, N) do … end` here:"
+          (Some "with fuel(f, 4) do\n    …\nend") $startpos(fuel);
+      EProof (PWithFuel (f, n, [ body ]), mk_span ($loc)) }
+  | CALC; DO; e0 = expr_add; steps = nonempty_list(calc_step); END
+    { EProof (PCalc (e0, steps), mk_span ($loc)) }
+
+(* A `do … end` hint is an ordinary block expression ([expr_atom]); the
+   refinement checker reads its statements. *)
+proof_hint:
+  | e = expr_app { [ e ] }
+
+calc_step:
+  | op = calc_op; rhs = expr_add; h = option(preceded(BY, proof_hint))
+    { { cs_op = op; cs_rhs = rhs; cs_hint = Option.value h ~default:[]; cs_span = mk_span ($loc) } }
+
+calc_op:
+  | EQEQ { "==" }
+  | LT { "<" }
+  | LEQ { "<=" }
+  | GT { ">" }
+  | GEQ { ">=" }
+
 expr_pipe:
   | l = expr_pipe; PIPE_ARROW; r = expr_or
     { EPipe (l, r, mk_span ($loc)) }
@@ -2027,6 +2064,7 @@ expr_no_bare_lambda:
   | e = expr_pipe { e }
   | ASSERT; e = expr
     { EAssert (e, mk_span ($loc)) }
+  | p = proof_stmt { p }
   | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END
     { EIf (cond, t, f, mk_span ($loc)) }
   | IF; cond = expr; THEN; t = expr; ELSE; f = expr

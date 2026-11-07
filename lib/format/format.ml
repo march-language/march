@@ -475,7 +475,7 @@ let is_stmt_form = function
 (** The binding level of [e] as the renderer prints it. *)
 let rec level_of e =
   match e with
-  | EIf _ | EMatch _ | ECond _ | ELam _ | EAssert _ -> lv_expr
+  | EIf _ | EMatch _ | ECond _ | ELam _ | EAssert _ | EProof _ -> lv_expr
   | EPipe _ -> lv_pipe
   | EBlock ([x], _) -> level_of x
   | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None -> lv_atom
@@ -514,6 +514,7 @@ let children e =
   | ERecordUpdate (b, fs, _) -> b :: List.map snd fs
   | EField (x, _, _) | EAnnot (x, _, _) | ESpawn (x, _) | EDbg (Some x, _)
   | EAssert (x, _) | ESigil (_, x, _) | ERefineMsg (x, _, _) -> [x]
+  | EProof (p, _) -> proof_children p
   | EIf (c, t, f, _) -> [c; t; f]
   | ECond (arms, _) -> List.concat_map (fun (c, b) -> [c; b]) arms
   | EPipe (a, b, _) | ESend (a, b, _) -> [a; b]
@@ -527,7 +528,7 @@ let children e =
     skip the check). *)
 let rec needs_break e =
   match e with
-  | EMatch _ | ECond _ | ELet _ | ELetFn _ | ELetQ _ | ELetStar _ -> true
+  | EMatch _ | ECond _ | ELet _ | ELetFn _ | ELetQ _ | ELetStar _ | EProof _ -> true
   | EBlock (_ :: _ :: _, _) -> true
   | _ -> List.exists needs_break (children e)
 
@@ -711,6 +712,8 @@ and render_raw ind e =
   | EDbg (None, _)              -> "dbg()"
   | EDbg (Some x, _)            -> Printf.sprintf "dbg(%s)" (r lv_expr x)
   | EAssert (x, _)              -> Printf.sprintf "assert %s" (r lv_expr x)
+  (* A proof statement is always written one construct per line. *)
+  | EProof _                    -> sub_block ind (fun c -> emit_stmt c e)
   | ESigil (name, content, _)   -> Printf.sprintf "~%s%s" name (r lv_atom content)
   | ERefineMsg (inner, msg, sp) ->
     Printf.sprintf "%s else %s" (r lv_expr inner) (render_raw ind (ELit (LitString msg, sp)))
@@ -813,6 +816,8 @@ and emit_stmt ctx e =
   | ERecord ((_ :: _), _) when should_break ctx.indent e ->
     emit_literal_multiline ctx ~suffix:"" e
 
+  | EProof (p, _) -> emit_proof ctx p
+
   | _ ->
     line ctx (ex e)
 
@@ -824,6 +829,41 @@ and emit_bind_line ctx kw r =
     indented ctx (fun () -> emit_stmt ctx r)
   end else
     line ctx (Printf.sprintf "%s = %s" kw (render ctx.indent lv_expr r))
+
+(** A proof statement, one construct per line so it re-parses: a hint that is
+    one call stays on the `by` line; anything else is a `do … end` block, as is
+    a `with fuel` body.  A calc term that is a comparison or a Boolean
+    connective gets parentheses (steps are read at the additive level). *)
+and emit_proof ctx p =
+  let is_call = function EApp _ | ECon _ | EVar _ -> true | _ -> false in
+  let operand e =
+    match e with
+    | EApp (EVar { txt = ("==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||"); _ }, [ _; _ ], _) ->
+      "(" ^ (render ctx.indent lv_expr) e ^ ")"
+    | _ -> (render ctx.indent lv_expr) e
+  in
+  let with_hint prefix hs =
+    match hs with
+    | [] -> line ctx prefix
+    | [ h ] when is_call h && not (is_multiline h) -> line ctx (prefix ^ " by " ^ (render ctx.indent lv_expr) h)
+    | hs ->
+      line ctx (prefix ^ " by do");
+      indented ctx (fun () -> List.iter (emit_stmt ctx) hs);
+      line ctx "end"
+  in
+  match p with
+  | PAssertBy (e, hs) -> with_hint ("assert " ^ (render ctx.indent lv_expr) e) hs
+  | PReveal f -> line ctx ("reveal " ^ (render ctx.indent lv_expr) f)
+  | PWithFuel (f, n, body) ->
+    line ctx (Printf.sprintf "with fuel(%s, %d) do" ((render ctx.indent lv_expr) f) n);
+    indented ctx (fun () -> List.iter (emit_stmt ctx) body);
+    line ctx "end"
+  | PCalc (e0, steps) ->
+    line ctx "calc do";
+    indented ctx (fun () ->
+        line ctx (operand e0);
+        List.iter (fun s -> with_hint (s.cs_op ^ " " ^ operand s.cs_rhs) s.cs_hint) steps);
+    line ctx "end"
 
 (** Emit a too-wide list or record literal across lines, with [suffix]
     (a trailing "," when this literal is itself an element of an enclosing

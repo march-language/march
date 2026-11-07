@@ -22,6 +22,9 @@ module.exports = grammar({
 
   conflicts: $ => [
     [$.typed_hole],
+    // `reveal f` (a proof hint) vs `reveal` used as a name: the compiler's
+    // token filter decides by the next token; here GLR does.
+    [$._expr, $.reveal_expression],
     // atom optional args
     [$.atom],
     // type_def: type_identifier can be variant name or type_constructor alias
@@ -608,6 +611,9 @@ module.exports = grammar({
     // Full expression hierarchy
     _expr: $ => choice(
       $.assert_expression,
+      $.reveal_expression,
+      $.with_fuel_expression,
+      $.calc_expression,
       $.pipe_expression,
       $.or_expression,
       $.and_expression,
@@ -642,6 +648,9 @@ module.exports = grammar({
       $.string,
       $.boolean,
       $.identifier,
+      // `calc` and `reveal` are soft keywords (the compiler's token filter
+      // promotes them only before `do` / a name): elsewhere they are names.
+      alias(choice('calc', 'reveal'), $.identifier),
     ),
 
     pipe_expression: $ => prec.left(1, seq(
@@ -741,7 +750,24 @@ module.exports = grammar({
 
     send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
     spawn_expression: $ => seq('spawn', '(', commaSep1($._expr), ')'),
-    assert_expression: $ => seq('assert', field('value', $._expr)),
+    // `assert P` and the proof hint `assert P by hint` (specs/lang/lemmas.md).
+    assert_expression: $ => prec.right(seq(
+      'assert', field('value', $._expr),
+      optional(seq('by', field('hint', $._expr))),
+    )),
+    // Proof hints: `reveal f`, `with fuel(f, N) do … end`, and a `calc`
+    // chain.  The chain is read flatly (terms and `by` hints in order); the
+    // compiler gives it its structure.
+    reveal_expression: $ => prec.right(seq('reveal', field('function', $._expr))),
+    with_fuel_expression: $ => seq(
+      'with', field('name', $.identifier), '(', commaSep1($._expr), ')',
+      'do', optional($.block_body), 'end',
+    ),
+    calc_expression: $ => prec(10, seq(
+      'calc', 'do',
+      repeat1(choice(field('term', $._expr), seq('by', field('hint', $._expr)))),
+      'end',
+    )),
 
     // Sigil expressions: ~H"...", ~H"""...""", ~yaml"...".  The content is one
     // string token; nothing tokenizes the HTML or interpolations inside it.

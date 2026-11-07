@@ -4826,6 +4826,7 @@ let children : A.expr -> A.expr list = function
   | A.EPipe (a, b, _) -> [ a; b ]
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> [ e ]
+  | A.EProof (p, _) -> A.proof_children p
   | A.ESend (a, b, _) -> [ a; b ]
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> [ e1; e2 ]
 
