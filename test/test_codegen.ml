@@ -13646,7 +13646,12 @@ let test_js_diagnostics_observers () =
         (Filename.quote mjs)) in
     Alcotest.(check bool)
       (name ^ ": the panic still reaches Node after the observers (got: " ^ js_err ^ ")")
-      true (ir_contains js_err "Error: boom")
+      true (ir_contains js_err "Error: boom");
+    (* ...pointing at the program's throw, not at the runtime helper that
+       built the Error. *)
+    Alcotest.(check bool)
+      (name ^ ": the stack starts at the program, not march_panic_err (got: " ^ js_err ^ ")")
+      false (ir_contains js_err "march_panic_err (")
   end
 
 (** Issue #1181: an unwritable `-o` path is a filesystem error, not a compiler

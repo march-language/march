@@ -830,6 +830,10 @@ export function march_panic_site(file, line, _col, _end_col) {
  * call site (taken and cleared), for a crash report made later. */
 export function march_panic_err(msg) {
   const e = new Error(msg);
+  /* Drop this frame, so Node's uncaught-error excerpt and stack start at the
+   * March program's throw, not at this helper (as `throw new Error` did). */
+  if (typeof Error.captureStackTrace === "function")
+    Error.captureStackTrace(e, march_panic_err);
   /* Non-enumerable: Node prints an uncaught Error's enumerable fields. */
   if (march_diag_site_file !== null) {
     Object.defineProperty(e, "march_site",

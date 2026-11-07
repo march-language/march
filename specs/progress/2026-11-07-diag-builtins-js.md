@@ -33,6 +33,8 @@ Semantics (closest to native that JS allows):
 - `backtrace` is empty: JS frames name emitted JS, not March functions/lines.
 - Observer order, an observer's panic swallowed, `unobserve` idempotent: as native.
   After the observers the error is rethrown, so Node's output and exit 1 are unchanged.
+  `march_panic_err` drops its own frame (`Error.captureStackTrace`), so Node's uncaught-error
+  excerpt and stack still start at the program's throw, not at the runtime helper.
 
 Test: `test/test_codegen.ml` `test_js_diagnostics_observers` compiles a program with
 `--target js`, runs it under node, and requires its stdout to equal the
