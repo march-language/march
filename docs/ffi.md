@@ -107,7 +107,8 @@ The `= "symbol"` gives the exact C symbol; omit it and the default is
 [capability]({{ site.baseurl }}/docs/capabilities/#ioforeign--calling-unverified-c)
 (and `IO.Foreign.Blocking` if any function is `blocking`), and `main` grants it like
 any other capability: here `Cap(IO.Foreign)` beside `Cap(IO.Console)`. Leaving out
-`needs IO.Foreign` is a warning; leaving out the grant on `main` is an error.
+`needs IO.Foreign` is an error (`extern_needs_foreign`; it was a warning before
+2026-11-06), and so is leaving out the grant on `main`.
 
 ---
 

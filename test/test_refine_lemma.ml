@@ -961,76 +961,80 @@ let hyp_defs =
   end
 |}
 
+(* The design's P1 probe.  Its names carry a `p1_`/`P1` prefix: the stdlib's
+   Session.Theory declares `project`, `dual`, `binary`, `Local` and `Global`,
+   and a user declaration named like a stdlib one is not yet resolved inside
+   a predicate (lemmas design §6, G2). *)
 let project_dual_src =
-  {|  type Local = LEnd | LSend(Int, Local) | LRecv(Int, Local) | LChoose(Int, Local, Int, Local) | LOffer(Int, Local, Int, Local) | LRec(Local) | LVar(Int)
+  {|  type P1Local = LEnd | LSend(Int, P1Local) | LRecv(Int, P1Local) | LChoose(Int, P1Local, Int, P1Local) | LOffer(Int, P1Local, Int, P1Local) | LRec(P1Local) | LVar(Int)
 
-  fn dual(l : Local) : Local do
+  fn p1_dual(l : P1Local) : P1Local do
     match l do
       LEnd -> LEnd
-      LSend(t, k) -> LRecv(t, dual(k))
-      LRecv(t, k) -> LSend(t, dual(k))
-      LChoose(a, x, b, y) -> LOffer(a, dual(x), b, dual(y))
-      LOffer(a, x, b, y) -> LChoose(a, dual(x), b, dual(y))
-      LRec(k) -> LRec(dual(k))
+      LSend(t, k) -> LRecv(t, p1_dual(k))
+      LRecv(t, k) -> LSend(t, p1_dual(k))
+      LChoose(a, x, b, y) -> LOffer(a, p1_dual(x), b, p1_dual(y))
+      LOffer(a, x, b, y) -> LChoose(a, p1_dual(x), b, p1_dual(y))
+      LRec(k) -> LRec(p1_dual(k))
       LVar(i) -> LVar(i)
     end
   end
 
   @[lemma]
-  fn dual_dual(l : Local) : {Unit | dual(dual(l)) == l} do
+  fn p1_dual_dual(l : P1Local) : {Unit | p1_dual(p1_dual(l)) == l} do
     match l do
       LEnd -> ()
-      LSend(_, k) -> dual_dual(k)
-      LRecv(_, k) -> dual_dual(k)
+      LSend(_, k) -> p1_dual_dual(k)
+      LRecv(_, k) -> p1_dual_dual(k)
       LChoose(_, x, _, y) ->
-        dual_dual(x)
-        dual_dual(y)
+        p1_dual_dual(x)
+        p1_dual_dual(y)
       LOffer(_, x, _, y) ->
-        dual_dual(x)
-        dual_dual(y)
-      LRec(k) -> dual_dual(k)
+        p1_dual_dual(x)
+        p1_dual_dual(y)
+      LRec(k) -> p1_dual_dual(k)
       LVar(_) -> ()
     end
   end
 
-  -- Global protocol, roles as Int
-  type Global = GEnd | GMsg(Int, Int, Int, Global) | GChoice(Int, Int, Global, Int, Global) | GLoop(Global) | GVar(Int)
+  -- P1Global protocol, roles as Int
+  type P1Global = GEnd | GMsg(Int, Int, Int, P1Global) | GChoice(Int, Int, P1Global, Int, P1Global) | GLoop(P1Global) | GVar(Int)
 
-  fn project(g : Global, r : Int) : Local do
+  fn p1_project(g : P1Global, r : Int) : P1Local do
     match g do
       GEnd -> LEnd
       GMsg(s, d, t, k) ->
-        if s == r do LSend(t, project(k, r))
-        else if d == r do LRecv(t, project(k, r))
-        else project(k, r) end end
+        if s == r do LSend(t, p1_project(k, r))
+        else if d == r do LRecv(t, p1_project(k, r))
+        else p1_project(k, r) end end
       GChoice(c, a, x, b, y) ->
-        if c == r do LChoose(a, project(x, r), b, project(y, r))
-        else LOffer(a, project(x, r), b, project(y, r)) end
-      GLoop(k) -> LRec(project(k, r))
+        if c == r do LChoose(a, p1_project(x, r), b, p1_project(y, r))
+        else LOffer(a, p1_project(x, r), b, p1_project(y, r)) end
+      GLoop(k) -> LRec(p1_project(k, r))
       GVar(i) -> LVar(i)
     end
   end
 
   -- every message and choice is between a and b
-  fn binary(g : Global, a : Int, b : Int) : Bool do
+  fn p1_binary(g : P1Global, a : Int, b : Int) : Bool do
     match g do
       GEnd -> true
-      GMsg(s, d, _, k) -> ((s == a && d == b) || (s == b && d == a)) && binary(k, a, b)
-      GChoice(c, _, x, _, y) -> (c == a || c == b) && binary(x, a, b) && binary(y, a, b)
-      GLoop(k) -> binary(k, a, b)
+      GMsg(s, d, _, k) -> ((s == a && d == b) || (s == b && d == a)) && p1_binary(k, a, b)
+      GChoice(c, _, x, _, y) -> (c == a || c == b) && p1_binary(x, a, b) && p1_binary(y, a, b)
+      GLoop(k) -> p1_binary(k, a, b)
       GVar(_) -> true
     end
   end
 
   @[lemma]
-  fn project_dual(a : Int, b : {Int | _ != a}, g : {Global | binary(_, a, b)}) : {Unit | project(g, b) == dual(project(g, a))} do
+  fn p1_project_dual(a : Int, b : {Int | _ != a}, g : {P1Global | p1_binary(_, a, b)}) : {Unit | p1_project(g, b) == p1_dual(p1_project(g, a))} do
     match g do
       GEnd -> ()
-      GMsg(_, _, _, k) -> project_dual(a, b, k)
+      GMsg(_, _, _, k) -> p1_project_dual(a, b, k)
       GChoice(_, _, x, _, y) ->
-        project_dual(a, b, x)
-        project_dual(a, b, y)
-      GLoop(k) -> project_dual(a, b, k)
+        p1_project_dual(a, b, x)
+        p1_project_dual(a, b, y)
+      GLoop(k) -> p1_project_dual(a, b, k)
       GVar(_) -> ()
     end
   end
@@ -1106,11 +1110,11 @@ let hypotheses =
           [ "need_u"; "need_v"; "need_g" ]);
     gated "hyp_project_dual: a binary protocol's projections are duals, from the hypothesis (design §2 P1)" (fun () ->
         let out = run ("mod P do\n" ^ project_dual_src ^ "end\n") in
-        expect_admitted out "project_dual";
-        (* RED control: without `binary(_, a, b)` the law is false (a third role's message). *)
-        let weak = Str.global_replace (Str.regexp_string "g : {Global | binary(_, a, b)})") "g : Global)" project_dual_src in
+        expect_admitted out "p1_project_dual";
+        (* RED control: without `p1_binary(_, a, b)` the law is false (a third role's message). *)
+        let weak = Str.global_replace (Str.regexp_string "g : {P1Global | p1_binary(_, a, b)})") "g : P1Global)" project_dual_src in
         let out2 = run ("mod P do\n" ^ weak ^ "end\n") in
-        if not (unproved out2 "project_dual" || refuted out2 "project_dual") then
+        if not (unproved out2 "p1_project_dual" || refuted out2 "p1_project_dual") then
           Alcotest.failf "without the hypothesis project_dual is not proved:\n%s" out2);
     gated "hyp_caller_obliged: a caller must still establish the hypothesis" (fun () ->
         let out =

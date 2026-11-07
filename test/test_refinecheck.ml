@@ -3711,6 +3711,7 @@ end|}));
 mod QExt do
   mod List do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn length(xs: List(Int)) : Int = "march_qext_length"
     end
@@ -4224,6 +4225,7 @@ end|}));
 mod QSExt do
   mod String do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn byte_size(s: String) : Int = "march_qsext_byte_size"
     end
@@ -4497,6 +4499,7 @@ end|}));
              {|
 mod DX do
   needs LibC
+  needs IO.Foreign
   extern "libc": Cap(LibC) do
     fn string_byte_length(s: String): Int
   end
@@ -25417,6 +25420,137 @@ let with_src_dir src f =
       Out_channel.with_open_bin file (fun oc -> output_string oc src);
       f dir (fun () -> In_channel.with_open_bin file In_channel.input_all))
 
+(* Lemmas phase C: `Session.Theory` (stdlib/session_theory.march) proves its
+   laws, and `--validate-projections` (M6, bin/session_validate.ml) checks both
+   protocol projectors against its `project` by evaluation. *)
+let session_theory_suite =
+  let protocols =
+    "mod P do\n\
+    \  protocol Relay do\n\
+    \    Client -> Server : String\n\
+    \    Server -> Client : Int\n\
+    \  end\n\
+    \  protocol Ring do\n\
+    \    X -> Y : String\n\
+    \    Y -> Z : String\n\
+    \    Z -> X : Int\n\
+    \  end\n\
+    \  protocol Shop do\n\
+    \    loop do\n\
+    \      Buyer -> Seller : String\n\
+    \      choose by Seller:\n\
+    \        ok -> Seller -> Buyer : Int\n\
+    \        no -> Seller -> Buyer : String\n\
+    \              stop\n\
+    \      end\n\
+    \    end\n\
+    \  end\n\
+    end\n"
+  in
+  let lines out = List.filter (fun l -> String.length l > 11 && String.sub l 0 11 = "projection ") (String.split_on_char '\n' out) in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  [ Alcotest.test_case "the theory's lemmas are in the proved-lemma manifest" `Quick (fun () ->
+        (* stdlib/lemmas.verified lists the stdlib lemmas the checker proves;
+           test_refine_stdlib_list's "is fresh" case fails when it is stale,
+           so a lemma listed here proves in the stdlib as shipped. *)
+        let manifest =
+          In_channel.with_open_bin
+            (Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/lemmas.verified")
+            In_channel.input_all
+        in
+        List.iter
+          (fun lemma ->
+            Alcotest.(check bool) (lemma ^ " is listed as proved") true
+              (contains manifest ("Session.Theory." ^ lemma ^ "\t")))
+          [ "dual_dual"; "dual_dual_bs"; "same_eq"; "same_eq_bs"; "dual_loop_of"; "erase_loop_of";
+            "merge_binary"; "project_dual"; "project_dual_bs" ]);
+    Alcotest.test_case "both projectors agree on two-role, three-role and loop/choice protocols" `Quick (fun () ->
+        let code, out = run_cli "--validate-projections" protocols in
+        Alcotest.(check int) "exit 0" 0 code;
+        let ls = lines out in
+        (* Relay 2 + Ring 3 + Shop 2 roles, two projectors each. *)
+        Alcotest.(check int) "one row per protocol, projector and role" 14 (List.length ls);
+        Alcotest.(check (list string)) "every row agrees" []
+          (List.filter (fun l -> not (contains l "agrees with Session.Theory.project")) ls);
+        has out "projection Shop Seller (endpoints): agrees";
+        has out "projection Ring Z (typecheck): agrees");
+    Alcotest.test_case "a bystander that is not told the choice is not compared" `Quick (fun () ->
+        let src =
+          "mod P do\n\
+          \  protocol Blind do\n\
+          \    choose by A:\n\
+          \      go -> A -> B : Int\n\
+          \            B -> C : Int\n\
+          \      halt -> A -> B : String\n\
+          \              B -> C : String\n\
+          \    end\n\
+          \  end\n\
+          end\n"
+        in
+        let code, out = run_cli "--validate-projections" src in
+        Alcotest.(check int) "exit 0" 0 code;
+        has out "projection Blind C (typecheck): not compared: the role is not told which branch a choice took";
+        has out "projection Blind C (endpoints): not compared: the role is not told which branch a choice took";
+        has out "projection Blind A (typecheck): agrees");
+    Alcotest.test_case "endpoints: unlabelled messages are distinct, so the bystander is not told" `Quick (fun () ->
+        (* specs/todos/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
+           the typechecker merges C's branches, the generator does not. *)
+        let src =
+          "mod P do\n\
+          \  protocol Three do\n\
+          \    choose by A:\n\
+          \      go -> A -> B : Int\n\
+          \            B -> C : Int\n\
+          \      halt -> A -> B : String\n\
+          \              B -> C : Int\n\
+          \    end\n\
+          \  end\n\
+          end\n"
+        in
+        let code, out = run_cli "--validate-projections" src in
+        Alcotest.(check int) "exit 0" 0 code;
+        has out "projection Three C (typecheck): agrees";
+        has out "projection Three C (endpoints): not compared: the role is not told");
+    Alcotest.test_case "a role that may crash is outside the fragment" `Quick (fun () ->
+        let src =
+          "mod P do\n\
+          \  protocol Logging do\n\
+          \    may crash C\n\
+          \    L -> I : Int\n\
+          \    C -> I : String\n\
+          \      or crash do\n\
+          \        I -> L : String\n\
+          \      end\n\
+          \    I -> L : String\n\
+          \  end\n\
+          end\n"
+        in
+        let code, out = run_cli "--validate-projections" src in
+        Alcotest.(check int) "exit 0" 0 code;
+        has out "projection Logging * (typecheck): not compared: a role that may crash";
+        has out "projection Logging * (endpoints): not compared: a role that may crash");
+    Alcotest.test_case "a user type named like the theory's common words still typechecks" `Quick (fun () ->
+        (* March has one global type namespace: a stdlib type named `Global` or
+           `Local` made every user record of that name a type_mismatch, so
+           the theory's types carry a `Session` prefix. *)
+        let src =
+          "mod G do\n\
+          \  type Global = { x : Int, y : Option(Local) }\n\
+          \  type Local = { n : Int }\n\
+          \  fn take(g : Global) : Int do g.x end\n\
+          \  fn main() : Int do take({ x: 1, y: Some({ n: 2 }) }) end\n\
+          end\n"
+        in
+        let code, out = run_cli "--check" src in
+        Alcotest.(check int) (Printf.sprintf "accepted\n%s" out) 0 code);
+    Alcotest.test_case "--guarantees: a validated projection inherits the theory's laws" `Quick (fun () ->
+        let _, out = run_cli "--check --guarantees" protocols in
+        has out "protocol Relay (2 roles): not checked\n";
+        has out "projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)";
+        has out "protocol Ring (3 roles): not checked\n";
+        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
+        has out "deadlock freedom  not checked") ]
+
 (* `--guarantees` (lemmas phase B, bin/guarantees.ml): one labelled block per
    actor and protocol, read off the ledger after the check; it changes no
    verdict. *)
@@ -25485,9 +25619,9 @@ let guarantees_suite =
         let code, out = run_cli "--check --guarantees" src in
         Alcotest.(check int) "accepted" 0 code;
         has out "protocol Relay (2 roles): not checked\n";
-        has out "checked (compiler): the two roles' projections are dual";
+        has out "proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual";
         has out "protocol Ring (3 roles): not checked\n";
-        has out "checked (compiler): every send has the matching receive at its peer";
+        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
         has out "deadlock freedom  not checked";
         Alcotest.(check bool) "no runtime block without actors" false (contains out "runtime:"));
     Alcotest.test_case "a derived migrate_state is told apart from the actor's own sites" `Quick (fun () ->
@@ -29809,6 +29943,7 @@ let () =
       ("hcr-migration", hcr_migration_suite);
       ("hcr-derived-migration", hcr_derived_migration_suite);
       ("guarantees", guarantees_suite);
+      ("session-theory", session_theory_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
       ("silent-holes", silent_holes_suite);
