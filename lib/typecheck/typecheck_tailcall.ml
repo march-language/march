@@ -599,6 +599,9 @@ let rec check_tail_position
     | Ast.EAssert (ex, _)     -> chk false names params smaller "assert expression" ex
     | Ast.ESigil (_, content, _) -> chk false names params smaller "sigil content" content
     | Ast.ERefineMsg (content, _, _) -> chk false names params smaller "refinement predicate" content
+    (* A `with fuel` body is ordinary code that erasure keeps as a block, so it
+       inherits the tail position; the other proof statements are ghost. *)
+    | Ast.EProof (Ast.PWithFuel (_, _, body), sp) -> chk in_tail names params smaller ctx (Ast.EBlock (body, sp))
     | Ast.EProof (p, _) -> List.iter (chk false names params smaller "proof statement") (Ast.proof_children p)
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _

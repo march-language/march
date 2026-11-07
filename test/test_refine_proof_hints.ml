@@ -174,4 +174,123 @@ let calc =
         expect out ~line:13 ~callee:"calc step 1" "proved";
         expect out ~line:14 ~callee:"calc step 2" "proved") ]
 
-let suite = assert_by @ reveal_fuel @ calc
+(* The whole-branch review's findings (2026-11-06). *)
+let review =
+  [ gated "C1: an assert inside a hint is proved, never assumed" (fun () ->
+        let out =
+          run
+            (prog
+               "  fn c1(x : Int) : Int do\n\
+               \    assert x == 3 by do\n\
+               \      assert x == 3\n\
+               \    end\n\
+               \    need3(x)\n\
+               \  end\n")
+        in
+        U.not_proved out ~line:11 ~callee:"assert";
+        U.not_proved out ~line:14 ~callee:"need3");
+    gated "C2: a let inside a hint shadows; a fact about the inner name is not about the outer" (fun () ->
+        let out =
+          run
+            (prog
+               "  @[lemma]\n\
+               \  fn is3(n : {Int | _ == 3}) : {Unit | n == 3} do () end\n\
+               \  fn c2(x : Int) : Int do\n\
+               \    assert x == 3 by do\n\
+               \      let x = 3\n\
+               \      is3(x)\n\
+               \    end\n\
+               \    need3(x)\n\
+               \  end\n")
+        in
+        U.not_proved out ~line:13 ~callee:"assert";
+        U.not_proved out ~line:17 ~callee:"need3");
+    gated "I2: an assert by that is a whole body, or in a branch, is still checked" (fun () ->
+        let out =
+          run
+            (prog
+               ("  fn whole(xs : List(Int), ys : List(Int)) : Unit do assert " ^ sum_goal
+              ^ " by List.sum_int_append(xs, ys) end\n\
+                 \  fn branch(x : Int) : Int do\n\
+                 \    if x > 0 do assert x == 7 by unit() else () end\n\
+                 \    0\n\
+                 \  end\n"))
+        in
+        expect out ~line:10 ~callee:"assert" "proved";
+        U.not_proved out ~line:12 ~callee:"assert");
+    gated "I3: a recursive call in a with-fuel body keeps its tail position" (fun () ->
+        let out =
+          run
+            (prog
+               "  @[decreases(n)]\n\
+               \  fn spin(n : {Int | _ >= 0}) : Int do\n\
+               \    if n == 0 do 0 else\n\
+               \      with fuel(cnt, 2) do\n\
+               \        spin(n - 1)\n\
+               \      end\n\
+               \    end\n\
+               \  end\n")
+        in
+        if contains out "Function `spin`" then Alcotest.failf "spin flagged as non-tail:\n%s" out);
+    gated "reveal and with fuel take a qualified name" (fun () ->
+        let out =
+          run
+            "mod Q do\n\
+             \  fn need4(x : {Int | _ == 4}) : Int do x end\n\
+             \  mod Inner do\n\
+             \    @[opaque]\n\
+             \    fn dbl(x : Int) : Int do x + x end\n\
+             \  end\n\
+             \  fn shown() : Int do\n\
+             \    reveal Inner.dbl\n\
+             \    need4(Inner.dbl(2))\n\
+             \  end\n\
+             end\n"
+        in
+        expect out ~line:9 ~callee:"need4" "proved");
+    gated "I1: march fmt keeps every proof statement and its output parses" (fun () ->
+        let src =
+          "mod F do\n\
+           \  @[opaque]\n\
+           \  fn dbl(x : Int) : Int do x + x end\n\
+           \  fn go(xs : List(Int), ys : List(Int)) : Int do\n\
+           \    assert 1 == 1 by do\n\
+           \      let n = 2\n\
+           \      assert n == 2\n\
+           \    end\n\
+           \    assert 2 == 2 by do\n\
+           \      assert 1 == 1\n\
+           \    end\n\
+           \    reveal dbl\n\
+           \    with fuel(dbl, 4) do\n\
+           \      let y = dbl(2)\n\
+           \      y\n\
+           \    end\n\
+           \    with fuel(dbl, 3) do\n\
+           \      dbl(1)\n\
+           \    end\n\
+           \    calc do\n\
+           \      List.sum_int(List.append(xs, ys))\n\
+           \      == List.sum_int(xs) + List.sum_int(ys) by List.sum_int_append(xs, ys)\n\
+           \      <= List.sum_int(xs) + List.sum_int(ys) + 0 by do\n\
+           \        assert 0 == 0\n\
+           \      end\n\
+           \    end\n\
+           \    0\n\
+           \  end\n\
+           end\n"
+        in
+        let dir = Filename.temp_dir "fmtproof" "" in
+        let f = Filename.concat dir "m.march" in
+        Out_channel.with_open_bin f (fun oc -> output_string oc src);
+        ignore (U.run_in ~dir "fmt" "m.march");
+        let formatted = In_channel.with_open_bin f In_channel.input_all in
+        List.iter
+          (fun frag -> if not (contains formatted frag) then Alcotest.failf "lost %S:\n%s" frag formatted)
+          [ "let n = 2"; "assert n == 2"; "reveal dbl"; "with fuel(dbl, 4) do"; "let y = dbl(2)";
+            "with fuel(dbl, 3) do"; "calc do"; "by List.sum_int_append(xs, ys)"; "assert 0 == 0" ];
+        if contains formatted "..." then Alcotest.failf "elided code:\n%s" formatted;
+        let out = U.run_in ~dir "--check" "m.march" in
+        if U.has_code out "syntax_error" then Alcotest.failf "formatted output does not parse:\n%s\n%s" formatted out) ]
+
+let suite = assert_by @ reveal_fuel @ calc @ review

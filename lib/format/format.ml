@@ -559,7 +559,7 @@ let sigil_is_multiline content =
     needs multi-line rendering — the "trailing block" call shape, e.g.
     [List.map(xs, fn x -> <multi-statement body> )]. *)
 let rec is_multiline = function
-  | EMatch _ | ELetFn _ | ELetQ _ | ELetStar _ -> true
+  | EMatch _ | ELetFn _ | ELetQ _ | ELetStar _ | EProof _ -> true
   | EBlock (_ :: _ :: _, _) -> true
   | ESigil (_, content, _) -> sigil_is_multiline content
   | ELam (_, body, _) -> is_multiline body
@@ -660,8 +660,45 @@ let rec emit_stmt ctx e =
   | ERecord ((_ :: _), _) when should_break ctx.indent e ->
     emit_literal_multiline ctx ~suffix:"" e
 
+  | EProof (p, _) -> emit_proof ctx p
+
   | _ ->
     line ctx (expr_inline e)
+
+(** A proof statement, one construct per line so it re-parses: a hint that is
+    one call stays on the `by` line; anything else is a `do … end` block, as is
+    a `with fuel` body.  A calc term that is a comparison or a Boolean
+    connective gets parentheses (steps are read at the additive level). *)
+and emit_proof ctx p =
+  let is_call = function EApp _ | ECon _ | EVar _ -> true | _ -> false in
+  let operand e =
+    match e with
+    | EApp (EVar { txt = ("==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||"); _ }, [ _; _ ], _) ->
+      "(" ^ expr_inline e ^ ")"
+    | _ -> expr_inline e
+  in
+  let with_hint prefix hs =
+    match hs with
+    | [] -> line ctx prefix
+    | [ h ] when is_call h && not (is_multiline h) -> line ctx (prefix ^ " by " ^ expr_inline h)
+    | hs ->
+      line ctx (prefix ^ " by do");
+      indented ctx (fun () -> List.iter (emit_stmt ctx) hs);
+      line ctx "end"
+  in
+  match p with
+  | PAssertBy (e, hs) -> with_hint ("assert " ^ expr_inline e) hs
+  | PReveal f -> line ctx ("reveal " ^ expr_inline f)
+  | PWithFuel (f, n, body) ->
+    line ctx (Printf.sprintf "with fuel(%s, %d) do" (expr_inline f) n);
+    indented ctx (fun () -> List.iter (emit_stmt ctx) body);
+    line ctx "end"
+  | PCalc (e0, steps) ->
+    line ctx "calc do";
+    indented ctx (fun () ->
+        line ctx (operand e0);
+        List.iter (fun s -> with_hint (s.cs_op ^ " " ^ operand s.cs_rhs) s.cs_hint) steps);
+    line ctx "end"
 
 (** Emit a too-wide list or record literal across lines, with [suffix]
     (a trailing "," when this literal is itself an element of an enclosing

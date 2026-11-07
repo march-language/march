@@ -449,10 +449,11 @@ ordinary expressions (a comparison inside a term needs parentheses).
 **`reveal f`** lets the rest of its block use the definition of an `@[opaque]` function, as if
 it were reflected. Outside that block `f` stays opaque, so the cost of unfolding it is paid
 only where a proof needs it. It applies to a function that `@[opaque]` is the only reason for
-keeping out of the logic.
+keeping out of the logic, and that does not call itself: a recursive `@[opaque]` function
+stays opaque.
 
-**`with fuel(f, N) do … end`** runs its body with `f`'s fuel set to `N` (1 to 8) for the
-checks inside, instead of raising `@[reflect(fuel: N)]` for every caller. A `reflect-fuel`
+**`with fuel(f, N) do … end`** runs its body with `f`'s fuel set to `N` (1 to 8; a value outside
+that range is taken as the nearest bound) for the checks inside, instead of raising `@[reflect(fuel: N)]` for every caller. A `reflect-fuel`
 skip says which function ran out.
 
 ## When a lemma does not prove

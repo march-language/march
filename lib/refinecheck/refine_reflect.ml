@@ -2353,15 +2353,22 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
      that says `reveal` somewhere: anywhere else nothing changes. *)
   let reveals =
     let found = ref false in
+    let body e = RE.iter_all (function A.EProof (A.PReveal _, _) -> found := true | _ -> ()) e in
+    let fn (fd : A.fn_def) = List.iter (fun (c : A.fn_clause) -> body c.A.fc_body) fd.A.fn_clauses in
+    (* Every place a statement can be: functions, impl methods, actor handlers,
+       tests, an app's body (review minor). *)
     let rec scan ds =
       List.iter
         (function
-          | A.DFn (fd, _) ->
-            List.iter
-              (fun (c : A.fn_clause) ->
-                RE.iter_all (function A.EProof (A.PReveal _, _) -> found := true | _ -> ()) c.A.fc_body)
-              fd.A.fn_clauses
-          | A.DMod (_, _, inner, _) -> scan inner
+          | A.DFn (fd, _) -> fn fd
+          | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> fn fd) idf.A.impl_methods
+          | A.DActor (_, _, ad, _) ->
+            body ad.A.actor_init;
+            List.iter (fun (h : A.actor_handler) -> body h.A.ah_body) (A.actor_body_handlers ad)
+          | A.DTest (t, _) -> body t.A.test_body
+          | A.DApp (app, _) -> body app.A.app_body
+          | A.DLet (_, b, _) -> body b.A.bind_expr
+          | A.DMod (_, _, inner, _) | A.DDescribe (_, inner, _) -> scan inner
           | _ -> ())
         ds
     in

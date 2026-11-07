@@ -40,11 +40,24 @@ Language reference: `specs/lang/lemmas.md`, "Proof hints".
   its sub-kind; tree-sitter (`assert … by`, `reveal_expression`, `with_fuel_expression`,
   `calc_expression`; parser regenerated with 0.26.7).
 
+## Whole-branch review (fresh reviewer, 2026-11-06)
+
+| Finding | Fix | Test (RED → GREEN) |
+|---|---|---|
+| C1 (Critical): an `assert q` inside a hint was assumed unchecked; the hint is erased, so `by do assert false end` proved anything | `hint_path` proves each inner assert with `lemma_assert` and keeps it only if proved | `C1: an assert inside a hint is proved, never assumed` |
+| C2 (Critical): a `let` inside a hint did not shadow, so `let x = 5; pos5(x)` gave a fact about the OUTER `x` | `hint_path` retires rebound names (`path_shadow`); `proof_assert_by` drops every fact about a hint-bound name and restores the outer facts about it | `C2: a let inside a hint shadows…` |
+| I1: `march fmt` printed a multi-statement hint or `with fuel` body as `...` (code lost) and some forms unparseably | `emit_proof` in the block renderer: one construct per line, a hint that is not one call as `by do … end`, calc terms parenthesised when they are comparisons | `I1: march fmt keeps every proof statement and its output parses` |
+| I2: `assert … by` / `calc` outside a block statement (a whole body, a branch) was never checked | proving moved to `visit_inner` (results in `proof_results` by span); the block loop only reads them | `I2: an assert by that is a whole body, or in a branch, is still checked` |
+| I3: the tail-call check walked a `with fuel` body as non-tail | the body inherits `in_tail` | `I3: a recursive call in a with-fuel body keeps its tail position` (RED confirmed by reverting the fix) |
+| Minor: the `reveal` gate scanned only functions | it also scans impl methods, actor init and handlers, tests, `app` bodies and top-level `let`s | — (code reading) |
+| Minor: qualified `reveal Inner.f` | already worked (desugar flattens the name); pinned | `reveal and with fuel take a qualified name` |
+| Minor: keyword impact, silent fuel clamp, recursive `@[opaque]` not revealable | documented in CHANGELOG / `lemmas.md` | — |
+
 ## Verification
 
 | Check | Result |
 |---|---|
-| `proof-hints` group (12): assert-by proves and assumes P (one call / a block), hint facts do not leak, an unproved assert-by is not assumed, erased (program runs), `reveal` proves `need4(dbl(2))` with `@[opaque] dbl` and is scoped to its block, `with fuel(cnt, 5)` proves `cnt(3) == 3` (default fuel skips), its body still runs, calc proves each step and the chain, a wrong middle step is reported as `calc step 2` with nothing assumed, mixed `==`/`<=` | RED (parse errors) → GREEN, 12/12 |
+| `proof-hints` group (18, including the review cases above): assert-by proves and assumes P (one call / a block), hint facts do not leak, an unproved assert-by is not assumed, erased (program runs), `reveal` proves `need4(dbl(2))` with `@[opaque] dbl` and is scoped to its block, `with fuel(cnt, 5)` proves `cnt(3) == 3` (default fuel skips), its body still runs, calc proves each step and the chain, a wrong middle step is reported as `calc step 2` with nothing assumed, mixed `==`/`<=` | RED → GREEN, 18/18 |
 | The two `lemmas.md` examples | both prove (`assert`, `calc step 1/2`, `need_eq`) |
 | `scripts/check-tree-sitter.sh` | ok (1739/1743 clean, 4 known failures as before; keywords listed) |
 | Menhir | 7 shift/reduce conflicts, as on main; no reduce/reduce |
