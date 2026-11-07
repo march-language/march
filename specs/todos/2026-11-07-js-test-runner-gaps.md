@@ -24,3 +24,11 @@ on 2026-11-07 (`specs/progress/2026-11-07-js-test-runner-gaps.md`), and
   fixture on JS needs a decision: give JS an `argv[0]` (the script path, which changes
   `js_argv`'s pinned output) or keep the difference and leave this fixture native-only.
   Until then there is no JS rule for `test/cap_mock/` in `test/dune`.
+- **`to_string` without `Show` on JS: a whole-number Float under a multi-parameter type
+  prints as an Int.** `show_expr` (`lib/tir/js_emit.ml`) substitutes a one-parameter type's
+  argument into its fields, but `Tir.TDVariant` / `TDRecord` do not record the declared
+  parameter order, so with two or more parameters a field typed by a parameter is printed
+  by `march_show_dyn` at run time, where a JS number cannot say it was a Float:
+  `to_string(Pair(1, 2.0))` for `type Pair(a, b) = Pair(a, b)` prints `Pair(1, 2)` on JS and
+  `Pair(1, 2.)` natively. Closing it needs the parameter list kept on the TIR type
+  definition (`lower_type_def` in `lib/tir/lower_decls.ml` drops it).
