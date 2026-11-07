@@ -316,6 +316,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`Math`, `Option` and `Result` are `cap verified`.** Every refinement contract and lemma in
+  them is proved, and a test now fails if a change leaves one unproved (the same now holds for
+  `Udp`, which already declared it). `List` is fully proved in ordinary programs but is not yet
+  marked, because of a name clash when it is checked on its own.
+
 - **Int `/` and `%` are faster in compiled code.** The zero-divisor check is now a test in
   the generated code instead of a call into the runtime, so LLVM sees the division: a literal
   divisor becomes a multiply, and a divisor the code has already tested is not tested again.

@@ -199,3 +199,48 @@ let s2 =
           [ "len_length_onto"; "sum_onto_shift"; "sum_onto_append"; "sum_int_append"; "sum_onto_reverse_onto";
             "sum_int_reverse"; "product_onto_shift"; "product_onto_append"; "product_int_append";
             "product_onto_reverse_onto"; "product_int_reverse" ]) ]
+
+(* `cap verified` stdlib modules (2026-11-07 pass): every module that declares it
+   must check clean as its own entry, the way its `cap verified` claim was
+   measured; nothing else enforced a stdlib module's claim (stdlib diagnostics are
+   filtered from user builds).  List is not among them yet: checked as its own
+   entry, its `reverse` collides with `Prelude.reverse` (todo
+   2026-11-07-stdlib-list-cap-verified). *)
+let cap_verified =
+  let stdlib = Filename.concat (Filename.dirname Sys.executable_name) "../stdlib" in
+  let declares f =
+    let src = In_channel.with_open_bin (Filename.concat stdlib f) In_channel.input_all in
+    List.exists (fun l -> String.trim l = "cap verified") (String.split_on_char '\n' src)
+  in
+  let verified () =
+    Sys.readdir stdlib |> Array.to_list
+    |> List.filter (fun f -> Filename.check_suffix f ".march" && declares f)
+    |> List.sort compare
+  in
+  [ Alcotest.test_case "the cap verified stdlib modules are the ones expected" `Quick (fun () ->
+        let got = verified () in
+        List.iter
+          (fun f -> if not (List.mem f got) then Alcotest.failf "%s does not declare `cap verified` (got %s)" f (String.concat ", " got))
+          [ "math.march"; "option.march"; "result.march"; "udp.march" ]);
+    gated "every cap verified stdlib module checks clean as its own entry" (fun () ->
+        let dir = Filename.concat (Filename.dirname Sys.executable_name) ".." in
+        List.iter
+          (fun f ->
+            let out = U.run_in ~dir "--check --stdlib-source --refine-report" ("stdlib/" ^ f) in
+            (* The module's own obligations: none violated, none skipped. *)
+            let summary =
+              List.find_opt (fun l -> U.contains l "refinement obligations (user code):") (lines out)
+            in
+            let clean =
+              match summary with
+              | Some l -> U.contains l " 0 violated" && U.contains l " 0 skipped"
+              | None -> false
+            in
+            let bad_code =
+              List.exists (fun c -> U.contains out ("[" ^ c ^ "]"))
+                [ "refinement_violated"; "return_refinement_violated"; "refinement_unverified"; "lemma_unproved";
+                  "invalid_lemma"; "termination_unproved" ]
+            in
+            if (not clean) || bad_code then
+              Alcotest.failf "stdlib/%s declares `cap verified` but does not check clean:\n%s" f out)
+          (verified ())) ]
