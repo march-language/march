@@ -83,6 +83,3 @@ be assumptions without evidence, and one false assumption is enough to "prove" a
 the program.
 
 See also: [the language reference](../refinement-types.md), [the lemmas guide](../lemmas.md), `invalid_lemma`, `lemma_unproved_call`.
-
-Scoped `assert … by` blocks use this diagnostic too. Their hints must be total and pure;
-only a proved goal becomes a fact outside the block. See [scoped proof hints](../lemmas.md#scoped-proof-hints-assert--by).

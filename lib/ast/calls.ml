@@ -54,7 +54,7 @@ let rec calls_in_expr (acc : (string * Ast.span * Ast.span) list) (e : Ast.expr)
   | Ast.ECond (arms, _) ->
     List.fold_left (fun a (ce, be) ->
       calls_in_expr (calls_in_expr a ce) be) acc arms
-  | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
+  | Ast.EPipe (a, b, _) -> calls_in_expr (calls_in_expr acc a) b
   | Ast.EAnnot (ex, _, _) -> calls_in_expr acc ex
   | Ast.EHole _ -> acc
   | Ast.EAtom (_, args, _) -> List.fold_left calls_in_expr acc args
@@ -67,6 +67,7 @@ let rec calls_in_expr (acc : (string * Ast.span * Ast.span) list) (e : Ast.expr)
   | Ast.ELetQ (_, rhs, body, _) -> calls_in_expr (calls_in_expr acc rhs) body
   | Ast.ELetStar (_, rhs, body, _) -> calls_in_expr (calls_in_expr acc rhs) body
   | Ast.EAssert (e, _) -> calls_in_expr acc e
+  | Ast.EProof (p, _) -> List.fold_left calls_in_expr acc (Ast.proof_children p)
   | Ast.ESigil (_, content, _) -> calls_in_expr acc content
   | Ast.ERefineMsg (content, _, _) -> calls_in_expr acc content
   | Ast.ELit _ | Ast.EVar _ -> acc
@@ -165,7 +166,7 @@ let builtin_candidate_calls ?(bound = []) (e : Ast.expr)
     | Ast.EIf (c, t, f, _) -> go' (go' (go' acc c) t) f
     | Ast.ECond (arms, _) ->
       List.fold_left (fun a (ce, be) -> go' (go' a ce) be) acc arms
-    | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) -> go' (go' acc a) b
+    | Ast.EPipe (a, b, _) -> go' (go' acc a) b
     | Ast.EAnnot (ex, _, _) -> go' acc ex
     | Ast.EAtom (_, args, _) -> List.fold_left go' acc args
     | Ast.ESend (a, b, _) -> go' (go' acc a) b
@@ -181,6 +182,7 @@ let builtin_candidate_calls ?(bound = []) (e : Ast.expr)
       let acc = go' acc rhs in
       go (List.fold_left (fun s v -> SSet.add v s) bound (pattern_vars [] pat)) acc body
     | Ast.EAssert (ex, _) -> go' acc ex
+    | Ast.EProof (p, _) -> List.fold_left go' acc (Ast.proof_children p)
     | Ast.ESigil (_, content, _) -> go' acc content
     | Ast.ERefineMsg (content, _, _) -> go' acc content
     | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
@@ -242,7 +244,7 @@ let rec spawned_actor_names (acc : string list) (e : Ast.expr) : string list =
   | Ast.ECond (arms, _) ->
     List.fold_left (fun a (ce, be) ->
       spawned_actor_names (spawned_actor_names a ce) be) acc arms
-  | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) -> spawned_actor_names (spawned_actor_names acc a) b
+  | Ast.EPipe (a, b, _) -> spawned_actor_names (spawned_actor_names acc a) b
   | Ast.EAnnot (ex, _, _) -> spawned_actor_names acc ex
   | Ast.EAtom (_, args, _) -> List.fold_left spawned_actor_names acc args
   | Ast.ESend (a, b, _) -> spawned_actor_names (spawned_actor_names acc a) b
@@ -253,6 +255,7 @@ let rec spawned_actor_names (acc : string list) (e : Ast.expr) : string list =
   | Ast.ELetStar (_, rhs, body, _) ->
     spawned_actor_names (spawned_actor_names acc rhs) body
   | Ast.EAssert (e, _) -> spawned_actor_names acc e
+  | Ast.EProof (p, _) -> List.fold_left spawned_actor_names acc (Ast.proof_children p)
   | Ast.ESigil (_, content, _) -> spawned_actor_names acc content
   | Ast.ERefineMsg (content, _, _) -> spawned_actor_names acc content
   | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)
@@ -347,7 +350,7 @@ let free_app_sites ?(bound = []) (e : Ast.expr) : app_site list =
     | Ast.EIf (c, t, f, _) -> go' (go' (go' acc c) t) f
     | Ast.ECond (arms, _) ->
       List.fold_left (fun a (ce, be) -> go' (go' a ce) be) acc arms
-    | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) -> go' (go' acc a) b
+    | Ast.EPipe (a, b, _) -> go' (go' acc a) b
     | Ast.EAnnot (ex, _, _) -> go' acc ex
     | Ast.EAtom (_, args, _) -> List.fold_left go' acc args
     | Ast.ESend (a, b, _) -> go' (go' acc a) b
@@ -363,6 +366,7 @@ let free_app_sites ?(bound = []) (e : Ast.expr) : app_site list =
       let acc = go' acc rhs in
       go (List.fold_left (fun s v -> SSet.add v s) bound (pattern_vars [] pat)) acc body
     | Ast.EAssert (ex, _) -> go' acc ex
+    | Ast.EProof (p, _) -> List.fold_left go' acc (Ast.proof_children p)
     | Ast.ESigil (_, content, _) -> go' acc content
     | Ast.ERefineMsg (content, _, _) -> go' acc content
     | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _)

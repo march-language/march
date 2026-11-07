@@ -150,7 +150,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
         List.iter (fun (br : Ast.branch) -> scan_one br.branch_body) brs
       | Ast.EIf (c, t, el, _) -> scan_one c; scan_one t; scan_one el
       | Ast.EApp (f, args, _) -> scan_one f; List.iter scan_one args
-      | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> scan_one l; scan_one r
+      | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> scan_one l; scan_one r
       | Ast.ELet (b, _) -> scan_one b.Ast.bind_expr
       | _ -> ()
     in
@@ -724,7 +724,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
                 fv b br.branch_body) brs
           | Ast.EIf (c, t, el, _) -> fv bound c; fv bound t; fv bound el
           | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> fv bound c; fv bound b) arms
-          | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> fv bound a; fv bound b
+          | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> fv bound a; fv bound b
           | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> fv bound e) fs
           | Ast.ERecordUpdate (e, fs, _) -> fv bound e; List.iter (fun (_, e) -> fv bound e) fs
           | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->
@@ -733,6 +733,7 @@ let ast_code_actions (a : t) ~line ~character : Lsp.Types.CodeAction.t list =
             fv b c
           | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
           | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _) | Ast.EDbg (Some e, _) -> fv bound e
+          | Ast.EProof (p, _) -> List.iter (fv bound) (Ast.proof_children p)
         in
         fv [] e;
         (* Keep only locals (names not in the module/global env), de-duped, in use order. *)

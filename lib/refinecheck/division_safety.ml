@@ -282,7 +282,7 @@ let rec iter_sites
         walk f { c with path = (cond, false) :: c.path } b)
       arms
   | A.EField (inner, _, _) -> go inner
-  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) -> go a; go b
+  | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (inner, _, _) -> go inner
   | A.ELam (ps, body, _) -> under (lam_param_names ps) body
   (* A local `fn go(...)` binds its own name (it may recurse) and its
@@ -291,6 +291,10 @@ let rec iter_sites
   | A.ELetQ (p, rhs, body, _) | A.ELetStar (p, rhs, body, _) ->
     go rhs; under (Refine_check.pat_binders p) body
   | A.EAssert (inner, _) -> go inner
+  (* Ghost: a proof hint never runs, so it can never divide by zero; a
+     `with fuel` body is ordinary code. *)
+  | A.EProof (A.PWithFuel (_, _, body), _) -> List.iter go body
+  | A.EProof _ -> ()
   | A.ESend (cap, msg, _) -> go cap; go msg
   | A.ESpawn (inner, _) -> go inner
   | A.EDbg (e_opt, _) -> Option.iter go e_opt

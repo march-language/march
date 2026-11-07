@@ -50,7 +50,8 @@ let rec span_of (e : Ast.expr) : Ast.span =
   | Ast.EAnnot (_, _, sp) | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp)
   | Ast.ESend (_, _, sp) | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp)
   | Ast.ELetFn (_, _, _, _, sp) | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
-  | Ast.EAssert (_, sp) | Ast.EAssertBy (_, _, sp) | Ast.ESigil (_, _, sp) -> sp
+  | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) -> sp
+  | Ast.EProof (_, sp) -> sp
   | Ast.ERefineMsg (inner, _, _) -> span_of inner
 
 let is_and = function

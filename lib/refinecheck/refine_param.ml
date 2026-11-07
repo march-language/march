@@ -338,10 +338,11 @@ let rec expr_binders (acc : string list) (e : A.expr) : string list =
   | A.ERecordUpdate (r, fs, _) -> List.fold_left (fun acc (_, e) -> go acc e) (go acc r) fs
   | A.EField (x, _, _) | A.EAnnot (x, _, _) | A.ESpawn (x, _) | A.EAssert (x, _)
   | A.ESigil (_, x, _) -> go acc x
+  | A.EProof (p, _) -> List.fold_left go acc (A.proof_children p)
   | A.ERefineMsg (x, _, _) -> go acc x
   | A.EIf (c, t, f, _) -> go (go (go acc c) t) f
   | A.ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
-  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go (go acc a) b
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go (go acc a) b
   | A.EDbg (x, _) -> (match x with Some x -> go acc x | None -> acc)
   | A.ELetFn (n, ps, _, body, _) ->
     go (n.A.txt :: List.map (fun (p : A.param) -> p.A.param_name.A.txt) ps @ acc) body
@@ -377,10 +378,11 @@ let rec value_refs (acc : string list) (e : A.expr) : string list =
   | A.ERecordUpdate (r, fs, _) -> List.fold_left (fun acc (_, e) -> go acc e) (go acc r) fs
   | A.EField (x, _, _) | A.EAnnot (x, _, _) | A.ESpawn (x, _) | A.EAssert (x, _)
   | A.ESigil (_, x, _) -> go acc x
+  | A.EProof (p, _) -> List.fold_left go acc (A.proof_children p)
   | A.ERefineMsg (x, _, _) -> go acc x
   | A.EIf (c, t, f, _) -> go (go (go acc c) t) f
   | A.ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
-  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go (go acc a) b
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go (go acc a) b
   | A.EDbg (x, _) -> (match x with Some x -> go acc x | None -> acc)
   | A.ELetQ (_, a, b, _) | A.ELetStar (_, a, b, _) -> go (go acc a) b
 

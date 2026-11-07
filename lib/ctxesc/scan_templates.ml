@@ -155,7 +155,7 @@ let rec find_sigils tbl file (e : March_ast.Ast.expr) =
   | ERecord (fs, _) -> List.iter (fun (_, e) -> go e) fs
   | ERecordUpdate (e, fs, _) -> go e; List.iter (fun (_, e) -> go e) fs
   | EField (e, _, _) -> go e
-  | EAssertBy (a, b, _) | EPipe (a, b, _) -> go a; go b
+  | EPipe (a, b, _) -> go a; go b
   | EAnnot (e, _, _) -> go e
   | EAtom (_, es, _) -> List.iter go es
   | ESend (a, b, _) -> go a; go b

@@ -197,7 +197,7 @@ let rec iter_expr (f : A.expr -> unit) (e : A.expr) : unit =
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
   | A.EDbg (Some inner, _) -> go inner
   | A.EApp (h, args, _) -> go h; List.iter go args
-  | A.EAssertBy (l, r, _) | A.EPipe (l, r, _) -> go l; go r
+  | A.EPipe (l, r, _) -> go l; go r
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.ELam (_, body, _) -> go body
   | A.EBlock (es, _) -> List.iter go es
@@ -212,6 +212,7 @@ let rec iter_expr (f : A.expr -> unit) (e : A.expr) : unit =
   | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | A.EAnnot (ex, _, _) | A.ESpawn (ex, _) | A.EAssert (ex, _) | A.ESigil (_, ex, _)
   | A.ERefineMsg (ex, _, _) -> go ex
+  | A.EProof (p, _) -> List.iter go (A.proof_children p)
   | A.ESend (a, b, _) -> go a; go b
   | A.ELetFn (_, _, _, body, _) -> go body
   | A.ELetQ (_, r, k, _) | A.ELetStar (_, r, k, _) -> go r; go k

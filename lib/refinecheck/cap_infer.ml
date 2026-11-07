@@ -248,9 +248,10 @@ let direct_callees (e : A.expr) : string list =
     | A.EIf (c, t, f, _) -> go c; go t; go f
     | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
     | A.ELam (_, body, _) -> go body
-    | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go a; go b
+    | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go a; go b
     | A.EField (e, _, _) | A.EAnnot (e, _, _) | A.ESpawn (e, _)
     | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _) | A.EAssert (e, _) -> go e
+    | A.EProof (p, _) -> List.iter go (A.proof_children p)
     | A.EDbg (e_opt, _) -> Option.iter go e_opt
     | A.EVar _ | A.ELit _ | A.EHole _ | A.EResultRef _ -> ()
   in

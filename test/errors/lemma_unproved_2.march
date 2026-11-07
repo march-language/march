@@ -1,9 +1,0 @@
-mod Main do
-  cap verified
-  fn require_positive(n : Int) : Int do
-    assert n > 0 by do
-      ()
-    end
-    n
-  end
-end

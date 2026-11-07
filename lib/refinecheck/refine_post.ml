@@ -2799,7 +2799,7 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
           calls_of acc br.A.branch_body)
         (calls_of acc x) brs
     | A.EIf (c, t, f, _) -> calls_of (calls_of (calls_of acc c) t) f
-    | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) -> calls_of (calls_of acc a) b
+    | A.EPipe (a, b, _) -> calls_of (calls_of acc a) b
     | A.EAnnot (x, _, _) | A.EField (x, _, _) -> calls_of acc x
     | _ -> acc
   in

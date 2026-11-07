@@ -94,7 +94,6 @@ type expr =
           [fold_letq] in the parser nests continuations for both [ELetQ]
           and [ELetStar] at parse time. See
           specs/lang/let-star-generalized-bind.md. *)
-  | EAssertBy of expr * expr * span  (** Statically proved goal with erased, scoped hints. *)
   | EAssert of expr * span
       (** Test assertion: assert expr.
           When the inner expr is a binary comparison (==, !=, <, >, <=, >=),
@@ -104,6 +103,11 @@ type expr =
           The string is the sigil name (e.g. "H", "xml", "toml").
           The expr is the string content (may include interpolation).
           Desugared to Sigil.x(content) call by the desugar pass. *)
+  | EProof of proof * span
+      (** A ghost proof statement (proof hints: todos 2026-11-06-proof-assert-by,
+          -proof-reveal-and-local-fuel, -proof-calc-blocks).  The refinement
+          checker uses it; [Lemma_erase] removes it (keeping a [PWithFuel]
+          body) before anything lowers, interprets or JIT-compiles. *)
   | ERefineMsg of expr * string * span
       (** A conjunct of a refinement predicate with an author-written message:
           `{Int | _ >= 0 else "index must not be negative" && ...}`.  Only
@@ -111,6 +115,27 @@ type expr =
           [TyRefine] predicate.  The refinement checker strips it on entry
           ([Refine_msg.strip]) and keeps the message for its diagnostics, so
           no predicate reasoning ever sees this node. *)
+
+and proof =
+  | PAssertBy of expr * expr list
+      (** `assert P by do hints end` / `assert P by hint(…)`: [P] proved with the
+          hints' facts in scope, then assumed; the hints' facts do not leak. *)
+  | PReveal of expr
+      (** `reveal f`: an [@[opaque]] function's definition is usable by the
+          obligations after it in the enclosing block. *)
+  | PWithFuel of expr * int * expr list
+      (** `with fuel(f, N) do body end`: [f]'s unfolding depth is [N] for the
+          obligations in [body].  The body is ordinary code and is kept. *)
+  | PCalc of expr * calc_step list
+      (** `calc do e0  op1 e1 by h1  op2 e2 … end`: each step is its own
+          obligation; the chain's conclusion is assumed afterwards. *)
+
+and calc_step = {
+  cs_op : string;          (** "==", "<", "<=", ">", ">=" *)
+  cs_rhs : expr;
+  cs_hint : expr list;     (** the step's hint statements; [] for none *)
+  cs_span : span;          (** the step's operator through its operand *)
+}
 
 and param = {
   param_name : name;
@@ -566,6 +591,24 @@ let rec show_ty = function
   | TyRefine (base, Some v, _) ->
     Printf.sprintf "{ %s : %s | ... }" v.txt (show_ty base)
 
+(** The expressions a proof statement contains, in source order (the
+    asserted predicate or the calc chain's terms, then the hints / body). *)
+let proof_children (p : proof) : expr list =
+  match p with
+  | PAssertBy (e, hints) -> e :: hints
+  | PReveal f -> [ f ]
+  | PWithFuel (f, _, body) -> f :: body
+  | PCalc (e0, steps) -> e0 :: List.concat_map (fun s -> s.cs_rhs :: s.cs_hint) steps
+
+(** Rebuild a proof statement with [f] applied to every expression it holds. *)
+let map_proof (f : expr -> expr) (p : proof) : proof =
+  match p with
+  | PAssertBy (e, hints) -> PAssertBy (f e, List.map f hints)
+  | PReveal e -> PReveal (f e)
+  | PWithFuel (e, n, body) -> PWithFuel (f e, n, List.map f body)
+  | PCalc (e0, steps) ->
+    PCalc (f e0, List.map (fun s -> { s with cs_rhs = f s.cs_rhs; cs_hint = List.map f s.cs_hint }) steps)
+
 (** Compact expression summary — used in test failure messages. *)
 let show_expr = function
   | ELit (LitInt n, _) -> string_of_int n
@@ -598,10 +641,10 @@ let show_expr = function
   | ELetFn _ -> "ELetFn(...)"
   | ELetQ _ -> "ELetQ(...)"
   | ELetStar _ -> "ELetStar(...)"
-  | EAssertBy _ -> "EAssertBy(...)"
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"
   | ERefineMsg _ -> "ERefineMsg(...)"
+  | EProof _ -> "EProof(...)"
 
 (** The restart-backoff curve a `supervise` block gets when it declares no
     `backoff` clause: exactly the constants that were hardcoded in the runtime

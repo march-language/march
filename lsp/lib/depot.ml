@@ -54,13 +54,14 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
   | Ast.ECond (arms, _) ->
     List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
   | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
-  | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
+  | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
   | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
   | Ast.ERecordUpdate (e2, fs, _) ->
     iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
   | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
   | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _) | Ast.ERefineMsg (e2, _, _)
   | Ast.EDbg (Some e2, _) -> iter_expr f e2
+  | Ast.EProof (p, _) -> List.iter (iter_expr f) (Ast.proof_children p)
   | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> iter_expr f r; iter_expr f c
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _) -> ()
@@ -191,7 +192,7 @@ let schema_has_column (schemas : schema list) ~table ~col =
    raw EPipe form and the desugared nested-EApp form. *)
 let rec table_of_query (schemas : schema list) (e : Ast.expr) : string option =
   match e with
-  | Ast.EAssertBy (lhs, _, _) | Ast.EPipe (lhs, _, _) -> table_of_query schemas lhs
+  | Ast.EPipe (lhs, _, _) -> table_of_query schemas lhs
   | Ast.EApp (callee, args, _) ->
     (match callee_name callee with
      | Some n when name_matches ~suffix:"Query.from_table" n ->

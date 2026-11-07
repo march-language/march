@@ -21,8 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
-- Scoped `assert P by do … end` proof hints: only a proved goal becomes a fact outside the block; all hints are erased before execution.
-
+- **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
+  `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
+  gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
+  reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
+  block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
+  function's unfolding depth for the checks inside only. All four are checked by the compiler
+  and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
+  in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
+  keeps working.
 - **A warning when a predicate means the built-in, not your function.** Inside a refinement
   predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
   own function of that name is in scope, the checker now says so
@@ -682,6 +689,16 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **Module functions used as values compile correctly.** A binding such as
+  `let k = List.length` now retains the function definition during compilation,
+  including when the binding is called with different element types.
+- **Type-qualified function names fail with an actionable diagnostic.**
+  `Int.to_string(5)` now explains that `Int` is a type and points to `to_string`,
+  instead of passing checking and failing or producing the wrong value at runtime.
+- **Endpoint generation merges equivalent unlabelled choice branches.** A bystander
+  receiving the same message in either branch now shares the message constructor
+  and continuation state, instead of receiving errors in generated code.
 
 - **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
   such a type, and a lemma about it, can now be used in refinements. Recursion through

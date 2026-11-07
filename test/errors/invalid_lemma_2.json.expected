@@ -1,1 +1,0 @@
-{"severity":"error","file":"errors/invalid_lemma_2.march","start_line":3,"start_col":4,"end_line":6,"end_col":7,"message":"This proof block is invalid: a hint binds a name used by the goal; rename the hint-local binding","code":"invalid_lemma","fix":null,"labels":[],"notes":[],"category":"REFINEMENT"}

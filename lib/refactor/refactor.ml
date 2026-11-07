@@ -187,11 +187,12 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.EField (e, fld, _) -> expr e; f SField fld
     | Ast.EIf (c, t, el, _) -> expr c; expr t; expr el
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> expr c; expr b) arms
-    | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> expr a; expr b
+    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> expr a; expr b
     | Ast.EAnnot (e, t, _) -> expr e; ty t
     | Ast.EAtom (_, es, _) -> List.iter expr es
     | Ast.ESpawn (e, _) | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _)
     | Ast.EDbg (Some e, _) -> expr e
+    | Ast.EProof (p, _) -> List.iter expr (Ast.proof_children p)
     | Ast.ELetFn (n, ps, rt, body, _) ->
       f SFn n; List.iter param ps;
       (match rt with Some t -> ty t | None -> ()); expr body
@@ -595,7 +596,7 @@ and iter_app_exprs (f : Ast.expr -> Ast.expr list -> Ast.span -> unit)
           (match br.branch_guard with Some g -> ex g | None -> ()); ex br.branch_body) brs
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
     | Ast.EIf (c, t, el, _) -> ex c; ex t; ex el
-    | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> ex a; ex b
+    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> ex a; ex b
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> ex e) fs
     | Ast.ERecordUpdate (e, fs, _) -> ex e; List.iter (fun (_, e) -> ex e) fs
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
@@ -627,7 +628,7 @@ and span_of_expr (e : Ast.expr) : Ast.span =
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
-  | Ast.EAssert (_, sp) | Ast.EAssertBy (_, _, sp) | Ast.ESigil (_, _, sp) | Ast.ERefineMsg (_, _, sp) -> sp
+  | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) | Ast.ERefineMsg (_, _, sp) | Ast.EProof (_, sp) -> sp
   | Ast.EVar n -> n.Ast.span
   | Ast.EResultRef _ -> Ast.dummy_span
 
@@ -724,14 +725,15 @@ let unshadowed_uses (targets : string list) (e : Ast.expr) : (string * Ast.span)
           walk b br.branch_body) brs
     | Ast.EIf (c, t, el, _) -> walk bound c; walk bound t; walk bound el
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> walk bound c; walk bound b) arms
-    | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> walk bound a; walk bound b
+    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> walk bound a; walk bound b
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk bound e) fs
     | Ast.ERecordUpdate (e, fs, _) -> walk bound e; List.iter (fun (_, e) -> walk bound e) fs
     | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) ->
       walk bound r;
       walk bound c
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
-    | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _) | Ast.EDbg (Some e, _) -> walk bound e in
+    | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _) | Ast.EDbg (Some e, _) -> walk bound e
+    | Ast.EProof (p, _) -> List.iter (walk bound) (Ast.proof_children p) in
   walk [] e;
   !acc
 

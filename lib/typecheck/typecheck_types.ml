@@ -478,9 +478,10 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ELetFn (_, _, _, _, sp) -> sp
   | Ast.ELetQ  (_, _, _, sp)   -> sp
   | Ast.ELetStar (_, _, _, sp) -> sp
-  | Ast.EAssert (_, sp) | Ast.EAssertBy (_, _, sp)         -> sp
+  | Ast.EAssert (_, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
   | Ast.ERefineMsg (_, _, sp)       -> sp
+  | Ast.EProof (_, sp)          -> sp
 
 (** The provided side of a type mismatch (D5, diagnostics plan §9): the
     sub-expression whose inferred type [p_ty] failed to meet the context,
@@ -580,10 +581,10 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
     free_vars_expr (pat_bound @ bound) cont
   | Ast.EPipe (l, r, _) ->
     free_vars_expr bound l @ free_vars_expr bound r
-  | Ast.EAssertBy (p, h, _) -> free_vars_expr bound p @ free_vars_expr bound h
   | Ast.EAssert (e, _) -> free_vars_expr bound e
   | Ast.ESigil (_, content, _) -> free_vars_expr bound content
   | Ast.ERefineMsg (content, _, _) -> free_vars_expr bound content
+  | Ast.EProof (p, _) -> List.concat_map (free_vars_expr bound) (Ast.proof_children p)
 
 and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
   match es with

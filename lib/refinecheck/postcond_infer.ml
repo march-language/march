@@ -105,7 +105,7 @@ let rec calls_name (name : string) (e : A.expr) : bool =
   | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> any es
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> calls_name name e
   | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> calls_name name b
-  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> calls_name name a || calls_name name b
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> calls_name name a || calls_name name b
   | A.ERecord (fs, _) -> List.exists (fun (_, v) -> calls_name name v) fs
   | A.ERecordUpdate (r, fs, _) ->
     calls_name name r || List.exists (fun (_, v) -> calls_name name v) fs

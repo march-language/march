@@ -156,10 +156,11 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.ESpawn (e, _) -> ex e
     | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
     | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> ex r; ex c
-    | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) -> ex l; ex r
+    | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
     | Ast.ERefineMsg (c, _, _) -> ex c
+    | Ast.EProof (p, _) -> List.iter ex (Ast.proof_children p)
   in
   let fn_param (fp : Ast.fn_param) =
     match fp with
@@ -268,10 +269,11 @@ let unqualified_module_deps
     | Ast.ESpawn (e, _) -> ex e
     | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
     | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> ex r; ex c
-    | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) -> ex l; ex r
+    | Ast.EPipe (l, r, _) -> ex l; ex r
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
     | Ast.ERefineMsg (c, _, _) -> ex c
+    | Ast.EProof (p, _) -> List.iter ex (Ast.proof_children p)
   in
   let decl (d : Ast.decl) =
     match d with

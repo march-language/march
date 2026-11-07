@@ -14713,6 +14713,38 @@ let test_non_redundant_no_warning () =
 
 (* ── Improvement #8: qualified error uses notes ─────────────────────────── *)
 
+let test_type_qualified_value_rejected () =
+  List.iter (fun (decl, expr, qualifier) ->
+    let ctx = typecheck ("mod Test do " ^ decl ^
+      " fn f() do " ^ expr ^ " end end") in
+    Alcotest.(check bool) (expr ^ " is rejected") true (has_errors ctx);
+    Alcotest.(check bool) "actionable type qualifier diagnostic" true
+      (List.exists (fun d ->
+        _contains_substr d.March_errors.Errors.message
+          ("`" ^ qualifier ^ "` is a type, not a module") &&
+        _contains_substr d.March_errors.Errors.message "to_string")
+        (March_errors.Errors.sorted ctx)))
+    [ "", "Int.to_string(5)", "Int";
+      "", "Int.to_string", "Int";
+      "type Counter = Counter(Int)", "Counter.to_string(5)", "Counter";
+      "type Number = Int", "Number.to_string(5)", "Number" ]
+
+let test_type_qualified_value_controls () =
+  let ctx = typecheck {|mod Test do
+    mod Auth do
+      type Auth = Auth
+      pfn hash(s : String) : String do s end
+      fn verify(plain, stored) do Auth.hash(plain) == stored end
+    end
+    mod Counter do
+      fn to_string(x : Int) : String do int_to_string(x) end
+    end
+    fn f() do Counter.to_string(5) end
+    fn g() do to_string(5) end
+  end|} in
+  Alcotest.(check bool) "real module and bare function still accepted" false
+    (has_errors ctx)
+
 let test_qualified_error_uses_notes () =
   let ctx = typecheck {|mod Test do
     fn f() do Nonexistent.foo(1) end
@@ -18224,30 +18256,8 @@ let test_callarity_aliases_matching_ok () =
   end|}) in
   Alcotest.(check bool) "matching aliases / lambda callee: no error" false (has_errors ctx)
 
-let test_assert_by_surface () =
-  let src = {|mod N do
-  fn f(x : Int) : Int do
-    assert x == x by do
-      let y = x
-      assert y == x by do () end
-    end
-    x
-  end
-end
-|} in
-  Alcotest.(check bool) "scoped proof typechecks" false (has_errors (typecheck src));
-  let formatted = March_format.Format.format_source ~filename:"t.march" src in
-  Alcotest.(check bool) "formatted proof typechecks" false (has_errors (typecheck formatted));
-  Alcotest.(check string) "format is stable" formatted
-    (March_format.Format.format_source ~filename:"t.march" formatted)
-
-let test_assert_by_type_errors () =
-  List.iter (fun src -> Alcotest.(check bool) "reject invalid scope/type" true (has_errors (typecheck src)))
-    [ "mod N do fn f() do assert 42 by do () end end end";
-      "mod N do fn f() do assert true by do\n let y = 1\n ()\n end\n y\n end end" ]
-
 let compiler_suites =
-  [ ("assert-by", [Alcotest.test_case "surface and format" `Quick test_assert_by_surface; Alcotest.test_case "types and scope" `Quick test_assert_by_type_errors]);
+  [
       sigil_interp_suite;
       csrf_suite;
       ("repl_cache", Test_repl_cache.tests);
@@ -19334,6 +19344,8 @@ let compiler_suites =
           Alcotest.test_case "#6 arm after wildcard: redundant warning"     `Quick test_redundant_after_wildcard_warning;
           Alcotest.test_case "#6 guarded arm: no redundancy warning"        `Quick test_guarded_arm_no_redundant_warning;
           Alcotest.test_case "#6 non-redundant match: no warning"           `Quick test_non_redundant_no_warning;
+          Alcotest.test_case "type qualifier cannot resolve value" `Quick test_type_qualified_value_rejected;
+          Alcotest.test_case "type qualifier controls" `Quick test_type_qualified_value_controls;
           Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
           Alcotest.test_case "#7 parse error uses -- SYNTAX header"          `Quick test_parse_error_has_error_header;
           Alcotest.test_case "X5: every code has one category"             `Quick test_every_code_has_one_category;

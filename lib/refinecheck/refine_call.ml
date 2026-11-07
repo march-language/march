@@ -254,9 +254,10 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
   | A.EField (r, _, _) -> free r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
-  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
+  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
+  | A.EProof (p, _) -> List.exists free (A.proof_children p)
 
 (* ── Attributing a skip to a withdrawn alias ───────────────────────────────
    A withdrawn alias is only ONE of the reasons an obligation can go
@@ -544,9 +545,10 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EField (r, _, _) -> recur r
       | A.EIf (c, t, el, _) -> any [ c; t; el ]
       | A.ECond (arms, _) -> List.exists (fun (c, b) -> recur c || recur b) arms
-      | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
+      | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
       | A.EDbg (Some e, _) -> recur e
+      | A.EProof (p, _) -> List.exists recur (A.proof_children p)
     in
     (* [pred] itself may be a top-level conjunction (`len(_) >= 0 && len(_) >
        0`), which is exactly the shape [Partial_conjunct] names: one conjunct
@@ -3572,7 +3574,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                | Callback_codomain, _ ->
                  Printf.sprintf "the return of `%s`, passed where a refined codomain is expected," callee
                | Decreases, _ -> Printf.sprintf "the recursive call to `%s`" callee
-               | Lemma_goal, _ when callee = "assert" -> "this static `assert` in a proof"
+               | Lemma_goal, _ when callee = "assert" -> "this static `assert` in a lemma"
                | Lemma_goal, _ -> Printf.sprintf "the lemma `%s`" callee
              in
              (* Point at the offending argument itself. The call span covers the

@@ -12,13 +12,13 @@ One file per step. Grouped by effort, ordered within a group by practical payoff
 
 ## Quick wins (small effort; each makes existing proofs easier to write or debug)
 
-1. **Done 2026-11-07** (`specs/progress/2026-11-06-proof-assert-by.md`) — `assert P by do … end`: a scoped hint whose helper facts do
+1. ~~`2026-11-06-proof-assert-by`~~ done (`specs/progress/2026-11-06-proof-hints.md`) — `assert P by do … end`: a scoped hint whose helper facts do
    not leak.
-2. `2026-11-06-proof-calc-blocks` — `calc` chains with one obligation per step and per-step
+2. ~~`2026-11-06-proof-calc-blocks`~~ done (same) — `calc` chains with one obligation per step and per-step
    diagnostics.
 3. `2026-11-06-refinement-indexed-type-aliases` — `type Vec(a, n) = {List(a) | len(_) == n}`:
    value-indexed types in refinement form (most of what length-indexed vectors buy).
-4. `2026-11-06-proof-reveal-and-local-fuel` — `reveal f` for `@[opaque]` functions and a
+4. ~~`2026-11-06-proof-reveal-and-local-fuel`~~ done (same) — `reveal f` for `@[opaque]` functions and a
    per-proof fuel override (per-function `@[reflect(fuel: N)]` exists already).
 
 ## Medium (a feature each; unlock new classes of property)
@@ -49,7 +49,7 @@ One file per step. Grouped by effort, ordered within a group by practical payoff
 
 ## Suggested order
 
-1 is complete. Finish 2 and 4 next (cheap, immediately useful); then 5 with 6 (they unlock 11); 8 and 9 in
+1-2 and 4 first (cheap, immediately useful); then 5 with 6 (they unlock 11); 8 and 9 in
 parallel whenever someone has the appetite (independent of the rest); 3 and 7 when a user needs
 them; 10, 12, 13 after 5 has settled.
 

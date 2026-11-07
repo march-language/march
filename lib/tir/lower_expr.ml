@@ -1397,8 +1397,11 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     in
     lower_expr env flat_map_call
 
+  (* --- Proof hints: erased before lowering ([Lemma_erase]); kept total. --- *)
+  | Ast.EProof (Ast.PWithFuel (_, _, body), sp) -> lower_expr env (Ast.EBlock (body, sp))
+  | Ast.EProof (_, sp) -> lower_expr env (Ast.ETuple ([], sp))
+
   (* --- Assert: a failed assertion panics with a rendered report --- *)
-  | Ast.EAssertBy (_, _, sp) -> lower_expr env (Ast.ETuple ([], sp))
   | Ast.EAssert (inner, _) ->
     (* The report (lib/errors/test_report.ml) is the interpreter's, byte for
        byte: its header (the source line and caret) is rendered here, at

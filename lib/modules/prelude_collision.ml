@@ -136,10 +136,11 @@ let rec free_names (bound : StrSet.t) (e : expr) : StrSet.t =
   | ELetQ (p, result, cont, _) | ELetStar (p, result, cont, _) ->
     let pat_bound = free_pattern_names p in
     StrSet.union (go result) (free_names (StrSet.union pat_bound bound) cont)
-  | EAssertBy (l, r, _) | EPipe (l, r, _) -> StrSet.union (go l) (go r)
+  | EPipe (l, r, _) -> StrSet.union (go l) (go r)
   | EAssert (e, _) -> go e
   | ESigil (_, content, _) -> go content
   | ERefineMsg (content, _, _) -> go content
+  | EProof (p, _) -> union_all (List.map go (proof_children p))
 
 and free_names_block (bound : StrSet.t) (es : expr list) : StrSet.t =
   match es with

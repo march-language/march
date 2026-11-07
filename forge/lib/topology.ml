@@ -609,7 +609,7 @@ let rec refs_in_expr acc (e : Ast.expr) : string list =
   | Ast.EField (inner, _, _) -> (match dotted e with Some _ -> acc | None -> go acc inner)
   | Ast.EIf (c, t, f, _) -> go (go (go acc c) t) f
   | Ast.ECond (arms, _) -> List.fold_left (fun a (c, b) -> go (go a c) b) acc arms
-  | Ast.EAssertBy (x, y, _) | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go (go acc x) y
+  | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go (go acc x) y
   | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _) | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) -> go acc e
   | Ast.EDbg (Some e, _) -> go acc e
   | Ast.ELetQ (_, e1, e2, _) | Ast.ELetStar (_, e1, e2, _) -> go (go acc e1) e2
