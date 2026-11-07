@@ -9,11 +9,12 @@ exit: 1
     mod Name do
         ...
     end
-    run `march --explain module_keyword`
 
-fix [module_keyword]:
-@@ lines 1-1 @@
--module Main do
-+mod Main do
+    fix (`forge fix` applies it):
+
+1 - module Main do
+1 + mod Main do
+
+    run `march --explain module_keyword`
 
 after fix: exit 0

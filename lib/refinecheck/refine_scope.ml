@@ -604,9 +604,37 @@ let law_method_display (s : string) : string =
     cut 0
   else s
 
-let rec pred_str (e : A.expr) : string =
-  let binop op a b = pred_str a ^ " " ^ op ^ " " ^ pred_str b in
-  match e with
+(* The levels follow parser.mly's expr_or through expr_field. Comparisons
+   are non-associative; every other binary level associates to the left. *)
+let pred_infix_precedence = function
+  | "||" -> Some 1
+  | "&&" -> Some 2
+  | ">=" | "<=" | ">" | "<" | "==" | "!=" -> Some 3
+  | "+" | "-" | "+." | "-." -> Some 4
+  | "*" | "/" | "%" | "*." | "/." -> Some 5
+  | _ -> None
+
+let rec pred_precedence = function
+  | A.ERefineMsg (inner, _, _) -> pred_precedence inner
+  | A.EApp (A.EVar { A.txt = op; _ }, [ _; _ ], _) ->
+    Option.value (pred_infix_precedence op) ~default:7
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ _ ], _) -> 6
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ _ ], sp)
+    when !Reflect_state.negate_builtin_at sp -> 6
+  | A.EApp _ -> 7
+  | A.EField _ -> 8
+  | _ -> 9
+
+let rec pred_str (e : A.expr) : string = pred_str_prec 0 e
+and pred_str_prec context (e : A.expr) : string =
+  let precedence = pred_precedence e in
+  let binop op a b =
+    (* Even associative operators retain right-nested grouping: the report
+       should reparse to the original tree, not merely an equivalent one. *)
+    let left_context = if precedence = 3 then precedence + 1 else precedence in
+    pred_str_prec left_context a ^ " " ^ op ^ " " ^ pred_str_prec (precedence + 1) b
+  in
+  let rendered = match e with
   (* Only an undesugared predicate still carries an author message
      ([March_ast.Refine_msg]); the text is the conjunct's alone, so
      [Refine_audit.desugar_dropped] matches it against the desugared copy. *)
@@ -633,20 +661,16 @@ let rec pred_str (e : A.expr) : string =
   | A.ECon ({ A.txt = ctor; _ }, args, _) ->
     ctor ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.EVar { A.txt; _ } -> if txt = set_empty_literal then "empty" else law_method_display txt
-  | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
+  | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str_prec 8 recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
                              | "+" | "-" | "*" | "/" | "%" | "+." | "-." | "*." | "/.") as op; _ },
             [ a; b ], _) ->
     binop op a b
-  (* `!` binds tighter than any infix operator, so `!(y > 0)` printed flat
-     as `!y > 0` would name a different predicate (an instantiated `!p(_)`
-     slot is the common producer, leftovers design §3.2). *)
-  | A.EApp (A.EVar { A.txt = "not"; _ },
-            [ (A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
-                                       | "+" | "-" | "*" | "/" | "%"); _ }, [ _; _ ], _) as a) ], _) ->
-    "!(" ^ pred_str a ^ ")"
-  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp -> "-" ^ pred_str a
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str_prec 6 a
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
+    let operand = pred_str_prec 6 a in
+    (* Adjacent minus signs would begin a line comment. *)
+    "-" ^ (if String.starts_with ~prefix:"-" operand then "(" ^ operand ^ ")" else operand)
   (* Any other application of a plain IDENTIFIER — an unrecognised predicate
      such as `is_prime(_)`.  It reflects to nothing, so it is exactly the case
      `cap verified` reports, and rendering it `<predicate>` would name the
@@ -661,7 +685,8 @@ let rec pred_str (e : A.expr) : string =
   (* A record literal, as written (field order kept). *)
   | A.ERecord (fs, _) ->
     "{ " ^ String.concat ", " (List.map (fun ((n : A.name), v) -> n.A.txt ^ ": " ^ pred_str v) fs) ^ " }"
-  | _ -> "<predicate>"
+  | _ -> "<predicate>" in
+  if precedence < context then "(" ^ rendered ^ ")" else rendered
 
 (* Why a `/`/`%` leaf did not reflect, for the `unreflectable-predicate`
    detail and the definition-site warning; [None] for any other leaf.  Since

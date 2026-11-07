@@ -101,6 +101,10 @@ let cap_strict     = ref true
    `json.march` used to get this for free. *)
 let stdlib_source  = ref false
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
+(* --fix-verify-source PATH (internal): read the entry's text from PATH while
+   keeping its file name, for the child run that re-checks a fix
+   (bin/fix_verify.ml). *)
+let fix_verify_source : string option ref = ref None
 let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)

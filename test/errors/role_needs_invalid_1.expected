@@ -7,15 +7,16 @@ Protocol `Logging`: `C` may crash, so `C -> I : ...` needs `or crash do ... end`
          ^
 
     The crash branch is the rest of the conversation when `C` is gone. It must begin, for `L`, with a message from `I`; the fix sends one each, for you to change to what the conversation should do.
+
+    fix (`forge fix` applies it):
+
+13 |     C -> I : String
+14 +       or crash do
+15 +         I -> L : String
+16 +       end
+
     run `march --explain role_needs_invalid`
 
 
-
-fix [role_needs_invalid]:
-@@ after line 13 @@
-     C -> I : String
-+      or crash do
-+        I -> L : String
-+      end
 
 after fix: exit 0

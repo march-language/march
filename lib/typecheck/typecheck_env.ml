@@ -1918,6 +1918,31 @@ let qualified_error_msg (name : string) (env : env) : string =
         in
         Printf.sprintf "Module `%s` does not export `%s`.%s" mod_name member hint
 
+(** The replacement text for a qualified name that failed to resolve, when
+    [qualified_error_msg] names exactly one: a misspelt module (`Lsit.map` ->
+    `List.map`) or one misspelt member (`List.fodl` -> `List.fold`). *)
+let qualified_fix (name : string) (env : env) : string option =
+  match split_qualified name with
+  | None -> None
+  | Some (mod_name, member) ->
+    if StrMap.mem mod_name env.local_mods then None
+    else
+      match March_modules.Module_registry.ensure_loaded mod_name with
+      | None ->
+        Option.map (fun s -> s ^ "." ^ member) (suggest_module_name mod_name)
+      | Some exports ->
+        let open March_modules.Module_registry in
+        if List.exists (fun e -> e.ex_name = member) exports.me_entries then None
+        else
+          match List.filter_map (fun e ->
+              if e.ex_public
+              && edit_distance (String.lowercase_ascii member)
+                   (String.lowercase_ascii e.ex_name) <= 2
+              then Some e.ex_name else None) exports.me_entries
+                |> List.sort_uniq compare with
+          | [ s ] -> Some (mod_name ^ "." ^ s)
+          | _ -> None
+
 (** All parent types of ctors in [env] that share [name] (multiple types may
     define the same variant). Returns list of type names (deduplicated).
     O(log n) — just a single map lookup on the ctor_info list. *)
@@ -2174,6 +2199,21 @@ let suggest_ctors ?need (name : string) (env : env) : (string * string) list =
       if Hashtbl.mem shown line then None
       else (Hashtbl.add shown line (); Some line))
   |> List.filteri (fun i _ -> i < 5)
+
+(** The one constructor [unknown_ctor_hint] suggests, when it suggests one. *)
+let unknown_ctor_fix ?need (name : string) (env : env) : string option =
+  match suggest_ctors ?need name env with
+  | [ (k, _) ] -> Some k
+  | _ -> None
+
+(** A field-name guess's tier: a machine fix when no other field is as close
+    a spelling ([cont] and [count] for `conut` are both one edit away), a
+    guess otherwise. *)
+let field_guess_tier (name : string) (flds : (string * 'a) list) (guess : string) =
+  let d = edit_distance name guess in
+  if List.exists (fun (f, _) -> f <> guess && edit_distance name f <= d) flds
+  then March_errors.Errors.Maybe_incorrect
+  else March_errors.Errors.Machine_applicable
 
 (** The rest of an [unknown_constructor] error after its first sentence: a
     newline and the ranked suggestions, or why nothing is offered for a

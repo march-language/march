@@ -690,9 +690,9 @@ let check_redundant_arms (env : env) (scrut_ty : ty)
             labels  = [];
             notes   = ["An earlier arm already covers all values this pattern matches."];
             code    = Err.Code.redundant_arm;
-            fix     = Some (Err.FDelete {
+            fix     = Some (Err.fix (Err.FDelete {
               start_line = arm_span.March_ast.Ast.start_line;
-              end_line   = arm_span.March_ast.Ast.end_line }) }
+              end_line   = arm_span.March_ast.Ast.end_line })) }
       end;
       prefix := !prefix @ arm_rows
     end
@@ -754,12 +754,35 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
       env.nonexhaustive_match_spans := span :: !(env.nonexhaustive_match_spans);
       (match missing with
        | ex :: _ ->
+         (* The missing arm, after the last one at its indentation, with a
+            `todo(...)` body for the programmer to replace: a fix with a
+            placeholder.  Not for a list case, whose printed form names the
+            internal constructors rather than a pattern one can write. *)
+         let fix =
+           match List.rev branches with
+           | last :: _ when not (String.contains ex '#')
+                         && not (List.exists (fun w ->
+                             let n = String.length w and m = String.length ex in
+                             let rec at i = i + n <= m && (String.sub ex i n = w || at (i + 1)) in
+                             at 0) [ "Cons"; "Nil" ]) ->
+             let pat_sp = span_of_pat last.Ast.branch_pat in
+             let body_sp = span_of_expr last.Ast.branch_body in
+             if pat_sp.March_ast.Ast.start_line <= 0 || body_sp.March_ast.Ast.end_line <= 0
+             then None
+             else
+               Some (Err.fix ~tier:Err.Has_placeholders
+                       (Err.FInsert {
+                           after_line = body_sp.March_ast.Ast.end_line;
+                           text = Printf.sprintf "%s%s -> todo(%S)"
+                               (String.make pat_sp.March_ast.Ast.start_col ' ') ex
+                               ("handle " ^ ex) }))
+           | _ -> None in
          Err.report env.errors
            { Err.severity = Warning; span;
              message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s." ex;
              labels  = [];
              notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
-             code    = Err.Code.non_exhaustive_match; fix = None }
+             code    = Err.Code.non_exhaustive_match; fix }
        | [] ->
          Err.report env.errors
            { Err.severity = Warning; span;

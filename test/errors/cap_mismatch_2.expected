@@ -19,11 +19,11 @@ exit: 1
 11 |   fn main(cap : Cap(IO)) do
                ^^^
 
+    fix (`forge fix` applies it):
+
+12 -     greet(cap, "march")
+12 +     greet(cap_narrow(cap), "march")
 
 
-fix [cap_mismatch:IO.Console]:
-@@ lines 12-12 @@
--    greet(cap, "march")
-+    greet(cap_narrow(cap), "march")
 
 after fix: exit 0

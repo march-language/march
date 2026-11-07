@@ -19,16 +19,16 @@ and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : 
 
 14 |   fn main(c : Cap(IO.Console)) do
               ^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+ 6 | mod Main do
+ 7 +   needs IO.FileWrite
+14 -   fn main(c : Cap(IO.Console)) do
+14 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+
     run `march --explain cap_needs`
 
 
-
-fix [cap_needs:IO.FileWrite]:
-@@ after line 6 @@
- mod Main do
-+  needs IO.FileWrite
-@@ lines 14-14 @@
--  fn main(c : Cap(IO.Console)) do
-+  fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
 
 after fix: exit 0

@@ -1217,6 +1217,6 @@ let attach_promoted_fixes ?(root = Sys.getcwd ()) ?(budget = default_budget)
                 upgrades
             with
             | Some (_, _, help, fix) when d.Err.fix = None ->
-              { d with Err.message = d.Err.message ^ help; Err.fix = Some fix }
+              { d with Err.message = d.Err.message ^ help; Err.fix = Some (Err.fix fix) }
             | _ -> d)
           errctx.Err.diagnostics

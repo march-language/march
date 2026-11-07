@@ -14,6 +14,12 @@ expected `List(a)` but got `Int -> Int`. [type_mismatch]
 
 9 |     let ys = List.map(fn x -> x * 2, xs)
                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+9 -     let ys = List.map(fn x -> x * 2, xs)
+9 +     let ys = List.map(xs, fn x -> x * 2)
+
     run `march --explain type_mismatch`
 
 
@@ -39,10 +45,5 @@ expected `a -> b` but got `List(Int)`. [type_mismatch]
             ^^
 
 
-
-fix [type_mismatch]:
-@@ lines 9-9 @@
--    let ys = List.map(fn x -> x * 2, xs)
-+    let ys = List.map(xs, fn x -> x * 2)
 
 after fix: exit 0

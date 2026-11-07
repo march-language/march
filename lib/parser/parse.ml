@@ -99,8 +99,8 @@ let refine_structural ~filename ~src ~generic (st : Token_filter.open_state)
          else d.message);
       fix =
         (if only_end then
-           Some (Errors.FDelete { start_line = p.Lexing.pos_lnum;
-                                  end_line = p.Lexing.pos_lnum })
+           Some (Errors.fix (Errors.FDelete { start_line = p.Lexing.pos_lnum;
+                                              end_line = p.Lexing.pos_lnum }))
          else d.fix) }
   | Some la when (la = Parser.EOF || is_decl_keyword la) ->
     let where =
@@ -204,8 +204,32 @@ let refine_structural ~filename ~src ~generic (st : Token_filter.open_state)
          span = span_at ~filename o.op_pos (String.length o.op_kw);
          message;
          notes = d.notes @ (noticed :: chain);
-         fix = (match fix with Some _ -> fix | None -> d.fix) })
+         fix = (match fix with Some f -> Some (Errors.fix f) | None -> d.fix) })
   | _ -> d
+
+(* `let? x : T = e` / `let* x : T = e` (the parser stops at the `:`, [pos]):
+   the fix deletes the annotation, from the `:` to the `=` that ends it on
+   the same line. *)
+let annotation_fix ~filename ~src ~msg (pos : Lexing.position) =
+  if not (String.starts_with ~prefix:"A `let?` binding can't have a type annotation" msg
+          || String.starts_with ~prefix:"A `let*` binding can't have a type annotation" msg)
+  then None
+  else
+    let text = line_text (src_lines src) pos.Lexing.pos_lnum in
+    let c = col pos in
+    let n = String.length text in
+    let rec find_eq i =
+      if i >= n then None
+      else if text.[i] = '='
+           && (i + 1 >= n || (text.[i + 1] <> '=' && text.[i + 1] <> '>'))
+           && (i = 0 || not (String.contains "=<>!" text.[i - 1]))
+      then Some i
+      else find_eq (i + 1) in
+    match find_eq (c + 1) with
+    | Some e when c < n && text.[c] = ':' ->
+      let span = { (span_at ~filename pos 1) with March_ast.Ast.end_col = e } in
+      Some (Errors.FReplace { span; text = (if c > 0 && text.[c - 1] = ' ' then "" else " ") })
+    | _ -> None
 
 let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
   let lexbuf = lexbuf_of_string ~filename src in
@@ -221,10 +245,13 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
   | exception Errors.ParseError (msg, hint, pos) ->
     (* D4: the production's own code and fix, when it set them. *)
     let (code, fix) = Errors.take_parse_error_extra () in
+    let fix = match fix with
+      | Some _ -> fix
+      | None -> annotation_fix ~filename ~src ~msg pos in
     let code = Option.value code ~default:code_parse_error in
     Error [ refine ~generic:false
               { (Errors.parse_error_diagnostic_at ~filename ?hint ~src ~msg pos)
-                with code; fix } ]
+                with code; fix = Errors.fix_opt fix } ]
   | exception Parser.Error ->
     Error [ refine ~generic:true
               { (Errors.parse_error_diagnostic ~filename ~msg:stuck lexbuf)
@@ -255,7 +282,7 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
                   then "\n" ^ String.make (indent_of text) ' ' else replace) }
     in
     Error [ { (Errors.parse_error_diagnostic_at ~filename ~len:1 ~msg p)
-              with code; notes = [ note ]; fix = Some fix } ]
+              with code; notes = [ note ]; fix = Some (Errors.fix fix) } ]
 
 let module_ ?filename ?stuck src    = run ?filename ?stuck Parser.module_ src
 let repl_input ?filename ?stuck src = run ?filename ?stuck Parser.repl_input src

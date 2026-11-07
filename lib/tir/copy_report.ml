@@ -497,4 +497,5 @@ let diagnostic (s : site) (l : located) : March_errors.Errors.diagnostic =
     | None -> [] in
   { March_errors.Errors.severity = March_errors.Errors.Warning;
     span = l.call_arg; message = String.concat "\n" (headline :: why :: help);
-    labels = [ label ]; notes = []; code = March_errors.Code.copy_shared; fix = l.fix }
+    labels = [ label ]; notes = []; code = March_errors.Code.copy_shared;
+    fix = March_errors.Errors.fix_opt l.fix }

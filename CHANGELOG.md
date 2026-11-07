@@ -21,6 +21,26 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
+  `march --check-json`, a fix's `applicability` is `machine-applicable`,
+  `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
+  `--check-json` applies it to a copy of the file and checks the copy. Unless its own
+  error went away and nothing new appeared, the fix is printed as `maybe-incorrect`.
+  `forge fix` applies only machine-applicable fixes, and the language server marks only
+  those as the preferred quick fix, after re-checking each one on a copy of the buffer.
+  The others are labelled "a guess: check it" or "fill in the placeholder".
+- **`march --check` shows each fix under its error,** as the lines it changes
+  (`4 - old`, `4 + new`), headed by its tier. Until now only `--check-json`, the editor
+  and `forge fix` saw fixes.
+- **More errors come with a fix:**
+  - an unknown name, qualified name, constructor or record field, when the message
+    suggests exactly one replacement (a guess when another candidate is as close);
+  - a missing JSON codec: `derive Json for T` after `T`'s declaration;
+  - a type annotation on `let?` / `let*`: it is removed;
+  - a non-exhaustive `match`: the missing arm, with a `todo(...)` body to replace.
+
+  In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
+  have a machine-applicable one.
 - **`Actor.Theory`: the mailbox's promises, proved on a model and tested against the
   runtime.** A new stdlib module models an actor's mailbox and proves, once, that one sender's
   messages arrive in the order sent (whatever other senders, a hot-deploy hold, a stash or a
@@ -46,6 +66,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
   module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
@@ -644,11 +672,25 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
+- Compiled record equality keeps helpers distinct for different record shapes,
+  avoiding wrong comparisons and crashes when a program uses several record types.
+- Refinement diagnostics preserve predicate grouping with parentheses, including
+  mixed Boolean operators, arithmetic and unary expressions.
+
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
   file, instead of silently reporting success.
 
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,

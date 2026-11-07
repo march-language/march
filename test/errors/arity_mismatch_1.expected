@@ -14,11 +14,11 @@ March has no partial application — a call must supply all arguments.
 4 |     let cb = fn _ -> 42
                  ^^^^^^^^^^
 
+    fix (`forge fix` applies it):
+
+4 -     let cb = fn _ -> 42
+4 +     let cb = fn -> 42
 
 
-fix [arity_mismatch]:
-@@ lines 4-4 @@
--    let cb = fn _ -> 42
-+    let cb = fn -> 42
 
 after fix: exit 0
