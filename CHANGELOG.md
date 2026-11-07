@@ -41,6 +41,14 @@ git log is authoritative for exact commits.
 
   In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
   have a machine-applicable one.
+- **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
+  parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
+  parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
+  checked (including a reflected call that returns one, `need_x(bump(p))`), and a return type
+  can relate the result to a record parameter (`{Int | _ == p.x}`, `{Pt | _.x == p.y}`). A
+  record literal in a predicate is typed by its field names when exactly one record has them,
+  and reports print it as written instead of `<predicate>`.
+
 - **Stdlib laws for `List.sum_int` and `List.product_int`, and a result type on `List.length`.**
   `List.sum_int_append(xs, ys)` proves `sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)`,
   `List.sum_int_reverse(xs)` proves `sum_int(reverse(xs)) == sum_int(xs)`, and
@@ -646,6 +654,11 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
+  generated failure-handler parameters; their offer functions typecheck normally.
+- The two-node test harness now fails when a started node has no expected-output
+  file, instead of silently reporting success.
 
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
