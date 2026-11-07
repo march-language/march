@@ -655,6 +655,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
+  such a type, and a lemma about it, can now be used in refinements. Recursion through
+  `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating
+  too.
+
 - Compiled record equality keeps helpers distinct for different record shapes,
   avoiding wrong comparisons and crashes when a program uses several record types.
 - Refinement diagnostics preserve predicate grouping with parentheses, including

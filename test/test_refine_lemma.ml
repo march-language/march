@@ -1582,3 +1582,66 @@ let tuple_body =
         List.iter
           (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
           [ "l_bad"; "l_bad2" ]) ]
+
+(* A derived `Eq` on a recursive type (todo 2026-11-06-derived-eq-recursive-type-unreflected):
+   the derived `eq` recurses through `match (a, b) do (B(_, x), B(_, y)) -> x == y`, and a
+   component bound through a tuple of parameters did not count as structurally smaller, so
+   no function using `==` on the type was reflected.  (The todo's example names its type
+   `T`, which `Crdt.T` also declares at the same arity: that clash is
+   2026-11-03-reflect-type-name-clash-with-stdlib, so the test uses `Chain`.) *)
+let reflect_row out name =
+  List.find_map
+    (fun l ->
+      match String.split_on_char '\t' l with
+      | "reflect" :: _ :: n :: verdict :: _ when n = name -> Some verdict
+      | _ -> None)
+    (lines out)
+
+let expect_reflected out name want =
+  match reflect_row out name with
+  | Some v when v = want -> ()
+  | v -> Alcotest.failf "reflect `%s`: expected %s, got %s:\n%s" name want (Option.value ~default:"no row" v) out
+
+let derived_eq =
+  [ gated "derived_eq: == on a recursive type with derive Eq is usable in a lemma" (fun () ->
+        let out =
+          run ~args:"--check --reflect-report --reflect-deps"
+            "mod D do\n\
+             \  type Chain = A | B(Int, Chain)\n\
+             \  derive Eq for Chain\n\
+             \  fn same(x : Chain, y : Chain) : Bool do x == y end\n\
+             \  @[lemma]\n\
+             \  fn refl(x : Chain) : {Unit | same(x, x)} do () end\n\
+             end\n"
+        in
+        expect_reflected out "same" "reflected";
+        expect_status out "refl" "admitted");
+    gated "derived_eq: a recursion on components of a tuple of parameters is structural" (fun () ->
+        let out =
+          run ~args:"--check --reflect-report"
+            "mod Z do\n\
+             \  fn zlen(xs : List(Int), ys : List(Int)) : Int do\n\
+             \    match (xs, ys) do\n\
+             \      (Cons(_, xt), Cons(_, yt)) -> 1 + zlen(xt, yt)\n\
+             \      _ -> 0\n\
+             \    end\n\
+             \  end\n\
+             end\n"
+        in
+        expect_reflected out "zlen" "reflected");
+    gated "derived_eq control: a component passed in another parameter's position is not structural" (fun () ->
+        (* `xt` is smaller than `xs`, but it is passed where `ys` goes, and `ys`
+           itself is passed where `xs` goes: neither position decreases. *)
+        let out =
+          run ~args:"--check --reflect-report"
+            "mod Z do\n\
+             \  fn swp(xs : List(Int), ys : List(Int)) : Int do\n\
+             \    match (xs, ys) do\n\
+             \      (Cons(_, xt), _) -> swp(ys, xt)\n\
+             \      _ -> 0\n\
+             \    end\n\
+             \  end\n\
+             end\n"
+        in
+        expect_reflected out "swp" "no") ]
+

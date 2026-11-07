@@ -4871,6 +4871,31 @@ let structural_subvars ?(params : string list = []) (param : string) (body : A.e
                List.iter (fun v -> Hashtbl.replace set v ()) vs
              | _ -> ())
            brs
+       (* `match (a, b) do (C(…), D(…)) -> …`: a component of the scrutinee
+          tuple that is structural here contributes the variables of ITS
+          constructor sub-pattern, position by position (todo
+          2026-11-06-derived-eq-recursive-type-unreflected: a derived `Eq`
+          recurses this way).  A variable bound by another position's
+          pattern is a component of that position's value, not of this one. *)
+       | A.EMatch (A.ETuple (comps, _), brs, _) ->
+         List.iteri
+           (fun i (c : A.expr) ->
+             match c with
+             | A.EVar s when is_struct ~live s.A.txt ->
+               List.iter
+                 (fun (br : A.branch) ->
+                   match br.A.branch_pat with
+                   | A.PatTuple (pats, _) when List.length pats = List.length comps -> (
+                     match List.nth pats i with
+                     | A.PatCon (_, sub) ->
+                       let vs = List.concat_map pat_vars sub in
+                       occ := vs @ !occ;
+                       List.iter (fun v -> Hashtbl.replace set v ()) vs
+                     | _ -> ())
+                   | _ -> ())
+                 brs
+             | _ -> ())
+           comps
        | _ -> ());
       match e with
       | A.EBlock (es, _) ->
