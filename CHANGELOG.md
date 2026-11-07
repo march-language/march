@@ -655,6 +655,18 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march --target js --test` runs the tests.** The output used to define the test blocks
+  and never call them, so a failing test exited 0 with no output; with a `main` the tests
+  were dropped and `main` ran. A program that prints did not build at all with `--test`
+  (`builtin cap_dict has no JavaScript-target implementation`). The `.mjs` now runs the
+  tests and prints the same report as a native test binary, takes `--verbose` and
+  `--filter=`, and exits 1 when a test fails. Capability mocks work there too (#1176).
+- **An output path that cannot be written is no longer an internal compiler error.**
+  `march --target js -o dist/app.mjs` with no `dist/` printed "internal compiler error" and
+  exited 3. `-o` now creates missing parent directories, for `--target js` and `--compile`
+  alike. A path that still cannot be written, such as a directory, is an error naming it,
+  with exit code 1. A source map that cannot be written is now a warning instead of being
+  skipped without a word (#1181).
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output

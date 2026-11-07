@@ -13448,6 +13448,134 @@ let test_js_int_subset_parity () =
             && ir_contains tail "EXIT:1")
   end
 
+(** Issue #1181: an unwritable `-o` path is a filesystem error, not a compiler
+    crash.  `--target js -o dist/x.mjs` with no `dist/` hit an unguarded
+    [open_out] whose [Sys_error] reached the catch-all handler: "internal
+    compiler error", a backtrace, exit 3.  Now a missing parent directory is
+    created (for `--compile -o` too, which a cache HIT already did and a miss
+    left to fail in the linker), and a path that still cannot be written (a
+    directory, a parent that is a file) is a plain `error:` naming the path,
+    exit 1. *)
+let test_output_path_errors () =
+  let name = "out_path_1181" in
+  let src =
+    "mod OutPath do\n\
+    \  needs IO.Console\n\
+    \  fn main(_c : Cap(IO.Console)) : () do\n\
+    \    println(\"hello\")\n\
+    \  end\n\
+     end\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  let compile args =
+    run_capture (Printf.sprintf "cd %s && %s %s %s 2>&1"
+                   (Filename.quote project_root) (Filename.quote main_exe)
+                   args (Filename.quote src_path)) in
+  let no_ice what out =
+    Alcotest.(check bool) (what ^ ": not reported as a compiler bug (got: " ^ out ^ ")")
+      false (ir_contains out "internal compiler error" || ir_contains out "compiler bug") in
+  (* A missing parent (two levels deep) is created: JS. *)
+  let mjs = Filename.concat tmp "dist/sub/x.mjs" in
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote mjs) in
+  no_ice "js, missing dir" out;
+  Alcotest.(check int) ("js, missing dir: exit 0 (got: " ^ out ^ ")") 0 rc;
+  Alcotest.(check bool) "js, missing dir: output written" true (Sys.file_exists mjs);
+  Alcotest.(check bool) "js, missing dir: source map written beside it" true
+    (Sys.file_exists (mjs ^ ".map"));
+  if Sys.command "command -v node >/dev/null 2>&1" = 0 then begin
+    let (_, js_out) = run_capture ("node " ^ Filename.quote mjs) in
+    Alcotest.(check string) "js, missing dir: the output runs" "hello\n" js_out
+  end;
+  (* A parent that is a regular file: a user error naming the path, exit 1. *)
+  let afile = Filename.concat tmp "afile" in
+  let oc = open_out afile in output_string oc "x"; close_out oc;
+  let bad = Filename.concat afile "x.mjs" in
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote bad) in
+  no_ice "js, parent is a file" out;
+  Alcotest.(check int) ("js, parent is a file: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("js, parent is a file: names the path (got: " ^ out ^ ")")
+    true (ir_contains out "error:" && ir_contains out afile);
+  (* The output path is an existing directory. *)
+  let adir = Filename.concat tmp "adir" in
+  Unix.mkdir adir 0o755;
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote adir) in
+  no_ice "js, output is a directory" out;
+  Alcotest.(check int) ("js, output is a directory: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("js, output is a directory: names the path (got: " ^ out ^ ")")
+    true (ir_contains out "error:" && ir_contains out adir);
+  (* Native: a missing parent is created the same way, and the binary runs. *)
+  let bin = Filename.concat tmp "out/sub/x" in
+  let (rc, out) = compile ("--compile -o " ^ Filename.quote bin) in
+  no_ice "native, missing dir" out;
+  Alcotest.(check int) ("native, missing dir: exit 0 (got: " ^ out ^ ")") 0 rc;
+  let (_, nat_out) = run_capture (Filename.quote bin) in
+  Alcotest.(check string) "native, missing dir: the binary runs" "hello\n" nat_out;
+  (* Native, parent is a file: exit 1 and no ICE. *)
+  let (rc, out) = compile ("--compile -o " ^ Filename.quote (Filename.concat afile "x")) in
+  no_ice "native, parent is a file" out;
+  Alcotest.(check int) ("native, parent is a file: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("native, parent is a file: names the path (got: " ^ out ^ ")")
+    true (ir_contains out afile)
+
+(** Issue #1176: `--target js --test` compiled the test blocks and never ran
+    them (node exited 0 with no output); with a `main` the tests were pruned
+    away and `main` ran instead; and a program that prints did not build at
+    all, because `--test` turns capability mocking on and `cap_dict` had no
+    JS implementation.  The JS output now runs the tests as the native test
+    binary does: the same report, byte for byte, the same `--filter=` /
+    `--verbose` flags, exit 1 on a failure.  The report text itself is pinned
+    for every target by test/run_test_reports.ml. *)
+let test_js_test_runner () =
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS test runner)"
+  else begin
+    let name = "js_test_runner_1176" in
+    let src =
+      "mod JsTestRunner do\n\
+      \  needs IO.Console\n\
+      \  fn double(n : Int) : Int do n * 2 end\n\
+      \  fn main(_c : Cap(IO.Console)) : () do\n\
+      \    println(\"main ran\")\n\
+      \  end\n\
+      \  test \"doubles\" do\n\
+      \    println(\"printed from a test\")\n\
+      \    assert (double(2) == 4)\n\
+      \  end\n\
+      \  test \"must fail\" do\n\
+      \    assert (double(1) == 3)\n\
+      \  end\n\
+       end\n" in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let bin = Filename.concat tmp name in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js --test build failed (rc=%d):\n%s" name crc cout;
+    let (nrc, nout) = run_capture (Printf.sprintf "cd %s && %s --compile --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote bin) (Filename.quote src_path)) in
+    if nrc <> 0 then Alcotest.failf "%s: --compile --test build failed (rc=%d):\n%s" name nrc nout;
+    let run cmd = run_capture (cmd ^ "; echo EXIT:$?") in
+    let (_, js_out) = run ("node " ^ Filename.quote mjs) in
+    let (_, native_out) = run (Filename.quote bin) in
+    Alcotest.(check bool) (name ^ ": the tests ran, not main (got: " ^ js_out ^ ")") true
+      (ir_contains js_out "Finished: 2 tests, 1 failure"
+       && ir_contains js_out "printed from a test"
+       && not (ir_contains js_out "main ran"));
+    Alcotest.(check bool) (name ^ ": a failure exits 1 (got: " ^ js_out ^ ")") true
+      (ir_contains js_out "EXIT:1");
+    Alcotest.(check string) (name ^ ": the JS run prints what the native test binary prints")
+      native_out js_out;
+    let (_, js_filtered) = run ("node " ^ Filename.quote mjs ^ " --filter=doubles") in
+    let (_, native_filtered) = run (Filename.quote bin ^ " --filter=doubles") in
+    Alcotest.(check bool) (name ^ ": all passing exits 0 (got: " ^ js_filtered ^ ")") true
+      (ir_contains js_filtered "Finished: 1 test, 0 failures" && ir_contains js_filtered "EXIT:0");
+    Alcotest.(check string) (name ^ ": --filter= agrees with native") native_filtered js_filtered;
+    let (_, js_verbose) = run ("node " ^ Filename.quote mjs ^ " --verbose") in
+    let (_, native_verbose) = run (Filename.quote bin ^ " --verbose") in
+    Alcotest.(check string) (name ^ ": --verbose agrees with native") native_verbose js_verbose
+  end
+
 (** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
     lists have been filled with freed cons cells.  march_alloc is a plain
     malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
@@ -18443,6 +18571,10 @@ let codegen_suites =
             test_int_overflow_uncaught_panic;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
+          Alcotest.test_case "unwritable -o path: dirs created, plain error, no ICE (#1181)" `Quick
+            test_output_path_errors;
+          Alcotest.test_case "--target js --test runs the tests like the native runner (#1176)" `Quick
+            test_js_test_runner;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
           Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick

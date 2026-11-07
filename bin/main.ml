@@ -65,6 +65,37 @@ let read_whole_file (path : string) : string =
   let s = really_input_string ic (in_channel_length ic) in
   close_in ic; s
 
+(* An output path that cannot be written is the user's filesystem, not a
+   compiler bug: a plain error naming the path, exit 1 (issue #1181; it used
+   to reach the catch-all handler and print an internal compiler error). *)
+let output_path_error (path : string) (reason : string) : 'a =
+  Printf.eprintf "march: error: cannot write the output %s: %s\n%!" path reason;
+  exit 1
+
+(* Make [path] writable as a build output: create its missing parent
+   directories (`-o dist/app.mjs` with no `dist/` yet), and reject up front a
+   path that is a directory or sits under a non-directory. *)
+let prepare_output_path (path : string) : unit =
+  if Sys.file_exists path && Sys.is_directory path then
+    output_path_error path "it is a directory";
+  let dir = Filename.dirname path in
+  (try mkdir_p dir with
+   | Unix.Unix_error (e, _, _) ->
+     output_path_error path
+       (Printf.sprintf "cannot create the directory %s (%s)" dir (Unix.error_message e))
+   | Sys_error msg -> output_path_error path msg);
+  if not (Sys.file_exists dir && Sys.is_directory dir) then
+    output_path_error path (dir ^ " is not a directory")
+
+(* Write [contents] to the output [path], reporting a failure as
+   [output_path_error] rather than letting [Sys_error] escape. *)
+let write_output_file (path : string) (contents : string) : unit =
+  try
+    let oc = open_out_bin path in
+    Fun.protect ~finally:(fun () -> close_out_noerr oc)
+      (fun () -> output_string oc contents; close_out oc)
+  with Sys_error msg -> output_path_error path msg
+
 let bundle_js_modules ~(src_file : string) ~(out_bin : string) : unit =
   let out_dir = Filename.dirname out_bin in
   let roots =
@@ -5856,6 +5887,7 @@ let compile filename =
           else if target = March_tir.Llvm_emit.Js then basename ^ ".mjs"
           else basename
         in
+        prepare_output_path out_bin;
         (* JS target: skip LLVM/clang entirely *)
         if target = March_tir.Llvm_emit.Js then begin
           let tir_for_js = if !opt_enabled then March_tir.Opt.run tir else tir in
@@ -5864,7 +5896,16 @@ let compile filename =
              desktop entry beside its browser one) kept its C-backed externs
              alive and failed the JS build. *)
           let tir_for_js =
-            if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
+            if tir_for_js.March_tir.Tir.tm_tests <> [] then
+              (* --test: the output runs the tests, not `main` (issue
+                 #1176), so root at them and their setup blocks; rooting
+                 at `main` alone pruned every test away. *)
+              March_tir.Dce.prune_unreachable
+                ~roots:(List.map fst tir_for_js.March_tir.Tir.tm_tests
+                        @ [ March_tir.Tir_names.setup_fn_name;
+                            March_tir.Tir_names.setup_all_fn_name ])
+                tir_for_js
+            else if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
                  tir_for_js.March_tir.Tir.tm_fns
             then March_tir.Dce.prune_unreachable ~roots:[ "main" ] tir_for_js
             else tir_for_js in
@@ -5896,16 +5937,20 @@ let compile filename =
             | None -> js
             | Some map_json ->
               let map_path = Filename.concat (Filename.dirname out_bin) map_name in
-              (try
-                let oc2 = open_out map_path in
-                output_string oc2 map_json;
-                close_out oc2
-               with Sys_error _ -> ());
-              js ^ "//# sourceMappingURL=" ^ map_name ^ "\n"
+              (* The map is a debugging aid: failing to write it is a warning,
+                 and the output then names no map it cannot find. *)
+              (match
+                 let oc2 = open_out_bin map_path in
+                 Fun.protect ~finally:(fun () -> close_out_noerr oc2)
+                   (fun () -> output_string oc2 map_json; close_out oc2)
+               with
+               | () -> js ^ "//# sourceMappingURL=" ^ map_name ^ "\n"
+               | exception Sys_error msg ->
+                 Printf.eprintf "march: warning: cannot write the source map %s: %s\n%!"
+                   map_path msg;
+                 js)
           in
-          let oc = open_out out_bin in
-          output_string oc js;
-          close_out oc;
+          write_output_file out_bin js;
           (* Put every module the output imports beside it, unless
              --no-copy-runtime is given (e.g. when dune manages them). *)
           if not !no_copy_runtime then bundle_js_modules ~src_file:filename ~out_bin;
@@ -8140,7 +8185,7 @@ let () =
     ("--apply-public", Arg.Set apply_public, " With --apply: also apply proposals on public functions with no in-unit callers");
     ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
      "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
-    ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
+    ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile, or --target js for a test-runner .mjs)");
     ("--emit-io-ops", Arg.Set emit_io_ops, " Print the generated per-IO-capability dictionary module (stdlib/io_ops.march) and exit");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
