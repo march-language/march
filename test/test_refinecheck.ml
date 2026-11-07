@@ -23975,11 +23975,16 @@ let module_qualified_measure_and_sort_suite =
      specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
      What still holds, and is pinned: the collision makes neither call a
      proof nor a violation. *)
+  (* Since 2026-11-06 (specs/progress/2026-11-06-predicate-names.md) the
+     first is PROVED again: the user's `Tree` takes no type argument and
+     `OrderedMap.Tree(k, v)` takes two, and the typechecker never unifies
+     types of different arities, so the two are told apart by arity.  A
+     same-arity collision still skips (the `pred-names` suite pins it). *)
   [ gated
-      "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
-       once its whole stdlib is prepended, is skipped, not proved (short-name conflation)"
+      "a user's own top-level Tree, beside the stdlib's OrderedMap.Tree(k, v) of \
+       another arity, is proved (types told apart by arity)"
       (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
     gated "...and a literal that is not a member is skipped too, not proved" (fun () ->
@@ -25469,6 +25474,19 @@ let session_theory_suite =
             "trace_bs_found"; "end_done"; "compose_msg"; "compose_pick"; "projections_compose"; "projections_compose_bs"; "progress";
             (* C3 *)
             "restrict_choice"; "collapse_dual"; "pairwise_choice"; "pairwise"; "pairwise_bs" ]);
+    Alcotest.test_case "Actor.Theory's lemmas are in the proved-lemma manifest" `Quick (fun () ->
+        let manifest =
+          In_channel.with_open_bin
+            (Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/lemmas.verified")
+            In_channel.input_all
+        in
+        List.iter
+          (fun lemma ->
+            Alcotest.(check bool) (lemma ^ " is listed as proved") true
+              (contains manifest ("Actor.Theory." ^ lemma ^ "\t")))
+          [ "qcat_end"; "from_cat"; "enq_other"; "enq_self"; "replay_order"; "call_keeps_others";
+            "stale_reply_ignored"; "call_reply_cat"; "call_reply_later"; "deadline_law";
+            "downs_cat"; "down_never_dropped"; "unmonitor_gone"; "down_at_most_once" ]);
     Alcotest.test_case "both projectors agree on two-role, three-role and loop/choice protocols" `Quick (fun () ->
         let code, out = run_cli "--validate-projections" protocols in
         Alcotest.(check int) "exit 0" 0 code;
@@ -25643,15 +25661,19 @@ let guarantees_suite =
   in
   let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
   let first_line out = List.hd (String.split_on_char '\n' out) in
-  [ Alcotest.test_case "proved state, unchecked @invariant, assumed runtime" `Quick (fun () ->
+  [ Alcotest.test_case "proved state, unchecked @invariant, the runtime proved on a model" `Quick (fun () ->
         let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(count <= limit)\n" ~init:"0" ()) in
         Alcotest.(check int) "accepted" 0 code;
         Alcotest.(check string) "the invariant decides the summary" "actor Counter: not checked" (first_line out);
         has out "state refinements  proved: ";
         has out "@invariant         not checked: init and handler results are not checked against it";
         has out "handler contracts";
-        has out "runtime: assumed\n";
-        has out "assumed: the runtime is trusted");
+        (* Actor.Theory: the runtime's laws are proved on a model, and tested
+           against the runtime where a fixture covers them. *)
+        has out "runtime: proved (model)\n";
+        has out "per-sender message order  proved (model) · tested (runtime): Actor.Theory.enq_self";
+        has out "Actor.call replies        proved (model) · tested (runtime)";
+        has out "DOWN delivery             proved (model): at most once");
     Alcotest.test_case "no @invariant: proved" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" (actor ~init:"0" ()) in
         Alcotest.(check string) "summary" "actor Counter: proved" (first_line out));
@@ -30071,6 +30093,7 @@ let () =
       ("reflect-record-vars", Test_refine_record_vars.tests);
       ("proof-hints", Test_refine_proof_hints.suite);
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2);
+      ("pred-names", Test_refine_pred_names.suite);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
       ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);

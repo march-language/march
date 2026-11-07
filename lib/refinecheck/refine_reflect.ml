@@ -1736,7 +1736,7 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
          review round 4): a conflated short name, an inexact qualified one,
          or a type that is no registered variant declines. *)
       let adt =
-        match RE.adt_of_type_name n with
+        match RE.adt_of_type_name ~arity:(List.length args) n with
         | Some a when a <> RE.ambiguous_adt_sentinel -> a
         | _ -> raise Decline
       in

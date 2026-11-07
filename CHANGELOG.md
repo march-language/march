@@ -30,6 +30,10 @@ git log is authoritative for exact commits.
   and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
   in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
   keeps working.
+- **A warning when a predicate means the built-in, not your function.** Inside a refinement
+  predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
+  own function of that name is in scope, the checker now says so
+  (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
 - **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
   `march --check-json`, a fix's `applicability` is `machine-applicable`,
   `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
@@ -50,6 +54,15 @@ git log is authoritative for exact commits.
 
   In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
   have a machine-applicable one.
+- **`Actor.Theory`: the mailbox's promises, proved on a model and tested against the
+  runtime.** A new stdlib module models an actor's mailbox and proves, once, that one sender's
+  messages arrive in the order sent (whatever other senders, a hot-deploy hold, a stash or a
+  call waiting inside a handler do), that a late reply never answers a later `Actor.call`, and
+  that a monitor's `Down` is never dropped by a full mailbox and is delivered at most once. A
+  native fixture checks the runtime's receive order against the model.
+  `march --check --guarantees` now reports the runtime's laws as `proved (model) · tested
+  (runtime)` or `proved (model)` instead of `assumed`. See the actors chapter, "What is
+  proved about the mailbox".
 - **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
   parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
   parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
@@ -672,6 +685,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A type named like a standard-library type of another arity works in predicates.** A
+  `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
+  it unchecked. Types of the same name and the same number of parameters still are, with a
+  message saying so that now names your function.
+- **No false "not checked" warning on a qualified predicate call that is checked.** A
+  predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
 - **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
   matched a user function (a theorem's `f`, say) was read as a reference to that function,
   which made the function's whole body part of its callers' dependency key; after an

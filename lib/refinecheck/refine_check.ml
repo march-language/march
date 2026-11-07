@@ -3533,11 +3533,11 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
      relation when one [Within] field holds every related slot (leftovers
      phase E's rule), and a recorded skip for any other shape. *)
   | A.ECon (k, args, _)
-    when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+    when (match ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt with
           | Some kk -> Hashtbl.mem ctor_param_fields kk
           | None -> false) ->
     (* [container]'s own constructor of that name (2026-11-02). *)
-    let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+    let kk = Option.get (ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt) in
     let roles = Hashtbl.find ctor_param_fields kk in
     let fparams = Hashtbl.find_opt ctor_field_params kk in
     if List.length roles <> List.length args then true
@@ -4972,17 +4972,28 @@ let read_manifest (path : string) : (string * string) list =
 (* A parameter type of the program function [f] whose short name is
    conflated with another declaration ([Refine_encode.conflated_declarants]):
    the type and the modules declaring it. *)
-let conflated_param_type (f : string) : (string * string list) option =
+let conflated_param_type ?decl_span (f : string) : (string * string list) option =
   match !Witness.current_module with
   | None -> None
   | Some m ->
-    let rec find ds =
+    (* The declaration the predicate's name denotes: the one in scope where
+       the predicate is written ([decl_span]), else a user file's, else any.
+       The first bare-name match was a stdlib `fn size` (`Deque.size`, …),
+       so a user's `size` over a conflated type never got this message. *)
+    let rec find ok ds =
       List.find_map
         (function
-          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f -> Some fd
-          | A.DMod (_, _, inner, _) -> find inner
+          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f && ok fd -> Some fd
+          | A.DMod (_, _, inner, _) -> find ok inner
           | _ -> None)
         ds
+    in
+    let find ds =
+      let user (fd : A.fn_def) = not (March_typecheck.Typecheck_builtins.file_is_stdlib fd.A.fn_name.A.span.A.file) in
+      let in_scope (fd : A.fn_def) = Some fd.A.fn_name.A.span = decl_span in
+      match (if decl_span = None then None else find in_scope ds) with
+      | Some fd -> Some fd
+      | None -> ( match find user ds with Some fd -> Some fd | None -> find (fun _ -> true) ds)
     in
     let rec tys (t : A.ty) : string list =
       match t with
@@ -6176,12 +6187,12 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           | A.PatCon (k, subpats) ->
             (match container_entry_of_expr ctx defs cb ce_outer subj with
              | Some ({ cont = container; slots; _ } as entry)
-               when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+               when (match ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt with
                      | Some kk -> (match Hashtbl.find_opt ctor_param_fields kk with
                                    | Some roles -> List.length roles = List.length subpats
                                    | None -> false)
                      | None -> false) ->
-               let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+               let kk = Option.get (ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt) in
                let roles = Hashtbl.find ctor_param_fields kk in
                (* Table-driven (P3 design §2a): a `PatVar` at a [Param i]
                   field takes slot [i] — a refined slot as a scope fact, a
@@ -6683,8 +6694,35 @@ let warn_qualified_call (errctx : Err.ctx) ~(span : A.span) (qname : string) : u
         never reflected here, so the refinement enforces nothing.%s"
        qname remedy)
 
-let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
-    (e : A.expr) : unit =
+(* A function declared directly in a module enclosing a predicate, innermost
+   module first: what a bare name in that predicate would denote in program
+   code ([warn_predicate_decls] collects them). *)
+type scope_fn = { sf_name : string; sf_qualified : string; sf_span : A.span }
+
+(* Reflection design F21 (todo 2026-10-29-predicate-vocabulary-shadows-user-
+   functions): in a predicate, `len`, `elts`, `keys` and `is_<Ctor>` keep their
+   built-in meaning even where the program's own function of that name is in
+   scope.  The verdict is unchanged; this says which meaning was taken.  Only
+   for a user's function: the stdlib declares `Map.keys` beside predicates
+   that mean the built-in on purpose. *)
+let vocabulary_shadow (in_scope : scope_fn list) (f : string) : (scope_fn * string) option =
+  let meaning =
+    match f with
+    | "len" -> Some "length measure"
+    | "elts" -> Some "set of elements"
+    | "keys" -> Some "set of keys"
+    | _ when ctor_of_tester f <> None -> Some "constructor test"
+    | _ -> None
+  in
+  match meaning with
+  | None -> None
+  | Some what ->
+    let user_file file = not (March_typecheck.Typecheck_builtins.file_is_stdlib file) in
+    List.find_opt (fun sf -> sf.sf_name = f && user_file sf.sf_span.A.file) in_scope
+    |> Option.map (fun sf -> (sf, what))
+
+let warn_predicate_expr ?(abstract_refs : string list = []) ?(in_scope : scope_fn list = [])
+    (errctx : Err.ctx) (e : A.expr) : unit =
   (* A name this signature declares as an abstract refinement
      (specs/2026-09-20-abstract-refinements-design.md §1) is NOT unknown
      vocabulary: it is checked by [Refine_abstract.check], which reports its
@@ -6717,8 +6755,21 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
             not checked. A predicate cannot call a program function of that name."
            f);
       List.iter go args
+    | A.EApp (A.EVar { A.txt = f; _ }, _, span) when vocabulary_shadow in_scope f <> None ->
+      let sf, what = Option.get (vocabulary_shadow in_scope f) in
+      Err.warning ~code:Err.Code.predicate_vocabulary_shadowed errctx ~span
+        (Printf.sprintf
+           "In a refinement predicate `%s` means the built-in %s, not your function `%s` \
+            (line %d): a predicate cannot call a function whose name is predicate vocabulary. \
+            Rename your function to use it in a predicate."
+           f what sf.sf_qualified sf.sf_span.A.start_line);
+      (match e with A.EApp (_, args, _) -> List.iter go args | _ -> ())
     | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
-      if (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
+      (* A call reflection resolved at this site (by span, so a qualified
+         `Inner.dbl` too) is checked: no "unchecked" warning of any kind. *)
+      let resolved = !Reflect_state.active && Reflect_state.resolve_site span <> None in
+      let decl_span = Option.map (fun sf -> sf.sf_span) (List.find_opt (fun sf -> sf.sf_name = f) in_scope) in
+      if (not resolved) && (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
         if String.contains f '.' then
           (* [Desugar.desugar_ty] (Task 8) now flattens a MODULE-PATH call head
              (`List.length(_)`) in predicate position into this dotted `EVar`
@@ -6756,12 +6807,12 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
                   note: a function is usable in a predicate when it terminates, has no effects, \
                   cannot fail, and calls only such functions."
                  f why at.A.start_line)
-          | _ when conflated_param_type f <> None ->
+          | _ when conflated_param_type ?decl_span f <> None ->
             (* The function is reflectable, but one of its parameter types
                shares its short name with another declaration (often a
                stdlib one): the logic cannot tell the two apart, so it uses
                neither.  Say so, rather than "not a measure". *)
-            let ty, paths = Option.get (conflated_param_type f) in
+            let ty, paths = Option.get (conflated_param_type ?decl_span f) in
             Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf
                  "`%s` cannot be used in this refinement predicate, so the refinement is not \
@@ -6796,13 +6847,13 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
   in
   go e
 
-let rec warn_predicate_ty ?(abstract_refs : string list = []) (errctx : Err.ctx)
-    (t : A.ty) : unit =
-  let go = warn_predicate_ty ~abstract_refs errctx in
+let rec warn_predicate_ty ?(abstract_refs : string list = []) ?(in_scope : scope_fn list = [])
+    (errctx : Err.ctx) (t : A.ty) : unit =
+  let go = warn_predicate_ty ~abstract_refs ~in_scope errctx in
   match t with
   | A.TyRefine (base, binder, pred) ->
     go base;
-    warn_predicate_expr ~abstract_refs errctx pred;
+    warn_predicate_expr ~abstract_refs ~in_scope errctx pred;
     (* Reflection §3.5: `==` in a predicate is structural (logical) equality,
        whatever the type's `Eq` says.  At a type with a hand-written `Eq` that
        differs from what the program's `==` runs, so say so.  No verdict
@@ -7147,7 +7198,18 @@ let decls_declare_verified (decls : A.decl list) : bool =
    and recomputes from its own decls (below); a `describe` block is not a
    module and inherits the flag unchanged, matching [visit_decl]'s own
    [visit_group] treatment of `DDescribe`. *)
-let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl list) : unit =
+let rec warn_predicate_decls ?(path = "") ?(in_scope : scope_fn list = []) (errctx : Err.ctx)
+    ~(strict : bool) (decls : A.decl list) : unit =
+  let in_scope =
+    List.filter_map
+      (function
+        | A.DFn (fd, _) ->
+          let n = fd.A.fn_name.A.txt in
+          Some { sf_name = n; sf_qualified = (if path = "" then n else path ^ "." ^ n); sf_span = fd.A.fn_name.A.span }
+        | _ -> None)
+      decls
+    @ in_scope
+  in
   let set_fns =
     List.filter_map
       (function
@@ -7166,13 +7228,13 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
     Refine_abstract.check ~entry_shaped:(fun ~name_of c s -> entry_shaped ~name_of c s) errctx
       ~is_known:known_predicate_fn fd;
     let abstract_refs = Refine_abstract.names ~is_known:known_predicate_fn fd in
-    Option.iter (warn_predicate_ty ~abstract_refs errctx) fd.A.fn_ret_ty;
+    Option.iter (warn_predicate_ty ~abstract_refs ~in_scope errctx) fd.A.fn_ret_ty;
     List.iter
       (fun (c : A.fn_clause) ->
         List.iter
           (function
             | A.FPNamed p | A.FPDefault (p, _) ->
-              Option.iter (warn_predicate_ty ~abstract_refs errctx) p.A.param_ty
+              Option.iter (warn_predicate_ty ~abstract_refs ~in_scope errctx) p.A.param_ty
             | A.FPPat _ -> ())
           c.A.fc_params;
         warn_predicate_expr_tys errctx c.A.fc_body)
@@ -7182,8 +7244,10 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
   List.iter
     (function
       | A.DFn (fd, _) -> warn_fn fd
-      | A.DMod (_, _, ds, _) -> warn_predicate_decls errctx ~strict:(decls_declare_verified ds) ds
-      | A.DDescribe (_, ds, _) -> warn_predicate_decls errctx ~strict ds
+      | A.DMod (name, _, ds, _) ->
+        let path = if path = "" then name.A.txt else path ^ "." ^ name.A.txt in
+        warn_predicate_decls ~path ~in_scope errctx ~strict:(decls_declare_verified ds) ds
+      | A.DDescribe (_, ds, _) -> warn_predicate_decls ~path ~in_scope errctx ~strict ds
       | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> warn_fn fd) idf.A.impl_methods
       | A.DInterface (idf, _) ->
         List.iter
@@ -10429,7 +10493,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)
-  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
+  warn_predicate_decls ~path:m.A.mod_name.A.txt errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
   (* Coverage audit: runs last, only when asked, and touches neither [errctx]
      nor the obligation ledger; it is a read-only classification of every
      declared refinement occurrence against the registration state this

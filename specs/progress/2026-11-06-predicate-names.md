@@ -1,0 +1,75 @@
+# Predicate names: resolve and print them right (2026-11-06)
+
+Plan: `specs/plans/2026-11-06-predicate-names-plan.md`. Closes two todos and one bullet, and pins
+a third that #1184 closed first:
+
+| Todo | Priority | Outcome |
+|---|---|---|
+| `2026-11-04-refine-pred-str-drops-parens` | P4 | closed by #1184 (`specs/progress/2026-11-04-refine-pred-str-drops-parens.md`), which landed first; this branch's printer was dropped in favour of main's, and its tests stay as checks on it |
+| `2026-10-31-reflection-encoder-gaps`, bullet "predicate display-name resolution in the propagation pre-pass" | P2 file | already closed by 71f112f4a; pinned, bullet removed |
+| `2026-10-29-predicate-vocabulary-shadows-user-functions` | P2 | new warning `predicate_vocabulary_shadowed` |
+| `2026-11-03-reflect-type-name-clash-with-stdlib` | P3 | same-named types of different arity are told apart |
+
+All tests are in the new `pred-names` group (`test/test_refine_pred_names.ml`, 25 cases).
+
+## What changed
+
+- **`pred_str`.** This branch first carried its own precedence printer for the parentheses todo.
+  #1184 fixed the same todo on main with `pred_infix_precedence` / `pred_str_prec`, so on merge
+  main's printer was kept and this branch's (`binop_level`) dropped. The five parentheses cases
+  in `pred-names` (`min_int`'s row, `_ == (a + b) * 2`, `_ == (keys(m) == empty)`, the reparse
+  round trip, an inference candidate read back from the text) stay, and pass on main's printer.
+- **#20.** 71f112f4a ("resolve every reflected call by site") replaced name-based predicate
+  resolution with per-span resolution (`Refine_term.pred_expr` → `pred_sites` →
+  `Reflect_state.call_sym`), so the walk and the postcondition pre-pass
+  (`gate_unverified_posts_ih`) resolve identically. The bullet had been copied into the todo
+  afterwards. Pinned: a bare `dbl` inside `mod Inner`, with an outer decoy `dbl`, resolves to
+  `Inner.dbl` in a postcondition a caller uses through the pre-pass. The probe found one false
+  warning: a qualified `Inner.dbl(n)` that resolved and proved still got `refinement_unchecked`,
+  because `warn_predicate_expr` took its dotted-name branch before checking `resolve_site`.
+  A call resolved at its site now gets no unchecked warning.
+- **`predicate_vocabulary_shadowed` (`lib/refinecheck/refine_check.ml`).** `warn_predicate_decls`
+  now threads the functions declared in each enclosing module (`scope_fn`, innermost first).
+  A predicate applying `len`, `elts`, `keys` or `is_<Ctor>` while a user function of that name
+  is in scope gets a warning saying the predicate means the built-in. The verdict is unchanged
+  (F21 is kept, not altered). Stdlib functions are exempt (`Typecheck_builtins.file_is_stdlib`):
+  `Map` declares `fn keys` and writes `keys(_)` meaning the built-in on purpose. Set operators
+  are not warned: a well-formed `member(x, s)` is the set operator by its arguments, and a
+  malformed one already warns `refinement_unchecked`. New code in `lib/errors/code.ml`, page
+  `specs/lang/errors/predicate_vocabulary_shadowed.md`, corpus case
+  `test/errors/predicate_vocabulary_shadowed_1`.
+- **Arity (`lib/refinecheck/refine_encode.ml`).** A user `type Tree` made every predicate over it
+  `unreflectable-predicate`: `poly_sort` asked `adt_of_short_type_name "Tree"`, which answered
+  the ambiguity sentinel because `OrderedMap` also declares a `Tree`, so `size`'s logic symbol
+  was never registered. The typechecker never unifies types of different arities
+  (`expected Tree but got Tree(Int, Int)`), so `short_name_conflated ?arity`,
+  `adt_sort_name ?arity` and `adt_of_type_name ?arity` now count only declarants of the
+  reference's arity, and `finalize_ctor_names` marks a declarant's constructors ambiguous only
+  when another declarant has its arity. A built-in counts at its `Typecheck_builtins.builtin_types`
+  arity (now exported). Same-arity names stay a skip: a user `type Tree(a, b)` accepts an
+  `OrderedMap` tree (`size(m.tree)` typechecks), so preferring the user's declaration could
+  prove a false fact; that waits on `2026-10-13-same-short-name-nested-types-unify`. The
+  "Rename your type" message (`conflated_param_type`) now finds the declaration in scope at
+  the predicate rather than the first bare-name match, which was a stdlib `fn size`.
+
+## Found on the way
+
+- `specs/todos/2026-11-06-predicate-call-not-unfolded-from-body.md`: `{Int | _ == dbl(n)}` on a
+  body `n + n` is skipped; stage 2 does not unfold a predicate-side call the body does not make.
+- `scripts/seed-error-corpus.sh` would add 90 never-seeded cases from existing pages; not done
+  here (out of scope).
+
+## Verification
+
+| Check | Result |
+|---|---|
+| `pred-names` (24): parentheses ×5, #20 pin + qualified-call warning + control, shadow warning ×6, arity ×10 | each new behaviour RED → GREEN; the controls (sibling-module `len`, well-formed `member`, stdlib Map/List/Set, same-arity `Tree(a, b)`, `DownReason`, `Option(a)`, type errors) green before and after |
+| Two existing tests that pinned the old conservative #8 behaviour | `module-qualified-measure-and-sort` 0 (arity-0 user `Tree`: skip → proved, 3 is a member) and `reflect-lemma` 51 (the name-clash warning now on a same-arity `Tree(a, b)`; arity-0 `Tree` admits the lemma) re-pinned |
+| Error corpus (`run_errors.exe`) | 412 pass; regenerating changed no existing case |
+| Refine audit baselines | regenerated, unchanged |
+| Refine oracle vs merge-base | IDENTICAL (8153 lines, 574 fixtures) |
+| Types oracle vs merge-base | tier 1 and tier 2 IDENTICAL (1066 fixtures, 9602 lines) |
+| Final whole-branch review (fresh reviewer) | one Critical: with no `Tree` declarant at the top level, an arity-less lookup's preferred declarant (the stdlib's `OrderedMap.Tree(k, v)`) was no longer ambiguous, so a nested user `Tree(a)`'s `match` took OrderedMap's `Node` field roles and proved a plain `Int` field positive. Fixed: that preferred declarant is marked ambiguous again, and the container constructor lookups pass the entry's arity; `pred-names` "a nested user Tree(a) never takes OrderedMap's Tree field roles" RED → GREEN (25/25). Minors deferred: `record_sort_of_ty`'s refined arm still arity-less (gated by `is_record_base`); `-(-1)` prints `--1` (pre-existing) |
+| `scripts/affected.sh --run --full` on the branch merged with main (01cae3ed2) | every suite passed except the new corpus case, which on the merged tree also prints its `--explain` pointer (regenerated); ir, refine and types oracles IDENTICAL (520 programs; 8153 lines / 574 fixtures; 1066 fixtures / 9608 lines) |
+| CI conformance ceiling (`--check --stdlib-source --refine-report stdlib/list.march`) | 49 skipped, ceiling 49 |
+| After merging main again (S2 #1157, #1158, #1161, #1163) | refinecheck and errors suites pass (the errors corpus 414 cases); refine oracle IDENTICAL (8508 lines / 575 fixtures); conformance 49 skipped, ceiling 49 |

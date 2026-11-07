@@ -1823,9 +1823,27 @@ let adt_decl_paths : (string, (string * string) list) Hashtbl.t = Hashtbl.create
    stdlib's own declaration of it).  The other built-ins are not entered in
    [adt_decl_paths]: their bare key carries no constructors here, and filing
    them there would make an unseeded name's preferred declarant empty. *)
-let short_name_conflated (short : string) : bool =
+let short_name_conflated ?arity (short : string) : bool =
   match Hashtbl.find_opt adt_decl_paths ("M_" ^ short) with
   | None | Some [] -> false
+  | Some entries when arity <> None ->
+    (* At one ARITY (todo 2026-11-03-reflect-type-name-clash-with-stdlib):
+       the typechecker never unifies two types that take different numbers of
+       arguments (`expected Tree but got Tree(Int, Int)`), so only the
+       declarants of the same arity are conflated with each other.  A
+       declarant whose arity is not recorded counts at every arity, and so
+       does a built-in name the typechecker records no arity for. *)
+    let n = Option.get arity in
+    let at_n key = match Hashtbl.find_opt adt_arity key with Some k -> k = n | None -> true in
+    let same = List.filter (fun (_, key) -> at_n key) entries in
+    List.length same >= 2
+    || (same <> []
+        && List.mem short builtin_type_names
+        && (not (List.mem short seeded_builtin_names))
+        && (not (Hashtbl.mem stdlib_declared short))
+        && (match List.assoc_opt short March_typecheck.Typecheck_builtins.builtin_types with
+            | Some k -> k = n
+            | None -> true))
   | Some entries ->
     (* ENTRIES, not distinct paths (review round 3): two declarations at one
        module path (`type Zq` twice, a reopened `mod A`, a user `mod
@@ -1874,9 +1892,18 @@ let canonical_type_name (name : string) : string =
         | _ -> name)
      | None -> name)
 
-let adt_sort_name (march_name : string) : string =
+let adt_sort_name ?arity (march_name : string) : string =
   let bare = "M_" ^ canonical_type_name march_name in
-  match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
+  let preferred () = match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare in
+  match arity, Hashtbl.find_opt adt_decl_paths bare with
+  (* Two or more declarants of the short name: the one of this arity, when
+     exactly one declares it (todo 2026-11-03-reflect-type-name-clash-with-
+     stdlib).  Otherwise the preferred declarant, as before. *)
+  | Some n, Some (_ :: _ :: _ as entries) -> (
+    match List.filter (fun (_, key) -> Hashtbl.find_opt adt_arity key = Some n) entries with
+    | [ (_, key) ] -> key
+    | _ -> preferred ())
+  | _ -> preferred ()
 
 (* Is the type a reference to [name] resolves to opaque?  Only when EVERY
    declaration of that bare name is ([adt_decl_paths]): the checker's bare
@@ -2063,9 +2090,31 @@ let finalize_ctor_names () : unit =
     (fun bare entries ->
       let short = String.sub bare 2 (String.length bare - 2) in
       if short_name_conflated short then begin
-        List.iter (fun (_, key) -> Hashtbl.replace ambiguous_adts key ()) entries;
-        (* The bare key too: a single declarant was re-filed there. *)
-        Hashtbl.replace ambiguous_adts bare ()
+        (* Per declarant, at its own arity: a user `type Tree` beside the
+           stdlib's `Tree(k, v)` is not conflated with it, so its
+           constructors stay usable; two declarants of one arity are. *)
+        let ambiguous key =
+          match Hashtbl.find_opt adt_arity key with
+          | Some n -> short_name_conflated ~arity:n short
+          | None -> true
+        in
+        List.iter (fun (_, key) -> if ambiguous key then Hashtbl.replace ambiguous_adts key ()) entries;
+        (* The bare key too, unless it IS an unambiguous declarant's key: a
+           stray unqualified reference must not pick a constructor list. *)
+        if not (List.exists (fun (_, key) -> key = bare && not (ambiguous key)) entries) then
+          Hashtbl.replace ambiguous_adts bare ();
+        (* And the declarant an arity-less lookup prefers when no declarant
+           sits at the top level ([adt_canonical], the first one registered:
+           usually the stdlib's).  A caller that resolves the name without the
+           reference's arity must not get that declarant's constructors for a
+           value of another one's type: `Tree(a)` in a nested user module took
+           `OrderedMap.Tree(k, v)`'s field roles and proved a plain `Int`
+           field positive (review C1 of 2026-11-06).  The arity-aware path
+           ([adt_sort_name ~arity]) is unaffected for every other declarant. *)
+        match Hashtbl.find_opt adt_canonical bare with
+        | Some preferred when not (List.exists (fun (p, _) -> p = "" || p = builtin_path) entries) ->
+          Hashtbl.replace ambiguous_adts preferred ()
+        | _ -> ()
       end)
     adt_decl_paths;
   let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) adt_ctors []) in
@@ -2189,7 +2238,7 @@ let is_record_sort (s : string) : bool =
    arguments, e.g. `Option(Int)`.  The ADT-tag feature dispatches on this. *)
 let is_adt_base (t : A.ty) : bool =
   match t with
-  | A.TyCon ({ A.txt = name; _ }, _) -> Hashtbl.mem adt_ctors (adt_sort_name name)
+  | A.TyCon ({ A.txt = name; _ }, args) -> Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) name)
   | _ -> false
 
 (* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
@@ -2206,8 +2255,8 @@ let rec instance_sort_of_ty (t : A.ty) : Smt.sort =
   | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> instance_sort_of_ty b
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
-  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    let adt = adt_sort_name txt in
+  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) txt) ->
+    let adt = adt_sort_name ~arity:(List.length args) txt in
     let n = try Hashtbl.find adt_arity adt with Not_found -> 0 in
     if n = 0 then Smt.sdata adt
     else
@@ -2243,8 +2292,8 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
     match strip t with
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
-    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name n) ->
-      let adt = adt_sort_name n in
+    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) n) ->
+      let adt = adt_sort_name ~arity:(List.length args) n in
       let k = try Hashtbl.find adt_arity adt with Not_found -> 0 in
       if k = 0 then Smt.sdata adt
       else
@@ -2261,8 +2310,8 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
      stdlib's `type Set(a) = …`), and the SMT set sort is only ever the
      result of a set measure over it (`elts(s)`, `keys(m)`), never the sort
      of the value itself. *)
-  | T.TCon (n, _) as ty ->
-    let adt = adt_sort_name n in
+  | T.TCon (n, args) as ty ->
+    let adt = adt_sort_name ~arity:(List.length args) n in
     (match Hashtbl.find_opt adt_ctors adt with
      | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> None
      | Some _ -> Some (inst ty)
@@ -2282,9 +2331,9 @@ let caller_sort_at (sp : A.span) : Smt.sort option =
    type name two modules declare (`A.T`, `B.T`) does not ([adt_sort_name]'s
    preferred declarant would be a guess), a record is not a variant, and
    anything that is not a registered datatype is unknown. *)
-let rec adt_of_type_name (n : string) : string option =
+let rec adt_of_type_name ?arity (n : string) : string option =
   match String.rindex_opt n '.' with
-  | None -> adt_of_short_type_name n
+  | None -> adt_of_short_type_name ?arity n
   | Some i ->
     (* A QUALIFIED name resolves EXACTLY or not at all (review round 4):
        `Counter.Msg` is not whatever `Msg` some other module declares.  As
@@ -2303,18 +2352,19 @@ let rec adt_of_type_name (n : string) : string option =
         | _ -> false)
       | None -> false
     in
-    if exact then adt_of_short_type_name t
+    if exact then adt_of_short_type_name ?arity t
     else (
       match March_typecheck.Typecheck_env.actor_msg_alias_target n with
-      | Some target when Hashtbl.mem adt_decl_paths ("M_" ^ target) -> adt_of_type_name target
+      | Some target when Hashtbl.mem adt_decl_paths ("M_" ^ target) -> adt_of_type_name ?arity target
       | _ -> Some ambiguous_adt_sentinel)
 
-and adt_of_short_type_name (short : string) : string option =
+and adt_of_short_type_name ?arity (short : string) : string option =
   (* KNOWN but conflated: a sentinel that resolves no constructor, so the
-     caller declines rather than falling back to the name alone. *)
-  if short_name_conflated short then Some ambiguous_adt_sentinel
+     caller declines rather than falling back to the name alone.  With the
+     reference's [arity], conflated only with a declarant of that arity. *)
+  if short_name_conflated ?arity short then Some ambiguous_adt_sentinel
   else
-    let adt = adt_sort_name short in
+    let adt = adt_sort_name ?arity short in
     (* A KNOWN type that is not a registered variant (`Int`, `String`, a
        record, a built-in or synthesised type the checker does not model) is
        the sentinel too, never "unknown" (review round 3): no constructor of
@@ -2328,7 +2378,7 @@ let adt_of_tc_ty (t : March_typecheck.Typecheck.ty) : string option =
   let module T = March_typecheck.Typecheck in
   let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
   match strip t with
-  | T.TCon (n, _) -> adt_of_type_name n
+  | T.TCon (n, args) -> adt_of_type_name ~arity:(List.length args) n
   (* A type variable is the one genuinely unknown type. *)
   | T.TVar _ -> None
   | _ -> Some ambiguous_adt_sentinel
@@ -2337,7 +2387,7 @@ let adt_of_tc_ty (t : March_typecheck.Typecheck.ty) : string option =
 let rec adt_of_decl_ty (t : A.ty) : string option =
   match t with
   | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> adt_of_decl_ty b
-  | A.TyCon (n, _) -> adt_of_type_name n.A.txt
+  | A.TyCon (n, args) -> adt_of_type_name ~arity:(List.length args) n.A.txt
   | A.TyVar _ -> None
   | _ -> Some ambiguous_adt_sentinel
 
@@ -2407,8 +2457,8 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
      datatype's parameters where the field names one, and `Elem` otherwise.
      [resolve_sorts] reconciles a field's concrete instance with the terms
      placed in it.) *)
-  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    let adt = adt_sort_name txt in
+  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) txt) ->
+    let adt = adt_sort_name ~arity:(List.length args) txt in
     let n = try Hashtbl.find adt_arity adt with Not_found -> 0 in
     if n = 0 then Smt.sdata adt
     else
@@ -2649,8 +2699,8 @@ let clause_param_adt (c : A.fn_clause) : (string * string) option =
   match c.A.fc_params with
   | A.FPNamed p :: _ -> (
       match p.A.param_ty with
-      | Some (A.TyCon (adt, _)) when Hashtbl.mem adt_ctors (adt_sort_name adt.A.txt) ->
-        Some (p.A.param_name.A.txt, adt_sort_name adt.A.txt)
+      | Some (A.TyCon (adt, args)) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) adt.A.txt) ->
+        Some (p.A.param_name.A.txt, adt_sort_name ~arity:(List.length args) adt.A.txt)
       | _ -> None)
   | _ -> None
 
