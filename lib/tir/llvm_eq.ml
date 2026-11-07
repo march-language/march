@@ -23,7 +23,35 @@ let rec apply_ty_subst (subst : (string * Tir.ty) list) : Tir.ty -> Tir.ty = fun
 
 (* ── ADT structural equality generation ─────────────────────────────── *)
 
-(** Mangle a TIR type to a valid LLVM identifier fragment for equality function names. *)
+(** A record field name as a self-delimiting identifier fragment: its length
+    then the name ([3a_b]), so an underscore inside a field name can never be
+    read as a separator.  A name with any character outside [A-Za-z0-9_] (not
+    a valid bare LLVM identifier) is hex-encoded behind an [h], which cannot
+    start the decimal-length form. *)
+let mangle_field_name (n : string) : string =
+  let plain = String.for_all (function
+    | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' -> true
+    | _ -> false) n in
+  if plain then string_of_int (String.length n) ^ n
+  else begin
+    let b = Buffer.create (2 * String.length n + 4) in
+    Buffer.add_char b 'h';
+    Buffer.add_string b (string_of_int (String.length n));
+    Buffer.add_char b '_';
+    String.iter (fun c -> Buffer.add_string b (Printf.sprintf "%02x" (Char.code c))) n;
+    Buffer.contents b
+  end
+
+(** Mangle a TIR type to a valid LLVM identifier fragment for equality function
+    names.  [ensure_adt_eq_fn] memoizes helpers BY THIS NAME, so two types
+    with different layouts must never mangle alike: a collision makes one
+    type's [==] run the other's helper (wrong answers, over-reads past the
+    cell, SIGSEGV — #1171, where every record type mangled to "Ptr").
+    Composite forms carry their arity ([Tup3_], [Rec2_], [Fn1_]) so a nested
+    shape cannot be re-parsed as a different one: without it
+    [((Int, Int), Int, Int)] and [((Int, Int, Int), Int)] both read
+    [Tup_Tup_Int_x_Int_x_Int_x_Int].  A record names each field (length-
+    prefixed, see [mangle_field_name]) and its type, in slot order. *)
 let rec mangle_ty_for_eq : Tir.ty -> string = function
   | Tir.TInt    -> "Int"
   | Tir.TFloat  -> "Float"
@@ -35,8 +63,18 @@ let rec mangle_ty_for_eq : Tir.ty -> string = function
     let n' = String.concat "_" (String.split_on_char '.' n) in
     n' ^ "_" ^ String.concat "_" (List.map mangle_ty_for_eq args)
   | Tir.TVar _   -> "Any"
-  | Tir.TTuple ts -> "Tup_" ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
-  | _            -> "Ptr"
+  | Tir.TTuple ts ->
+    Printf.sprintf "Tup%d_" (List.length ts)
+    ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
+  | Tir.TRecord fields ->
+    Printf.sprintf "Rec%d_" (List.length fields)
+    ^ String.concat "_x_"
+        (List.map (fun (n, t) -> mangle_field_name n ^ "_" ^ mangle_ty_for_eq t)
+           fields)
+  | Tir.TFn (ps, r) ->
+    Printf.sprintf "Fn%d_" (List.length ps)
+    ^ String.concat "_x_" (List.map mangle_ty_for_eq (ps @ [r]))
+  | Tir.TPtr t   -> "Ptr_" ^ mangle_ty_for_eq t
 
 (** LLVM load type for an ADT field: i64 for scalar types, double for float, ptr for heap. *)
 let field_load_llty : Tir.ty -> string = function
