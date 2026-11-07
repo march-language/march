@@ -7,12 +7,13 @@ Unexpected `;`: March separates expressions with newlines, not semicolons. [semi
                  ^
 
     Put each expression on its own line.
-    run `march --explain semicolon_separator`
 
-fix [semicolon_separator]:
-@@ lines 4-4 @@
--    let x = 1; let y = 2
-+    let x = 1
-+    let y = 2
+    fix (`forge fix` applies it):
+
+4 -     let x = 1; let y = 2
+4 +     let x = 1
+5 +     let y = 2
+
+    run `march --explain semicolon_separator`
 
 after fix: exit 0

@@ -8,4 +8,11 @@ Did you mean `Postal` (from type `Mail`)?
                         ^^^^^^^^
 
 
+    fix (`forge fix` applies it):
 
+11 -     let m : Mail = Posts(1)
+11 +     let m : Mail = Postal(1)
+
+
+
+after fix: exit 0

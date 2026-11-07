@@ -8,6 +8,14 @@ A remote message crosses the network as JSON, and its type's name is its wire ta
                      ^^^
 
     Add `derive Json for Hit` next to its declaration.
+
+    fix (`forge fix` applies it):
+
+11 |   type Hit = { n : Int }
+12 +   derive Json for Hit
+
     run `march --explain codec_missing`
 
 
+
+after fix: exit 0

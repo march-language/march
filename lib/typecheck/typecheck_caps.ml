@@ -1397,7 +1397,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          | Some (c, use_sp, subject) when not (List.mem cap_path !check1_reported) ->
            check1_reported := cap_path :: !check1_reported;
            Err.report env.errors
-             { Err.severity = Err.Error; span = use_sp; code; fix = Some fix; notes = [];
+             { Err.severity = Err.Error; span = use_sp; code; fix = Some (Err.fix fix); notes = [];
                labels = [ { Err.lbl_span = sp;
                             lbl_message = Printf.sprintf "`Cap(%s)` is named here too" cap_path } ];
                message =
@@ -1500,9 +1500,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      Err.report env.errors
        { Err.severity = Err.Error; span = first_span; labels; notes = [];
          code = Err.Code.with_arg Err.Code.cap_needs (String.concat "," caps);
-         fix = Some (Err.FInsert {
+         fix = Some (Err.fix (Err.FInsert {
              after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
-             text = fix_lines });
+             text = fix_lines }));
          message =
            Printf.sprintf
              "%s %s, but module `%s` declares no `needs %s`%s.\n\
@@ -2245,6 +2245,15 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
      tag, then its schema) at spans no excerpt can show: report the type once,
      at each handler's annotation of it ([DActor] records them). *)
   let remote_reported = Hashtbl.create 4 in
+  (* The fix the note describes: `derive Json for T` on the line after
+     [T]'s declaration, at its indentation, when [T] is declared in the file
+     the error is reported in. *)
+  let derive_json_fix (at : Ast.span) s =
+    match Hashtbl.find_opt env.decl_sites ("type:" ^ s) with
+    | Some (tsp : Ast.span) when tsp.Ast.start_line > 0 && tsp.Ast.file = at.Ast.file ->
+      Some (Err.fix (Err.FInsert { after_line = tsp.Ast.end_line;
+                                   text = String.make tsp.Ast.start_col ' ' ^ "derive Json for " ^ s }))
+    | _ -> None in
   let remote_codec_missing sp s =
     if not (Hashtbl.mem remote_reported s) then begin
       Hashtbl.add remote_reported s ();
@@ -2275,7 +2284,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
                 MPCode s; MPText ", which has no JSON codec.";
                 MPBreak;
                 MPText "A remote message crosses the network as JSON, and its type's name is its wire tag."];
-            labels = []; code = Err.Code.codec_missing; fix = None;
+            labels = []; code = Err.Code.codec_missing; fix = derive_json_fix tsp s;
             notes = [ render_parts [
                 MPText "Add "; MPCode ("derive Json for " ^ s);
                 MPText " next to its declaration."] ] }
@@ -2317,7 +2326,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
            else
              Err.report env.errors
                { Err.severity = Err.Error; span = sp; labels = [];
-                 code = Err.Code.codec_missing; fix = None;
+                 code = Err.Code.codec_missing; fix = derive_json_fix sp s;
                  message = render_parts [
                      MPCode callee; MPText " needs a JSON codec for ";
                      MPCode s; MPText ", and none is derived.";

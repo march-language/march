@@ -7,4 +7,12 @@ A `let?` binding can't have a type annotation — its type is inferred from the 
                 ^
 
     let? name = result_expr
+
+    fix (`forge fix` applies it):
+
+10 -     let? x : Int = f()
+10 +     let? x = f()
+
     run `march --explain parse_error`
+
+after fix: exit 0
