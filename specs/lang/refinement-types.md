@@ -1313,8 +1313,21 @@ Functions with several parameters, and functions that return a list or a
   `match` or a `let` takes one apart. A tuple or record literal may be passed to
   a reflected function in a predicate: `sw((5, 2)) == 3`, `px({ x: 1, y: 2 }) == 3`.
 
-A variable of tuple or record type cannot be used in a predicate yet. So a lemma
-that takes a tuple parameter, such as `swap(swap(t)) == t`, is not proved.
+A variable of record type can be used in a predicate:
+- a lemma's theorem can read its record parameter's fields: `px(p) == p.x + p.y`;
+- a precondition can name another parameter's field: `n : {Int | _ > p.x}`;
+- a record passed where the callee refines a record (`{Pt | _ == a}`, `{Pt | _.x > 0}`)
+  is checked, and so is a reflected call that returns one (`need_x(bump(p))`);
+- a return type can relate the result to a record parameter: `{Int | _ == p.x}`,
+  `{Pt | _.x == p.y}`.
+
+A record literal in a predicate needs no parameter to say its type when exactly
+one declared record has those field names: `swp({ x: n, y: 1 }) == { x: 1, y: n }`.
+When two records share the field names, the literal is not translated and the
+obligation is skipped.
+
+A variable of tuple type cannot be used in a predicate yet. So a lemma that takes
+a tuple parameter, such as `swap(swap(t)) == t`, is not proved.
 
 **Steps the facts decide, up to the fuel.** The checker uses each reflected
 call's definition at the arguments it sees. When that produces another call,
