@@ -29,4 +29,4 @@ builds).
 |---|---|
 | the two new cases | RED (Math/Option/Result not declared) → GREEN |
 | `audit-baseline` | unchanged |
-| `scripts/affected.sh --run --full` | see the PR |
+| `scripts/affected.sh --run --full` | every suite green (refinecheck, compiler, errors, stdlib, stdlib_march, eval, codegen, test_reports); refine oracle IDENTICAL (8657 lines, 575 fixtures); IR oracle first CHANGED in 9 programs, from the three header lines shifting source line numbers into panic locations: with `cap verified` on the blank line after `mod … do` instead, IR IDENTICAL across 521 programs |

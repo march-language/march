@@ -7,10 +7,7 @@
 -- doc: try
 
 mod Math do
-  -- Every refinement contract and lemma below is proved, not just checked where it
-  -- can be: an obligation the checker cannot discharge is a compile error.
   cap verified
-
   -- ---- Constants ----
 
   doc """
