@@ -25515,9 +25515,10 @@ let session_theory_suite =
         has out "projection Blind C (typecheck): not compared: the role is not told which branch a choice took";
         has out "projection Blind C (endpoints): not compared: the role is not told which branch a choice took";
         has out "projection Blind A (typecheck): agrees");
-    Alcotest.test_case "endpoints: unlabelled messages are distinct, so the bystander is not told" `Quick (fun () ->
-        (* specs/todos/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
-           the typechecker merges C's branches, the generator does not. *)
+    Alcotest.test_case "endpoints: the same unlabelled message in both branches is merged, as the theory merges it" `Quick (fun () ->
+        (* specs/progress/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
+           the generator shares the synthesised constructor across equivalent
+           branch tails, so C's projection is one receive, as Session.Theory.project's is. *)
         let src =
           "mod P do\n\
           \  protocol Three do\n\
@@ -25533,7 +25534,8 @@ let session_theory_suite =
         let code, out = run_cli "--validate-projections" src in
         Alcotest.(check int) "exit 0" 0 code;
         has out "projection Three C (typecheck): agrees";
-        has out "projection Three C (endpoints): not compared: the role is not told");
+        has out "projection Three C (endpoints): agrees with Session.Theory.project";
+        has out "laws Three: in the fragment");
     Alcotest.test_case "a role that may crash is outside the fragment" `Quick (fun () ->
         let src =
           "mod P do\n\

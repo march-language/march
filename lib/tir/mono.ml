@@ -796,6 +796,14 @@ let rec rewrite_calls
     | _ -> None
   in
   match expr with
+  | Tir.EAtom (Tir.AVar v as a) when not (SSet.mem v.Tir.v_name shadowed) ->
+    (* A let-bound or returned function is reachable just like a function
+       passed as an argument. Polymorphic definitions are not seeded, so
+       omitting this edge leaves a closure referring to an absent symbol
+       (for example [let k = List.length]). Keep the generic body: a
+       generalized binding may be called at more than one element type. *)
+    ensure_atom_fns fn_table done_set worklist [a];
+    expr
   | Tir.EApp (f_var, args) ->
     (* Ensure functions passed as arguments are discovered *)
     ensure_atom_fns fn_table done_set worklist args;

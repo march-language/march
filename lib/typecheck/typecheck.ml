@@ -2871,6 +2871,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
               modules) — so this guard cannot misfire on that case. *)
            Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span (qualified_error_msg name.txt env);
            TError
+         | _ when (match split_qualified name.txt with
+                   | Some (q, member) when not (String.contains member '.') ->
+                     q <> env.current_module
+                     && not (StrMap.mem q env.local_mods)
+                     && (StrMap.mem q env.types || StrMap.mem q env.records
+                         || StrMap.mem q env.ty_aliases)
+                   | _ -> false) ->
+           (* A type is not a value namespace. The suffix fallback used to
+              type Int.to_string as to_string while leaving the qualified
+              AST name unresolved in both execution backends. Real module
+              and interface exports have already resolved above. The current
+              module may also name a type (including its implicit capability);
+              its own qualified private calls still need the suffix fallback. *)
+           let q, member = Option.get (split_qualified name.txt) in
+           let hint = match lookup_var member env with
+             | Some _ -> Printf.sprintf " Write `%s` without the type qualifier." member
+             | None -> " Use an exported module member or an unqualified function." in
+           Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span
+             (Printf.sprintf "`%s` is a type, not a module.%s" q hint);
+           TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
@@ -2890,9 +2910,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
               module, no `Q.`-prefixed binding) is a misspelled module, not a
               path to strip: stripping `Lsit.` off `Lsit.length` resolved the
               builtin `length`, so the typo checked clean and failed only at
-              run time with "unbound variable: Lsit.length".  A qualifier
-              that names a TYPE keeps the fallback: `Int.to_string(n)` is
-              how programs spell the bare `to_string` on an Int. *)
+              run time with "unbound variable: Lsit.length". Type qualifiers
+              are rejected separately above. *)
            let unknown_single_qualifier =
              match split_qualified name.txt with
              | Some (q, member) when not (String.contains member '.') ->
