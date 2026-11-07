@@ -1,0 +1,291 @@
+-- Actor.Theory: a model of an actor's mailbox, and laws about it.
+--
+-- The mailbox lives in the runtime (C, compiled) and the interpreter (OCaml);
+-- no March function implements it, so these laws are about this MODEL
+-- (lemmas design §4.2).  They say what the runtime promises in
+-- specs/lang/actors.md, stated so they can be proved:
+--
+--   A1  one sender's messages are received in the order it sent them, and no
+--       other sender, deferral (a hot-deploy epoch hold), stash or a call
+--       waiting inside a handler reorders them;
+--   A2  `Actor.call` takes only its own reply: a late reply to an earlier
+--       call cannot answer it;
+--   A3  a monitor's `Down` is delivered at most once, and a full mailbox
+--       never drops it.
+--
+-- Senders, payloads, monitor refs and call ids are `Int`s.  The runtime is
+-- tied to the model by trace conformance (design M8), which is what makes a
+-- guarantee `proved (model) · tested (runtime)` and never more.
+--
+-- The names are prefixed (`ActorEnv`, `EnvMsg`, `QEnd`, ...): March has one
+-- global type namespace, so a stdlib type named like a user's would collide.
+mod Actor.Theory do
+
+  -- What arrives in a mailbox: a message (sender, payload), a monitor's Down
+  -- (monitor ref), or a reply to an `Actor.call` (call id, value).
+  type ActorEnv = EnvMsg(Int, Int) | EnvDown(Int) | EnvReply(Int, Int)
+
+  -- A mailbox, oldest first.
+  type ActorQueue = QEnd | QThen(ActorEnv, ActorQueue)
+
+  -- The monitor refs still registered.
+  type ActorMons = MonEnd | MonThen(Int, ActorMons)
+
+  -- ── the queue ────────────────────────────────────────────────────────
+
+  doc "`xs` followed by `ys`."
+  fn qcat(xs : ActorQueue, ys : ActorQueue) : ActorQueue do
+    match xs do
+      QEnd -> ys
+      QThen(e, rest) -> QThen(e, qcat(rest, ys))
+    end
+  end
+
+  doc "Enqueue `e` at the back."
+  fn qenq(q : ActorQueue, e : ActorEnv) : ActorQueue do
+    qcat(q, QThen(e, QEnd))
+  end
+
+  doc "How many envelopes are queued."
+  fn qlen(q : ActorQueue) : Int do
+    match q do
+      QEnd -> 0
+      QThen(_, rest) -> 1 + qlen(rest)
+    end
+  end
+
+  doc "The messages from sender `s`, in queue order."
+  fn from_sender(s : Int, q : ActorQueue) : ActorQueue do
+    match q do
+      QEnd -> QEnd
+      QThen(e, rest) ->
+        match e do
+          EnvMsg(f, _) -> if f == s do QThen(e, from_sender(s, rest)) else from_sender(s, rest) end
+          _ -> from_sender(s, rest)
+        end
+    end
+  end
+
+  doc "The messages' payloads, oldest first (what a conformance test compares with what was sent)."
+  fn payloads(q : ActorQueue) : List(Int) do
+    match q do
+      QEnd -> Nil
+      QThen(e, rest) ->
+        match e do
+          EnvMsg(_, p) -> Cons(p, payloads(rest))
+          _ -> payloads(rest)
+        end
+    end
+  end
+
+  -- ── deferral and stash ───────────────────────────────────────────────
+
+  doc "Replay messages set aside (a hot-deploy epoch hold, or a stash on `become`): they go in front, in the order they were set aside."
+  fn replay(held : ActorQueue, q : ActorQueue) : ActorQueue do
+    qcat(held, q)
+  end
+
+  -- ── Actor.call ───────────────────────────────────────────────────────
+
+  doc "The value of the first reply to call `id`, if one is queued."
+  fn call_reply(id : Int, q : ActorQueue) : Option(Int) do
+    match q do
+      QEnd -> None
+      QThen(e, rest) ->
+        match e do
+          EnvReply(c, v) -> if c == id do Some(v) else call_reply(id, rest) end
+          _ -> call_reply(id, rest)
+        end
+    end
+  end
+
+  doc "The queue after a waiting call takes its reply: only that reply leaves; everything else stays, in arrival order."
+  fn without_reply(id : Int, q : ActorQueue) : ActorQueue do
+    match q do
+      QEnd -> QEnd
+      QThen(e, rest) ->
+        match e do
+          EnvReply(c, _) -> if c == id do rest else QThen(e, without_reply(id, rest)) end
+          _ -> QThen(e, without_reply(id, rest))
+        end
+    end
+  end
+
+  doc "A call with deadline `deadline` whose reply arrives at `t_reply` returns the reply."
+  fn call_succeeds(deadline : Int, t_reply : Int) : Bool do
+    t_reply <= deadline
+  end
+
+  -- ── monitors ─────────────────────────────────────────────────────────
+
+  doc "How many `Down`s for monitor `r` are queued."
+  fn downs(r : Int, q : ActorQueue) : Int do
+    match q do
+      QEnd -> 0
+      QThen(e, rest) ->
+        match e do
+          EnvDown(x) -> if x == r do 1 + downs(r, rest) else downs(r, rest) end
+          _ -> downs(r, rest)
+        end
+    end
+  end
+
+  doc "Whether an envelope is a monitor's `Down`."
+  fn is_down(e : ActorEnv) : Bool do
+    match e do
+      EnvDown(_) -> true
+      _ -> false
+    end
+  end
+
+  doc "Enqueue into a mailbox holding at most `limit` messages: a full mailbox drops an ordinary message, never a `Down`."
+  fn bounded_enq(limit : Int, q : ActorQueue, e : ActorEnv) : ActorQueue do
+    if qlen(q) >= limit && !is_down(e) do q else qenq(q, e) end
+  end
+
+  doc "Whether monitor `r` is still registered."
+  fn monitored(ms : ActorMons, r : Int) : Bool do
+    match ms do
+      MonEnd -> false
+      MonThen(x, rest) -> x == r || monitored(rest, r)
+    end
+  end
+
+  doc "Monitor `r` removed (`demonitor`, or the death path after delivering its `Down`)."
+  fn unmonitor(ms : ActorMons, r : Int) : ActorMons do
+    match ms do
+      MonEnd -> MonEnd
+      MonThen(x, rest) -> if x == r do unmonitor(rest, r) else MonThen(x, unmonitor(rest, r)) end
+    end
+  end
+
+  doc "The watched actor dies: a registered monitor `r` gets its `Down` (past any mailbox limit)."
+  fn death_q(q : ActorQueue, ms : ActorMons, r : Int) : ActorQueue do
+    if monitored(ms, r) do qenq(q, EnvDown(r)) else q end
+  end
+
+  -- ── laws: A1, ordering ───────────────────────────────────────────────
+
+  doc "Appending nothing changes nothing."
+  @[lemma]
+  fn qcat_end(xs : ActorQueue) : {Unit | qcat(xs, QEnd) == xs} do
+    match xs do
+      QEnd -> ()
+      QThen(_, rest) -> qcat_end(rest)
+    end
+  end
+
+  doc "A sender's messages in two queues, one after the other, are its messages in each, one after the other."
+  @[lemma]
+  fn from_cat(s : Int, xs : ActorQueue, ys : ActorQueue)
+    : {Unit | from_sender(s, qcat(xs, ys)) == qcat(from_sender(s, xs), from_sender(s, ys))} do
+    match xs do
+      QEnd -> ()
+      QThen(_, rest) -> from_cat(s, rest, ys)
+    end
+  end
+
+  doc "A1. Another sender's message does not change what `s` will receive, or its order."
+  @[lemma]
+  fn enq_other(s : Int, q : ActorQueue, f : {Int | _ != s}, p : Int)
+    : {Unit | from_sender(s, qenq(q, EnvMsg(f, p))) == from_sender(s, q)} do
+    from_cat(s, q, QThen(EnvMsg(f, p), QEnd))
+    qcat_end(from_sender(s, q))
+  end
+
+  doc "A1. A sender's new message is received after everything it sent before."
+  @[lemma]
+  fn enq_self(s : Int, q : ActorQueue, p : Int)
+    : {Unit | from_sender(s, qenq(q, EnvMsg(s, p))) == qenq(from_sender(s, q), EnvMsg(s, p))} do
+    from_cat(s, q, QThen(EnvMsg(s, p), QEnd))
+  end
+
+  doc "A1b. Replaying held messages keeps each sender's order: the held ones first, then the rest."
+  @[lemma]
+  fn replay_order(s : Int, held : ActorQueue, q : ActorQueue)
+    : {Unit | from_sender(s, replay(held, q)) == qcat(from_sender(s, held), from_sender(s, q))} do
+    from_cat(s, held, q)
+  end
+
+  doc "A1c. A call waiting inside a handler takes only its reply: every sender's messages stay, in order."
+  @[lemma]
+  fn call_keeps_others(s : Int, id : Int, q : ActorQueue)
+    : {Unit | from_sender(s, without_reply(id, q)) == from_sender(s, q)} do
+    match q do
+      QEnd -> ()
+      QThen(_, rest) -> call_keeps_others(s, id, rest)
+    end
+  end
+
+  -- ── laws: A2, Actor.call ─────────────────────────────────────────────
+
+  doc "A2. A reply to another call, ahead of ours, is not taken as ours."
+  @[lemma]
+  fn stale_reply_ignored(id : Int, c : {Int | _ != id}, v : Int, q : ActorQueue)
+    : {Unit | call_reply(id, QThen(EnvReply(c, v), q)) == call_reply(id, q)} do
+    ()
+  end
+
+  doc "A2. Once our reply is queued, nothing arriving later changes which reply we take."
+  @[lemma]
+  fn call_reply_cat(id : Int, xs : ActorQueue, ys : ActorQueue)
+    : {Unit | call_reply(id, xs) == None || call_reply(id, qcat(xs, ys)) == call_reply(id, xs)} do
+    match xs do
+      QEnd -> ()
+      QThen(_, rest) -> call_reply_cat(id, rest, ys)
+    end
+  end
+
+  doc "A2. With no reply of ours queued yet, the reply we take is the first among later arrivals."
+  @[lemma]
+  fn call_reply_later(id : Int, xs : ActorQueue, ys : ActorQueue)
+    : {Unit | call_reply(id, xs) != None || call_reply(id, qcat(xs, ys)) == call_reply(id, ys)} do
+    match xs do
+      QEnd -> ()
+      QThen(_, rest) -> call_reply_later(id, rest, ys)
+    end
+  end
+
+  doc "A2. A call returns its reply only if the reply came by the deadline."
+  @[lemma]
+  fn deadline_law(deadline : Int, t_reply : Int)
+    : {Unit | !call_succeeds(deadline, t_reply) || t_reply <= deadline} do
+    ()
+  end
+
+  -- ── laws: A3, monitors ───────────────────────────────────────────────
+
+  doc "`Down`s in two queues add up."
+  @[lemma]
+  fn downs_cat(r : Int, xs : ActorQueue, ys : ActorQueue)
+    : {Unit | downs(r, qcat(xs, ys)) == downs(r, xs) + downs(r, ys)} do
+    match xs do
+      QEnd -> ()
+      QThen(_, rest) -> downs_cat(r, rest, ys)
+    end
+  end
+
+  doc "A3. A full mailbox never drops a `Down`."
+  @[lemma]
+  fn down_never_dropped(limit : Int, q : ActorQueue, r : Int)
+    : {Unit | downs(r, bounded_enq(limit, q, EnvDown(r))) == downs(r, q) + 1} do
+    downs_cat(r, q, QThen(EnvDown(r), QEnd))
+  end
+
+  doc "A removed monitor is gone."
+  @[lemma]
+  fn unmonitor_gone(ms : ActorMons, r : Int) : {Unit | !monitored(unmonitor(ms, r), r)} do
+    match ms do
+      MonEnd -> ()
+      MonThen(_, rest) -> unmonitor_gone(rest, r)
+    end
+  end
+
+  doc "A3. A monitor's `Down` is delivered at most once: delivering it removes the monitor, so a second death adds nothing."
+  @[lemma]
+  fn down_at_most_once(q : ActorQueue, ms : ActorMons, r : Int)
+    : {Unit | downs(r, death_q(death_q(q, ms, r), unmonitor(ms, r), r)) <= downs(r, q) + 1} do
+    unmonitor_gone(ms, r)
+    downs_cat(r, q, QThen(EnvDown(r), QEnd))
+  end
+end

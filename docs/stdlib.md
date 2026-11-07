@@ -9,7 +9,7 @@ permalink: /docs/stdlib-guide/
 
 The standard library is the set of modules every March program can use with no
 dependency to add and no import to write: collections, strings, files, HTTP, JSON,
-cryptography, clustering and more, 137 modules in all. You call a function by its
+cryptography, clustering and more, 138 modules in all. You call a function by its
 qualified name, `List.map` or `String.trim`, or bring names into scope with `import` or
 `use`. A few names, such as `panic`, `unwrap` and `head`, come from `Prelude` and are
 always in scope.
@@ -1074,6 +1074,19 @@ SessionAP.authorize(Some(cert), "Checkout", "Ledger", SessionAP.offer_mode())
                                               -- Result((), String)
 SessionAP.permission("Checkout", "Ledger", SessionAP.initiate_mode())
                                               -- "Checkout.Ledger:initiate"
+```
+
+### Actor.Theory
+
+`actor_theory.march`: a model of an actor's mailbox and the laws proved about it (per-sender
+order, `Actor.call` replies, monitor `Down`s). See the actors chapter, "What is proved about the
+mailbox".
+
+```march
+Actor.Theory.from_sender(s, q)                -- ActorQueue: sender s's messages, in order
+Actor.Theory.call_reply(id, q)                -- Option(Int): the reply call `id` takes
+Actor.Theory.enq_other(s, q, f, p)            -- lemma: another sender doesn't reorder s
+Actor.Theory.down_never_dropped(limit, q, r)  -- lemma: a full mailbox keeps a Down
 ```
 
 ### Session.Theory

@@ -1,0 +1,82 @@
+-- Trace conformance for Actor.Theory's ordering law A1 (lemmas design §4.2,
+-- M8): the runtime's receive order, replayed through the model, gives each
+-- sender's messages in the order it sent them.
+--
+-- Three senders each send 50 numbered messages to one logger concurrently;
+-- the logger records (sender, number) as it handles each.  The recorded order
+-- is built into an Actor.Theory queue and `from_sender` (the function the
+-- proved laws `enq_self` / `enq_other` are about) is applied to it: for every
+-- sender it must be exactly 1..50.  Interleaving between senders is free, so
+-- nothing here depends on the scheduler's choices.
+mod Main do
+  needs IO.Console
+
+  actor Logger do
+    state { log : List(Int) }
+    init  { log: [] }
+    on GetLog(reply_to) do
+      Actor.reply(reply_to, state.log)
+      state
+    end
+    on Note(s : Int, k : Int) do
+      { log: Cons(s * 1000 + k, state.log) }
+    end
+  end
+
+  actor Sender do
+    state { n : Int }
+    init  { n: 0 }
+    on Go(target, s : Int, k : Int) do
+      send_all(target, s, 1, k)
+      { n: state.n + k }
+    end
+  end
+
+  type GetLogReq = GetLogReq
+
+  fn send_all(target, s : Int, i : Int, k : Int) : Unit do
+    if i > k do () else
+      send(target, Note(s, i))
+      send_all(target, s, i + 1, k)
+    end
+  end
+
+  -- The recorded order (oldest first) as a model queue.
+  fn to_queue(xs : List(Int)) : Actor.Theory.ActorQueue do
+    match xs do
+      Nil -> Actor.Theory.QEnd
+      Cons(v, rest) -> Actor.Theory.QThen(Actor.Theory.EnvMsg(v / 1000, v % 1000), to_queue(rest))
+    end
+  end
+
+  -- 1..i in order, built from the top.
+  fn upto(i : Int, acc : List(Int)) : List(Int) do
+    if i == 0 do acc else upto(i - 1, Cons(i, acc)) end
+  end
+
+  fn check(q : Actor.Theory.ActorQueue, s : Int, k : Int) : Unit do
+    let got = Actor.Theory.payloads(Actor.Theory.from_sender(s, q))
+    println("sender " ++ int_to_string(s) ++ " in order: " ++ bool_to_string(got == upto(k, Nil)))
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let k = 50
+    let log = spawn(Logger)
+    let a = spawn(Sender)
+    let b = spawn(Sender)
+    let c = spawn(Sender)
+    send(a, Go(log, 1, k))
+    send(b, Go(log, 2, k))
+    send(c, Go(log, 3, k))
+    run_until_idle()
+    match Actor.call(log, GetLogReq, 10000) do
+      Ok(rev) ->
+        let q = to_queue(List.reverse(rev))
+        println("messages: " ++ int_to_string(Actor.Theory.qlen(q)))
+        check(q, 1, k)
+        check(q, 2, k)
+        check(q, 3, k)
+      Err(e) -> println("err: " ++ e)
+    end
+  end
+end

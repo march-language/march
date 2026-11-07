@@ -126,6 +126,7 @@ let pipe_into_match = "pipe_into_match"
 let pipe_match_pattern = "pipe_match_pattern"
 let portable_capture = "portable_capture"
 let predicate_eq_structural = "predicate_eq_structural"
+let predicate_vocabulary_shadowed = "predicate_vocabulary_shadowed"
 let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
 let proof_cap_mint_private = "proof_cap_mint_private"
@@ -335,6 +336,7 @@ let all = [
   pipe_match_pattern;
   portable_capture;
   predicate_eq_structural;
+  predicate_vocabulary_shadowed;
   prelude_collision;
   proof_cap_foreign;
   proof_cap_mint_private;
@@ -517,7 +519,8 @@ let category_table : (string * string list) list = [
     int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
     invariant_not_deploy_checkable;
     lemma_argument_impure; lemma_unproved; lemma_unproved_call;
-    measure_scalar_field; predicate_eq_structural; refinement_ignored;
+    measure_scalar_field; predicate_eq_structural; predicate_vocabulary_shadowed;
+    refinement_ignored;
     refinement_unchecked; refinement_unverified; refinement_violated;
     reflect_conflict; reflect_inconsistent; return_refinement_violated;
     set_measure_call; set_refinement_type; solver_unavailable;

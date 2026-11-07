@@ -47,3 +47,8 @@ variant types whose short name is declared at two or more module paths, stdlib
 excluded) is the design proposal in the derive-Json todo; this todo is its reject case.
 Landing it makes previously-accepted programs that mixed the two types into type
 errors (a Changed entry).
+
+2026-11-06: the refinement checker now tells two same-named types apart when their arities
+differ (the typechecker never unifies those), so a user `type Tree` beside the stdlib's
+`OrderedMap.Tree(k, v)` works in predicates (`specs/progress/2026-11-06-predicate-names.md`).
+Same-arity names still make the checker skip, and wait on this todo.
