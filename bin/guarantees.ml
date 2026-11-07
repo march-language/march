@@ -216,7 +216,8 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
 (* The protocol's lines from its translation-validation rows
    ([Session_validate], M6): a projection that agrees with
    [Session.Theory.project] inherits what the stdlib proves about it. *)
-let protocol_lines (rows : Session_validate.row list) (pd : A.protocol_def) : int * line list =
+let protocol_lines ~(fragment : (unit, string) result) (rows : Session_validate.row list) (pd : A.protocol_def)
+    : int * line list =
   let rec roles acc = function
     | [] -> acc
     | A.ProtoMsg (s, r, _, _) :: rest -> roles (s.A.txt :: r.A.txt :: acc) rest
@@ -272,15 +273,33 @@ let protocol_lines (rows : Session_validate.row list) (pd : A.protocol_def) : in
             (if String.contains projectors ' ' then "" else "s")
             (if n = 2 then ", whose two projections are dual (Session.Theory.project_dual)" else "") }
   in
+  (* C3-C5 hold for a protocol in Session.Theory's fragment once its
+     projections are validated (the laws are about `project`). *)
+  let laws =
+    if projection.label <> Proved_spec then Error "its projections are not validated"
+    else fragment
+  in
   let pairwise =
     if n = 2 then []
     else
-      [ { what = "pairwise duality"; label = Checked_compiler;
-          detail = "every send has the matching receive at its peer (not yet proved for more than two roles)" } ]
+      match laws with
+      | Ok () ->
+        [ { what = "pairwise duality"; label = Proved_spec;
+            detail = "what each pair of roles does with each other is dual (Session.Theory.pairwise)" } ]
+      | Error why ->
+        [ { what = "pairwise duality"; label = Checked_compiler;
+            detail = "every send has the matching receive at its peer; not proved: " ^ why } ]
   in
-  ( n,
-    (projection :: pairwise)
-    @ [ { what = "deadlock freedom"; label = Not_checked; detail = "no proof covers this protocol yet" } ] )
+  let deadlock =
+    match laws with
+    | Ok () ->
+      { what = "deadlock freedom"; label = Proved_spec;
+        detail =
+          "on the protocol's own schedule every role can take each step and every role finishes \
+           (Session.Theory.progress, projections_compose; synchronous delivery)" }
+    | Error why -> { what = "deadlock freedom"; label = Not_checked; detail = "not proved: " ^ why }
+  in
+  (n, (projection :: pairwise) @ [ deadlock ])
 
 let pad s w = if String.length s >= w then s else s ^ String.make (w - String.length s) ' '
 
@@ -318,7 +337,10 @@ let print ?(oc = stdout) ~filename ~user_files ~(surface : A.decl list) (desugar
   let rows = Session_validate.run surface in
   List.iter
     (fun (name, pd) ->
-      let n, lines = protocol_lines (List.filter (fun (r : Session_validate.row) -> r.Session_validate.proto = name) rows) pd in
+      let n, lines =
+        protocol_lines ~fragment:(Session_validate.fragment name)
+          (List.filter (fun (r : Session_validate.row) -> r.Session_validate.proto = name) rows) pd
+      in
       print_block oc (Printf.sprintf "protocol %s (%d roles)" name n) lines)
     (protocols surface);
   if acts <> [] then
