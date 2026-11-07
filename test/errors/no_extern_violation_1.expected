@@ -8,6 +8,11 @@ hint: add `needs IO.Foreign` to the module body.
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
+    possible fix (a guess: check it before applying it):
+
+16 | mod NoFFI do
+17 +   needs IO.Foreign
+
 
 -- CONTRACT ---------- errors/no_extern_violation_1.march
 
@@ -18,10 +23,5 @@ Remove `extern` blocks and `needs IO.Foreign` from `cap no_extern` modules.
 20 |   extern "libc" : Cap(IO.FileSystem) do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-
-    possible fix (a guess: check it before applying it):
-
-16 | mod NoFFI do
-17 +   needs IO.Foreign
 
 
