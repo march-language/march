@@ -674,6 +674,125 @@ let test_parse_multiline_call_args_still_work () =
       | _ -> Alcotest.fail "multi-line arg list must still parse as a call")
    | _ -> Alcotest.fail "expected [ELet; unit]")
 
+(* ── #1179: the same rule after `}`, `end` and an interpolated string ──────
+   #129/#132 retagged a line-initial `(` only after an identifier, `)`, `]` or
+   a literal. A record literal, a record update, a `do ... end` block and an
+   interpolated string also reduce to the call rule's [expr_field], so after
+   any of them the `(` line was still glued on as an argument list:
+   `let r = { x: 1 }`⏎`(r.x + 1)` parsed as `let r = { x: 1 }(r.x + 1)` (a
+   confusing `not_a_function` + `unbound_variable` pile), and
+   `let g = do fn s -> ... end`⏎`("discarded")` silently CALLED `g`. *)
+
+(* The block must be two statements, and the binding's RHS must not be a call
+   (that is what the glom produced). [rhs_ok] checks the RHS shape. *)
+let check_paren_line_is_stmt ~what ~rhs_ok src =
+  let es = single_fn_body_exprs src in
+  Alcotest.(check int) (what ^ ": two block exprs, the let then the `(` line")
+    2 (List.length es);
+  match es with
+  | [March_ast.Ast.ELet (b, _); _] ->
+    if not (rhs_ok b.March_ast.Ast.bind_expr) then
+      Alcotest.fail (what ^ ": the binding glommed the next line's `(...)` into a call")
+  | _ -> Alcotest.fail (what ^ ": expected [ELet; paren expr]")
+
+let test_parse_paren_line_after_record_literal () =
+  check_paren_line_is_stmt ~what:"record literal"
+    ~rhs_ok:(function March_ast.Ast.ERecord _ -> true | _ -> false)
+    {|mod Test do
+    fn f() do
+      let r = { x: 1 }
+      (r.x + 1)
+    end
+  end|}
+
+let test_parse_paren_line_after_record_update () =
+  check_paren_line_is_stmt ~what:"record update"
+    ~rhs_ok:(function March_ast.Ast.ERecordUpdate _ -> true | _ -> false)
+    {|mod Test do
+    fn f(r) do
+      let s = { r with x: 2 }
+      (s.x + 1)
+    end
+  end|}
+
+let test_parse_paren_line_after_interp_string () =
+  (* An interpolated string desugars to a concatenation, which may itself be an
+     application, so the shape check is on the arity: the glommed form is ONE
+     block expr, whatever its RHS looks like. *)
+  check_paren_line_is_stmt ~what:"interpolated string"
+    ~rhs_ok:(fun _ -> true)
+    {|mod Test do
+    fn f(n) do
+      let s = "n=${n}"
+      (n + 1)
+    end
+  end|}
+
+let test_parse_paren_line_after_do_block () =
+  (* The silent-call case: `g` used to be applied to "discarded". *)
+  check_paren_line_is_stmt ~what:"do ... end block"
+    ~rhs_ok:(function March_ast.Ast.EApp _ -> false | _ -> true)
+    {|mod Test do
+    fn f() do
+      let g = do
+        fn s -> s
+      end
+      ("discarded")
+    end
+  end|}
+
+let test_parse_paren_line_after_if_and_local_fn () =
+  (* Controls for the other `end`s: an `if ... end` and a local `fn ... end`
+     followed by a `(` line were already two statements (neither reduces to
+     [expr_field]); the retag must keep them that way. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(c) do
+      let x = if c do 1 else 2 end
+      (x, x)
+      fn helper(y) do
+        y + 1
+      end
+      (helper(1), 2)
+    end
+  end|} in
+  Alcotest.(check int) "let, tuple, local fn, tuple" 4 (List.length es)
+
+let test_parse_same_line_call_after_do_block_still_works () =
+  (* The retag keys on the newline: `do ... end(` on one line stays a call. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f() do
+      let y = do fn s -> s end("x")
+      y
+    end
+  end|} in
+  match es with
+  | [March_ast.Ast.ELet (b, _); _] ->
+    (match b.March_ast.Ast.bind_expr with
+     | March_ast.Ast.EApp _ -> ()
+     | _ -> Alcotest.fail "`do ... end(\"x\")` on one line must still be a call")
+  | _ -> Alcotest.fail "expected [ELet; y]"
+
+let test_parse_tuple_arm_after_brace_and_end_bodies () =
+  (* A match arm may open a fresh line with a tuple pattern after an arm body
+     ending in `}`, a `do ... end` block or an interpolated string: the
+     retagged `(` must still be accepted as a pattern. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(p, st) do
+      match p do
+        (0, _) -> { st with n: 1 }
+        (1, _) -> do
+          st
+        end
+        (2, y) -> "y=${y}"
+        (_, _) -> st
+      end
+    end
+  end|} in
+  match es with
+  | [March_ast.Ast.EMatch (_, branches, _)] ->
+    Alcotest.(check int) "four arms" 4 (List.length branches)
+  | _ -> Alcotest.fail "expected a single match expression"
+
 (* ── `with ... else` multi-arm parsing (token-filter arm separators) ────── *)
 
 (* Parse a module whose single fn body is a `with ... else ... end` and return
@@ -18283,6 +18402,20 @@ let compiler_suites =
             `Quick test_parse_same_line_call_still_works;
           Alcotest.test_case "multi-line call arg list still parses as a call"
             `Quick test_parse_multiline_call_args_still_work;
+          Alcotest.test_case "`(` line after a record literal is a statement (#1179)"
+            `Quick test_parse_paren_line_after_record_literal;
+          Alcotest.test_case "`(` line after a record update is a statement (#1179)"
+            `Quick test_parse_paren_line_after_record_update;
+          Alcotest.test_case "`(` line after an interpolated string is a statement (#1179)"
+            `Quick test_parse_paren_line_after_interp_string;
+          Alcotest.test_case "`(` line after a do-block does not call it (#1179)"
+            `Quick test_parse_paren_line_after_do_block;
+          Alcotest.test_case "`(` line after if/local fn `end` stays a statement"
+            `Quick test_parse_paren_line_after_if_and_local_fn;
+          Alcotest.test_case "same-line `do ... end(` still parses as a call"
+            `Quick test_parse_same_line_call_after_do_block_still_works;
+          Alcotest.test_case "tuple-pattern arm after `}`/`end`/interp arm bodies"
+            `Quick test_parse_tuple_arm_after_brace_and_end_bodies;
         ] );
       ( "keywords",
         [

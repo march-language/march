@@ -686,6 +686,11 @@ git log is authoritative for exact commits.
   `compare` on `Int`, `Float` and `String` (and so a derived `Ord` over such
   fields) now also builds on `--target js`.
 
+- **A line starting with `(` after a record, a `do ... end` block or an interpolated
+  string is now a new statement** (#1179), as it already was after an identifier, `)`,
+  `]` or a literal. Before, `let r = { x: 1 }` followed by a `(r.x + 1)` line parsed as
+  a call on the record (`not_a_function`, then `unbound_variable` for `r`), and
+  `let g = do ... end` followed by a `("x")` line silently called `g`.
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
