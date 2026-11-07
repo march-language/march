@@ -655,6 +655,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A module on `MARCH_LIB_PATH` is no longer loaded just because it declares a type or
+  constructor with the same name as one your code uses from its own module.** A module
+  that used its own `type Tally` pulled in every other lib-path module declaring a
+  `Tally`, even ones nothing referenced, and an error in any of them failed the build
+  (`--check`, `--compile` and the interpreter alike). A bare name used without being
+  defined in the same module still loads the modules that define it (#1183).
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
