@@ -1,0 +1,67 @@
+-- Regression: a function-typed module-level `let` outside the entry module
+-- is lowered to a zero-parameter fn that RETURNS the closure.  A call
+-- `Cst.inc(4)` passed 4 to that zero-arg fn and a value use `let g = Cst.inc`
+-- took the zero-arg fn itself as the function, so native printed pointer-sized
+-- integers and --target js printed `[object Object]`.  Lowering now calls the
+-- zero-arg fn for the closure first (Lower_decls.call_fn_typed_module_lets).
+-- The interpreter was always right; this file's .expected is its output.
+mod ModuleLetFn do
+  needs IO.Console
+
+  let top_double = fn x -> x * 2
+
+  mod Mk do
+    fn make_adder(n : Int) : Int -> Int do fn x -> x + n end
+  end
+
+  mod Cst do
+    let inc = fn x -> x + 1
+    let add = fn (a, b) -> a + b
+    let shout = fn s -> s ++ "!"
+    let ident = fn x -> x
+
+    -- a closure built by a call, capturing 10
+    let add10 = Mk.make_adder(10)
+
+    -- bare in-module uses: a call, a value use, and a HOF argument
+    fn inc_twice(x : Int) : Int do inc(inc(x)) end
+
+    fn pick() : Int -> Int do inc end
+
+    fn bump_all(xs : List(Int)) : List(Int) do List.map(xs, inc) end
+
+    mod Inner do
+      let triple = fn x -> x * 3
+
+      fn via_parent(x : Int) : Int do Cst.inc(triple(x)) end
+    end
+  end
+
+  fn apply(f : Int -> Int, x : Int) : Int do f(x) end
+
+  fn show_list(xs : List(Int)) : String do
+    List.fold_left(xs, "", fn (acc, x) -> acc ++ int_to_string(x) ++ " ")
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(int_to_string(top_double(21)))
+    println(int_to_string(Cst.inc(4)))
+    let g = Cst.inc
+    println(int_to_string(g(5)))
+    println(int_to_string(Cst.add(2, 3)))
+    println(Cst.shout("hey"))
+    println(int_to_string(Cst.add10(5)))
+    println(int_to_string(Cst.inc_twice(1)))
+    let picked = Cst.pick()
+    println(int_to_string(picked(7)))
+    println(show_list(Cst.bump_all([1, 2, 3])))
+    println(show_list(List.map([10, 20], Cst.inc)))
+    println(int_to_string(apply(Cst.inc, 99)))
+    println(int_to_string(Cst.Inner.triple(3)))
+    println(show_list(List.map([1, 2], Cst.Inner.triple)))
+    println(int_to_string(Cst.Inner.via_parent(2)))
+    println(int_to_string(Cst.ident(8)) ++ " " ++ Cst.ident("poly"))
+    let fs = [Cst.inc, Cst.Inner.triple, top_double]
+    println(show_list(List.map(fs, fn f -> f(5))))
+  end
+end

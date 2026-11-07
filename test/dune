@@ -8769,6 +8769,51 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/module_let_value.expected js_module_let_value.out)))
 
+; Regression: a function-typed module-level `let` outside the entry module
+; (`mod Cst do let inc = fn x -> x + 1 end`) is a zero-param fn returning the
+; closure.  `Cst.inc(4)` passed 4 to it and `let g = Cst.inc` took the fn itself:
+; native printed pointers, --target js `[object Object]`.  All three diffed
+; against ONE .expected, the interpreter's.
+(rule
+ (targets native_module_let_fn native_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_module_let_fn
+        native/module_let_fn.march)
+   (with-stdout-to native_module_let_fn.out
+        (system "./native_module_let_fn")))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected native_module_let_fn.out)))
+
+(rule
+ (targets js_module_let_fn.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_fn.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_fn.mjs native/module_let_fn.march)))
+
+(rule
+ (targets js_module_let_fn.out)
+ (deps js_module_let_fn.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_fn.out (run node js_module_let_fn.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected js_module_let_fn.out)))
+
+(rule
+ (targets interp_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (with-stdout-to interp_module_let_fn.out
+    (run %{exe:../bin/main.exe} native/module_let_fn.march))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected interp_module_let_fn.out)))
+
 ; Regression (#1177): an entry-module fn named like a bare-name-dispatched
 ; builtin (negate, not, string_length, int_xor) must be called on --target js
 ; and natively (the `not(<literal>)` fold ignored it on both).

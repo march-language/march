@@ -103,6 +103,20 @@ let fresh_nested_name ~(host : string) (prefix : string) : string =
 let fresh_var ?(lin = Tir.Unr) (ty : Tir.ty) : Tir.var =
   { v_name = fresh_name "t"; v_ty = ty; v_lin = lin }
 
+(** Function-typed module-level lets outside the entry module: qualified TIR
+    fn name -> the let's value type (a [TFn]).  Such a let is lowered to a
+    zero-parameter fn RETURNING the closure, so a reference to it must call
+    it first; [Lower_decls.call_fn_typed_module_lets] rewrites the references
+    at the end of [lower_module].  Reset per [lower_module].
+    specs/progress/2026-11-07-function-typed-module-let-outside-entry.md *)
+let _fn_typed_module_lets : (string, Tir.ty) Hashtbl.t = Hashtbl.create 8
+
+(** Record a module-level let lowered to the zero-arg fn [fn]. *)
+let note_module_let (fn : Tir.fn_def) : unit =
+  match fn.fn_ret_ty with
+  | Tir.TFn _ -> Hashtbl.replace _fn_typed_module_lets fn.fn_name fn.fn_ret_ty
+  | _ -> ()
+
 (** Emit a runtime panic for a non-exhaustive match that the typechecker
     missed.  Returning [LitInt 0] here would silently reinterpret a value of
     the match's real (possibly non-Int) type as a tagged int — e.g. treated
