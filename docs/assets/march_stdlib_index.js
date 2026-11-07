@@ -39,6 +39,13 @@ window.marchModuleIndex = {
     "Scheduler"
    ]
   },
+  "Actor.Theory": {
+   "file": "actor_theory.march",
+   "unavailable": null,
+   "uses": [
+    "Actor"
+   ]
+  },
   "AhoCorasick": {
    "file": "aho_corasick.march",
    "unavailable": null,
