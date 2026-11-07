@@ -7,13 +7,14 @@ help: add `needs IO.FileWrite` to the module body.
 13 |   fn save(cap : Cap(IO.FileWrite), path : String, data : String) : String do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+10 | mod Store do
+11 +   needs IO.FileWrite
+
     run `march --explain cap_needs`
 
 
-
-fix [cap_needs:IO.FileWrite]:
-@@ after line 10 @@
- mod Store do
-+  needs IO.FileWrite
 
 after fix: exit 0

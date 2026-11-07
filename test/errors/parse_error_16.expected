@@ -7,11 +7,12 @@ This `fn` (line 3) has no matching `end`. [parse_error]
       ^^
 
     I only noticed at the end of the file.
-    run `march --explain parse_error`
 
-fix [parse_error]:
-@@ after line 4 @@
-     if true do List.map(xs, fn x -> x + 1) else xs end
-+  end
+    fix (`forge fix` applies it):
+
+4 |     if true do List.map(xs, fn x -> x + 1) else xs end
+5 +   end
+
+    run `march --explain parse_error`
 
 after fix: exit 0

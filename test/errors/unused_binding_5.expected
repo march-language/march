@@ -8,6 +8,11 @@ Use `_` to mark intentionally unused params.
                 ^^
 
 
+    fix (`forge fix` applies it):
+
+37 -   fn inner(xs : {List(Int) | len(_) > 0}) : Int do
+37 +   fn inner(_xs : {List(Int) | len(_) > 0}) : Int do
+
 
 -- REFINEMENT ------------- errors/unused_binding_5.march
 
@@ -30,11 +35,6 @@ no fact the checker derived constrains `ys`
 
 
 
-
-fix [unused_binding]:
-@@ lines 37-37 @@
--  fn inner(xs : {List(Int) | len(_) > 0}) : Int do
-+  fn inner(_xs : {List(Int) | len(_) > 0}) : Int do
 
 after fix: exit 1
 refinement violation: bound expression does not satisfy type annotation `len(_) > 0` [refinement_violated]
