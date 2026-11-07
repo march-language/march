@@ -46,6 +46,7 @@ backends.
 - [Protocol syntax](#protocol-syntax)
 - [Generated names](#generated-names)
 - [The entry points](#the-entry-points)
+- [What is proved about a protocol](#what-is-proved-about-a-protocol)
 
 **Running in production**
 
@@ -564,6 +565,39 @@ The two that open their own connections take the root capability, `Cap(IO)`. The
 that run over a `ClusterNode` take only the node: a program that holds a running node can
 play a role without holding `Cap(IO)`. A role with a [grant](#per-role-grants) adds one
 capability parameter per granted path, straight after the node.
+
+## What is proved about a protocol
+
+The standard library's `Session.Theory` (`stdlib/session_theory.march`) states what a
+protocol means as March code: a protocol is a `SessionGlobal`, a role's part in it is a `SessionLocal`, and
+`Session.Theory.project(g, role, multiparty)` is the projection. Its laws are lemmas, proved
+once in the standard library:
+
+| Law | Says |
+|---|---|
+| `dual_dual` | the other end of the other end is the original |
+| `project_dual` | in a two-role protocol, each role's projection is the other's dual |
+
+The compiler projects a protocol twice, in OCaml: once for `Chan(Role, Proto)` and once for
+`@[endpoints]`. `march --check --guarantees` (and `forge hot-reload check`) checks each
+projection it built against `Session.Theory.project`, by running `project` in the interpreter
+on that protocol. When they agree, the laws hold for your protocol, and the report says so:
+
+```
+protocol Relay (2 roles): not checked
+  projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)
+  deadlock freedom  not checked: no proof covers this protocol yet
+```
+
+A disagreement is a compiler bug, reported as `violated`. `march --validate-projections FILE`
+prints one line per protocol, projector and role, and exits 1 on a disagreement.
+
+Not covered yet, and labelled so:
+
+- a protocol with a crash branch or a role that may crash;
+- a role in a protocol of more than two roles that is not told which branch a `choose` took
+  (its branches differ and do not all begin with the chooser's message);
+- duality for more than two roles, and deadlock freedom.
 
 ## Running over a cluster node
 

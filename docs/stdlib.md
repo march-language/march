@@ -9,7 +9,7 @@ permalink: /docs/stdlib-guide/
 
 The standard library is the set of modules every March program can use with no
 dependency to add and no import to write: collections, strings, files, HTTP, JSON,
-cryptography, clustering and more, 136 modules in all. You call a function by its
+cryptography, clustering and more, 137 modules in all. You call a function by its
 qualified name, `List.map` or `String.trim`, or bring names into scope with `import` or
 `use`. A few names, such as `panic`, `unwrap` and `head`, come from `Prelude` and are
 always in scope.
@@ -1074,6 +1074,21 @@ SessionAP.authorize(Some(cert), "Checkout", "Ledger", SessionAP.offer_mode())
                                               -- Result((), String)
 SessionAP.permission("Checkout", "Ledger", SessionAP.initiate_mode())
                                               -- "Checkout.Ledger:initiate"
+```
+
+### Session.Theory
+
+`session_theory.march`: what a protocol means, as March code, and laws proved about it.
+A protocol is a `SessionGlobal`, a role's part a `SessionLocal` (role, label and payload ids are `Int`).
+The compiler checks its own projections against `project` (`march --check --guarantees`);
+see the choreography chapter, "What is proved about a protocol".
+
+```march
+Session.Theory.project(g, role, multiparty)   -- SessionLocal
+Session.Theory.dual(l)                        -- SessionLocal: the other end
+Session.Theory.same(a, b)                     -- Bool: structural equality
+Session.Theory.informed(g, role, multiparty)  -- Bool: the role is told every choice it must be
+Session.Theory.project_dual(a, b, g)          -- lemma: two-role projections are dual
 ```
 
 ### ClusterAuth
