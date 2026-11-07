@@ -46,12 +46,18 @@ handler was tried and changed nothing.)
 ## Fix
 
 - `Eval_prim.call_return_hook : (unit -> unit) ref` (re-exported as
-  `Eval.call_return_hook`), a no-op by default, called by `apply` after every March
-  closure body returns. Natively it is one indirect call to a no-op.
+  `Eval.call_return_hook`), a no-op by default, called by `apply` in the `~finally` of
+  the `Fun.protect` around every March closure body, so it runs on a normal return AND
+  while an exception unwinds. Natively it is one indirect call to a no-op.
 - `js/march_browser.ml` sets it to `bounce`, a function that contains `Effect.perform`
   behind a guard read from a JS global no page sets. A function with an effect primitive
   is CPS, and so is every call to it, so the hook call in `apply` is depth-checked on
   every return. The effect is never performed.
+- Review follow-up: the first version called the hook after `Fun.protect` returned,
+  which covered only the normal return. A panic at the bottom of a deep recursion
+  (`deep_panic(20000)`, `1 + deep_panic(n - 1)` with `panic` at 0) still overflowed on
+  6.5.0 while unwinding (6.4.1 reports `runtime error: panic: bottom`). Calling the hook
+  from `~finally` fixes both paths; the smoke test now has that case too.
 - `dune-project` / `march.opam`: `js_of_ocaml (>= 5.0)`, pin removed.
 
 ## Verified
@@ -62,12 +68,12 @@ build):
 
 | check | 6.4.1 | 6.5.0 |
 |---|---|---|
-| `scripts/browser-repl-smoke.js` | 53 pass | 53 pass (2 failures before the fix) |
+| `scripts/browser-repl-smoke.js` | 55 pass | 55 pass (before the fix: 2 failures on the `List.map` case and 1 on `deep_panic(20000)`; with the return-only first version: 1, `deep_panic`) |
 | `scripts/browser-repl-doc-sweep.js` | 3006 clean, 13 expected | same |
 | `scripts/check-doc-try-it.js docs/docs/stdlib` | 1491 examples pass | same |
 | `List.map` over 100,000 / `depth(100000)` / 1,000,000 tail calls | pass | pass |
 | `fib(22)`, median of 5 (Node 22) | 913 ms before, 879 ms after | 699 ms after |
 
-The regression test is the existing smoke case (red on 6.5.0 before this change, green
-after); CI's `browser-repl` job runs it on whatever js_of_ocaml a fresh switch resolves,
+The regression tests are the smoke cases `List.map` over 20,000 and `deep_panic(20000)`
+(red on 6.5.0 before this change, green after, green on 6.4.1 throughout); CI's `browser-repl` job runs it on whatever js_of_ocaml a fresh switch resolves,
 which with the pin gone is 6.5.x.

@@ -65,7 +65,8 @@ let http_fetch_hook
   : (string -> string -> string -> string -> (string, string) result) option ref
   = ref None
 
-(** Called by [apply] each time a March closure body returns. Native builds
+(** Called by [apply] each time a March closure body returns, normally or by an
+    exception (it runs in [Fun.protect]'s [~finally]). Native builds
     leave it a no-op. The js_of_ocaml browser REPL (js/march_browser.ml) sets
     it to a function that js_of_ocaml compiles in CPS, so that every return
     from a March call goes through a stack-depth-checked trampoline call:
