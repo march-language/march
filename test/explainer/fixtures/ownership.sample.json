@@ -1,0 +1,233 @@
+{
+  "contracts": {
+    "bare": {
+      "excerpt": "fn describe(i : Int) : String do\n  \"item \" ++ int_to_string(i)\nend\n\n@[no_alloc]\nfn width_bare(i : Int) : Int do\n  String.byte_size(describe(i))\nend\n",
+      "exit": 1,
+      "headline": "`width_bare` is marked @[no_alloc] but allocates. [no_alloc]",
+      "output": "-- CONTRACT ------------------------- contract_bare.march\n\n`width_bare` is marked @[no_alloc] but allocates. [no_alloc]\n  In `width_bare`: `int_to_string` allocates.\n\n10 |   fn width_bare(i : Int) : Int do\n          ^^^^^^^^^^\n",
+      "reason": "In `width_bare`: `int_to_string` allocates."
+    },
+    "boxed": {
+      "excerpt": "@[no_alloc]\nfn forward(yaw : Float, pitch : Float) : Vec3 do\n  let cp = Math.cos(pitch)\n  Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)\nend\n\n@[no_alloc]\nfn record(yaw : Float, pitch : Float, id : Int) : Hit do\n  Hit(forward(yaw, pitch), id)\nend\n",
+      "exit": 1,
+      "headline": "`record` is marked @[no_alloc] but allocates. [no_alloc]",
+      "output": "-- CONTRACT ------------------------ contract_boxed.march\n\n`record` is marked @[no_alloc] but allocates. [no_alloc]\n  In `record`: constructor `Hit` is allocated here.\n\n15 |   fn record(yaw : Float, pitch : Float, id : Int) : Hit do\n          ^^^^^^\n",
+      "reason": "In `record`: constructor `Hit` is allocated here."
+    },
+    "caller": {
+      "allocs": {
+        "inc_leaves": 5
+      },
+      "excerpt": "fn main(_c : Cap(IO.Console)) : Unit do\n  let t = Node(Leaf(1), Node(Leaf(2), Leaf(3)))\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\nend\n",
+      "exit": 0,
+      "tree_cells": 5
+    },
+    "candidate": {
+      "code": "no_alloc_candidate",
+      "fix": "  @[no_alloc]",
+      "message": "`inc_leaves` is verified allocation-free; add @[no_alloc] to keep it that way."
+    },
+    "pinned": {
+      "excerpt": "@[no_alloc]\nfn inc_leaves(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))\n  end\nend\n",
+      "exit": 0
+    },
+    "transient": {
+      "excerpt": "@[no_alloc(transient)]\nfn width(i : Int) : Int do\n  String.byte_size(describe(i))\nend\n",
+      "exit": 0
+    }
+  },
+  "generated": {
+    "compiler": "march 0.7.0",
+    "commit": "sample",
+    "date": "2026-11-06",
+    "inputs_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "linear": {
+    "affine_ok": {
+      "binder": 1,
+      "excerpt": "fn maybe_sum(t : affine Tree, wanted : Bool) : Int do\n  if wanted do sum_leaves(t) else 0 end\nend\n",
+      "exit": 0,
+      "kind": "affine",
+      "uses": [
+        2
+      ],
+      "verdict": "ok"
+    },
+    "affine_twice": {
+      "at": 2,
+      "binder": 1,
+      "excerpt": "fn twice(t : affine Tree) : Int do\n  sum_leaves(t) + sum_leaves(t)\nend\n",
+      "exit": 1,
+      "headline": "The affine value `t` is used more than once here. [linear_used_twice]",
+      "kind": "affine",
+      "output": "-- LINEARITY ------------------------- affine_twice.march\n\nThe affine value `t` is used more than once here. [linear_used_twice]\nAffine values may be used at most once.\n\n13 |     sum_leaves(t) + sum_leaves(t)\n                                    ^\n\n    `t` was already consumed here:\n\n13 |     sum_leaves(t) + sum_leaves(t)\n                    ^\n    run `march --explain linear_used_twice`\n",
+      "slug": "linear_used_twice",
+      "uses": [
+        2,
+        2
+      ],
+      "verdict": "twice"
+    },
+    "never": {
+      "at": 2,
+      "binder": 2,
+      "excerpt": "fn main() : Int do\n  linear let t : Tree = Node(Leaf(1), Node(Leaf(2), Leaf(3)))\n  0\nend\n",
+      "exit": 1,
+      "headline": "The linear value `t` was never used. [linear_never_used]",
+      "kind": "linear",
+      "output": "-- LINEARITY ------------------------- linear_never.march\n\nThe linear value `t` was never used. [linear_never_used]\nLinear values must be consumed exactly once — did you mean to pass it somewhere?\n\n6 |     linear let t : Tree = Node(Leaf(1), Node(Leaf(2), Leaf(3)))\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    run `march --explain linear_never_used`\n",
+      "slug": "linear_never_used",
+      "uses": [],
+      "verdict": "never"
+    },
+    "ok": {
+      "binder": 9,
+      "excerpt": "fn inc_leaves(linear t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))\n  end\nend\n\nfn main() : Int do\n  linear let t : Tree = Node(Leaf(1), Node(Leaf(2), Leaf(3)))\n  sum_leaves(inc_leaves(t))\nend\n",
+      "exit": 0,
+      "kind": "linear",
+      "uses": [
+        10
+      ],
+      "verdict": "ok"
+    },
+    "twice": {
+      "at": 4,
+      "binder": 2,
+      "excerpt": "fn main() : Int do\n  linear let t : Tree = Node(Leaf(1), Node(Leaf(2), Leaf(3)))\n  let t2 = inc_leaves(t)\n  sum_leaves(t2) - sum_leaves(t)\nend\n",
+      "exit": 1,
+      "headline": "The linear value `t` is used more than once here. [linear_used_twice]",
+      "kind": "linear",
+      "output": "-- LINEARITY ------------------------- linear_twice.march\n\nThe linear value `t` is used more than once here. [linear_used_twice]\nLinear values must be consumed exactly once — they cannot be copied or ignored.\n\n22 |     sum_leaves(t2) - sum_leaves(t)\n                                     ^\n\n    `t` was already consumed here:\n\n21 |     let t2 = inc_leaves(t)\n                             ^\n    run `march --explain linear_used_twice`\n",
+      "slug": "linear_used_twice",
+      "uses": [
+        3,
+        4
+      ],
+      "verdict": "twice"
+    }
+  },
+  "pinned": {
+    "alloc_bound": {
+      "design": "specs/2026-11-04-alloc-bound-design.md",
+      "todo": "specs/todos/2026-11-04-alloc-bound-contract.md"
+    },
+    "disjoint": {
+      "file": "specs/lang/memory-model.md",
+      "name": "disjoint",
+      "phrase": "Uniqueness *is* the disjointness proof"
+    },
+    "endpoint": {
+      "file": "specs/lang/linear-types.md",
+      "name": "endpoint",
+      "phrase": "An endpoint is tracked as affine plus"
+    },
+    "erased": {
+      "file": "specs/lang/linear-types.md",
+      "name": "erased",
+      "phrase": "linearity is **compile-time-erased**"
+    },
+    "fallback": {
+      "file": "specs/lang/memory-model.md",
+      "name": "fallback",
+      "phrase": "the fallback is automatic and always correct"
+    },
+    "strongest": {
+      "file": "specs/lang/memory-model.md",
+      "name": "strongest",
+      "phrase": "A `linear` value is the *strongest* FBIP case"
+    }
+  },
+  "runs": {
+    "owned": {
+      "allocs": {
+        "build": 31,
+        "inc_leaves": 0,
+        "main": 0,
+        "plumbing": 0,
+        "tasks": 0,
+        "total": 32
+      },
+      "excerpt": "fn inc_leaves(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))\n  end\nend\n\nfn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\nend\n",
+      "exit": 0,
+      "headline": "No copies found: every value passed to a function that reuses it in place is its last use.",
+      "incs": {
+        "build": 0,
+        "inc_leaves": 0,
+        "main": 1
+      },
+      "output": "392",
+      "why_copies": "No copies found: every value passed to a function that reuses it in place is its last use.\n"
+    },
+    "parallel": {
+      "allocs": {
+        "build": 31,
+        "inc_leaves": 0,
+        "main": 0,
+        "plumbing": 11,
+        "tasks": 2,
+        "total": 45
+      },
+      "excerpt": "fn inc_parallel(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) ->\n    match List.pmap_n([l, r], fn half -> inc_leaves(half), 2) do\n    [left, right] -> Node(left, right)\n    _ -> panic(\"two halves\")\n    end\n  end\nend\n",
+      "exit": 0,
+      "headline": "No copies found: every value passed to a function that reuses it in place is its last use.",
+      "incs": {
+        "build": 0,
+        "inc_leaves": 0,
+        "main": 1
+      },
+      "output": "392",
+      "why_copies": "No copies found: every value passed to a function that reuses it in place is its last use.\n"
+    },
+    "shared": {
+      "allocs": {
+        "build": 31,
+        "inc_leaves": 31,
+        "main": 0,
+        "plumbing": 0,
+        "tasks": 0,
+        "total": 63
+      },
+      "excerpt": "fn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\nend\n",
+      "exit": 0,
+      "headline": "`inc_leaves` builds a new copy instead of reusing `t` in place, because `t` is used again afterwards. [copy_shared]",
+      "incs": {
+        "build": 0,
+        "inc_leaves": 30,
+        "main": 2
+      },
+      "output": "16",
+      "why_copies": "-- WARNING: COPY --------------------------- shared.march\n\n`inc_leaves` builds a new copy instead of reusing `t` in place, because `t` is used again afterwards. [copy_shared]\nA function can update a value in place only when it holds the only reference to it; make this call the last use of `t` and `inc_leaves` reuses its memory instead of allocating.\n\n27 |     let t2 = inc_leaves(t)\n                             ^\n\n    `t` is used again here, so it is still shared when `inc_leaves` runs:\n\n28 |     println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\n                                                           ^\n    run `march --explain copy_shared`\n"
+    },
+    "vault": {
+      "allocs": {
+        "build": 31,
+        "inc_leaves": 31,
+        "main": 0,
+        "plumbing": 0,
+        "tasks": 0,
+        "total": 68
+      },
+      "excerpt": "fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) : Unit do\n  let t = build(4, 1)\n  let kept = Vault.new(\"trees\")\n  Vault.set(kept, \"before\", t)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\nend\n",
+      "exit": 0,
+      "headline": "No copies found: every value passed to a function that reuses it in place is its last use.",
+      "incs": {
+        "build": 0,
+        "inc_leaves": 30,
+        "main": 3
+      },
+      "output": "392",
+      "why_copies": "No copies found: every value passed to a function that reuses it in place is its last use.\n"
+    }
+  },
+  "sim": {
+    "hold_s": 0.35,
+    "seed": 20261106,
+    "visit_s": 0.12
+  },
+  "tree": {
+    "cells": 31,
+    "depth": 4,
+    "leaves": 16,
+    "nodes": 15
+  }
+}

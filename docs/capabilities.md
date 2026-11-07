@@ -757,7 +757,7 @@ mod Bindings do
 end
 ```
 
-`needs IO.Foreign` on its own subsumes `IO.Foreign.Blocking` (parent covers child), so one declaration suppresses both warnings if you prefer coarser annotations.
+`needs IO.Foreign` on its own subsumes `IO.Foreign.Blocking` (parent covers child), so one declaration satisfies both requirements if you prefer coarser annotations.
 
 ---
 

@@ -1517,11 +1517,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
              (if others = [] then "this" else "these")
              display_lines })
   ;
-  (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
+  (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns).
+     An ERROR since 2026-11-06: a module that calls C without declaring it made
+     `forge audit` and `forge.caps.lock` blind to that dependency reaching C. *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     if not covered then
-      Err.warning_with_fix ~code:Err.Code.extern_needs_foreign env.errors ~span:sp
+      Err.error_with_fix ~code:Err.Code.extern_needs_foreign env.errors ~span:sp
         ~fix:(Err.FInsert {
           after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
           text = "  needs " ^ cap_path })

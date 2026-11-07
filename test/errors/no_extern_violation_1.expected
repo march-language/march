@@ -1,19 +1,19 @@
 exit: 1
--- CONTRACT ---------- errors/no_extern_violation_1.march
+-- CAPABILITY -------- errors/no_extern_violation_1.march
 
-`mod NoFFI` (declared `cap no_extern`) contains an `extern` block (`libc`). [no_extern_violation]
-
-Remove `extern` blocks and `needs IO.Foreign` from `cap no_extern` modules.
+The extern block in `NoFFI` requires `Cap(IO.Foreign)` but `NoFFI` does not declare `needs IO.Foreign`. [extern_needs_foreign]
+hint: add `needs IO.Foreign` to the module body.
 
 20 |   extern "libc" : Cap(IO.FileSystem) do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
 
--- WARNING: CAPABILITY -- errors/no_extern_violation_1.march
+-- CONTRACT ---------- errors/no_extern_violation_1.march
 
-The extern block in `NoFFI` requires `Cap(IO.Foreign)` but `NoFFI` does not declare `needs IO.Foreign`. [extern_needs_foreign]
-hint: add `needs IO.Foreign` to the module body.
+`mod NoFFI` (declared `cap no_extern`) contains an `extern` block (`libc`). [no_extern_violation]
+
+Remove `extern` blocks and `needs IO.Foreign` from `cap no_extern` modules.
 
 20 |   extern "libc" : Cap(IO.FileSystem) do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
