@@ -261,14 +261,17 @@ mod List do
       march> List.length([])
       0
   """
-  fn length(xs : List(a)) : Int do
-    fn go(lst : List(a), acc : Int) : Int do
-      match lst do
-      Nil        -> acc
-      Cons(_, t) -> go(t, acc + 1)
-      end
+  fn length(xs : List(a)) : {Int | _ == len(xs)} do
+    len_length_onto(xs, 0)
+    length_onto(xs, 0)
+  end
+
+  -- `length`'s loop, top-level so a lemma can name it (`len_length_onto`).
+  pfn length_onto(lst : List(a), acc : Int) : Int do
+    match lst do
+    Nil        -> acc
+    Cons(_, t) -> length_onto(t, acc + 1)
     end
-    go(xs, 0)
   end
 
   doc """
@@ -1126,13 +1129,15 @@ mod List do
       0
   """
   fn sum_int(xs : List(Int)) : Int do
-    fn go(lst : List(Int), acc : Int) : Int do
-      match lst do
-      Nil        -> acc
-      Cons(x, t) -> go(t, acc + x)
-      end
+    sum_onto(xs, 0)
+  end
+
+  -- `sum_int`'s loop, top-level so a lemma can name it (`sum_onto_shift`).
+  pfn sum_onto(lst : List(Int), acc : Int) : Int do
+    match lst do
+    Nil        -> acc
+    Cons(x, t) -> sum_onto(t, acc + x)
     end
-    go(xs, 0)
   end
 
   doc """
@@ -1146,13 +1151,15 @@ mod List do
       1
   """
   fn product_int(xs : List(Int)) : Int do
-    fn go(lst : List(Int), acc : Int) : Int do
-      match lst do
-      Nil        -> acc
-      Cons(x, t) -> go(t, acc * x)
-      end
+    product_onto(xs, 1)
+  end
+
+  -- `product_int`'s loop, top-level so a lemma can name it (`product_onto_shift`).
+  pfn product_onto(lst : List(Int), acc : Int) : Int do
+    match lst do
+    Nil        -> acc
+    Cons(x, t) -> product_onto(t, acc * x)
     end
-    go(xs, 1)
   end
 
   doc """
@@ -1164,15 +1171,17 @@ mod List do
       -1
   """
   fn minimum_int(xs : {List(Int) | len(_) > 0}) : Int do
-    fn go(lst : List(Int), m : Int) : Int do
-      match lst do
-      Nil        -> m
-      Cons(x, r) -> if x < m do go(r, x) else go(r, m) end
-      end
-    end
     match xs do
     Nil        -> panic("List.minimum_int: empty list")
-    Cons(h, t) -> go(t, h)
+    Cons(h, t) -> min_onto(t, h)
+    end
+  end
+
+  -- `minimum_int`'s loop, top-level like the other accumulator loops.
+  pfn min_onto(lst : List(Int), m : Int) : Int do
+    match lst do
+    Nil        -> m
+    Cons(x, r) -> if x < m do min_onto(r, x) else min_onto(r, m) end
     end
   end
 
@@ -1185,15 +1194,17 @@ mod List do
       3
   """
   fn maximum_int(xs : {List(Int) | len(_) > 0}) : Int do
-    fn go(lst : List(Int), m : Int) : Int do
-      match lst do
-      Nil        -> m
-      Cons(x, r) -> if x > m do go(r, x) else go(r, m) end
-      end
-    end
     match xs do
     Nil        -> panic("List.maximum_int: empty list")
-    Cons(h, t) -> go(t, h)
+    Cons(h, t) -> max_onto(t, h)
+    end
+  end
+
+  -- `maximum_int`'s loop, top-level like the other accumulator loops.
+  pfn max_onto(lst : List(Int), m : Int) : Int do
+    match lst do
+    Nil        -> m
+    Cons(x, r) -> if x > m do max_onto(r, x) else max_onto(r, m) end
     end
   end
 
@@ -1436,6 +1447,116 @@ mod List do
     Nil        -> ()
     Cons(_, t) -> if i == 0 do () else nth_opt_append(t, ys, i - 1) end
     end
+  end
+
+
+  doc "`length`'s loop counts the list onto the accumulator."
+  @[lemma]
+  fn len_length_onto(xs : List(a), acc : Int) : {Unit | length_onto(xs, acc) == len(xs) + acc} do
+    match xs do
+    Nil        -> ()
+    Cons(_, t) -> len_length_onto(t, acc + 1)
+    end
+  end
+
+  doc "`sum_int`'s loop: the accumulator adds on at the end."
+  @[lemma]
+  fn sum_onto_shift(xs : List(Int), acc : Int) : {Unit | sum_onto(xs, acc) == sum_onto(xs, 0) + acc} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) ->
+      sum_onto_shift(t, acc + h)
+      sum_onto_shift(t, h)
+    end
+  end
+
+  doc "`sum_int`'s loop over `append(xs, ys)` runs over `xs`, then over `ys`."
+  @[lemma]
+  fn sum_onto_append(xs : List(Int), ys : List(Int), acc : Int)
+    : {Unit | sum_onto(append(xs, ys), acc) == sum_onto(ys, sum_onto(xs, acc))} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) -> sum_onto_append(t, ys, acc + h)
+    end
+  end
+
+  doc "`sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)`."
+  @[lemma]
+  fn sum_int_append(xs : List(Int), ys : List(Int))
+    : {Unit | sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)} do
+    sum_onto_append(xs, ys, 0)
+    sum_onto_shift(ys, sum_onto(xs, 0))
+  end
+
+  doc "`sum_int`'s loop over `reverse`'s loop: the reversed part and the accumulator both add on."
+  @[lemma]
+  fn sum_onto_reverse_onto(xs : List(Int), rest : List(Int), acc : Int)
+    : {Unit | sum_onto(reverse_onto(xs, rest), acc) == sum_onto(xs, sum_onto(rest, acc))} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) ->
+      sum_onto_reverse_onto(t, Cons(h, rest), acc)
+      sum_onto_shift(rest, acc + h)
+      sum_onto_shift(rest, acc)
+    end
+  end
+
+  doc "`sum_int(reverse(xs)) == sum_int(xs)`."
+  @[lemma]
+  fn sum_int_reverse(xs : List(Int)) : {Unit | sum_int(reverse(xs)) == sum_int(xs)} do
+    sum_onto_reverse_onto(xs, Nil, 0)
+  end
+
+  doc "`product_int`'s loop: the accumulator multiplies on at the end."
+  @[lemma]
+  fn product_onto_shift(xs : List(Int), acc : Int)
+    : {Unit | product_onto(xs, acc) == product_onto(xs, 1) * acc} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) ->
+      product_onto_shift(t, acc * h)
+      product_onto_shift(t, h)
+    end
+  end
+
+  doc "`product_int`'s loop over `append(xs, ys)` runs over `xs`, then over `ys`."
+  @[lemma]
+  fn product_onto_append(xs : List(Int), ys : List(Int), acc : Int)
+    : {Unit | product_onto(append(xs, ys), acc) == product_onto(ys, product_onto(xs, acc))} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) -> product_onto_append(t, ys, acc * h)
+    end
+  end
+
+  doc "`product_int(append(xs, ys)) == product_int(xs) * product_int(ys)`."
+  @[lemma]
+  fn product_int_append(xs : List(Int), ys : List(Int))
+    : {Unit | product_int(append(xs, ys)) == product_int(xs) * product_int(ys)} do
+    product_onto_append(xs, ys, 1)
+    product_onto_shift(ys, product_onto(xs, 1))
+  end
+
+  doc "`product_int`'s loop over `reverse`'s loop: the reversed part and the accumulator both multiply on."
+  @[lemma]
+  fn product_onto_reverse_onto(xs : List(Int), rest : List(Int), acc : Int)
+    : {Unit | product_onto(reverse_onto(xs, rest), acc) == product_onto(xs, product_onto(rest, acc))} do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) ->
+      product_onto_reverse_onto(t, Cons(h, rest), acc)
+      product_onto_shift(rest, acc * h)
+      product_onto_shift(rest, acc)
+      -- The step is nonlinear (`p * (acc * h) == (p * acc) * h` under a call), so spell it out.
+      assert product_onto(Cons(h, rest), acc) == product_onto(rest, acc * h)
+      assert product_onto(rest, acc * h) == product_onto(rest, acc) * h
+    end
+  end
+
+  doc "`product_int(reverse(xs)) == product_int(xs)`."
+  @[lemma]
+  fn product_int_reverse(xs : List(Int)) : {Unit | product_int(reverse(xs)) == product_int(xs)} do
+    product_onto_reverse_onto(xs, Nil, 1)
   end
 
 end

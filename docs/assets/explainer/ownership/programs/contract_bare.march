@@ -1,0 +1,17 @@
+-- A function that allocates and throws it away, under the bare contract.
+mod Own do
+  needs IO.Console
+
+  fn describe(i : Int) : String do
+    "item " ++ int_to_string(i)
+  end
+
+  @[no_alloc]
+  fn width_bare(i : Int) : Int do
+    String.byte_size(describe(i))
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(width_bare(8)))
+  end
+end

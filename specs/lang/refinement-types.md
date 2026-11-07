@@ -1713,6 +1713,10 @@ are already proved, so a check does not prove them again (see below).
 | `List.take_append(xs, ys)` | `take(append(xs, ys), len(xs)) == xs` |
 | `List.drop_append(xs, ys)` | `drop(append(xs, ys), len(xs)) == ys` |
 | `List.nth_opt_append(xs, ys, i)`, for `0 <= i < len(xs)` | `nth_opt(append(xs, ys), i) == nth_opt(xs, i)` |
+| `List.sum_int_append(xs, ys)` | `sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)` |
+| `List.sum_int_reverse(xs)` | `sum_int(reverse(xs)) == sum_int(xs)` |
+| `List.product_int_append(xs, ys)` | `product_int(append(xs, ys)) == product_int(xs) * product_int(ys)` |
+| `List.product_int_reverse(xs)` | `product_int(reverse(xs)) == product_int(xs)` |
 
 ```march
 fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
@@ -1728,6 +1732,8 @@ end
 and `{Int | high < low || (_ >= low && _ <= high)}` for `clamp_int`, so a call with
 `low <= high` is known to be in range. The condition is in the result, not a precondition,
 so no existing call gains an obligation.
+
+`List.length(xs)` has the proved result type `{Int | _ == len(xs)}`.
 
 `List.filter`'s result also has a proved length contract,
 `len(_) <= len(xs)`, alongside the existing one about its elements.

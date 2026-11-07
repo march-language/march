@@ -27,11 +27,14 @@ function taking `Cap(IO.FileWrite)`), a capability builtin called directly
 (`file_write(path, data)`, an error since 2026-08-06; it was only a warning
 before), and a standard-library wrapper such as `File.write` (caught by the
 [capability upper limit]({{ site.baseurl }}/docs/capabilities/#cap-strict),
-on by default). The one exception is an `extern` block: a module that calls C
-without declaring `needs IO.Foreign` gets a warning, not an error.
+on by default). An `extern` block is held to the same rule: a module that calls C
+without declaring `needs IO.Foreign` does not compile
+(`[extern_needs_foreign]`).
+It was only a warning before 2026-11-06.
 
 So a package's declared capability set is checked by the compiler and cannot
-drift silently, except past an `extern` block. See
+drift silently. Past an `extern` block the declaration is `IO.Foreign` and the C itself is
+opaque. See
 [what this does not prove](#what-this-does-and-does-not-prove) for what follows
 from that, and the [Capability Threat Model]({{ site.baseurl }}/docs/capability-threat-model/)
 for the whole system's guarantees and limits.
@@ -260,7 +263,7 @@ into a settled one.
 | A new transitive dependency arrives with capabilities | **Yes**: reported as an addition |
 | A dependency uses a `Cap(X)` value it did not declare | **Yes**: compile error, at build time |
 | A dependency calls a capability builtin it did not declare | **Yes**: compile error, at build time (a warning before 2026-08-06) |
-| A dependency calls C (`extern`) without declaring `IO.Foreign` | **Partly**: compiler warning at build time, and it compiles |
+| A dependency calls C (`extern`) without declaring `IO.Foreign` | **Yes**: compile error, at build time (a warning before 2026-11-06) |
 | Baseline edited to hide a change | Partly: the edit is in your diff, reviewed like any other |
 | Effects through `extern` C, `dlopen`, or raw syscalls | **No**: reported as `IO.Foreign`, which constrains no behaviour |
 | A dependency that misuses a capability it validly possesses | **No**: out of scope for any capability system |

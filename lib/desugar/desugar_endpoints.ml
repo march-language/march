@@ -1102,6 +1102,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              [ let_wild (app "on_cancel" [ var "c_role"; var "c_cause"; con cancelled_name [ con "Secret" [] ] ]);
                var "c_ep" ]) ]
   in
+  (* Branch labels are user-chosen: `cancel` / `drain` must not bind the
+     failure callbacks. Keep branch parameters in a separate namespace. *)
+  let branch_callback label = "on_branch_" ^ label in
   let transitions =
     List.concat_map
       (fun (node, this) ->
@@ -1180,9 +1183,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            let cbs = List.map (fun (lbl, ctor, payload, next) -> (lbl, ctor, payload, state_of next)) brs in
            let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) in
            let branch_params =
-             List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
+             List.map (fun (lbl, _, payload, nx) -> (branch_callback lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
            in
-           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
+           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, branch_callback lbl, nx)) cbs in
            let boundary = at_boundary node in
            [ fn offer_name ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params) t_yield
                (on_ep (block [ let_wild (suspend_with ~boundary from (var "ep") arms); yield ]));
@@ -1202,7 +1205,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            let boundary = at_boundary node in
            let suspend_with = suspend_with ~boundary in
            let t_on_crash = TyArrow (t_crashed, TyArrow (sty crash_nx, t_yield)) in
-           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
+           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, branch_callback lbl, nx)) cbs in
            (match cbs with
             | [ (_, ctor, payload, nx) ] ->
               (* `recv_<Ctor>(s, st, k, on_crash)`: the receive, with what to
@@ -1216,7 +1219,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
             | _ ->
               let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) ^ "_crash" in
               let branch_params =
-                List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
+                List.map (fun (lbl, _, payload, nx) -> (branch_callback lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
               in
               [ fn offer_name ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params @ [ ("on_crash", t_on_crash) ]) t_yield
                   (on_ep (block [ let_wild (suspend_with from (with_crash from (var "ep") crash_nx) arms); yield ])) ])
@@ -2735,3 +2738,63 @@ let expand (errors : Err.ctx) (decls : decl list) : decl list =
               List.map respan_mod ((msg :: List.map fst role_mods) @ run)))
       | _ -> [])
     decls
+
+(** This projector's view of a protocol for translation validation against
+    [Session.Theory.project] (lemmas design §5.2, M6;
+    [March_ast.Session_term]).  [LChoose]/[LOffer] fuse a branch's label
+    with its head message; the view unfuses them (the label, then that
+    send or receive), which is the theory's shape.  [Error]: the generator
+    does not apply to the protocol (its own checks refuse it) or it is
+    outside the theory's fragment. *)
+let theory_view (pdef : protocol_def) : (March_ast.Session_term.view, string) result =
+  let module T = March_ast.Session_term in
+  let errors = Err.create () in
+  match annotate errors ~proto:"_" ~span:dummy_span pdef.proto_steps with
+  | None -> Error "the @[endpoints] generator does not apply to it"
+  | Some steps ->
+    let names = List.sort_uniq String.compare (roles_of steps) in
+    let roles = T.ids () and labels = T.ids () and payloads = T.ids () in
+    List.iter (fun r -> ignore (T.id roles r)) names;
+    (* A message is its constructor here, not only its payload type: two
+       unlabelled `B -> C : Int` in different branches are different
+       messages to this projector (`Msg_B_C_1`, `Msg_B_C_2`), and it merges
+       only identical ones. *)
+    let pay ctor t = T.id payloads (ctor ^ " : " ^ March_ast.Ast.show_ty t) in
+    let rec global_of steps cont =
+      match steps with
+      | [] -> cont
+      | AMsg (s, r, t, ctor) :: rest -> T.GMsg (T.id roles s, T.id roles r, pay ctor t, global_of rest cont)
+      | ALoop (_, inner) :: rest -> T.GLoop (global_of inner (T.GVar 0), global_of rest cont)
+      | AChoice (c, branches) :: rest ->
+        if List.mem_assoc "crash" branches then raise (T.Outside "a crash branch");
+        let after = global_of rest cont in
+        T.GChoice (T.id roles c, List.map (fun (l, st) -> (T.id labels l, global_of st after)) branches)
+      | AStop :: _ -> T.GEnd
+      | ACrashOr _ :: _ -> raise (T.Outside "a crash branch")
+    in
+    (try
+       if List.exists (function ProtoMayCrash _ -> true | _ -> false) pdef.proto_steps then
+         raise (T.Outside "a role that may crash");
+       let global = global_of steps T.GEnd in
+       let multiparty = List.length (roles_of steps) > 2 in
+       let local_of role =
+         let rec go env = function
+           | LSend (r, c, t, k) -> T.LSend (T.id roles r, pay c t, go env k)
+           | LRecv (r, c, t, k) -> T.LRecv (T.id roles r, pay c t, go env k)
+           | LChoose brs ->
+             T.LChoose (List.map (fun (l, r, c, t, k) -> (T.id labels l, T.LSend (T.id roles r, pay c t, go env k))) brs)
+           | LOffer (f, brs) ->
+             T.LOffer (List.map (fun (l, c, t, k) -> (T.id labels l, T.LRecv (T.id roles f, pay c t, go env k))) brs)
+           | LRecvCrash _ -> raise (T.Outside "a crash branch")
+           | LRec (x, _, k) -> T.LRec (go (x :: env) k)
+           | LVar x -> T.LVar (T.var_index env x)
+           | LEnd -> T.LEnd
+         in
+         let tags = { nodes = []; ends = [] } in
+         try Ok (go [] (project ~proto:"_" ~multiparty ~tags ~at:(Some []) ~i:0 steps role LEnd))
+         with T.Outside why -> Error why
+       in
+       Ok { T.v_global = global; v_multiparty = multiparty;
+            v_roles = List.map (fun r -> (r, T.id roles r)) names;
+            v_locals = List.map (fun r -> (r, local_of r)) names }
+     with T.Outside why -> Error why)

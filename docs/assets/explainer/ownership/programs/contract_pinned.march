@@ -1,0 +1,26 @@
+-- inc_leaves under an allocation contract.
+mod Own do
+  needs IO.Console
+
+  type Tree = Leaf(Int) | Node(Tree, Tree)
+
+  @[no_alloc]
+  fn inc_leaves(t : Tree) : Tree do
+    match t do
+    Leaf(n)    -> Leaf(n + 1)
+    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+    end
+  end
+
+  fn sum_leaves(t : Tree) : Int do
+    match t do
+    Leaf(n)    -> n
+    Node(l, r) -> sum_leaves(l) + sum_leaves(r)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let t = Node(Leaf(1), Node(Leaf(2), Leaf(3)))
+    println(int_to_string(sum_leaves(inc_leaves(t))))
+  end
+end
