@@ -1083,6 +1083,33 @@ let emit_checked_int_op ctx (op : string) (va : string) (vb : string) : string =
   emit ctx (Printf.sprintf "%s = ashr exact i64 %s, 1" r r2);
   r
 
+(** Int `/` or `%` with the zero-divisor check inline: [icmp eq vb, 0] to a
+    cold edge, then a plain [sdiv] / [srem] that LLVM can see through (a
+    literal divisor becomes a multiply, a loop-invariant one hoists its test).
+    The cold edge calls the runtime helper with the zero divisor, so the panic
+    message is still the interpreter's ("division by zero" / "modulo by
+    zero"); [march_panic] does not return.  The operands are normalised
+    63-bit values, so [sdiv] never sees INT64_MIN / -1; the -2^62 / -1
+    quotient is the bare 2^62 that [emit_wrap_int63] normalises. *)
+let emit_checked_divmod ctx (op : string) (va : string) (vb : string) : string =
+  let (helper, instr) = match op with
+    | "/" -> ("march_checked_div_op", "sdiv")
+    | "%" -> ("march_checked_mod_op", "srem")
+    | s -> failwith ("emit_checked_divmod: " ^ s) in
+  let z = fresh ctx "dz" in
+  emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 0" z vb);
+  let trap_lbl = fresh_block ctx "dz_trap" in
+  let ok_lbl = fresh_block ctx "dz_ok" in
+  emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" z trap_lbl ok_lbl);
+  emit_label ctx trap_lbl;
+  let t = fresh ctx "dzt" in
+  emit ctx (Printf.sprintf "%s = call i64 @%s(i64 %s, i64 0)" t helper va);
+  emit_term ctx "unreachable";
+  emit_label ctx ok_lbl;
+  let r = fresh ctx "dv" in
+  emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r instr va vb);
+  r
+
 (* One immortal, statically-initialised closure object per top-level function
    used as a first-class value.  The object march_alloc would build here is
    entirely compile-time constant — march_hdr {rc; tag; pad} (16 bytes, see

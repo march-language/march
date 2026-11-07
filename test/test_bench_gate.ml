@@ -99,6 +99,9 @@ let gated : (string * string * compare_mode) list = [
   (* checked Int `+ - *` in counted loops: the cost the 2026-10-30
      overflow trap adds per iteration. *)
   "index_loop",       "548550000003", Exact;
+  (* Int `/` and `%`: a literal, a gcd and a loop-invariant divisor; the
+     zero-divisor check moved inline on 2026-11-06. *)
+  "int_divmod",       "640000000 8933305 135136885134996", Exact;
   (* an unboxed P2(Int, Int) built in the arms of an `if`, 50M times: the
      struct-typed case join slot (specs/progress/2026-09-30-unbox-aware-case-
      join-slot.md). *)

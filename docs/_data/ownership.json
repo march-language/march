@@ -37,10 +37,10 @@
     }
   },
   "generated": {
-    "commit": "7dcff7c1b",
+    "commit": "87553b42a",
     "compiler": "march 0.7.0",
     "date": "2026-11-06",
-    "inputs_sha256": "a04c27802a17fd8d9de9beba243eaca1d3d627471601103e46714f3cfa1d8872"
+    "inputs_sha256": "e6110c69218fdd46bca07adae256c8c86fe63c913b07294bde6c07dcf6a71eb3"
   },
   "linear": {
     "affine_ok": {

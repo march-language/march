@@ -288,6 +288,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Int `/` and `%` are faster in compiled code.** The zero-divisor check is now a test in
+  the generated code instead of a call into the runtime, so LLVM sees the division: a literal
+  divisor becomes a multiply, and a divisor the code has already tested is not tested again.
+  `bench/int_divmod.march` runs in 0.31 s instead of 0.56 s, `bench/index_loop.march` in
+  0.49 s instead of 0.64 s. A zero divisor still panics with `division by zero` /
+  `modulo by zero`.
 - **A module that calls C without `needs IO.Foreign` no longer compiles.** `extern_needs_foreign`
   was a warning, so a dependency could reach C while `forge audit` and `forge.caps.lock` showed
   nothing for it. It is now an error with the same `needs IO.Foreign` fix (and

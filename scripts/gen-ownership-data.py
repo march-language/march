@@ -280,9 +280,13 @@ SIM = {"seed": 20261106, "visit_s": 0.12, "hold_s": 0.35}
 # ── inputs ─────────────────────────────────────────────────────────────────────
 
 def input_files(root):
-    """The fixtures, the prose the pinned phrases live in, and this script."""
+    """The fixtures, the prose the pinned phrases live in, and this script.
+
+    Only the `.march` fixtures count: compiling one in place leaves a gitignored `.ll`
+    beside it, and a sha that swept those in would match only the machine that made it.
+    """
     root = Path(root)
-    return (sorted(p for p in (root / "docs" / "assets" / "explainer" / "ownership").rglob("*") if p.is_file())
+    return (sorted((root / "docs" / "assets" / "explainer" / "ownership").rglob("*.march"))
             + sorted({root / e["file"] for e in PINNED} | {root / p for p in ALLOC_BOUND.values()})
             + [root / "scripts" / "gen-ownership-data.py"])
 
