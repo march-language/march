@@ -235,6 +235,10 @@ let pos_lt (a : A.span) (b : A.span) = compare (a.A.start_line, a.A.start_col) (
 
 type ev = { ev_rule : int; ev_text : string; ev_span : A.span }
 
+(** Scoped proof validation: a missing entry is outside a checked body,
+    [None] is valid, and [Some reason] records a rejected proof body. *)
+let proof_blocks : (A.span, string option) Hashtbl.t = Hashtbl.create 16
+
 (** Lemmas (§4.2) the last [analyze] found invalid under L2 or L3, by
     declaring span: (2 or 3, the first offending event's text). *)
 let lemma_blocked : (A.span, int * string) Hashtbl.t = Hashtbl.create 16
@@ -300,6 +304,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
       ds
   in
   scan_eq decls;
+  let proof_depth = ref 0 in
   let rec walk ~(owner : A.span) ~(local : bool) (env : bind SM.t) (e : A.expr) : unit =
     let w = walk ~owner ~local env in
     match e with
@@ -319,7 +324,15 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
     | A.ESpawn (x, sp) -> emit owner 3 "spawns an actor" sp; w x
     | A.ESend (a, b, sp) -> emit owner 3 "sends a message" sp; w a; w b
     | A.EDbg (x, sp) -> emit owner 3 "calls dbg" sp; Option.iter w x
-    | A.EAssert (x, sp) -> emit owner 4 "has a runtime `assert`" sp; w x
+    | A.EProof (A.PReveal _, _) -> ()
+    | A.EProof (A.PWithFuel (_, _, body), sp) -> w (A.EBlock (body, sp))
+    | A.EProof (A.PAssertBy (p, hs), sp) ->
+      let saved = !proof_depth in
+      Fun.protect ~finally:(fun () -> proof_depth := saved)
+        (fun () -> proof_depth := saved + 1; w p; w (A.EBlock (hs, sp)))
+    | A.EAssert (x, sp) ->
+      if !proof_depth = 0 then emit owner 4 "has a runtime `assert`" sp;
+      w x
     | A.EHole (_, sp) -> emit owner 4 "has a typed hole" sp
     | A.EMatch (s, brs, sp) ->
       if inp.nonexhaustive sp then begin
@@ -1053,18 +1066,26 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
      constructors or R6 builtins (L3).  R8's "returns Unit" is the point of a
      lemma and does not apply. *)
   Hashtbl.reset lemma_blocked;
+  Hashtbl.reset proof_blocks;
   lemma_value_uses := [];
   let is_lemma v = List.mem "lemma" (unit_ v).RT.u_attrs in
   Array.iter
     (fun (u : RT.unit_) ->
       let i = u.RT.u_id in
-      if is_lemma i then begin
+      let scopes = ref [] in
+      List.iter (fun (c : RT.owner) ->
+        Refine_encode.iter_all (function A.EProof (A.PAssertBy _, sp) -> scopes := sp :: !scopes | _ -> ()) c.RT.o_body)
+        u.RT.u_clauses;
+      if is_lemma i || !scopes <> [] then begin
         (* `==` inside a lemma's `assert` is the predicate's logical
            equality (§3.5), never a call of `eq`. *)
         let asserts = ref [] in
         List.iter
           (fun (c : RT.owner) ->
-            Refine_encode.iter_all (function A.EAssert (_, sp) -> asserts := sp :: !asserts | _ -> ()) c.RT.o_body)
+            Refine_encode.iter_all (function
+              | A.EAssert (_, sp) -> asserts := sp :: !asserts
+              | A.EProof (A.PAssertBy (goal, _), _) -> asserts := T.span_of_expr goal :: !asserts
+              | _ -> ()) c.RT.o_body)
           u.RT.u_clauses;
         let in_assert (sp : A.span) =
           List.exists
@@ -1094,10 +1115,32 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
                          ev_span = s.RT.s_span })
               deps.(i)
         in
-        match (first l2, first l3) with
-        | Some e, _ -> Hashtbl.replace lemma_blocked u.RT.u_span (2, e.ev_text)
-        | None, Some e -> Hashtbl.replace lemma_blocked u.RT.u_span (3, e.ev_text)
-        | None, None -> ()
+        (* Revealing a body does not relax totality: only units already in
+           [revealable] qualify. Actual lexical visibility is still enforced
+           by the proof walk's [Reflect_state.revealed] scope. *)
+        let explicit_reveals = ref [] in
+        List.iter (fun (c : RT.owner) ->
+          Refine_encode.iter_all (function
+            | A.EProof (A.PReveal (A.EVar f), _) -> explicit_reveals := f.A.txt :: !explicit_reveals
+            | _ -> ()) c.RT.o_body) u.RT.u_clauses;
+        let revealed_event e =
+          List.exists (function
+            | `Refl v, (s : RT.site) ->
+              s.RT.s_span = e.ev_span
+              && List.exists (Reflect_state.names_fn ~display:(unit_ v).RT.u_name) !explicit_reveals
+              && Hashtbl.mem revealable (unit_ v).RT.u_span
+            | _ -> false) deps.(i)
+        in
+        let proof_events = l2 @ List.filter (fun e -> not (revealed_event e)) l3 in
+        List.iter (fun sp ->
+          match first (List.filter (fun e -> span_within e.ev_span sp) proof_events) with
+          | Some e -> Hashtbl.replace proof_blocks sp (Some e.ev_text)
+          | None -> Hashtbl.replace proof_blocks sp None) !scopes;
+        if is_lemma i then
+          match (first l2, first l3) with
+          | Some e, _ -> Hashtbl.replace lemma_blocked u.RT.u_span (2, e.ev_text)
+          | None, Some e -> Hashtbl.replace lemma_blocked u.RT.u_span (3, e.ev_text)
+          | None, None -> ()
       end)
     g.RT.units;
   (* L5: a lemma named as a value. *)
@@ -2007,6 +2050,9 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
 (* A statement-position call of a lemma, `l(..)` or `let _ = l(..)`: erased
    before the program runs, so it is `()` in a reflected body (§4.5, I2). *)
 and lemma_stmt (c : tctx) (e : A.expr) : bool =
+  match e with
+  | A.EProof (A.PAssertBy _, _) | A.ELet ({ A.bind_expr = A.EProof (A.PAssertBy _, _); _ }, _) -> true
+  | _ ->
   let call =
     match e with
     | A.EApp (A.EVar _, _, sp) -> Some sp

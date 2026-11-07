@@ -690,6 +690,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
+
 - **Module functions used as values compile correctly.** A binding such as
   `let k = List.length` now retains the function definition during compilation,
   including when the binding is called with different element types.

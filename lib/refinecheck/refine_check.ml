@@ -4931,6 +4931,21 @@ let post_walk_ok = ref false
    or a hypothesis like `okz(g)` never reaches `okz(k)` and the induction
    hypothesis is withheld. *)
 let lemma_body : bool ref = ref false
+let proof_depth = ref 0
+let proof_assertions : (A.span, bool) Hashtbl.t = Hashtbl.create 16
+let proof_results : (A.span, (A.expr * bool) list) Hashtbl.t = Hashtbl.create 16
+
+(* Speculative walks must not publish proof facts into their caller's walk. *)
+let with_proof_scratch f =
+  let facts = Hashtbl.copy proof_results and assertions = Hashtbl.copy proof_assertions in
+  let depth = !proof_depth in
+  Fun.protect ~finally:(fun () ->
+    Hashtbl.reset proof_results;
+    Hashtbl.iter (Hashtbl.replace proof_results) facts;
+    Hashtbl.reset proof_assertions;
+    Hashtbl.iter (Hashtbl.replace proof_assertions) assertions;
+    proof_depth := depth) f
+
 
 (** Lemmas that passed L1-L3 and L5 in this module, by declaring span. *)
 let lemma_valid : (A.span, unit) Hashtbl.t = Hashtbl.create 16
@@ -5025,12 +5040,6 @@ let is_lemma (fd : A.fn_def) = List.mem "lemma" fd.A.fn_attrs
     reflection share), and that lemma's declared theorem. *)
 let lemma_call_sites : (A.span, A.fn_def) Hashtbl.t = Hashtbl.create 16
 
-(* What a proof statement ([assert … by], [calc]) proved at its span, filled
-   when [visit_inner] checks it (wherever it sits: a block statement, a whole
-   body, a branch); the block loop reads it to extend the path for the
-   statements after it (review I2). *)
-let proof_results : (A.span, (A.expr * bool) list) Hashtbl.t = Hashtbl.create 8
-
 (** The lemma calls whose fact the emitting walk added (§4.4), for the LSP. *)
 let lemma_fact_spans : (A.span, unit) Hashtbl.t = Hashtbl.create 16
 
@@ -5047,6 +5056,23 @@ let rec lemma_tails (e : A.expr) : A.expr list =
   | A.EIf (_, a, b, _) -> lemma_tails a @ lemma_tails b
   | A.EMatch (_, brs, _) -> List.concat_map (fun (br : A.branch) -> lemma_tails br.A.branch_body) brs
   | _ -> [ e ]
+
+(* Check a scoped goal at each normal exit of its hint body, retaining the
+   branch's facts. Like a lemma's tails, only the last statement branches;
+   earlier statements are walked normally in their lexical scope. *)
+let rec proof_body (goal : A.expr) (span : A.span) (hints : A.expr) : A.expr =
+  let finish = proof_body goal span in
+  match hints with
+  | A.EBlock (es, sp) ->
+    (match List.rev es with
+     | [] -> A.EAssert (goal, span)
+     | last :: rest -> A.EBlock (List.rev_append rest [finish last], sp))
+  | A.EIf (c, t, f, sp) -> A.EIf (c, finish t, finish f, sp)
+  | A.EProof (A.PWithFuel (f, n, body), sp) ->
+    A.EProof (A.PWithFuel (f, n, [finish (A.EBlock (body, sp))]), sp)
+  | A.EMatch (e, brs, sp) ->
+    A.EMatch (e, List.map (fun (b : A.branch) -> { b with branch_body = finish b.branch_body }) brs, sp)
+  | e -> A.EBlock ([e; A.EAssert (goal, span)], span)
 
 (* A goal as a call to a synthetic signature (the [Decreases] device): one
    refined parameter ["$t"], applied to [0], whose predicate is [goal] over the
@@ -5131,47 +5157,49 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
 and lemma_call_facts ~root errctx defs (ctx : rctx) ?(quiet = false) path lets sc re cb ce (e : A.expr) :
     (A.expr * bool) list =
   ignore (root, path, lets, sc, re, cb, ce);
-  match stmt_call e with
-  | Some (A.EApp (A.EVar f, args, sp)) -> (
-    match Hashtbl.find_opt lemma_call_sites sp with
-    | None -> []
-    | Some lfd -> (
-      let theorem = Refine_post.assumed_return lfd in
-      let fact (_, pred, _) = [ (pred, false) ] in
-      (* At an eligible span [check_group] has already checked that this
-         checker's resolution reaches the member the graph names. *)
-      match !Refine_post.ih_at sp f.A.txt args with
-      | Some r -> fact r
-      | None -> (
-        match resolve_call_arity ctx defs f.A.txt (List.length args), theorem with
-        | Some (Some sg), Some p when (match sg.ret with Some (_, p1) -> p1 == p | None -> false) -> (
-          match instantiate_ret sg args with
-          | None -> []
-          | Some r ->
-            let pres =
-              List.filter (fun (o : Obligation.t) -> o.Obligation.kind = Obligation.Precondition)
-                (Obligation.obligations_at sp)
-            in
-            if List.for_all (fun (o : Obligation.t) -> o.Obligation.verdict = Obligation.Proved) pres
-               && (pres <> [] || sg.refined = [])
-            then begin
-              Hashtbl.replace lemma_fact_spans sp ();
-              fact r
-            end
-            else begin
-              let msg =
-                Printf.sprintf
-                  "this call of the lemma `%s` gives no facts: its precondition is not proved here, and \
-                   a lemma is never run, so there is no check to fall back on"
-                  f.A.txt
+  match e with
+  | A.EProof (A.PAssertBy _, sp) -> (match Hashtbl.find_opt proof_results sp with Some facts -> facts | None -> [])
+  | _ -> (match stmt_call e with
+    | Some (A.EApp (A.EVar f, args, sp)) -> (
+      match Hashtbl.find_opt lemma_call_sites sp with
+      | None -> []
+      | Some lfd -> (
+        let theorem = Refine_post.assumed_return lfd in
+        let fact (_, pred, _) = [ (pred, false) ] in
+        (* At an eligible span [check_group] has already checked that this
+           checker's resolution reaches the member the graph names. *)
+        match !Refine_post.ih_at sp f.A.txt args with
+        | Some r -> fact r
+        | None -> (
+          match resolve_call_arity ctx defs f.A.txt (List.length args), theorem with
+          | Some (Some sg), Some p when (match sg.ret with Some (_, p1) -> p1 == p | None -> false) -> (
+            match instantiate_ret sg args with
+            | None -> []
+            | Some r ->
+              let pres =
+                List.filter (fun (o : Obligation.t) -> o.Obligation.kind = Obligation.Precondition)
+                  (Obligation.obligations_at sp)
               in
-              if quiet then ()
-              else if !strict_verified then Err.error ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg
-              else Err.warning ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg;
-              []
-            end)
-        | _ -> [])))
-  | _ -> []
+              if List.for_all (fun (o : Obligation.t) -> o.Obligation.verdict = Obligation.Proved) pres
+                 && (pres <> [] || sg.refined = [])
+              then begin
+                Hashtbl.replace lemma_fact_spans sp ();
+                fact r
+              end
+              else begin
+                let msg =
+                  Printf.sprintf
+                    "this call of the lemma `%s` gives no facts: its precondition is not proved here, and \
+                     a lemma is never run, so there is no check to fall back on"
+                    f.A.txt
+                in
+                if quiet then ()
+                else if !strict_verified then Err.error ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg
+                else Err.warning ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg;
+                []
+              end)
+          | _ -> [])))
+    | _ -> [])
 
 (* The facts of the lemma calls [e] always evaluates, wherever they sit in it
    (todo 2026-11-02-lemma-facts-from-non-statement-calls): an argument, a
@@ -5188,6 +5216,7 @@ and inner_lemma_facts ~root errctx defs (ctx : rctx) ?(quiet = false) ?(extra = 
      statement-position call is warned by that block's own walk. *)
   let rec calls ~stmt acc (e : A.expr) =
     match e with
+    | A.EProof (A.PAssertBy _, _) -> (e, false) :: acc
     | A.EApp (A.EVar { A.txt = "&&" | "||"; _ }, a :: _, _) -> calls ~stmt:false acc a
     | A.EApp (A.EVar _, args, sp) ->
       let acc = List.fold_left (calls ~stmt:false) acc args in
@@ -5248,8 +5277,8 @@ and hint_path ~root errctx defs (ctx : rctx) path lets sc re cb ce (hints : A.ex
         lemma_call_facts ~root errctx defs ctx path lets sc re cb ce h @ path
       | A.EAssert (q, sp) ->
         if lemma_assert ~root errctx defs ctx path lets sc re cb ce q sp then (q, false) :: path else path
-      | A.EProof (A.PAssertBy (q, hs), sp) ->
-        if proof_assert_by ~root errctx defs ctx path lets sc re cb ce q hs sp then (q, false) :: path else path
+      | A.EProof (A.PAssertBy _, sp) ->
+        (match Hashtbl.find_opt proof_results sp with Some facts -> facts @ path | None -> path)
       | A.ELet (b, _) -> path_shadow path (pat_binders b.A.bind_pat)
       | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
       | _ -> path)
@@ -5315,6 +5344,39 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        verdict := false
    | _ -> ());
   match e with
+  | A.EAssert (p, sp) when !proof_depth > 0 ->
+    go p;
+    Hashtbl.replace proof_assertions sp (lemma_assert ~root errctx defs ctx path lets sc re cb ce p sp)
+  | A.EProof (A.PAssertBy (goal, hint_list), sp) ->
+    let hints = A.EBlock (hint_list, sp) in
+    Hashtbl.remove proof_results sp;
+    let invalid why =
+      ignore (lemma_assert ~root errctx defs ctx path lets sc re cb ce goal sp);
+      Err.error ~code:Err.Code.invalid_lemma errctx ~span:sp
+        ("This proof block is invalid: " ^ why) in
+    let bound = Refine_param.binder_occurrences [] hints in
+    if expr_mentions bound goal then
+      invalid "a hint binds a name used by the goal; rename the hint-local binding"
+    else (match Hashtbl.find_opt Refine_reflect.proof_blocks sp with
+    | None -> invalid "proof blocks must be inside a checked function body"
+    | Some (Some why) -> invalid (why ^ "; proof hints must be total, pure, and use only reflected functions or lemmas")
+    | Some None ->
+      let saved_depth = !proof_depth and saved_walk = !lemma_walk and saved_body = !lemma_body in
+      Fun.protect ~finally:(fun () -> proof_depth := saved_depth; lemma_walk := saved_walk; lemma_body := saved_body)
+        (fun () ->
+          proof_depth := saved_depth + 1;
+          lemma_walk := None;
+          lemma_body := true;
+          go (proof_body goal sp hints);
+          let obs = List.filter (fun (o : Obligation.t) -> Refine_reflect.span_within o.span sp) (Obligation.all ()) in
+          if obs <> [] && List.for_all (fun (o : Obligation.t) -> o.verdict = Obligation.Proved) obs
+          then Hashtbl.replace proof_results sp [(goal, false)]
+          else begin
+            Hashtbl.remove proof_results sp;
+            let msg = "this proof block is not proved; its goal gives no facts after the block" in
+            if !strict_verified then Err.error ~code:Err.Code.lemma_unproved errctx ~span:sp msg
+            else Err.warning ~code:Err.Code.lemma_unproved errctx ~span:sp msg
+          end))
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     if Hashtbl.mem ih_watch sp then Hashtbl.replace ih_reached sp ();
     (match Hashtbl.find_opt !term_sites sp with
@@ -5554,6 +5616,8 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                lemma_call_facts ~root errctx defs ctx path lets sc re cb ce e @ path
              (* A lemma is never run, so its `assert` is a fact only once
                 proved; a function's runs, also in its result walk. *)
+             | A.EAssert (p, sp) when !proof_depth > 0 ->
+               if Hashtbl.find_opt proof_assertions sp = Some true then (p, false) :: path else path
              | A.EAssert (p, sp) when (match !lemma_walk with Some lw -> not lw.lw_ret | None -> false) ->
                if lemma_assert ~root errctx defs ctx path lets sc re cb ce p sp then (p, false) :: path else path
              | A.EAssert (p, _) -> (p, false) :: path
@@ -6365,13 +6429,7 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.EField (r, _, _) -> go r
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _) -> go e
-  (* Proof hints: the goal is proved by the block loop ([proof_assert_by],
-     [proof_calc]); here only the hints' own calls are checked (a lemma
-     call's precondition), each hint list as a block of its own. *)
-  | A.EProof (A.PAssertBy (p, hints), sp) ->
-    go (A.EBlock (hints, sp));
-    let ok = proof_assert_by ~root errctx defs ctx path lets sc re cb ce p hints sp in
-    Hashtbl.replace proof_results sp (if ok then [ (p, false) ] else [])
+  (* Calculations retain per-step hint checking and report labels. *)
   | A.EProof (A.PCalc (e0, steps), sp) ->
     List.iter (fun (st : A.calc_step) -> if st.A.cs_hint <> [] then go (A.EBlock (st.A.cs_hint, sp))) steps;
     Hashtbl.replace proof_results sp (proof_calc ~root errctx defs ctx path lets sc re cb ce e0 steps)
@@ -6577,6 +6635,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                last_elem_return_proved := saved_last;
                local_elem_ret_proved := saved_locals)
              (fun () ->
+               with_proof_scratch @@ fun () ->
                Obligation.with_scratch (fun () ->
                    strict_verified := false;
                    walk (Err.create ()) gate_hyp))
@@ -7418,6 +7477,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
          "`@[assume]` on `%s` has no effect: it declares no refined return \
           type, so there is no postcondition to assume."
          fd.A.fn_name.A.txt);
+  let saved_proof_depth = !proof_depth in
+  proof_depth := 0;
   let saved_trusted = !trusted_fn in
   let saved_enclosing = !enclosing_fn in
   let saved_abstracts = !current_abstracts in
@@ -7438,6 +7499,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
     ~finally:(fun () ->
       Hashtbl.reset const_shadowed;
       Hashtbl.iter (fun n () -> Hashtbl.replace const_shadowed n ()) saved_shadowed;
+      proof_depth := saved_proof_depth;
       trusted_fn := saved_trusted;
       enclosing_fn := saved_enclosing;
       current_abstracts := saved_abstracts)
@@ -7688,6 +7750,7 @@ and post_scratch_verdict ~root defs (fd : A.fn_def) : bool =
 (* A walk of [fd] that leaves nothing behind (ledger, diagnostics, the
    walk's caches), answered by [result] over its diagnostics. *)
 and scratch_walk ~root defs (fd : A.fn_def) (result_of : Err.ctx -> bool) : bool =
+  with_proof_scratch @@ fun () ->
   let saved_acc = Hashtbl.copy annotated_acc_facts in
   let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
   let saved_mal = !March_refine.Solver.malformed_count
@@ -8716,6 +8779,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
         strict_verified := saved_strict;
         unverified_hinted := saved_hinted)
       (fun () ->
+        with_proof_scratch @@ fun () ->
         Obligation.with_scratch (fun () ->
             Obligation.reset ();
             strict_verified := false;
@@ -9261,6 +9325,7 @@ let report_cap_total errctx (t : Refine_term.t) (certs : string array) fails
 let term_scratch_walk ~root defs (decls : A.decl list)
     ~(sites : (A.span, Refine_term.metric_site) Hashtbl.t) ~(after : unit -> unit) :
     (A.span, Obligation.verdict list) Hashtbl.t =
+  with_proof_scratch @@ fun () ->
   let saved_sites = !term_sites in
   let saved_verdicts = Hashtbl.copy term_verdicts in
   let saved_acc = Hashtbl.copy annotated_acc_facts in
@@ -9827,11 +9892,21 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
        match Hashtbl.find_opt tbl sp with
        | Some b -> b
        | None -> (not any_user) && not (List.mem sp.A.file user_negate_files));
-  if Sys.getenv_opt "MARCH_REFLECT" <> Some "0" then begin
+  let reflection_off = Sys.getenv_opt "MARCH_REFLECT" = Some "0" in
+  let has_proof_blocks =
+    reflection_off && Array.exists (fun (u : Refine_term.unit_) ->
+      List.exists (fun (c : Refine_term.owner) ->
+        let found = ref false in
+        Refine_encode.iter_all (function A.EProof (A.PAssertBy _, _) -> found := true | _ -> ()) c.o_body;
+        !found) u.u_clauses) (Lazy.force term).graph.units
+  in
+  Hashtbl.reset Refine_reflect.proof_blocks;
+  if not reflection_off || has_proof_blocks then begin
     Refine_reflect.install ~user_files:[] ~type_map (Lazy.force term) m.A.mod_decls;
     List.iter
       (fun (span, msg) -> Err.error ~code:Err.Code.internal_error errctx ~span msg)
-      !Refine_reflect.install_errors
+      !Refine_reflect.install_errors;
+    if reflection_off then Reflect_state.reset ()
   end;
   (* The first blocker of a function the encoder does not reflect, as
      (rule number, "R<k>:<text>"). *)
@@ -9934,6 +10009,8 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset lemma_valid;
   Hashtbl.reset lemma_call_sites;
   Hashtbl.reset proof_results;
+  Hashtbl.reset proof_assertions;
+  proof_depth := 0;
   Hashtbl.reset lemma_fact_spans;
   (match lemma_fns m.A.mod_decls with
    | [] -> ()
