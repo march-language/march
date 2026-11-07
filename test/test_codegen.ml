@@ -14697,6 +14697,140 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
 
+(* ── #1171: one structural-eq helper per record / tuple SHAPE ──────────
+   [Llvm_eq.mangle_ty_for_eq] had no [TRecord] case, so every record type
+   mangled to "Ptr" and shared ONE [__march_eq_Ptr], generated for whichever
+   record's [==] was emitted first ([ensure_adt_eq_fn] returns a memoized
+   helper by name).  Tuples were mangled but not injectively: a 3-tuple whose
+   first element is a pair and a 2-tuple whose first element is a triple both
+   mangled to [Tup_Tup_Int_x_Int_x_Int_x_Int].  The interpreter was right in
+   every case; compiled code gave wrong answers, over-read, or SIGSEGVed. *)
+
+(** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
+let test_record_eq_pair_then_triple_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_pair_triple"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Triple = { c : Int, d : Int, e : Int }
+  derive Eq for Triple
+  fn main(_cap : Cap(IO.Console)) : () do
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    let t1 : Triple = { c: 1, d: 2, e: 3 }
+    let t2 : Triple = { c: 1, d: 2, e: 4 }
+    println(to_string(p1 == p2))
+    println(to_string(t1 == t2))
+    println(to_string(t1 != t2))
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue"
+    ()
+
+(** Triple first: equal Pairs ran Triple's helper, which loaded offset 32
+    from a 32-byte cell and answered [false]. *)
+let test_record_eq_triple_then_pair_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_triple_pair"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Triple = { c : Int, d : Int, e : Int }
+  derive Eq for Triple
+  fn main(_cap : Cap(IO.Console)) : () do
+    let t1 : Triple = { c: 1, d: 2, e: 3 }
+    let t2 : Triple = { c: 1, d: 2, e: 3 }
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    println(to_string(t1 == t2))
+    println(to_string(p1 == p2))
+  end
+end
+|}
+    ~expected:"true\ntrue"
+    ()
+
+(** Record of Strings first: the Int record ran [march_string_eq] on a
+    tagged Int and SIGSEGVed (addr 0x11, exit 139). *)
+let test_record_eq_strings_then_ints_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_str_int"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Name = { first : String, last : String }
+  derive Eq for Name
+  type Point = { x : Int, y : Int }
+  derive Eq for Point
+  fn main(_cap : Cap(IO.Console)) : () do
+    let n1 : Name = { first: "a", last: "b" }
+    let n2 : Name = { first: "a", last: "b" }
+    let q1 : Point = { x: 1, y: 2 }
+    let q2 : Point = { x: 1, y: 2 }
+    println(to_string(n1 == n2))
+    println(to_string(q1 == q2))
+  end
+end
+|}
+    ~expected:"true\ntrue"
+    ()
+
+(** [eq()] reaches the helper through nesting: [derive Eq] compares each
+    field with [==], and [impl Eq(List(a))] compares elements with [==]. *)
+let test_record_eq_nested_and_list_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Inner = { x : Int, y : Int, z : Int }
+  derive Eq for Inner
+  type Outer = { inner : Inner, tag : Int }
+  derive Eq for Outer
+  fn main(_cap : Cap(IO.Console)) : () do
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    println(to_string(p1 == p2))
+    let o1 : Outer = { inner: { x: 1, y: 2, z: 3 }, tag: 0 }
+    let o2 : Outer = { inner: { x: 1, y: 2, z: 4 }, tag: 0 }
+    println(to_string(eq(o1, o2)))
+    let l1 : List(Inner) = [{ x: 1, y: 2, z: 3 }]
+    let l2 : List(Inner) = [{ x: 1, y: 2, z: 9 }]
+    println(to_string(eq(l1, l2)))
+  end
+end
+|}
+    ~expected:"true\nfalse\nfalse"
+    ()
+
+(** Tuples: [((Int, Int, Int), Int)] and [((Int, Int), Int, Int)] mangled to
+    the same name.  [ip] is shared so the over-read of the pair's missing
+    third slot reads the same word on both sides and the wrong answer is
+    deterministic: the 2-field helper never reaches the differing [4]/[5]. *)
+let test_tuple_eq_nested_shape_collision_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_tup_eq_shapes"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn main(_cap : Cap(IO.Console)) : () do
+    let b1 = ((1, 2, 3), 4)
+    let b2 = ((1, 2, 3), 4)
+    let ip = (1, 2)
+    let a1 = (ip, 3, 4)
+    let a2 = (ip, 3, 5)
+    println(to_string(b1 == b2))
+    println(to_string(a1 == a2))
+    println(to_string(a1 != a2))
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue"
+    ()
+
 (** Bug: a variant field typed as an OPAQUE builtin type constructor (no
     March-level `type` declaration exists for it — e.g. `Task(a)`) makes
     [ensure_adt_eq_fn] return [None] for that field's own type. The `==`
@@ -18523,6 +18657,16 @@ let codegen_suites =
             test_newtype_eq_operator_generic_payload_compiled;
           Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
             test_eq_operator_opaque_ctor_field_uses_poly_eq;
+          Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
+            test_record_eq_pair_then_triple_compiled;
+          Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick
+            test_record_eq_triple_then_pair_compiled;
+          Alcotest.test_case "#1171 record ==: String-record helper not reused for Int record" `Quick
+            test_record_eq_strings_then_ints_compiled;
+          Alcotest.test_case "#1171 eq() on nested record field and List of records" `Quick
+            test_record_eq_nested_and_list_compiled;
+          Alcotest.test_case "#1171 tuple ==: nested tuple shapes get distinct helpers" `Quick
+            test_tuple_eq_nested_shape_collision_compiled;
         ] );
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick

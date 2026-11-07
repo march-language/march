@@ -655,6 +655,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `==` and `!=` on records compare the right fields** ([#1171](https://github.com/march-language/march/issues/1171)).
+  Every record type shared one native equality helper, built for whichever record was
+  compared first, so another record type got wrong answers, read past the end of the record,
+  or crashed with SIGSEGV. This also reached `eq()` on records nested in a record or a `List`.
+  Each record type now gets its own helper. Tuples of different nested shapes, such as
+  `((Int, Int), Int, Int)` and `((Int, Int, Int), Int)`, no longer share one either.
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
