@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
+  `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
+  gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
+  reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
+  block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
+  function's unfolding depth for the checks inside only. All four are checked by the compiler
+  and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
+  in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
+  keeps working.
 - **A warning when a predicate means the built-in, not your function.** Inside a refinement
   predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
   own function of that name is in scope, the checker now says so

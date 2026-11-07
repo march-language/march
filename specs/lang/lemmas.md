@@ -46,6 +46,7 @@ chapter has the reference summary.
 - [Induction: a recursive call](#induction-a-recursive-call)
 - [Steps: `assert` inside a lemma](#steps-assert-inside-a-lemma)
 - [Decided steps and fuel](#decided-steps-and-fuel)
+- [Proof hints: `assert … by`, `calc`, `reveal`, `with fuel`](#proof-hints-assert--by-calc-reveal-with-fuel)
 - [When a lemma does not prove](#when-a-lemma-does-not-prove)
 - [When a lemma is false](#when-a-lemma-is-false)
 
@@ -82,7 +83,10 @@ chapter has the reference summary.
 | The checker to know a fact it can't work out by itself | A `@[lemma]` that proves it, called before the place that needs it |
 | A proof by induction over a list or tree | A lemma that matches on the value and calls itself on the smaller part |
 | To spell out one step of a longer proof | `assert step` inside the lemma |
-| The checker to follow a function's calls further | `@[reflect(fuel: N)]` on that function (default 2, at most 8) |
+| The checker to follow a function's calls further | `@[reflect(fuel: N)]` on that function (default 2, at most 8), or `with fuel(f, N) do … end` for one proof |
+| A step proved with helper facts that should not leak | `assert P by do … end` |
+| A chain of equalities or inequalities, each step checked | `calc do … end` |
+| An `@[opaque]` function's definition, for one proof | `reveal f` |
 | A theorem that only holds for some inputs | Refined parameters on the lemma: `n : {Int \| _ >= 0}` |
 | Every lemma in a module to be proved, or the build fails | `cap verified` in that module |
 | To know whether a law you can't prove yet is even true | Leave it unproved; `forge test` tests it on generated inputs |
@@ -384,6 +388,73 @@ the function **is** reflected, so a later edit that adds a `println` is an error
 [`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/), instead of a quiet loss of
 every proof that used the function. Fuel outside 1 to 8 is the same error. Use `@[opaque]`
 to keep a function out of the logic.
+
+## Proof hints: `assert … by`, `calc`, `reveal`, `with fuel`
+
+Four statements help a proof along without changing what the program does. All four are
+checked by the compiler and then erased: none of them runs (a `with fuel` body is ordinary
+code and does run). They work in any function, not only in lemmas.
+
+**`assert P by hint`** proves `P` using the hint's facts, then gives the code after it `P`, and
+only `P`. The hint is one lemma call, or a `do … end` block of lemma calls, `let`s and
+asserts:
+
+```march
+mod Main do
+  fn need_eq(a : Int, _b : {Int | _ == a}) : Int do 0 end
+
+  fn total(xs : List(Int), ys : List(Int)) : Int do
+    assert List.sum_int(List.append(xs, ys)) == List.sum_int(xs) + List.sum_int(ys) by do
+      List.sum_int_append(xs, ys)
+    end
+    need_eq(List.sum_int(xs) + List.sum_int(ys), List.sum_int(List.append(xs, ys)))
+  end
+
+  fn main() : Int do 0 end
+end
+```
+
+A plain lemma call does the same job, but its fact then stays for the rest of the block, in
+every later query. That makes later checks slower, and a later proof can end up resting on a
+fact you did not mean it to use. With `assert … by` the helper facts stay inside the hint.
+Unlike a plain `assert`, which is checked when the program runs, `assert … by` is checked by
+the compiler only: a `P` it cannot prove is reported (`unverified`, or an error under
+`cap verified`) and is not assumed afterwards.
+
+**`calc`** writes a proof as a chain. Each step compares the previous term with the next
+(`==`, `<`, `<=`, `>`, `>=`) and may have its own hint; each step is proved on its own, so a
+step that does not follow is reported by its number (`calc step 2`). Every proved step is a
+fact afterwards, so a chain of `==` and `<=` gives the caller the first term `<=` the last.
+
+```march
+mod Main do
+  fn need_eq(a : Int, _b : {Int | _ == a}) : Int do 0 end
+
+  fn swapped(xs : List(Int), ys : List(Int)) : Int do
+    calc do
+      List.sum_int(List.append(xs, ys))
+      == List.sum_int(xs) + List.sum_int(ys) by List.sum_int_append(xs, ys)
+      == List.sum_int(ys) + List.sum_int(xs)
+    end
+    need_eq(List.sum_int(ys) + List.sum_int(xs), List.sum_int(List.append(xs, ys)))
+  end
+
+  fn main() : Int do 0 end
+end
+```
+
+Steps are written on their own lines starting with the operator; the terms between them are
+ordinary expressions (a comparison inside a term needs parentheses).
+
+**`reveal f`** lets the rest of its block use the definition of an `@[opaque]` function, as if
+it were reflected. Outside that block `f` stays opaque, so the cost of unfolding it is paid
+only where a proof needs it. It applies to a function that `@[opaque]` is the only reason for
+keeping out of the logic, and that does not call itself: a recursive `@[opaque]` function
+stays opaque.
+
+**`with fuel(f, N) do … end`** runs its body with `f`'s fuel set to `N` (1 to 8; a value outside
+that range is taken as the nearest bound) for the checks inside, instead of raising `@[reflect(fuel: N)]` for every caller. A `reflect-fuel`
+skip says which function ran out.
 
 ## When a lemma does not prove
 
