@@ -67,4 +67,4 @@ Language reference: `specs/lang/lemmas.md`, "Proof hints".
 | `run_stdlib` adversarial-regressions 48 (generates a `fn calc()`) | failed with hard keywords (syntax error); passes with soft keywords |
 | `proof-hints` case `calc and reveal stay usable as names` | RED → GREEN |
 | Menhir | 7 shift/reduce conflicts, as on main; no reduce/reduce |
-| `scripts/affected.sh --run --full` | see the PR |
+| `scripts/affected.sh --run --full` on the tree merged with main (every suite, incl. Slow: compiler 1518, eval 291, codegen 729, stdlib 903, refinecheck, LSP suites, errors 412; doc-lint, tree-sitter, determinism oracle) | all passed; ir (521 programs), refine (8837 lines / 575 fixtures) and types (1067 fixtures, both tiers) oracles IDENTICAL to main |
