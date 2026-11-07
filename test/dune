@@ -8752,6 +8752,72 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_let_shadowing.expected js_let_shadowing.out)))
 
+; Regression (#1170): a module-level `let` outside the entry module (nested
+; mod, stdlib Bytes.b64_alphabet) is a zero-param fn in TIR; --target js read
+; it as its `$clo` wrapper ([object Object]) instead of calling it.
+(rule
+ (targets js_module_let_value.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_value.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_value.mjs native/module_let_value.march)))
+
+(rule
+ (targets js_module_let_value.out)
+ (deps js_module_let_value.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_value.out (run node js_module_let_value.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_value.expected js_module_let_value.out)))
+
+; Regression (#1177): an entry-module fn named like a bare-name-dispatched
+; builtin (negate, not, string_length, int_xor) must be called on --target js
+; and natively (the `not(<literal>)` fold ignored it on both).
+(rule
+ (targets js_shadowed_negate_not.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_negate_not.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_negate_not.mjs native/shadowed_negate_not.march)))
+
+(rule
+ (targets js_shadowed_negate_not.out)
+ (deps js_shadowed_negate_not.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_negate_not.out (run node js_shadowed_negate_not.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_negate_not.expected js_shadowed_negate_not.out)))
+
+(rule
+ (targets native_shadowed_negate_not native_shadowed_negate_not.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/shadowed_negate_not.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadowed_negate_not
+        native/shadowed_negate_not.march)
+   (with-stdout-to native_shadowed_negate_not.out
+        (system "./native_shadowed_negate_not")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadowed_negate_not.expected native_shadowed_negate_not.out)))
+
+; The native shadowed-builtin witness on --target js: a user `fn int_mod`
+; collided with the first-class `const int_mod = {...}` builtin wrapper.
+(rule
+ (targets js_shadowed_builtin_name.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_name.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_builtin_name.mjs native/shadowed_builtin_name.march)))
+
+(rule
+ (targets js_shadowed_builtin_name.out)
+ (deps js_shadowed_builtin_name.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_builtin_name.out (run node js_shadowed_builtin_name.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_builtin_name.expected js_shadowed_builtin_name.out)))
+
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
  (targets js_extern_import.mjs)

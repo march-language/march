@@ -20,7 +20,7 @@ let rec is_float_free = function
 
 let mk_var name ty = { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr }
 
-let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
+let rec simplify_expr ~user_not ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
   (* x + 0 | 0 + x → x *)
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitInt 0)]) when f.Tir.v_name = "+" ->
     changed := true; Tir.EAtom x
@@ -108,7 +108,8 @@ let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true))
 
   (* P15 — not with known argument: not true = false, not false = true *)
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)]) when f.Tir.v_name = "not" ->
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)])
+    when f.Tir.v_name = "not" && not user_not ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool (not b)))
 
   (* String identities x ++ "" → x and "" ++ x → x.
@@ -140,7 +141,7 @@ let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
   | Tir.ECase (a,
       [{ Tir.br_tag; br_vars = []; br_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool false)) }],
       Some (Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool true))))
-    when br_tag = Tir_names.synthetic_true_tag ->
+    when br_tag = Tir_names.synthetic_true_tag && not user_not ->
     changed := true;
     Tir.EApp (mk_var "not" (Tir.TFn ([Tir.TBool], Tir.TBool)), [a])
 
@@ -160,21 +161,21 @@ let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
 
   (* Recurse *)
   | Tir.ELet (v, rhs, body) ->
-    Tir.ELet (v, simplify_expr ~changed ~pre_perceus rhs,
-              simplify_expr ~changed ~pre_perceus body)
+    Tir.ELet (v, simplify_expr ~user_not ~changed ~pre_perceus rhs,
+              simplify_expr ~user_not ~changed ~pre_perceus body)
   | Tir.ECase (a, branches, default) ->
     Tir.ECase (a,
       List.map (fun b ->
-        { b with Tir.br_body = simplify_expr ~changed ~pre_perceus b.Tir.br_body }) branches,
-      Option.map (simplify_expr ~changed ~pre_perceus) default)
+        { b with Tir.br_body = simplify_expr ~user_not ~changed ~pre_perceus b.Tir.br_body }) branches,
+      Option.map (simplify_expr ~user_not ~changed ~pre_perceus) default)
   | Tir.ELetRec (fns, body) ->
     Tir.ELetRec (
       List.map (fun fd ->
-        { fd with Tir.fn_body = simplify_expr ~changed ~pre_perceus fd.Tir.fn_body }) fns,
-      simplify_expr ~changed ~pre_perceus body)
+        { fd with Tir.fn_body = simplify_expr ~user_not ~changed ~pre_perceus fd.Tir.fn_body }) fns,
+      simplify_expr ~user_not ~changed ~pre_perceus body)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (simplify_expr ~changed ~pre_perceus e1,
-              simplify_expr ~changed ~pre_perceus e2)
+    Tir.ESeq (simplify_expr ~user_not ~changed ~pre_perceus e1,
+              simplify_expr ~user_not ~changed ~pre_perceus e2)
   | other -> other
 
 (** [pre_perceus] enables rewrites that are only sound before RC insertion
@@ -182,6 +183,8 @@ let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
     omits it (default [false]); the dedicated pre-Perceus pipeline step passes
     [~pre_perceus:true]. *)
 let run ?(pre_perceus = false) ~changed (m : Tir.tir_module) : Tir.tir_module =
+  (* A user top-level `fn not` owns the name (#1177): see [Fold.has_user_not]. *)
+  let user_not = Fold.has_user_not m in
   { m with Tir.tm_fns = List.map (fun fd ->
-      { fd with Tir.fn_body = simplify_expr ~changed ~pre_perceus fd.Tir.fn_body }
+      { fd with Tir.fn_body = simplify_expr ~user_not ~changed ~pre_perceus fd.Tir.fn_body }
     ) m.Tir.tm_fns }
