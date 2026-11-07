@@ -688,6 +688,23 @@ and emit_val_impl ctx expr =
          backend byte-for-byte unchanged instead of calling an undefined symbol. *)
       | "march_value_to_string", [a] ->
         emit_atom ctx a
+      (* `compare` on Int / String (Ord$Int.compare, Ord$String.compare and
+         the compare_* builtins; a derived `Ord` on a record or payload type
+         calls these per field): -1/0/1 like march_compare_int /
+         march_compare_string in march_runtime.c.  A String orders by JS `<`,
+         the same order the JS backend's String `<` already uses.  Operands
+         are atoms, so evaluating them twice is free. *)
+      | ("march_compare_int" | "compare_int"
+        | "march_compare_string" | "compare_string"), [a; b] ->
+        emit ctx "(("; emit_atom ctx a; emit ctx " < "; emit_atom ctx b;
+        emit ctx ") ? -1 : ("; emit_atom ctx a; emit ctx " > "; emit_atom ctx b;
+        emit ctx ") ? 1 : 0)"
+      (* `compare` on Float: NaN-total, as march_compare_float in
+         march_runtime.c and the interpreter's Float.compare. *)
+      | ("march_compare_float" | "compare_float"), [a; b] ->
+        use_runtime ctx "march_compare_float";
+        emit ctx "march_compare_float("; emit_atom ctx a; emit ctx ", ";
+        emit_atom ctx b; emit ctx ")"
       | "int_to_string",   [a] ->
         emit ctx "String("; emit_atom ctx a; emit ctx ")"
       | "bool_to_string",  [a] ->

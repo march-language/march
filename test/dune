@@ -2035,6 +2035,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/tuple_ord.expected native_tuple_ord.out)))
 
+; `<`/`<=`/`>`/`>=` on an ADT, record, newtype or unboxed ADT with an Ord
+; impl (derived or hand-written), and in generic `when Ord(a)` code, mean
+; `compare(a, b) <op> 0` (issue #1172): Mono routes them through the prelude's
+; `__ord_lt` & co. Before, native compared heap cells via march_poly_compare
+; (always 0), a newtype by raw payload, an unboxed ADT failed the LLVM build,
+; and JS used the JS operator on objects. Same fixture on both backends.
+(rule
+ (targets native_adt_ord_operators native_adt_ord_operators.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/adt_ord_operators.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_adt_ord_operators native/adt_ord_operators.march)
+   (with-stdout-to native_adt_ord_operators.out (system "./native_adt_ord_operators")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/adt_ord_operators.expected native_adt_ord_operators.out)))
+
+(rule
+ (targets js_adt_ord_operators.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/adt_ord_operators.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_adt_ord_operators.mjs native/adt_ord_operators.march)))
+
+(rule
+ (targets js_adt_ord_operators.out)
+ (deps js_adt_ord_operators.mjs march_runtime.mjs)
+ (action (with-stdout-to js_adt_ord_operators.out (run node js_adt_ord_operators.mjs))))
+
+(rule (alias runtest) (action (diff native/adt_ord_operators.expected js_adt_ord_operators.out)))
+
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
 ; its scope and must be dropped there; each shape leaked the record before.

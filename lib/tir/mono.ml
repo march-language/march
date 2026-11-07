@@ -814,25 +814,38 @@ let rec rewrite_calls
        `List.length(xs)` runs the user's `go` and returns garbage. *)
     if SSet.mem orig_name shadowed then expr
     else
-    (* `<` / `<=` / `>` / `>=` on two TUPLES: the order is the prelude's
-       lexicographic `impl Ord((a, b))` (2..5-tuples), so route the operator
-       through the prelude's `__tuple_lt` & co. (`compare(a, b) <op> 0`),
-       specialised here like any generic call, which in turn specialises each
-       component's own `compare`.  Done in Mono, not at lowering, because a
-       generic `fn lt(a, b) do a < b end` only learns that [a] is a tuple
-       here.  Left to the emitter, a tuple operand is a plain `ptr` and fell
-       to `march_poly_compare`, which has no static type to order a heap cell
-       by and returns 0: every tuple `<` was false. *)
-    let tuple_ord_helper =
-      match orig_name, first_arg_ty args with
-      | ("<" | "<=" | ">" | ">="), Tir.TTuple (_ :: _) when List.length args = 2 ->
+    (* `<` / `<=` / `>` / `>=` on two values of a NON-PRIMITIVE type (a
+       tuple, an ADT, a record, a newtype, an unboxed ADT): the order is the
+       type's `Ord` impl, so route the operator through the prelude's
+       `__ord_lt` & co. (`compare(a, b) <op> 0`), specialised here like any
+       generic call, which in turn dispatches `compare` to the type's own impl
+       (a derived or hand-written `Ord(T)`, or the prelude's lexicographic
+       `impl Ord((a, b))` for 2..5-tuples).  Done in Mono, not at lowering,
+       because a generic `fn lt(a, b) when Ord(a) do a < b end` only learns
+       the concrete type here.  Left to the emitter, a boxed operand is a plain
+       `ptr` and fell to `march_poly_compare`, which has no static type to
+       order a heap cell by and returns 0 (every `<` false, every `<=` true);
+       a newtype compared its raw payload; an unboxed ADT was fed to `icmp` as
+       an aggregate (an LLVM type error); and the JS backend compared the two
+       objects with the JS operator (issue #1172).  Int/Float/String/Bool and
+       atoms keep the emitters' native comparisons.  A TCon/record with no
+       resolvable `compare` impl is left alone. *)
+    let ord_helper =
+      let routed = match orig_name, first_arg_ty args with
+        | ("<" | "<=" | ">" | ">="), Tir.TTuple (_ :: _) -> true
+        | ("<" | "<=" | ">" | ">="), Tir.TCon ("Atom", []) -> false
+        | ("<" | "<=" | ">" | ">="), (Tir.TCon _ | Tir.TRecord _) ->
+          iface_impl_name "compare" args <> None
+        | _ -> false
+      in
+      if routed && List.length args = 2 then
         let h = match orig_name with
-          | "<" -> "__tuple_lt" | "<=" -> "__tuple_le"
-          | ">" -> "__tuple_gt" | _ -> "__tuple_ge" in
+          | "<" -> "__ord_lt" | "<=" -> "__ord_le"
+          | ">" -> "__ord_gt" | _ -> "__ord_ge" in
         if Hashtbl.mem fn_table h then Some h else None
-      | _ -> None
+      else None
     in
-    (match tuple_ord_helper with
+    (match ord_helper with
     | Some h ->
       rewrite_calls fn_table done_set worklist iface_methods record_to_typename
         shadowed (Tir.EApp ({ f_var with Tir.v_name = h }, args))
