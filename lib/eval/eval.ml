@@ -1871,7 +1871,7 @@ let span_of_expr (e : expr) : span =
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
-  | EAssert (_, sp) -> sp
+  | EAssert (_, sp) | EAssertBy (_, _, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | ERefineMsg (_, _, sp) -> sp
   | EVar n -> n.span
@@ -2562,6 +2562,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     apply flat_map_fn [v; k]
 
+  | EAssertBy _ -> VUnit
   | EAssert (inner, _) ->
     (* A failed assertion raises a rendered report
        (lib/errors/test_report.ml): the header with the asserted expression

@@ -504,6 +504,9 @@ let rec expr_to_json (e : expr) : string =
       ("span", span_to_json span);
       rty;
     ]
+  | EAssertBy (p, h, span) -> Dump.json_obj [
+      ("kind", Dump.json_string "EAssertBy"); ("goal", expr_to_json p);
+      ("hints", expr_to_json h); ("span", span_to_json span); rty ]
   | EAssert (e, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EAssert");

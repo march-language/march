@@ -1149,6 +1149,16 @@
     "type": "assert_expression",
     "named": true,
     "fields": {
+      "proof": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "block_body",
+            "named": true
+          }
+        ]
+      },
       "value": {
         "multiple": false,
         "required": true,

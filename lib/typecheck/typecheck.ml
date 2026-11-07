@@ -4639,6 +4639,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.EDbg (Some inner, _) -> infer_expr env inner
 
     (* ── Test assertion ─────────────────────────────────────────────── *)
+    | Ast.EAssertBy (goal, hints, sp) ->
+      check_expr env goal t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
+      ignore (infer_expr env hints);
+      Hashtbl.replace env.type_map sp t_unit;
+      t_unit
     | Ast.EAssert (inner, sp) ->
       (* The inner expression must be Bool. Assert evaluates to Unit. *)
       check_expr env inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
@@ -10295,7 +10300,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
   | Ast.EDbg (Some inner, _) -> go inner
   | Ast.EApp (h, args, _) -> go h; List.iter go args
-  | Ast.EPipe (l, r, _) -> go l; go r
+  | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) -> go l; go r
   | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) -> List.iter go args
   | Ast.ELam (_, body, _) -> go body
   | Ast.EBlock (es, _) -> List.iter go es
@@ -10344,7 +10349,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
   | Ast.EDbg (Some inner, _) -> go inner
   | Ast.EApp (h, args, _) -> go h; List.iter go args
-  | Ast.EPipe (l, r, _) -> go l; go r
+  | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) -> go l; go r
   | Ast.ECon (_, args, _) | Ast.EAtom (_, args, _) | Ast.ETuple (args, _) -> List.iter go args
   | Ast.ELam (ps, body, _) ->
     iter_expr_scoped f (opaque (List.map (fun (p : Ast.param) -> p.Ast.param_name.Ast.txt) ps)) body

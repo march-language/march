@@ -762,7 +762,7 @@ let rec flatten_pred_quals (e : expr) : expr =
     ERecordUpdate (go b, List.map (fun (n, e) -> (n, go e)) fs, sp)
   | ELit _ | EVar _ | EHole _ | EResultRef _ -> e
   | ELam _ | ELetFn _ | ELetQ _ | ELetStar _ | ESend _ | ESpawn _ | EPipe _
-  | ESigil _ | EAssert _ | EDbg _ -> e
+  | EAssertBy _ | ESigil _ | EAssert _ | EDbg _ -> e
   | ERefineMsg (inner, msg, sp) -> ERefineMsg (go inner, msg, sp)
 
 (** Structural [ty] walk whose ONLY effect is calling [flatten_pred_quals] on
@@ -1060,6 +1060,7 @@ let rec desugar_expr (e : expr) : expr =
       with_conn_scope (pat_binds_conn p) (fun () -> desugar_expr cont) in
     ELetStar (p, result', cont', sp)
 
+  | EAssertBy (p, h, sp) -> EAssertBy (desugar_expr p, desugar_expr h, sp)
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
 
@@ -2020,6 +2021,7 @@ let make_qualifier (prefix : string) (own_names : string list) =
     | EDbg (Some ex, sp)        -> EDbg (Some (go bound ex), sp)
     | ESend (cap, msg, sp)      -> ESend (go bound cap, go bound msg, sp)
     | ESpawn (ex, sp)           -> ESpawn (go bound ex, sp)
+    | EAssertBy (p, h, sp) -> EAssertBy (go bound p, go bound h, sp)
     | EAssert (ex, sp)          -> EAssert (go bound ex, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map (go bound) args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, go bound ex, sp)
@@ -2213,6 +2215,7 @@ let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
     | EDbg (Some ex, sp)        -> EDbg (Some (rw ex), sp)
     | ESend (cap, msg, sp)      -> ESend (rw cap, rw msg, sp)
     | ESpawn (ex, sp)           -> ESpawn (rw ex, sp)
+    | EAssertBy (p, h, sp) -> EAssertBy (rw p, rw h, sp)
     | EAssert (ex, sp)          -> EAssert (rw ex, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map rw args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, rw ex, sp)

@@ -18224,8 +18224,30 @@ let test_callarity_aliases_matching_ok () =
   end|}) in
   Alcotest.(check bool) "matching aliases / lambda callee: no error" false (has_errors ctx)
 
+let test_assert_by_surface () =
+  let src = {|mod N do
+  fn f(x : Int) : Int do
+    assert x == x by do
+      let y = x
+      assert y == x by do () end
+    end
+    x
+  end
+end
+|} in
+  Alcotest.(check bool) "scoped proof typechecks" false (has_errors (typecheck src));
+  let formatted = March_format.Format.format_source ~filename:"t.march" src in
+  Alcotest.(check bool) "formatted proof typechecks" false (has_errors (typecheck formatted));
+  Alcotest.(check string) "format is stable" formatted
+    (March_format.Format.format_source ~filename:"t.march" formatted)
+
+let test_assert_by_type_errors () =
+  List.iter (fun src -> Alcotest.(check bool) "reject invalid scope/type" true (has_errors (typecheck src)))
+    [ "mod N do fn f() do assert 42 by do () end end end";
+      "mod N do fn f() do assert true by do\n let y = 1\n ()\n end\n y\n end end" ]
+
 let compiler_suites =
-  [
+  [ ("assert-by", [Alcotest.test_case "surface and format" `Quick test_assert_by_surface; Alcotest.test_case "types and scope" `Quick test_assert_by_type_errors]);
       sigil_interp_suite;
       csrf_suite;
       ("repl_cache", Test_repl_cache.tests);

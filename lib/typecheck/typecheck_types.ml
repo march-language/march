@@ -478,7 +478,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ELetFn (_, _, _, _, sp) -> sp
   | Ast.ELetQ  (_, _, _, sp)   -> sp
   | Ast.ELetStar (_, _, _, sp) -> sp
-  | Ast.EAssert (_, sp)         -> sp
+  | Ast.EAssert (_, sp) | Ast.EAssertBy (_, _, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
   | Ast.ERefineMsg (_, _, sp)       -> sp
 
@@ -580,6 +580,7 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
     free_vars_expr (pat_bound @ bound) cont
   | Ast.EPipe (l, r, _) ->
     free_vars_expr bound l @ free_vars_expr bound r
+  | Ast.EAssertBy (p, h, _) -> free_vars_expr bound p @ free_vars_expr bound h
   | Ast.EAssert (e, _) -> free_vars_expr bound e
   | Ast.ESigil (_, content, _) -> free_vars_expr bound content
   | Ast.ERefineMsg (content, _, _) -> free_vars_expr bound content

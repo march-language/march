@@ -475,7 +475,7 @@ let is_stmt_form = function
 (** The binding level of [e] as the renderer prints it. *)
 let rec level_of e =
   match e with
-  | EIf _ | EMatch _ | ECond _ | ELam _ | EAssert _ -> lv_expr
+  | EIf _ | EMatch _ | ECond _ | ELam _ | EAssertBy _ | EAssert _ -> lv_expr
   | EPipe _ -> lv_pipe
   | EBlock ([x], _) -> level_of x
   | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None -> lv_atom
@@ -516,7 +516,7 @@ let children e =
   | EAssert (x, _) | ESigil (_, x, _) | ERefineMsg (x, _, _) -> [x]
   | EIf (c, t, f, _) -> [c; t; f]
   | ECond (arms, _) -> List.concat_map (fun (c, b) -> [c; b]) arms
-  | EPipe (a, b, _) | ESend (a, b, _) -> [a; b]
+  | EAssertBy (a, b, _) | EPipe (a, b, _) | ESend (a, b, _) -> [a; b]
   | ELetQ (_, r, c, _) | ELetStar (_, r, c, _) -> [r; c]
 
 (** True when [e] contains, anywhere inside it, a construct that can only be
@@ -710,6 +710,7 @@ and render_raw ind e =
   | EResultRef (Some n)         -> Printf.sprintf "v(%d)" n
   | EDbg (None, _)              -> "dbg()"
   | EDbg (Some x, _)            -> Printf.sprintf "dbg(%s)" (r lv_expr x)
+  | EAssertBy (p, h, _) -> Printf.sprintf "assert %s by %s" (r lv_expr p) (do_block ind h)
   | EAssert (x, _)              -> Printf.sprintf "assert %s" (r lv_expr x)
   | ESigil (name, content, _)   -> Printf.sprintf "~%s%s" name (r lv_atom content)
   | ERefineMsg (inner, msg, sp) ->

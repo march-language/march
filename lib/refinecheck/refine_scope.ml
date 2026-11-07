@@ -1309,7 +1309,7 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) ->
     List.exists (fun (c, b) -> expr_mentions names c || expr_mentions names b) arms
-  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
 
@@ -1366,7 +1366,7 @@ let rec name_escapes ?(pass_checked : string -> int -> bool = fun _ _ -> false) 
   | A.EField (r, _, _) -> esc r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> esc c || esc b) arms
-  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> esc e
 
@@ -1428,7 +1428,7 @@ let rec expr_mentions_free (m : string) (e : A.expr) : bool =
   | A.EField (r, _, _) -> free r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
-  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
 

@@ -192,6 +192,7 @@ and respan_expr (e : expr) : expr =
             respan_expr body, fresh_synthetic_span ())
   | ELetQ (p, e1, e2, _) -> ELetQ (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
   | ELetStar (p, e1, e2, _) -> ELetStar (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
+  | EAssertBy (p, h, _) -> EAssertBy (respan_expr p, respan_expr h, fresh_synthetic_span ())
   | EAssert (e, _)       -> EAssert (respan_expr e, fresh_synthetic_span ())
   | ESigil (s, e, _)     -> ESigil (s, respan_expr e, fresh_synthetic_span ())
   | ERefineMsg (e, s, _)     -> ERefineMsg (respan_expr e, s, fresh_synthetic_span ())

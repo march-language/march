@@ -900,6 +900,10 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
         List.iter w args
     in
     match e with
+    | A.EAssertBy (p, h, _) ->
+      let saved = !in_lemma and saved_assert = !in_lemma_assert in
+      Fun.protect ~finally:(fun () -> in_lemma := saved; in_lemma_assert := saved_assert)
+        (fun () -> in_lemma := true; in_lemma_assert := true; w p; in_lemma_assert := false; w h)
     | A.EAssert (x, _) when !in_lemma ->
       in_lemma_assert := true;
       Fun.protect ~finally:(fun () -> in_lemma_assert := false) (fun () -> w x)

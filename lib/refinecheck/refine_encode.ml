@@ -4823,7 +4823,7 @@ let children : A.expr -> A.expr list = function
   | A.EField (r, _, _) -> [ r ]
   | A.EIf (c, t, e, _) -> [ c; t; e ]
   | A.ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
-  | A.EPipe (a, b, _) -> [ a; b ]
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) -> [ a; b ]
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> [ e ]
   | A.ESend (a, b, _) -> [ a; b ]

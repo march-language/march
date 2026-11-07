@@ -21,6 +21,8 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- Scoped `assert P by do … end` proof hints: only a proved goal becomes a fact outside the block; all hints are erased before execution.
+
 - **A warning when a predicate means the built-in, not your function.** Inside a refinement
   predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
   own function of that name is in scope, the checker now says so

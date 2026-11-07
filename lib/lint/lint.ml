@@ -168,7 +168,7 @@ let collect_call_names expr =
     | Ast.EIf (c, t, e, _)   -> walk c; walk t; walk e
     | Ast.ECond (arms, _)    ->
       List.iter (fun (c, e) -> walk c; walk e) arms
-    | Ast.EPipe (l, r, _)    -> walk l; walk r
+    | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _)    -> walk l; walk r
     | Ast.ETuple (xs, _)     -> List.iter walk xs
     | Ast.ERecord (fs, _)    -> List.iter (fun (_, e) -> walk e) fs
     | Ast.ERecordUpdate (b, fs, _) ->
@@ -374,7 +374,7 @@ let check_style ~config ~file ~acc ~type_map:_ decls =
     (* block: walk each sub-expression *)
     | Ast.EBlock (xs, _)     -> List.iter walk_expr xs
     | Ast.ELet (b, _)        -> walk_expr b.Ast.bind_expr
-    | Ast.EPipe (l, r, _)    -> walk_expr l; walk_expr r
+    | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _)    -> walk_expr l; walk_expr r
     | Ast.ETuple (xs, _)     -> List.iter walk_expr xs
     | Ast.EField (e, _, _)   -> walk_expr e
     | Ast.ECon (_, args, _)  -> List.iter walk_expr args
@@ -461,7 +461,7 @@ let check_safety ~config ~file ~acc ~type_map decls =
       walk_expr s;
       List.iter (fun a -> walk_expr a.Ast.branch_body) arms
     | Ast.EIf (c, t, e, _)     -> walk_expr c; walk_expr t; walk_expr e
-    | Ast.EPipe (l, r, _)       -> walk_expr l; walk_expr r
+    | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _)       -> walk_expr l; walk_expr r
     | Ast.ETuple (xs, _)        -> List.iter walk_expr xs
     | Ast.EField (e, _, _)      -> walk_expr e
     | Ast.ECon (_, args, _)     -> List.iter walk_expr args
@@ -517,7 +517,7 @@ let check_dead_code ~config ~file ~acc ~type_map decls =
       walk_expr s;
       List.iter (fun a -> walk_expr a.Ast.branch_body) arms
     | Ast.EIf (c, t, e, _)   -> walk_expr c; walk_expr t; walk_expr e
-    | Ast.EPipe (l, r, _)     -> walk_expr l; walk_expr r
+    | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _)     -> walk_expr l; walk_expr r
     | Ast.ETuple (xs, _)      -> List.iter walk_expr xs
     | Ast.EField (e, _, _)    -> walk_expr e
     | Ast.ECon (_, args, _)   -> List.iter walk_expr args

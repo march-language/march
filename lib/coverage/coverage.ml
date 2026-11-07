@@ -74,7 +74,7 @@ let span_of_expr (e : expr) : span =
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
-  | EAssert (_, sp) -> sp
+  | EAssert (_, sp) | EAssertBy (_, _, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | ERefineMsg (_, _, sp) -> sp
   | EVar n -> n.span
@@ -161,6 +161,7 @@ let rec walk_expr ~file (acc_e : (string, unit) Hashtbl.t)
     walk_expr ~file acc_e acc_b m
   | ESpawn (ex, _) ->
     walk_expr ~file acc_e acc_b ex
+  | EAssertBy _ -> ()
   | EAssert (ex, _) ->
     walk_expr ~file acc_e acc_b ex
   | EAtom (_, args, _) ->

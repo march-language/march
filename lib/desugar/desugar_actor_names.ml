@@ -234,6 +234,7 @@ let rename_expr tbl ~root cur =
     | EAnnot (x, t, sp) -> EAnnot (ex x, ty t, sp)
     | EDbg (Some x, sp) -> EDbg (Some (ex x), sp)
     | ESend (c, m, sp) -> ESend (ex c, ex m, sp)
+    | EAssertBy (p, h, sp) -> EAssertBy (ex p, ex h, sp)
     | EAssert (x, sp) -> EAssert (ex x, sp)
     | EAtom (a, args, sp) -> EAtom (a, List.map ex args, sp)
     | ESigil (s, x, sp) -> ESigil (s, ex x, sp)

@@ -1398,6 +1398,7 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     lower_expr env flat_map_call
 
   (* --- Assert: a failed assertion panics with a rendered report --- *)
+  | Ast.EAssertBy (_, _, sp) -> lower_expr env (Ast.ETuple ([], sp))
   | Ast.EAssert (inner, _) ->
     (* The report (lib/errors/test_report.ml) is the interpreter's, byte for
        byte: its header (the source line and caret) is rendered here, at

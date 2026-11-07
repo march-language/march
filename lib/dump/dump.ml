@@ -140,7 +140,7 @@ let rec calls_in_expr acc = function
     List.fold_left (fun a br -> calls_in_expr a br.branch_body) acc arms
   | EIf (c, t, e, _)     ->
     calls_in_expr (calls_in_expr (calls_in_expr acc c) t) e
-  | EPipe (a, b, _)       -> calls_in_expr (calls_in_expr acc a) b
+  | EAssertBy (a, b, _) | EPipe (a, b, _)       -> calls_in_expr (calls_in_expr acc a) b
   | ECon (_, args, _)     -> List.fold_left calls_in_expr acc args
   | ETuple (es, _)        -> List.fold_left calls_in_expr acc es
   | ERecord (fs, _)       -> List.fold_left (fun a (_, e) -> calls_in_expr a e) acc fs

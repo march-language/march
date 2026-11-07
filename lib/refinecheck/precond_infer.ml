@@ -182,7 +182,7 @@ let rec mentions_panic (e : A.expr) : bool =
   | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) ->
     List.exists mentions_panic es
   | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> mentions_panic b
-  | A.EPipe (a, b, _) -> mentions_panic a || mentions_panic b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) -> mentions_panic a || mentions_panic b
   | _ -> false
 
 (* Does this pattern match the empty list? *)
@@ -214,7 +214,7 @@ let rec handles_empty_nonfatally (param : string) (e : A.expr) : bool =
   | A.EApp (f, args, _) -> sub f || List.exists sub args
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> sub e
   | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> sub b
-  | A.EPipe (a, b, _) -> sub a || sub b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) -> sub a || sub b
   | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> List.exists sub es
   | _ -> false
 
@@ -315,7 +315,7 @@ let rec calls_name (name : string) (e : A.expr) : bool =
   | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> any es
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> calls_name name e
   | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> calls_name name b
-  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> calls_name name a || calls_name name b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> calls_name name a || calls_name name b
   | A.ERecord (fs, _) -> List.exists (fun (_, v) -> calls_name name v) fs
   | A.ERecordUpdate (r, fs, _) ->
     calls_name name r || List.exists (fun (_, v) -> calls_name name v) fs
@@ -413,7 +413,7 @@ let rec calls_target ~defined ~(caller : string list) ~(target : string) (e : A.
   | A.ETuple (es, _) | A.ECon (_, es, _) | A.EAtom (_, es, _) -> any es
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) -> go e
   | A.ELam (_, b, _) | A.ELetFn (_, _, _, b, _) -> go b
-  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go a || go b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> go a || go b
   | A.ERecord (fs, _) -> List.exists (fun (_, v) -> go v) fs
   | A.ERecordUpdate (r, fs, _) -> go r || List.exists (fun (_, v) -> go v) fs
   | A.EField (e, _, _) -> go e

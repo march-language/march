@@ -94,6 +94,7 @@ type expr =
           [fold_letq] in the parser nests continuations for both [ELetQ]
           and [ELetStar] at parse time. See
           specs/lang/let-star-generalized-bind.md. *)
+  | EAssertBy of expr * expr * span  (** Statically proved goal with erased, scoped hints. *)
   | EAssert of expr * span
       (** Test assertion: assert expr.
           When the inner expr is a binary comparison (==, !=, <, >, <=, >=),
@@ -597,6 +598,7 @@ let show_expr = function
   | ELetFn _ -> "ELetFn(...)"
   | ELetQ _ -> "ELetQ(...)"
   | ELetStar _ -> "ELetStar(...)"
+  | EAssertBy _ -> "EAssertBy(...)"
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"
   | ERefineMsg _ -> "ERefineMsg(...)"

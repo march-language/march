@@ -282,7 +282,7 @@ let rec iter_sites
         walk f { c with path = (cond, false) :: c.path } b)
       arms
   | A.EField (inner, _, _) -> go inner
-  | A.EPipe (a, b, _) -> go a; go b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (inner, _, _) -> go inner
   | A.ELam (ps, body, _) -> under (lam_param_names ps) body
   (* A local `fn go(...)` binds its own name (it may recurse) and its

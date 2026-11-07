@@ -405,6 +405,9 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
     collect_expr ~def_map ~use_map ~calls e1;
     collect_expr ~def_map ~use_map ~calls e2
 
+  | Ast.EAssertBy (p, h, _) ->
+    collect_expr ~def_map ~use_map ~calls p;
+    collect_expr ~def_map ~use_map ~calls h
   | Ast.EAssert (e, _) ->
     collect_expr ~def_map ~use_map ~calls e
 
@@ -564,7 +567,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.EIf (c, e1, e2, _) -> walk scope c; walk scope e1; walk scope e2
     | Ast.ECond (arms, _) ->
       List.iter (fun (ce, be) -> walk scope ce; walk scope be) arms
-    | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
+    | Ast.EAssertBy (e1, e2, _) | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
     | Ast.EAssert (e, _) -> walk scope e
     | Ast.ESigil (_, content, _) -> walk scope content
     | Ast.ERefineMsg (content, _, _) -> walk scope content
@@ -780,7 +783,7 @@ let build_linearity_map (decls : Ast.decl list) (always_linear : string list)
       List.iter (fun (br : Ast.branch) -> scan_expr br.Ast.branch_body) brs
     | Ast.EApp (f, args, _) -> scan_expr f; List.iter scan_expr args
     | Ast.EIf (c, t, f, _) -> scan_expr c; scan_expr t; scan_expr f
-    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> scan_expr a; scan_expr b
+    | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> scan_expr a; scan_expr b
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
     | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) -> scan_expr e
     | _ -> ()
@@ -840,7 +843,7 @@ let build_reuse_hints (decls : Ast.decl list) : Ast.span list =
       List.iter (fun (br : Ast.branch) -> scan_expr br.branch_body) brs
     | Ast.EApp (f, args, _) -> scan_expr f; List.iter scan_expr args
     | Ast.EIf (c, t, f, _) -> scan_expr c; scan_expr t; scan_expr f
-    | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> scan_expr x; scan_expr y
+    | Ast.EAssertBy (x, y, _) | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> scan_expr x; scan_expr y
     | _ -> ()
   in
   List.iter (function
@@ -867,7 +870,7 @@ let build_call_graph (decls : Ast.decl list) : cg_node list =
       | Ast.EMatch (subj, brs, _) ->
         go subj; List.iter (fun (br : Ast.branch) -> go br.Ast.branch_body) brs
       | Ast.EIf (c, t, f, _) -> go c; go t; go f
-      | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go x; go y
+      | Ast.EAssertBy (x, y, _) | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go x; go y
       | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
         List.iter go es
       | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> go e) fs
@@ -1470,7 +1473,7 @@ let indirect_call_check (params : string list) (e : Ast.expr) acc =
       List.fold_left (fun a (br : Ast.branch) -> go br.Ast.branch_body a)
         (go subj acc) brs
     | Ast.EIf (c, t, f, _) -> go f (go t (go c acc))
-    | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go y (go x acc)
+    | Ast.EAssertBy (x, y, _) | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> go y (go x acc)
     | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
       List.fold_left (fun a e -> go e a) acc es
     | Ast.ERecord (fs, _) -> List.fold_left (fun a (_, e) -> go e a) acc fs
@@ -1520,7 +1523,7 @@ let recursive_alloc_check fn_name (body : Ast.expr) acc =
       | Ast.EApp (f, args, _) -> walk ~in_arm f; List.iter (walk ~in_arm) args
       | Ast.ELet (b, _) -> walk ~in_arm b.Ast.bind_expr
       | Ast.EBlock (es, _) -> List.iter (walk ~in_arm) es
-      | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk ~in_arm x; walk ~in_arm y
+      | Ast.EAssertBy (x, y, _) | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk ~in_arm x; walk ~in_arm y
       | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
         List.iter (walk ~in_arm) es
       | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk ~in_arm e) fs
@@ -1594,7 +1597,7 @@ let parallelizable_check (e : Ast.expr) acc =
     | Ast.EIf (c, t, f, _) -> walk c; walk t; walk f
     | Ast.ELet (b, _) -> walk b.Ast.bind_expr
     | Ast.EBlock (es, _) -> List.iter walk es
-    | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk x; walk y
+    | Ast.EAssertBy (x, y, _) | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) -> walk x; walk y
     | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) -> List.iter walk es
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> walk e) fs
     | Ast.ERecordUpdate (e, fs, _) -> walk e; List.iter (fun (_, e) -> walk e) fs
@@ -2173,7 +2176,7 @@ let collect_h_sigils ~(src : string) (decls : Ast.decl list) : h_sigil list =
       ex s; List.iter (fun (br : Ast.branch) -> ex br.Ast.branch_body) brs
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
     | Ast.EIf (c, t, f, _) -> ex c; ex t; ex f
-    | Ast.EPipe (a2, b2, _) | Ast.ESend (a2, b2, _) -> ex a2; ex b2
+    | Ast.EAssertBy (a2, b2, _) | Ast.EPipe (a2, b2, _) | Ast.ESend (a2, b2, _) -> ex a2; ex b2
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> ex e) fs
     | Ast.ERecordUpdate (e2, fs, _) -> ex e2; List.iter (fun (_, e) -> ex e) fs
     | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _) | Ast.ESpawn (e2, _)

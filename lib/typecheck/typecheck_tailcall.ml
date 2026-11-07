@@ -173,7 +173,7 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
     ) (collect_direct_fn_calls fn_names base) fields
   | Ast.EField (ex, _, _)  -> collect_direct_fn_calls fn_names ex
   | Ast.EAnnot (ex, _, _)  -> collect_direct_fn_calls fn_names ex
-  | Ast.EPipe (l, r, _) ->
+  | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) ->
     StringSet.union (collect_direct_fn_calls fn_names l)
                     (collect_direct_fn_calls fn_names r)
   | Ast.EAtom (_, args, _) ->
@@ -594,6 +594,7 @@ let rec check_tail_position
        tail-position violation. *)
     | Ast.ELetStar (_, r, _, _) ->
       chk false names params smaller "right-hand side of `let*`" r
+    | Ast.EAssertBy (p, h, _) -> chk false names params smaller "proof goal" p; chk false names params smaller "proof hints" h
     | Ast.EAssert (ex, _)     -> chk false names params smaller "assert expression" ex
     | Ast.ESigil (_, content, _) -> chk false names params smaller "sigil content" content
     | Ast.ERefineMsg (content, _, _) -> chk false names params smaller "refinement predicate" content

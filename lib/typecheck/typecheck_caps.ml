@@ -92,7 +92,7 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.ECond (arms, _) ->
     List.fold_left (fun a (ce, be) ->
         cap_annots_in_expr (cap_annots_in_expr a ce) be) acc arms
-  | Ast.EPipe (a, b, _) -> cap_annots_in_expr (cap_annots_in_expr acc a) b
+  | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) -> cap_annots_in_expr (cap_annots_in_expr acc a) b
   | Ast.EAtom (_, args, _) -> List.fold_left cap_annots_in_expr acc args
   | Ast.ESend (a, b, _) -> cap_annots_in_expr (cap_annots_in_expr acc a) b
   | Ast.ESpawn (ex, _) -> cap_annots_in_expr acc ex

@@ -69,7 +69,7 @@ let rec expr_binders (acc : SS.t) (e : expr) : SS.t =
   | EField (x, _, _) | EAnnot (x, _, _) | ESpawn (x, _) | EAssert (x, _) | ESigil (_, x, _) | EDbg (Some x, _) -> go acc x
   | EIf (c, t, f, _) -> go (go (go acc c) t) f
   | ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
-  | EPipe (a, b, _) | ESend (a, b, _) -> go (go acc a) b
+  | EAssertBy (a, b, _) | EPipe (a, b, _) | ESend (a, b, _) -> go (go acc a) b
   | ERefineMsg (x, _, _) -> go acc x
 
 let fn_binders (acc : SS.t) (fd : fn_def) : SS.t =
@@ -170,6 +170,7 @@ let rec erase_expr (env : env) (e : expr) : expr =
   | EDbg (Some x, sp) -> EDbg (Some (ex x), sp)
   | ESend (c, m, sp) -> ESend (ex c, ex m, sp)
   | ESpawn (x, sp) -> ESpawn (ex x, sp)
+  | EAssertBy (_, _, sp) -> ETuple ([], sp)
   | EAssert (x, sp) -> EAssert (ex x, sp)
   | EAtom (a, args, sp) -> EAtom (a, List.map ex args, sp)
   | ESigil (s, x, sp) -> ESigil (s, ex x, sp)
@@ -242,7 +243,7 @@ let rec mentions (n : string) (decls : decl list) : bool =
     | ECon (_, args, _) | ETuple (args, _) | EAtom (_, args, _) | EBlock (args, _) -> args
     | ELam (_, b, _) | ELetFn (_, _, _, b, _) -> [ b ]
     | ELet (b, _) -> [ b.bind_expr ]
-    | ELetQ (_, a, b, _) | ELetStar (_, a, b, _) | EPipe (a, b, _) | ESend (a, b, _) -> [ a; b ]
+    | ELetQ (_, a, b, _) | ELetStar (_, a, b, _) | EAssertBy (a, b, _) | EPipe (a, b, _) | ESend (a, b, _) -> [ a; b ]
     | EMatch (s, brs, _) ->
       s :: List.concat_map (fun br -> br.branch_body :: Option.to_list br.branch_guard) brs
     | ERecord (fs, _) -> List.map snd fs
@@ -300,23 +301,16 @@ let erase_module_with (env : env) (decls : decl list) : decl list =
   drop_unreferenced erased erased
 
 let erase_module ?(reserved : string -> bool = fun _ -> false) (decls : decl list) : decl list =
-  let rec has_lemma ds =
-    List.exists
-      (function
-        | DFn (fd, _) -> is_lemma fd
-        | DMod (_, _, inner, _) | DDescribe (_, inner, _) -> has_lemma inner
-        | _ -> false)
-      ds
-  in
-  if not (has_lemma decls) then decls else erase_module_with (env_of_decls ~reserved decls) decls
+  (* Scoped proofs also occur in modules with no lemma declarations. *)
+  erase_module_with (env_of_decls ~reserved decls) decls
 
 (* One declaration at a time (the REPLs): a lemma keeps its declaration, for
    later inputs that call it, but its body becomes `()`, so no call ever runs
    a proof. *)
 let blank_lemma_decl (d : decl) : decl =
-  match d with
-  | DFn (fd, sp) when is_lemma fd -> DFn (erase_fn { erasable = SS.empty } fd, sp)
-  | d -> d
+  match erase_decls { erasable = SS.empty } [d] with
+  | [d] -> d
+  | _ -> d
 
 (* Every lemma body in [decls] becomes `()`, nested modules included; calls
    and declarations stay (the REPLs, where a later input may call a lemma). *)

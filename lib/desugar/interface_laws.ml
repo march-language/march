@@ -88,6 +88,7 @@ let rec map_expr (g : expr -> expr) (e : expr) : expr =
   | ELetFn (n, ps, rt, body, sp) -> ELetFn (n, ps, rt, r body, sp)
   | ELetQ (p, a, b, sp) -> ELetQ (p, r a, r b, sp)
   | ELetStar (p, a, b, sp) -> ELetStar (p, r a, r b, sp)
+  | EAssertBy (p, h, sp) -> EAssertBy (r p, r h, sp)
   | EAssert (e, sp) -> EAssert (r e, sp)
   | e -> e
 

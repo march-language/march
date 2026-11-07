@@ -51,7 +51,7 @@ let span_of_expr = function
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
-  | Ast.EAssert (_, sp) -> sp
+  | Ast.EAssert (_, sp) | Ast.EAssertBy (_, _, sp) -> sp
   | Ast.ESigil (_, _, sp) -> sp
   | Ast.ERefineMsg (_, _, sp) -> sp
   | Ast.EVar name -> name.Ast.span
@@ -94,7 +94,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
   | Ast.ECond (arms, _) ->
     List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
   | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
-  | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
+  | Ast.EAssertBy (l, r, _) | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
   | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
   | Ast.ERecordUpdate (e2, fs, _) ->
     iter_expr f e2; List.iter (fun (_, e3) -> iter_expr f e3) fs
@@ -143,7 +143,7 @@ let lambda_free_vars (params : Ast.param list) (body : Ast.expr) : string list =
         ) branches
     | Ast.EApp (f, args, _) -> go bound f; List.iter (go bound) args
     | Ast.EIf (c, t, f, _) -> go bound c; go bound t; go bound f
-    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go bound a; go bound b
+    | Ast.EAssertBy (a, b, _) | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go bound a; go bound b
     | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
       List.iter (go bound) es
     | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> go bound e) fs

@@ -197,7 +197,7 @@ let rec iter_expr (f : A.expr -> unit) (e : A.expr) : unit =
   | A.ELit _ | A.EVar _ | A.EHole _ | A.EResultRef _ | A.EDbg (None, _) -> ()
   | A.EDbg (Some inner, _) -> go inner
   | A.EApp (h, args, _) -> go h; List.iter go args
-  | A.EPipe (l, r, _) -> go l; go r
+  | A.EAssertBy (l, r, _) | A.EPipe (l, r, _) -> go l; go r
   | A.ECon (_, args, _) | A.EAtom (_, args, _) | A.ETuple (args, _) -> List.iter go args
   | A.ELam (_, body, _) -> go body
   | A.EBlock (es, _) -> List.iter go es

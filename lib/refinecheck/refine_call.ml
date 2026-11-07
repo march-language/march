@@ -254,7 +254,7 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
   | A.EField (r, _, _) -> free r
   | A.EIf (c, t, el, _) -> any [ c; t; el ]
   | A.ECond (arms, _) -> List.exists (fun (c, b) -> free c || free b) arms
-  | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
 
@@ -544,7 +544,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EField (r, _, _) -> recur r
       | A.EIf (c, t, el, _) -> any [ c; t; el ]
       | A.ECond (arms, _) -> List.exists (fun (c, b) -> recur c || recur b) arms
-      | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
+      | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
       | A.EDbg (Some e, _) -> recur e
     in
@@ -3572,7 +3572,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                | Callback_codomain, _ ->
                  Printf.sprintf "the return of `%s`, passed where a refined codomain is expected," callee
                | Decreases, _ -> Printf.sprintf "the recursive call to `%s`" callee
-               | Lemma_goal, _ when callee = "assert" -> "this static `assert` in a lemma"
+               | Lemma_goal, _ when callee = "assert" -> "this static `assert` in a proof"
                | Lemma_goal, _ -> Printf.sprintf "the lemma `%s`" callee
              in
              (* Point at the offending argument itself. The call span covers the

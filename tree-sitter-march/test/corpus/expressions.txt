@@ -211,3 +211,37 @@ mod Foo do let x = () end
       pattern: (variable_pattern
         (variable_pattern))
       value: (unit_expression))))
+
+================================================================================
+Scoped proof assertion
+================================================================================
+mod Proof do
+  fn f(x : Int) do
+    assert x == x by do
+      assert true by do () end
+    end
+  end
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (function_def
+      (identifier)
+      (fn_param
+        (named_param
+          (identifier)
+          (type_constructor
+            (type_constructor))))
+      (block_body
+        (assert_expression
+          (comparison_expression
+            (identifier)
+            (identifier))
+          (block_body
+            (assert_expression
+              (boolean)
+              (block_body
+                (unit_expression)))))))))

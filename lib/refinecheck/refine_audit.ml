@@ -106,7 +106,7 @@ let expr_span (e : A.expr) : A.span =
   | A.ELetFn (_, _, _, _, sp)
   | A.ELetQ (_, _, _, sp)
   | A.ELetStar (_, _, _, sp)
-  | A.EAssert (_, sp)
+  | A.EAssert (_, sp) | A.EAssertBy (_, _, sp)
   | A.ESigil (_, _, sp) -> sp
   | A.ERefineMsg (_, _, sp) -> sp
   | A.EVar n -> n.A.span
@@ -240,7 +240,7 @@ let rec walk_expr (sites : site list ref) (e : A.expr) : unit =
   | A.EField (e, _, _) -> ge e
   | A.EIf (c, t, e, _) -> ge c; ge t; ge e
   | A.ECond (arms, _) -> List.iter (fun (c, b) -> ge c; ge b) arms
-  | A.EPipe (a, b, _) -> ge a; ge b
+  | A.EAssertBy (a, b, _) | A.EPipe (a, b, _) -> ge a; ge b
   | A.EAnnot (e, t, _) -> ge e; start sites Expr_annot t
   | A.ESend (a, b, _) -> ge a; ge b
   | A.ESpawn (e, _) -> ge e

@@ -129,6 +129,7 @@ let rec remap_expr tbl = function
     Ast.ELetQ (remap_pattern tbl p, remap_expr tbl r, remap_expr tbl c, remap_span tbl sp)
   | Ast.ELetStar (p, r, c, sp) ->
     Ast.ELetStar (remap_pattern tbl p, remap_expr tbl r, remap_expr tbl c, remap_span tbl sp)
+  | Ast.EAssertBy (p, h, sp) -> Ast.EAssertBy (remap_expr tbl p, remap_expr tbl h, remap_span tbl sp)
   | Ast.EAssert (e, sp) ->
     Ast.EAssert (remap_expr tbl e, remap_span tbl sp)
   | Ast.ESigil (c, e, sp) ->

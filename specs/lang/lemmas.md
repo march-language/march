@@ -45,6 +45,7 @@ chapter has the reference summary.
 - [The five rules](#the-five-rules)
 - [Induction: a recursive call](#induction-a-recursive-call)
 - [Steps: `assert` inside a lemma](#steps-assert-inside-a-lemma)
+- [Scoped proof hints: `assert … by`](#scoped-proof-hints-assert--by)
 - [Decided steps and fuel](#decided-steps-and-fuel)
 - [When a lemma does not prove](#when-a-lemma-does-not-prove)
 - [When a lemma is false](#when-a-lemma-is-false)
@@ -384,6 +385,37 @@ the function **is** reflected, so a later edit that adds a `println` is an error
 [`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/), instead of a quiet loss of
 every proof that used the function. Fuel outside 1 to 8 is the same error. Use `@[opaque]`
 to keep a function out of the logic.
+
+## Scoped proof hints: `assert … by`
+
+Use `assert P by do … end` when helper facts should be available only for one
+proof. The hints see the surrounding facts. Afterwards, only `P` is available,
+and only if the checker proved it and the obligations in the hints.
+
+```march
+assert List.append(xs, Nil) == xs by do
+  List.append_nil(xs)
+end
+```
+
+A hint block may contain local `let` bindings, calls of lemmas and reflected
+functions, nested proof blocks, and ordinary `assert` steps. Assertions inside
+it are proof obligations: they must be proved, even in an ordinary function.
+A helper theorem that is not part of `P` does not become a fact after the block.
+When the hints end in an `if` or `match`, the goal must be proved at every branch
+exit, using that branch’s facts.
+
+The goal is resolved outside the hint block. Hint-local names do not escape;
+a hint that rebinds a name used by the goal is rejected with a request to rename
+that binding. Hints must be total and pure, like lemma bodies: effects, panic,
+and calls that the logic cannot validate are rejected. Proof blocks belong in
+checked function bodies.
+
+An unproved block reports `lemma_unproved` and gives no facts. This is a warning
+by default and an error under `cap verified`; a refuted assertion is an error.
+The goal and all hints are erased
+before execution, including when a proof is unverified. Unlike an ordinary
+runtime `assert`, this construct never supplies a runtime check.
 
 ## When a lemma does not prove
 

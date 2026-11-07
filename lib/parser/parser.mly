@@ -1837,6 +1837,8 @@ block_expr:
 
 expr:
   | e = expr_pipe { e }
+  | ASSERT; e = expr; BY; DO; hints = block_body; END
+    { EAssertBy (e, hints, mk_span ($loc)) }
   | ASSERT; e = expr
     { EAssert (e, mk_span ($loc)) }
   | FN; ARROW; body = lambda_body
@@ -2025,6 +2027,8 @@ call_arg:
     through [expr] via [expr_atom]'s `LPAREN expr RPAREN`. *)
 expr_no_bare_lambda:
   | e = expr_pipe { e }
+  | ASSERT; e = expr; BY; DO; hints = block_body; END
+    { EAssertBy (e, hints, mk_span ($loc)) }
   | ASSERT; e = expr
     { EAssert (e, mk_span ($loc)) }
   | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END

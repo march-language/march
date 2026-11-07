@@ -741,7 +741,7 @@ module.exports = grammar({
 
     send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
     spawn_expression: $ => seq('spawn', '(', commaSep1($._expr), ')'),
-    assert_expression: $ => seq('assert', field('value', $._expr)),
+    assert_expression: $ => prec.right(seq('assert', field('value', $._expr), optional(seq('by', 'do', field('proof', $.block_body), 'end')))),
 
     // Sigil expressions: ~H"...", ~H"""...""", ~yaml"...".  The content is one
     // string token; nothing tokenizes the HTML or interpolations inside it.
