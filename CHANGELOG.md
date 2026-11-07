@@ -663,6 +663,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
