@@ -147,6 +147,36 @@ let nonexhaustive_panic () =
     citing analysis doc lower.ml High #2's neighborhood). *)
 let _fn_param_types : (string, Tir.ty) Hashtbl.t = Hashtbl.create 8
 
+(** Use-site types of an unannotated, let-bound name whose binder type still
+    holds a type variable (issue #1173).
+
+    March generalizes every let (no value restriction), so [let x = None]
+    binds [x : forall a. Option(a)] and its RHS lowers with the residual
+    variable: [alloc Option.None('a)()].  Codegen encodes an [Option(TVar)]
+    value under the erased niche convention (None = raw null), while a use at
+    [Option(Float)] decodes Boxed (tag at ptr+8): SIGSEGV at 0x8.  The fix is
+    to give the binding the type it is USED at, and to know that, the block
+    lowering ([Lower_expr], [EBlock (ELet …)]) registers the name here as
+    [(installed, uses)] for the duration of the rest of the block, and EVar
+    lowering appends each use's span type to [uses].
+
+    [installed] is the very [Tir.ty] value put in [_fn_param_types] for the
+    name; a use is recorded only while that entry is still PHYSICALLY that
+    value, so a lambda parameter or nested fn parameter that shadows the name
+    (each installs its own type value) is never mistaken for a use. Saved and
+    restored around the block like [_fn_param_types]. *)
+let _poly_let_uses : (string, Tir.ty * Tir.ty list ref) Hashtbl.t = Hashtbl.create 8
+
+(** Record [use_ty] as a use-site type of the poly let-bound [name], if [name]
+    currently resolves to such a binding (see [_poly_let_uses]). *)
+let note_poly_let_use (name : string) (use_ty : Tir.ty) : unit =
+  match Hashtbl.find_opt _poly_let_uses name with
+  | Some (installed, uses) ->
+    (match Hashtbl.find_opt _fn_param_types name with
+     | Some t when t == installed -> uses := use_ty :: !uses
+     | _ -> ())
+  | None -> ()
+
 (* ── Env — module-scoped state threaded through the lowering functions
    (Wave 3 Task 8) ──────────────────────────────────────────────────────
 

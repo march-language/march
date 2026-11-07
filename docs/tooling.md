@@ -243,6 +243,17 @@ node dist/app.mjs
 march --target js --no-copy-runtime -o dist/app.mjs src/app.march
 ```
 
+`-o` creates any missing parent directories (here `dist/`), as `--compile -o` does for a native binary. A path that still cannot be written, such as an existing directory, is reported as an error naming it, with exit code 1.
+
+**Tests on this target.** `--test` with `--target js` builds an output that runs the file's `test` blocks instead of `main`, and prints what a native test binary prints: a dot per test, then each failure's report and a `Finished:` line. The run exits 1 when a test fails. It takes the same `--verbose` and `--filter=SUBSTRING` arguments:
+
+```sh
+march --target js --test -o build/tests.mjs src/app.march
+node build/tests.mjs --filter=parser
+```
+
+Capability mocks (`cap_impl` / `with_cap`) work in these tests. Some stdlib features still have no JS implementation, among them `Check.all` property tests, actors, and `to_string` on a record without a `Show` impl. Run those tests natively with `march --compile --test` or `forge test`.
+
 **`Int` is a subset on this target.** An `Int` is a JS number, exact only within ±(2^53 - 1). Inside that range arithmetic, division and the `int_*` bitwise builtins give the same answers as a native build. Past it, `+`, `-` and `*` round instead of wrapping at 63 bits, the `int_*` builtins throw a `RangeError`, and `int_max_value()`/`int_min_value()` do not compile. See [Int on the JavaScript target]({{ site.baseurl }}/docs/types/#int-on-the-javascript-target) for the full list.
 
 The JS backend auto-loads `dom.march` from stdlib, so `Js.Dom.*` functions are available without any extra imports in JS builds:

@@ -100,10 +100,32 @@ let contains_substring haystack needle =
   let rec go i = i + nl <= hl && (String.sub haystack i nl = needle || go (i + 1)) in
   go 0
 
+(** The formatter once stood in a literal "..." (or "match ...", or
+    "match do ... end") for any construct its single-line renderer could not
+    print, and wrote that over the user's code (#1174).  Any "..." in the
+    output is that placeholder: no test source here contains one. *)
 let check_no_ellipsis_placeholder label src =
   let formatted = fmt src in
-  if contains_substring formatted "-> ..." then
-    Alcotest.fail (Printf.sprintf "%s: lambda body collapsed to '...':\n%s" label formatted)
+  if contains_substring formatted "..." then
+    Alcotest.fail (Printf.sprintf "%s: code replaced by a '...' placeholder:\n%s" label formatted)
+
+(** The full round-trip property for one source: the output parses, has no
+    placeholder, parses to the SAME AST as the input (spans aside: the parser
+    drops parentheses, so a lost paren shows up here as a different tree,
+    #1175), and formatting it again changes nothing. *)
+let check_roundtrip label src =
+  let formatted = fmt src in
+  let reparsed =
+    try parse_module formatted
+    with _ ->
+      Alcotest.fail
+        (Printf.sprintf "%s: formatted source does not parse:\n%s" label formatted)
+  in
+  check_no_ellipsis_placeholder label src;
+  if not (March_format.Format.equal_modulo_spans (parse_module src) reparsed) then
+    Alcotest.fail
+      (Printf.sprintf "%s: formatted source parses to a DIFFERENT AST:\n%s" label formatted);
+  Alcotest.(check string) (label ^ ": idempotent") formatted (fmt formatted)
 
 let test_multiline_lambda_let () =
   let src = {|mod Test do
@@ -490,10 +512,14 @@ let stdlib_roundtrip name =
     in
     (try
        let formatted = March_format.Format.format_source ~filename:path src in
-       (* Formatted must parse *)
-       (try ignore (parse_module formatted)
-        with _ ->
-          Alcotest.fail (Printf.sprintf "stdlib/%s: formatted source does not parse" name));
+       (* Formatted must parse, to the same program *)
+       let reparsed =
+         try parse_module formatted
+         with _ ->
+           Alcotest.fail (Printf.sprintf "stdlib/%s: formatted source does not parse" name)
+       in
+       if not (March_format.Format.equal_modulo_spans (parse_module src) reparsed) then
+         Alcotest.fail (Printf.sprintf "stdlib/%s: formatted source is a different program" name);
        (* Idempotence *)
        let twice = March_format.Format.format_source ~filename:path formatted in
        Alcotest.(check string)
@@ -693,9 +719,224 @@ end|} in
     (has {|_ >= 0 else "index must not be negative" && _ < len(xs) else "index must be less than the list's length"|});
   Alcotest.(check bool) "escaped quote kept" true (has {|v != 0 else "the divisor must not be \"zero\""|})
 
+(* ------------------------------------------------------------------ *)
+(* #1174: no placeholder text, every shape round-trips                 *)
+(* #1175: parentheses the parser needs are kept                        *)
+(* ------------------------------------------------------------------ *)
+
+(** Wrap a function body in a module so it parses. *)
+let in_fn body = Printf.sprintf "mod X do\n  fn f(x : Int, xs : List(Int)) do\n%s\n  end\nend\n" body
+
+(* Every shape the two issues list, including their "also seen" ones. *)
+let issue_1174_shapes = [
+  "cond match as fn body",
+  in_fn {|    match do
+      x > 0 -> 1
+      true -> 2
+    end|};
+  "cond match with wildcard arm and multi-stmt arm",
+  in_fn {|    match do
+      x > 0 ->
+        let y = x + 1
+        y
+      _ -> 2
+    end|};
+  "multi-stmt lambda in a call in a list literal",
+  in_fn {|    [List.map(xs, fn x ->
+      let y = x + 1
+      y
+    )]|};
+  "if with a multi-stmt branch as a match arm",
+  in_fn {|    match x do
+      0 -> if x > 0 do
+        let y = 1
+        y
+      else 2 end
+      _ -> 3
+    end|};
+  "if with a multi-stmt branch bound by let",
+  in_fn {|    let r = if x > 0 do
+      let y = 1
+      y
+    else 2 end
+    r|};
+  "multi-stmt lambda as a non-last argument",
+  in_fn {|    h(fn x ->
+      let y = x + 1
+      y
+    , x)|};
+  "match in a list literal",
+  in_fn {|    [match x do
+      0 -> 1
+      _ -> 2
+    end]|};
+  "match as a call argument",
+  in_fn {|    h(1, match x do
+      0 -> 1
+      _ -> 2
+    end)|};
+  "match in a tuple",
+  in_fn {|    (match x do
+      0 -> 1
+      _ -> 2
+    end, 3)|};
+  "match in string interpolation",
+  in_fn {|    "a ${match x do
+      0 -> "z"
+      _ -> "nz"
+    end} b"|};
+  "multi-stmt lambda in a tuple",
+  in_fn {|    (fn x ->
+      let y = x + 1
+      y, 3)|};
+  "multi-stmt lambda in a record",
+  in_fn {|    { f: fn x ->
+      let y = x + 1
+      y, g: 2 }|};
+  "multi-stmt lambda body with a bare statement",
+  in_fn {|    let g = fn x -> do
+      println(x)
+      x
+    end
+    g|};
+  "cond match in a let and as a call argument",
+  in_fn {|    let a = match do
+      x > 0 -> 1
+      true -> 2
+    end
+    h(match do
+      x > 0 -> 1
+      true -> 2
+    end, a)|};
+  "multi-stmt do block bound by let",
+  in_fn {|    let a = do
+      let y = x + 1
+      y * 2
+    end
+    a|};
+  "let? in a lambda in a list",
+  in_fn {|    [fn x ->
+      let? y = parse(x)
+      Ok(y)
+    ]|};
+  "local fn in a lambda argument",
+  in_fn {|    h(fn x -> do
+      fn go(n : Int) : Int do
+        n
+      end
+      go(x)
+    end, 1)|};
+]
+
+let issue_1175_shapes = [
+  "if as right operand",     in_fn "    1 + (if x > 0 do 1 else 0 end)";
+  "if as left operand",      in_fn "    (if x > 0 do 1 else 0 end) + 1";
+  "pipe as right operand",   in_fn "    1 + (3 |> double)";
+  "pipe as left operand",    in_fn "    (3 |> double) * 2";
+  "pipe as pipe stage",      in_fn "    x |> (fn y -> y)";
+  "nested pipe on the right", in_fn "    x |> h(1, (y |> g))";
+  "if as callee",            in_fn "    (if x > 0 do add1 else add1 end)(5)";
+  "lambda as callee",        in_fn "    (fn y -> y)(1)";
+  "call as callee",          in_fn "    (make(1))(2)";
+  "call as field base",      in_fn "    (mk(x)).y";
+  "match as operand",
+  in_fn {|    1 + (match x do
+      0 -> 10
+      _ -> 20
+    end)|};
+  "multi-stmt if as operand",
+  in_fn {|    1 + (if x > 0 do
+      let y = 1
+      y
+    else 0 end)|};
+  "negate of if",            in_fn "    -(if x > 0 do 1 else 0 end)";
+  "not of if",               in_fn "    !(if x > 0 do true else false end)";
+  "negate of negate",        in_fn "    -(-x)";
+  "comparison chain left",   in_fn "    (a == b) == c";
+  "comparison chain right",  in_fn "    a == (b == c)";
+  "lambda as operand",       in_fn "    (fn y -> y) == f";
+  "match as pipe head",
+  in_fn {|    (match x do
+      0 -> xs
+      _ -> []
+    end) |> List.reverse|};
+  "if as match subject",     in_fn "    match (if x > 0 do 1 else 2 end) do\n      1 -> 1\n      _ -> 2\n    end";
+  "right-nested subtraction", in_fn "    a - (b - c)";
+]
+
+(* Bugs the round-trip check found in the stdlib sweep: each printed a file
+   that did not parse, or that parsed to a different program. *)
+let sweep_shapes = [
+  "utf-8 and ${ in a string",
+  in_fn "    \"caf\xc3\xa9 \\${x} \xe2\x86\x92\"";
+  "carriage return in a long string",
+  in_fn {|    "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"|};
+  "${ in a multi-line string",
+  in_fn "    \"\"\"line one\nhas \\${x} in it\nline three\"\"\"";
+  "resource declaration",    "mod X do\n  resource Ctx\nend\n";
+  "opaque type",             "mod X do\n  opaque type T = A | B(Int)\nend\n";
+  "always_linear opaque type",
+  "mod X do\n  always_linear opaque type L(k) = LRep(Int, k)\nend\n";
+  "blocking raises extern",
+  "mod X do\n  extern \"x\" : Cap(Ffi) do\n    blocking raises fn load(url : String) : Result(Int, String) = \"x_load\"\n  end\nend\n";
+  "linear let",              in_fn "    linear let r : Res = R(1)\n    r";
+  "nested as pattern",       in_fn "    match x do\n      (1 as a) as b -> a + b\n      _ -> 0\n    end";
+  "interface requires",
+  "mod X do\n  interface Greet(a) requires Speak(a) do\n    fn greet : a -> String\n  end\nend\n";
+]
+
+let roundtrip_cases shapes =
+  List.map (fun (label, src) ->
+    Alcotest.test_case label `Quick (fun () -> check_roundtrip label src)) shapes
+
+(** #1175's two semantic witnesses, pinned as text: the parens are in the
+    output, not only an equivalent tree. *)
+let test_semantic_parens_kept () =
+  let out = fmt (in_fn "    1 + (3 |> double)") in
+  if not (contains_substring out "1 + (3 |> double)") then
+    Alcotest.fail (Printf.sprintf "pipe operand lost its parens:\n%s" out);
+  let out = fmt (in_fn "    (if x > 0 do add1 else add1 end)(5)") in
+  if not (contains_substring out "(if x > 0 do add1 else add1 end)(5)") then
+    Alcotest.fail (Printf.sprintf "if callee lost its parens:\n%s" out)
+
+(** The safety net used by `march fmt` and `forge format`: a formatter result
+    that does not re-parse to the same tree is refused, never written. *)
+let test_checked_format_accepts_and_refuses () =
+  let src = in_fn "    1 + (3 |> double)" in
+  (match March_format.Format.format_source_checked ~filename:"t.march" src with
+   | Ok out -> Alcotest.(check string) "checked = plain" (fmt src) out
+   | Error msg -> Alcotest.fail ("refused a good format: " ^ msg));
+  (* REJECT witness: the check itself must say no to a tree change. *)
+  let m1 = parse_module (in_fn "    1 + (3 |> double)") in
+  let m2 = parse_module (in_fn "    1 + 3 |> double") in
+  Alcotest.(check bool) "different trees compare different" false
+    (March_format.Format.equal_modulo_spans m1 m2);
+  let m3 = parse_module (in_fn "    1   +   (3 |> double)") in
+  Alcotest.(check bool) "spans alone do not count" true
+    (March_format.Format.equal_modulo_spans m1 m3)
+
+(** A float literal keeps its value: `string_of_float` prints 12 significant
+    digits, so 3.14159265358979 used to come back as 3.14159265359. *)
+let test_float_precision () =
+  check_roundtrip "float precision" (in_fn "    3.14159265358979 +. 0.1")
+
+(** A default argument keeps its value (it was printed as `\\ _`). *)
+let test_default_param () =
+  check_roundtrip "default param"
+    "mod X do\n  fn greet(name, greeting \\\\ \"Hello\") do\n    greeting ++ name\n  end\nend\n"
+
 let () =
   let open Alcotest in
   run "formatter" [
+    "issue 1174 shapes", roundtrip_cases issue_1174_shapes;
+    "issue 1175 shapes", roundtrip_cases issue_1175_shapes;
+    "round-trip sweep shapes", roundtrip_cases sweep_shapes;
+    "round-trip safety", [
+      test_case "semantic parens kept" `Quick test_semantic_parens_kept;
+      test_case "checked format accepts and refuses" `Quick test_checked_format_accepts_and_refuses;
+      test_case "float precision" `Quick test_float_precision;
+      test_case "default param" `Quick test_default_param;
+    ];
     "basic", [
       test_case "simple fn"       `Quick test_simple_fn;
       test_case "abstract refinement shorthand" `Quick test_abstract_refinement_shorthand;

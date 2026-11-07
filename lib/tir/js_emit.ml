@@ -34,6 +34,10 @@ type ctx = {
   (* runtime function names referenced — imported at top of output *)
   fn_names     : (string, unit) Hashtbl.t;
   (* user-defined function names in this module — used to emit $clo wrappers *)
+  zero_arg_fns : (string, unit) Hashtbl.t;
+  (* the zero-parameter subset of fn_names: a module-level `let` outside the
+     entry module is lowered to one, and a value-position reference CALLS it
+     (see emit_atom; native's Llvm_ctx.zero_arg_fns) *)
   param_names  : (string, unit) Hashtbl.t;
   (* local parameter names in the current function — excluded from $clo suffix
      to avoid false positives when a parameter shadows a module function *)
@@ -82,6 +86,7 @@ let create_ctx ?(fn_lines=[]) () = {
   line         = 0;
   runtime_uses = Hashtbl.create 16;
   fn_names     = Hashtbl.create 64;
+  zero_arg_fns = Hashtbl.create 16;
   param_names  = Hashtbl.create 8;
   extern_fns   = Hashtbl.create 8;
   used_externs = Hashtbl.create 8;
@@ -264,7 +269,23 @@ let emit_atom ctx = function
        && not (Hashtbl.mem ctx.param_names v.Tir.v_name)
        (* a let-bound local of the same name shadows the function *)
        && not (Hashtbl.mem ctx.name_env v.Tir.v_name)
-    then emit ctx (n ^ "$clo")
+    then begin
+      (* A zero-param top-level fn referenced at a non-function type is a
+         module-level `let` from outside the entry module (lowered to a
+         zero-arg fn; the entry module's own lets are injected as locals):
+         call it for the value, as native does (llvm_emit's emit_atom
+         falls through to a 0-arg call for zero_arg_fns), once per read,
+         no caching (#1170).  At a function type it is a first-class
+         function value and keeps its $clo wrapper, exactly as native's
+         TFn arm wraps it in a closure. *)
+      match v.Tir.v_ty with
+      | Tir.TFn _ -> emit ctx (n ^ "$clo")
+      | _ when Hashtbl.mem ctx.zero_arg_fns v.Tir.v_name ->
+        if Hashtbl.mem ctx.async_fns v.Tir.v_name
+        then emit ctx ("(await " ^ n ^ "())")
+        else emit ctx (n ^ "()")
+      | _ -> emit ctx (n ^ "$clo")
+    end
     (* Local binding: honour any active shadow-rename. *)
     else emit ctx (js_local ctx v.Tir.v_name)
   | Tir.ADefRef d ->
@@ -566,6 +587,34 @@ let emit_tagged_alloc_hole ctx ty args hole =
   done;
   emit ctx " }"
 
+(* ── User top-level fn shadowing a name-dispatched builtin ─────────── *)
+
+(* True when [name] is a top-level March function of this module, which then
+   owns the name: emit_val_impl's builtin arms all dispatch on the callee's
+   BARE name, so without this check an entry-module `fn negate` / `fn not` /
+   `fn int_xor` compiled its call sites into the JS operator or runtime helper
+   and never ran (#1177).  Shadowing a builtin name from the entry module is a
+   supported feature (lib/modules/prelude_collision.ml), and builtins have no
+   March definition, so fn_names membership is the discriminator, exactly as
+   native's [shadows_dispatched_builtin] uses top_fns (llvm_emit.ml).
+
+   [panic] is the one exception: Prelude's own `fn panic(msg) do panic_(msg)
+   end` is in tm_fns, and its JS arm (a throw, and a throw STATEMENT in
+   emit_assign) is the same behaviour without the indirection.  An entry
+   module cannot define `panic` (Prelude's bodies call it bare, so
+   Prelude_collision rejects it), so excluding it shadows nothing. *)
+let shadows_js_builtin ctx name =
+  Hashtbl.mem ctx.fn_names name && name <> "panic"
+
+(* A direct call of a user-defined (or letrec-local / parameter) function. *)
+let emit_direct_call ctx name args =
+  let is_async_callee = Hashtbl.mem ctx.async_fns name in
+  if is_async_callee then emit ctx "(await ";
+  emit ctx (mangle name ^ "(");
+  List.iteri (fun i a ->
+    if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+  if is_async_callee then emit ctx "))" else emit ctx ")"
+
 (* ── Forward declarations ────────────────────────────────────────── *)
 
 let rec emit_val  ctx expr = emit_val_impl  ctx expr
@@ -579,6 +628,11 @@ and     emit_assign ctx rv expr = emit_assign_impl ctx rv expr
 and emit_val_impl ctx expr =
   match expr with
   | Tir.EAtom a -> emit_atom ctx a
+
+  (* A user top-level fn owns its name: ahead of every bare-name builtin arm
+     below (see [shadows_js_builtin]). *)
+  | Tir.EApp (f, args) when shadows_js_builtin ctx f.Tir.v_name ->
+    emit_direct_call ctx f.Tir.v_name args
 
   | Tir.EApp (f, args) ->
     let name = f.Tir.v_name in
@@ -688,6 +742,23 @@ and emit_val_impl ctx expr =
          backend byte-for-byte unchanged instead of calling an undefined symbol. *)
       | "march_value_to_string", [a] ->
         emit_atom ctx a
+      (* `compare` on Int / String (Ord$Int.compare, Ord$String.compare and
+         the compare_* builtins; a derived `Ord` on a record or payload type
+         calls these per field): -1/0/1 like march_compare_int /
+         march_compare_string in march_runtime.c.  A String orders by JS `<`,
+         the same order the JS backend's String `<` already uses.  Operands
+         are atoms, so evaluating them twice is free. *)
+      | ("march_compare_int" | "compare_int"
+        | "march_compare_string" | "compare_string"), [a; b] ->
+        emit ctx "(("; emit_atom ctx a; emit ctx " < "; emit_atom ctx b;
+        emit ctx ") ? -1 : ("; emit_atom ctx a; emit ctx " > "; emit_atom ctx b;
+        emit ctx ") ? 1 : 0)"
+      (* `compare` on Float: NaN-total, as march_compare_float in
+         march_runtime.c and the interpreter's Float.compare. *)
+      | ("march_compare_float" | "compare_float"), [a; b] ->
+        use_runtime ctx "march_compare_float";
+        emit ctx "march_compare_float("; emit_atom ctx a; emit ctx ", ";
+        emit_atom ctx b; emit ctx ")"
       | "int_to_string",   [a] ->
         emit ctx "String("; emit_atom ctx a; emit ctx ")"
       | "bool_to_string",  [a] ->
@@ -719,16 +790,27 @@ and emit_val_impl ctx expr =
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
       (* The Diagnostics panic-site record: nothing to record in JS. *)
       | "__panic_site", _ -> emit ctx "undefined"
-      (* A test's panic header (compiled test runner only): nothing in JS. *)
-      | "__test_header", _ -> emit ctx "undefined"
-      (* A failed assert: throw the report's header (its first \x1f field);
-         the value diff is the native runtime's. *)
-      | "__assert_fail", meta :: _ ->
-        let b = Buffer.create 16 in
-        emit_atom { ctx with buf = b } meta;
-        emit ctx (Printf.sprintf
-                    "(() => { throw new Error(%s.split(\"\\x1f\")[0]); })()"
-                    (Buffer.contents b))
+      (* --test (issue #1176): the running test's panic header, and a failed
+         assert, which throws the whole rendered report (header and value
+         diff), as the native march_test_header / march_assert_fail do. *)
+      | "__test_header", [h] ->
+        use_runtime ctx "march_test_header";
+        emit ctx "march_test_header("; emit_atom ctx h; emit ctx ")"
+      | "__assert_fail", [meta; l; r] ->
+        use_runtime ctx "march_assert_fail";
+        emit ctx "march_assert_fail("; emit_atom ctx meta; emit ctx ", ";
+        emit_atom ctx l; emit ctx ", "; emit_atom ctx r; emit ctx ")"
+      (* Capability dictionaries (--test turns capability mocking on).  A
+         capability is undefined or its dictionary, as native's is NULL or
+         the dictionary (march_cap_impl / march_cap_dict); [cap_dict] reads
+         it back as an Option.  [root_cap] is the undefined sentinel (a const
+         in [builtin_wrappers]); a minted capability carries no dictionary. *)
+      | "cap_impl", [_; d] -> emit_atom ctx d
+      | "cap_narrow", [c] -> emit_atom ctx c
+      | "mint_cap", [_] -> emit ctx "undefined"
+      | "cap_dict", [c] ->
+        emit ctx "(("; emit_atom ctx c; emit ctx " == null) ? { $: \"None\" } : { $: \"Some\", _0: ";
+        emit_atom ctx c; emit ctx " })"
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
         let msg = if args = [] then "\"panic\""
                   else (let b = Buffer.create 16 in
@@ -839,6 +921,19 @@ and emit_val_impl ctx expr =
            half toward +inf — delegate to the runtime helper *)
         use_runtime ctx "march_float_round";
         emit ctx "march_float_round("; emit_atom ctx a; emit ctx ")"
+      (* float_from_string is string_to_float under a second name (one C
+         symbol natively); the float constants and predicates are plain JS
+         numbers. Unmapped before #1178, so they failed the JS compile. *)
+      | "float_from_string", [a] ->
+        use_runtime ctx "march_string_to_float";
+        emit ctx "march_string_to_float("; emit_atom ctx a; emit ctx ")"
+      | "float_infinity", _ -> emit ctx "Infinity"
+      | "float_neg_infinity", _ -> emit ctx "(-Infinity)"
+      | "float_nan", _ -> emit ctx "NaN"
+      | "float_epsilon", _ -> emit ctx "Number.EPSILON"
+      | "float_is_nan", [a] -> emit ctx "Number.isNaN("; emit_atom ctx a; emit ctx ")"
+      | "float_is_infinite", [a] ->
+        emit ctx "(Math.abs("; emit_atom ctx a; emit ctx ") === Infinity)"
       (* unix_time takes a Unit argument in March; the JS runtime fn takes none *)
       | "unix_time", _ ->
         use_runtime ctx "march_unix_time";
@@ -859,12 +954,7 @@ and emit_val_impl ctx expr =
               && not (Hashtbl.mem ctx.local_fns name)
               && not (Hashtbl.mem ctx.param_names name)
            then (if not (Hashtbl.mem ctx.unmapped name) then Hashtbl.replace ctx.unmapped name ctx.cur_loc);
-           let is_async_callee = Hashtbl.mem ctx.async_fns name in
-           if is_async_callee then emit ctx "(await ";
-           emit ctx (mangle name ^ "(");
-           List.iteri (fun i a ->
-             if i > 0 then emit ctx ", "; emit_atom ctx a) args;
-           if is_async_callee then emit ctx "))" else emit ctx ")")
+           emit_direct_call ctx name args)
       end
     end
 
@@ -1674,6 +1764,7 @@ const negate_float    = { _0: ($_, x) => -x };
 const float_abs       = { _0: ($_, x) => Math.abs(x) };
 const float_floor     = { _0: ($_, x) => Math.floor(x) };
 const float_ceil      = { _0: ($_, x) => Math.ceil(x) };
+const root_cap        = undefined;
 |}
 
 (** Raised by [emit_module] when used C-backed externs are compiled with [--target js].
@@ -1690,7 +1781,10 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   ctx.int_check <- int_check;
   ctx.src_file <- source_file;
   (* Pre-register all user-defined function names so emit_atom emits $clo versions *)
-  List.iter (fun fn -> Hashtbl.replace ctx.fn_names fn.Tir.fn_name ()) m.Tir.tm_fns;
+  List.iter (fun fn ->
+    Hashtbl.replace ctx.fn_names fn.Tir.fn_name ();
+    if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name ()
+  ) m.Tir.tm_fns;
   (* Register externs separately for lazy tracking (not in fn_names to avoid
      emitting $clo suffixes for extern call sites that don't need them) *)
   List.iter (fun (ed : Tir.extern_decl) ->
@@ -1790,20 +1884,29 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
   Hashtbl.replace ctx.runtime_uses "march_unix_time_ms" ();
   Hashtbl.replace ctx.runtime_uses "march_float_round" ();
+  (* The --test runner emitted after the functions, below. *)
+  if m.Tir.tm_tests <> [] then
+    List.iter (fun n -> Hashtbl.replace ctx.runtime_uses n ())
+      [ "march_test_init"; "march_test_setup_all"; "march_test_run"; "march_test_report" ];
+  (* A user top-level fn of the same name owns it (#1177): its own
+     `function n` + `n$clo` are emitted, and a second `const n` would be a
+     load-time SyntaxError (redeclared identifier). *)
+  let wrapper n body =
+    if Hashtbl.mem ctx.fn_names n then "" else Printf.sprintf "const %s = %s;\n" n body in
   let runtime_wrappers =
-    "const float_to_string    = { _0: ($_, x) => march_float_to_string(x) };\n" ^
-    "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
-    "const string_byte_length = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
+    wrapper "float_to_string" "{ _0: ($_, x) => march_float_to_string(x) }" ^
+    wrapper "string_length" "{ _0: ($_, x) => march_string_byte_length(x) }" ^
+    wrapper "string_byte_length" "{ _0: ($_, x) => march_string_byte_length(x) }" ^
     String.concat "" (List.map (fun n ->
-      Printf.sprintf "const %s = { _0: ($_, a, b) => march_%s(a, b) };\n" n n)
+      wrapper n (Printf.sprintf "{ _0: ($_, a, b) => march_%s(a, b) }" n))
       int_rt_builtins2) ^
     String.concat "" (List.map (fun n ->
-      Printf.sprintf "const %s = { _0: ($_, a) => march_%s(a) };\n" n n)
+      wrapper n (Printf.sprintf "{ _0: ($_, a) => march_%s(a) }" n))
       int_rt_builtins1) ^
-    "const int_abs     = { _0: ($_, a) => Math.abs(a) };\n" ^
-    "const unix_time   = { _0: ($_) => march_unix_time() };\n" ^
-    "const unix_time_ms = { _0: ($_) => march_unix_time_ms() };\n" ^
-    "const float_round = { _0: ($_, a) => march_float_round(a) };\n"
+    wrapper "int_abs" "{ _0: ($_, a) => Math.abs(a) }" ^
+    wrapper "unix_time" "{ _0: ($_) => march_unix_time() }" ^
+    wrapper "unix_time_ms" "{ _0: ($_) => march_unix_time_ms() }" ^
+    wrapper "float_round" "{ _0: ($_, a) => march_float_round(a) }"
   in
   let runtime_import =
     let names = Hashtbl.fold (fun k () acc -> k :: acc) ctx.runtime_uses [] in
@@ -1818,7 +1921,28 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
-  if has_main then begin
+  let has_fn n = List.exists (fun fn -> fn.Tir.fn_name = n) m.Tir.tm_fns in
+  if m.Tir.tm_tests <> [] then begin
+    (* --test (issue #1176): run every test as the native test binary does
+       (llvm_toplevel's test-runner @main over the same [tm_tests]) and not
+       `main`: the same dots, report and summary, exit status 1 on a failure
+       through process.exitCode.  The runner functions are imported above
+       ([runtime_uses]); each call is awaited, as a test may be async. *)
+    let setup =
+      if has_fn Tir_names.setup_fn_name then mangle Tir_names.setup_fn_name
+      else "null" in
+    Buffer.add_string export_buf "march_test_init();\n";
+    if has_fn Tir_names.setup_all_fn_name then
+      Buffer.add_string export_buf
+        (Printf.sprintf "await march_test_setup_all(%s);\n"
+           (mangle Tir_names.setup_all_fn_name));
+    List.iter (fun (fn_name, display) ->
+        Buffer.add_string export_buf
+          (Printf.sprintf "await march_test_run(%s, %s, %s);\n"
+             (mangle fn_name) (js_string_lit display) setup))
+      m.Tir.tm_tests;
+    Buffer.add_string export_buf "march_test_report();\n"
+  end else if has_main then begin
     Buffer.add_string export_buf "export { main };\n";
     if Hashtbl.mem ctx.async_fns "main" then
       Buffer.add_string export_buf "await main();\n"
