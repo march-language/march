@@ -590,6 +590,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
+  generated failure-handler parameters; their offer functions typecheck normally.
+- The two-node test harness now fails when a started node has no expected-output
+  file, instead of silently reporting success.
+
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,
