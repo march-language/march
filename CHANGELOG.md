@@ -681,6 +681,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
+  gave `NaN` and the program went on; they now panic with "division by zero" / "modulo by
+  zero", as natively. `to_string` on a record or variant with no `Show` impl now builds and
+  prints what native prints (`{ x: 1, y: 2 }`), and `Check.all` property tests,
+  `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
+  A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
+  native message.
 - **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
   such a type, and a lemma about it, can now be used in refinements. Recursion through
   `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating

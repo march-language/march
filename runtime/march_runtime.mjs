@@ -569,6 +569,109 @@ export function march_int_mod_floor(a, b) {
   return (r !== 0 && ((r < 0) !== (b < 0))) ? r + b : r;
 }
 
+/* `to_string` on a value with no Show impl (js_emit's show_expr renders the
+ * statically typed parts).  march_show_str is a String BENEATH the top,
+ * quoted and escaped like native's cb_put_escaped (march_extras.c: OCaml's
+ * String.escaped for the ASCII controls, three-digit decimal escapes).
+ * march_show_dyn classifies a value whose static type is a type variable, as
+ * native's generic slot does; a JS number cannot say whether it was a Float,
+ * so a whole-number Float there prints as an Int. */
+export function march_show_str(s) {
+  let b = "\"";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i], c = s.charCodeAt(i);
+    if (ch === "\"") b += "\\\"";
+    else if (ch === "\\") b += "\\\\";
+    else if (ch === "\n") b += "\\n";
+    else if (ch === "\t") b += "\\t";
+    else if (ch === "\r") b += "\\r";
+    else if (ch === "\b") b += "\\b";
+    else if (c < 32 || c === 127) b += "\\" + String(c).padStart(3, "0");
+    else b += ch;
+  }
+  return b + "\"";
+}
+
+export function march_show_dyn(v) {
+  if (v === undefined || v === null) return "()";
+  switch (typeof v) {
+    case "number": return Number.isInteger(v) ? String(v) : march_float_to_string(v);
+    case "boolean": return v ? "true" : "false";
+    case "string": return march_show_str(v);
+    case "function": return "<fn>";
+    case "object": break;
+    default: return String(v);
+  }
+  if (typeof v.$ === "string") {
+    if (v.$.startsWith("$Clo")) return "<fn>";
+    if (v.$ === "Nil" || v.$ === "Cons") {
+      const xs = [];
+      let p = v;
+      while (p && p.$ === "Cons") { xs.push(march_show_dyn(p._0)); p = p._1; }
+      if (p && p.$ === "Nil") return "[" + xs.join(", ") + "]";
+    }
+    const args = [];
+    for (let i = 0; ("_" + i) in v; i++) args.push(march_show_dyn(v["_" + i]));
+    return args.length === 0 ? v.$ : v.$ + "(" + args.join(", ") + ")";
+  }
+  const keys = Object.keys(v);
+  if (keys.length > 0 && keys.every((k, i) => k === "_" + i))
+    return "(" + keys.map((k) => march_show_dyn(v[k])).join(", ") + ")";
+  keys.sort();
+  return "{ " + keys.map((k) => k + ": " + march_show_dyn(v[k])).join(", ") + " }";
+}
+
+/* A top-level String is the identity, as march_value_to_string's. */
+export function march_to_string_dyn(v) {
+  return typeof v === "string" ? v : march_show_dyn(v);
+}
+
+/* A `panic` / `todo` / `unreachable`: the Error's message is the bare text,
+ * and [prefix] ("panic: ", "todo: ") is what __try_call puts in front of it
+ * on the Err, as the interpreter's message and native's march_panic_user /
+ * march_todo_ext do. */
+export function march_panic_error(prefix, msg) {
+  const e = new Error(String(msg));
+  e.marchPanicPrefix = prefix;
+  return e;
+}
+
+/* __try_call / __try_call_val: run a `fn _ -> body` thunk, Ok(result), or
+ * Err(message) if it panics (march_try_call in march_runtime.c).  A thunk
+ * that is async (it awaits a JS-module extern) is not supported: its panic
+ * would reject a Promise this cannot wait for. */
+export function march_try_call(thunk) {
+  try {
+    return { $: "Ok", _0: thunk._0(thunk, true) };
+  } catch (e) {
+    let msg;
+    if (e instanceof RangeError && /call stack/i.test(e.message)) msg = "stack overflow";
+    else if (e instanceof Error) msg = (e.marchPanicPrefix || "") + e.message;
+    else msg = String(e);
+    return { $: "Err", _0: msg };
+  }
+}
+
+/* process_env / process_cwd / process_pid: node's process; in a browser
+ * there is no environment (None), the cwd is "/" and the pid 0. */
+export function march_process_env(name) {
+  const v = (typeof process !== "undefined" && process.env) ? process.env[name] : undefined;
+  return v === undefined ? { $: "None" } : { $: "Some", _0: v };
+}
+export function march_process_cwd() {
+  return (typeof process !== "undefined" && process.cwd) ? process.cwd() : "/";
+}
+export function march_process_pid() {
+  return (typeof process !== "undefined" && typeof process.pid === "number") ? process.pid : 0;
+}
+
+/* Int `/` and `%` by zero panic with the operator messages the interpreter
+ * and native code use (march_checked_div_op / march_checked_mod_op in
+ * march_runtime.c). js_emit inlines the quotient/remainder and calls these
+ * only on a zero divisor. */
+export function march_div_zero() { throw new Error("division by zero"); }
+export function march_mod_zero() { throw new Error("modulo by zero"); }
+
 /* Int `+ - *` and negation panic when the result leaves the 63-bit range
  * [-2^62, 2^62) (specs/lang/type-system.md, "Int width and overflow"), with
  * the interpreter's and native code's message. js_emit wraps each Int op as
