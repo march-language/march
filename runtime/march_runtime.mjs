@@ -527,6 +527,15 @@ export function march_int_ovf(r, op) {
   return r;
 }
 
+/** `compare` on Float: a total preorder like march_compare_float in
+ * march_runtime.c (and the interpreter's Float.compare). NaN equals NaN and
+ * is less than every other value; otherwise IEEE order (-0.0 == +0.0). */
+export function march_compare_float(x, y) {
+  const xn = x !== x, yn = y !== y;
+  if (xn || yn) return (yn ? 1 : 0) - (xn ? 1 : 0);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
 /** int_wrapping_add/sub/mul: modulo-2^63 arithmetic, for hashes and
  * checksums. Exact within ±(2^53 - 1); a wrapped result outside it throws a
  * RangeError like the other checked Int builtins. */

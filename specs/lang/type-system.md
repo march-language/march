@@ -696,7 +696,7 @@ or returned from a function, and applied later is not checked.
 | `%` | `Int` | Integer modulo (monomorphic, `Int` only) |
 | `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic, `Float` only) |
 | `==` `!=` | any `Eq` | Equality / inequality |
-| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`) | Ordering |
+| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`, tuples, any type with an `Ord` impl) | Ordering: on a non-primitive type, `a < b` is `compare(a, b) < 0` |
 | `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
 | `++` | `String` | String concatenation |
 | `\|>` | any | Pipe: `x \|> f` is `f(x)` |

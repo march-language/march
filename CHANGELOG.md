@@ -676,6 +676,16 @@ git log is authoritative for exact commits.
   `Tally`, even ones nothing referenced, and an error in any of them failed the build
   (`--check`, `--compile` and the interpreter alike). A bare name used without being
   defined in the same module still loads the modules that define it (#1183).
+- **`<`, `<=`, `>`, `>=` on a type with an `Ord` impl now use it in compiled code**
+  (#1172). On an enum, record, payload ADT, newtype or unboxed ADT with a derived or
+  hand-written `Ord`, and in generic `when Ord(a)` code, the operators mean
+  `compare(a, b) <op> 0` on native and `--target js`, as they already did in the
+  interpreter. Before, native strict comparisons were always false and `<=`/`>=`
+  always true, a single-field newtype compared its raw payload, an all-scalar ADT
+  such as `Pair(Int, Int)` failed the native build, and JS compared the objects.
+  `compare` on `Int`, `Float` and `String` (and so a derived `Ord` over such
+  fields) now also builds on `--target js`.
+
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
