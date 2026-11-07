@@ -45,6 +45,15 @@ git log is authoritative for exact commits.
 
   In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
   have a machine-applicable one.
+- **`Actor.Theory`: the mailbox's promises, proved on a model and tested against the
+  runtime.** A new stdlib module models an actor's mailbox and proves, once, that one sender's
+  messages arrive in the order sent (whatever other senders, a hot-deploy hold, a stash or a
+  call waiting inside a handler do), that a late reply never answers a later `Actor.call`, and
+  that a monitor's `Down` is never dropped by a full mailbox and is delivered at most once. A
+  native fixture checks the runtime's receive order against the model.
+  `march --check --guarantees` now reports the runtime's laws as `proved (model) · tested
+  (runtime)` or `proved (model)` instead of `assumed`. See the actors chapter, "What is
+  proved about the mailbox".
 - **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
   parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
   parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is

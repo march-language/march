@@ -2,6 +2,20 @@
 # theorem and proof reach (reflection design, phase 3).  A stdlib lemma whose line
 # still matches is admitted without re-proving it.  Regenerate with
 # scripts/gen-lemma-manifest.sh; a test fails when this file is stale.
+Actor.Theory.call_keeps_others	67d535a5da537e9f0d0d92e66f5242c5
+Actor.Theory.call_reply_cat	4621ce37bb49b21306e9f375b5aad68a
+Actor.Theory.call_reply_later	2db8ec8fa4a41624d2ffd1c888423203
+Actor.Theory.deadline_law	a6c1607c7004cb43444f795a022b4fd4
+Actor.Theory.down_at_most_once	75a5a1ca9bace0a55125508d31ac1060
+Actor.Theory.down_never_dropped	d78cd267cc241f27563f298163725dc6
+Actor.Theory.downs_cat	eb0e03a3aef30458b20d5e16da814c83
+Actor.Theory.enq_other	d1562a9651f7c190f74c7deb4433764f
+Actor.Theory.enq_self	ee1ce664144b3fca611a333d77986673
+Actor.Theory.from_cat	7137b1fb975f18292012fadd5417e2a4
+Actor.Theory.qcat_end	7854d8aa6c79d142090e2bceabf34248
+Actor.Theory.replay_order	4197e0d9230d27d3b06193861262d602
+Actor.Theory.stale_reply_ignored	3c02ed65a131e923f1587403f47e2c6c
+Actor.Theory.unmonitor_gone	7a09dfbceac0575875edc8211586297c
 List.append_assoc	39b8fdcb389f6cba56bb448868b2981e
 List.append_nil	7969e7a91d0168921db3274a5e9deda5
 List.drop_append	43f17b4565ea0a4e6c6dd9aec7d19a79

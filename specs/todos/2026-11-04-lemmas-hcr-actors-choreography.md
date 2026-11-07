@@ -48,7 +48,10 @@ Phases (design §7):
   `2026-11-06-session-theory-loops-crash`).
 - **D.** `stdlib/actor_theory.march` (per-sender FIFO, `Actor.call` correlation, DOWN
   delivery: proved today on the model, design §2 P2), plus trace conformance against the
-  runtime and RC-trace fixtures for each send path.
+  runtime and RC-trace fixtures for each send path. Part one done (progress `2026-11-06-actor-theory`):
+  `Actor.Theory` with A1-A3 proved, A1 conformance fixture, report labels. Open: the A3
+  runtime fixture, A4 RC fixtures, trace-driven conformance (todo
+  `2026-11-06-actor-theory-runtime-tests`).
 - **E.** Lemma ergonomics: landed 2026-11-04 (progress
   `2026-11-04-lemma-hypothesis-reflected-call-not-assumed`,
   `2026-11-04-unreflectable-predicate-hides-name-clash`,
