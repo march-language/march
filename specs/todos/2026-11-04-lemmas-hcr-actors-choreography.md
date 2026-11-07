@@ -51,8 +51,9 @@ Phases (design §7):
   `2026-11-04-unreflectable-predicate-hides-name-clash`,
   `2026-11-04-return-contract-block-facts`); user type names the stdlib also declares
   remain (todo `2026-11-03-reflect-type-name-clash-with-stdlib`).
-- **F.** Baseline invariants as migration hypotheses, handlers reflected as `<Actor>.step`,
-  the migration-simulation law, rollback round trip, chained `migrate_msg`, tag checks at
-  deploy.
+- **F.** Baseline invariants as migration hypotheses, the migration-simulation law, rollback
+  round trip, chained `migrate_msg`, tag checks at deploy. Handlers reflected as
+  `<Actor>.step` with an inductive `@invariant` moved to its own todo
+  (`2026-11-06-actor-inductive-invariants`), which F builds on.
 
 Move this file to `specs/progress/` when phase F lands, or split it per phase as phases land.

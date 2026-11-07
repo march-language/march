@@ -687,9 +687,31 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
     | Some _ -> Smt.SInt
     | None -> (match List.assoc_opt name scalar_env with Some s -> s | None -> Smt.SInt)
   in
+  (* Set when a name is declared at a record sort taken from [scalar_env] (an
+     unrefined record parameter, read bare or through a field): the VC then
+     needs the datatype preamble, as a refined record scope entry does. *)
+  let env_record_used = ref false in
   let var_const name =
     if is_str_scope name then Some (Smt.Const name)
-    else begin decls := (name, scalar_of name) :: !decls; Some (Smt.Const name) end
+    else begin
+      let srt = scalar_of name in
+      (match srt with Smt.SData (n, []) when is_record_sort n -> env_record_used := true | _ -> ());
+      decls := (name, srt) :: !decls;
+      Some (Smt.Const name)
+    end
+  in
+  (* `p.x` for a parameter declared at a record sort in [scalar_env] and not in
+     the refined scope: the record's selector over the parameter's constant,
+     the construction [scope_field_resolver] uses for a refined one. *)
+  let env_field_resolver varname fname =
+    if List.mem_assoc varname sc then None
+    else
+      match List.assoc_opt varname scalar_env with
+      | Some (Smt.SData (n, [])) when is_record_sort n ->
+        (match make_field_resolver varname n (Smt.Const varname) varname fname with
+         | Some _ as t -> ignore (var_const varname); t
+         | None -> None)
+      | _ -> None
   in
   let resolve_measure m name =
     (* `len` over a String-sorted scope name is the string `len`, applied to the
@@ -867,7 +889,7 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
             match rf varname fname with
             | Some _ as r -> r
             | None -> rf_param varname fname)
-      (fun _ _ -> None) sc
+      env_field_resolver sc
   in
   let scalar e =
     smt_of ~resolve_var:var_const ~resolve_measure ~resolve_measure_app
@@ -1068,8 +1090,10 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
        false)
   | Some tail_term ->
     let resolve_field = match record_sort with
-      | Some sort_name -> make_field_resolver binder sort_name tail_term
-      | None -> fun _ _ -> None
+      | Some sort_name ->
+        let rb = make_field_resolver binder sort_name tail_term in
+        fun v f -> (match rb v f with Some _ as t -> t | None -> scope_field_resolver v f)
+      | None -> scope_field_resolver
     in
     (* Under [list_ret] the binder denotes a LIST, which is not a term here;
        only its measures are.  A predicate using it bare is untranslatable. *)
@@ -1179,7 +1203,7 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
        let vc = { Smt.decls; assumptions; goal } in
        let str_pre = if scope_has_string || !uses_string then string_preamble else "" in
        let preamble = str_pre ^
-         if record_sort <> None || scope_has_record then
+         if record_sort <> None || scope_has_record || !env_record_used then
            (* When all measure apps were evaluated concretely (needs_axiom_preamble=false),
               skip the quantified-axiom measure_preamble.  The quantified forall axioms
               cause Z3 to return `unknown` for SAT queries even when the goal is trivial
@@ -1199,7 +1223,7 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
          preamble
          ^ set_preamble ~elem_declared:(contains preamble "(declare-sort Elem 0)")
              ~str_declared:(str_pre <> "")
-             ~measure_attached:((record_sort <> None || scope_has_record) && !needs_axiom_preamble)
+             ~measure_attached:((record_sort <> None || scope_has_record || !env_record_used) && !needs_axiom_preamble)
              vc
          (* Last: an abstract symbol's argument sort is declared above. *)
          ^ abstract_preamble vc
@@ -2584,7 +2608,13 @@ and check_fn_post_verdict_core ~root errctx ?(emit = true) (fd : A.fn_def) : boo
     let clause_ok ~emit (c : A.fn_clause) =
       let sc = List.fold_left scope_add_fnparam [] c.A.fc_params in
       let scalar_env =
-        List.map (fun fp -> (param_name_of fp, scalar_sort_of_param_ty (param_ty_of fp)))
+        List.map
+          (fun fp ->
+            let t = param_ty_of fp in
+            (param_name_of fp,
+             match record_sort_of_param_ty t with
+             | Some n -> adt_sort n
+             | None -> scalar_sort_of_param_ty t))
           c.A.fc_params
       in
       let base = match c.A.fc_guard with Some g -> [ (g, false) ] | None -> [] in

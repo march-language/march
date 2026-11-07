@@ -15,15 +15,15 @@ display-name resolution in the propagation pre-pass was closed by 71f112f4a, whi
 reflected call by its site, and is pinned by the `pred-names` suite:
 `specs/progress/2026-11-06-predicate-names.md`.)
 
-- **A tuple- or record-typed variable in a predicate.** A lemma parameter or caller variable
-  of tuple or record type gets no sort in the predicate encoder (the sort-marker channel has no
-  tuple marker, and records have their own field-flattening mode), so `swap(swap(t)) == t`
-  over `t : (Int, Int)` is a `sort-conflict` skip and `px(p) == p.x + p.y` over `p : Pt` is
-  `unreflectable-predicate`. Literals at a reflected call's parameter do translate.
+- **A tuple-typed variable in a predicate.** A lemma parameter or caller variable of tuple
+  type gets no sort in the predicate encoder (the sort-marker channel has no tuple marker), so
+  `swap(swap(t)) == t` over `t : (Int, Int)` is a `sort-conflict` skip. Literals at a reflected
+  call's parameter do translate. (The record half is done:
+  `specs/progress/2026-11-06-reflection-record-predicate-variables.md`.)
 - **Parametric records.** A record type is matched to its declaration by its field set; a
   record with type parameters declines (its instance is not recovered from the structural
   type).
-- **A tuple or record literal printed in a report** reads `<predicate>` (`pred_str` has no
-  arm for `ETuple`/`ERecord`); changing it moves golden diagnostic text.
+- **A tuple literal printed in a report** reads `<predicate>` (`pred_str` has no arm for
+  `ETuple`; a record literal prints as written since 2026-11-06).
 - **`uses:` over-approximation.** When a stage-2 proof's unsat core names no unfolding
   (congruence, I8), `uses:` lists the whole frontier.
