@@ -9809,6 +9809,74 @@ let test_cap_deterministic_arithmetic_ok () =
   end|} in
   Alcotest.(check bool) "cap deterministic + pure arithmetic: no error" false (has_errors ctx)
 
+(* ── Issue #1180: monotonic clock reads and `needs` under the module caps ──
+   `sys_uptime_ms` (the builtin behind `System.monotonic_time`) is ambient for
+   `needs` on purpose (typecheck_builtins.ml: gating it would break every
+   timing caller granted only IO.Console), so it has no `builtin_cap_table`
+   row and neither banned set derived from that table contained it: both
+   module caps accepted a clock read the docs say they ban. *)
+let test_cap_pure_sys_uptime_ms_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn t() : Int do sys_uptime_ms() end
+  end|} in
+  Alcotest.(check int) "cap pure + sys_uptime_ms: one pure_violation" 1
+    (count_errors_with ctx "calls `sys_uptime_ms`, which has side effects")
+
+let test_cap_deterministic_sys_uptime_ms_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn t() : Int do sys_uptime_ms() end
+  end|} in
+  Alcotest.(check int) "cap deterministic + sys_uptime_ms: one violation" 1
+    (count_errors_with ctx "calls `sys_uptime_ms`, which is non-deterministic")
+
+(* The control: outside the two module caps a monotonic read stays ambient —
+   no `needs IO.Clock`, no error. *)
+let test_sys_uptime_ms_stays_ambient () =
+  let ctx = typecheck {|mod Timing do
+    fn t() : Int do sys_uptime_ms() end
+  end|} in
+  Alcotest.(check bool) "sys_uptime_ms outside cap pure/deterministic: no error"
+    false (has_errors ctx)
+
+(* A `cap pure` module that declares ANY `needs` is a contradiction: every
+   stdlib IO wrapper (`File.read`, `DateTime.now`, ...) is reachable only
+   with its `needs` (the capability ceiling), and the call-name scan sees only
+   direct builtins, so the `needs` line is where the hole closes. *)
+let test_cap_pure_rejects_needs () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    needs IO.FileRead
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check int) "cap pure + needs IO.FileRead: one pure_violation" 1
+    (count_errors_with ctx "declares `needs IO.FileRead`")
+
+(* `cap deterministic` may hold ordinary IO capabilities, but never the clock
+   or an RNG, nor a parent (`IO`) that includes them. *)
+let test_cap_deterministic_rejects_clock_and_random_needs () =
+  List.iter (fun cap ->
+      let ctx = typecheck (Printf.sprintf {|mod Det do
+    cap deterministic
+    needs %s
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} cap) in
+      Alcotest.(check int)
+        (Printf.sprintf "cap deterministic + needs %s: one violation" cap) 1
+        (count_errors_with ctx (Printf.sprintf "declares `needs %s`" cap)))
+    [ "IO.Clock"; "IO.Random"; "IO" ]
+
+let test_cap_deterministic_allows_ordinary_needs () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    needs IO.FileRead
+    needs IO.Console
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check int) "cap deterministic + needs IO.FileRead + IO.Console: no violation" 0
+    (count_errors_with ctx "declares `needs")
+
 (* ── Proof-cap mint soundness (Part 1: cap_narrow restriction) ────────────
    cap_narrow's polymorphic result Cap(a) let ANY holder of a plain Cap(IO)
    forge a nominal proof capability at a proof-cap-typed call site (inline arg,
@@ -12941,6 +13009,51 @@ let test_unrelated_needs_still_warns_with_stdlib_loaded () =
     Alcotest.(check bool)
       "needs IO.NetListen with no use of any kind still warns" true
       (has_warning_with errors "unused capability"))
+
+(* Issue #1180: `System.monotonic_time()` reaches `sys_uptime_ms`, which needs
+   no capability, so neither the capability ceiling nor the `needs` rule of
+   `cap pure`/`cap deterministic` sees it; the call-name scan must follow a
+   stdlib callee to the ambient banned builtin it reaches.  [mod_cap] is the
+   cap line ("" for the non-pure control). *)
+let check_with_system_loaded mod_cap =
+  (* system.march imports Process (for `ProcessResult`), so load both. *)
+  with_stdlib_registered "process.march" @@ fun () ->
+  with_stdlib_registered "system.march" (fun () ->
+    let proc = load_stdlib_file_for_test "process.march" in
+    let sys = load_stdlib_file_for_test "system.march" in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "Main"; span = dummy_span };
+      mod_decls = proc :: sys :: (parse_and_desugar (Printf.sprintf {|mod Main do
+        mod Inner do
+          %s
+          fn wrapped() : Int do
+            System.monotonic_time()
+          end
+        end
+      end|} mod_cap)).March_ast.Ast.mod_decls;
+    } in
+    let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+    errors)
+
+let test_cap_pure_rejects_monotonic_wrapper () =
+  let errors = check_with_system_loaded "cap pure" in
+  Alcotest.(check int) "cap pure + System.monotonic_time: one pure_violation" 1
+    (count_errors_with errors "calls `System.monotonic_time`, which has side effects")
+
+let test_cap_deterministic_rejects_monotonic_wrapper () =
+  let errors = check_with_system_loaded "cap deterministic" in
+  Alcotest.(check int) "cap deterministic + System.monotonic_time: one violation" 1
+    (count_errors_with errors "calls `System.monotonic_time`, which is non-deterministic")
+
+let test_monotonic_wrapper_ambient_outside_module_caps () =
+  let errors = check_with_system_loaded "" in
+  let msgs =
+    List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+        if d.severity = March_errors.Errors.Error then Some d.message else None)
+      errors.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check (list string)) "System.monotonic_time in a plain module: no error"
+    [] msgs
 
 (* ── Unrecognized capability names in `needs` are rejected ────────────────
    Task 4 of the 2026-08-13 capability UX plan: `needs IO.Filesystem` (wrong
@@ -18683,6 +18796,12 @@ let compiler_suites =
           Alcotest.test_case "cap deterministic + unix_time_ms (real): error" `Quick test_cap_deterministic_unix_time_ms_error;
           Alcotest.test_case "cap deterministic + file_read: no error" `Quick test_cap_deterministic_file_read_ok;
           Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
+          Alcotest.test_case "cap pure + sys_uptime_ms: error (#1180)" `Quick test_cap_pure_sys_uptime_ms_error;
+          Alcotest.test_case "cap deterministic + sys_uptime_ms: error (#1180)" `Quick test_cap_deterministic_sys_uptime_ms_error;
+          Alcotest.test_case "sys_uptime_ms stays ambient (#1180)" `Quick test_sys_uptime_ms_stays_ambient;
+          Alcotest.test_case "cap pure + any needs: error (#1180)" `Quick test_cap_pure_rejects_needs;
+          Alcotest.test_case "cap deterministic + clock/random needs: error (#1180)" `Quick test_cap_deterministic_rejects_clock_and_random_needs;
+          Alcotest.test_case "cap deterministic + ordinary needs: ok (#1180)" `Quick test_cap_deterministic_allows_ordinary_needs;
         ] );
       ( "proof_cap_mint", [
           Alcotest.test_case "cap_narrow cannot mint proof cap (inline arg): error" `Quick test_cap_narrow_cannot_mint_proof_cap;
@@ -18868,6 +18987,9 @@ let compiler_suites =
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
           Alcotest.test_case "stdlib-mediated needs is not unused"          `Quick test_stdlib_mediated_needs_is_not_unused;
           Alcotest.test_case "unrelated needs warns with stdlib loaded"     `Quick test_unrelated_needs_still_warns_with_stdlib_loaded;
+          Alcotest.test_case "cap pure + System.monotonic_time: error (#1180)" `Quick test_cap_pure_rejects_monotonic_wrapper;
+          Alcotest.test_case "cap deterministic + System.monotonic_time: error (#1180)" `Quick test_cap_deterministic_rejects_monotonic_wrapper;
+          Alcotest.test_case "System.monotonic_time ambient elsewhere (#1180)" `Quick test_monotonic_wrapper_ambient_outside_module_caps;
         ] );
       ( "cap_ux_no_nag", [
           Alcotest.test_case "capability param is not an unused variable" `Quick test_unused_cap_param_is_not_warned;

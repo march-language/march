@@ -1,0 +1,23 @@
+-- EXPECT-ERROR: declares `needs IO.FileRead`, but a pure module cannot hold a capability
+-- Issue #1180: a stdlib wrapper (`File.read`) is not a banned builtin NAME,
+-- so the call scan never saw it, and with `needs IO.FileRead` declared the
+-- capability ceiling admitted it too. A `cap pure` module may declare no
+-- `needs` at all, so the `needs` line itself is rejected.
+mod Main do
+  needs IO
+
+  mod Pure do
+    cap pure
+    needs IO.FileRead
+    fn read() : Int do
+      match File.read("pure_violation_4.march") do
+        Ok(s) -> string_byte_length(s)
+        Err(_) -> 0
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO)) : () do
+    println(int_to_string(Pure.read()))
+  end
+end
