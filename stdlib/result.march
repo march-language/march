@@ -7,7 +7,7 @@
 -- doc: try
 
 mod Result do
-
+  cap verified
   doc """
   Returns true if the result is Ok.
 

@@ -337,6 +337,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`Math`, `Option` and `Result` are `cap verified`.** Every refinement contract and lemma in
+  them is proved, and a test now fails if a change leaves one unproved (the same now holds for
+  `Udp`, which already declared it). `List` is fully proved in ordinary programs but is not yet
+  marked, because of a name clash when it is checked on its own.
+
 - **Int `/` and `%` are faster in compiled code.** The zero-divisor check is now a test in
   the generated code instead of a call into the runtime, so LLVM sees the division: a literal
   divisor becomes a multiply, and a divisor the code has already tested is not tested again.
@@ -676,6 +681,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
+  such a type, and a lemma about it, can now be used in refinements. Recursion through
+  `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating
+  too.
 - **Compiled `x +. 0.0` keeps the sign of zero right** (#1185). The optimizer rewrote
   `x +. 0.0` and `0.0 +. x` to `x`, so native and JS builds returned `-0.0` for
   `-0.0 +. 0.0`, where IEEE 754 (and the interpreter) give `+0.0`. The rewrite now fires

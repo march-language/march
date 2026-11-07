@@ -6,7 +6,7 @@
 -- doc: try
 
 mod Option do
-
+  cap verified
   doc """
   Returns true if the option contains a value.
 
