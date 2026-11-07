@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A warning when a predicate means the built-in, not your function.** Inside a refinement
+  predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
+  own function of that name is in scope, the checker now says so
+  (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
 - **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
   `march --check-json`, a fix's `applicability` is `machine-applicable`,
   `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
@@ -663,6 +667,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A type named like a standard-library type of another arity works in predicates.** A
+  `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
+  it unchecked. Types of the same name and the same number of parameters still are, with a
+  message saying so that now names your function.
+- **No false "not checked" warning on a qualified predicate call that is checked.** A
+  predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
 - **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
   matched a user function (a theorem's `f`, say) was read as a reference to that function,
   which made the function's whole body part of its callers' dependency key; after an

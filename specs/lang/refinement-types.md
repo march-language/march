@@ -5331,7 +5331,10 @@ The rules, in the order the report checks them:
 - **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.
 - **R11**: its name is not predicate vocabulary (`len`, `elts`, `keys`, the
   set operators, `is_<Ctor>`): inside a predicate such a name always means the
-  built-in.
+  built-in. When your own `len`, `elts`, `keys` or `is_<Ctor>` is in scope where
+  a predicate uses that name, the checker warns that the predicate means the
+  built-in (`predicate_vocabulary_shadowed`); rename the function to use it in
+  a predicate.
 
 A recursive group is reflected as a whole or not at all. A reflected function
 whose parameters are refined shows the guard each use will carry, for example

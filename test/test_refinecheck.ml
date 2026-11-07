@@ -23975,11 +23975,16 @@ let module_qualified_measure_and_sort_suite =
      specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
      What still holds, and is pinned: the collision makes neither call a
      proof nor a violation. *)
+  (* Since 2026-11-06 (specs/progress/2026-11-06-predicate-names.md) the
+     first is PROVED again: the user's `Tree` takes no type argument and
+     `OrderedMap.Tree(k, v)` takes two, and the typechecker never unifies
+     types of different arities, so the two are told apart by arity.  A
+     same-arity collision still skips (the `pred-names` suite pins it). *)
   [ gated
-      "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
-       once its whole stdlib is prepended, is skipped, not proved (short-name conflation)"
+      "a user's own top-level Tree, beside the stdlib's OrderedMap.Tree(k, v) of \
+       another arity, is proved (types told apart by arity)"
       (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
     gated "...and a literal that is not a member is skipped too, not proved" (fun () ->
@@ -30070,6 +30075,7 @@ let () =
       ("law-coverage", Test_refine_law_coverage.tests);
       ("reflect-record-vars", Test_refine_record_vars.tests);
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2);
+      ("pred-names", Test_refine_pred_names.suite);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
       ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);
