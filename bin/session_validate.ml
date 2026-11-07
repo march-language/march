@@ -106,6 +106,43 @@ let run (surface : A.decl list) : row list =
       @ check_view ~proto:name ~projector:"endpoints" (March_desugar.Desugar_endpoints.theory_view pd))
     (protocols surface)
 
+let rec has_loop : T.global -> bool = function
+  | T.GLoop _ | T.GVar _ -> true
+  | T.GEnd -> false
+  | T.GMsg (_, _, _, k) -> has_loop k
+  | T.GChoice (_, bs) -> List.exists (fun (_, g) -> has_loop g) bs
+
+(** Whether the protocol is in the fragment the laws C3-C5 cover
+    ([Session.Theory.in_fragment], evaluated on the typechecker's view, over
+    all its roles): [Ok ()], or why not.  Inside it, `pairwise` (C3),
+    `projections_compose` (C4) and `progress` (C5) hold for the protocol once its
+    projections are validated. *)
+let fragment (name : string) : (unit, string) result =
+  match Hashtbl.find_opt T.typecheck_views name with
+  | None -> Error "the typechecker did not project it"
+  | Some (Error why) -> Error why
+  | Some (Ok v) ->
+    let rs =
+      List.fold_right (fun (_, i) acc -> V.VCon ("RoleThen", [ V.VInt i; acc ])) v.T.v_roles (V.VCon ("RoleEnd", []))
+    in
+    let mp = V.VBool v.T.v_multiparty in
+    (match call "in_fragment" [ v_global v.T.v_global; rs; mp ] with
+     | Ok (V.VBool true) -> (
+       (* The proved law's instance, run: C4 on the default schedule.  It
+          cannot be false; if it is, the proof is unsound, which is a
+          compiler bug, and nothing is claimed. *)
+       match call "composes" [ v_global v.T.v_global; rs; mp; V.VCon ("PickEnd", []) ] with
+       | Ok (V.VBool true) -> Ok ()
+       | Ok _ -> Error "internal error: Session.Theory.projections_compose's instance is false for this protocol (a compiler bug)"
+       | Error m -> Error ("the theory could not be evaluated: " ^ m))
+     | Ok _ ->
+       Error
+         (if has_loop v.T.v_global then "a loop (the laws cover loop-free protocols for now)"
+          else
+            "a choice whose other roles do not all see the same branches (a role other than the chooser \
+             and the receiver of its first message must learn the label)")
+     | Error m -> Error ("the theory could not be evaluated: " ^ m))
+
 let outcome_text = function
   | Agrees -> "agrees with Session.Theory.project"
   | Differs d -> "DIFFERS: " ^ d
@@ -118,6 +155,12 @@ let print (surface : A.decl list) : unit =
   List.iter
     (fun r -> Printf.printf "projection %s %s (%s): %s\n" r.proto r.role r.projector (outcome_text r.outcome))
     rows;
+  List.iter
+    (fun (name, _) ->
+      match fragment name with
+      | Ok () -> Printf.printf "laws %s: in the fragment (pairwise duality, composition, deadlock freedom)\n" name
+      | Error why -> Printf.printf "laws %s: outside the fragment: %s\n" name why)
+    (protocols surface);
   if List.exists (fun r -> match r.outcome with Differs _ -> true | _ -> false) rows then begin
     prerr_endline
       "projection: a compiler projector disagrees with Session.Theory.project; this is a compiler bug";

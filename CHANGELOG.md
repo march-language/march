@@ -57,6 +57,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
   module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
@@ -664,12 +672,10 @@ git log is authoritative for exact commits.
   on `PATH`, the `curl | sh` install failed at "Verifying checksum" on macOS, because
   Apple's `sha256sum -c` prints usage when the checklist comes on stdin without a `-`
   operand. The installer now passes `-`.
-- **Compiled `==` and `!=` on records compare the right fields** ([#1171](https://github.com/march-language/march/issues/1171)).
-  Every record type shared one native equality helper, built for whichever record was
-  compared first, so another record type got wrong answers, read past the end of the record,
-  or crashed with SIGSEGV. This also reached `eq()` on records nested in a record or a `List`.
-  Each record type now gets its own helper. Tuples of different nested shapes, such as
-  `((Int, Int), Int, Int)` and `((Int, Int, Int), Int)`, no longer share one either.
+- **Compiled `==` on tuples of different nested shapes no longer shares one helper**
+  ([#1171](https://github.com/march-language/march/issues/1171)). `((Int, Int), Int, Int)`
+  and `((Int, Int, Int), Int)` got the same native equality helper, so unequal values
+  compared `true`. (The record half of #1171 is the record-equality fix below.)
 - **A module on `MARCH_LIB_PATH` is no longer loaded just because it declares a type or
   constructor with the same name as one your code uses from its own module.** A module
   that used its own `type Tally` pulled in every other lib-path module declaring a
@@ -739,6 +745,15 @@ git log is authoritative for exact commits.
   accept a string with an embedded NUL or depend on the C library for `nan(...)`.
   `float_infinity`, `float_neg_infinity`, `float_nan`, `float_epsilon`, `float_is_nan`,
   `float_is_infinite` and `float_from_string` now compile for `--target js`.
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
+- Compiled record equality keeps helpers distinct for different record shapes,
+  avoiding wrong comparisons and crashes when a program uses several record types.
+- Refinement diagnostics preserve predicate grouping with parentheses, including
+  mixed Boolean operators, arithmetic and unary expressions.
+
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
@@ -749,6 +764,11 @@ git log is authoritative for exact commits.
   binding is now compiled at the type it is used at. The interpreter was already
   correct.
 
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,

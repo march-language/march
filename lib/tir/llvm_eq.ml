@@ -23,35 +23,44 @@ let rec apply_ty_subst (subst : (string * Tir.ty) list) : Tir.ty -> Tir.ty = fun
 
 (* ── ADT structural equality generation ─────────────────────────────── *)
 
-(** A record field name as a self-delimiting identifier fragment: its length
-    then the name ([3a_b]), so an underscore inside a field name can never be
-    read as a separator.  A name with any character outside [A-Za-z0-9_] (not
-    a valid bare LLVM identifier) is hex-encoded behind an [h], which cannot
-    start the decimal-length form. *)
-let mangle_field_name (n : string) : string =
-  let plain = String.for_all (function
-    | 'a'..'z' | 'A'..'Z' | '0'..'9' | '_' -> true
-    | _ -> false) n in
-  if plain then string_of_int (String.length n) ^ n
-  else begin
-    let b = Buffer.create (2 * String.length n + 4) in
-    Buffer.add_char b 'h';
-    Buffer.add_string b (string_of_int (String.length n));
-    Buffer.add_char b '_';
-    String.iter (fun c -> Buffer.add_string b (Printf.sprintf "%02x" (Char.code c))) n;
-    Buffer.contents b
-  end
+(** An injective structural encoding for record helper identities. The old
+    mangler flattens constructor/tuple boundaries and normalizes qualified
+    names, so it cannot safely encode a record's nested field types. Counted
+    lists and length-prefixed hex names retain those boundaries using only
+    LLVM identifier characters. Field order is the TIR's canonical slot order. *)
+let record_eq_key ty =
+  let name s =
+    string_of_int (String.length s) ^ "_" ^
+    String.concat "" (List.init (String.length s)
+      (fun i -> Printf.sprintf "%02x" (Char.code s.[i])))
+  in
+  let sequence encode xs =
+    string_of_int (List.length xs) ^ "_" ^ String.concat "" (List.map encode xs)
+  in
+  let rec encode = function
+    | Tir.TInt -> "i"
+    | Tir.TFloat -> "d"
+    | Tir.TBool -> "b"
+    | Tir.TString -> "s"
+    | Tir.TUnit -> "u"
+    | Tir.TTuple ts -> "t" ^ sequence encode ts
+    | Tir.TRecord fs -> "r" ^ sequence (fun (n, t) -> name n ^ encode t) fs
+    | Tir.TCon (n, args) -> "c" ^ name n ^ sequence encode args
+    | Tir.TFn (ps, r) -> "f" ^ sequence encode ps ^ encode r
+    | Tir.TPtr t -> "p" ^ encode t
+    | Tir.TVar n -> "v" ^ name n
+  in
+  "Rec$" ^ encode ty
 
 (** Mangle a TIR type to a valid LLVM identifier fragment for equality function
-    names.  [ensure_adt_eq_fn] memoizes helpers BY THIS NAME, so two types
-    with different layouts must never mangle alike: a collision makes one
-    type's [==] run the other's helper (wrong answers, over-reads past the
-    cell, SIGSEGV — #1171, where every record type mangled to "Ptr").
-    Composite forms carry their arity ([Tup3_], [Rec2_], [Fn1_]) so a nested
-    shape cannot be re-parsed as a different one: without it
+    names.  [ensure_adt_eq_fn] memoizes helpers BY THIS NAME, so two types with
+    different layouts must never mangle alike.  Records use [record_eq_key]
+    (#1184).  Tuples carry their arity (#1171): without it
     [((Int, Int), Int, Int)] and [((Int, Int, Int), Int)] both read
-    [Tup_Tup_Int_x_Int_x_Int_x_Int].  A record names each field (length-
-    prefixed, see [mangle_field_name]) and its type, in slot order. *)
+    [Tup_Tup_Int_x_Int_x_Int_x_Int] and shared one helper (a wrong [true]
+    natively).  Functions and raw pointers get their own forms instead of a
+    shared "Ptr", so they stay distinct when they appear inside another
+    type's name. *)
 let rec mangle_ty_for_eq : Tir.ty -> string = function
   | Tir.TInt    -> "Int"
   | Tir.TFloat  -> "Float"
@@ -62,15 +71,11 @@ let rec mangle_ty_for_eq : Tir.ty -> string = function
   | Tir.TCon (n, args) ->
     let n' = String.concat "_" (String.split_on_char '.' n) in
     n' ^ "_" ^ String.concat "_" (List.map mangle_ty_for_eq args)
+  | Tir.TRecord _ as ty -> record_eq_key ty
   | Tir.TVar _   -> "Any"
   | Tir.TTuple ts ->
     Printf.sprintf "Tup%d_" (List.length ts)
     ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
-  | Tir.TRecord fields ->
-    Printf.sprintf "Rec%d_" (List.length fields)
-    ^ String.concat "_x_"
-        (List.map (fun (n, t) -> mangle_field_name n ^ "_" ^ mangle_ty_for_eq t)
-           fields)
   | Tir.TFn (ps, r) ->
     Printf.sprintf "Fn%d_" (List.length ps)
     ^ String.concat "_x_" (List.map mangle_ty_for_eq (ps @ [r]))

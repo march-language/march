@@ -1,66 +1,83 @@
-`[P1]` Compiled `==` on records called another record type's equality. FIXED
-2026-11-07 (GitHub #1171).
+`[P1]` Compiled `==` on records calls another record type's equality.
 
-Filed 2026-11-05 writing test/test_reports/. In a program that declares
+Found 2026-11-05 writing test/test_reports/. In a program that declares
 `type User = { name : String, tags : List(Role) }` (derive Eq, Show) and
 `type Point = { x : Int, y : Int }` (derive Eq), compiled `p == { x: 1, y: 3 }`
-with `p : Point` called `@__march_eq_Ptr`, which was `User`'s field-by-field
-equality. It ran `march_string_eq` on Point's `x` field and SIGSEGVed at
-address 0x11 (exit 139). Interpreted: `false`. #1171 added the silent cases:
-`Pair` compared first made `Triple`'s `==` skip its third field (`true` for
-unequal values); `Triple` first made equal `Pair`s compare unequal (the helper
-loaded offset 32 from a 32-byte cell); and `eq()` reached the shared helper
-through nesting (`derive Eq` compares each field with `==`, and
-`impl Eq(List(a))` compares elements with `==`).
+with `p : Point` calls `@__march_eq_Ptr`, which is `User`'s field-by-field
+equality. It runs `march_string_eq` on Point's `x` field and SIGSEGVs at
+address 0x11. No `assert` is needed:
 
-## Cause
+```march
+mod T do
+  needs IO.Console
+  type Role = Admin | Guest | Owner(Int)
+  type User = { name : String, tags : List(Role) }
+  derive Eq, Show for Role
+  derive Eq, Show for User
+  type Point = { x : Int, y : Int }
+  derive Eq for Point
+  test "rec" do
+    let p : Point = { x: 1, y: 2 }
+    let b = p == { x: 1, y: 3 }
+    println(to_string(b))
+  end
+end
+```
 
-`Llvm_eq.mangle_ty_for_eq` (lib/tir/llvm_eq.ml; the todo named
-`llvm_emit_eq.ml`, which does not exist) had no `Tir.TRecord` case, so every
-record fell through to `| _ -> "Ptr"`. `ensure_adt_eq_fn` names its helper
-`__march_eq_<mangled>` and returns any helper already registered under that
-name in `emitted_eq_fns`, so the first record type compared got the helper
-and every later one reused it against its own layout.
+`march --compile --test` it and run it: exit 139. Interpreted: `false`.
+Without the `User` declaration (or the test that builds a `User`), it works.
+The record equality helper seems to be keyed by its LLVM representation
+(`Ptr`), so two record types' helpers share one name. Look at how
+`__march_eq_*` helpers are named and deduplicated (lib/tir/llvm_emit_eq.ml).
 
-Tuples had the same failure in a narrower form: they were mangled
-(`Tup_` + elements joined by `_x_`) but not injectively, because tuple arity
-was not recorded. `((Int, Int), Int, Int)` and `((Int, Int, Int), Int)` both
-mangled to `Tup_Tup_Int_x_Int_x_Int_x_Int`, so whichever was compared second
-ran the other's helper (a wrong `true` was confirmed natively).
+test/test_reports/assert_records.march keeps the plain-record case in its own
+file because of this; merge it back into assert_values.march once fixed.
 
-## Fix
+## Resolution — 2026-11-06
 
-`mangle_ty_for_eq` now mangles every type it can be handed, and the composite
-forms record their arity so a nested shape cannot be read as a different one:
+`lib/tir/llvm_eq.ml` now assigns records a structural helper identity rather
+than falling through to `Ptr`. The key includes field names and recursively
+encodes every field type; counted lists and length-prefixed hex names preserve
+nested tuple/generic boundaries and distinguish qualified names from
+underscore spellings. The original non-record helper names are unchanged.
 
-- `TTuple ts` → `Tup<N>_` + elements joined by `_x_` (`Tup2_Int_x_Int`).
-- `TRecord fs` → `Rec<N>_` + `<field>_<type>` joined by `_x_`, in slot order.
-  Field names are length-prefixed (`{ a_b : Int }` → `Rec1_3a_b_Int`), so an
-  underscore in a field name is never read as a separator; a name with a
-  character outside `[A-Za-z0-9_]` is hex-encoded behind `h`.
-- `TFn (ps, r)` → `Fn<N>_` + params and result; `TPtr t` → `Ptr_<t>`. Neither
-  reaches `ensure_adt_eq_fn` at the top level (it returns `None` for them),
-  but both can appear as a record or tuple field type inside a mangled name,
-  and they no longer collapse to one "Ptr".
+The plain-record report now lives alongside the nested User record in
+`test/test_reports/assert_values.march`; the standalone `assert_records`
+fixture is removed. Codegen regressions exercise equal and unequal mixed
+record shapes, nested records, direct generic record instantiations, and
+adversarial structural helper keys.
 
-The other callers of `mangle_ty_for_eq` (`llvm_case.ml`, `llvm_emit_alloc.ml`)
-only use it for `MARCH_REPR_AUDIT` report strings; no code depends on the old
-spellings. Named `TCon` types keep their existing mangling: each type name has
-a fixed arity, so the prefix form stays unambiguous for them. One theoretical
-gap is left: `.` in a qualified name and `_` inside a name both become `_`, so
-`A.B` and a type literally named `A_B` would still share a spelling. Type
-names are CamelCase by convention and no such pair has been seen.
+Before the fix, `scripts/triage.sh` reproduced native exit 139, and all four
+optional-pass switches still failed. The sanitizer traced the failure to a
+String comparison loading Point's Int field as a pointer at address 0x11.
+The native mixed-shape regression failed the same way, while the key test
+found only one unique helper key for thirteen distinct record types.
 
-## Tests
+The separate native equality failure for a newtype wrapping a generic named
+record is tracked in
+`specs/todos/2026-11-06-compiled-generic-record-newtype-equality.md`.
 
-- test/test_codegen.ml, group `newtype_derived_method_crash`, five
-  compiled-vs-interpreter parity cases (`#1171 …`): Pair then Triple, Triple
-  then Pair, record of Strings then record of Ints (the SIGSEGV), `eq()` on a
-  nested record field and on a `List` of records, and the two nested tuple
-  shapes. All five failed before the fix and pass after.
-- test/test_reports/assert_records.march was split out to keep the plain
-  `Point` record away from `User`. The todo asked to merge it back once this was
-  fixed, but it stays separate: the `test_reports` suite now also runs each
-  fixture on `--target js` (#1176), and `to_string` on a record without Show has
-  no JS mapping, so this file is in `js_unsupported` while `assert_values`
-  keeps its JS coverage. Its header comment now gives that reason.
+Verification: all three `record_equality` cases pass, and all thirteen
+neighboring `newtype_derived_method_crash` cases pass. The consolidated
+rendered-report corpus also passes interpreted/native parity.
+
+## Follow-up — 2026-11-07 (GitHub #1171, PR #1186)
+
+#1171 reported the same collision independently and was fixed in parallel with a
+second record mangling. On merging main the record part was dropped in favour of
+`record_eq_key` above. Two pieces of the #1171 fix were kept:
+
+- **Tuples carry their arity** (`Tup<N>_`). The old flat `Tup_` form gave
+  `((Int, Int), Int, Int)` and `((Int, Int, Int), Int)` the same name,
+  `Tup_Tup_Int_x_Int_x_Int_x_Int`, so they shared one helper and compiled `==`
+  answered `true` for unequal values. `TFn` and `TPtr` get their own forms
+  (`Fn<N>_`, `Ptr_<t>`) instead of the shared `Ptr` fallback.
+- **`assert_records` stays its own fixture.** The `test_reports` suite now also
+  runs each fixture on `--target js` (#1176), and `to_string` on a record
+  without Show has no JS mapping. So the plain-record case lives in
+  `assert_records.march` (listed in `js_unsupported`), and `assert_values`
+  keeps its JS coverage. This reverses the "merge it back" step above.
+
+The #1171 codegen tests (Pair/Triple in both orders, a String record then an Int
+record, `eq()` through a nested record and a List of records, and the two tuple
+shapes) are in `test/test_codegen.ml` beside main's `record_equality` cases.
