@@ -10176,7 +10176,7 @@ let test_lint_pfn_impl_method () =
 type MyInt = MyInt(Int)
 
 pfn format_inner(n: Int): String do
-  Int.to_string(n)
+  int_to_string(n)
 end
 
 interface Show(a) do

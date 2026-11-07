@@ -764,6 +764,7 @@ let rec flatten_pred_quals (e : expr) : expr =
   | ELam _ | ELetFn _ | ELetQ _ | ELetStar _ | ESend _ | ESpawn _ | EPipe _
   | ESigil _ | EAssert _ | EDbg _ -> e
   | ERefineMsg (inner, msg, sp) -> ERefineMsg (go inner, msg, sp)
+  | EProof (pr, sp) -> EProof (map_proof go pr, sp)
 
 (** Structural [ty] walk whose ONLY effect is calling [flatten_pred_quals] on
     every [TyRefine] predicate it finds — mirrors [Desugar.respan_ty]'s shape
@@ -1062,6 +1063,7 @@ let rec desugar_expr (e : expr) : expr =
 
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
+  | EProof (pr, sp) -> EProof (map_proof desugar_expr pr, sp)
 
   | ERefineMsg (inner, msg, sp) -> ERefineMsg (desugar_expr inner, msg, sp)
 
@@ -2021,6 +2023,7 @@ let make_qualifier (prefix : string) (own_names : string list) =
     | ESend (cap, msg, sp)      -> ESend (go bound cap, go bound msg, sp)
     | ESpawn (ex, sp)           -> ESpawn (go bound ex, sp)
     | EAssert (ex, sp)          -> EAssert (go bound ex, sp)
+    | EProof (pr, sp)           -> EProof (map_proof (go bound) pr, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map (go bound) args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, go bound ex, sp)
     | ERefineMsg (ex, s, sp)        -> ERefineMsg (go bound ex, s, sp)
@@ -2214,6 +2217,7 @@ let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
     | ESend (cap, msg, sp)      -> ESend (rw cap, rw msg, sp)
     | ESpawn (ex, sp)           -> ESpawn (rw ex, sp)
     | EAssert (ex, sp)          -> EAssert (rw ex, sp)
+    | EProof (pr, sp)           -> EProof (map_proof rw pr, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map rw args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, rw ex, sp)
     | ERefineMsg (ex, s, sp)        -> ERefineMsg (rw ex, s, sp)
