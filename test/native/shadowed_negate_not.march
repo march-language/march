@@ -1,0 +1,53 @@
+-- Regression (#1177): an entry-module top-level fn whose bare name is one
+-- of the backend's name-dispatched builtins must be CALLED, on every backend.
+--
+-- --target js matched the callee's bare name (`negate`, `not`, ...) and
+-- emitted the JS operator, so the user fn never ran (`-y` printed -5, not
+-- "neg" then 15).  It also declared a `const int_xor = {...}` first-class
+-- builtin wrapper next to the user's `function int_xor`, a SyntaxError at
+-- load.  Separately the TIR folds (fold.ml, simplify.ml) rewrote
+-- `not(<bool literal>)` by name, so native too ignored a user `fn not` for
+-- a literal argument, and they synthesise `not x` from `x == false`, which
+-- would have called the user's `not`.
+--
+-- Each shadow prints a marker and returns what the builtin cannot.  Every
+-- fn has two or more call sites and a println, so nothing gets inlined
+-- away before the emitter sees the call.
+mod ShadowedNegateNot do
+  needs IO.Console
+
+  fn negate(x : Int) : Int do
+    println("neg")
+    x + 10
+  end
+
+  fn not(b : Bool) : Bool do
+    println("not")
+    b
+  end
+
+  fn string_length(s : String) : Int do
+    println("len " ++ s)
+    100
+  end
+
+  fn int_xor(a : Int, b : Int) : Int do
+    println("xor")
+    a + b + 1000
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let y = string_length("q") - 95
+    println(int_to_string(-y))
+    println(int_to_string(negate(y)))
+    let t = y > 0
+    println(bool_to_string(!t))
+    println(bool_to_string(not(t)))
+    println(bool_to_string(not(true)))
+    println(bool_to_string(!false))
+    println(bool_to_string(t == false))
+    println(int_to_string(string_length("ab")))
+    println(int_to_string(int_xor(2, 3)))
+    println(int_to_string(int_xor(2, 4)))
+  end
+end

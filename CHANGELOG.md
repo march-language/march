@@ -828,6 +828,17 @@ git log is authoritative for exact commits.
   Safari. The cache is now a `Map` keyed by the string, holding at most one string of
   each length so older V8 (which hashes long strings by length) doesn't compare them
   either.
+- **`--target js`: a module-level `let` outside the entry module reads as its value**
+  (#1170). A `let` in a nested `mod`, a `MARCH_LIB_PATH` module or the standard library
+  printed `[object Object]`, and `Bytes.encode_base64` threw
+  `TypeError: s.slice is not a function`. The interpreter and native binaries were right.
+- **A top-level `fn` named like a builtin is called on `--target js`** (#1177). A user
+  `fn negate` (also reached by prefix `-x`), `fn not` (also `!x`), `fn string_length`,
+  `fn int_mod` and the like were replaced by the builtin, or, for the names JS also
+  exposes as first-class values, made the module fail to load (`Identifier 'int_xor' has
+  already been declared`). On every backend, a user `fn not` is now also called for a
+  literal argument (`not(true)`, `!false`); the optimizer used to fold those as the
+  builtin.
 
 ### Documentation
 
