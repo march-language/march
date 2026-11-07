@@ -1102,6 +1102,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
              [ let_wild (app "on_cancel" [ var "c_role"; var "c_cause"; con cancelled_name [ con "Secret" [] ] ]);
                var "c_ep" ]) ]
   in
+  (* Branch labels are user-chosen: `cancel` / `drain` must not bind the
+     failure callbacks. Keep branch parameters in a separate namespace. *)
+  let branch_callback label = "on_branch_" ^ label in
   let transitions =
     List.concat_map
       (fun (node, this) ->
@@ -1180,9 +1183,9 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            let cbs = List.map (fun (lbl, ctor, payload, next) -> (lbl, ctor, payload, state_of next)) brs in
            let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) in
            let branch_params =
-             List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
+             List.map (fun (lbl, _, payload, nx) -> (branch_callback lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
            in
-           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
+           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, branch_callback lbl, nx)) cbs in
            let boundary = at_boundary node in
            [ fn offer_name ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params) t_yield
                (on_ep (block [ let_wild (suspend_with ~boundary from (var "ep") arms); yield ]));
@@ -1202,7 +1205,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
            let boundary = at_boundary node in
            let suspend_with = suspend_with ~boundary in
            let t_on_crash = TyArrow (t_crashed, TyArrow (sty crash_nx, t_yield)) in
-           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, "on_" ^ lbl, nx)) cbs in
+           let arms = List.map (fun (lbl, ctor, _, nx) -> (ctor, branch_callback lbl, nx)) cbs in
            (match cbs with
             | [ (_, ctor, payload, nx) ] ->
               (* `recv_<Ctor>(s, st, k, on_crash)`: the receive, with what to
@@ -1216,7 +1219,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
             | _ ->
               let offer_name = "offer_" ^ String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) ^ "_crash" in
               let branch_params =
-                List.map (fun (lbl, _, payload, nx) -> ("on_" ^ lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
+                List.map (fun (lbl, _, payload, nx) -> (branch_callback lbl, TyArrow (payload, TyArrow (sty nx, t_yield)))) cbs
               in
               [ fn offer_name ([ ("s", t_cap_session); ("st", sty this) ] @ branch_params @ [ ("on_crash", t_on_crash) ]) t_yield
                   (on_ep (block [ let_wild (suspend_with from (with_crash from (var "ep") crash_nx) arms); yield ])) ])

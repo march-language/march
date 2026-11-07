@@ -203,6 +203,8 @@ classify() {
       add CHECKS scripts/check-tree-sitter.sh; reason "$f" "tree-sitter" ;;
     scripts/run-tests.sh|scripts/test-run-tests.sh)
       add CHECKS scripts/test-run-tests.sh; reason "$f" "test-run-tests.sh" ;;
+    scripts/two-node.sh|scripts/test-two-node.sh)
+      add CHECKS scripts/test-two-node.sh; reason "$f" "test-two-node.sh" ;;
     scripts/affected.sh|scripts/test-affected.sh)
       add CHECKS scripts/test-affected.sh; reason "$f" "test-affected.sh" ;;
     scripts/determinism-oracle.sh)

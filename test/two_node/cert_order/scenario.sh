@@ -41,3 +41,10 @@ b_sessions=$(grep -c "stock: a session on node-b" "$work/b.out")
 echo "two-node[cert_order]: $b_sessions of 12 sessions ran Stock on node-b"
 kill_node b
 kill_node c
+
+# Placement chooses how many sessions each Stock serves. The cross-node
+# assertion above checks node-b's count; compare all remaining output exactly.
+for n in b c; do
+  cp "$work/$n.out" "$work/$n.raw.out"
+  sed "/^stock: a session on node-$n\$/d" "$work/$n.raw.out" > "$work/$n.out"
+done

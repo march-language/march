@@ -39,6 +39,9 @@ jobs:
       - name: Test the test runner's failure attribution
         run: scripts/test-run-tests.sh
 
+      - name: Test the two-node harness golden checks
+        run: scripts/test-two-node.sh
+
       # scripts/affected.sh picks which suites a local change runs. A rule that
       # selects too little is a silent hole, so its path -> plan mapping is pinned
       # (pure text, no build).
