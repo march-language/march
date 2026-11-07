@@ -10724,6 +10724,27 @@ let write_march_source ~name src_text =
   close_out oc;
   (project_root, main_exe, src, tmp)
 
+(* A function used only as a value must remain reachable through mono. *)
+let test_other_module_function_value_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_module_fn_value" {|mod Main do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let k = List.length
+    println(int_to_string(k([1, 2])))
+    println(int_to_string(k(["a", "b", "c"])))
+  end
+end
+|} in
+  let bin = Filename.concat tmp "module_fn_value_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string) "polymorphic module function bound as a value"
+      "2\n3" (read_cmd_output (Filename.quote bin))
+
 (* ── A nested module's call to an ENCLOSING module's fn ────────────────────
    specs/progress/2026-09-25-nested-module-parent-call.md.  `mod Outer do pfn
    helper ... mod Inner do fn f(x) do helper(x) end end end` typechecked and
@@ -17727,6 +17748,10 @@ let codegen_suites =
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
           Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
           Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;
+        ] );
+      ( "module_function_values", [
+          Alcotest.test_case "stdlib function bound as a value" `Slow
+            test_other_module_function_value_compiled;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;

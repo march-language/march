@@ -676,6 +676,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Module functions used as values compile correctly.** A binding such as
+  `let k = List.length` now retains the function definition during compilation,
+  including when the binding is called with different element types.
+- **Type-qualified function names fail with an actionable diagnostic.**
+  `Int.to_string(5)` now explains that `Int` is a type and points to `to_string`,
+  instead of passing checking and failing or producing the wrong value at runtime.
+- **Endpoint generation merges equivalent unlabelled choice branches.** A bystander
+  receiving the same message in either branch now shares the message constructor
+  and continuation state, instead of receiving errors in generated code.
+
 - **A type named like a standard-library type of another arity works in predicates.** A
   `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
   it unchecked. Types of the same name and the same number of parameters still are, with a
