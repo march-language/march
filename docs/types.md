@@ -218,6 +218,32 @@ a native or wasm target. The decision to treat the JS target as a subset
 rather than emulate 63 bits with `BigInt` is recorded in
 `specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md`.
 
+### Parsing a Float
+
+`string_to_float(s)` (also `float_from_string`, and `String.to_float`, which
+wraps it in a `Result`) returns `Some(f)` exactly when C `strtod` in the "C"
+locale would consume all of `s`, and `None` otherwise. The interpreter, native
+code and `--target js` accept the same strings and round them the same way
+(to nearest, ties to even):
+
+- optional leading whitespace (space, `\t`, `\n`, `\v`, `\f`, `\r`); trailing
+  whitespace is rejected, so `" 1.5"` parses and `"1.5 "` does not;
+- an optional `+` or `-`;
+- then one of: a decimal number, digits with an optional `.` and fraction
+  or a `.` and fraction (`12`, `5.`, `.5`), optionally followed by
+  `e`/`E`, an optional sign and digits; a hex number, `0x`/`0X` then hex
+  digits with an optional `.` and hex fraction, optionally followed by
+  `p`/`P`, an optional sign and decimal digits (`0x10` is `16.`, `0x1p3` is
+  `8.`); `inf` or `infinity`; or `nan`, optionally followed by
+  `(`, letters, digits and `_`, then `)`. The words are case-insensitive.
+
+Nothing else parses: not `""` or `" "`, not `_` separators (`"1_000"`), not
+`0b`/`0o` prefixes, not an exponent without digits (`"1e"`), not an
+embedded NUL. A value too large for a double gives `Some(inf)` (`"1e400"`)
+and one too small gives `Some(0.)`. `"nan"` gives `Some(nan)`, distinct from
+`None`. The accepted set does not depend on the platform's C library: the
+native runtime checks the shape before calling `strtod`.
+
 ---
 
 ## Type Annotations
@@ -696,7 +722,7 @@ or returned from a function, and applied later is not checked.
 | `%` | `Int` | Integer modulo (monomorphic, `Int` only) |
 | `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic, `Float` only) |
 | `==` `!=` | any `Eq` | Equality / inequality |
-| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`) | Ordering |
+| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`, tuples, any type with an `Ord` impl) | Ordering: on a non-primitive type, `a < b` is `compare(a, b) < 0` |
 | `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
 | `++` | `String` | String concatenation |
 | `\|>` | any | Pipe: `x \|> f` is `f(x)` |

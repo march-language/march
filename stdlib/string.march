@@ -488,6 +488,14 @@ mod String do
   Parse `s` as a floating-point number.
   Returns `Ok(f)` on success, `Err(msg)` if the string is not a valid float.
 
+  The grammar is C `strtod`'s in the "C" locale with the whole string
+  consumed, the same on every backend: optional leading (never trailing)
+  whitespace, an optional sign, then a decimal number with an optional
+  exponent (`1.5`, `.5`, `5.`, `1e3`), a hex number with an optional `p`
+  exponent (`0x10`, `0x1p3`), `inf`/`infinity`, or `nan`, the words
+  case-insensitive. Blank strings, `_` separators and `0b`/`0o` prefixes
+  are rejected.
+
       march> String.to_float("3.14")
       Ok(3.14)
       march> String.to_float("1e10") == Ok(10000000000.0)
