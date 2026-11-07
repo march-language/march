@@ -8,6 +8,11 @@ Non-exhaustive pattern match — missing case: None. [non_exhaustive_match]
 
     Add a branch for this case, or use `_ -> ...` as a catch-all.
 
+    fix, with a placeholder to fill in:
+
+8 |       Some(x) -> x
+9 +       None -> todo("handle None")
+
 
 -- TYPE MISMATCH ---------- errors/type_mismatch_41.march
 

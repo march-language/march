@@ -3732,7 +3732,7 @@ let compile filename =
   Printexc.record_backtrace true;
   let is_js_target = parse_target !target_str = March_tir.Llvm_emit.Js in
   let src =
-    try read_file filename
+    try read_file (Option.value !fix_verify_source ~default:filename)
     with Sys_error msg ->
       Printf.eprintf "march: %s\n" msg;
       exit 1
@@ -4057,6 +4057,8 @@ let compile filename =
                  `needs IO.Console` to the module, and give `main` the grant, \
                  `fn main(_console : Cap(IO.Console))`." ] } :: rest
         | _ -> diags in
+      (* The fix is shown under the error with the tier it earned. *)
+      let diags = Fix_verify.verify_parse ~filename ~src diags in
       List.iter (fun d ->
         Printf.eprintf "%s\n"
           (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
@@ -4539,7 +4541,7 @@ let compile filename =
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
-    ) diags;
+    ) (Fix_verify.verify ~src ~verifiable:is_user_file diags);
     exit 0
   end;
   let frontend_rejected =
@@ -4589,11 +4591,17 @@ let compile filename =
   (* Under --shell, only errors: they stop the session.  The program's
      warnings and refinement hints are the build's business, and a real
      project (forgepm) printed screens of them before the first prompt. *)
+  (* Under --check each fix is shown with the tier it earned on a re-check,
+     as --check-json prints it.  A build or run shows the tier the compiler
+     declared: re-checking there would rerun a compile. *)
+  let shown =
+    if !do_check && !shell_socket = None
+    then Fix_verify.verify ~src ~verifiable:is_user_file diags else diags in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d
          && (!shell_socket = None || d.severity = March_errors.Errors.Error) then
         emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
-    ) diags;
+    ) shown;
   (* --shell: the program typechecked as the node's build did; hand it to the
      remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
   (match !shell_socket with
@@ -5382,8 +5390,8 @@ let compile filename =
                   "`%s` is %s; add %s to keep it that way."
                   d.March_tir.Alloc_contract.d_name verdict attr;
               labels = []; notes = []; code = March_errors.Code.no_alloc_candidate;
-              fix = Some (contract_attr_fix ~src ~filename ~read_file
-                            d.March_tir.Alloc_contract.d_decl_span attr) }
+              fix = Some (March_errors.Errors.fix (contract_attr_fix ~src ~filename ~read_file
+                            d.March_tir.Alloc_contract.d_decl_span attr)) }
           in
           print_string (March_errors.Errors.render_diagnostic_json diag ^ "\n"))
         cands;
@@ -8061,6 +8069,8 @@ let () =
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
+    ("--fix-verify-source", Arg.String (fun p -> fix_verify_source := Some p),
+     "PATH (internal) Read the source text from PATH, keeping the file name given; used to re-check a fix");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
     ("--why-copies", Arg.Set why_copies,
      " Report each place in your code where a function builds a new copy of a value instead of reusing it in place, because the value is used again afterwards; with a fix that reorders when that is safe. Stops before code generation");

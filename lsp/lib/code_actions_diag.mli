@@ -19,3 +19,10 @@ val code_actions_at :
   ?diagnostics:Analysis_util.Lsp.Types.Diagnostic.t list ->
   unit ->
   Analysis_util.Lsp.Types.CodeAction.t list
+
+(** Set by [Analysis] to [Analysis.analyse] (which includes this module, so
+    cannot be named here): the analyser [code_actions_at] uses to re-check a
+    machine-applicable fix on a patched copy of the buffer before marking it
+    preferred. *)
+val reanalyse :
+  (filename:string -> src:string -> Analysis_util.t) option ref

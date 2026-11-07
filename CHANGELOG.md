@@ -21,6 +21,26 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
+  `march --check-json`, a fix's `applicability` is `machine-applicable`,
+  `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
+  `--check-json` applies it to a copy of the file and checks the copy. Unless its own
+  error went away and nothing new appeared, the fix is printed as `maybe-incorrect`.
+  `forge fix` applies only machine-applicable fixes, and the language server marks only
+  those as the preferred quick fix, after re-checking each one on a copy of the buffer.
+  The others are labelled "a guess: check it" or "fill in the placeholder".
+- **`march --check` shows each fix under its error,** as the lines it changes
+  (`4 - old`, `4 + new`), headed by its tier. Until now only `--check-json`, the editor
+  and `forge fix` saw fixes.
+- **More errors come with a fix:**
+  - an unknown name, qualified name, constructor or record field, when the message
+    suggests exactly one replacement (a guess when another candidate is as close);
+  - a missing JSON codec: `derive Json for T` after `T`'s declaration;
+  - a type annotation on `let?` / `let*`: it is removed;
+  - a non-exhaustive `match`: the missing arm, with a `todo(...)` body to replace.
+
+  In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
+  have a machine-applicable one.
 - **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
   parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
   parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is

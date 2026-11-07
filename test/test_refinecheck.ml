@@ -11706,7 +11706,7 @@ end|}
         March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
         match ctx.March_errors.Errors.diagnostics with
         | [ { March_errors.Errors.fix =
-                Some (March_errors.Errors.FReplace { text; _ }); _ } ] ->
+                Some { edit = March_errors.Errors.FReplace { text; _ }; _ }; _ } ] ->
           Alcotest.(check string) "rewrites the parameter list"
             "(ys : {List(Int) | len(_) > 0})" text
         | _ -> Alcotest.fail "the promoted warning carried no FReplace fix")

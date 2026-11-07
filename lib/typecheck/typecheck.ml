@@ -842,6 +842,13 @@ let ambiguous_ctor_hint env ctor all_types =
     We don't yet resolve constructor types through a type registry —
     ADT patterns produce fresh type variables.  That will be fixed
     when [DType] declarations populate the type registry. *)
+(* The span of a name as written, when the node's span covers more (a
+   constructor's span runs over its arguments): its first line, from its
+   start for the name's length. *)
+let name_only (name : Ast.name) : Ast.span =
+  { name.span with Ast.end_line = name.span.Ast.start_line;
+                   end_col = name.span.Ast.start_col + String.length name.txt }
+
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
   report_duplicate_pattern_binders env pat;
@@ -941,11 +948,14 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
      in
      match ci_opt with
      | None ->
-       let hint =
-         unknown_ctor_hint ?need:(Option.map (fun t -> NeedType t) expected) name.txt env in
-       Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-         (Printf.sprintf "I don't know a constructor called `%s`.%s"
-            name.txt hint);
+       let need = Option.map (fun t -> NeedType t) expected in
+       let hint = unknown_ctor_hint ?need name.txt env in
+       let msg = Printf.sprintf "I don't know a constructor called `%s`.%s" name.txt hint in
+       (match unknown_ctor_fix ?need name.txt env with
+        | Some k ->
+          Err.error_with_fix ~code:Err.Code.unknown_constructor env.errors ~span:name.span
+            ~fix:(Err.FReplace { span = name_only name; text = k }) msg
+        | None -> Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span msg);
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
@@ -1849,7 +1859,7 @@ let suggest_argument_order (env : env) (name : Ast.name) (args : Ast.expr list)
           env.errors.Err.diagnostics <- List.map (fun (x : Err.diagnostic) ->
               if x == first then
                 { x with Err.notes = x.Err.notes @ [ note ];
-                         fix = (match x.Err.fix with None -> fix | f -> f) }
+                         fix = (match x.Err.fix with None -> Err.fix_opt fix | f -> f) }
               else x) env.errors.Err.diagnostics
 
 (** What a name written as `spawn`'s actor (or a supervise block's child) is
@@ -1917,7 +1927,7 @@ let report_not_actor env ~(where : string) (n : Ast.name) : bool =
           message = Printf.sprintf "I don't know an actor called `%s`.%s" n.txt second;
           labels = []; notes = [];
           code = Err.Code.unknown_constructor;
-          fix = Option.map (fun g -> Err.FReplace { span = n.span; text = g }) guess };
+          fix = Err.fix_opt (Option.map (fun g -> Err.FReplace { span = n.span; text = g }) guess) };
       true
     end
 
@@ -2897,20 +2907,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
            (match (if unknown_single_qualifier then None else try_suffix name.txt) with
             | Some sch -> instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
             | None ->
-              let msg =
+              let msg, guess =
                 if String.contains name.txt '.' then
-                  qualified_error_msg name.txt env
+                  qualified_error_msg name.txt env, qualified_fix name.txt env
                 else begin
                   let base = Printf.sprintf "I cannot find `%s`." name.txt in
                   match suggest_var_in_scope ?need:(suggest_type_at name.span) name.txt env with
-                  | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s
-                  | None   -> base
+                  | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s, Some s
+                  | None   -> base, None
                 end
               in
               let code =
                 if String.contains name.txt '.' then Err.Code.unknown_qualified_name
                 else Err.Code.unbound_variable in
-              Err.error ~code env.errors ~span:name.span msg;
+              (* The one name the message suggests is the fix; `--check-json`
+                 re-checks it before calling it machine-applicable. *)
+              (match guess with
+               | Some g ->
+                 Err.error_with_fix ~code env.errors ~span:name.span
+                   ~fix:(Err.FReplace { span = name.span; text = g }) msg
+               | None -> Err.error ~code env.errors ~span:name.span msg);
               TError))
 
     (* ── Type annotations ─────────────────────────────────────────── *)
@@ -3862,7 +3878,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                       else []);
              code = Err.Code.arity_mismatch;
              fix = (match wildcard with
-                    | Some w when fix_here -> Some (Err.FReplace { span = w; text = "fn" })
+                    | Some w when fix_here -> Some (Err.fix (Err.FReplace { span = w; text = "fn" }))
                     | _ -> None) };
          let rec peel n t =
            if n <= 0 then t
@@ -3918,7 +3934,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                         [ Printf.sprintf "Add a callback `fn (value, next_state) -> ...` for %s, \
                                           in the order the protocol lists the branches."
                             (ticks missing) ]);
-             code = Err.Code.session_offer_nonexhaustive; fix };
+             code = Err.Code.session_offer_nonexhaustive; fix = Err.fix_opt fix };
          TError
        | Some (name, arity, n_args, def_span), _, _ ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
@@ -4036,10 +4052,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some _ | None -> ());
        match ci_opt with
        | None ->
-         let hint = unknown_ctor_hint ?need:(suggest_need_at sp) name.txt env in
-         Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-           (Printf.sprintf "I don't know a constructor called `%s`.%s"
-              name.txt hint);
+         let need = suggest_need_at sp in
+         let hint = unknown_ctor_hint ?need name.txt env in
+         let msg = Printf.sprintf "I don't know a constructor called `%s`.%s" name.txt hint in
+         (match unknown_ctor_fix ?need name.txt env with
+          | Some k ->
+            Err.error_with_fix ~code:Err.Code.unknown_constructor env.errors ~span:name.span
+              ~fix:(Err.FReplace { span = name_only name; text = k }) msg
+          | None -> Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span msg);
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
        | Some ci ->
@@ -4211,7 +4231,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
                        whose fname second;
                    labels = []; notes = [];
                    code = Err.Code.unknown_record_field;
-                   fix = Option.map (fun g -> Err.FReplace { span = fsp; text = g })
+                   fix = Option.map (fun g ->
+                       Err.fix ~tier:(field_guess_tier fname all_flds g)
+                         (Err.FReplace { span = fsp; text = g }))
                        (if span == fsp then guess else None) }
            ) update_tys;
          base_ty
@@ -4313,15 +4335,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
              | _ -> ());
             t
           | None   ->
-            Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
-              (Printf.sprintf
+            let guess = suggest_field ?need:(suggest_type_at sp) name.txt flds in
+            let msg = Printf.sprintf
                  "This record does not have a field called `%s`.%s\n\
                   The fields I see are: %s"
                  name.txt
-                 (match suggest_field ?need:(suggest_type_at sp) name.txt flds with
+                 (match guess with
                   | Some f -> Printf.sprintf " Did you mean `%s`?" f
                   | None -> "")
-                 (String.concat ", " (List.map fst flds)));
+                 (String.concat ", " (List.map fst flds)) in
+            (match guess with
+             | Some g when name.span.Ast.start_line > 0 ->
+               Err.error_with_fix ~code:Err.Code.unknown_record_field env.errors ~span:sp
+                 ~tier:(field_guess_tier name.txt flds g)
+                 ~fix:(Err.FReplace { span = name.span; text = g }) msg
+             | _ -> Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp msg);
             TError)
        | _ ->
          (match repr e_ty with
@@ -6894,7 +6922,7 @@ let report_missing_impl ?(builtin_class = false) env ~span ~site iface ty =
   in
   Err.report env.errors
     { Err.severity = Err.Error; span; message = msg; labels = bound_label; notes;
-      code = Err.Code.missing_impl; fix }
+      code = Err.Code.missing_impl; fix = Err.fix_opt fix }
 
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
@@ -7473,7 +7501,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
                          change to what the conversation should do."
                         s.txt (String.concat ", " (List.map (fun x -> "`" ^ x ^ "`") others)) r.txt ]);
             code = Err.Code.role_needs_invalid;
-            fix = Some (Err.FInsert { after_line = s.span.end_line; text }) }
+            fix = Some (Err.fix (Err.FInsert { after_line = s.span.end_line; text })) }
       end;
       walk ~tail ~dead rest
     | Ast.ProtoCrashOr (inner, crash, csp) :: rest ->
@@ -7971,7 +7999,7 @@ let rec check_decl env (d : Ast.decl) : env =
                           sf.sf_name.txt);
                  labels = []; notes = [];
                  code = Err.Code.supervise_field_missing;
-                 fix = Option.map (fun g -> Err.FReplace { span = sf.sf_name.span; text = g }) guess }
+                 fix = Err.fix_opt (Option.map (fun g -> Err.FReplace { span = sf.sf_name.span; text = g }) guess) }
            end;
            match sf.sf_ty with
            | Ast.TyCon (child, []) when report_not_actor env ~where:"this supervise block" child ->
@@ -9872,7 +9900,7 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
                   (L.the_capability have);
               labels;
               notes = [ L.relation ~have ~need; help ];
-              fix } in
+              fix = Err.fix_opt fix } in
           (* The callee's signature naming `Cap(X)` in a module without
              `needs X`: the same missing authority, so one report. *)
           let d' =
@@ -9889,7 +9917,7 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
                                        Printf.sprintf "`Cap(%s)` is named here, and the module declares no `needs %s`"
                                          need need } ];
                   notes = d'.Err.notes @ [ Printf.sprintf "and add `needs %s` to the module." need ];
-                  fix = Err.multi_fix [ n.Err.fix; d'.Err.fix ] }
+                  fix = Err.merge_fixes [ n.Err.fix; d'.Err.fix ] }
               | None -> d'
           in
           cap_diag_replace env.errors d d')
@@ -10033,7 +10061,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                labels = d.Err.labels
                         @ [ { Err.lbl_span = params_span;
                               lbl_message = "`main` is granted nothing here" } ];
-               fix = Err.multi_fix [ d.Err.fix; Some grant_fix ] }
+               fix = Err.merge_fixes [ d.Err.fix; Some (Err.fix grant_fix) ] }
          | None ->
          Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
            ~fix:grant_fix
@@ -10148,11 +10176,11 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                                    and give `main` a `Cap(%s)` parameter: `fn main(…, %s)`."
                      head show_grant rest c param_hint;
                  labels = d.Err.labels @ hops @ [ grant_label ];
-                 fix = Err.multi_fix [ d.Err.fix; param_fix ] }
+                 fix = Err.merge_fixes [ d.Err.fix; Err.fix_opt param_fix ] }
            | _ ->
            Err.report env.errors
              { Err.severity = Err.Error; span = primary; labels; notes = [];
-               code = Err.Code.cap_grant_exceeded; fix = param_fix;
+               code = Err.Code.cap_grant_exceeded; fix = Err.fix_opt param_fix;
                message =
              Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s`%s. \

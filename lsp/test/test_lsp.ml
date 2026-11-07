@@ -357,6 +357,10 @@ let () =
       "unreachable after panic: warning emitted", `Quick, test_unreachable_code_after_panic_warning;
       "unused_fns field populated correctly",     `Quick, test_unused_fns_field_populated;
     ];
+    "fix tiers", [
+      "a fix that holds is preferred",         `Quick, test_fix_tier_holds_preferred;
+      "a fix that fails its re-check is not",  `Quick, test_fix_tier_fails_recheck;
+    ];
     "termination code actions", [
       "x == 0 -> x <= 0 round-trips",           `Quick, test_term_action_eq_zero;
       "@[diverges] replaces @[decreases]",      `Quick, test_term_action_diverges_replaces_decreases;

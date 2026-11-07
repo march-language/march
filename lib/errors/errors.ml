@@ -27,6 +27,32 @@ type fix_kind =
       an applier sorts them bottom-up by (line, column).  Flat: build one
       with {!multi_fix}, which never nests. *)
 
+(** How far a tool may trust a fix (the rustc [Applicability] scale,
+    specs/progress/2026-11-06-fix-applicability-tiers.md):
+    - [Machine_applicable]: apply it unasked.  `forge fix` applies only these,
+      and an editor may offer them as the preferred quick fix.  [--check-json]
+      re-checks each one before printing it ([Fix_verify] in the driver) and
+      downgrades any that does not clear its own diagnostic cleanly;
+    - [Has_placeholders]: the right shape, with a part the programmer must
+      fill in (a `todo()` to replace);
+    - [Maybe_incorrect]: one plausible repair among several (a nearest-name
+      guess with a close second, a change of meaning).  Offered, never
+      applied unasked. *)
+type applicability = Machine_applicable | Has_placeholders | Maybe_incorrect
+
+type fix = { edit : fix_kind; tier : applicability }
+
+let string_of_applicability = function
+  | Machine_applicable -> "machine-applicable"
+  | Has_placeholders -> "has-placeholders"
+  | Maybe_incorrect -> "maybe-incorrect"
+
+(** A fix; [tier] defaults to [Machine_applicable]. *)
+let fix ?(tier = Machine_applicable) edit = { edit; tier }
+
+(** [Option.map fix]: for the builders that compute a [fix_kind option]. *)
+let fix_opt ?tier = Option.map (fix ?tier)
+
 type diagnostic = {
   severity : severity;
   span : March_ast.Ast.span;
@@ -35,7 +61,7 @@ type diagnostic = {
   notes : string list;      (** Extra context / suggestions *)
   code : string;           (** Machine-readable code from {!Code}, e.g. [Code.unused_binding].
                                Required: every diagnostic has one. *)
-  fix : fix_kind option;   (** Mechanically-determined fix, if one exists *)
+  fix : fix option;        (** Mechanically-determined fix, if one exists *)
 }
 
 and label = {
@@ -112,6 +138,59 @@ let multi_fix (fixes : fix_kind option list) : fix_kind option =
   | [ f ] -> Some f
   | fs -> Some (FMulti fs)
 
+(** [src] with the edits applied the way `forge fix` applies them: every
+    position is relative to the ORIGINAL source, so the edits go bottom-up,
+    right to left within a line.  Exact duplicate edits apply once.  An edit
+    whose position is outside the source is skipped.  Unlike `forge fix`, a
+    replace may span lines. *)
+let apply_edits (src : string) (edits : fix_kind list) : string =
+  let lines = Array.of_list (String.split_on_char '\n' src) in
+  let lines = ref (Array.to_list lines) in
+  let edits =
+    List.fold_left (fun acc f -> if List.mem f acc then acc else acc @ [ f ]) []
+      (List.concat_map fix_edits edits) in
+  let key = function
+    | FInsert { after_line; _ } -> (after_line, max_int)
+    | FDelete { end_line; _ } -> (end_line, max_int)
+    | FReplace { span; _ } -> (span.March_ast.Ast.start_line, span.March_ast.Ast.start_col)
+    | FMulti _ -> (0, 0) in
+  let sorted = List.sort (fun a b -> compare (key b) (key a)) edits in
+  List.iter (fun e ->
+      let ls = Array.of_list !lines in
+      let n = Array.length ls in
+      match e with
+      | FInsert { after_line; text } when after_line >= 0 && after_line <= n ->
+        let before = Array.to_list (Array.sub ls 0 after_line)
+        and after = Array.to_list (Array.sub ls after_line (n - after_line)) in
+        lines := before @ (String.split_on_char '\n' text) @ after
+      | FDelete { start_line; end_line }
+        when start_line >= 1 && start_line <= end_line && end_line <= n ->
+        lines := List.filteri (fun i _ -> i + 1 < start_line || i + 1 > end_line) !lines
+      | FReplace { span; text }
+        when span.March_ast.Ast.start_line >= 1
+          && span.March_ast.Ast.start_line <= span.March_ast.Ast.end_line
+          && span.March_ast.Ast.end_line <= n ->
+        let sl = span.March_ast.Ast.start_line - 1 and el = span.March_ast.Ast.end_line - 1 in
+        let clamp s c = max 0 (min c (String.length s)) in
+        let first = ls.(sl) and last = ls.(el) in
+        let sc = clamp first span.March_ast.Ast.start_col
+        and ec = clamp last span.March_ast.Ast.end_col in
+        let joined = String.sub first 0 sc ^ text ^ String.sub last ec (String.length last - ec) in
+        let before = Array.to_list (Array.sub ls 0 sl)
+        and after = Array.to_list (Array.sub ls (el + 1) (n - el - 1)) in
+        lines := before @ (String.split_on_char '\n' joined) @ after
+      | _ -> ())
+    sorted;
+  String.concat "\n" !lines
+
+(** Two diagnostics' fixes made one ({!multi_fix} over their edits), at the
+    weaker of their tiers. *)
+let merge_fixes (fixes : fix option list) : fix option =
+  let rank = function Machine_applicable -> 0 | Has_placeholders -> 1 | Maybe_incorrect -> 2 in
+  let tier = List.fold_left (fun t -> function
+      | Some f when rank f.tier > rank t -> f.tier | _ -> t) Machine_applicable fixes in
+  fix_opt ~tier (multi_fix (List.map (Option.map (fun f -> f.edit)) fixes))
+
 (* Some diagnostics get re-derived at every use of a declaration whose own
    definition is broken (e.g. instantiating a constructor re-resolves its
    stored surface argument types on each use, needed for fresh per-use type
@@ -143,13 +222,15 @@ let hint ctx ~code ~span message =
 (* Kept as an alias of [warning] now that every helper takes [~code]. *)
 let warning_with_code = warning
 
-let error_with_fix ctx ~code ~span ~fix message =
+let error_with_fix ctx ?tier ~code ~span ~fix:edit message =
   report ctx
-    { severity = Error; span; message; labels = []; notes = []; code; fix = Some fix }
+    { severity = Error; span; message; labels = []; notes = []; code;
+      fix = Some (fix ?tier edit) }
 
-let warning_with_fix ctx ~code ~span ~fix message =
+let warning_with_fix ctx ?tier ~code ~span ~fix:edit message =
   report ctx
-    { severity = Warning; span; message; labels = []; notes = []; code; fix = Some fix }
+    { severity = Warning; span; message; labels = []; notes = []; code;
+      fix = Some (fix ?tier edit) }
 
 let warning_with_code_and_fix = warning_with_fix
 
@@ -161,6 +242,8 @@ let ansi_dim          = "\027[2m"
 let ansi_cyan         = "\027[36m"
 let ansi_magenta      = "\027[35m"
 let ansi_bold_magenta = "\027[1;35m"
+let ansi_red          = "\027[31m"
+let ansi_green        = "\027[32m"
 
 let sev_bold_code  = function Error -> "\027[1;31m" | Warning -> "\027[1;33m" | Hint -> "\027[1;34m"
 let sev_plain_code = function Error -> "\027[31m"   | Warning -> "\027[33m"   | Hint -> "\027[34m"
@@ -617,6 +700,54 @@ let header_severity (line : string) : severity option =
       else Some Error
     else None
 
+(* A diagnostic's fix, shown under it as the lines it changes: `N - old`,
+   `N + new`, and for an inserted line the line it goes after (`N | …`).  The
+   heading says how far the fix can be trusted (its tier). *)
+let render_fix_block ~src (f : fix) : string =
+  let lines = Array.of_list (String.split_on_char '\n' src) in
+  let n = Array.length lines in
+  let get i = if i >= 1 && i <= n then lines.(i - 1) else "" in
+  let edits = List.sort compare (List.map (fun e ->
+      let k = match e with
+        | FInsert { after_line; _ } -> (after_line, max_int)
+        | FDelete { start_line; _ } -> (start_line, 0)
+        | FReplace { span; _ } -> (span.March_ast.Ast.start_line, span.March_ast.Ast.start_col)
+        | FMulti _ -> (0, 0) in
+      (k, e)) (fix_edits f.edit)) |> List.map snd in
+  let rows = List.concat_map (function
+      | FInsert { after_line; text } ->
+        (if after_line >= 1 then [ (after_line, '|', get after_line) ] else [])
+        @ List.mapi (fun i l -> (after_line + 1 + i, '+', l)) (String.split_on_char '\n' text)
+      | FDelete { start_line; end_line } ->
+        List.init (max 0 (end_line - start_line + 1)) (fun i ->
+            (start_line + i, '-', get (start_line + i)))
+      | FReplace { span; text } ->
+        let sl = span.March_ast.Ast.start_line and el = span.March_ast.Ast.end_line in
+        let first = get sl and last = get el in
+        let clamp s c = max 0 (min c (String.length s)) in
+        let sc = clamp first span.March_ast.Ast.start_col
+        and ec = clamp last span.March_ast.Ast.end_col in
+        let joined = String.sub first 0 sc ^ text ^ String.sub last ec (String.length last - ec) in
+        List.init (max 0 (el - sl + 1)) (fun i -> (sl + i, '-', get (sl + i)))
+        @ List.mapi (fun i l -> (sl + i, '+', l)) (String.split_on_char '\n' joined)
+      | FMulti _ -> []) edits in
+  if rows = [] then ""
+  else
+    let w = List.fold_left (fun m (k, _, _) -> max m (String.length (string_of_int k))) 1 rows in
+    let heading = match f.tier with
+      | Machine_applicable -> "fix (`forge fix` applies it):"
+      | Has_placeholders -> "fix, with a placeholder to fill in:"
+      | Maybe_incorrect -> "possible fix (a guess: check it before applying it):" in
+    let row (k, mark, l) =
+      let ns = string_of_int k in
+      let g = String.make (w - String.length ns) ' ' ^ ns ^ " " ^ String.make 1 mark ^ " " in
+      let painted = match mark with
+        | '-' -> paint ansi_red (g ^ l)
+        | '+' -> paint ansi_green (g ^ l)
+        | _ -> paint ansi_dim g ^ l in
+      painted in
+    "\n\n    " ^ paint ansi_dim heading ^ "\n\n" ^ String.concat "\n" (List.map row rows)
+
 let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
   let sev_str = header_title d in
   let line  = d.span.March_ast.Ast.start_line in
@@ -706,7 +837,10 @@ let render_diagnostic ~src ?(filename = "") (d : diagnostic) : string =
          pad ^ paint (sev_plain_code d.severity) underline;
          notes_block ]
        @ label_blocks)
-    ^ explain_hint d
+    ^ (let fix = match d.fix with Some f -> render_fix_block ~src f | None -> ""
+       and explain = explain_hint d in
+       (* A blank line between the fix's last row and the explain pointer. *)
+       fix ^ (if fix <> "" && explain <> "" then "\n" else "") ^ explain)
   end
 
 let parse_error_diagnostic ?(filename = "") ?hint ?(code = Code.syntax_error) ~msg lexbuf =
@@ -822,9 +956,15 @@ let render_diagnostic_json ?(related = true) (d : diagnostic) : string =
       Printf.sprintf {|{"kind":"multi","edits":[%s]}|}
         (String.concat "," (List.map edit_json (List.concat_map fix_edits fs)))
   in
+  (* The tier rides inside the fix object, after the edit's own fields, so
+     a reader that ignores it (an older `forge fix`) still parses the edit. *)
   let fix_json = match d.fix with
     | None -> "null"
-    | Some f -> edit_json f
+    | Some f ->
+      let e = edit_json f.edit in
+      Printf.sprintf {|%s,"applicability":%s}|}
+        (String.sub e 0 (String.length e - 1))
+        (json_string (string_of_applicability f.tier))
   in
   let related_json =
     if not related then ""
