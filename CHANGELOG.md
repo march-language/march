@@ -280,6 +280,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A module that calls C without `needs IO.Foreign` no longer compiles.** `extern_needs_foreign`
+  was a warning, so a dependency could reach C while `forge audit` and `forge.caps.lock` showed
+  nothing for it. It is now an error with the same `needs IO.Foreign` fix (and
+  `IO.Foreign.Blocking` for a `blocking fn`; `needs IO.Foreign` covers both). A module that
+  already declares it is unaffected. Declaring only the block's own capability (`needs Ffi`,
+  `needs LibC`) does not count: add `needs IO.Foreign` beside it. `Js.Dom`, `Js.Audio` and
+  `Js.Canvas` now do.
+
 - **Breaking:** the generated `@[endpoints]` entry points over a cluster node no longer take
   the root capability. `<P>_Run.cluster_<R>`, `offer_<R>`, `initiate_<R>`, `offer_hosted_<R>`
   and `cluster_hosted_<R>` take the node first: `Echo_Run.initiate_Client(node, body)`, where

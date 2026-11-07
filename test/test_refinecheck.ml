@@ -3711,6 +3711,7 @@ end|}));
 mod QExt do
   mod List do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn length(xs: List(Int)) : Int = "march_qext_length"
     end
@@ -4224,6 +4225,7 @@ end|}));
 mod QSExt do
   mod String do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn byte_size(s: String) : Int = "march_qsext_byte_size"
     end
@@ -4497,6 +4499,7 @@ end|}));
              {|
 mod DX do
   needs LibC
+  needs IO.Foreign
   extern "libc": Cap(LibC) do
     fn string_byte_length(s: String): Int
   end
