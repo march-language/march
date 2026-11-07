@@ -839,6 +839,19 @@ and emit_val_impl ctx expr =
            half toward +inf — delegate to the runtime helper *)
         use_runtime ctx "march_float_round";
         emit ctx "march_float_round("; emit_atom ctx a; emit ctx ")"
+      (* float_from_string is string_to_float under a second name (one C
+         symbol natively); the float constants and predicates are plain JS
+         numbers. Unmapped before #1178, so they failed the JS compile. *)
+      | "float_from_string", [a] ->
+        use_runtime ctx "march_string_to_float";
+        emit ctx "march_string_to_float("; emit_atom ctx a; emit ctx ")"
+      | "float_infinity", _ -> emit ctx "Infinity"
+      | "float_neg_infinity", _ -> emit ctx "(-Infinity)"
+      | "float_nan", _ -> emit ctx "NaN"
+      | "float_epsilon", _ -> emit ctx "Number.EPSILON"
+      | "float_is_nan", [a] -> emit ctx "Number.isNaN("; emit_atom ctx a; emit ctx ")"
+      | "float_is_infinite", [a] ->
+        emit ctx "(Math.abs("; emit_atom ctx a; emit ctx ") === Infinity)"
       (* unix_time takes a Unit argument in March; the JS runtime fn takes none *)
       | "unix_time", _ ->
         use_runtime ctx "march_unix_time";

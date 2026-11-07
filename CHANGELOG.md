@@ -655,6 +655,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`string_to_float` (and `String.to_float`, `float_from_string`) accepts the same
+  strings on every backend** (#1178): C `strtod`'s grammar with the whole string consumed,
+  now written down in the language reference. On `--target js`, `"inf"`, `"-inf"` and
+  `"nan"` parsed as `None` (so a TOML `x = inf` read as `0.`), blank strings as `Some(0.)`,
+  and `"1.5 "`, `"0b11"` and `"0o17"` were accepted while hex floats (`"0x1p3"`) were not.
+  The interpreter no longer accepts `_` separators (`"1_000"`), and native builds no longer
+  accept a string with an embedded NUL or depend on the C library for `nan(...)`.
+  `float_infinity`, `float_neg_infinity`, `float_nan`, `float_epsilon`, `float_is_nan`,
+  `float_is_infinite` and `float_from_string` now compile for `--target js`.
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
