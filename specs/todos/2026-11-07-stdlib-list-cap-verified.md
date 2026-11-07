@@ -15,9 +15,13 @@ conformance job and the `reflect-stdlib-sweep` "checks clean" case), and there L
    `reverse_append`, `reverse_reverse`, `take_onto_drop`, `take_onto_append`), six are
    `lemma_unproved` (`len_reverse`, `len_take_onto`, `len_take`, `take_drop`, `take_append`,
    `sum_int_reverse`, `product_int_reverse` and others that reach them), and nine sites are
-   `unreflectable-predicate` (the CI conformance skip ceiling counts them). Fix: resolve a bare
-   name at the entry's top level to the entry's own declaration before the Prelude's (the
-   typechecker's current-module rule), in `Refine_term`'s resolver.
+   `unreflectable-predicate` (the CI conformance skip ceiling counts them). Cause, exactly:
+   `Refine_term`'s `own_file_decl` prefers the walked file's own declaration of a shared key
+   only when that file is NOT a stdlib file ("Stdlib code still sees both"), and
+   `--stdlib-source` registers the entry as a stdlib file (`Typecheck_builtins.stdlib_source_files`,
+   which every stdlib loader also fills, so it cannot tell the entry apart). Fix: hand the graph
+   builder the entry file (the driver knows it) and apply the own-file rule to it as to a user
+   file; the typechecker already resolves the entry's own `reverse`.
 2. **A capability error under `cap verified`:** `List.par_map`'s `task_spawn` asks for
    `needs IO.Spawn` (`stdlib/list.march:461`), which `List` does not declare. Decide whether
    `par_map` belongs in `List` (it is the module's only effect) or `List` declares the need.
