@@ -5866,7 +5866,25 @@ let compile filename =
           let tir_for_js =
             if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
                  tir_for_js.March_tir.Tir.tm_fns
-            then March_tir.Dce.prune_unreachable ~roots:[ "main" ] tir_for_js
+            then
+              (* --test: the emitted entry hands the runner the test functions
+                 instead of calling main, so they — and the setup stubs the
+                 runner invokes — are entry points too.  Rooting only `main`
+                 pruned every test away, and the .mjs defined them but never
+                 called them (issue #1176). *)
+              let test_roots =
+                List.map fst tir_for_js.March_tir.Tir.tm_tests
+                @ List.filter_map
+                    (fun (fn : March_tir.Tir.fn_def) ->
+                      let n = fn.March_tir.Tir.fn_name in
+                      if n = March_tir.Tir_names.setup_fn_name
+                         || n = March_tir.Tir_names.setup_all_fn_name
+                         || March_tir.Tir_names.is_migrate_fn_name n
+                      then Some n else None)
+                    tir_for_js.March_tir.Tir.tm_fns
+              in
+              March_tir.Dce.prune_unreachable ~roots:([ "main" ] @ test_roots)
+                tir_for_js
             else tir_for_js in
           (* Collect source lines from user AST for source map generation.
              user_ast = desugared before stdlib injection, so only user functions. *)

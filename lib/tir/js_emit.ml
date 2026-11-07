@@ -188,6 +188,12 @@ let emit_literal ctx lit =
 (* Emit an atom as a plain name — used for apply-function slots in EAlloc
    where we need the raw function, not a closure wrapper. *)
 let emit_atom_raw ctx = function
+  | Tir.AVar v when v.Tir.v_name = "root_cap" ->
+    (* The ambient-capability sentinel (the --test dispatch wrappers call the
+       ambient implementation through it): native emits NULL for it (the
+       root_cap arm in llvm_emit.ml); a JS capability has no representation
+       of its own, so the sentinel is undefined. *)
+    emit ctx "undefined"
   | Tir.AVar v    -> emit ctx (mangle v.Tir.v_name)
   | Tir.ADefRef d -> emit ctx (mangle d.Tir.did_name)
   | Tir.ALit l    -> emit_literal ctx l
@@ -253,6 +259,10 @@ let unbind_br_vars ctx binds =
    Both AVar and ADefRef can hold a module-level function reference — check fn_names.
    Extern function names also get the $clo suffix and are tracked as used. *)
 let emit_atom ctx = function
+  | Tir.AVar v when v.Tir.v_name = "root_cap" ->
+    (* ambient-capability sentinel: undefined, as native's NULL — see
+       emit_atom_raw. *)
+    emit ctx "undefined"
   | Tir.AVar v ->
     let n = mangle v.Tir.v_name in
     if Hashtbl.mem ctx.extern_fns v.Tir.v_name
@@ -719,16 +729,40 @@ and emit_val_impl ctx expr =
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
       (* The Diagnostics panic-site record: nothing to record in JS. *)
       | "__panic_site", _ -> emit ctx "undefined"
-      (* A test's panic header (compiled test runner only): nothing in JS. *)
-      | "__test_header", _ -> emit ctx "undefined"
-      (* A failed assert: throw the report's header (its first \x1f field);
-         the value diff is the native runtime's. *)
-      | "__assert_fail", meta :: _ ->
-        let b = Buffer.create 16 in
-        emit_atom { ctx with buf = b } meta;
-        emit ctx (Printf.sprintf
-                    "(() => { throw new Error(%s.split(\"\\x1f\")[0]); })()"
-                    (Buffer.contents b))
+      (* A test's panic header (Lower_tests sets it first thing in every
+         compiled test): the JS runner stores it to splice panic messages
+         into, exactly like march_test_header in runtime/march_runtime.c. *)
+      | "__test_header", h :: _ ->
+        use_runtime ctx "march_test_header";
+        emit ctx "march_test_header("; emit_atom ctx h; emit ctx ")"
+      (* A failed assert: the report engine (lib/errors/test_report.ml's,
+         ported into runtime/march_runtime.mjs) builds the message from the
+         \x1f-separated meta fields and the two printed operands, then
+         panics: a thrown Error tagged .marchPanic the runner catches. *)
+      | "__assert_fail", meta :: left :: right :: _ ->
+        use_runtime ctx "march_assert_fail";
+        emit ctx "march_assert_fail("; emit_atom ctx meta;
+        emit ctx ", "; emit_atom ctx left;
+        emit ctx ", "; emit_atom ctx right; emit ctx ")"
+      (* Capability dictionaries (--test's ambient dispatch wrappers).
+         Native stores a capability as NULL-or-a-dictionary (the "Capabilities"
+         note in runtime/march_runtime.c) and Option there is niche-encoded,
+         so cap_dict is a bare cast; a JS capability has no representation of
+         its own (the entry call passes no argument: undefined, exactly
+         native's NULL), so the JS helper allocates the tagged Option. *)
+      | "cap_dict", c :: _ ->
+        use_runtime ctx "march_cap_dict";
+        emit ctx "march_cap_dict("; emit_atom ctx c; emit ctx ")"
+      | "cap_impl", (c :: d :: _) ->
+        use_runtime ctx "march_cap_impl";
+        emit ctx "march_cap_impl("; emit_atom ctx c;
+        emit ctx ", "; emit_atom ctx d; emit ctx ")"
+      | "mint_cap", c :: _ ->
+        use_runtime ctx "march_mint_cap";
+        emit ctx "march_mint_cap("; emit_atom ctx c; emit ctx ")"
+      | "cap_narrow", c :: _ ->
+        use_runtime ctx "march_cap_narrow";
+        emit ctx "march_cap_narrow("; emit_atom ctx c; emit ctx ")"
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
         let msg = if args = [] then "\"panic\""
                   else (let b = Buffer.create 16 in
@@ -1790,6 +1824,12 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
   Hashtbl.replace ctx.runtime_uses "march_unix_time_ms" ();
   Hashtbl.replace ctx.runtime_uses "march_float_round" ();
+  (* A --test module's entry calls the runner helpers (emitted with the
+     exports below); import them whether or not the compiled code does. *)
+  if m.Tir.tm_tests <> [] then
+    List.iter (use_runtime ctx)
+      [ "march_test_init"; "march_test_setup_all"
+      ; "march_test_run"; "march_test_report" ];
   let runtime_wrappers =
     "const float_to_string    = { _0: ($_, x) => march_float_to_string(x) };\n" ^
     "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
@@ -1818,12 +1858,35 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
+  (* --test: the runner entry replaces main's call, exactly like
+     llvm_toplevel's --test driver: main is exported but never runs, and
+     march_test_init/setup_all/run/report (runtime/march_runtime.mjs) run
+     the tests and exit with 1 if any failed.  Test functions may be async
+     (actors), so each runs awaited, in order. *)
+  let tests = m.Tir.tm_tests in
+  let has_fn n = List.exists (fun fn -> fn.Tir.fn_name = n) m.Tir.tm_fns in
   if has_main then begin
     Buffer.add_string export_buf "export { main };\n";
-    if Hashtbl.mem ctx.async_fns "main" then
-      Buffer.add_string export_buf "await main();\n"
-    else
-      Buffer.add_string export_buf "main();\n"
+    if tests = [] then
+      if Hashtbl.mem ctx.async_fns "main" then
+        Buffer.add_string export_buf "await main();\n"
+      else
+        Buffer.add_string export_buf "main();\n"
+  end;
+  if tests <> [] then begin
+    Buffer.add_string export_buf "march_test_init();\n";
+    Buffer.add_string export_buf
+      (Printf.sprintf "await march_test_setup_all(%s);\n"
+         (if has_fn Tir_names.setup_all_fn_name then Tir_names.setup_all_fn_name
+          else "null"));
+    List.iter (fun (fn_name, display_name) ->
+      Buffer.add_string export_buf
+        (Printf.sprintf "await march_test_run(%s, %s, %s);\n"
+           (mangle fn_name) (js_string_lit display_name)
+           (if has_fn Tir_names.setup_fn_name then Tir_names.setup_fn_name
+            else "null"))
+    ) tests;
+    Buffer.add_string export_buf "march_test_report();\n"
   end;
   List.iter (fun name ->
     if name <> "main" then

@@ -13448,6 +13448,111 @@ let test_js_int_subset_parity () =
             && ir_contains tail "EXIT:1")
   end
 
+(** `march --target js --test` runs the compiled test blocks and reports them
+    byte-for-byte the way the native `--compile --test` harness does
+    (https://github.com/march-language/march/issues/1176).  The JS backend used
+    to emit an .mjs that exported nothing and called nothing: a failing test
+    printed nothing and exited 0.  The runner entry (js_emit.ml) and the ported
+    harness (runtime/march_runtime.mjs) must reproduce the native report
+    exactly — the plain run and a `--filter=` run (which parses argv through
+    the ported march_test_init) alike.  The report's `-- TEST FAILURE -- <path>`
+    line is normalized away before comparing: the compile cache is keyed by
+    SOURCE CONTENT, so a cached native binary can carry the source path of an
+    earlier compile of identical content (a different temp dir), and that
+    path-stamp is not what this fix is about. *)
+let normalize_test_report_path s =
+  String.concat "\n"
+    (List.map
+       (fun l ->
+         if String.starts_with ~prefix:"  -- TEST FAILURE -- " l
+         then "  -- TEST FAILURE -- <src>" else l)
+       (String.split_on_char '\n' s))
+
+let test_js_test_runner_matches_native () =
+  let name = "march_js_test_runner" in
+  let src = "mod Parity do\n\
+    \  test \"passes one\" do\n\
+    \    assert (1 + 1 == 2)\n\
+    \  end\n\
+    \n\
+    \  test \"must fail\" do\n\
+    \    assert (1 + 1 == 3)\n\
+    \  end\n\
+     end\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS --test runner parity)"
+  else begin
+    let cd = Filename.quote project_root in
+    let bin = Filename.concat tmp "testbin" in
+    (* The native --compile --test binary is the reference run. *)
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " cd)
+            ~extra_args:"--test" ~main_exe ~bin ~src:src_path () with
+    | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+    | Some bin ->
+      let mjs = Filename.concat tmp (name ^ ".mjs") in
+      let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js --test -o %s %s 2>&1"
+          cd (Filename.quote main_exe) (Filename.quote mjs) (Filename.quote src_path)) in
+      if crc <> 0 then
+        Alcotest.failf "%s: --target js --test compile failed (rc=%d):\n%s" name crc cout;
+      (* Both runs append their exit code with `echo EXIT:$?`, so the byte-for-byte
+         comparison below pins the exit code along with the report text. *)
+      let (_, nout) = run_capture (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+      let (_, jout) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?" (Filename.quote mjs)) in
+      Alcotest.(check string) (name ^ ": the JS report matches the native binary byte for byte")
+        (normalize_test_report_path nout) (normalize_test_report_path jout);
+      Alcotest.(check bool) (name ^ ": the failing test is reported and the run exits 1 (got: "
+        ^ jout ^ ")")
+        true (ir_contains jout "FAIL: \"must fail\"" && ir_contains jout "Finished:"
+              && ir_contains jout "EXIT:1");
+      (* A filter that matches nothing: no FAIL block, exit 0 — the ported
+         init/filter parsing and the skip-not-fail semantics, again vs native. *)
+      let filter = "--filter=zzz_no_such_test_zzz" in
+      let (_, nfout) = run_capture (Printf.sprintf "%s %s 2>&1; echo EXIT:$?"
+          (Filename.quote bin) filter) in
+      let (_, jfout) = run_capture (Printf.sprintf "node %s %s 2>&1; echo EXIT:$?"
+          (Filename.quote mjs) filter) in
+      Alcotest.(check string) (name ^ ": the --filter= run matches native byte for byte")
+        nfout jfout;
+      Alcotest.(check bool) (name ^ ": a filter matching nothing exits 0 with no FAIL (got: "
+        ^ jfout ^ ")")
+        true (ir_contains (String.trim jfout) "EXIT:0" && not (ir_contains jfout "FAIL:"))
+  end
+
+(** `march --target js --test` on a program with NO test block must still
+    compile and run (issue #1176's second symptom).  `--test` makes capability
+    mocking live (flags.ml), so the IO dispatch wrappers (cap_dict over the
+    ambient root_cap) are injected into every --test compile — and the JS
+    target mapped neither `cap_dict` nor `root_cap`, so EVERY --target js --test
+    compile died with "builtin `cap_dict` has no JavaScript-target
+    implementation", even for a println-only program with no tests.  The
+    runner entry is only emitted when tm_tests is non-empty, so a test-free
+    program must still export and call main. *)
+let test_js_test_target_no_tests () =
+  let name = "march_js_test_no_tests" in
+  let src = "mod Prints do\n\
+    \  needs IO.Console\n\
+    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
+    \    println(\"hello\")\n\
+    \  end\n\
+     end\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS --test test-free compile)"
+  else begin
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then
+      Alcotest.failf "%s: --target js --test compile failed (rc=%d) — the cap_dict-on-JS symptom:\n%s"
+        name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    Alcotest.(check string) (name ^ ": main still runs and exits 0")
+      "hello\nEXIT:0" (String.trim js_out)
+  end
+
 (** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
     lists have been filled with freed cons cells.  march_alloc is a plain
     malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
@@ -18443,6 +18548,10 @@ let codegen_suites =
             test_int_overflow_uncaught_panic;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
+          Alcotest.test_case "--target js --test reports failures byte-for-byte like native, filter too (issue 1176)" `Quick
+            test_js_test_runner_matches_native;
+          Alcotest.test_case "--target js --test compiles a test-free println program (cap_dict on JS)" `Quick
+            test_js_test_target_no_tests;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
           Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick

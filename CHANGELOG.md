@@ -314,6 +314,18 @@ git log is authoritative for exact commits.
   the lambda, or use the sequential version. `task_spawn` and `Task.async`
   are unaffected.
 
+### Fixed
+
+- **`march --target js --test` runs the tests.** It compiled the `test` blocks into a
+  `.mjs` that never called the test functions: a run printed nothing and exited 0 even
+  when a test failed. The emitted module now drives the same harness as a native
+  `--compile --test` binary — `setup` / `setup_all`, `--filter=`, `--verbose`, failure
+  reports with the value differ, the `Finished: N tests, M failures` footer and a
+  nonzero exit when anything failed — and its output matches the native binary's.
+  `--test` with `--target js` also no longer fails with `builtin 'cap_dict' has no
+  JavaScript-target implementation`: the capability-mocking builtins (`cap_dict`,
+  `cap_impl`, `mint_cap`, `cap_narrow`) are implemented in the JavaScript runtime.
+
 ### Changed
 
 - **Int `/` and `%` are faster in compiled code.** The zero-divisor check is now a test in

@@ -700,3 +700,715 @@ export function march_process_argv() {
   for (let i = args.length - 1; i >= 0; i--) list = { $: "Cons", _0: args[i], _1: list };
   return list;
 }
+
+/* ── Panics ──────────────────────────────────────────────────────────────
+ * A March panic is a thrown Error tagged .marchPanic, its message the panic
+ * report as a byte string.  The test runner catches a tagged throw the way
+ * the native runner catches a longjmp'd march_panic; an untagged Error is a
+ * genuine JS fault and, as there, kills the process. */
+export function march_panic(msg) {
+  const e = new Error(msg === undefined || msg === null ? "panic" : String(msg));
+  e.marchPanic = true;
+  throw e;
+}
+
+/* ── Capability dictionaries under `march --test` ────────────────────────
+ * --test injects the ambient-capability dispatch wrappers (lib/ir/io_ops_gen.ml),
+ * and each wrapper opens with `match cap_dict(c)`.  Native's builtins treat a
+ * capability as NULL-or-a-dictionary (runtime/march_runtime.c "Capabilities"),
+ * and a JS capability is a value with no representation of its own: the
+ * argument-free entry call leaves it undefined, exactly native's NULL.  None
+ * must be a fresh tagged object here — JS Option has no NULL niche — so the
+ * wrapper's `Some(d)`/`None` arms match. */
+export function march_cap_dict(c) {
+  return (c === null || c === undefined)
+    ? { $: "None" }
+    : { $: "Some", _0: c };
+}
+export function march_cap_impl(_c, d) { return d; }
+export function march_mint_cap(_c) { return undefined; }
+export function march_cap_narrow(c) { return c; }
+
+/* ── Test harness: the `march --target js --test` runner ─────────────────
+ * A line-for-line port of the C runner in runtime/march_runtime.c
+ * (march_test_init / march_test_header / march_test_run / march_test_report
+ * and march_assert_fail's report engine), which is itself a port of
+ * lib/errors/test_report.ml that the interpreter runs: a failed test must
+ * report byte for byte the same on every backend.  Change one, change all.
+ *
+ * A JS panic is a thrown Error tagged .marchPanic (march_panic above); the
+ * runner catches it the way the native runner longjmp's back.  Test
+ * functions may be async, so the runner awaits them one at a time: the
+ * dot/✓/F stream stays in order, and `march_test_report` still runs after
+ * every test has settled. */
+
+function march_test_write(s) { march_write(s, false); }
+
+/* ── Byte strings as byte arrays: the report engine's working form ──
+ * The differ's work strings are byte strings (see "Byte strings" above);
+ * it operates on byte arrays, since it counts columns in bytes, splits at
+ * byte offsets, and marks a byte's whole UTF-8 sequence.  tr_bytes /
+ * tr_bstr cross the boundary at the edges of the engine. */
+function tr_bytes(s) {
+  if (s === null || s === undefined || s === "") return [];
+  const v = march_byte_view(s);
+  if (v) return Array.from(v);
+  const n = s.length, a = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = s.charCodeAt(i);
+    a[i] = c < 0x80 ? c : c - MARCH_RAW_BASE;
+  }
+  return a;
+}
+function tr_bstr(a) { return a.length ? march_bytes_to_string(a) : ""; }
+
+const TR_ELLIPSIS = [0xe2, 0x80, 0xa6];   /* UTF-8 "…" */
+const TR_ELIDE_OVER = 60;
+
+function tr_cont(b) { return (b & 0xc0) === 0x80; }
+function tr_width(a) {
+  let w = 0;
+  for (let i = 0; i < a.length; i++) if (!tr_cont(a[i])) w++;
+  return w;
+}
+
+function TrBuf() { this.a = []; }
+TrBuf.prototype.add = function (a) { for (let i = 0; i < a.length; i++) this.a.push(a[i]); };
+
+/* test_report.ml's [clip]: at most [max] columns, the last an ellipsis. */
+function tr_clip(a, max) {
+  if (tr_width(a) <= max) return a.slice();
+  const out = [];
+  let w = 0, i = 0;
+  const n = a.length;
+  while (i < n && (w < max - 1 || tr_cont(a[i]))) {
+    if (!tr_cont(a[i])) w++;
+    out.push(a[i]);
+    i++;
+  }
+  const b = new TrBuf();
+  b.add(out); b.add(TR_ELLIPSIS);
+  return b.a;
+}
+
+/* test_report.ml's [quote]. */
+function tr_quote(s) {
+  const out = [34];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === 34) out.push(92, 34);
+    else if (c === 92) out.push(92, 92);
+    else if (c === 10) out.push(92, 110);
+    else if (c === 9) out.push(92, 116);
+    else if (c === 13) out.push(92, 114);
+    else if (c < 0x20 || c === 0x7f) {
+      const hx = c.toString(16).padStart(2, "0");   /* %02x, lowercase */
+      out.push(92, 120);
+      for (const ch of hx) out.push(ch.charCodeAt(0));
+    } else out.push(c);
+  }
+  out.push(34);
+  return out;
+}
+
+/* Node kinds: LEAF / STR / LIST / TUPLE / RECORD / CTOR.
+ * text: LEAF/STR the text (STR's includes the quotes and escapes);
+ * CTOR/RECORD the name ([] = none).  sep: RECORD ": " or " = " (interned,
+ * so === compares). */
+const TR_LEAF = 0, TR_STR = 1, TR_LIST = 2, TR_TUPLE = 3, TR_RECORD = 4, TR_CTOR = 5;
+function tr_node(kind) { return { kind, text: null, sep: null, n: 0, items: [], keys: null }; }
+
+/* The parser: tr_parse.s is a byte array.  NULL (JS null) is "unreadable". */
+function tr_is_delim(b) {
+  return b === 44 || b === 40 || b === 41 || b === 91 || b === 93
+    || b === 123 || b === 125 || b === 34;
+}
+function tr_alpha_byte(b) { return (b >= 65 && b <= 90) || (b >= 97 && b <= 122); }
+function tr_alnum_byte(b) { return tr_alpha_byte(b) || (b >= 48 && b <= 57); }
+function tr_is_ident(t) {
+  if (!t.length) return false;
+  if (!(tr_alpha_byte(t[0]) || t[0] === 95)) return false;
+  for (let i = 0; i < t.length; i++)
+    if (!(tr_alnum_byte(t[i]) || t[i] === 95 || t[i] === 46)) return false;
+  return true;
+}
+/* OCaml's String.trim: ' ', '\012', '\n', '\r', '\t' (\012 == '\n'). */
+function tr_is_trim(b) { return b === 32 || b === 10 || b === 13 || b === 9; }
+
+function tr_skip(p) { while (p.pos < p.n && p.s[p.pos] === 32) p.pos++; }
+function tr_peek(p) { return p.pos < p.n ? p.s[p.pos] : -1; }
+
+/* Items up to [close]; null on an unreadable sequence. */
+function tr_seq(p, kind, close) {
+  const v = tr_node(kind);
+  tr_skip(p);
+  if (tr_peek(p) === close) { p.pos++; return v; }
+  for (;;) {
+    const x = tr_value(p);
+    if (!x) return null;
+    v.items.push(x); v.n++;
+    tr_skip(p);
+    const c = tr_peek(p);
+    if (c === 44) { p.pos++; continue; }
+    if (c === close) { p.pos++; return v; }
+    return null;
+  }
+}
+
+function tr_fields(p, name) {
+  const v = tr_node(TR_RECORD);
+  v.text = name; v.sep = null; v.keys = [];
+  tr_skip(p);
+  if (tr_peek(p) === 125) { p.pos++; v.sep = ": "; return v; }
+  for (;;) {
+    tr_skip(p);
+    const start = p.pos;
+    while (p.pos < p.n && p.s[p.pos] !== 58 && p.s[p.pos] !== 61 && !tr_is_delim(p.s[p.pos])) p.pos++;
+    const c = tr_peek(p);
+    const this_sep = c === 58 ? ": " : c === 61 ? " = " : null;
+    if (!this_sep || (v.sep !== null && v.sep !== this_sep)) return null;
+    v.sep = this_sep;
+    const key = tr_trim(p.s.slice(start, p.pos));
+    if (!tr_is_ident(key)) return null;
+    p.pos++;
+    const x = tr_value(p);
+    if (!x) return null;
+    v.items.push(x); v.n++; v.keys.push(key);
+    tr_skip(p);
+    const c2 = tr_peek(p);
+    if (c2 === 44) { p.pos++; continue; }
+    if (c2 === 125) { p.pos++; return v; }
+    return null;
+  }
+}
+
+function tr_trim(a) {
+  let x = 0, y = a.length;
+  while (x < y && tr_is_trim(a[x])) x++;
+  while (y > x && tr_is_trim(a[y - 1])) y--;
+  return a.slice(x, y);
+}
+
+function tr_value(p) {
+  tr_skip(p);
+  const c = tr_peek(p);
+  if (c < 0) return null;
+  if (c === 34) {                       /* '"' */
+    const start = p.pos;
+    p.pos++;
+    while (p.pos < p.n && p.s[p.pos] !== 34) {
+      if (p.s[p.pos] === 92) p.pos++;   /* a backslash skips its escape */
+      p.pos++;
+    }
+    if (p.pos >= p.n) return null;      /* no closing quote: unreadable */
+    p.pos++;
+    const v = tr_node(TR_STR);
+    v.text = p.s.slice(start, p.pos);
+    return v;
+  }
+  if (c === 91) { p.pos++; return tr_seq(p, TR_LIST, 93); }        /* '[' ... ']' */
+  if (c === 40) {                                                   /* '(' ... ')' */
+    p.pos++;
+    const v = tr_seq(p, TR_TUPLE, 41);
+    if (v && v.n === 0) { v.kind = TR_LEAF; v.text = [40, 41]; }    /* "()" */
+    return v;
+  }
+  if (c === 123) { p.pos++; return tr_fields(p, []); }              /* '{' fields */
+  if (tr_is_delim(c)) return null;
+  const start = p.pos;
+  while (p.pos < p.n && !tr_is_delim(p.s[p.pos])) p.pos++;
+  const text = tr_trim(p.s.slice(start, p.pos));
+  if (!text.length) return null;
+  if (p.pos < p.n && p.s[p.pos] === 40 && tr_is_ident(text)) {      /* Name(args) */
+    p.pos++;
+    const v = tr_seq(p, TR_CTOR, 41);
+    if (!v) return null;
+    v.text = text;
+    return v;
+  }
+  if (p.pos < p.n && p.s[p.pos] === 123 && tr_is_ident(text)) {     /* Name{fields} */
+    p.pos++;
+    return tr_fields(p, text);
+  }
+  const v = tr_node(TR_LEAF);
+  v.text = text;
+  return v;
+}
+
+function tr_parse(bytes) {
+  const p = { s: bytes, n: bytes.length, pos: 0 };
+  const v = tr_value(p);
+  if (v) {
+    tr_skip(p);
+    if (p.pos === p.n) return v;
+  }
+  const leaf = tr_node(TR_LEAF);
+  leaf.text = bytes.slice();
+  return leaf;
+}
+
+/* text/keys: byte arrays; null text compares equal only to null. */
+function tr_text_eq(x, y) {
+  if (x === null || x === undefined || y === null || y === undefined)
+    return (x === null || x === undefined) && (y === null || y === undefined);
+  if (x.length !== y.length) return false;
+  for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+  return true;
+}
+
+function tr_eq(a, b) {
+  if (a.kind !== b.kind || a.n !== b.n) return false;
+  if (!tr_text_eq(a.text, b.text)) return false;
+  if (a.kind === TR_RECORD && a.sep !== b.sep) return false;
+  for (let i = 0; i < a.n; i++) {
+    if (a.keys && !tr_text_eq(a.keys[i], b.keys[i])) return false;
+    if (!tr_eq(a.items[i], b.items[i])) return false;
+  }
+  return true;
+}
+
+function tr_print_to(b, v) {
+  switch (v.kind) {
+    case TR_LEAF: case TR_STR: b.add(v.text); return;
+    case TR_LIST: case TR_TUPLE: case TR_CTOR:
+      if (v.kind === TR_CTOR) { b.add(v.text); b.add([40]); }
+      else b.add([v.kind === TR_LIST ? 91 : 40]);
+      for (let i = 0; i < v.n; i++) {
+        if (i > 0) b.add([44, 32]);
+        tr_print_to(b, v.items[i]);
+      }
+      b.add([v.kind === TR_LIST ? 93 : 41]);
+      return;
+    case TR_RECORD:
+      if (v.text.length) { b.add(v.text); b.add([32]); }
+      b.add([123, 32]);                                              /* "{ " */
+      for (let i = 0; i < v.n; i++) {
+        if (i > 0) b.add([44, 32]);
+        b.add(v.keys[i]); b.add(tr_bytes(v.sep));
+        tr_print_to(b, v.items[i]);
+      }
+      b.add([32, 125]);                                              /* " }" */
+      return;
+  }
+}
+function tr_print(v) { const b = new TrBuf(); tr_print_to(b, v); return b.a; }
+
+/* A path step: an index into a list / tuple / constructor, or a field.
+ * diff kinds: 0 WHOLE, 1 CHARS, 2 LENGTH. */
+function tr_diff_new() { return { steps: [], nsteps: 0, kind: 0, chars: 0, nl: 0, nr: 0 }; }
+
+/* test_report.ml's [first_diff]; [a] and [b] differ.  A path deeper than 64
+ * steps stops there and marks the whole part. */
+function tr_first_diff(a, b, d) {
+  if (d.steps.length >= 64) { d.kind = 0; return; }
+  const same_shape =
+    (a.kind === TR_LIST && b.kind === TR_LIST)
+    || (a.kind === TR_TUPLE && b.kind === TR_TUPLE && a.n === b.n)
+    || (a.kind === TR_CTOR && b.kind === TR_CTOR && a.n === b.n
+        && tr_text_eq(a.text, b.text));
+  if (same_shape) {
+    const m = a.n < b.n ? a.n : b.n;
+    for (let i = 0; i < m; i++) {
+      if (!tr_eq(a.items[i], b.items[i])) {
+        d.steps.push({ is_field: 0, idx: i, field: null });
+        tr_first_diff(a.items[i], b.items[i], d);
+        return;
+      }
+    }
+    /* Only a list can get here (equal-length tuples / constructors that
+       differ have a differing item). */
+    d.kind = 2; d.nl = a.n; d.nr = b.n;
+    return;
+  }
+  if (a.kind === TR_RECORD && b.kind === TR_RECORD && a.n === b.n
+      && tr_text_eq(a.text, b.text)) {
+    let keys_same = true;
+    for (let i = 0; i < a.n; i++)
+      if (!tr_text_eq(a.keys[i], b.keys[i])) { keys_same = false; break; }
+    if (keys_same) {
+      for (let i = 0; i < a.n; i++) {
+        if (!tr_eq(a.items[i], b.items[i])) {
+          d.steps.push({ is_field: 1, idx: i, field: a.keys[i] });
+          tr_first_diff(a.items[i], b.items[i], d);
+          return;
+        }
+      }
+      d.kind = 0;  /* only the separators differ */
+      return;
+    }
+  }
+  if (a.kind === TR_STR && b.kind === TR_STR) {
+    const la = a.text.length, lb = b.text.length;
+    const n = la < lb ? la : lb;
+    let i = 0;
+    while (i < n && a.text[i] === b.text[i]) i++;
+    while (i > 0 && tr_cont(a.text[i])) i--;
+    d.kind = 1; d.chars = i;
+    return;
+  }
+  d.kind = 0;
+}
+
+function tr_path_text(d, root) {
+  const b = new TrBuf();
+  let v = root;
+  for (let i = 0; i < d.steps.length; i++) {
+    if (d.steps[i].is_field) { b.add([46]); b.add(d.steps[i].field); }
+    else if (v.kind === TR_LIST) b.add(tr_bytes("[" + d.steps[i].idx + "]"));
+    else break;  /* a constructor or tuple argument: the carets show the rest */
+    v = v.items[d.steps[i].idx];
+  }
+  return b.a;
+}
+
+function tr_render_new(d, elide, longer) {
+  return { b: new TrBuf(), col: 0, mcol: 0, mwidth: 1, elide, d, longer };
+}
+function tr_r_add(r, a) { r.b.add(a); r.col += tr_width(a); }
+function tr_r_marked(r, a) {
+  const c = r.col;
+  tr_r_add(r, a);
+  const w = tr_width(a);
+  r.mcol = c; r.mwidth = w > 1 ? w : 1;
+}
+function tr_r_print(r, v) { tr_r_add(r, tr_print(v)); }
+
+function tr_r_str(r, s, i) {
+  const n = s.length;
+  if (!r.elide || tr_width(s) <= TR_ELIDE_OVER) {
+    tr_r_add(r, s.slice(0, i));
+    let j = i + 1;
+    while (j < n && tr_cont(s[j])) j++;
+    tr_r_marked(r, s.slice(i, j));
+    tr_r_add(r, s.slice(j, n));
+    return;
+  }
+  let back = i, cols = 0;
+  while (back > 1 && cols < 20) { back--; if (!tr_cont(s[back])) cols++; }
+  let fwd = i, fcols = 0;
+  while (fwd < n - 1 && fcols < 30) { fwd++; if (fwd < n && !tr_cont(s[fwd])) fcols++; }
+  while (fwd < n && tr_cont(s[fwd])) fwd++;
+  /* Only the closing quote left: show it rather than an ellipsis. */
+  if (fwd >= n - 1) fwd = n;
+  { const b = new TrBuf(); b.add([34]); if (back > 1) b.add(TR_ELLIPSIS); tr_r_add(r, b.a); }
+  tr_r_add(r, s.slice(back, i));
+  let j = i + 1;
+  while (j < n && tr_cont(s[j])) j++;
+  if (j > n) j = n;
+  tr_r_marked(r, s.slice(i, j));
+  const stop = j > fwd ? j : fwd;
+  tr_r_add(r, s.slice(j, stop));
+  if (stop < n) { const b = new TrBuf(); b.add(TR_ELLIPSIS); b.add([34]); tr_r_add(r, b.a); }
+}
+
+function tr_r_target(r, v) {
+  const d = r.d;
+  if (d.kind === 1 && v.kind === TR_STR) { tr_r_str(r, v.text, d.chars); return; }
+  if (d.kind === 2 && v.kind === TR_LIST) {
+    const common = d.nl < d.nr ? d.nl : d.nr;
+    tr_r_add(r, [91]);
+    if (!r.longer) {
+      if (r.elide && v.n > 0) tr_r_add(r, TR_ELLIPSIS);
+      else for (let j = 0; j < v.n; j++) { if (j > 0) tr_r_add(r, [44, 32]); tr_r_print(r, v.items[j]); }
+      tr_r_marked(r, [93]);
+      return;
+    }
+    if (common > 0) {
+      if (r.elide) tr_r_add(r, tr_bytes(TR_ELLIPSIS_STR + ", "));
+      else for (let j = 0; j < common && j < v.n; j++) { tr_r_print(r, v.items[j]); tr_r_add(r, [44, 32]); }
+    }
+    const e = new TrBuf();
+    if (r.elide) {
+      if (v.n > common) {
+        e.add(tr_clip(tr_print(v.items[common]), TR_ELIDE_OVER));
+        if (v.n > common + 1) { const b = new TrBuf(); b.add([44, 32]); b.add(TR_ELLIPSIS); e.add(b.a); }
+      }
+    } else {
+      for (let j = common; j < v.n; j++) {
+        if (j > common) e.add([44, 32]);
+        tr_print_to(e, v.items[j]);
+      }
+    }
+    tr_r_marked(r, e.a);
+    tr_r_add(r, [93]);
+    return;
+  }
+  const p = tr_print(v);
+  if (r.elide) { tr_r_marked(r, tr_clip(p, TR_ELIDE_OVER)); return; }
+  tr_r_marked(r, p);
+}
+
+/* The ellipsis as a byte string, for mixing with ", " text. */
+const TR_ELLIPSIS_STR = "\u2026";
+
+function tr_r_go(r, v, step) {
+  const d = r.d;
+  if (step >= d.steps.length) { tr_r_target(r, v); return; }
+  const s = d.steps[step];
+  const i = s.idx;
+  if (i < 0 || i >= v.n) { tr_r_target(r, v); return; }
+  if (v.kind === TR_RECORD && s.is_field) {
+    if (v.text.length) { tr_r_add(r, v.text); tr_r_add(r, [32]); }
+    tr_r_add(r, [123, 32]);
+    if (r.elide) {
+      if (i > 0) { const b = new TrBuf(); b.add(TR_ELLIPSIS); b.add([44, 32]); tr_r_add(r, b.a); }
+      tr_r_add(r, v.keys[i]); tr_r_add(r, tr_bytes(v.sep));
+      tr_r_go(r, v.items[i], step + 1);
+      if (i < v.n - 1) { const b = new TrBuf(); b.add([44, 32]); b.add(TR_ELLIPSIS); tr_r_add(r, b.a); }
+    } else {
+      for (let j = 0; j < v.n; j++) {
+        if (j > 0) tr_r_add(r, [44, 32]);
+        tr_r_add(r, v.keys[j]); tr_r_add(r, tr_bytes(v.sep));
+        if (j === i) tr_r_go(r, v.items[j], step + 1);
+        else tr_r_print(r, v.items[j]);
+      }
+    }
+    tr_r_add(r, [32, 125]);
+    return;
+  }
+  if (!s.is_field && (v.kind === TR_LIST || v.kind === TR_TUPLE || v.kind === TR_CTOR)) {
+    if (v.kind === TR_CTOR) { tr_r_add(r, v.text); tr_r_add(r, [40]); }
+    else tr_r_add(r, [v.kind === TR_LIST ? 91 : 40]);
+    if (r.elide) {
+      if (i > 0) { const b = new TrBuf(); b.add(TR_ELLIPSIS); b.add([44, 32]); tr_r_add(r, b.a); }
+      tr_r_go(r, v.items[i], step + 1);
+      if (i < v.n - 1) { const b = new TrBuf(); b.add([44, 32]); b.add(TR_ELLIPSIS); tr_r_add(r, b.a); }
+    } else {
+      for (let j = 0; j < v.n; j++) {
+        if (j > 0) tr_r_add(r, [44, 32]);
+        if (j === i) tr_r_go(r, v.items[j], step + 1);
+        else tr_r_print(r, v.items[j]);
+      }
+    }
+    tr_r_add(r, [v.kind === TR_LIST ? 93 : 41]);
+    return;
+  }
+  tr_r_target(r, v);
+}
+
+function tr_line(b, s) { b.add(tr_bytes(s)); b.add([10]); }
+
+function tr_label(b, side, src, printed) {
+  /* squash: drop spaces, compare */
+  const sq = (a) => a.filter((c) => c !== 32);
+  const xs = sq(src), ys = sq(printed);
+  b.add([32, 32, 32, 32]);
+  b.add(tr_bytes(side));
+  if (src.length && !tr_text_eq(xs, ys)) {
+    b.add([32, 96]); b.add(src); b.add([96]);   /* " `src`" */
+  }
+  b.add([10]);
+}
+
+function tr_value_line(b, v, max) {
+  b.add(tr_bytes("        "));
+  b.add(tr_clip(v, max));
+  b.add([10]);
+}
+
+/* test_report.ml's [compare_body]. */
+function tr_compare_body(op, lsrc, rsrc, l, r) {
+  const b = new TrBuf();
+  if (tr_text_eq(op, [33, 61, 45 /* "!=" */])) {
+    tr_line(b, "    Both sides are:");
+    tr_value_line(b, l, 200);
+  } else if (tr_text_eq(op, [61, 61 /* "==" */]) && !tr_text_eq(l, r)) {
+    const lt = tr_parse(l), rt = tr_parse(r);
+    if (tr_eq(lt, rt)) {
+      tr_label(b, "left", lsrc, l);  tr_value_line(b, l, 200);
+      tr_label(b, "right", rsrc, r); tr_value_line(b, r, 200);
+    } else {
+      const d = tr_diff_new();
+      tr_first_diff(lt, rt, d);
+      const elide = tr_width(l) > TR_ELIDE_OVER || tr_width(r) > TR_ELIDE_OVER;
+      const nl = d.kind === 2 ? d.nl : 0, nr = d.kind === 2 ? d.nr : 0;
+      for (let side = 0; side < 2; side++) {
+        const rr = tr_render_new(d, elide, side === 0 ? nl > nr : nr > nl);
+        tr_r_go(rr, side === 0 ? lt : rt, 0);
+        tr_label(b, side === 0 ? "left" : "right", side === 0 ? lsrc : rsrc,
+                 side === 0 ? l : r);
+        b.add(tr_bytes("        ")); b.add(rr.b.a); b.add([10]);
+        b.add(tr_bytes("        "));
+        for (let k = 0; k < rr.mcol; k++) b.add([32]);
+        for (let k = 0; k < rr.mwidth; k++) b.add([94]);   /* caret ^ */
+        b.add([10]);
+      }
+      const where = tr_path_text(d, lt);
+      if (d.kind === 2) {
+        const what = new TrBuf();
+        if (!where.length) what.add(tr_bytes("The left list"));
+        else { what.add([96]); what.add(where); what.add(tr_bytes("` on the left")); }
+        tr_line(b, "");
+        b.add([32, 32, 32, 32]); b.add(what.a);
+        b.add(tr_bytes(" has " + d.nl + " element" + (d.nl === 1 ? "" : "s")
+                  + "; on the right it has " + d.nr + "."));
+        b.add([10]);
+      } else if (where.length) {
+        tr_line(b, "");
+        b.add(tr_bytes("    They first differ at `")); b.add(where);
+        b.add(tr_bytes("`.") ); b.add([10]);
+      }
+    }
+  } else {
+    tr_label(b, "left", lsrc, l);  tr_value_line(b, l, 200);
+    tr_label(b, "right", rsrc, r); tr_value_line(b, r, 200);
+    if (tr_text_eq(op, [61, 61])) {
+      tr_line(b, "");
+      tr_line(b, "    They print the same, so they differ in something printing");
+      tr_line(b, "    does not show: a custom `Eq` impl, or a Float NaN.");
+    }
+  }
+  if (b.a.length && b.a[b.a.length - 1] === 10) b.a.pop();
+  return b.a;
+}
+
+/* Split [a] at the \x1f separators into at most 5 byte arrays. */
+function tr_split(a, max) {
+  const out = [];
+  let start = 0;
+  for (let i = 0; i <= a.length && out.length < max; i++) {
+    if (i === a.length || a[i] === 0x1f) {
+      out.push(a.slice(start, i));
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
+/* __assert_fail(meta, left, right): the native engine, ported — see
+ * runtime/march_runtime.c's march_assert_fail. */
+export function march_assert_fail(meta, left, right) {
+  const parts = tr_split(tr_bytes(meta === undefined || meta === null ? "" : String(meta)), 5);
+  while (parts.length < 5) parts.push([]);
+  const header = parts[0], op = parts[1], lsrc = parts[2], rsrc = parts[3], flags = parts[4];
+  const b = new TrBuf();
+  b.add(header);
+  if (op.length) {
+    const lq = String.fromCharCode(flags.length ? flags[0] : 0) === "q";
+    const rq = flags.length > 1 && String.fromCharCode(flags[1]) === "q";
+    const lb = tr_bytes(left === undefined || left === null ? "" : String(left));
+    const rb = tr_bytes(right === undefined || right === null ? "" : String(right));
+    const l = lq ? tr_quote(lb) : lb;
+    const r = rq ? tr_quote(rb) : rb;
+    b.add([10, 10]);
+    b.add(tr_compare_body(op, lsrc, rsrc, l, r));
+  }
+  march_panic(tr_bstr(b.a));
+}
+
+/* ── The runner ─────────────────────────────────────────────────────────── */
+
+/* At most 2048 failures recorded to avoid unbounded memory (native parity). */
+const MARCH_TEST_MAX_FAILURES = 2048;
+
+let march_test_verbose = false;
+let march_test_filter = null;         /* null: unset; else the --filter= text */
+let march_test_total = 0;
+let march_test_failed = 0;
+const march_test_fnames = [];
+const march_test_fmsgs = [];
+let march_test_cur_header = null;     /* byte string, \x01-hole, or null */
+
+/* Parse --verbose / -v and --filter=... from Node's argv (browser: none). */
+export function march_test_init() {
+  const args = (typeof process !== "undefined" && process.argv) ? process.argv.slice(2) : [];
+  for (const a of args) {
+    if (a === "--verbose" || a === "-v") march_test_verbose = true;
+    else if (a.startsWith("--filter=")) march_test_filter = a.slice(9);
+  }
+}
+
+/* The running test's panic header (Lower_tests sets it first thing): a
+ * rendered `-- TEST FAILURE --` report with \x01 where the panic message
+ * goes.  Returns nothing, as native's NULL does. */
+export function march_test_header(header) {
+  march_test_cur_header = (header === null || header === undefined) ? null : String(header);
+  return undefined;
+}
+
+/* The message a failed test reports: a rendered report as it is, any
+ * other panic message put into the test's panic header. */
+function march_test_failure_message(fail) {
+  const f = fail !== "" ? fail : "assertion failed";
+  if (f.startsWith("-- TEST FAILURE ") || march_test_cur_header === null) return f;
+  const hole = march_test_cur_header.indexOf("\x01");
+  if (hole < 0) return f;
+  return march_test_cur_header.slice(0, hole) + f + march_test_cur_header.slice(hole + 1);
+}
+
+/* Print [msg] with every non-empty line indented by [indent]. */
+function march_test_indented_str(indent, msg) {
+  let out = "", p = 0;
+  const n = msg.length;
+  while (p < n) {
+    const nl = msg.indexOf("\n", p);
+    const seg = nl < 0 ? msg.slice(p) : msg.slice(p, nl);
+    if (seg.length > 0) out += indent + seg;
+    out += "\n";
+    if (nl < 0) break;
+    p = nl + 1;
+  }
+  return out;
+}
+
+/* Run the setup_all function once before any tests. */
+export async function march_test_setup_all(fn) { if (fn) await fn(); }
+
+/* Run one test (which may be async); the name is its display name (a byte
+ * string); setup, if given, runs before each test. */
+export async function march_test_run(fn, name, setup) {
+  /* Apply the filter (a case-sensitive substring match). */
+  if (march_test_filter !== null && !String(name).includes(march_test_filter)) return;
+
+  march_test_total++;
+  if (setup) await setup();
+
+  let fail = "";
+  try {
+    await fn();
+  } catch (e) {
+    if (!e || !e.marchPanic) throw e;     /* a real fault, not a March panic */
+    fail = e.message === undefined || e.message === null ? "" : String(e.message);
+  }
+
+  if (fail === "") {
+    if (march_test_verbose) march_test_write("  \u2713 " + name + "\n");
+    else march_test_write(".");
+  } else {
+    const msg = march_test_failure_message(fail);
+    if (march_test_verbose) march_test_write("  \u2717 " + name + "\n" + march_test_indented_str("    ", msg));
+    else march_test_write("F");
+    if (march_test_fnames.length < MARCH_TEST_MAX_FAILURES) {
+      march_test_fnames.push(String(name));
+      march_test_fmsgs.push(msg);
+    }
+    march_test_failed++;
+  }
+}
+
+/* Print the final summary and exit with the test result (0 = all pass). */
+export function march_test_report() {
+  let out = "";
+  if (!march_test_verbose) out += "\n";
+  if (march_test_failed > 0 && !march_test_verbose) {
+    out += "\n" + march_test_fnames.length + " failure(s):\n\n";
+    for (let i = 0; i < march_test_fnames.length; i++) {
+      out += "FAIL: \"" + march_test_fnames[i] + "\"\n"
+        + march_test_indented_str("  ", march_test_fmsgs[i]) + "\n";
+    }
+  }
+  out += "Finished: " + march_test_total + (march_test_total === 1 ? " test" : " tests")
+    + ", " + march_test_failed + (march_test_failed === 1 ? " failure" : " failures") + "\n";
+  march_test_write(out);
+  const code = march_test_failed > 0 ? 1 : 0;
+  /* Native ends with _exit().  process.exit() would truncate stdout when it
+   * is a pipe (Node writes pipes asynchronously), so flush the queued writes
+   * and exit from the flush callback; process.exitCode covers the case of no
+   * stdout at all (a browser: the caller gets the code back). */
+  if (typeof process !== "undefined" && process.exit) {
+    process.exitCode = code;
+    if (process.stdout && process.stdout.write)
+      process.stdout.write("", () => process.exit(code));
+  }
+  return code;
+}
