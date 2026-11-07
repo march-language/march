@@ -736,16 +736,27 @@ and emit_val_impl ctx expr =
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
       (* The Diagnostics panic-site record: nothing to record in JS. *)
       | "__panic_site", _ -> emit ctx "undefined"
-      (* A test's panic header (compiled test runner only): nothing in JS. *)
-      | "__test_header", _ -> emit ctx "undefined"
-      (* A failed assert: throw the report's header (its first \x1f field);
-         the value diff is the native runtime's. *)
-      | "__assert_fail", meta :: _ ->
-        let b = Buffer.create 16 in
-        emit_atom { ctx with buf = b } meta;
-        emit ctx (Printf.sprintf
-                    "(() => { throw new Error(%s.split(\"\\x1f\")[0]); })()"
-                    (Buffer.contents b))
+      (* --test (issue #1176): the running test's panic header, and a failed
+         assert, which throws the whole rendered report (header and value
+         diff), as the native march_test_header / march_assert_fail do. *)
+      | "__test_header", [h] ->
+        use_runtime ctx "march_test_header";
+        emit ctx "march_test_header("; emit_atom ctx h; emit ctx ")"
+      | "__assert_fail", [meta; l; r] ->
+        use_runtime ctx "march_assert_fail";
+        emit ctx "march_assert_fail("; emit_atom ctx meta; emit ctx ", ";
+        emit_atom ctx l; emit ctx ", "; emit_atom ctx r; emit ctx ")"
+      (* Capability dictionaries (--test turns capability mocking on).  A
+         capability is undefined or its dictionary, as native's is NULL or
+         the dictionary (march_cap_impl / march_cap_dict); [cap_dict] reads
+         it back as an Option.  [root_cap] is the undefined sentinel (a const
+         in [builtin_wrappers]); a minted capability carries no dictionary. *)
+      | "cap_impl", [_; d] -> emit_atom ctx d
+      | "cap_narrow", [c] -> emit_atom ctx c
+      | "mint_cap", [_] -> emit ctx "undefined"
+      | "cap_dict", [c] ->
+        emit ctx "(("; emit_atom ctx c; emit ctx " == null) ? { $: \"None\" } : { $: \"Some\", _0: ";
+        emit_atom ctx c; emit ctx " })"
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
         let msg = if args = [] then "\"panic\""
                   else (let b = Buffer.create 16 in
@@ -1691,6 +1702,7 @@ const negate_float    = { _0: ($_, x) => -x };
 const float_abs       = { _0: ($_, x) => Math.abs(x) };
 const float_floor     = { _0: ($_, x) => Math.floor(x) };
 const float_ceil      = { _0: ($_, x) => Math.ceil(x) };
+const root_cap        = undefined;
 |}
 
 (** Raised by [emit_module] when used C-backed externs are compiled with [--target js].
@@ -1807,6 +1819,10 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
   Hashtbl.replace ctx.runtime_uses "march_unix_time_ms" ();
   Hashtbl.replace ctx.runtime_uses "march_float_round" ();
+  (* The --test runner emitted after the functions, below. *)
+  if m.Tir.tm_tests <> [] then
+    List.iter (fun n -> Hashtbl.replace ctx.runtime_uses n ())
+      [ "march_test_init"; "march_test_setup_all"; "march_test_run"; "march_test_report" ];
   let runtime_wrappers =
     "const float_to_string    = { _0: ($_, x) => march_float_to_string(x) };\n" ^
     "const string_length      = { _0: ($_, x) => march_string_byte_length(x) };\n" ^
@@ -1835,7 +1851,28 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
   let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
-  if has_main then begin
+  let has_fn n = List.exists (fun fn -> fn.Tir.fn_name = n) m.Tir.tm_fns in
+  if m.Tir.tm_tests <> [] then begin
+    (* --test (issue #1176): run every test as the native test binary does
+       (llvm_toplevel's test-runner @main over the same [tm_tests]) and not
+       `main`: the same dots, report and summary, exit status 1 on a failure
+       through process.exitCode.  The runner functions are imported above
+       ([runtime_uses]); each call is awaited, as a test may be async. *)
+    let setup =
+      if has_fn Tir_names.setup_fn_name then mangle Tir_names.setup_fn_name
+      else "null" in
+    Buffer.add_string export_buf "march_test_init();\n";
+    if has_fn Tir_names.setup_all_fn_name then
+      Buffer.add_string export_buf
+        (Printf.sprintf "await march_test_setup_all(%s);\n"
+           (mangle Tir_names.setup_all_fn_name));
+    List.iter (fun (fn_name, display) ->
+        Buffer.add_string export_buf
+          (Printf.sprintf "await march_test_run(%s, %s, %s);\n"
+             (mangle fn_name) (js_string_lit display) setup))
+      m.Tir.tm_tests;
+    Buffer.add_string export_buf "march_test_report();\n"
+  end else if has_main then begin
     Buffer.add_string export_buf "export { main };\n";
     if Hashtbl.mem ctx.async_fns "main" then
       Buffer.add_string export_buf "await main();\n"
