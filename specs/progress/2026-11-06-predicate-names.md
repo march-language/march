@@ -71,4 +71,7 @@ All tests are in the new `pred-names` group (`test/test_refine_pred_names.ml`, 2
 | Refine audit baselines | regenerated, unchanged |
 | Refine oracle vs merge-base | IDENTICAL (8153 lines, 574 fixtures) |
 | Types oracle vs merge-base | tier 1 and tier 2 IDENTICAL (1066 fixtures, 9602 lines) |
-| `scripts/affected.sh --run --full` | see the PR |
+| Final whole-branch review (fresh reviewer) | one Critical: with no `Tree` declarant at the top level, an arity-less lookup's preferred declarant (the stdlib's `OrderedMap.Tree(k, v)`) was no longer ambiguous, so a nested user `Tree(a)`'s `match` took OrderedMap's `Node` field roles and proved a plain `Int` field positive. Fixed: that preferred declarant is marked ambiguous again, and the container constructor lookups pass the entry's arity; `pred-names` "a nested user Tree(a) never takes OrderedMap's Tree field roles" RED → GREEN (25/25). Minors deferred: `record_sort_of_ty`'s refined arm still arity-less (gated by `is_record_base`); `-(-1)` prints `--1` (pre-existing) |
+| `scripts/affected.sh --run --full` on the branch merged with main (01cae3ed2) | every suite passed except the new corpus case, which on the merged tree also prints its `--explain` pointer (regenerated); ir, refine and types oracles IDENTICAL (520 programs; 8153 lines / 574 fixtures; 1066 fixtures / 9608 lines) |
+| CI conformance ceiling (`--check --stdlib-source --refine-report stdlib/list.march`) | 49 skipped, ceiling 49 |
+| After merging main again (S2 #1157, #1158, #1161, #1163) | refinecheck and errors suites pass (the errors corpus 414 cases); refine oracle IDENTICAL (8508 lines / 575 fixtures); conformance 49 skipped, ceiling 49 |
