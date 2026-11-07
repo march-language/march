@@ -655,6 +655,25 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`march fmt` and `forge format` no longer replace code with `...`** (#1174). A `match`
+  or `match do` in a list, tuple, record, call argument, operand or string interpolation,
+  a multi-statement lambda that is not the last argument, and an `if` with a
+  multi-statement branch inside another expression were written out as `...`,
+  `match ...` or `match do ... end`. They are now printed in full.
+- **The formatter keeps the parentheses the grammar needs** (#1175). It dropped them
+  around `if`, `match`, `fn` and `|>` operands, a called `(if ...)` or `(fn ...)`, the
+  operand of `-` or `!`, and a comparison inside a comparison. The output either did
+  not parse or meant something else: `1 + (3 |> double)` became `1 + 3 |> double`.
+- **`march fmt`, `forge format` and the language server refuse output that changes the
+  program.** The formatted text is parsed again and compared with the input. If it does
+  not parse, or parses to a different program, the file is left unchanged and `march
+  fmt` exits 1 with a message. The check found more formatter bugs, now fixed: UTF-8
+  and `${` in strings, `\r` in multi-line strings, float literals with more than 12
+  digits, default argument values, `resource`, `opaque type`, `blocking` and `raises`
+  extern functions, `linear let`, `p as a as b`, an interface's `requires`, `use A`
+  (printed as `import A`), and multi-line sigils, whose content was re-indented. Actor
+  declarations with `supervise`, `mailbox`, `@compat`, `@invariant` or `@[remote]` are
+  still not printed in full, so such files are now refused instead of losing those parts.
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output

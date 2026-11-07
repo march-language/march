@@ -2826,20 +2826,34 @@ let resolve_imports ~source_file m =
      see Resolver.resolve_imports's [strict_parse] doc. *)
   March_resolver.Resolver.resolve_imports ~strict_parse:!do_test ~source_file m
 
-(** Format [filename] in-place.  Returns true if the file was changed. *)
+(** Format [filename]: [Some (changed, formatted)], or [None] when the
+    formatter's output does not parse back to the same program (a formatter
+    bug).  [None] has already been reported; the caller must not write
+    anything.  Exits on a source that does not parse. *)
 let fmt_file filename =
   let src = read_file filename in
-  let formatted =
-    match March_format.Format.format_source_result ~filename
-            ~stuck:"Parse error (cannot format)" src with
-    | Ok formatted -> formatted
-    | Error diags ->
-      List.iter (fun d ->
-        Printf.eprintf "%s\n"
-          (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
-      exit 1
+  let refuse why =
+    Printf.eprintf
+      "march fmt: %s: not formatted: %s. This is a formatter bug; the file \
+       was left unchanged.\n%!" filename why;
+    None
   in
-  formatted <> src, formatted
+  match
+    March_format.Format.format_source_result ~filename
+      ~stuck:"Parse error (cannot format)" src
+  with
+  | exception e -> refuse ("the formatter raised " ^ Printexc.to_string e)
+  | Error diags ->
+    List.iter (fun d ->
+      Printf.eprintf "%s\n"
+        (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
+    exit 1
+  | Ok formatted ->
+    (* The round-trip check (#1174, #1175): never write output that does not
+       re-parse to the same AST as the input. *)
+    match March_format.Format.verify_format ~filename ~src formatted with
+    | Ok () -> Some (formatted <> src, formatted)
+    | Error why -> refuse why
 
 (** Collect all .march files under a directory recursively.
     Tolerant of unreadable entries: a permission-denied subdirectory (whose
@@ -3197,12 +3211,21 @@ let run_fmt args =
      with End_of_file -> ());
     let src = Buffer.contents buf in
     let filename = match !targets with f :: _ -> f | [] -> "<stdin>" in
-    let formatted =
-      try March_format.Format.format_source ~filename src
-      with _ -> src
-    in
-    print_string formatted;
-    exit 0
+    (* Unparseable input is echoed unchanged (exit 0), as before.  Output
+       that fails the round-trip check is a formatter bug: the input is
+       echoed so an editor that pipes through this loses nothing, and the
+       exit code says it was not formatted. *)
+    (match March_format.Format.format_source_result ~filename src with
+     | exception _ | Error _ -> print_string src; exit 0
+     | Ok formatted ->
+       match March_format.Format.verify_format ~filename ~src formatted with
+       | Ok () -> print_string formatted; exit 0
+       | Error why ->
+         print_string src;
+         Printf.eprintf
+           "march fmt: %s: not formatted: %s. This is a formatter bug; the \
+            input is printed unchanged.\n%!" filename why;
+         exit 1)
   end;
   let targets = List.rev !targets in
   let files = List.concat_map (fun target ->
@@ -3215,21 +3238,24 @@ let run_fmt args =
     Printf.eprintf "march fmt: no files specified\n"; exit 1
   end;
   let any_changed = ref false in
+  let any_refused = ref false in
   List.iter (fun f ->
-    let changed, formatted = fmt_file f in
-    if !check_mode then begin
-      if changed then begin
-        Printf.eprintf "%s: not formatted\n" f;
-        any_changed := true
+    match fmt_file f with
+    | None -> any_refused := true
+    | Some (changed, formatted) ->
+      if !check_mode then begin
+        if changed then begin
+          Printf.eprintf "%s: not formatted\n" f;
+          any_changed := true
+        end
+      end else begin
+        if changed then begin
+          write_file f formatted;
+          Printf.printf "formatted %s\n%!" f
+        end
       end
-    end else begin
-      if changed then begin
-        write_file f formatted;
-        Printf.printf "formatted %s\n%!" f
-      end
-    end
   ) files;
-  if !check_mode && !any_changed then exit 1
+  if !any_refused || (!check_mode && !any_changed) then exit 1
   else exit 0
 
 
@@ -3740,11 +3766,13 @@ let compile filename =
   load_protocol_inputs ();
   (* --fmt: format the source file before compiling *)
   if !do_fmt then begin
-    let changed, formatted = fmt_file filename in
-    if changed then begin
-      write_file filename formatted;
-      Printf.eprintf "formatted %s\n%!" filename
-    end
+    match fmt_file filename with
+    | None -> exit 1
+    | Some (changed, formatted) ->
+      if changed then begin
+        write_file filename formatted;
+        Printf.eprintf "formatted %s\n%!" filename
+      end
   end;
   (* Early source-hash CAS: read all input bytes, compute hash, and exit
      before parsing if sources are unchanged since the last successful run.
