@@ -95,8 +95,14 @@ let empty_surface = { fns = []; types = [] }
 (*  Rendering (surface-syntax text, for diffing/display purposes only) *)
 (* ------------------------------------------------------------------ *)
 
+(* A default's VALUE is not part of the surface, only that there is one, so
+   it renders as `\\ _` (the formatter's own [fmt_fn_param] prints the value). *)
+let render_fn_param = function
+  | Ast.FPDefault (p, _) -> Fmt.fmt_param p ^ " \\\\ _"
+  | fp -> Fmt.fmt_fn_param fp
+
 let render_clause_params (clause : Ast.fn_clause) =
-  String.concat ", " (List.map Fmt.fmt_fn_param clause.Ast.fc_params)
+  String.concat ", " (List.map render_fn_param clause.Ast.fc_params)
 
 (** Render a function's full parameter surface across all of its clauses. *)
 let render_fn_params (fn : Ast.fn_def) =

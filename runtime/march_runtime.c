@@ -11503,13 +11503,79 @@ void *march_string_last_index_of(void *s, void *sub) {
     return make_none();
 }
 
+/* The string_to_float grammar (#1178): exactly what C99 strtod accepts in the
+ * "C" locale, with the WHOLE string consumed. The interpreter
+ * (lib/eval/eval_builtins.ml, march_float_of_string) and the JS runtime
+ * (runtime/march_runtime.mjs, march_string_to_float) implement the same
+ * grammar; test/native/string_to_float_grammar.march pins all three.
+ *
+ *   ws* [+-]? ( dec | hex | "inf" | "infinity" | "nan" ( "(" [0-9A-Za-z_]* ")" )? )
+ *   dec = ( digit+ ("." digit*)? | "." digit+ ) ( [eE] [+-]? digit+ )?
+ *   hex = "0" [xX] ( xdigit+ ("." xdigit*)? | "." xdigit+ ) ( [pP] [+-]? digit+ )?
+ *   ws  = one of " \t\n\v\f\r" (leading only; trailing whitespace is rejected)
+ *
+ * inf/infinity/nan are case-insensitive. strtod is still what computes the
+ * value; this check exists so the ACCEPTED set doesn't depend on the libc:
+ * macOS's strtod also takes "nan(1 )" (glibc and musl do not), and a plain
+ * strtod stops at an embedded NUL, so "1.5\0x" parsed as 1.5. */
+static int march_ascii_ieq(const char *p, const char *word, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (march_ascii_lower(p[i]) != word[i]) return 0;
+    return 1;
+}
+
+static int march_float_syntax_ok(const char *p, int64_t n) {
+    const char *e = p + n;
+    while (p < e && (*p == ' ' || (*p >= '\t' && *p <= '\r'))) p++;
+    if (p < e && (*p == '+' || *p == '-')) p++;
+    if (p == e) return 0;
+    if (*p == 'i' || *p == 'I') {
+        int64_t r = e - p;
+        if (r == 3) return march_ascii_ieq(p, "inf", 3);
+        if (r == 8) return march_ascii_ieq(p, "infinity", 8);
+        return 0;
+    }
+    if (*p == 'n' || *p == 'N') {
+        if (e - p < 3 || !march_ascii_ieq(p, "nan", 3)) return 0;
+        p += 3;
+        if (p == e) return 1;
+        if (*p++ != '(') return 0;
+        while (p < e && ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z')
+                         || (*p >= 'A' && *p <= 'Z') || *p == '_')) p++;
+        return p + 1 == e && *p == ')';
+    }
+    int hex = 0;
+    if (e - p >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { hex = 1; p += 2; }
+#define MARCH_FLT_DIGIT(c) (((c) >= '0' && (c) <= '9') || \
+    (hex && (((c) >= 'a' && (c) <= 'f') || ((c) >= 'A' && (c) <= 'F'))))
+    int digits = 0;
+    while (p < e && MARCH_FLT_DIGIT(*p)) { p++; digits++; }
+    if (p < e && *p == '.') {
+        p++;
+        while (p < e && MARCH_FLT_DIGIT(*p)) { p++; digits++; }
+    }
+#undef MARCH_FLT_DIGIT
+    if (digits == 0) return 0;
+    if (p < e && (hex ? (*p == 'p' || *p == 'P') : (*p == 'e' || *p == 'E'))) {
+        p++;
+        if (p < e && (*p == '+' || *p == '-')) p++;
+        int ed = 0;
+        while (p < e && *p >= '0' && *p <= '9') { p++; ed++; }
+        if (ed == 0) return 0;
+    }
+    return p == e;
+}
+
 /* Returns Option(Float). Option(Float) stays BOXED (0.0 == raw 0, not niche-safe).
  * None is a heap cell with tag=0; cannot use make_none() which returns raw 0. */
 void *march_string_to_float(void *s) {
     march_string *str = (march_string *)s;
     char *end;
+    if (!march_float_syntax_ok(str->data, str->len)) {
+        return march_alloc(16);  /* boxed None: tag stays 0 */
+    }
     double f = strtod(str->data, &end);
-    if (end == str->data || *end != '\0') {
+    if (end != str->data + str->len) {
         return march_alloc(16);  /* boxed None: tag stays 0 */
     }
     /* Some(f): tag=1, one ptr field at offset 16 holding a march_alloc_float

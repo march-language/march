@@ -1,0 +1,21 @@
+-- EXPECT-ERROR: declares `needs IO.Clock`, which admits the clock
+-- Issue #1180: `DateTime.now()` reads the wall clock through a stdlib
+-- wrapper the call scan cannot see, and `needs IO.Clock` let the capability
+-- ceiling admit it. A `cap deterministic` module may hold ordinary IO
+-- capabilities but never the clock, an RNG, or a parent (`IO`) that
+-- includes them, so the `needs` line is rejected.
+mod Main do
+  needs IO
+
+  mod Sim do
+    cap deterministic
+    needs IO.Clock
+    fn now() : Int do
+      DateTime.now()
+    end
+  end
+
+  fn main(_c : Cap(IO)) : () do
+    println(int_to_string(Sim.now()))
+  end
+end

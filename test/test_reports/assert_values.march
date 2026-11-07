@@ -7,9 +7,6 @@ mod AssertValues do
   derive Eq, Show for Role
   derive Eq, Show for User
 
-  type Point = { x : Int, y : Int }
-  derive Eq for Point
-
   pfn long_list(n : Int) : List(Int) do
     List.map(List.range(0, n), fn i -> i * 10)
   end
@@ -19,11 +16,6 @@ mod AssertValues do
       let user = { name: "ann", tags: [Admin, Owner(1), Guest] }
       let expected = { name: "ann", tags: [Admin, Owner(2), Guest] }
       assert (user == expected)
-    end
-
-    test "plain record field" do
-      let p : Point = { x: 1, y: 2 }
-      assert (p == { x: 1, y: 3 })
     end
 
     test "strings" do

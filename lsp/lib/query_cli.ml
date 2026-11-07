@@ -141,10 +141,11 @@ let run_to_string (args : string list) ~src_override : string =
        "{\"references\":[" ^ String.concat "," (local_json @ cross_json) ^ "]}"
      | "format" ->
        (* Raw formatted source (like gofmt); unparseable input is returned
-          unchanged. Note: emitted verbatim, not wrapped in JSON. *)
-       (try Utf16.normalize_trailing
-              (March_format.Format.format_source ~filename:file src)
-        with _ -> src)
+          unchanged, and so is input whose formatted text would not re-parse
+          to the same program. Note: emitted verbatim, not wrapped in JSON. *)
+       (match March_format.Format.format_source_checked ~filename:file src with
+        | Ok formatted -> Utf16.normalize_trailing formatted
+        | Error _ | exception _ -> src)
      | "diagnostics" ->
        (* [Query.diagnostics] already returns UTF-16 ranges. *)
        let ds = Query.diagnostics a in

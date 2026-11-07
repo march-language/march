@@ -1,0 +1,32 @@
+Red < Green     true
+Green > Red     true
+Green <= Red    false
+Red >= Green    false
+Red <= Red      true
+p < q           true
+q > p           true
+p >= q          false
+Small < Large   true
+Large <= Small  false
+Ci(1) < Sq(1)   true
+Ci(1) >= Sq(1)  false
+Wrap(1) < Wrap(2)  false
+Wrap(1) <= Wrap(2) true
+Rev(1) < Rev(2)  false
+Rev(1) > Rev(2)  true
+Pair(1,1) < Pair(1,2)  false
+Pair(1,1) >= Pair(1,2) true
+lt(Red, Green)  true
+lt(p, q)        true
+lt(Large, Small) false
+ge(Sq(0), Ci(9)) true
+lt(3, 4)        true
+lt("b", "a")    false
+lt(1.5, 0.5)    false
+i1 > i2         true
+i1 < i3         true
+i2 <= i2        true
+compare floats  1 -1
+compare strings -1 0
+compare ints    1 -1
+0011

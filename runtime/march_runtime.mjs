@@ -192,10 +192,69 @@ export function march_string_to_int(s) {
   return { $: "Some", _0: n };
 }
 
+/* string_to_float accepts exactly what C strtod accepts in the "C" locale with
+ * the whole string consumed — the native runtime's grammar (#1178; see
+ * march_float_syntax_ok in march_runtime.c for the grammar, and
+ * test/native/string_to_float_grammar.march, which pins all three backends).
+ * `Number(s)` is not that: it reads "" and "  " as 0, trims trailing space,
+ * takes 0b/0o, spells infinity only "Infinity", rejects hex floats, and its
+ * NaN result can't tell "nan" from a failed parse. */
+const MARCH_FLOAT_DEC = /^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+const MARCH_FLOAT_HEX = /^0[xX](?:([0-9a-fA-F]+)(?:\.([0-9a-fA-F]*))?|\.([0-9a-fA-F]+))(?:[pP]([+-]?[0-9]+))?$/;
+const MARCH_FLOAT_INF = /^[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$/;
+const MARCH_FLOAT_NAN = /^[nN][aA][nN](?:\([0-9A-Za-z_]*\))?$/;
+
+/* Hex digits `int`.`frac` times 2^exp, correctly rounded (nearest, ties to
+ * even, gradual underflow), as strtod rounds it. */
+function march_hex_float(int, frac, exp) {
+  const digits = (int + frac).replace(/^0+/, "");
+  if (digits === "") return 0;
+  const m = BigInt("0x" + digits);
+  const e = Number(exp) - 4 * frac.length;
+  const bl = m.toString(2).length;
+  const top = bl + e;                  // m * 2^e lies in [2^(top-1), 2^top)
+  if (top > 1025) return Infinity;
+  if (top < -1075) return 0;
+  // Bits a double keeps at this magnitude: 53, fewer once subnormal.
+  const keep = Math.min(53, top + 1074);
+  let shift = bl - keep;
+  let q = m;
+  if (shift > 0) {
+    const sb = BigInt(shift);
+    q = m >> sb;
+    const rem = m & ((1n << sb) - 1n);
+    const half = 1n << (sb - 1n);
+    if (rem > half || (rem === half && (q & 1n) === 1n)) q += 1n;
+  } else {
+    shift = 0;
+  }
+  // q has at most 54 bits, so Number(q) is exact; the result is representable,
+  // and scaling in two halves keeps each power of two a normal double.
+  const k = e + shift;
+  const k1 = Math.trunc(k / 2);
+  return Number(q) * Math.pow(2, k1) * Math.pow(2, k - k1);
+}
+
 export function march_string_to_float(s) {
-  const n = Number(s);
-  if (isNaN(n)) return { $: "None" };
-  return { $: "Some", _0: n };
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c === 32 || (c >= 9 && c <= 13)) i++; else break;
+  }
+  let neg = false;
+  if (s[i] === "+" || s[i] === "-") { neg = s[i] === "-"; i++; }
+  const body = s.slice(i);
+  let v;
+  if (MARCH_FLOAT_DEC.test(body)) v = Number(body);
+  else if (MARCH_FLOAT_INF.test(body)) v = Infinity;
+  else if (MARCH_FLOAT_NAN.test(body)) v = NaN;
+  else {
+    const h = MARCH_FLOAT_HEX.exec(body);
+    if (h === null) return { $: "None" };
+    v = h[3] !== undefined ? march_hex_float("", h[3], h[4] ?? "0")
+                           : march_hex_float(h[1], h[2] ?? "", h[4] ?? "0");
+  }
+  return { $: "Some", _0: neg ? -v : v };
 }
 
 export function march_string_to_lowercase(s) { return s.toLowerCase(); }
@@ -527,6 +586,15 @@ export function march_int_ovf(r, op) {
   return r;
 }
 
+/** `compare` on Float: a total preorder like march_compare_float in
+ * march_runtime.c (and the interpreter's Float.compare). NaN equals NaN and
+ * is less than every other value; otherwise IEEE order (-0.0 == +0.0). */
+export function march_compare_float(x, y) {
+  const xn = x !== x, yn = y !== y;
+  if (xn || yn) return (yn ? 1 : 0) - (xn ? 1 : 0);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
 /** int_wrapping_add/sub/mul: modulo-2^63 arithmetic, for hashes and
  * checksums. Exact within ±(2^53 - 1); a wrapped result outside it throws a
  * RangeError like the other checked Int builtins. */
@@ -699,4 +767,451 @@ export function march_process_argv() {
   let list = { $: "Nil" };
   for (let i = args.length - 1; i >= 0; i--) list = { $: "Cons", _0: args[i], _1: list };
   return list;
+}
+
+/* ── Test runner (`march --target js --test`) ─────────────────────────────
+ * The JS twin of the native harness (march_test_init / march_test_run /
+ * march_test_report and march_assert_fail in runtime/march_runtime.c), and a
+ * port of lib/errors/test_report.ml's value differ, which those two already
+ * share line for line.  All three must print byte for byte the same report:
+ * test/run_test_reports.ml runs every golden case interpreted, compiled and
+ * on this target.  Change one, change the others.
+ *
+ * Strings are handled as arrays of code points, so a "column" is a code
+ * point, as test_report.ml's [width] counts UTF-8 lead bytes. */
+
+let march_test_verbose = false;
+let march_test_filter = "";
+let march_test_total = 0;
+let march_test_failed = 0;
+const march_test_failures = [];
+let march_test_cur_header = null;
+
+function march_test_out(s) {
+  if (typeof process !== "undefined" && process.stdout && process.stdout.write) process.stdout.write(s);
+  else console.log(s.endsWith("\n") ? s.slice(0, -1) : s);
+}
+
+/* --verbose / -v and --filter=SUBSTRING, as a native test binary takes them. */
+export function march_test_init() {
+  const args = (typeof process !== "undefined" && process.argv) ? process.argv.slice(2) : [];
+  for (const a of args) {
+    if (a === "--verbose" || a === "-v") march_test_verbose = true;
+    else if (a.startsWith("--filter=")) march_test_filter = a.slice(9);
+  }
+}
+
+/* The running test's panic header: `This test panicked: \x01` under its
+ * `test "..."` line, the \x01 replaced by the panic message. */
+export function march_test_header(h) { march_test_cur_header = h; return undefined; }
+
+function march_test_failure_message(e) {
+  let fail = (e instanceof Error) ? e.message : String(e);
+  if (fail === "") fail = "assertion failed";
+  if (fail.startsWith("-- TEST FAILURE ") || march_test_cur_header === null) return fail;
+  const hole = march_test_cur_header.indexOf("\x01");
+  if (hole < 0) return fail;
+  return march_test_cur_header.slice(0, hole) + fail + march_test_cur_header.slice(hole + 1);
+}
+
+function march_test_indented(indent, msg) {
+  let out = "";
+  for (const line of msg.split("\n")) out += (line.length > 0 ? indent + line : "") + "\n";
+  return out;
+}
+
+export async function march_test_setup_all(fn) { if (fn) await fn(); }
+
+export async function march_test_run(fn, name, setup) {
+  if (march_test_filter !== "" && !name.includes(march_test_filter)) return;
+  march_test_total++;
+  if (setup) await setup();
+  march_test_cur_header = null;
+  let err = null, failed = false;
+  try { await fn(); } catch (e) { err = e; failed = true; }
+  if (!failed) {
+    march_test_out(march_test_verbose ? `  ✓ ${name}\n` : ".");
+  } else {
+    const msg = march_test_failure_message(err);
+    if (march_test_verbose) march_test_out(`  ✗ ${name}\n` + march_test_indented("    ", msg));
+    else march_test_out("F");
+    march_test_failures.push([name, msg]);
+    march_test_failed++;
+  }
+}
+
+/* The summary; the exit status (1 on any failure) goes to process.exitCode. */
+export function march_test_report() {
+  let out = march_test_verbose ? "" : "\n";
+  if (march_test_failed > 0 && !march_test_verbose) {
+    out += `\n${march_test_failures.length} failure(s):\n\n`;
+    for (const [name, msg] of march_test_failures)
+      out += `FAIL: "${name}"\n` + march_test_indented("  ", msg) + "\n";
+  }
+  out += `Finished: ${march_test_total} test${march_test_total === 1 ? "" : "s"}, ` +
+         `${march_test_failed} failure${march_test_failed === 1 ? "" : "s"}\n`;
+  march_test_out(out);
+  const code = march_test_failed > 0 ? 1 : 0;
+  if (typeof process !== "undefined") process.exitCode = code;
+  return code;
+}
+
+/* ── The value differ (test_report.ml) ── */
+
+const TR_ELLIPSIS = "…";
+const TR_ELIDE_OVER = 60;
+const tr_cps = (s) => Array.from(s);
+const tr_width = (s) => tr_cps(s).length;
+
+function tr_clip(s, max) {
+  const cs = tr_cps(s);
+  if (cs.length <= max) return s;
+  return cs.slice(0, Math.max(0, max - 1)).join("") + TR_ELLIPSIS;
+}
+
+function tr_quote(s) {
+  let b = "\"";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i], c = s.charCodeAt(i);
+    if (ch === "\"") b += "\\\"";
+    else if (ch === "\\") b += "\\\\";
+    else if (ch === "\n") b += "\\n";
+    else if (ch === "\t") b += "\\t";
+    else if (ch === "\r") b += "\\r";
+    else if (c < 0x20 || c === 0x7f) b += "\\x" + c.toString(16).padStart(2, "0");
+    else b += ch;
+  }
+  return b + "\"";
+}
+
+const tr_is_delim = (c) => ",()[]{}\"".includes(c);
+const tr_is_ident = (s) => /^[A-Za-z_][A-Za-z0-9_.]*$/.test(s);
+/* OCaml's String.trim: ' ', '\012', '\n', '\r', '\t'. */
+function tr_trim(s) {
+  const ws = (c) => c === " " || c === "\x0c" || c === "\n" || c === "\r" || c === "\t";
+  let a = 0, b = s.length;
+  while (a < b && ws(s[a])) a++;
+  while (b > a && ws(s[b - 1])) b--;
+  return s.slice(a, b);
+}
+
+/* Nodes: {k:"leaf"|"str", t} | {k:"list"|"tuple", xs} | {k:"ctor", t, xs}
+ *        | {k:"record", t: name, sep, keys, xs} */
+function tr_parse(s) {
+  const n = s.length;
+  let pos = 0;
+  const UNREADABLE = {};
+  const skip = () => { while (pos < n && s[pos] === " ") pos++; };
+  const peek = () => (pos < n ? s[pos] : null);
+  function value() {
+    skip();
+    const c = peek();
+    if (c === null) throw UNREADABLE;
+    if (c === "\"") {
+      const start = pos;
+      pos++;
+      while (pos < n && s[pos] !== "\"") { if (s[pos] === "\\") pos++; pos++; }
+      if (pos >= n) throw UNREADABLE;
+      pos++;
+      return { k: "str", t: s.slice(start, pos) };
+    }
+    if (c === "[") { pos++; return { k: "list", xs: seq("]") }; }
+    if (c === "(") {
+      pos++;
+      const xs = seq(")");
+      return xs.length === 0 ? { k: "leaf", t: "()" } : { k: "tuple", xs };
+    }
+    if (c === "{") { pos++; return fields(""); }
+    if (tr_is_delim(c)) throw UNREADABLE;
+    const start = pos;
+    while (pos < n && !tr_is_delim(s[pos])) pos++;
+    const text = tr_trim(s.slice(start, pos));
+    if (text === "") throw UNREADABLE;
+    if (pos < n && s[pos] === "(" && tr_is_ident(text)) { pos++; return { k: "ctor", t: text, xs: seq(")") }; }
+    if (pos < n && s[pos] === "{" && tr_is_ident(text)) { pos++; return fields(text); }
+    return { k: "leaf", t: text };
+  }
+  function seq(close) {
+    skip();
+    if (peek() === close) { pos++; return []; }
+    const acc = [];
+    for (;;) {
+      acc.push(value());
+      skip();
+      const c = peek();
+      if (c === ",") { pos++; continue; }
+      if (c === close) { pos++; return acc; }
+      throw UNREADABLE;
+    }
+  }
+  function fields(name) {
+    let sep = "";
+    const keys = [], xs = [];
+    skip();
+    if (peek() === "}") { pos++; return { k: "record", t: name, sep: ": ", keys, xs }; }
+    for (;;) {
+      skip();
+      const start = pos;
+      while (pos < n && s[pos] !== ":" && s[pos] !== "=" && !tr_is_delim(s[pos])) pos++;
+      const c = peek();
+      const here = c === ":" ? ": " : c === "=" ? " = " : null;
+      if (here === null) throw UNREADABLE;
+      if (sep === "") sep = here; else if (sep !== here) throw UNREADABLE;
+      const key = tr_trim(s.slice(start, pos));
+      if (!tr_is_ident(key)) throw UNREADABLE;
+      pos++;
+      const v = value();
+      keys.push(key); xs.push(v);
+      skip();
+      const d = peek();
+      if (d === ",") { pos++; continue; }
+      if (d === "}") { pos++; return { k: "record", t: name, sep, keys, xs }; }
+      throw UNREADABLE;
+    }
+  }
+  try {
+    const v = value();
+    skip();
+    return pos !== n ? { k: "leaf", t: s } : v;
+  } catch (e) {
+    if (e === UNREADABLE) return { k: "leaf", t: s };
+    throw e;
+  }
+}
+
+function tr_eq(a, b) {
+  if (a.k !== b.k) return false;
+  if ((a.t ?? null) !== (b.t ?? null)) return false;
+  if (a.k === "record" && a.sep !== b.sep) return false;
+  const ax = a.xs || [], bx = b.xs || [];
+  if (ax.length !== bx.length) return false;
+  for (let i = 0; i < ax.length; i++) {
+    if (a.keys && a.keys[i] !== b.keys[i]) return false;
+    if (!tr_eq(ax[i], bx[i])) return false;
+  }
+  return true;
+}
+
+function tr_print(v) {
+  switch (v.k) {
+    case "leaf": case "str": return v.t;
+    case "list": return "[" + v.xs.map(tr_print).join(", ") + "]";
+    case "tuple": return "(" + v.xs.map(tr_print).join(", ") + ")";
+    case "ctor": return v.t + "(" + v.xs.map(tr_print).join(", ") + ")";
+    case "record":
+      return (v.t === "" ? "" : v.t + " ") + "{ " +
+        v.xs.map((x, i) => v.keys[i] + v.sep + tr_print(x)).join(", ") + " }";
+  }
+  return "";
+}
+
+/* Steps: {idx} | {field} | {arg}.  Kinds: {whole} | {chars: i} | {len: [nl, nr]}.
+ * [chars] is a code-point offset into the quoted string. */
+function tr_first_diff(a, b, path) {
+  if (tr_eq(a, b)) return null;
+  const items = (xs, ys, mk) => {
+    for (let i = 0; i < Math.min(xs.length, ys.length); i++)
+      if (!tr_eq(xs[i], ys[i])) return tr_first_diff(xs[i], ys[i], path.concat([mk(i)]));
+    return null;
+  };
+  if (a.k === "list" && b.k === "list") {
+    const d = items(a.xs, b.xs, (i) => ({ idx: i }));
+    return d || { path, kind: { len: [a.xs.length, b.xs.length] } };
+  }
+  if ((a.k === "tuple" && b.k === "tuple" && a.xs.length === b.xs.length)
+      || (a.k === "ctor" && b.k === "ctor" && a.t === b.t && a.xs.length === b.xs.length))
+    return items(a.xs, b.xs, (i) => ({ arg: i }));
+  if (a.k === "record" && b.k === "record" && a.t === b.t
+      && a.keys.length === b.keys.length && a.keys.every((k, i) => k === b.keys[i])) {
+    for (let i = 0; i < a.xs.length; i++)
+      if (!tr_eq(a.xs[i], b.xs[i]))
+        return tr_first_diff(a.xs[i], b.xs[i], path.concat([{ field: a.keys[i] }]));
+    return { path, kind: { whole: true } };
+  }
+  if (a.k === "str" && b.k === "str") {
+    const s = tr_cps(a.t), t = tr_cps(b.t);
+    let i = 0;
+    while (i < Math.min(s.length, t.length) && s[i] === t[i]) i++;
+    return { path, kind: { chars: i } };
+  }
+  return { path, kind: { whole: true } };
+}
+
+function tr_path_text(path) {
+  let b = "";
+  for (const st of path) {
+    if (st.idx !== undefined) b += `[${st.idx}]`;
+    else if (st.field !== undefined) b += "." + st.field;
+    else break;
+  }
+  return b;
+}
+
+function tr_render(elide, root, path, kind, longer) {
+  let b = "", col = 0, mark = [0, 1];
+  const add = (s) => { b += s; col += tr_width(s); };
+  const marked = (s) => { const c = col; add(s); mark = [c, Math.max(1, tr_width(s))]; };
+  const full = (v) => (elide ? tr_clip(tr_print(v), TR_ELIDE_OVER) : tr_print(v));
+  function go(v, p) {
+    if (p.length === 0) return target(v);
+    const [st, ...rest] = p;
+    if (v.k === "list" || v.k === "tuple" || v.k === "ctor") {
+      const i = v.k === "list" ? (st.idx ?? -1) : (st.arg ?? -1);
+      const open = v.k === "list" ? "[" : v.k === "tuple" ? "(" : v.t + "(";
+      const close = v.k === "list" ? "]" : ")";
+      if (i < 0 || i >= v.xs.length) return target(v);
+      add(open);
+      if (elide) {
+        if (i > 0) add(TR_ELLIPSIS + ", ");
+        go(v.xs[i], rest);
+        if (i < v.xs.length - 1) add(", " + TR_ELLIPSIS);
+      } else {
+        v.xs.forEach((x, j) => { if (j > 0) add(", "); if (j === i) go(x, rest); else add(tr_print(x)); });
+      }
+      add(close);
+      return;
+    }
+    if (st.field !== undefined && v.k === "record") {
+      const idx = v.keys.lastIndexOf(st.field);
+      if (idx < 0) return target(v);
+      const n = v.keys.length;
+      if (v.t !== "") add(v.t + " ");
+      add("{ ");
+      if (elide) {
+        if (idx > 0) add(TR_ELLIPSIS + ", ");
+        add(st.field + v.sep);
+        go(v.xs[idx], rest);
+        if (idx < n - 1) add(", " + TR_ELLIPSIS);
+      } else {
+        v.xs.forEach((x, j) => {
+          if (j > 0) add(", ");
+          add(v.keys[j] + v.sep);
+          if (j === idx) go(x, rest); else add(tr_print(x));
+        });
+      }
+      add(" }");
+      return;
+    }
+    return target(v);
+  }
+  function target(v) {
+    if (kind.chars !== undefined && v.k === "str") return str_marked(tr_cps(v.t), kind.chars);
+    if (kind.len !== undefined && v.k === "list") {
+      const [nl, nr] = kind.len;
+      const common = Math.min(nl, nr);
+      add("[");
+      if (!longer) {
+        if (elide && v.xs.length > 0) add(TR_ELLIPSIS);
+        else v.xs.forEach((x, j) => { if (j > 0) add(", "); add(tr_print(x)); });
+        marked("]");
+        return;
+      }
+      if (common > 0) {
+        if (elide) add(TR_ELLIPSIS + ", ");
+        else v.xs.forEach((x, j) => { if (j < common) { add(tr_print(x)); add(", "); } });
+      }
+      const extra = v.xs.slice(common);
+      let et;
+      if (elide) {
+        et = extra.length === 0 ? ""
+          : tr_clip(tr_print(extra[0]), TR_ELIDE_OVER) + (extra.length > 1 ? ", " + TR_ELLIPSIS : "");
+      } else et = extra.map(tr_print).join(", ");
+      marked(et);
+      add("]");
+      return;
+    }
+    marked(full(v));
+  }
+  function str_marked(s, i) {
+    const n = s.length;
+    const sub = (a, z) => s.slice(a, z).join("");
+    if (!elide || n <= TR_ELIDE_OVER) {
+      add(sub(0, i)); marked(sub(i, i + 1)); add(sub(i + 1, n));
+      return;
+    }
+    let back = i, cols = 0;
+    while (back > 1 && cols < 20) { back--; cols++; }
+    let fwd = i, fcols = 0;
+    while (fwd < n - 1 && fcols < 30) { fwd++; fcols++; }
+    if (fwd >= n - 1) fwd = n;
+    add(back > 1 ? "\"" + TR_ELLIPSIS : "\"");
+    add(sub(back, i));
+    const j = Math.min(i + 1, n);
+    marked(sub(i, j));
+    const stop = Math.max(j, fwd);
+    add(sub(j, stop));
+    if (stop < n) add(TR_ELLIPSIS + "\"");
+  }
+  go(root, path);
+  return [b, mark[0], mark[1]];
+}
+
+function tr_label(side, src, printed) {
+  const squash = (s) => s.split(" ").join("");
+  return (src === "" || squash(src) === squash(printed)) ? side : `${side} \`${src}\``;
+}
+
+function tr_compare_body(op, lsrc, rsrc, l, r) {
+  const IND = "    ", VIND = "        ";
+  let b = "";
+  const line = (s) => { b += s + "\n"; };
+  const shown = (v) => tr_clip(v, 200);
+  const plain = () => {
+    line(IND + tr_label("left", lsrc, l)); line(VIND + shown(l));
+    line(IND + tr_label("right", rsrc, r)); line(VIND + shown(r));
+  };
+  if (op === "!=") {
+    line(IND + "Both sides are:");
+    line(VIND + shown(l));
+  } else if (op === "==" && l !== r) {
+    const lt = tr_parse(l), rt = tr_parse(r);
+    const d = tr_first_diff(lt, rt, []);
+    if (d === null) plain();
+    else {
+      const elide = tr_width(l) > TR_ELIDE_OVER || tr_width(r) > TR_ELIDE_OVER;
+      const [nl, nr] = d.kind.len || [0, 0];
+      const side = (name, src, printed, tree, longer) => {
+        const [text, c, w] = tr_render(elide, tree, d.path, d.kind, longer);
+        line(IND + tr_label(name, src, printed));
+        line(VIND + text);
+        line(VIND + " ".repeat(c) + "^".repeat(w));
+      };
+      side("left", lsrc, l, lt, nl > nr);
+      side("right", rsrc, r, rt, nr > nl);
+      const where = tr_path_text(d.path);
+      if (d.kind.len) {
+        const [a, c] = d.kind.len;
+        const what = where === "" ? "The left list" : `\`${where}\` on the left`;
+        line("");
+        line(`${IND}${what} has ${a} element${a === 1 ? "" : "s"}; on the right it has ${c}.`);
+      } else if (where !== "") {
+        line("");
+        line(`${IND}They first differ at \`${where}\`.`);
+      }
+    }
+  } else {
+    plain();
+    if (op === "==") {
+      line("");
+      line(IND + "They print the same, so they differ in something printing");
+      line(IND + "does not show: a custom `Eq` impl, or a Float NaN.");
+    }
+  }
+  return b.endsWith("\n") ? b.slice(0, -1) : b;
+}
+
+/* A failed `assert`: [meta] is header \x1f op \x1f left source \x1f right
+ * source \x1f flags (Lower_expr's EAssert arm); [l]/[r] the operands'
+ * `to_string`.  Throws the whole report, as march_assert_fail panics with it. */
+export function march_assert_fail(meta, l, r) {
+  const parts = String(meta).split("\x1f");
+  while (parts.length < 5) parts.push("");
+  const [header, op, lsrc, rsrc, flags] = parts;
+  let msg = header;
+  if (op !== "") {
+    const ls = flags[0] === "q" ? tr_quote(String(l)) : String(l);
+    const rs = flags[1] === "q" ? tr_quote(String(r)) : String(r);
+    msg += "\n\n" + tr_compare_body(op, lsrc, rsrc, ls, rs);
+  }
+  throw new Error(msg);
 }

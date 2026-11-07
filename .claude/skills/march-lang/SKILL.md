@@ -999,6 +999,7 @@ Directly callable without module qualification (built into the evaluator).
 | `string_pad_left(s, w, fill)` / `string_pad_right` | Padding |
 | `string_grapheme_count(s)` | Unicode graphemes |
 | `string_to_int(s)` | Parse → Option(Int) |
+| `string_to_float(s)` | Parse → Option(Float); C `strtod` grammar, whole string, every backend (`inf`, `nan`, `0x1p3`; no `_`, no blank) |
 | `bool_to_string(b)` | Bool to string |
 
 ### Char

@@ -4367,17 +4367,38 @@ let test_simplify_strength_reduce () =
      Alcotest.(check string) "x * 2 stays a multiply" "*" f.March_tir.Tir.v_name
    | _ -> Alcotest.fail "expected EApp(*)")
 
-let test_simplify_float_add_zero () =
+(* #1185: signed zeros. `x +. 0.0` must NOT simplify (-0.0 +. 0.0 = +0.0);
+   the true additive identity is -0.0. Dually `x -. 0.0` simplifies but
+   `x -. -0.0` must not. *)
+let float_simplify_case op args =
   let changed = ref false in
-  let x = avar "x" March_tir.Tir.TFloat in
   let fapp' op args =
     March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)), args) in
-  let m = mk_module [mk_fn "f" (fapp' "+." [x; flit 0.0])] in
+  let m = mk_module [mk_fn "f" (fapp' op args)] in
   let m' = March_tir.Simplify.run ~changed m in
-  Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "x+.0.0=x"
-    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
-    (March_tir.Tir.show_expr (first_body m'))
+  (!changed, first_body m')
+
+let test_simplify_float_add_zero () =
+  let x = avar "x" March_tir.Tir.TFloat in
+  let check_kept name op args =
+    let (changed, body) = float_simplify_case op args in
+    Alcotest.(check bool) (name ^ ": unchanged") false changed;
+    (match body with
+     | March_tir.Tir.EApp (f, _) ->
+       Alcotest.(check string) (name ^ ": stays " ^ op) op f.March_tir.Tir.v_name
+     | _ -> Alcotest.fail (name ^ ": expected EApp")) in
+  let check_folded name op args =
+    let (changed, body) = float_simplify_case op args in
+    Alcotest.(check bool) (name ^ ": changed") true changed;
+    Alcotest.(check string) (name ^ ": = x")
+      (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+      (March_tir.Tir.show_expr body) in
+  check_kept   "x+.0.0"    "+." [x; flit 0.0];
+  check_kept   "0.0+.x"    "+." [flit 0.0; x];
+  check_folded "x+.-0.0"   "+." [x; flit (-0.0)];
+  check_folded "-0.0+.x"   "+." [flit (-0.0); x];
+  check_folded "x-.0.0"    "-." [x; flit 0.0];
+  check_kept   "x-.-0.0"   "-." [x; flit (-0.0)]
 
 let test_simplify_bool_and_true () =
   let changed = ref false in
@@ -12737,6 +12758,111 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
        interior nested tuple) matches the interpreter"
       "15" run_out
 
+(* ── Issue #1173: a generalized `let x = None` used at a niche-UNSAFE type ──
+   `let x = None` is generalized (no value restriction), so its RHS lowered at
+   the scheme's residual type, `alloc Option.None('a)()`, which codegen
+   encodes under the erased Option(TVar) niche convention: raw null.  At
+   Option(Float), Option(()) and Option(Option(_)) the payload fails
+   [Kind.niche_payload_ok], so the use decodes Boxed and loads the tag from
+   ptr+8 on the null: SIGSEGV at 0x8 (a record field holding the None crashed
+   in its drop instead).  The interpreter and the JS backend were right.
+   Lowering now types the binding at the one type its uses instantiate it at.
+   Covers every shape in the issue plus a `let y = x` chain and a capture,
+   at --opt 0..3. *)
+let poly_let_none_src =
+  {|mod Main do
+  needs IO.Console
+
+  fn opt_float() : Option(Float) do
+    let x = None
+    x
+  end
+
+  fn opt_unit() : Option(()) do
+    let x = None
+    x
+  end
+
+  fn opt_opt() : Option(Option(Int)) do
+    let x = None
+    x
+  end
+
+  fn rec_field(s : Int) : { n : Int, o : Option(Float) } do
+    let blank = { n: s, o: None }
+    blank
+  end
+
+  fn chain() : Option(Float) do
+    let x = None
+    let y = x
+    y
+  end
+
+  fn pick(o : Option(Float)) : String do
+    match o do
+    | None -> "none"
+    | Some(f) -> float_to_string(f)
+    end
+  end
+
+  fn captured() : String do
+    let x = None
+    let f = fn _u -> pick(x)
+    f(1)
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(pick(opt_float()))
+    match opt_unit() do
+    | None -> println("unit none")
+    | Some(_) -> println("unit some")
+    end
+    match opt_opt() do
+    | None -> println("opt none")
+    | Some(_) -> println("opt some")
+    end
+    let r = rec_field(7)
+    println(int_to_string(r.n))
+    match r.o do
+    | None -> println("field none")
+    | Some(_) -> println("field some")
+    end
+    println(pick(chain()))
+    println(captured())
+    let z = None
+    let w : Option(Float) = Some(2.5)
+    println(pick(if r.n > 3 do w else z end))
+    println(pick(z))
+  end
+end
+|}
+
+let poly_let_none_expected =
+  "none\nunit none\nopt none\n7\nfield none\nnone\nnone\n2.5\nnone"
+
+let test_poly_let_none_niche_unsafe_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_poly_let_none" poly_let_none_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" poly_let_none_expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "polyletnone_o%d" opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string)
+          (Printf.sprintf "--opt %d: generalized `let x = None` at Option(Float) / \
+                           Option(()) / Option(Option(Int)) / a record field \
+                           matches the interpreter (not SIGSEGV at 0x8)" opt)
+          (poly_let_none_expected ^ "\nEXIT:0") run_out)
+    [0; 1; 2; 3]
+
 (* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
    A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
    with the MANY stdlib helpers that use a conventionally-named nested
@@ -13467,6 +13593,134 @@ let test_js_int_subset_parity () =
        ^ tail ^ ")")
       true (ir_contains tail "RangeError: int_shl: result 36028797018963964 overflows"
             && ir_contains tail "EXIT:1")
+  end
+
+(** Issue #1181: an unwritable `-o` path is a filesystem error, not a compiler
+    crash.  `--target js -o dist/x.mjs` with no `dist/` hit an unguarded
+    [open_out] whose [Sys_error] reached the catch-all handler: "internal
+    compiler error", a backtrace, exit 3.  Now a missing parent directory is
+    created (for `--compile -o` too, which a cache HIT already did and a miss
+    left to fail in the linker), and a path that still cannot be written (a
+    directory, a parent that is a file) is a plain `error:` naming the path,
+    exit 1. *)
+let test_output_path_errors () =
+  let name = "out_path_1181" in
+  let src =
+    "mod OutPath do\n\
+    \  needs IO.Console\n\
+    \  fn main(_c : Cap(IO.Console)) : () do\n\
+    \    println(\"hello\")\n\
+    \  end\n\
+     end\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  let compile args =
+    run_capture (Printf.sprintf "cd %s && %s %s %s 2>&1"
+                   (Filename.quote project_root) (Filename.quote main_exe)
+                   args (Filename.quote src_path)) in
+  let no_ice what out =
+    Alcotest.(check bool) (what ^ ": not reported as a compiler bug (got: " ^ out ^ ")")
+      false (ir_contains out "internal compiler error" || ir_contains out "compiler bug") in
+  (* A missing parent (two levels deep) is created: JS. *)
+  let mjs = Filename.concat tmp "dist/sub/x.mjs" in
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote mjs) in
+  no_ice "js, missing dir" out;
+  Alcotest.(check int) ("js, missing dir: exit 0 (got: " ^ out ^ ")") 0 rc;
+  Alcotest.(check bool) "js, missing dir: output written" true (Sys.file_exists mjs);
+  Alcotest.(check bool) "js, missing dir: source map written beside it" true
+    (Sys.file_exists (mjs ^ ".map"));
+  if Sys.command "command -v node >/dev/null 2>&1" = 0 then begin
+    let (_, js_out) = run_capture ("node " ^ Filename.quote mjs) in
+    Alcotest.(check string) "js, missing dir: the output runs" "hello\n" js_out
+  end;
+  (* A parent that is a regular file: a user error naming the path, exit 1. *)
+  let afile = Filename.concat tmp "afile" in
+  let oc = open_out afile in output_string oc "x"; close_out oc;
+  let bad = Filename.concat afile "x.mjs" in
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote bad) in
+  no_ice "js, parent is a file" out;
+  Alcotest.(check int) ("js, parent is a file: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("js, parent is a file: names the path (got: " ^ out ^ ")")
+    true (ir_contains out "error:" && ir_contains out afile);
+  (* The output path is an existing directory. *)
+  let adir = Filename.concat tmp "adir" in
+  Unix.mkdir adir 0o755;
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote adir) in
+  no_ice "js, output is a directory" out;
+  Alcotest.(check int) ("js, output is a directory: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("js, output is a directory: names the path (got: " ^ out ^ ")")
+    true (ir_contains out "error:" && ir_contains out adir);
+  (* Native: a missing parent is created the same way, and the binary runs. *)
+  let bin = Filename.concat tmp "out/sub/x" in
+  let (rc, out) = compile ("--compile -o " ^ Filename.quote bin) in
+  no_ice "native, missing dir" out;
+  Alcotest.(check int) ("native, missing dir: exit 0 (got: " ^ out ^ ")") 0 rc;
+  let (_, nat_out) = run_capture (Filename.quote bin) in
+  Alcotest.(check string) "native, missing dir: the binary runs" "hello\n" nat_out;
+  (* Native, parent is a file: exit 1 and no ICE. *)
+  let (rc, out) = compile ("--compile -o " ^ Filename.quote (Filename.concat afile "x")) in
+  no_ice "native, parent is a file" out;
+  Alcotest.(check int) ("native, parent is a file: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("native, parent is a file: names the path (got: " ^ out ^ ")")
+    true (ir_contains out afile)
+
+(** Issue #1176: `--target js --test` compiled the test blocks and never ran
+    them (node exited 0 with no output); with a `main` the tests were pruned
+    away and `main` ran instead; and a program that prints did not build at
+    all, because `--test` turns capability mocking on and `cap_dict` had no
+    JS implementation.  The JS output now runs the tests as the native test
+    binary does: the same report, byte for byte, the same `--filter=` /
+    `--verbose` flags, exit 1 on a failure.  The report text itself is pinned
+    for every target by test/run_test_reports.ml. *)
+let test_js_test_runner () =
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS test runner)"
+  else begin
+    let name = "js_test_runner_1176" in
+    let src =
+      "mod JsTestRunner do\n\
+      \  needs IO.Console\n\
+      \  fn double(n : Int) : Int do n * 2 end\n\
+      \  fn main(_c : Cap(IO.Console)) : () do\n\
+      \    println(\"main ran\")\n\
+      \  end\n\
+      \  test \"doubles\" do\n\
+      \    println(\"printed from a test\")\n\
+      \    assert (double(2) == 4)\n\
+      \  end\n\
+      \  test \"must fail\" do\n\
+      \    assert (double(1) == 3)\n\
+      \  end\n\
+       end\n" in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let bin = Filename.concat tmp name in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js --test build failed (rc=%d):\n%s" name crc cout;
+    let (nrc, nout) = run_capture (Printf.sprintf "cd %s && %s --compile --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote bin) (Filename.quote src_path)) in
+    if nrc <> 0 then Alcotest.failf "%s: --compile --test build failed (rc=%d):\n%s" name nrc nout;
+    let run cmd = run_capture (cmd ^ "; echo EXIT:$?") in
+    let (_, js_out) = run ("node " ^ Filename.quote mjs) in
+    let (_, native_out) = run (Filename.quote bin) in
+    Alcotest.(check bool) (name ^ ": the tests ran, not main (got: " ^ js_out ^ ")") true
+      (ir_contains js_out "Finished: 2 tests, 1 failure"
+       && ir_contains js_out "printed from a test"
+       && not (ir_contains js_out "main ran"));
+    Alcotest.(check bool) (name ^ ": a failure exits 1 (got: " ^ js_out ^ ")") true
+      (ir_contains js_out "EXIT:1");
+    Alcotest.(check string) (name ^ ": the JS run prints what the native test binary prints")
+      native_out js_out;
+    let (_, js_filtered) = run ("node " ^ Filename.quote mjs ^ " --filter=doubles") in
+    let (_, native_filtered) = run (Filename.quote bin ^ " --filter=doubles") in
+    Alcotest.(check bool) (name ^ ": all passing exits 0 (got: " ^ js_filtered ^ ")") true
+      (ir_contains js_filtered "Finished: 1 test, 0 failures" && ir_contains js_filtered "EXIT:0");
+    Alcotest.(check string) (name ^ ": --filter= agrees with native") native_filtered js_filtered;
+    let (_, js_verbose) = run ("node " ^ Filename.quote mjs ^ " --verbose") in
+    let (_, native_verbose) = run (Filename.quote bin ^ " --verbose") in
+    Alcotest.(check string) (name ^ ": --verbose agrees with native") native_verbose js_verbose
   end
 
 (** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
@@ -14800,6 +15054,140 @@ let test_newtype_eq_operator_generic_payload_compiled () =
          \  end\n\
           end\n"
     ~expected:"true\nfalse\ntrue\nfalse"
+    ()
+
+(* ── #1171: one structural-eq helper per record / tuple SHAPE ──────────
+   [Llvm_eq.mangle_ty_for_eq] had no [TRecord] case, so every record type
+   mangled to "Ptr" and shared ONE [__march_eq_Ptr], generated for whichever
+   record's [==] was emitted first ([ensure_adt_eq_fn] returns a memoized
+   helper by name).  Tuples were mangled but not injectively: a 3-tuple whose
+   first element is a pair and a 2-tuple whose first element is a triple both
+   mangled to [Tup_Tup_Int_x_Int_x_Int_x_Int].  The interpreter was right in
+   every case; compiled code gave wrong answers, over-read, or SIGSEGVed. *)
+
+(** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
+let test_record_eq_pair_then_triple_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_pair_triple"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Triple = { c : Int, d : Int, e : Int }
+  derive Eq for Triple
+  fn main(_cap : Cap(IO.Console)) : () do
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    let t1 : Triple = { c: 1, d: 2, e: 3 }
+    let t2 : Triple = { c: 1, d: 2, e: 4 }
+    println(to_string(p1 == p2))
+    println(to_string(t1 == t2))
+    println(to_string(t1 != t2))
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue"
+    ()
+
+(** Triple first: equal Pairs ran Triple's helper, which loaded offset 32
+    from a 32-byte cell and answered [false]. *)
+let test_record_eq_triple_then_pair_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_triple_pair"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Triple = { c : Int, d : Int, e : Int }
+  derive Eq for Triple
+  fn main(_cap : Cap(IO.Console)) : () do
+    let t1 : Triple = { c: 1, d: 2, e: 3 }
+    let t2 : Triple = { c: 1, d: 2, e: 3 }
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    println(to_string(t1 == t2))
+    println(to_string(p1 == p2))
+  end
+end
+|}
+    ~expected:"true\ntrue"
+    ()
+
+(** Record of Strings first: the Int record ran [march_string_eq] on a
+    tagged Int and SIGSEGVed (addr 0x11, exit 139). *)
+let test_record_eq_strings_then_ints_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_str_int"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Name = { first : String, last : String }
+  derive Eq for Name
+  type Point = { x : Int, y : Int }
+  derive Eq for Point
+  fn main(_cap : Cap(IO.Console)) : () do
+    let n1 : Name = { first: "a", last: "b" }
+    let n2 : Name = { first: "a", last: "b" }
+    let q1 : Point = { x: 1, y: 2 }
+    let q2 : Point = { x: 1, y: 2 }
+    println(to_string(n1 == n2))
+    println(to_string(q1 == q2))
+  end
+end
+|}
+    ~expected:"true\ntrue"
+    ()
+
+(** [eq()] reaches the helper through nesting: [derive Eq] compares each
+    field with [==], and [impl Eq(List(a))] compares elements with [==]. *)
+let test_record_eq_nested_and_list_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Inner = { x : Int, y : Int, z : Int }
+  derive Eq for Inner
+  type Outer = { inner : Inner, tag : Int }
+  derive Eq for Outer
+  fn main(_cap : Cap(IO.Console)) : () do
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    println(to_string(p1 == p2))
+    let o1 : Outer = { inner: { x: 1, y: 2, z: 3 }, tag: 0 }
+    let o2 : Outer = { inner: { x: 1, y: 2, z: 4 }, tag: 0 }
+    println(to_string(eq(o1, o2)))
+    let l1 : List(Inner) = [{ x: 1, y: 2, z: 3 }]
+    let l2 : List(Inner) = [{ x: 1, y: 2, z: 9 }]
+    println(to_string(eq(l1, l2)))
+  end
+end
+|}
+    ~expected:"true\nfalse\nfalse"
+    ()
+
+(** Tuples: [((Int, Int, Int), Int)] and [((Int, Int), Int, Int)] mangled to
+    the same name.  [ip] is shared so the over-read of the pair's missing
+    third slot reads the same word on both sides and the wrong answer is
+    deterministic: the 2-field helper never reaches the differing [4]/[5]. *)
+let test_tuple_eq_nested_shape_collision_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_tup_eq_shapes"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn main(_cap : Cap(IO.Console)) : () do
+    let b1 = ((1, 2, 3), 4)
+    let b2 = ((1, 2, 3), 4)
+    let ip = (1, 2)
+    let a1 = (ip, 3, 4)
+    let a2 = (ip, 3, 5)
+    println(to_string(b1 == b2))
+    println(to_string(a1 == a2))
+    println(to_string(a1 != a2))
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue"
     ()
 
 (** Bug: a variant field typed as an OPAQUE builtin type constructor (no
@@ -18501,6 +18889,10 @@ let codegen_suites =
           Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
             test_nested_tuple_let_deep_wildcard_compiled;
         ] );
+      ( "poly_let_none_codegen", [
+          Alcotest.test_case "generalized `let x = None` at a niche-unsafe Option (#1173)" `Quick
+            test_poly_let_none_niche_unsafe_compiled;
+        ] );
       ( "nested_fn_name_collision_codegen", [
           Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick
             test_nested_fn_name_shadows_toplevel_compiled;
@@ -18552,6 +18944,10 @@ let codegen_suites =
             test_int_overflow_uncaught_panic;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
+          Alcotest.test_case "unwritable -o path: dirs created, plain error, no ICE (#1181)" `Quick
+            test_output_path_errors;
+          Alcotest.test_case "--target js --test runs the tests like the native runner (#1176)" `Quick
+            test_js_test_runner;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
           Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick
@@ -18640,6 +19036,16 @@ let codegen_suites =
             test_newtype_eq_operator_generic_payload_compiled;
           Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
             test_eq_operator_opaque_ctor_field_uses_poly_eq;
+          Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
+            test_record_eq_pair_then_triple_compiled;
+          Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick
+            test_record_eq_triple_then_pair_compiled;
+          Alcotest.test_case "#1171 record ==: String-record helper not reused for Int record" `Quick
+            test_record_eq_strings_then_ints_compiled;
+          Alcotest.test_case "#1171 eq() on nested record field and List of records" `Quick
+            test_record_eq_nested_and_list_compiled;
+          Alcotest.test_case "#1171 tuple ==: nested tuple shapes get distinct helpers" `Quick
+            test_tuple_eq_nested_shape_collision_compiled;
         ] );
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick

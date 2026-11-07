@@ -441,12 +441,13 @@ mod Prelude do
     end
   end
 
-  -- What compiled `<`, `<=`, `>`, `>=` on a tuple lower to (Lower_expr):
-  -- the Ord impls above decide. Not for direct use.
-  pfn __tuple_lt(a, b) do compare(a, b) < 0 end
-  pfn __tuple_le(a, b) do compare(a, b) <= 0 end
-  pfn __tuple_gt(a, b) do compare(a, b) > 0 end
-  pfn __tuple_ge(a, b) do compare(a, b) >= 0 end
+  -- What compiled `<`, `<=`, `>`, `>=` on a tuple, ADT, record or newtype
+  -- lower to (Mono.rewrite_calls): the type's Ord impl decides (the tuple
+  -- impls above, or a derived / hand-written `impl Ord(T)`). Not for direct use.
+  pfn __ord_lt(a, b) do compare(a, b) < 0 end
+  pfn __ord_le(a, b) do compare(a, b) <= 0 end
+  pfn __ord_gt(a, b) do compare(a, b) > 0 end
+  pfn __ord_ge(a, b) do compare(a, b) >= 0 end
 
   -- ---- Polymorphic println and string conversion ----
 
