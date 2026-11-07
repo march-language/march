@@ -25464,6 +25464,19 @@ let session_theory_suite =
               (contains manifest ("Session.Theory." ^ lemma ^ "\t")))
           [ "dual_dual"; "dual_dual_bs"; "same_eq"; "same_eq_bs"; "dual_loop_of"; "erase_loop_of";
             "merge_binary"; "project_dual"; "project_dual_bs" ]);
+    Alcotest.test_case "Actor.Theory's lemmas are in the proved-lemma manifest" `Quick (fun () ->
+        let manifest =
+          In_channel.with_open_bin
+            (Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/lemmas.verified")
+            In_channel.input_all
+        in
+        List.iter
+          (fun lemma ->
+            Alcotest.(check bool) (lemma ^ " is listed as proved") true
+              (contains manifest ("Actor.Theory." ^ lemma ^ "\t")))
+          [ "qcat_end"; "from_cat"; "enq_other"; "enq_self"; "replay_order"; "call_keeps_others";
+            "stale_reply_ignored"; "call_reply_cat"; "call_reply_later"; "deadline_law";
+            "downs_cat"; "down_never_dropped"; "unmonitor_gone"; "down_at_most_once" ]);
     Alcotest.test_case "both projectors agree on two-role, three-role and loop/choice protocols" `Quick (fun () ->
         let code, out = run_cli "--validate-projections" protocols in
         Alcotest.(check int) "exit 0" 0 code;
@@ -25566,15 +25579,19 @@ let guarantees_suite =
   in
   let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
   let first_line out = List.hd (String.split_on_char '\n' out) in
-  [ Alcotest.test_case "proved state, unchecked @invariant, assumed runtime" `Quick (fun () ->
+  [ Alcotest.test_case "proved state, unchecked @invariant, the runtime proved on a model" `Quick (fun () ->
         let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(count <= limit)\n" ~init:"0" ()) in
         Alcotest.(check int) "accepted" 0 code;
         Alcotest.(check string) "the invariant decides the summary" "actor Counter: not checked" (first_line out);
         has out "state refinements  proved: ";
         has out "@invariant         not checked: init and handler results are not checked against it";
         has out "handler contracts";
-        has out "runtime: assumed\n";
-        has out "assumed: the runtime is trusted");
+        (* Actor.Theory: the runtime's laws are proved on a model, and tested
+           against the runtime where a fixture covers them. *)
+        has out "runtime: proved (model)\n";
+        has out "per-sender message order  proved (model) · tested (runtime): Actor.Theory.enq_self";
+        has out "Actor.call replies        proved (model) · tested (runtime)";
+        has out "DOWN delivery             proved (model): at most once");
     Alcotest.test_case "no @invariant: proved" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" (actor ~init:"0" ()) in
         Alcotest.(check string) "summary" "actor Counter: proved" (first_line out));

@@ -25,17 +25,23 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "f4d45ccad",
+    "commit": "b7c963d74",
     "date": "2026-11-06",
     "inputs_sha256": "8869d6813a03fed65550e32f9da917310738ef7a1610f56e995aca6ba4a77b49"
   },
   "modules": {
     "classes": {
       "inside": 15,
-      "none": 117,
+      "none": 118,
       "outside": 24
     },
     "list": [
+      {
+        "cls": "none",
+        "name": "Actor.Theory",
+        "needs": [],
+        "own": false
+      },
       {
         "cls": "none",
         "name": "AhoCorasick",
@@ -1146,7 +1152,7 @@
         "own": true
       }
     ],
-    "total": 156
+    "total": 157
   },
   "pinned": {
     "node_refusal": "FAILED Server.handle: ERR cap_policy IO.FileWrite \u2014 deploy rejected by node capability policy",

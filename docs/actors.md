@@ -68,6 +68,7 @@ state while it runs.
 
 - [Builtins Reference](#builtins-reference)
 - [Interpreted vs compiled](#interpreted-vs-compiled)
+- [What is proved about the mailbox](#what-is-proved-about-the-mailbox)
 - [See also](#see-also)
 
 ## Choosing a concurrency primitive
@@ -1294,6 +1295,29 @@ for the scheduler and lowering internals, see the implementation reference
 (`specs/impl/index.md`).
 
 ---
+
+## What is proved about the mailbox
+
+The mailbox lives in the runtime, so no March function implements it. The standard library's
+`Actor.Theory` (`stdlib/actor_theory.march`) is a model of it: a queue of envelopes (a
+message with its sender, a monitor's `Down`, a reply to an `Actor.call`), with the laws this
+chapter promises proved about the model:
+
+| Law | Says |
+|---|---|
+| `enq_self`, `enq_other` | one sender's messages are received in the order it sent them; another sender's message does not change that |
+| `replay_order` | messages set aside during a hot deploy, or stashed, are replayed in front, in order |
+| `call_keeps_others` | an `Actor.call` waiting inside a handler takes only its reply; everything else stays, in order |
+| `stale_reply_ignored`, `call_reply_cat` | a late reply to an earlier call never answers a later one |
+| `down_never_dropped`, `down_at_most_once` | a monitor's `Down` is never dropped by a full mailbox, and is delivered at most once |
+
+A model is only as good as its match with the runtime, so the runtime is tested against it:
+the native fixture `actor_theory_conformance` has three senders message one actor
+concurrently, replays the order the actor handled them through `Actor.Theory.from_sender`,
+and checks each sender's messages arrived in order. `march --check --guarantees` reports each
+law as `proved (model) · tested (runtime)` when a fixture tests the runtime against it, and
+`proved (model)` when none does yet (`Down` delivery, today). Neither is a proof about the
+runtime itself.
 
 ## Errors you'll see
 

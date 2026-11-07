@@ -556,7 +556,7 @@ references inside interface method signatures and impl headers are not tracked
 
 ## 5. Stdlib Manifest
 
-137 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+138 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -671,6 +671,8 @@ Functions always in scope without `use`:
 **Udp** — `open`, `open_with`, `open_sharded`, `defaults`, `resolve`, `connect`, `send_to`, `send`, `send_batch`, `send_batch_connected`, `send_many`, `recv`, `recv_batch`, `local_addr`, `local_port`, `addr_to_string`, `addr_port`, `stats`, `close`. Packets are `String`; types are `UdpSocket`/`UdpAddr`/`UdpOptions`/`UdpStats` (global type namespace)
 
 **Session.Theory** — `project`, `project_bs`, `dual`, `erase`, `same`, `merge`, `informed`, `binary`; lemmas `dual_dual`, `project_dual`, `same_eq`. Types `SessionGlobal`/`SessionGBranches`/`SessionLocal`/`SessionLBranches` over `Int` ids. The spec the compiler's protocol projectors are validated against (`--validate-projections`)
+
+**Actor.Theory** — mailbox model: `qcat`, `qenq`, `from_sender`, `replay`, `call_reply`, `without_reply`, `downs`, `bounded_enq`, `death_q`, `payloads`; lemmas `enq_self`, `enq_other`, `replay_order`, `call_keeps_others`, `stale_reply_ignored`, `call_reply_cat`, `down_never_dropped`, `down_at_most_once`. Types `ActorEnv` (`EnvMsg`/`EnvDown`/`EnvReply`), `ActorQueue` (`QEnd`/`QThen`), `ActorMons`
 
 ### Actors / Concurrency
 
@@ -1243,7 +1245,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     137 March stdlib modules
+stdlib/                     138 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server

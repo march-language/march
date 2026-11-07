@@ -91,6 +91,10 @@ let stdlib_file_list = [
   "logger.march";
   "diagnostics.march";
   "actor.march";
+  (* Actor.Theory: a model of the mailbox (per-sender order, Actor.call
+     replies, monitors) and its laws (lemmas design §4).  Depends on nothing
+     but Option. *)
+  "actor_theory.march";
   "scheduler.march";
   "flow.march";
   "json.march";
