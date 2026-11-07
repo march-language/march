@@ -692,6 +692,13 @@ git log is authoritative for exact commits.
 
 - **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
 
+- **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
+  gave `NaN` and the program went on; they now panic with "division by zero" / "modulo by
+  zero", as natively. `to_string` on a record or variant with no `Show` impl now builds and
+  prints what native prints (`{ x: 1, y: 2 }`), and `Check.all` property tests,
+  `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
+  A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
+  native message.
 - **Module functions used as values compile correctly.** A binding such as
   `let k = List.length` now retains the function definition during compilation,
   including when the binding is called with different element types.
