@@ -1950,3 +1950,60 @@ let test_term_action_decreases_replaces () =
         (let n = "@[decreases(n)]" in
          let rec go i = i + String.length n <= String.length src' && (String.sub src' i (String.length n) = n || go (i + 1)) in
          go 0))
+
+(* ── Fix tiers: a machine-applicable fix is re-checked before it is preferred ── *)
+
+(* Every quick fix offered on [src]'s own diagnostics, each asked for at the
+   diagnostic's start as an editor would. *)
+let fix_actions_on src =
+  let a = analyse src in
+  List.concat_map
+    (fun (d : Lsp.Types.Diagnostic.t) ->
+      An.code_actions_at a ~line:d.range.start.line ~character:d.range.start.character
+        ~diagnostics:[ d ] ())
+    a.An.diagnostics
+
+let test_fix_tier_holds_preferred () =
+  (* `fn _ -> 42` called with no argument: the fix (`fn -> 42`) clears the
+     error and adds nothing, so the re-check keeps it preferred. *)
+  let src = {|mod M do
+  fn main() : Int do
+    let cb = fn _ -> 42
+    let r = cb()
+    r
+  end
+end
+|} in
+  match List.find_opt (fun (ca : Lsp.Types.CodeAction.t) -> ca.title = "Replace `fn` with `fn`"
+                                                             || String.length ca.title > 8
+                                                                && String.sub ca.title 0 8 = "Replace ")
+          (fix_actions_on src) with
+  | Some ca ->
+    Alcotest.(check bool) "preferred" true (ca.isPreferred = Some true)
+  | None -> Alcotest.fail "no quick fix for the arity mismatch"
+
+let test_fix_tier_fails_recheck () =
+  (* `clsoe(c)` -> `close(c)` is the one suggestion, declared
+     machine-applicable; applied, it uncovers `c` used twice, so the re-check
+     demotes it: offered, not preferred, and labelled a guess. *)
+  let src = {|mod M do
+  always_linear type Conn = Conn(Int)
+  fn close(c : Conn) : Int do match c do Conn(n) -> n end end
+  fn main() : Int do
+    let c = Conn(1)
+    let n = clsoe(c)
+    close(c)
+  end
+end
+|} in
+  match List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let t = "Replace `clsoe` with `close`" in
+      String.length ca.title >= String.length t && String.sub ca.title 0 (String.length t) = t)
+      (fix_actions_on src) with
+  | Some ca ->
+    Alcotest.(check bool) "not preferred" false (ca.isPreferred = Some true);
+    Alcotest.(check bool) "labelled a guess" true
+      (let s = "(a guess: check it)" and t = ca.title in
+       let n = String.length s and m = String.length t in
+       m >= n && String.sub t (m - n) n = s)
+  | None -> Alcotest.fail "no quick fix for `clsoe`"

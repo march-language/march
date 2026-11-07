@@ -54,9 +54,20 @@ expected `String` but got `Int`. [type_mismatch]              ← the message, a
   pages are on this site, listed under [Error reference](#error-reference).
 - **One mistake, one error.** When a mistake would cause others downstream, March reports
   the mistake and holds back the errors that only follow from it.
-- **Fixes as edits.** Many errors also carry a machine-applicable fix. `march --check-json`
-  includes it as a text edit, the [language server](lsp.md) offers it as a quick fix, and
-  `forge fix` applies it.
+- **Fixes as edits.** Many errors also carry a fix. `march --check` shows it under the
+  error as the lines it changes (`4 - old`, `4 + new`), `march --check-json` includes it
+  as a text edit, and the [language server](lsp.md) offers it as a quick fix. Each fix has
+  a tier, the `applicability` field of the edit, and the heading `--check` gives it:
+  - `machine-applicable` ("fix (`forge fix` applies it)"): safe to apply unasked. Before
+    showing one, `--check` and `--check-json` apply it to a copy of the file and check the
+    copy, and the editor does the same before offering it. The fix keeps this tier only if
+    its own error is gone and no new error or warning appeared. `forge fix` applies these,
+    and the editor marks them as the preferred quick fix.
+  - `has-placeholders` ("fix, with a placeholder to fill in"): the right shape with a
+    part to fill in, such as the missing `match` arm whose body is `todo("handle None")`.
+  - `maybe-incorrect` ("possible fix (a guess: check it before applying it)"): one
+    plausible repair among several, such as a field name with another field spelled just
+    as close. It is offered and never applied unasked.
 
 ---
 
@@ -97,6 +108,12 @@ I don't recognize `then` here — March uses do/end blocks instead. [then_keywor
     else
         expr2
     end
+
+    fix (`forge fix` applies it):
+
+5 -     if n > 0 then 1 else 0 end
+5 +     if n > 0 do 1 else 0 end
+
     run `march --explain then_keyword`
 ```
 <!-- /error-tour -->
@@ -171,6 +188,12 @@ This `if` (line 3) needs its own `end`: the `end` on line 4 belongs to an outer 
 
     I only noticed at the end of the file.
     `else if` is a nested `if` in the else position, so each `if` needs its own `end`: a two-branch chain ends `end end`, a three-branch chain `end end end`.
+
+    fix (`forge fix` applies it):
+
+3 |     if a do 1 else if b do 2 else 3 end
+4 +     end
+
     run `march --explain parse_error`
 ```
 <!-- /error-tour -->
@@ -209,6 +232,13 @@ Unexpected `;`: March separates expressions with newlines, not semicolons. [semi
                  ^
 
     Put each expression on its own line.
+
+    fix (`forge fix` applies it):
+
+5 -     let x = 1; let y = 2
+5 +     let x = 1
+6 +     let y = 2
+
     run `march --explain semicolon_separator`
 ```
 <!-- /error-tour -->
@@ -284,6 +314,12 @@ Unknown module `Lsit`. Did you mean `List`? [unknown_qualified_name]
 5 |     Lsit.length([1, 2])
         ^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+5 -     Lsit.length([1, 2])
+5 +     List.length([1, 2])
+
     run `march --explain unknown_qualified_name`
 ```
 <!-- /error-tour -->
@@ -314,6 +350,12 @@ The fields I see are: cont, count
 
 4 |     let n : Int = r.conut
                       ^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+4 -     let n : Int = r.conut
+4 +     let n : Int = r.count
 ```
 <!-- /error-tour -->
 
@@ -346,6 +388,12 @@ Did you mean `Postal` (from type `Mail`)?
 
 6 |     let m : Mail = Posts(1)
                        ^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+6 -     let m : Mail = Posts(1)
+6 +     let m : Mail = Postal(1)
 ```
 <!-- /error-tour -->
 
@@ -569,6 +617,11 @@ end
                    ^^^^^
 
     Add `derive Ord for Hue` after the type to get the structural one, or write `impl Ord(Hue) do ... end`.
+
+    fix (`forge fix` applies it):
+
+4 |   type Hue = Red | Blue
+5 +   derive Ord for Hue
 ```
 <!-- /error-tour -->
 
@@ -611,6 +664,12 @@ or grant everything with `fn main(cap : Cap(IO))`.
 
 4 |   fn main() do
       ^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+4 -   fn main() do
+4 +   fn main(_cap_console : Cap(IO.Console)) do
 
     run `march --explain cap_grant`
 ```
@@ -662,6 +721,14 @@ and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : 
 
 9 |   fn main(c : Cap(IO.Console)) do
              ^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+1 | mod Main do
+2 +   needs IO.FileWrite
+9 -   fn main(c : Cap(IO.Console)) do
+9 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+
     run `march --explain cap_needs`
 ```
 <!-- /error-tour -->
@@ -717,6 +784,15 @@ end
 
 6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
              ^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+1 | mod Main do
+2 +   needs IO.FileRead
+6 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
+6 +   fn main(c : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do println(read(c)) end
+6 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
+6 +   fn main(c : Cap(IO.Console)) do println(read(_cap_fileread)) end
 ```
 <!-- /error-tour -->
 
@@ -907,6 +983,12 @@ Did you mean `Counter`?
 
 11 |     let p = spawn(Countr)
                        ^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+11 -     let p = spawn(Countr)
+11 +     let p = spawn(Counter)
 ```
 <!-- /error-tour -->
 
@@ -1376,6 +1458,14 @@ Protocol `Logging`: `C` may crash, so `C -> I : ...` needs `or crash do ... end`
         ^
 
     The crash branch is the rest of the conversation when `C` is gone. It must begin, for `L`, with a message from `I`; the fix sends one each, for you to change to what the conversation should do.
+
+    fix (`forge fix` applies it):
+
+ 9 |     C -> I : String
+10 +       or crash do
+11 +         I -> L : String
+12 +       end
+
     run `march --explain role_needs_invalid`
 ```
 <!-- /error-tour -->
@@ -1937,6 +2027,13 @@ help: move `let n = List.length(xs)` above the call.
 
 6 |     let n = List.length(xs)
                             ^^
+
+    fix (`forge fix` applies it):
+
+4 |   fn inc_all(xs : List(Int)) : List(Int) do
+5 +     let n = List.length(xs)
+6 -     let n = List.length(xs)
+
     run `march --explain copy_shared`
 ```
 <!-- /error-tour -->

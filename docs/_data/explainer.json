@@ -4,7 +4,7 @@
     "stock_signature": "fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield"
   },
   "generated": {
-    "commit": "a1acb7c3d",
+    "commit": "128b0af38",
     "date": "2026-11-06",
     "inputs_sha256": "bd7f8d3944f8f1a782f790a3ae1a9d0a51639d087c846c735347e3df40e0145a"
   },
@@ -129,7 +129,7 @@
       ],
       "exit": 1,
       "headline": "`Order_Shop.offer_have_out` takes one callback for each branch `Stock` can choose in protocol `Order` (`have` and `out`), but this call leaves out `out`. [session_offer_nonexhaustive]",
-      "output": "-- PROTOCOL ------------------- offer_misses_branch.march\n\n`Order_Shop.offer_have_out` takes one callback for each branch `Stock` can choose in protocol `Order` (`have` and `out`), but this call leaves out `out`. [session_offer_nonexhaustive]\n\n25 |     Order_Shop.offer_have_out(s, st1,\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    After `out` the conversation ends, so the fix closes it; put any other work for that branch before the `close`.\n\n    the choice is declared here:\n\n11 |       choose by Stock:\n                     ^^^^^\n    run `march --explain session_offer_nonexhaustive`\n",
+      "output": "-- PROTOCOL ------------------- offer_misses_branch.march\n\n`Order_Shop.offer_have_out` takes one callback for each branch `Stock` can choose in protocol `Order` (`have` and `out`), but this call leaves out `out`. [session_offer_nonexhaustive]\n\n25 |     Order_Shop.offer_have_out(s, st1,\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    After `out` the conversation ends, so the fix closes it; put any other work for that branch before the `close`.\n\n    the choice is declared here:\n\n11 |       choose by Stock:\n                     ^^^^^\n\n    fix (`forge fix` applies it):\n\n26 -       fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)))\n26 +       fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)), fn (_v, st) -> Order_Shop.close(s, st))\n\n    run `march --explain session_offer_nonexhaustive`\n",
       "source": "mod Main do\n  needs IO\n  needs Session.Live\n\n  @[endpoints]\n  protocol Order do\n    role Stock needs IO.Mut\n    role Ledger needs IO.Console\n    loop do\n      want: Shop -> Stock : Int\n      choose by Stock:\n        have -> Stock -> Shop : String\n                book: Stock -> Ledger : Int\n                booked: Ledger -> Shop : String\n        out  -> Stock -> Shop : String\n                skip: Stock -> Ledger : Int\n                stop\n      end\n    end\n  end\n\n  -- Shop handles the `have` answer and has nothing for `out`.\n  pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry) : Order_Shop.Yield do\n    let st1 = Order_Shop.send_Want(s, st, 1)\n    Order_Shop.offer_have_out(s, st1,\n      fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)))\n  end\n\n  fn main(_c : Cap(IO)) do () end\nend\n"
     },
     "send_out_of_turn": {

@@ -8,4 +8,11 @@ Did you mean `Poke` (message of actor `A`)?
                  ^^^^^^^^
 
 
+    fix (`forge fix` applies it):
 
+28 -     send(a, Pokee(1))
+28 +     send(a, Poke(1))
+
+
+
+after fix: exit 0
