@@ -14731,6 +14731,11 @@ let test_type_qualified_value_rejected () =
 
 let test_type_qualified_value_controls () =
   let ctx = typecheck {|mod Test do
+    mod Auth do
+      type Auth = Auth
+      pfn hash(s : String) : String do s end
+      fn verify(plain, stored) do Auth.hash(plain) == stored end
+    end
     mod Counter do
       fn to_string(x : Int) : String do int_to_string(x) end
     end

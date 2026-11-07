@@ -2873,14 +2873,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
            TError
          | _ when (match split_qualified name.txt with
                    | Some (q, member) when not (String.contains member '.') ->
-                     not (StrMap.mem q env.local_mods)
+                     q <> env.current_module
+                     && not (StrMap.mem q env.local_mods)
                      && (StrMap.mem q env.types || StrMap.mem q env.records
                          || StrMap.mem q env.ty_aliases)
                    | _ -> false) ->
            (* A type is not a value namespace. The suffix fallback used to
               type Int.to_string as to_string while leaving the qualified
               AST name unresolved in both execution backends. Real module
-              and interface exports have already resolved above. *)
+              and interface exports have already resolved above. The current
+              module may also name a type (including its implicit capability);
+              its own qualified private calls still need the suffix fallback. *)
            let q, member = Option.get (split_qualified name.txt) in
            let hint = match lookup_var member env with
              | Some _ -> Printf.sprintf " Write `%s` without the type qualifier." member

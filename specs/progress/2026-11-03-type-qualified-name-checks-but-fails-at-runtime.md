@@ -45,3 +45,10 @@ Verification:
 Compatibility: this deliberately rejects previously typechecked programs
 whose type-qualified value names did not execute correctly. Type-qualified
 constructors and genuine module/interface exports are unaffected.
+
+CI follow-up: the runnable cookbook exposed self-qualified private calls inside
+a module whose name also denotes a type (including its capability). Exempt the
+current module from the type-only qualifier guard; confirmed external privacy
+checks still run first. The added control failed before this fix, then all 34
+diagnostic tests, three privacy controls, and the full runnable Scroll notebook
+check passed.
