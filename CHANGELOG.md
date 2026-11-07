@@ -584,6 +584,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Every cookbook "run" button runs.** 54 of the 151 March blocks on the cookbook and
+  "Coming from" pages failed when run in the sidebar REPL: they used a value from an earlier
+  block, had a placeholder body, used `1_000_000` (March has no digit separators), or need a
+  file system, sockets or the DOM. Each now runs on its own, or, when it cannot run in a
+  browser, shows only a copy button. CI runs every block.
 - The Error Messages tour shows two more examples: a protocol step stranded after a `choose`
   branch that loops forever, and a division by a value from a pattern. The role-grant example
   explains its new help, and the error reference lists `protocol_invalid`,
@@ -681,6 +686,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`~H"..."` works in the browser REPL.** An HTML sigil failed with
+  `unbound variable: IOList.from_strings` unless something had already loaded IOList: the
+  REPL loads a stdlib module when the input names it, and a sigil names none. A sigil now
+  loads the module it expands to.
 - **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
   such a type, and a lemma about it, can now be used in refinements. Recursion through
   `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating

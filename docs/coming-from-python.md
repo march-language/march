@@ -38,8 +38,10 @@ pfn helper(s : String) : String do String.to_uppercase(s) end
 There's no `None` that silently infects your program. A value that might be absent has type `Option(a)`:
 
 ```march
+type User = { id : Int, name : String }
+
 fn find_user(id : Int) : Option(User) do
-  -- returns Some(user) or None
+  if id == 1 do Some({ id: 1, name: "Ada" }) else None end
 end
 
 match find_user(42) do
@@ -52,6 +54,7 @@ The compiler forces you to handle both cases. No `AttributeError: 'NoneType' obj
 
 `Option.unwrap_or` is the safe equivalent of `x or default`:
 
+<!-- repl:skip -->
 ```march
 Option.unwrap_or(find_user(42), default_user)
 ```
@@ -116,6 +119,7 @@ first   = next((x for x in nums if x > 10), None)
 ```
 
 ```march
+let nums    = [4, -2, 15, 8]
 let doubled = nums |> List.filter(fn x -> x > 0) |> List.map(fn x -> x * 2)
 let total   = List.fold_left(nums, 0, fn (acc, x) -> acc + x)
 let first   = List.find(nums, fn x -> x > 10)
@@ -138,6 +142,9 @@ else:
 ```
 
 ```march
+type Shape = Circle(Float) | Rect(Float, Float) | Point
+
+let shape = Circle(2.0)
 match shape do
   Circle(r)  -> 3.14159 *. r *. r
   Rect(w, h) -> w *. h
@@ -150,6 +157,7 @@ The compiler checks exhaustiveness: if you add a new constructor to `Shape` late
 `match do` without a subject replaces `if/elif/else` chains:
 
 ```march
+let score = 85
 match do
   score >= 90 -> "A"
   score >= 80 -> "B"
@@ -171,6 +179,7 @@ let pair = ("hello", 42)        -- inferred: (String, Int)
 
 Annotate at module boundaries for documentation and better error messages:
 
+<!-- repl:skip -->
 ```march
 fn fetch(id : Int) : Result(User, String) do ... end
 ```
@@ -232,7 +241,7 @@ total = doubled.sum()
 ```
 
 ```march
-let arr = NativeArray.make_float(1_000_000, 0.0)
+let arr = NativeArray.make_float(1000000, 0.0)
 let doubled = NativeArray.map_float(arr, fn x -> x *. 2.0)
 let total = NativeArray.sum_float(doubled)
 ```

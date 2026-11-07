@@ -41,6 +41,7 @@ stdout clean for real output. Set the process exit code with `System.exit(n)`;
 returning an `Int` from `main` does *not* affect the exit status.
 
 <!-- scroll:skip -->
+<!-- repl:skip -->
 ```march
 fn main() do
   match System.argv() do
@@ -110,6 +111,7 @@ two-argument lambda (note the parentheses).
 becomes a clean error instead of a crash:
 
 <!-- scroll:skip -->
+<!-- repl:skip -->
 ```march
 fn run(path : String) do
   match File.read(path) do
@@ -129,6 +131,7 @@ for streaming side effects.
 
 ## Complete example
 
+<!-- repl:skip -->
 ```march
 mod Cat do
   needs IO.Console
