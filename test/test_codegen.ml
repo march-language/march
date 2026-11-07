@@ -14611,6 +14611,90 @@ let test_handwritten_impl_nested_match_newtype_compiled () =
    (march_string_eq for String, recursive `ensure_adt_eq_fn` for a nested
    heap ADT/tuple/record, scalar `icmp`/`fcmp` otherwise). *)
 
+(* Distinct record shapes must never reuse an equality helper: loading an Int
+   field with a String comparator used to crash the native program. *)
+let test_record_eq_distinct_shapes_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_record_eq_shapes"
+    ~src:{|mod RecordEq do
+  needs IO.Console
+  type User = { name : String, tags : List(Int) }
+  type Point = { x : Int, y : Int }
+  derive Eq for User
+  derive Eq for Point
+  fn main(_cap_console : Cap(IO.Console)) do
+    let user : User = { name: "ann", tags: [1, 2] }
+    let point : Point = { x: 1, y: 2 }
+    println(bool_to_string(user == { name: "ann", tags: [1, 2] }))
+    println(bool_to_string(user != { name: "bob", tags: [1, 2] }))
+    println(bool_to_string(point == { x: 1, y: 2 }))
+    println(bool_to_string(point == { x: 1, y: 3 }))
+    println(bool_to_string(point != { x: 1, y: 3 }))
+  end
+end
+|}
+    ~expected:"true\ntrue\ntrue\nfalse\ntrue"
+    ()
+
+let test_record_eq_nested_generic_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_record_eq_nested_generic"
+    ~src:{|mod NestedRecordEq do
+  needs IO.Console
+  type Label = { text : String }
+  type Count = { value : Int }
+  type Named = { payload : Label, valid : Bool }
+  type Numbered = { payload : Count, valid : Bool }
+  derive Eq for Label
+  derive Eq for Count
+  derive Eq for Named
+  derive Eq for Numbered
+  type Cell(a) = { item : a }
+  derive Eq for Cell
+  fn main(_cap_console : Cap(IO.Console)) do
+    let a : Named = { payload: { text: "ann" }, valid: true }
+    let b : Numbered = { payload: { value: 1 }, valid: true }
+    println(bool_to_string(a == { payload: { text: "ann" }, valid: true }))
+    println(bool_to_string(a == { payload: { text: "bob" }, valid: true }))
+    println(bool_to_string(b == { payload: { value: 1 }, valid: true }))
+    println(bool_to_string(b != { payload: { value: 2 }, valid: true }))
+    let a : Cell(String) = { item: "ann" }
+    let b : Cell(String) = { item: "bob" }
+    let c : Cell(Int) = { item: 1 }
+    let d : Cell(Int) = { item: 2 }
+    println(bool_to_string(a == { item: "ann" }))
+    println(bool_to_string(a == b))
+    println(bool_to_string(c == { item: 1 }))
+    println(bool_to_string(c != d))
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue"
+    ()
+
+(* These pairs collide under unframed concatenation or lossy type-name
+   sanitization. Each record needs its own structural helper identity. *)
+let test_record_eq_structural_keys () =
+  let open March_tir.Tir in
+  let records = [
+    TRecord [];
+    TRecord ["x", TInt];
+    TRecord ["y", TInt];
+    TRecord ["x", TString];
+    TRecord ["x", TRecord ["y", TInt]];
+    TRecord ["x", TCon ("A.B", [])];
+    TRecord ["x", TCon ("A_B", [])];
+    TRecord ["x", TCon ("A", [TCon ("B", [TInt]); TString])];
+    TRecord ["x", TCon ("A", [TCon ("B", [TInt; TString])])];
+    TRecord ["x", TTuple [TTuple [TInt]; TString]];
+    TRecord ["x", TTuple [TInt; TTuple [TString]]];
+    TRecord ["x_Int_y", TString];
+    TRecord ["x", TInt; "y", TString];
+  ] in
+  let names = List.map March_tir.Llvm_eq.mangle_ty_for_eq records in
+  Alcotest.(check int) "distinct structural types have distinct helper keys"
+    (List.length records) (List.length (List.sort_uniq String.compare names))
+
 (** Core bug: `==`/`!=` on a String-payload Newtype. Pre-fix, compiled
     `WrapS("a") == WrapS("a")` returned FALSE (garbage tag/field offsets into
     the raw string cell); the interpreter was always correct. *)
@@ -18495,6 +18579,14 @@ let codegen_suites =
       ( "scrutinee_borrowed_cross_branch_dec_codegen", [
           Alcotest.test_case "no double dec_rc on scrutinee re-matched in sibling sub-path (P0)" `Quick
             test_scrutinee_borrowed_cross_branch_no_double_dec;
+        ] );
+      ( "record_equality", [
+          Alcotest.test_case "distinct record shapes compare natively" `Quick
+            test_record_eq_distinct_shapes_compiled;
+          Alcotest.test_case "nested and generic records compare natively" `Quick
+            test_record_eq_nested_generic_compiled;
+          Alcotest.test_case "record helper keys preserve structural boundaries" `Quick
+            test_record_eq_structural_keys;
         ] );
       ( "newtype_derived_method_crash", [
           Alcotest.test_case "derived Eq: == operator vs named eq() parity (P1)" `Quick
