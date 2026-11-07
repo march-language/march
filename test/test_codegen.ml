@@ -13615,6 +13615,96 @@ let test_compiled_int_overflow_trap_parity () =
                -4611686018427387904"
     ()
 
+(** Int `/` and `%` test the divisor inline and divide with a plain
+    `sdiv` / `srem` (proved-checks slice 1, 2026-11-06): the opaque call to
+    march_checked_div_op hid the division from LLVM, so a literal divisor
+    could not become a multiply nor a loop-invariant test hoist.  The call is
+    now only on the cold zero-divisor edge, which still panics with the
+    interpreter's message.  Each row is caught with __try_call_val so the
+    interpreter's line is the reference.  Operands come from a NativeIntArr so
+    neither folder sees them, except the literal rows: `x / 0` and `x % 0`
+    must still panic at run time (an `sdiv` by a literal 0 is undefined in
+    LLVM, so the branch must stay in front of it), and `x / 10` is the
+    multiply LLVM makes of a literal divisor. *)
+let test_compiled_int_divmod_trap_parity () =
+  assert_compiled_interp_parity
+    ~name:"march_int_divmod_trap"
+    ~src:"mod IntDivmodTrap do\n\
+    \  needs IO.Console\n\
+    \  fn show(r) : String do\n\
+    \    match r do\n\
+    \      Ok(v) -> int_to_string(v)\n\
+    \      Err(e) -> e\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let arr = NativeArray.from_list_int([23, 7, 0, -4611686018427387903, -1])\n\
+    \    let a = NativeArray.get_int(arr, 0)\n\
+    \    let b = NativeArray.get_int(arr, 1)\n\
+    \    let z = NativeArray.get_int(arr, 2)\n\
+    \    let mn = NativeArray.get_int(arr, 3) - 1\n\
+    \    let m1 = NativeArray.get_int(arr, 4)\n\
+    \    println(show(__try_call_val(fn _ -> a / b)))\n\
+    \    println(show(__try_call_val(fn _ -> a % b)))\n\
+    \    println(show(__try_call_val(fn _ -> (0 - a) / b)))\n\
+    \    println(show(__try_call_val(fn _ -> (0 - a) % b)))\n\
+    \    println(show(__try_call_val(fn _ -> a / (0 - b))))\n\
+    \    println(show(__try_call_val(fn _ -> a % (0 - b))))\n\
+    \    println(show(__try_call_val(fn _ -> a / z)))\n\
+    \    println(show(__try_call_val(fn _ -> a % z)))\n\
+    \    println(show(__try_call_val(fn _ -> a / 0)))\n\
+    \    println(show(__try_call_val(fn _ -> a % 0)))\n\
+    \    println(show(__try_call_val(fn _ -> mn / m1)))\n\
+    \    println(show(__try_call_val(fn _ -> mn % m1)))\n\
+    \    println(show(__try_call_val(fn _ -> (a * 1000 + 7) / 10)))\n\
+    \    println(show(__try_call_val(fn _ -> (a * 1000 + 7) % 10)))\n\
+    \  end\n\
+     end\n"
+    ~expected:"3\n\
+               2\n\
+               -3\n\
+               -2\n\
+               -3\n\
+               2\n\
+               division by zero\n\
+               modulo by zero\n\
+               division by zero\n\
+               modulo by zero\n\
+               -4611686018427387904\n\
+               0\n\
+               2300\n\
+               7"
+    ()
+
+(** The IR side of [test_compiled_int_divmod_trap_parity]: `/` and `%` emit
+    an inline zero test and `sdiv` / `srem`, and reach the runtime helper only
+    from the trap block, never on the path that divides. *)
+let test_int_divmod_inline_ir () =
+  let src = {|mod Test do
+    fn q(a : Int, b : Int) : Int do a / b end
+    fn r(a : Int, b : Int) : Int do a % b end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  let body name =
+    let start = Str.search_forward (Str.regexp_string ("@" ^ name ^ "(")) ir 0 in
+    let stop = Str.search_forward (Str.regexp_string "\n}") ir start in
+    String.sub ir start (stop - start)
+  in
+  let has b pat =
+    try ignore (Str.search_forward (Str.regexp pat) b 0); true with Not_found -> false
+  in
+  List.iter
+    (fun (fn, instr, helper) ->
+      let b = body fn in
+      Alcotest.(check bool) (fn ^ ": zero test") true (has b "icmp eq i64 %[^,]*, 0");
+      Alcotest.(check bool) (fn ^ ": plain " ^ instr) true (has b (instr ^ " i64"));
+      Alcotest.(check bool) (fn ^ ": helper only on the trap edge") true
+        (has b ("dz_trap[0-9]*:\n *%[a-z0-9_]+ = call i64 @" ^ helper ^ "(i64 %[^,]*, i64 0)\n *unreachable")))
+    [ ("q", "sdiv", "march_checked_div_op"); ("r", "srem", "march_checked_mod_op") ]
+
 (** An overflow nobody catches ends the program like any panic, with its
     message, on all three backends: the interpreter, compiled code (stderr
     "... run-time error: ..."), and --target js (an uncaught Error).  The JS operands are
@@ -18345,6 +18435,10 @@ let codegen_suites =
             test_compiled_int_overflow_parity;
           Alcotest.test_case "Int + - * and negation panic on overflow at every boundary (compiled = interpreter)" `Quick
             test_compiled_int_overflow_trap_parity;
+          Alcotest.test_case "Int / and % divide inline and trap on a zero divisor (compiled = interpreter)" `Quick
+            test_compiled_int_divmod_trap_parity;
+          Alcotest.test_case "Int / and % emit an inline zero test and sdiv/srem" `Quick
+            test_int_divmod_inline_ir;
           Alcotest.test_case "uncaught Int overflow panics with its message, exit 1 (interp, compiled, JS)" `Quick
             test_int_overflow_uncaught_panic;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick

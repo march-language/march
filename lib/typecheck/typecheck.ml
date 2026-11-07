@@ -8590,6 +8590,7 @@ let rec check_decl env (d : Ast.decl) : env =
     check_unreachable_after_loop ~tail:[] pdef.proto_steps;
     (* Project the protocol onto each role and verify duality. *)
     let projections, positions = project_protocol env ~span:sp ~proto_name:name.txt pdef in
+    theory_view env ~proto_name:name.txt pdef projections;
     March_ast.Protocol_states.record_protocol ~proto:name.txt pdef.proto_steps;
     let participants = List.map fst projections in
     if participants <> [] && List.length participants < 2 then

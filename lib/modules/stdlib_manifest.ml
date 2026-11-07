@@ -185,6 +185,11 @@ let stdlib_file_list = [
   (* Session transport capability (proof cap + dictionary). References
      Bytes, so it must sit after bytes.march. *)
   "session.march";
+  (* Session.Theory: the logic of protocols (global and local types,
+     projection, duality) and its laws; the spec the compiler's two
+     projectors are validated against (lemmas design §5.2).  Depends on
+     nothing. *)
+  "session_theory.march";
   (* the access-point authorization check (dd step 11b): after node_cert,
      BEFORE cluster_node (authorize_peer) and session_node, whose offers
      and initiators call it. *)
