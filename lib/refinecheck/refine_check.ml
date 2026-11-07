@@ -5198,7 +5198,7 @@ and inner_lemma_facts ~root errctx defs (ctx : rctx) ?(quiet = false) ?(extra = 
 
 (* A static `assert p` inside a lemma (I5): an [Assertion] obligation, and a
    fact for the rest of the block only when proved. *)
-and lemma_assert ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.expr) (sp : A.span) : bool =
+and lemma_assert ?(callee = "assert") ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.expr) (sp : A.span) : bool =
   let vars = goal_vars_typed p in
   let tys = List.map snd vars in
   let base =
@@ -5210,9 +5210,53 @@ and lemma_assert ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.exp
   let sg, args = goal_sig ~base base.param_names p in
   let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
   let out = ref None in
-  check_call cx ~span:sp ~callee:"assert" ~subject:Lemma_goal ~kind:Obligation.Assertion ~verdict_out:out sg args
+  check_call cx ~span:sp ~callee ~subject:Lemma_goal ~kind:Obligation.Assertion ~verdict_out:out sg args
     (List.hd sg.refined);
   !out = Some Obligation.Proved
+
+(* The path a proof hint adds (todo 2026-11-06-proof-assert-by): each lemma
+   call's theorem and each assert, in order, on top of [path].  Used only to
+   prove the hinted goal; the caller decides what survives the hint. *)
+and hint_path ~root errctx defs (ctx : rctx) path lets sc re cb ce (hints : A.expr list) =
+  List.fold_left
+    (fun path (h : A.expr) ->
+      match h with
+      | A.EBlock (es, _) -> hint_path ~root errctx defs ctx path lets sc re cb ce es
+      | _ when (match stmt_call h with
+                | Some (A.EApp (_, _, sp)) -> Hashtbl.mem lemma_call_sites sp
+                | _ -> false) ->
+        lemma_call_facts ~root errctx defs ctx path lets sc re cb ce h @ path
+      | A.EAssert (q, _) -> (q, false) :: path
+      | A.EProof (A.PAssertBy (q, hs), sp) ->
+        if proof_assert_by ~root errctx defs ctx path lets sc re cb ce q hs sp then (q, false) :: path else path
+      | _ -> path)
+    path hints
+
+(* `assert P by hints`: [P] is proved under [path] plus the hints' facts.
+   Ghost and static in every context (a function's too): never a runtime
+   check, so only a proved [P] may be assumed afterwards. *)
+and proof_assert_by ?callee ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.expr) hints sp : bool =
+  let hp = hint_path ~root errctx defs ctx path lets sc re cb ce hints in
+  lemma_assert ?callee ~root errctx defs ctx hp lets sc re cb ce p sp
+
+(* `calc do e0 op1 e1 by h1 … end`: step i is `e(i-1) op_i e(i)`, proved with
+   its own hint only; every proved step is a fact afterwards (together they
+   give the chain's conclusion).  A step after a failed one is still checked,
+   so each failure is reported by its own number. *)
+and proof_calc ~root errctx defs (ctx : rctx) path lets sc re cb ce (e0 : A.expr) (steps : A.calc_step list) =
+  let _, facts, _ =
+    List.fold_left
+      (fun (prev, facts, i) (st : A.calc_step) ->
+        let sp = st.A.cs_span in
+        let goal = A.EApp (A.EVar { A.txt = st.A.cs_op; A.span = sp }, [ prev; st.A.cs_rhs ], sp) in
+        let ok =
+          proof_assert_by ~callee:(Printf.sprintf "calc step %d" i) ~root errctx defs ctx path lets sc re cb ce goal
+            st.A.cs_hint sp
+        in
+        (st.A.cs_rhs, (if ok then (goal, false) :: facts else facts), i + 1))
+      (e0, [], 1) steps
+  in
+  facts @ path
 
 and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
@@ -5467,6 +5511,10 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              | A.EAssert (p, sp) when (match !lemma_walk with Some lw -> not lw.lw_ret | None -> false) ->
                if lemma_assert ~root errctx defs ctx path lets sc re cb ce p sp then (p, false) :: path else path
              | A.EAssert (p, _) -> (p, false) :: path
+             | A.EProof (A.PAssertBy (p, hints), sp) ->
+               if proof_assert_by ~root errctx defs ctx path lets sc re cb ce p hints sp then (p, false) :: path
+               else path
+             | A.EProof (A.PCalc (e0, steps), _) -> proof_calc ~root errctx defs ctx path lets sc re cb ce e0 steps
              (* A `let` REBINDS its names: retire any fact about them first
                 (the shadow discipline every other channel obeys), then, for
                 an admitted RHS shape, push `n == rhs` as an ordinary path
@@ -5707,7 +5755,16 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              | A.ELetFn (n, _, _, _, _) -> cont_shadow ce [ n.A.txt ]
              | _ -> ce
            in
-           loop (ctx', path', lets', sc', re', cb', ce') rest
+           (match e with
+            (* `reveal f`: [f]'s definition is usable by the rest of this
+               block only ([Reflect_state.resolve_site]). *)
+            | A.EProof (A.PReveal (A.EVar { A.txt = f; _ }), _) ->
+              let saved = !Reflect_state.revealed in
+              Reflect_state.revealed := f :: saved;
+              Fun.protect
+                ~finally:(fun () -> Reflect_state.revealed := saved)
+                (fun () -> loop (ctx', path', lets', sc', re', cb', ce') rest)
+            | _ -> loop (ctx', path', lets', sc', re', cb', ce') rest)
     in
     loop (ctx, path, lets, sc, re, cb, ce) es
   | A.ELet (b, _) -> go b.A.bind_expr
@@ -6264,6 +6321,20 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.EField (r, _, _) -> go r
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _) -> go e
+  (* Proof hints: the goal is proved by the block loop ([proof_assert_by],
+     [proof_calc]); here only the hints' own calls are checked (a lemma
+     call's precondition), each hint list as a block of its own. *)
+  | A.EProof (A.PAssertBy (_, hints), sp) -> go (A.EBlock (hints, sp))
+  | A.EProof (A.PCalc (_, steps), sp) ->
+    List.iter (fun (st : A.calc_step) -> if st.A.cs_hint <> [] then go (A.EBlock (st.A.cs_hint, sp))) steps
+  | A.EProof (A.PReveal _, _) -> ()
+  | A.EProof (A.PWithFuel (f, n, body), sp) -> (
+    match f with
+    | A.EVar { A.txt = fname; _ } ->
+      let saved = !Reflect_state.fuel_override in
+      Reflect_state.fuel_override := (fname, max 1 (min 8 n)) :: saved;
+      Fun.protect ~finally:(fun () -> Reflect_state.fuel_override := saved) (fun () -> go (A.EBlock (body, sp)))
+    | _ -> go (A.EBlock (body, sp)))
   | A.ESend (a, b, _) -> go a; go b
   | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
     go e1;
@@ -7016,6 +7087,7 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
     ge body
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> ge e1; ge e2
   | A.EAssert (e, _) -> ge e
+  | A.EProof (pr, _) -> List.iter ge (A.proof_children pr)
   | A.ESigil (_, e, _) -> ge e
   | A.ERefineMsg (e, _, _) -> ge e
 

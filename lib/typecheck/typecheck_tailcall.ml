@@ -192,6 +192,8 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
   | Ast.EAssert (ex, _) -> collect_direct_fn_calls fn_names ex
   | Ast.ESigil (_, content, _) -> collect_direct_fn_calls fn_names content
   | Ast.ERefineMsg (content, _, _) -> collect_direct_fn_calls fn_names content
+  | Ast.EProof (p, _) ->
+    List.fold_left (fun acc x -> StringSet.union acc (collect_direct_fn_calls fn_names x)) StringSet.empty (Ast.proof_children p)
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _)       -> StringSet.empty
 
@@ -597,6 +599,7 @@ let rec check_tail_position
     | Ast.EAssert (ex, _)     -> chk false names params smaller "assert expression" ex
     | Ast.ESigil (_, content, _) -> chk false names params smaller "sigil content" content
     | Ast.ERefineMsg (content, _, _) -> chk false names params smaller "refinement predicate" content
+    | Ast.EProof (p, _) -> List.iter (chk false names params smaller "proof statement") (Ast.proof_children p)
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()

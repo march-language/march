@@ -1287,6 +1287,7 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
+  | A.EProof (p, _) -> List.exists (expr_mentions names) (A.proof_children p)
 
 (* Does the local function [n] ESCAPE in [e] — occur anywhere other than as
    the head of a call `n(...)`?  Passed as a value (`apply(n, 0)`), returned,
@@ -1344,6 +1345,7 @@ let rec name_escapes ?(pass_checked : string -> int -> bool = fun _ _ -> false) 
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> esc e
+  | A.EProof (p, _) -> List.exists (esc) (A.proof_children p)
 
 (* Does [e] mention [m] FREE — an occurrence not captured by an intervening
    binder of the same name?
@@ -1406,6 +1408,7 @@ let rec expr_mentions_free (m : string) (e : A.expr) : bool =
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
+  | A.EProof (p, _) -> List.exists (free) (A.proof_children p)
 
 (* The path-context companion to [scope_shadow].  A path condition is recorded
    against a VARIABLE NAME (`is_None(x)`, `x < 0`); when an inner scope rebinds

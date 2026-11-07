@@ -401,6 +401,8 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
 
   | Ast.EAssert (e, _) ->
     collect_expr ~def_map ~use_map ~calls e
+  | Ast.EProof (p, _) ->
+    List.iter (collect_expr ~def_map ~use_map ~calls) (Ast.proof_children p)
 
   | Ast.ESigil (_, content, _) ->
     collect_expr ~def_map ~use_map ~calls content
@@ -560,6 +562,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
       List.iter (fun (ce, be) -> walk scope ce; walk scope be) arms
     | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
     | Ast.EAssert (e, _) -> walk scope e
+    | Ast.EProof (p, _) -> List.iter (walk scope) (Ast.proof_children p)
     | Ast.ESigil (_, content, _) -> walk scope content
     | Ast.ERefineMsg (content, _, _) -> walk scope content
     | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->

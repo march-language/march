@@ -510,6 +510,7 @@ let rec expr_inline = function
   | ELetStar (p, r, _, _)       ->
     Printf.sprintf "let* %s = %s; ..." (fmt_pat p) (expr_inline r)
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
+  | EProof (p, _)               -> proof_inline p
   | ESigil (name, content, _)     ->
     let inner = expr_inline content in
     Printf.sprintf "~%s%s" name inner
@@ -519,6 +520,28 @@ let rec expr_inline = function
 
 (** Returns true if the expression must be rendered on multiple lines
     (match, multi-statement block, local fn definition). *)
+(* A proof statement on one line.  Hint blocks print as `do … end` inline; the
+   block renderer has no special case for them yet. *)
+and proof_inline (p : proof) : string =
+  let hints = function
+    | [ (EBlock _ as b) ] -> "do " ^ expr_inline b ^ " end"
+    | [ h ] -> expr_inline h
+    | hs -> "do " ^ String.concat "; " (List.map expr_inline hs) ^ " end"
+  in
+  match p with
+  | PAssertBy (e, hs) -> Printf.sprintf "assert %s by %s" (expr_inline e) (hints hs)
+  | PReveal f -> "reveal " ^ expr_inline f
+  | PWithFuel (f, n, body) -> Printf.sprintf "with fuel(%s, %d) %s" (expr_inline f) n (hints body)
+  | PCalc (e0, steps) ->
+    "calc do " ^ expr_inline e0
+    ^ String.concat ""
+        (List.map
+           (fun s ->
+             " " ^ s.cs_op ^ " " ^ expr_inline s.cs_rhs
+             ^ (if s.cs_hint = [] then "" else " by " ^ hints s.cs_hint))
+           steps)
+    ^ " end"
+
 let sigil_is_multiline content =
   match content with
   | ELit (LitString s, _) -> String.contains s '\n'

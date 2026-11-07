@@ -61,7 +61,37 @@ let syms : (string, fsig) Hashtbl.t = Hashtbl.create 64
     of every channel: predicates, path conditions, `let` facts, subjects. *)
 let call_sym : (March_ast.Ast.span, string) Hashtbl.t = Hashtbl.create 256
 
-let resolve_site (sp : March_ast.Ast.span) : string option = Hashtbl.find_opt call_sym sp
+(** `reveal f` (todo 2026-11-06-proof-reveal-and-local-fuel): the call sites
+    of an [@[opaque]] function that would otherwise be reflected, with its
+    symbol and display name.  Filled only when the program has a `reveal`
+    statement; a site here resolves only while its function is revealed. *)
+let hidden_call_sym : (March_ast.Ast.span, string * string) Hashtbl.t = Hashtbl.create 16
+
+(** The functions a `reveal` statement in scope has revealed, as spelled. *)
+let revealed : string list ref = ref []
+
+(** `with fuel(f, N)` in scope: [f] as spelled, and its fuel. *)
+let fuel_override : (string * int) list ref = ref []
+
+(** Does a spelling (`f`, `Inner.f`) name the function displayed [display]
+    (`f`, `Inner.f`, `M.Inner.f`)? *)
+let names_fn ~(display : string) (spelled : string) : bool =
+  display = spelled || String.ends_with ~suffix:("." ^ spelled) display
+
+let resolve_site (sp : March_ast.Ast.span) : string option =
+  match Hashtbl.find_opt call_sym sp with
+  | Some s -> Some s
+  | None -> (
+    match Hashtbl.find_opt hidden_call_sym sp with
+    | Some (s, display) when List.exists (names_fn ~display) !revealed -> Some s
+    | _ -> None)
+
+(** The fuel of the function displayed [display], under any `with fuel`
+    in scope, else [default]. *)
+let fuel_for ~(display : string) (default : int) : int =
+  match List.find_opt (fun (f, _) -> names_fn ~display f) !fuel_override with
+  | Some (_, n) -> n
+  | None -> default
 
 (** Phase 5 (D10): a specialised call site -> the expressions its logic symbol
     is applied to.  A call [g(xs, fn x -> x > k)] specialised as [g$k] passes
@@ -305,6 +335,7 @@ let reset () =
   confirmed := false;
   Hashtbl.reset syms;
   Hashtbl.reset call_sym;
+  Hashtbl.reset hidden_call_sym;
   Hashtbl.reset site_args;
   Hashtbl.reset instances;
   Hashtbl.reset literal_owner;

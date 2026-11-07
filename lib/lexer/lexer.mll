@@ -126,6 +126,8 @@ let () =
       ("test",      TEST);
       ("describe",  DESCRIBE);
       ("assert",    ASSERT);
+      ("calc",      CALC);
+      ("reveal",    REVEAL);
       ("setup",     SETUP);
       ("setup_all", SETUP_ALL);
       ("always_linear", ALWAYSLINEAR);

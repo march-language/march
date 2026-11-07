@@ -4617,6 +4617,36 @@ let rec infer_expr env (e : Ast.expr) : ty =
       Hashtbl.replace env.type_map sp t_unit;
       t_unit
 
+    (* ── Proof hints (ghost; erased after the refinement checker) ─────── *)
+    | Ast.EProof (p, sp) ->
+      let hints hs = List.iter (fun h -> ignore (infer_expr env h)) hs in
+      let ty =
+        match p with
+        | Ast.PAssertBy (pred, hs) ->
+          check_expr env pred t_bool ~reason:(Some (RBuiltin "assert … by expects a Bool expression"));
+          hints hs;
+          t_unit
+        | Ast.PReveal f ->
+          ignore (infer_expr env f);
+          t_unit
+        | Ast.PWithFuel (f, _, body) ->
+          ignore (infer_expr env f);
+          infer_block env body
+        | Ast.PCalc (e0, steps) ->
+          (* Each step is `prev op rhs`, typed as that comparison would be. *)
+          ignore
+            (List.fold_left
+               (fun prev (st : Ast.calc_step) ->
+                 let cmp = Ast.EApp (Ast.EVar { Ast.txt = st.Ast.cs_op; Ast.span = st.Ast.cs_span }, [ prev; st.Ast.cs_rhs ], st.Ast.cs_span) in
+                 check_expr env cmp t_bool ~reason:(Some (RBuiltin "a calc step compares its two sides"));
+                 hints st.Ast.cs_hint;
+                 st.Ast.cs_rhs)
+               e0 steps);
+          t_unit
+      in
+      Hashtbl.replace env.type_map sp ty;
+      ty
+
     (* ── Local recursive named function (block-scoped) ─────────────── *)
     | Ast.ELetFn (name, params, ret_ann, body, sp) ->
       (* Typecheck the local fn and return the type of its closure.
@@ -10281,6 +10311,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (_, _, _, body, _) -> go body
   | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
@@ -10357,6 +10388,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (name, ps, _, body, _) ->
     (* outside a block: only its own body sees it *)

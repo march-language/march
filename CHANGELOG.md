@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
+  `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
+  gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
+  reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
+  block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
+  function's unfolding depth for the checks inside only. All four are checked by the compiler
+  and erased; nothing about a running program changes. `calc` and `reveal` are now keywords.
 - **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
   parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
   parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
