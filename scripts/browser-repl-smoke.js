@@ -255,7 +255,7 @@ function compileAndRun(src) {
     try {
       return { ok: true, stdout: execFileSync(process.execPath, [path.join(dir, 'main.mjs')],
                                               { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
-    } catch (e) { return { ok: false, stdout: e.stdout || '', error: String(e.stderr || e.message).split('\n')[0] }; }
+    } catch (e) { return { ok: false, stdout: e.stdout || '', error: String(e.stderr || e.message) }; }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 // The REPL runs a top-level main when it is defined: unwrap the module.
@@ -279,8 +279,10 @@ for (const [label, runner] of [['compiled', compileAndRun], ['REPL', replRun]]) 
   } else if (!withLemma.ok || withLemma.stdout !== without.stdout) {
     failures++; console.error(`FAIL lemma (${label}): a lemma body ran, or the output differs from the lemma-free program's\n  with:    ${JSON.stringify(withLemma)}\n  without: ${JSON.stringify(without)}`);
   }
-  if (plain.ok) {
-    failures++; console.error(`FAIL lemma (${label}) control: boom as an ordinary function should abort, so this case can fail; got ${JSON.stringify(plain)}`);
+  // The control must fail on boom's assert, not on something else (a compile error
+  // would make the case vacuous too).
+  if (plain.ok || !/\[assert_failed\]/.test(plain.error || '')) {
+    failures++; console.error(`FAIL lemma (${label}) control: boom as an ordinary function should abort on its assert, so this case can fail; got ${JSON.stringify(plain)}`);
   }
 }
 
