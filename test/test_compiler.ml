@@ -8688,6 +8688,86 @@ let test_unrelated_broken_lib_module_is_pruned () =
     Alcotest.(check bool) "entry referencing broken module still errors"
       true (has_errors errors2)))
 
+(** Regression (#1183): a module's type and constructor names are
+    reachability anchors, because a bare type or constructor name resolves
+    program-wide.  But a bare name that the REFERENCING source defines itself
+    resolves to its own definition, so it must not reach every other
+    discovered module defining the same name.  Before the fix, `Alpha` using
+    its own `type Tally` loaded an unreferenced (and broken) `Zeta` that also
+    declared `type Tally`, and Zeta's errors failed the build; renaming
+    Zeta's type made it go away.  Constructors had the same over-inclusion.
+    Controls: the renamed type is pruned too, and a source that uses the name
+    WITHOUT defining it still keeps the defining module (the name genuinely
+    may refer to it). *)
+let test_shared_type_name_does_not_load_unreferenced_module () =
+  let dir = Filename.temp_file "march_lib_shared_type_name_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let lib = Filename.concat dir "lib" in
+  Unix.mkdir lib 0o755;
+  Fun.protect ~finally:(fun () ->
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ()) (fun () ->
+  let write_file path contents =
+    let oc = open_out path in output_string oc contents; close_out oc in
+  write_file (Filename.concat lib "alpha.march")
+    "mod Alpha do\n\
+    \  type Tally = { n : Int }\n\
+    \  type Color = Red | Blue\n\
+    \  fn one() : Int do\n\
+    \    let t : Tally = { n: 1 }\n\
+    \    match Red do\n\
+    \      Red -> t.n\n\
+    \      Blue -> 0\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  (* Never referenced; shares Alpha's type name; broken. *)
+  write_file (Filename.concat lib "zeta.march")
+    "mod Zeta do\n  type Tally = { m : String }\n  fn two() : Int do\n    Gamma.missing()\n  end\nend\n";
+  (* Never referenced; shares Alpha's constructor name; broken. *)
+  write_file (Filename.concat lib "hue.march")
+    "mod HueLib do\n  type Hue = Red | Green\n  fn three() : Int do\n    Gamma.missing()\n  end\nend\n";
+  (* Never referenced; the renamed-type control from the issue. *)
+  write_file (Filename.concat lib "omega.march")
+    "mod Omega do\n  type Other = { m : String }\n  fn four() : Int do\n    Gamma.missing()\n  end\nend\n";
+  Unix.putenv "MARCH_LIB_PATH" lib;
+  Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+    let kept name decls =
+      List.exists (function
+        | March_ast.Ast.DMod ({March_ast.Ast.txt = n; _}, _, _, _) -> n = name
+        | _ -> false) decls
+    in
+    let resolve entry src =
+      let path = Filename.concat dir entry in
+      write_file path src;
+      let m = parse_and_desugar (read_file_contents path) in
+      let (resolve_errors, extra, _uf) =
+        March_resolver.Resolver.resolve_imports ~source_file:path m in
+      (m, resolve_errors, extra)
+    in
+    (* (1) The issue's layout: the entry names only Alpha. *)
+    let (m, resolve_errors, extra) = resolve "main.march"
+        "mod Main do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : () do\n    println(int_to_string(Alpha.one()))\n  end\nend\n" in
+    Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+    Alcotest.(check bool) "Alpha is loaded" true (kept "Alpha" extra);
+    Alcotest.(check bool) "Zeta (same type name) is not loaded" false (kept "Zeta" extra);
+    Alcotest.(check bool) "HueLib (same ctor name) is not loaded" false (kept "HueLib" extra);
+    Alcotest.(check bool) "Omega (renamed type) is not loaded" false (kept "Omega" extra);
+    let assembled =
+      { m with March_ast.Ast.mod_decls = extra @ m.March_ast.Ast.mod_decls } in
+    let (errors, _tm) = March_typecheck.Typecheck.check_module assembled in
+    Alcotest.(check bool) "the program typechecks clean" false (has_errors errors);
+    (* (2) Control: an entry that uses `Tally` and `Green` bare, defining
+       neither, may mean Zeta's and HueLib's: both stay in the build. *)
+    let (_m2, _re2, extra2) = resolve "bare.march"
+        "mod Bare do\n  fn main() : Int do\n    let t : Tally = { m: \"x\" }\n    match Green do\n      Green -> 1\n      Red -> 2\n    end\n  end\nend\n" in
+    Alcotest.(check bool) "a bare type name the source does not define keeps its definer"
+      true (kept "Zeta" extra2);
+    Alcotest.(check bool) "a bare ctor name the source does not define keeps its definer"
+      true (kept "HueLib" extra2);
+    Alcotest.(check bool) "Omega is still not loaded" false (kept "Omega" extra2)))
+
 (* ── `tag` keyword tests ───────────────────────────────────────────────── *)
 
 let test_tag_parses () =
@@ -18023,6 +18103,9 @@ let compiler_suites =
           Alcotest.test_case
             "unrelated broken lib module is pruned; referenced one still errors"
             `Quick test_unrelated_broken_lib_module_is_pruned;
+          Alcotest.test_case
+            "a shared type/ctor name does not load an unreferenced lib module (#1183)"
+            `Quick test_shared_type_name_does_not_load_unreferenced_module;
           Alcotest.test_case
             "qualified private opaque ctor from a sibling module is rejected"
             `Quick test_opaque_ctor_qualified_bypass_rejected;

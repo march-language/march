@@ -3554,10 +3554,10 @@ let write_impl_hashes basename (h_sccs : March_cas.Pipeline.hashed_scc list) =
      any of them (a new sibling can become reachable);
    - every recorded load-set file still exists;
    - every recorded NON-loaded sibling whose bytes changed still parses, has
-     no global-effect declaration, and none of its anchors (its module name,
-     type and constructor names: Resolver.provided_anchor_names) is a token
-     of the entry or a loaded file (Resolver.referenced_name_tokens): i.e.
-     the resolver would prune it again.
+     no global-effect declaration, and is reached by no seed of the entry or
+     a loaded file (Resolver.seed_reaches: its module name, or a type or
+     constructor name that source does not define itself): i.e. the
+     resolver would prune it again.
    Anything else falls back to today's full-directory key. *)
 
 let loadset_version = "march-loadset v1"
@@ -3636,20 +3636,30 @@ let valid_loadset ~path ~entry_real ~src ~walked : string list option =
              unlisted in
          if changed = [] then Some listed
          else begin
-           let tokens = Hashtbl.create 256 in
-           List.iter (fun t ->
-               Hashtbl.iter (fun k () -> Hashtbl.replace tokens k ())
-                 (March_resolver.Resolver.referenced_name_tokens t))
-             (src :: List.filter_map read_opt listed);
+           (* Each source's own type/ctor names do not reach a same-named
+              module (Resolver.seed_reaches); a file that no longer parses
+              keeps them all, which only errs toward the full walk. *)
+           let seeds =
+             List.map (fun (f, t) ->
+                 let own_decls =
+                   match March_parser.Parse.module_ ~filename:f t with
+                   | Ok m -> m.March_ast.Ast.mod_decls
+                   | Error _ -> [] in
+                 March_resolver.Resolver.ref_seed ~own_decls t)
+               ((entry_real, src)
+                :: List.filter_map (fun f -> Option.map (fun t -> (f, t)) (read_opt f))
+                  listed) in
            let still_pruned (f, b) =
              match March_parser.Parse.module_ ~filename:f b with
              | Error _ -> false
              | Ok m ->
                let decls = m.March_ast.Ast.mod_decls in
+               let mod_name = m.March_ast.Ast.mod_name.March_ast.Ast.txt in
+               let anchors = March_resolver.Resolver.provided_anchor_names decls in
                not (March_resolver.Resolver.has_global_effect_decl decls)
-               && not (List.exists (fun a -> Hashtbl.mem tokens a)
-                         (m.March_ast.Ast.mod_name.March_ast.Ast.txt
-                          :: March_resolver.Resolver.provided_anchor_names decls))
+               && not (List.exists (fun seed ->
+                   March_resolver.Resolver.seed_reaches seed ~mod_name ~anchors)
+                   seeds)
            in
            if List.for_all still_pruned changed then Some listed else None
          end
