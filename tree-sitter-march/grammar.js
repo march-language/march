@@ -22,6 +22,9 @@ module.exports = grammar({
 
   conflicts: $ => [
     [$.typed_hole],
+    // `reveal f` (a proof hint) vs `reveal` used as a name: the compiler's
+    // token filter decides by the next token; here GLR does.
+    [$._expr, $.reveal_expression],
     // atom optional args
     [$.atom],
     // type_def: type_identifier can be variant name or type_constructor alias
@@ -645,6 +648,9 @@ module.exports = grammar({
       $.string,
       $.boolean,
       $.identifier,
+      // `calc` and `reveal` are soft keywords (the compiler's token filter
+      // promotes them only before `do` / a name): elsewhere they are names.
+      alias(choice('calc', 'reveal'), $.identifier),
     ),
 
     pipe_expression: $ => prec.left(1, seq(
@@ -757,11 +763,11 @@ module.exports = grammar({
       'with', field('name', $.identifier), '(', commaSep1($._expr), ')',
       'do', optional($.block_body), 'end',
     ),
-    calc_expression: $ => seq(
+    calc_expression: $ => prec(10, seq(
       'calc', 'do',
       repeat1(choice(field('term', $._expr), seq('by', field('hint', $._expr)))),
       'end',
-    ),
+    )),
 
     // Sigil expressions: ~H"...", ~H"""...""", ~yaml"...".  The content is one
     // string token; nothing tokenizes the HTML or interpolations inside it.

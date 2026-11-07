@@ -27,8 +27,9 @@ git log is authoritative for exact commits.
   reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
   block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
   function's unfolding depth for the checks inside only. All four are checked by the compiler
-  and erased; nothing about a running program changes. `calc` and `reveal` are now keywords, so
-  a function, variable or field named `calc` or `reveal` has to be renamed.
+  and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
+  in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
+  keeps working.
 - **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
   `march --check-json`, a fix's `applicability` is `machine-applicable`,
   `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,

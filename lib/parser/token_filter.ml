@@ -171,6 +171,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | _ -> false
       in
       match tok with
+      (* Proof hints (specs/lang/lemmas.md): `calc` and `reveal` are keywords
+         only where the statement is written, `calc do` and `reveal f`.  A
+         call (`calc(…)`), a binding (`let reveal = …`) or a declaration
+         (`fn calc()`) keeps the word an ordinary name. *)
+      | Parser.LOWER_IDENT "calc" ->
+        promote_to Parser.CALC ~when_:(function Parser.DO -> true | _ -> false)
+      | Parser.LOWER_IDENT "reveal" ->
+        promote_to Parser.REVEAL ~when_:(function Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _ -> true | _ -> false)
       | Parser.LOWER_IDENT "module" ->
         promote_to Parser.MODULE_KW ~when_:after_upper_ident
       | Parser.LOWER_IDENT ("elif" | "elsif") ->

@@ -14,7 +14,11 @@ Language reference: `specs/lang/lemmas.md`, "Proof hints".
   after the `with` keyword), and `calc do e0 op e1 [by h] … end`, where operands are parsed at
   the additive level so a leading `==` on the next line starts a step instead of continuing the
   term. A hint is any call-level expression, which includes a `do … end` block. `calc` and
-  `reveal` are new keywords (no identifier of either name in the repo). The grammar has the same 7
+  `reveal` are SOFT keywords: the token filter (`lib/parser/token_filter.ml`) promotes `calc` to
+  `CALC` only before `do` and `reveal` to `REVEAL` only before a name, so `fn calc()`,
+  `calc(…)`, `let reveal = …` keep parsing (adversarial-regressions 48 generates a `fn calc()`
+  and failed with hard keywords). Tree-sitter mirrors it: both words are also identifiers there
+  (`calc_expression` at precedence 10, a declared `_expr`/`reveal_expression` conflict). The grammar has the same 7
   shift/reduce conflicts as before; `assert assert p by h` gives the `by` to the inner assert
   (`%prec prec_assert`).
 - **Semantics** (`lib/refinecheck/refine_check.ml`):
@@ -59,6 +63,8 @@ Language reference: `specs/lang/lemmas.md`, "Proof hints".
 |---|---|
 | `proof-hints` group (18, including the review cases above): assert-by proves and assumes P (one call / a block), hint facts do not leak, an unproved assert-by is not assumed, erased (program runs), `reveal` proves `need4(dbl(2))` with `@[opaque] dbl` and is scoped to its block, `with fuel(cnt, 5)` proves `cnt(3) == 3` (default fuel skips), its body still runs, calc proves each step and the chain, a wrong middle step is reported as `calc step 2` with nothing assumed, mixed `==`/`<=` | RED → GREEN, 18/18 |
 | The two `lemmas.md` examples | both prove (`assert`, `calc step 1/2`, `need_eq`) |
-| `scripts/check-tree-sitter.sh` | ok (1739/1743 clean, 4 known failures as before; keywords listed) |
+| `scripts/check-tree-sitter.sh` | ok (1739/1743 clean, 4 known failures as before) |
+| `run_stdlib` adversarial-regressions 48 (generates a `fn calc()`) | failed with hard keywords (syntax error); passes with soft keywords |
+| `proof-hints` case `calc and reveal stay usable as names` | RED → GREEN |
 | Menhir | 7 shift/reduce conflicts, as on main; no reduce/reduce |
 | `scripts/affected.sh --run --full` | see the PR |

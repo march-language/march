@@ -5082,6 +5082,24 @@
         {
           "type": "SYMBOL",
           "name": "identifier"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "calc"
+              },
+              {
+                "type": "STRING",
+                "value": "reveal"
+              }
+            ]
+          },
+          "named": true,
+          "value": "identifier"
         }
       ]
     },
@@ -6328,54 +6346,58 @@
       ]
     },
     "calc_expression": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "calc"
-        },
-        {
-          "type": "STRING",
-          "value": "do"
-        },
-        {
-          "type": "REPEAT1",
-          "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "FIELD",
-                "name": "term",
-                "content": {
-                  "type": "SYMBOL",
-                  "name": "_expr"
-                }
-              },
-              {
-                "type": "SEQ",
-                "members": [
-                  {
-                    "type": "STRING",
-                    "value": "by"
-                  },
-                  {
-                    "type": "FIELD",
-                    "name": "hint",
-                    "content": {
-                      "type": "SYMBOL",
-                      "name": "_expr"
-                    }
+      "type": "PREC",
+      "value": 10,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "calc"
+          },
+          {
+            "type": "STRING",
+            "value": "do"
+          },
+          {
+            "type": "REPEAT1",
+            "content": {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "FIELD",
+                  "name": "term",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_expr"
                   }
-                ]
-              }
-            ]
+                },
+                {
+                  "type": "SEQ",
+                  "members": [
+                    {
+                      "type": "STRING",
+                      "value": "by"
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "hint",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "_expr"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "STRING",
+            "value": "end"
           }
-        },
-        {
-          "type": "STRING",
-          "value": "end"
-        }
-      ]
+        ]
+      }
     },
     "sigil_expression": {
       "type": "SEQ",
@@ -6816,6 +6838,10 @@
   "conflicts": [
     [
       "typed_hole"
+    ],
+    [
+      "_expr",
+      "reveal_expression"
     ],
     [
       "atom"

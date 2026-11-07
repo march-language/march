@@ -6,6 +6,7 @@
 module U = Test_refine_unfold
 
 let gated = U.gated
+let test_case_run name f = Alcotest.test_case name `Quick f
 let run = U.run
 let expect = U.expect
 let contains = U.contains
@@ -293,4 +294,25 @@ let review =
         let out = U.run_in ~dir "--check" "m.march" in
         if U.has_code out "syntax_error" then Alcotest.failf "formatted output does not parse:\n%s\n%s" formatted out) ]
 
-let suite = assert_by @ reveal_fuel @ calc @ review
+(* `calc` and `reveal` are SOFT keywords: a keyword only where the statement is
+   (`calc do`, `reveal f`); everywhere else an ordinary name, so programs
+   that already use either name keep parsing (adversarial-regressions 48 has
+   a `fn calc()`). *)
+let soft =
+  [ test_case_run "calc and reveal stay usable as names" (fun () ->
+        let out =
+          run ~args:""
+            "mod S do\n\
+             \  needs IO.Console\n\
+             \  fn calc() : Int do 1 end\n\
+             \  fn reveal(x : Int) : Int do x + 1 end\n\
+             \  fn main(_c : Cap(IO.Console)) : Unit do\n\
+             \    let calc_v = calc()\n\
+             \    let reveal = reveal(calc_v)\n\
+             \    println(int_to_string(reveal))\n\
+             \  end\n\
+             end\n"
+        in
+        if not (List.mem "2" (List.map String.trim (U.lines out))) then Alcotest.failf "did not run:\n%s" out) ]
+
+let suite = assert_by @ reveal_fuel @ calc @ review @ soft
