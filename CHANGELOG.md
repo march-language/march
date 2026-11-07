@@ -722,6 +722,11 @@ git log is authoritative for exact commits.
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
   file, instead of silently reporting success.
+- **A compiled program no longer segfaults when an unannotated `let x = None` is used as
+  `Option(Float)`, `Option(())` or `Option(Option(_))`** (#1173). This includes a
+  `None` stored in a record field, which crashed when the record was dropped. The
+  binding is now compiled at the type it is used at. The interpreter was already
+  correct.
 
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
