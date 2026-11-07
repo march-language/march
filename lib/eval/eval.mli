@@ -231,6 +231,7 @@ val pmap_threshold_value : int ref
 val http_fetch_hook :
   (string -> string -> string -> string -> (string, string) result) option
   ref
+val call_return_hook : (unit -> unit) ref
 val ring_drop_newest : 'a ring -> int -> unit
 type actor_inst_snapshot = {
   ais_name : string;

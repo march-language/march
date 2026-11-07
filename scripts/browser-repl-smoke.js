@@ -54,7 +54,9 @@ const CASES = [
   { input: "[1, 2, 3] |> List.map(fn x -> x + 1)",
     output: "[2, 3, 4]\n", error: null },
   // Deep recursion does not depend on the JS stack (march.js is CPS-compiled,
-  // js/dune): this overflowed at 243 elements before.
+  // js/dune): this overflowed at 243 elements before, and again under
+  // js_of_ocaml 6.5 until the evaluator bounced the stack on the return path
+  // too (Eval.call_return_hook, set in js/march_browser.ml).
   { input: "List.length(List.map(List.range(0, 20000), fn x -> x + 1))",
     output: "20000\n", error: null },
   // Defining another function after `main` does not run `main` again.

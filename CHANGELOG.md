@@ -681,6 +681,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
+  recursion (`List.map` over 20,000 elements) ran out of JavaScript stack on the way back up,
+  so the build was pinned to js_of_ocaml `< 6.5`. The interpreter now resets the stack on
+  return as well as on call, and the pin is gone.
 - **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
   such a type, and a lemma about it, can now be used in refinements. Recursion through
   `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating

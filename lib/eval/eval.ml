@@ -655,6 +655,7 @@ let pmap_threshold_value : int ref = ref 1024
    working for existing call sites (the js_of_ocaml build installs it).
    Aliasing a [ref] shares the same mutable cell. *)
 let http_fetch_hook = Eval_prim.http_fetch_hook
+let call_return_hook = Eval_prim.call_return_hook
 
 
 
@@ -1942,9 +1943,14 @@ and apply_inner (fn_val : value) (args : value list) : value =
        this hot path. *)
     let saved = !closure_prefix_override in
     closure_prefix_override := Some defn_prefix;
-    Fun.protect
-      ~finally:(fun () -> closure_prefix_override := saved)
-      (fun () -> eval_expr env' body)
+    let v =
+      Fun.protect
+        ~finally:(fun () -> closure_prefix_override := saved)
+        (fun () -> eval_expr env' body) in
+    (* A no-op natively; the browser REPL's stack bounce on the return path
+       (see [Eval_prim.call_return_hook]). *)
+    !call_return_hook ();
+    v
 
   | VBuiltin (name, f) ->
     (* Witness-validation effect guard — see [Eval_prim.builtin_guard]. *)
