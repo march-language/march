@@ -12716,6 +12716,111 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
        interior nested tuple) matches the interpreter"
       "15" run_out
 
+(* ── Issue #1173: a generalized `let x = None` used at a niche-UNSAFE type ──
+   `let x = None` is generalized (no value restriction), so its RHS lowered at
+   the scheme's residual type, `alloc Option.None('a)()`, which codegen
+   encodes under the erased Option(TVar) niche convention: raw null.  At
+   Option(Float), Option(()) and Option(Option(_)) the payload fails
+   [Kind.niche_payload_ok], so the use decodes Boxed and loads the tag from
+   ptr+8 on the null: SIGSEGV at 0x8 (a record field holding the None crashed
+   in its drop instead).  The interpreter and the JS backend were right.
+   Lowering now types the binding at the one type its uses instantiate it at.
+   Covers every shape in the issue plus a `let y = x` chain and a capture,
+   at --opt 0..3. *)
+let poly_let_none_src =
+  {|mod Main do
+  needs IO.Console
+
+  fn opt_float() : Option(Float) do
+    let x = None
+    x
+  end
+
+  fn opt_unit() : Option(()) do
+    let x = None
+    x
+  end
+
+  fn opt_opt() : Option(Option(Int)) do
+    let x = None
+    x
+  end
+
+  fn rec_field(s : Int) : { n : Int, o : Option(Float) } do
+    let blank = { n: s, o: None }
+    blank
+  end
+
+  fn chain() : Option(Float) do
+    let x = None
+    let y = x
+    y
+  end
+
+  fn pick(o : Option(Float)) : String do
+    match o do
+    | None -> "none"
+    | Some(f) -> float_to_string(f)
+    end
+  end
+
+  fn captured() : String do
+    let x = None
+    let f = fn _u -> pick(x)
+    f(1)
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(pick(opt_float()))
+    match opt_unit() do
+    | None -> println("unit none")
+    | Some(_) -> println("unit some")
+    end
+    match opt_opt() do
+    | None -> println("opt none")
+    | Some(_) -> println("opt some")
+    end
+    let r = rec_field(7)
+    println(int_to_string(r.n))
+    match r.o do
+    | None -> println("field none")
+    | Some(_) -> println("field some")
+    end
+    println(pick(chain()))
+    println(captured())
+    let z = None
+    let w : Option(Float) = Some(2.5)
+    println(pick(if r.n > 3 do w else z end))
+    println(pick(z))
+  end
+end
+|}
+
+let poly_let_none_expected =
+  "none\nunit none\nopt none\n7\nfield none\nnone\nnone\n2.5\nnone"
+
+let test_poly_let_none_niche_unsafe_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_poly_let_none" poly_let_none_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" poly_let_none_expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "polyletnone_o%d" opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string)
+          (Printf.sprintf "--opt %d: generalized `let x = None` at Option(Float) / \
+                           Option(()) / Option(Option(Int)) / a record field \
+                           matches the interpreter (not SIGSEGV at 0x8)" opt)
+          (poly_let_none_expected ^ "\nEXIT:0") run_out)
+    [0; 1; 2; 3]
+
 (* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
    A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
    with the MANY stdlib helpers that use a conventionally-named nested
@@ -18391,6 +18496,10 @@ let codegen_suites =
             test_nested_tuple_let_destructure_compiled;
           Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
             test_nested_tuple_let_deep_wildcard_compiled;
+        ] );
+      ( "poly_let_none_codegen", [
+          Alcotest.test_case "generalized `let x = None` at a niche-unsafe Option (#1173)" `Quick
+            test_poly_let_none_niche_unsafe_compiled;
         ] );
       ( "nested_fn_name_collision_codegen", [
           Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick
