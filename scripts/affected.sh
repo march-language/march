@@ -102,7 +102,7 @@ classify() {
   local f="$1" o
   case "$f" in
     # ── the distributed explainer: generator, data, scripts and their tests ──
-    examples/lab_app/*|scripts/gen-explainer-data.py|scripts/gen-authority-data.py|scripts/render-explainer-fallbacks.js|scripts/check-explainer-budget.py|docs/_data/explainer.json|docs/_data/authority.json|docs/deploy-authority.md|docs/assets/explainer/*|docs/_includes/explainer.html|docs/protocol-to-cluster.md|test/explainer/*)
+    examples/lab_app/*|scripts/gen-explainer-data.py|scripts/gen-authority-data.py|scripts/gen-ownership-data.py|scripts/render-explainer-fallbacks.js|scripts/check-explainer-budget.py|docs/_data/explainer.json|docs/_data/authority.json|docs/_data/ownership.json|docs/deploy-authority.md|docs/one-owner.md|docs/assets/explainer/*|docs/_includes/explainer.html|docs/protocol-to-cluster.md|test/explainer/*)
       add CHECKS scripts/check-docs.sh scripts/check-explainer.sh; reason "$f" "explainer data + doc-lint" ;;
     # ── docs and design records: lint only ───────────────────────────────
     *.md|docs/*|specs/progress/*|specs/todos/*|specs/plans/*|specs/impl/*|specs/features/*)
@@ -203,6 +203,8 @@ classify() {
       add CHECKS scripts/check-tree-sitter.sh; reason "$f" "tree-sitter" ;;
     scripts/run-tests.sh|scripts/test-run-tests.sh)
       add CHECKS scripts/test-run-tests.sh; reason "$f" "test-run-tests.sh" ;;
+    scripts/two-node.sh|scripts/test-two-node.sh)
+      add CHECKS scripts/test-two-node.sh; reason "$f" "test-two-node.sh" ;;
     scripts/affected.sh|scripts/test-affected.sh)
       add CHECKS scripts/test-affected.sh; reason "$f" "test-affected.sh" ;;
     scripts/determinism-oracle.sh)

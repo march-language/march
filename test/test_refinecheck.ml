@@ -3711,6 +3711,7 @@ end|}));
 mod QExt do
   mod List do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn length(xs: List(Int)) : Int = "march_qext_length"
     end
@@ -4224,6 +4225,7 @@ end|}));
 mod QSExt do
   mod String do
     needs Ffi
+    needs IO.Foreign
     extern "c" : Cap(Ffi) do
       fn byte_size(s: String) : Int = "march_qsext_byte_size"
     end
@@ -4497,6 +4499,7 @@ end|}));
              {|
 mod DX do
   needs LibC
+  needs IO.Foreign
   extern "libc": Cap(LibC) do
     fn string_byte_length(s: String): Int
   end
@@ -30065,6 +30068,7 @@ let () =
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
+      ("reflect-record-vars", Test_refine_record_vars.tests);
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);

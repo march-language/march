@@ -71,7 +71,7 @@ let emit_int_arith ~emit_atom ctx (f : Tir.var) (a : Tir.atom) (b : Tir.atom)
     end else begin
       let va' = coerce ctx ty_a va "i64" in
       let vb = emit_atom_as ctx "i64" b in
-      let r  = fresh ctx "ar" in
+      let _ = fresh ctx "ar" in  (* kept: the temp numbering of every other Int op *)
       (* / and % on Int route through checked helpers so a zero divisor traps
          (matching the interpreter) instead of emitting a raw sdiv/srem that
          returns garbage.  The helpers use the bare operator messages
@@ -82,8 +82,7 @@ let emit_int_arith ~emit_atom ctx (f : Tir.var) (a : Tir.atom) (b : Tir.atom)
          does only for -2^62 / -1, and that bare 2^62 normalises to -2^62
          at its first observation ([Llvm_ctx.emit_wrap_int63]). *)
       (match f.Tir.v_name with
-       | "/" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_div_op(i64 %s, i64 %s)" r va' vb); ("i64", r)
-       | "%" -> emit ctx (Printf.sprintf "%s = call i64 @march_checked_mod_op(i64 %s, i64 %s)" r va' vb); ("i64", r)
+       | ("/" | "%") as op -> ("i64", emit_checked_divmod ctx op va' vb)
        | op  -> ("i64", emit_checked_int_op ctx op va' vb))
     end
 

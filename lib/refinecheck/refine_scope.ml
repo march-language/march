@@ -297,6 +297,37 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
   match e with
   | A.ELit (A.LitInt n, _) -> Ok (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Ok (Smt.BoolLit b)
+  (* A record literal with no parameter to type it (`== { x: 1, y: n }`): the
+     one record whose fields are exactly these names, when exactly one
+     unambiguous record declares that set; any other literal declines.  A
+     literal at a reflected call's record parameter is typed by the parameter
+     (the reflected-call arm below).  The field terms' sorts are checked by
+     the query's well-sortedness test like any other term's. *)
+  | A.ERecord (fs, _) -> (
+    let given = List.sort compare (List.map (fun ((n : A.name), _) -> n.A.txt) fs) in
+    let cands =
+      Hashtbl.fold
+        (fun adt ctors acc ->
+          match ctors with
+          | [ ctor ] when (not (Hashtbl.mem ambiguous_adts adt)) && Hashtbl.mem ctor_field_names ctor
+                          && Hashtbl.find_opt adt_arity adt |> Option.value ~default:0 = 0
+                          && List.sort compare (Hashtbl.find ctor_field_names ctor) = given ->
+            (adt, ctor) :: acc
+          | _ -> acc)
+        adt_ctors []
+    in
+    match cands with
+    | [ (adt, ctor) ] when List.length (List.sort_uniq compare given) = List.length given ->
+      let names = Hashtbl.find ctor_field_names ctor in
+      let rec all = function
+        | [] -> Ok []
+        | n :: rest ->
+          (match r (snd (List.find (fun ((m : A.name), _) -> m.A.txt = n) fs)) with
+           | Ok t -> Result.map (fun ts -> t :: ts) (all rest)
+           | Error e -> Error e)
+      in
+      Result.map (ctor_term adt ctor) (all names)
+    | _ -> Error e)
   (* A zero-argument constant function IS its literal (see [const_fns]);
      `_ < size_x()` reflects exactly as `_ < 128` does. *)
   | A.EApp (A.EVar { A.txt = f; _ }, [], _) when is_const_fn f ->
@@ -627,6 +658,9 @@ let rec pred_str (e : A.expr) : string =
          && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
     law_method_display f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.ETuple ([], _) -> "()"
+  (* A record literal, as written (field order kept). *)
+  | A.ERecord (fs, _) ->
+    "{ " ^ String.concat ", " (List.map (fun ((n : A.name), v) -> n.A.txt ^ ": " ^ pred_str v) fs) ^ " }"
   | _ -> "<predicate>"
 
 (* Why a `/`/`%` leaf did not reflect, for the `unreflectable-predicate`
@@ -1131,6 +1165,16 @@ let is_string_param_ty : A.ty option -> bool = function
    every parameter was declared at before, so nothing but Bool (and later
    Float) changes behaviour.  Driven by the DECLARED type, never by the actual:
    an unknown must stay unknown rather than be guessed from its argument. *)
+(* The record sort a parameter's declared type names, refined or not: `p : Pt`
+   and `p : {Pt | _.x > 0}` both answer Pt's sort name, a non-record [None]. *)
+let record_sort_of_param_ty (t : A.ty option) : string option =
+  match Option.map unlinear t with
+  | Some (A.TyRefine (b, _, _)) | Some b ->
+    (match b with
+     | A.TyCon ({ A.txt = name; _ }, []) when is_record_base b -> Some (adt_sort_name name)
+     | _ -> None)
+  | None -> None
+
 let scalar_sort_of_param_ty (t : A.ty option) : Smt.sort =
   let base = match t with Some (A.TyRefine (b, _, _)) -> Some b | t -> t in
   match base with

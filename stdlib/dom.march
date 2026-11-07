@@ -24,6 +24,7 @@
 
 mod Js.Dom do
   needs Ffi
+  needs IO.Foreign
 
   -- Opaque handle to a DOM Element.
   resource Node

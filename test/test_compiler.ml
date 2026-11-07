@@ -11242,15 +11242,16 @@ let test_refined_param_typechecks_as_base () =
   Alcotest.(check bool) "bare typechecks cleanly" false
     (Test_helpers.has_errors (Test_helpers.typecheck bare))
 
-(* IO.Foreign tests — extern blocks imply IO.Foreign meta-capability *)
+(* IO.Foreign tests — extern blocks imply IO.Foreign meta-capability.
+   An uncovered implication is an ERROR (it was a warning before 2026-11-06). *)
 let test_cap_body_missing_foreign () =
   let ctx = typecheck {|mod Bindings do
     extern "libc": Cap(IO.FileSystem) do
       fn read(fd : Int) : Int
     end
   end|} in
-  Alcotest.(check bool) "extern block without needs IO.Foreign: warn" true
-    (has_warning_with ctx "IO.Foreign")
+  Alcotest.(check bool) "extern block without needs IO.Foreign: error" true
+    (has_error_with ctx "IO.Foreign")
 
 let test_cap_body_foreign_ok () =
   let ctx = typecheck {|mod Bindings do
@@ -11260,8 +11261,8 @@ let test_cap_body_foreign_ok () =
       fn read(fd : Int) : Int
     end
   end|} in
-  Alcotest.(check bool) "extern block with needs IO.Foreign: no warn" false
-    (has_warning_with ctx "IO.Foreign")
+  Alcotest.(check bool) "extern block with needs IO.Foreign: no error" false
+    (has_error_with ctx "IO.Foreign")
 
 let test_cap_body_foreign_parent_ok () =
   let ctx = typecheck {|mod Bindings do
@@ -11270,19 +11271,19 @@ let test_cap_body_foreign_parent_ok () =
       fn read(fd : Int) : Int
     end
   end|} in
-  Alcotest.(check bool) "needs IO umbrella covers IO.Foreign: no warn" false
-    (has_warning_with ctx "IO.Foreign")
+  Alcotest.(check bool) "needs IO umbrella covers IO.Foreign: no error" false
+    (has_error_with ctx "IO.Foreign")
 
 let test_cap_body_foreign_blocking () =
-  (* No needs at all: blocking extern warns for both IO.Foreign and IO.Foreign.Blocking *)
+  (* No needs at all: blocking extern errors for both IO.Foreign and IO.Foreign.Blocking *)
   let ctx = typecheck {|mod Bindings do
     needs IO.FileSystem
     extern "libc": Cap(IO.FileSystem) do
       blocking fn slow_read(fd : Int) : Int
     end
   end|} in
-  Alcotest.(check bool) "blocking extern (no needs IO.Foreign) warns IO.Foreign.Blocking" true
-    (has_warning_with ctx "IO.Foreign.Blocking")
+  Alcotest.(check bool) "blocking extern (no needs IO.Foreign) errors on IO.Foreign.Blocking" true
+    (has_error_with ctx "IO.Foreign.Blocking")
 
 (* ── fn_capability_closures: per-function IO-capability closure (Phase5C-A.2) ─
    check_module_needs records, per fully-qualified function name, the
