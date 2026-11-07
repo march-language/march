@@ -3635,12 +3635,18 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              (* [pred_str] prints `<predicate>` for a form it cannot spell
                 (a record literal read into `v.port >= 1`); such a rendering
                 is not shown, the parameter-named or declared one is. *)
+             (* …nor is a field read off a record literal (`{ port: 0 }.port`),
+                which [pred_str] spells since record literals print as
+                written: no one writes that, so the named rendering wins. *)
              let printable (p : A.expr) : string option =
                let t = pred_str p in
-               let ph = "<predicate>" in
-               let n = String.length ph and m = String.length t in
-               let rec has i = i + n <= m && (String.sub t i n = ph || has (i + 1)) in
-               if has 0 then None else Some t
+               let ph = "<predicate>" and fl = "}." in
+               let has ph =
+                 let n = String.length ph and m = String.length t in
+                 let rec go i = i + n <= m && (String.sub t i n = ph || go (i + 1)) in
+                 go 0
+               in
+               if has ph || has fl then None else Some t
              in
              let at_arg_or_named (a : A.expr) (p : A.expr) : string =
                match printable (over_args a p) with

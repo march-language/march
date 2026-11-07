@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
+  parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
+  parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
+  checked (including a reflected call that returns one, `need_x(bump(p))`), and a return type
+  can relate the result to a record parameter (`{Int | _ == p.x}`, `{Pt | _.x == p.y}`). A
+  record literal in a predicate is typed by its field names when exactly one record has them,
+  and reports print it as written instead of `<predicate>`.
+
 - **Stdlib laws for `List.sum_int` and `List.product_int`, and a result type on `List.length`.**
   `List.sum_int_append(xs, ys)` proves `sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)`,
   `List.sum_int_reverse(xs)` proves `sum_int(reverse(xs)) == sum_int(xs)`, and
