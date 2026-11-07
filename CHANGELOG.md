@@ -655,6 +655,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled `x +. 0.0` keeps the sign of zero right** (#1185). The optimizer rewrote
+  `x +. 0.0` and `0.0 +. x` to `x`, so native and JS builds returned `-0.0` for
+  `-0.0 +. 0.0`, where IEEE 754 (and the interpreter) give `+0.0`. The rewrite now fires
+  only for `-0.0`, the real additive identity; `x -. 0.0` still simplifies and
+  `x -. -0.0` no longer does.
+- **`install.sh` verifies checksums with Apple's `/sbin/sha256sum`** (#1182). With it first
+  on `PATH`, the `curl | sh` install failed at "Verifying checksum" on macOS, because
+  Apple's `sha256sum -c` prints usage when the checklist comes on stdin without a `-`
+  operand. The installer now passes `-`.
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output

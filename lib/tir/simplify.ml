@@ -62,12 +62,21 @@ let rec simplify_expr ~changed ~pre_perceus : Tir.expr -> Tir.expr = function
     when f.Tir.v_name = "/" && d <> 0 ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt 0))
 
-  (* Float identities (IEEE 754 safe; no x -. x rule due to NaN) *)
-  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitFloat 0.0)]) when f.Tir.v_name = "+." ->
+  (* Float identities (IEEE 754 safe; no x -. x rule due to NaN).
+     Signed zeros matter (#1185): `x +. 0.0` is NOT `x`, because
+     `-0.0 +. 0.0 = +0.0`; the additive identity is `-0.0` (`x +. -0.0 = x`
+     for every x, -0.0 included).  Dually `x -. 0.0 = x` holds but
+     `x -. -0.0` (= `x +. 0.0`) does not.  OCaml float patterns compare with
+     `=`, under which `0.0 = -0.0`, so the literal pattern alone can't tell
+     the two apart: test the sign bit explicitly. *)
+  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitFloat z)])
+    when f.Tir.v_name = "+." && z = 0.0 && Float.sign_bit z ->
     changed := true; Tir.EAtom x
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitFloat 0.0); x]) when f.Tir.v_name = "+." ->
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitFloat z); x])
+    when f.Tir.v_name = "+." && z = 0.0 && Float.sign_bit z ->
     changed := true; Tir.EAtom x
-  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitFloat 0.0)]) when f.Tir.v_name = "-." ->
+  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitFloat z)])
+    when f.Tir.v_name = "-." && z = 0.0 && not (Float.sign_bit z) ->
     changed := true; Tir.EAtom x
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitFloat 1.0)]) when f.Tir.v_name = "*." ->
     changed := true; Tir.EAtom x

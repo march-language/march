@@ -4367,17 +4367,38 @@ let test_simplify_strength_reduce () =
      Alcotest.(check string) "x * 2 stays a multiply" "*" f.March_tir.Tir.v_name
    | _ -> Alcotest.fail "expected EApp(*)")
 
-let test_simplify_float_add_zero () =
+(* #1185: signed zeros. `x +. 0.0` must NOT simplify (-0.0 +. 0.0 = +0.0);
+   the true additive identity is -0.0. Dually `x -. 0.0` simplifies but
+   `x -. -0.0` must not. *)
+let float_simplify_case op args =
   let changed = ref false in
-  let x = avar "x" March_tir.Tir.TFloat in
   let fapp' op args =
     March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)), args) in
-  let m = mk_module [mk_fn "f" (fapp' "+." [x; flit 0.0])] in
+  let m = mk_module [mk_fn "f" (fapp' op args)] in
   let m' = March_tir.Simplify.run ~changed m in
-  Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "x+.0.0=x"
-    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
-    (March_tir.Tir.show_expr (first_body m'))
+  (!changed, first_body m')
+
+let test_simplify_float_add_zero () =
+  let x = avar "x" March_tir.Tir.TFloat in
+  let check_kept name op args =
+    let (changed, body) = float_simplify_case op args in
+    Alcotest.(check bool) (name ^ ": unchanged") false changed;
+    (match body with
+     | March_tir.Tir.EApp (f, _) ->
+       Alcotest.(check string) (name ^ ": stays " ^ op) op f.March_tir.Tir.v_name
+     | _ -> Alcotest.fail (name ^ ": expected EApp")) in
+  let check_folded name op args =
+    let (changed, body) = float_simplify_case op args in
+    Alcotest.(check bool) (name ^ ": changed") true changed;
+    Alcotest.(check string) (name ^ ": = x")
+      (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+      (March_tir.Tir.show_expr body) in
+  check_kept   "x+.0.0"    "+." [x; flit 0.0];
+  check_kept   "0.0+.x"    "+." [flit 0.0; x];
+  check_folded "x+.-0.0"   "+." [x; flit (-0.0)];
+  check_folded "-0.0+.x"   "+." [flit (-0.0); x];
+  check_folded "x-.0.0"    "-." [x; flit 0.0];
+  check_kept   "x-.-0.0"   "-." [x; flit (-0.0)]
 
 let test_simplify_bool_and_true () =
   let changed = ref false in
