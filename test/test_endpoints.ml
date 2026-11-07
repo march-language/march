@@ -2545,6 +2545,205 @@ let two_step_branch_skip = bad "skipping a choose branch's second step is a type
   end
 |}))
 
+(* Unlabelled messages shared by alternatives must use the same wire tag,
+   while successive messages and explicitly labelled alternatives stay distinct. *)
+let shared_bystander = {|
+  @[endpoints]
+  protocol Three do
+    choose by A:
+      go -> A -> B : Int
+            B -> C : Int
+      halt -> A -> B : String
+              B -> C : Int
+    end
+  end
+|}
+
+let shared_bystander_ok = ok "identical unlabelled bystander receives merge"
+  (wrap (shared_bystander ^ {|
+  pfn b(s : Cap(Session.Live), st : Three_B.S_offer_go_halt) : Three_B.Yield do
+    Three_B.offer_go_halt(s, st,
+      fn (_n, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 1)),
+      fn (_text, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 2)))
+  end
+  pfn c(s : Cap(Session.Live), st : Three_C.S_recv_Msg_B_C_1) : Three_C.Yield do
+    Three_C.recv_Msg_B_C_1(s, st, fn (_n, next) -> Three_C.close(s, next))
+  end
+|}))
+
+let shared_bystander_shape =
+  Alcotest.test_case "a merged bystander receives from the sender without a fabricated choice" `Quick
+    (fun () ->
+       let mods = generated (wrap shared_bystander) in
+       Alcotest.(check bool) "receive from B" true (has_fn mods "Three_C" "recv_Msg_B_C_1");
+       Alcotest.(check bool) "no offer from A" false (has_fn mods "Three_C" "offer_go_halt");
+       Alcotest.(check bool) "B sends the same tag on both paths" false
+         (has_fn mods "Three_B" "send_Msg_B_C_2"))
+
+let shared_bystander_tags =
+  Alcotest.test_case "choice tags preserve payloads, labels, sequential steps and nested sharing" `Quick
+    (fun () ->
+       let module E = March_desugar.Desugar_endpoints in
+       let n txt = { txt; span = dummy_span } in
+       let int = TyCon (n "Int", []) and str = TyCon (n "String", []) in
+       let msg ?label t = ProtoMsg (n "B", n "C", t, Option.map n label) in
+       let choice branches = ProtoChoice (n "A", List.map (fun (label, tail) ->
+           (n label, ProtoMsg (n "A", n "B", int, None) :: tail)) branches) in
+       let steps = [choice [
+           "go", [msg int; msg int; msg ~label:"first" int; msg str];
+           "halt", [msg int; msg int; msg ~label:"second" int; msg int]]] in
+       let annotate steps =
+         match E.annotate (March_errors.Errors.create ()) ~proto:"Three" ~span:dummy_span steps with
+         | Some xs -> xs | None -> Alcotest.fail "annotation failed" in
+       let rec tags = function
+         | E.AMsg ("B", "C", _, ctor) -> [ctor]
+         | E.AChoice (_, arms) -> List.concat_map (fun (_, xs) -> List.concat_map tags xs) arms
+         | _ -> [] in
+       (match annotate steps with
+        | [E.AChoice (_, [(_, a); (_, b)])] ->
+          let a = List.concat_map tags a and b = List.concat_map tags b in
+          Alcotest.(check (list string)) "different tails keep their tags, labels and payloads distinct"
+            ["Msg_B_C_4"; "Msg_B_C_5"; "Second"; "Msg_B_C_6"] b;
+          Alcotest.(check (list string)) "first branch unchanged"
+            ["Msg_B_C_1"; "Msg_B_C_2"; "First"; "Msg_B_C_3"] a
+        | _ -> Alcotest.fail "expected two branches");
+       (match annotate [choice ["go", [msg int; msg int]; "halt", [msg int; msg int]]] with
+        | [E.AChoice (_, [(_, a); (_, b)])] ->
+          Alcotest.(check (list string)) "successive messages stay distinct"
+            ["Msg_B_C_1"; "Msg_B_C_2"] (List.concat_map tags a);
+          Alcotest.(check (list string)) "equivalent sequential tails share their tags"
+            (List.concat_map tags a) (List.concat_map tags b)
+        | _ -> Alcotest.fail "expected sequential branches");
+       let nested = choice ["inner_go", [msg int]; "inner_halt", [msg int]] in
+       match annotate [choice ["outer_go", [nested]; "outer_halt", [nested]]] with
+       | [E.AChoice (_, [(_, a); (_, b)])] ->
+         Alcotest.(check (list string)) "nested alternatives keep a shared tag"
+           ["Msg_B_C_1"; "Msg_B_C_1"] (List.concat_map tags a);
+         Alcotest.(check (list string)) "outer alternatives share nested tags"
+           (List.concat_map tags a) (List.concat_map tags b)
+       | _ -> Alcotest.fail "expected nested branches")
+
+let choice_distinct_continuations = ok "equal payloads with different continuations retain separate APIs" (wrap {|
+  @[endpoints]
+  protocol Different do
+    choose by A:
+      go -> A -> B : Int
+            A -> B : Int
+            A -> B : String
+      halt -> A -> B : Int
+              A -> B : Int
+              A -> B : Bool
+    end
+  end
+|})
+
+let choice_reserved_head_labels =
+  Alcotest.test_case "Msg-prefixed choice labels retain distinct wire constructors" `Quick
+    (fun () ->
+       let src = wrap {|
+         @[endpoints]
+         protocol Labels do
+           choose by A:
+             msg_yes -> A -> B : Int
+             msg_no -> A -> B : Int
+           end
+         end
+       |} in
+       Alcotest.(check (option (list string))) "branch tags"
+         (Some ["Msg_yes"; "Msg_no"]) (variant_ctors src "Labels_Msg" "Labels_Message");
+       Alcotest.(check (list string)) "generated code typechecks" []
+         (error_messages (typecheck_with_stdlib src)))
+
+let choice_atomic_boundaries =
+  Alcotest.test_case "atomic and ordinary loop alternatives retain separate drain behavior" `Quick
+    (fun () ->
+       let src = wrap {|
+         @[endpoints]
+         protocol Boundaries do
+           choose by A:
+             atomic -> A -> B : Int
+                       loop atomic do
+                         A -> B : Int
+                       end
+             ordinary -> A -> B : Int
+                         loop do
+                           A -> B : Int
+                         end
+           end
+         end
+       |} in
+       let mods = generated src in
+       Alcotest.(check bool) "atomic transition" true (has_fn mods "Boundaries_B" "recv_Msg_A_B_1");
+       Alcotest.(check bool) "ordinary transition stays distinct" true
+         (has_fn mods "Boundaries_B" "recv_Msg_A_B_2");
+       Alcotest.(check int) "atomic receive is not a drain boundary" 0
+         (count_calls src "Boundaries_B" "recv_Msg_A_B_1" "Session.suspend_at_boundary");
+       Alcotest.(check int) "ordinary receive is a drain boundary" 1
+         (count_calls src "Boundaries_B" "recv_Msg_A_B_2" "Session.suspend_at_boundary");
+       Alcotest.(check (list string)) "generated code typechecks" []
+         (error_messages (typecheck_with_stdlib src)))
+
+let shared_bystander_native =
+  Alcotest.test_case "both shared bystander paths deliver on interpreter and native backends" `Slow
+    (fun () ->
+       let src = {|mod SharedChoice do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Three do
+    choose by A:
+      go -> A -> B : Int
+            B -> C : Int
+      halt -> A -> B : String
+              B -> C : Int
+    end
+  end
+
+  pfn b(s : Cap(Session.Live), st : Three_B.S_offer_go_halt) : Three_B.Yield do
+    Three_B.offer_go_halt(s, st,
+      fn (_n, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 11)),
+      fn (_text, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 22)))
+  end
+  pfn c(s : Cap(Session.Live), st : Three_C.S_recv_Msg_B_C_1) : Three_C.Yield do
+    Three_C.recv_Msg_B_C_1(s, st, fn (n, next) ->
+      print_line(int_to_string(n))
+      Three_C.close(s, next))
+  end
+  fn main(io : Cap(IO)) do
+    let t = Session.in_process()
+    let s = Session.attach(io, t.ops)
+    let _ = c(s, Three_C.register(s, 0))
+    let _ = b(s, Three_B.register(s, 0))
+    let _ = Three_A.close(s, Three_A.choose_go(s, Three_A.register(s, 0), 1))
+    t.drain(())
+    let u = Session.in_process()
+    let q = Session.attach(io, u.ops)
+    let _ = c(q, Three_C.register(q, 0))
+    let _ = b(q, Three_B.register(q, 0))
+    let _ = Three_A.close(q, Three_A.choose_halt(q, Three_A.register(q, 0), "halt"))
+    u.drain(())
+  end
+end
+|} in
+       let expected = "11\n22\n" in
+       let rc, out = check_cli ~flags:"" src in
+       Alcotest.(check int) ("interpreter exit: " ^ out) 0 rc;
+       Alcotest.(check string) "interpreter delivers both branches" expected out;
+       let binary = Filename.temp_file "endpoints_shared" ".exe" in
+       let output = Filename.temp_file "endpoints_shared" ".out" in
+       Fun.protect ~finally:(fun () ->
+           List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [binary; output])
+         (fun () ->
+            let rc, out = check_cli ~flags:("--compile -o " ^ Filename.quote binary) src in
+            Alcotest.(check int) ("compile exit: " ^ out) 0 rc;
+            let rc = Sys.command (Printf.sprintf "%s > %s 2>&1"
+                (Filename.quote binary) (Filename.quote output)) in
+            let out = In_channel.with_open_bin output In_channel.input_all in
+            Alcotest.(check int) ("native exit: " ^ out) 0 rc;
+            Alcotest.(check string) "native delivers both branches" expected out))
+
 (* ── protocol evolution: the compatibility table (build step 9) ────────── *)
 
 (* Plan 6.4 / II.5.  Rule one: the old and new annotated step lists are
@@ -2813,6 +3012,9 @@ let handler_label_collisions = ok "cancel and drain labels do not shadow failure
 let tests =
   [ handler_label_collisions; stream_shape;
     two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
+    shared_bystander_ok; shared_bystander_shape; shared_bystander_tags;
+    choice_distinct_continuations; choice_reserved_head_labels; choice_atomic_boundaries;
+    shared_bystander_native;
     peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
     cli_script_mismatch_panics; cli_script_runs_out_panics;
     cli_role_grant_violation; cli_role_grant_cluster_fronts; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;

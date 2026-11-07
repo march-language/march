@@ -676,6 +676,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Module functions used as values compile correctly.** A binding such as
+  `let k = List.length` now retains the function definition during compilation,
+  including when the binding is called with different element types.
+- **Type-qualified function names fail with an actionable diagnostic.**
+  `Int.to_string(5)` now explains that `Int` is a type and points to `to_string`,
+  instead of passing checking and failing or producing the wrong value at runtime.
+- **Endpoint generation merges equivalent unlabelled choice branches.** A bystander
+  receiving the same message in either branch now shares the message constructor
+  and continuation state, instead of receiving errors in generated code.
+
 - **Compiled `x +. 0.0` keeps the sign of zero right** (#1185). The optimizer rewrote
   `x +. 0.0` and `0.0 +. x` to `x`, so native and JS builds returned `-0.0` for
   `-0.0 +. 0.0`, where IEEE 754 (and the interpreter) give `+0.0`. The rewrite now fires
