@@ -52,6 +52,7 @@ let span_of_expr = function
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
   | Ast.EAssert (_, sp) -> sp
+  | Ast.EProof (_, sp) -> sp
   | Ast.ESigil (_, _, sp) -> sp
   | Ast.ERefineMsg (_, _, sp) -> sp
   | Ast.EVar name -> name.Ast.span
@@ -101,6 +102,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
   | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
   | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) | Ast.ESigil (_, e2, _) | Ast.ERefineMsg (e2, _, _)
   | Ast.EDbg (Some e2, _) -> iter_expr f e2
+  | Ast.EProof (p, _) -> List.iter (iter_expr f) (Ast.proof_children p)
   | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> iter_expr f r; iter_expr f c
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _) -> ()

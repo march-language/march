@@ -1874,6 +1874,7 @@ let span_of_expr (e : expr) : span =
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | ERefineMsg (_, _, sp) -> sp
+  | EProof (_, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -2562,6 +2563,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     apply flat_map_fn [v; k]
 
+  (* Proof hints are erased before anything runs ([Lemma_erase]); a tree that
+     reaches the interpreter unerased (a REPL fragment) treats them the same
+     way: a `with fuel` body runs, the rest is unit. *)
+  | EProof (PWithFuel (_, _, body), _) -> eval_block env body
+  | EProof (_, _) -> VUnit
   | EAssert (inner, _) ->
     (* A failed assertion raises a rendered report
        (lib/errors/test_report.ml): the header with the asserted expression

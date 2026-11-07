@@ -160,6 +160,8 @@ let seed_of_body (params : string list) (body : A.expr) : seed =
       go scope ex
     | A.ERefineMsg (ex, _, _) ->
       go scope ex
+    | A.EProof (p, _) ->
+      List.iter (go scope) (A.proof_children p)
     | A.ESend (a, b, _) ->
       go scope a;
       go scope b
