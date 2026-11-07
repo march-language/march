@@ -192,10 +192,69 @@ export function march_string_to_int(s) {
   return { $: "Some", _0: n };
 }
 
+/* string_to_float accepts exactly what C strtod accepts in the "C" locale with
+ * the whole string consumed — the native runtime's grammar (#1178; see
+ * march_float_syntax_ok in march_runtime.c for the grammar, and
+ * test/native/string_to_float_grammar.march, which pins all three backends).
+ * `Number(s)` is not that: it reads "" and "  " as 0, trims trailing space,
+ * takes 0b/0o, spells infinity only "Infinity", rejects hex floats, and its
+ * NaN result can't tell "nan" from a failed parse. */
+const MARCH_FLOAT_DEC = /^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+const MARCH_FLOAT_HEX = /^0[xX](?:([0-9a-fA-F]+)(?:\.([0-9a-fA-F]*))?|\.([0-9a-fA-F]+))(?:[pP]([+-]?[0-9]+))?$/;
+const MARCH_FLOAT_INF = /^[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$/;
+const MARCH_FLOAT_NAN = /^[nN][aA][nN](?:\([0-9A-Za-z_]*\))?$/;
+
+/* Hex digits `int`.`frac` times 2^exp, correctly rounded (nearest, ties to
+ * even, gradual underflow), as strtod rounds it. */
+function march_hex_float(int, frac, exp) {
+  const digits = (int + frac).replace(/^0+/, "");
+  if (digits === "") return 0;
+  const m = BigInt("0x" + digits);
+  const e = Number(exp) - 4 * frac.length;
+  const bl = m.toString(2).length;
+  const top = bl + e;                  // m * 2^e lies in [2^(top-1), 2^top)
+  if (top > 1025) return Infinity;
+  if (top < -1075) return 0;
+  // Bits a double keeps at this magnitude: 53, fewer once subnormal.
+  const keep = Math.min(53, top + 1074);
+  let shift = bl - keep;
+  let q = m;
+  if (shift > 0) {
+    const sb = BigInt(shift);
+    q = m >> sb;
+    const rem = m & ((1n << sb) - 1n);
+    const half = 1n << (sb - 1n);
+    if (rem > half || (rem === half && (q & 1n) === 1n)) q += 1n;
+  } else {
+    shift = 0;
+  }
+  // q has at most 54 bits, so Number(q) is exact; the result is representable,
+  // and scaling in two halves keeps each power of two a normal double.
+  const k = e + shift;
+  const k1 = Math.trunc(k / 2);
+  return Number(q) * Math.pow(2, k1) * Math.pow(2, k - k1);
+}
+
 export function march_string_to_float(s) {
-  const n = Number(s);
-  if (isNaN(n)) return { $: "None" };
-  return { $: "Some", _0: n };
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c === 32 || (c >= 9 && c <= 13)) i++; else break;
+  }
+  let neg = false;
+  if (s[i] === "+" || s[i] === "-") { neg = s[i] === "-"; i++; }
+  const body = s.slice(i);
+  let v;
+  if (MARCH_FLOAT_DEC.test(body)) v = Number(body);
+  else if (MARCH_FLOAT_INF.test(body)) v = Infinity;
+  else if (MARCH_FLOAT_NAN.test(body)) v = NaN;
+  else {
+    const h = MARCH_FLOAT_HEX.exec(body);
+    if (h === null) return { $: "None" };
+    v = h[3] !== undefined ? march_hex_float("", h[3], h[4] ?? "0")
+                           : march_hex_float(h[1], h[2] ?? "", h[4] ?? "0");
+  }
+  return { $: "Some", _0: neg ? -v : v };
 }
 
 export function march_string_to_lowercase(s) { return s.toLowerCase(); }
