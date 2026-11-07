@@ -710,6 +710,14 @@ git log is authoritative for exact commits.
   (printed as `import A`), and multi-line sigils, whose content was re-indented. Actor
   declarations with `supervise`, `mailbox`, `@compat`, `@invariant` or `@[remote]` are
   still not printed in full, so such files are now refused instead of losing those parts.
+- **`cap pure` and `cap deterministic` now reject monotonic clock reads and stdlib
+  wrappers over IO.** `sys_uptime_ms()` and `System.monotonic_time()` passed both caps
+  (the read needs no `IO.Clock`); they are now rejected, called directly or through any
+  stdlib function that reaches them, and still need no capability elsewhere. A
+  `cap pure` module may no longer declare any `needs`, and a `cap deterministic` module
+  may not declare `needs IO.Clock`, `IO.Random` or `IO`: those lines let stdlib wrappers
+  such as `File.read` and `DateTime.now()` through. Each is a `[pure_violation]` or
+  `[deterministic_violation]` at the `needs` line (#1180).
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
@@ -886,6 +894,13 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Capabilities: monotonic time and `extern`-backed stdlib modules.** The capabilities
+  chapter says that monotonic time (`sys_uptime_ms`, `System.monotonic_time`) is not
+  gated by `IO.Clock` but is banned under `cap pure` and `cap deterministic`, describes
+  how both caps now cover stdlib wrappers, and says that the `IO.Foreign` exclusion from
+  the capability upper limit covers first-party stdlib modules built on `extern`
+  (`Js.Dom`, `Js.Canvas`), which a module can call without declaring `needs`; function
+  `needs ()` bounds and `main`'s grant still see them (#1180).
 - **Lemmas as a contract for changes.** The refinement-types chapter and the
   `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
   as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a
