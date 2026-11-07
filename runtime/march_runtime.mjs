@@ -769,6 +769,118 @@ export function march_process_argv() {
   return list;
 }
 
+/* ── Diagnostics: crash observers (stdlib/diagnostics.march) ──────────────
+ * The JS twin of march_runtime.c's "Diagnostics: crash observers" and the
+ * interpreter's Eval_prim.diag_*.  What differs, and why:
+ *
+ * - One crash context for the program.  JS runs one thread; async code that
+ *   interleaves at an `await` shares it (native keeps one per green thread).
+ * - The report is made when an error escapes `main` (js_emit wraps the call
+ *   when the program registers an observer), not at the panic: a JS `throw`
+ *   cannot know whether a `catch` further out handles it.  A panic records
+ *   the context and the panic call's site on the Error it throws
+ *   (march_panic_err), so a report still carries the context of the
+ *   `with_context` scopes it unwound through, as on the other backends.
+ *   `--test` runs never report (the runner handles every test's panic, as
+ *   native's test trap does).
+ * - Any error escaping `main` is reported (an Int overflow too, like the
+ *   interpreter), always as kind Panic, with pid -1 and supervised false.
+ * - The backtrace is empty: the JS stack names emitted JS functions and
+ *   lines of the .mjs, not March functions and source lines. */
+
+const march_diag_observers = [];        // [id, closure], registration order
+let march_diag_next_id = 1;
+let march_diag_ctx = null;              // null: no context (Nil)
+let march_diag_site_file = null;        // the next panic's call site
+let march_diag_site_line = 0;
+let march_diag_dispatching = false;
+
+/* diag_observe(cb): the handle is a positive id, never reused. */
+export function march_diag_observe(cb) {
+  const id = march_diag_next_id++;
+  march_diag_observers.push([id, cb]);
+  return id;
+}
+
+/* Idempotent: an unknown or already-removed id is a no-op. */
+export function march_diag_unobserve(id) {
+  const i = march_diag_observers.findIndex((e) => e[0] === id);
+  if (i >= 0) march_diag_observers.splice(i, 1);
+  return undefined;
+}
+
+export function march_diag_context_get() {
+  return march_diag_ctx === null ? { $: "Nil" } : march_diag_ctx;
+}
+
+export function march_diag_context_set(ctx) {
+  march_diag_ctx = ctx;
+  return undefined;
+}
+
+/* __panic_site(file, line, col, end_col): emitted right before a direct
+ * panic / todo / unreachable call; the next march_panic_err takes it. */
+export function march_panic_site(file, line, _col, _end_col) {
+  march_diag_site_file = file;
+  march_diag_site_line = line;
+  return undefined;
+}
+
+/* The Error a panic throws: carries the context in force and the recorded
+ * call site (taken and cleared), for a crash report made later. */
+export function march_panic_err(msg) {
+  const e = new Error(msg);
+  /* Non-enumerable: Node prints an uncaught Error's enumerable fields. */
+  if (march_diag_site_file !== null) {
+    Object.defineProperty(e, "march_site",
+      { value: [march_diag_site_file, march_diag_site_line] });
+    march_diag_site_file = null;
+    march_diag_site_line = 0;
+  }
+  Object.defineProperty(e, "march_ctx", { value: march_diag_context_get() });
+  return e;
+}
+
+/* try_finally(action, cleanup): action's value; cleanup runs after it
+ * returns or throws, and the error goes on (march_try_finally in
+ * march_runtime.c).  Both closures take one ignored argument.  An action
+ * that returns a promise (an async closure) is cleaned up when it settles. */
+export function march_try_finally(action, cleanup) {
+  let r;
+  try {
+    r = action._0(action, undefined);
+  } catch (e) {
+    cleanup._0(cleanup, undefined);
+    throw e;
+  }
+  if (r !== null && typeof r === "object" && typeof r.then === "function")
+    return r.finally(() => cleanup._0(cleanup, undefined));
+  cleanup._0(cleanup, undefined);
+  return r;
+}
+
+/* An error escaped `main`: call every observer registered now, in
+ * registration order, with a Diagnostics.DiagCrash.  An observer's own
+ * error (or rejected promise) is swallowed and never reported. */
+export async function march_diag_unhandled(e) {
+  if (march_diag_observers.length === 0 || march_diag_dispatching) return;
+  const isErr = e instanceof Error;
+  const msg = isErr ? e.message : String(e);
+  const site = (isErr && e.march_site) ? e.march_site : ["", 0];
+  const ctx = (isErr && e.march_ctx) ? e.march_ctx : march_diag_context_get();
+  const snapshot = march_diag_observers.slice();
+  march_diag_dispatching = true;
+  try {
+    for (const [, cb] of snapshot) {
+      const report = { $: "DiagCrash", _0: 0, _1: msg, _2: { $: "Nil" }, _3: -1, _4: 0,
+                       _5: ctx, _6: site[0], _7: site[1] };
+      try { await cb._0(cb, report); } catch (_) { /* swallowed */ }
+    }
+  } finally {
+    march_diag_dispatching = false;
+  }
+}
+
 /* ── Test runner (`march --target js --test`) ─────────────────────────────
  * The JS twin of the native harness (march_test_init / march_test_run /
  * march_test_report and march_assert_fail in runtime/march_runtime.c), and a

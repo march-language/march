@@ -681,6 +681,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Diagnostics` and `try_finally` work on `--target js`.** A program using
+  `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
+  compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
+  use) threw `ReferenceError` at run time. Observers now receive a report, with its context and
+  the panic's location, when an error escapes `main`; the error then reaches Node as before.
+  The JS report has no backtrace; the `Diagnostics` module doc lists the other differences.
 - **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
   such a type, and a lemma about it, can now be used in refinements. Recursion through
   `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating

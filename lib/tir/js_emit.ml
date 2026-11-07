@@ -788,8 +788,26 @@ and emit_val_impl ctx expr =
         emit ctx "march_string_from_codepoint("; emit_atom ctx a; emit ctx ")"
       | "print_stderr", [a] ->
         emit ctx "console.error("; emit_atom ctx a; emit ctx ")"
-      (* The Diagnostics panic-site record: nothing to record in JS. *)
-      | "__panic_site", _ -> emit ctx "undefined"
+      (* Diagnostics (stdlib/diagnostics.march): crash observers and the
+         crash context, march_runtime.mjs's "Diagnostics: crash observers"
+         (which says how they differ from native).  [__panic_site] records
+         the call site the next panic's Error carries. *)
+      | "__panic_site", _ ->
+        use_runtime ctx "march_panic_site";
+        emit ctx "march_panic_site(";
+        List.iteri (fun i a -> if i > 0 then emit ctx ", "; emit_atom ctx a) args;
+        emit ctx ")"
+      | ("diag_observe" | "diag_unobserve" | "diag_context_set"), [a] ->
+        let rt = "march_" ^ name in
+        use_runtime ctx rt;
+        emit ctx (rt ^ "("); emit_atom ctx a; emit ctx ")"
+      | "try_finally", [a; c] ->
+        use_runtime ctx "march_try_finally";
+        emit ctx "march_try_finally("; emit_atom ctx a; emit ctx ", ";
+        emit_atom ctx c; emit ctx ")"
+      | "diag_context_get", _ ->
+        use_runtime ctx "march_diag_context_get";
+        emit ctx "march_diag_context_get()"
       (* --test (issue #1176): the running test's panic header, and a failed
          assert, which throws the whole rendered report (header and value
          diff), as the native march_test_header / march_assert_fail do. *)
@@ -816,7 +834,8 @@ and emit_val_impl ctx expr =
                   else (let b = Buffer.create 16 in
                         emit_atom { ctx with buf = b } (List.hd args);
                         Buffer.contents b) in
-        emit ctx (Printf.sprintf "(() => { throw new Error(%s); })()" msg)
+        use_runtime ctx "march_panic_err";
+        emit ctx (Printf.sprintf "(() => { throw march_panic_err(%s); })()" msg)
       (* ADT structural equality: eq_TypeName / neq_TypeName *)
       | n, [a; b] when String.length n > 3 && String.sub n 0 3 = "eq_" ->
         let ty = mangle (String.sub n 3 (String.length n - 3)) in
@@ -1374,8 +1393,9 @@ and emit_assign_impl ctx rv expr =
     when (match f.Tir.v_name with
           | "panic" | "panic_" | "todo_" | "unreachable_" -> true | _ -> false) ->
     (* a panic needs no value: a throw statement, not a throwing closure *)
+    use_runtime ctx "march_panic_err";
     emit_indent ctx;
-    emit ctx "throw new Error(";
+    emit ctx "throw march_panic_err(";
     (match args with a :: _ -> emit_atom ctx a | [] -> emit ctx "\"panic\"");
     emit ctx ");\n"
   | e ->
@@ -1884,6 +1904,10 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
   Hashtbl.replace ctx.runtime_uses "march_unix_time_ms" ();
   Hashtbl.replace ctx.runtime_uses "march_float_round" ();
+  Hashtbl.replace ctx.runtime_uses "march_try_finally" ();   (* try_finally *)
+  (* main's crash-observer wrapper, emitted below. *)
+  if Hashtbl.mem ctx.runtime_uses "march_diag_observe" then
+    Hashtbl.replace ctx.runtime_uses "march_diag_unhandled" ();
   (* The --test runner emitted after the functions, below. *)
   if m.Tir.tm_tests <> [] then
     List.iter (fun n -> Hashtbl.replace ctx.runtime_uses n ())
@@ -1906,7 +1930,8 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
     wrapper "int_abs" "{ _0: ($_, a) => Math.abs(a) }" ^
     wrapper "unix_time" "{ _0: ($_) => march_unix_time() }" ^
     wrapper "unix_time_ms" "{ _0: ($_) => march_unix_time_ms() }" ^
-    wrapper "float_round" "{ _0: ($_, a) => march_float_round(a) }"
+    wrapper "float_round" "{ _0: ($_, a) => march_float_round(a) }" ^
+    wrapper "try_finally" "{ _0: ($_, a, c) => march_try_finally(a, c) }"
   in
   let runtime_import =
     let names = Hashtbl.fold (fun k () acc -> k :: acc) ctx.runtime_uses [] in
@@ -1944,10 +1969,15 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
     Buffer.add_string export_buf "march_test_report();\n"
   end else if has_main then begin
     Buffer.add_string export_buf "export { main };\n";
-    if Hashtbl.mem ctx.async_fns "main" then
-      Buffer.add_string export_buf "await main();\n"
+    let call =
+      if Hashtbl.mem ctx.async_fns "main" then "await main();" else "main();" in
+    (* A program that registers a crash observer reports an error escaping
+       main to it, then rethrows (Node prints it and exits 1 as before). *)
+    if Hashtbl.mem ctx.runtime_uses "march_diag_observe" then
+      Buffer.add_string export_buf
+        (Printf.sprintf "try { %s } catch ($e) { await march_diag_unhandled($e); throw $e; }\n" call)
     else
-      Buffer.add_string export_buf "main();\n"
+      Buffer.add_string export_buf (call ^ "\n")
   end;
   List.iter (fun name ->
     if name <> "main" then
