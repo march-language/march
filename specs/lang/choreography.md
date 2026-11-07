@@ -578,7 +578,7 @@ once in the standard library:
 | `dual_dual` | the other end of the other end is the original |
 | `project_dual` | in a two-role protocol, each role's projection is the other's dual |
 | `pairwise` | for any two roles, what one does with the other is the dual of what the other does with it |
-| `compose` | run together, the roles' projections take every step of the protocol and all finish |
+| `projections_compose` | run together, the roles' projections take every step of the protocol and all finish |
 | `progress` | deadlock freedom: while the protocol has a next step, the roles can take it |
 
 The compiler projects a protocol twice, in OCaml: once for `Chan(Role, Proto)` and once for
@@ -590,14 +590,14 @@ on that protocol. When they agree, the laws hold for your protocol, and the repo
 protocol Ring (3 roles): proved (spec) · validated (compiler)
   projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role
   pairwise duality  proved (spec) · validated (compiler): what each pair of roles does with each other is dual (Session.Theory.pairwise)
-  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, compose; synchronous delivery)
+  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)
 ```
 
 A disagreement is a compiler bug, reported as `violated`. `march --validate-projections FILE`
 prints one line per protocol, projector and role, and one `laws` line per protocol saying
-whether `pairwise`, `compose` and `progress` cover it; it exits 1 on a disagreement.
+whether `pairwise`, `projections_compose` and `progress` cover it; it exits 1 on a disagreement.
 
-`pairwise`, `compose` and `progress` cover protocols in a fragment
+`pairwise`, `projections_compose` and `progress` cover protocols in a fragment
 (`Session.Theory.in_fragment`):
 
 - no `loop`;

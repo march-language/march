@@ -296,7 +296,7 @@ let protocol_lines ~(fragment : (unit, string) result) (rows : Session_validate.
       { what = "deadlock freedom"; label = Proved_spec;
         detail =
           "on the protocol's own schedule every role can take each step and every role finishes \
-           (Session.Theory.progress, compose; synchronous delivery)" }
+           (Session.Theory.progress, projections_compose; synchronous delivery)" }
     | Error why -> { what = "deadlock freedom"; label = Not_checked; detail = "not proved: " ^ why }
   in
   (n, (projection :: pairwise) @ [ deadlock ])

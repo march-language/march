@@ -115,7 +115,7 @@ let rec has_loop : T.global -> bool = function
 (** Whether the protocol is in the fragment the laws C3-C5 cover
     ([Session.Theory.in_fragment], evaluated on the typechecker's view, over
     all its roles): [Ok ()], or why not.  Inside it, `pairwise` (C3),
-    `compose` (C4) and `progress` (C5) hold for the protocol once its
+    `projections_compose` (C4) and `progress` (C5) hold for the protocol once its
     projections are validated. *)
 let fragment (name : string) : (unit, string) result =
   match Hashtbl.find_opt T.typecheck_views name with
@@ -123,7 +123,7 @@ let fragment (name : string) : (unit, string) result =
   | Some (Error why) -> Error why
   | Some (Ok v) ->
     let rs =
-      List.fold_right (fun (_, i) acc -> V.VCon ("RCons", [ V.VInt i; acc ])) v.T.v_roles (V.VCon ("RNil", []))
+      List.fold_right (fun (_, i) acc -> V.VCon ("RoleThen", [ V.VInt i; acc ])) v.T.v_roles (V.VCon ("RoleEnd", []))
     in
     let mp = V.VBool v.T.v_multiparty in
     (match call "in_fragment" [ v_global v.T.v_global; rs; mp ] with
@@ -131,9 +131,9 @@ let fragment (name : string) : (unit, string) result =
        (* The proved law's instance, run: C4 on the default schedule.  It
           cannot be false; if it is, the proof is unsound, which is a
           compiler bug, and nothing is claimed. *)
-       match call "composes" [ v_global v.T.v_global; rs; mp; V.VCon ("PNil", []) ] with
+       match call "composes" [ v_global v.T.v_global; rs; mp; V.VCon ("PickEnd", []) ] with
        | Ok (V.VBool true) -> Ok ()
-       | Ok _ -> Error "internal error: Session.Theory.compose's instance is false for this protocol (a compiler bug)"
+       | Ok _ -> Error "internal error: Session.Theory.projections_compose's instance is false for this protocol (a compiler bug)"
        | Error m -> Error ("the theory could not be evaluated: " ^ m))
      | Ok _ ->
        Error

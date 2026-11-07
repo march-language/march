@@ -31,7 +31,7 @@ git log is authoritative for exact commits.
 
 - **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
   protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
-  every step of the protocol and all finish (`compose`), and can always take the next step
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
   (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
   it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
   freedom `proved (spec) · validated (compiler)` once its projections are validated, and says

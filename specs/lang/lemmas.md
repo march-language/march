@@ -686,7 +686,7 @@ The standard library proves lemmas about `List`: `List.append_nil`, `List.append
 `List.len_take`, `List.len_drop`, `List.take_drop`, `List.take_append`, `List.drop_append`,
 `List.nth_opt_append`, `List.sum_int_append`, `List.sum_int_reverse`, `List.product_int_append`
 and `List.product_int_reverse`, and about protocols in `Session.Theory` (`dual_dual`,
-`project_dual`, `pairwise`, `compose`, `progress`; see [What is proved about a protocol]({{ site.baseurl }}/docs/choreography/#what-is-proved-about-a-protocol)).
+`project_dual`, `pairwise`, `projections_compose`, `progress`; see [What is proved about a protocol]({{ site.baseurl }}/docs/choreography/#what-is-proved-about-a-protocol)).
 You call them like your own lemmas, so
 you don't need to re-prove `reverse(reverse(xs)) == xs` in every project. The manifest
 `stdlib/lemmas.verified` lists the ones that are proved; a listed lemma is admitted without

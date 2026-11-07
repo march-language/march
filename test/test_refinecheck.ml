@@ -25463,7 +25463,7 @@ let session_theory_suite =
             "merge_binary"; "project_dual"; "project_dual_bs";
             (* C4 and C5 *)
             "present_config"; "act_msg"; "apply_msg"; "step_msg"; "act_pick"; "apply_pick"; "step_pick";
-            "trace_bs_found"; "end_done"; "compose_msg"; "compose_pick"; "compose"; "compose_bs"; "progress";
+            "trace_bs_found"; "end_done"; "compose_msg"; "compose_pick"; "projections_compose"; "projections_compose_bs"; "progress";
             (* C3 *)
             "restrict_choice"; "collapse_dual"; "pairwise_choice"; "pairwise"; "pairwise_bs" ]);
     Alcotest.test_case "both projectors agree on two-role, three-role and loop/choice protocols" `Quick (fun () ->
@@ -25551,7 +25551,7 @@ let session_theory_suite =
         has out "projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)";
         has out "protocol Ring (3 roles): proved (spec) · validated (compiler)\n";
         has out "pairwise duality  proved (spec) · validated (compiler): what each pair of roles does with each other is dual (Session.Theory.pairwise)";
-        has out "deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, compose; synchronous delivery)";
+        has out "deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)";
         (* A loop is outside the fragment the laws cover: said, not claimed. *)
         has out "protocol Shop (2 roles): not checked\n";
         has out "deadlock freedom  not checked: not proved: a loop (the laws cover loop-free protocols for now)");

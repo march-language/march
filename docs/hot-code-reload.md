@@ -768,7 +768,7 @@ actor Counter: not checked
   migrate_state (derived)  proved: 1 site against the deployed build
 protocol Relay (2 roles): proved (spec) · validated (compiler)
   projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)
-  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, compose; synchronous delivery)
+  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)
 runtime: assumed
   mailbox order, Actor.call replies, DOWN delivery  assumed: the runtime is trusted; nothing here proves it
 ```

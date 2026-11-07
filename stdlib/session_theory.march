@@ -441,7 +441,7 @@ mod Session.Theory do
 
   -- The roles of a configuration (its own list type: see Session.Theory's
   -- progress note on a reflected function over the stdlib List).
-  type SessionRoles = RNil | RCons(Int, SessionRoles)
+  type SessionRoles = RoleEnd | RoleThen(Int, SessionRoles)
 
   --
   -- Loop-free (`stop` is GEnd), crash-free, and every choice DIRECTED: each
@@ -453,8 +453,8 @@ mod Session.Theory do
   doc "Whether `r` is in the role list."
   fn has(rs : SessionRoles, r : Int) : Bool do
     match rs do
-      RNil -> false
-      RCons(x, rest) -> x == r || has(rest, r)
+      RoleEnd -> false
+      RoleThen(x, rest) -> x == r || has(rest, r)
     end
   end
 
@@ -498,8 +498,8 @@ mod Session.Theory do
   doc "`role_ok` for every role of `rs`."
   fn bystanders_merged(rs : SessionRoles, c : Int, bs : SessionGBranches, multiparty : Bool) : Bool do
     match rs do
-      RNil -> true
-      RCons(r, rest) -> role_ok(c, bs, r, multiparty) && bystanders_merged(rest, c, bs, multiparty)
+      RoleEnd -> true
+      RoleThen(r, rest) -> role_ok(c, bs, r, multiparty) && bystanders_merged(rest, c, bs, multiparty)
     end
   end
 
@@ -540,23 +540,23 @@ mod Session.Theory do
   -- ── configurations and steps ─────────────────────────────────────────
 
   -- A sequence of steps.
-  type SessionActs = ANil | ACons(SessionAct, SessionActs)
+  type SessionActs = ActEnd | ActThen(SessionAct, SessionActs)
 
   -- The labels to take at successive choices.
-  type SessionPicks = PNil | PCons(Int, SessionPicks)
+  type SessionPicks = PickEnd | PickThen(Int, SessionPicks)
 
   -- One step of the whole system: a message, or a choice whose label rides
   -- on the chooser's first message (chooser, receiver, label, payload).
-  type SessionAct = AMsg(Int, Int, Int) | APick(Int, Int, Int, Int)
+  type SessionAct = ActMsg(Int, Int, Int) | ActPick(Int, Int, Int, Int)
 
   -- Every role with its local type.
-  type SessionCfg = CNil | CCons(Int, SessionLocal, SessionCfg)
+  type SessionCfg = CfgEnd | CfgRole(Int, SessionLocal, SessionCfg)
 
   -- The result of a step.
-  type SessionCfgStep = Stuck | Moved(SessionCfg)
+  type SessionCfgStep = CfgStuck | CfgMoved(SessionCfg)
 
   -- One role's part of a step.
-  type SessionLStep = LBad | LOk(SessionLocal)
+  type SessionLStep = StepBad | StepOk(SessionLocal)
 
   derive Eq for SessionAct
   derive Eq for SessionActs
@@ -568,40 +568,40 @@ mod Session.Theory do
   doc "The configuration of `g`: every role of `rs` runs its projection."
   fn config(g : SessionGlobal, rs : SessionRoles, multiparty : Bool) : SessionCfg do
     match rs do
-      RNil -> CNil
-      RCons(r, rest) -> CCons(r, project(g, r, multiparty), config(g, rest, multiparty))
+      RoleEnd -> CfgEnd
+      RoleThen(r, rest) -> CfgRole(r, project(g, r, multiparty), config(g, rest, multiparty))
     end
   end
 
   doc "Whether role `r` is in the configuration."
   fn present(cfg : SessionCfg, r : Int) : Bool do
     match cfg do
-      CNil -> false
-      CCons(x, _, rest) -> x == r || present(rest, r)
+      CfgEnd -> false
+      CfgRole(x, _, rest) -> x == r || present(rest, r)
     end
   end
 
   doc "Send `p` to `t`, if that is what `l` does next."
   fn send_step(l : SessionLocal, t : Int, p : Int) : SessionLStep do
     match l do
-      LSend(x, y, k) -> if x == t && y == p do LOk(k) else LBad end
-      _ -> LBad
+      LSend(x, y, k) -> if x == t && y == p do StepOk(k) else StepBad end
+      _ -> StepBad
     end
   end
 
   doc "Receive `p` from `f`, if that is what `l` does next."
   fn recv_step(l : SessionLocal, f : Int, p : Int) : SessionLStep do
     match l do
-      LRecv(x, y, k) -> if x == f && y == p do LOk(k) else LBad end
-      _ -> LBad
+      LRecv(x, y, k) -> if x == f && y == p do StepOk(k) else StepBad end
+      _ -> StepBad
     end
   end
 
   doc "The first branch labelled `lab`."
   fn find(bs : SessionLBranches, lab : Int) : SessionLStep do
     match bs do
-      LBNil -> LBad
-      LBCons(l, k, rest) -> if l == lab do LOk(k) else find(rest, lab) end
+      LBNil -> StepBad
+      LBCons(l, k, rest) -> if l == lab do StepOk(k) else find(rest, lab) end
     end
   end
 
@@ -611,10 +611,10 @@ mod Session.Theory do
     match l do
       LChoose(bs) ->
         match find(bs, lab) do
-          LOk(k) -> send_step(k, t, p)
-          LBad -> LBad
+          StepOk(k) -> send_step(k, t, p)
+          StepBad -> StepBad
         end
-      _ -> LBad
+      _ -> StepBad
     end
   end
 
@@ -624,11 +624,11 @@ mod Session.Theory do
     match l do
       LOffer(bs) ->
         match find(bs, lab) do
-          LOk(k) -> recv_step(k, c, p)
-          LBad -> LBad
+          StepOk(k) -> recv_step(k, c, p)
+          StepBad -> StepBad
         end
       LRecv(_, _, _) -> recv_step(l, c, p)
-      _ -> LBad
+      _ -> StepBad
     end
   end
 
@@ -636,24 +636,24 @@ mod Session.Theory do
   @[reflect(fuel: 4)]
   fn act(r : Int, l : SessionLocal, a : SessionAct) : SessionLStep do
     match a do
-      AMsg(f, t, p) ->
-        if r == f do send_step(l, t, p) else if r == t do recv_step(l, f, p) else LOk(l) end end
-      APick(c, t, lab, p) ->
-        if r == c do choose_step(l, lab, t, p) else if r == t do offer_step(l, lab, c, p) else LOk(l) end end
+      ActMsg(f, t, p) ->
+        if r == f do send_step(l, t, p) else if r == t do recv_step(l, f, p) else StepOk(l) end end
+      ActPick(c, t, lab, p) ->
+        if r == c do choose_step(l, lab, t, p) else if r == t do offer_step(l, lab, c, p) else StepOk(l) end end
     end
   end
 
   doc "Every role takes its part in `a`."
   fn apply(cfg : SessionCfg, a : SessionAct) : SessionCfgStep do
     match cfg do
-      CNil -> Moved(CNil)
-      CCons(r, l, rest) ->
+      CfgEnd -> CfgMoved(CfgEnd)
+      CfgRole(r, l, rest) ->
         match act(r, l, a) do
-          LBad -> Stuck
-          LOk(l2) ->
+          StepBad -> CfgStuck
+          StepOk(l2) ->
             match apply(rest, a) do
-              Stuck -> Stuck
-              Moved(c2) -> Moved(CCons(r, l2, c2))
+              CfgStuck -> CfgStuck
+              CfgMoved(c2) -> CfgMoved(CfgRole(r, l2, c2))
             end
         end
     end
@@ -662,32 +662,32 @@ mod Session.Theory do
   doc "The sender of `a`."
   fn act_from(a : SessionAct) : Int do
     match a do
-      AMsg(f, _, _) -> f
-      APick(c, _, _, _) -> c
+      ActMsg(f, _, _) -> f
+      ActPick(c, _, _, _) -> c
     end
   end
 
   doc "The receiver of `a`."
   fn act_to(a : SessionAct) : Int do
     match a do
-      AMsg(_, t, _) -> t
-      APick(_, t, _, _) -> t
+      ActMsg(_, t, _) -> t
+      ActPick(_, t, _, _) -> t
     end
   end
 
   doc "One synchronous step: both parties are there and each can take its part."
   fn step(cfg : SessionCfg, a : SessionAct) : SessionCfgStep do
-    if present(cfg, act_from(a)) && present(cfg, act_to(a)) do apply(cfg, a) else Stuck end
+    if present(cfg, act_from(a)) && present(cfg, act_to(a)) do apply(cfg, a) else CfgStuck end
   end
 
   doc "Run the steps in order."
   fn run(cfg : SessionCfg, acts : SessionActs) : SessionCfgStep do
     match acts do
-      ANil -> Moved(cfg)
-      ACons(a, rest) ->
+      ActEnd -> CfgMoved(cfg)
+      ActThen(a, rest) ->
         match step(cfg, a) do
-          Stuck -> Stuck
-          Moved(c2) -> run(c2, rest)
+          CfgStuck -> CfgStuck
+          CfgMoved(c2) -> run(c2, rest)
         end
     end
   end
@@ -758,26 +758,26 @@ mod Session.Theory do
   doc "The label `picks` asks for, when there is such a branch; else the first."
   fn pick(bs : SessionGBranches, picks : SessionPicks) : Int do
     match picks do
-      PNil -> first_label(bs)
-      PCons(l, _) -> if has_label(bs, l) do l else first_label(bs) end
+      PickEnd -> first_label(bs)
+      PickThen(l, _) -> if has_label(bs, l) do l else first_label(bs) end
     end
   end
 
   doc "The rest of `picks` after one choice."
   fn rest_picks(picks : SessionPicks) : SessionPicks do
     match picks do
-      PNil -> PNil
-      PCons(_, rest) -> rest
+      PickEnd -> PickEnd
+      PickThen(_, rest) -> rest
     end
   end
 
   doc "The steps of `g` when each choice takes the label `picks` lists in turn (loop-free)."
   fn trace(g : SessionGlobal, picks : SessionPicks) : SessionActs do
     match g do
-      GEnd -> ANil
-      GVar(_) -> ANil
-      GLoop(_, _) -> ANil
-      GMsg(f, t, p, k) -> ACons(AMsg(f, t, p), trace(k, picks))
+      GEnd -> ActEnd
+      GVar(_) -> ActEnd
+      GLoop(_, _) -> ActEnd
+      GMsg(f, t, p, k) -> ActThen(ActMsg(f, t, p), trace(k, picks))
       GChoice(c, bs) -> trace_bs(bs, c, dest(bs), pick(bs, picks), rest_picks(picks))
     end
   end
@@ -785,12 +785,12 @@ mod Session.Theory do
   doc "The steps of branch `lab`: the chooser's first message carries the label."
   fn trace_bs(bs : SessionGBranches, c : Int, t : Int, lab : Int, picks : SessionPicks) : SessionActs do
     match bs do
-      GBNil -> ANil
+      GBNil -> ActEnd
       GBCons(l, g, rest) ->
         if l == lab do
           match g do
-            GMsg(_, _, p, k) -> ACons(APick(c, t, lab, p), trace(k, picks))
-            _ -> ANil
+            GMsg(_, _, p, k) -> ActThen(ActPick(c, t, lab, p), trace(k, picks))
+            _ -> ActEnd
           end
         else trace_bs(rest, c, t, lab, picks) end
     end
@@ -803,22 +803,22 @@ mod Session.Theory do
   fn present_config(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, r : Int)
     : {Unit | present(config(g, rs, multiparty), r) == has(rs, r)} do
     match rs do
-      RNil -> ()
-      RCons(_, rest) -> present_config(g, rest, multiparty, r)
+      RoleEnd -> ()
+      RoleThen(_, rest) -> present_config(g, rest, multiparty, r)
     end
   end
 
   doc "One role's part in a message step: it ends at its projection of what follows."
   @[lemma]
   fn act_msg(f : Int, t : {Int | _ != f}, p : Int, k : SessionGlobal, r : Int, multiparty : Bool)
-    : {Unit | act(r, project(GMsg(f, t, p, k), r, multiparty), AMsg(f, t, p)) == LOk(project(k, r, multiparty))} do
+    : {Unit | act(r, project(GMsg(f, t, p, k), r, multiparty), ActMsg(f, t, p)) == StepOk(project(k, r, multiparty))} do
     let rest = project(k, r, multiparty)
     if r == f do
       assert project(GMsg(f, t, p, k), r, multiparty) == LSend(t, p, rest)
-      assert send_step(LSend(t, p, rest), t, p) == LOk(rest)
+      assert send_step(LSend(t, p, rest), t, p) == StepOk(rest)
     else if r == t do
       assert project(GMsg(f, t, p, k), r, multiparty) == LRecv(f, p, rest)
-      assert recv_step(LRecv(f, p, rest), f, p) == LOk(rest)
+      assert recv_step(LRecv(f, p, rest), f, p) == StepOk(rest)
     else
       assert project(GMsg(f, t, p, k), r, multiparty) == rest
     end end
@@ -827,10 +827,10 @@ mod Session.Theory do
   doc "Every role takes its part in a message step."
   @[lemma]
   fn apply_msg(f : Int, t : {Int | _ != f}, p : Int, k : SessionGlobal, rs : SessionRoles, multiparty : Bool)
-    : {Unit | apply(config(GMsg(f, t, p, k), rs, multiparty), AMsg(f, t, p)) == Moved(config(k, rs, multiparty))} do
+    : {Unit | apply(config(GMsg(f, t, p, k), rs, multiparty), ActMsg(f, t, p)) == CfgMoved(config(k, rs, multiparty))} do
     match rs do
-      RNil -> ()
-      RCons(r, rest) ->
+      RoleEnd -> ()
+      RoleThen(r, rest) ->
         act_msg(f, t, p, k, r, multiparty)
         apply_msg(f, t, p, k, rest, multiparty)
     end
@@ -839,18 +839,18 @@ mod Session.Theory do
   doc "Subject reduction for a message: its step takes the configuration of `GMsg(f, t, p, k)` to that of `k`."
   @[lemma]
   fn step_msg(f : Int, t : {Int | _ != f}, p : Int, k : SessionGlobal, rs : SessionRoles, multiparty : Bool)
-    : {Unit | !(has(rs, f) && has(rs, t)) || step(config(GMsg(f, t, p, k), rs, multiparty), AMsg(f, t, p)) == Moved(config(k, rs, multiparty))} do
+    : {Unit | !(has(rs, f) && has(rs, t)) || step(config(GMsg(f, t, p, k), rs, multiparty), ActMsg(f, t, p)) == CfgMoved(config(k, rs, multiparty))} do
     present_config(GMsg(f, t, p, k), rs, multiparty, f)
     present_config(GMsg(f, t, p, k), rs, multiparty, t)
     apply_msg(f, t, p, k, rs, multiparty)
-    assert act_from(AMsg(f, t, p)) == f
-    assert act_to(AMsg(f, t, p)) == t
+    assert act_from(ActMsg(f, t, p)) == f
+    assert act_to(ActMsg(f, t, p)) == t
   end
 
   doc "Looking up a label in a projected choice gives the projection of that branch."
   @[lemma]
   fn find_project(bs : SessionGBranches, r : Int, multiparty : Bool, lab : Int)
-    : {Unit | !has_label(bs, lab) || find(project_bs(bs, r, multiparty), lab) == LOk(project(gbranch(bs, lab), r, multiparty))} do
+    : {Unit | !has_label(bs, lab) || find(project_bs(bs, r, multiparty), lab) == StepOk(project(gbranch(bs, lab), r, multiparty))} do
     match bs do
       GBNil -> ()
       GBCons(_, _, rest) -> find_project(rest, r, multiparty, lab)
@@ -860,7 +860,7 @@ mod Session.Theory do
   doc "In branches that are all `first`, a lookup finds `first` or nothing."
   @[lemma]
   fn find_all_same(rest : SessionLBranches, first : SessionLocal, lab : Int)
-    : {Unit | !all_same(rest, first) || find(rest, lab) == LBad || find(rest, lab) == LOk(first)} do
+    : {Unit | !all_same(rest, first) || find(rest, lab) == StepBad || find(rest, lab) == StepOk(first)} do
     match rest do
       LBNil -> ()
       LBCons(_, k, more) ->
@@ -872,7 +872,7 @@ mod Session.Theory do
   doc "In merged branches, a lookup finds the first branch or nothing."
   @[lemma]
   fn find_merged(pbs : SessionLBranches, lab : Int)
-    : {Unit | !merged(pbs) || find(pbs, lab) == LBad || find(pbs, lab) == LOk(lhead(pbs))} do
+    : {Unit | !merged(pbs) || find(pbs, lab) == StepBad || find(pbs, lab) == StepOk(lhead(pbs))} do
     match pbs do
       LBNil -> ()
       LBCons(_, first, rest) -> find_all_same(rest, first, lab)
@@ -905,8 +905,8 @@ mod Session.Theory do
   @[lemma]
   fn act_pick(c : Int, bs : SessionGBranches, multiparty : Bool, lab : Int, r : Int)
     : {Unit | !(choice_ok(c, bs) && role_ok(c, bs, r, multiparty) && has_label(bs, lab))
-              || act(r, project(GChoice(c, bs), r, multiparty), APick(c, dest(bs), lab, gpay(bs, lab)))
-                 == LOk(project(gcont(bs, lab), r, multiparty))} do
+              || act(r, project(GChoice(c, bs), r, multiparty), ActPick(c, dest(bs), lab, gpay(bs, lab)))
+                 == StepOk(project(gcont(bs, lab), r, multiparty))} do
     if choice_ok(c, bs) && role_ok(c, bs, r, multiparty) && has_label(bs, lab) do
       let t = dest(bs)
       let p = gpay(bs, lab)
@@ -918,38 +918,38 @@ mod Session.Theory do
       directed_branch(bs, c, t, lab)
       let g = gbranch(bs, lab)
       assert g == GMsg(c, t, p, k)
-      assert find(pbs, lab) == LOk(project(g, r, multiparty))
-      assert find(pbs, lab) == LOk(project(GMsg(c, t, p, k), r, multiparty))
+      assert find(pbs, lab) == StepOk(project(g, r, multiparty))
+      assert find(pbs, lab) == StepOk(project(GMsg(c, t, p, k), r, multiparty))
       if r == c do
         assert project(GChoice(c, bs), r, multiparty) == LChoose(pbs)
         assert project(GMsg(c, t, p, k), r, multiparty) == LSend(t, p, after)
-        assert find(pbs, lab) == LOk(LSend(t, p, after))
-        assert send_step(LSend(t, p, after), t, p) == LOk(after)
-        assert choose_step(LChoose(pbs), lab, t, p) == LOk(after)
-        assert act(r, LChoose(pbs), APick(c, t, lab, p)) == LOk(after)
+        assert find(pbs, lab) == StepOk(LSend(t, p, after))
+        assert send_step(LSend(t, p, after), t, p) == StepOk(after)
+        assert choose_step(LChoose(pbs), lab, t, p) == StepOk(after)
+        assert act(r, LChoose(pbs), ActPick(c, t, lab, p)) == StepOk(after)
       else
         assert project(GChoice(c, bs), r, multiparty) == merge(pbs, multiparty)
         merge_cases(pbs, multiparty)
         find_merged(pbs, lab)
         if r == t do
           assert project(GMsg(c, t, p, k), r, multiparty) == LRecv(c, p, after)
-          assert find(pbs, lab) == LOk(LRecv(c, p, after))
-          assert recv_step(LRecv(c, p, after), c, p) == LOk(after)
+          assert find(pbs, lab) == StepOk(LRecv(c, p, after))
+          assert recv_step(LRecv(c, p, after), c, p) == StepOk(after)
           if multiparty && merged(pbs) do
             assert lhead(pbs) == LRecv(c, p, after)
-            assert offer_step(LRecv(c, p, after), lab, c, p) == LOk(after)
-            assert act(r, LRecv(c, p, after), APick(c, t, lab, p)) == LOk(after)
+            assert offer_step(LRecv(c, p, after), lab, c, p) == StepOk(after)
+            assert act(r, LRecv(c, p, after), ActPick(c, t, lab, p)) == StepOk(after)
             assert merge(pbs, multiparty) == LRecv(c, p, after)
           else
-            assert offer_step(LOffer(pbs), lab, c, p) == LOk(after)
-            assert act(r, LOffer(pbs), APick(c, t, lab, p)) == LOk(after)
+            assert offer_step(LOffer(pbs), lab, c, p) == StepOk(after)
+            assert act(r, LOffer(pbs), ActPick(c, t, lab, p)) == StepOk(after)
             assert merge(pbs, multiparty) == LOffer(pbs)
           end
         else
           assert project(GMsg(c, t, p, k), r, multiparty) == after
           assert merge(pbs, multiparty) == lhead(pbs)
           assert lhead(pbs) == after
-          assert act(r, after, APick(c, t, lab, p)) == LOk(after)
+          assert act(r, after, ActPick(c, t, lab, p)) == StepOk(after)
         end
       end
     else
@@ -961,11 +961,11 @@ mod Session.Theory do
   @[lemma]
   fn apply_pick(c : Int, bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, lab : Int)
     : {Unit | !(choice_ok(c, bs) && bystanders_merged(rs, c, bs, multiparty) && has_label(bs, lab))
-              || apply(config(GChoice(c, bs), rs, multiparty), APick(c, dest(bs), lab, gpay(bs, lab)))
-                 == Moved(config(gcont(bs, lab), rs, multiparty))} do
+              || apply(config(GChoice(c, bs), rs, multiparty), ActPick(c, dest(bs), lab, gpay(bs, lab)))
+                 == CfgMoved(config(gcont(bs, lab), rs, multiparty))} do
     match rs do
-      RNil -> ()
-      RCons(r, rest) ->
+      RoleEnd -> ()
+      RoleThen(r, rest) ->
         act_pick(c, bs, multiparty, lab, r)
         apply_pick(c, bs, rest, multiparty, lab)
     end
@@ -975,8 +975,8 @@ mod Session.Theory do
   @[lemma]
   fn step_pick(c : Int, bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, lab : Int)
     : {Unit | !(choice_ok(c, bs) && bystanders_merged(rs, c, bs, multiparty) && has_label(bs, lab) && has(rs, c) && has(rs, dest(bs)))
-              || step(config(GChoice(c, bs), rs, multiparty), APick(c, dest(bs), lab, gpay(bs, lab)))
-                 == Moved(config(gcont(bs, lab), rs, multiparty))} do
+              || step(config(GChoice(c, bs), rs, multiparty), ActPick(c, dest(bs), lab, gpay(bs, lab)))
+                 == CfgMoved(config(gcont(bs, lab), rs, multiparty))} do
     let t = dest(bs)
     present_config(GChoice(c, bs), rs, multiparty, c)
     present_config(GChoice(c, bs), rs, multiparty, t)
@@ -987,7 +987,7 @@ mod Session.Theory do
   @[lemma]
   fn trace_bs_found(bs : SessionGBranches, c : Int, t : Int, lab : Int, picks : SessionPicks)
     : {Unit | !(directed(bs, c, t) && has_label(bs, lab))
-              || trace_bs(bs, c, t, lab, picks) == ACons(APick(c, t, lab, gpay(bs, lab)), trace(gcont(bs, lab), picks))} do
+              || trace_bs(bs, c, t, lab, picks) == ActThen(ActPick(c, t, lab, gpay(bs, lab)), trace(gcont(bs, lab), picks))} do
     match bs do
       GBNil -> ()
       GBCons(l, g, rest) ->
@@ -1018,8 +1018,8 @@ mod Session.Theory do
   doc "Every role of the configuration is done."
   fn all_done(cfg : SessionCfg) : Bool do
     match cfg do
-      CNil -> true
-      CCons(_, l, rest) ->
+      CfgEnd -> true
+      CfgRole(_, l, rest) ->
         match l do
           LEnd -> all_done(rest)
           _ -> false
@@ -1030,8 +1030,8 @@ mod Session.Theory do
   doc "The run took every step and every role is done."
   fn finished(r : SessionCfgStep) : Bool do
     match r do
-      Stuck -> false
-      Moved(cfg) -> all_done(cfg)
+      CfgStuck -> false
+      CfgMoved(cfg) -> all_done(cfg)
     end
   end
 
@@ -1044,8 +1044,8 @@ mod Session.Theory do
   @[lemma]
   fn end_done(rs : SessionRoles, multiparty : Bool) : {Unit | all_done(config(GEnd, rs, multiparty))} do
     match rs do
-      RNil -> ()
-      RCons(_, rest) -> end_done(rest, multiparty)
+      RoleEnd -> ()
+      RoleThen(_, rest) -> end_done(rest, multiparty)
     end
   end
 
@@ -1057,8 +1057,8 @@ mod Session.Theory do
     if in_fragment(GMsg(f, t, p, k), rs, multiparty) do
       assert f != t && has(rs, f) && has(rs, t) && in_fragment(k, rs, multiparty)
       step_msg(f, t, p, k, rs, multiparty)
-      assert trace(GMsg(f, t, p, k), picks) == ACons(AMsg(f, t, p), trace(k, picks))
-      assert step(config(GMsg(f, t, p, k), rs, multiparty), AMsg(f, t, p)) == Moved(config(k, rs, multiparty))
+      assert trace(GMsg(f, t, p, k), picks) == ActThen(ActMsg(f, t, p), trace(k, picks))
+      assert step(config(GMsg(f, t, p, k), rs, multiparty), ActMsg(f, t, p)) == CfgMoved(config(k, rs, multiparty))
       assert run(config(GMsg(f, t, p, k), rs, multiparty), trace(GMsg(f, t, p, k), picks))
              == run(config(k, rs, multiparty), trace(k, picks))
       assert finished(run(config(GMsg(f, t, p, k), rs, multiparty), trace(GMsg(f, t, p, k), picks))) == finished(run(config(k, rs, multiparty), trace(k, picks)))
@@ -1086,8 +1086,8 @@ mod Session.Theory do
       assert nonempty(bs) && directed(bs, c, t)
       assert has_label(bs, lab)
       assert trace(GChoice(c, bs), picks) == trace_bs(bs, c, t, lab, more)
-      assert trace(GChoice(c, bs), picks) == ACons(APick(c, t, lab, gpay(bs, lab)), trace(gcont(bs, lab), more))
-      assert step(config(GChoice(c, bs), rs, multiparty), APick(c, t, lab, gpay(bs, lab))) == Moved(config(gcont(bs, lab), rs, multiparty))
+      assert trace(GChoice(c, bs), picks) == ActThen(ActPick(c, t, lab, gpay(bs, lab)), trace(gcont(bs, lab), more))
+      assert step(config(GChoice(c, bs), rs, multiparty), ActPick(c, t, lab, gpay(bs, lab))) == CfgMoved(config(gcont(bs, lab), rs, multiparty))
       assert run(config(GChoice(c, bs), rs, multiparty), trace(GChoice(c, bs), picks))
              == run(config(gcont(bs, lab), rs, multiparty), trace(gcont(bs, lab), more))
       assert finished(run(config(GChoice(c, bs), rs, multiparty), trace(GChoice(c, bs), picks))) == finished(run(config(gcont(bs, lab), rs, multiparty), trace(gcont(bs, lab), more)))
@@ -1098,34 +1098,34 @@ mod Session.Theory do
 
   doc "C4. The projections compose back to the protocol: run on the protocol's own trace, the configuration of every role's projection takes every step and ends with every role done."
   @[lemma]
-  fn compose(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, picks : SessionPicks)
+  fn projections_compose(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, picks : SessionPicks)
     : {Unit | !in_fragment(g, rs, multiparty) || finished(run(config(g, rs, multiparty), trace(g, picks)))} do
     match g do
       GEnd ->
         end_done(rs, multiparty)
-        assert trace(GEnd, picks) == ANil
+        assert trace(GEnd, picks) == ActEnd
       GVar(_) -> ()
       GLoop(_, _) -> ()
       GMsg(f, t, p, k) ->
-        compose(k, rs, multiparty, picks)
+        projections_compose(k, rs, multiparty, picks)
         compose_msg(f, t, p, k, rs, multiparty, picks)
       GChoice(c, bs) ->
         let lab = pick(bs, picks)
         let more = rest_picks(picks)
-        compose_bs(bs, rs, multiparty, lab, more)
+        projections_compose_bs(bs, rs, multiparty, lab, more)
         compose_pick(c, bs, rs, multiparty, picks)
     end
   end
 
   doc "C4 for what follows branch `lab`'s first message."
   @[lemma]
-  fn compose_bs(bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, lab : Int, picks : SessionPicks)
+  fn projections_compose_bs(bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, lab : Int, picks : SessionPicks)
     : {Unit | !in_fragment_bs(bs, rs, multiparty) || finished(run(config(gcont(bs, lab), rs, multiparty), trace(gcont(bs, lab), picks)))} do
     match bs do
       GBNil ->
         end_done(rs, multiparty)
         assert gcont(bs, lab) == GEnd
-        assert trace(GEnd, picks) == ANil
+        assert trace(GEnd, picks) == ActEnd
       GBCons(l, g, rest) ->
         match g do
           GMsg(_, _, _, k) ->
@@ -1133,20 +1133,20 @@ mod Session.Theory do
             assert !in_fragment(g, rs, multiparty) || in_fragment(k, rs, multiparty)
             if l == lab do
               assert gcont(bs, lab) == k
-              compose(k, rs, multiparty, picks)
+              projections_compose(k, rs, multiparty, picks)
             else
               assert gcont(bs, lab) == gcont(rest, lab)
-              compose_bs(rest, rs, multiparty, lab, picks)
+              projections_compose_bs(rest, rs, multiparty, lab, picks)
             end
           _ ->
             assert !in_fragment_bs(bs, rs, multiparty) || in_fragment_bs(rest, rs, multiparty)
             if l == lab do
               end_done(rs, multiparty)
               assert gcont(bs, lab) == GEnd
-              assert trace(GEnd, picks) == ANil
+              assert trace(GEnd, picks) == ActEnd
             else
               assert gcont(bs, lab) == gcont(rest, lab)
-              compose_bs(rest, rs, multiparty, lab, picks)
+              projections_compose_bs(rest, rs, multiparty, lab, picks)
             end
         end
     end
@@ -1155,16 +1155,16 @@ mod Session.Theory do
   doc "The first step of the protocol's trace (a no-op message when there is none)."
   fn first_act(g : SessionGlobal, picks : SessionPicks) : SessionAct do
     match trace(g, picks) do
-      ANil -> AMsg(0, 0, 0)
-      ACons(a, _) -> a
+      ActEnd -> ActMsg(0, 0, 0)
+      ActThen(a, _) -> a
     end
   end
 
   doc "C5. Deadlock freedom (synchronous, the fragment): while the protocol has a next step, the configuration of the projections can take it."
   @[lemma]
   fn progress(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, picks : SessionPicks)
-    : {Unit | !in_fragment(g, rs, multiparty) || trace(g, picks) == ANil
-              || step(config(g, rs, multiparty), first_act(g, picks)) != Stuck} do
+    : {Unit | !in_fragment(g, rs, multiparty) || trace(g, picks) == ActEnd
+              || step(config(g, rs, multiparty), first_act(g, picks)) != CfgStuck} do
     match g do
       GEnd -> ()
       GVar(_) -> ()
@@ -1283,8 +1283,8 @@ mod Session.Theory do
   fn role_ok_has(rs : SessionRoles, c : Int, bs : SessionGBranches, multiparty : Bool, r : Int)
     : {Unit | !(bystanders_merged(rs, c, bs, multiparty) && has(rs, r)) || role_ok(c, bs, r, multiparty)} do
     match rs do
-      RNil -> ()
-      RCons(_, rest) -> role_ok_has(rest, c, bs, multiparty, r)
+      RoleEnd -> ()
+      RoleThen(_, rest) -> role_ok_has(rest, c, bs, multiparty, r)
     end
   end
 

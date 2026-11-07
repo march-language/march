@@ -14,16 +14,16 @@ theorem is not attempted).
 
 ## Theory (stdlib/session_theory.march)
 
-- Semantics: `SessionCfg` (role, local) list built by `config(g, rs, mp)`; `SessionAct` is `AMsg(f, t, p)`
-  or `APick(c, t, label, p)` (a choice's label rides on the chooser's first message);
+- Semantics: `SessionCfg` (role, local) list built by `config(g, rs, mp)`; `SessionAct` is `ActMsg(f, t, p)`
+  or `ActPick(c, t, label, p)` (a choice's label rides on the chooser's first message);
   `step` (both parties present, each takes its part: `send_step`, `recv_step`, `choose_step`,
   `offer_step` from an offer or a merged receive); `run` over `SessionActs`; the protocol's own
   `trace(g, picks)`; `finished` (every role `LEnd`).
-- C4 `compose`: `!in_fragment(g, rs, mp) || composes(g, rs, mp, picks)`, from subject
+- C4 `projections_compose`: `!in_fragment(g, rs, mp) || composes(g, rs, mp, picks)`, from subject
   reduction per step (`step_msg`, `step_pick`, built from per-role `act_msg`/`act_pick`), the
-  per-head steps `compose_msg`/`compose_pick`, and `compose_bs` walking to the chosen branch.
+  per-head steps `compose_msg`/`compose_pick`, and `projections_compose_bs` walking to the chosen branch.
 - C5 `progress`: while `trace(g, picks)` has a step, `step(config(g, rs, mp), first_act(g,
-  picks)) != Stuck`.
+  picks)) != CfgStuck`.
 - C3 `pairwise`: for `p != q` in `rs`, `restrict(project(g, p), q) == dual(restrict(project(g,
   q), p))`. `restrict` keeps the actions with that peer, peers erased, and `collapse`s a choice
   whose restricted branches all look alike. The choice case is uniform
