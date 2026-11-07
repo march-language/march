@@ -6,5 +6,6 @@ In a refinement predicate `len` means the built-in length measure, not your func
 5 |   fn need(_xs : {List(Int) | len(_) == 1}) : Int do 0 end
                                  ^^^^^^
 
+    run `march --explain predicate_vocabulary_shadowed`
 
 
