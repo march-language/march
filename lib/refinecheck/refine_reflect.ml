@@ -1719,7 +1719,7 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
          review round 4): a conflated short name, an inexact qualified one,
          or a type that is no registered variant declines. *)
       let adt =
-        match RE.adt_of_type_name n with
+        match RE.adt_of_type_name ~arity:(List.length args) n with
         | Some a when a <> RE.ambiguous_adt_sentinel -> a
         | _ -> raise Decline
       in
@@ -2852,12 +2852,22 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
      does not parse, so a head's refinements are all written in it.) *)
   let refs_of (u : RT.unit_) =
     let names = ref [] in
+    (* A name the refinement binds is a value, never a function: the unit's
+       own parameters (a lemma's `f` in `EnvMsg(f, p)`) and the binders
+       (`_`, `v` of `{v : T | ...}`).  Resolved by bare name like a call,
+       a stdlib theorem's parameter `f` marked a user's `App.f` (and all
+       it reaches) as named by a predicate, so the user function's contract
+       hash moved with the set of files loaded (the LSP re-checked a
+       dependent that nothing touched). *)
+    let params = List.filter_map Fun.id u.RT.u_params in
     let rec ty (t : A.ty) =
       match t with
-      | A.TyRefine (b, _, e) ->
+      | A.TyRefine (b, binder, e) ->
         ty b;
+        let bound = "_" :: (match binder with Some n -> [ n.A.txt ] | None -> []) @ params in
         let rec walk (e : A.expr) =
           (match e with
+           | A.EVar n when List.mem n.A.txt bound -> ()
            | A.EVar n -> names := n.A.txt :: !names
            | A.EField (_, n, _) -> names := n.A.txt :: !names
            | _ -> ());

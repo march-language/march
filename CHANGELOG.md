@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **A warning when a predicate means the built-in, not your function.** Inside a refinement
+  predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
+  own function of that name is in scope, the checker now says so
+  (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
 - **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
   `march --check-json`, a fix's `applicability` is `machine-applicable`,
   `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
@@ -41,6 +45,15 @@ git log is authoritative for exact commits.
 
   In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
   have a machine-applicable one.
+- **`Actor.Theory`: the mailbox's promises, proved on a model and tested against the
+  runtime.** A new stdlib module models an actor's mailbox and proves, once, that one sender's
+  messages arrive in the order sent (whatever other senders, a hot-deploy hold, a stash or a
+  call waiting inside a handler do), that a late reply never answers a later `Actor.call`, and
+  that a monitor's `Down` is never dropped by a full mailbox and is delivered at most once. A
+  native fixture checks the runtime's receive order against the model.
+  `march --check --guarantees` now reports the runtime's laws as `proved (model) · tested
+  (runtime)` or `proved (model)` instead of `assumed`. See the actors chapter, "What is
+  proved about the mailbox".
 - **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
   parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
   parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
@@ -57,6 +70,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
   module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
@@ -664,7 +685,16 @@ git log is authoritative for exact commits.
   such a type, and a lemma about it, can now be used in refinements. Recursion through
   `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating
   too.
-
+- **A type named like a standard-library type of another arity works in predicates.** A
+  `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
+  it unchecked. Types of the same name and the same number of parameters still are, with a
+  message saying so that now names your function.
+- **No false "not checked" warning on a qualified predicate call that is checked.** A
+  predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
 - Compiled record equality keeps helpers distinct for different record shapes,
   avoiding wrong comparisons and crashes when a program uses several record types.
 - Refinement diagnostics preserve predicate grouping with parentheses, including
@@ -675,6 +705,11 @@ git log is authoritative for exact commits.
 - The two-node test harness now fails when a started node has no expected-output
   file, instead of silently reporting success.
 
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,

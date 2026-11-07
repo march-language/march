@@ -766,11 +766,13 @@ actor Counter: not checked
   @invariant               not checked: init and handler results are not checked against it; a hot deploy checks it on the migrated state
   handler contracts        proved: 1 site where a message is built
   migrate_state (derived)  proved: 1 site against the deployed build
-protocol Relay (2 roles): not checked
+protocol Relay (2 roles): proved (spec) · validated (compiler)
   projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)
-  deadlock freedom  not checked: no proof covers this protocol yet
-runtime: assumed
-  mailbox order, Actor.call replies, DOWN delivery  assumed: the runtime is trusted; nothing here proves it
+  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)
+runtime: proved (model)
+  per-sender message order  proved (model) · tested (runtime): Actor.Theory.enq_self, enq_other, replay_order, call_keeps_others; tested: actor_theory_conformance, actor_call_in_handler_keeps_messages
+  Actor.call replies        proved (model) · tested (runtime): a late reply never answers a later call (Actor.Theory.stale_reply_ignored, call_reply_cat); tested: actor_call_late_reply
+  DOWN delivery             proved (model): at most once, never dropped by a full mailbox (Actor.Theory.down_at_most_once, down_never_dropped); the runtime is not yet tested against it
 ```
 
 | Label | Meaning |
@@ -780,13 +782,16 @@ runtime: assumed
 | `not proved` | Some obligation was neither proved nor refuted; the line gives the checker's reason. |
 | `not checked` | The program states a guarantee nothing checks yet. This line is the only place it is said. |
 | `checked (compiler)` | A compile-time check that is not a proof about a model (a multiparty protocol's send/receive matching). |
+| `proved (model)` | Proved about a model of the runtime (`Actor.Theory`: the mailbox), with no test yet that the runtime matches the model. |
+| `proved (model) · tested (runtime)` | Proved about the model, and a native fixture checks the runtime against it. |
 | `proved (spec) · validated (compiler)` | The compiler's projection agrees with `Session.Theory.project`, so the laws the standard library proves about it hold (see the choreography chapter, "What is proved about a protocol"). |
-| `assumed` | The trust boundary: the runtime, and messages from other nodes to an `@[remote]` actor. |
+| `assumed` | The trust boundary: messages from other nodes to an `@[remote]` actor. |
 
-A block's header is its weakest line, `assumed` aside. Two gaps are reported as
-`not checked` today: `@invariant` is used only across a hot deploy (as the migration's goal
-and, from the deployed build, as a hypothesis), and nothing yet proves a protocol free of
-deadlock.
+A block's header is its weakest line, `assumed` aside. `@invariant` is reported
+`not checked` today: it is used only across a hot deploy (as the migration's goal and, from
+the deployed build, as a hypothesis). A protocol's deadlock freedom is proved for the
+fragment the choreography chapter describes ("What is proved about a protocol"), and
+`not checked`, with the reason, outside it (a loop, for one).
 
 ## Contracts across versions
 

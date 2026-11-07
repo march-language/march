@@ -64,6 +64,12 @@ val file_is_stdlib : string -> bool
     each as a declarant of its name: a user type of the same short name is
     conflated with it). *)
 val builtin_type_names : string list
+
+(** Every built-in type of the base environment with its arity (the number of
+    type arguments it takes). The refinement checker counts a built-in as a
+    declarant of its short name only at that arity: the typechecker does not
+    unify a user type of another arity with it. *)
+val builtin_types : (string * int) list
 val span_is_stdlib : Ast.span -> bool
 
 (** Builtins only the standard library may reference, with the suggestion
