@@ -1,26 +1,24 @@
 # Predicate names: resolve and print them right (2026-11-06)
 
-Plan: `specs/plans/2026-11-06-predicate-names-plan.md`. Closes three todos and one bullet:
+Plan: `specs/plans/2026-11-06-predicate-names-plan.md`. Closes two todos and one bullet, and pins
+a third that #1184 closed first:
 
 | Todo | Priority | Outcome |
 |---|---|---|
-| `2026-11-04-refine-pred-str-drops-parens` | P4 | `pred_str` keeps the parentheses a reparse needs |
+| `2026-11-04-refine-pred-str-drops-parens` | P4 | closed by #1184 (`specs/progress/2026-11-04-refine-pred-str-drops-parens.md`), which landed first; this branch's printer was dropped in favour of main's, and its tests stay as checks on it |
 | `2026-10-31-reflection-encoder-gaps`, bullet "predicate display-name resolution in the propagation pre-pass" | P2 file | already closed by 71f112f4a; pinned, bullet removed |
 | `2026-10-29-predicate-vocabulary-shadows-user-functions` | P2 | new warning `predicate_vocabulary_shadowed` |
 | `2026-11-03-reflect-type-name-clash-with-stdlib` | P3 | same-named types of different arity are told apart |
 
-All tests are in the new `pred-names` group (`test/test_refine_pred_names.ml`, 24 cases).
+All tests are in the new `pred-names` group (`test/test_refine_pred_names.ml`, 25 cases).
 
 ## What changed
 
-- **`pred_str` (`lib/refinecheck/refine_scope.ml`).** It printed every binary operator flat, so
-  `_ <= a && _ <= b && (_ == a || _ == b)` (`Math.min_int`) printed as
-  `… && _ == a || _ == b`, `_ == (a + b) * 2` as `_ == a + b * 2`, and
-  `_ == (keys(m) == empty)` (`Map.is_empty`) as text that does not parse. Inference reads this
-  text back (`Infer_vocab.candidate_of_text`) and `--refine-infer-apply` writes it. Now a child
-  is parenthesised when it binds looser than its parent, as tightly but on the right of a
-  left-associative operator, or when both are comparisons (`binop_level`, the parser's
-  `expr_or` … `expr_mul` levels); `!` and unary `-` parenthesise any infix operand.
+- **`pred_str`.** This branch first carried its own precedence printer for the parentheses todo.
+  #1184 fixed the same todo on main with `pred_infix_precedence` / `pred_str_prec`, so on merge
+  main's printer was kept and this branch's (`binop_level`) dropped. The five parentheses cases
+  in `pred-names` (`min_int`'s row, `_ == (a + b) * 2`, `_ == (keys(m) == empty)`, the reparse
+  round trip, an inference candidate read back from the text) stay, and pass on main's printer.
 - **#20.** 71f112f4a ("resolve every reflected call by site") replaced name-based predicate
   resolution with per-span resolution (`Refine_term.pred_expr` → `pred_sites` →
   `Reflect_state.call_sym`), so the walk and the postcondition pre-pass

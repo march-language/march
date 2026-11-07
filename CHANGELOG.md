@@ -659,15 +659,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
-- **Refinement reports keep a predicate's parentheses.** `_ <= a && (_ == a || _ == b)` printed
-  as `_ <= a && _ == a || _ == b`, which reads as a different predicate, and
-  `--refine-infer` read that text back. Printed predicates now re-parse to what you wrote.
 - **A type named like a standard-library type of another arity works in predicates.** A
   `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
   it unchecked. Types of the same name and the same number of parameters still are, with a
   message saying so that now names your function.
 - **No false "not checked" warning on a qualified predicate call that is checked.** A
   predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
+- Compiled record equality keeps helpers distinct for different record shapes,
+  avoiding wrong comparisons and crashes when a program uses several record types.
+- Refinement diagnostics preserve predicate grouping with parentheses, including
+  mixed Boolean operators, arithmetic and unary expressions.
+
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output

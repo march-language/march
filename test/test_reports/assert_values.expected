@@ -3,7 +3,7 @@ FAIL: "assert == nested record, list and variant"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-18 |       assert (user == expected)
+21 |       assert (user == expected)
                    ^^^^^^^^^^^^^^^^
 
     left `user`
@@ -15,12 +15,29 @@ The two sides of this `==` are not equal. [assert_failed]
 
     They first differ at `.tags[1]`.
 
+FAIL: "assert == plain record field"
+-- TEST FAILURE -------- test_reports/assert_values.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+26 |       assert (p == { x: 1, y: 3 })
+                   ^^^^^^^^^^^^^^^^^^^
+
+    left `p`
+        { x: 1, y: 2 }
+                   ^
+    right
+        { x: 1, y: 3 }
+                   ^
+
+    They first differ at `.y`.
+
 FAIL: "assert == strings"
 -- TEST FAILURE -------- test_reports/assert_values.march
 
 The two sides of this `==` are not equal. [assert_failed]
 
-22 |       assert ("hello world" == "hello word")
+30 |       assert ("hello world" == "hello word")
                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     left
@@ -35,7 +52,7 @@ FAIL: "assert == a long string shows a window"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-27 |       assert (got == "the quick brown fox jumps over the lazy cat and keeps running far away")
+35 |       assert (got == "the quick brown fox jumps over the lazy cat and keeps running far away")
                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     left `got`
@@ -50,7 +67,7 @@ FAIL: "assert == list is shorter"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-32 |       assert (xs == [1, 2, 3, 4])
+40 |       assert (xs == [1, 2, 3, 4])
                    ^^^^^^^^^^^^^^^^^^
 
     left `xs`
@@ -67,7 +84,7 @@ FAIL: "assert == list is longer"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-37 |       assert (xs == [1, 2, 3])
+45 |       assert (xs == [1, 2, 3])
                    ^^^^^^^^^^^^^^^
 
     left `xs`
@@ -84,7 +101,7 @@ FAIL: "assert == a long list is elided"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-43 |       assert (xs == ys)
+51 |       assert (xs == ys)
                    ^^^^^^^^
 
     left `xs`
@@ -101,7 +118,7 @@ FAIL: "assert == tuples"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-47 |       assert ((1, "a", true) == (1, "a", false))
+55 |       assert ((1, "a", true) == (1, "a", false))
                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     left
@@ -116,7 +133,7 @@ FAIL: "assert == options in a list"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-51 |       assert ([Some(1), None, Some(3)] == [Some(1), Some(2), Some(3)])
+59 |       assert ([Some(1), None, Some(3)] == [Some(1), Some(2), Some(3)])
                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     left
@@ -133,7 +150,7 @@ FAIL: "assert == different constructors"
 
 The two sides of this `==` are not equal. [assert_failed]
 
-55 |       assert (Owner(1) == Guest)
+63 |       assert (Owner(1) == Guest)
                    ^^^^^^^^^^^^^^^^^
 
     left
@@ -148,7 +165,7 @@ FAIL: "other comparisons not equal"
 
 The two sides of this `!=` are equal. [assert_failed]
 
-62 |       assert (xs != [1, 2])
+70 |       assert (xs != [1, 2])
                    ^^^^^^^^^^^^
 
     Both sides are:
@@ -159,7 +176,7 @@ FAIL: "other comparisons less than"
 
 This `<` comparison is false. [assert_failed]
 
-67 |       assert (a * 2 < 10)
+75 |       assert (a * 2 < 10)
                    ^^^^^^^^^^
 
     left `a * 2`
@@ -172,7 +189,7 @@ FAIL: "other comparisons plain condition"
 
 This assertion is false. [assert_failed]
 
-72 |       assert List.is_empty(xs)
+80 |       assert List.is_empty(xs)
                   ^^^^^^^^^^^^^^^^^
 
 exit 1
