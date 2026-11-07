@@ -55,8 +55,55 @@ let stdlib_post_rows file out =
       | _ -> None)
     (lines out)
 
+(* Compare parsed structure independently of the printer, ignoring source spans. *)
+let rec predicate_tree expr =
+  let open March_ast.Ast in
+  match expr with
+  | EVar n -> "var:" ^ n.txt
+  | ELit (LitInt n, _) -> "int:" ^ string_of_int n
+  | EApp (f, args, _) ->
+    "app(" ^ predicate_tree f ^ "," ^ String.concat "," (List.map predicate_tree args) ^ ")"
+  | EField (recv, n, _) -> "field(" ^ predicate_tree recv ^ "," ^ n.txt ^ ")"
+  | _ -> Alcotest.fail "unexpected predicate fixture node"
+
+let predicate_roundtrip source expected () =
+  let parse s = March_parser.Parse.expr_of_lexbuf (Lexing.from_string s) in
+  let original = parse source in
+  let builtin = March_refinecheck.Reflect_state.negate_builtin_at in
+  let saved = !builtin in
+  let printed =
+    Fun.protect ~finally:(fun () -> builtin := saved) (fun () ->
+        builtin := (fun _ -> true);
+        March_refinecheck.Refine_scope.pred_str original)
+  in
+  Alcotest.(check string) "rendered predicate" expected printed;
+  Alcotest.(check string) "same parsed tree" (predicate_tree original) (predicate_tree (parse printed))
+
+let predicate_tests =
+  List.map
+    (fun (source, expected) ->
+      Alcotest.test_case ("predicate grouping: " ^ source) `Quick (predicate_roundtrip source expected))
+    [ "_ <= a && _ <= b && (_ == a || _ == b)", "_ <= a && _ <= b && (_ == a || _ == b)";
+      "high < low || (_ >= low && _ <= high)", "high < low || _ >= low && _ <= high";
+      "(a + b) * c", "(a + b) * c";
+      "a - (b - c)", "a - (b - c)";
+      "a / (b * c)", "a / (b * c)";
+      "a + (b + c)", "a + (b + c)";
+      "a && (b && c)", "a && (b && c)";
+      "(a == b) == c", "(a == b) == c";
+      "a == (b == c)", "a == (b == c)";
+      "!(a || b)", "!(a || b)";
+      "!(a +. b)", "!(a +. b)";
+      "-(a + b)", "-(a + b)";
+      "-(-a)", "-(-a)";
+      "(a + b).value", "(a + b).value";
+      "(-a).value", "(-a).value";
+      "(f(a)).value", "(f(a)).value";
+      "a /. (b *. c)", "a /. (b *. c)";
+      "a + b * c - d", "a + b * c - d" ]
+
 let tests =
-  [ gated "List.drop_append: drop(append(xs, ys), len(xs)) == ys (without it: a fuel skip)" (fun () ->
+  predicate_tests @ [ gated "List.drop_append: drop(append(xs, ys), len(xs)) == ys (without it: a fuel skip)" (fun () ->
         with_and_without ~line:6 ~callee:"need_leq" ~lemma:"List.drop_append(xs, ys)" (fun call ->
             "  fn a(xs : List(Int), ys : List(Int)) : Int do\n" ^ call
             ^ "    need_leq(ys, List.drop(List.append(xs, ys), List.length(xs)))\n  end\n"));
@@ -88,6 +135,15 @@ let tests =
           [ "take_onto_append"; "take_append"; "drop_append"; "nth_opt_append" ]);
     gated "Math: min_int, max_int and clamp_int prove their result types" (fun () ->
         let out = run "mod U do\n  fn f(n : Int) : Int do n end\nend\n" in
+        let min_rows =
+          List.filter (fun row -> contains row "\tpostcondition\tmin_int\t") (lines out)
+        in
+        if min_rows = [] then Alcotest.failf "missing min_int report row:\n%s" out;
+        List.iter
+          (fun row ->
+            if not (contains row "_ <= a && _ <= b && (_ == a || _ == b)") then
+              Alcotest.failf "min_int report lost predicate grouping:\n%s" row)
+          min_rows;
         let rows = stdlib_post_rows "math.march" out in
         List.iter
           (fun f ->
