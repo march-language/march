@@ -264,7 +264,9 @@ let uniquify_fn (fn : Tir.fn_def) : Tir.fn_def =
 
     - a call [Cst.inc(4)] (lowered as the known call [EApp (Cst.inc, [4])],
       which passed 4 to the zero-arg fn) becomes
-      [let t = Cst.inc() in call_ptr t(4)];
+      [let t = Cst.inc() in call_ptr t(4)]; a zero-argument call of a
+      [fn () -> ...] let ([Cst.thunk()]) likewise becomes
+      [let t = Cst.thunk() in call_ptr t()];
     - a value use [let g = Cst.inc] / [List.map(xs, Cst.inc)] (an [AVar]
       atom, which both backends treat as the function itself at a [TFn] type:
       native wrapped the zero-arg fn in a closure trampoline, JS emitted its
@@ -326,7 +328,10 @@ let call_fn_typed_module_lets (lets : (string, Tir.ty) Hashtbl.t)
     let wrap e = List.fold_left (fun body (t, call) -> Tir.ELet (t, call, body)) e !pre in
     let bind_all bound vs = List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s) bound vs in
     match e with
-    | Tir.EApp (f, (_ :: _ as args)) when is_let bound f.Tir.v_name ->
+    (* Every [EApp] of a let here is a source call of its closure, including
+       a zero-argument one ([let thunk = fn () -> 42]; [Cst.thunk()]):
+       lowering itself never emits [EApp (let, [])] to read the value. *)
+    | Tir.EApp (f, args) when is_let bound f.Tir.v_name ->
       let args = atoms args in
       let t, call = call_var f in
       wrap (Tir.ELet (t, call, Tir.ECallPtr (Tir.AVar t, args)))

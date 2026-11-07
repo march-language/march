@@ -19,6 +19,8 @@ mod ModuleLetFn do
     let add = fn (a, b) -> a + b
     let shout = fn s -> s ++ "!"
     let ident = fn x -> x
+    -- zero parameters: `Cst.thunk()` is an EApp with no args
+    let thunk = fn () -> 42
 
     -- a closure built by a call, capturing 10
     let add10 = Mk.make_adder(10)
@@ -61,6 +63,9 @@ mod ModuleLetFn do
     println(show_list(List.map([1, 2], Cst.Inner.triple)))
     println(int_to_string(Cst.Inner.via_parent(2)))
     println(int_to_string(Cst.ident(8)) ++ " " ++ Cst.ident("poly"))
+    println(int_to_string(Cst.thunk()))
+    let t = Cst.thunk
+    println(int_to_string(t() + 1))
     let fs = [Cst.inc, Cst.Inner.triple, top_double]
     println(show_list(List.map(fs, fn f -> f(5))))
   end

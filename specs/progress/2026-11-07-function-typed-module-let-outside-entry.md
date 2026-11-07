@@ -43,8 +43,11 @@ whose value type is a `TFn` in `Lower_state._fn_typed_module_lets` (reset per `l
 At the end of `lower_module`, before `uniquify_fn`, `Lower_decls.call_fn_typed_module_lets`
 rewrites every fn body:
 
-- `EApp (f, args)` with `args <> []` and `f` such a let becomes
-  `let t = f() in call_ptr t(args)`;
+- `EApp (f, args)` with `f` such a let becomes `let t = f() in call_ptr t(args)`, including
+  `args = []`: a zero-parameter let (`let thunk = fn () -> 42`) called as `Cst.thunk()` is an
+  `EApp (Cst.thunk, [])` that otherwise returned the closure (pointer natively,
+  `[object Object]` on JS). Lowering never emits `EApp (let, [])` to read a let's value (value
+  reads are atoms), so every `EApp` of one here is a source call;
 - each value-use atom `AVar f` becomes a fresh `t` bound by `let t = f()` just before the
   expression that uses it.
 
@@ -56,7 +59,8 @@ each fn as is and draws no fresh names).
 
 ## Tests
 
-`test/native/module_let_fn.march`: calls, value uses, a two-parameter let, a polymorphic `ident` used at Int and String, a closure built by a
+`test/native/module_let_fn.march`: calls, value uses, a two-parameter let, a polymorphic `ident` used at Int and String, a zero-parameter let (`Cst.thunk()` and
+`let t = Cst.thunk; t()`), a closure built by a
 call in another module, bare in-module uses (call, value, `List.map` argument), a let in a nested
 module (`Cst.Inner.triple`) used from the parent and passed to `List.map`, a list of lets, and an
 entry-module function let as the control. Its `.expected` is the interpreter's output; `test/dune`
