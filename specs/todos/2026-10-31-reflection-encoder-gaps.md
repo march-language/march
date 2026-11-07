@@ -12,16 +12,19 @@ the solver, a `match` nested in value position, and guard calls are encoded sinc
 String, records, tuples and destructuring `let`s since
 `specs/progress/2026-11-06-reflection-float-string-records-tuples.md`.)
 
-- **A tuple- or record-typed variable in a predicate.** A lemma parameter or caller variable
-  of tuple or record type gets no sort in the predicate encoder (the sort-marker channel has no
-  tuple marker, and records have their own field-flattening mode), so `swap(swap(t)) == t`
-  over `t : (Int, Int)` is a `sort-conflict` skip and `px(p) == p.x + p.y` over `p : Pt` is
-  `unreflectable-predicate`. Literals at a reflected call's parameter do translate.
+- **A record-typed variable in a predicate, and a tuple-typed return binder.** Tuple-typed
+  parameters, lemma parameters, caller values and tuple literals in a predicate are encoded since
+  `specs/progress/2026-11-06-stdlib-lemma-sweep-s3-tuples.md`. Left: a RECORD-typed variable
+  (`px(p) == p.x + p.y` over `p : Pt` is `unreflectable-predicate`; records have their own
+  field-flattening mode), and a tuple RETURN refinement (`fn mk(x) : {(Int, Int) |
+  Tuple.first(_) == x}` is `unreflectable-subject` on the definition side; `return_refine_ext` /
+  `return_refine_sorted` have no tuple arm, and it must go to `post_walk_verdict`, not `engine`,
+  which would take `$Tup2` for a record sort).
 - **Parametric records.** A record type is matched to its declaration by its field set; a
   record with type parameters declines (its instance is not recovered from the structural
   type).
-- **A tuple or record literal printed in a report** reads `<predicate>` (`pred_str` has no
-  arm for `ETuple`/`ERecord`); changing it moves golden diagnostic text.
+- **A record literal printed in a report** reads `<predicate>` (`pred_str` has no `ERecord`
+  arm; a tuple literal prints since the S3 tuples change).
 - **`uses:` over-approximation.** When a stage-2 proof's unsat core names no unfolding
   (congruence, I8), `uses:` lists the whole frontier.
 - **Predicate display-name resolution in the propagation pre-pass.** A predicate's bare

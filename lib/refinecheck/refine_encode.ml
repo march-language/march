@@ -2192,6 +2192,28 @@ let is_adt_base (t : A.ty) : bool =
   | A.TyCon ({ A.txt = name; _ }, _) -> Hashtbl.mem adt_ctors (adt_sort_name name)
   | _ -> false
 
+(* The tuple datatype of arity [n] (reflection §3.2: tuples are datatypes):
+   one constructor `$tup<n>` over the datatype's own [n] parameters, its
+   selectors `$tup<n>_<i>`.  `$` cannot occur in a March name, so neither can
+   collide with a user's.  Registered on first use (a reflected function's
+   signature or body), so a module that never reflects a tuple declares
+   nothing new. *)
+let tuple_ctor (n : int) : string = Printf.sprintf "$tup%d" n
+
+(* Is [adt] a tuple datatype ([tuple_adt])? *)
+let is_tuple_adt (adt : string) : bool = String.starts_with ~prefix:"$Tup" adt
+
+let tuple_adt (n : int) : string =
+  let adt = Printf.sprintf "$Tup%d" n in
+  if not (Hashtbl.mem adt_ctors adt) then begin
+    let ctor = tuple_ctor n in
+    Hashtbl.replace adt_ctors adt [ ctor ];
+    Hashtbl.replace adt_arity adt n;
+    set_ctor_fields adt ctor (List.init n (fun i -> Smt.SParam i));
+    Hashtbl.replace ctor_param_fields ctor (List.init n (fun i -> Param i))
+  end;
+  adt
+
 (* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
    registered ADT (self or another — so cross-ADT measure calls are well-sorted,
    M-c) its datatype sort, everything else (type params, unmodelled types) the
@@ -2206,6 +2228,10 @@ let rec instance_sort_of_ty (t : A.ty) : Smt.sort =
   | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> instance_sort_of_ty b
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
+  (* A tuple is the datatype [tuple_adt n] at its components' sorts (todo
+     2026-11-04-stdlib-lemma-sweep-s3): before, it was `Elem`, so a
+     tuple-typed parameter in a predicate was declared Int. *)
+  | A.TyTuple (_ :: _ :: _ as ts) -> Smt.SData (tuple_adt (List.length ts), List.map instance_sort_of_ty ts)
   | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
     let adt = adt_sort_name txt in
     let n = try Hashtbl.find adt_arity adt with Not_found -> 0 in
@@ -2243,6 +2269,7 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
     match strip t with
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
+    | T.TTuple (_ :: _ :: _ as ts) -> Smt.SData (tuple_adt (List.length ts), List.map inst ts)
     | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name n) ->
       let adt = adt_sort_name n in
       let k = try Hashtbl.find adt_arity adt with Not_found -> 0 in
@@ -2257,6 +2284,8 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
   | T.TCon ("Bool", []) -> Some Smt.SBool
   | T.TCon ("Float", []) -> Some Smt.SFloat
   | T.TCon ("String", []) -> Some (Smt.sdata str_sort)
+  (* A tuple value: the tuple datatype at its components' sorts. *)
+  | T.TTuple (_ :: _ :: _) as ty -> Some (inst ty)
   (* No `Set(t)` -> `SSet` arm: a March `Set` VALUE is a datatype here (the
      stdlib's `type Set(a) = …`), and the SMT set sort is only ever the
      result of a set measure over it (`elts(s)`, `keys(m)`), never the sort
@@ -3755,24 +3784,6 @@ let register_builtin_adts () : unit =
   Hashtbl.replace ctor_param_fields "Ok" [ Param 0 ];
   Hashtbl.replace ctor_param_fields "Err" [ Param 1 ]
 
-(* The tuple datatype of arity [n] (reflection §3.2: tuples are datatypes):
-   one constructor `$tup<n>` over the datatype's own [n] parameters, its
-   selectors `$tup<n>_<i>`.  `$` cannot occur in a March name, so neither can
-   collide with a user's.  Registered on first use (a reflected function's
-   signature or body), so a module that never reflects a tuple declares
-   nothing new. *)
-let tuple_ctor (n : int) : string = Printf.sprintf "$tup%d" n
-
-let tuple_adt (n : int) : string =
-  let adt = Printf.sprintf "$Tup%d" n in
-  if not (Hashtbl.mem adt_ctors adt) then begin
-    let ctor = tuple_ctor n in
-    Hashtbl.replace adt_ctors adt [ ctor ];
-    Hashtbl.replace adt_arity adt n;
-    set_ctor_fields adt ctor (List.init n (fun i -> Smt.SParam i));
-    Hashtbl.replace ctor_param_fields ctor (List.init n (fun i -> Param i))
-  end;
-  adt
 
 
 (* =================================================================

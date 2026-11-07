@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Tuples in refinement predicates.** A tuple-typed parameter can be refined
+  (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
+  predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
+  tuple refinement was silently not checked, and a tuple in a predicate was an unchecked skip.
 - **Stdlib laws for `List.sum_int` and `List.product_int`, and a result type on `List.length`.**
   `List.sum_int_append(xs, ys)` proves `sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)`,
   `List.sum_int_reverse(xs)` proves `sum_int(reverse(xs)) == sum_int(xs)`, and
