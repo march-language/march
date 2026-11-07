@@ -306,3 +306,51 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
        ) msgs
    | _ -> ());  (* 0 or 1 role: already warned in caller *)
   (projections, positions)
+
+(** This projector's view of [pdef] for translation validation against
+    [Session.Theory.project] (lemmas design §5.2, M6; [March_ast.Session_term]).
+    Payload ids come from the same [surface_ty] the projection uses, so a
+    payload is the type the projector saw.  A binary projection's
+    [SSend]/[SRecv] carry no peer: the peer is the other role. *)
+let theory_view env ~proto_name (pdef : Ast.protocol_def) (projections : (string * session_ty) list) =
+  let module T = March_ast.Session_term in
+  let roles = T.ids () and labels = T.ids () and payloads = T.ids () in
+  (* Roles numbered in the order the projections list them (sorted). *)
+  List.iter (fun (r, _) -> ignore (T.id roles r)) projections;
+  let role_ids = List.map (fun (r, _) -> (r, T.id roles r)) projections in
+  let pay t = T.id payloads (pp_ty t) in
+  try
+    let global =
+      T.global_of_steps ~role:(T.id roles) ~label:(T.id labels)
+        ~payload:(fun t -> pay (surface_ty env ~tvars:(ref []) t))
+        pdef.Ast.proto_steps
+    in
+    let multiparty = List.length projections > 2 in
+    let local_of role (s : session_ty) =
+      let other =
+        match List.filter (fun (r, _) -> r <> role) role_ids with
+        | [ (_, i) ] -> Some i
+        | _ -> None
+      in
+      let binary_peer () =
+        match other with Some i -> i | None -> raise (T.Outside "a peerless send in a multiparty projection")
+      in
+      let rec go env = function
+        | SSend (t, k) -> T.LSend (binary_peer (), pay t, go env k)
+        | SRecv (t, k) -> T.LRecv (binary_peer (), pay t, go env k)
+        | SMSend (r, t, k) -> T.LSend (T.id roles r, pay t, go env k)
+        | SMRecv (r, t, k) -> T.LRecv (T.id roles r, pay t, go env k)
+        | SChoose bs -> T.LChoose (List.map (fun (l, k) -> (T.id labels l, go env k)) bs)
+        | SOffer bs -> T.LOffer (List.map (fun (l, k) -> (T.id labels l, go env k)) bs)
+        | SOfferPending _ -> raise (T.Outside "a pending offer")
+        | SEnd -> T.LEnd
+        | SRec (x, k) -> T.LRec (go (x :: env) k)
+        | SVar x -> T.LVar (T.var_index env x)
+        | SError -> raise (T.Outside "a projection error")
+      in
+      try Ok (go [] s) with T.Outside why -> Error why
+    in
+    Hashtbl.replace T.typecheck_views proto_name
+      (Ok { T.v_global = global; v_multiparty = multiparty; v_roles = role_ids;
+            v_locals = List.map (fun (r, s) -> (r, local_of r s)) projections })
+  with T.Outside why -> Hashtbl.replace T.typecheck_views proto_name (Error why)

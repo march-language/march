@@ -29,6 +29,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
+  module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
+  lemmas proved once: duality is an involution, and a two-role protocol's projections are
+  dual. The compiler checks both of its own projectors against `Session.Theory.project` for
+  every protocol you write, by running it in the interpreter: `march --check --guarantees`
+  labels a protocol's projection `proved (spec) · validated (compiler)` when they agree, and
+  `march --validate-projections FILE` lists every role. See the choreography chapter,
+  "What is proved about a protocol".
 - **`forge hot-reload check` / `march --check --guarantees` say what a build guarantees.**
   One block per actor and protocol, each line labelled `proved`, `violated`, `not proved`,
   `not checked`, `checked (compiler)` or `assumed`, with what it rests on: state refinements,
