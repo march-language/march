@@ -86,5 +86,6 @@ Design: `specs/2026-11-04-stdlib-lemma-sweep-design.md` §3 "S2". Phase S1 is
 | `scripts/gen-lemma-manifest.sh --check` | fresh |
 | `@types-check` conformance corpus | 492 passed, 0 failed |
 | doc-lint | passes |
+| TIR golden snapshots (`run_snapshots`), regenerated | 5 programs change at both stages (`trmc_modulo_cons`, `trmc_computed_arg_nested`, `nested_cons_ctor_heap`, `tuple_param_borrowed_destruct`, `record_field_tail_projection`): the `$Clo_go$0_List_*` closures go and the `_onto` functions appear, called directly. `trmc_modulo_cons`'s metrics: allocations 15 → 11 and decrements 55 → 24 after Perceus. Increments rise 2 → 8, all `inc_rc` on Int binders the snapshot still types `'_` (a no-op once types are known) |
 | `bench/list_ops.march`, `--opt 2` | same output, same binary size (270936), times within noise (0.02–0.04 s both) |
 | A micro-benchmark of `length`, `sum_int`, `product_int` and `maximum_int` over a 100 000-element list, 300 rounds, `--opt 2` | same output; base 0.31–0.43 s, new 0.21–0.37 s (load average 15) |

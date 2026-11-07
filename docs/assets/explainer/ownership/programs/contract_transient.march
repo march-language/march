@@ -1,0 +1,17 @@
+-- The same function, under the transient form.
+mod Own do
+  needs IO.Console
+
+  fn describe(i : Int) : String do
+    "item " ++ int_to_string(i)
+  end
+
+  @[no_alloc(transient)]
+  fn width(i : Int) : Int do
+    String.byte_size(describe(i))
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(int_to_string(width(7)))
+  end
+end

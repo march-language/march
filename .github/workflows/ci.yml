@@ -794,6 +794,16 @@ jobs:
           FORGE_BIN="$PWD/_build/default/forge/bin/main.exe" \
             python3 scripts/gen-authority-data.py --check
 
+      # docs/one-owner.md, the third explainer: allocation counts from the runtime's RC
+      # trace, `--why-copies`, the linear/affine diagnostics and the no_alloc contract
+      # messages (scripts/gen-ownership-data.py). Compiler only; no forge.
+      - name: Check the one-owner explainer's generated data
+        timeout-minutes: 10
+        run: |
+          eval $(opam env)
+          MARCH_BIN="$PWD/_build/default/bin/main.exe" \
+            python3 scripts/gen-ownership-data.py --check
+
       # Compiles every demo/*.march program (the `demo` alias in demo/dune).
       # Nothing else in CI builds demo/: at the 0.5.0 cut seven demos had
       # silently stopped compiling once the cluster transport began requiring

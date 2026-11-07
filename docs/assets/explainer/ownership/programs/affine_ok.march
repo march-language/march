@@ -1,0 +1,15 @@
+-- An affine tree: used in one branch, dropped in the other.
+mod Own do
+  type Tree = Leaf(Int) | Node(Tree, Tree)
+
+  fn sum_leaves(t : Tree) : Int do
+    match t do
+    Leaf(n)    -> n
+    Node(l, r) -> sum_leaves(l) + sum_leaves(r)
+    end
+  end
+
+  fn maybe_sum(t : affine Tree, wanted : Bool) : Int do
+    if wanted do sum_leaves(t) else 0 end
+  end
+end

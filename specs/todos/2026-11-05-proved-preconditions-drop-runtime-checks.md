@@ -1,7 +1,7 @@
 `[P3]` Use proved preconditions to drop the compiler's own runtime checks
 
-Filed 2026-11-05. Not started; this records the design so the first slice can
-start from it.
+Filed 2026-11-05. Slice 1 (division) is done as its cheap alternative; see
+"Slice 1, measured" below. Slices 2 and 3 are open.
 
 ## What
 
@@ -12,7 +12,7 @@ own safety checks, and the refinement checker often proves them dead:
 
 | Check | Emitted as today | Proof that removes it |
 |---|---|---|
-| `/` `%` by zero | a call to `march_checked_div_op` / `march_checked_mod_op` (`lib/tir/llvm_emit_arith.ml`) | divisor != 0; `Division_safety` already proves it, but only reports under `cap no_panic` |
+| `/` `%` by zero | an inline `icmp eq b, 0` to a cold trap, then `sdiv` / `srem` (`Llvm_ctx.emit_checked_divmod`; until 2026-11-06 an opaque call to `march_checked_div_op` / `march_checked_mod_op`) | divisor != 0; `Division_safety` already proves it, but only reports under `cap no_panic`. Measured not worth it: see "Slice 1, measured" |
 | `+ - *` overflow | `llvm.*.with.overflow` + panic branch (`Llvm_ctx.emit_checked_int_op`) | result in 63 bits; `Overflow_safety`, also `cap no_panic` only |
 | array / Bytes / SIMD bounds | inside the runtime getters (`runtime/march_runtime.c`, `native_*_arr_get`) | the call's `0 <= i < length` precondition, already in the per-call-site verdict index |
 | partial stdlib fns (`head`, `unwrap`, `at`) | a `panic` in the March body | the call site's precondition discharged |
@@ -44,14 +44,36 @@ own safety checks, and the refinement checker often proves them dead:
 
 ## Slices, in order
 
-1. Division only: lowering rewrite + deterministic budget + a flag to turn it
-   off (`pass_switch`). Benchmark a division-heavy loop compiled at `--opt 2`
-   before and after. Cheaper alternative to measure first: just inline
-   `march_checked_div_op`.
+1. ~~Division only~~ — done as the inline test, the proof rewrite measured and
+   dropped (below).
 2. NativeArray bounds, measured on `bench/simd_kernels.march`; bounds checks in
    index loops block vectorisation (see
    `2026-08-11-march-index-loop-per-iteration-overhead.md`).
 3. Overflow, last.
+
+## Slice 1, measured (2026-11-06)
+
+`specs/progress/2026-11-06-inline-int-divmod-check.md` has the numbers. In short, on a
+division-heavy loop at `--opt 2` (user time, three loops: a literal divisor, `gcd`, a
+loop-invariant divisor):
+
+| Build | Time |
+|---|---|
+| main: every `/` `%` an opaque call to `march_checked_div_op` | 0.57-0.60 s |
+| the zero test inline, then `sdiv` / `srem` | 0.32-0.34 s |
+| no zero test at all (unsound, measurement only) | 0.32 s |
+
+Inlining is the whole win: LLVM folds the test for a literal divisor, reuses a dominating
+`b == 0` branch (`gcd`), and the tests left are well-predicted branches. The binary with the
+test inline has 2 trap call sites left; dropping them changes nothing measurable. So the
+proof-based division rewrite (design steps 1-3 for `/`) is **not shipped**, by this todo's own
+rule, and the inline test shipped instead. Its determinism problem (step 3) never arises for
+division.
+
+What this suggests for slice 2: measure the same cheap alternative first. Array and `Bytes`
+getters are also opaque runtime calls (`native_*_arr_get`), so emitting the bounds test inline
+may again be most of the win; the proof should be needed only where a remaining in-loop bounds
+test blocks vectorisation.
 
 ## Done when
 

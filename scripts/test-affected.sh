@@ -26,6 +26,8 @@ expect() {
 }
 
 # Narrow plans.
+expect checks "scripts/test-two-node.sh" -- scripts/two-node.sh
+expect checks "scripts/test-two-node.sh" -- scripts/test-two-node.sh
 expect suites "lsp utf16 jsonrpc incremental query_cli" -- lsp/lib/analysis.ml
 expect suites "!codegen" -- lsp/lib/analysis.ml
 expect oracles "(none)" -- lsp/lib/analysis.ml
@@ -38,6 +40,9 @@ expect checks "scripts/check-explainer.sh" -- docs/protocol-to-cluster.md
 expect checks "scripts/check-explainer.sh" -- scripts/render-explainer-fallbacks.js
 expect checks "scripts/check-explainer.sh" -- docs/deploy-authority.md
 expect checks "scripts/check-explainer.sh" -- scripts/gen-authority-data.py
+expect checks "scripts/check-explainer.sh" -- docs/one-owner.md
+expect checks "scripts/check-explainer.sh" -- scripts/gen-ownership-data.py
+expect checks "scripts/check-explainer.sh" -- docs/assets/explainer/ownership/programs/owned.march
 expect suites "refinecheck" -- lib/refinecheck/refine_check.ml
 expect suites "!ALL" -- lib/refinecheck/refine_check.ml
 expect oracles "refine" -- lib/refinecheck/refine_check.ml

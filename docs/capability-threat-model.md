@@ -169,9 +169,9 @@ filesystem exception. Read-only reload and observe queries remain available.
 
 An `extern` block calls C, and the compiler's knowledge stops there. The rules:
 
-- A module with an `extern` block should declare `needs IO.Foreign`. If it doesn't, the
-  compiler warns (`[extern_needs_foreign]`).
-  This is still a warning, not an error.
+- A module with an `extern` block must declare `needs IO.Foreign`. If it doesn't, the
+  build fails (`[extern_needs_foreign]`). It was only a warning before 2026-11-06, which
+  let a dependency reach C without showing up in `forge audit` or `forge.caps.lock`.
 - A program that reaches an `extern` block can't be built under any grant narrower than
   `Cap(IO)`: a narrow grant over C code would be a lie, so the compiler refuses it.
 - `forge audit` and `forge cap inspect` report `IO.Foreign`; read it as "the rest of this

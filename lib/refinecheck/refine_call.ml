@@ -1569,8 +1569,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       decls := (nm, s) :: !decls;
       Smt.Const nm
     in
-    let record_self sort_name : Smt.term option =
-      match self_actual with
+    let rec record_term sort_name (actual : A.expr) : Smt.term option =
+      match actual with
       | A.ERecord (fields, _) ->
         reflect_record_literal ~opaque:opaque_field sort_name fields scalar_arg
       | A.EVar { A.txt = x; _ } ->
@@ -1623,6 +1623,32 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          has already cleared [ret] on every signature whose postcondition the
          DEFINITION side did not prove, so anything [postcond] returns is a
          fact rather than a trusted contract. *)
+      (* Reflection stage 2: a reflected call returning this record is its
+         logic symbol over its arguments, a record argument through this same
+         function and a scalar one through [reflect_scalar]; any other
+         argument declines.  Stage 1 only notes the frontier. *)
+      | A.EApp (A.EVar _, (_ :: _ as cargs), csp) when Reflect_state.stage2_call_at csp -> (
+        let sym = Option.get (Reflect_state.resolve_site csp) in
+        match Reflect_state.sig_of sym with
+        | Some fs when fs.Reflect_state.fs_ret = adt_sort sort_name ->
+          let cargs = Reflect_state.args_at csp cargs in
+          if List.length cargs <> List.length fs.Reflect_state.fs_params then None
+          else
+            let parts =
+              List.map2
+                (fun a p ->
+                  match p with
+                  | Smt.SData (n, []) when is_record_sort n ->
+                    let t = record_term n a in
+                    if t <> None && not (List.mem n !adt_sorts) then adt_sorts := n :: !adt_sorts;
+                    t
+                  | (Smt.SInt | Smt.SBool | Smt.SFloat) as sort -> absorb (reflect_scalar ~postcond ~sort sc a)
+                  | _ -> None)
+                cargs fs.Reflect_state.fs_params
+            in
+            if List.exists Option.is_none parts then None
+            else Some (Smt.App (sym, List.map Option.get parts))
+        | _ -> None)
       | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) -> (
         match postcond fname cargs with
         | Some (b, q, Some srt) when srt = sort_name ->
@@ -1645,6 +1671,30 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           Some c
         | _ -> None)
       | _ -> None
+    in
+    let record_self sort_name = record_term sort_name self_actual in
+    (* The record sort a callee parameter OTHER than the refined one is declared
+       at, and the term for its actual (memoized: one actual, one term). *)
+    let callee_record_sort name =
+      match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
+      | Some ty -> record_sort_of_param_ty ty
+      | None -> None
+    in
+    let callee_record_terms : (string, Smt.term option) Hashtbl.t = Hashtbl.create 4 in
+    let callee_record_term name =
+      match Hashtbl.find_opt callee_record_terms name with
+      | Some t -> t
+      | None ->
+        let t =
+          match callee_record_sort name, actual_of_name name with
+          | Some s, Some a ->
+            let t = record_term s a in
+            if t <> None && not (List.mem s !adt_sorts) then adt_sorts := s :: !adt_sorts;
+            t
+          | _ -> None
+        in
+        Hashtbl.replace callee_record_terms name t;
+        t
     in
     (* [`Other] = every non-record subject — Int, String and variant ADT — each
        handled by its own resolver below, unchanged.
@@ -1987,6 +2037,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                   reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
                     ~foreign_field:arg_resolve_field ~foreign_len
                     ~sort sc self_actual)))
+      else if callee_record_sort name <> None then callee_record_term name
       else
         match actual_of_name name with
         | Some a ->
@@ -2013,7 +2064,15 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
              Declaring it `Int` here would put one symbol at two sorts; dropping
              the sub-term instead just loses a fact (silence). *)
-          else if is_recvar name then None
+          else if is_recvar name then begin
+            (* …and is then that record's constant at its datatype sort, the
+               one a field read projects from ([path_resolve_field]), so `p` in a lemma's
+               theorem (`swp(swp(p)) == p`) and `p.x` meet on one symbol. *)
+            let sort_name = List.assoc name re in
+            decls := (name, adt_sort sort_name) :: !decls;
+            if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
+            Some (Smt.Const name)
+          end
           else begin
             (match caller_dt name with
              | Some adt ->
@@ -2652,9 +2711,33 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        record path installs one; every other path keeps [smt_of]'s default
        (which returns None, dropping any field-bearing predicate). *)
     let resolve_field =
-      match mode with
-      | `Record (sort_name, t) -> make_field_resolver rp.binder sort_name t
-      | `Other | `Skip -> fun _ _ -> None
+      let own =
+        match mode with
+        | `Record (sort_name, t) -> make_field_resolver rp.binder sort_name t
+        | `Other | `Skip -> fun _ _ -> None
+      in
+      (* Then another callee parameter of record type (`_ > p.x`), its actual's
+         record term; then a caller-scope record ([path_resolve_field], a
+         lemma's own record parameter in its theorem). *)
+      fun varname fname ->
+        match own varname fname with
+        | Some _ as t -> t
+        | None ->
+          if (not (is_self varname)) && callee_record_sort varname <> None then
+            match callee_record_term varname, callee_record_sort varname with
+            | Some t, Some s -> make_field_resolver varname s t varname fname
+            | _ -> None
+          else if (not (is_self varname)) && not (List.mem_assoc varname name_pos) then
+            match List.assoc_opt varname re with
+            | None -> None
+            | Some sort_name ->
+              (match make_field_resolver varname sort_name (Smt.Const varname) varname fname with
+               | None -> None
+               | Some t ->
+                 decls := (varname, adt_sort sort_name) :: !decls;
+                 if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
+                 Some t)
+          else None
     in
     (* A measure applied to a non-variable term — `len(v.history)` where
        `v.history` is a field selector.  Mirrors check_post: evaluate
@@ -3565,12 +3648,18 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              (* [pred_str] prints `<predicate>` for a form it cannot spell
                 (a record literal read into `v.port >= 1`); such a rendering
                 is not shown, the parameter-named or declared one is. *)
+             (* …nor is a field read off a record literal (`{ port: 0 }.port`),
+                which [pred_str] spells since record literals print as
+                written: no one writes that, so the named rendering wins. *)
              let printable (p : A.expr) : string option =
                let t = pred_str p in
-               let ph = "<predicate>" in
-               let n = String.length ph and m = String.length t in
-               let rec has i = i + n <= m && (String.sub t i n = ph || has (i + 1)) in
-               if has 0 then None else Some t
+               let ph = "<predicate>" and fl = "}." in
+               let has ph =
+                 let n = String.length ph and m = String.length t in
+                 let rec go i = i + n <= m && (String.sub t i n = ph || go (i + 1)) in
+                 go 0
+               in
+               if has ph || has fl then None else Some t
              in
              let at_arg_or_named (a : A.expr) (p : A.expr) : string =
                match printable (over_args a p) with

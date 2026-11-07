@@ -2784,8 +2784,34 @@ let d25_quiet =
        Alcotest.(check int) "labelled" 0 (List.length (d25_warnings ~topology:[ "Tri" ] tri_labelled_v1));
        Alcotest.(check int) "qualified name matches" 1 (List.length (d25_warnings ~topology:[ "Main.Tri" ] tri_v1)))
 
+(* Labels belong to the protocol, not the generated handler namespace. *)
+let handler_label_collisions = ok "cancel and drain labels do not shadow failure handlers" (wrap {|
+  @[endpoints]
+  protocol Labels do
+    choose by A:
+      cancel -> A -> B : Int
+      drain -> A -> B : Bool
+      branch_cancel -> A -> B : String
+    end
+  end
+  pfn receive_cancel(s : Cap(Session.Live), st : Labels_B.S_offer_cancel_drain_branch_cancel) : Labels_B.Yield do
+    Labels_B.offer_cancel_drain_branch_cancel_or(s, st,
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_role, _cause, token) -> Labels_B.cancelled(s, token))
+  end
+  pfn receive_drain(s : Cap(Session.Live), st : Labels_B.S_offer_cancel_drain_branch_cancel) : Labels_B.Yield do
+    Labels_B.offer_cancel_drain_branch_cancel_or_drain(s, st,
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_role, _messages, token) -> Labels_B.drained(s, token))
+  end
+|})
+
 let tests =
-  [ stream_shape;
+  [ handler_label_collisions; stream_shape;
     two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
     peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
     cli_script_mismatch_panics; cli_script_runs_out_panics;

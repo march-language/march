@@ -39,3 +39,13 @@ is a language change (syntax, typechecker, both backends' call paths), with its 
 The schema writer records each call handler's reply refinement (`"reply_refine"`), and
 `--check-migration` adds a law `<Actor>.<Handler>.reply`, new ⇒ old (covariant), with the
 same verdicts and the `--accept-unproved` override.
+
+## Proof consequence: contracts that compose across calls
+
+Rung 5 of the distributed-proof ladder (2026-11-06 discussion). With a typed reply channel,
+a handler's reply refinement becomes an obligation at each `Actor.reply` and a fact at the
+caller's `Ok(v)`, exactly as a function's return refinement is today. That is what makes
+actor contracts compose: a caller can prove things from what the callee promises, and
+`2026-11-06-actor-inductive-invariants` can oblige reply refinements alongside state
+invariants. Raised from a diagnostics item to a verification enabler; still `[P3]` until the
+typed-reply design exists.
