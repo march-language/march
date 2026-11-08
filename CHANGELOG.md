@@ -714,6 +714,12 @@ git log is authoritative for exact commits.
   measure no longer resolves to a prelude function of that name, which made
   every user set measure `invalid_measure`.
 
+- **Refinement reflection over records with type parameters.** A lemma or contract over a
+  parameter typed `Pr(Int)` (`type Pr(a) = { fst : a, snd : a }`) is now checked through the
+  reflected functions it calls (`sw(sw(p)) == p` is proved); it used to be skipped as
+  `unreflectable-predicate`. A stage-2 proof whose solver core names no definition lists only the
+  definitions its own query unfolded under `uses:`, not every one the module unfolded.
+
 - **Bounded quantifier bodies are scoped more strictly.** Inside `forall` / `exists`, a
   measure over a call or a constructor tester whose argument mentions the binder (for
   example `elts(mk(k))`) is now refused, so the predicate is skipped rather than ever
