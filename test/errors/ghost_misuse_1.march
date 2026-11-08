@@ -1,0 +1,4 @@
+mod Main do
+  fn step(ghost before : Int, x : {Int | _ == before}) : {Int | _ == before + 1} do x + 1 end
+  fn steps() do step end
+end

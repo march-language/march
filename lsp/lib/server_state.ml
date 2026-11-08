@@ -330,7 +330,7 @@ let semantic_tokens_data (a : Analysis.t) : int array =
       match lin with
       | March_ast.Ast.Linear -> Hashtbl.replace ownership name mod_linear
       | March_ast.Ast.Affine -> Hashtbl.replace ownership name mod_affine
-      | March_ast.Ast.Unrestricted -> ()
+      | March_ast.Ast.Unrestricted | March_ast.Ast.Ghost -> ()
     ) (Analysis.build_linearity_map a.Analysis.decls a.Analysis.always_linear_names);
   let ownership_mod name =
     match Hashtbl.find_opt ownership name with Some m -> m | None -> 0

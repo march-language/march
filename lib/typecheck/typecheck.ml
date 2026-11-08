@@ -205,7 +205,7 @@ let record_use_noted ?(notes = []) name span env =
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true;
        if !(le.le_first_use) = None then le.le_first_use := Some span
-     | Ast.Unrestricted -> ())
+     | Ast.Unrestricted | Ast.Ghost -> ())
 
 let record_use name span env = record_use_noted name span env
 
@@ -5487,7 +5487,8 @@ and infer_block env exprs =
        constructor, auto-promote the binding to Linear.
        Otherwise, propagate linearity from the RHS expression type. *)
     let auto_lin =
-      match b.bind_lin with
+      (* `ghost let` is erased; it binds like a plain `let`. *)
+      match (if b.bind_lin = Ast.Ghost then Ast.Unrestricted else b.bind_lin) with
       | Ast.Unrestricted ->
         let rty = repr rhs_ty in
         (match rty with
@@ -5863,8 +5864,10 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in
-  if p.param_lin <> Ast.Unrestricted then mark_linear_ok env t;
+  if p.param_lin = Ast.Linear || p.param_lin = Ast.Affine then mark_linear_ok env t;
   let effective_lin = match p.param_lin with
+    (* A ghost parameter is erased; it carries no use obligation. *)
+    | Ast.Ghost -> Ast.Unrestricted
     | Ast.Unrestricted ->
       (match repr t with
        | t when holds_linear env t -> Ast.Linear
@@ -6244,8 +6247,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Some ann -> surface_ty env' ~tvars:fn_tvars ann
                 | None -> fresh_var env'.level
               in
-              if p.param_lin <> Ast.Unrestricted then mark_linear_ok env' t;
+              if p.param_lin = Ast.Linear || p.param_lin = Ast.Affine then mark_linear_ok env' t;
               let effective_lin = match p.param_lin with
+                | Ast.Ghost -> Ast.Unrestricted
                 | Ast.Unrestricted ->
                   (match repr t with
                    | t when holds_linear env' t -> Ast.Linear
@@ -12201,6 +12205,29 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     check_deterministic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
+  (* Ghost code (lib/desugar/ghost.ml): a ghost value reaches only ghost
+     positions, and no linear value is observed by ghost code. *)
+  March_desugar.Ghost.check errors m.Ast.mod_decls ~top:m.Ast.mod_name.Ast.txt
+    (* A check seeded with the stdlib's environment has no stdlib
+       declarations to scan: its globals are the seed's names. *)
+    ~globals:(fun n -> match seed_env with Some (se : env) -> StrMap.mem n se.vars | None -> false)
+    ~exports:(fun path ->
+        Option.map
+          (fun (me : March_modules.Module_registry.module_exports) ->
+            List.filter_map
+              (fun (e : March_modules.Module_registry.export_entry) ->
+                if e.ex_public then Some e.ex_name else None)
+              me.me_entries)
+          (March_modules.Module_registry.ensure_loaded path))
+    ~reserved:(March_desugar.Lemma_erase.reserved_by
+                 (List.map fst Typecheck_builtins.builtin_bindings
+                  @ List.map fst Typecheck_builtins.builtin_interface_bindings))
+    ~is_linear:(fun sp ->
+        match Hashtbl.find_opt type_map sp with
+        | Some t ->
+          holds_linear final_env t
+          || (match repr t with TLin ((Ast.Linear | Ast.Affine), _) -> true | _ -> false)
+        | None -> false);
   (* Pass 3: tail-call enforcement *)
   check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
