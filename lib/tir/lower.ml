@@ -262,6 +262,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Hot_reload.reset_work_entries ();
   Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
+  Hashtbl.reset Lower_state._fn_typed_module_lets;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
      get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
      decls WRITTEN in the entry file count: [m.mod_decls] also carries the
@@ -922,6 +923,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      fn_body   = rhs;
                      fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
                    } in
+                   Lower_state.note_module_let fn;
                    fns := fn :: !fns
                  | _ -> ())
               | Ast.DUse (ud, _) ->
@@ -1190,6 +1192,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             { fn with fn_body = body }
         ) all_fns
   in
+  (* A reference to a function-typed module-level let calls it for the
+     closure first (see [Lower_decls.call_fn_typed_module_lets]). *)
+  let fn_lets = Hashtbl.copy Lower_state._fn_typed_module_lets in
+  let all_fns = List.map (Lower_decls.call_fn_typed_module_lets fn_lets) all_fns in
   (* Alpha-rename any shadowed local binder to a fresh unique name so that
      every name-based downstream pass (cprop/fold/inline/dce and the JS
      [const] emitter) is immune to variable capture across shadowing.  A
@@ -1268,6 +1274,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                          fn.fn_name = "main" || fn_body_uses v.Tir.v_name fn.fn_body) lets in
                      { fn with fn_body = List.fold_right (fun (v, rhs) body ->
                            Tir.ELet (v, rhs, body)) needed fn.fn_body }) new_fns in
+             (* Lets lowered lazily by these decls join the module's. *)
+             Hashtbl.iter (Hashtbl.replace fn_lets) Lower_state._fn_typed_module_lets;
+             let new_fns = List.map (Lower_decls.call_fn_typed_module_lets fn_lets) new_fns in
              (List.map uniquify_fn new_fns, List.rev !types))
         with e ->
           Hashtbl.filter_map_inplace (fun k v ->
