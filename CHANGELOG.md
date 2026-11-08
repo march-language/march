@@ -695,6 +695,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Diagnostics` and `try_finally` work on `--target js`.** A program using
+  `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
+  compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
+  use) threw `ReferenceError` at run time. Observers now receive a report, with its context and
+  the panic's location, when an error escapes `main`; the error then reaches Node as before.
+  The JS report has no backtrace; the `Diagnostics` module doc lists the other differences.
 - **`~H"..."` works in the browser REPL.** An HTML sigil failed with
   `unbound variable: IOList.from_strings` unless something had already loaded IOList: the
   REPL loads a stdlib module when the input names it, and a sigil names none. A sigil now
