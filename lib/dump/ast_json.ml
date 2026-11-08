@@ -504,6 +504,17 @@ let rec expr_to_json (e : expr) : string =
       ("span", span_to_json span);
       rty;
     ]
+  | EProof (p, span) ->
+    let sub = match p with
+      | PAssertBy _ -> "assert_by" | PReveal _ -> "reveal"
+      | PWithFuel _ -> "with_fuel" | PCalc _ -> "calc" in
+    Dump.json_obj [
+      ("kind", Dump.json_string "EProof");
+      ("proof", Dump.json_string sub);
+      ("exprs", Dump.json_list (List.map expr_to_json (proof_children p)));
+      ("span", span_to_json span);
+      rty;
+    ]
   | EAssert (e, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EAssert");

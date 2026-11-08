@@ -655,6 +655,7 @@ let pmap_threshold_value : int ref = ref 1024
    working for existing call sites (the js_of_ocaml build installs it).
    Aliasing a [ref] shares the same mutable cell. *)
 let http_fetch_hook = Eval_prim.http_fetch_hook
+let call_return_hook = Eval_prim.call_return_hook
 
 
 
@@ -1874,6 +1875,7 @@ let span_of_expr (e : expr) : span =
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | ERefineMsg (_, _, sp) -> sp
+  | EProof (_, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -1942,8 +1944,13 @@ and apply_inner (fn_val : value) (args : value list) : value =
        this hot path. *)
     let saved = !closure_prefix_override in
     closure_prefix_override := Some defn_prefix;
+    (* [call_return_hook] is a no-op natively; in the browser REPL it is the
+       stack bounce on the return path (see [Eval_prim.call_return_hook]).
+       It runs in [~finally] so an exception unwinding a deep recursion (a
+       March panic 20000 calls down) is bounced too, not only a normal
+       return. *)
     Fun.protect
-      ~finally:(fun () -> closure_prefix_override := saved)
+      ~finally:(fun () -> closure_prefix_override := saved; !call_return_hook ())
       (fun () -> eval_expr env' body)
 
   | VBuiltin (name, f) ->
@@ -2562,6 +2569,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     apply flat_map_fn [v; k]
 
+  (* Proof hints are erased before anything runs ([Lemma_erase]); a tree that
+     reaches the interpreter unerased (a REPL fragment) treats them the same
+     way: a `with fuel` body runs, the rest is unit. *)
+  | EProof (PWithFuel (_, _, body), _) -> eval_block env body
+  | EProof (_, _) -> VUnit
   | EAssert (inner, _) ->
     (* A failed assertion raises a rendered report
        (lib/errors/test_report.ml): the header with the asserted expression

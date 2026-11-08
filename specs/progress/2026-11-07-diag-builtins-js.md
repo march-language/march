@@ -41,3 +41,9 @@ Test: `test/test_codegen.ml` `test_js_diagnostics_observers` compiles a program 
 interpreter's (context inside/after scopes, removed observer silent, report kind /
 message / context / pid / location, observer panic swallowed, next observer runs),
 exit 1, and the panic on stderr.
+
+Integration with the JS test-runner fixes preserves `march_panic_error` prefixes
+while delegating context and source-location capture to `march_panic_err`. Both
+helper frames are omitted from the thrown stack and metadata stays non-enumerable.
+Six focused codegen regressions (cases 10–15 in `iface_impl_mono_codegen`) pass,
+including Diagnostics observer parity and caught-error/test-runner behavior.

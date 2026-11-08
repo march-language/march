@@ -1,4 +1,4 @@
-import { march_float_round, march_float_to_string, march_int_and, march_int_div, march_int_div_euclid, march_int_div_floor, march_int_mod, march_int_mod_euclid, march_int_mod_floor, march_int_not, march_int_or, march_int_ovf, march_int_popcount, march_int_shl, march_int_shr, march_int_wrapping_add, march_int_wrapping_mul, march_int_wrapping_sub, march_int_xor, march_string_byte_length, march_string_concat_n, march_string_join, march_string_split, march_string_to_int, march_unix_time, march_unix_time_ms } from "./march_runtime.mjs";
+import { march_div_zero, march_float_round, march_float_to_string, march_int_and, march_int_div, march_int_div_euclid, march_int_div_floor, march_int_mod, march_int_mod_euclid, march_int_mod_floor, march_int_not, march_int_or, march_int_ovf, march_int_popcount, march_int_shl, march_int_shr, march_int_wrapping_add, march_int_wrapping_mul, march_int_wrapping_sub, march_int_xor, march_mod_zero, march_panic_error, march_string_byte_length, march_string_concat_n, march_string_join, march_string_split, march_string_to_int, march_unix_time, march_unix_time_ms } from "./march_runtime.mjs";
 
 import { march_dom_set_timeout as dom_set_timeout, march_dom_prevent_default as dom_prevent_default, march_dom_event_key as dom_event_key, march_dom_add_event_listener as dom_add_event_listener, march_dom_set_style as dom_set_style, march_dom_class_add as dom_class_add, march_dom_set_attribute as dom_set_attribute, march_dom_get_attribute as dom_get_attribute, march_dom_set_text as dom_set_text, march_dom_append_child as dom_append_child, march_dom_create_element as dom_create_element, march_dom_body as dom_body, march_dom_get_element_by_id as dom_get_element_by_id } from "./march_dom.mjs";
 
@@ -6264,14 +6264,14 @@ function TetrisLogic$piece_cells(p) {
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
 const TetrisLogic$piece_cells$clo = { _0: ($_, p) => TetrisLogic$piece_cells(p) };
 
 function TetrisLogic$level_for_lines(total_lines) {
-  return ((total_lines - total_lines % 10) / 10);
+  return (10 === 0 ? march_div_zero() : (total_lines - total_lines % 10) / 10);
 }
 const TetrisLogic$level_for_lines$clo = { _0: ($_, total_lines) => TetrisLogic$level_for_lines(total_lines) };
 
@@ -6366,7 +6366,7 @@ function TetrisLogic$clear_lines(board) {
                               break;
                             }
                             default: {
-                              throw new Error("non-exhaustive pattern match");
+                              throw march_panic_error("panic: ", "non-exhaustive pattern match");
                               break;
                             }
                           }
@@ -6422,7 +6422,7 @@ function int_list_to_string(xs) {
               break;
             }
             default: {
-              throw new Error("non-exhaustive pattern match");
+              throw march_panic_error("panic: ", "non-exhaustive pattern match");
               break;
             }
           }
@@ -6468,7 +6468,7 @@ function piece_to_string(p) {
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
@@ -6509,10 +6509,10 @@ function next_piece(rng) {
                                   let rng2;
                                   {
                                     const $t46555_i12243 = ((rng * 16807) < 4611686018427387904 && (rng * 16807) >= -4611686018427387904 ? (rng * 16807) : march_int_ovf((rng * 16807), 2));
-                                    rng2 = ($t46555_i12243 % 2147483647);
+                                    rng2 = (2147483647 === 0 ? march_mod_zero() : $t46555_i12243 % 2147483647);
                                   }
                                   {
-                                    const idx = (rng2 % 7);
+                                    const idx = (7 === 0 ? march_mod_zero() : rng2 % 7);
                                     {
                                       let result;
                                       {
@@ -6555,11 +6555,11 @@ function state_el() {
       }
       case "None": {
         undefined;
-        return (() => { throw new Error("Tetris: #game-state element missing"); })();
+        return (() => { throw march_panic_error("panic: ", "Tetris: #game-state element missing"); })();
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -6593,7 +6593,7 @@ function get_int_attr(el, name, _default) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -6617,7 +6617,7 @@ function get_str_attr(el, name, _default) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -6663,7 +6663,7 @@ function rotate_n($tco_a0, $tco_a1) {
                 break;
               }
               default: {
-                throw new Error("non-exhaustive pattern match");
+                throw march_panic_error("panic: ", "non-exhaustive pattern match");
                 break;
               }
             }
@@ -6736,7 +6736,7 @@ function set_text_if_found(id, text) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -6928,7 +6928,7 @@ function with_state(f) {
                                                     } else if (over2 === true) {
                                                       $eff = {  };
                                                     } else {
-                                                      throw new Error("non-exhaustive pattern match");
+                                                      throw march_panic_error("panic: ", "non-exhaustive pattern match");
                                                     }
                                                   }
                                                   {
@@ -6984,7 +6984,7 @@ function with_state(f) {
                                                     } else if (over2 === false) {
                                                       game_over_text = "";
                                                     } else {
-                                                      throw new Error("non-exhaustive pattern match");
+                                                      throw march_panic_error("panic: ", "non-exhaustive pattern match");
                                                     }
                                                     set_text_if_found("game-over", game_over_text);
                                                     {
@@ -7085,7 +7085,7 @@ function with_state(f) {
                                                       } else if (over2 === false) {
                                                         over2_s = "false";
                                                       } else {
-                                                        throw new Error("non-exhaustive pattern match");
+                                                        throw march_panic_error("panic: ", "non-exhaustive pattern match");
                                                       }
                                                       {
                                                         let $eff;
@@ -7123,7 +7123,7 @@ function with_state(f) {
           }
         }
       } else {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -7169,7 +7169,7 @@ function lock_and_advance(board, piece, rot, x, y, next, score, lines, rng) {
               break;
             }
             default: {
-              throw new Error("non-exhaustive pattern match");
+              throw march_panic_error("panic: ", "non-exhaustive pattern match");
               break;
             }
           }
@@ -7272,7 +7272,7 @@ function set_paused(el, paused) {
     } else if (paused === false) {
       paused_s = "false";
     } else {
-      throw new Error("non-exhaustive pattern match");
+      throw march_panic_error("panic: ", "non-exhaustive pattern match");
     }
     {
       let status_s;
@@ -7281,7 +7281,7 @@ function set_paused(el, paused) {
       } else if (paused === false) {
         status_s = "";
       } else {
-        throw new Error("non-exhaustive pattern match");
+        throw march_panic_error("panic: ", "non-exhaustive pattern match");
       }
       Js$Dom$set_attr(el, "data-paused", paused_s);
       return set_text_if_found("pause-status", status_s);
@@ -7315,7 +7315,7 @@ function toggle_pause() {
           return set_paused(el, $t46761);
         }
       } else {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -7351,7 +7351,7 @@ function fall_from($tco_a0, $tco_a1, $tco_a2, $tco_a3) {
           }
         }
       } else {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -7402,7 +7402,7 @@ function restart() {
             } else if ($t46560_i12253 === false) {
               rng0 = raw_i12252;
             } else {
-              throw new Error("non-exhaustive pattern match");
+              throw march_panic_error("panic: ", "non-exhaustive pattern match");
             }
           }
         }
@@ -7769,7 +7769,7 @@ function restore_from_request() {
                                           } else if (over === true) {
                                             $eff = {  };
                                           } else {
-                                            throw new Error("non-exhaustive pattern match");
+                                            throw march_panic_error("panic: ", "non-exhaustive pattern match");
                                           }
                                         }
                                         {
@@ -7829,7 +7829,7 @@ function restore_from_request() {
                                           } else if (over === false) {
                                             game_over_text = "";
                                           } else {
-                                            throw new Error("non-exhaustive pattern match");
+                                            throw march_panic_error("panic: ", "non-exhaustive pattern match");
                                           }
                                           set_text_if_found("game-over", game_over_text);
                                           {
@@ -7894,7 +7894,7 @@ function restore_from_request() {
                                             } else if (over === false) {
                                               over_s = "false";
                                             } else {
-                                              throw new Error("non-exhaustive pattern match");
+                                              throw march_panic_error("panic: ", "non-exhaustive pattern match");
                                             }
                                             return Js$Dom$set_attr(el, "data-over", over_s);
                                           }
@@ -7918,7 +7918,7 @@ function restore_from_request() {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -7963,7 +7963,7 @@ function handle_key(ev) {
         } else if ($t46873 === false) {
           $eff = {  };
         } else {
-          throw new Error("non-exhaustive pattern match");
+          throw march_panic_error("panic: ", "non-exhaustive pattern match");
         }
       }
     }
@@ -8015,7 +8015,7 @@ function handle_key(ev) {
               return {  };
             }
           } else {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -8125,7 +8125,7 @@ function main(_cap_clock, _cap_foreign) {
                 break;
               }
               default: {
-                return (() => { throw new Error("non-exhaustive pattern match"); })();
+                return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
               }
             }
           }
@@ -8133,7 +8133,7 @@ function main(_cap_clock, _cap_foreign) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
   }
@@ -8141,7 +8141,7 @@ function main(_cap_clock, _cap_foreign) {
 const main$clo = { _0: ($_, _cap_clock, _cap_foreign) => main(_cap_clock, _cap_foreign) };
 
 function panic(msg) {
-  return (() => { throw new Error(msg); })();
+  return (() => { throw march_panic_error("panic: ", msg); })();
 }
 const panic$clo = { _0: ($_, msg) => panic(msg) };
 
@@ -8180,7 +8180,7 @@ function List$all$List_Int$Fn_Int_Bool($tco_a0, $tco_a1) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -8226,7 +8226,7 @@ function List$filter$List_Int$Fn_Int_Bool($tco_a0, $tco_a1) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -8250,7 +8250,7 @@ function Option$unwrap_or$Option_Int$Int(opt, _default) {
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
@@ -8282,7 +8282,7 @@ function Array$from_list$List_Int(xs) {
               let $t8559;
               {
                 const $t8558 = ((n - 1) < 4611686018427387904 && (n - 1) >= -4611686018427387904 ? (n - 1) : march_int_ovf((n - 1), 1));
-                $t8559 = (($t8558 - $t8558 % 32) / 32);
+                $t8559 = (32 === 0 ? march_div_zero() : ($t8558 - $t8558 % 32) / 32);
               }
               $t8560 = ((32 * $t8559) < 4611686018427387904 && (32 * $t8559) >= -4611686018427387904 ? (32 * $t8559) : march_int_ovf((32 * $t8559), 2));
             }
@@ -8397,7 +8397,7 @@ function List$any$List_T_Int_Int$Fn_T_Int_Int_Bool($tco_a0, $tco_a1) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -8431,7 +8431,7 @@ function Array$get$PVec_Int$Int(v, idx) {
                 }
                 if ($t8293 === true) {
                   undefined;
-                  return (() => { throw new Error("Array.get: index out of range"); })();
+                  return (() => { throw march_panic_error("panic: ", "Array.get: index out of range"); })();
                 } else {
                   {
                     let tail_len;
@@ -8466,7 +8466,7 @@ function Array$get$PVec_Int$Int(v, idx) {
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
@@ -8504,7 +8504,7 @@ function List$fold_left$List_T_Int_Int$PVec_Int$Fn_PVec_Int_T_Int_Int_PVec_Int($
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -8538,7 +8538,7 @@ function Array$set$PVec_Int$Int$Int(v, idx, val) {
                 }
                 if ($t8314 === true) {
                   undefined;
-                  return (() => { throw new Error("Array.set: index out of range"); })();
+                  return (() => { throw march_panic_error("panic: ", "Array.set: index out of range"); })();
                 } else {
                   {
                     let tail_len;
@@ -8590,7 +8590,7 @@ function Array$set$PVec_Int$Int$Int(v, idx, val) {
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
@@ -8623,7 +8623,7 @@ function List$map$List_String$Fn_String_Int(xs, f) {
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
@@ -8636,7 +8636,7 @@ function List$nth$List_Piece$Int($tco_a0, $tco_a1) {
     switch (xs.$) {
       case "Nil": {
         undefined;
-        return (() => { throw new Error("List.nth: index out of bounds"); })();
+        return (() => { throw march_panic_error("panic: ", "List.nth: index out of bounds"); })();
         break;
       }
       case "Cons": {
@@ -8666,7 +8666,7 @@ function List$nth$List_Piece$Int($tco_a0, $tco_a1) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -8714,7 +8714,7 @@ function List$map$dps$List_Int$Fn_Int_String$List_String($tco_a0, $tco_a1, $tco_
       }
       default: {
         {
-          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          const $trmc12 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           return ($dst._1 = $trmc12, undefined);
         }
       }
@@ -8764,7 +8764,7 @@ function List$map$dps$List_Int$Fn_Int_Int$List_Int($tco_a0, $tco_a1, $tco_a2) {
       }
       default: {
         {
-          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          const $trmc12 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           return ($dst._1 = $trmc12, undefined);
         }
       }
@@ -8807,7 +8807,7 @@ function List$append$dps$List_Int$List_Int$List_Int($tco_a0, $tco_a1, $tco_a2) {
       }
       default: {
         {
-          const $trmc8 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          const $trmc8 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           return ($dst._1 = $trmc8, undefined);
         }
       }
@@ -8843,7 +8843,7 @@ function List$length_onto$List_Int$Int($tco_a0, $tco_a1) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -8900,7 +8900,7 @@ function List$filter$dps$List_Int$Fn_Int_Bool$List_Int($tco_a0, $tco_a1, $tco_a2
       }
       default: {
         {
-          const $trmc21 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          const $trmc21 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           return ($dst._1 = $trmc21, undefined);
         }
       }
@@ -8950,7 +8950,7 @@ function List$map$dps$List_T_Int_Int$Fn_T_Int_Int_T_Int_Int$List_T_Int_Int($tco_
       }
       default: {
         {
-          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          const $trmc12 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           return ($dst._1 = $trmc12, undefined);
         }
       }
@@ -8967,7 +8967,7 @@ function Array$lst_nth$List_Int$Int($tco_a0, $tco_a1) {
     switch (lst.$) {
       case "Nil": {
         undefined;
-        return (() => { throw new Error("Array: index out of bounds"); })();
+        return (() => { throw march_panic_error("panic: ", "Array: index out of bounds"); })();
         break;
       }
       case "Cons": {
@@ -8998,7 +8998,7 @@ function Array$lst_nth$List_Int$Int($tco_a0, $tco_a1) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -9014,7 +9014,7 @@ function Array$trie_get$TrieNode_Int$Int$Int($tco_a0, $tco_a1, $tco_a2) {
     switch (node.$) {
       case "TrieEmpty": {
         undefined;
-        return (() => { throw new Error("Array.get: missing node"); })();
+        return (() => { throw march_panic_error("panic: ", "Array.get: missing node"); })();
         break;
       }
       case "TrieLeaf": {
@@ -9058,7 +9058,7 @@ function Array$trie_get$TrieNode_Int$Int$Int($tco_a0, $tco_a1, $tco_a2) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -9116,13 +9116,13 @@ function List$flat_map_go$List_Int$List_Int$Fn_Int_List_Int($tco_a0, $tco_a1, $t
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -9170,7 +9170,7 @@ function List$map$dps$List_String$Fn_String_Int$List_Int($tco_a0, $tco_a1, $tco_
       }
       default: {
         {
-          const $trmc12 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          const $trmc12 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           return ($dst._1 = $trmc12, undefined);
         }
       }
@@ -9204,7 +9204,7 @@ function Array$fold_left$PVec_Int$List_Int$Fn_List_Int_Int_List_Int(v, acc, f) {
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
@@ -9217,7 +9217,7 @@ function Array$lst_nth$List_TrieNode_Int$Int($tco_a0, $tco_a1) {
     switch (lst.$) {
       case "Nil": {
         undefined;
-        return (() => { throw new Error("Array: index out of bounds"); })();
+        return (() => { throw march_panic_error("panic: ", "Array: index out of bounds"); })();
         break;
       }
       case "Cons": {
@@ -9247,7 +9247,7 @@ function Array$lst_nth$List_TrieNode_Int$Int($tco_a0, $tco_a1) {
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -9265,7 +9265,7 @@ function Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$In
     switch (n.$) {
       case "TrieEmpty": {
         undefined;
-        return (() => { throw new Error("Array.set: missing node"); })();
+        return (() => { throw march_panic_error("panic: ", "Array.set: missing node"); })();
         break;
       }
       case "TrieLeaf": {
@@ -9335,7 +9335,7 @@ function Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$In
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -9405,7 +9405,7 @@ function List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int($tco_a0
           }
           default: {
             {
-              const $trmc18 = (() => { throw new Error("non-exhaustive pattern match"); })();
+              const $trmc18 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
               return ($dst._1 = $trmc18, undefined);
             }
           }
@@ -9414,7 +9414,7 @@ function List$flat_map_go$dps$List_Int$List_Int$Fn_Int_List_Int$List_Int($tco_a0
       }
       default: {
         {
-          const $trmc16 = (() => { throw new Error("non-exhaustive pattern match"); })();
+          const $trmc16 = (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           return ($dst._1 = $trmc16, undefined);
         }
       }
@@ -9453,7 +9453,7 @@ function Array$trie_fold$List_Int$TrieNode_Int$Fn_List_Int_Int_List_Int(acc, nod
       break;
     }
     default: {
-      return (() => { throw new Error("non-exhaustive pattern match"); })();
+      return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
     }
   }
 }
@@ -9508,7 +9508,7 @@ function Array$trie_update_up$TrieNode_Int$List_T_List_TrieNode_Int_Int($tco_a0,
         break;
       }
       default: {
-        return (() => { throw new Error("non-exhaustive pattern match"); })();
+        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
       }
     }
     return undefined;
@@ -9608,7 +9608,7 @@ function $lam0_TetrisLogic_collides$apply$0_TetrisLogic_collides($clo, c) {
                       return ($t46508 !== 0);
                     }
                   } else {
-                    return (() => { throw new Error("non-exhaustive pattern match"); })();
+                    return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                   }
                 }
               }
@@ -9673,7 +9673,7 @@ function $lam0_TetrisLogic_lock_piece$apply$0_TetrisLogic_lock_piece($clo, b, c)
                   } else if ($t46517 === false) {
                     return b;
                   } else {
-                    return (() => { throw new Error("non-exhaustive pattern match"); })();
+                    return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                   }
                 }
               }
@@ -9798,7 +9798,7 @@ function $lam1_TetrisLogic_clear_lines$apply$1_TetrisLogic_clear_lines($clo, y) 
                 break;
               }
               default: {
-                return (() => { throw new Error("non-exhaustive pattern match"); })();
+                return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
               }
             }
           }
@@ -9921,14 +9921,14 @@ function $lam0__lam0_render_board$apply$1_render_board($clo, x) {
                           return Js$Dom$set_style(cell, "background", $t46616);
                         }
                       } else {
-                        return (() => { throw new Error("non-exhaustive pattern match"); })();
+                        return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                       }
                     }
                   }
                   break;
                 }
                 default: {
-                  return (() => { throw new Error("non-exhaustive pattern match"); })();
+                  return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                 }
               }
             }
@@ -10038,7 +10038,7 @@ function $lam0_render_falling$apply$0_render_falling($clo, c) {
                                     break;
                                   }
                                   default: {
-                                    throw new Error("non-exhaustive pattern match");
+                                    throw march_panic_error("panic: ", "non-exhaustive pattern match");
                                     break;
                                   }
                                 }
@@ -10048,13 +10048,13 @@ function $lam0_render_falling$apply$0_render_falling($clo, c) {
                             break;
                           }
                           default: {
-                            return (() => { throw new Error("non-exhaustive pattern match"); })();
+                            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                           }
                         }
                       }
                     }
                   } else {
-                    return (() => { throw new Error("non-exhaustive pattern match"); })();
+                    return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                   }
                 }
               }
@@ -10092,7 +10092,7 @@ function $lam0_tick$apply$0_tick($clo, board, piece, rot, x, y, next, score, lin
             return { _0: board, _1: piece, _2: rot, _3: x, _4: $t46767, _5: next, _6: score, _7: lines, _8: rng, _9: false };
           }
         } else {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
+          return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
         }
       }
     }
@@ -10113,7 +10113,7 @@ function $lam0_schedule_tick$apply$0_schedule_tick($clo, _) {
           $eff = with_state($t46768_i13279);
         }
       } else {
-        throw new Error("non-exhaustive pattern match");
+        throw march_panic_error("panic: ", "non-exhaustive pattern match");
       }
     }
   }
@@ -10185,7 +10185,7 @@ function $lam0_try_move$apply$0_try_move($clo, board, piece, rot, x, y, next, sc
                 }
               }
             } else {
-              return (() => { throw new Error("non-exhaustive pattern match"); })();
+              return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
             }
           }
         }
@@ -10200,7 +10200,7 @@ function $lam0_try_rotate$apply$0_try_rotate($clo, board, piece, rot, x, y, next
     let new_rot;
     {
       const $t46783 = ((rot + 1) < 4611686018427387904 && (rot + 1) >= -4611686018427387904 ? (rot + 1) : march_int_ovf((rot + 1), 0));
-      new_rot = ($t46783 % 4);
+      new_rot = (4 === 0 ? march_mod_zero() : $t46783 % 4);
     }
     {
       const $t46784 = TetrisLogic$piece_cells(piece);
@@ -10217,7 +10217,7 @@ function $lam0_try_rotate$apply$0_try_rotate($clo, board, piece, rot, x, y, next
           } else if ($t46785 === false) {
             return { _0: board, _1: piece, _2: new_rot, _3: x, _4: y, _5: next, _6: score, _7: lines, _8: rng, _9: false };
           } else {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -10423,7 +10423,7 @@ function up$apply$0_Array_from_list_List_Int($tco_a0, $tco_a1, $tco_a2) {
                   break;
                 }
                 default: {
-                  return (() => { throw new Error("non-exhaustive pattern match"); })();
+                  return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                 }
               }
             } else {
@@ -10491,7 +10491,7 @@ function go$apply$0_List_each_List_Int_Fn_Int_T_($tco_a0, $tco_a1) {
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -10536,7 +10536,7 @@ function go$apply$0_List_each_List_T_Int_Int_Fn_T_Int_Int_T_($tco_a0, $tco_a1) {
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -10581,7 +10581,7 @@ function go$apply$0_Array_lst_len_List_TrieNode_Int($tco_a0, $tco_a1, $tco_a2) {
           break;
         }
         default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
+          return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
         }
       }
     }
@@ -10707,7 +10707,7 @@ function chunk$apply$0_Array_group32_List_TrieNode_Int_Fn_List_TrieNode_Int_Trie
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -10834,7 +10834,7 @@ function chunk$apply$0_Array_group32_List_Int_Fn_List_Int_TrieNode_Int($tco_a0, 
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -10910,7 +10910,7 @@ function go$apply$0_Array_lst_split_List_Int_Int($tco_a0, $tco_a1, $tco_a2, $tco
               break;
             }
             default: {
-              return (() => { throw new Error("non-exhaustive pattern match"); })();
+              return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
             }
           }
         }
@@ -10951,7 +10951,7 @@ function go$apply$0_Array_lst_len_List_Int($tco_a0, $tco_a1, $tco_a2) {
           break;
         }
         default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
+          return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
         }
       }
     }
@@ -10993,7 +10993,7 @@ function rev_onto$apply$0_Array_lst_set_List_Int_Int_Int($tco_a0, $tco_a1, $tco_
           break;
         }
         default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
+          return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
         }
       }
     }
@@ -11042,7 +11042,7 @@ function go$apply$1_Array_lst_set_List_Int_Int_Int($tco_a0, $tco_a1, $tco_a2, $t
                   break;
                 }
                 default: {
-                  return (() => { throw new Error("non-exhaustive pattern match"); })();
+                  return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                 }
               }
             } else {
@@ -11082,7 +11082,7 @@ function go$apply$1_Array_lst_set_List_Int_Int_Int($tco_a0, $tco_a1, $tco_a2, $t
                   break;
                 }
                 default: {
-                  return (() => { throw new Error("non-exhaustive pattern match"); })();
+                  return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
                 }
               }
             }
@@ -11128,7 +11128,7 @@ function go$apply$0_Array_lst_rev_List_Int($tco_a0, $tco_a1, $tco_a2) {
           break;
         }
         default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
+          return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
         }
       }
     }
@@ -11174,7 +11174,7 @@ function go$apply$0_Array_fold_left_PVec_Int_List_Int_Fn_List_Int_Int_List_Int($
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -11217,7 +11217,7 @@ function go$apply$0_Array_lst_rev_List_TrieNode_Int($tco_a0, $tco_a1, $tco_a2) {
           break;
         }
         default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
+          return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
         }
       }
     }
@@ -11263,7 +11263,7 @@ function go$apply$0_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_I
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -11310,7 +11310,7 @@ function go$apply$1_Array_trie_fold_List_Int_TrieNode_Int_Fn_List_Int_Int_List_I
             break;
           }
           default: {
-            return (() => { throw new Error("non-exhaustive pattern match"); })();
+            return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
           }
         }
       }
@@ -11353,7 +11353,7 @@ function rev_onto$apply$0_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_I
           break;
         }
         default: {
-          return (() => { throw new Error("non-exhaustive pattern match"); })();
+          return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
         }
       }
     }
@@ -11422,7 +11422,7 @@ function go$apply$1_Array_lst_replace_nth_List_TrieNode_Int_Int_TrieNode_Int($tc
               break;
             }
             default: {
-              return (() => { throw new Error("non-exhaustive pattern match"); })();
+              return (() => { throw march_panic_error("panic: ", "non-exhaustive pattern match"); })();
             }
           }
         }

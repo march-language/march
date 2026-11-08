@@ -10745,6 +10745,27 @@ let write_march_source ~name src_text =
   close_out oc;
   (project_root, main_exe, src, tmp)
 
+(* A function used only as a value must remain reachable through mono. *)
+let test_other_module_function_value_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_module_fn_value" {|mod Main do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let k = List.length
+    println(int_to_string(k([1, 2])))
+    println(int_to_string(k(["a", "b", "c"])))
+  end
+end
+|} in
+  let bin = Filename.concat tmp "module_fn_value_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string) "polymorphic module function bound as a value"
+      "2\n3" (read_cmd_output (Filename.quote bin))
+
 (* ── A nested module's call to an ENCLOSING module's fn ────────────────────
    specs/progress/2026-09-25-nested-module-parent-call.md.  `mod Outer do pfn
    helper ... mod Inner do fn f(x) do helper(x) end end end` typechecked and
@@ -13782,6 +13803,90 @@ let test_js_test_runner () =
     Alcotest.(check string) (name ^ ": --verbose agrees with native") native_verbose js_verbose
   end
 
+(** The JS gaps that kept test bodies native-only
+    (specs/progress/2026-11-07-js-test-runner-gaps.md): `to_string` on a value
+    with no `Show` impl (a record, a variant) had no JS mapping and failed the
+    build; `__try_call` (Check.try_prop) and `process_env` were unmapped, so no
+    `Check.all` property built; `process_cwd` / `process_pid` were unmapped,
+    so a value-typed capability mock did not build.  The JS run must print
+    exactly what the native test binary prints, panics caught with their
+    "panic: " / "todo: " prefixes and `%` by zero included. *)
+let test_js_test_runner_gaps () =
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS test runner gaps)"
+  else begin
+    let name = "js_test_runner_gaps" in
+    let src = {|mod JsGaps do
+  needs IO.Console
+  needs IO.Process
+
+  type Shape = Dot | Box(Float, String)
+  type Pt = { x : Int, label : String }
+
+  pfn show_r(r : Result(Bool, String)) : String do
+    match r do
+      Ok(b) -> "Ok(" ++ to_string(b) ++ ")"
+      Err(e) -> "Err(" ++ e ++ ")"
+    end
+  end
+
+  pfn where_am_i() : String do
+    Process.cwd()
+  end
+
+  test "to_string without Show" do
+    let p : Pt = { x: -3, label: "q\"t\n" }
+    println(to_string(p))
+    println(to_string(Box(2.0, "s")))
+    println(to_string({ b: [Dot, Box(0.5, "")], a: (1, true, ()) }))
+  end
+
+  test "try_call" do
+    println(show_r(Check.try_prop(fn x -> 10 / x > 0, 0)))
+    println(show_r(Check.try_prop(fn x -> 10 % x > 0, 0)))
+    println(show_r(Check.try_prop(fn x -> if x > 0 do panic("boom") else true end, 1)))
+    println(show_r(Check.try_prop(fn x -> if x > 0 do todo("later") else true end, 1)))
+    println(show_r(Check.try_prop(fn x -> x > 0, 1)))
+  end
+
+  test "process env and value-typed capability mocks" do
+    println(to_string(process_env("MARCH_JS_GAPS_VAR")))
+    println(to_string(process_env("MARCH_JS_GAPS_UNSET")))
+    let c : Cap(IO.Process) = cap_narrow(root_cap)
+    let before = where_am_i()
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      process_cwd: Some("/mocked"),
+      process_pid: Some(42) })
+    println(with_cap(mock, fn _ -> where_am_i()))
+    println(to_string(with_cap(mock, fn _ -> Process.pid())))
+    println(to_string(before == where_am_i() && before != "/mocked"))
+  end
+end
+|} in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let bin = Filename.concat tmp name in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js --test build failed (rc=%d):\n%s" name crc cout;
+    let (nrc, nout) = run_capture (Printf.sprintf "cd %s && %s --compile --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote bin) (Filename.quote src_path)) in
+    if nrc <> 0 then Alcotest.failf "%s: --compile --test build failed (rc=%d):\n%s" name nrc nout;
+    let run cmd =
+      snd (run_capture ("MARCH_JS_GAPS_VAR=hi " ^ cmd ^ " --verbose 2>&1; echo EXIT:$?")) in
+    let js_out = run ("node " ^ Filename.quote mjs) in
+    let native_out = run (Filename.quote bin) in
+    Alcotest.(check bool) (name ^ ": native passes (got: " ^ native_out ^ ")") true
+      (ir_contains native_out "Finished: 3 tests, 0 failures"
+       && ir_contains native_out "{ label: \"q\\\"t\\n\", x: -3 }"
+       && ir_contains native_out "Err(modulo by zero)"
+       && ir_contains native_out "Err(panic: boom)");
+    Alcotest.(check string) (name ^ ": the JS run prints what the native test binary prints")
+      native_out js_out
+  end
+
 (** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
     lists have been filled with freed cons cells.  march_alloc is a plain
     malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
@@ -14039,8 +14144,8 @@ let test_int_divmod_inline_ir () =
         (has b ("dz_trap[0-9]*:\n *%[a-z0-9_]+ = call i64 @" ^ helper ^ "(i64 %[^,]*, i64 0)\n *unreachable")))
     [ ("q", "sdiv", "march_checked_div_op"); ("r", "srem", "march_checked_mod_op") ]
 
-(** An overflow nobody catches ends the program like any panic, with its
-    message, on all three backends: the interpreter, compiled code (stderr
+(** An overflow (or an Int division by zero) nobody catches ends the
+    program like any panic, with its message, on all three backends: the interpreter, compiled code (stderr
     "... run-time error: ..."), and --target js (an uncaught Error).  The JS operands are
     powers of two, exact in a double, so the 63-bit boundary is reachable
     there (2^61 + 2^61 = 2^62).  The JS half is skipped when node is absent. *)
@@ -14087,7 +14192,12 @@ let test_int_overflow_uncaught_panic () =
     end)
     [ ("march_ovf_add", "h + h", "attempt to add with overflow");
       ("march_ovf_mul", "h * 2", "attempt to multiply with overflow");
-      ("march_ovf_neg", "-(0 - h - h)", "attempt to negate with overflow") ]
+      ("march_ovf_neg", "-(0 - h - h)", "attempt to negate with overflow");
+      (* Int `/` and `%` by zero: on JS they were NaN (js_emit inlined the
+         quotient with no zero test), so the program printed "NaN" and went
+         on instead of panicking. *)
+      ("march_divz", "h / (h - h)", "division by zero");
+      ("march_modz", "h % (h - h)", "modulo by zero") ]
 
 (** A shift count outside [0, 62] (and a negative int_pow exponent) panics
     on both backends with the interpreter's message.  Compiled, a non-literal
@@ -18196,6 +18306,10 @@ let codegen_suites =
           Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
           Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;
         ] );
+      ( "module_function_values", [
+          Alcotest.test_case "stdlib function bound as a value" `Slow
+            test_other_module_function_value_compiled;
+        ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
           Alcotest.test_case "nested int lit: tagged switch"    `Quick test_nested_int_lit_pattern_tagged_switch;
@@ -18995,7 +19109,7 @@ let codegen_suites =
             test_compiled_int_divmod_trap_parity;
           Alcotest.test_case "Int / and % emit an inline zero test and sdiv/srem" `Quick
             test_int_divmod_inline_ir;
-          Alcotest.test_case "uncaught Int overflow panics with its message, exit 1 (interp, compiled, JS)" `Quick
+          Alcotest.test_case "uncaught Int overflow / div by zero panics with its message, exit 1 (interp, compiled, JS)" `Quick
             test_int_overflow_uncaught_panic;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
@@ -19005,6 +19119,8 @@ let codegen_suites =
             test_output_path_errors;
           Alcotest.test_case "--target js --test runs the tests like the native runner (#1176)" `Quick
             test_js_test_runner;
+          Alcotest.test_case "--target js --test: to_string without Show, __try_call, process_env/cwd/pid" `Quick
+            test_js_test_runner_gaps;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
           Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick

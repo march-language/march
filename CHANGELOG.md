@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
+  `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
+  gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
+  reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
+  block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
+  function's unfolding depth for the checks inside only. All four are checked by the compiler
+  and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
+  in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
+  keeps working.
 - **A warning when a predicate means the built-in, not your function.** Inside a refinement
   predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
   own function of that name is in scope, the checker now says so
@@ -687,6 +696,30 @@ git log is authoritative for exact commits.
   use) threw `ReferenceError` at run time. Observers now receive a report, with its context and
   the panic's location, when an error escapes `main`; the error then reaches Node as before.
   The JS report has no backtrace; the `Diagnostics` module doc lists the other differences.
+- **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
+  recursion (`List.map` over 20,000 elements, or a panic unwinding 20,000 calls) ran out of
+  JavaScript stack on the way back up, so the build was pinned to js_of_ocaml `< 6.5`. The
+  interpreter now resets the stack on return (and on exception unwind) as well as on call,
+  and the pin is gone.
+- **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
+
+- **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
+  gave `NaN` and the program went on; they now panic with "division by zero" / "modulo by
+  zero", as natively. `to_string` on a record or variant with no `Show` impl now builds and
+  prints what native prints (`{ x: 1, y: 2 }`), and `Check.all` property tests,
+  `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
+  A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
+  native message.
+- **Module functions used as values compile correctly.** A binding such as
+  `let k = List.length` now retains the function definition during compilation,
+  including when the binding is called with different element types.
+- **Type-qualified function names fail with an actionable diagnostic.**
+  `Int.to_string(5)` now explains that `Int` is a type and points to `to_string`,
+  instead of passing checking and failing or producing the wrong value at runtime.
+- **Endpoint generation merges equivalent unlabelled choice branches.** A bystander
+  receiving the same message in either branch now shares the message constructor
+  and continuation state, instead of receiving errors in generated code.
+
 - **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
   such a type, and a lemma about it, can now be used in refinements. Recursion through
   `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating
