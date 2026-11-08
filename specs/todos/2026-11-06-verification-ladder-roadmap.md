@@ -26,8 +26,10 @@ One file per step. Grouped by effort, ordered within a group by practical payoff
 5. `2026-11-06-bounded-quantifiers` — `forall i in 0..len(xs)`, `forall x in elts(s)` with
    triggers derived from the measure: sortedness, "contains", "all keys below k". The biggest
    single step.
-6. `2026-11-06-ghost-code` — ghost parameters, lets and functions, erased like lemmas: proof-only
-   state (the abstraction of a tree, a counter's history).
+6. ~~`2026-11-06-ghost-code`~~ done (`specs/progress/2026-11-08-ghost-code.md`) — ghost
+   parameters, lets and functions, erased like lemmas: proof-only state. Follow-ups (a ghost-set
+   proof, merged clauses, impl methods, the REPLs, actor state):
+   `2026-11-08-ghost-code-followups`.
 7. `2026-11-06-two-state-specs` — `old(state)` in actor handler and migration contracts.
 8. `2026-11-06-lean-export` — emit reflected definitions and unproved lemmas as Lean 4, prove
    the hard ones there, admit them by digest. Lean's power without becoming Lean.

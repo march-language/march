@@ -742,7 +742,7 @@ let build_linearity_map (decls : Ast.decl list) (always_linear : string list)
   let resolve (lin : Ast.linearity) (ty : Ast.ty option) : Ast.linearity option =
     match lin with
     | Ast.Linear | Ast.Affine -> Some lin
-    | Ast.Unrestricted -> (match ty with Some t -> lin_of_ty t | None -> None)
+    | Ast.Unrestricted | Ast.Ghost -> (match ty with Some t -> lin_of_ty t | None -> None)
   in
   let record name lin = result := (name, lin) :: !result in
   let rec pat_names (p : Ast.pattern) acc =

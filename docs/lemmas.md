@@ -47,6 +47,7 @@ chapter has the reference summary.
 - [Steps: `assert` inside a lemma](#steps-assert-inside-a-lemma)
 - [Decided steps and fuel](#decided-steps-and-fuel)
 - [Proof hints: `assert … by`, `calc`, `reveal`, `with fuel`](#proof-hints-assert--by-calc-reveal-with-fuel)
+- [Ghost code: proof-only parameters, bindings and functions](#ghost-code-proof-only-parameters-bindings-and-functions)
 - [When a lemma does not prove](#when-a-lemma-does-not-prove)
 - [When a lemma is false](#when-a-lemma-is-false)
 
@@ -87,6 +88,7 @@ chapter has the reference summary.
 | A step proved with helper facts that should not leak | `assert P by do … end` |
 | A chain of equalities or inequalities, each step checked | `calc do … end` |
 | An `@[opaque]` function's definition, for one proof | `reveal f` |
+| A value only the proof needs (a bound, an abstraction, a history) | A `ghost` parameter, `ghost let` or `ghost fn`: checked, then erased |
 | A theorem that only holds for some inputs | Refined parameters on the lemma: `n : {Int \| _ >= 0}` |
 | Every lemma in a module to be proved, or the build fails | `cap verified` in that module |
 | To know whether a law you can't prove yet is even true | Leave it unproved; `forge test` tests it on generated inputs |
@@ -462,6 +464,109 @@ stays opaque.
 **`with fuel(f, N) do … end`** runs its body with `f`'s fuel set to `N` (1 to 8; a value outside
 that range is taken as the nearest bound) for the checks inside, instead of raising `@[reflect(fuel: N)]` for every caller. A `reflect-fuel`
 skip says which function ran out.
+
+## Ghost code: proof-only parameters, bindings and functions
+
+Some contracts talk about a value the program never computes: the bounds every key of a search
+tree lies between, the set a structure represents, the input a loop started from. **Ghost code**
+carries such a value for the proof and is removed before the program runs, as lemmas are.
+There are three forms:
+
+```march
+ghost fn bst(t : Tree, lo : Int, hi : Int) : Bool do … end        -- a proof-only function
+fn contains(ghost lo : Int, ghost hi : Int, t : {Tree | bst(_, lo, hi)}, x : Int) : Bool do … end
+ghost let top = hi                                                 -- a proof-only binding
+```
+
+- A **`ghost fn`** (or `ghost pfn`) is never compiled. The refinement checker reflects it, so it
+  must be pure, total and terminating ([`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/)
+  otherwise), and it may take `@[reflect(fuel: N)]`.
+- A **ghost parameter** (`ghost s : T`) is an ordinary parameter to the checker: other
+  parameters' refinements and the result's may mention it, and a caller passes an argument for
+  it. The compiled function has no such parameter, and its callers pass nothing.
+- A **`ghost let`** names a proof-only value inside a body.
+
+`ghost` is a keyword only in these three places. `let ghost = 1`, `fn ghost()` and `ghost(x)`
+still use it as a name.
+
+### The rule: ghost values never reach the running program
+
+A ghost value may appear only where nothing runs: in refinements, in another ghost binding, as
+a ghost argument, as a lemma argument, in a proof hint (`assert … by`, `calc`) and in a ghost
+function's body. Anywhere else is
+[`ghost_in_runtime`]({{ site.baseurl }}/docs/errors/ghost_in_runtime/): a runtime branch, a
+return value, a pattern match, a closure, an argument to a runtime parameter. So no behaviour
+of the program can depend on ghost code, and deleting it changes nothing that runs. Ghost code
+also may not use a `linear` or `affine` value, since removing that use would change which part
+of the program consumes it.
+
+Erasure is the same kind of pass as lemma erasure: it runs after the refinement checker, reads
+only the syntax, and gives the same program with or without a solver. To remove the right
+arguments without the typechecker it resolves calls conservatively. A bare call `f(…)` is
+ghost when it is written in the file that declares ghost `f` and no local of that name shadows
+it. So a ghost function's name must not also be a function, value or import visible there, nor
+a global or builtin (`map`, for one). A qualified call `M.f(…)` is ghost when the program's
+module `M` declares ghost `f`, so `List.member(…)` is never confused with a user's ghost
+`member`. A name that breaks this is
+[`ghost_misuse`]({{ site.baseurl }}/docs/errors/ghost_misuse/).
+
+### Example: a search tree's order
+
+On the tree alone, "every key in the left subtree is smaller" needs a quantifier. With two
+ghost bounds it is a recursive `Bool` function the checker unfolds, and the lookup below proves
+that each recursive call searches an ordered subtree. The bounds exist only in the proof:
+
+```march
+mod Bst do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[reflect(fuel: 4)]
+  ghost fn bst(t : Tree, lo : Int, hi : Int) : Bool do
+    match t do
+    Leaf -> true
+    Node(l, v, r) -> lo < v && v < hi && bst(l, lo, v) && bst(r, v, hi)
+    end
+  end
+
+  @[lemma]
+  fn split(l : Tree, v : Int, r : Tree, lo : Int, hi : Int)
+      : {Unit | !bst(Node(l, v, r), lo, hi) || (lo < v && v < hi && bst(l, lo, v) && bst(r, v, hi))} do
+    ()
+  end
+
+  fn contains(ghost lo : Int, ghost hi : Int, t : {Tree | bst(_, lo, hi)}, x : Int) : Bool do
+    match t do
+    Leaf -> false
+    Node(l, v, r) ->
+      split(l, v, r, lo, hi)
+      if x < v do contains(lo, v, l, x)              -- proved: bst(l, lo, v)
+      else
+        if x > v do contains(v, hi, r, x)            -- proved: bst(r, v, hi)
+        else true end
+      end
+    end
+  end
+
+  fn main() : Int do
+    if contains(0, 10, Node(Node(Leaf, 1, Leaf), 5, Leaf), 1) do 1 else 0 end   -- proved
+  end
+end
+```
+
+The compiled `contains` takes `t` and `x` only, and the program is the one you would get by
+deleting `bst`, `split` and every ghost parameter and argument (the compiler's test suite checks
+the IR is identical). The full example, with a membership function and a lemma that a key
+outside the bounds is absent, is `test/refine/ghost/bst.march`.
+
+### Not yet
+
+- Ghost parameters go on a module-level `fn` with one clause of named parameters and no `when`
+  guard, not on impl methods or local functions; a function with ghost parameters is called
+  directly, never passed as a value.
+- A `Bool` result contract stated with a ghost function (`contains`'s `_ == mem(t, x)`) is not
+  proved yet, for the reason given in [What lemmas don't do (yet)](#what-lemmas-dont-do-yet):
+  only an `Int` result contract uses the facts of its body.
+- Ghost state for actors (a handler's message history) is planned after these rules settle.
 
 ## When a lemma does not prove
 
