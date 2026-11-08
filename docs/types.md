@@ -190,7 +190,8 @@ register or a list. Use `Float` (or a bignum library) for wider arithmetic.
 JS number (an IEEE-754 double), which holds integers exactly only within
 **±(2^53 - 1)** (`-9007199254740991` to `9007199254740991`). Inside that
 range every operation listed above gives the same answer as the interpreter
-and native code, including division (truncating), `int_shr` (arithmetic) and
+and native code, including division (truncating; `/` and `%` by zero panic
+with "division by zero" / "modulo by zero"), `int_shr` (arithmetic) and
 `int_popcount` (of the 63-bit pattern). Outside it, the JS target departs
 from the 63-bit rules instead of wrapping:
 
@@ -207,8 +208,6 @@ from the 63-bit rules instead of wrapping:
   when an argument or the result lies outside ±(2^53 - 1), rather than
   return a rounded value. Within the range they are exact on every bit, not
   only the low 32 that JS's own `&`, `|` and `>>` see.
-- **`/` and `%` by zero give `NaN`** instead of panicking (`int_div` and
-  `int_mod` still panic).
 - **`int_max_value()` and `int_min_value()` do not compile** for the JS
   target: ±2^62 has no exact JS number.
 

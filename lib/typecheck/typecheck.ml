@@ -2871,6 +2871,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
               modules) — so this guard cannot misfire on that case. *)
            Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span (qualified_error_msg name.txt env);
            TError
+         | _ when (match split_qualified name.txt with
+                   | Some (q, member) when not (String.contains member '.') ->
+                     q <> env.current_module
+                     && not (StrMap.mem q env.local_mods)
+                     && (StrMap.mem q env.types || StrMap.mem q env.records
+                         || StrMap.mem q env.ty_aliases)
+                   | _ -> false) ->
+           (* A type is not a value namespace. The suffix fallback used to
+              type Int.to_string as to_string while leaving the qualified
+              AST name unresolved in both execution backends. Real module
+              and interface exports have already resolved above. The current
+              module may also name a type (including its implicit capability);
+              its own qualified private calls still need the suffix fallback. *)
+           let q, member = Option.get (split_qualified name.txt) in
+           let hint = match lookup_var member env with
+             | Some _ -> Printf.sprintf " Write `%s` without the type qualifier." member
+             | None -> " Use an exported module member or an unqualified function." in
+           Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span
+             (Printf.sprintf "`%s` is a type, not a module.%s" q hint);
+           TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
@@ -2890,9 +2910,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
               module, no `Q.`-prefixed binding) is a misspelled module, not a
               path to strip: stripping `Lsit.` off `Lsit.length` resolved the
               builtin `length`, so the typo checked clean and failed only at
-              run time with "unbound variable: Lsit.length".  A qualifier
-              that names a TYPE keeps the fallback: `Int.to_string(n)` is
-              how programs spell the bare `to_string` on an Int. *)
+              run time with "unbound variable: Lsit.length". Type qualifiers
+              are rejected separately above. *)
            let unknown_single_qualifier =
              match split_qualified name.txt with
              | Some (q, member) when not (String.contains member '.') ->
@@ -4644,6 +4663,36 @@ let rec infer_expr env (e : Ast.expr) : ty =
       check_expr env inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
       Hashtbl.replace env.type_map sp t_unit;
       t_unit
+
+    (* ── Proof hints (ghost; erased after the refinement checker) ─────── *)
+    | Ast.EProof (p, sp) ->
+      let hints hs = List.iter (fun h -> ignore (infer_expr env h)) hs in
+      let ty =
+        match p with
+        | Ast.PAssertBy (pred, hs) ->
+          check_expr env pred t_bool ~reason:(Some (RBuiltin "assert … by expects a Bool expression"));
+          hints hs;
+          t_unit
+        | Ast.PReveal f ->
+          ignore (infer_expr env f);
+          t_unit
+        | Ast.PWithFuel (f, _, body) ->
+          ignore (infer_expr env f);
+          infer_block env body
+        | Ast.PCalc (e0, steps) ->
+          (* Each step is `prev op rhs`, typed as that comparison would be. *)
+          ignore
+            (List.fold_left
+               (fun prev (st : Ast.calc_step) ->
+                 let cmp = Ast.EApp (Ast.EVar { Ast.txt = st.Ast.cs_op; Ast.span = st.Ast.cs_span }, [ prev; st.Ast.cs_rhs ], st.Ast.cs_span) in
+                 check_expr env cmp t_bool ~reason:(Some (RBuiltin "a calc step compares its two sides"));
+                 hints st.Ast.cs_hint;
+                 st.Ast.cs_rhs)
+               e0 steps);
+          t_unit
+      in
+      Hashtbl.replace env.type_map sp ty;
+      ty
 
     (* ── Local recursive named function (block-scoped) ─────────────── *)
     | Ast.ELetFn (name, params, ret_ann, body, sp) ->
@@ -10309,6 +10358,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (_, _, _, body, _) -> go body
   | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
@@ -10385,6 +10435,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (name, ps, _, body, _) ->
     (* outside a block: only its own body sees it *)

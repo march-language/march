@@ -210,7 +210,7 @@ mod PartialApp do
     end
   end
   fn main(_cap_console : Cap(IO.Console)) : () do
-    println(Int.to_string(Dep.add(2, 3)))
+    println(int_to_string(Dep.add(2, 3)))
   end
 end
 |}

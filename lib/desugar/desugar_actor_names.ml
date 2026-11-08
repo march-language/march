@@ -235,6 +235,7 @@ let rename_expr tbl ~root cur =
     | EDbg (Some x, sp) -> EDbg (Some (ex x), sp)
     | ESend (c, m, sp) -> ESend (ex c, ex m, sp)
     | EAssert (x, sp) -> EAssert (ex x, sp)
+    | EProof (p, sp) -> EProof (map_proof ex p, sp)
     | EAtom (a, args, sp) -> EAtom (a, List.map ex args, sp)
     | ESigil (s, x, sp) -> ESigil (s, ex x, sp)
     | ERefineMsg (x, s, sp) -> ERefineMsg (ex x, s, sp)
