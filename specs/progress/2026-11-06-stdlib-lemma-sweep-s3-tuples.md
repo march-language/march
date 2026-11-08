@@ -39,7 +39,11 @@ at a caller by unfolding (S1's rule: ship a law only where unfolding cannot get 
 | Check | Result |
 |---|---|
 | `reflect-stdlib-sweep` S3 cases (4): tuple precondition (2 proved, 2 violated), a guard `p == q` proves and `p != q` does not, a tuple literal `_ == (1, 2)` (proved / violated, no `<predicate>`), tuple lemmas (`swap_swap` at `(Int, Int)` and generic proved, `swap(p) == p` not proved) | RED (no row / `sort-conflict` / `unreflectable-predicate`) → GREEN |
-| `scripts/affected.sh --run --full` | see the PR |
+| Three tests that pinned tuples as an unplaceable sort | re-pinned: `audit-classify` "an unplaceable field base…" and the M4 parameter fixture now use a `Char` base (still unplaceable); `law-coverage` "no_generator" uses a function-typed parameter. New: `audit-classify` "a parameter refined at a tuple base is Enforced" |
+| A tuple-refined record field | checked at every construction (`_ == (1, 0)` proves and is violated as it should); a reflected call over it (`Tuple.first(_)`) is still `unreflectable-predicate` (encoder-gaps todo) |
+| Refine audit baselines | regenerated, unchanged |
+| `scripts/affected.sh --run --full` after merging main (refinecheck 209 groups / 2511 tests, compiler, errors, doc-lint, refine oracle) | all pass; refine oracle IDENTICAL to merge-base 4d9ffe976 (9004 lines, 582 fixtures) |
+| CI conformance skip ceiling (`--stdlib-source --refine-report stdlib/list.march`) | 186 proved / 49 skipped, at `baseline=49` |
 
 ## Left for later
 

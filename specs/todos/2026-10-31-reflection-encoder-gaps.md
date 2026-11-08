@@ -26,8 +26,8 @@ reflected call by its site, and is pinned by the `pred-names` suite:
   (`type Box = { v : {(Int, Int) | Tuple.first(_) > 0} }` is checked at every construction but
   `unreflectable-predicate`; a field predicate without a call, `_ == (1, 0)`, proves and is
   violated as it should).
-- **Parametric records.** A record type is matched to its declaration by its field set; a
-  record with type parameters declines (its instance is not recovered from the structural
-  type).
+- **Parametric records: covered by `claude/encoder-gaps-mapset`** (Refinement todos session,
+  not yet merged): `record_of_fields` recovers the instance, so lemmas over `p : Pr(Int)` prove
+  through reflected functions. Still open there: a direct field read (`p.fst`) in a predicate.
 - **`uses:` over-approximation.** When a stage-2 proof's unsat core names no unfolding
   (congruence, I8), `uses:` lists the whole frontier.
