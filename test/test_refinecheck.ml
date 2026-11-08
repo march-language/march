@@ -30093,14 +30093,14 @@ let () =
       ("termination-report", Test_refine_term.report_suite);
       ("reflect-report", Test_refine_reflect.suite @ Test_refine_reflect.fixture_suite);
       ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.review @ Test_refine_unfold.review2 @ Test_refine_unfold.review3 @ Test_refine_unfold.identical);
-      ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
+      ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr @ Test_refine_reflect1b.uses_query_frontier);
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
-      ("reflect-record-vars", Test_refine_record_vars.tests);
+      ("reflect-record-vars", Test_refine_record_vars.tests @ Test_refine_record_vars.parametric);
       ("proof-hints", Test_refine_proof_hints.suite);
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified @ Test_refine_stdlib_sweep.s3);
       ("pred-names", Test_refine_pred_names.suite);
