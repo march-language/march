@@ -3081,6 +3081,9 @@ let rec rename_heads (f : string -> string option) (e : A.expr) : A.expr =
   | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
   | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
   | A.EField (r, n, sp) -> A.EField (go r, n, sp)
+  (* A bounded quantifier's body is a lambda; its binder is a variable, never
+     an applied head, so renaming heads under it cannot capture. *)
+  | A.ELam (ps, b, sp) -> A.ELam (ps, go b, sp)
   | e -> e
 
 let to_own (e : A.expr) : A.expr =

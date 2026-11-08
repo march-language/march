@@ -700,6 +700,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Bounded quantifier bodies are scoped more strictly.** Inside `forall` / `exists`, a
+  measure over a call or a constructor tester whose argument mentions the binder (for
+  example `elts(mk(k))`) is now refused, so the predicate is skipped rather than ever
+  being encoded as one constant shared by every instance. Own abstract-predicate renaming
+  and inferred-lemma substitution now also reach quantifier bodies, and `nth` is
+  documented as reserved inside predicates.
+
 - **`Diagnostics` and `try_finally` work on `--target js`.** A program using
   `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
   compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
