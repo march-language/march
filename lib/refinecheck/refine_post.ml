@@ -1834,7 +1834,7 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
               match e with
               | A.EVar { A.txt = x; _ } ->
                 if declare x (adt_sort d) then Some (Smt.Const x) else None
-              | A.ECon (ct, args, _) when ctor_belongs ct.A.txt d ->
+              | A.ECon (ct, args, sp) when ctor_belongs ct.A.txt d ->
                 let k = ctor_k ct.A.txt d in
                 let fs = try Hashtbl.find ctor_field_sorts k with Not_found -> [] in
                 if List.length fs <> List.length args then None
@@ -1845,7 +1845,10 @@ let check_post_induction ~root (errctx : Err.ctx) ?(record = true) (fd : A.fn_de
                       | Some t, Some ts -> Some (t :: ts)
                       | _ -> None)
                     args fs (Some [])
-                  |> Option.map (fun ts -> ctor_term d k ts)
+                  |> Option.map (fun ts ->
+                       match March_ast.Bounded_pred.contains pred, caller_sort_at sp with
+                       | true, Some (Smt.SData (a, _) as sort) when a = d -> Smt.Ctor (k, sort, ts)
+                       | _ -> ctor_term d k ts)
               (* ── THE INDUCTION HYPOTHESIS ─────────────────────────────────
                  A self-recursive call returning this datatype.  It becomes a
                  fresh opaque constant; the postcondition is assumed ABOUT that

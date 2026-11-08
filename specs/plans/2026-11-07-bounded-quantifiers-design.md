@@ -1,12 +1,12 @@
-# Bounded quantifiers: proposed design
+# Bounded quantifiers: approved design
 
-Status: design for review; no compiler implementation yet.
+Status: approved; implementation in progress on `codex/verification-stage-b`. Focused controls and the integer insertion-sort fixture pass; full compatibility, performance, and integration validation remain pending.
 
 ## Intent and scope
 
 Add bounded universal and existential predicates so a sorted-list insertion lemma can state and prove sortedness. This is Stage B's first feature in the verification ladder. Ghost state follows separately; external prover export, unbounded quantification, and proof scripts are outside this change.
 
-Use the existing OCaml compiler, March predicate expressions, and Z3 bridge. Preserve warning-by-default and strict `cap verified` behavior. Unknown, unsupported, and timed-out queries must never export proof facts. This design's syntax and policies are proposed implementation choices, not previously approved user requirements.
+Use the existing OCaml compiler, March predicate expressions, and Z3 bridge. Preserve warning-by-default and strict `cap verified` behavior. Unknown, unsupported, and timed-out queries must never export proof facts. The user approved implementation of this design.
 
 ## Surface and meaning
 

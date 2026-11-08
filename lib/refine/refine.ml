@@ -212,7 +212,7 @@ let well_formed : (string -> Smt.vc -> bool) ref = ref (fun _ _ -> true)
    be served to a later run that has no z3 at all. *)
 let storable () = Solver.identity () <> None
 
-let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
+let discharge_raw ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   last_core := [];
   if ground_verified vc then Verified else
   if not (!well_formed preamble vc) then Unverified else
@@ -289,3 +289,11 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   | Solver.Unsat -> Verified
   | Solver.Sat model -> Refuted model
   | Solver.Unknown | Solver.Rejected -> Unverified
+
+
+let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
+  let goal, changed = Bounded_witness.expand vc in
+  if not changed then discharge_raw ~root ~preamble vc
+  else match discharge_raw ~root ~preamble {vc with goal} with
+    | Verified -> Verified
+    | Refuted _ | Unverified -> Unverified

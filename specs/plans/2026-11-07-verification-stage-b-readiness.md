@@ -1,6 +1,6 @@
 # Verification ladder: Stage B readiness
 
-**Status:** Preparation only; no Stage B implementation has started.
+**Status:** Bounded quantifiers approved and under implementation. Ghost state remains a separate subsequent stage. See `2026-11-07-bounded-quantifiers-design.md` and `2026-11-07-bounded-quantifiers-implementation.md`.
 
 A1–A3 landed through PR #1189 (`specs/progress/2026-11-06-proof-hints.md`). PR #1192 preserves additional scoped-proof validation and regression coverage from the independently developed A1 implementation. Its final validation boundary should be the foundation for further proof features. The earlier A2 draft is superseded.
 

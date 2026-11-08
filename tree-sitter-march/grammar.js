@@ -609,7 +609,16 @@ module.exports = grammar({
     ),
 
     // Full expression hierarchy
+    bounded_quantifier: $ => prec.right(seq(
+      field("kind", choice("forall", "exists")),
+      field("binder", $.identifier), "in",
+      field("domain", choice(
+        seq($._expr, "..", $._expr), $._expr)),
+      ",", field("body", $._expr)
+    )),
+
     _expr: $ => choice(
+      $.bounded_quantifier,
       $.assert_expression,
       $.reveal_expression,
       $.with_fuel_expression,

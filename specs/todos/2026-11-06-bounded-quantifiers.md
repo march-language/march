@@ -1,31 +1,35 @@
-`[P2]` Bounded quantifiers in predicates: `forall i in 0..len(xs)`, `forall x in elts(s)`.
+`[P2]` Bounded quantifiers in predicates.
 
-Medium step 5 of `2026-11-06-verification-ladder-roadmap`; the biggest single step on it.
+Stage B, step 5 of `2026-11-06-verification-ladder-roadmap`.
 
-## What it unlocks
+## Implementation status
 
-Properties that need "every pair" or "some element": sortedness
-(`forall i in 0..len(xs) - 1, xs[i] <= xs[i + 1]`), membership (`exists x in elts(xs), x == k`),
-"all keys below k", "no duplicates". Today element facts come only through measures and
-element/abstract refinements, which cannot relate two positions or say "some".
+Approved design and implementation plan: `specs/plans/2026-11-07-bounded-quantifiers-design.md`
+and `specs/plans/2026-11-07-bounded-quantifiers-implementation.md`.
+Implementation is in progress; keep this item open until the acceptance gates pass.
 
-## Design sketch
+The focused suite passes 32 controls, including lexical capture, Boolean map
+keys, unsupported Float list domains, checked existential candidates, and
+indexing definedness. `test/refine/quantifiers/insertion_sort.march` proves
+integer insertion and insertion-sort contracts using lower-bound and pairwise
+sortedness invariants. It introduces no trusted sorting axioms. This does not
+verify the existing comparator-based `List.sort_by` or `Sort.sort`, nor add a
+public `List.sort` API. Use logical `nth(xs, i)` rather than runtime indexing
+syntax in predicates.
 
-- Syntax inside predicates: `forall i in lo..hi, P`, `forall x in elts(e), P`,
-  `forall k in keys(m), P`, and `exists` likewise. Only bounded forms at first.
-- Encoding: SMT quantifiers with a trigger chosen by the compiler from the bound's measure
-  (`$nth(xs, i)` for an index range, `member(x, s)` for a set), never left to z3's heuristics.
-  This avoids Dafny's main trap (bad triggers: brittle, timing-dependent proofs).
-- Needs an indexing measure (`nth(xs, i)` in predicates, reflecting `List.nth_opt` or a
-  dedicated measure) and its axioms.
-- `exists` in a hypothesis is skolemised; in a goal it needs a witness (the checker tries the
-  bound's terms in scope, else reports "give a witness" with an `assert P(k)` fix).
+## Remaining acceptance gates
 
-## Done when
+- Complete parser/formatter, strict-capability, solver-limit and soundness controls;
+  review exact sorts and reflected contracts.
+- Full suites, fresh review, and CI.
+- Byte-identical emitted SMT for the existing quantifier-free corpus.
+- Three paired cold and warm solver timings, median within 5% of baseline,
+  with no new timeouts.
+- Build and validate the updated documentation. Move this item to progress
+  only when the implementation and validation are complete.
 
-- `List.sort`'s result type can say sorted, and `insert` into a sorted list is proved to keep
-  it sorted (a lemma by structural induction).
-- A predicate using an unbounded quantifier is a clear error pointing at the bounded forms
-  (unbounded ones are `2026-11-06-unbounded-quantified-lemmas`).
-- Solve-time budget: the refine oracle's corpus time does not regress (quantifier-free VCs are
-  unchanged byte for byte: `scripts/ir-oracle.sh`-style hash check over emitted SMT).
+Bounded forms are `forall` / `exists` over `lo..hi`, `elts(e)`, or `keys(m)`.
+Triggers are chosen from suitable binder-dependent applications when available;
+quantified solving remains incomplete. Existential goals require checked
+candidates satisfying both their domain and body. Unbounded quantification is
+tracked separately in `2026-11-06-unbounded-quantified-lemmas`.

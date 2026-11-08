@@ -5109,8 +5109,9 @@ let rec surface_of_tc (t : T.ty) : A.ty option =
    its element sort, not at the `Int` default). *)
 let goal_vars_typed (e : A.expr) : (string * A.ty option) list =
   let acc = ref [] in
+  let bound = ref [] in
   let add (v : A.name) =
-    if v.A.txt <> "_" && not (List.mem_assoc v.A.txt !acc) then
+    if not (List.mem v.A.txt !bound) && v.A.txt <> "_" && not (List.mem_assoc v.A.txt !acc) then
       let ty =
         match !Refine_encode.call_type_map with
         | Some tm -> Option.bind (Hashtbl.find_opt tm v.A.span) surface_of_tc
@@ -5119,7 +5120,14 @@ let goal_vars_typed (e : A.expr) : (string * A.ty option) list =
       acc := (v.A.txt, ty) :: !acc
   in
   let rec go (e : A.expr) =
-    match e with
+    match March_ast.Bounded_pred.view e with
+    | Some q ->
+      List.iter go (March_ast.Bounded_pred.domain_exprs q.domain);
+      let saved = !bound in
+      bound := q.binder.txt :: saved;
+      go q.body;
+      bound := saved
+    | None -> match e with
     | A.EVar v -> add v
     | A.EApp (A.EVar _, args, _) -> List.iter go args
     | A.EApp (f, args, _) -> go f; List.iter go args
@@ -5373,7 +5381,8 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           then Hashtbl.replace proof_results sp [(goal, false)]
           else begin
             Hashtbl.remove proof_results sp;
-            let msg = "this proof block is not proved; its goal gives no facts after the block" in
+            let msg = "this proof block is not proved; its goal gives no facts after the block"
+              ^ March_ast.Bounded_pred.witness_hint goal in
             if !strict_verified then Err.error ~code:Err.Code.lemma_unproved errctx ~span:sp msg
             else Err.warning ~code:Err.Code.lemma_unproved errctx ~span:sp msg
           end))
@@ -6038,7 +6047,9 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             let links =
               (* Inside a lemma (§4.3): each component bound by name, as a
                  selector of the scrutinee, for stage 2. *)
-              match !lemma_walk <> None || !lemma_body, resolve_tested_ctor subj_adt ctor.A.txt, br.A.branch_pat with
+              match !lemma_walk <> None || !lemma_body
+                    || List.exists (fun (_, (_, q, _)) -> March_ast.Bounded_pred.contains q) sc,
+                    resolve_tested_ctor subj_adt ctor.A.txt, br.A.branch_pat with
               | true, Some (_, k), A.PatCon (_, ps) ->
                 List.concat
                   (List.mapi
@@ -7700,6 +7711,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
             lw.lw_name
             (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
             k n
+          ^ (match Refine_post.assumed_return fd with Some p -> March_ast.Bounded_pred.witness_hint p | None -> "")
         in
         match Hashtbl.find_opt Refine_call.lemma_refuted lw.lw_name with
         | Some at ->

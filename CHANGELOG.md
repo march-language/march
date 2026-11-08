@@ -21,6 +21,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Bounded predicates:** `forall` and `exists` over half-open integer ranges,
+  `elts` and `keys`, with logical `nth` indexing, domain-wide indexing checks,
+  and checked existential candidates. Integer insertion-sort is included as a
+  verification fixture; existing public sorting implementations are unchanged.
+
 - **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
   `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
   gives the code after it only `P`. A `calc do … end` chain proves each step on its own and

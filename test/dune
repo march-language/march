@@ -1404,7 +1404,7 @@
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
- (modules test_refinecheck test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars test_refine_pred_names test_refine_proof_hints)
+ (modules test_refinecheck test_refine_quantifier test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars test_refine_pred_names test_refine_proof_hints)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
@@ -1423,7 +1423,7 @@
  ; reason (and this test group always runs relative to the repo root, not
  ; the sandbox, per its own require_repo_root check).
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)
-   (source_tree ../test/native) (source_tree refine_audit) (source_tree refine/reflect)))
+   (source_tree ../test/native) (source_tree refine_audit) (source_tree refine/reflect) (source_tree refine/quantifiers)))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;

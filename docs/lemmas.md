@@ -1039,10 +1039,11 @@ build checks it, so a reviewer doesn't have to.
   higher-order functions (`map` composition, `filter` run twice) can't be stated yet. The
   functions a theorem calls must be reflected, and a reflected function takes no function
   parameter.
-- **No quantifiers in a theorem.** A theorem is about the lemma's parameters, for all of
-  them at once. It can't say "there exists" or nest a "for all" inside, and a caller gets
-  the theorem only for the arguments of a call. To use a law at several values, call the
-  lemma once for each.
+- **Quantifiers must be bounded.** Theorem predicates and proof assertions can use
+  `forall i in lo..hi, P`, `exists i in lo..hi, P`, and membership domains
+  `elts(xs)` / `keys(m)`. See [Bounded quantifiers]({{ site.baseurl }}/docs/refinement-types/#bounded-quantifiers)
+  for scope, indexing definedness, and checked existential candidates. Unbounded
+  quantification and higher-order theorems remain unsupported.
 - **Only an `Int` result contract uses the facts before it.** A function whose result type
   is a refined `Int` is checked with the facts of its body: an earlier `let`, a lemma call or
   `assert` before the result, and the unfolding of a reflected call as the result.
