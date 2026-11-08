@@ -69,17 +69,12 @@ type outputs = { interp : string; interp_code : int;
                  js_build : string; js_build_code : int;
                  js : string; js_code : int }
 
-(* Fixtures the JS target cannot build yet, each with the gap that stops it
-   (specs/todos/2026-11-07-js-test-runner-gaps.md).  Remove an entry when its
-   gap closes; the JS case then runs and must match the golden. *)
-let js_unsupported = [
-  "assert_records",
-    "`to_string` on a record without a Show impl has no JS implementation";
-  "panics",
-    "Int `/` by zero is NaN on the JS target instead of a panic";
-  "properties",
-    "Check.all needs `__try_call` and `process_env`, which have no JS implementation";
-]
+(* Fixtures the JS target cannot build yet, each with the gap that stops it.
+   Empty since the gaps of specs/progress/2026-11-07-js-test-runner-gaps.md
+   closed: every fixture's JS run must match its golden.  Add an entry (the
+   fixture's name and the gap, with a specs/todos/ item) only for a fixture
+   that needs something the JS target genuinely lacks. *)
+let js_unsupported : (string * string) list = []
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)
 

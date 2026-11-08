@@ -25515,9 +25515,10 @@ let session_theory_suite =
         has out "projection Blind C (typecheck): not compared: the role is not told which branch a choice took";
         has out "projection Blind C (endpoints): not compared: the role is not told which branch a choice took";
         has out "projection Blind A (typecheck): agrees");
-    Alcotest.test_case "endpoints: unlabelled messages are distinct, so the bystander is not told" `Quick (fun () ->
-        (* specs/todos/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
-           the typechecker merges C's branches, the generator does not. *)
+    Alcotest.test_case "endpoints: the same unlabelled message in both branches is merged, as the theory merges it" `Quick (fun () ->
+        (* specs/progress/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
+           the generator shares the synthesised constructor across equivalent
+           branch tails, so C's projection is one receive, as Session.Theory.project's is. *)
         let src =
           "mod P do\n\
           \  protocol Three do\n\
@@ -25533,7 +25534,8 @@ let session_theory_suite =
         let code, out = run_cli "--validate-projections" src in
         Alcotest.(check int) "exit 0" 0 code;
         has out "projection Three C (typecheck): agrees";
-        has out "projection Three C (endpoints): not compared: the role is not told");
+        has out "projection Three C (endpoints): agrees with Session.Theory.project";
+        has out "laws Three: in the fragment");
     Alcotest.test_case "a role that may crash is outside the fragment" `Quick (fun () ->
         let src =
           "mod P do\n\
@@ -30091,11 +30093,12 @@ let () =
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
       ("reflect-record-vars", Test_refine_record_vars.tests);
+      ("proof-hints", Test_refine_proof_hints.suite);
       ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified);
       ("pred-names", Test_refine_pred_names.suite);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
+      ("reflect-lemma", Test_refine_lemma.scoped_asserts @ Test_refine_lemma.scoped_hint_bindings @ Test_refine_lemma.scoped_directives @ Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);
