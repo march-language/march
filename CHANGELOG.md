@@ -724,6 +724,9 @@ git log is authoritative for exact commits.
   `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
   A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
   native message.
+- Check recursive local functions for unsafe non-tail calls inside non-recursive
+  functions and actor handlers, which previously escaped stack-safety diagnostics.
+
 - **Module functions used as values compile correctly.** A binding such as
   `let k = List.length` now retains the function definition during compilation,
   including when the binding is called with different element types.
