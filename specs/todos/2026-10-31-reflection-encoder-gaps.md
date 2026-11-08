@@ -15,12 +15,12 @@ display-name resolution in the propagation pre-pass was closed by 71f112f4a, whi
 reflected call by its site, and is pinned by the `pred-names` suite:
 `specs/progress/2026-11-06-predicate-names.md`.)
 
-(Parametric records reached through reflected functions, tuple literals in reports, and the
-`uses:` fallback are closed since `specs/progress/2026-11-08-reflection-encoder-gaps-records-uses.md`.)
+(Parametric records reached through reflected functions and the `uses:` fallback are closed
+since `specs/progress/2026-11-08-reflection-encoder-gaps-records-uses.md`.)
 
 - **A tuple-typed variable in a predicate.** A lemma parameter or caller variable of tuple
   type gets no sort in the predicate encoder, so `swap(swap(t)) == t` over `t : (Int, Int)` is a
-  `sort-conflict` skip. Fixed on branch `claude/s3-tuples-finish` (S3 part 1), not yet merged.
+  `sort-conflict` skip. Fixed with tuple literals in reports by #1203 (S3 tuples), not yet merged.
 - **A parametric record's field read directly in a predicate.** `p.fst` over `p : Pr(Int)` in a
   theorem or a callee refinement (`n : {Int | _ > p.fst}`) does not reflect: the record
   environment (`Refine_scope.recenv`, `(name, sort name)`) holds only records without type

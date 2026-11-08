@@ -53,10 +53,6 @@ let parens =
           (List.map fst rows @ [ "_ == a - b + c"; "_ == a - (b + c)" ]);
         List.iter (fun s -> Alcotest.(check string) s (RS.pred_str (pred_of_bool s)) (again "Bool" s)) bool_rows;
         List.iter (fun s -> Alcotest.(check string) ("kept: " ^ s) s (RS.pred_str (pred_of_bool s))) bool_rows);
-    test "a tuple literal prints as written, not <predicate>" (fun () ->
-        List.iter
-          (fun s -> Alcotest.(check string) s s (RS.pred_str (pred_on ~base:"(Int, Int)" s)))
-          [ "_ == (a, b)"; "_ != (a + 1, (b, c))" ]);
     test "an inference candidate read back from the text keeps its grouping" (fun () ->
         match IV.candidate_of_text (RS.pred_str (pred_of "_ == (a + b) * 2")) with
         | Some c -> Alcotest.(check string) "round trip" "_ == (a + b) * 2" c.PI.c_text

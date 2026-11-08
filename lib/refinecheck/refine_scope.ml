@@ -682,9 +682,6 @@ and pred_str_prec context (e : A.expr) : string =
          && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
     law_method_display f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.ETuple ([], _) -> "()"
-  (* A tuple literal, as written; the parentheses are the tuple's own, so a
-     component never needs more. *)
-  | A.ETuple (cs, _) -> "(" ^ String.concat ", " (List.map pred_str cs) ^ ")"
   (* A record literal, as written (field order kept). *)
   | A.ERecord (fs, _) ->
     "{ " ^ String.concat ", " (List.map (fun ((n : A.name), v) -> n.A.txt ^ ": " ^ pred_str v) fs) ^ " }"

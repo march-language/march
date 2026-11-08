@@ -460,7 +460,8 @@ end
   fn f(n : Int, x : Float) : Int do
     if x == x do n + 1 else n end
   end
-  type Bx(a) = { v : a }
+  type Bx = { v : Int }
+  type By = { v : Int }
   fn g(n : Int) : Int do
     let b = { v: n }
     b.v + 1
