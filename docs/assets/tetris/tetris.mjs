@@ -1,4 +1,4 @@
-import { march_div_zero, march_float_round, march_float_to_string, march_int_and, march_int_div, march_int_div_euclid, march_int_div_floor, march_int_mod, march_int_mod_euclid, march_int_mod_floor, march_int_not, march_int_or, march_int_ovf, march_int_popcount, march_int_shl, march_int_shr, march_int_wrapping_add, march_int_wrapping_mul, march_int_wrapping_sub, march_int_xor, march_mod_zero, march_panic_error, march_string_byte_length, march_string_concat_n, march_string_join, march_string_split, march_string_to_int, march_unix_time, march_unix_time_ms } from "./march_runtime.mjs";
+import { march_div_zero, march_float_round, march_float_to_string, march_int_and, march_int_div, march_int_div_euclid, march_int_div_floor, march_int_mod, march_int_mod_euclid, march_int_mod_floor, march_int_not, march_int_or, march_int_ovf, march_int_popcount, march_int_shl, march_int_shr, march_int_wrapping_add, march_int_wrapping_mul, march_int_wrapping_sub, march_int_xor, march_mod_zero, march_panic_error, march_panic_site, march_string_byte_length, march_string_concat_n, march_string_join, march_string_split, march_string_to_int, march_try_finally, march_unix_time, march_unix_time_ms } from "./march_runtime.mjs";
 
 import { march_dom_set_timeout as dom_set_timeout, march_dom_prevent_default as dom_prevent_default, march_dom_event_key as dom_event_key, march_dom_add_event_listener as dom_add_event_listener, march_dom_set_style as dom_set_style, march_dom_class_add as dom_class_add, march_dom_set_attribute as dom_set_attribute, march_dom_get_attribute as dom_get_attribute, march_dom_set_text as dom_set_text, march_dom_append_child as dom_append_child, march_dom_create_element as dom_create_element, march_dom_body as dom_body, march_dom_get_element_by_id as dom_get_element_by_id } from "./march_dom.mjs";
 
@@ -39,6 +39,7 @@ const int_abs = { _0: ($_, a) => Math.abs(a) };
 const unix_time = { _0: ($_) => march_unix_time() };
 const unix_time_ms = { _0: ($_) => march_unix_time_ms() };
 const float_round = { _0: ($_, a) => march_float_round(a) };
+const try_finally = { _0: ($_, a, c) => march_try_finally(a, c) };
 const dom_get_element_by_id$clo = { _0: ($_, p0) => dom_get_element_by_id(p0) };
 const dom_body$clo = { _0: ($_, ) => dom_body() };
 const dom_create_element$clo = { _0: ($_, p0) => dom_create_element(p0) };
@@ -6554,7 +6555,7 @@ function state_el() {
         break;
       }
       case "None": {
-        undefined;
+        march_panic_site("tetris.march", 254, 18, 62);
         return (() => { throw march_panic_error("panic: ", "Tetris: #game-state element missing"); })();
         break;
       }
@@ -8430,7 +8431,7 @@ function Array$get$PVec_Int$Int(v, idx) {
                   }
                 }
                 if ($t8293 === true) {
-                  undefined;
+                  march_panic_site("stdlib/array.march", 432, 32, 70);
                   return (() => { throw march_panic_error("panic: ", "Array.get: index out of range"); })();
                 } else {
                   {
@@ -8537,7 +8538,7 @@ function Array$set$PVec_Int$Int$Int(v, idx, val) {
                   }
                 }
                 if ($t8314 === true) {
-                  undefined;
+                  march_panic_site("stdlib/array.march", 463, 32, 70);
                   return (() => { throw march_panic_error("panic: ", "Array.set: index out of range"); })();
                 } else {
                   {
@@ -8635,7 +8636,7 @@ function List$nth$List_Piece$Int($tco_a0, $tco_a1) {
     const n = $tco_a1;
     switch (xs.$) {
       case "Nil": {
-        undefined;
+        march_panic_site("stdlib/list.march", 227, 18, 56);
         return (() => { throw march_panic_error("panic: ", "List.nth: index out of bounds"); })();
         break;
       }
@@ -8966,7 +8967,7 @@ function Array$lst_nth$List_Int$Int($tco_a0, $tco_a1) {
     const n = $tco_a1;
     switch (lst.$) {
       case "Nil": {
-        undefined;
+        march_panic_site("stdlib/array.march", 53, 11, 46);
         return (() => { throw march_panic_error("panic: ", "Array: index out of bounds"); })();
         break;
       }
@@ -9013,7 +9014,7 @@ function Array$trie_get$TrieNode_Int$Int$Int($tco_a0, $tco_a1, $tco_a2) {
     const shift = $tco_a2;
     switch (node.$) {
       case "TrieEmpty": {
-        undefined;
+        march_panic_site("stdlib/array.march", 167, 17, 49);
         return (() => { throw march_panic_error("panic: ", "Array.get: missing node"); })();
         break;
       }
@@ -9216,7 +9217,7 @@ function Array$lst_nth$List_TrieNode_Int$Int($tco_a0, $tco_a1) {
     const n = $tco_a1;
     switch (lst.$) {
       case "Nil": {
-        undefined;
+        march_panic_site("stdlib/array.march", 53, 11, 46);
         return (() => { throw march_panic_error("panic: ", "Array: index out of bounds"); })();
         break;
       }
@@ -9264,7 +9265,7 @@ function Array$trie_update_down$TrieNode_Int$Int$List_T_List_TrieNode_Int_Int$In
     const val = $tco_a4;
     switch (n.$) {
       case "TrieEmpty": {
-        undefined;
+        march_panic_site("stdlib/array.march", 196, 17, 49);
         return (() => { throw march_panic_error("panic: ", "Array.set: missing node"); })();
         break;
       }

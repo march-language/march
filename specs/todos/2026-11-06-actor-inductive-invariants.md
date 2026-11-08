@@ -38,3 +38,23 @@ it; today it is checked where it is cheap and otherwise trusted at deploy.
   `Dec`-guarded-by-`count > 0` handlers is proved; a `Dec` without the guard is refused with the
   message and state that break it (executed counterexample).
 - The migration-simulation law of phase F can take the proved invariant as its hypothesis.
+
+## Sound induction boundary (2026-11-07)
+
+[Horn Clause Solvers for Program Verification](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/nbjorner-yurifest.pdf)
+provides the init/transition/safety decomposition. Check user-supplied invariants first; discovering
+an invariant is separate work (`2026-11-07-local-refinement-inference-experiment`).
+
+- The inductive argument assumes serialized handler transitions. State whether panic,
+  cancellation, restart and hot migration are transitions, termination of an actor, or outside
+  the claim. Each way to install a live state must establish the invariant (including HCR);
+  non-returning handlers do not establish progress or eventual reply.
+- A handler-local invariant proves a safety property of local state. Ignoring sends is valid
+  only for that scope; it cannot prove mailbox bounds, delivery, another actor's state, or
+  cross-actor conservation. Explicitly reject treating those as local invariants.
+- Preserve message-refinement admission requirements across local and remote send paths.
+  Model reply contracts only once typed replies and their actual dispatch path are covered.
+- Acceptance includes bad initialization, an unguarded decrement, two actors sharing message
+  constructor names, an unsupported/effectful guard, restart and migration boundaries, and an
+  undecidable preservation obligation. Label `proved (inductive)` only when all required
+  obligations prove; retain assumptions and skipped boundaries in `--guarantees`.
