@@ -40,7 +40,9 @@ syntax in predicates.
   `MARCH_REFINE_RLIMIT=40000` on 12 fixtures changed 4476 of 4476 blocks.
 - Cold solver timing, full 582-fixture sweep at 4 jobs, base/branch
   alternated: 269/268, 268/268, 268/272 s; median 268 s vs 268 s, no new
-  timeouts observed. Warm-cache paired timings are still outstanding.
+  timeouts observed. Warm (each fixture's `.march/cas` warmed by a prior cold
+  pass, then the sweep timed again): 183.3/185.4, 183.9/182.9, 181.0/181.0 s;
+  median 183.3 s vs 182.9 s.
 - Tree-sitter: `forall` / `exists` are soft keywords (names elsewhere, e.g.
   `let exists = …` in `stdlib/dataframe.march`); `scripts/check-tree-sitter.sh` ok.
 - Full `scripts/run-tests.sh` on the merged tree: every suite green
