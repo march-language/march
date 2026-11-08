@@ -56,7 +56,7 @@ let return_refine_ext (fd : A.fn_def) : (string * A.expr * string option) option
     Some (binder_name binder, pred, Some str_sort)
   | Some (A.TyRefine (A.TyCon ({ A.txt = name; _ }, []) as base, binder, pred))
     when is_record_base base ->
-    Some (binder_name binder, pred, Some (adt_sort_name name))
+    Some (binder_name binder, pred, Some (adt_sort_name ~arity:0 name))
   (* A LIST return, at the MEASURE-ONLY marker: the returned list is never a
      datatype term (its heads are opaque `Elem`), but its MEASURES are —
      `elts(_)` over a literal or a returned parameter (set refinements,
@@ -1423,8 +1423,8 @@ let rec smt_sort_of_ty (t : A.ty) : Smt.sort option =
   | A.TyRefine (base, _, _) -> smt_sort_of_ty base
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Some Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Some Smt.SBool
-  | A.TyCon ({ A.txt; _ }, _) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    Some (adt_sort (adt_sort_name txt))
+  | A.TyCon ({ A.txt; _ }, targs) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length targs) txt) ->
+    Some (adt_sort (adt_sort_name ~arity:(List.length targs) txt))
   | _ -> None
 
 (* Does datatype [adt] declare SOURCE constructor [ctor]?  ([ctor_k] is its
@@ -1463,9 +1463,9 @@ let list_structure_measure (m : string) : string option =
 let post_induction_shape (fd : A.fn_def)
   : (string * string * string list * A.expr * A.fn_clause * string list) option =
   match fd.A.fn_ret_ty, fd.A.fn_clauses with
-  | Some (A.TyRefine ((A.TyCon (rn, _) as rbase), bnd, pred)), [ c ]
+  | Some (A.TyRefine ((A.TyCon (rn, rargs) as rbase), bnd, pred)), [ c ]
     when is_adt_base rbase && (not (is_record_base rbase)) && c.A.fc_guard = None -> (
-    let ret_adt = adt_sort_name rn.A.txt in
+    let ret_adt = adt_sort_name ~arity:(List.length rargs) rn.A.txt in
     let binder = binder_name bnd in
     let params = List.map param_name_of c.A.fc_params in
     match classify_pred binder params pred with
@@ -2899,8 +2899,21 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
           end)
         groups;
       let todo = List.filter (fun (k, _, _, _) -> not (List.exists (fun (k', _, _, _) -> k' = k) !admitted)) todo in
+      (* An ordinary item is retried when it calls a contract admitted in
+         this round (a group above) or proved in the round before
+         ([fresh]; the first IH round has none: the IH-free rounds already
+         tried everything).  Without the second, an item waiting on an
+         ordinary item that [check] proved in the previous IH round was
+         never retried and stayed unadmitted although every path proved
+         (Session.Theory: `compose_msg` waits on `step_msg`, which waits on
+         the `present_config` group). *)
       let proved, rest =
-        List.partition (fun item -> (not (in_group item)) && eligible (Some (names_of !admitted)) item && check item) todo
+        List.partition
+          (fun item ->
+            (not (in_group item))
+            && ((fresh <> None && eligible fresh item) || eligible (Some (names_of !admitted)) item)
+            && check item)
+          todo
       in
       let progress = !admitted @ proved in
       if progress <> [] && rest <> [] then ih_rounds rest (Some (names_of progress))

@@ -42,7 +42,14 @@ let parse_fix_line line : fix_item list =
     let j = Yojson.Basic.from_string line in
     let open Yojson.Basic.Util in
     let fix_j = j |> member "fix" in
-    if fix_j = `Null then []
+    (* Only a machine-applicable fix is applied unasked: a guess or a fix
+       with a placeholder is the programmer's call.  A fix with no tier (an
+       older compiler) counts as machine-applicable. *)
+    let tier = match fix_j with
+      | `Assoc kv -> (match List.assoc_opt "applicability" kv with
+          | Some (`String t) -> t | _ -> "machine-applicable")
+      | _ -> "machine-applicable" in
+    if fix_j = `Null || tier <> "machine-applicable" then []
     else begin
       let file = j |> member "file" |> to_string in
       let sev  = j |> member "severity" |> to_string in

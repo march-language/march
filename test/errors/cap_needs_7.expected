@@ -7,13 +7,14 @@ help: add `needs IO` to the module body.
 14 |   fn listen(cap : Cap(IO), port : Int) : Int do
        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+11 | mod Server do
+12 +   needs IO
+
     run `march --explain cap_needs`
 
 
-
-fix [cap_needs:IO]:
-@@ after line 11 @@
- mod Server do
-+  needs IO
 
 after fix: exit 0

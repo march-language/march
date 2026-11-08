@@ -65,6 +65,20 @@ let http_fetch_hook
   : (string -> string -> string -> string -> (string, string) result) option ref
   = ref None
 
+(** Called by [apply] each time a March closure body returns, normally or by an
+    exception (it runs in [Fun.protect]'s [~finally]). Native builds
+    leave it a no-op. The js_of_ocaml browser REPL (js/march_browser.ml) sets
+    it to a function that js_of_ocaml compiles in CPS, so that every return
+    from a March call goes through a stack-depth-checked trampoline call:
+    under [--effects=cps] the return path of a deep non-tail recursion is a
+    chain of continuation calls, each one a JS frame, and only a CPS call
+    bounces the stack. js_of_ocaml < 6.5 got that bounce for free from the
+    unknown [~finally] call in [Fun.protect]; 6.5 resolves that call and
+    makes it direct, so List.map over 20000 elements overflowed the JS stack
+    on the way back up
+    (specs/progress/2026-11-07-js-of-ocaml-6-5-browser-repl-stack-overflow.md). *)
+let call_return_hook : (unit -> unit) ref = ref (fun () -> ())
+
 (** Effect guard for compile-time witness validation
     (lib/refinecheck/witness.ml).  When set, called with the builtin's name
     before every [VBuiltin] application; the guard raises [Blocked_builtin]

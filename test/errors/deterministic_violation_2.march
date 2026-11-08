@@ -1,0 +1,22 @@
+-- EXPECT-ERROR: which is non-deterministic: it reaches `sys_uptime_ms`
+-- Issue #1180: `cap deterministic` must reject a monotonic clock read, both
+-- the builtin `sys_uptime_ms` and the stdlib wrapper `System.monotonic_time`.
+-- The read needs no `IO.Clock` (it is ambient on purpose), so a module that
+-- declares no clock capability at all still reached it before the fix.
+mod Main do
+  needs IO.Console
+
+  mod Det do
+    cap deterministic
+    fn direct() : Int do
+      sys_uptime_ms()
+    end
+    fn wrapped() : Int do
+      System.monotonic_time()
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(int_to_string(Det.direct() + Det.wrapped()))
+  end
+end

@@ -8,11 +8,12 @@ This `if` (line 4) needs its own `end`: the `end` on line 5 belongs to an outer 
 
     I only noticed at the end of the file.
     `else if` is a nested `if` in the else position, so each `if` needs its own `end`: a two-branch chain ends `end end`, a three-branch chain `end end end`.
-    run `march --explain parse_error`
 
-fix [parse_error]:
-@@ after line 4 @@
-     if a do 1 else if b do 2 else 3 end
-+    end
+    fix (`forge fix` applies it):
+
+4 |     if a do 1 else if b do 2 else 3 end
+5 +     end
+
+    run `march --explain parse_error`
 
 after fix: exit 0

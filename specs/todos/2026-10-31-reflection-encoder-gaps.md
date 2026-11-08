@@ -10,7 +10,10 @@ design is `specs/2026-10-29-refinement-reflection-design.md`.
 the solver, a `match` nested in value position, and guard calls are encoded since
 `specs/progress/2026-11-05-reflection-value-match-solver-divisor-guard-calls.md`; Float,
 String, records, tuples and destructuring `let`s since
-`specs/progress/2026-11-06-reflection-float-string-records-tuples.md`.)
+`specs/progress/2026-11-06-reflection-float-string-records-tuples.md`.  Predicate
+display-name resolution in the propagation pre-pass was closed by 71f112f4a, which resolves every
+reflected call by its site, and is pinned by the `pred-names` suite:
+`specs/progress/2026-11-06-predicate-names.md`.)
 
 - **A tuple-typed return binder, and a reflected call over a tuple-typed record field.**
   Tuple-typed parameters, lemma parameters, caller values and tuple literals in a predicate are
@@ -28,6 +31,3 @@ String, records, tuples and destructuring `let`s since
   type).
 - **`uses:` over-approximation.** When a stage-2 proof's unsat core names no unfolding
   (congruence, I8), `uses:` lists the whole frontier.
-- **Predicate display-name resolution in the propagation pre-pass.** A predicate's bare
-  spelling resolves in the enclosing function's module only for obligations checked inside
-  `visit_fn`; the pre-pass resolves exact display names only.

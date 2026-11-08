@@ -398,6 +398,42 @@ All four `NL`s vanish, `DO` pushes a plain `Block` context
 this paren depth), and every `NL` while `Block` is on top is swallowed by
 the `else next lexbuf` branch (`token_filter.ml:392–393`).
 
+**The one thing a swallowed `NL` still decides: a line-initial `(` becomes
+`LPAREN_STMT`.** Deleting the newline would make `let _ = a`⏎`()` and
+`let _ = a()` token-identical, and the call rule (`expr_field LPAREN …
+RPAREN`) would glue the `(` line onto the previous expression. So the
+filter's emit step remembers whether an `NL` passed since the previous
+significant token, and when it is about to emit an `LPAREN` that follows a
+newline AND a token that can end an expression (`ends_expression` in
+`token_filter.ml`), it emits `LPAREN_STMT` instead. The expression-ending
+tokens are: `LOWER_IDENT`, `UPPER_IDENT`, `RPAREN`, `RBRACKET`; the literals
+`INT`, `FLOAT`, `STRING`, `BOOL`, `ATOM`; and `RBRACE` (record literal or
+update), `END` (a `do … end` block, `if`, `match`, …) and `INTERP_END`
+(an interpolated string). `LPAREN_STMT` is accepted only by `expr_atom`'s
+group/tuple/unit alternatives and `simple_pattern`'s parenthesised/tuple
+alternatives (a match arm may open a fresh line with a tuple pattern),
+never by the call rule, so the `(` line always starts a new statement or arm:
+
+```
+source:
+  let r = { x: 1 }
+  (r.x + 1)
+
+after filter:   LET LOWER_IDENT("r") EQUALS LBRACE … RBRACE
+                LPAREN_STMT LOWER_IDENT("r") DOT LOWER_IDENT("x") PLUS INT(1) RPAREN
+```
+
+After the tokens that can never be followed by a call (`END` of an `if`,
+`match` or local `fn`; a type's `}`), the retag changes nothing: a `(` there
+already had to start a new statement. The rule landed in three steps: #129
+(identifiers, `)`, `]`; witness
+[`parse/p33`](grammar/parse/p33_paren_stmt_after_bare_ident.march)), #132
+(literals; [`parse/p34`](grammar/parse/p34_paren_stmt_after_literal.march))
+and #1179 (`}`, `end`, interpolated strings;
+[`parse/p46`](grammar/parse/p46_paren_stmt_after_brace_end_interp.march)).
+Only `(` is special: a line starting with `-` or an infix operator still
+continues the previous expression.
+
 **Inside a `Match` context, it's the opposite default (`NL` is kept by
 default) but with three suppression rules layered on top**, because a
 `match` body's arms can themselves contain multi-expression bodies that

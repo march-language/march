@@ -25,6 +25,48 @@ git log is authoritative for exact commits.
   (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
   predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
   tuple refinement was silently not checked, and a tuple in a predicate was an unchecked skip.
+- **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
+  `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
+  gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
+  reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
+  block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
+  function's unfolding depth for the checks inside only. All four are checked by the compiler
+  and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
+  in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
+  keeps working.
+- **A warning when a predicate means the built-in, not your function.** Inside a refinement
+  predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
+  own function of that name is in scope, the checker now says so
+  (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
+- **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
+  `march --check-json`, a fix's `applicability` is `machine-applicable`,
+  `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
+  `--check-json` applies it to a copy of the file and checks the copy. Unless its own
+  error went away and nothing new appeared, the fix is printed as `maybe-incorrect`.
+  `forge fix` applies only machine-applicable fixes, and the language server marks only
+  those as the preferred quick fix, after re-checking each one on a copy of the buffer.
+  The others are labelled "a guess: check it" or "fill in the placeholder".
+- **`march --check` shows each fix under its error,** as the lines it changes
+  (`4 - old`, `4 + new`), headed by its tier. Until now only `--check-json`, the editor
+  and `forge fix` saw fixes.
+- **More errors come with a fix:**
+  - an unknown name, qualified name, constructor or record field, when the message
+    suggests exactly one replacement (a guess when another candidate is as close);
+  - a missing JSON codec: `derive Json for T` after `T`'s declaration;
+  - a type annotation on `let?` / `let*`: it is removed;
+  - a non-exhaustive `match`: the missing arm, with a `todo(...)` body to replace.
+
+  In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
+  have a machine-applicable one.
+- **`Actor.Theory`: the mailbox's promises, proved on a model and tested against the
+  runtime.** A new stdlib module models an actor's mailbox and proves, once, that one sender's
+  messages arrive in the order sent (whatever other senders, a hot-deploy hold, a stash or a
+  call waiting inside a handler do), that a late reply never answers a later `Actor.call`, and
+  that a monitor's `Down` is never dropped by a full mailbox and is delivered at most once. A
+  native fixture checks the runtime's receive order against the model.
+  `march --check --guarantees` now reports the runtime's laws as `proved (model) · tested
+  (runtime)` or `proved (model)` instead of `assumed`. See the actors chapter, "What is
+  proved about the mailbox".
 - **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
   parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
   parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
@@ -41,6 +83,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
   module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
@@ -300,6 +350,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`Math`, `Option` and `Result` are `cap verified`.** Every refinement contract and lemma in
+  them is proved, and a test now fails if a change leaves one unproved (the same now holds for
+  `Udp`, which already declared it). `List` is fully proved in ordinary programs but is not yet
+  marked, because of a name clash when it is checked on its own.
+
 - **Int `/` and `%` are faster in compiled code.** The zero-divisor check is now a test in
   the generated code instead of a call into the runtime, so LLVM sees the division: a literal
   divisor becomes a multiply, and a divisor the code has already tested is not tested again.
@@ -542,6 +597,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Every cookbook "run" button runs.** 54 of the 151 March blocks on the cookbook and
+  "Coming from" pages failed when run in the sidebar REPL: they used a value from an earlier
+  block, had a placeholder body, used `1_000_000` (March has no digit separators), or need a
+  file system, sockets or the DOM. Each now runs on its own, or, when it cannot run in a
+  browser, shows only a copy button. CI runs every block.
 - The Error Messages tour shows two more examples: a protocol step stranded after a `choose`
   branch that loops forever, and a division by a value from a pattern. The role-grant example
   explains its new help, and the error reference lists `protocol_invalid`,
@@ -639,11 +699,161 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Diagnostics` and `try_finally` work on `--target js`.** A program using
+  `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
+  compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
+  use) threw `ReferenceError` at run time. Observers now receive a report, with its context and
+  the panic's location, when an error escapes `main`; the error then reaches Node as before.
+  The JS report has no backtrace; the `Diagnostics` module doc lists the other differences.
+- **`~H"..."` works in the browser REPL.** An HTML sigil failed with
+  `unbound variable: IOList.from_strings` unless something had already loaded IOList: the
+  REPL loads a stdlib module when the input names it, and a sigil names none. A sigil now
+  loads the module it expands to.
+- **A module-level `let` holding a function works outside the entry module.** With
+  `mod Cst do let inc = fn x -> x + 1 end`, a compiled `Cst.inc(4)` printed a pointer-sized
+  number natively and `[object Object]` on `--target js`, and `let g = Cst.inc` or
+  `List.map(xs, Cst.inc)` passed the wrong thing along (likewise `Cst.thunk()` for
+  `let thunk = fn () -> 42`). Native and JS builds now call it like the interpreter does.
+- **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
+  recursion (`List.map` over 20,000 elements, or a panic unwinding 20,000 calls) ran out of
+  JavaScript stack on the way back up, so the build was pinned to js_of_ocaml `< 6.5`. The
+  interpreter now resets the stack on return (and on exception unwind) as well as on call,
+  and the pin is gone.
+- **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
+
+- **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
+  gave `NaN` and the program went on; they now panic with "division by zero" / "modulo by
+  zero", as natively. `to_string` on a record or variant with no `Show` impl now builds and
+  prints what native prints (`{ x: 1, y: 2 }`), and `Check.all` property tests,
+  `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
+  A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
+  native message.
+- **Module functions used as values compile correctly.** A binding such as
+  `let k = List.length` now retains the function definition during compilation,
+  including when the binding is called with different element types.
+- **Type-qualified function names fail with an actionable diagnostic.**
+  `Int.to_string(5)` now explains that `Int` is a type and points to `to_string`,
+  instead of passing checking and failing or producing the wrong value at runtime.
+- **Endpoint generation merges equivalent unlabelled choice branches.** A bystander
+  receiving the same message in either branch now shares the message constructor
+  and continuation state, instead of receiving errors in generated code.
+
+- **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
+  such a type, and a lemma about it, can now be used in refinements. Recursion through
+  `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating
+  too.
+- **Compiled `x +. 0.0` keeps the sign of zero right** (#1185). The optimizer rewrote
+  `x +. 0.0` and `0.0 +. x` to `x`, so native and JS builds returned `-0.0` for
+  `-0.0 +. 0.0`, where IEEE 754 (and the interpreter) give `+0.0`. The rewrite now fires
+  only for `-0.0`, the real additive identity; `x -. 0.0` still simplifies and
+  `x -. -0.0` no longer does.
+- **`install.sh` verifies checksums with Apple's `/sbin/sha256sum`** (#1182). With it first
+  on `PATH`, the `curl | sh` install failed at "Verifying checksum" on macOS, because
+  Apple's `sha256sum -c` prints usage when the checklist comes on stdin without a `-`
+  operand. The installer now passes `-`.
+- **Compiled `==` on tuples of different nested shapes no longer shares one helper**
+  ([#1171](https://github.com/march-language/march/issues/1171)). `((Int, Int), Int, Int)`
+  and `((Int, Int, Int), Int)` got the same native equality helper, so unequal values
+  compared `true`. (The record half of #1171 is the record-equality fix below.)
+- **A module on `MARCH_LIB_PATH` is no longer loaded just because it declares a type or
+  constructor with the same name as one your code uses from its own module.** A module
+  that used its own `type Tally` pulled in every other lib-path module declaring a
+  `Tally`, even ones nothing referenced, and an error in any of them failed the build
+  (`--check`, `--compile` and the interpreter alike). A bare name used without being
+  defined in the same module still loads the modules that define it (#1183).
+- **`<`, `<=`, `>`, `>=` on a type with an `Ord` impl now use it in compiled code**
+  (#1172). On an enum, record, payload ADT, newtype or unboxed ADT with a derived or
+  hand-written `Ord`, and in generic `when Ord(a)` code, the operators mean
+  `compare(a, b) <op> 0` on native and `--target js`, as they already did in the
+  interpreter. Before, native strict comparisons were always false and `<=`/`>=`
+  always true, a single-field newtype compared its raw payload, an all-scalar ADT
+  such as `Pair(Int, Int)` failed the native build, and JS compared the objects.
+  `compare` on `Int`, `Float` and `String` (and so a derived `Ord` over such
+  fields) now also builds on `--target js`.
+
+- **A line starting with `(` after a record, a `do ... end` block or an interpolated
+  string is now a new statement** (#1179), as it already was after an identifier, `)`,
+  `]` or a literal. Before, `let r = { x: 1 }` followed by a `(r.x + 1)` line parsed as
+  a call on the record (`not_a_function`, then `unbound_variable` for `r`), and
+  `let g = do ... end` followed by a `("x")` line silently called `g`.
+- **`march fmt` and `forge format` no longer replace code with `...`** (#1174). A `match`
+  or `match do` in a list, tuple, record, call argument, operand or string interpolation,
+  a multi-statement lambda that is not the last argument, and an `if` with a
+  multi-statement branch inside another expression were written out as `...`,
+  `match ...` or `match do ... end`. They are now printed in full.
+- **The formatter keeps the parentheses the grammar needs** (#1175). It dropped them
+  around `if`, `match`, `fn` and `|>` operands, a called `(if ...)` or `(fn ...)`, the
+  operand of `-` or `!`, and a comparison inside a comparison. The output either did
+  not parse or meant something else: `1 + (3 |> double)` became `1 + 3 |> double`.
+- **`march fmt`, `forge format` and the language server refuse output that changes the
+  program.** The formatted text is parsed again and compared with the input. If it does
+  not parse, or parses to a different program, the file is left unchanged and `march
+  fmt` exits 1 with a message. The check found more formatter bugs, now fixed: UTF-8
+  and `${` in strings, `\r` in multi-line strings, float literals with more than 12
+  digits, default argument values, `resource`, `opaque type`, `blocking` and `raises`
+  extern functions, `linear let`, `p as a as b`, an interface's `requires`, `use A`
+  (printed as `import A`), and multi-line sigils, whose content was re-indented. Actor
+  declarations with `supervise`, `mailbox`, `@compat`, `@invariant` or `@[remote]` are
+  still not printed in full, so such files are now refused instead of losing those parts.
+- **`cap pure` and `cap deterministic` now reject monotonic clock reads and stdlib
+  wrappers over IO.** `sys_uptime_ms()` and `System.monotonic_time()` passed both caps
+  (the read needs no `IO.Clock`); they are now rejected, called directly or through any
+  stdlib function that reaches them, and still need no capability elsewhere. A
+  `cap pure` module may no longer declare any `needs`, and a `cap deterministic` module
+  may not declare `needs IO.Clock`, `IO.Random` or `IO`: those lines let stdlib wrappers
+  such as `File.read` and `DateTime.now()` through. Each is a `[pure_violation]` or
+  `[deterministic_violation]` at the `needs` line (#1180).
+- **`march --target js --test` runs the tests.** The output used to define the test blocks
+  and never call them, so a failing test exited 0 with no output; with a `main` the tests
+  were dropped and `main` ran. A program that prints did not build at all with `--test`
+  (`builtin cap_dict has no JavaScript-target implementation`). The `.mjs` now runs the
+  tests and prints the same report as a native test binary, takes `--verbose` and
+  `--filter=`, and exits 1 when a test fails. Capability mocks work there too (#1176).
+- **An output path that cannot be written is no longer an internal compiler error.**
+  `march --target js -o dist/app.mjs` with no `dist/` printed "internal compiler error" and
+  exited 3. `-o` now creates missing parent directories, for `--target js` and `--compile`
+  alike. A path that still cannot be written, such as a directory, is an error naming it,
+  with exit code 1. A source map that cannot be written is now a warning instead of being
+  skipped without a word (#1181).
+- **`string_to_float` (and `String.to_float`, `float_from_string`) accepts the same
+  strings on every backend** (#1178): C `strtod`'s grammar with the whole string consumed,
+  now written down in the language reference. On `--target js`, `"inf"`, `"-inf"` and
+  `"nan"` parsed as `None` (so a TOML `x = inf` read as `0.`), blank strings as `Some(0.)`,
+  and `"1.5 "`, `"0b11"` and `"0o17"` were accepted while hex floats (`"0x1p3"`) were not.
+  The interpreter no longer accepts `_` separators (`"1_000"`), and native builds no longer
+  accept a string with an embedded NUL or depend on the C library for `nan(...)`.
+  `float_infinity`, `float_neg_infinity`, `float_nan`, `float_epsilon`, `float_is_nan`,
+  `float_is_infinite` and `float_from_string` now compile for `--target js`.
+- **A type named like a standard-library type of another arity works in predicates.** A
+  `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
+  it unchecked. Types of the same name and the same number of parameters still are, with a
+  message saying so that now names your function.
+- **No false "not checked" warning on a qualified predicate call that is checked.** A
+  predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
+- Compiled record equality keeps helpers distinct for different record shapes,
+  avoiding wrong comparisons and crashes when a program uses several record types.
+- Refinement diagnostics preserve predicate grouping with parentheses, including
+  mixed Boolean operators, arithmetic and unary expressions.
+
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
   file, instead of silently reporting success.
+- **A compiled program no longer segfaults when an unannotated `let x = None` is used as
+  `Option(Float)`, `Option(())` or `Option(Option(_))`** (#1173). This includes a
+  `None` stored in a record field, which crashed when the record was dropped. The
+  binding is now compiled at the type it is used at. The interpreter was already
+  correct.
 
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,
@@ -812,9 +1022,27 @@ git log is authoritative for exact commits.
   Safari. The cache is now a `Map` keyed by the string, holding at most one string of
   each length so older V8 (which hashes long strings by length) doesn't compare them
   either.
+- **`--target js`: a module-level `let` outside the entry module reads as its value**
+  (#1170). A `let` in a nested `mod`, a `MARCH_LIB_PATH` module or the standard library
+  printed `[object Object]`, and `Bytes.encode_base64` threw
+  `TypeError: s.slice is not a function`. The interpreter and native binaries were right.
+- **A top-level `fn` named like a builtin is called on `--target js`** (#1177). A user
+  `fn negate` (also reached by prefix `-x`), `fn not` (also `!x`), `fn string_length`,
+  `fn int_mod` and the like were replaced by the builtin, or, for the names JS also
+  exposes as first-class values, made the module fail to load (`Identifier 'int_xor' has
+  already been declared`). On every backend, a user `fn not` is now also called for a
+  literal argument (`not(true)`, `!false`); the optimizer used to fold those as the
+  builtin.
 
 ### Documentation
 
+- **Capabilities: monotonic time and `extern`-backed stdlib modules.** The capabilities
+  chapter says that monotonic time (`sys_uptime_ms`, `System.monotonic_time`) is not
+  gated by `IO.Clock` but is banned under `cap pure` and `cap deterministic`, describes
+  how both caps now cover stdlib wrappers, and says that the `IO.Foreign` exclusion from
+  the capability upper limit covers first-party stdlib modules built on `extern`
+  (`Js.Dom`, `Js.Canvas`), which a module can call without declaring `needs`; function
+  `needs ()` bounds and `main`'s grant still see them (#1180).
 - **Lemmas as a contract for changes.** The refinement-types chapter and the
   `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
   as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a

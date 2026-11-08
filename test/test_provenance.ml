@@ -268,11 +268,11 @@ let test_compiled_with_debug_info_runs () =
   output_string oc {|mod ProvE2e do
   needs IO.Console
   fn boom(n : Int) : Int do
-    if n > 2 do panic("boom at " ++ Int.to_string(n)) else n end
+    if n > 2 do panic("boom at " ++ int_to_string(n)) else n end
   end
   fn main(_cap_console : Cap(IO.Console)) do
     println("before")
-    println(Int.to_string(boom(5)))
+    println(int_to_string(boom(5)))
   end
 end
 |};

@@ -1404,7 +1404,7 @@
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
- (modules test_refinecheck test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars)
+ (modules test_refinecheck test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars test_refine_pred_names test_refine_proof_hints)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
@@ -2034,6 +2034,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/tuple_ord.expected native_tuple_ord.out)))
+
+; `<`/`<=`/`>`/`>=` on an ADT, record, newtype or unboxed ADT with an Ord
+; impl (derived or hand-written), and in generic `when Ord(a)` code, mean
+; `compare(a, b) <op> 0` (issue #1172): Mono routes them through the prelude's
+; `__ord_lt` & co. Before, native compared heap cells via march_poly_compare
+; (always 0), a newtype by raw payload, an unboxed ADT failed the LLVM build,
+; and JS used the JS operator on objects. Same fixture on both backends.
+(rule
+ (targets native_adt_ord_operators native_adt_ord_operators.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/adt_ord_operators.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_adt_ord_operators native/adt_ord_operators.march)
+   (with-stdout-to native_adt_ord_operators.out (system "./native_adt_ord_operators")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/adt_ord_operators.expected native_adt_ord_operators.out)))
+
+(rule
+ (targets js_adt_ord_operators.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/adt_ord_operators.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_adt_ord_operators.mjs native/adt_ord_operators.march)))
+
+(rule
+ (targets js_adt_ord_operators.out)
+ (deps js_adt_ord_operators.mjs march_runtime.mjs)
+ (action (with-stdout-to js_adt_ord_operators.out (run node js_adt_ord_operators.mjs))))
+
+(rule (alias runtest) (action (diff native/adt_ord_operators.expected js_adt_ord_operators.out)))
 
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
@@ -8717,6 +8752,117 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_let_shadowing.expected js_let_shadowing.out)))
 
+; Regression (#1170): a module-level `let` outside the entry module (nested
+; mod, stdlib Bytes.b64_alphabet) is a zero-param fn in TIR; --target js read
+; it as its `$clo` wrapper ([object Object]) instead of calling it.
+(rule
+ (targets js_module_let_value.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_value.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_value.mjs native/module_let_value.march)))
+
+(rule
+ (targets js_module_let_value.out)
+ (deps js_module_let_value.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_value.out (run node js_module_let_value.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_value.expected js_module_let_value.out)))
+
+; Regression: a function-typed module-level `let` outside the entry module
+; (`mod Cst do let inc = fn x -> x + 1 end`) is a zero-param fn returning the
+; closure.  `Cst.inc(4)` passed 4 to it and `let g = Cst.inc` took the fn itself:
+; native printed pointers, --target js `[object Object]`.  All three diffed
+; against ONE .expected, the interpreter's.
+(rule
+ (targets native_module_let_fn native_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_module_let_fn
+        native/module_let_fn.march)
+   (with-stdout-to native_module_let_fn.out
+        (system "./native_module_let_fn")))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected native_module_let_fn.out)))
+
+(rule
+ (targets js_module_let_fn.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_fn.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_fn.mjs native/module_let_fn.march)))
+
+(rule
+ (targets js_module_let_fn.out)
+ (deps js_module_let_fn.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_fn.out (run node js_module_let_fn.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected js_module_let_fn.out)))
+
+(rule
+ (targets interp_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (with-stdout-to interp_module_let_fn.out
+    (run %{exe:../bin/main.exe} native/module_let_fn.march))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected interp_module_let_fn.out)))
+
+; Regression (#1177): an entry-module fn named like a bare-name-dispatched
+; builtin (negate, not, string_length, int_xor) must be called on --target js
+; and natively (the `not(<literal>)` fold ignored it on both).
+(rule
+ (targets js_shadowed_negate_not.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_negate_not.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_negate_not.mjs native/shadowed_negate_not.march)))
+
+(rule
+ (targets js_shadowed_negate_not.out)
+ (deps js_shadowed_negate_not.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_negate_not.out (run node js_shadowed_negate_not.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_negate_not.expected js_shadowed_negate_not.out)))
+
+(rule
+ (targets native_shadowed_negate_not native_shadowed_negate_not.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/shadowed_negate_not.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadowed_negate_not
+        native/shadowed_negate_not.march)
+   (with-stdout-to native_shadowed_negate_not.out
+        (system "./native_shadowed_negate_not")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadowed_negate_not.expected native_shadowed_negate_not.out)))
+
+; The native shadowed-builtin witness on --target js: a user `fn int_mod`
+; collided with the first-class `const int_mod = {...}` builtin wrapper.
+(rule
+ (targets js_shadowed_builtin_name.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_name.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_builtin_name.mjs native/shadowed_builtin_name.march)))
+
+(rule
+ (targets js_shadowed_builtin_name.out)
+ (deps js_shadowed_builtin_name.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_builtin_name.out (run node js_shadowed_builtin_name.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_builtin_name.expected js_shadowed_builtin_name.out)))
+
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
  (targets js_extern_import.mjs)
@@ -12338,6 +12484,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/string_to_float_option.expected native_string_to_float_option.out)))
 
+; ── #1178: string_to_float accepts ONE grammar (C strtod, whole string) on
+; every backend. The same fixture runs compiled, interpreted and as
+; --target js, and all three are diffed against ONE .expected.
+(rule
+ (targets native_string_to_float_grammar native_string_to_float_grammar.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_string_to_float_grammar
+        native/string_to_float_grammar.march)
+   (with-stdout-to native_string_to_float_grammar.out
+        (system "./native_string_to_float_grammar")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected native_string_to_float_grammar.out)))
+
+(rule
+ (targets interp_string_to_float_grammar.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march))
+ (action
+  (with-stdout-to interp_string_to_float_grammar.out
+    (run %{exe:../bin/main.exe} native/string_to_float_grammar.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected interp_string_to_float_grammar.out)))
+
+(rule
+ (targets js_string_to_float_grammar.mjs)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_string_to_float_grammar.mjs native/string_to_float_grammar.march)))
+
+(rule
+ (targets js_string_to_float_grammar.out)
+ (deps js_string_to_float_grammar.mjs march_runtime.mjs)
+ (action (with-stdout-to js_string_to_float_grammar.out (run node js_string_to_float_grammar.mjs))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected js_string_to_float_grammar.out)))
+
 (rule
  (targets native_html_safe_raw native_html_safe_raw.out)
  (deps (file %{exe:../bin/main.exe})
@@ -13212,6 +13407,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/mailbox_bounded.expected native_mailbox_bounded.out)))
+
+; ── Actor.Theory trace conformance (lemmas design §4.2, M8) ──────────────
+; (compiled) Three senders each send 50 numbered messages to one logger; the
+; logger's handling order, replayed through Actor.Theory.from_sender (the
+; function the proved ordering laws enq_self / enq_other are about), must
+; give each sender 1..50.  Uses List/Actor/Actor.Theory, hence ../stdlib.
+(rule
+ (targets native_actor_theory_conformance native_actor_theory_conformance.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_theory_conformance.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_theory_conformance
+        native/actor_theory_conformance.march)
+   (with-stdout-to native_actor_theory_conformance.out
+        (system "./native_actor_theory_conformance")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_theory_conformance.expected native_actor_theory_conformance.out)))
 
 ; ── Named registry (Task 4): Actor.register/whereis/unregister ───────────
 ; (compiled) ───────────────────────────────────────────────────────────

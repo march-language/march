@@ -257,6 +257,7 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
+  | A.EProof (p, _) -> List.exists free (A.proof_children p)
 
 (* ── Attributing a skip to a withdrawn alias ───────────────────────────────
    A withdrawn alias is only ONE of the reasons an obligation can go
@@ -547,6 +548,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
       | A.EDbg (Some e, _) -> recur e
+      | A.EProof (p, _) -> List.exists recur (A.proof_children p)
     in
     (* [pred] itself may be a top-level conjunction (`len(_) >= 0 && len(_) >
        0`), which is exactly the shape [Partial_conjunct] names: one conjunct

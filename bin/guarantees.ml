@@ -21,7 +21,9 @@
 module A = March_ast.Ast
 module O = March_refinecheck.Obligation
 
-type label = Proved | Violated | Not_proved | Not_checked | Checked_compiler | Proved_spec | Assumed
+type label =
+  | Proved | Violated | Not_proved | Not_checked | Checked_compiler
+  | Proved_model | Proved_model_tested | Proved_spec | Assumed
 
 let label_text = function
   | Proved -> "proved"
@@ -29,6 +31,8 @@ let label_text = function
   | Not_proved -> "not proved"
   | Not_checked -> "not checked"
   | Checked_compiler -> "checked (compiler)"
+  | Proved_model -> "proved (model)"
+  | Proved_model_tested -> "proved (model) · tested (runtime)"
   | Proved_spec -> "proved (spec) · validated (compiler)"
   | Assumed -> "assumed"
 
@@ -36,7 +40,7 @@ let label_text = function
    not a weakness of this build, so it never decides the summary. *)
 let rank = function
   | Violated -> 0 | Not_checked -> 1 | Not_proved -> 2 | Checked_compiler -> 3
-  | Proved_spec -> 4 | Proved -> 5 | Assumed -> 6
+  | Proved_model -> 4 | Proved_model_tested -> 5 | Proved_spec -> 6 | Proved -> 7 | Assumed -> 8
 
 type line = { what : string; label : label; detail : string }
 
@@ -216,7 +220,8 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
 (* The protocol's lines from its translation-validation rows
    ([Session_validate], M6): a projection that agrees with
    [Session.Theory.project] inherits what the stdlib proves about it. *)
-let protocol_lines (rows : Session_validate.row list) (pd : A.protocol_def) : int * line list =
+let protocol_lines ~(fragment : (unit, string) result) (rows : Session_validate.row list) (pd : A.protocol_def)
+    : int * line list =
   let rec roles acc = function
     | [] -> acc
     | A.ProtoMsg (s, r, _, _) :: rest -> roles (s.A.txt :: r.A.txt :: acc) rest
@@ -272,15 +277,33 @@ let protocol_lines (rows : Session_validate.row list) (pd : A.protocol_def) : in
             (if String.contains projectors ' ' then "" else "s")
             (if n = 2 then ", whose two projections are dual (Session.Theory.project_dual)" else "") }
   in
+  (* C3-C5 hold for a protocol in Session.Theory's fragment once its
+     projections are validated (the laws are about `project`). *)
+  let laws =
+    if projection.label <> Proved_spec then Error "its projections are not validated"
+    else fragment
+  in
   let pairwise =
     if n = 2 then []
     else
-      [ { what = "pairwise duality"; label = Checked_compiler;
-          detail = "every send has the matching receive at its peer (not yet proved for more than two roles)" } ]
+      match laws with
+      | Ok () ->
+        [ { what = "pairwise duality"; label = Proved_spec;
+            detail = "what each pair of roles does with each other is dual (Session.Theory.pairwise)" } ]
+      | Error why ->
+        [ { what = "pairwise duality"; label = Checked_compiler;
+            detail = "every send has the matching receive at its peer; not proved: " ^ why } ]
   in
-  ( n,
-    (projection :: pairwise)
-    @ [ { what = "deadlock freedom"; label = Not_checked; detail = "no proof covers this protocol yet" } ] )
+  let deadlock =
+    match laws with
+    | Ok () ->
+      { what = "deadlock freedom"; label = Proved_spec;
+        detail =
+          "on the protocol's own schedule every role can take each step and every role finishes \
+           (Session.Theory.progress, projections_compose; synchronous delivery)" }
+    | Error why -> { what = "deadlock freedom"; label = Not_checked; detail = "not proved: " ^ why }
+  in
+  (n, (projection :: pairwise) @ [ deadlock ])
 
 let pad s w = if String.length s >= w then s else s ^ String.make (w - String.length s) ' '
 
@@ -318,13 +341,32 @@ let print ?(oc = stdout) ~filename ~user_files ~(surface : A.decl list) (desugar
   let rows = Session_validate.run surface in
   List.iter
     (fun (name, pd) ->
-      let n, lines = protocol_lines (List.filter (fun (r : Session_validate.row) -> r.Session_validate.proto = name) rows) pd in
+      let n, lines =
+        protocol_lines ~fragment:(Session_validate.fragment name)
+          (List.filter (fun (r : Session_validate.row) -> r.Session_validate.proto = name) rows) pd
+      in
       print_block oc (Printf.sprintf "protocol %s (%d roles)" name n) lines)
     (protocols surface);
   if acts <> [] then
+    (* Actor.Theory (stdlib/actor_theory.march) proves these about a model
+       of the mailbox; the runtime is tied to the model by the native
+       fixtures named here (lemmas design §4.2, M8).  Never more than
+       `proved (model) · tested (runtime)`. *)
     print_block oc "runtime"
-      [ { what = "mailbox order, Actor.call replies, DOWN delivery";
-          label = Assumed;
-          detail = "the runtime is trusted; nothing here proves it" } ];
+      [ { what = "per-sender message order";
+          label = Proved_model_tested;
+          detail =
+            "Actor.Theory.enq_self, enq_other, replay_order, call_keeps_others; tested: \
+             actor_theory_conformance, actor_call_in_handler_keeps_messages" };
+        { what = "Actor.call replies";
+          label = Proved_model_tested;
+          detail =
+            "a late reply never answers a later call (Actor.Theory.stale_reply_ignored, \
+             call_reply_cat); tested: actor_call_late_reply" };
+        { what = "DOWN delivery";
+          label = Proved_model;
+          detail =
+            "at most once, never dropped by a full mailbox (Actor.Theory.down_at_most_once, \
+             down_never_dropped); the runtime is not yet tested against it" } ];
   if acts = [] && protocols surface = [] then
     Printf.fprintf oc "no actors or protocols in %s\n" filename

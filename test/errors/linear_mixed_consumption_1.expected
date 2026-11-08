@@ -28,6 +28,11 @@ Non-exhaustive pattern match — missing case: _. [non_exhaustive_match]
 
     Add a branch for this case, or use `_ -> ...` as a catch-all.
 
+    fix, with a placeholder to fill in:
+
+28 |           :error -> ()
+29 +           _ -> todo("handle _")
+
 
 -- LINEARITY ---- errors/linear_mixed_consumption_1.march
 

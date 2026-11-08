@@ -74,3 +74,6 @@ closes one way to "prove" something false:
 - a lemma used as a value would need to exist at run time (L5).
 
 See also: [the language reference](../refinement-types.md), [the lemmas guide](../lemmas.md), `lemma_unproved`, `invalid_measure`.
+
+Scoped `assert … by` blocks use this diagnostic too. Their hints must be total and pure;
+only a proved goal becomes a fact outside the block. See [scoped proof hints](../lemmas.md#scoped-proof-hints-assert--by).

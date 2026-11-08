@@ -102,6 +102,7 @@ has a fast-path version of `sum_column` that hands the reduction to
 Filter by extension with `Path.extension`, which returns the extension **without**
 the leading dot:
 
+<!-- repl:skip -->
 ```march
 mod Batch do
 

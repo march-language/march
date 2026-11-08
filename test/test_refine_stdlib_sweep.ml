@@ -55,8 +55,55 @@ let stdlib_post_rows file out =
       | _ -> None)
     (lines out)
 
+(* Compare parsed structure independently of the printer, ignoring source spans. *)
+let rec predicate_tree expr =
+  let open March_ast.Ast in
+  match expr with
+  | EVar n -> "var:" ^ n.txt
+  | ELit (LitInt n, _) -> "int:" ^ string_of_int n
+  | EApp (f, args, _) ->
+    "app(" ^ predicate_tree f ^ "," ^ String.concat "," (List.map predicate_tree args) ^ ")"
+  | EField (recv, n, _) -> "field(" ^ predicate_tree recv ^ "," ^ n.txt ^ ")"
+  | _ -> Alcotest.fail "unexpected predicate fixture node"
+
+let predicate_roundtrip source expected () =
+  let parse s = March_parser.Parse.expr_of_lexbuf (Lexing.from_string s) in
+  let original = parse source in
+  let builtin = March_refinecheck.Reflect_state.negate_builtin_at in
+  let saved = !builtin in
+  let printed =
+    Fun.protect ~finally:(fun () -> builtin := saved) (fun () ->
+        builtin := (fun _ -> true);
+        March_refinecheck.Refine_scope.pred_str original)
+  in
+  Alcotest.(check string) "rendered predicate" expected printed;
+  Alcotest.(check string) "same parsed tree" (predicate_tree original) (predicate_tree (parse printed))
+
+let predicate_tests =
+  List.map
+    (fun (source, expected) ->
+      Alcotest.test_case ("predicate grouping: " ^ source) `Quick (predicate_roundtrip source expected))
+    [ "_ <= a && _ <= b && (_ == a || _ == b)", "_ <= a && _ <= b && (_ == a || _ == b)";
+      "high < low || (_ >= low && _ <= high)", "high < low || _ >= low && _ <= high";
+      "(a + b) * c", "(a + b) * c";
+      "a - (b - c)", "a - (b - c)";
+      "a / (b * c)", "a / (b * c)";
+      "a + (b + c)", "a + (b + c)";
+      "a && (b && c)", "a && (b && c)";
+      "(a == b) == c", "(a == b) == c";
+      "a == (b == c)", "a == (b == c)";
+      "!(a || b)", "!(a || b)";
+      "!(a +. b)", "!(a +. b)";
+      "-(a + b)", "-(a + b)";
+      "-(-a)", "-(-a)";
+      "(a + b).value", "(a + b).value";
+      "(-a).value", "(-a).value";
+      "(f(a)).value", "(f(a)).value";
+      "a /. (b *. c)", "a /. (b *. c)";
+      "a + b * c - d", "a + b * c - d" ]
+
 let tests =
-  [ gated "List.drop_append: drop(append(xs, ys), len(xs)) == ys (without it: a fuel skip)" (fun () ->
+  predicate_tests @ [ gated "List.drop_append: drop(append(xs, ys), len(xs)) == ys (without it: a fuel skip)" (fun () ->
         with_and_without ~line:6 ~callee:"need_leq" ~lemma:"List.drop_append(xs, ys)" (fun call ->
             "  fn a(xs : List(Int), ys : List(Int)) : Int do\n" ^ call
             ^ "    need_leq(ys, List.drop(List.append(xs, ys), List.length(xs)))\n  end\n"));
@@ -88,6 +135,15 @@ let tests =
           [ "take_onto_append"; "take_append"; "drop_append"; "nth_opt_append" ]);
     gated "Math: min_int, max_int and clamp_int prove their result types" (fun () ->
         let out = run "mod U do\n  fn f(n : Int) : Int do n end\nend\n" in
+        let min_rows =
+          List.filter (fun row -> contains row "\tpostcondition\tmin_int\t") (lines out)
+        in
+        if min_rows = [] then Alcotest.failf "missing min_int report row:\n%s" out;
+        List.iter
+          (fun row ->
+            if not (contains row "_ <= a && _ <= b && (_ == a || _ == b)") then
+              Alcotest.failf "min_int report lost predicate grouping:\n%s" row)
+          min_rows;
         let rows = stdlib_post_rows "math.march" out in
         List.iter
           (fun f ->
@@ -201,3 +257,48 @@ let s3 =
         expect out ~line:3 ~callee:"swap_swap_int" "proved";
         expect out ~line:5 ~callee:"swap_swap" "proved";
         U.not_proved out ~line:7 ~callee:"swap_id_bad") ]
+
+(* `cap verified` stdlib modules (2026-11-07 pass): every module that declares it
+   must check clean as its own entry, the way its `cap verified` claim was
+   measured; nothing else enforced a stdlib module's claim (stdlib diagnostics are
+   filtered from user builds).  List is not among them yet: checked as its own
+   entry, its `reverse` collides with `Prelude.reverse` (todo
+   2026-11-07-stdlib-list-cap-verified). *)
+let cap_verified =
+  let stdlib = Filename.concat (Filename.dirname Sys.executable_name) "../stdlib" in
+  let declares f =
+    let src = In_channel.with_open_bin (Filename.concat stdlib f) In_channel.input_all in
+    List.exists (fun l -> String.trim l = "cap verified") (String.split_on_char '\n' src)
+  in
+  let verified () =
+    Sys.readdir stdlib |> Array.to_list
+    |> List.filter (fun f -> Filename.check_suffix f ".march" && declares f)
+    |> List.sort compare
+  in
+  [ Alcotest.test_case "the cap verified stdlib modules are the ones expected" `Quick (fun () ->
+        let got = verified () in
+        List.iter
+          (fun f -> if not (List.mem f got) then Alcotest.failf "%s does not declare `cap verified` (got %s)" f (String.concat ", " got))
+          [ "math.march"; "option.march"; "result.march"; "udp.march" ]);
+    gated "every cap verified stdlib module checks clean as its own entry" (fun () ->
+        let dir = Filename.concat (Filename.dirname Sys.executable_name) ".." in
+        List.iter
+          (fun f ->
+            let out = U.run_in ~dir "--check --stdlib-source --refine-report" ("stdlib/" ^ f) in
+            (* The module's own obligations: none violated, none skipped. *)
+            let summary =
+              List.find_opt (fun l -> U.contains l "refinement obligations (user code):") (lines out)
+            in
+            let clean =
+              match summary with
+              | Some l -> U.contains l " 0 violated" && U.contains l " 0 skipped"
+              | None -> false
+            in
+            let bad_code =
+              List.exists (fun c -> U.contains out ("[" ^ c ^ "]"))
+                [ "refinement_violated"; "return_refinement_violated"; "refinement_unverified"; "lemma_unproved";
+                  "invalid_lemma"; "termination_unproved" ]
+            in
+            if (not clean) || bad_code then
+              Alcotest.failf "stdlib/%s declares `cap verified` but does not check clean:\n%s" f out)
+          (verified ())) ]

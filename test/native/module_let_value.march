@@ -1,0 +1,37 @@
+-- Regression (#1170): a module-level `let` outside the entry module is
+-- lowered to a zero-parameter function.  Native calls it to get the value
+-- (Llvm_ctx.zero_arg_fns); --target js used to emit its `$clo` closure
+-- wrapper instead, so `Cst.n` printed `[object Object]` and a stdlib reader
+-- of its own module-level `let` (Bytes.encode_base64 -> b64_alphabet) threw
+-- `TypeError: s.slice is not a function`.  The entry-module `let` (the
+-- control) was always right: it is injected into each function as a local.
+mod ModuleLetValue do
+  needs IO.Console
+
+  let top = 3
+
+  mod Cst do
+    let n = 7
+    let greeting = "hi"
+    let pair = (1, "one")
+
+    fn via_let() : Int do n end
+
+    fn via_literal() : Int do 7 end
+
+    fn twice() : Int do n + n end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(int_to_string(top))
+    println(int_to_string(Cst.n))
+    println(Cst.greeting ++ "!")
+    let (k, v) = Cst.pair
+    println(int_to_string(k) ++ " " ++ v)
+    println(int_to_string(Cst.via_let()))
+    println(int_to_string(Cst.via_literal()))
+    println(int_to_string(Cst.twice()))
+    println(Bytes.encode_base64(Bytes.from_string("hi!")))
+    println(Bytes.encode_base64(Bytes.from_string("March")))
+  end
+end

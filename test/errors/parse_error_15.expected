@@ -10,10 +10,11 @@ A file may have only one top-level `mod`; everything else must live inside it. [
         fn helper() do ... end
         fn main() do ... end
     end
-    run `march --explain parse_error`
 
-fix [parse_error]:
-@@ lines 7-7 @@
--end
+    fix (`forge fix` applies it):
+
+7 - end
+
+    run `march --explain parse_error`
 
 after fix: exit 0

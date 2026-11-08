@@ -6,9 +6,10 @@
 
     - [<name>.expected]: the exit code, the full rendered diagnostics on stderr
       (carets, labels, notes, the [[slug]] suffix, the [march --explain]
-      pointer), every machine fix rendered as a before/after diff of the
-      lines it touches, and, when there is a fix, the result of applying
-      every fix the way [forge fix] does and checking the program again
+      pointer), every fix rendered as a before/after diff of the lines it
+      touches under a header naming its tier, and, when there is a
+      machine-applicable fix, the result of applying those fixes the way
+      [forge fix] does and checking the program again
       ([after fix: exit N], plus the first diagnostic line if any): a fix
       the plan calls mechanical must leave a program that compiles (D4);
     - [<name>.json.expected]: the [--check-json] lines, so the machine form
@@ -188,7 +189,15 @@ let fixes_of_json json : Yojson.Safe.t list =
   |> List.filter (fun l -> String.trim l <> "")
   |> List.filter_map (fun l ->
       match Yojson.Safe.from_string l with
-      | j -> (match Yojson.Safe.Util.member "fix" j with `Null -> None | f -> Some f)
+      | j ->
+        (* Only what `forge fix` applies: a machine-applicable fix.  A guess
+           or a fix with a placeholder is shown, not applied, and not held
+           to making the program check. *)
+        (match Yojson.Safe.Util.member "fix" j with
+         | `Null -> None
+         | f when (match Yojson.Safe.Util.member "applicability" f with
+             | `String t -> t <> "machine-applicable" | _ -> false) -> None
+         | f -> Some f)
       | exception _ -> None)
   |> List.concat_map edits_of_fix
 
@@ -255,53 +264,6 @@ let run_all (names : string list) : (string, result) Hashtbl.t =
 
 (* ── Fixes as diffs ────────────────────────────────────────────────────── *)
 
-let render_fix ~src (j : Yojson.Safe.t) : string option =
-  let open Yojson.Safe.Util in
-  match member "fix" j with
-  | `Null -> None
-  | fix ->
-    let lines = Array.of_list (lines_of src) in
-    let line n = if n >= 1 && n <= Array.length lines then lines.(n - 1) else "" in
-    let buf = Buffer.create 128 in
-    let code = member "code" j |> to_string in
-    Printf.bprintf buf "fix [%s]:\n" code;
-    (* A multi-edit fix renders one hunk per edit, in source order. *)
-    let pos f = match member "kind" f |> to_string with
-      | "insert" -> (member "after_line" f |> to_int, max_int)
-      | "delete" -> (member "start_line" f |> to_int, 0)
-      | _ -> (member "start_line" f |> to_int, member "start_col" f |> to_int) in
-    let edits = List.stable_sort (fun a b -> compare (pos a) (pos b)) (edits_of_fix fix) in
-    List.iter (fun fix ->
-        match member "kind" fix |> to_string with
-        | "insert" ->
-          let after = member "after_line" fix |> to_int in
-          let text = member "text" fix |> to_string in
-          Printf.bprintf buf "@@ after line %d @@\n %s\n" after (line after);
-          List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of text)
-        | "delete" ->
-          let s = member "start_line" fix |> to_int
-          and e = member "end_line" fix |> to_int in
-          Printf.bprintf buf "@@ lines %d-%d @@\n" s e;
-          for n = s to e do Printf.bprintf buf "-%s\n" (line n) done
-        | "replace" ->
-          let sl = member "start_line" fix |> to_int
-          and sc = member "start_col" fix |> to_int
-          and el = member "end_line" fix |> to_int
-          and ec = member "end_col" fix |> to_int
-          and text = member "text" fix |> to_string in
-          let first = line sl and last = line el in
-          let clip s n = String.sub s 0 (max 0 (min n (String.length s))) in
-          let from s n =
-            let n = max 0 (min n (String.length s)) in
-            String.sub s n (String.length s - n) in
-          let after = clip first sc ^ text ^ from last ec in
-          Printf.bprintf buf "@@ lines %d-%d @@\n" sl el;
-          for n = sl to el do Printf.bprintf buf "-%s\n" (line n) done;
-          List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of after)
-        | k -> Printf.bprintf buf "(unknown fix kind %s)\n" k)
-      edits;
-    Some (Buffer.contents buf)
-
 (* ── One corpus program ────────────────────────────────────────────────── *)
 
 let expect_error_fragments src =
@@ -322,14 +284,6 @@ let contains hay needle =
 let render results name =
   let src = read_file (Filename.concat (errors_dir ()) (name ^ ".march")) in
   let r = Hashtbl.find results name in
-  let fixes =
-    lines_of r.json
-    |> List.filter (fun l -> String.trim l <> "")
-    |> List.filter_map (fun l ->
-        match Yojson.Safe.from_string l with
-        | j -> render_fix ~src j
-        | exception _ -> None)
-  in
   (* The program with every fix applied, checked again: its exit code and,
      if it still fails, the first diagnostic headline (the line carrying the
      [slug]), so the .expected shows what the fix leaves behind. *)
@@ -369,11 +323,9 @@ let render results name =
          | Some h when code <> 0 -> "\n" ^ String.trim h
          | _ -> "")
   in
-  let human =
-    Printf.sprintf "exit: %d\n%s%s%s" r.code r.err
-      (if fixes = [] then "" else "\n" ^ String.concat "\n" fixes)
-      after
-  in
+  (* Each fix is shown in the rendered output, under its diagnostic and
+     headed by its tier; the .json.expected pins its edit. *)
+  let human = Printf.sprintf "exit: %d\n%s%s" r.code r.err after in
   (src, human, r.json)
 
 (* The internals lint (specs/plans/2026-11-02-diagnostics-depth-plan.md §X4):
@@ -643,9 +595,16 @@ let errors_of_json json : (string * bool) list =
    fix cleared what it was about and broke nothing else. *)
 let fixes_did_their_part (r : result) =
   let before = errors_of_json r.json in
+  let after = errors_of_json r.after_json in
   let unfixed = List.filter_map (fun (s, f) -> if f then None else Some s) before in
-  unfixed <> []
-  && List.for_all (fun (s, _) -> List.mem s unfixed) (errors_of_json r.after_json)
+  (* A syntax error stops the compiler before any later check, so the errors
+     its fix uncovers could not have been reported with it: the fix did its
+     part when the program now parses. *)
+  let parse_phase s = List.mem s [ "parse_error"; "syntax_error"; "lex_error"; "then_keyword";
+                                   "module_keyword"; "semicolon_separator" ] in
+  (before <> [] && List.for_all (fun (s, _) -> parse_phase s) before
+   && not (List.exists (fun (s, _) -> parse_phase s) after))
+  || (unfixed <> [] && List.for_all (fun (s, _) -> List.mem s unfixed) after)
 
 let check_fix_fixes ~src name (r : result) =
   let partial = contains src fix_partial_marker in

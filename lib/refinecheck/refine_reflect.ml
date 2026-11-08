@@ -235,6 +235,10 @@ let pos_lt (a : A.span) (b : A.span) = compare (a.A.start_line, a.A.start_col) (
 
 type ev = { ev_rule : int; ev_text : string; ev_span : A.span }
 
+(** Scoped proof validation: a missing entry is outside a checked body,
+    [None] is valid, and [Some reason] records a rejected proof body. *)
+let proof_blocks : (A.span, string option) Hashtbl.t = Hashtbl.create 16
+
 (** Lemmas (§4.2) the last [analyze] found invalid under L2 or L3, by
     declaring span: (2 or 3, the first offending event's text). *)
 let lemma_blocked : (A.span, int * string) Hashtbl.t = Hashtbl.create 16
@@ -244,6 +248,13 @@ let lemma_blocked : (A.span, int * string) Hashtbl.t = Hashtbl.create 16
 let lemma_value_uses : (A.span * string) list ref = ref []
 
 type bind = { k_var : bool;  (** a value ([false]: a local [fn]) *) k_owner : A.span  (** the unit that bound it *) }
+
+(* `reveal f` (todo 2026-11-06-proof-reveal-and-local-fuel): the [@[opaque]]
+   units that are blocked by R9 alone (every other rule passes, every callee is
+   reflected, and the unit is alone in its SCC).  [analyze] fills it; the rows
+   and every caller's verdict are unchanged, so nothing that does not say
+   `reveal` sees a difference. *)
+let revealable : (A.span, unit) Hashtbl.t = Hashtbl.create 8
 
 let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let g = t.RT.graph in
@@ -293,6 +304,7 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
       ds
   in
   scan_eq decls;
+  let proof_depth = ref 0 in
   let rec walk ~(owner : A.span) ~(local : bool) (env : bind SM.t) (e : A.expr) : unit =
     let w = walk ~owner ~local env in
     match e with
@@ -312,7 +324,15 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
     | A.ESpawn (x, sp) -> emit owner 3 "spawns an actor" sp; w x
     | A.ESend (a, b, sp) -> emit owner 3 "sends a message" sp; w a; w b
     | A.EDbg (x, sp) -> emit owner 3 "calls dbg" sp; Option.iter w x
-    | A.EAssert (x, sp) -> emit owner 4 "has a runtime `assert`" sp; w x
+    | A.EProof (A.PReveal _, _) -> ()
+    | A.EProof (A.PWithFuel (_, _, body), sp) -> w (A.EBlock (body, sp))
+    | A.EProof (A.PAssertBy (p, hs), sp) ->
+      let saved = !proof_depth in
+      Fun.protect ~finally:(fun () -> proof_depth := saved)
+        (fun () -> proof_depth := saved + 1; w p; w (A.EBlock (hs, sp)))
+    | A.EAssert (x, sp) ->
+      if !proof_depth = 0 then emit owner 4 "has a runtime `assert`" sp;
+      w x
     | A.EHole (_, sp) -> emit owner 4 "has a typed hole" sp
     | A.EMatch (s, brs, sp) ->
       if inp.nonexhaustive sp then begin
@@ -921,6 +941,16 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
           List.iter (fun v -> if refl.(v) then (refl.(v) <- false; changed := true)) members)
       g.RT.sccs
   done;
+  Hashtbl.reset revealable;
+  Array.iteri
+    (fun i (u : RT.unit_) ->
+      if List.mem "opaque" u.RT.u_attrs
+         && List.for_all (fun e -> e.ev_rule = 9 && e.ev_text = "@[opaque]") local.(i)
+         && local.(i) <> []
+         && List.for_all dep_ok deps.(i)
+         && g.RT.sccs.(g.RT.scc_of.(i)) = [ i ]
+      then Hashtbl.replace revealable u.RT.u_span ())
+    g.RT.units;
   (* ── Reasons ───────────────────────────────────────────────────────────── *)
   let memo = Hashtbl.create 64 in
   let rec reason (i : int) : blocker option =
@@ -1036,18 +1066,26 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
      constructors or R6 builtins (L3).  R8's "returns Unit" is the point of a
      lemma and does not apply. *)
   Hashtbl.reset lemma_blocked;
+  Hashtbl.reset proof_blocks;
   lemma_value_uses := [];
   let is_lemma v = List.mem "lemma" (unit_ v).RT.u_attrs in
   Array.iter
     (fun (u : RT.unit_) ->
       let i = u.RT.u_id in
-      if is_lemma i then begin
+      let scopes = ref [] in
+      List.iter (fun (c : RT.owner) ->
+        Refine_encode.iter_all (function A.EProof (A.PAssertBy _, sp) -> scopes := sp :: !scopes | _ -> ()) c.RT.o_body)
+        u.RT.u_clauses;
+      if is_lemma i || !scopes <> [] then begin
         (* `==` inside a lemma's `assert` is the predicate's logical
            equality (§3.5), never a call of `eq`. *)
         let asserts = ref [] in
         List.iter
           (fun (c : RT.owner) ->
-            Refine_encode.iter_all (function A.EAssert (_, sp) -> asserts := sp :: !asserts | _ -> ()) c.RT.o_body)
+            Refine_encode.iter_all (function
+              | A.EAssert (_, sp) -> asserts := sp :: !asserts
+              | A.EProof (A.PAssertBy (goal, _), _) -> asserts := T.span_of_expr goal :: !asserts
+              | _ -> ()) c.RT.o_body)
           u.RT.u_clauses;
         let in_assert (sp : A.span) =
           List.exists
@@ -1077,10 +1115,32 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
                          ev_span = s.RT.s_span })
               deps.(i)
         in
-        match (first l2, first l3) with
-        | Some e, _ -> Hashtbl.replace lemma_blocked u.RT.u_span (2, e.ev_text)
-        | None, Some e -> Hashtbl.replace lemma_blocked u.RT.u_span (3, e.ev_text)
-        | None, None -> ()
+        (* Revealing a body does not relax totality: only units already in
+           [revealable] qualify. Actual lexical visibility is still enforced
+           by the proof walk's [Reflect_state.revealed] scope. *)
+        let explicit_reveals = ref [] in
+        List.iter (fun (c : RT.owner) ->
+          Refine_encode.iter_all (function
+            | A.EProof (A.PReveal (A.EVar f), _) -> explicit_reveals := f.A.txt :: !explicit_reveals
+            | _ -> ()) c.RT.o_body) u.RT.u_clauses;
+        let revealed_event e =
+          List.exists (function
+            | `Refl v, (s : RT.site) ->
+              s.RT.s_span = e.ev_span
+              && List.exists (Reflect_state.names_fn ~display:(unit_ v).RT.u_name) !explicit_reveals
+              && Hashtbl.mem revealable (unit_ v).RT.u_span
+            | _ -> false) deps.(i)
+        in
+        let proof_events = l2 @ List.filter (fun e -> not (revealed_event e)) l3 in
+        List.iter (fun sp ->
+          match first (List.filter (fun e -> span_within e.ev_span sp) proof_events) with
+          | Some e -> Hashtbl.replace proof_blocks sp (Some e.ev_text)
+          | None -> Hashtbl.replace proof_blocks sp None) !scopes;
+        if is_lemma i then
+          match (first l2, first l3) with
+          | Some e, _ -> Hashtbl.replace lemma_blocked u.RT.u_span (2, e.ev_text)
+          | None, Some e -> Hashtbl.replace lemma_blocked u.RT.u_span (3, e.ev_text)
+          | None, None -> ()
       end)
     g.RT.units;
   (* L5: a lemma named as a value. *)
@@ -1545,7 +1605,7 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
             (fun ((f, args) as k) ->
               let tp = Hashtbl.find templates f in
               if List.mem k !seen then false
-              else if depth >= tp.t_fuel || !count >= budget then true
+              else if depth >= RS.fuel_for ~display:tp.t_name tp.t_fuel || !count >= budget then true
               else
                 let env = List.mapi (fun i a -> (param_const i, a)) args in
                 let inst = List.map (fun (conds, res) -> (List.map (subst env) conds, subst env res)) tp.t_cases in
@@ -1585,7 +1645,7 @@ let unfold (decls : (string * Smt.sort) list) (goal : Smt.term) (assumptions : S
       List.iter
         (fun (f, args) ->
           let tp = Hashtbl.find templates f in
-          if !count >= budget && depth < tp.t_fuel then RS.budget_hit := true;
+          if !count >= budget && depth < RS.fuel_for ~display:tp.t_name tp.t_fuel then RS.budget_hit := true;
           RS.fuel_pending := true;
           if !RS.fuel_fn = "" then RS.fuel_fn := tp.t_name;
           ignore args)
@@ -1719,7 +1779,7 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
          review round 4): a conflated short name, an inexact qualified one,
          or a type that is no registered variant declines. *)
       let adt =
-        match RE.adt_of_type_name n with
+        match RE.adt_of_type_name ~arity:(List.length args) n with
         | Some a when a <> RE.ambiguous_adt_sentinel -> a
         | _ -> raise Decline
       in
@@ -1990,6 +2050,9 @@ let rec tr_val (c : tctx) (env : (string * Smt.term) list) (e : A.expr) : Smt.te
 (* A statement-position call of a lemma, `l(..)` or `let _ = l(..)`: erased
    before the program runs, so it is `()` in a reflected body (§4.5, I2). *)
 and lemma_stmt (c : tctx) (e : A.expr) : bool =
+  match e with
+  | A.EProof (A.PAssertBy _, _) | A.ELet ({ A.bind_expr = A.EProof (A.PAssertBy _, _); _ }, _) -> true
+  | _ ->
   let call =
     match e with
     | A.EApp (A.EVar _, _, sp) -> Some sp
@@ -2332,9 +2395,40 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
   let sym_of = Array.make (Array.length g.RT.units) None in
   let owners : (string, int) Hashtbl.t = Hashtbl.create 64 in
   let dup = ref [] in
+  (* A revealable [@[opaque]] unit gets a symbol too, but only in a program
+     that says `reveal` somewhere: anywhere else nothing changes. *)
+  let reveals =
+    let found = ref false in
+    let body e = RE.iter_all (function A.EProof (A.PReveal _, _) -> found := true | _ -> ()) e in
+    let fn (fd : A.fn_def) = List.iter (fun (c : A.fn_clause) -> body c.A.fc_body) fd.A.fn_clauses in
+    (* Every place a statement can be: functions, impl methods, actor handlers,
+       tests, an app's body (review minor). *)
+    let rec scan ds =
+      List.iter
+        (function
+          | A.DFn (fd, _) -> fn fd
+          | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> fn fd) idf.A.impl_methods
+          | A.DActor (_, _, ad, _) ->
+            body ad.A.actor_init;
+            List.iter (fun (h : A.actor_handler) -> body h.A.ah_body) (A.actor_body_handlers ad)
+          | A.DTest (t, _) -> body t.A.test_body
+          | A.DApp (app, _) -> body app.A.app_body
+          | A.DLet (_, b, _) -> body b.A.bind_expr
+          | A.DMod (_, _, inner, _) | A.DDescribe (_, inner, _) -> scan inner
+          | _ -> ())
+        ds
+    in
+    scan decls;
+    !found
+  in
+  let hidden_units = Hashtbl.create 8 in
   Array.iter
     (fun (u : RT.unit_) ->
-      if Hashtbl.mem refl_spans u.RT.u_span then begin
+      if reveals && Hashtbl.mem revealable u.RT.u_span then Hashtbl.replace hidden_units u.RT.u_id ())
+    g.RT.units;
+  Array.iter
+    (fun (u : RT.unit_) ->
+      if Hashtbl.mem refl_spans u.RT.u_span || Hashtbl.mem hidden_units u.RT.u_id then begin
         let origin = origin_of_file ~user_files u.RT.u_span.A.file in
         (* The display name is not unique on its own (an entry module's
            nested `mod X` and a library `X` both print `X.g`, review C-A):
@@ -2476,7 +2570,9 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
     else
     match sym_of.(v) with
     | Some sym when Hashtbl.mem RS.syms sym && not (Hashtbl.mem axiom_tier sym) ->
-      Hashtbl.replace RS.call_sym sp sym
+      if Hashtbl.mem hidden_units v then
+        Hashtbl.replace RS.hidden_call_sym sp (sym, g.RT.units.(v).RT.u_name)
+      else Hashtbl.replace RS.call_sym sp sym
     | _ -> ()
   in
   List.iter
@@ -2852,12 +2948,22 @@ let install ~(user_files : string list) ~(type_map : (A.span, T.ty) Hashtbl.t op
      does not parse, so a head's refinements are all written in it.) *)
   let refs_of (u : RT.unit_) =
     let names = ref [] in
+    (* A name the refinement binds is a value, never a function: the unit's
+       own parameters (a lemma's `f` in `EnvMsg(f, p)`) and the binders
+       (`_`, `v` of `{v : T | ...}`).  Resolved by bare name like a call,
+       a stdlib theorem's parameter `f` marked a user's `App.f` (and all
+       it reaches) as named by a predicate, so the user function's contract
+       hash moved with the set of files loaded (the LSP re-checked a
+       dependent that nothing touched). *)
+    let params = List.filter_map Fun.id u.RT.u_params in
     let rec ty (t : A.ty) =
       match t with
-      | A.TyRefine (b, _, e) ->
+      | A.TyRefine (b, binder, e) ->
         ty b;
+        let bound = "_" :: (match binder with Some n -> [ n.A.txt ] | None -> []) @ params in
         let rec walk (e : A.expr) =
           (match e with
+           | A.EVar n when List.mem n.A.txt bound -> ()
            | A.EVar n -> names := n.A.txt :: !names
            | A.EField (_, n, _) -> names := n.A.txt :: !names
            | _ -> ());

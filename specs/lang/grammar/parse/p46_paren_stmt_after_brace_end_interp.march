@@ -1,0 +1,44 @@
+mod P46ParenStmtAfterBraceEndInterp do
+  needs IO.Console
+  -- §3.3 / §7.3 — companion to p33 and p34: the two-statement reading of a
+  -- `(`-led line also applies after `}` (a record literal or update), `end`
+  -- (a `do ... end` block) and an interpolated string.
+  --
+  -- Those three close an `expr_atom`, which reduces to the call rule's
+  -- `expr_field`, but the token filter's `ends_expression` did not list
+  -- RBRACE, END or INTERP_END, so the `(` on the next line stayed a plain
+  -- LPAREN and was taken as an argument list (#1179):
+  -- `let r = { x: 1 }` then `(r.x + 1)` parsed as `{ x: 1 }(r.x + 1)`
+  -- (`not_a_function` plus `unbound_variable`), and `let g = do ... end`
+  -- then `("discarded")` silently CALLED `g`.
+  --
+  -- Each function returns the value of its `(` line, so `main` prints `ok`
+  -- only if every one of them is a separate statement.
+  fn after_record() : Int do
+    let r = { x: 1 }
+    (r.x + 1)
+  end
+
+  fn after_record_update() : Int do
+    let r = { x: 1 }
+    let s = { r with x: 5 }
+    (s.x + 1)
+  end
+
+  fn after_interp(n : Int) : Int do
+    let _ = "n=${n}"
+    (n + 1)
+  end
+
+  fn after_do_block() : Int do
+    let _ = do
+      fn s -> string_length(s)
+    end
+    (40 + 2)
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let total = after_record() + after_record_update() + after_interp(1) + after_do_block()
+    if total == 52 do println("ok") else println("glommed: " ++ int_to_string(total)) end
+  end
+end

@@ -7,11 +7,12 @@ This `mod` (line 2) has no matching `end`. [parse_error]
     ^^^
 
     I only noticed at the end of the file.
-    run `march --explain parse_error`
 
-fix [parse_error]:
-@@ after line 5 @@
-   end
-+end
+    fix (`forge fix` applies it):
+
+5 |   end
+6 + end
+
+    run `march --explain parse_error`
 
 after fix: exit 0

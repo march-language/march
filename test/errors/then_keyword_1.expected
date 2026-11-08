@@ -11,11 +11,12 @@ I don't recognize `then` here — March uses do/end blocks instead. [then_keywor
     else
         expr2
     end
-    run `march --explain then_keyword`
 
-fix [then_keyword]:
-@@ lines 4-4 @@
--    if n > 0 then 1 else 0 end
-+    if n > 0 do 1 else 0 end
+    fix (`forge fix` applies it):
+
+4 -     if n > 0 then 1 else 0 end
+4 +     if n > 0 do 1 else 0 end
+
+    run `march --explain then_keyword`
 
 after fix: exit 0

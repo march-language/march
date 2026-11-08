@@ -215,11 +215,13 @@ shrink. New reject programs and `--explain` pages are added by
 ### Golden test-failure reports
 
 `test/run_test_reports.exe` (suite `test_reports`) runs every `test/test_reports/<name>.march`
-(test modules whose tests all fail on purpose) with `march test` AND compiled with
-`--compile --test`, and requires both runs' failure blocks to equal `<name>.expected`. It pins
-the report text (`lib/errors/test_report.ml`) and that the interpreter (OCaml) and a compiled
-binary (`march_assert_fail` in `runtime/march_runtime.c`, `stdlib/check.march`) print it byte
-for byte the same: the value differ exists twice, so change both. After an intentional change:
+(test modules whose tests all fail on purpose) with `march test`, compiled with
+`--compile --test`, AND with `--target js --test` under node, and requires every run's failure
+block to equal `<name>.expected` (a fixture the JS target can't build yet is listed, with its
+reason, in `js_unsupported`). It pins the report text (`lib/errors/test_report.ml`) and that the
+interpreter (OCaml), a compiled binary (`march_assert_fail` in `runtime/march_runtime.c`,
+`stdlib/check.march`) and the JS runner (`runtime/march_runtime.mjs`) print it byte for byte
+the same: the value differ exists three times, so change all three. After an intentional change:
 `UPDATE_TEST_REPORTS=1 ./_build/default/test/run_test_reports.exe -e`, then review
 `git diff test/test_reports/`.
 
@@ -373,7 +375,7 @@ lsp/lib/                    LSP analysis: analysis (+.mli) + analysis_{types,uti
                              code_actions_{ast,diag} (the two code-action engines)
 lsp/test/                   test_lsp (Alcotest registration only) + the test bodies in
                              test_lsp_{harness,analysis,actions,perf,features,refactor,html,depot}
-stdlib/                     137 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     138 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)

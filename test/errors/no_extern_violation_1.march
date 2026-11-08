@@ -21,4 +21,3 @@ mod NoFFI do
     fn c_read(fd : Int, buf : String, n : Int) : Int
   end
 end
--- EXPECT-FIX-PARTIAL: the fix removes an unused needs; the no_extern violation is the case's subject

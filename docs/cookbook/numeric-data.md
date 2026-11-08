@@ -115,6 +115,7 @@ result through the same binding allocates nothing:
 
 <!-- scroll:skip -->
 ```march
+let arr = NativeArray.from_list_int([5, 3, 9, 1, 7])
 let arr = NativeArray.sort_int(arr)          -- in place, no copy
 ```
 
@@ -123,6 +124,7 @@ that safe:
 
 <!-- scroll:skip -->
 ```march
+let original = NativeArray.from_list_int([5, 3, 9, 1, 7])
 let sorted = NativeArray.sort_int(original)  -- `original` is unchanged
 ```
 

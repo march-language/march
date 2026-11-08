@@ -14,6 +14,11 @@ The call to `same` needs it here.
 9 |   fn same(a, b) when Eq(a) do a == b end
                          ^^^^^
 
+    fix (`forge fix` applies it):
+
+4 |   type Hue = Rood | Bloo
+5 +   derive Eq for Hue
+
 
 -- CAPABILITY --------------- errors/missing_impl_3.march
 
@@ -26,18 +31,14 @@ or grant everything with `fn main(cap : Cap(IO))`.
 10 |   fn main() do
        ^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+10 -   fn main() do
+10 +   fn main(_cap_console : Cap(IO.Console)) do
+
     run `march --explain cap_grant`
 
 
-
-fix [missing_impl]:
-@@ after line 4 @@
-   type Hue = Rood | Bloo
-+  derive Eq for Hue
-
-fix [cap_grant]:
-@@ lines 10-10 @@
--  fn main() do
-+  fn main(_cap_console : Cap(IO.Console)) do
 
 after fix: exit 0

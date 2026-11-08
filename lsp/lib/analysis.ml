@@ -125,7 +125,7 @@ let severity_to_lsp (sev : Err.severity) =
    (`{"fix": {"kind": "replace", ...}}`), so the generic quick-fix adapter in
    [Code_actions_diag] can offer every compiler fix without a per-message
    rule, and any other client can apply it too (D4, diagnostics plan §8). *)
-let fix_data (fix : Err.fix_kind option) : Yojson.Safe.t option =
+let fix_data (fix : Err.fix option) : Yojson.Safe.t option =
   let rec edit : Err.fix_kind -> Yojson.Safe.t = function
     | Err.FInsert { after_line; text } ->
       `Assoc [ ("kind", `String "insert");
@@ -146,7 +146,13 @@ let fix_data (fix : Err.fix_kind option) : Yojson.Safe.t option =
       `Assoc [ ("kind", `String "multi");
                ("edits", `List (List.map edit (List.concat_map Err.fix_edits fs))) ]
   in
-  Option.map (fun f -> `Assoc [ ("fix", edit f) ]) fix
+  (* The tier rides in the fix object as it does in `--check-json`, so the
+     quick-fix adapter marks only a machine-applicable fix preferred. *)
+  Option.map (fun (f : Err.fix) ->
+      let e = match edit f.edit with `Assoc kv -> kv | _ -> [] in
+      `Assoc [ ("fix", `Assoc (e @ [ ("applicability",
+                                      `String (Err.string_of_applicability f.tier)) ])) ])
+    fix
 
 let diag_to_lsp ~filename (d : Err.diagnostic) =
   let is_user =
@@ -401,6 +407,8 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
 
   | Ast.EAssert (e, _) ->
     collect_expr ~def_map ~use_map ~calls e
+  | Ast.EProof (p, _) ->
+    List.iter (collect_expr ~def_map ~use_map ~calls) (Ast.proof_children p)
 
   | Ast.ESigil (_, content, _) ->
     collect_expr ~def_map ~use_map ~calls content
@@ -560,6 +568,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
       List.iter (fun (ce, be) -> walk scope ce; walk scope be) arms
     | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
     | Ast.EAssert (e, _) -> walk scope e
+    | Ast.EProof (p, _) -> List.iter (walk scope) (Ast.proof_children p)
     | Ast.ESigil (_, content, _) -> walk scope content
     | Ast.ERefineMsg (content, _, _) -> walk scope content
     | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->
@@ -5098,6 +5107,9 @@ let () =
    [Code_actions_ast]; this [include] republishes [code_actions_at] here
    with its original name and signature. *)
 include Code_actions_diag
+
+(* [Code_actions_diag.fix_holds] re-analyses a patched buffer with this. *)
+let () = reanalyse := Some analyse
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->

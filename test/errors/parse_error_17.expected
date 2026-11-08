@@ -7,11 +7,12 @@ This `fn` (line 10) has no matching `end`. [parse_error]
        ^^
 
     I only noticed at the end of the file.
-    run `march --explain parse_error`
 
-fix [parse_error]:
-@@ after line 11 @@
-     1
-+  end
+    fix (`forge fix` applies it):
+
+11 |     1
+12 +   end
+
+    run `march --explain parse_error`
 
 after fix: exit 0

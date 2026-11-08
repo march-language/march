@@ -674,6 +674,125 @@ let test_parse_multiline_call_args_still_work () =
       | _ -> Alcotest.fail "multi-line arg list must still parse as a call")
    | _ -> Alcotest.fail "expected [ELet; unit]")
 
+(* ── #1179: the same rule after `}`, `end` and an interpolated string ──────
+   #129/#132 retagged a line-initial `(` only after an identifier, `)`, `]` or
+   a literal. A record literal, a record update, a `do ... end` block and an
+   interpolated string also reduce to the call rule's [expr_field], so after
+   any of them the `(` line was still glued on as an argument list:
+   `let r = { x: 1 }`⏎`(r.x + 1)` parsed as `let r = { x: 1 }(r.x + 1)` (a
+   confusing `not_a_function` + `unbound_variable` pile), and
+   `let g = do fn s -> ... end`⏎`("discarded")` silently CALLED `g`. *)
+
+(* The block must be two statements, and the binding's RHS must not be a call
+   (that is what the glom produced). [rhs_ok] checks the RHS shape. *)
+let check_paren_line_is_stmt ~what ~rhs_ok src =
+  let es = single_fn_body_exprs src in
+  Alcotest.(check int) (what ^ ": two block exprs, the let then the `(` line")
+    2 (List.length es);
+  match es with
+  | [March_ast.Ast.ELet (b, _); _] ->
+    if not (rhs_ok b.March_ast.Ast.bind_expr) then
+      Alcotest.fail (what ^ ": the binding glommed the next line's `(...)` into a call")
+  | _ -> Alcotest.fail (what ^ ": expected [ELet; paren expr]")
+
+let test_parse_paren_line_after_record_literal () =
+  check_paren_line_is_stmt ~what:"record literal"
+    ~rhs_ok:(function March_ast.Ast.ERecord _ -> true | _ -> false)
+    {|mod Test do
+    fn f() do
+      let r = { x: 1 }
+      (r.x + 1)
+    end
+  end|}
+
+let test_parse_paren_line_after_record_update () =
+  check_paren_line_is_stmt ~what:"record update"
+    ~rhs_ok:(function March_ast.Ast.ERecordUpdate _ -> true | _ -> false)
+    {|mod Test do
+    fn f(r) do
+      let s = { r with x: 2 }
+      (s.x + 1)
+    end
+  end|}
+
+let test_parse_paren_line_after_interp_string () =
+  (* An interpolated string desugars to a concatenation, which may itself be an
+     application, so the shape check is on the arity: the glommed form is ONE
+     block expr, whatever its RHS looks like. *)
+  check_paren_line_is_stmt ~what:"interpolated string"
+    ~rhs_ok:(fun _ -> true)
+    {|mod Test do
+    fn f(n) do
+      let s = "n=${n}"
+      (n + 1)
+    end
+  end|}
+
+let test_parse_paren_line_after_do_block () =
+  (* The silent-call case: `g` used to be applied to "discarded". *)
+  check_paren_line_is_stmt ~what:"do ... end block"
+    ~rhs_ok:(function March_ast.Ast.EApp _ -> false | _ -> true)
+    {|mod Test do
+    fn f() do
+      let g = do
+        fn s -> s
+      end
+      ("discarded")
+    end
+  end|}
+
+let test_parse_paren_line_after_if_and_local_fn () =
+  (* Controls for the other `end`s: an `if ... end` and a local `fn ... end`
+     followed by a `(` line were already two statements (neither reduces to
+     [expr_field]); the retag must keep them that way. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(c) do
+      let x = if c do 1 else 2 end
+      (x, x)
+      fn helper(y) do
+        y + 1
+      end
+      (helper(1), 2)
+    end
+  end|} in
+  Alcotest.(check int) "let, tuple, local fn, tuple" 4 (List.length es)
+
+let test_parse_same_line_call_after_do_block_still_works () =
+  (* The retag keys on the newline: `do ... end(` on one line stays a call. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f() do
+      let y = do fn s -> s end("x")
+      y
+    end
+  end|} in
+  match es with
+  | [March_ast.Ast.ELet (b, _); _] ->
+    (match b.March_ast.Ast.bind_expr with
+     | March_ast.Ast.EApp _ -> ()
+     | _ -> Alcotest.fail "`do ... end(\"x\")` on one line must still be a call")
+  | _ -> Alcotest.fail "expected [ELet; y]"
+
+let test_parse_tuple_arm_after_brace_and_end_bodies () =
+  (* A match arm may open a fresh line with a tuple pattern after an arm body
+     ending in `}`, a `do ... end` block or an interpolated string: the
+     retagged `(` must still be accepted as a pattern. *)
+  let es = single_fn_body_exprs {|mod Test do
+    fn f(p, st) do
+      match p do
+        (0, _) -> { st with n: 1 }
+        (1, _) -> do
+          st
+        end
+        (2, y) -> "y=${y}"
+        (_, _) -> st
+      end
+    end
+  end|} in
+  match es with
+  | [March_ast.Ast.EMatch (_, branches, _)] ->
+    Alcotest.(check int) "four arms" 4 (List.length branches)
+  | _ -> Alcotest.fail "expected a single match expression"
+
 (* ── `with ... else` multi-arm parsing (token-filter arm separators) ────── *)
 
 (* Parse a module whose single fn body is a `with ... else ... end` and return
@@ -8688,6 +8807,86 @@ let test_unrelated_broken_lib_module_is_pruned () =
     Alcotest.(check bool) "entry referencing broken module still errors"
       true (has_errors errors2)))
 
+(** Regression (#1183): a module's type and constructor names are
+    reachability anchors, because a bare type or constructor name resolves
+    program-wide.  But a bare name that the REFERENCING source defines itself
+    resolves to its own definition, so it must not reach every other
+    discovered module defining the same name.  Before the fix, `Alpha` using
+    its own `type Tally` loaded an unreferenced (and broken) `Zeta` that also
+    declared `type Tally`, and Zeta's errors failed the build; renaming
+    Zeta's type made it go away.  Constructors had the same over-inclusion.
+    Controls: the renamed type is pruned too, and a source that uses the name
+    WITHOUT defining it still keeps the defining module (the name genuinely
+    may refer to it). *)
+let test_shared_type_name_does_not_load_unreferenced_module () =
+  let dir = Filename.temp_file "march_lib_shared_type_name_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let lib = Filename.concat dir "lib" in
+  Unix.mkdir lib 0o755;
+  Fun.protect ~finally:(fun () ->
+    try ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote dir)))
+    with _ -> ()) (fun () ->
+  let write_file path contents =
+    let oc = open_out path in output_string oc contents; close_out oc in
+  write_file (Filename.concat lib "alpha.march")
+    "mod Alpha do\n\
+    \  type Tally = { n : Int }\n\
+    \  type Color = Red | Blue\n\
+    \  fn one() : Int do\n\
+    \    let t : Tally = { n: 1 }\n\
+    \    match Red do\n\
+    \      Red -> t.n\n\
+    \      Blue -> 0\n\
+    \    end\n\
+    \  end\n\
+     end\n";
+  (* Never referenced; shares Alpha's type name; broken. *)
+  write_file (Filename.concat lib "zeta.march")
+    "mod Zeta do\n  type Tally = { m : String }\n  fn two() : Int do\n    Gamma.missing()\n  end\nend\n";
+  (* Never referenced; shares Alpha's constructor name; broken. *)
+  write_file (Filename.concat lib "hue.march")
+    "mod HueLib do\n  type Hue = Red | Green\n  fn three() : Int do\n    Gamma.missing()\n  end\nend\n";
+  (* Never referenced; the renamed-type control from the issue. *)
+  write_file (Filename.concat lib "omega.march")
+    "mod Omega do\n  type Other = { m : String }\n  fn four() : Int do\n    Gamma.missing()\n  end\nend\n";
+  Unix.putenv "MARCH_LIB_PATH" lib;
+  Fun.protect ~finally:(fun () -> Unix.putenv "MARCH_LIB_PATH" "") (fun () ->
+    let kept name decls =
+      List.exists (function
+        | March_ast.Ast.DMod ({March_ast.Ast.txt = n; _}, _, _, _) -> n = name
+        | _ -> false) decls
+    in
+    let resolve entry src =
+      let path = Filename.concat dir entry in
+      write_file path src;
+      let m = parse_and_desugar (read_file_contents path) in
+      let (resolve_errors, extra, _uf) =
+        March_resolver.Resolver.resolve_imports ~source_file:path m in
+      (m, resolve_errors, extra)
+    in
+    (* (1) The issue's layout: the entry names only Alpha. *)
+    let (m, resolve_errors, extra) = resolve "main.march"
+        "mod Main do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : () do\n    println(int_to_string(Alpha.one()))\n  end\nend\n" in
+    Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
+    Alcotest.(check bool) "Alpha is loaded" true (kept "Alpha" extra);
+    Alcotest.(check bool) "Zeta (same type name) is not loaded" false (kept "Zeta" extra);
+    Alcotest.(check bool) "HueLib (same ctor name) is not loaded" false (kept "HueLib" extra);
+    Alcotest.(check bool) "Omega (renamed type) is not loaded" false (kept "Omega" extra);
+    let assembled =
+      { m with March_ast.Ast.mod_decls = extra @ m.March_ast.Ast.mod_decls } in
+    let (errors, _tm) = March_typecheck.Typecheck.check_module assembled in
+    Alcotest.(check bool) "the program typechecks clean" false (has_errors errors);
+    (* (2) Control: an entry that uses `Tally` and `Green` bare, defining
+       neither, may mean Zeta's and HueLib's: both stay in the build. *)
+    let (_m2, _re2, extra2) = resolve "bare.march"
+        "mod Bare do\n  fn main() : Int do\n    let t : Tally = { m: \"x\" }\n    match Green do\n      Green -> 1\n      Red -> 2\n    end\n  end\nend\n" in
+    Alcotest.(check bool) "a bare type name the source does not define keeps its definer"
+      true (kept "Zeta" extra2);
+    Alcotest.(check bool) "a bare ctor name the source does not define keeps its definer"
+      true (kept "HueLib" extra2);
+    Alcotest.(check bool) "Omega is still not loaded" false (kept "Omega" extra2)))
+
 (* ── `tag` keyword tests ───────────────────────────────────────────────── *)
 
 let test_tag_parses () =
@@ -9808,6 +10007,74 @@ let test_cap_deterministic_arithmetic_ok () =
     fn add(a : Int, b : Int) : Int do a + b end
   end|} in
   Alcotest.(check bool) "cap deterministic + pure arithmetic: no error" false (has_errors ctx)
+
+(* ── Issue #1180: monotonic clock reads and `needs` under the module caps ──
+   `sys_uptime_ms` (the builtin behind `System.monotonic_time`) is ambient for
+   `needs` on purpose (typecheck_builtins.ml: gating it would break every
+   timing caller granted only IO.Console), so it has no `builtin_cap_table`
+   row and neither banned set derived from that table contained it: both
+   module caps accepted a clock read the docs say they ban. *)
+let test_cap_pure_sys_uptime_ms_error () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    fn t() : Int do sys_uptime_ms() end
+  end|} in
+  Alcotest.(check int) "cap pure + sys_uptime_ms: one pure_violation" 1
+    (count_errors_with ctx "calls `sys_uptime_ms`, which has side effects")
+
+let test_cap_deterministic_sys_uptime_ms_error () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    fn t() : Int do sys_uptime_ms() end
+  end|} in
+  Alcotest.(check int) "cap deterministic + sys_uptime_ms: one violation" 1
+    (count_errors_with ctx "calls `sys_uptime_ms`, which is non-deterministic")
+
+(* The control: outside the two module caps a monotonic read stays ambient —
+   no `needs IO.Clock`, no error. *)
+let test_sys_uptime_ms_stays_ambient () =
+  let ctx = typecheck {|mod Timing do
+    fn t() : Int do sys_uptime_ms() end
+  end|} in
+  Alcotest.(check bool) "sys_uptime_ms outside cap pure/deterministic: no error"
+    false (has_errors ctx)
+
+(* A `cap pure` module that declares ANY `needs` is a contradiction: every
+   stdlib IO wrapper (`File.read`, `DateTime.now`, ...) is reachable only
+   with its `needs` (the capability ceiling), and the call-name scan sees only
+   direct builtins, so the `needs` line is where the hole closes. *)
+let test_cap_pure_rejects_needs () =
+  let ctx = typecheck {|mod Pure do
+    cap pure
+    needs IO.FileRead
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check int) "cap pure + needs IO.FileRead: one pure_violation" 1
+    (count_errors_with ctx "declares `needs IO.FileRead`")
+
+(* `cap deterministic` may hold ordinary IO capabilities, but never the clock
+   or an RNG, nor a parent (`IO`) that includes them. *)
+let test_cap_deterministic_rejects_clock_and_random_needs () =
+  List.iter (fun cap ->
+      let ctx = typecheck (Printf.sprintf {|mod Det do
+    cap deterministic
+    needs %s
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} cap) in
+      Alcotest.(check int)
+        (Printf.sprintf "cap deterministic + needs %s: one violation" cap) 1
+        (count_errors_with ctx (Printf.sprintf "declares `needs %s`" cap)))
+    [ "IO.Clock"; "IO.Random"; "IO" ]
+
+let test_cap_deterministic_allows_ordinary_needs () =
+  let ctx = typecheck {|mod Det do
+    cap deterministic
+    needs IO.FileRead
+    needs IO.Console
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check int) "cap deterministic + needs IO.FileRead + IO.Console: no violation" 0
+    (count_errors_with ctx "declares `needs")
 
 (* ── Proof-cap mint soundness (Part 1: cap_narrow restriction) ────────────
    cap_narrow's polymorphic result Cap(a) let ANY holder of a plain Cap(IO)
@@ -12942,6 +13209,51 @@ let test_unrelated_needs_still_warns_with_stdlib_loaded () =
       "needs IO.NetListen with no use of any kind still warns" true
       (has_warning_with errors "unused capability"))
 
+(* Issue #1180: `System.monotonic_time()` reaches `sys_uptime_ms`, which needs
+   no capability, so neither the capability ceiling nor the `needs` rule of
+   `cap pure`/`cap deterministic` sees it; the call-name scan must follow a
+   stdlib callee to the ambient banned builtin it reaches.  [mod_cap] is the
+   cap line ("" for the non-pure control). *)
+let check_with_system_loaded mod_cap =
+  (* system.march imports Process (for `ProcessResult`), so load both. *)
+  with_stdlib_registered "process.march" @@ fun () ->
+  with_stdlib_registered "system.march" (fun () ->
+    let proc = load_stdlib_file_for_test "process.march" in
+    let sys = load_stdlib_file_for_test "system.march" in
+    let m = March_ast.Ast.{
+      mod_name = { txt = "Main"; span = dummy_span };
+      mod_decls = proc :: sys :: (parse_and_desugar (Printf.sprintf {|mod Main do
+        mod Inner do
+          %s
+          fn wrapped() : Int do
+            System.monotonic_time()
+          end
+        end
+      end|} mod_cap)).March_ast.Ast.mod_decls;
+    } in
+    let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
+    errors)
+
+let test_cap_pure_rejects_monotonic_wrapper () =
+  let errors = check_with_system_loaded "cap pure" in
+  Alcotest.(check int) "cap pure + System.monotonic_time: one pure_violation" 1
+    (count_errors_with errors "calls `System.monotonic_time`, which has side effects")
+
+let test_cap_deterministic_rejects_monotonic_wrapper () =
+  let errors = check_with_system_loaded "cap deterministic" in
+  Alcotest.(check int) "cap deterministic + System.monotonic_time: one violation" 1
+    (count_errors_with errors "calls `System.monotonic_time`, which is non-deterministic")
+
+let test_monotonic_wrapper_ambient_outside_module_caps () =
+  let errors = check_with_system_loaded "" in
+  let msgs =
+    List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+        if d.severity = March_errors.Errors.Error then Some d.message else None)
+      errors.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check (list string)) "System.monotonic_time in a plain module: no error"
+    [] msgs
+
 (* ── Unrecognized capability names in `needs` are rejected ────────────────
    Task 4 of the 2026-08-13 capability UX plan: `needs IO.Filesystem` (wrong
    case), `needs IO.FileWrit` (typo), and `needs Network` (bare leaf, missing
@@ -13730,7 +14042,7 @@ let stage_d_fix_of src =
     (fun acc (d : March_errors.Errors.diagnostic) ->
        match acc, d.fix with
        | Some _, _ -> acc
-       | None, Some (March_errors.Errors.FReplace { text; span }) -> Some (text, span)
+       | None, Some { March_errors.Errors.edit = March_errors.Errors.FReplace { text; span }; _ } -> Some (text, span)
        | None, _ -> None)
     None
     (List.rev ctx.March_errors.Errors.diagnostics)
@@ -14401,6 +14713,38 @@ let test_non_redundant_no_warning () =
 
 (* ── Improvement #8: qualified error uses notes ─────────────────────────── *)
 
+let test_type_qualified_value_rejected () =
+  List.iter (fun (decl, expr, qualifier) ->
+    let ctx = typecheck ("mod Test do " ^ decl ^
+      " fn f() do " ^ expr ^ " end end") in
+    Alcotest.(check bool) (expr ^ " is rejected") true (has_errors ctx);
+    Alcotest.(check bool) "actionable type qualifier diagnostic" true
+      (List.exists (fun d ->
+        _contains_substr d.March_errors.Errors.message
+          ("`" ^ qualifier ^ "` is a type, not a module") &&
+        _contains_substr d.March_errors.Errors.message "to_string")
+        (March_errors.Errors.sorted ctx)))
+    [ "", "Int.to_string(5)", "Int";
+      "", "Int.to_string", "Int";
+      "type Counter = Counter(Int)", "Counter.to_string(5)", "Counter";
+      "type Number = Int", "Number.to_string(5)", "Number" ]
+
+let test_type_qualified_value_controls () =
+  let ctx = typecheck {|mod Test do
+    mod Auth do
+      type Auth = Auth
+      pfn hash(s : String) : String do s end
+      fn verify(plain, stored) do Auth.hash(plain) == stored end
+    end
+    mod Counter do
+      fn to_string(x : Int) : String do int_to_string(x) end
+    end
+    fn f() do Counter.to_string(5) end
+    fn g() do to_string(5) end
+  end|} in
+  Alcotest.(check bool) "real module and bare function still accepted" false
+    (has_errors ctx)
+
 let test_qualified_error_uses_notes () =
   let ctx = typecheck {|mod Test do
     fn f() do Nonexistent.foo(1) end
@@ -14621,7 +14965,7 @@ let test_parse_diag_codes () =
   Alcotest.(check string) "then production" "then_keyword"
     (code "mod T do\n  fn f(x) do\n    if x then 1 end\n  end\nend");
   (match parse_error_diag "mod T do\n  fn f(x) do\n    if x then 1 else 0 end\n  end\nend" with
-   | Some { March_errors.Errors.fix = Some (March_errors.Errors.FReplace { span; text }); _ } ->
+   | Some { March_errors.Errors.fix = Some { edit = March_errors.Errors.FReplace { span; text }; _ }; _ } ->
      Alcotest.(check string) "then fix text" "do" text;
      Alcotest.(check (list int)) "then fix span" [3; 9; 3; 13]
        [span.March_ast.Ast.start_line; span.start_col; span.end_line; span.end_col]
@@ -18024,6 +18368,9 @@ let compiler_suites =
             "unrelated broken lib module is pruned; referenced one still errors"
             `Quick test_unrelated_broken_lib_module_is_pruned;
           Alcotest.test_case
+            "a shared type/ctor name does not load an unreferenced lib module (#1183)"
+            `Quick test_shared_type_name_does_not_load_unreferenced_module;
+          Alcotest.test_case
             "qualified private opaque ctor from a sibling module is rejected"
             `Quick test_opaque_ctor_qualified_bypass_rejected;
           Alcotest.test_case
@@ -18200,6 +18547,20 @@ let compiler_suites =
             `Quick test_parse_same_line_call_still_works;
           Alcotest.test_case "multi-line call arg list still parses as a call"
             `Quick test_parse_multiline_call_args_still_work;
+          Alcotest.test_case "`(` line after a record literal is a statement (#1179)"
+            `Quick test_parse_paren_line_after_record_literal;
+          Alcotest.test_case "`(` line after a record update is a statement (#1179)"
+            `Quick test_parse_paren_line_after_record_update;
+          Alcotest.test_case "`(` line after an interpolated string is a statement (#1179)"
+            `Quick test_parse_paren_line_after_interp_string;
+          Alcotest.test_case "`(` line after a do-block does not call it (#1179)"
+            `Quick test_parse_paren_line_after_do_block;
+          Alcotest.test_case "`(` line after if/local fn `end` stays a statement"
+            `Quick test_parse_paren_line_after_if_and_local_fn;
+          Alcotest.test_case "same-line `do ... end(` still parses as a call"
+            `Quick test_parse_same_line_call_after_do_block_still_works;
+          Alcotest.test_case "tuple-pattern arm after `}`/`end`/interp arm bodies"
+            `Quick test_parse_tuple_arm_after_brace_and_end_bodies;
         ] );
       ( "keywords",
         [
@@ -18683,6 +19044,12 @@ let compiler_suites =
           Alcotest.test_case "cap deterministic + unix_time_ms (real): error" `Quick test_cap_deterministic_unix_time_ms_error;
           Alcotest.test_case "cap deterministic + file_read: no error" `Quick test_cap_deterministic_file_read_ok;
           Alcotest.test_case "cap deterministic + arithmetic: no error" `Quick test_cap_deterministic_arithmetic_ok;
+          Alcotest.test_case "cap pure + sys_uptime_ms: error (#1180)" `Quick test_cap_pure_sys_uptime_ms_error;
+          Alcotest.test_case "cap deterministic + sys_uptime_ms: error (#1180)" `Quick test_cap_deterministic_sys_uptime_ms_error;
+          Alcotest.test_case "sys_uptime_ms stays ambient (#1180)" `Quick test_sys_uptime_ms_stays_ambient;
+          Alcotest.test_case "cap pure + any needs: error (#1180)" `Quick test_cap_pure_rejects_needs;
+          Alcotest.test_case "cap deterministic + clock/random needs: error (#1180)" `Quick test_cap_deterministic_rejects_clock_and_random_needs;
+          Alcotest.test_case "cap deterministic + ordinary needs: ok (#1180)" `Quick test_cap_deterministic_allows_ordinary_needs;
         ] );
       ( "proof_cap_mint", [
           Alcotest.test_case "cap_narrow cannot mint proof cap (inline arg): error" `Quick test_cap_narrow_cannot_mint_proof_cap;
@@ -18868,6 +19235,9 @@ let compiler_suites =
           Alcotest.test_case "unrelated needs still warns"                  `Quick test_cap_propagation_still_warns_unrelated;
           Alcotest.test_case "stdlib-mediated needs is not unused"          `Quick test_stdlib_mediated_needs_is_not_unused;
           Alcotest.test_case "unrelated needs warns with stdlib loaded"     `Quick test_unrelated_needs_still_warns_with_stdlib_loaded;
+          Alcotest.test_case "cap pure + System.monotonic_time: error (#1180)" `Quick test_cap_pure_rejects_monotonic_wrapper;
+          Alcotest.test_case "cap deterministic + System.monotonic_time: error (#1180)" `Quick test_cap_deterministic_rejects_monotonic_wrapper;
+          Alcotest.test_case "System.monotonic_time ambient elsewhere (#1180)" `Quick test_monotonic_wrapper_ambient_outside_module_caps;
         ] );
       ( "cap_ux_no_nag", [
           Alcotest.test_case "capability param is not an unused variable" `Quick test_unused_cap_param_is_not_warned;
@@ -18974,6 +19344,8 @@ let compiler_suites =
           Alcotest.test_case "#6 arm after wildcard: redundant warning"     `Quick test_redundant_after_wildcard_warning;
           Alcotest.test_case "#6 guarded arm: no redundancy warning"        `Quick test_guarded_arm_no_redundant_warning;
           Alcotest.test_case "#6 non-redundant match: no warning"           `Quick test_non_redundant_no_warning;
+          Alcotest.test_case "type qualifier cannot resolve value" `Quick test_type_qualified_value_rejected;
+          Alcotest.test_case "type qualifier controls" `Quick test_type_qualified_value_controls;
           Alcotest.test_case "#8 qualified error has notes not inline"      `Quick test_qualified_error_uses_notes;
           Alcotest.test_case "#7 parse error uses -- SYNTAX header"          `Quick test_parse_error_has_error_header;
           Alcotest.test_case "X5: every code has one category"             `Quick test_every_code_has_one_category;

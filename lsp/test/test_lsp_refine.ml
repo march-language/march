@@ -116,6 +116,22 @@ let tests =
             let n0 = !R.runs in
             Alcotest.(check int) "no dependent is stale" 0 (List.length (R.on_change util_path));
             Alcotest.(check int) "only util.march itself was checked" (n0 + 1) !R.runs));
+    gated "lsp_invalidate: a refinement's parameter named like a user function marks nothing" (fun () ->
+        (* lem.march's `f` is g's parameter, a value.  Resolved by bare name it
+           marked App.f, and Util.is_small which App.f reaches, as named by a
+           predicate, so is_small's contract hash in app.march's check (which
+           loads lem.march) differed from util.march's own, and an edit that
+           moved nothing re-checked app.march (it first showed up as the stdlib
+           Actor.Theory's `enq_other(s, q, f, p)`). *)
+        with_project (fun dir ->
+            write dir "util.march" (util 10);
+            write dir "lem.march" "mod Lem do\n  fn g(f : Int) : {Int | _ == f} do f end\nend\n";
+            write dir "app.march"
+              "mod App do\n  fn need_small(n : {Int | _ < 10}) : Int do n end\n  fn f(n : Int) : Int do\n    if Util.is_small(n) do need_small(Lem.g(n)) else 0 end\n  end\nend\n";
+            let app_path = Filename.concat dir "app.march" and util_path = Filename.concat dir "util.march" in
+            ignore (R.check app_path);
+            write dir "util.march" (util_with_extra 10);
+            Alcotest.(check int) "no dependent is stale" 0 (List.length (R.on_change util_path))));
     gated "lsp_invalidate: the key is the frontier, not the core (a skip that would become a proof re-checks)" (fun () ->
         (* A skipped obligation has no unsat core.  Keyed on cores, the edit
            that makes it provable would leave the stale skip on screen. *)

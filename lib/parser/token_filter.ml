@@ -171,6 +171,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | _ -> false
       in
       match tok with
+      (* Proof hints (specs/lang/lemmas.md): `calc` and `reveal` are keywords
+         only where the statement is written, `calc do` and `reveal f`.  A
+         call (`calc(…)`), a binding (`let reveal = …`) or a declaration
+         (`fn calc()`) keeps the word an ordinary name. *)
+      | Parser.LOWER_IDENT "calc" ->
+        promote_to Parser.CALC ~when_:(function Parser.DO -> true | _ -> false)
+      | Parser.LOWER_IDENT "reveal" ->
+        promote_to Parser.REVEAL ~when_:(function Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _ -> true | _ -> false)
       | Parser.LOWER_IDENT "module" ->
         promote_to Parser.MODULE_KW ~when_:after_upper_ident
       | Parser.LOWER_IDENT ("elif" | "elsif") ->
@@ -241,10 +249,21 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
      ⏎ `()` was still glued into `1()`. Interpreted that raised "applied
      non-function value: 1"; compiled it reached codegen as a call to a
      literal and emitted invalid IR — `declare ptr @<lit>()` — which clang
-     rejected with "expected function name". *)
+     rejected with "expected function name".
+
+     The same holds for the closing token of every other [expr_atom] (#1179):
+     `}` (a record literal or update), `end` (a `do ... end` block) and the
+     end of an interpolated string. Without them `let r = { x: 1 }` ⏎
+     `(r.x + 1)` was glued into `{ x: 1 }(r.x + 1)`, and `let g = do ... end`
+     ⏎ `("x")` silently CALLED `g`. Every other `end` (of an `if`, `match`,
+     local `fn`, `mod`, ...) and `}` (a record type or pattern) already ended
+     a statement, or is followed by a keyword rather than a `(`; at those
+     sites the retag is a no-op, because [LPAREN_STMT] is accepted wherever
+     a statement or a match-arm pattern can start. *)
   let ends_expression = function
     | Parser.INT _ | Parser.FLOAT _ | Parser.STRING _
-    | Parser.BOOL _ | Parser.ATOM _ -> true
+    | Parser.BOOL _ | Parser.ATOM _
+    | Parser.RBRACE | Parser.END | Parser.INTERP_END _ -> true
     | t -> is_value_ending t
   in
 

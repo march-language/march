@@ -8,11 +8,11 @@ This `with` (line 4) has no matching `end`. [syntax_error]
 
     I only noticed at the end of the file.
 
-fix [syntax_error]:
-@@ after line 7 @@
-       Err(e) -> Err(e)
-+    end
-+  end
+    fix (`forge fix` applies it):
+
+7 |       Err(e) -> Err(e)
+8 +     end
+9 +   end
 
 after fix: exit 1
 `Result(a, b)` does not implement Num. [missing_impl]

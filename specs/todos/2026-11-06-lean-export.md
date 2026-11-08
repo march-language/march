@@ -2,7 +2,7 @@
 
 Medium step 8 of `2026-11-06-verification-ladder-roadmap`. How March gets Lean's proving power
 (induction, `omega`, `simp`, mathlib) for the lemmas SMT cannot do, without becoming a proof
-assistant. Aeneas (Rust to Lean) and F*'s Lean bridge do the same.
+assistant. External proof is a separate backend with an explicit translation and admission boundary.
 
 ## Why it fits
 
@@ -33,3 +33,30 @@ inputs.
 - One lemma SMT cannot prove (e.g. the `zip`/`unzip` round trip, or an AVL rotation law) is
   exported, proved in Lean in march-lean, and admitted here by digest; editing the March function
   invalidates it.
+
+## Admission protocol and semantic boundary (2026-11-07)
+
+[Refinement Reflection](https://nikivazou.github.io/static/popl18/refinement-reflection.pdf)
+relies on a pure, terminating reflected fragment. Export that fragment, not unchecked source.
+The following are March admission requirements; a matching text digest alone is not a proof.
+
+- Generate a proof task with `sorry` only as an editor scaffold. Admission requires a successful
+  Lean build and an audit of the theorem's transitive axioms: reject `sorryAx` and custom
+  unapproved axioms; list any allowed foundational axioms explicitly. Prevent replacement of
+  generated definitions or theorem statements by user proof files.
+- Bind evidence to the canonical theorem, transitive reflected definitions, datatype layouts,
+  measures/axioms, arithmetic encoding, exporter version and pinned Lean/dependency versions.
+  Check the elaborated theorem against the generated statement. A changed callee or trusted
+  assumption invalidates evidence even when the lemma's source text is unchanged.
+- Publish the trust boundary: Lean checks a theorem about the translation; the exporter,
+  admission verifier and source/logic correspondence remain trusted unless separately proved.
+  Mathematical Int in the logic does not by itself justify machine integer behavior: export
+  the checker's actual overflow/domain assumptions and test arithmetic edge cases.
+- Start with structural recursion. A March termination metric is input to translation, not a
+  promise that Lean accepts the definition automatically. Unsupported recursion, partiality,
+  floats or effects produce explicit export failures. No `axiom` fallback for definitions.
+
+Acceptance adds: reject a `sorry` proof; reject an extra axiom and an altered statement; invalidate
+on a changed dependency; retain admission across irrelevant source formatting. Evaluate exported
+functions against the interpreter on boundary and generated inputs, while stating that testing
+is correspondence evidence, not a proof of the translator.

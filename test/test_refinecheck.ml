@@ -11706,7 +11706,7 @@ end|}
         March_refinecheck.Precond_infer.attach_promoted_fixes ctx m;
         match ctx.March_errors.Errors.diagnostics with
         | [ { March_errors.Errors.fix =
-                Some (March_errors.Errors.FReplace { text; _ }); _ } ] ->
+                Some { edit = March_errors.Errors.FReplace { text; _ }; _ }; _ } ] ->
           Alcotest.(check string) "rewrites the parameter list"
             "(ys : {List(Int) | len(_) > 0})" text
         | _ -> Alcotest.fail "the promoted warning carried no FReplace fix")
@@ -23983,11 +23983,16 @@ let module_qualified_measure_and_sort_suite =
      specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
      What still holds, and is pinned: the collision makes neither call a
      proof nor a violation. *)
+  (* Since 2026-11-06 (specs/progress/2026-11-06-predicate-names.md) the
+     first is PROVED again: the user's `Tree` takes no type argument and
+     `OrderedMap.Tree(k, v)` takes two, and the typechecker never unifies
+     types of different arities, so the two are told apart by arity.  A
+     same-arity collision still skips (the `pred-names` suite pins it). *)
   [ gated
-      "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
-       once its whole stdlib is prepended, is skipped, not proved (short-name conflation)"
+      "a user's own top-level Tree, beside the stdlib's OrderedMap.Tree(k, v) of \
+       another arity, is proved (types told apart by arity)"
       (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
     gated "...and a literal that is not a member is skipped too, not proved" (fun () ->
@@ -25471,7 +25476,25 @@ let session_theory_suite =
             Alcotest.(check bool) (lemma ^ " is listed as proved") true
               (contains manifest ("Session.Theory." ^ lemma ^ "\t")))
           [ "dual_dual"; "dual_dual_bs"; "same_eq"; "same_eq_bs"; "dual_loop_of"; "erase_loop_of";
-            "merge_binary"; "project_dual"; "project_dual_bs" ]);
+            "merge_binary"; "project_dual"; "project_dual_bs";
+            (* C4 and C5 *)
+            "present_config"; "act_msg"; "apply_msg"; "step_msg"; "act_pick"; "apply_pick"; "step_pick";
+            "trace_bs_found"; "end_done"; "compose_msg"; "compose_pick"; "projections_compose"; "projections_compose_bs"; "progress";
+            (* C3 *)
+            "restrict_choice"; "collapse_dual"; "pairwise_choice"; "pairwise"; "pairwise_bs" ]);
+    Alcotest.test_case "Actor.Theory's lemmas are in the proved-lemma manifest" `Quick (fun () ->
+        let manifest =
+          In_channel.with_open_bin
+            (Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/lemmas.verified")
+            In_channel.input_all
+        in
+        List.iter
+          (fun lemma ->
+            Alcotest.(check bool) (lemma ^ " is listed as proved") true
+              (contains manifest ("Actor.Theory." ^ lemma ^ "\t")))
+          [ "qcat_end"; "from_cat"; "enq_other"; "enq_self"; "replay_order"; "call_keeps_others";
+            "stale_reply_ignored"; "call_reply_cat"; "call_reply_later"; "deadline_law";
+            "downs_cat"; "down_never_dropped"; "unmonitor_gone"; "down_at_most_once" ]);
     Alcotest.test_case "both projectors agree on two-role, three-role and loop/choice protocols" `Quick (fun () ->
         let code, out = run_cli "--validate-projections" protocols in
         Alcotest.(check int) "exit 0" 0 code;
@@ -25500,9 +25523,10 @@ let session_theory_suite =
         has out "projection Blind C (typecheck): not compared: the role is not told which branch a choice took";
         has out "projection Blind C (endpoints): not compared: the role is not told which branch a choice took";
         has out "projection Blind A (typecheck): agrees");
-    Alcotest.test_case "endpoints: unlabelled messages are distinct, so the bystander is not told" `Quick (fun () ->
-        (* specs/todos/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
-           the typechecker merges C's branches, the generator does not. *)
+    Alcotest.test_case "endpoints: the same unlabelled message in both branches is merged, as the theory merges it" `Quick (fun () ->
+        (* specs/progress/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
+           the generator shares the synthesised constructor across equivalent
+           branch tails, so C's projection is one receive, as Session.Theory.project's is. *)
         let src =
           "mod P do\n\
           \  protocol Three do\n\
@@ -25518,7 +25542,8 @@ let session_theory_suite =
         let code, out = run_cli "--validate-projections" src in
         Alcotest.(check int) "exit 0" 0 code;
         has out "projection Three C (typecheck): agrees";
-        has out "projection Three C (endpoints): not compared: the role is not told");
+        has out "projection Three C (endpoints): agrees with Session.Theory.project";
+        has out "laws Three: in the fragment");
     Alcotest.test_case "a role that may crash is outside the fragment" `Quick (fun () ->
         let src =
           "mod P do\n\
@@ -25553,11 +25578,83 @@ let session_theory_suite =
         Alcotest.(check int) (Printf.sprintf "accepted\n%s" out) 0 code);
     Alcotest.test_case "--guarantees: a validated projection inherits the theory's laws" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" protocols in
-        has out "protocol Relay (2 roles): not checked\n";
+        has out "protocol Relay (2 roles): proved (spec) · validated (compiler)\n";
         has out "projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)";
-        has out "protocol Ring (3 roles): not checked\n";
-        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
-        has out "deadlock freedom  not checked") ]
+        has out "protocol Ring (3 roles): proved (spec) · validated (compiler)\n";
+        has out "pairwise duality  proved (spec) · validated (compiler): what each pair of roles does with each other is dual (Session.Theory.pairwise)";
+        has out "deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)";
+        (* A loop is outside the fragment the laws cover: said, not claimed. *)
+        has out "protocol Shop (2 roles): not checked\n";
+        has out "deadlock freedom  not checked: not proved: a loop (the laws cover loop-free protocols for now)");
+    Alcotest.test_case "--validate-projections: which protocols the laws cover" `Quick (fun () ->
+        let src =
+          "mod P do\n\
+          \  protocol Ring do\n\
+          \    X -> Y : String\n\
+          \    Y -> Z : String\n\
+          \    Z -> X : Int\n\
+          \  end\n\
+          \  protocol Blind do\n\
+          \    choose by A:\n\
+          \      go -> A -> B : Int\n\
+          \            B -> C : Int\n\
+          \      halt -> A -> B : String\n\
+          \              B -> C : String\n\
+          \    end\n\
+          \  end\n\
+          \  protocol Loop do\n\
+          \    loop do\n\
+          \      A -> B : Int\n\
+          \    end\n\
+          \  end\n\
+          end\n"
+        in
+        let code, out = run_cli "--validate-projections" src in
+        Alcotest.(check int) "exit 0" 0 code;
+        has out "laws Ring: in the fragment (pairwise duality, composition, deadlock freedom)";
+        has out "laws Blind: outside the fragment: a choice whose other roles do not all see the same branches";
+        has out "laws Loop: outside the fragment: a loop");
+    Alcotest.test_case "gate: a lemma waiting only on an ordinary lemma proved in an IH round is admitted" `Quick (fun () ->
+        (* add_z is an induction (admitted in an IH round); add_z2 calls it and
+           is proved in that round; add_z3 calls only add_z2.  Before the fix
+           the next IH round retried only items calling a group admitted in
+           that round, so add_z3 was never retried and stayed unproved
+           although its one path proves (refine_post.ml, ih_rounds). *)
+        let src =
+          "mod G do\n\
+          \  type N = Z | S(N)\n\
+          \  fn add(a : N, b : N) : N do\n\
+          \    match a do\n\
+          \      Z -> b\n\
+          \      S(k) -> S(add(k, b))\n\
+          \    end\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z(a : N) : {Unit | add(a, Z) == a} do\n\
+          \    match a do\n\
+          \      Z -> ()\n\
+          \      S(k) -> add_z(k)\n\
+          \    end\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z2(a : N) : {Unit | add(add(a, Z), Z) == a} do\n\
+          \    add_z(a)\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z3(a : N) : {Unit | add(add(a, Z), Z) == a} do\n\
+          \    add_z2(a)\n\
+          \  end\n\
+          \  fn main() : Int do 0 end\n\
+          end\n"
+        in
+        let _, out = run_cli "--check --reflect-deps" src in
+        List.iter
+          (fun l ->
+            Alcotest.(check bool) (Printf.sprintf "%s admitted\n%s" l out) true
+              (List.exists
+                 (fun line -> contains line ("\tG." ^ l ^ "\t") && contains line ":admitted")
+                 (String.split_on_char '\n' out)))
+          [ "add_z"; "add_z2"; "add_z3" ]) ]
 
 (* `--guarantees` (lemmas phase B, bin/guarantees.ml): one labelled block per
    actor and protocol, read off the ledger after the check; it changes no
@@ -25574,15 +25671,19 @@ let guarantees_suite =
   in
   let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
   let first_line out = List.hd (String.split_on_char '\n' out) in
-  [ Alcotest.test_case "proved state, unchecked @invariant, assumed runtime" `Quick (fun () ->
+  [ Alcotest.test_case "proved state, unchecked @invariant, the runtime proved on a model" `Quick (fun () ->
         let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(count <= limit)\n" ~init:"0" ()) in
         Alcotest.(check int) "accepted" 0 code;
         Alcotest.(check string) "the invariant decides the summary" "actor Counter: not checked" (first_line out);
         has out "state refinements  proved: ";
         has out "@invariant         not checked: init and handler results are not checked against it";
         has out "handler contracts";
-        has out "runtime: assumed\n";
-        has out "assumed: the runtime is trusted");
+        (* Actor.Theory: the runtime's laws are proved on a model, and tested
+           against the runtime where a fixture covers them. *)
+        has out "runtime: proved (model)\n";
+        has out "per-sender message order  proved (model) · tested (runtime): Actor.Theory.enq_self";
+        has out "Actor.call replies        proved (model) · tested (runtime)";
+        has out "DOWN delivery             proved (model): at most once");
     Alcotest.test_case "no @invariant: proved" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" (actor ~init:"0" ()) in
         Alcotest.(check string) "summary" "actor Counter: proved" (first_line out));
@@ -25610,7 +25711,7 @@ let guarantees_suite =
         let _, out = run_cli "--check --guarantees" src in
         has out "migrate_state";
         has out "against its parameter type (no deployed build known)");
-    Alcotest.test_case "protocols: projection checked, deadlock freedom not" `Quick (fun () ->
+    Alcotest.test_case "protocols: projection, pairwise duality and deadlock freedom validated" `Quick (fun () ->
         let src =
           "mod G do\n\
           \  protocol Relay do\n\
@@ -25626,11 +25727,11 @@ let guarantees_suite =
         in
         let code, out = run_cli "--check --guarantees" src in
         Alcotest.(check int) "accepted" 0 code;
-        has out "protocol Relay (2 roles): not checked\n";
+        has out "protocol Relay (2 roles): proved (spec) · validated (compiler)\n";
         has out "proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual";
-        has out "protocol Ring (3 roles): not checked\n";
-        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
-        has out "deadlock freedom  not checked";
+        has out "protocol Ring (3 roles): proved (spec) · validated (compiler)\n";
+        has out "pairwise duality  proved (spec) · validated (compiler)";
+        has out "deadlock freedom  proved (spec) · validated (compiler)";
         Alcotest.(check bool) "no runtime block without actors" false (contains out "runtime:"));
     Alcotest.test_case "a derived migrate_state is told apart from the actor's own sites" `Quick (fun () ->
         (* The derived function sits under the actor's span with synthetic
@@ -30000,10 +30101,12 @@ let () =
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
       ("reflect-record-vars", Test_refine_record_vars.tests);
-      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.s3);
+      ("proof-hints", Test_refine_proof_hints.suite);
+      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified @ Test_refine_stdlib_sweep.s3);
+      ("pred-names", Test_refine_pred_names.suite);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);
+      ("reflect-lemma", Test_refine_lemma.scoped_asserts @ Test_refine_lemma.scoped_hint_bindings @ Test_refine_lemma.scoped_directives @ Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

@@ -176,10 +176,69 @@ let expand_scientific s =
     in
     if neg then "-" ^ body else body
 
+(* String literal escaping, matching the lexer's own escapes
+   (lib/lexer/lexer.mll [read_string]).  OCaml's [String.escaped] is not that:
+   it writes each UTF-8 byte as a decimal escape (\226) that the lexer
+   rejects, and it leaves `${` alone, which then re-lexes as an
+   interpolation. *)
+let escape_string s =
+  let b = Buffer.create (String.length s + 8) in
+  let n = String.length s in
+  String.iteri (fun i c ->
+    match c with
+    | '\\' -> Buffer.add_string b {|\\|}
+    | '"' -> Buffer.add_string b {|\"|}
+    | '\n' -> Buffer.add_string b {|\n|}
+    | '\t' -> Buffer.add_string b {|\t|}
+    | '\r' -> Buffer.add_string b {|\r|}
+    | '\b' -> Buffer.add_string b {|\b|}
+    | '\012' -> Buffer.add_string b {|\f|}
+    | '\000' -> Buffer.add_string b {|\0|}
+    | '$' when i + 1 < n && s.[i + 1] = '{' -> Buffer.add_string b {|\$|}
+    | c when Char.code c < 0x20 || Char.code c = 0x7f ->
+      Buffer.add_string b (Printf.sprintf {|\x%02x|} (Char.code c))
+    | c -> Buffer.add_char b c) s;
+  Buffer.contents b
+
+(** [s] as an ordinary double-quoted March string literal. *)
+let quote_string s = "\"" ^ escape_string s ^ "\""
+
+let contains_sub s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+  go 0
+
+(* A triple-quoted string has one escape (backslash-dollar), so its content
+   is printed raw except for an interpolation opener.  Content holding three
+   double quotes in a row or a literal backslash-dollar, or ending in a double
+   quote, cannot be spelled that way and takes the ordinary escaped form; so
+   does a carriage return, which the lexer folds into the newline after it. *)
+let triple_safe s =
+  not (contains_sub s {|"""|}) && not (contains_sub s {|\$|})
+  && not (String.contains s '\r')
+  && not (String.length s > 0 && s.[String.length s - 1] = '"')
+
+let escape_triple s =
+  let b = Buffer.create (String.length s + 8) in
+  let n = String.length s in
+  String.iteri (fun i c ->
+    if c = '$' && i + 1 < n && s.[i + 1] = '{' then Buffer.add_string b {|\$|}
+    else Buffer.add_char b c) s;
+  Buffer.contents b
+
 let fmt_lit = function
   | LitInt n    -> string_of_int n
   | LitFloat f  ->
-    let s = string_of_float f in
+    (* The shortest %g form that reads back as the same float.
+       [string_of_float] keeps only 12 significant digits, so formatting
+       used to change a literal's value (3.14159265358979 -> 3.14159265359). *)
+    let s =
+      let rec go p =
+        let s = Printf.sprintf "%.*g" p f in
+        if p >= 17 || float_of_string s = f then s else go (p + 1)
+      in
+      go 1
+    in
     let s = if String.contains s 'e' then expand_scientific s else s in
     (* March requires digit+ '.' digit+ — ensure at least one digit after decimal *)
     if not (String.contains s '.') then s ^ ".0"
@@ -191,11 +250,11 @@ let fmt_lit = function
   | LitString s ->
     (* Use triple quotes for multi-line strings that are actual content blocks,
        not short strings that just contain a \n *)
-    if String.contains s '\n' && String.length s > 10 then
+    if String.contains s '\n' && String.length s > 10 && triple_safe s then
       let triple = "\"\"\"" in
-      triple ^ s ^ triple
+      triple ^ escape_triple s ^ triple
     else
-      "\"" ^ String.escaped s ^ "\""
+      "\"" ^ escape_string s ^ "\""
   | LitBool b   -> if b then "true" else "false"
   | LitAtom s   -> ":" ^ s
 
@@ -206,7 +265,8 @@ let fmt_lit = function
 (* Forward reference to the inline expression formatter, used to render
    refinement predicates faithfully (so reformatting never drops the predicate).
    Assigned once [expr_inline] is in scope, at the bottom of this module. *)
-let fmt_pred_ref : (expr -> string) ref = ref (fun _ -> "...")
+let fmt_pred_ref : (expr -> string) ref =
+  ref (fun _ -> invalid_arg "Format.fmt_pred_ref: used before initialisation")
 
 (* The abstract-refinement DEFINER `D1 -> … -> Dn -> Bool[p]`, as the parser
    rewrites it (Parser.abstract_definer_arrow): each domain carries a binder
@@ -293,8 +353,10 @@ let rec fmt_pat = function
       if ps = n.txt then n.txt else Printf.sprintf "%s: %s" n.txt ps
     in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
+  (* [p as a as b] does not parse: the inner as-pattern keeps its parens. *)
+  | PatAs ((PatAs _ as p), n, _)  -> Printf.sprintf "(%s) as %s" (fmt_pat p) n.txt
   | PatAs (p, n, _)               -> Printf.sprintf "%s as %s" (fmt_pat p) n.txt
-  | PatOr (ps, _)                 -> String.concat " | " (List.map fmt_pat ps)
+  | PatOr (ps, _)               -> String.concat " | " (List.map fmt_pat ps)
 
 and fmt_pats ps = String.concat ", " (List.map fmt_pat ps)
 
@@ -311,11 +373,6 @@ let fmt_param p =
   | None    -> l ^ p.param_name.txt
   | Some ty -> Printf.sprintf "%s%s : %s" l p.param_name.txt (fmt_ty ty)
 
-let fmt_fn_param = function
-  | FPPat  p -> fmt_pat p
-  | FPNamed p -> fmt_param p
-  | FPDefault (p, _default_e) -> fmt_param p ^ " \\\\ _"
-
 (** Render a lambda's parameter list, e.g. [x], [(a, b)], [()]. *)
 let fmt_lam_params = function
   | []  -> "()"
@@ -323,32 +380,48 @@ let fmt_lam_params = function
   | ps  -> Printf.sprintf "(%s)" (String.concat ", " (List.map fmt_param ps))
 
 (* ------------------------------------------------------------------ *)
-(* Infix operator handling                                            *)
+(* Binding levels: where an operand needs parentheses                 *)
 (* ------------------------------------------------------------------ *)
 
-(** Returns the precedence of a binary infix operator, or None if the
-    operator name is not a known infix operator. *)
-let infix_prec = function
-  | "||"          -> Some 1
-  | "&&"          -> Some 2
-  | "==" | "!=" | "<" | ">" | "<=" | ">=" -> Some 3
-  | "+" | "-" | "++" | "+." | "-."        -> Some 4
-  | "*" | "/" | "%" | "*." | "/."         -> Some 5
+(* The parser drops parentheses ([LPAREN e RPAREN] yields plain [e]), so the
+   formatter has to put back every pair the grammar needs (#1175).  Each
+   expression gets a binding level from the grammar's own layering in
+   lib/parser/parser.mly (expr > expr_pipe > expr_or > expr_and > expr_cmp >
+   expr_add > expr_mul > expr_unary > expr_app > expr_field/expr_atom), and
+   each operand position asks for a minimum level: an operand that binds
+   looser than its position allows is wrapped in parentheses. *)
+let lv_expr  = 0   (* a full [expr]: if / match / fn / assert *)
+let lv_pipe  = 10  (* expr_pipe: [a |> f] *)
+let lv_or    = 20
+let lv_and   = 30
+let lv_cmp   = 40  (* non-associative: both operands need lv_cmp + 1 *)
+let lv_add   = 50
+let lv_mul   = 60
+let lv_unary = 70  (* [-e], [!e] *)
+let lv_app   = 80  (* expr_app: [f(x)], [Con(x)] *)
+let lv_atom  = 90  (* expr_field / expr_atom: what a callee or field base must be *)
+
+(** Binding level of a binary infix operator, or [None]. *)
+let infix_level = function
+  | "||"          -> Some lv_or
+  | "&&"          -> Some lv_and
+  | "==" | "!=" | "<" | ">" | "<=" | ">=" -> Some lv_cmp
+  | "+" | "-" | "++" | "+." | "-."        -> Some lv_add
+  | "*" | "/" | "%" | "*." | "/."         -> Some lv_mul
   | _             -> None
+
+(** Precedence rank of a binary infix operator (1 = loosest), or [None]. *)
+let infix_prec op = Option.map (fun l -> l / 10 - 1) (infix_level op)
 
 (** True if this expression is a binary infix application. *)
 let is_infix_app = function
-  | EApp (EVar { txt; _ }, [_; _], _) -> infix_prec txt <> None
+  | EApp (EVar { txt; _ }, [_; _], _) -> infix_level txt <> None
   | _ -> false
 
 (** Get the infix precedence of an expression (for parenthesisation). *)
 let expr_infix_prec = function
   | EApp (EVar { txt; _ }, [_; _], _) -> infix_prec txt
   | _ -> None
-
-(* ------------------------------------------------------------------ *)
-(* Expressions — inline (single-line) renderer                        *)
-(* ------------------------------------------------------------------ *)
 
 (** Try to reconstruct a list literal from Cons(a, Cons(b, Nil)) *)
 let rec try_collect_list acc = function
@@ -392,133 +465,73 @@ let try_collect_interp expr =
     collect_pairs [] rest
   | _ -> None
 
+(** A statement form: it only means something as a line of a block body, so
+    in an expression position it is printed as a [do ... end] block. *)
+let is_stmt_form = function
+  | ELet _ | ELetFn _ | ELetQ _ | ELetStar _ -> true
+  | EBlock (_ :: _ :: _, _) -> true
+  | _ -> false
 
-(** Render an expression as a single line.  Used to measure width and
-    decide whether to emit inline or break across multiple lines. *)
-let rec expr_inline = function
-  | ELit (lit, _)               -> fmt_lit lit
-  | EVar { txt; _ }             -> txt
-  (* Reconstruct list literals: Cons(a, Cons(b, Nil)) → [a, b] *)
-  | ECon ({ txt = "Cons"; _ }, [_; _], _) as e ->
-    (match try_collect_list [] e with
-     | Some elems ->
-       Printf.sprintf "[%s]" (String.concat ", " (List.map expr_inline elems))
-     | None ->
-       let[@warning "-8"] ECon ({ txt; _ }, args, _) = e in
-       Printf.sprintf "%s(%s)" txt (String.concat ", " (List.map expr_inline args)))
-  | ECon ({ txt = "Nil"; _ }, [], _) -> "[]"
-  (* Reconstruct string interpolation: ++ chain → "${expr}" *)
-  | EApp (EVar { txt = "++"; _ }, [_; _], _) as e
-    when try_collect_interp e <> None ->
-    let[@warning "-8"] Some (prefix, parts) = try_collect_interp e in
-    let needs_triple = String.contains prefix '\n' ||
-      List.exists (fun (_, s) -> String.contains s '\n') parts in
-    let buf = Buffer.create 64 in
-    if needs_triple then begin
-      let triple = "\"\"\"" in
-      Buffer.add_string buf triple;
-      Buffer.add_string buf prefix;
-      List.iter (fun (e, seg) ->
-        Buffer.add_string buf "${";
-        Buffer.add_string buf (expr_inline e);
-        Buffer.add_char buf '}';
-        Buffer.add_string buf seg
-      ) parts;
-      Buffer.add_string buf triple
-    end else begin
-      Buffer.add_char buf '"';
-      Buffer.add_string buf (String.escaped prefix);
-      List.iter (fun (e, seg) ->
-        Buffer.add_string buf "${";
-        Buffer.add_string buf (expr_inline e);
-        Buffer.add_char buf '}';
-        Buffer.add_string buf (String.escaped seg)
-      ) parts;
-      Buffer.add_char buf '"'
-    end;
-    Buffer.contents buf
-  | EApp (EVar { txt = op; _ }, [a; b], _) when infix_prec op <> None ->
-    (* Binary infix operator — render as  a op b  with precedence-correct parens *)
-    let p    = Option.get (infix_prec op) in
-    let la   = match expr_infix_prec a with Some pa -> pa < p  | None -> false in
-    let rb   = match expr_infix_prec b with Some pb -> pb <= p | None -> false in
-    let left = if la then Printf.sprintf "(%s)" (expr_inline a) else expr_inline a in
-    let right= if rb then Printf.sprintf "(%s)" (expr_inline b) else expr_inline b in
-    Printf.sprintf "%s %s %s" left op right
-  | EApp (EVar { txt = "negate"; _ }, [e], _) ->
-    (* Unary negation: -e *)
-    if is_infix_app e then Printf.sprintf "-(%s)" (expr_inline e)
-    else Printf.sprintf "-%s" (expr_inline e)
-  | EApp (EVar { txt = "not"; _ }, [e], _) ->
-    (* Logical not: !e *)
-    if is_infix_app e then Printf.sprintf "!(%s)" (expr_inline e)
-    else Printf.sprintf "!%s" (expr_inline e)
-  | EApp (f, args, _)           ->
-    Printf.sprintf "%s(%s)" (expr_inline f)
-      (String.concat ", " (List.map expr_inline args))
-  | ECon ({ txt; _ }, [], _)    -> txt
-  | ECon ({ txt; _ }, args, _)  ->
-    Printf.sprintf "%s(%s)" txt (String.concat ", " (List.map expr_inline args))
-  | ELam (params, body, _)      ->
-    Printf.sprintf "fn %s -> %s" (fmt_lam_params params) (expr_inline body)
-  | EBlock ([], _)              -> ""
-  | EBlock ([e], _)             -> expr_inline e
-  | EBlock _                    -> "..."
-  | ELet (b, _)                 ->
-    let ty = match b.bind_ty with
-      | None   -> ""
-      | Some t -> Printf.sprintf " : %s" (fmt_ty t)
-    in
-    Printf.sprintf "let %s%s%s = %s"
-      (fmt_lin b.bind_lin) (fmt_pat b.bind_pat) ty (expr_inline b.bind_expr)
-  | EMatch _                    -> "match ..."
-  | ETuple (es, _)              ->
-    Printf.sprintf "(%s)" (String.concat ", " (List.map expr_inline es))
-  | ERecord (flds, _)           ->
-    let f (n, e) = Printf.sprintf "%s: %s" n.txt (expr_inline e) in
-    Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
-  | ERecordUpdate (e, flds, _)  ->
-    let f (n, v) = Printf.sprintf "%s: %s" n.txt (expr_inline v) in
-    Printf.sprintf "{ %s with %s }" (expr_inline e)
-      (String.concat ", " (List.map f flds))
-  | EField (e, n, _)            -> Printf.sprintf "%s.%s" (expr_inline e) n.txt
-  | EIf (c, t, e, _)           ->
-    Printf.sprintf "if %s do %s else %s end"
-      (expr_inline c) (expr_inline t) (expr_inline e)
-  | EPipe (a, b, _)             ->
-    Printf.sprintf "%s |> %s" (expr_inline a) (expr_inline b)
-  | EAnnot (e, t, _)            ->
-    Printf.sprintf "(%s : %s)" (expr_inline e) (fmt_ty t)
-  | EHole (None, _)             -> "?"
-  | EHole (Some n, _)           -> "?" ^ n.txt
-  | EAtom (name, [], _)         -> ":" ^ name
-  | EAtom (name, args, _)       ->
-    Printf.sprintf ":%s(%s)" name (String.concat ", " (List.map expr_inline args))
-  | ESend (cap, msg, _)         ->
-    Printf.sprintf "send(%s, %s)" (expr_inline cap) (expr_inline msg)
-  | ESpawn (a, _)               -> Printf.sprintf "spawn(%s)" (expr_inline a)
-  | EResultRef None             -> "v"
-  | EResultRef (Some n)         -> Printf.sprintf "v(%d)" n
-  | EDbg (None, _)              -> "dbg()"
-  | EDbg (Some e, _)            -> Printf.sprintf "dbg(%s)" (expr_inline e)
-  | ELetFn (n, ps, ret, _, _)   ->
-    let ty = match ret with None -> "" | Some t -> Printf.sprintf " : %s" (fmt_ty t) in
-    Printf.sprintf "fn %s(%s)%s do ... end"
-      n.txt (String.concat ", " (List.map fmt_param ps)) ty
-  | ELetQ (p, r, _, _)          ->
-    Printf.sprintf "let? %s = %s; ..." (fmt_pat p) (expr_inline r)
-  | ELetStar (p, r, _, _)       ->
-    Printf.sprintf "let* %s = %s; ..." (fmt_pat p) (expr_inline r)
-  | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
-  | ESigil (name, content, _)     ->
-    let inner = expr_inline content in
-    Printf.sprintf "~%s%s" name inner
-  | ERefineMsg (inner, msg, sp)  ->
-    Printf.sprintf "%s else %s" (expr_inline inner) (expr_inline (ELit (LitString msg, sp)))
-  | ECond _                     -> "match do ... end"
+(** The binding level of [e] as the renderer prints it. *)
+let rec level_of e =
+  match e with
+  | EIf _ | EMatch _ | ECond _ | ELam _ | EAssert _ | EProof _ -> lv_expr
+  | EPipe _ -> lv_pipe
+  | EBlock ([x], _) -> level_of x
+  | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None -> lv_atom
+  | EApp (EVar { txt = op; _ }, [_; _], _) when infix_level op <> None ->
+    Option.get (infix_level op)
+  | EApp (EVar { txt = ("negate" | "not"); _ }, [_], _) -> lv_unary
+  | EApp _ -> lv_app
+  | ECon ({ txt = "Cons"; _ }, [_; _], _) when try_collect_list [] e <> None -> lv_atom
+  | ECon (_, _ :: _, _) -> lv_app
+  | _ -> lv_atom
 
-(** Returns true if the expression must be rendered on multiple lines
-    (match, multi-statement block, local fn definition). *)
+(** A call the renderer prints as [head(args)], as opposed to an operator
+    application or a list literal, which are also [EApp] / [ECon] nodes. *)
+let plain_call e =
+  match e with
+  | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None -> None
+  | EApp (EVar { txt; _ }, [_; _], _) when infix_level txt <> None -> None
+  | EApp (EVar { txt = ("negate" | "not"); _ }, [_], _) -> None
+  | EApp (f, (_ :: _ as args), _) -> Some (`Fn f, args)
+  | ECon ({ txt = "Cons"; _ }, [_; _], _) when try_collect_list [] e <> None -> None
+  | ECon (n, (_ :: _ as args), _) -> Some (`Con n, args)
+  | _ -> None
+
+(** The direct subexpressions of [e]. *)
+let children e =
+  match e with
+  | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg (None, _) -> []
+  | EApp (f, args, _) -> f :: args
+  | ECon (_, xs, _) | ETuple (xs, _) | EAtom (_, xs, _) | EBlock (xs, _) -> xs
+  | ELam (_, b, _) | ELetFn (_, _, _, b, _) -> [b]
+  | ELet (b, _) -> [b.bind_expr]
+  | EMatch (s, arms, _) ->
+    s :: List.concat_map
+           (fun a -> Option.to_list a.branch_guard @ [a.branch_body]) arms
+  | ERecord (fs, _) -> List.map snd fs
+  | ERecordUpdate (b, fs, _) -> b :: List.map snd fs
+  | EField (x, _, _) | EAnnot (x, _, _) | ESpawn (x, _) | EDbg (Some x, _)
+  | EAssert (x, _) | ESigil (_, x, _) | ERefineMsg (x, _, _) -> [x]
+  | EProof (p, _) -> proof_children p
+  | EIf (c, t, f, _) -> [c; t; f]
+  | ECond (arms, _) -> List.concat_map (fun (c, b) -> [c; b]) arms
+  | EPipe (a, b, _) | ESend (a, b, _) -> [a; b]
+  | ELetQ (_, r, c, _) | ELetStar (_, r, c, _) -> [r; c]
+
+(** True when [e] contains, anywhere inside it, a construct that can only be
+    printed across lines (a match, a cond, a statement or a block of them).
+    Every layout decision consults this, so a construct is never squeezed
+    onto one line by a container that did not look inside it (#1174: lists,
+    tuples, records, call arguments, operands and if branches all used to
+    skip the check). *)
+let rec needs_break e =
+  match e with
+  | EMatch _ | ECond _ | ELet _ | ELetFn _ | ELetQ _ | ELetStar _ | EProof _ -> true
+  | EBlock (_ :: _ :: _, _) -> true
+  | _ -> List.exists needs_break (children e)
+
 let sigil_is_multiline content =
   match content with
   | ELit (LitString s, _) -> String.contains s '\n'
@@ -530,55 +543,226 @@ let sigil_is_multiline content =
       List.exists (fun (_, s) -> String.contains s '\n') parts
     | None -> false
 
+(** True if [e] is printed on multiple lines: it [needs_break], or it is (or
+    its trailing lambda body is) a multi-line sigil, which reads better on
+    lines of its own. *)
+let rec is_multiline e =
+  needs_break e ||
+  (match e with
+   | ESigil (_, content, _) -> sigil_is_multiline content
+   | ELam (_, body, _) -> is_multiline body
+   | EApp _ | ECon _ ->
+     (match plain_call e with Some (_, args) -> trailing_multiline args | None -> false)
+   | _ -> false)
+
 (** True when the last argument, followed through any chain of wrapper
     calls/constructors in tail position (e.g. [Thunk(fn _ -> ...)] passed
     as the last arg of [GenTree(...)]), bottoms out in a lambda whose body
     needs multi-line rendering — the "trailing block" call shape, e.g.
     [List.map(xs, fn x -> <multi-statement body> )]. *)
-let rec is_multiline = function
-  | EMatch _ | ELetFn _ | ELetQ _ | ELetStar _ -> true
-  | EBlock (_ :: _ :: _, _) -> true
-  | ESigil (_, content, _) -> sigil_is_multiline content
-  | ELam (_, body, _) -> is_multiline body
-  | EApp (_, args, _) | ECon (_, args, _) -> trailing_multiline args
-  | _ -> false
-
 and trailing_multiline args =
   match List.rev args with
   | ELam (_, body, _) :: _ -> is_multiline body
-  | (EApp (_, a, _) | ECon (_, a, _)) :: _ -> trailing_multiline a
-  | _ -> false
+  | last :: _ ->
+    (match plain_call last with Some (_, a) -> trailing_multiline a | None -> false)
+  | [] -> false
+
+(** A lambda body made only of [let] bindings ahead of a final expression:
+    the only shape [fn x ->] may continue with on the following lines outside
+    a call argument (parser.mly [lambda_body]).  Anything else is wrapped in
+    [do ... end], or a bare statement would end the lambda and change the
+    program. *)
+let rec lets_only_body e =
+  match e with
+  | EBlock ((_ :: _ :: _ as es), _) ->
+    let rec go = function
+      | [last] -> lets_only_body last
+      | ELet _ :: rest -> go rest
+      | _ -> false
+    in
+    go es
+  | ELetQ (_, _, c, _) | ELetStar (_, _, c, _) -> lets_only_body c
+  | ELet _ | ELetFn _ | EBlock ([], _) -> false
+  | _ -> true
+
+(* ------------------------------------------------------------------ *)
+(* Expressions                                                         *)
+(* ------------------------------------------------------------------ *)
+
+(* One renderer serves every position.  [render ind lvl e] is [e]'s text for
+   a position that needs binding level [lvl], parenthesised when [e] binds
+   looser.  The text begins on a line indented [ind] levels; a construct that
+   must span lines is emitted by the block emitters below into a scratch
+   buffer at that indentation ([sub_block]), so its continuation lines carry
+   their absolute indentation and the text can be dropped into any line.
+   There is no placeholder: every construct prints in full (#1174). *)
+let rec render ind lvl e =
+  let s = render_raw ind e in
+  if level_of e < lvl then "(" ^ s ^ ")" else s
+
+(** The text the block emitter [f] writes when started at indentation [ind],
+    minus the first line's indentation and the final newline. *)
+and sub_block ind f =
+  let c = { buf = Buffer.create 256; indent = ind; comments = [||]; com_idx = 0 } in
+  f c;
+  let s = Buffer.contents c.buf in
+  let pre = 2 * ind in
+  let n = String.length s in
+  let s = if n >= pre then String.sub s pre (n - pre) else s in
+  let n = String.length s in
+  if n > 0 && s.[n - 1] = '\n' then String.sub s 0 (n - 1) else s
+
+(** [e] (a statement form) as a [do ... end] block. *)
+and do_block ind e =
+  sub_block ind (fun c ->
+    line c "do";
+    indented c (fun () -> emit_body c e);
+    line c "end")
+
+(** A callee: [f] in [f(args)].  A bare constructor is parenthesised too, or
+    [(Foo)(x)] would come back as the constructor application [Foo(x)]. *)
+and callee ind f =
+  match f with
+  | ECon (n, [], _) -> "(" ^ n.txt ^ ")"
+  | _ -> render ind lv_atom f
+
+and call_head ind = function
+  | `Fn f -> callee ind f
+  | `Con (n : name) -> n.txt
+
+and render_raw ind e =
+  let r lvl x = render ind lvl x in
+  let args xs = String.concat ", " (List.map (r lv_expr) xs) in
+  match e with
+  | ELit (lit, _)               -> fmt_lit lit
+  | EVar { txt; _ }             -> txt
+  (* Reconstruct list literals: Cons(a, Cons(b, Nil)) → [a, b] *)
+  | ECon ({ txt = "Cons"; _ }, [_; _], _) when try_collect_list [] e <> None ->
+    Printf.sprintf "[%s]" (args (Option.get (try_collect_list [] e)))
+  | ECon ({ txt = "Nil"; _ }, [], _) -> "[]"
+  | ECon ({ txt; _ }, [], _)    -> txt
+  | ECon ({ txt; _ }, xs, _)    -> Printf.sprintf "%s(%s)" txt (args xs)
+  (* Reconstruct string interpolation: ++ chain → "${expr}" *)
+  | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None ->
+    let prefix, parts = Option.get (try_collect_interp e) in
+    let segs = prefix :: List.map snd parts in
+    let last = List.nth segs (List.length segs - 1) in
+    let needs_triple =
+      List.exists (fun s -> String.contains s '\n') segs
+      && List.for_all (fun s -> not (contains_sub s {|"""|} || contains_sub s {|\$|})) segs
+      && not (String.length last > 0 && last.[String.length last - 1] = '"')
+    in
+    let esc s = if needs_triple then escape_triple s else escape_string s in
+    let buf = Buffer.create 64 in
+    let quote = if needs_triple then "\"\"\"" else "\"" in
+    Buffer.add_string buf quote;
+    Buffer.add_string buf (esc prefix);
+    List.iter (fun (x, seg) ->
+      Buffer.add_string buf "${";
+      Buffer.add_string buf (r lv_expr x);
+      Buffer.add_char buf '}';
+      Buffer.add_string buf (esc seg)
+    ) parts;
+    Buffer.add_string buf quote;
+    Buffer.contents buf
+  | EApp (EVar { txt = op; _ }, [a; b], _) when infix_level op <> None ->
+    (* Left-associative operators take an equal-level left operand; a
+       comparison is non-associative, so [(a == b) == c] keeps its parens. *)
+    let p = Option.get (infix_level op) in
+    let lp = if p = lv_cmp then p + 1 else p in
+    Printf.sprintf "%s %s %s" (r lp a) op (r (p + 1) b)
+  | EApp (EVar { txt = "negate"; _ }, [x], _) ->
+    (* [-(-x)] must not print as [--x], which lexes as a comment. *)
+    let s = r lv_unary x in
+    if String.length s > 0 && s.[0] = '-' then "-(" ^ s ^ ")" else "-" ^ s
+  | EApp (EVar { txt = "not"; _ }, [x], _) -> "!" ^ r lv_unary x
+  | EApp (f, xs, _)             -> Printf.sprintf "%s(%s)" (callee ind f) (args xs)
+  | ELam (params, body, _)      ->
+    let ps = fmt_lam_params params in
+    if is_stmt_form body then Printf.sprintf "fn %s -> %s" ps (do_block ind body)
+    else Printf.sprintf "fn %s -> %s" ps (r lv_expr body)
+  | EBlock ([], _)              -> ""
+  | EBlock ([x], _)             -> render_raw ind x
+  | EBlock _ | ELet _ | ELetFn _ | ELetQ _ | ELetStar _ -> do_block ind e
+  | EMatch (subj, arms, _)      -> sub_block ind (fun c -> emit_match c subj arms)
+  | ECond (arms, _)             -> sub_block ind (fun c -> emit_cond c arms)
+  | ETuple (xs, _)              -> Printf.sprintf "(%s)" (args xs)
+  | ERecord (flds, _)           ->
+    let f (n, x) = Printf.sprintf "%s: %s" n.txt (r lv_expr x) in
+    Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
+  | ERecordUpdate (b, flds, _)  ->
+    let f (n, v) = Printf.sprintf "%s: %s" n.txt (r lv_expr v) in
+    Printf.sprintf "{ %s with %s }" (r lv_pipe b) (String.concat ", " (List.map f flds))
+  | EField (x, n, _)            -> Printf.sprintf "%s.%s" (r lv_atom x) n.txt
+  | EIf (c, t, f, _)            ->
+    if needs_break c || needs_break t || needs_break f then
+      sub_block ind (fun cx -> emit_if_lines cx c t f)
+    else
+      Printf.sprintf "if %s do %s else %s end" (r lv_pipe c) (r lv_expr t) (r lv_expr f)
+  | EPipe (a, b, _)             -> Printf.sprintf "%s |> %s" (r lv_pipe a) (r lv_or b)
+  | EAnnot (x, t, _)            -> Printf.sprintf "(%s : %s)" (r lv_pipe x) (fmt_ty t)
+  | EHole (None, _)             -> "?"
+  | EHole (Some n, _)           -> "?" ^ n.txt
+  | EAtom (name, [], _)         -> ":" ^ name
+  | EAtom (name, xs, _)         -> Printf.sprintf ":%s(%s)" name (args xs)
+  | ESend (cap, msg, _)         -> Printf.sprintf "send(%s, %s)" (r lv_expr cap) (r lv_expr msg)
+  | ESpawn (a, _)               -> Printf.sprintf "spawn(%s)" (r lv_expr a)
+  | EResultRef None             -> "v"
+  | EResultRef (Some n)         -> Printf.sprintf "v(%d)" n
+  | EDbg (None, _)              -> "dbg()"
+  | EDbg (Some x, _)            -> Printf.sprintf "dbg(%s)" (r lv_expr x)
+  | EAssert (x, _)              -> Printf.sprintf "assert %s" (r lv_expr x)
+  (* A proof statement is always written one construct per line. *)
+  | EProof _                    -> sub_block ind (fun c -> emit_stmt c e)
+  | ESigil (name, content, _)   -> Printf.sprintf "~%s%s" name (r lv_atom content)
+  | ERefineMsg (inner, msg, sp) ->
+    Printf.sprintf "%s else %s" (r lv_expr inner) (render_raw ind (ELit (LitString msg, sp)))
 
 (** Returns true if we should break this expression across lines,
     considering the current indentation level. *)
-let should_break indent_lvl expr =
+and should_break indent_lvl expr =
   is_multiline expr ||
-  String.length (expr_inline expr) + indent_lvl * 2 > 80
+  String.length (render indent_lvl lv_expr expr) + indent_lvl * 2 > 80
 
 (* ------------------------------------------------------------------ *)
 (* Expressions — block (multi-line) renderer                          *)
 (* ------------------------------------------------------------------ *)
 
 (** Emit expression [e] as one or more statements at current indentation. *)
-let rec emit_stmt ctx e =
+and emit_stmt ctx e =
+  let ex x = render ctx.indent lv_expr x in
   match e with
-  | EBlock (es, _) ->
-    List.iter (emit_stmt ctx) es
+  | EBlock ([], _) -> ()
+  | EBlock ([x], _) -> emit_stmt ctx x
+  | EBlock _ ->
+    (* A block nested inside a block keeps its own scope: printed as
+       [do ... end], never spliced into the enclosing statements. *)
+    line ctx "do";
+    indented ctx (fun () -> emit_body ctx e);
+    line ctx "end"
 
   | ELet (b, _) ->
     let ty  = match b.bind_ty with
       | None   -> ""
       | Some t -> Printf.sprintf " : %s" (fmt_ty t)
     in
-    let lhs = Printf.sprintf "let %s%s%s" (fmt_lin b.bind_lin) (fmt_pat b.bind_pat) ty in
-    if should_break (ctx.indent + 1) b.bind_expr then begin
+    (* `linear let x`, not `let linear x`, which does not parse. *)
+    let lhs = Printf.sprintf "%slet %s%s" (fmt_lin b.bind_lin) (fmt_pat b.bind_pat) ty in
+    if is_stmt_form b.bind_expr then begin
+      line ctx (lhs ^ " = do");
+      indented ctx (fun () -> emit_body ctx b.bind_expr);
+      line ctx "end"
+    end else if should_break (ctx.indent + 1) b.bind_expr then begin
       line ctx (lhs ^ " =");
       indented ctx (fun () -> emit_stmt ctx b.bind_expr)
     end else
-      line ctx (Printf.sprintf "%s = %s" lhs (expr_inline b.bind_expr))
+      line ctx (Printf.sprintf "%s = %s" lhs (ex b.bind_expr))
 
   | EMatch (subj, arms, _) ->
     emit_match ctx subj arms
+
+  | ECond (arms, _) ->
+    emit_cond ctx arms
 
   | EIf (c, t, e, _) ->
     emit_if ctx c t e
@@ -594,33 +778,28 @@ let rec emit_stmt ctx e =
     line ctx "end"
 
   | ELetQ (p, r, cont, _) ->
-    if should_break (ctx.indent + 1) r then begin
-      line ctx (Printf.sprintf "let? %s =" (fmt_pat p));
-      indented ctx (fun () -> emit_stmt ctx r)
-    end else
-      line ctx (Printf.sprintf "let? %s = %s" (fmt_pat p) (expr_inline r));
-    emit_stmt ctx cont
+    emit_bind_line ctx (Printf.sprintf "let? %s" (fmt_pat p)) r;
+    emit_body ctx cont
 
   | ELetStar (p, r, cont, _) ->
-    if should_break (ctx.indent + 1) r then begin
-      line ctx (Printf.sprintf "let* %s =" (fmt_pat p));
-      indented ctx (fun () -> emit_stmt ctx r)
-    end else
-      line ctx (Printf.sprintf "let* %s = %s" (fmt_pat p) (expr_inline r));
-    emit_stmt ctx cont
+    emit_bind_line ctx (Printf.sprintf "let* %s" (fmt_pat p)) r;
+    emit_body ctx cont
 
   | ESigil (name, content, _) when sigil_is_multiline content ->
     emit_sigil_multiline ctx name content
 
   | ELam (params, body, _) when is_multiline body ->
-    line ctx (Printf.sprintf "fn %s ->" (fmt_lam_params params));
-    indented ctx (fun () -> emit_body ctx body)
+    if lets_only_body body then begin
+      line ctx (Printf.sprintf "fn %s ->" (fmt_lam_params params));
+      indented ctx (fun () -> emit_body ctx body)
+    end else
+      line ctx (ex e)
 
-  | EApp (f, args, _) when trailing_multiline args ->
-    emit_call_multiline ctx ~prefix:"" ~head:(expr_inline f) args
-
-  | ECon (n, args, _) when trailing_multiline args ->
-    emit_call_multiline ctx ~prefix:"" ~head:n.txt args
+  | (EApp _ | ECon _) when (match plain_call e with
+                            | Some (_, args) -> trailing_multiline args
+                            | None -> false) ->
+    let head, args = Option.get (plain_call e) in
+    emit_call_multiline ctx ~prefix:"" ~head:(call_head ctx.indent head) args
 
   (* A list or record literal too wide for the 80-column budget breaks one
      element (field) per line. Until 2026-09-11 literals had NO multi-line
@@ -637,8 +816,54 @@ let rec emit_stmt ctx e =
   | ERecord ((_ :: _), _) when should_break ctx.indent e ->
     emit_literal_multiline ctx ~suffix:"" e
 
+  | EProof (p, _) -> emit_proof ctx p
+
   | _ ->
-    line ctx (expr_inline e)
+    line ctx (ex e)
+
+(** [kw = r] for a [let?] / [let*] binding, breaking after [=] when [r]
+    does not fit. *)
+and emit_bind_line ctx kw r =
+  if should_break (ctx.indent + 1) r then begin
+    line ctx (kw ^ " =");
+    indented ctx (fun () -> emit_stmt ctx r)
+  end else
+    line ctx (Printf.sprintf "%s = %s" kw (render ctx.indent lv_expr r))
+
+(** A proof statement, one construct per line so it re-parses: a hint that is
+    one call stays on the `by` line; anything else is a `do … end` block, as is
+    a `with fuel` body.  A calc term that is a comparison or a Boolean
+    connective gets parentheses (steps are read at the additive level). *)
+and emit_proof ctx p =
+  let is_call = function EApp _ | ECon _ | EVar _ -> true | _ -> false in
+  let operand e =
+    match e with
+    | EApp (EVar { txt = ("==" | "!=" | "<" | "<=" | ">" | ">=" | "&&" | "||"); _ }, [ _; _ ], _) ->
+      "(" ^ (render ctx.indent lv_expr) e ^ ")"
+    | _ -> (render ctx.indent lv_expr) e
+  in
+  let with_hint prefix hs =
+    match hs with
+    | [] -> line ctx prefix
+    | [ h ] when is_call h && not (is_multiline h) -> line ctx (prefix ^ " by " ^ (render ctx.indent lv_expr) h)
+    | hs ->
+      line ctx (prefix ^ " by do");
+      indented ctx (fun () -> List.iter (emit_stmt ctx) hs);
+      line ctx "end"
+  in
+  match p with
+  | PAssertBy (e, hs) -> with_hint ("assert " ^ (render ctx.indent lv_expr) e) hs
+  | PReveal f -> line ctx ("reveal " ^ (render ctx.indent lv_expr) f)
+  | PWithFuel (f, n, body) ->
+    line ctx (Printf.sprintf "with fuel(%s, %d) do" ((render ctx.indent lv_expr) f) n);
+    indented ctx (fun () -> List.iter (emit_stmt ctx) body);
+    line ctx "end"
+  | PCalc (e0, steps) ->
+    line ctx "calc do";
+    indented ctx (fun () ->
+        line ctx (operand e0);
+        List.iter (fun s -> with_hint (s.cs_op ^ " " ^ operand s.cs_rhs) s.cs_hint) steps);
+    line ctx "end"
 
 (** Emit a too-wide list or record literal across lines, with [suffix]
     (a trailing "," when this literal is itself an element of an enclosing
@@ -646,7 +871,8 @@ let rec emit_stmt ctx e =
     record that fits on one line inside a broken list stays inline; one that
     does not breaks at the next indent level. *)
 and emit_literal_multiline ctx ~suffix e =
-  let emit_elem render_inline el is_last =
+  let ex x = render ctx.indent lv_expr x in
+  let emit_elem el is_last =
     let sfx = if is_last then "" else "," in
     match el with
     | ECon ({ txt = "Cons"; _ }, [_; _], _)
@@ -654,11 +880,11 @@ and emit_literal_multiline ctx ~suffix e =
       emit_literal_multiline ctx ~suffix:sfx el
     | ERecord ((_ :: _), _) when should_break ctx.indent el ->
       emit_literal_multiline ctx ~suffix:sfx el
-    | _ -> line ctx (render_inline el ^ sfx)
+    | _ -> line ctx (ex el ^ sfx)
   in
-  let emit_elems render_inline elems =
+  let emit_elems elems =
     let n = List.length elems in
-    List.iteri (fun i el -> emit_elem render_inline el (i = n - 1)) elems
+    List.iteri (fun i el -> emit_elem el (i = n - 1)) elems
   in
   match e with
   | ERecord (flds, _) ->
@@ -671,7 +897,8 @@ and emit_literal_multiline ctx ~suffix e =
         match v with
         | (ECon ({ txt = "Cons"; _ }, [_; _], _) | ERecord ((_ :: _), _))
           when should_break (ctx.indent + 1) v
-               && String.length head + String.length (expr_inline v) + ctx.indent * 2 > 80 ->
+               && not (is_multiline v)
+               && String.length head + String.length (ex v) + ctx.indent * 2 > 80 ->
           line ctx (head ^ (match v with ERecord _ -> "{" | _ -> "["));
           (* Re-enter through the element path so nested literals break at
              the next level; the opener was emitted with the field name. *)
@@ -680,19 +907,19 @@ and emit_literal_multiline ctx ~suffix e =
              indented ctx (fun () ->
                let m = List.length inner in
                List.iteri (fun j (nm, iv) ->
-                 line ctx (Printf.sprintf "%s: %s%s" nm.txt (expr_inline iv)
+                 line ctx (Printf.sprintf "%s: %s%s" nm.txt (ex iv)
                              (if j = m - 1 then "" else ","))) inner);
              line ctx ("}" ^ sfx)
            | _ ->
              let elems = match try_collect_list [] v with Some es -> es | None -> [] in
-             indented ctx (fun () -> emit_elems expr_inline elems);
+             indented ctx (fun () -> emit_elems elems);
              line ctx ("]" ^ sfx))
-        | _ -> line ctx (Printf.sprintf "%s%s%s" head (expr_inline v) sfx)) flds);
+        | _ -> line ctx (Printf.sprintf "%s%s%s" head (ex v) sfx)) flds);
     line ctx ("}" ^ suffix)
   | _ ->
     let elems = match try_collect_list [] e with Some es -> es | None -> [] in
     line ctx "[";
-    indented ctx (fun () -> emit_elems expr_inline elems);
+    indented ctx (fun () -> emit_elems elems);
     line ctx ("]" ^ suffix)
 
 (** Emit a call whose last argument, possibly through a chain of wrapper
@@ -702,32 +929,31 @@ and emit_literal_multiline ctx ~suffix e =
       [Head(arg1, ..., Wrapper(fn params ->]
         <indented body>
       [))]
+    The body is a call argument's lambda body (parser.mly
+    [call_arg_lambda_body]), which may hold any statements.
     [prefix] is prepended to the head line (e.g. ["|> "] inside a pipe
     chain); [head] is the already-rendered outermost callee. *)
 and emit_call_multiline ctx ~prefix ~head args =
+  let ind = ctx.indent in
   let buf = Buffer.create 64 in
   Buffer.add_string buf prefix;
   let rec walk head args =
     let init_args, last = match List.rev args with
       | last :: rest -> (List.rev rest, last)
-      | [] -> assert false
+      | [] -> invalid_arg "emit_call_multiline: no arguments"
     in
     let sep = if init_args = [] then "" else ", " in
-    let args_s = String.concat ", " (List.map expr_inline init_args) in
-    match last with
-    | ELam (params, body, _) ->
+    let args_s = String.concat ", " (List.map (render ind lv_expr) init_args) in
+    match last, plain_call last with
+    | ELam (params, body, _), _ ->
       Buffer.add_string buf
         (Printf.sprintf "%s(%s%sfn %s ->" head args_s sep (fmt_lam_params params));
       (body, 1)
-    | EApp (f, nested_args, _) ->
+    | _, Some (h, nested_args) ->
       Buffer.add_string buf (Printf.sprintf "%s(%s%s" head args_s sep);
-      let (body, depth) = walk (expr_inline f) nested_args in
+      let (body, depth) = walk (call_head ind h) nested_args in
       (body, depth + 1)
-    | ECon (n, nested_args, _) ->
-      Buffer.add_string buf (Printf.sprintf "%s(%s%s" head args_s sep);
-      let (body, depth) = walk n.txt nested_args in
-      (body, depth + 1)
-    | _ -> assert false
+    | _ -> invalid_arg "emit_call_multiline: no trailing lambda"
   in
   let (body, depth) = walk head args in
   line ctx (Buffer.contents buf);
@@ -740,149 +966,153 @@ and emit_body ctx body =
   | EBlock (es, _) -> List.iter (emit_stmt ctx) es
   | _ -> emit_stmt ctx body
 
+(** One match (or cond) arm: [head -> body], or [head -> do ... end] when
+    the body does not fit on the line. *)
+and emit_arm ctx head body =
+  if should_break (ctx.indent + 1) body then begin
+    line ctx (Printf.sprintf "%s -> do" head);
+    indented ctx (fun () -> emit_body ctx body);
+    line ctx "end"
+  end else
+    line ctx (Printf.sprintf "%s -> %s" head (render ctx.indent lv_expr body))
+
 and emit_match ctx subj arms =
-  line ctx (Printf.sprintf "match %s do" (expr_inline subj));
+  line ctx (Printf.sprintf "match %s do" (render ctx.indent lv_pipe subj));
   List.iter (fun arm ->
     let guard = match arm.branch_guard with
       | None   -> ""
-      | Some g -> " when " ^ expr_inline g
+      | Some g -> " when " ^ render ctx.indent lv_pipe g
     in
-    let pat_s = fmt_pat arm.branch_pat ^ guard in
-    let body  = arm.branch_body in
-    if should_break (ctx.indent + 1) body then begin
-      line ctx (Printf.sprintf "%s -> do" pat_s);
-      indented ctx (fun () -> emit_body ctx body);
-      line ctx "end"
-    end else
-      line ctx (Printf.sprintf "%s -> %s" pat_s (expr_inline body))
+    emit_arm ctx (fmt_pat arm.branch_pat ^ guard) arm.branch_body
   ) arms;
   line ctx "end"
 
+(** The subject-less [match do cond -> body ... end] (it had no emitter, and
+    its inline form was the placeholder [match do ... end], #1174). *)
+and emit_cond ctx arms =
+  line ctx "match do";
+  List.iter (fun (c, body) ->
+    emit_arm ctx (render ctx.indent lv_pipe c) body) arms;
+  line ctx "end"
+
 and emit_if ctx cond then_ else_ =
-  let cs = expr_inline cond  in
-  let ts = expr_inline then_ in
-  let es = expr_inline else_ in
-  let inline_len =
-    ctx.indent * 2 + 3 + String.length cs + 4 + String.length ts + 6 + String.length es + 4
-  in
-  if not (is_multiline then_) && not (is_multiline else_) && inline_len <= 80 then
-    line ctx (Printf.sprintf "if %s do %s else %s end" cs ts es)
+  if is_multiline cond || is_multiline then_ || is_multiline else_ then
+    emit_if_lines ctx cond then_ else_
   else begin
-    line ctx (Printf.sprintf "if %s do" cs);
-    emit_if_branch ctx then_;
-    line ctx "else";
-    emit_if_branch ctx else_;
-    line ctx "end"
+    let cs = render ctx.indent lv_pipe cond in
+    let ts = render ctx.indent lv_expr then_ in
+    let es = render ctx.indent lv_expr else_ in
+    let inline_len =
+      ctx.indent * 2 + 3 + String.length cs + 4 + String.length ts + 6 + String.length es + 4
+    in
+    if inline_len <= 80 then
+      line ctx (Printf.sprintf "if %s do %s else %s end" cs ts es)
+    else
+      emit_if_lines ctx cond then_ else_
   end
 
-(** Emit an if/then/else branch.  Multi-statement blocks must be wrapped in
-    [do...end] because if-branches are [expr], not [block_body]. *)
+and emit_if_lines ctx cond then_ else_ =
+  line ctx (Printf.sprintf "if %s do" (render ctx.indent lv_pipe cond));
+  emit_if_branch ctx then_;
+  line ctx "else";
+  emit_if_branch ctx else_;
+  line ctx "end"
+
+(** Emit an if/then/else branch.  A multi-statement branch is wrapped in
+    [do...end] (the branch is a [block_body], so this is the same tree). *)
 and emit_if_branch ctx e =
   match e with
   | EBlock (_ :: _ :: _, _) ->
-    (* Multi-statement: wrap in do...end *)
     indented ctx (fun () ->
       line ctx "do";
       indented ctx (fun () -> emit_body ctx e);
       line ctx "end")
-  | EIf _ ->
-    (* Nested if — emit directly at same indent (chained else-if) *)
-    indented ctx (fun () -> emit_stmt ctx e)
   | _ ->
     indented ctx (fun () -> emit_stmt ctx e)
 
 and emit_sigil_multiline ctx name content =
-  (* Reconstruct the raw string with interpolation preserved *)
-  let raw = match content with
-    | ELit (LitString s, _) -> s
-    | _ ->
-      match try_collect_interp content with
-      | Some (prefix, parts) ->
-        let buf = Buffer.create 256 in
-        Buffer.add_string buf prefix;
-        List.iter (fun (e, seg) ->
-          Buffer.add_string buf "${";
-          Buffer.add_string buf (expr_inline e);
-          Buffer.add_char buf '}';
-          Buffer.add_string buf seg
-        ) parts;
-        Buffer.contents buf
-      | None -> expr_inline content
+  (* The content is printed exactly as written, newlines and leading
+     whitespace included.  It used to be re-indented (common indentation
+     stripped, the first newline and trailing blanks dropped), which changed
+     the string the sigil receives: a ~H template's output bytes, or the
+     structure of a ~yaml block.  Content a triple-quoted string cannot spell
+     falls back to an ordinary escaped string. *)
+  let segs = match content with
+    | ELit (LitString s, _) -> Some (s, [])
+    | _ -> try_collect_interp content
   in
-  let triple = "\"\"\"" in
-  line ctx (Printf.sprintf "~%s%s" name triple);
-  (* Output content lines at base_indent + 2.
-     Strip common leading whitespace from the original, then re-indent. *)
-  (* Strip leading newline (implicit from triple-quote on own line)
-     and trailing newline+whitespace (from closing triple-quote on own line) *)
-  let raw =
-    let len = String.length raw in
-    let start = if len > 0 && raw.[0] = '\n' then 1 else 0 in
-    let stop = ref len in
-    while !stop > start && (raw.[!stop - 1] = ' ' || raw.[!stop - 1] = '\n' || raw.[!stop - 1] = '\t') do
-      decr stop
-    done;
-    if start = 0 && !stop = len then raw
-    else String.sub raw start (!stop - start)
+  let spellable (prefix, parts) =
+    let all = prefix :: List.map snd parts in
+    let last = List.nth all (List.length all - 1) in
+    List.for_all (fun s ->
+        not (contains_sub s {|"""|} || contains_sub s {|\$|} || String.contains s '\r'))
+      all
+    && not (String.length last > 0 && last.[String.length last - 1] = '"')
   in
-  let content_lines = String.split_on_char '\n' raw in
-  let base = (ctx.indent + 1) * 2 in
-  let base_indent = String.make base ' ' in
-  (* Find minimum leading spaces among non-empty lines *)
-  let min_indent = List.fold_left (fun acc l ->
-    if String.length l = 0 then acc
-    else
-      let spaces = ref 0 in
-      while !spaces < String.length l && l.[!spaces] = ' ' do incr spaces done;
-      min acc !spaces
-  ) max_int content_lines in
-  let min_indent = if min_indent = max_int then 0 else min_indent in
-  List.iter (fun l ->
-    if String.length l = 0 then
-      Buffer.add_char ctx.buf '\n'
-    else begin
-      let stripped = if min_indent > 0 && String.length l >= min_indent
-        then String.sub l min_indent (String.length l - min_indent)
-        else l in
-      Buffer.add_string ctx.buf base_indent;
-      Buffer.add_string ctx.buf stripped;
-      Buffer.add_char ctx.buf '\n'
-    end
-  ) content_lines;
-  line ctx triple
+  match segs with
+  | Some ((prefix, parts) as sp) when spellable sp ->
+    let buf = Buffer.create 256 in
+    Buffer.add_string buf (Printf.sprintf "~%s\"\"\"" name);
+    Buffer.add_string buf (escape_triple prefix);
+    List.iter (fun (e, seg) ->
+      Buffer.add_string buf "${";
+      Buffer.add_string buf (render ctx.indent lv_expr e);
+      Buffer.add_char buf '}';
+      Buffer.add_string buf (escape_triple seg)
+    ) parts;
+    Buffer.add_string buf "\"\"\"";
+    line ctx (Buffer.contents buf)
+  | _ ->
+    line ctx (Printf.sprintf "~%s%s" name (render ctx.indent lv_atom content))
 
 and emit_pipe_chain ctx expr =
-  (* Collect the pipe chain from left to right. *)
+  (* Collect the pipe chain from left to right.  The head is a pipe's left
+     operand (expr_pipe) and each stage a right operand (expr_or), so an
+     if / match / fn / pipe there keeps its parentheses. *)
   let rec collect acc = function
     | EPipe (lhs, rhs, _) -> collect (rhs :: acc) lhs
     | e -> (e, acc)
   in
   let (head, stages) = collect [] expr in
   let any_multiline = is_multiline head || List.exists is_multiline stages in
-  let head_s   = expr_inline head in
-  let stage_ss = List.map expr_inline stages in
-  let inline   =
-    head_s ^ String.concat "" (List.map (fun s -> " |> " ^ s) stage_ss)
+  let head_s () = render ctx.indent lv_pipe head in
+  let stage_s s = render ctx.indent lv_or s in
+  let trailing e =
+    match plain_call e with
+    | Some (h, args) when trailing_multiline args -> Some (h, args)
+    | _ -> None
   in
-  if not any_multiline && ctx.indent * 2 + String.length inline <= 80 then
-    line ctx inline
+  let inline () =
+    head_s () ^ String.concat "" (List.map (fun s -> " |> " ^ stage_s s) stages)
+  in
+  if not any_multiline && ctx.indent * 2 + String.length (inline ()) <= 80 then
+    line ctx (inline ())
   else begin
-    (match head with
-     | EApp (f, args, _) when trailing_multiline args ->
-       emit_call_multiline ctx ~prefix:"" ~head:(expr_inline f) args
-     | ECon (n, args, _) when trailing_multiline args ->
-       emit_call_multiline ctx ~prefix:"" ~head:n.txt args
-     | _ -> line ctx head_s);
+    (match trailing head with
+     | Some (h, args) ->
+       emit_call_multiline ctx ~prefix:"" ~head:(call_head ctx.indent h) args
+     | None -> line ctx (head_s ()));
     indented ctx (fun () ->
       List.iter (fun stage ->
-        match stage with
-        | EApp (f, args, _) when trailing_multiline args ->
-          emit_call_multiline ctx ~prefix:"|> " ~head:(expr_inline f) args
-        | ECon (n, args, _) when trailing_multiline args ->
-          emit_call_multiline ctx ~prefix:"|> " ~head:n.txt args
-        | _ -> line ctx ("|> " ^ expr_inline stage)
+        match trailing stage with
+        | Some (h, args) ->
+          emit_call_multiline ctx ~prefix:"|> " ~head:(call_head ctx.indent h) args
+        | None -> line ctx ("|> " ^ stage_s stage)
       ) stages)
   end
+
+(** Render an expression with no enclosing context (a full [expr] position
+    at indentation 0).  Constructs that need several lines come back with
+    embedded newlines; nothing is ever summarised. *)
+let expr_inline e = render 0 lv_expr e
+
+let fmt_fn_param = function
+  | FPPat  p -> fmt_pat p
+  | FPNamed p -> fmt_param p
+  | FPDefault (p, default_e) ->
+    (* The default value is part of the program: it used to print as `_`. *)
+    fmt_param p ^ " \\\\ " ^ render 0 lv_pipe default_e
+
 
 (* ------------------------------------------------------------------ *)
 (* Declarations                                                        *)
@@ -949,11 +1179,15 @@ and emit_decl ctx = function
       line ctx (lhs ^ " =");
       indented ctx (fun () -> emit_stmt ctx b.bind_expr)
     end else
-      line ctx (Printf.sprintf "%s = %s" lhs (expr_inline b.bind_expr))
+      line ctx (Printf.sprintf "%s = %s" lhs (render ctx.indent lv_expr b.bind_expr))
 
   | DAlwaysLinearType (_, name, params, tdef, _) ->
-    (* Format as `always_linear type Name(params) = ...` — always public *)
-    let tkw = "always_linear type" in
+    (* Format as `always_linear type Name(params) = ...` — always public;
+       private variants are the `always_linear opaque type` spelling. *)
+    let tkw = match tdef with
+      | TDVariant (_ :: _ as vs) when List.for_all (fun v -> v.var_vis = Private) vs ->
+        "always_linear opaque type"
+      | _ -> "always_linear type" in
     let ps = match params with
       | []  -> ""
       | ps' -> Printf.sprintf "(%s)" (String.concat ", " (List.map (fun n -> n.txt) ps'))
@@ -976,8 +1210,21 @@ and emit_decl ctx = function
        line ctx (Printf.sprintf "%s %s%s = { %s }" tkw name.txt ps (String.concat ", " fstrs))
     )
 
+  (* `resource Name` parses to a variant type with no constructors; printed
+     as `type Name = ` it no longer parsed. *)
+  | DType (Public, name, [], TDVariant [], _) ->
+    line ctx (Printf.sprintf "resource %s" name.txt)
+
   | DType (vis, name, params, tdef, _) ->
-    let tkw = match vis with Public -> "type" | Private -> "ptype" in
+    (* `opaque type` is the only spelling of a public type whose variants are
+       private; printed as `type` it silently exported the constructors. *)
+    let opaque = match vis, tdef with
+      | Public, TDVariant (_ :: _ as vs) -> List.for_all (fun v -> v.var_vis = Private) vs
+      | _ -> false
+    in
+    let tkw = match vis with
+      | Public -> if opaque then "opaque type" else "type"
+      | Private -> "ptype" in
     let ps = match params with
       | []  -> ""
       | ps' -> Printf.sprintf "(%s)" (String.concat ", " (List.map (fun n -> n.txt) ps'))
@@ -1040,7 +1287,9 @@ and emit_decl ctx = function
     let supers = match iface.iface_superclasses with
       | [] -> ""
       | cs ->
-        " when " ^ String.concat ", "
+        (* An interface's superclasses follow `requires` (an impl's
+           constraints follow `when`). *)
+        " requires " ^ String.concat ", "
           (List.map (fun (n, tys) ->
              if tys = [] then n.txt
              else Printf.sprintf "%s(%s)" n.txt (fmt_tys tys)) cs)
@@ -1092,8 +1341,8 @@ and emit_decl ctx = function
     line ctx "end"
 
   | DExtern (ext, _) ->
-    line ctx (Printf.sprintf "extern \"%s\" : %s do"
-      ext.ext_lib_name (fmt_ty ext.ext_cap_ty));
+    line ctx (Printf.sprintf "extern %s : %s do"
+      (quote_string ext.ext_lib_name) (fmt_ty ext.ext_cap_ty));
     indented ctx (fun () ->
       List.iter (fun ef ->
         let consumed i =
@@ -1102,10 +1351,15 @@ and emit_decl ctx = function
           (List.mapi (fun i (n, t) ->
              Printf.sprintf "%s%s : %s" (consumed i) n.txt (fmt_ty t)) ef.ef_params) in
         let sym = match ef.ef_symbol with
-          | Some s -> Printf.sprintf " = %S" s
+          | Some s -> " = " ^ quote_string s
           | None -> "" in
-        line ctx (Printf.sprintf "fn %s(%s) : %s%s"
-          ef.ef_name.txt ps (fmt_ty ef.ef_ret_ty) sym)
+        (* `blocking` / `raises` change how the binding is called; dropping
+           them changed the program. *)
+        let mods =
+          (if ef.ef_blocking then "blocking " else "")
+          ^ (if ef.ef_raises then "raises " else "") in
+        line ctx (Printf.sprintf "%sfn %s(%s) : %s%s"
+          mods ef.ef_name.txt ps (fmt_ty ef.ef_ret_ty) sym)
       ) ext.ext_fns
     );
     line ctx "end"
@@ -1119,7 +1373,8 @@ and emit_decl ctx = function
        line ctx (Printf.sprintf "import %s, only: [%s]" path
          (String.concat ", " (List.map (fun n -> n.txt) ns)))
      | UseSingle   ->
-       line ctx (Printf.sprintf "import %s" path)
+       (* `use A` brings in the module name only; `import A` is [UseAll]. *)
+       line ctx (Printf.sprintf "use %s" path)
      | UseExcept ns ->
        line ctx (Printf.sprintf "import %s, except: [%s]" path
          (String.concat ", " (List.map (fun n -> n.txt) ns))))
@@ -1136,7 +1391,7 @@ and emit_decl ctx = function
          let path = String.concat "." (List.map (fun n -> n.txt) cap) in
          match scope with
          | None -> path
-         | Some sc -> Printf.sprintf "%s(%S)" path sc) caps in
+         | Some sc -> Printf.sprintf "%s(%s)" path (quote_string sc)) caps in
     line ctx (Printf.sprintf "needs %s" (String.concat ", " cs))
 
   | DProofCap (name, dict, _) ->
@@ -1239,7 +1494,7 @@ and emit_decl ctx = function
       (String.concat ", " (List.map (fun n -> n.txt) types)))
 
   | DTest (tdef, _) ->
-    line ctx (Printf.sprintf "test \"%s\" do" tdef.test_name);
+    line ctx (Printf.sprintf "test %s do" (quote_string tdef.test_name));
     indented ctx (fun () -> emit_body ctx tdef.test_body);
     line ctx "end"
 
@@ -1254,7 +1509,7 @@ and emit_decl ctx = function
     line ctx "end"
 
   | DDescribe (name, decls, _) ->
-    line ctx (Printf.sprintf "describe %S do" name);
+    line ctx (Printf.sprintf "describe %s do" (quote_string name));
     indented ctx (fun () -> List.iter (emit_decl ctx) decls);
     line ctx "end"
 
@@ -1316,7 +1571,9 @@ and emit_fn ctx fn =
           match List.assoc_opt a fn.fn_attr_args with
           (* `@[decreases(e, ...)]`: the payload is expressions, kept apart
              from the name (termination design §2.1). *)
-          | Some args -> Printf.sprintf "%s(%s)" a (String.concat ", " (List.map expr_inline args))
+          | Some args ->
+            Printf.sprintf "%s(%s)" a
+              (String.concat ", " (List.map (render ctx.indent lv_expr) args))
           | None -> (
             (* A one-identifier payload is stored `name:value`; it is
                written `name(value)`. *)
@@ -1333,7 +1590,7 @@ and emit_fn ctx fn =
     let ps    = String.concat ", " (List.map fmt_fn_param clause.fc_params) in
     let guard = match clause.fc_guard with
       | None   -> ""
-      | Some g -> " when " ^ expr_inline g
+      | Some g -> " when " ^ render ctx.indent lv_pipe g
     in
     emit_attrs ();
     line ctx (Printf.sprintf "%s %s(%s)%s%s do" kw fn.fn_name.txt ps ret guard);
@@ -1346,7 +1603,7 @@ and emit_fn ctx fn =
       let ps    = String.concat ", " (List.map fmt_fn_param clause.fc_params) in
       let guard = match clause.fc_guard with
         | None   -> ""
-        | Some g -> " when " ^ expr_inline g
+        | Some g -> " when " ^ render ctx.indent lv_pipe g
       in
       emit_attrs ();
       line ctx (Printf.sprintf "%s %s(%s)%s%s do" kw fn.fn_name.txt ps ret guard);
@@ -1412,6 +1669,46 @@ let format_module ?(src = "") m =
   else
     result
 
+(* ------------------------------------------------------------------ *)
+(* Round-trip safety net                                               *)
+(* ------------------------------------------------------------------ *)
+
+(** Structural equality of two parsed values (modules, exprs, …) that
+    ignores source spans.
+
+    The AST is plain immutable data (variants, records, lists, strings,
+    ints, floats), so this walks the two representations in parallel.  A
+    [March_ast.Ast.span] is the only five-field record in it whose first field
+    is a string and whose other four are immediate ints; two such blocks
+    always compare equal, which is what "the same AST shape" means after a
+    reformat moves everything around.  Comments are not in the AST, so
+    dropping one is not a difference this can see. *)
+let equal_modulo_spans (a : 'a) (b : 'a) : bool =
+  let is_span o =
+    Obj.is_block o && Obj.tag o = 0 && Obj.size o = 5
+    && (let f0 = Obj.field o 0 in Obj.is_block f0 && Obj.tag f0 = Obj.string_tag)
+    && Obj.is_int (Obj.field o 1) && Obj.is_int (Obj.field o 2)
+    && Obj.is_int (Obj.field o 3) && Obj.is_int (Obj.field o 4)
+  in
+  let rec eq a b =
+    if Obj.is_int a || Obj.is_int b then a == b
+    else if is_span a && is_span b then true
+    else
+      let ta = Obj.tag a in
+      if ta <> Obj.tag b then false
+      else if ta = Obj.string_tag then (Obj.obj a : string) = (Obj.obj b : string)
+      else if ta = Obj.double_tag then
+        Float.equal (Obj.obj a : float) (Obj.obj b : float)
+      else if ta >= Obj.no_scan_tag then compare a b = 0
+      else begin
+        let n = Obj.size a in
+        n = Obj.size b
+        && (let rec go i = i >= n || (eq (Obj.field a i) (Obj.field b i) && go (i + 1)) in
+            go 0)
+      end
+  in
+  eq (Obj.repr a) (Obj.repr b)
+
 (** Parse [src] (from [filename]) and format it.
     Raises the parser's exception on parse failure; see
     [format_source_result] for the reporting form. *)
@@ -1421,6 +1718,42 @@ let format_source ~filename src =
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   let m = March_parser.Parse.module_of_lexbuf lexbuf in
   format_module ~src m
+
+(** [format_source] with a round-trip check, for every caller that writes
+    the result over the user's file: [Error msg] when [src] does not parse,
+    or when the formatted text does not parse back to the same AST
+    ([equal_modulo_spans]).  A formatter bug then refuses to format instead
+    of destroying code (#1174, #1175). *)
+let rec format_source_checked ~filename src : (string, string) result =
+  match March_parser.Parse.module_ ~filename src with
+  | Error diags ->
+    Error
+      (String.concat "\n"
+         (List.map (fun d -> March_errors.Errors.render_diagnostic ~src ~filename d) diags))
+  | Ok m ->
+    let formatted = format_module ~src m in
+    Result.map (fun () -> formatted) (verify_format_of ~filename m formatted)
+
+(** [Ok ()] when [formatted], the formatter's output for the source [src],
+    parses back to the same AST as [src]; otherwise [Error why], a sentence
+    for the user.  Callers that already hold the formatted text (from
+    [format_source_result]) use this before writing it anywhere. *)
+and verify_format ~filename ~src formatted : (unit, string) result =
+  match March_parser.Parse.module_ ~filename src with
+  | Error _ -> Error "the input does not parse"
+  | Ok m -> verify_format_of ~filename m formatted
+
+and verify_format_of ~filename m formatted =
+  match March_parser.Parse.module_ ~filename formatted with
+  | Error diags ->
+    let first = match diags with
+      | d :: _ -> Printf.sprintf " (%s at line %d)" d.March_errors.Errors.message d.span.start_line
+      | [] -> ""
+    in
+    Error (Printf.sprintf "the formatted output does not parse%s" first)
+  | Ok m2 ->
+    if equal_modulo_spans m m2 then Ok ()
+    else Error "the formatted output parses to a different program"
 
 (** [format_source] for callers that report the failure: a source that does
     not parse yields its diagnostics instead of an exception.  [stuck] is
