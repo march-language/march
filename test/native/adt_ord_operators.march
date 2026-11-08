@@ -56,6 +56,12 @@ mod Main do
   type Item = { name : String, w : Float }
   derive Eq, Ord for Item
 
+  -- Derived Ord on a record is lexicographic in declaration order: the first
+  -- field that differs decides, even when a later field differs the other way.
+  -- (It used to return only the last field's comparison.)
+  type P3 = { a : Int, b : Int, c : Int }
+  derive Eq, Ord for P3
+
   -- Generic: only Mono learns the concrete type here.
   fn lt(a, b) when Ord(a) do a < b end
   fn ge(a, b) when Ord(a) do a >= b end
@@ -97,6 +103,20 @@ mod Main do
     println("compare floats  " ++ int_to_string(compare(2.5, 0.5)) ++ " " ++ int_to_string(compare(0.5, 2.5)))
     println("compare strings " ++ int_to_string(compare("a", "b")) ++ " " ++ int_to_string(compare("b", "b")))
     println("compare ints    " ++ int_to_string(compare(3, 2)) ++ " " ++ int_to_string(compare(2, 3)))
+    let i4 : Item = { name: "b", w: 0.0 }
+    println("i1 < i4         " ++ bool_to_string(i1 < i4))
+    println("compare(i1, i4) " ++ int_to_string(compare(i1, i4)))
+    let r1 : P3 = { a: 1, b: 9, c: 9 }
+    let r2 : P3 = { a: 2, b: 0, c: 0 }
+    let r3 : P3 = { a: 1, b: 9, c: 0 }
+    let r4 : P3 = { a: 1, b: 0, c: 9 }
+    println("compare(r1, r2) " ++ int_to_string(compare(r1, r2)) ++ " " ++ int_to_string(compare(r2, r1)))
+    println("r1 < r2         " ++ bool_to_string(r1 < r2))
+    println("r3 < r1         " ++ bool_to_string(r3 < r1))
+    println("r4 < r3         " ++ bool_to_string(r4 < r3))
+    println("compare(r1, r1) " ++ int_to_string(compare(r1, r1)))
+    let rs = List.sort_by([r1, r2, r3, r4], fn (x, y) -> x < y)
+    println(List.fold_left(rs, "", fn (acc, r) -> acc ++ int_to_string(r.a) ++ int_to_string(r.b) ++ int_to_string(r.c) ++ " "))
     let sorted = List.sort_by([Large, Small, Large, Small], fn (a, b) -> a < b)
     println(List.fold_left(sorted, "", fn (acc, s) -> acc ++ int_to_string(rank(s))))
   end

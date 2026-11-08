@@ -29,4 +29,12 @@ i2 <= i2        true
 compare floats  1 -1
 compare strings -1 0
 compare ints    1 -1
+i1 < i4         true
+compare(i1, i4) -1
+compare(r1, r2) -1 1
+r1 < r2         true
+r3 < r1         true
+r4 < r3         true
+compare(r1, r1) 0
+109 190 199 200 
 0011
