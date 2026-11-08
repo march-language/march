@@ -9200,7 +9200,7 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
              function, an interface method, a builtin or an extern, so it may diverge"
             (String.concat ", " names)
         | "no-int-parameter" -> "a function in its recursive cycle has no Int parameter to measure"
-        | "no-structural-arg" | "not-same-family" ->
+        | "no-structural-arg" ->
           "no argument shrinks structurally at every recursive call, and no Int metric was checked"
         | "shadowed" ->
           "a recursive call sits under a binding that reuses a parameter the metric names, so \

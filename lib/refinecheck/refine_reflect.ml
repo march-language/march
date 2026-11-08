@@ -158,7 +158,7 @@ let eq_ops = [ "=="; "!=" ]
 let div_ops = [ "/"; "%" ]
 
 (* Set vocabulary, meaningful only inside a set-valued function. *)
-let set_ops = [ "union"; "inter"; "diff"; "singleton"; "member"; "subset"; "empty"; "card" ]
+let set_ops = [ "union"; "inter"; "diff"; "singleton"; "member"; "subset"; "empty"; "card"; "elts" ]
 
 let fail_builtins = [ "panic"; "panic_"; "todo"; "todo_"; "unreachable"; "unreachable_"; "exit" ]
 

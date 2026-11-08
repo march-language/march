@@ -6360,7 +6360,10 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               ("singleton", poly1 (fun a -> TArrow (a, t_set a)));
               ("member", poly1 (fun a -> TArrow (a, TArrow (t_set a, t_bool))));
               ("subset", poly1 (fun a -> TArrow (t_set a, TArrow (t_set a, t_bool))));
-              ("empty", poly1 (fun a -> t_set a)) ]
+              ("empty", poly1 (fun a -> t_set a));
+              (* A list's elements, the predicate vocabulary's [elts]: a
+                 HAMT branch's collision bucket is a [List(a)]. *)
+              ("elts", poly1 (fun a -> TArrow (TCon ("List", [ a ]), t_set a))) ]
             body_env
         end
         else body_env
