@@ -690,6 +690,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
+  recursion (`List.map` over 20,000 elements, or a panic unwinding 20,000 calls) ran out of
+  JavaScript stack on the way back up, so the build was pinned to js_of_ocaml `< 6.5`. The
+  interpreter now resets the stack on return (and on exception unwind) as well as on call,
+  and the pin is gone.
 - **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
 
 - **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
