@@ -1337,3 +1337,37 @@ let builtin_names_cover_signatures =
             if not (List.mem n names) then
               Alcotest.failf "%s (named by a builtin signature) is missing from builtin_type_names" n)
           [ "CancelToken"; "TimerRef"; "DownReason"; "Option"; "Int" ]) ]
+
+(* `uses:` when a stage-2 proof's unsat core names no unfolding (congruence
+   alone, I8): the definitions that query assumed, not every unfolding the
+   whole stage-2 run made (todo 2026-10-31-reflection-encoder-gaps, "`uses:`
+   over-approximation").  Driven at [Obligation.record], where the query's
+   core and assumptions meet. *)
+let uses_query_frontier =
+  let module O = March_refinecheck.Obligation in
+  let module R = March_refine.Refine in
+  let ob callee =
+    { O.span = March_ast.Ast.dummy_span; callee; predicate = "_ == a"; verdict = O.Proved
+    ; kind = O.Precondition; inst = None }
+  in
+  [ Alcotest.test_case "an empty core reports the query's own frontier" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [];
+            R.last_assumed := [ "|$ru_1:f|"; "|$ru_2:f|" ];
+            let o = ob "need_eq_a" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [ "f" ] (O.uses_of o)));
+    Alcotest.test_case "a core naming an unfolding still wins over the query's frontier" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [ "$ru_2:g" ];
+            R.last_assumed := [ "|$ru_1:f|"; "|$ru_2:g|" ];
+            let o = ob "need_eq_b" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [ "g" ] (O.uses_of o)));
+    Alcotest.test_case "a stage-1 proof (no assumptions) records no uses" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [];
+            R.last_assumed := [];
+            let o = ob "need_eq_c" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [] (O.uses_of o))) ]

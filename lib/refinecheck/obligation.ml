@@ -305,12 +305,21 @@ let uses_of (o : t) : string list = Option.value ~default:[] (Hashtbl.find_opt u
 let set_uses (o : t) (u : string list) : unit = if u <> [] then Hashtbl.replace uses_tbl (uses_key o) u
 
 let record (o : t) : unit =
-  (if o.verdict = Proved && !March_refine.Refine.last_core <> [] then
-     let names =
-       List.filter_map Reflect_state.literal_function !March_refine.Refine.last_core
-       |> List.sort_uniq compare
-     in
-     set_uses o names);
+  (if o.verdict = Proved then
+     let names lits = List.filter_map Reflect_state.literal_function lits |> List.sort_uniq compare in
+     match names !March_refine.Refine.last_core with
+     | _ :: _ as used -> set_uses o used
+     (* The core named no unfolding (congruence alone, I8): the definitions
+        THIS query unfolded, not every one the stage-2 run unfolded (todo
+        2026-10-31-reflection-encoder-gaps, "`uses:` over-approximation"). *)
+     | [] ->
+       (* Declared names keep their SMT-LIB `|…|` quoting; a core is read back
+          unquoted. *)
+       let unquote l =
+         let n = String.length l in
+         if n >= 2 && l.[0] = '|' && l.[n - 1] = '|' then String.sub l 1 (n - 2) else l
+       in
+       set_uses o (names (List.map unquote !March_refine.Refine.last_assumed)));
   log := o :: !log;
   Hashtbl.replace by_span o.span (o :: Option.value ~default:[] (Hashtbl.find_opt by_span o.span))
 

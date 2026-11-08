@@ -15,15 +15,17 @@ display-name resolution in the propagation pre-pass was closed by 71f112f4a, whi
 reflected call by its site, and is pinned by the `pred-names` suite:
 `specs/progress/2026-11-06-predicate-names.md`.)
 
+(Parametric records reached through reflected functions, tuple literals in reports, and the
+`uses:` fallback are closed since `specs/progress/2026-11-08-reflection-encoder-gaps-records-uses.md`.)
+
 - **A tuple-typed variable in a predicate.** A lemma parameter or caller variable of tuple
-  type gets no sort in the predicate encoder (the sort-marker channel has no tuple marker), so
-  `swap(swap(t)) == t` over `t : (Int, Int)` is a `sort-conflict` skip. Literals at a reflected
-  call's parameter do translate. (The record half is done:
-  `specs/progress/2026-11-06-reflection-record-predicate-variables.md`.)
-- **Parametric records.** A record type is matched to its declaration by its field set; a
-  record with type parameters declines (its instance is not recovered from the structural
-  type).
-- **A tuple literal printed in a report** reads `<predicate>` (`pred_str` has no arm for
-  `ETuple`; a record literal prints as written since 2026-11-06).
-- **`uses:` over-approximation.** When a stage-2 proof's unsat core names no unfolding
-  (congruence, I8), `uses:` lists the whole frontier.
+  type gets no sort in the predicate encoder, so `swap(swap(t)) == t` over `t : (Int, Int)` is a
+  `sort-conflict` skip. Fixed on branch `claude/s3-tuples-finish` (S3 part 1), not yet merged.
+- **A parametric record's field read directly in a predicate.** `p.fst` over `p : Pr(Int)` in a
+  theorem or a callee refinement (`n : {Int | _ > p.fst}`) does not reflect: the record
+  environment (`Refine_scope.recenv`, `(name, sort name)`) holds only records without type
+  arguments, so the variable has no instance sort there. A theorem that reads the fields through
+  a reflected function (`sum(p)`) proves. Closing it means carrying a full `Smt.sort` in
+  `recenv` (about 80 sites, all compiler-checked).
+- **`uses:` when a stage-2 query assumed nothing.** `Reflect_stage` still lists the whole run's
+  frontier for a proof whose query assumed no unfolding literal at all.

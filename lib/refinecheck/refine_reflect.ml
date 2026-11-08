@@ -1717,12 +1717,17 @@ let field_adt (smt : string) (i : int) : string option =
   | _ -> None
 
 (* The declared record a structural record type is (records unify by their
-   fields, so the typechecker keeps no name): the ONE registered,
-   monomorphic, unconflated record whose field names are exactly [fs]'s and
-   whose declared field sorts are [fs]'s sorts ([sort]).  Anything else —
-   two declared records with one field set, a parametric record, a field of
-   another sort (an anonymous record) — is not decided here. *)
-let record_of_fields (sort : T.ty -> Smt.sort) (fs : (string * T.ty) list) : (string * string * string list) option =
+   fields, so the typechecker keeps no name): the ONE registered, unconflated
+   record whose field names are exactly [fs]'s and whose declared field sorts
+   match [fs]'s sorts ([sort]), with its instance.  A record with type
+   parameters (`type Pr(a) = { fst : a, snd : a }`) is matched by reading each
+   parameter off the field that holds it (todo 2026-10-31-reflection-encoder-
+   gaps, "Parametric records"): every occurrence must agree, and a parameter
+   no field holds is not decided here.  Anything else, two declared records
+   with one field set or a field of another sort (an anonymous record),
+   declines.  Answers (datatype, constructor, field names, instance). *)
+let record_of_fields_inst (sort : T.ty -> Smt.sort) (fs : (string * T.ty) list)
+    : (string * string * string list * Smt.sort list) option =
   let names = List.sort compare (List.map fst fs) in
   let cands =
     Hashtbl.fold
@@ -1736,16 +1741,34 @@ let record_of_fields (sort : T.ty -> Smt.sort) (fs : (string * T.ty) list) : (st
       RE.adt_ctors []
   in
   match cands with
-  | [ (adt, ctor, ns) ]
-    when (not (Hashtbl.mem RE.ambiguous_adts adt))
-         && Option.value ~default:0 (Hashtbl.find_opt RE.adt_arity adt) = 0 -> (
+  | [ (adt, ctor, ns) ] when not (Hashtbl.mem RE.ambiguous_adts adt) -> (
+    let arity = Option.value ~default:0 (Hashtbl.find_opt RE.adt_arity adt) in
     let declared = try Hashtbl.find RE.ctor_field_sorts_poly ctor with Not_found -> [] in
+    let inst = Array.make arity None in
+    (* Match a declared field sort (with [SParam i]) against the actual one,
+       filling [inst]. *)
+    let rec matches (d : Smt.sort) (a : Smt.sort) : bool =
+      match d, a with
+      | Smt.SParam i, _ when i < arity -> (
+        match inst.(i) with
+        | None -> inst.(i) <- Some a; true
+        | Some b -> b = a)
+      | Smt.SData (n, ds), Smt.SData (m, as_) when n = m && List.length ds = List.length as_ ->
+        List.for_all2 matches ds as_
+      | Smt.SSet d', Smt.SSet a' -> matches d' a'
+      | _ -> d = a
+    in
     try
       if List.length declared <> List.length ns then None
-      else if List.for_all2 (fun n d -> sort (List.assoc n fs) = d) ns declared then Some (adt, ctor, ns)
+      else if List.for_all2 (fun n d -> matches d (sort (List.assoc n fs))) ns declared
+              && Array.for_all Option.is_some inst
+      then Some (adt, ctor, ns, Array.to_list (Array.map Option.get inst))
       else None
     with Decline | Not_found | Invalid_argument _ -> None)
   | _ -> None
+
+let record_of_fields (sort : T.ty -> Smt.sort) (fs : (string * T.ty) list) : (string * string * string list) option =
+  Option.map (fun (adt, ctor, ns, _) -> (adt, ctor, ns)) (record_of_fields_inst sort fs)
 
 let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
   let rec go (t : T.ty) =
@@ -1754,7 +1777,10 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
     | T.TTuple (_ :: _ :: _ as ts) -> Smt.SData (RE.tuple_adt (List.length ts), List.map go ts)
     (* A record (§3.2): its declared record sort. *)
     | T.TRecord fs -> (
-      match record_of_fields go fs with Some (adt, _, _) -> Smt.sdata adt | None -> raise Decline)
+      match record_of_fields_inst go fs with
+      | Some (adt, _, _, []) -> Smt.sdata adt
+      | Some (adt, _, _, inst) -> Smt.SData (adt, inst)
+      | None -> raise Decline)
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
     (* D9: the checker's Float sort, every operation on it opaque. *)

@@ -190,6 +190,13 @@ let stage2_rlimit = Solver.stage2_rlimit
 (** The literals of the last stage-2 proof ([[]] after any other discharge). *)
 let last_core : string list ref = ref []
 
+(** Every unfolding literal the last discharged query assumed (its own
+    frontier), proved or not; [[]] after a stage-1 query.  A proof whose core
+    names none of them ([last_core] empty, congruence alone) used none of their
+    definitions, and its `uses:` falls back to this query's frontier rather than
+    every unfolding the whole stage-2 run made. *)
+let last_assumed : string list ref = ref []
+
 let stage2_queries = ref 0
 
 let stage2_unknown_hits = ref 0
@@ -214,9 +221,11 @@ let storable () = Solver.identity () <> None
 
 let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   last_core := [];
+  last_assumed := [];
   if ground_verified vc then Verified else
   if not (!well_formed preamble vc) then Unverified else
   let assume = stage2_literals vc in
+  last_assumed := assume;
   let key = Vc_cache.key_of_vc ~preamble vc in
   let neg_key =
     if assume = [] then ""

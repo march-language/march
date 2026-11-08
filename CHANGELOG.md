@@ -695,6 +695,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Refinement reflection over records with type parameters.** A lemma or contract over a
+  parameter typed `Pr(Int)` (`type Pr(a) = { fst : a, snd : a }`) is now checked through the
+  reflected functions it calls (`sw(sw(p)) == p` is proved); it used to be skipped as
+  `unreflectable-predicate`. A tuple literal in a predicate prints as written in reports instead
+  of `<predicate>`, and a stage-2 proof whose solver core names no definition lists only the
+  definitions its own query unfolded under `uses:`, not every one the module unfolded.
+
 - **`Diagnostics` and `try_finally` work on `--target js`.** A program using
   `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
   compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
