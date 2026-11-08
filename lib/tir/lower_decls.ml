@@ -257,6 +257,122 @@ let uniquify_fn (fn : Tir.fn_def) : Tir.fn_def =
     { f with Tir.fn_params = params'; Tir.fn_body = go env' f.Tir.fn_body } in
   go_fn SMap.empty fn
 
+(** A function-typed module-level [let] outside the entry module
+    ([mod Cst do let inc = fn x -> x + 1 end]) is lowered to a zero-parameter
+    fn [Cst.inc] that RETURNS the closure.  A reference to it is a reference to
+    that closure value, so it must call the fn first:
+
+    - a call [Cst.inc(4)] (lowered as the known call [EApp (Cst.inc, [4])],
+      which passed 4 to the zero-arg fn) becomes
+      [let t = Cst.inc() in call_ptr t(4)]; a zero-argument call of a
+      [fn () -> ...] let ([Cst.thunk()]) likewise becomes
+      [let t = Cst.thunk() in call_ptr t()];
+    - a value use [let g = Cst.inc] / [List.map(xs, Cst.inc)] (an [AVar]
+      atom, which both backends treat as the function itself at a [TFn] type:
+      native wrapped the zero-arg fn in a closure trampoline, JS emitted its
+      [$clo] wrapper) becomes [let t = Cst.inc() in ... t ...].
+
+    [lets] maps the qualified fn name to the let's value type
+    ([Lower_state._fn_typed_module_lets]).  A local binder of the same name
+    shadows it.  Non-function lets need nothing: both backends already call a
+    zero-arg fn read at a non-[TFn] type (#1170).
+    specs/progress/2026-11-07-function-typed-module-let-outside-entry.md *)
+let call_fn_typed_module_lets (lets : (string, Tir.ty) Hashtbl.t)
+    (fn : Tir.fn_def) : Tir.fn_def =
+  let module SSet = Set.Make (String) in
+  let is_let bound name = Hashtbl.mem lets name && not (SSet.mem name bound) in
+  let call_var (v : Tir.var) : Tir.var * Tir.expr =
+    let ty = Hashtbl.find lets v.Tir.v_name in
+    (Lower_state.fresh_var ty, Tir.EApp ({ v with Tir.v_ty = Tir.TFn ([], ty) }, []))
+  in
+  let rec mentions bound (e : Tir.expr) =
+    let atom = function Tir.AVar v -> is_let bound v.Tir.v_name | _ -> false in
+    let atoms = List.exists atom in
+    match e with
+    | Tir.EAtom a | Tir.EField (a, _) | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
+    | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> atom a
+    | Tir.EApp (f, args) -> is_let bound f.Tir.v_name || atoms args
+    | Tir.ECallPtr (a, args) | Tir.EReuse (a, _, args) -> atom a || atoms args
+    | Tir.ELet (v, e1, e2) ->
+      mentions bound e1 || mentions (SSet.add v.Tir.v_name bound) e2
+    | Tir.ELetRec (fns, body) ->
+      let bound = List.fold_left (fun s (f : Tir.fn_def) -> SSet.add f.Tir.fn_name s) bound fns in
+      List.exists (fun (f : Tir.fn_def) ->
+          mentions (List.fold_left (fun s (p : Tir.var) -> SSet.add p.Tir.v_name s)
+                      bound f.Tir.fn_params) f.Tir.fn_body) fns
+      || mentions bound body
+    | Tir.ECase (a, brs, def) ->
+      atom a
+      || List.exists (fun (br : Tir.branch) ->
+          mentions (List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s)
+                      bound br.Tir.br_vars) br.Tir.br_body) brs
+      || (match def with Some d -> mentions bound d | None -> false)
+    | Tir.ETuple args | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) -> atoms args
+    | Tir.ERecord fs -> List.exists (fun (_, a) -> atom a) fs
+    | Tir.EUpdate (a, fs) -> atom a || List.exists (fun (_, a) -> atom a) fs
+    | Tir.EAllocHole (tok, _, args, _) ->
+      (match tok with Some a -> atom a | None -> false) || atoms args
+    | Tir.ESetField (o, _, v) -> atom o || atom v
+    | Tir.ESeq (e1, e2) -> mentions bound e1 || mentions bound e2
+  in
+  let rec go bound (e : Tir.expr) : Tir.expr =
+    (* Each value use of a let gets its own call, bound just before [e]. *)
+    let pre = ref [] in
+    let atom a = match a with
+      | Tir.AVar v when is_let bound v.Tir.v_name ->
+        let t, call = call_var v in
+        pre := (t, call) :: !pre;
+        Tir.AVar t
+      | a -> a in
+    let atoms = List.map atom in
+    let wrap e = List.fold_left (fun body (t, call) -> Tir.ELet (t, call, body)) e !pre in
+    let bind_all bound vs = List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s) bound vs in
+    match e with
+    (* Every [EApp] of a let here is a source call of its closure, including
+       a zero-argument one ([let thunk = fn () -> 42]; [Cst.thunk()]):
+       lowering itself never emits [EApp (let, [])] to read the value. *)
+    | Tir.EApp (f, args) when is_let bound f.Tir.v_name ->
+      let args = atoms args in
+      let t, call = call_var f in
+      wrap (Tir.ELet (t, call, Tir.ECallPtr (Tir.AVar t, args)))
+    | Tir.EAtom a -> let a = atom a in wrap (Tir.EAtom a)
+    | Tir.EApp (f, args) -> let args = atoms args in wrap (Tir.EApp (f, args))
+    | Tir.ECallPtr (a, args) ->
+      let a = atom a in let args = atoms args in wrap (Tir.ECallPtr (a, args))
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, go bound e1, go (SSet.add v.Tir.v_name bound) e2)
+    | Tir.ELetRec (fns, body) ->
+      let bound = List.fold_left (fun s (f : Tir.fn_def) -> SSet.add f.Tir.fn_name s) bound fns in
+      Tir.ELetRec (List.map (fun (f : Tir.fn_def) ->
+          { f with Tir.fn_body = go (bind_all bound f.Tir.fn_params) f.Tir.fn_body }) fns,
+                   go bound body)
+    | Tir.ECase (a, brs, def) ->
+      let a = atom a in
+      wrap (Tir.ECase (a, List.map (fun (br : Tir.branch) ->
+          { br with Tir.br_body = go (bind_all bound br.Tir.br_vars) br.Tir.br_body }) brs,
+                       Option.map (go bound) def))
+    | Tir.ETuple args -> let args = atoms args in wrap (Tir.ETuple args)
+    | Tir.ERecord fs -> let fs = List.map (fun (k, a) -> (k, atom a)) fs in wrap (Tir.ERecord fs)
+    | Tir.EField (a, f) -> let a = atom a in wrap (Tir.EField (a, f))
+    | Tir.EUpdate (a, fs) ->
+      let a = atom a in
+      let fs = List.map (fun (k, x) -> (k, atom x)) fs in
+      wrap (Tir.EUpdate (a, fs))
+    | Tir.EAlloc (ty, args) -> let args = atoms args in wrap (Tir.EAlloc (ty, args))
+    | Tir.EStackAlloc (ty, args) -> let args = atoms args in wrap (Tir.EStackAlloc (ty, args))
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (go bound e1, go bound e2)
+    (* RC / reuse / TRMC forms are inserted after lowering; never seen here. *)
+    | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _
+    | Tir.EAtomicDecRC _ | Tir.EReuse _ | Tir.EAllocHole _ | Tir.ESetField _ -> e
+  in
+  if Hashtbl.length lets = 0 then fn
+  else
+    let bound = List.fold_left (fun s (v : Tir.var) -> SSet.add v.Tir.v_name s)
+        SSet.empty fn.Tir.fn_params in
+    if mentions bound fn.Tir.fn_body
+    then { fn with Tir.fn_body = go bound fn.Tir.fn_body }
+    else fn
+
 (* ── Declaration lowering ───────────────────────────────────────── *)
 
 (** Lower a single function definition (post-desugaring: exactly 1 clause). *)
@@ -414,6 +530,7 @@ let rec lower_stdlib_mod_decls ?(enclosing = []) (env : Lower_state.env) prefix 
              fn_body   = rhs;
              fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
            } in
+           Lower_state.note_module_let fn;
            !Lower_state._fns_ref := fn :: !(!Lower_state._fns_ref)
          | _ -> ())
       | _ -> ()

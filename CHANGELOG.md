@@ -690,6 +690,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A module-level `let` holding a function works outside the entry module.** With
+  `mod Cst do let inc = fn x -> x + 1 end`, a compiled `Cst.inc(4)` printed a pointer-sized
+  number natively and `[object Object]` on `--target js`, and `let g = Cst.inc` or
+  `List.map(xs, Cst.inc)` passed the wrong thing along (likewise `Cst.thunk()` for
+  `let thunk = fn () -> 42`). Native and JS builds now call it like the interpreter does.
 - **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
   recursion (`List.map` over 20,000 elements, or a panic unwinding 20,000 calls) ran out of
   JavaScript stack on the way back up, so the build was pinned to js_of_ocaml `< 6.5`. The
