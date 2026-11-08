@@ -45,6 +45,7 @@ Multiple actors can call `update` concurrently without conflict. If the key does
 `Vault.set_ttl` sets a key with an expiry. It takes `(store, key, value, ttl_secs)`; TTL is in **seconds**:
 
 ```march
+let v = Vault.new("sessions")
 Vault.set_ttl(v, "token", "abc123", 60)   -- expires after 60 seconds
 ```
 

@@ -598,6 +598,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Every cookbook "run" button runs.** 54 of the 151 March blocks on the cookbook and
+  "Coming from" pages failed when run in the sidebar REPL: they used a value from an earlier
+  block, had a placeholder body, used `1_000_000` (March has no digit separators), or need a
+  file system, sockets or the DOM. Each now runs on its own, or, when it cannot run in a
+  browser, shows only a copy button. CI runs every block.
 - The Error Messages tour shows two more examples: a protocol step stranded after a `choose`
   branch that loops forever, and a division by a value from a pattern. The role-grant example
   explains its new help, and the error reference lists `protocol_invalid`,
@@ -695,6 +700,21 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Diagnostics` and `try_finally` work on `--target js`.** A program using
+  `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
+  compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
+  use) threw `ReferenceError` at run time. Observers now receive a report, with its context and
+  the panic's location, when an error escapes `main`; the error then reaches Node as before.
+  The JS report has no backtrace; the `Diagnostics` module doc lists the other differences.
+- **`~H"..."` works in the browser REPL.** An HTML sigil failed with
+  `unbound variable: IOList.from_strings` unless something had already loaded IOList: the
+  REPL loads a stdlib module when the input names it, and a sigil names none. A sigil now
+  loads the module it expands to.
+- **A module-level `let` holding a function works outside the entry module.** With
+  `mod Cst do let inc = fn x -> x + 1 end`, a compiled `Cst.inc(4)` printed a pointer-sized
+  number natively and `[object Object]` on `--target js`, and `let g = Cst.inc` or
+  `List.map(xs, Cst.inc)` passed the wrong thing along (likewise `Cst.thunk()` for
+  `let thunk = fn () -> 42`). Native and JS builds now call it like the interpreter does.
 - **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
   recursion (`List.map` over 20,000 elements, or a panic unwinding 20,000 calls) ran out of
   JavaScript stack on the way back up, so the build was pinned to js_of_ocaml `< 6.5`. The

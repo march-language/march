@@ -69,6 +69,7 @@ Copy them next to your `index.html`. The build script in
 
 `Js.Dom.find` looks up an element by `id` and returns `Option(Node)`:
 
+<!-- repl:skip -->
 ```march
 match Js.Dom.find("my-button") do
   None    -> ()
@@ -78,6 +79,7 @@ end
 
 `Js.Dom.select` takes any CSS selector:
 
+<!-- repl:skip -->
 ```march
 match Js.Dom.select(".active") do
   None    -> ()
@@ -87,6 +89,7 @@ end
 
 `Js.Dom.select_all` returns every matching element as a `List(Node)`:
 
+<!-- repl:skip -->
 ```march
 let items = Js.Dom.select_all("li.todo")
 -- items : List(Node)
@@ -98,6 +101,7 @@ let items = Js.Dom.select_all("li.todo")
 
 Build a node tree with `Js.Dom.create`, set it up, then attach it:
 
+<!-- repl:skip -->
 ```march
 let div = Js.Dom.create("div")
 Js.Dom.add_class(div, "card")
@@ -131,6 +135,7 @@ elements without wrapping them in a container.
 Moving a node is just `remove` + `append`, or only `append` if you
 know the parent (the browser removes it from the old position automatically):
 
+<!-- repl:skip -->
 ```march
 -- Move the last tile to the front
 match Js.Dom.find("board") do
@@ -147,6 +152,7 @@ end
 
 ## Attributes, classes, and styles
 
+<!-- repl:skip -->
 ```march
 -- Attributes
 Js.Dom.set_attr(el, "href", "#section-2")
@@ -171,6 +177,7 @@ Js.Dom.set_style(el, "transform", "")   -- empty string removes the property
 
 `Js.Dom.listen` attaches a handler that receives the `Event`:
 
+<!-- repl:skip -->
 ```march
 Js.Dom.listen(btn, "click", fn ev ->
   Js.Dom.prevent_default(ev)
@@ -196,6 +203,7 @@ Common events: `"click"`, `"input"`, `"change"`, `"keydown"`, `"keyup"`,
 
 To read back the element that fired the event:
 
+<!-- repl:skip -->
 ```march
 Js.Dom.listen(container, "click", fn ev ->
   let target = Js.Dom.event_target(ev)
@@ -206,6 +214,7 @@ Js.Dom.listen(container, "click", fn ev ->
 `Js.Dom.event_key` reads the key that triggered a `"keydown"`/`"keyup"` event
 (e.g. `"ArrowLeft"`, `"a"`, `" "` for space):
 
+<!-- repl:skip -->
 ```march
 Js.Dom.listen(Js.Dom.body(), "keydown", fn ev ->
   match Js.Dom.event_key(ev) do
@@ -220,6 +229,7 @@ Js.Dom.listen(Js.Dom.body(), "keydown", fn ev ->
 
 ## Form inputs
 
+<!-- repl:skip -->
 ```march
 match Js.Dom.find("search-box") do
   None -> ()
@@ -237,6 +247,7 @@ end
 
 ## Timers and animation
 
+<!-- repl:skip -->
 ```march
 -- Run once after 500 ms
 Js.Dom.set_timeout(500, fn _ ->

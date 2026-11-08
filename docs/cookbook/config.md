@@ -17,6 +17,7 @@ environment variables override them. Uses `File`, `Toml`, and `Env`.
 `Toml.parse` returns `Result(TomlValue, TomlError)`. The `get_*` accessors each
 return an `Option`, so a missing key becomes a default rather than a crash:
 
+<!-- repl:skip -->
 ```march
 mod AppConfig do
 
@@ -80,6 +81,12 @@ port = 5432
 
 <!-- scroll:skip -->
 ```march
+let tv =
+  match Toml.parse("[database]\nhost = \"db.internal\"\n") do
+    Ok(t)  -> t
+    Err(e) -> panic(e)
+  end
+
 let db_host =
   match Toml.get_in(tv, ["database", "host"]) do
     Some(TomlValue.TStr(h)) -> h

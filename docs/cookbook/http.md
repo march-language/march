@@ -42,6 +42,7 @@ end
 With a configured client (base URL, auth, retries):
 
 <!-- scroll:skip -->
+<!-- repl:skip -->
 ```march
 let client =
   HttpClient.new_client()
@@ -63,6 +64,7 @@ end
 A minimal HTTP handler:
 
 <!-- scroll:skip -->
+<!-- repl:skip -->
 ```march
 fn handle(conn) do
   match HttpServer.method(conn) do
@@ -78,6 +80,7 @@ end
 Path-based routing:
 
 <!-- scroll:skip -->
+<!-- repl:skip -->
 ```march
 fn route(conn) do
   match (HttpServer.method(conn), HttpServer.path(conn)) do
@@ -94,6 +97,7 @@ end
 
 ## Complete example: a JSON echo server
 
+<!-- repl:skip -->
 ```march
 mod EchoServer do
   needs IO.NetListen

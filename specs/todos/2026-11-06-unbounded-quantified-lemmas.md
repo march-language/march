@@ -18,7 +18,21 @@ with unrelated edits). The bounded forms cover most needs; this is for library-l
 
 ## Done when
 
-- A matching loop is detected (instantiation count limit) and reported as such with the trigger,
-  instead of a timeout.
+- An instantiation/resource budget prevents uncontrolled search and reports the trigger,
+  available statistics and `not proved`. Diagnose a matching loop only with evidence of repeated
+  term generation; a large instantiation count alone is not proof of one.
 - A library law (e.g. `forall xs, ys: reverse(append(xs, ys)) == append(reverse(ys), reverse(xs))`
   stated once and used without a call) proves and is used at callers.
+
+## Prefer explicit proof boundaries (2026-11-07)
+
+[Refinement Reflection, POPL 2018](https://nikivazou.github.io/static/popl18/refinement-reflection.pdf)
+motivates controlling definition instantiation. Keep ordinary lemma calls as the default:
+instantiating a theorem at a supplied argument is more explicit than installing all theorems as
+ambient quantified axioms. Automatic use of an unbounded law is opt-in and locally scoped.
+
+Universal introduction uses a fresh arbitrary variable, with no hidden assumptions specific to
+one witness. Existential introduction checks the supplied witness. Validate binder coverage and
+scope for triggers; no-pattern or exhausted cases are unproved. Add a recursive self-triggering
+law and mutually triggering laws as negative/resource controls. This feature has no general
+completeness guarantee and does not inherit one from PLE.
