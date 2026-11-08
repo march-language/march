@@ -13595,6 +13595,86 @@ let test_js_int_subset_parity () =
             && ir_contains tail "EXIT:1")
   end
 
+(** The Diagnostics module on `--target js` (the diag_* builtins, and the
+    try_finally its with_context is built on, had no JS mapping: the first
+    failed the compile, the second a ReferenceError at run time).  The JS
+    program's stdout must equal the interpreter's: the context while scopes
+    are open and after they close, an unobserved observer that never runs,
+    the report's kind, message, context (inner scope first, captured at the
+    panic though try_finally has unwound it by the time main's wrapper
+    reports) and location, an observer's own panic swallowed, and the next
+    observer still called.  Then the error goes on: Node exits 1 with it on
+    stderr.  Skipped when node is absent. *)
+let test_js_diagnostics_observers () =
+  let name = "march_js_diag" in
+  let src =
+    "mod JsDiag do\n\
+    \  needs IO.Console\n\
+    \  pfn keys(ctx : List((String, Diagnostics.DiagnosticValue))) : String do\n\
+    \    String.join(List.map(ctx, fn p -> match p do (k, _) -> k end), \",\")\n\
+    \  end\n\
+    \  pfn loc(l : Option(Diagnostics.SourceLocation)) : String do\n\
+    \    match l do\n\
+    \      Some(s) -> \"line \" ++ int_to_string(s.line)\n\
+    \      None -> \"none\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    println(\"outside: \" ++ keys(Diagnostics.current_context()))\n\
+    \    let v = Diagnostics.with_context([(\"a\", Diagnostics.DStr(\"x\"))], fn ->\n\
+    \      Diagnostics.with_context([(\"b\", Diagnostics.DBool(true))], fn ->\n\
+    \        keys(Diagnostics.current_context())))\n\
+    \    println(\"inside: \" ++ v)\n\
+    \    println(\"after: \" ++ keys(Diagnostics.current_context()))\n\
+    \    let gone = Diagnostics.observe_crashes(fn _ -> println(\"removed observer ran\"))\n\
+    \    Diagnostics.unobserve(gone)\n\
+    \    Diagnostics.unobserve(gone)\n\
+    \    let _h = Diagnostics.observe_crashes(fn r ->\n\
+    \      println(Diagnostics.kind_to_string(r.kind) ++ \": \" ++ r.message ++ \" ctx=\" ++ keys(r.context)\n\
+    \              ++ \" pid=\" ++ int_to_string(r.process.pid) ++ \" \" ++ loc(r.location)))\n\
+    \    let _h2 = Diagnostics.observe_crashes(fn _ -> panic(\"observer panics\"))\n\
+    \    let _h3 = Diagnostics.observe_crashes(fn _ -> println(\"third observer ran\"))\n\
+    \    Diagnostics.with_context([(\"request_id\", Diagnostics.DStr(\"r1\"))], fn ->\n\
+    \      Diagnostics.with_context([(\"job\", Diagnostics.DInt(7))], fn ->\n\
+    \        panic(\"boom\")))\n\
+    \  end\n\
+     end\n" in
+  let expected =
+    "outside: \n\
+     inside: b,a\n\
+     after: \n\
+     panic: boom ctx=job,request_id pid=-1 line 29\n\
+     third observer ran\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>/dev/null"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote src_path)) in
+  Alcotest.(check string) (name ^ ": interpreter output")
+    (String.trim expected) (String.trim interp_out);
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Diagnostics observers)"
+  else begin
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>/dev/null; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    Alcotest.(check string) (name ^ ": JS stdout and exit status")
+      (expected ^ "EXIT:1") (String.trim js_out);
+    let (_, js_err) = run_capture (Printf.sprintf "node %s 2>&1 >/dev/null"
+        (Filename.quote mjs)) in
+    Alcotest.(check bool)
+      (name ^ ": the panic still reaches Node after the observers (got: " ^ js_err ^ ")")
+      true (ir_contains js_err "Error: boom");
+    (* ...pointing at the program's throw, not at the runtime helper that
+       built the Error. *)
+    Alcotest.(check bool)
+      (name ^ ": the stack starts at the program, not march_panic_err (got: " ^ js_err ^ ")")
+      false (ir_contains js_err "march_panic_err (")
+  end
+
 (** Issue #1181: an unwritable `-o` path is a filesystem error, not a compiler
     crash.  `--target js -o dist/x.mjs` with no `dist/` hit an unguarded
     [open_out] whose [Sys_error] reached the catch-all handler: "internal
@@ -19033,6 +19113,8 @@ let codegen_suites =
             test_int_overflow_uncaught_panic;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
+          Alcotest.test_case "--target js Diagnostics: observers, context, location match the interpreter" `Quick
+            test_js_diagnostics_observers;
           Alcotest.test_case "unwritable -o path: dirs created, plain error, no ICE (#1181)" `Quick
             test_output_path_errors;
           Alcotest.test_case "--target js --test runs the tests like the native runner (#1176)" `Quick

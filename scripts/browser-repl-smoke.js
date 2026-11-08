@@ -82,6 +82,9 @@ const CASES = [
   // Loaded on demand: hash_map.march is not in the startup set.
   { input: "HashMap.size(HashMap.from_list([(\"a\", 1), (\"b\", 2)]))",
     output: "2\n", error: null },
+  // A sigil names no module but desugars to calls into one: ~H"..." loads IOList.
+  { input: "~H\"<p>${\"<b>\"}</p>\"",
+    output: "Segments([Str(\"<p>\"), Str(\"&lt;b&gt;\"), Str(\"</p>\")])\n", error: null },
   // Named but cannot run in a browser: a clear message, nothing evaluated.
   { input: "File.read(\"notes.txt\")",
     output: "", error: "File isn't available in the browser REPL: it needs a file system. Install March to run this." },
@@ -215,7 +218,84 @@ else {
   }
 }
 
+// ── Lemma erasure ───────────────────────────────────────────────────────────
+// A lemma is proof-only: the live compiler erases it after typechecking
+// (lib/driver/js_pipeline.ml) and the REPL blanks its body (js/march_browser.ml),
+// so a lemma body never runs (the reflection design's sound_erase_paths row, pinned
+// natively by test/test_refine_lemma.ml). boom's body would abort: its assert is
+// false. The program with the lemma must print exactly what the lemma-free program
+// prints, compiled (run under node with the Tetris runtime) and in the REPL; and as
+// a control, the same program with boom an ordinary function must fail.
+function lemmaProgram(mode) { // 'lemma' | 'none' | 'plain' (boom not a lemma)
+  const keep = mode !== 'none';
+  return [
+    'mod Main do',
+    '  needs IO.Console',
+    '  fn cat(xs : List(Int), ys : List(Int)) : List(Int) do',
+    '    match xs do',
+    '      Nil -> ys',
+    '      Cons(h, t) -> Cons(h, cat(t, ys))',
+    '    end',
+    '  end',
+    mode === 'lemma' ? '  @[lemma]' : '',
+    keep ? '  fn boom(xs : List(Int)) : {Unit | cat(xs, xs) == xs} do' : '',
+    keep ? '    assert cat(xs, xs) == xs' : '',
+    keep ? '    ()' : '',
+    keep ? '  end' : '',
+    '  fn main(_cap : Cap(IO.Console)) do',
+    '    let xs = Cons(1, Cons(2, Nil))',
+    keep ? '    boom(Cons(1, Nil))' : '',
+    '    println(int_to_string(List.length(cat(xs, Nil))))',
+    '  end',
+    'end',
+    ''].join('\n');
+}
+// Compile with the live compiler and run the module under node: {ok, stdout, error}.
+function compileAndRun(src) {
+  const { execFileSync } = require('child_process');
+  const os = require('os');
+  const out = comp.marchCompileToJs(src);
+  const errs = Array.from(out.errors || []);
+  if (!out.js || errs.length) return { ok: false, stdout: '', error: `compile: ${JSON.stringify(errs)}` };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'march-smoke-'));
+  try {
+    fs.copyFileSync(path.join(assets, 'tetris', 'march_runtime.mjs'), path.join(dir, 'march_runtime.mjs'));
+    fs.writeFileSync(path.join(dir, 'main.mjs'), out.js);
+    try {
+      return { ok: true, stdout: execFileSync(process.execPath, [path.join(dir, 'main.mjs')],
+                                              { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
+    } catch (e) { return { ok: false, stdout: e.stdout || '', error: String(e.stderr || e.message) }; }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+// The REPL runs a top-level main when it is defined: unwrap the module.
+function replRun(src) {
+  const body = src.split('\n').filter(l => !/^(mod Main do|end|  needs IO\.Console)$/.test(l))
+                  .map(l => l.replace(/^  /, '')).join('\n')
+                  .replace('fn main(_cap : Cap(IO.Console))', 'fn main()');
+  repl.reset();
+  const r = repl.run(body);
+  return { ok: r.error === null, stdout: r.output, error: r.error };
+}
+let lemmaCases = 0;
+for (const [label, runner] of [['compiled', compileAndRun], ['REPL', replRun]]) {
+  lemmaCases++;
+  const withLemma = runner(lemmaProgram('lemma'));
+  const without = runner(lemmaProgram('none'));
+  const plain = runner(lemmaProgram('plain'));
+  if (print) { console.log(JSON.stringify({ lemma: label, withLemma, without, plain })); continue; }
+  if (!without.ok || without.stdout !== '2\n') {
+    failures++; console.error(`FAIL lemma (${label}): the lemma-free program should print "2": ${JSON.stringify(without)}`);
+  } else if (!withLemma.ok || withLemma.stdout !== without.stdout) {
+    failures++; console.error(`FAIL lemma (${label}): a lemma body ran, or the output differs from the lemma-free program's\n  with:    ${JSON.stringify(withLemma)}\n  without: ${JSON.stringify(without)}`);
+  }
+  // The control must fail on boom's assert, not on something else (a compile error
+  // would make the case vacuous too).
+  if (plain.ok || !/\[assert_failed\]/.test(plain.error || '')) {
+    failures++; console.error(`FAIL lemma (${label}) control: boom as an ordinary function should abort on its assert, so this case can fail; got ${JSON.stringify(plain)}`);
+  }
+}
+
 if (!print) {
   if (failures) { console.error(`browser-repl-smoke: ${failures} failure(s)`); process.exit(1); }
-  console.log(`browser-repl-smoke: ${CASES.length + TRANSCRIPT_CASES.length + 1 + checkCases} cases passed (${assets})`);
+  console.log(`browser-repl-smoke: ${CASES.length + TRANSCRIPT_CASES.length + 1 + checkCases + lemmaCases} cases passed (${assets})`);
 }
