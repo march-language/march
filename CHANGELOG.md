@@ -21,6 +21,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Tuples in refinement predicates.** A tuple-typed parameter can be refined
+  (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
+  predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
+  tuple refinement was silently not checked, and a tuple in a predicate was an unchecked skip.
+
 - **Bounded predicates:** `forall` and `exists` over half-open integer ranges,
   `elts` and `keys`, with logical `nth` indexing, domain-wide indexing checks,
   and checked existential candidates. Integer insertion-sort is included as a
@@ -709,6 +714,18 @@ git log is authoritative for exact commits.
   measure no longer resolves to a prelude function of that name, which made
   every user set measure `invalid_measure`.
 
+- **Bounded quantifier bodies are scoped more strictly.** Inside `forall` / `exists`, a
+  measure over a call or a constructor tester whose argument mentions the binder (for
+  example `elts(mk(k))`) is now refused, so the predicate is skipped rather than ever
+  being encoded as one constant shared by every instance. Own abstract-predicate renaming
+  and inferred-lemma substitution now also reach quantifier bodies, and `nth` is
+  documented as reserved inside predicates.
+
+- **`derive Ord` on a record compares fields in declaration order.** With two or more
+  fields, the derived `compare` returned only the last field's comparison, so
+  `compare({ a: 1, b: 9 }, { a: 2, b: 0 })` was `1` and sorting by `<` put records out of
+  order. It is now lexicographic, as documented: the first field that differs decides. Same
+  on the interpreter, native and JS.
 - **`Diagnostics` and `try_finally` work on `--target js`.** A program using
   `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
   compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers

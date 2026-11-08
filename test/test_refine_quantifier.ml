@@ -47,6 +47,19 @@ let tests = [
     if U.contains out "[proof_unproved]" || U.contains out "[syntax_error]" || not (U.contains out "proved\tuser\t") then
       Alcotest.failf "expected checked explicit witness:\n%s" out);
   proved "Boolean indexed value" "forall i in 0..1, nth([true], i)";
+  (* A measure over a call whose argument is the binder must not collapse
+     every instance into one constant (contradictory -> vacuous proof). *)
+  U.gated "binder-dependent call cannot become one constant" (fun () ->
+    let out = U.run ~args:"--check --refine-report-sites=all" {|mod Q do
+  fn mk(x : Int) : {List(Int) | elts(_) == elts([x])} do [x] end
+  fn g(u : {Int | forall k in 0..3, member(k, elts(mk(k)))}) : {Int | _ == 99} do u end
+  fn h(u : {Int | forall k in 0..3, len(mk(k)) == k}) : {Int | _ == 99} do u end
+end
+|} in
+    let rows = String.split_on_char '\n' out
+      |> List.filter (fun l -> U.contains l "\tuser\t" && U.contains l "_ == 99") in
+    if List.length rows <> 2 || List.exists (fun l -> String.starts_with ~prefix:"proved\t" l) rows then
+      Alcotest.failf "binder-dependent call must not prove a false postcondition:\n%s" out);
 
   Alcotest.test_case "synthetic binder spans cannot capture" `Quick (fun () ->
     let module A = March_ast.Ast in

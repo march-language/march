@@ -321,9 +321,18 @@ let rec smt_of_r_marked ?(logical_binders = []) ?(vocab = true) ?(nonneg = []) ?
       else if is_axiom_measure m then Some (Smt.App (m, [variable]))
       else None in
     let inner_field x f = if x = q.binder.txt then None else resolve_field x f in
+    (* These two resolvers receive RAW argument expressions and resolve their
+       names in the enclosing scope, where the binder is unknown (or names a
+       different, free variable).  A binder-dependent call or tester would
+       become one constant shared by every instance of the quantifier, so
+       refuse it: the predicate is then skipped, never wrongly assumed. *)
+    let mentions_binder e = March_ast.Bounded_pred.may_mention q.binder.txt e in
+    let inner_measure_call m f cargs =
+      if List.exists mentions_binder cargs then None else resolve_measure_call m f cargs in
+    let inner_tester ctor arg = if mentions_binder arg then None else resolve_tester ctor arg in
     let body = smt_of_r_marked ~logical_binders:(name :: logical_binders) ~vocab ~nonneg:[] ~total_div:true ~resolve_var:inner
-      ~resolve_measure:inner_measure ~resolve_field:inner_field ~resolve_measure_app ~resolve_tester
-      ~resolve_str_lit ~resolve_measure_call q.body in
+      ~resolve_measure:inner_measure ~resolve_field:inner_field ~resolve_measure_app ~resolve_tester:inner_tester
+      ~resolve_str_lit ~resolve_measure_call:inner_measure_call q.body in
     let domain = match q.domain with
       | March_ast.Bounded_pred.Range (lo, hi) ->
         (match r lo, r hi with
@@ -477,6 +486,15 @@ let rec smt_of_r_marked ?(logical_binders = []) ?(vocab = true) ?(nonneg = []) ?
        (match resolve_source_ctor ?adt:(tc_adt_at sp) ctor with
         | Some (adt, k) -> Ok (ctor_term adt k ts)
         | None -> Error e))
+  (* A tuple literal: the tuple datatype's one constructor (S3 tuples).  The
+     datatype is named by arity, so it needs no type at the site. *)
+  | A.ETuple ((_ :: _ :: _ as xs), _) ->
+    let reflected = List.map r xs in
+    (match List.find_map (function Error e -> Some e | Ok _ -> None) reflected with
+     | Some e -> Error e
+     | None ->
+       let n = List.length xs in
+       Ok (ctor_term (tuple_adt n) (tuple_ctor n) (List.map (function Ok t -> t | Error _ -> assert false) reflected)))
   (* Field access on a bare variable: s.count → selector applied to s.
      Only EVar receivers are supported; complex receivers conservatively return
      None — safe under the definite-failure soundness stance. *)
@@ -731,6 +749,7 @@ and pred_str_prec context (e : A.expr) : string =
          && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
     law_method_display f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.ETuple ([], _) -> "()"
+  | A.ETuple (xs, _) -> "(" ^ String.concat ", " (List.map pred_str xs) ^ ")"
   (* A record literal, as written (field order kept). *)
   | A.ERecord (fs, _) ->
     "{ " ^ String.concat ", " (List.map (fun ((n : A.name), v) -> n.A.txt ^ ": " ^ pred_str v) fs) ^ " }"
@@ -1015,6 +1034,10 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, targs) as base), binder, pred))
     when is_adt_base base ->
     Some (binder_name binder, pred, Some (adt_sort_name ~arity:(List.length targs) name))
+  (* A tuple (S3): the tuple datatype, named by [tuple_adt] so it is
+     registered before any query declares a constant at it. *)
+  | Some (A.TyRefine (A.TyTuple (_ :: _ :: _ as ts), binder, pred)) ->
+    Some (binder_name binder, pred, Some (tuple_adt (List.length ts)))
   | _ -> None
 
 (* A function's declared RETURN refinement together with the SMT sort of the

@@ -164,7 +164,9 @@ let strength_tests =
            checker cannot admit either (an opaque sort), so this is pinned on
            [judge] and the report directly. *)
         let fd =
-          parsed_fn (m "  fn first(p : (Int, Int)) : Int do\n    match p do\n      (a, _) -> a\n    end\n  end\n") "first"
+          (* A function-typed parameter has no generator (a tuple had none
+             until tuples became a predicate sort, 2026-11-06). *)
+          parsed_fn (m "  fn first(p : Int -> Int) : Int do\n    p(0)\n  end\n") "first"
         in
         let module LS = March_refinecheck.Law_strength in
         let module LC = March_refinecheck.Law_coverage in

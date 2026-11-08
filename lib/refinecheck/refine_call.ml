@@ -2081,12 +2081,16 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            the named spelling below already is, so `okz(_)` meets a reflected
            call over the actual exactly as `okz(g)` does (todo
            2026-11-04-lemma-hypothesis-reflected-call-not-assumed). *)
+        (* A tuple has no scalar reading at all (S3 tuples): its datatype
+           sort in both stages, or a path fact over it (`if p == q`) declares
+           the same name at `$Tup2` beside the stage-1 `Int`. *)
         let sort =
-          if not !Reflect_state.arm_on && not quantified then self_scalar
-          else
-            match List.nth_opt sg.param_tys rp.idx with
-            | Some (Some ty) -> (match instance_sort_of_ty ty with Smt.SData (n, _) as s when n <> "Elem" -> s | _ -> self_scalar)
-            | _ -> self_scalar
+          match List.nth_opt sg.param_tys rp.idx with
+          | Some (Some ty) -> (
+            match instance_sort_of_ty ty with
+            | Smt.SData (n, _) as s when n <> "Elem" && (!Reflect_state.arm_on || quantified || is_tuple_adt n) -> s
+            | _ -> self_scalar)
+          | _ -> self_scalar
         in
         mark_self name
           (absorb
@@ -2100,11 +2104,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              sort, so it can meet a reflected call over the same value (the
              Int default below is what stage 1 has always used). *)
           let sort =
-            if not !Reflect_state.arm_on && not quantified then scalar_of_name name
-            else
-              match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
-              | Some (Some ty) -> (match instance_sort_of_ty ty with Smt.SData (n, _) as s when n <> "Elem" -> s | _ -> scalar_of_name name)
-              | _ -> scalar_of_name name
+            match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
+            | Some (Some ty) -> (
+              match instance_sort_of_ty ty with
+              | Smt.SData (n, _) as s when n <> "Elem" && (!Reflect_state.arm_on || quantified || is_tuple_adt n) -> s
+              | _ -> scalar_of_name name)
+            | _ -> scalar_of_name name
           in
           absorb
             (reflect_cached name (fun () ->
@@ -2939,7 +2944,15 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
         List.iter
           (fun c -> Option.iter (fun k -> load_scope_tester_facts adt k name) (ctor_of_adt adt c))
           goal_ctors;
-        match reflect_dt adt (A.EVar { A.txt = name; A.span }) with
+        (* A tuple at its instance (S3): the goal declares a tuple-typed
+           parameter at `$Tup2(Int, Int)`, so the guard's copy of the same
+           name must not be the bare `$Tup2`. *)
+        let args =
+          match caller_sort_of name with
+          | Some (Smt.SData (a, args)) when is_tuple_adt a -> Some args
+          | _ -> None
+        in
+        match reflect_dt ?args adt (A.EVar { A.txt = name; A.span }) with
         | Some t ->
           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
           Some t

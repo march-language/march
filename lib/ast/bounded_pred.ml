@@ -49,6 +49,18 @@ let rec names = function
   | EIf (c, a, b, _) -> names c @ names a @ names b
   | _ -> []
 
+(** Conservative: may [x] occur in [e]?  True for any form [names] does not
+    model, so a caller that refuses on [true] never misses an occurrence. *)
+let rec may_mention x = function
+  | EVar n -> n.txt = x
+  | ELit _ -> false
+  | EApp (f, args, _) -> may_mention x f || List.exists (may_mention x) args
+  | ELam (ps, body, _) -> List.exists (fun p -> p.param_name.txt = x) ps || may_mention x body
+  | ECon (_, es, _) | ETuple (es, _) -> List.exists (may_mention x) es
+  | EField (e, _, _) | EAnnot (e, _, _) | ERefineMsg (e, _, _) -> may_mention x e
+  | EIf (c, a, b, _) -> may_mention x c || may_mention x a || may_mention x b
+  | _ -> true
+
 let rec has_exists e =
   match view e with
   | Some q -> q.kind = Exists || has_exists q.body || List.exists has_exists (domain_exprs q.domain)
