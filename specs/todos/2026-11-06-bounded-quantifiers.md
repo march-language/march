@@ -40,9 +40,32 @@ syntax in predicates.
   `MARCH_REFINE_RLIMIT=40000` on 12 fixtures changed 4476 of 4476 blocks.
 - Cold solver timing, full 582-fixture sweep at 4 jobs, base/branch
   alternated: 269/268, 268/268, 268/272 s; median 268 s vs 268 s, no new
-  timeouts observed. Warm-cache paired timings are still outstanding.
+  timeouts observed. Warm (each fixture's `.march/cas` warmed by a prior cold
+  pass, then the sweep timed again): 183.3/185.4, 183.9/182.9, 181.0/181.0 s;
+  median 183.3 s vs 182.9 s.
 - Tree-sitter: `forall` / `exists` are soft keywords (names elsewhere, e.g.
   `let exists = …` in `stdlib/dataframe.march`); `scripts/check-tree-sitter.sh` ok.
+- Full `scripts/run-tests.sh` on the merged tree: every suite green
+  (refinecheck: 210 groups, 2538 tests). `test_lsp` was re-run alone after
+  removing a stray `_build/oracle-check/` (412 tests green): the resolver's
+  library walk follows the per-fixture symlinks that tree holds, so leaving it
+  behind wedges `import run folds as one range`. Delete it after an oracle run.
+- Formatter controls: `--fmt` round-trips the insertion-sort fixture and a
+  file mixing range/set/nested/shadowed quantifiers with `forall` / `exists`
+  used as function, parameter and `let` names. A second pass changes nothing,
+  and refinement verdicts are unchanged.
+- Fresh whole-branch review: no false `proved` found. Follow-ups landed after
+  the PR merged: a measure call / tester inside a quantifier body that mentions
+  the binder is refused (the probe was already undecided, since the hypothesis
+  was dropped elsewhere, so this closes the path rather than fixing an observed
+  proof); `rename_heads` and `Infer_lemma.subst` descend into quantifier
+  bodies (capture-avoiding); `nth` documented as reserved in predicates.
+  Refine oracle identical after these fixes. Two review notes remain open:
+  a raw `Refuted` on the `scope_complete` record path is not witness-confirmed
+  when `nth` appears (not reproduced), and the token filter promotes
+  `forall` / `exists` on a one-token lookahead, so `x -> exists` followed by a
+  lowercase-binder arm on the next line would mis-parse (same as `calc` /
+  `reveal`; no code in the repo does this).
 
 Bounded forms are `forall` / `exists` over `lo..hi`, `elts(e)`, or `keys(m)`.
 Triggers are chosen from suitable binder-dependent applications when available;

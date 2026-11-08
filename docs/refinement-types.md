@@ -243,6 +243,9 @@ short-circuit guards can establish that condition. For **both** `forall` and
 valid existential witness would suffice for truth. For example,
 `exists i in 0..2, nth([7], i) == 7` cannot prove: index one is invalid.
 Negating the predicate does not remove this obligation.
+Like `len` and the set vocabulary, `nth` is reserved inside predicates: a
+module's own unqualified `nth` is not consulted there, so write a differently
+named helper (or `List.nth` in ordinary code) for any other indexing meaning.
 
 A sorted-list predicate can compare adjacent positions:
 

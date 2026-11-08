@@ -700,6 +700,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Bounded quantifier bodies are scoped more strictly.** Inside `forall` / `exists`, a
+  measure over a call or a constructor tester whose argument mentions the binder (for
+  example `elts(mk(k))`) is now refused, so the predicate is skipped rather than ever
+  being encoded as one constant shared by every instance. Own abstract-predicate renaming
+  and inferred-lemma substitution now also reach quantifier bodies, and `nth` is
+  documented as reserved inside predicates.
+
 - **`derive Ord` on a record compares fields in declaration order.** With two or more
   fields, the derived `compare` returned only the last field's comparison, so
   `compare({ a: 1, b: 9 }, { a: 2, b: 0 })` was `1` and sorting by `<` put records out of

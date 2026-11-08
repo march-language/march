@@ -321,9 +321,18 @@ let rec smt_of_r_marked ?(logical_binders = []) ?(vocab = true) ?(nonneg = []) ?
       else if is_axiom_measure m then Some (Smt.App (m, [variable]))
       else None in
     let inner_field x f = if x = q.binder.txt then None else resolve_field x f in
+    (* These two resolvers receive RAW argument expressions and resolve their
+       names in the enclosing scope, where the binder is unknown (or names a
+       different, free variable).  A binder-dependent call or tester would
+       become one constant shared by every instance of the quantifier, so
+       refuse it: the predicate is then skipped, never wrongly assumed. *)
+    let mentions_binder e = March_ast.Bounded_pred.may_mention q.binder.txt e in
+    let inner_measure_call m f cargs =
+      if List.exists mentions_binder cargs then None else resolve_measure_call m f cargs in
+    let inner_tester ctor arg = if mentions_binder arg then None else resolve_tester ctor arg in
     let body = smt_of_r_marked ~logical_binders:(name :: logical_binders) ~vocab ~nonneg:[] ~total_div:true ~resolve_var:inner
-      ~resolve_measure:inner_measure ~resolve_field:inner_field ~resolve_measure_app ~resolve_tester
-      ~resolve_str_lit ~resolve_measure_call q.body in
+      ~resolve_measure:inner_measure ~resolve_field:inner_field ~resolve_measure_app ~resolve_tester:inner_tester
+      ~resolve_str_lit ~resolve_measure_call:inner_measure_call q.body in
     let domain = match q.domain with
       | March_ast.Bounded_pred.Range (lo, hi) ->
         (match r lo, r hi with
