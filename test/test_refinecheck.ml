@@ -13503,7 +13503,7 @@ let audit_classify_reason_suite =
       `Quick (fun () ->
         let _, d = classify_only_site
             {|mod M do
-                type Box = { v : {(Int, Int) | true} }
+                type Box = { v : {Char | true} }
               end|}
         in
         match d with
@@ -13723,13 +13723,21 @@ let audit_classify_fixloop1_suite =
           (compiler_warns src "carries a refinement, which enforces nothing"))
 
   ; (* Section 6 / Mutation M4: a rejecting-side fixture for rule 3.
-       [refined_param_ty] has no [TyTuple] arm, so a parameter refined at a
-       TUPLE base is [Unenforced] -- without this fixture, a classifier that
+       [refined_param_ty] has no [Char] arm, so a parameter refined at a
+       CHAR base is [Unenforced] -- without this fixture, a classifier that
        hardcodes every top-level-fn [Param] as [Enforced], never calling
        [refined_param_ty] at all, still passes the whole group (the review's
-       own M4). *)
-    check_unenforced "a parameter refined at a tuple base is Unenforced (refined_param_ty has no TyTuple arm)"
+       own M4).  It used a tuple base until 2026-11-06, when tuples became a
+       predicate sort (specs/progress/2026-11-06-stdlib-lemma-sweep-s3-tuples.md). *)
+    check_unenforced "a parameter refined at a Char base is Unenforced (refined_param_ty has no Char arm)"
       {|mod TUPP1 do
+          fn f(p : { t : Char | true }) : Int do 0 end
+        end|}
+
+  ; (* Its positive twin: since tuples are a predicate sort, a tuple-refined
+       parameter is Enforced (an obligation at every call). *)
+    check_enforced "a parameter refined at a tuple base is Enforced (tuples are a predicate sort)"
+      {|mod TUPP2 do
           fn f(p : { t : (Int, Int) | true }) : Int do 0 end
         end|}
 
@@ -30094,7 +30102,7 @@ let () =
       ("law-coverage", Test_refine_law_coverage.tests);
       ("reflect-record-vars", Test_refine_record_vars.tests);
       ("proof-hints", Test_refine_proof_hints.suite);
-      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified);
+      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified @ Test_refine_stdlib_sweep.s3);
       ("pred-names", Test_refine_pred_names.suite);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);

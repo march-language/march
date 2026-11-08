@@ -15,15 +15,19 @@ display-name resolution in the propagation pre-pass was closed by 71f112f4a, whi
 reflected call by its site, and is pinned by the `pred-names` suite:
 `specs/progress/2026-11-06-predicate-names.md`.)
 
-- **A tuple-typed variable in a predicate.** A lemma parameter or caller variable of tuple
-  type gets no sort in the predicate encoder (the sort-marker channel has no tuple marker), so
-  `swap(swap(t)) == t` over `t : (Int, Int)` is a `sort-conflict` skip. Literals at a reflected
-  call's parameter do translate. (The record half is done:
-  `specs/progress/2026-11-06-reflection-record-predicate-variables.md`.)
-- **Parametric records.** A record type is matched to its declaration by its field set; a
-  record with type parameters declines (its instance is not recovered from the structural
-  type).
-- **A tuple literal printed in a report** reads `<predicate>` (`pred_str` has no arm for
-  `ETuple`; a record literal prints as written since 2026-11-06).
+- **A tuple-typed return binder, and a reflected call over a tuple-typed record field.**
+  Tuple-typed parameters, lemma parameters, caller values and tuple literals in a predicate are
+  encoded since `specs/progress/2026-11-06-stdlib-lemma-sweep-s3-tuples.md`, and record-typed
+  variables since `specs/progress/2026-11-06-reflection-record-predicate-variables.md`. Left:
+  a tuple RETURN refinement (`fn mk(x) : {(Int, Int) | Tuple.first(_) == x}` is
+  `unreflectable-subject` on the definition side; `return_refine_ext` / `return_refine_sorted`
+  have no tuple arm, and it must go to `post_walk_verdict`, not `engine`, which would take
+  `$Tup2` for a record sort), and a reflected call over a tuple-typed record field
+  (`type Box = { v : {(Int, Int) | Tuple.first(_) > 0} }` is checked at every construction but
+  `unreflectable-predicate`; a field predicate without a call, `_ == (1, 0)`, proves and is
+  violated as it should).
+- **Parametric records: covered by `claude/encoder-gaps-mapset`** (Refinement todos session,
+  not yet merged): `record_of_fields` recovers the instance, so lemmas over `p : Pr(Int)` prove
+  through reflected functions. Still open there: a direct field read (`p.fst`) in a predicate.
 - **`uses:` over-approximation.** When a stage-2 proof's unsat core names no unfolding
   (congruence, I8), `uses:` lists the whole frontier.

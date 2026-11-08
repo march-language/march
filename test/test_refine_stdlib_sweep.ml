@@ -200,6 +200,64 @@ let s2 =
             "sum_int_reverse"; "product_onto_shift"; "product_onto_append"; "product_int_append";
             "product_onto_reverse_onto"; "product_int_reverse" ]) ]
 
+(* Phase S3, tuples (todo 2026-11-04-stdlib-lemma-sweep-s3; encoder-gaps item
+   "a tuple-typed variable in a predicate"): a tuple-refined parameter was
+   dropped before any check ran (no row at all), and a tuple-typed variable
+   in a predicate was declared `Int`, a sort conflict.  Each accept case has a
+   REJECT control on the same shape. *)
+let s3 =
+  let need_eq = "  fn need_eq(a : (Int, Int), _b : {(Int, Int) | _ == a}) : Int do 0 end\n" in
+  let m name body = "mod " ^ name ^ " do\n" ^ body ^ "end\n" in
+  [ gated "tuple precondition: _ == a over (Int, Int) is checked, not dropped" (fun () ->
+        let out =
+          run
+            (m "T1"
+               (need_eq
+               ^ "  fn ok1(p : (Int, Int)) : Int do need_eq(p, p) end\n\
+                 \  fn ok2(p : (Int, Int)) : Int do need_eq(p, Tuple.swap(Tuple.swap(p))) end\n\
+                 \  fn bad1() : Int do need_eq((1, 2), (2, 1)) end\n\
+                 \  fn bad2() : Int do need_eq((1, 2), Tuple.swap((1, 2))) end\n"))
+        in
+        expect out ~line:3 ~callee:"need_eq" "proved";
+        expect out ~line:4 ~callee:"need_eq" "proved";
+        expect out ~line:5 ~callee:"need_eq" "violated";
+        expect out ~line:6 ~callee:"need_eq" "violated");
+    gated "tuple precondition from a path fact: p == q proves, p != q does not" (fun () ->
+        let out =
+          run
+            (m "T4"
+               (need_eq
+               ^ "  fn ok(p : (Int, Int), q : (Int, Int)) : Int do if p == q do need_eq(p, q) else 0 end end\n\
+                 \  fn bad(p : (Int, Int), q : (Int, Int)) : Int do if p != q do need_eq(p, q) else 0 end end\n"))
+        in
+        expect out ~line:3 ~callee:"need_eq" "proved";
+        U.not_proved out ~line:4 ~callee:"need_eq");
+    gated "a tuple literal in a predicate: _ == (1, 2)" (fun () ->
+        let out =
+          run
+            (m "T5"
+               "  fn need12(t : {(Int, Int) | _ == (1, 2)}) : Int do 0 end\n\
+               \  fn ok() : Int do need12((1, 2)) end\n\
+               \  fn bad() : Int do need12((2, 1)) end\n")
+        in
+        expect out ~line:3 ~callee:"need12" "proved";
+        expect out ~line:4 ~callee:"need12" "violated";
+        if contains out "<predicate>" then Alcotest.failf "a tuple literal printed as <predicate>:\n%s" out);
+    gated "tuple lemmas over a tuple parameter prove, and a false one does not" (fun () ->
+        let out =
+          run
+            (m "T3"
+               "  @[lemma]\n\
+               \  fn swap_swap_int(p : (Int, Int)) : {Unit | Tuple.swap(Tuple.swap(p)) == p} do () end\n\
+               \  @[lemma]\n\
+               \  fn swap_swap(p : (a, b)) : {Unit | Tuple.swap(Tuple.swap(p)) == p} do () end\n\
+               \  @[lemma]\n\
+               \  fn swap_id_bad(p : (Int, Int)) : {Unit | Tuple.swap(p) == p} do () end\n")
+        in
+        expect out ~line:3 ~callee:"swap_swap_int" "proved";
+        expect out ~line:5 ~callee:"swap_swap" "proved";
+        U.not_proved out ~line:7 ~callee:"swap_id_bad") ]
+
 (* `cap verified` stdlib modules (2026-11-07 pass): every module that declares it
    must check clean as its own entry, the way its `cap verified` claim was
    measured; nothing else enforced a stdlib module's claim (stdlib diagnostics are

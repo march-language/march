@@ -21,6 +21,11 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Tuples in refinement predicates.** A tuple-typed parameter can be refined
+  (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
+  predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
+  tuple refinement was silently not checked, and a tuple in a predicate was an unchecked skip.
+
 - **Bounded predicates:** `forall` and `exists` over half-open integer ranges,
   `elts` and `keys`, with logical `nth` indexing, domain-wide indexing checks,
   and checked existential candidates. Integer insertion-sort is included as a
