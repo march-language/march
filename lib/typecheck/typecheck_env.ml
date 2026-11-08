@@ -269,6 +269,8 @@ type cap_mismatch_site = {
 }
 
 type env = {
+  in_logical_predicate : bool;
+  in_proof_hints : bool;
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
   ctors   : ctor_info list StrMap.t;       (** Data constructor name → all infos (head = most recent) *)
@@ -854,6 +856,8 @@ type env = {
 }
 
 let make_env errors type_map = {
+  in_logical_predicate = false;
+  in_proof_hints = false;
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   ty_aliases = StrMap.empty;
   level = 0; lin = [];

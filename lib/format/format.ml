@@ -474,6 +474,7 @@ let is_stmt_form = function
 
 (** The binding level of [e] as the renderer prints it. *)
 let rec level_of e =
+  if March_ast.Bounded_pred.view e <> None then lv_expr else
   match e with
   | EIf _ | EMatch _ | ECond _ | ELam _ | EAssert _ | EProof _ -> lv_expr
   | EPipe _ -> lv_pipe
@@ -490,6 +491,7 @@ let rec level_of e =
 (** A call the renderer prints as [head(args)], as opposed to an operator
     application or a list literal, which are also [EApp] / [ECon] nodes. *)
 let plain_call e =
+  if March_ast.Bounded_pred.view e <> None then None else
   match e with
   | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None -> None
   | EApp (EVar { txt; _ }, [_; _], _) when infix_level txt <> None -> None
@@ -633,7 +635,14 @@ and call_head ind = function
 and render_raw ind e =
   let r lvl x = render ind lvl x in
   let args xs = String.concat ", " (List.map (r lv_expr) xs) in
-  match e with
+  match March_ast.Bounded_pred.view e with
+  | Some q ->
+    let domain = match q.domain with
+      | March_ast.Bounded_pred.Range (lo, hi) -> r lv_add lo ^ ".." ^ r lv_add hi
+      | March_ast.Bounded_pred.Elements set -> r lv_expr set in
+    (if q.kind = March_ast.Bounded_pred.Forall then "forall " else "exists ")
+    ^ q.binder.txt ^ " in " ^ domain ^ ", " ^ r lv_expr q.body
+  | None -> match e with
   | ELit (lit, _)               -> fmt_lit lit
   | EVar { txt; _ }             -> txt
   (* Reconstruct list literals: Cons(a, Cons(b, Nil)) → [a, b] *)

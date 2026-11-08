@@ -160,6 +160,8 @@ type cap_mismatch_site = {
 }
 
 type env = {
+  in_logical_predicate : bool;
+  in_proof_hints : bool;
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
   ctors : ctor_info list StrMap.t;
