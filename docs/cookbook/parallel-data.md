@@ -114,7 +114,7 @@ The number of workers defaults to `System.cpu_count()`. Use the `_n` variants fo
 ### Parallel.pmap: order-preserving parallel transform
 
 ```march
-let nums = RRB.range(1, 1000001)
+let nums = RRB.range(1, 1001)
 
 -- double every element (parallel, same order as input)
 let doubled = Parallel.pmap(nums, fn n -> n * 2)
@@ -134,14 +134,16 @@ let scores = RRB.from_list([88, 92, 75, 95, 60, 84])
 -- sum of squares
 let sum_sq = Parallel.preduce(scores, 0, fn n -> n * n, fn (a, b) -> a + b)
 
--- maximum score
-let top = Parallel.preduce(scores, -2147483648, fn n -> n, fn (a, b) -> if a > b do a else b end)
+-- maximum score (scores are never negative, so 0 is an identity for max here)
+let top = Parallel.preduce(scores, 0, fn n -> n, fn (a, b) -> if a > b do a else b end)
 ```
 
 The merge function must be **associative** and `zero` must be its identity. Commutativity is not
 required.
 
 ```march
+let scores = RRB.from_list([88, 92, 75, 95, 60, 84])
+
 -- explicit 8 workers
 let total = Parallel.preduce_n(scores, 0, fn n -> n, fn (a, b) -> a + b, 8)
 ```
@@ -272,6 +274,7 @@ Static partitioning (one chunk per worker) leaves fast workers idle while slow o
 Pass a larger `workers` argument to `preduce_n` / `pmap_n` to create finer chunks:
 
 <!-- scroll:skip -->
+<!-- repl:skip -->
 ```march
 -- 4× more chunks than schedulers — reduces worst-case idle time
 Parallel.preduce_n(v, 0, expensive_fn, merge, System.cpu_count() * 4)

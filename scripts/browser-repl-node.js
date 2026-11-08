@@ -47,7 +47,9 @@ function loadRepl(assets) {
   for (const g of ['marchEvalLine', 'marchResetSession', 'marchModulesNeeded', 'marchLoadModule']) {
     if (typeof ctx[g] !== 'function') throw new Error(`march.js does not export ${g}`);
   }
-  function run(code) {
+  // opts.timeout (ms): give up on an evaluation that runs longer (a server loop, an
+  // actor waiting forever); the result is then an error naming the limit.
+  function run(code, opts) {
     const need = ctx.marchModulesNeeded(code);
     const unavailable = Array.from(need.unavailable);
     if (unavailable.length) {
@@ -60,8 +62,18 @@ function loadRepl(assets) {
       if (r.error) return { output: '', error: r.error, loaded };
       loaded.push(file);
     }
-    const r = ctx.marchEvalLine(code);
-    return { output: r.output, error: r.error, loaded };
+    if (!(opts && opts.timeout)) {
+      const r = ctx.marchEvalLine(code);
+      return { output: r.output, error: r.error, loaded };
+    }
+    ctx.__marchInput = code;
+    try {
+      const r = vm.runInContext('marchEvalLine(__marchInput)', ctx, { timeout: opts.timeout });
+      return { output: r.output, error: r.error, loaded };
+    } catch (e) {
+      if (!/timed out/.test(String(e && e.message))) throw e;
+      return { output: '', error: `timed out after ${opts.timeout} ms`, loaded };
+    }
   }
   return { ctx, run, reset: () => ctx.marchResetSession(), load };
 }
