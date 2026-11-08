@@ -2593,3 +2593,26 @@ of claim through 2026-07-23; both became reachable 2026-07-24 and are no
 longer in this category, see §6.3.) The `f(1)(2)` entry in
 `specs/todos/`'s "Grammar / lint contradictions (2026-07-03)" section is
 now closed (moved to Done, 2026-07-06), see §7.3 for the fix.
+
+
+## Bounded predicate syntax
+
+The expression entry points `expr` and `expr_no_bare_lambda` accept the
+following additional form; type checking restricts it to logical predicate
+positions, including proof assertions:
+
+```ebnf
+bounded_pred   ::= quantifier_kind LOWER_IDENT "in" bounded_domain "," expr
+quantifier_kind ::= "forall" | "exists"
+bounded_domain ::= expr_add ".." expr_add | expr_add
+```
+
+The single-expression domain must be `elts(e)` or `keys(e)` with one argument.
+`forall` and `exists` are promoted to binder tokens when followed by a lower
+identifier; ordinary identifier calls retain their usual spelling. `..` is a
+lexer token distinct from `.`. Arithmetic range endpoints use `expr_add`,
+and the comma introduces the full predicate body. Parentheses delimit a
+quantified predicate used as an operand. An unbounded binder is rejected with
+a diagnostic directing the author to bounded forms. The binder is scoped only
+over its body, not the domain. See [Bounded quantifiers]({{ site.baseurl }}/docs/refinement-types/#bounded-quantifiers)
+for semantics and current solver limits.

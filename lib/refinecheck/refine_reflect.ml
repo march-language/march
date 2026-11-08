@@ -122,10 +122,12 @@ let binders_in (e : A.expr) : string list =
     e;
   !acc
 
-let has_lambda (e : A.expr) =
-  let r = ref false in
-  Refine_encode.iter_all (function A.ELam _ | A.ELetFn _ | A.ELetStar _ -> r := true | _ -> ()) e;
-  !r
+let rec has_lambda (e : A.expr) =
+  match March_ast.Bounded_pred.view e with
+  | Some q -> List.exists has_lambda (q.body :: March_ast.Bounded_pred.domain_exprs q.domain)
+  | None -> match e with
+    | A.ELam _ | A.ELetFn _ | A.ELetStar _ -> true
+    | _ -> List.exists has_lambda (Refine_encode.children e)
 
 (* Every [/] and [%] divides by a non-zero literal. *)
 let literal_divisions (e : A.expr) =
@@ -307,7 +309,12 @@ let analyze (inp : inputs) (t : RT.t) (decls : A.decl list) : row list =
   let proof_depth = ref 0 in
   let rec walk ~(owner : A.span) ~(local : bool) (env : bind SM.t) (e : A.expr) : unit =
     let w = walk ~owner ~local env in
-    match e with
+    match March_ast.Bounded_pred.view e with
+    | Some q ->
+      List.iter w (March_ast.Bounded_pred.domain_exprs q.domain);
+      let env = SM.add q.binder.txt {k_var = true; k_owner = owner} env in
+      walk ~owner ~local env q.body
+    | None -> match e with
     | A.EVar v -> (
       match SM.find_opt v.A.txt env with
       | Some { k_var = true; k_owner } when local && k_owner <> owner ->
@@ -1313,6 +1320,7 @@ let param_const i = Printf.sprintf "$rp%d" i
 let map_term (f : Smt.term -> Smt.term) (t : Smt.term) : Smt.term =
   let open Smt in
   match t with
+  | Quant (q, n, sort, g, b) -> Quant (q, n, sort, f g, f b)
   | Const _ | IntLit _ | BoolLit _ | FloatLit _ | SetEmpty _ -> t
   | App (g, xs) -> App (g, List.map f xs)
   | Ctor (c, s, xs) -> Ctor (c, s, List.map f xs)

@@ -195,6 +195,7 @@ let rec known_pos ~vocab (ctx : string list) (e : A.expr) : bool =
    else — an arithmetic subject, a bare variable, a call — is reflected
    without the wrap, so a non-literal divisor there must be [known_pos]. *)
 let bool_shaped (e : A.expr) : bool =
+  if March_ast.Bounded_pred.view e <> None then true else
   match e with
   | A.EApp
       (A.EVar { A.txt = "&&" | "||" | "not" | "==" | "!=" | "<" | "<=" | ">" | ">="; _ }, _, _) ->
@@ -258,9 +259,15 @@ let rec definedness (t : Smt.term) : Smt.term option =
   in
   let all ts = List.fold_left (fun acc c -> conj acc (definedness c)) None ts in
   match t with
+  | Smt.Quant (_, n, sort, guard, body) ->
+    Option.map (fun d -> Smt.Quant (true, n, sort, Smt.BoolLit true, d))
+      (conj (definedness guard) (Option.map (fun d -> Smt.Implies (guard, d)) (definedness body)))
   | Smt.And (a, b) | Smt.Implies (a, b) ->
     conj (definedness a) (Option.map (fun db -> Smt.Implies (a, db)) (definedness b))
   | Smt.Or (a, b) -> conj (definedness a) (Option.map (fun db -> Smt.Or (a, db)) (definedness b))
+  | Smt.App (m, [xs; i]) when m = list_nth_measure ->
+    conj (all [xs; i]) (Some (Smt.And (Smt.Le (Smt.IntLit 0, i),
+      Smt.Lt (i, Smt.App (list_len_measure, [xs])))))
   | Smt.Div (x, d) | Smt.Mod (x, d) -> conj (all [ x; d ]) (Some (Smt.Ne (d, Smt.IntLit 0)))
   | t -> all (Smt.children t)
 
@@ -272,7 +279,7 @@ let rec definedness (t : Smt.term) : Smt.term option =
    down still names the leaf, not each ancestor on the way up. [smt_of] is now
    this function with [Result.to_option] on the outside; the 18 existing
    callers, which want only the [option], are unchanged. *)
-let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~resolve_var
+let rec smt_of_r_marked ?(logical_binders = []) ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~resolve_var
     ~resolve_measure
     ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
@@ -284,7 +291,7 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
      [total_div]: set by [smt_of_r] for a [bool_shaped] predicate, which it
      wraps in [definedness]; only then may a divisor be an arbitrary term. *)
   let r_in nonneg =
-    smt_of_r_marked ~vocab ~nonneg ~total_div ~resolve_var ~resolve_measure ~resolve_field
+    smt_of_r_marked ~logical_binders ~vocab ~nonneg ~total_div ~resolve_var ~resolve_measure ~resolve_field
       ~resolve_measure_app ~resolve_tester ~resolve_str_lit ~resolve_measure_call
   in
   let r = r_in nonneg in
@@ -294,7 +301,40 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
     | Error e, _ -> Error e
     | _, Error e -> Error e
   in
-  match e with
+  match March_ast.Bounded_pred.view e with
+  | Some q ->
+    if !Reflect_state.active && not !Reflect_state.arm_on then Reflect_state.frontier_seen := true;
+    let vocab = true in
+    let r = smt_of_r_marked ~logical_binders ~vocab ~nonneg ~total_div ~resolve_var ~resolve_measure ~resolve_field
+      ~resolve_measure_app ~resolve_tester ~resolve_str_lit ~resolve_measure_call in
+    let stem = Printf.sprintf "$quant$%d$%d" q.binder.span.start_line q.binder.span.start_col in
+    let rec fresh n =
+      let name = if n = 0 then stem else stem ^ "$" ^ string_of_int n in
+      if List.mem name logical_binders then fresh (n + 1) else name in
+    let name = fresh 0 in
+    let variable = Smt.Const name in
+    let inner x = if x = q.binder.txt then Some variable else resolve_var x in
+    let inner_measure m x =
+      if x <> q.binder.txt then resolve_measure m x
+      else if m = "len" then Some (Smt.App (list_len_measure, [variable]))
+      else if m = elts_measure then Some (Smt.App (list_elts_measure, [variable]))
+      else if is_axiom_measure m then Some (Smt.App (m, [variable]))
+      else None in
+    let inner_field x f = if x = q.binder.txt then None else resolve_field x f in
+    let body = smt_of_r_marked ~logical_binders:(name :: logical_binders) ~vocab ~nonneg:[] ~total_div:true ~resolve_var:inner
+      ~resolve_measure:inner_measure ~resolve_field:inner_field ~resolve_measure_app ~resolve_tester
+      ~resolve_str_lit ~resolve_measure_call q.body in
+    let domain = match q.domain with
+      | March_ast.Bounded_pred.Range (lo, hi) ->
+        (match r lo, r hi with
+         | Ok lo, Ok hi -> Ok (Smt.SInt, Smt.And (Smt.Le (lo, variable), Smt.Lt (variable, hi)))
+         | Error e, _ | _, Error e -> Error e)
+      | March_ast.Bounded_pred.Elements set ->
+        Result.map (fun s -> (Smt.set_unknown_elem, Smt.SetMem (variable, s))) (r set) in
+    (match domain, body with
+     | Ok (sort, guard), Ok body -> Ok (Smt.Quant (q.kind = March_ast.Bounded_pred.Forall, name, sort, guard, body))
+     | Error e, _ | _, Error e -> Error e)
+  | None -> match e with
   | A.ELit (A.LitInt n, _) -> Ok (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Ok (Smt.BoolLit b)
   (* A record literal with no parameter to type it (`== { x: 1, y: n }`): the
@@ -397,6 +437,8 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
      literal `empty`.  A set term's ELEMENT sort is left as the placeholder and
      unified per VC by [resolve_set_sorts], so no resolver here needs to know
      what a list holds. *)
+  | A.EApp (A.EVar { A.txt = "nth"; _ }, [xs; i], _) when vocab ->
+    b2 (fun xs i -> Smt.App (list_nth_measure, [xs; i])) xs i
   | A.EApp (A.EVar { A.txt = "member"; _ }, [ x; st ], _) when vocab -> b2 (fun x s -> Smt.SetMem (x, s)) x st
   | A.EApp (A.EVar { A.txt = "union"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetUnion (x, y)) a b
   | A.EApp (A.EVar { A.txt = "inter"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetInter (x, y)) a b
@@ -636,14 +678,21 @@ let rec pred_precedence = function
 
 let rec pred_str (e : A.expr) : string = pred_str_prec 0 e
 and pred_str_prec context (e : A.expr) : string =
-  let precedence = pred_precedence e in
+  let precedence = if March_ast.Bounded_pred.view e <> None then 0 else pred_precedence e in
   let binop op a b =
     (* Even associative operators retain right-nested grouping: the report
        should reparse to the original tree, not merely an equivalent one. *)
     let left_context = if precedence = 3 then precedence + 1 else precedence in
     pred_str_prec left_context a ^ " " ^ op ^ " " ^ pred_str_prec (precedence + 1) b
   in
-  let rendered = match e with
+  let rendered = match March_ast.Bounded_pred.view e with
+  | Some q ->
+    let domain = match q.domain with
+      | March_ast.Bounded_pred.Range (lo, hi) -> pred_str lo ^ ".." ^ pred_str hi
+      | March_ast.Bounded_pred.Elements set -> pred_str set in
+    (if q.kind = March_ast.Bounded_pred.Forall then "forall " else "exists ")
+    ^ q.binder.txt ^ " in " ^ domain ^ ", " ^ pred_str q.body
+  | None -> match e with
   (* Only an undesugared predicate still carries an author message
      ([March_ast.Refine_msg]); the text is the conjunct's alone, so
      [Refine_audit.desugar_dropped] matches it against the desugared copy. *)

@@ -16759,6 +16759,125 @@ let test_tce_tuple_position_smallness_does_not_leak () =
   Alcotest.(check bool) "smallness does not leak to a whole-value tuple position"
     true (has_error_with ctx "not in tail position")
 
+let test_tce_nonrecursive_outer_checks_local () =
+  let ctx = typecheck {|mod T do
+    fn outer(n : Int) : Int do
+      fn go(i : Int) : Int do 1 + go(i + 1) end
+      go(n)
+    end
+  end|} in
+  Alcotest.(check bool) "local non-tail recursion is rejected"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_actor_checks_local () =
+  let ctx = typecheck {|mod T do
+    actor Counter do
+      state { count: Int }
+      init { count: 0 }
+      on Inc(n : Int) do
+        fn go(i : Int) : Int do 1 + go(i + 1) end
+        { count: go(n) }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler local non-tail recursion is rejected"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_actor_tail_local_ok () =
+  let ctx = typecheck {|mod T do
+    actor Counter do
+      state { count: Int }
+      init { count: 0 }
+      on Inc(n : Int) do
+        fn go(i : Int) : Int do
+          if i == 0 do 0 else go(i - 1) end
+        end
+        { count: go(n) }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "handler tail-recursive local is accepted"
+    false (has_errors ctx)
+
+let test_tce_local_structural_recursion_warns_once () =
+  let ctx = typecheck {|mod T do
+    fn outer(n : Int) : Int do
+      fn go(i : Int) : Int do
+        if i == 0 do 0 else 1 + go(i - 1) end
+      end
+      go(n)
+    end
+  end|} in
+  Alcotest.(check bool) "structural recursion is allowed" false (has_errors ctx);
+  let ds = List.filter (fun (d : March_errors.Errors.diagnostic) ->
+    d.code = March_errors.Errors.Code.non_tail_recursion
+  ) (warnings ctx) in
+  Alcotest.(check int) "one stack-use warning" 1 (List.length ds)
+
+let test_tce_nested_local_checked () =
+  let ctx = typecheck {|mod T do
+    fn outer(n : Int) : Int do
+      fn middle(i : Int) : Int do
+        fn inner(j : Int) : Int do 1 + inner(j + 1) end
+        inner(i)
+      end
+      middle(n)
+    end
+  end|} in
+  Alcotest.(check bool) "nested local recursion is rejected"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_local_no_warn_recursion_preserved () =
+  let ctx = typecheck {|mod T do
+    @[no_warn_recursion]
+    fn outer(n : Int) : Int do
+      fn go(i : Int) : Int do 1 + go(i + 1) end
+      go(n)
+    end
+  end|} in
+  Alcotest.(check bool) "outer opt-out still covers locals"
+    false (has_errors ctx)
+
+let test_tce_lambda_checks_named_local () =
+  let ctx = typecheck {|mod T do
+    fn outer(n : Int) : Int do
+      let thunk = fn () -> do
+        fn go(i : Int) : Int do 1 + go(i + 1) end
+        go(n)
+      end
+      thunk()
+    end
+  end|} in
+  Alcotest.(check bool) "lambda's named local is checked"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_let_star_checks_named_local () =
+  let ctx = typecheck {|mod T do
+    mod Box do
+      type Box(a) = Box(a)
+      fn flat_map(m : Box(a), f : a -> Box(b)) : Box(b) do
+        match m do Box(x) -> f(x) end
+      end
+    end
+    fn outer(n : Int) : Box.Box(Int) do
+      let* x = Box.Box(n)
+      fn go(i : Int) : Int do 1 + go(i + 1) end
+      Box.Box(go(x))
+    end
+  end|} in
+  Alcotest.(check bool) "let* continuation's named local is checked"
+    true (has_error_with ctx "not in tail position")
+
+let test_tce_lambda_enclosing_call_still_exempt () =
+  let ctx = typecheck {|mod T do
+    fn outer(n : Int) : Int do
+      let thunk = fn () -> 1 + outer(n + 1)
+      if n == 0 do thunk() else outer(n - 1) end
+    end
+  end|} in
+  Alcotest.(check bool) "callback calls to enclosing function remain exempt"
+    false (has_errors ctx)
+
 let test_tce_local_helper_shadow_no_false_recursion () =
   (* `helper`'s local `fn go` is NOT the top-level `go`: no edge, no SCC, and
      so `helper(m)` inside `go` is not a recursive call at all. *)
@@ -19499,6 +19618,15 @@ let compiler_suites =
           Alcotest.test_case "genuinely unbound dotted name gets no hint"         `Quick test_genuinely_unbound_dotted_name_gets_no_hint;
         ] );
       ( "tail_call_enforcement", [
+          Alcotest.test_case "let* checks named local" `Quick test_tce_let_star_checks_named_local;
+          Alcotest.test_case "lambda enclosing call stays exempt" `Quick test_tce_lambda_enclosing_call_still_exempt;
+          Alcotest.test_case "lambda checks named local" `Quick test_tce_lambda_checks_named_local;
+          Alcotest.test_case "nested local recursion is checked" `Quick test_tce_nested_local_checked;
+          Alcotest.test_case "outer recursion opt-out covers locals" `Quick test_tce_local_no_warn_recursion_preserved;
+          Alcotest.test_case "local structural recursion warns once" `Quick test_tce_local_structural_recursion_warns_once;
+          Alcotest.test_case "nonrecursive outer checks local recursion" `Quick test_tce_nonrecursive_outer_checks_local;
+          Alcotest.test_case "actor checks local recursion" `Quick test_tce_actor_checks_local;
+          Alcotest.test_case "actor tail-recursive local is accepted" `Quick test_tce_actor_tail_local_ok;
           Alcotest.test_case "local `fn` helper shadowing a top-level fn: no error"  `Quick test_tce_local_helper_shadow_no_false_recursion;
           Alcotest.test_case "let-bound lambda shadowing a top-level fn: no error"   `Quick test_tce_let_bound_lambda_shadow_no_false_recursion;
           Alcotest.test_case "call to an extern-declared name: no error"            `Quick test_tce_extern_name_not_recursive;

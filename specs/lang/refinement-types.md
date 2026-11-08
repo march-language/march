@@ -211,6 +211,58 @@ and `==`/`!=` against literals. `Bool` values take the boolean operators against
 comparisons against float literals, discharged through Z3's bit-precise IEEE-754
 theory rather than reals ([Float Refinements](#float-refinements)).
 
+## Bounded quantifiers
+
+Logical predicates can quantify over a half-open integer range or collection
+membership:
+
+```march
+{List(Int) | forall i in 0..len(_), nth(_, i) >= 0}
+{List(Int) | exists x in elts(_), x == 7}
+```
+
+Write `forall i in lo..hi, P` or `exists i in lo..hi, P`. The range contains
+integers satisfying `lo <= i && i < hi`. Empty and reversed ranges make a
+universal predicate true and an existential predicate false. Negative bounds
+are legal. `elts(xs)` and `keys(m)` bound a variable by membership in the
+collection's elements or map keys. Current collection-domain support targets
+`Int` and `Bool` elements; unsupported element sorts must remain unverified.
+
+Binders are lexical: bounds use the outer scope, and the new name is in scope
+only in the body. Quantifiers may nest. Parenthesize a quantified predicate
+when combining it with another predicate using `&&` or `||`; the comma starts
+the quantifier's body. `forall` and `exists` are contextual in binder syntax;
+ordinary calls such as `forall(...)` remain identifier uses. Unbounded forms
+are unsupported. Quantifiers are allowed in refinements and proof assertions,
+not as executable expressions.
+
+`nth(xs, i)` is a logical list-indexing operation at the list's element sort.
+Every reached access must satisfy `0 <= i && i < len(xs)`. Boolean
+short-circuit guards can establish that condition. For **both** `forall` and
+`exists`, definedness is required for every domain member, even when a single
+valid existential witness would suffice for truth. For example,
+`exists i in 0..2, nth([7], i) == 7` cannot prove: index one is invalid.
+Negating the predicate does not remove this obligation.
+
+A sorted-list predicate can compare adjacent positions:
+
+```march
+{List(Int) | forall i in 0..len(_) - 1, nth(_, i) <= nth(_, i + 1)}
+```
+
+An existential goal requires checked candidates. The checker tries a
+deterministic bounded set of well-sorted terms from the obligation and proof
+facts (at most 32); a candidate must establish domain membership and the body.
+An unknown result or a missing candidate does not prove the predicate. Proof
+assertions can supply candidate facts; establish the candidate's bounds as
+well as its desired property. This search is incomplete, so an unproved goal
+may need a witness even when it is mathematically true.
+
+Quantified reasoning retains the usual warning-by-default policy and strict
+`cap verified` checks. Solver limits and unsupported formulas never supply
+proved facts. Bounded quantification does not make Z3 complete for quantified
+arithmetic or recursive list properties.
+
 Multiplication by a literal keeps a query in linear arithmetic, where the
 solver is complete and fast. A product of two non-constant terms is accepted
 too — `v * v > 0` is exactly `v != 0` over the integers, and refusing it only

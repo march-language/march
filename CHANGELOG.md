@@ -25,6 +25,12 @@ git log is authoritative for exact commits.
   (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
   predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
   tuple refinement was silently not checked, and a tuple in a predicate was an unchecked skip.
+
+- **Bounded predicates:** `forall` and `exists` over half-open integer ranges,
+  `elts` and `keys`, with logical `nth` indexing, domain-wide indexing checks,
+  and checked existential candidates. Integer insertion-sort is included as a
+  verification fixture; existing public sorting implementations are unchanged.
+
 - **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
   `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
   gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
@@ -728,6 +734,9 @@ git log is authoritative for exact commits.
   `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
   A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
   native message.
+- Check recursive local functions for unsafe non-tail calls inside non-recursive
+  functions and actor handlers, which previously escaped stack-safety diagnostics.
+
 - **Module functions used as values compile correctly.** A binding such as
   `let k = List.length` now retains the function definition during compilation,
   including when the binding is called with different element types.
