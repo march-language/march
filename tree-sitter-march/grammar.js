@@ -25,6 +25,8 @@ module.exports = grammar({
     // `reveal f` (a proof hint) vs `reveal` used as a name: the compiler's
     // token filter decides by the next token; here GLR does.
     [$._expr, $.reveal_expression],
+    // `forall x in ..` (a quantifier) vs `forall` used as a name.
+    [$._expr, $.bounded_quantifier],
     // atom optional args
     [$.atom],
     // type_def: type_identifier can be variant name or type_constructor alias
@@ -262,7 +264,9 @@ module.exports = grammar({
     qualified_constructor: $ => seq($.type_identifier, '.', $.type_identifier),
 
     // alias() — not a new regex — to avoid duplicate-terminal conflict with identifier
-    variable_pattern: $ => alias($.identifier, $.variable_pattern),
+    variable_pattern: $ => choice(
+      alias($.identifier, $.variable_pattern),
+      alias(choice('forall', 'exists'), $.variable_pattern)),
 
     constructor_pattern: $ => seq(
       field('name', choice($.type_identifier, $.qualified_constructor)),
@@ -657,9 +661,10 @@ module.exports = grammar({
       $.string,
       $.boolean,
       $.identifier,
-      // `calc` and `reveal` are soft keywords (the compiler's token filter
-      // promotes them only before `do` / a name): elsewhere they are names.
-      alias(choice('calc', 'reveal'), $.identifier),
+      // `calc`, `reveal`, `forall` and `exists` are soft keywords (the
+      // compiler's token filter promotes them only in their proof/quantifier
+      // positions): elsewhere they are names.
+      alias(choice('calc', 'reveal', 'forall', 'exists'), $.identifier),
     ),
 
     pipe_expression: $ => prec.left(1, seq(

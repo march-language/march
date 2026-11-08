@@ -1643,13 +1643,36 @@
       ]
     },
     "variable_pattern": {
-      "type": "ALIAS",
-      "content": {
-        "type": "SYMBOL",
-        "name": "identifier"
-      },
-      "named": true,
-      "value": "variable_pattern"
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          },
+          "named": true,
+          "value": "variable_pattern"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "forall"
+              },
+              {
+                "type": "STRING",
+                "value": "exists"
+              }
+            ]
+          },
+          "named": true,
+          "value": "variable_pattern"
+        }
+      ]
     },
     "constructor_pattern": {
       "type": "SEQ",
@@ -5179,6 +5202,14 @@
               {
                 "type": "STRING",
                 "value": "reveal"
+              },
+              {
+                "type": "STRING",
+                "value": "forall"
+              },
+              {
+                "type": "STRING",
+                "value": "exists"
               }
             ]
           },
@@ -6926,6 +6957,10 @@
     [
       "_expr",
       "reveal_expression"
+    ],
+    [
+      "_expr",
+      "bounded_quantifier"
     ],
     [
       "atom"
