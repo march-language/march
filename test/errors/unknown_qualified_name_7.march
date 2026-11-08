@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: `Int` is a type, not a module
+mod Test do
+  fn render() : String do
+    Int.to_string(5)
+  end
+end

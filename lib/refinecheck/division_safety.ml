@@ -291,6 +291,10 @@ let rec iter_sites
   | A.ELetQ (p, rhs, body, _) | A.ELetStar (p, rhs, body, _) ->
     go rhs; under (Refine_check.pat_binders p) body
   | A.EAssert (inner, _) -> go inner
+  (* Ghost: a proof hint never runs, so it can never divide by zero; a
+     `with fuel` body is ordinary code. *)
+  | A.EProof (A.PWithFuel (_, _, body), _) -> List.iter go body
+  | A.EProof _ -> ()
   | A.ESend (cap, msg, _) -> go cap; go msg
   | A.ESpawn (inner, _) -> go inner
   | A.EDbg (e_opt, _) -> Option.iter go e_opt

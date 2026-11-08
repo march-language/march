@@ -54,9 +54,18 @@ const CASES = [
   { input: "[1, 2, 3] |> List.map(fn x -> x + 1)",
     output: "[2, 3, 4]\n", error: null },
   // Deep recursion does not depend on the JS stack (march.js is CPS-compiled,
-  // js/dune): this overflowed at 243 elements before.
+  // js/dune): this overflowed at 243 elements before, and again under
+  // js_of_ocaml 6.5 until the evaluator bounced the stack on the return path
+  // too (Eval.call_return_hook, set in js/march_browser.ml).
   { input: "List.length(List.map(List.range(0, 20000), fn x -> x + 1))",
     output: "20000\n", error: null },
+  // The same for an exception unwinding a deep recursion: under js_of_ocaml 6.5
+  // the panic below overflowed the JS stack on its way up until the bounce ran
+  // in apply's ~finally (both return paths), not only after a normal return.
+  { input: "fn deep_panic(n) do if n == 0 do panic(\"bottom\") else 1 + deep_panic(n - 1) end end",
+    output: "", error: null },
+  { input: "deep_panic(20000)",
+    output: "", error: "runtime error: panic: bottom" },
   // Defining another function after `main` does not run `main` again.
   { input: "fn depth(n) do if n == 0 do 0 else 1 + depth(n - 1) end end",
     output: "", error: null },

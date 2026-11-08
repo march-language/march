@@ -124,6 +124,36 @@ type astep =
   | AStop
   | ACrashOr of astep * astep list                  (** an [AMsg] with its sender's crash branch *)
 
+(** Share synthesized tags only between equivalent branch tails. Keeping the
+    entire continuation in the comparison preserves transition identities when
+    payloads, explicit labels, or atomic-loop boundaries differ. Branch heads
+    always retain the user's label, even when it starts with [Msg_]. *)
+let share_choice_ctors ~is_synth (arms : (string * astep list) list) =
+  let rec equal_steps xs ys =
+    List.length xs = List.length ys && List.for_all2 equal_step xs ys
+  and equal_step a b = match a, b with
+    | AMsg (s, r, t, c), AMsg (s', r', t', c') ->
+      s = s' && r = r' && ty_equal t t'
+      && (c = c' || (is_synth c && is_synth c'))
+    | ALoop (atomic, xs), ALoop (atomic', ys) -> atomic = atomic' && equal_steps xs ys
+    | AChoice (who, xs), AChoice (who', ys) ->
+      who = who' && List.length xs = List.length ys
+      && List.for_all2 (fun (l, xs) (l', ys) -> l = l' && equal_steps xs ys) xs ys
+    | ACrashOr (m, xs), ACrashOr (m', ys) -> equal_step m m' && equal_steps xs ys
+    | AStop, AStop -> true
+    | _ -> false in
+  let representatives = ref [] in
+  List.map (fun (label, steps) ->
+      match steps with
+      | (AMsg _ as head) :: tail when label <> "crash" ->
+        (* Equivalent tails already carry exactly the wire tags we need;
+           reuse them, including sharing established by nested choices. *)
+        let tail = match List.find_opt (equal_steps tail) !representatives with
+          | Some tail -> tail
+          | None -> representatives := !representatives @ [tail]; tail in
+        (label, head :: tail)
+      | _ -> (label, steps)) arms
+
 let capitalize s =
   if s = "" then s else String.capitalize_ascii s
 
@@ -148,10 +178,13 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
     (steps : protocol_step list) : astep list option =
   let counts : (string * string, int) Hashtbl.t = Hashtbl.create 8 in
   let ok = ref true in
+  let synthesized = Hashtbl.create 8 in
   let synth s r =
     let k = 1 + Option.value ~default:0 (Hashtbl.find_opt counts (s, r)) in
     Hashtbl.replace counts (s, r) k;
-    Printf.sprintf "Msg_%s_%s_%d" s r k
+    let c = Printf.sprintf "Msg_%s_%s_%d" s r k in
+    Hashtbl.replace synthesized c ();
+    c
   in
   let ctor_of s r = function
     | None -> synth s r
@@ -202,7 +235,7 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
               | _ -> ()) branches;
           [ AChoice
             (chooser.txt,
-             List.map
+             share_choice_ctors ~is_synth:(Hashtbl.mem synthesized) (List.map
                (fun (lbl, arm) ->
                   match arm with
                   | ProtoMsg (s, r, t, label) :: rest when s.txt = chooser.txt ->
@@ -230,7 +263,7 @@ let annotate (errors : Err.ctx) ~(proto : string) ~(span : span)
                           on that message. Branch `%s` does not."
                          proto chooser.txt chooser.txt lbl.txt);
                     (lbl.txt, go arm))
-               branches) ])
+               branches)) ])
       steps
   in
   let annotated = go steps in
@@ -541,7 +574,9 @@ let panic msg = app "panic" [ lit_str msg ]
 (** Every distinct node of the projection is a state; name it after what the
     role must do there (`S_send_Item`, `S_offer_more_done`, `S_end`), so an
     unrelated edit elsewhere in the protocol does not rename it.  A second
-    state that would take the same name gets a numeric suffix. *)
+    state that would take the same name gets a numeric suffix. Equal
+    continuations reached through alternative branches share a state and its
+    transition functions, just as [state_of] resolves them structurally. *)
 let state_names (root : lty) : (lty * string) list =
   let taken : (string, int) Hashtbl.t = Hashtbl.create 8 in
   let fresh base =
@@ -551,9 +586,13 @@ let state_names (root : lty) : (lty * string) list =
   in
   let labels brs = String.concat "_" (List.map (fun (l, _, _, _) -> l) brs) in
   let acc = ref [] in
-  let rec go (t : lty) =
+  let boundaries = ref [] in
+  let rec go ?(boundary = false) (t : lty) =
+    if List.exists (fun (s, _) -> lty_equal s t
+        && boundary = List.exists (fun b -> b == s) !boundaries) !acc then () else begin
+    if boundary then boundaries := t :: !boundaries;
     match t with
-    | LRec (_, _, body) -> go body
+    | LRec (_, atomic, body) -> go ~boundary:(not atomic) body
     | LVar _ -> ()
     | LEnd -> if not (List.exists (fun (s, _) -> s == t) !acc) then acc := (t, fresh "S_end") :: !acc
     | LSend (_, ctor, _, next) -> acc := (t, fresh ("S_send_" ^ ctor)) :: !acc; go next
@@ -570,6 +609,7 @@ let state_names (root : lty) : (lty * string) list =
       acc := (t, fresh base) :: !acc;
       List.iter (fun (_, _, _, nx) -> go nx) brs;
       go crash
+    end
   in
   go root;
   List.rev !acc

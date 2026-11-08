@@ -78,6 +78,12 @@ type ctx = {
   mutable src_file : string;
   mutable cur_loc : string;
   (* "Fn.name (file.march:LINE)" of the function being emitted, for diagnostics *)
+  type_defs : (string, Tir.type_def) Hashtbl.t;
+  (* the module's variant/record declarations by name, for [show_expr] *)
+  show_fns : (string, string) Hashtbl.t;
+  (* type key → name of its generated `__show$N` printer (see [show_expr]) *)
+  show_buf : Buffer.t;
+  (* the generated printers, appended after the functions (hoisted) *)
 }
 
 let create_ctx ?(fn_lines=[]) () = {
@@ -103,6 +109,9 @@ let create_ctx ?(fn_lines=[]) () = {
   int_check    = false;
   src_file     = "";
   cur_loc      = "";
+  type_defs    = Hashtbl.create 16;
+  show_fns     = Hashtbl.create 8;
+  show_buf     = Buffer.create 256;
 }
 
 let use_runtime ctx name = Hashtbl.replace ctx.runtime_uses name ()
@@ -298,6 +307,169 @@ let emit_atom ctx = function
     else
       emit ctx n
   | Tir.ALit l    -> emit_literal ctx l
+
+(* ── `to_string` without a Show impl ──────────────────────────────── *)
+
+(** A JS expression rendering [v] (a JS expression, evaluated once per use, so
+    pass a name) of static type [ty] the way the interpreter's
+    [value_to_string] does, and native's constructor-descriptor renderer
+    ([Llvm_ctor_desc], march_extras.c): records with their fields sorted by
+    name, `Ctor(a, b)`, a List as `[a, b]`, and every String beneath the top
+    quoted and escaped.  This is what the `to_string` builtin reaches on JS:
+    mono routes a value with no `Show` impl (a plain record, a variant with no
+    derive) to it.  JS values carry no Int/Float distinction, so the type is
+    read statically; a field typed by a type variable the declaration does not
+    let us resolve (more than one parameter) is classified at run time by
+    march_show_dyn, which prints a whole-number Float as an Int. *)
+let rec show_expr ctx (ty : Tir.ty) (v : string) : string =
+  match ty with
+  | Tir.TInt | Tir.TCon ("Int", []) -> Printf.sprintf "String(%s)" v
+  | Tir.TBool | Tir.TCon ("Bool", []) -> Printf.sprintf "(%s ? \"true\" : \"false\")" v
+  | Tir.TFloat | Tir.TCon ("Float", []) ->
+    use_runtime ctx "march_float_to_string";
+    Printf.sprintf "march_float_to_string(%s)" v
+  | Tir.TString | Tir.TCon ("String", []) ->
+    use_runtime ctx "march_show_str";
+    Printf.sprintf "march_show_str(%s)" v
+  | Tir.TCon ("Atom", []) -> v
+  | Tir.TUnit | Tir.TTuple [] | Tir.TCon ("Unit", []) -> "\"()\""
+  | Tir.TFn _ -> "\"<fn>\""
+  | Tir.TTuple ts ->
+    "(\"(\" + " ^ String.concat " + \", \" + "
+      (List.mapi (fun i t -> show_expr ctx t (Printf.sprintf "%s._%d" v i)) ts)
+    ^ " + \")\")"
+  | Tir.TRecord fs -> show_record ctx fs v
+  | Tir.TCon (name, args) ->
+    (match find_type_def ctx name with
+     | Some td -> Printf.sprintf "%s(%s)" (show_fn ctx ty name args td) v
+     | None -> show_dyn ctx v)
+  | Tir.TPtr _ | Tir.TVar _ -> show_dyn ctx v
+
+and show_dyn ctx v =
+  use_runtime ctx "march_show_dyn";
+  Printf.sprintf "march_show_dyn(%s)" v
+
+and show_record ctx fs v =
+  let fs = List.stable_sort (fun (a, _) (b, _) -> String.compare a b) fs in
+  if fs = [] then "\"{  }\""
+  else
+    "(\"{ " ^ String.concat " + \", "
+      (List.map (fun (f, t) ->
+           f ^ ": \" + "
+           ^ show_expr ctx t (Printf.sprintf "%s.%s" v f)) fs)
+    ^ " + \" }\")"
+
+and find_type_def ctx name =
+  match Hashtbl.find_opt ctx.type_defs name with
+  | Some _ as r -> r
+  | None ->
+    (* An unqualified reference to a qualified declaration (or the reverse):
+       accept the bare-name match only when it is unique. *)
+    let bare = bare_ctor name in
+    let hits = Hashtbl.fold (fun k td acc ->
+        if bare_ctor k = bare then td :: acc else acc) ctx.type_defs [] in
+    (match hits with [td] -> Some td | _ -> None)
+
+(* The printer function for one instantiation [name(args)], generated once
+   into [show_buf].  Field types mention the declaration's parameters as
+   TVars; with exactly one parameter and one argument the substitution is
+   unambiguous, otherwise those fields stay TVar (march_show_dyn). *)
+and show_fn ctx ty name args td =
+  let key = Pp.string_of_ty ty in
+  match Hashtbl.find_opt ctx.show_fns key with
+  | Some f -> f
+  | None ->
+    let f = Printf.sprintf "__show$%d" (Hashtbl.length ctx.show_fns) in
+    Hashtbl.replace ctx.show_fns key f;
+    let field_tys = match td with
+      | Tir.TDVariant (_, ctors) -> List.concat_map snd ctors
+      | Tir.TDRecord (_, fs) -> List.map snd fs
+      | Tir.TDClosure _ -> [] in
+    let rec tvars acc = function
+      | Tir.TVar a -> if List.mem a acc then acc else acc @ [a]
+      | Tir.TTuple ts | Tir.TCon (_, ts) -> List.fold_left tvars acc ts
+      | Tir.TRecord fs -> List.fold_left tvars acc (List.map snd fs)
+      | Tir.TFn (ps, r) -> List.fold_left tvars acc (ps @ [r])
+      | Tir.TPtr t -> tvars acc t
+      | _ -> acc in
+    let subst = match List.fold_left tvars [] field_tys, args with
+      | [a], [t] -> (fun x -> if x = a then Some t else None)
+      | _ -> (fun _ -> None) in
+    let rec sub = function
+      | Tir.TVar a as t -> (match subst a with Some t' -> t' | None -> t)
+      | Tir.TTuple ts -> Tir.TTuple (List.map sub ts)
+      | Tir.TCon (n, ts) -> Tir.TCon (n, List.map sub ts)
+      | Tir.TRecord fs -> Tir.TRecord (List.map (fun (f, t) -> (f, sub t)) fs)
+      | Tir.TFn (ps, r) -> Tir.TFn (List.map sub ps, sub r)
+      | Tir.TPtr t -> Tir.TPtr (sub t)
+      | t -> t in
+    let b = Buffer.create 256 in
+    Printf.bprintf b "function %s(v) {\n" f;
+    (match td with
+     | Tir.TDRecord (_, fs) ->
+       Printf.bprintf b "  return %s;\n"
+         (show_record ctx (List.map (fun (n, t) -> (n, sub t)) fs) "v")
+     | Tir.TDVariant (_, ctors)
+       when bare_ctor name = "List"
+         && List.sort compare (List.map (fun (c, _) -> bare_ctor c) ctors)
+            = ["Cons"; "Nil"] ->
+       let elt = match List.find_opt (fun (c, _) -> bare_ctor c = "Cons") ctors with
+         | Some (_, e :: _) -> sub e | _ -> Tir.TVar "_" in
+       Printf.bprintf b
+         "  let s = \"[\";\n  for (let first = true; v.$ === \"Cons\"; v = v._1, first = false)\n    s += (first ? \"\" : \", \") + %s;\n  return s + \"]\";\n"
+         (show_expr ctx elt "v._0")
+     | Tir.TDVariant (_, ctors) ->
+       Buffer.add_string b "  switch (v.$) {\n";
+       List.iter (fun (c, fts) ->
+           let c = bare_ctor c in
+           if fts = [] then
+             Printf.bprintf b "    case %s: return %s;\n" (js_string_lit c) (js_string_lit c)
+           else
+             Printf.bprintf b "    case %s: return %s + \"(\" + %s + \")\";\n"
+               (js_string_lit c) (js_string_lit c)
+               (String.concat " + \", \" + "
+                  (List.mapi (fun i t -> show_expr ctx (sub t) (Printf.sprintf "v._%d" i)) fts)))
+         ctors;
+       Buffer.add_string b "  }\n";
+       Printf.bprintf b "  return %s;\n" (show_dyn ctx "v")
+     | Tir.TDClosure _ -> Buffer.add_string b "  return \"<fn>\";\n");
+    Buffer.add_string b "}\n";
+    Buffer.add_buffer ctx.show_buf b;
+    f
+
+(** The Error a `panic` / `todo` / `unreachable` throws: its message is the
+    bare text (what a test report and an uncaught panic print), and
+    march_panic_error records the prefix __try_call puts on the Err, as
+    march_panic_user / march_todo_ext do natively. *)
+let panic_error ctx name args =
+  use_runtime ctx "march_panic_error";
+  let msg = match name, args with
+    | "unreachable_", _ -> "\"unreachable: reached unreachable code\""
+    | _, a :: _ -> let b = Buffer.create 16 in emit_atom { ctx with buf = b } a; Buffer.contents b
+    | "todo_", [] -> "\"not yet implemented\""
+    | _, [] -> "\"panic\"" in
+  let prefix = match name with
+    | "todo_" -> "todo: " | "unreachable_" -> "" | _ -> "panic: " in
+  Printf.sprintf "march_panic_error(%s, %s)" (js_string_lit prefix) msg
+
+(** Int `/` and `%`, truncating like native sdiv/srem.  A zero divisor
+    panics with the interpreter's and native code's operator message
+    ("division by zero" / "modulo by zero", march_runtime.c's
+    march_checked_div_op / march_checked_mod_op) through march_div_zero /
+    march_mod_zero, instead of yielding NaN.  The quotient is
+    `(a - a % b) / b`: the remainder is exact, so the division is of an exact
+    multiple (see the inline "/" arm).  Operands are atoms, so evaluating them
+    more than once is free; the fast path adds one strict compare. *)
+let emit_int_div ctx a b =
+  use_runtime ctx "march_div_zero";
+  emit ctx "("; emit_atom ctx b; emit ctx " === 0 ? march_div_zero() : (";
+  emit_atom ctx a; emit ctx " - "; emit_atom ctx a; emit ctx " % ";
+  emit_atom ctx b; emit ctx ") / "; emit_atom ctx b; emit ctx ")"
+
+let emit_int_mod ctx a b =
+  use_runtime ctx "march_mod_zero";
+  emit ctx "("; emit_atom ctx b; emit ctx " === 0 ? march_mod_zero() : ";
+  emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ")"
 
 (* ── Builtin lowering ────────────────────────────────────────────── *)
 
@@ -663,13 +835,16 @@ and emit_val_impl ctx expr =
           remainder is exact, so the division is of an exact multiple and
           exact everywhere within +-(2^53 - 1), where `a / b` can round up to
           the next integer (march_int_div in march_runtime.mjs does the same).
-          Operands are atoms, so evaluating them twice is free. *)
+          Operands are atoms, so evaluating them twice is free.  A zero
+          divisor panics "division by zero" like the other backends
+          (march_div_zero); the fast path costs one strict compare. *)
        | "/", [a; b]
          when (match atom_ty a, atom_ty b with
                | Tir.TInt, _ | _, Tir.TInt -> true | _ -> false) ->
-         emit ctx "(("; emit_atom ctx a; emit ctx " - ";
-         emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ") / ";
-         emit_atom ctx b; emit ctx ")"
+         emit_int_div ctx a b
+       (* Int `%` (the only `%`: Float has none): a zero divisor panics
+          "modulo by zero" like native and the interpreter, not NaN. *)
+       | "%", [a; b] -> emit_int_mod ctx a b
        (* --js-int-check: an Int + - * whose result leaves the doubles' exact
           range throws, naming the enclosing function (TIR has no expression
           positions). Operands are atoms, so evaluating them twice is free. *)
@@ -719,16 +894,12 @@ and emit_val_impl ctx expr =
         emit ctx "march_int_ovf(-("; emit_atom ctx a; emit ctx "), 3)"
       | ("neg_int" | "neg_float" | "negate" | "-" | "-."), [a] -> emit ctx "(-"; emit_atom ctx a; emit ctx ")"
       | ("not_bool" | "not"),  [a] -> emit ctx "(!"; emit_atom ctx a; emit ctx ")"
-      | "div_int", [a; b] ->
-        emit ctx "Math.trunc("; emit_atom ctx a;
-        emit ctx " / "; emit_atom ctx b; emit ctx ")"
+      | "div_int", [a; b] -> emit_int_div ctx a b
       | "/", [a; b] when (match atom_ty a with Tir.TInt -> true | _ -> false) ->
-        emit ctx "Math.trunc("; emit_atom ctx a;
-        emit ctx " / "; emit_atom ctx b; emit ctx ")"
+        emit_int_div ctx a b
       | "/", [a; b] ->
         emit ctx "("; emit_atom ctx a; emit ctx " / "; emit_atom ctx b; emit ctx ")"
-      | "mod_int",   [a; b] ->
-        emit ctx "("; emit_atom ctx a; emit ctx " % "; emit_atom ctx b; emit ctx ")"
+      | "mod_int",   [a; b] -> emit_int_mod ctx a b
       | "int_to_float", [a] ->
         emit_atom ctx a
       | "float_to_int", [a] | "float_truncate", [a] ->
@@ -742,6 +913,22 @@ and emit_val_impl ctx expr =
          backend byte-for-byte unchanged instead of calling an undefined symbol. *)
       | "march_value_to_string", [a] ->
         emit_atom ctx a
+      (* `to_string` on a value with no `Show` impl (see [show_expr]).  A
+         top-level String is the identity, as natively. *)
+      | "to_string", [a] ->
+        (match atom_ty a with
+         | Tir.TString | Tir.TCon ("String", []) -> emit_atom ctx a
+         | ty ->
+           let b = Buffer.create 16 in
+           emit_atom { ctx with buf = b } a;
+           let v = Buffer.contents b in
+           (match ty with
+            | Tir.TVar _ | Tir.TPtr _ ->
+              use_runtime ctx "march_to_string_dyn";
+              emit ctx (Printf.sprintf "march_to_string_dyn(%s)" v)
+            (* The atom may be a zero-arg fn's call (a module-level `let`):
+               bind it once, as [show_expr] reads it per field. *)
+            | _ -> emit ctx (Printf.sprintf "((v) => %s)(%s)" (show_expr ctx ty "v") v)))
       (* `compare` on Int / String (Ord$Int.compare, Ord$String.compare and
          the compare_* builtins; a derived `Ord` on a record or payload type
          calls these per field): -1/0/1 like march_compare_int /
@@ -812,11 +999,22 @@ and emit_val_impl ctx expr =
         emit ctx "(("; emit_atom ctx c; emit ctx " == null) ? { $: \"None\" } : { $: \"Some\", _0: ";
         emit_atom ctx c; emit ctx " })"
       | ("panic" | "panic_" | "todo_" | "unreachable_"), _ ->
-        let msg = if args = [] then "\"panic\""
-                  else (let b = Buffer.create 16 in
-                        emit_atom { ctx with buf = b } (List.hd args);
-                        Buffer.contents b) in
-        emit ctx (Printf.sprintf "(() => { throw new Error(%s); })()" msg)
+        emit ctx (Printf.sprintf "(() => { throw %s; })()" (panic_error ctx name args))
+      (* Check.try_prop's panic-catching call (and Depot's): run the
+         `fn _ -> body` thunk, a panic becoming Err(message) with the prefix
+         the interpreter and native put on it ("panic: boom"). *)
+      | ("__try_call" | "__try_call_val"), [t] ->
+        use_runtime ctx "march_try_call";
+        emit ctx "march_try_call("; emit_atom ctx t; emit ctx ")"
+      | "process_env", [a] ->
+        use_runtime ctx "march_process_env";
+        emit ctx "march_process_env("; emit_atom ctx a; emit ctx ")"
+      | "process_cwd", _ ->
+        use_runtime ctx "march_process_cwd";
+        emit ctx "march_process_cwd()"
+      | "process_pid", _ ->
+        use_runtime ctx "march_process_pid";
+        emit ctx "march_process_pid()"
       (* ADT structural equality: eq_TypeName / neq_TypeName *)
       | n, [a; b] when String.length n > 3 && String.sub n 0 3 = "eq_" ->
         let ty = mangle (String.sub n 3 (String.length n - 3)) in
@@ -1375,9 +1573,7 @@ and emit_assign_impl ctx rv expr =
           | "panic" | "panic_" | "todo_" | "unreachable_" -> true | _ -> false) ->
     (* a panic needs no value: a throw statement, not a throwing closure *)
     emit_indent ctx;
-    emit ctx "throw new Error(";
-    (match args with a :: _ -> emit_atom ctx a | [] -> emit ctx "\"panic\"");
-    emit ctx ");\n"
+    emit ctx ("throw " ^ panic_error ctx f.Tir.v_name args ^ ";\n")
   | e ->
     emit_indent ctx;
     emit ctx (rv ^ " = ");
@@ -1779,6 +1975,9 @@ exception Js_emit_error of string list
 let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir_module) : string * string option =
   let ctx = create_ctx ~fn_lines () in
   ctx.int_check <- int_check;
+  List.iter (fun td -> match td with
+      | Tir.TDVariant (n, _) | Tir.TDRecord (n, _) -> Hashtbl.replace ctx.type_defs n td
+      | Tir.TDClosure _ -> ()) m.Tir.tm_types;
   ctx.src_file <- source_file;
   (* Pre-register all user-defined function names so emit_atom emits $clo versions *)
   List.iter (fun fn ->
@@ -1806,7 +2005,8 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
     groups;
   List.iter (fun fn -> if not (in_group fn.Tir.fn_name) then emit_fn_decl ctx fn)
     m.Tir.tm_fns;
-  let fns_js = Buffer.contents ctx.buf in
+  (* The `to_string` printers (function declarations, so hoisted). *)
+  let fns_js = Buffer.contents ctx.buf ^ Buffer.contents ctx.show_buf in
   let raw_segments = !(ctx.segments) in
   (* Emit extern bridges only for externs actually referenced in the emitted code *)
   let used_ed = List.filter (fun (ed : Tir.extern_decl) ->
