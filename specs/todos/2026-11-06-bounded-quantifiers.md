@@ -28,6 +28,22 @@ syntax in predicates.
 - Build and validate the updated documentation. Move this item to progress
   only when the implementation and validation are complete.
 
+### Gate results (2026-11-08, branch merged with main at 4d9ffe9762)
+
+- `scripts/oracle-base.sh ir refine` against 4d9ffe9762: IR identical over 527
+  programs; refinement diagnostics identical (9004 lines over 582 fixtures).
+- Quantifier-free SMT byte-identical: every `(reset)` block sent to z3 was
+  captured through a `MARCH_Z3` tee wrapper over the refine-oracle corpus
+  (`test/native/*.march` + `stdlib/*.march`, fresh cwd and private `HOME`
+  per fixture). Base and branch both emit 217,883 blocks with identical
+  per-fixture hash multisets. Control: the same capture with
+  `MARCH_REFINE_RLIMIT=40000` on 12 fixtures changed 4476 of 4476 blocks.
+- Cold solver timing, full 582-fixture sweep at 4 jobs, base/branch
+  alternated: 269/268, 268/268, 268/272 s; median 268 s vs 268 s, no new
+  timeouts observed. Warm-cache paired timings are still outstanding.
+- Tree-sitter: `forall` / `exists` are soft keywords (names elsewhere, e.g.
+  `let exists = …` in `stdlib/dataframe.march`); `scripts/check-tree-sitter.sh` ok.
+
 Bounded forms are `forall` / `exists` over `lo..hi`, `elts(e)`, or `keys(m)`.
 Triggers are chosen from suitable binder-dependent applications when available;
 quantified solving remains incomplete. Existential goals require checked
