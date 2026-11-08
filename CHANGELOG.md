@@ -700,6 +700,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`derive Ord` on a record compares fields in declaration order.** With two or more
+  fields, the derived `compare` returned only the last field's comparison, so
+  `compare({ a: 1, b: 9 }, { a: 2, b: 0 })` was `1` and sorting by `<` put records out of
+  order. It is now lexicographic, as documented: the first field that differs decides. Same
+  on the interpreter, native and JS.
 - **`Diagnostics` and `try_finally` work on `--target js`.** A program using
   `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
   compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers

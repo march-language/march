@@ -24,3 +24,20 @@ delete the dead `result` / `final_cmp` bindings next to it. Add a golden case
 where the fields disagree in direction, run on interpreter, native and JS.
 Check `test/` and `stdlib/` for anything that relied on the current order
 (e.g. a derived record used as a `Map` key or sorted with `compare`).
+
+## Resolution — 2026-11-08
+
+Fixed as described: the final `List.fold_right` in the `"Ord"` / `TDRecord`
+arm of `lib/desugar/desugar_derive.ml` now runs over the fields in declaration
+order, so the first field's `if _cmp0 != 0` is outermost and the last field is
+the innermost fallback. The dead `result` / `final_cmp` bindings are gone.
+
+Nothing in `stdlib/`, `examples/` or `bench/` derives `Ord` on a record, so no
+library code depended on the old order.
+
+Test: `test/native/adt_ord_operators.march` gained a three-field `P3` and an
+`Item` pair whose fields disagree in direction (`compare`, `<`, and a
+`List.sort_by`). The interpreter on the unfixed compiler printed
+`compare(r1, r2) 1 -1` and sorted `190 200 109 199`; after the fix it prints
+`-1 1` and `109 190 199 200`. Native and `--target js` (the fixture's two dune
+rules) match the interpreter byte for byte.
