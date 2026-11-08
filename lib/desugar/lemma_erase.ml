@@ -306,23 +306,16 @@ let erase_module_with (env : env) (decls : decl list) : decl list =
   drop_unreferenced erased erased
 
 let erase_module ?(reserved : string -> bool = fun _ -> false) (decls : decl list) : decl list =
-  let rec has_lemma ds =
-    List.exists
-      (function
-        | DFn (fd, _) -> is_lemma fd
-        | DMod (_, _, inner, _) | DDescribe (_, inner, _) -> has_lemma inner
-        | _ -> false)
-      ds
-  in
-  if not (has_lemma decls) then decls else erase_module_with (env_of_decls ~reserved decls) decls
+  (* Scoped proofs also occur in modules with no lemma declarations. *)
+  erase_module_with (env_of_decls ~reserved decls) decls
 
 (* One declaration at a time (the REPLs): a lemma keeps its declaration, for
    later inputs that call it, but its body becomes `()`, so no call ever runs
    a proof. *)
 let blank_lemma_decl (d : decl) : decl =
-  match d with
-  | DFn (fd, sp) when is_lemma fd -> DFn (erase_fn { erasable = SS.empty } fd, sp)
-  | d -> d
+  match erase_decls { erasable = SS.empty } [d] with
+  | [d] -> d
+  | _ -> d
 
 (* Every lemma body in [decls] becomes `()`, nested modules included; calls
    and declarations stay (the REPLs, where a later input may call a lemma). *)

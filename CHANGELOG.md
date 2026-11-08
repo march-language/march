@@ -690,6 +690,8 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
+
 - **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
   gave `NaN` and the program went on; they now panic with "division by zero" / "modulo by
   zero", as natively. `to_string` on a record or variant with no `Show` impl now builds and

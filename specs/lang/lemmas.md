@@ -419,7 +419,14 @@ every later query. That makes later checks slower, and a later proof can end up 
 fact you did not mean it to use. With `assert … by` the helper facts stay inside the hint.
 Unlike a plain `assert`, which is checked when the program runs, `assert … by` is checked by
 the compiler only: a `P` it cannot prove is reported (`unverified`, or an error under
-`cap verified`) and is not assumed afterwards.
+`cap verified`) and is not assumed afterwards. Every assertion and helper precondition
+inside the hint must also be proved, even if the final goal is independently true.
+
+Hints follow the same purity and termination restrictions as lemmas: effectful,
+panicking, divergent, and unreflectable calls are rejected. This validation also runs
+when reflection is disabled. Hint bindings have their own lexical scope; a binding
+that shadows a name used in `P` is rejected, so rename that local binding. A final
+`if` or `match` in the hint must establish `P` at every branch exit.
 
 **`calc`** writes a proof as a chain. Each step compares the previous term with the next
 (`==`, `<`, `<=`, `>`, `>=`) and may have its own hint; each step is proved on its own, so a
