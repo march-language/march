@@ -12016,8 +12016,11 @@ let test_self_recursive_capturing_closure_correct_compiled () =
     \  end\n\
      end\n"
   in
+  (* stderr dropped: `helper` is deliberately double-recursive (fib-shaped), so
+     the checker's non-tail-recursion warning for local functions now fires. It
+     is not what this test pins; the values are. *)
   let interp_out = read_cmd_output (Printf.sprintf
-    "cd %s && %s %s 2>&1"
+    "cd %s && %s %s 2>/dev/null"
     (Filename.quote project_root)
     (Filename.quote main_exe) (Filename.quote src)) in
   Alcotest.(check string) "interpreted self-recursive capturing closure"

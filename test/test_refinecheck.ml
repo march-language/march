@@ -13503,7 +13503,7 @@ let audit_classify_reason_suite =
       `Quick (fun () ->
         let _, d = classify_only_site
             {|mod M do
-                type Box = { v : {(Int, Int) | true} }
+                type Box = { v : {Char | true} }
               end|}
         in
         match d with
@@ -13723,13 +13723,21 @@ let audit_classify_fixloop1_suite =
           (compiler_warns src "carries a refinement, which enforces nothing"))
 
   ; (* Section 6 / Mutation M4: a rejecting-side fixture for rule 3.
-       [refined_param_ty] has no [TyTuple] arm, so a parameter refined at a
-       TUPLE base is [Unenforced] -- without this fixture, a classifier that
+       [refined_param_ty] has no [Char] arm, so a parameter refined at a
+       CHAR base is [Unenforced] -- without this fixture, a classifier that
        hardcodes every top-level-fn [Param] as [Enforced], never calling
        [refined_param_ty] at all, still passes the whole group (the review's
-       own M4). *)
-    check_unenforced "a parameter refined at a tuple base is Unenforced (refined_param_ty has no TyTuple arm)"
+       own M4).  It used a tuple base until 2026-11-06, when tuples became a
+       predicate sort (specs/progress/2026-11-06-stdlib-lemma-sweep-s3-tuples.md). *)
+    check_unenforced "a parameter refined at a Char base is Unenforced (refined_param_ty has no Char arm)"
       {|mod TUPP1 do
+          fn f(p : { t : Char | true }) : Int do 0 end
+        end|}
+
+  ; (* Its positive twin: since tuples are a predicate sort, a tuple-refined
+       parameter is Enforced (an obligation at every call). *)
+    check_enforced "a parameter refined at a tuple base is Enforced (tuples are a predicate sort)"
+      {|mod TUPP2 do
           fn f(p : { t : (Int, Int) | true }) : Int do 0 end
         end|}
 
@@ -30094,10 +30102,11 @@ let () =
       ("law-coverage", Test_refine_law_coverage.tests);
       ("reflect-record-vars", Test_refine_record_vars.tests @ Test_refine_record_vars.parametric);
       ("proof-hints", Test_refine_proof_hints.suite);
-      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified);
+      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified @ Test_refine_stdlib_sweep.s3);
       ("pred-names", Test_refine_pred_names.suite);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
+      ("quantifiers", Test_refine_quantifier.tests);
       ("reflect-lemma", Test_refine_lemma.scoped_asserts @ Test_refine_lemma.scoped_hint_bindings @ Test_refine_lemma.scoped_directives @ Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);

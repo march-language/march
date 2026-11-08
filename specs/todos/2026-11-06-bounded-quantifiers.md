@@ -1,36 +1,77 @@
-`[P2]` Bounded quantifiers in predicates: `forall i in 0..len(xs)`, `forall x in elts(s)`.
+`[P2]` Bounded quantifiers in predicates.
 
-Medium step 5 of `2026-11-06-verification-ladder-roadmap`; the biggest single step on it.
+Stage B, step 5 of `2026-11-06-verification-ladder-roadmap`.
 
-## What it unlocks
+## Implementation status
 
-Properties that need "every pair" or "some element": sortedness
-(`forall i in 0..len(xs) - 1, xs[i] <= xs[i + 1]`), membership (`exists x in elts(xs), x == k`),
-"all keys below k", "no duplicates". Today element facts come only through measures and
-element/abstract refinements, which cannot relate two positions or say "some".
+Approved design and implementation plan: `specs/plans/2026-11-07-bounded-quantifiers-design.md`
+and `specs/plans/2026-11-07-bounded-quantifiers-implementation.md`.
+Implementation is in progress; keep this item open until the acceptance gates pass.
 
-## Design sketch
+The focused suite passes 32 controls, including lexical capture, Boolean map
+keys, unsupported Float list domains, checked existential candidates, and
+indexing definedness. `test/refine/quantifiers/insertion_sort.march` proves
+integer insertion and insertion-sort contracts using lower-bound and pairwise
+sortedness invariants. It introduces no trusted sorting axioms. This does not
+verify the existing comparator-based `List.sort_by` or `Sort.sort`, nor add a
+public `List.sort` API. Use logical `nth(xs, i)` rather than runtime indexing
+syntax in predicates.
 
-- Syntax inside predicates: `forall i in lo..hi, P`, `forall x in elts(e), P`,
-  `forall k in keys(m), P`, and `exists` likewise. Only bounded forms at first.
-- Encoding: SMT quantifiers with a trigger chosen by the compiler from the bound's measure
-  (`$nth(xs, i)` for an index range, `member(x, s)` for a set), with the chosen pattern
-  visible in diagnostics. Compiler-selected triggers constrain E-matching; they do not remove
-  heuristic search, matching loops, or incompleteness. Do not promise predictable solving merely
-  because the quantifier is bounded.
-- Needs an indexing measure (`nth(xs, i)` in predicates, reflecting `List.nth_opt` or a
-  dedicated measure) and its axioms.
-- `exists` in a hypothesis is skolemised; in a goal it needs a witness (the checker tries the
-  bound's terms in scope, else reports "give a witness" with an `assert P(k)` fix).
+## Remaining acceptance gates
 
-## Done when
+- Complete parser/formatter, strict-capability, solver-limit and soundness controls;
+  review exact sorts and reflected contracts.
+- Full suites, fresh review, and CI.
+- Byte-identical emitted SMT for the existing quantifier-free corpus.
+- Three paired cold and warm solver timings, median within 5% of baseline,
+  with no new timeouts.
+- Build and validate the updated documentation. Move this item to progress
+  only when the implementation and validation are complete.
 
-- `List.sort`'s result type can say sorted, and `insert` into a sorted list is proved to keep
-  it sorted (a lemma by structural induction).
-- A predicate using an unbounded quantifier is a clear error pointing at the bounded forms
-  (unbounded ones are `2026-11-06-unbounded-quantified-lemmas`).
-- Solve-time budget: the refine oracle's corpus time does not regress (quantifier-free VCs are
-  unchanged byte for byte: `scripts/ir-oracle.sh`-style hash check over emitted SMT).
+### Gate results (2026-11-08, branch merged with main at 4d9ffe9762)
+
+- `scripts/oracle-base.sh ir refine` against 4d9ffe9762: IR identical over 527
+  programs; refinement diagnostics identical (9004 lines over 582 fixtures).
+- Quantifier-free SMT byte-identical: every `(reset)` block sent to z3 was
+  captured through a `MARCH_Z3` tee wrapper over the refine-oracle corpus
+  (`test/native/*.march` + `stdlib/*.march`, fresh cwd and private `HOME`
+  per fixture). Base and branch both emit 217,883 blocks with identical
+  per-fixture hash multisets. Control: the same capture with
+  `MARCH_REFINE_RLIMIT=40000` on 12 fixtures changed 4476 of 4476 blocks.
+- Cold solver timing, full 582-fixture sweep at 4 jobs, base/branch
+  alternated: 269/268, 268/268, 268/272 s; median 268 s vs 268 s, no new
+  timeouts observed. Warm (each fixture's `.march/cas` warmed by a prior cold
+  pass, then the sweep timed again): 183.3/185.4, 183.9/182.9, 181.0/181.0 s;
+  median 183.3 s vs 182.9 s.
+- Tree-sitter: `forall` / `exists` are soft keywords (names elsewhere, e.g.
+  `let exists = …` in `stdlib/dataframe.march`); `scripts/check-tree-sitter.sh` ok.
+- Full `scripts/run-tests.sh` on the merged tree: every suite green
+  (refinecheck: 210 groups, 2538 tests). `test_lsp` was re-run alone after
+  removing a stray `_build/oracle-check/` (412 tests green): the resolver's
+  library walk follows the per-fixture symlinks that tree holds, so leaving it
+  behind wedges `import run folds as one range`. Delete it after an oracle run.
+- Formatter controls: `--fmt` round-trips the insertion-sort fixture and a
+  file mixing range/set/nested/shadowed quantifiers with `forall` / `exists`
+  used as function, parameter and `let` names. A second pass changes nothing,
+  and refinement verdicts are unchanged.
+- Fresh whole-branch review: no false `proved` found. Follow-ups landed after
+  the PR merged: a measure call / tester inside a quantifier body that mentions
+  the binder is refused (the probe was already undecided, since the hypothesis
+  was dropped elsewhere, so this closes the path rather than fixing an observed
+  proof); `rename_heads` and `Infer_lemma.subst` descend into quantifier
+  bodies (capture-avoiding); `nth` documented as reserved in predicates.
+  Refine oracle identical after these fixes. Two review notes remain open:
+  a raw `Refuted` on the `scope_complete` record path is not witness-confirmed
+  when `nth` appears (not reproduced), and the token filter promotes
+  `forall` / `exists` on a one-token lookahead, so `x -> exists` followed by a
+  lowercase-binder arm on the next line would mis-parse (same as `calc` /
+  `reveal`; no code in the repo does this).
+
+Bounded forms are `forall` / `exists` over `lo..hi`, `elts(e)`, or `keys(m)`.
+Triggers are chosen from suitable binder-dependent applications when available;
+quantified solving remains incomplete. Existential goals require checked
+candidates satisfying both their domain and body. Unbounded quantification is
+tracked separately in `2026-11-06-unbounded-quantified-lemmas`.
 
 ## Research-driven implementation gates (2026-11-07)
 

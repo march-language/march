@@ -444,7 +444,7 @@
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
-%token CALC REVEAL
+%token CALC REVEAL FORALL EXISTS
 %token DBG DOC
 %token <string> SIGIL_PREFIX
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
@@ -465,7 +465,7 @@
 %token LPAREN_STMT
 %token AT INVARIANT
 %token ARROW PIPE_ARROW
-%token EQUALS COLON COMMA PIPE DOT
+%token EQUALS COLON COMMA PIPE DOT DOTDOT
 %token PLUSPLUS PLUS MINUS STAR SLASH PERCENT
 %token PLUSDOT MINUSDOT STARDOT SLASHDOT
 %token LT GT EQEQ NEQ LEQ GEQ
@@ -1562,6 +1562,24 @@ impl_item:
         DFn ({ def with fn_attrs = List.map fst attrs_args; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
 
+bounded_pred:
+  | kind = quantifier_kind; binder = lower_name; IN; domain = bounded_domain; COMMA; body = expr
+    { let open March_ast.Bounded_pred in
+      (match domain with
+       | Elements (EApp (EVar {txt = ("elts" | "keys"); _}, [_], _)) | Range _ -> ()
+       | Elements _ -> error_raise "A bounded set domain must be `elts(xs)` or `keys(map)`." None $startpos(domain));
+      make {kind; binder; domain; body; span = mk_span $loc} }
+  | _kind = quantifier_kind; _binder = lower_name; error
+    { error_raise "Quantifiers require a bound: use `in lo..hi`, `in elts(xs)`, or `in keys(map)`." None $startpos($3) }
+
+quantifier_kind:
+  | FORALL { March_ast.Bounded_pred.Forall }
+  | EXISTS { March_ast.Bounded_pred.Exists }
+
+bounded_domain:
+  | lo = expr_add; DOTDOT; hi = expr_add { March_ast.Bounded_pred.Range (lo, hi) }
+  | s = expr_add { March_ast.Bounded_pred.Elements s }
+
 constraint_expr:
   | path = upper_dot_path; LPAREN; t = ty; RPAREN
     { let name = let joined = String.concat "." (List.map (fun n -> n.txt) path) in
@@ -1840,6 +1858,7 @@ block_expr:
 
 
 expr:
+  | q = bounded_pred { q }
   | e = expr_pipe { e }
   | ASSERT; e = expr %prec prec_assert
     { EAssert (e, mk_span ($loc)) }
@@ -2061,6 +2080,7 @@ call_arg:
     A parenthesized lambda `(fn ... -> ...)` is unaffected: it still goes
     through [expr] via [expr_atom]'s `LPAREN expr RPAREN`. *)
 expr_no_bare_lambda:
+  | q = bounded_pred { q }
   | e = expr_pipe { e }
   | ASSERT; e = expr
     { EAssert (e, mk_span ($loc)) }

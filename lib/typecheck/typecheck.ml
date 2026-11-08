@@ -2967,6 +2967,44 @@ let rec infer_expr env (e : Ast.expr) : ty =
           code    = Err.Code.typed_hole; fix = None };
       t
 
+    | Ast.EApp (_, _, sp) when March_ast.Bounded_pred.view e <> None ->
+      if not env.in_logical_predicate then begin
+        Err.error ~code:Err.Code.type_mismatch env.errors ~span:sp
+          "Bounded quantifiers are predicate-only: use a refinement or an erased proof assertion.";
+        TError
+      end else begin
+        let q = Option.get (March_ast.Bounded_pred.view e) in
+        let binder_ty = match q.domain with
+          | March_ast.Bounded_pred.Range (lo, hi) ->
+            check_expr env lo t_int ~reason:None;
+            check_expr env hi t_int ~reason:None;
+            t_int
+          | March_ast.Bounded_pred.Elements set ->
+            (match repr (infer_expr env set) with
+             | TCon ("$LogicSet", [a]) -> a
+             | _ -> Err.error ~code:Err.Code.type_mismatch env.errors ~span:sp "A quantified set domain must be elts(xs) or keys(map)."; TError) in
+        let local = bind_var q.binder.txt (Mono binder_ty) env in
+        check_expr local q.body t_bool ~reason:None;
+        Hashtbl.replace env.type_map sp t_bool;
+        t_bool
+      end
+    | Ast.EApp (Ast.EVar {txt = "nth"; _}, [xs; i], sp) when env.in_logical_predicate ->
+      let a = fresh_var env.level in
+      check_expr env xs (TCon ("List", [a])) ~reason:None;
+      check_expr env i t_int ~reason:None;
+      Hashtbl.replace env.type_map sp a;
+      a
+    | Ast.EApp (Ast.EVar {txt = ("elts" | "keys") as m; _}, [xs], sp) when env.in_logical_predicate ->
+      let a = fresh_var env.level in
+      let actual = infer_expr env xs in
+      if m = "keys" then unify env ~span:sp ~reason:None actual (TCon ("Map", [a; fresh_var env.level]))
+      else (match repr actual with
+        | TCon ("Set", [elem]) -> unify env ~span:sp ~reason:None elem a
+        | _ -> unify env ~span:sp ~reason:None actual (TCon ("List", [a])));
+      let ty = TCon ("$LogicSet", [a]) in
+      Hashtbl.replace env.type_map sp ty;
+      ty
+
     (* ── Function application ─────────────────────────────────────── *)
     (* ── Session channel operations (special casing for session type advancement) ── *)
 
@@ -4660,17 +4698,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── Test assertion ─────────────────────────────────────────────── *)
     | Ast.EAssert (inner, sp) ->
       (* The inner expression must be Bool. Assert evaluates to Unit. *)
-      check_expr env inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
+      check_expr {env with in_logical_predicate = env.in_proof_hints} inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
       Hashtbl.replace env.type_map sp t_unit;
       t_unit
 
     (* ── Proof hints (ghost; erased after the refinement checker) ─────── *)
     | Ast.EProof (p, sp) ->
-      let hints hs = List.iter (fun h -> ignore (infer_expr env h)) hs in
+      let hints hs = List.iter (fun h -> ignore (infer_expr {env with in_proof_hints = true} h)) hs in
       let ty =
         match p with
         | Ast.PAssertBy (pred, hs) ->
-          check_expr env pred t_bool ~reason:(Some (RBuiltin "assert … by expects a Bool expression"));
+          check_expr {env with in_logical_predicate = true} pred t_bool ~reason:(Some (RBuiltin "assert … by expects a Bool expression"));
           hints hs;
           t_unit
         | Ast.PReveal f ->
@@ -6269,7 +6307,8 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          require declaring-module + public provenance. Lambdas inherit this
          (they don't call check_fn); nested named fns/modules reset it via their
          own check_fn. *)
-      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public) } in
+      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public);
+        in_logical_predicate = false; in_proof_hints = List.mem "lemma" def.fn_attrs } in
 
       (* `@[trusted_linear(v)]` (specs/progress/2026-09-18-linear-map.md): the
          stdlib's LinearMap kernel.  Callers may instantiate the signature's

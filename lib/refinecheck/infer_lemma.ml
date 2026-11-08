@@ -280,6 +280,13 @@ let rec subst (env : (string * A.expr) list) (e : A.expr) : A.expr =
   | A.EField (x, n, sp) -> A.EField (go x, n, sp)
   | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
   | A.EIf (c, a, b, sp) -> A.EIf (go c, go a, go b, sp)
+  (* A bounded quantifier's body: the binder shadows [env], and a replacement
+     that mentions the binder would be captured, so leave that body alone. *)
+  | A.ELam (ps, b, sp) ->
+    let bound = List.map (fun p -> p.A.param_name.A.txt) ps in
+    let env = List.filter (fun (v, _) -> not (List.mem v bound)) env in
+    if List.exists (fun (_, r) -> List.exists (fun x -> March_ast.Bounded_pred.may_mention x r) bound) env then e
+    else A.ELam (ps, subst env b, sp)
   | _ -> e
 
 let refined (t : A.ty option) = match t with Some (A.TyRefine (_, b, p)) -> Some ((match b with Some n -> n.A.txt | None -> "_"), p) | _ -> None

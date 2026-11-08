@@ -18,9 +18,17 @@ reflected call by its site, and is pinned by the `pred-names` suite:
 (Parametric records reached through reflected functions and the `uses:` fallback are closed
 since `specs/progress/2026-11-08-reflection-encoder-gaps-records-uses.md`.)
 
-- **A tuple-typed variable in a predicate.** A lemma parameter or caller variable of tuple
-  type gets no sort in the predicate encoder, so `swap(swap(t)) == t` over `t : (Int, Int)` is a
-  `sort-conflict` skip. Fixed with tuple literals in reports by #1203 (S3 tuples), not yet merged.
+- **A tuple-typed return binder, and a reflected call over a tuple-typed record field.**
+  Tuple-typed parameters, lemma parameters, caller values and tuple literals in a predicate are
+  encoded since `specs/progress/2026-11-06-stdlib-lemma-sweep-s3-tuples.md`, and record-typed
+  variables since `specs/progress/2026-11-06-reflection-record-predicate-variables.md`. Left:
+  a tuple RETURN refinement (`fn mk(x) : {(Int, Int) | Tuple.first(_) == x}` is
+  `unreflectable-subject` on the definition side; `return_refine_ext` / `return_refine_sorted`
+  have no tuple arm, and it must go to `post_walk_verdict`, not `engine`, which would take
+  `$Tup2` for a record sort), and a reflected call over a tuple-typed record field
+  (`type Box = { v : {(Int, Int) | Tuple.first(_) > 0} }` is checked at every construction but
+  `unreflectable-predicate`; a field predicate without a call, `_ == (1, 0)`, proves and is
+  violated as it should).
 - **A parametric record's field read directly in a predicate.** `p.fst` over `p : Pr(Int)` in a
   theorem or a callee refinement (`n : {Int | _ > p.fst}`) does not reflect: the record
   environment (`Refine_scope.recenv`, `(name, sort name)`) holds only records without type

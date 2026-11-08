@@ -909,6 +909,12 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     | A.EAssert (x, _) when !in_lemma ->
       in_lemma_assert := true;
       Fun.protect ~finally:(fun () -> in_lemma_assert := false) (fun () -> w x)
+    | e when !in_lemma_assert && March_ast.Bounded_pred.view e <> None ->
+      let q = Option.get (March_ast.Bounded_pred.view e) in
+      List.iter w (March_ast.Bounded_pred.domain_exprs q.domain);
+      walk ~src ~owner ~lam (bind_vars env [q.binder.txt]) q.body
+    | A.EApp (A.EVar {A.txt = ("nth" | "elts" | "keys"); _}, args, _) when !in_lemma_assert ->
+      List.iter w args
     | A.EApp (f, args, sp) -> call f args sp
     | A.EPipe (l, A.EVar n, sp) -> call (A.EVar n) [ l ] sp
     | A.EPipe (l, A.EApp (f, args, _), sp) -> call f (l :: args) sp
@@ -1509,7 +1515,10 @@ let param_kind ?type_map (u : unit_) (i : int) : pkind =
     | _ -> PUnknown)
 
 let rec free_names (e : A.expr) : string list =
-  match e with
+  match March_ast.Bounded_pred.view e with
+  | Some q -> List.concat_map free_names (March_ast.Bounded_pred.domain_exprs q.domain)
+    @ List.filter ((<>) q.binder.txt) (free_names q.body)
+  | None -> match e with
   | A.EVar n -> [ n.A.txt ]
   (* An application's head names a function, operator or measure. *)
   | A.EApp (A.EVar _, args, _) -> List.concat_map free_names args
