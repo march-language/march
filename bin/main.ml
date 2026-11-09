@@ -5829,6 +5829,32 @@ let compile filename =
                    h.March_ast.Ast.ah_params))
               adef.March_ast.Ast.actor_handlers
           in
+          (* H7: each handler's actor-message tag, as codegen installs it
+             (the same table over the same final module emit_module gets),
+             so the deploy gate can compare it with the running version's
+             (Schema_diff.tag_check).  Forced only when an actor is written. *)
+          let msg_tags = lazy (
+            let types = tir.March_tir.Tir.tm_types in
+            March_tir.Llvm_toplevel.actor_msg_tag_table
+              ~pins:(March_tir.Llvm_toplevel.current_migrate_pins types) types) in
+          let msg_tag actor cn =
+            let tbl = Lazy.force msg_tags in
+            let key = actor ^ "_Msg." ^ cn in
+            match Hashtbl.find_opt tbl key with
+            | Some t -> Some t
+            | None ->
+              (* A module-qualified declaration: the unique key ending in it. *)
+              let sfx = "." ^ key in
+              let sl = String.length sfx in
+              (match Hashtbl.fold (fun k t acc ->
+                   let kl = String.length k in
+                   if kl > sl && String.sub k (kl - sl) sl = sfx then t :: acc else acc)
+                   tbl [] with
+               | [ t ] -> Some t
+               | _ -> None) in
+          let tag_field actor cn = match msg_tag actor cn with
+            | Some t -> Printf.sprintf {|,"tag":%d|} t
+            | None -> "" in
           let oc = Buffer.create 1024 in
             Printf.bprintf oc "{\n";
             List.iteri (fun i (actor_name, fields) ->
@@ -5874,19 +5900,22 @@ let compile filename =
                                (String.concat ", " (List.map (Printf.sprintf "%S") ls))) in
                 let ctor_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
-                      Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
+                      Printf.sprintf {|{"name":%S,"params":[%s]%s}|} cn
                         (String.concat "," (List.map (fun t ->
-                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))
+                        (tag_field actor_name cn)) ctors) ^ "]" in
                 let handler_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
                       let params = String.concat "," (List.map (fun t ->
                           Printf.sprintf "%S" (ty_to_schema_str t)) tys) in
+                      let tag = tag_field actor_name cn in
                       match List.assoc_opt cn hrefs with
                       | Some rs when List.exists Option.is_some rs ->
-                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]}|} cn params
+                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]%s}|} cn params
                           (String.concat "," (List.map (function
                                | Some r -> Printf.sprintf "%S" r | None -> "null") rs))
-                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]}|} cn params) ctors)
+                          tag
+                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]%s}|} cn params tag) ctors)
                   ^ "]" in
                 let handlers_line = match List.assoc_opt actor_name actor_handlers with
                   | None -> ""
@@ -5905,9 +5934,30 @@ let compile filename =
                   | Some (March_desugar.Desugar_migrate_derive.Not_derived why) ->
                     Printf.sprintf "    \"migrate_not_derived\": %S,\n" why
                   | None -> "" in
+                (* H3: a `@compat(simulation)` actor's handler bodies, as
+                   source, so the NEXT build can check that migrating
+                   commutes with handling (Desugar_simulation). *)
+                let steps_line =
+                  match adef with
+                  | Some a when compat = March_desugar.Desugar_simulation.compat ->
+                    Printf.sprintf "    \"steps\": [%s],\n"
+                      (String.concat ", "
+                         (List.map (fun (h : March_ast.Ast.actor_handler) ->
+                              Printf.sprintf {|{"msg":%s,"params":[%s],"body":%s}|}
+                                (Schema_migration.json_string h.March_ast.Ast.ah_msg.March_ast.Ast.txt)
+                                (String.concat ","
+                                   (List.map (fun (p : March_ast.Ast.param) ->
+                                        Schema_migration.json_string
+                                          p.March_ast.Ast.param_name.March_ast.Ast.txt)
+                                       h.March_ast.Ast.ah_params))
+                                (Schema_migration.json_string
+                                   (March_format.Format.expr_inline h.March_ast.Ast.ah_body)))
+                             a.March_ast.Ast.actor_handlers))
+                  | _ -> "" in
                 Printf.bprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat contracts_line invariant_line handlers_line mm_line derive_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat contracts_line invariant_line handlers_line mm_line derive_line
+                  steps_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.bprintf oc "}\n";

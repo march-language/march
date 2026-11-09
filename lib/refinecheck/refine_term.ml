@@ -224,7 +224,7 @@ let collect_types (decls : A.decl list) : (string, tdecl) Hashtbl.t =
       match td with
       | A.TDVariant vs -> List.concat_map (fun (v : A.variant) -> v.A.var_args) vs
       | A.TDRecord fs -> List.map (fun (f : A.field) -> f.A.fld_ty) fs
-      | A.TDAlias t -> [ t ]
+      | A.TDAlias (t, _) -> [ t ]
     in
     let prev = match Hashtbl.find_opt tbl name with Some p -> p.t_fields | None -> [] in
     Hashtbl.replace tbl name
@@ -564,6 +564,13 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
           let id = fn_unit ~name:(mod_path ^ def.A.fn_name.A.txt) def in
           List.iter (fun p -> register_key (p ^ def.A.fn_name.A.txt) def.A.fn_name.A.span id) prefixes
         | A.DActor (_, name, actor, _) ->
+          (* The `@invariant` is walked once, with the first handler: the
+             refinement checker obliges it at every handler's result
+             (Refine_check, the `DActor` arm), and its calls resolve by span
+             like any predicate's, so they need sites here. *)
+          let inv = ref (Option.map (fun e ->
+              (e, List.map (fun (f : A.field) -> f.A.fld_name.A.txt) actor.A.actor_state))
+              actor.A.actor_invariant) in
           List.iter
             (fun (h : A.actor_handler) ->
               let params = List.map (fun (p : A.param) -> Some p.A.param_name.A.txt) h.A.ah_params in
@@ -576,7 +583,9 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
                   ~clauses:[ { o_params = params; o_body = h.A.ah_body } ]
                   ~attrs:[] ()
               in
-              pending := `Handler (id, h, scope) :: !pending)
+              let this_inv = !inv in
+              inv := None;
+              pending := `Handler (id, h, scope, this_inv) :: !pending)
             (A.actor_body_handlers actor)
         | A.DImpl (idf, _) ->
           (* An [impl] method is reached only by dispatch (never by bare
@@ -1010,7 +1019,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
             Option.iter (walk ~src:id ~owner ~lam:false env) c.A.fc_guard;
             walk ~src:id ~owner ~lam:false env c.A.fc_body)
           def.A.fn_clauses
-      | `Handler (id, (h : A.actor_handler), scope) ->
+      | `Handler (id, (h : A.actor_handler), scope, inv) ->
         cur := scope;
         cur_file := "";
         set_measure := false;
@@ -1019,7 +1028,10 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
         let owner = { o_params = List.map Option.some params; o_body = h.A.ah_body } in
         (* A handler body also sees the actor's [state] (the typechecker's
            [handler_env]): a local value, never a callee to resolve. *)
-        walk ~src:id ~owner ~lam:false (bind_params (bind_vars SM.empty [ "state" ]) params) h.A.ah_body
+        walk ~src:id ~owner ~lam:false (bind_params (bind_vars SM.empty [ "state" ]) params) h.A.ah_body;
+        Option.iter
+          (fun (e, fields) -> walk ~src:id ~owner ~lam:false (bind_vars SM.empty ("state" :: fields)) e)
+          inv
       | `Expr (id, (owner : owner), scope) ->
         cur := scope;
         cur_file := "";

@@ -48,6 +48,7 @@ silence into an error for a module that wants a guarantee.
 - [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
 - [The Problem They Solve](#the-problem-they-solve)
 - [Syntax](#syntax)
+  - [Refinement aliases: naming a refinement, with value parameters](#refinement-aliases-naming-a-refinement-with-value-parameters)
   - [A message for each half of a contract](#a-message-for-each-half-of-a-contract)
   - [Refinements inside containers, callbacks and folds](#refinements-inside-containers-callbacks-and-folds)
 - [How Checking Works: Definite Failure](#how-checking-works-definite-failure)
@@ -111,6 +112,7 @@ the docs, and the compiler enforces it at every call.
 |---|---|
 | Reject a bad argument at the call site | A refined parameter: `i : {Int \| _ >= 0 && _ < len(xs)}` |
 | Promise something about a result | A refined return type: `: {Int | _ >= 0}` |
+| Name a refinement once and reuse it, `Vec(Int, n)` for a list of length `n` | A [refinement alias](#refinement-aliases-naming-a-refinement-with-value-parameters): `type Vec(a, n : Int) = {List(a) \| len(_) == n}` |
 | Give a broken contract a message in the caller's terms | [`else "…"` on a conjunct](#a-message-for-each-half-of-a-contract) |
 | Talk about a list's length, a record's fields, or your own data | A [measure](#measures-refining-over-data-structures) |
 | Call your own pure function inside a predicate | [Reflection](#reflection-your-functions-in-predicates): `if is_small(n) do need_small(n) …` |
@@ -312,6 +314,46 @@ comparisons, which is every ordinary refinement. A division in a bare
 `Int`-valued position, such as a call's argument `f(n / d)`, is translated only
 when its divisor is a non-zero literal or is syntactically positive
 (`len(xs) + 1`).
+
+### Refinement aliases: naming a refinement, with value parameters
+
+A `type` declaration whose right-hand side is a refinement type names that refinement. Its
+parameters can be types, as usual, or **values**, written with their sort:
+
+```march
+type Pos = {Int | _ > 0}
+type Vec(a, n : Int) = {List(a) | len(_) == n}
+type Matrix(r : Int, c : Int) = {List(Vec(Int, c)) | len(_) == r}
+
+fn dot(n : Int, xs : Vec(Int, n), ys : Vec(Int, n)) : Int do … end
+fn push(n : Int, x : Int, xs : Vec(Int, n)) : Vec(Int, n + 1) do Cons(x, xs) end
+```
+
+Each use is replaced by the refinement it names, with its arguments substituted: `Vec(Int, n)`
+is exactly `{List(Int) | len(_) == n}`, the contract you would have written. Nothing new reaches
+the solver. This gives most of what length-indexed vectors give in a dependently typed language,
+without dependent type checking: the length lives in a refinement, and the checker proves it.
+
+- A **value argument** is a number, a name in scope (usually an earlier parameter), or `+` / `*` of
+  those: `Vec(Int, 3)`, `Vec(Int, n)`, `Vec(Int, n + 1)`.
+- A **value parameter** may appear only in the predicate, or as a value argument of another alias
+  (`Matrix`'s `c`). Using one as a type (`{List(n) | …}`), passing a type for it, or passing a
+  value for a type parameter is [`alias_kind_mismatch`]({{ site.baseurl }}/docs/errors/alias_kind_mismatch/).
+  Only a refinement alias takes value parameters.
+- An alias works wherever a refinement does: parameters, results, element types (`List(Pos)`),
+  record fields, `let` annotations and actor messages. A refinement of an alias,
+  `{Vec(Int, 3) | len(_) > 5}`, is both.
+- A violation names the alias as written at the use, not its expansion:
+
+```
+refinement violation: expected Vec(Int, n) [refinement_violated]
+argument `ys` of `dot` does not satisfy precondition `len(_) == n`
+note: `[4, 5]` can never satisfy `len(ys) == n`; pass a value that does
+```
+
+A conjunct the alias's author gave its own [`else` message](#a-message-for-each-half-of-a-contract)
+keeps it. The full example, with a `Matrix` whose every row is checked, is
+`test/refine/aliases/vec.march`.
 
 ### A message for each half of a contract
 
@@ -5817,6 +5859,20 @@ position into a real contract, obligation and assumption together, is
   state's refined fields are obliged at `init` and at every handler's result
   (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
   of the incoming `state` in every handler body.
+- (Closed 2026-11-08.) An actor's `@invariant`: an inductive invariant too,
+  over its bare field names (or `state.f`), and it may call the program's own
+  functions, unfolded as in any contract. The state `init` builds must
+  satisfy it, and each handler's result must satisfy it, given an incoming
+  `state` that does and the handler's parameter refinements (assumed exactly
+  when the body assumes them). A violation is a `return_refinement_violated`
+  error naming the actor and handler, with the breaking state and message; an
+  undecided one is a recorded skip (`<Actor>.init`, `<Actor>.<Msg>`), an error
+  under `cap verified`. A handler's sends and replies are not part of the
+  claim. Before this, the predicate was read only across a hot deploy. A
+  record-returning function benefits too: `{ r with f: e }` over a named `r`
+  reflects, `r` returned as it is no longer conflicts on sorts, a simple
+  `let` ahead of a record tail is inlined, and a binder left free in the tail
+  never turns a model into a reported counterexample.
 - (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
   0})` obliges every construction of `Inc(...)` in the program (`send`,
   `Actor.call`, a message bound to a `let` first), and the handler body

@@ -1647,6 +1647,12 @@ let measure_preamble : string ref = ref ""
    1-ctor datatypes; used to map EField/ERecord field names to selector indices. *)
 let ctor_field_names : (string, string list) Hashtbl.t = Hashtbl.create 16
 
+(* The datatypes that are an actor's state ([register_field_sorts_once]'s
+   `DActor` arm), by datatype key: a record sort no value outside the
+   actor's own handlers has, which [Refine_reflect.record_of_fields_inst]
+   sets aside when another record sort shares its field set. *)
+let actor_state_adts : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (* ── Which constructor field carries which TYPE PARAMETER ──────────────────
    Container subtyping (P3 design §2a) needs, per constructor, whether each
    field holds an element of the container's type parameter `i` ([Param i]),
@@ -2731,6 +2737,7 @@ let rec register_field_sorts_once ?(path : string = "") (decls : A.decl list) : 
       | A.DActor (_, name, ad, _) ->
         let own = decl_key path name.A.txt in
         let ctor = ctor_smt_name own name.A.txt in
+        Hashtbl.replace actor_state_adts own ();
         set_ctor_fields own ctor
           (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) ad.A.actor_state);
         Hashtbl.replace ctor_field_names ctor

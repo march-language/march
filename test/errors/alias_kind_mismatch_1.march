@@ -1,0 +1,5 @@
+mod Main do
+  type Vec(a, n : Int) = {List(a) | len(_) == n}
+
+  fn first(xs : Vec(Int, Int)) : Int do List.length(xs) end
+end

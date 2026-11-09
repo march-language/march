@@ -209,7 +209,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
   let type_def name params (td : Ast.type_def) =
     f SType name; List.iter (f SType) params;
     match td with
-    | Ast.TDAlias t -> ty t
+    | Ast.TDAlias (t, _) -> ty t
     | Ast.TDVariant vs ->
       List.iter (fun (v : Ast.variant) -> f SCtor v.var_name; List.iter ty v.var_args) vs
     | Ast.TDRecord fs ->
