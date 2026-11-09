@@ -705,9 +705,12 @@ literal, optionally followed by a path prefix (`api.example.com/v1/weather/`). N
 userinfo; host names are compared case-insensitively, paths case-sensitively.
 
 **Path prefixes** match by whole segment: `/v1/weather/` admits `/v1/weather` and
-`/v1/weather/today`, not `/v1/weatherman`; the query string never counts. A request path
-with a `.` or `..` segment, `//`, a `\`, or a percent-encoded `.`, `/` or `\` is
-refused outright rather than cleaned up, because a server may resolve it differently. A
+`/v1/weather/today`, not `/v1/weatherman`; the query string never counts. A request path is
+judged only if every character is a plain path character (letters, digits and
+`-._~!$&'()*+,=:@/`; no `;`, `?`, `#`, space or control character), every `%` escape is
+well formed and does not decode to `.`, `/`, `\`, `%` or a control character, and it has no
+`//` and no `.` or `..` segment. Anything else is refused outright rather than cleaned up,
+because a server may resolve it differently (or, with a CR/LF, read a second request). A
 literal prefix proves the host but not the path (`"https://api.example.com/v1/weather/" ++
 "../admin"`), so under a path scope every request's path is checked when it is sent, and
 the compiler reports the violations it can see. A path-scoped host admits no raw

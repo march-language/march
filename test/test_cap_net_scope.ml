@@ -649,8 +649,33 @@ let test_host_only_unchanged () =
   accepts "host-only scope, parameter-free literal, as before"
     (program (fn_go (simple_get {|"https://example.com/anything/at/all"|})))
 
+(* ── Path-scope review fixes ───────────────────────────────────────── *)
+
+let test_crlf_literal_rejected () =
+  rejects "CRLF in a literal path" ~code:"cap_host_scope"
+    (program ~a_needs:path_needs
+       (fn_go (simple_get {|"https://example.com/v1/weather/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"|})))
+
+let test_fragment_via_helper_rejected () =
+  rejects "fragment then dot segments, through a helper" ~code:"cap_host_scope"
+    (program ~a_needs:path_needs
+       ~extra:(c_module ("    fn fetch() : String do\n      " ^ simple_get {|"https://example.com/v1/weather/#/../../admin"|} ^ "\n    end"))
+       (fn_go "C.fetch()"))
+
+let test_with_connection_host_base_ok () =
+  accepts "with_connection's base URL path is never sent"
+    (program ~a_needs:path_needs
+       (fn_go
+          {|match HttpClient.with_connection(HttpClient.new_client(), "https://example.com", fn d -> p) do
+        Ok(r) -> r
+        Err(_) -> "err"
+      end|}))
+
 let tests =
   [
+    Alcotest.test_case "CRLF literal rejected" `Slow test_crlf_literal_rejected;
+    Alcotest.test_case "fragment via helper rejected" `Slow test_fragment_via_helper_rejected;
+    Alcotest.test_case "with_connection host base ok" `Slow test_with_connection_host_base_ok;
     Alcotest.test_case "literal path in scope ok" `Slow test_literal_path_in_scope_ok;
     Alcotest.test_case "literal path outside rejected" `Slow test_literal_path_outside_rejected;
     Alcotest.test_case "prefix inside ok" `Slow test_prefix_inside_ok;

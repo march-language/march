@@ -63,9 +63,11 @@ val permits_raw : decl list -> host:string -> port:int -> bool
     covering the destination with no [methods(...)] and no path. *)
 
 val path_ok : string -> bool
-(** A request path the guard will judge at all: no [.] or [..] segment, no
-    [//], no [\\], no percent-encoded [.], [/] or [\\]. Refused, not
-    normalized. The query and fragment are ignored. *)
+(** A request path the guard will judge at all: it starts with [/], uses only
+    RFC 3986 path characters (no [;], [?], [#], space or control character),
+    every [%] is a well-formed escape that does not decode to [.], [/], [\\],
+    [%] or a control character, and it has no [//] and no [.] or [..]
+    segment. Refused, not normalized. Agrees with [Http.scope_path_ok]. *)
 
 val path_within : prefix:string list -> string -> bool
 (** Segment-wise: [/v1/weather/] admits [/v1/weather] and [/v1/weather/x], not
@@ -82,8 +84,8 @@ val permits_host_ignoring_path :
   decl list -> host:string -> port:int -> meth:string option -> bool
 
 val url_path_of_literal : prefix:bool -> string -> string option
-(** The path of a literal URL ([~prefix:false], query stripped, [/] when
-    absent), or the path part of a literal prefix up to and including its
+(** The path of a literal URL ([~prefix:false]: up to the first [?], a [#]
+    kept, [/] when absent, exactly as [Http.parse_url] reads it), or the path part of a literal prefix up to and including its
     last [/] ([~prefix:true]). *)
 
 val forbids_redirects : decl list -> host:string -> port:int -> bool

@@ -255,13 +255,17 @@ let source_phrase (n : string) : string =
 
 let url_evidence ?(meths = [ MDynamic ]) ~(callee : string) (v : value) : result =
   let guarded = D.guarded callee in
+  (* `with_connection`'s URL picks the host to connect to; its path is never
+     sent (each request carries its own, checked by the guard). *)
+  let path_never_sent = callee = "HttpClient.with_connection" in
   let opaque why = Opaque (Printf.sprintf "the URL passed to %s %s" (source_phrase callee) why) in
   match v with
   | VLit s -> (
       match H.authority_of_url ~prefix:false s with
       | Some a ->
         let path =
-          match H.url_path_of_literal ~prefix:false s with Some p -> DPath p | None -> DUnknown
+          if path_never_sent then DUnknown
+          else match H.url_path_of_literal ~prefix:false s with Some p -> DPath p | None -> DUnknown
         in
         Fixed (List.map (fun meth -> { auth = a; meth; path; guarded }) meths)
       | None ->
@@ -275,7 +279,8 @@ let url_evidence ?(meths = [ MDynamic ]) ~(callee : string) (v : value) : result
       match H.authority_of_url ~prefix:true s with
       | Some a ->
         let path =
-          match H.url_path_of_literal ~prefix:true s with Some p -> DPrefix p | None -> DUnknown
+          if path_never_sent then DUnknown
+          else match H.url_path_of_literal ~prefix:true s with Some p -> DPrefix p | None -> DUnknown
         in
         Fixed (List.map (fun meth -> { auth = a; meth; path; guarded }) meths)
       | None ->

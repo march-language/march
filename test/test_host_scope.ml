@@ -370,7 +370,13 @@ let path_corpus =
     ("a.test/v1/x/,a.test/v2/", "a.test", 443, "get", "/v1/y");
     ("a.test", "a.test", 443, "get", "/anything/../x");
     ("", "a.test", 443, "get", "/x");
-    ("a.test:8443/v1/", "a.test", 443, "get", "/v1/x") ]
+    ("a.test:8443/v1/", "a.test", 443, "get", "/v1/x");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/..;/admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/%252e%252e/admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/#/../../admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather?x=1");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/a%20b") ]
 
 let test_path_matcher_agrees () =
   let lines =
@@ -666,8 +672,27 @@ let test_path_scope_declared () =
   rejects_with "hint names the path form" ~expect:"api.example.com/v1/"
     {|needs IO.NetConnect("api.x.test/v1/../admin/")|}
 
+(* Review fixes (path scopes): a path is judged only when every byte is a
+   plain path character; CR/LF/space would smuggle a second request. *)
+let test_path_ok_allowlist () =
+  List.iter (fun p -> Alcotest.(check bool) (String.escaped p) false (H.path_ok p))
+    [ "/v1/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"; "/v1/x y"; "/v1/x\000"; "/v1/x\r";
+      "/v1/..;/admin"; "/v1/a;b"; "/v1/%252e%252e/x"; "/v1/x#/../../admin"; "/v1/x?y";
+      "/v1/\xc3\xa9"; "/v1/%2"; "/v1/%zz"; "/v1/%00"; "/v1/%0d%0a" ];
+  List.iter (fun p -> Alcotest.(check bool) p true (H.path_ok p))
+    [ "/v1/a%20b"; "/v1/a:b@c"; "/v1/a,b"; "/v1/weather/today"; "/" ]
+
+let test_literal_path_keeps_fragment () =
+  (* As Http.parse_url does: the path runs to `?`, and a `#` stays in it. *)
+  Alcotest.(check (option string)) "fragment kept" (Some "/v1/w#frag")
+    (H.url_path_of_literal ~prefix:false "https://a.test/v1/w#frag");
+  Alcotest.(check (option string)) "query cut" (Some "/v1/w")
+    (H.url_path_of_literal ~prefix:false "https://a.test/v1/w?q=1#f")
+
 let path_tests =
   [
+    Alcotest.test_case "path_ok allowlist" `Quick test_path_ok_allowlist;
+    Alcotest.test_case "literal path keeps fragment" `Quick test_literal_path_keeps_fragment;
     Alcotest.test_case "path scope declared" `Quick test_path_scope_declared;
     Alcotest.test_case "path pattern parses" `Quick test_path_pattern_parses;
     Alcotest.test_case "path pattern rejects" `Quick test_path_pattern_rejects;

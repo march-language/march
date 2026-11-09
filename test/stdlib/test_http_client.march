@@ -405,6 +405,23 @@ describe "HttpClient host scope guard" do
     end
   end
 
+  test "CRLF in a path is refused" do
+    let req = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin", None, Nil, "")
+    match HttpClient.hc_check_request("a.test/v1/weather/", req) do
+    Err(PathRefused(_)) -> ()
+    _ -> assert false
+    end
+  end
+
+  test "semicolon dot segment and double encoding are refused" do
+    let a = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/..;/admin", None, Nil, "")
+    let b = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/%252e%252e/admin", None, Nil, "")
+    match (HttpClient.hc_check_request("a.test/v1/weather/", a), HttpClient.hc_check_request("a.test/v1/weather/", b)) do
+    (Err(PathRefused(_)), Err(PathRefused(_))) -> ()
+    _ -> assert false
+    end
+  end
+
   test "out-of-scope request is refused before connecting" do
     let req = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
     match HttpClient.hc_check_request("example.com", req) do

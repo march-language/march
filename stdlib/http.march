@@ -1076,9 +1076,11 @@ mod Http do
   end
 
   doc """
-  Whether the guard will judge a request path at all: no `.` or `..`
-  segment, no `//`, no backslash, no percent-encoded `.`, `/` or backslash.
-  Such a path is refused, not normalized.
+  Whether the guard will judge a request path at all: it starts with `/`,
+  uses only RFC 3986 path characters (no `;`, `?`, `#`, space or control
+  character), every `%` escape is well formed and does not decode to `.`,
+  `/`, backslash, `%` or a control character, and it has no `//` and no
+  `.` or `..` segment. Such a path is refused, not normalized.
 
   ## Examples
 
@@ -1088,10 +1090,38 @@ mod Http do
       false
   """
   fn scope_path_ok(p) do
-    let l = string_to_lowercase(p)
-    not(string_contains(p, "\\")) && not(string_contains(p, "//"))
-      && not(string_contains(l, "%2e")) && not(string_contains(l, "%2f"))
-      && not(string_contains(l, "%5c")) && scope_no_dot_segs(string_split(p, "/"))
+    string_starts_with(p, "/") && not(string_contains(p, "//"))
+      && scope_path_chars(p, 0, string_byte_length(p))
+      && scope_no_dot_segs(string_split(p, "/"))
+  end
+
+  -- Only RFC 3986 path characters; a `%` must be a well-formed escape that
+  -- does not decode to `.`, `/`, `\`, `%` or a control character. Agrees with
+  -- `path_ok` in lib/caps/host_scope.ml.
+  pfn scope_path_chars(p, i, n) do
+    if i >= n do true
+    else do
+      let c = string_slice(p, i, 1)
+      if c == "%" do
+        if i + 2 <= n - 1 && scope_hex_ok(string_to_lowercase(string_slice(p, i + 1, 2))) do
+          scope_path_chars(p, i + 3, n)
+        else false
+        end
+      else if c != "" && string_contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$&'()*+,=:@/", c) do
+        scope_path_chars(p, i + 1, n)
+      else false
+      end end
+    end
+    end
+  end
+
+  pfn scope_hex_ok(h) do
+    let digits = "0123456789abcdef"
+    string_byte_length(h) == 2
+      && string_contains(digits, string_slice(h, 0, 1))
+      && string_contains(digits, string_slice(h, 1, 1))
+      && not(string_starts_with(h, "0")) && not(string_starts_with(h, "1"))
+      && h != "2e" && h != "2f" && h != "5c" && h != "25" && h != "7f"
   end
 
   -- An entry `[!]host[:port][/path/][@m+m]` as (no_redirects, host, path, methods).

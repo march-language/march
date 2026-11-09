@@ -46,16 +46,36 @@ let strip_query (p : string) : string =
   let cut c s = match String.index_opt s c with Some i -> String.sub s 0 i | None -> s in
   cut '#' (cut '?' p)
 
-let lower_contains (s : string) (sub : string) = contains (String.lowercase_ascii s) sub
+(* A request path the guard will judge at all.  An ALLOWLIST, not a
+   denylist: only RFC 3986 path characters (no `;`, no `?`, no `#`), and a
+   `%` must be a well-formed escape that does not decode to `.`, `/`, `\`,
+   `%` (double encoding) or a control character.  Then no `//` and no `.` or
+   `..` segment.  Refused, not normalized: a server may resolve these
+   differently from us, and CR/LF/space would let a path smuggle a second
+   request onto the wire.  Must agree with `Http.scope_path_ok`. *)
+let path_char c =
+  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || is_digit c
+  || String.contains "-._~!$&'()*+,=:@/" c
 
-(* Refused, not normalized: a server may resolve these differently from us. *)
+let hex_ok (h : string) : bool =
+  let hexd c = is_digit c || (c >= 'a' && c <= 'f') in
+  String.length h = 2
+  && hexd h.[0] && hexd h.[1]
+  && h.[0] <> '0' && h.[0] <> '1'
+  && not (List.mem h [ "2e"; "2f"; "5c"; "25"; "7f" ])
+
 let path_ok (p : string) : bool =
-  let p = strip_query p in
-  (not (String.contains p '\\'))
+  let n = String.length p in
+  let rec chars i =
+    if i >= n then true
+    else if p.[i] = '%' then
+      i + 2 <= n - 1 && hex_ok (String.lowercase_ascii (String.sub p (i + 1) 2))
+      && chars (i + 3)
+    else path_char p.[i] && chars (i + 1)
+  in
+  n > 0 && p.[0] = '/'
   && (not (contains p "//"))
-  && (not (lower_contains p "%2e"))
-  && (not (lower_contains p "%2f"))
-  && (not (lower_contains p "%5c"))
+  && chars 0
   && List.for_all (fun seg -> seg <> "." && seg <> "..") (String.split_on_char '/' p)
 
 let path_segments (p : string) : string list =
@@ -361,7 +381,11 @@ let url_path_of_literal ~(prefix : bool) (s : string) : string option =
       match String.index_opt rest '/' with
       | None -> if prefix then None else Some "/"
       | Some i ->
-        let p = strip_query (String.sub rest i (String.length rest - i)) in
+        (* As Http.parse_url: the path runs to the first `?`; a `#` stays. *)
+        let p =
+          let raw = String.sub rest i (String.length rest - i) in
+          match String.index_opt raw '?' with Some q -> String.sub raw 0 q | None -> raw
+        in
         if prefix then
           match String.rindex_opt p '/' with
           | Some j -> Some (String.sub p 0 (j + 1))
