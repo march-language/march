@@ -22,6 +22,7 @@ mod HttpClient do
     | RecvError(String)
     | ConnParseError(String)
     | Closed
+    | Refused(String)
 
   type HttpError =
     HttpTransportError(TransportError)
@@ -30,6 +31,7 @@ mod HttpClient do
     | OutOfScope(String)
     | RedirectRefused(String)
     | MethodRefused(String)
+    | PathRefused(String)
 
   -- Step entry types: wrap a name + function
   type RequestStepEntry = RequestStepEntry(String, a)
@@ -417,107 +419,11 @@ mod HttpClient do
   --
   -- A module that declares `needs IO.NetConnect("host")` has its HttpClient
   -- calls rewritten by the compiler to the private `*_scoped` variants
-  -- below, which receive the module's scope as a string: "" for any host,
-  -- otherwise ","-separated host patterns (`host`, `host:port`, `*.suffix`),
-  -- each prefixed with "!" when the declaration says `no_redirects`.  These
-  -- helpers check the destinations the client decides on by itself: a
-  -- redirect's target and the host after request steps.  The matching must
-  -- agree with lib/caps/host_scope.ml (test/test_host_scope.ml compares them).
+  -- below, which receive the module's scope as a string (format and matcher:
+  -- the scope section of stdlib/http.march).  These helpers check the
+  -- destinations the client decides on by itself: a redirect's target and
+  -- the request after request steps.
   -- -----------------------------------------------------------------------
-
-  pfn hc_norm_host(h) do
-    let l = string_to_lowercase(h)
-    if string_ends_with(l, ".") do string_slice(l, 0, string_byte_length(l) - 1)
-    else l
-    end
-  end
-
-  -- A host the guard will vouch for: letters, digits, `-` and `.`, or a
-  -- bracketed IPv6 literal. Anything else (a NUL byte ends the C string the
-  -- resolver sees) could connect somewhere the pattern match did not describe.
-  pfn hc_valid_host(h) do
-    if string_starts_with(h, "[") do
-      string_ends_with(h, "]") && hc_all_chars(h, 1, string_byte_length(h) - 1, true)
-    else string_byte_length(h) > 0 && hc_all_chars(h, 0, string_byte_length(h), false)
-    end
-  end
-
-  pfn hc_all_chars(h, i, stop, v6) do
-    if i >= stop do true
-    else do
-      let c = string_slice(h, i, 1)
-      let lc = string_to_lowercase(c)
-      let ok =
-        string_contains("abcdefghijklmnopqrstuvwxyz0123456789-.", lc) && c != ""
-        || (v6 && (c == ":"))
-      if ok do hc_all_chars(h, i + 1, stop, v6) else false end
-    end
-    end
-  end
-
-  pfn hc_split_port(body) do
-    if string_starts_with(body, "[") do
-      match string_index_of(body, "]") do
-      None -> (body, None)
-      Some(i) -> do
-        let rest = string_slice(body, i + 1, string_byte_length(body) - i - 1)
-        let h = string_slice(body, 0, i + 1)
-        if string_starts_with(rest, ":") do
-          (h, string_to_int(string_slice(rest, 1, string_byte_length(rest) - 1)))
-        else (h, None)
-        end
-      end
-      end
-    else
-      match string_last_index_of(body, ":") do
-      None -> (body, None)
-      Some(i) ->
-        (string_slice(body, 0, i),
-         string_to_int(string_slice(body, i + 1, string_byte_length(body) - i - 1)))
-      end
-    end
-  end
-
-  pfn hc_pattern_matches(body, host, port) do
-    match hc_split_port(body) do
-    (hpart, pport) -> do
-      let port_ok = match pport do
-        None -> true
-        Some(p) -> p == port
-        end
-      let h = hc_norm_host(host)
-      let pat = hc_norm_host(hpart)
-      if not(port_ok) do false
-      else if string_starts_with(pat, "*.") do
-        let suffix = string_slice(pat, 1, string_byte_length(pat) - 1)
-        string_byte_length(h) > string_byte_length(suffix) && string_ends_with(h, suffix)
-      else h == pat
-      end end
-    end
-    end
-  end
-
-  -- An entry is `[!]host[@get+head]`; `meth` "" means "any method will do".
-  pfn hc_any_entry(entries, host, port, only_no_redirects, meth) do
-    match entries do
-    Nil -> false
-    Cons(e, rest) -> do
-      let nr = string_starts_with(e, "!")
-      let e1 = if nr do string_slice(e, 1, string_byte_length(e) - 1) else e end
-      let (body, ms) = match string_index_of(e1, "@") do
-        None -> (e1, "")
-        Some(i) -> (string_slice(e1, 0, i),
-                    string_slice(e1, i + 1, string_byte_length(e1) - i - 1))
-        end
-      let covers = body == "" || hc_pattern_matches(body, host, port)
-      let method_ok =
-        meth == "" || ms == "" || List.member(string_split(ms, "+"), meth)
-      if covers && method_ok && (not(only_no_redirects) || nr) do true
-      else hc_any_entry(rest, host, port, only_no_redirects, meth)
-      end
-    end
-    end
-  end
 
   doc """
   Whether a host-scope string admits `host` on `port`. `""` admits
@@ -531,9 +437,7 @@ mod HttpClient do
       false
   """
   fn hc_scope_permits(spec, host, port) do
-    if spec == "" do true
-    else hc_any_entry(string_split(spec, ","), host, port, false, "")
-    end
+    Http.scope_permits_request(spec, host, port, "", "")
   end
 
   doc """
@@ -549,41 +453,7 @@ mod HttpClient do
       true
   """
   fn hc_scope_permits_method(spec, host, port, meth) do
-    if spec == "" do true
-    else hc_any_entry(string_split(spec, ","), host, port, false, meth)
-    end
-  end
-
-  pfn hc_method_lower(m) do
-    match m do
-    Get -> "get"
-    Post -> "post"
-    Put -> "put"
-    Patch -> "patch"
-    Delete -> "delete"
-    Head -> "head"
-    Options -> "options"
-    Trace -> "trace"
-    Connect -> "connect"
-    -- A non-standard verb never names a standard one: "!" cannot appear in a
-    -- scope's method list, so it matches no `methods(...)` entry.
-    Other(_) -> "!other"
-    end
-  end
-
-  pfn hc_method_upper(m) do
-    match m do
-    Get -> "GET"
-    Post -> "POST"
-    Put -> "PUT"
-    Patch -> "PATCH"
-    Delete -> "DELETE"
-    Head -> "HEAD"
-    Options -> "OPTIONS"
-    Trace -> "TRACE"
-    Connect -> "CONNECT"
-    Other(x) -> x
-    end
+    Http.scope_permits_request(spec, host, port, meth, "")
   end
 
   doc """
@@ -598,17 +468,15 @@ mod HttpClient do
       false
   """
   fn hc_scope_forbids_redirects(spec, host, port) do
-    if spec == "" do false
-    else hc_any_entry(string_split(spec, ","), host, port, true, "")
-    end
+    Http.scope_forbids_redirects(spec, host, port)
   end
 
   pfn hc_req_port(req) do hc_effective_port(Http.scheme(req), Http.port(req)) end
 
   doc """
-  `Ok(())` when the scope admits the request's host, effective port and
-  method; else `Err(OutOfScope(host))`, or `Err(MethodRefused("POST host"))`
-  when only the method is refused. Checked before every request a scoped
+  `Ok(())` when the scope admits the request's host, effective port, method
+  and path; else `Err(OutOfScope(host))`, `Err(MethodRefused("POST host"))`
+  or `Err(PathRefused("host/path"))`. Checked before every request a scoped
   call sends.
 
   ## Examples
@@ -617,14 +485,12 @@ mod HttpClient do
       Err(OutOfScope("foo.com"))
   """
   fn hc_check_request(spec, req) do
-    let host = Http.host(req)
-    let port = hc_req_port(req)
-    let m = Http.method(req)
-    if spec != "" && not(hc_valid_host(host)) do Err(OutOfScope(host))
-    else if not(hc_scope_permits(spec, host, port)) do Err(OutOfScope(host))
-    else if hc_scope_permits_method(spec, host, port, hc_method_lower(m)) do Ok(())
-    else Err(MethodRefused(hc_method_upper(m) ++ " " ++ host))
-    end end end
+    match Http.scope_check_request(spec, req) do
+    Ok(_) -> Ok(())
+    Err(HostRefused(h)) -> Err(OutOfScope(h))
+    Err(MethodNotAllowed(m)) -> Err(MethodRefused(m))
+    Err(PathNotAllowed(p)) -> Err(PathRefused(p))
+    end
   end
 
   doc """

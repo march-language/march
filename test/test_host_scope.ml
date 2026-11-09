@@ -358,6 +358,46 @@ let test_method_matcher_agrees () =
          (string_of_bool want) line)
     method_corpus got
 
+let path_corpus =
+  [ ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/today");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weatherman");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/../admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/%2e%2e/x");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather//x");
+    ("a.test/v1/weather/@get", "a.test", 443, "post", "/v1/weather/x");
+    ("a.test/v1/x/,a.test/v2/", "a.test", 443, "get", "/v2/y");
+    ("a.test/v1/x/,a.test/v2/", "a.test", 443, "get", "/v1/y");
+    ("a.test", "a.test", 443, "get", "/anything/../x");
+    ("", "a.test", 443, "get", "/x");
+    ("a.test:8443/v1/", "a.test", 443, "get", "/v1/x") ]
+
+let test_path_matcher_agrees () =
+  let lines =
+    List.map
+      (fun (spec, host, port, m, path) ->
+         Printf.sprintf
+           "    println(if Http.scope_permits_request(%s, %s, %d, %s, %s) do \"true\" else \"false\" end)"
+           (march_str spec) (march_str host) port (march_str m) (march_str path))
+      path_corpus
+  in
+  let src =
+    Printf.sprintf
+      "mod PDiff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      (String.concat "\n" lines)
+  in
+  let got = run_march src in
+  Alcotest.(check int) "one line per case" (List.length path_corpus) (List.length got);
+  List.iter2
+    (fun (spec, host, port, m, path) line ->
+       let want =
+         H.permits_request (H.decode_spec spec) ~host ~port ~meth:(Some m) ~path:(Some path)
+       in
+       Alcotest.(check string)
+         (Printf.sprintf "%S admits %s %s%s" spec m host path)
+         (string_of_bool want) line)
+    path_corpus got
+
 let url_corpus =
   [ "http://example.com/"; "https://example.com"; "https://example.com:8443/x";
     "https://Example.COM./x"; "http://203.0.113.7:8080/a?b=c"; "https://a-b.c-d.test/p" ]
@@ -467,6 +507,8 @@ let decl_tests =
     Alcotest.test_case "matcher agrees with the stdlib" `Slow test_matcher_agrees;
     Alcotest.test_case "method matcher agrees with the stdlib" `Slow
       test_method_matcher_agrees;
+    Alcotest.test_case "path matcher agrees with the stdlib" `Slow
+      test_path_matcher_agrees;
     Alcotest.test_case "URL parser agrees with Http.parse_url" `Slow
       test_url_parser_agrees;
   ]
