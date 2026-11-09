@@ -18,6 +18,10 @@ mod HttpServer do
   -- (typecheck.ml builtin_cap_table) is satisfied here rather than warning at
   -- every call site inside the module.
   needs IO.NetListen
+  -- HTTPS adds no module-level `needs`: a module importing HttpServer must
+  -- declare all of them (import_cap_missing), and Bastion/forgepm declare
+  -- only IO.NetListen. The TLS builtins (configure, reload) are classified
+  -- IO.NetListen, and the file-reading ACME plug lives in HttpAcme.
 
   -- Upgrade type for WebSocket connections
   type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
@@ -374,12 +378,35 @@ mod HttpServer do
     end
   end
 
+  -- Where an HTTPS server's certificate and private key come from:
+  -- TlsFiles(cert_path, key_path) reads PEM files (a full chain, leaf first,
+  -- such as certbot's fullchain.pem, and its key); TlsPem(cert, key) takes
+  -- the PEM text itself.
+  type TlsSource = TlsFiles(String, String) | TlsPem(String, String)
+
+  -- HTTPS and timeout options, set by the builders below.
+  -- The tls field holds the call that configures TLS (built by `tls`, given
+  -- the poll interval and the bootstrap flag), not the TlsSource itself, so
+  -- a plain-HTTP program never references the TLS builtin and links no
+  -- OpenSSL (runtime/march_tls_ops.h).
+  type ServerOpts = ServerOpts(
+    Option((Int, Int) -> Result(Int, String)),   -- tls (None = plain HTTP)
+    Int,                 -- TLS handshake timeout secs (default 10)
+    Int,                 -- certificate file poll interval secs (default 60, 0 = off)
+    Bool,                -- wait for a missing certificate (bootstrap mode)
+    Int,                 -- header timeout secs (default 30)
+    Int,                 -- body/response progress timeout secs (default 30)
+    Int,                 -- extra plain-HTTP listener port (0 = none)
+    List(Conn -> Conn)   -- its plugs
+  )
+
   -- Server config type
   type Server = Server(
     Int,                 -- port
     List(Conn -> Conn),  -- pipeline (list of plugs)
     Int,                 -- max_connections (default 1000)
-    Int                  -- idle_timeout_secs (default 60)
+    Int,                 -- idle_timeout_secs (default 60)
+    ServerOpts           -- HTTPS and timeouts
   )
 
   doc """
@@ -394,7 +421,7 @@ mod HttpServer do
       |> HttpServer.listen()
   """
   fn new(port) do
-    Server(port, Nil, 1000, 60)
+    Server(port, Nil, 1000, 60, ServerOpts(None, 10, 60, false, 30, 30, 0, Nil))
   end
 
   doc """
@@ -403,22 +430,333 @@ mod HttpServer do
   """
   fn plug(server, p) do
     match server do
-    Server(port, plugs, mc, it) ->
-      Server(port, List.append(plugs, Cons(p, Nil)), mc, it)
+    Server(port, plugs, mc, it, o) ->
+      Server(port, List.append(plugs, Cons(p, Nil)), mc, it, o)
     end
   end
 
   doc "Set the maximum number of concurrent connections (default 1000)."
   fn max_connections(server, n) do
     match server do
-    Server(port, plugs, _, it) -> Server(port, plugs, n, it)
+    Server(port, plugs, _, it, o) -> Server(port, plugs, n, it, o)
     end
   end
 
-  doc "Set the idle keep-alive timeout in seconds (default 60)."
+  doc """
+  Close a keep-alive connection after `secs` seconds with no request in
+  progress (default 60). Applies to both server modes; an upgraded WebSocket
+  is not subject to it.
+  """
   fn idle_timeout(server, secs) do
     match server do
-    Server(port, plugs, mc, _) -> Server(port, plugs, mc, secs)
+    Server(port, plugs, mc, _, o) -> Server(port, plugs, mc, secs, o)
+    end
+  end
+
+  pfn opts(server) do
+    match server do
+    Server(_, _, _, _, o) -> o
+    end
+  end
+
+  pfn with_opts(server, o) do
+    match server do
+    Server(port, plugs, mc, it, _) -> Server(port, plugs, mc, it, o)
+    end
+  end
+
+  doc """
+  Serve HTTPS on the server's port with the certificate and key from `src`.
+  `listen` refuses to start (it panics, naming the file and the reason)
+  when they cannot be loaded or do not match, unless `tls_wait_for_cert`
+  was set and the files are merely missing. An expired certificate at
+  startup is served with a warning. With `TlsFiles`, the files are re-read
+  every `tls_poll_interval` seconds and a renewed pair is picked up without
+  a restart. Needs a compiled build (`march --compile`, `forge build`).
+
+  ## Examples
+
+      HttpServer.new(443)
+      |> HttpServer.tls(HttpServer.TlsFiles(
+           "/etc/letsencrypt/live/example.com/fullchain.pem",
+           "/etc/letsencrypt/live/example.com/privkey.pem"))
+      |> HttpServer.plug(router)
+      |> HttpServer.listen()
+  """
+  fn tls(server, src) do
+    match opts(server) do
+    ServerOpts(_, hs, poll, wait, hdr, prog, pp, pplugs) -> do
+      let configure = match src do
+        TlsFiles(c, k) -> tls_configure_call(0, c, k)
+        TlsPem(c, k) -> tls_configure_call(1, c, k)
+      end
+      with_opts(server, ServerOpts(Some(configure), hs, poll, wait, hdr, prog, pp, pplugs))
+    end
+    end
+  end
+
+  -- The closure `tls` stores: configure TLS from (kind, a, b) given the poll
+  -- interval and the bootstrap flag. It captures the two strings themselves
+  -- and binds the builtin's result before returning it: the first version
+  -- matched a captured TlsSource and returned the call directly, and ASAN
+  -- caught the closure freeing the captured path strings before the builtin
+  -- (which borrows them) read them (specs/todos/2026-11-06-closure-borrowed-
+  -- tail-call-uaf.md).
+  pfn tls_configure_call(kind, a, b) do
+    fn pw ->
+      match pw do
+      (poll_secs, wait_flag) ->
+        let r = http_server_tls_configure(kind, a, b, poll_secs, wait_flag)
+        r
+      end
+  end
+
+  doc "Close a connection whose TLS handshake has not finished within `secs` seconds (default 10)."
+  fn tls_handshake_timeout(server, secs) do
+    match opts(server) do
+    ServerOpts(t, _, poll, wait, hdr, prog, pp, pplugs) ->
+      with_opts(server, ServerOpts(t, secs, poll, wait, hdr, prog, pp, pplugs))
+    end
+  end
+
+  doc """
+  Re-read the `TlsFiles` certificate pair every `secs` seconds (default 60)
+  and install it when its content changed. `0` turns polling off;
+  `reload_tls` still works.
+  """
+  fn tls_poll_interval(server, secs) do
+    match opts(server) do
+    ServerOpts(t, hs, _, wait, hdr, prog, pp, pplugs) ->
+      with_opts(server, ServerOpts(t, hs, secs, wait, hdr, prog, pp, pplugs))
+    end
+  end
+
+  doc """
+  Bootstrap mode for a first certificate: when the `TlsFiles` do not exist
+  yet, `listen` starts anyway, serving only the `plain_listener` (where an
+  ACME challenge can be answered), and binds the HTTPS port as soon as the
+  poller or `reload_tls` installs a valid pair. Files that exist but are
+  invalid still stop `listen`.
+  """
+  fn tls_wait_for_cert(server) do
+    match opts(server) do
+    ServerOpts(t, hs, poll, _, hdr, prog, pp, pplugs) ->
+      with_opts(server, ServerOpts(t, hs, poll, true, hdr, prog, pp, pplugs))
+    end
+  end
+
+  doc "Close a connection that has not sent a request's complete headers within `secs` seconds of its first byte (default 30)."
+  fn header_timeout(server, secs) do
+    match opts(server) do
+    ServerOpts(t, hs, poll, wait, _, prog, pp, pplugs) ->
+      with_opts(server, ServerOpts(t, hs, poll, wait, secs, prog, pp, pplugs))
+    end
+  end
+
+  doc """
+  Close a connection when reading a request body or writing a response makes
+  no progress for `secs` seconds (default 30). A slow transfer that keeps
+  moving is never cut.
+  """
+  fn progress_timeout(server, secs) do
+    match opts(server) do
+    ServerOpts(t, hs, poll, wait, hdr, _, pp, pplugs) ->
+      with_opts(server, ServerOpts(t, hs, poll, wait, hdr, secs, pp, pplugs))
+    end
+  end
+
+  doc """
+  Also serve plain HTTP on `port`, with its own `plugs`, from the same
+  `listen`. Typical use on an HTTPS server: answer ACME challenges and
+  redirect everything else.
+
+  ## Examples
+
+      HttpServer.new(443)
+      |> HttpServer.tls(HttpServer.TlsFiles(cert, key))
+      |> HttpServer.plain_listener(80, [HttpAcme.webroot("/var/www/acme"),
+                                        HttpServer.redirect_to_https(443)])
+      |> HttpServer.plug(router)
+      |> HttpServer.listen()
+  """
+  fn plain_listener(server, port, plugs) do
+    match opts(server) do
+    ServerOpts(t, hs, poll, wait, hdr, prog, _, _) ->
+      with_opts(server, ServerOpts(t, hs, poll, wait, hdr, prog, port, plugs))
+    end
+  end
+
+  doc """
+  Install a new certificate and key on the running HTTPS server. New
+  connections use it; open ones keep the one they started with. A pair that
+  does not load, does not match, or has expired is refused with `Err` and
+  the current certificate stays. Needs `IO.NetListen`, like serving.
+  """
+  fn reload_tls(src) do
+    let r = match src do
+      TlsFiles(c, k) -> http_server_reload_tls(0, c, k)
+      TlsPem(c, k) -> http_server_reload_tls(1, c, k)
+    end
+    match r do
+    Ok(_) -> Ok(())
+    Err(e) -> Err(e)
+    end
+  end
+
+  doc "`\"https\"` when the conn arrived over TLS, else `\"http\"`."
+  fn scheme(conn) do
+    if http_conn_is_tls(fd(conn)) do "https" else "http" end
+  end
+
+  -- ── Plugs for an HTTPS deployment ────────────────────────────────────
+
+  pfn acme_challenge_prefix() do
+    "/.well-known/acme-challenge/"
+  end
+
+  -- The rest of the path when it is under the ACME challenge prefix.
+  pfn acme_token(conn) do
+    let p = path(conn)
+    let pre = acme_challenge_prefix()
+    if string_starts_with(p, pre) do
+      let n = string_byte_length(pre)
+      Some(string_slice(p, n, string_byte_length(p) - n))
+    else
+      None
+    end
+  end
+
+  -- base64url: [A-Za-z0-9_-], non-empty. Anything else (dots, slashes,
+  -- percent escapes) is refused before any lookup or file access.
+  pfn valid_acme_token(t) do
+    let n = string_byte_length(t)
+    fn ok_from(i) do
+      if i >= n do true
+      else
+        let b = string_byte_at(t, i)
+        let good = (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+                   || (b >= 48 && b <= 57) || b == 95 || b == 45
+        if good do ok_from(i + 1) else false end
+      end
+    end
+    n > 0 && ok_from(0)
+  end
+
+  pfn not_found(conn) do
+    conn
+    |> put_resp_header("content-type", "text/plain")
+    |> send_resp(404, "Not Found")
+  end
+
+  doc """
+  A plug that answers ACME HTTP-01 challenges from memory: for
+  `GET /.well-known/acme-challenge/<token>` it calls `lookup(token)` and
+  responds 200 `text/plain` with `Some(key_authorization)`, or 404 for
+  `None`. Tokens outside the base64url alphabet are 404 without a lookup.
+  Other requests pass through untouched.
+
+  ## Examples
+
+      HttpServer.plain_listener(server, 80, [
+        HttpServer.acme_responder(fn token -> Vault.get(challenges, token)),
+        HttpServer.redirect_to_https(443)
+      ])
+  """
+  fn acme_responder(lookup) do
+    fn conn ->
+      match acme_token(conn) do
+      None -> conn
+      Some(t) ->
+        let m = method(conn)
+        if (m == :get || m == :head) && valid_acme_token(t) do
+          match lookup(t) do
+          Some(body) ->
+            conn
+            |> put_resp_header("content-type", "text/plain")
+            |> send_resp(200, body)
+          None -> not_found(conn)
+          end
+        else
+          not_found(conn)
+        end
+      end
+  end
+
+  -- "example.com:8080" -> "example.com", "[::1]:80" -> "[::1]".
+  pfn host_without_port(h) do
+    if string_starts_with(h, "[") do
+      match string_index_of(h, "]") do
+      Some(i) -> string_slice(h, 0, i + 1)
+      None -> h
+      end
+    else
+      match string_last_index_of(h, ":") do
+      Some(i) -> string_slice(h, 0, i)
+      None -> h
+      end
+    end
+  end
+
+  doc """
+  A plug that redirects every request to the same URL over HTTPS on `port`:
+  `https://<Host without its port>[:port unless 443]<path>[?query]`. GET and
+  HEAD get 301; other methods get 308 so the method and body are kept. A
+  request without a `Host` header gets 400. ACME challenge paths
+  (`/.well-known/acme-challenge/`) pass through, so it works before or after
+  `HttpAcme.webroot` in a `plain_listener`.
+
+  ## Examples
+
+      HttpServer.new(443)
+      |> HttpServer.tls(HttpServer.TlsFiles(cert, key))
+      |> HttpServer.plain_listener(80, [HttpServer.redirect_to_https(443)])
+  """
+  fn redirect_to_https(port) do
+    fn conn ->
+      match acme_token(conn) do
+      Some(_) -> conn
+      None ->
+        match get_req_header(conn, "host") do
+        None ->
+          conn
+          |> put_resp_header("content-type", "text/plain")
+          |> send_resp(400, "Bad Request: no Host header")
+        Some(h) ->
+          let port_part = if port == 443 do "" else ":" ++ int_to_string(port) end
+          let qs = query_string(conn)
+          let q = if qs == "" do "" else "?" ++ qs end
+          let m = method(conn)
+          let code = if m == :get || m == :head do 301 else 308 end
+          conn
+          |> put_resp_header("location", "https://" ++ host_without_port(h) ++ port_part ++ path(conn) ++ q)
+          |> send_resp(code, "")
+        end
+      end
+  end
+
+  -- Hand the HTTPS, timeout and plain-listener settings to the runtime
+  -- before the listen builtin reads them. A certificate that cannot be used
+  -- stops the program here, before anything is bound.
+  pfn configure_runtime(o) do
+    match o do
+    ServerOpts(t, hs, poll, wait, hdr, prog, pp, pplugs) -> do
+      match t do
+      None -> ()
+      Some(configure) ->
+        let w = if wait do 1 else 0 end
+        match configure((poll, w)) do
+        Ok(_) -> ()
+        Err(msg) -> panic("HttpServer.listen: " ++ msg)
+        end
+      end
+      http_server_set_timeouts(hs, hdr, prog)
+      if pp > 0 do
+        let plain_fn = fn conn -> run_pipeline(conn, pplugs)
+        http_server_plain_listener(pp, plain_fn)
+      else
+        ()
+      end
+    end
     end
   end
 
@@ -439,7 +777,8 @@ mod HttpServer do
   """
   fn listen(server) do
     match server do
-    Server(port, plugs, mc, it) -> do
+    Server(port, plugs, mc, it, o) -> do
+      configure_runtime(o)
       -- Build a server config heap object for the C runtime:
       -- The C runtime expects (port, max_conns, idle_timeout) at fields 0,1,2.
       -- The pipeline is passed separately.
@@ -471,7 +810,8 @@ mod HttpServer do
   """
   fn spawn_n(server, n) do
     match server do
-    Server(port, plugs, mc, it) -> do
+    Server(port, plugs, mc, it, o) -> do
+      configure_runtime(o)
       let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
       http_server_spawn_n(port, n, mc, it, pipeline_fn)
     end

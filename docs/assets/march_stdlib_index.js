@@ -577,6 +577,15 @@ window.marchModuleIndex = {
     "Uri"
    ]
   },
+  "HttpAcme": {
+   "file": "http_acme.march",
+   "unavailable": null,
+   "uses": [
+    "File",
+    "HttpServer",
+    "IO"
+   ]
+  },
   "HttpClient": {
    "file": "http_client.march",
    "unavailable": null,
@@ -591,9 +600,11 @@ window.marchModuleIndex = {
    "file": "http_server.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "HttpAcme",
     "HttpClient",
     "IO",
-    "List"
+    "List",
+    "Vault"
    ]
   },
   "HttpTransport": {

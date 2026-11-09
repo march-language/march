@@ -3945,16 +3945,23 @@ mod DataFrame do
 
   -- ── Utilities ──────────────────────────────────────────────────────────────
 
+  -- Escape every occurrence of the HTML-special characters (`&` first, so the
+  -- entities the later passes introduce are not escaped again). Each pass must
+  -- be `string_replace_all`: `string_replace` replaces only the first match,
+  -- which left later `<`s raw (an XSS through `to_html`).
   pfn html_esc(s : String) : String do
-    string_replace(string_replace(string_replace(string_replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;")
+    let s1 = string_replace_all(s,  "&", "&amp;")
+    let s2 = string_replace_all(s1, "<", "&lt;")
+    let s3 = string_replace_all(s2, ">", "&gt;")
+    let s4 = string_replace_all(s3, "\"", "&quot;")
+    string_replace_all(s4, "'", "&#39;")
   end
 
   doc """
   Render a DataFrame as an HTML table string: a `<caption>` with the
   dimensions ("N rows x M cols"), a header row of column names and one
-  `<tr>` per row (cells via `value_to_string`). Note: header and cell text
-  is only partially escaped; just the first occurrence of each of `&`,
-  `<`, `>` and `"` is replaced, so do not feed it untrusted text.
+  `<tr>` per row (cells via `value_to_string`). Header and cell text is
+  HTML-escaped: every `&`, `<`, `>`, `"` and `'` becomes an entity.
   The output is detected automatically by the March notebook and displayed
   as a styled table rather than raw text.
   """
