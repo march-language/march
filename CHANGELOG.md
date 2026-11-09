@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
+  methods(get))` limits a module to a path prefix on a host, matched by whole segment
+  (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
+  counts). A path with `.`/`..` segments, `//`, a backslash or a percent-encoded `.`, `/`
+  or backslash is refused rather than normalized. Literal paths are checked at compile time;
+  every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
+  `HttpTransport.Refused`). The scope matcher is now public in `Http`
+  (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
 - **Host and method scopes on network access.** `needs IO.NetConnect("api.example.com",
   methods(get, post))` limits a module, and everything it reaches, to the hosts and HTTP
   methods it names; `no_redirects` refuses redirects. Checked at compile time and

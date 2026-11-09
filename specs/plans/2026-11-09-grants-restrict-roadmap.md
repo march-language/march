@@ -8,7 +8,7 @@ starts, against the code as it is then. Each phase merges on its own.
 
 | # | Phase | Plan | Depends on | Ships alone? |
 |---|---|---|---|---|
-| 1 | Path scopes on `IO.NetConnect` | `2026-11-09-path-scopes-plan.md` | host scopes (#1213) | yes: a module may scope to a path today |
+| 1 | Path scopes on `IO.NetConnect` **(done 2026-11-09, PR #1215)** | `2026-11-09-path-scopes-plan.md` | host scopes (#1213) | yes: a module may scope to a path today |
 | 2 | Every capability operation returns `Result` (+ `forge fix` migration) | to write | — | yes (breaking, pre-1.0) |
 | 3 | Opaque file and socket handles | to write | — | yes |
 | 4 | Run-time authority context in every runtime (C, interpreter, JS) + cross-backend conformance suite; module-level scoped `needs` become frames | to write | 2, 3 | yes: module scopes become run-time enforced everywhere |

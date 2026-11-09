@@ -602,8 +602,63 @@ end
 |})
 
 
+(* ── Path scopes (path-scopes plan, Task 4) ────────────────────────── *)
+
+let path_needs = {|needs IO.NetConnect("example.com/v1/weather/", methods(get))|}
+
+let test_literal_path_in_scope_ok () =
+  accepts "literal path inside the prefix"
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/weather/today"|})))
+
+let test_literal_path_outside_rejected () =
+  rejects "literal path outside the prefix" ~code:"cap_host_scope" ~mentions:[ "/v1/admin" ]
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/admin"|})))
+
+let test_prefix_inside_ok () =
+  accepts "literal prefix inside the prefix"
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/weather/" ++ p|})))
+
+let test_prefix_leaving_rejected () =
+  rejects "literal prefix already outside" ~code:"cap_host_scope" ~mentions:[ "/v2/" ]
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v2/" ++ p|})))
+
+let test_simple_get_rewritten () =
+  let rc, out =
+    run_compiler ~flags:"--dump-tir"
+      (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/weather/" ++ p|})))
+  in
+  if rc <> 0 then Alcotest.failf "dump-tir failed:\n%s" out;
+  if not (contains out {|"example.com/v1/weather/@get"|}) then
+    Alcotest.fail "simple_get was not given the module's scope (no spec literal in the TIR)"
+
+let test_helper_unknown_path_unproven () =
+  rejects "path guard cannot follow through a helper" ~code:"cap_host_unproven"
+    (program ~a_needs:path_needs ~extra:annotated_fetch
+       (fn_go {|C.fetch("https://example.com/v1/weather/" ++ p)|}))
+
+let test_raw_to_path_scoped_unproven () =
+  rejects "raw tcp_connect to a path-scoped host" ~code:"cap_host_unproven"
+    (program ~a_needs:path_needs
+       (fn_go
+          {|match tcp_connect("example.com", 443) do
+        Ok(_) -> p
+        Err(_) -> "err"
+      end|}))
+
+let test_host_only_unchanged () =
+  accepts "host-only scope, parameter-free literal, as before"
+    (program (fn_go (simple_get {|"https://example.com/anything/at/all"|})))
+
 let tests =
   [
+    Alcotest.test_case "literal path in scope ok" `Slow test_literal_path_in_scope_ok;
+    Alcotest.test_case "literal path outside rejected" `Slow test_literal_path_outside_rejected;
+    Alcotest.test_case "prefix inside ok" `Slow test_prefix_inside_ok;
+    Alcotest.test_case "prefix leaving rejected" `Slow test_prefix_leaving_rejected;
+    Alcotest.test_case "simple_get rewritten" `Slow test_simple_get_rewritten;
+    Alcotest.test_case "helper unknown path unproven" `Slow test_helper_unknown_path_unproven;
+    Alcotest.test_case "raw to path-scoped host unproven" `Slow test_raw_to_path_scoped_unproven;
+    Alcotest.test_case "host-only unchanged" `Slow test_host_only_unchanged;
     Alcotest.test_case "stdlib-named user module checked" `Slow test_stdlib_named_user_module_checked;
     Alcotest.test_case "prelude-named entry fn checked" `Slow test_prelude_named_entry_fn_checked;
     Alcotest.test_case "NUL host rejected" `Slow test_nul_host_rejected;
