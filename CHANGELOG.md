@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Host and method scopes on network access.** `needs IO.NetConnect("api.example.com",
+  methods(get, post))` limits a module, and everything it reaches, to the hosts and HTTP
+  methods it names; `no_redirects` refuses redirects. Checked at compile time and
+  fail-closed: a destination the compiler cannot see is refused (`cap_host_scope`,
+  `cap_host_unproven`). Redirects and request-step rewrites are checked at run time by
+  `HttpClient` (`OutOfScope`, `MethodRefused`, `RedirectRefused`). A helper that takes
+  the URL as a parameter marks it `@[net_dest(url)]`. See "Host and method scopes" in the
+  [capabilities reference](docs/capabilities.md).
 - **Refinement aliases, with value parameters.** `type Pos = {Int | _ > 0}` and
   `type Vec(a, n : Int) = {List(a) | len(_) == n}` name a refinement; each use (`Vec(Int, n)`,
   `Vec(Int, 3)`, `Vec(Int, n + 1)`) is the refinement with its arguments substituted, in

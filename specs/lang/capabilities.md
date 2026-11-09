@@ -55,6 +55,7 @@ callers never have to satisfy. See [The grant](#grant).
 - [What the compiler tells you](#what-the-compiler-tells-you)
 - [The capability upper limit](#cap-strict)
 - [The grant: `main`'s parameter bounds the whole program](#grant)
+- [Host and method scopes on IO.NetConnect](#host-scopes)
 - [When not to use IO caps](#when-not-to-use-io-caps)
 - [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
@@ -677,6 +678,72 @@ made once where the bounded code is written. It is never part of a type and neve
 by a `when Iface(a)` constraint, so no caller, generic function or signature has to
 declare anything because of it. A call through an interface is charged what the impls in
 the program actually reach, exactly as before.
+
+### Host and method scopes on IO.NetConnect
+{: #host-scopes}
+
+A module can narrow outbound network access to the hosts it may reach, and to the HTTP
+methods it may use on them:
+
+```march
+mod Billing do                          -- your own code
+  needs IO.NetConnect("api.stripe.com", methods(get, post))
+end
+
+mod Weather do                          -- wraps a dependency: read only
+  needs IO.NetConnect("api.weather.test", methods(get), no_redirects)
+end
+```
+
+`Billing` may reach only `api.stripe.com`, with GET or POST; `Weather` only
+`api.weather.test`, with GET, and never follows a redirect. Scopes are per module and per
+host: each module's own `needs` lines decide.
+
+**Scope syntax.** A host (`example.com`), a host and port (`example.com:8443`), any
+subdomain (`*.example.com`, which does not include `example.com` itself), or an IP
+literal. No scheme, path or userinfo; host names are compared case-insensitively. A URL
+with no port uses its scheme's default (80 or 443). Two options may follow, in either
+order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete`,
+`options`, and `no_redirects`. Options alone mean any host:
+`needs IO.NetConnect(methods(get))`. Without `methods(...)` every method is allowed, and
+unscoped `needs IO.NetConnect` still means any host. Scopes are accepted on
+`IO.NetConnect` only; it also bounds the TLS connections built on it.
+
+**What is checked, at compile time.** In a scoped module, every network call must have a
+destination the compiler can see, inside the scope, with an allowed method; anything else
+fails the build. The check is fail-closed:
+
+- A literal URL, or a literal prefix that ends its host with `/`
+  (`"https://api.stripe.com/" ++ path`), is checked against the scope. Without the `/`
+  the rest could extend the host (`".evil.test/"`), so it is refused.
+- A URL from a parameter, a computed string, a socket handle (`tcp_send_all(fd, ...)`,
+  `tls_connect`), or a call the compiler cannot follow is refused (`cap_host_unproven`).
+- The method comes from the call: `HttpClient.get`, `HttpTransport.simple_get` are GET,
+  `HttpClient.post` POST, `put_request` PUT, `delete` DELETE. A raw `tcp_connect` shows
+  no method, so it is allowed only to a host declared without `methods(...)`.
+- The scope covers everything the module reaches, including calls into your other modules
+  and dependencies. A helper that takes the URL as a parameter must say so with
+  `@[net_dest(url)]`, and is then checked to pass that parameter straight to the
+  connection; its caller's argument is checked against the caller's scope. A helper with
+  a fixed URL is checked as if its call were written in the scoped module. A helper in
+  another module that makes `HttpClient` calls is refused for now (see below).
+- A function you hand in as a parameter is charged to whoever wrote it, as elsewhere on
+  this page: a closure built in an unscoped `main` may be called by a scoped module.
+
+**What is checked, at run time.** A redirect's target and a request rewritten by client
+request steps are only known when the program runs. In a scoped module the compiler
+routes `HttpClient` calls through a variant that receives the module's scope, and the
+client refuses, before connecting, a request outside it: `HttpClient.OutOfScope(host)`,
+`MethodRefused("POST host")`, or under `no_redirects` `RedirectRefused(host)`.
+
+**Limits.** Host scopes are checked on the `--compile` path only, like the
+[upper limit](#cap-strict); `--check` and the interpreter do not run them. They bound the
+name a module connects to, not the address it resolves to, and no OS sandbox enforces
+them: what C code reached through `extern` does is outside them, as it is outside every
+check here. A scoped module cannot call a stdlib server API (its socket handles are plain
+integers) or another module's `HttpClient`-calling helper; move those to an unscoped
+module. A scope on `main`'s grant, which would bound dependencies' own code as well, is
+planned (`specs/todos/2026-11-09-host-scope-phase-2.md`).
 
 ### When *not* to use IO caps
 

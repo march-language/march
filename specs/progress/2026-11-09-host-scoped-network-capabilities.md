@@ -1,15 +1,23 @@
-`[P2]` Host-scoped network capabilities: `needs IO.NetConnect("example.com")`.
+`[P2]` Host-scoped network capabilities: `needs IO.NetConnect("example.com")` — phase 1 DONE (2026-11-09).
 
-Design: `specs/2026-11-09-host-scoped-network-capabilities-design.md` (not yet approved).
+Design: `specs/2026-11-09-host-scoped-network-capabilities-design.md`.
+Plan: `specs/plans/2026-11-09-host-scoped-network-capabilities-plan.md`.
 
-Today a network capability cannot be narrowed to a host: `needs IO.NetConnect("…")` is
-`[invalid_cap_scope]`, so a module that talks to one API holds the same authority as one
-that talks to any host. The only separation available is handing each module a closure
-built by a module that holds the unscoped capability.
+## What shipped
 
-## Done when
+- Host scopes on `IO.NetConnect` (host, host:port, `*.suffix`, IP literal), with
+  `methods(get, head, post, put, patch, delete, options)` and `no_redirects` options;
+  parser, tree-sitter and formatter support (options stored in the scope string as
+  `"<host>;<option>;..."`).
+- `lib/caps/host_scope.ml` (algebra), `lib/caps/net_dest.ml` (where each network
+  builtin's destination comes from; `@[net_dest(param)]` for functions).
+- `lib/tir/net_scope.ml`: the compile-time check on post-lowering TIR (fail-closed;
+  follows calls into other modules; checks `@[net_dest]` honesty) and the rewrite of a
+  scoped module's redirect-capable `HttpClient` calls to private `*_scoped` twins.
+- `HttpClient` run-time guard: request host and method after request steps, redirect
+  targets, `no_redirects` (`OutOfScope`, `MethodRefused`, `RedirectRefused`).
+- Tests: `test/test_host_scope.ml` (algebra, declarations, OCaml-vs-March matcher and URL
+  parser differential), `test/test_cap_net_scope.ml` (end to end through `--compile`),
+  `test/stdlib/test_http_client.march`.
 
-Phase 1 of the design is in: module `A` scoped to `example.com` and module `B` scoped to
-`foo.com` each build when they reach only their own host, fail to build when they reach
-the other's (directly, through another user module, or with a destination the compiler
-cannot see), and a cross-host redirect from a scoped call is refused at run time.
+Follow-ups: `specs/todos/2026-11-09-host-scope-phase-2.md`.

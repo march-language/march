@@ -1,7 +1,7 @@
 # Host-scoped network capabilities
 
 **Date:** 2026-11-09
-**Status:** design, not yet approved
+**Status:** approved 2026-11-09; phase 1 implemented (with method scopes). Implementation notes: the check runs on the `--compile` path only; violations point at the module, not the call; scoped per-function bounds and the guard through another module's helper are deferred (`specs/todos/2026-11-09-host-scope-phase-2.md`).
 
 Let a module narrow an outbound network capability to the hosts it may reach:
 
@@ -144,6 +144,44 @@ scheme's default (80 for `http`, 443 for `https`), as the runtime does, so
 (`a.scope = None` or `b.scope`'s hosts ⊆ `a.scope`'s hosts). `*.example.com ⊒
 api.example.com`; `example.com ⋣ api.example.com`; a port-less pattern subsumes the
 same host with a port.
+
+### Method scopes
+
+A declaration can also list the HTTP methods allowed to its hosts (owner, 2026-11-09):
+
+```march
+mod A do                  -- calls into a dependency: read only
+  needs IO.NetConnect("api.example.com", methods(get))
+end
+
+mod B do                  -- your own code: may also write
+  needs IO.NetConnect("api.example.com", methods(get, post))
+end
+
+mod C do
+  needs IO.NetConnect(methods(get, head))   -- any host, these methods only
+end
+```
+
+- The words are the standard verbs of `Http.Method`: `get`, `head`, `post`, `put`,
+  `patch`, `delete`, `options`. Anything else (`trace`, `connect`, a custom method, a
+  typo) is a declaration error. Options may come in any order; `methods(...)` at most
+  once per declaration.
+- No `methods(...)` means every method, so existing declarations keep their meaning.
+- Per module and per host: each module's own `needs` lines decide. A destination is
+  allowed a method when some declaration of that module covers the host and either
+  lists the method or lists none.
+- **Compile time:** a URL-taking entry point has a fixed method (`simple_get` and
+  `HttpClient.get`/`stream_get` GET, `post` POST, `put_request` PUT, `delete` DELETE).
+  A `@[net_dest]` wrapper inherits the method of the call it forwards to, and a fixed
+  helper the methods its body uses. A call whose method the module does not allow for
+  that host is `cap_host_scope`.
+- **Raw connections** (`tcp_connect`, `tcp_connect_timeout`) show no method: they are
+  allowed only to a host that some declaration covers *without* `methods(...)`.
+- **Run time:** the guard (§5) checks the method of every request it is about to send
+  (after request steps, on `with_connection`, and on redirects, which are re-issued as
+  GET) and refuses one outside the scope with `HttpClient.MethodRefused`.
+- The scope string (§5) carries methods per entry: `host@get+head`.
 
 ### Where else a scope may appear
 
@@ -357,6 +395,9 @@ check.
 - A scope bounds everything the module reaches, through other user modules too (§4).
 - Redirects and request steps get a run-time guard, and a `no_redirects` option on the
   declaration refuses redirects outright (§3, §5).
+- HTTP methods are scoped too, per module and per host, from the standard verbs
+  (§3, "Method scopes"). The aim is granular control over how any code, especially
+  code you did not write, talks to the outside world.
 
 ## 10. Left to the builder
 
