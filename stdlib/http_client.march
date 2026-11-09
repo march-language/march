@@ -565,7 +565,9 @@ mod HttpClient do
     Options -> "options"
     Trace -> "trace"
     Connect -> "connect"
-    Other(x) -> string_to_lowercase(x)
+    -- A non-standard verb never names a standard one: "!" cannot appear in a
+    -- scope's method list, so it matches no `methods(...)` entry.
+    Other(_) -> "!other"
     end
   end
 

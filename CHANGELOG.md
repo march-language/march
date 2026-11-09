@@ -773,6 +773,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
+  was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
+  through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name
+  the actor or function you wrote (``handler `Go` of actor `Fetcher` ``), not compiler
+  names like `Fetcher_spawn` or `Fetch$B.T.fetch`, and two modules sharing a short name
+  (`P1.Inner`, `Inner`) keep their own host scopes whatever order they are declared in.
+- **A user module named like a stdlib module is charged for its own capabilities.** The
+  capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
+  `needs` to its callers; it now looks at where the module comes from, not its name.
+
 - **A record-returning function's contract no longer reports a false counterexample** when
   a field's value is bound by a `let` first (`let next = c + n` then `{ count: next }` was
   refuted with `next = -1`). Simple `let`s are now inlined into a record result, and a name

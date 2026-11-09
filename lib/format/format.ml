@@ -1424,17 +1424,7 @@ and emit_decl ctx = function
          | None -> path
          | Some sc ->
            (* Options ride in the scope string as "<scope>;<option>;..."
-              (parser.mly, [scoped_cap_path]; Host_scope.split_options is the
-              same split); print them back as written. *)
-           let word w = w <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') w in
-           let is_opt o =
-             match String.index_opt o '=' with
-             | None -> word o
-             | Some i ->
-               word (String.sub o 0 i)
-               && List.for_all word
-                    (String.split_on_char ',' (String.sub o (i + 1) (String.length o - i - 1)))
-           in
+              (parser.mly, [scoped_cap_path]); split with Host_scope.split_options and print them back as written. *)
            let show_opt o =
              match String.index_opt o '=' with
              | None -> o
@@ -1443,8 +1433,8 @@ and emit_decl ctx = function
                  (String.concat ", "
                     (String.split_on_char ',' (String.sub o (i + 1) (String.length o - i - 1))))
            in
-           (match String.split_on_char ';' sc with
-            | s :: (_ :: _ as opts) when List.for_all is_opt opts ->
+           (match March_caps.Host_scope.split_options sc with
+            | s, (_ :: _ as opts) ->
               let os = String.concat ", " (List.map show_opt opts) in
               if s = "" then Printf.sprintf "%s(%s)" path os
               else Printf.sprintf "%s(%s, %s)" path (quote_string s) os
