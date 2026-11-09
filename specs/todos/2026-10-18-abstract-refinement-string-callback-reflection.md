@@ -28,5 +28,11 @@ only string-sorted subterm is the argument of an abstract symbol (declared at th
 argument's sort by `abstract_preamble`), and teach `known_head` the `$abs_` prefix
 so a residual skip is not misreported as opaque.
 
+**Re-checked 2026-11-09 on `c3cd49c76`: half fixed.** The misreport is gone (no
+`opaque-application` skip naming `$abs_p`; `known_head` knows the `$abs_` prefix). The
+proof itself still fails: `--refine-report` gives `unconstrained-subject` at `sfilt`'s
+return `p(_)` plus two `abstract-refinement-uninstantiated` skips, while the `Int` body
+proves. What is left is the `foreign_var` / codomain-fact half of the fix above.
+
 Workaround today: delegate (`List.filter(xs, f)`), which proves at the String sort
 (test B11 does exactly that).
