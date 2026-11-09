@@ -2139,8 +2139,24 @@ let culprit_text (g : graph) (u : int) (c : culprit) : string =
       callee
 
 (** The unit declared at [span] (a declaring name's span), if any. *)
+let unit_index : (graph * (A.span, unit_) Hashtbl.t) option ref = ref None
+
 let unit_at (g : graph) (span : A.span) : unit_ option =
-  Array.find_opt (fun u -> u.u_span = span) g.units
+  (* Indexed once per graph: callers ask once per pending obligation and per
+     SCC, and a linear scan of every unit there was most of a stdlib check. *)
+  let tbl =
+    match !unit_index with
+    | Some (g', t) when g' == g -> t
+    | _ ->
+      let t = Hashtbl.create (2 * Array.length g.units + 1) in
+      (* The first unit declared at a span wins, as with [Array.find_opt]. *)
+      for i = Array.length g.units - 1 downto 0 do
+        Hashtbl.replace t g.units.(i).u_span g.units.(i)
+      done;
+      unit_index := Some (g, t);
+      t
+  in
+  Hashtbl.find_opt tbl span
 
 (* ── Inference (§3.5), phase 5 ────────────────────────────────────────── *)
 

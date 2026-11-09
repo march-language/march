@@ -10836,21 +10836,43 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
    diagnostics are dropped.  The certificate is a proof on its own (the first
    pass decided it without the function's equation), so the second pass may
    rely on it.  Only a module whose walk planned metrics (`@[decreases]`,
-   `cap total`, the termination report) can need it. *)
+   `cap total`, the termination report) can need it, and never for an
+   `@[opaque]` function, whose body stays out of the logic whatever its
+   certificate: the stdlib is checked with every program, so one opaque
+   stdlib function with a metric would otherwise check every program twice. *)
+let rec opaque_spans acc (ds : A.decl list) =
+  List.fold_left
+    (fun acc -> function
+      | A.DFn (fd, _) when List.mem "opaque" fd.A.fn_attrs -> fd.A.fn_name.A.span :: acc
+      | A.DMod (_, _, inner, _) -> opaque_spans acc inner
+      | _ -> acc)
+    acc ds
+
 let check_module ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map (errctx : Err.ctx)
     (m : A.module_) : unit =
   Hashtbl.reset Refine_reflect.seed_certs;
   let before = errctx.Err.diagnostics in
   check_module_pass ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map errctx m;
+  let opaque = lazy (opaque_spans [] m.A.mod_decls) in
   let late =
     Hashtbl.fold
       (fun sp c acc ->
         match Hashtbl.find_opt Refine_reflect.encoder_blocked sp with
-        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt -> (sp, c) :: acc
+        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt && not (List.mem sp (Lazy.force opaque)) ->
+          (sp, c) :: acc
         | _ -> acc)
       Refine_term.last_certs []
   in
   if late <> [] then begin
+    (* MARCH_REFLECT_DEBUG names what forced the second pass: a stdlib span
+       here means every program's check runs twice (test_refine_reflect,
+       "one pass"). *)
+    (if Sys.getenv_opt "MARCH_REFLECT_DEBUG" <> None then
+       List.iter
+         (fun ((sp : A.span), _) ->
+           Printf.eprintf "reflect-recheck: %s:%d: a late metric certificate re-runs the whole check\n%!" sp.A.file
+             sp.A.start_line)
+         late);
     List.iter (fun (sp, c) -> Hashtbl.replace Refine_reflect.seed_certs sp c) late;
     errctx.Err.diagnostics <- before;
     Fun.protect

@@ -774,6 +774,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
+  of a module whose names the checker cannot list counted against every ghost function in the
+  program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
+  own file. It now counts only against the ghost names of the file that writes it.
 - **A record-returning function's contract no longer reports a false counterexample** when
   a field's value is bound by a `let` first (`let next = c + n` then `{ count: next }` was
   refuted with `next = -1`). Simple `let`s are now inlined into a record result, and a name

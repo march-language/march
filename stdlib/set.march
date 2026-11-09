@@ -243,7 +243,10 @@ mod Set do
 
   -- Hashes are 30 bits (`key_hash`), five per level, so two distinct hashes
   -- differ at some level below 6 and the `lvl > 6` arm is unreachable.
+  -- Opaque: callers need only the contract, and a reflected body would wait
+  -- on its metric certificate, re-running the check of every program.
   @[decreases(7 - lvl)]
+  @[opaque]
   pfn branch_nodes(h1 : Int, n1 : SEntry(a), h2 : Int, n2 : SEntry(a), lvl : Int, acc : List(Int)) : {SEntry(a) | sentry_elts(_) == union(sentry_elts(n1), sentry_elts(n2))} do
     if lvl > 6 do panic("Set: two distinct hashes share every slot")
     else do

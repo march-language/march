@@ -75,8 +75,28 @@ instead of building a collision of two hashes.
   timing out the `conformance` job. The gate now defers, in its IH-free
   rounds, an item that calls a still-pending item (itself included); deferred
   items are tried as their callees prove, in the IH rounds, and in a final
-  IH-free sweep with no deferral, so nothing that proved before is lost. A
-  trivial `--check` is back to the base compiler's time.
+  IH-free sweep with no deferral, so nothing that proved before is lost.
+- **Every check ran twice.** That alone left a trivial `--check` ~1.25 s (38%)
+  slower than base even with every verdict cached, and the CI test jobs about
+  twice as slow (`test (ubuntu, rest)` hit its 75-minute timeout). Cause:
+  `check_module` re-runs the whole pass when a metric certificate is decided
+  after the encoder was built (reflection R2), and `branch_nodes`'
+  `@[decreases(7 - lvl)]` is one, in the stdlib every program checks.
+  `branch_nodes` is now `@[opaque]` (callers need only its contract) and the
+  re-run skips opaque functions, whose bodies stay out of the logic anyway.
+  Also: `Refine_term.unit_at` was a linear scan of every unit, called per
+  pending obligation per SCC by `ih_prepare`; it is a hash lookup now
+  (~0.35 s). A trivial `--check` is within ~0.13 s of base, cold or warm.
+  `MARCH_REFLECT_DEBUG` now prints `reflect-recheck: FILE:LINE` for each
+  function that forces the second pass, and a test fails if the stdlib forces
+  one. Re-checking only what a late certificate can change is filed as
+  `specs/todos/2026-11-09-refine-late-certificate-reruns-whole-check.md`.
+- **Ghost names and a wildcard import elsewhere.** A wildcard import whose
+  names cannot be listed (`test/imports/tq_ctor`: a library module importing
+  the entry while it loads) refused the stdlib's ghost Set measures: "`use
+  TqCtorEntry.*` may also bring in a `set_elts`". A bare ghost call resolves
+  only in its own file, so such an import now counts only against the ghost
+  names of the file that writes it (`lib/desugar/ghost.ml`).
 - **Measures are lowered.** A `@[measure]` is also an ordinary function the
   compiler lowers, and `elts` in a measure body has no runtime counterpart
   (`--verify-tir`: "call to `elts`, which is not a function"). The Set
@@ -94,7 +114,12 @@ instead of building a collision of two hashes.
 `nested-measure` group (`test/test_refine_nested_measure.ml`): each rule with a
 REJECT control; a copy of the trie insert with three wrong variants that stay
 unproved; `@[abstraction]` positive, REJECT and the three misuse errors; a
-`Set.insert` caller; each of the six Set contracts proved in the stdlib. Each
+`Set.insert` caller; each of the six Set contracts proved in the stdlib.
+`ghost` group (`test/test_refine_ghost.ml`): a wildcard import in a library
+module leaves the stdlib's ghost code alone (red before the fix).
+`reflect-report` group (`test/test_refine_reflect.ml`), "one pass": a trivial
+program forces no late-certificate re-check, a user `@[decreases]` function
+does (red, naming `set.march:249`, with `branch_nodes` not opaque). Each
 of the five checker rules was switched off in turn and its test (and the trie
 test) went red.
 
