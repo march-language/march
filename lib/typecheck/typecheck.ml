@@ -7900,7 +7900,6 @@ let rec check_decl env (d : Ast.decl) : env =
            | _ -> false
       in
       env.current_module = "DistLink"
-      && env.enclosing_package = "DistLink"
       && name.txt = "DownReason"
       && params = []
       && match typedef with
@@ -7911,12 +7910,21 @@ let rec check_decl env (d : Ast.decl) : env =
            && nullary "NodeDown" node_down
          | _ -> false
     in
-    if env.current_module = env.enclosing_package
+    (* Only the entry module's own top-level types collide: TIR unwraps the
+       entry module, so its `DownReason` reaches the backend under the bare
+       name the monitor ABI reserves, while a nested or library module's type
+       is qualified (`Sub.DownReason`) and shadows the built-in harmlessly.
+       [cap_qual_prefix] is "" exactly at the entry module's top level.  (This
+       used to test [current_module = enclosing_package], which never held for
+       user code: the stdlib baseline env leaves [enclosing_package] set to
+       "StdlibBaseline", so the redeclaration slipped through and crashed
+       [Llvm_toplevel.emit_module].) *)
+    if env.cap_qual_prefix = ""
        && (name.txt = "Down" || name.txt = "DownReason")
        && not is_canonical_dist_link_down_reason then begin
       Err.error ~code:Err.Code.reserved_type_name env.errors ~span:name.span
         (Printf.sprintf
-           "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"
+           "Type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared here. Rename it, or declare it inside a nested module."
            name.txt);
       env
     end else

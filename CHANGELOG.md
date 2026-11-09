@@ -782,6 +782,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Redeclaring `type DownReason` or `type Down` is an error, not a compiler crash.** These
+  names belong to the local-monitor runtime. A top-level declaration in your entry module was
+  accepted and then crashed `--compile` with an internal compiler error; it is now reported as
+  `reserved_type_name`. A nested module may still declare its own `DownReason`.
+- **Interpreter-mode FFI no longer needs `/opt/homebrew/lib/libblake3.a`.** Release binaries
+  linked the runtime library against the libblake3 found on the machine that built them, so on
+  a Mac without that file every interpreted program calling project FFI failed with "failed to
+  compile runtime .so". The runtime now uses the BLAKE3 implementation bundled with March, as
+  compiled programs already did.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
