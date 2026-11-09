@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Hot reload: an old message survives two message-type changes.** A message sent in an
+  actor's old format and received after two or more deploys that each changed the actor's
+  message type is now converted through each deploy's `migrate_msg` in turn, oldest first,
+  and handled. Before, it was dropped whenever more than one such deploy lay in between. It
+  is still dropped and counted when a deploy in between has no `migrate_msg` or one returns
+  `None`, and the drop reason a remote sender gets names which link it was.
+
 - **Tuples in refinement predicates.** A tuple-typed parameter can be refined
   (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
   predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
