@@ -8185,6 +8185,17 @@ let register_types_for_check (decls : A.decl list) : unit =
    duplicate-named measure from axiomatisation outright (below, under
    [measure_axioms]) is the variant proven safe so far; see
    specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md. *)
+(* Every function carrying `@[abstraction(..)]`, with its module path. *)
+let rec collect_abstraction_fns ?(prefix = "") (decls : A.decl list) : (string * A.fn_def) list =
+  List.concat_map
+    (function
+      | A.DFn (fd, _) when List.exists (String.starts_with ~prefix:"abstraction:") fd.A.fn_attrs ->
+        [ (prefix, fd) ]
+      | A.DMod (n, _, ds, _) ->
+        collect_abstraction_fns ~prefix:(if prefix = "" then n.A.txt else prefix ^ "." ^ n.A.txt) ds
+      | _ -> [])
+    decls
+
 let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
   List.concat_map
     (function
@@ -8954,7 +8965,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "assume"; "decreases"; "diverges"; "ghost"; "lemma"; "measure"; "net_dest"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
+  [ "abstraction"; "assume"; "decreases"; "diverges"; "ghost"; "lemma"; "measure"; "net_dest"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)
@@ -10439,6 +10450,39 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
           msgs)
       mfns;
+    (* `@[abstraction(elts)]` / `@[abstraction(keys)]` (2026-11-08): an
+       axiomatised measure over one of the module's datatypes stands for the
+       built-in measure on that type, inside its module only
+       ([Refine_post.abstraction_measure]). *)
+    Hashtbl.reset Refine_post.abstractions;
+    List.iter
+      (fun (modpath, (fd : A.fn_def)) ->
+        List.iter
+          (fun a ->
+            match String.index_opt a ':' with
+            | Some i when String.sub a 0 i = "abstraction" -> (
+              let bm = String.sub a (i + 1) (String.length a - i - 1) in
+              let err msg =
+                Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
+                  (Printf.sprintf "@[abstraction(%s)] on `%s` %s" bm fd.A.fn_name.A.txt msg)
+              in
+              if not (List.mem "measure" fd.A.fn_attrs) then
+                err "needs @[measure]: the attribute names the measure that stands for the built-in one"
+              else if not (is_builtin_set_measure bm) then
+                err "names no built-in set measure; the ones it can stand for are `elts` and `keys`"
+              else
+                match fd.A.fn_clauses with
+                | [ { A.fc_params = [ A.FPNamed { A.param_ty = Some (A.TyCon (tn, targs)); _ } ]; _ } ]
+                  when not (String.contains tn.A.txt '.') ->
+                  if is_axiom_measure fd.A.fn_name.A.txt then
+                    Hashtbl.replace Refine_post.abstractions
+                      (adt_sort_name ~arity:(List.length targs) tn.A.txt)
+                      (bm, fd.A.fn_name.A.txt, modpath)
+                  else err "is not axiomatised, so it cannot stand for the built-in measure"
+                | _ -> err "must take one parameter whose type is a datatype of its own module")
+            | _ -> ())
+          fd.A.fn_attrs)
+      (collect_abstraction_fns m.A.mod_decls);
     (* Scalar-field measure notice.  A measure reading a scalar constructor
        field (`Array.length` reading `PVec`'s count) is axiomatised correctly;
        since 2026-09-13 (P3 design §4a) call-site reflection places that field
@@ -10792,21 +10836,43 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
    diagnostics are dropped.  The certificate is a proof on its own (the first
    pass decided it without the function's equation), so the second pass may
    rely on it.  Only a module whose walk planned metrics (`@[decreases]`,
-   `cap total`, the termination report) can need it. *)
+   `cap total`, the termination report) can need it, and never for an
+   `@[opaque]` function, whose body stays out of the logic whatever its
+   certificate: the stdlib is checked with every program, so one opaque
+   stdlib function with a metric would otherwise check every program twice. *)
+let rec opaque_spans acc (ds : A.decl list) =
+  List.fold_left
+    (fun acc -> function
+      | A.DFn (fd, _) when List.mem "opaque" fd.A.fn_attrs -> fd.A.fn_name.A.span :: acc
+      | A.DMod (_, _, inner, _) -> opaque_spans acc inner
+      | _ -> acc)
+    acc ds
+
 let check_module ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map (errctx : Err.ctx)
     (m : A.module_) : unit =
   Hashtbl.reset Refine_reflect.seed_certs;
   let before = errctx.Err.diagnostics in
   check_module_pass ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map errctx m;
+  let opaque = lazy (opaque_spans [] m.A.mod_decls) in
   let late =
     Hashtbl.fold
       (fun sp c acc ->
         match Hashtbl.find_opt Refine_reflect.encoder_blocked sp with
-        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt -> (sp, c) :: acc
+        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt && not (List.mem sp (Lazy.force opaque)) ->
+          (sp, c) :: acc
         | _ -> acc)
       Refine_term.last_certs []
   in
   if late <> [] then begin
+    (* MARCH_REFLECT_DEBUG names what forced the second pass: a stdlib span
+       here means every program's check runs twice (test_refine_reflect,
+       "one pass"). *)
+    (if Sys.getenv_opt "MARCH_REFLECT_DEBUG" <> None then
+       List.iter
+         (fun ((sp : A.span), _) ->
+           Printf.eprintf "reflect-recheck: %s:%d: a late metric certificate re-runs the whole check\n%!" sp.A.file
+             sp.A.start_line)
+         late);
     List.iter (fun (sp, c) -> Hashtbl.replace Refine_reflect.seed_certs sp c) late;
     errctx.Err.diagnostics <- before;
     Fun.protect
