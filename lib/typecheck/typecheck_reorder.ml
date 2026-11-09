@@ -180,7 +180,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.DType (_, _, _, td, _)
     | Ast.DAlwaysLinearType (_, _, _, td, _) ->
       (match td with
-       | Ast.TDAlias t -> ty t
+       | Ast.TDAlias (t, _) -> ty t
        | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
        | Ast.TDVariant vs ->
          List.iter (fun (v : Ast.variant) -> List.iter ty v.Ast.var_args) vs)
@@ -287,7 +287,7 @@ let unqualified_module_deps
     | Ast.DType (_, _, _, td, _)
     | Ast.DAlwaysLinearType (_, _, _, td, _) ->
       (match td with
-       | Ast.TDAlias t -> ty t
+       | Ast.TDAlias (t, _) -> ty t
        | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
        | Ast.TDVariant vs ->
          List.iter (fun (v : Ast.variant) -> List.iter ty v.Ast.var_args) vs)

@@ -296,7 +296,15 @@ module.exports = grammar({
     // Full type rules
     _type: $ => choice(
       $.arrow_type,
+      $.type_nat_op,
       $._type_atom,
+    ),
+
+    // Type-level arithmetic (parser.mly `ty_nat_add` / `ty_nat_mul`): a
+    // refinement alias's value argument, `Vec(Int, n + 1)`.
+    type_nat_op: $ => choice(
+      prec.left(2, seq(field('left', $._type), '+', field('right', $._type))),
+      prec.left(3, seq(field('left', $._type), '*', field('right', $._type))),
     ),
 
     arrow_type: $ => prec.right(1, seq(
@@ -393,7 +401,11 @@ module.exports = grammar({
       ),
     ),
 
-    type_params: $ => seq('(', commaSep1($.type_variable), ')'),
+    // `n : Int` is a value parameter of a refinement alias:
+    // `type Vec(a, n : Int) = {List(a) | len(_) == n}`.
+    type_params: $ => seq('(', commaSep1(choice($.type_variable, $.value_param)), ')'),
+
+    value_param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
     variant: $ => seq(
       field('name', choice($.type_identifier, $.atom_literal)),

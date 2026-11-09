@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Refinement aliases, with value parameters.** `type Pos = {Int | _ > 0}` and
+  `type Vec(a, n : Int) = {List(a) | len(_) == n}` name a refinement; each use (`Vec(Int, n)`,
+  `Vec(Int, 3)`, `Vec(Int, n + 1)`) is the refinement with its arguments substituted, in
+  parameters, results, element types, record fields, `let` annotations and actor messages. A
+  violation names the alias as written (`refinement violation: expected Vec(Int, n)`). A value
+  used as a type, or the reverse, is the new
+  [`alias_kind_mismatch`](docs/errors/alias_kind_mismatch.md). Before this, `type X = {T | p}`
+  was a syntax error. See "Refinement aliases" in the
+  [refinement types reference](docs/refinement-types.md).
 - **Tuples in refinement predicates.** A tuple-typed parameter can be refined
   (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
   predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a

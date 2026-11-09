@@ -21,6 +21,7 @@ let abstract_refinement_misuse = "abstract_refinement_misuse"
 let abstract_refinement_unused = "abstract_refinement_unused"
 let actor_handler_state_type = "actor_handler_state_type"
 let actor_init_arity = "actor_init_arity"
+let alias_kind_mismatch = "alias_kind_mismatch"
 let ambiguous_constructor = "ambiguous_constructor"
 let annotated_tyvar_fixed = "annotated_tyvar_fixed"
 let arity_mismatch = "arity_mismatch"
@@ -231,6 +232,7 @@ let all = [
   abstract_refinement_unused;
   actor_handler_state_type;
   actor_init_arity;
+  alias_kind_mismatch;
   ambiguous_constructor;
   annotated_tyvar_fixed;
   arity_mismatch;
@@ -475,7 +477,7 @@ let category_table : (string * string list) list = [
     not_a_variant; record_update_non_record; sig_mismatch; type_arity;
     type_mismatch ];
   "TYPE", [
-    invalid_type_bound; let_star_no_flat_map; let_star_unknown_type;
+    alias_kind_mismatch; invalid_type_bound; let_star_no_flat_map; let_star_unknown_type;
     nonregular_type; recursive_type_alias; typed_hole; unsendable_type ];
   "INTERFACE", [
     json_derive_name_collision; missing_impl; missing_method;

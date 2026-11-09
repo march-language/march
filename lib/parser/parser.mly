@@ -39,6 +39,30 @@
     March_errors.Errors.parse_error_extra := (code, fix);
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
+  let pos_of_name (n : name) : Lexing.position =
+    { Lexing.pos_fname = n.span.file; pos_lnum = n.span.start_line; pos_bol = 0;
+      pos_cnum = n.span.start_col }
+
+  (* A type declaration's parameters: `a` (a type) or `n : Int` (a value, only
+     on a refinement alias, `type Vec(a, n : Int) = {List(a) | len(_) == n}`). *)
+  let plain_tparams (ps : (name * ty option) list option) : name list =
+    match ps with
+    | None -> []
+    | Some ps ->
+      List.map (fun ((n : name), k) ->
+          match k with
+          | None -> n
+          | Some _ ->
+            error_raise
+              (Printf.sprintf "`%s : …` is a value parameter, which only a refinement alias can take:" n.txt)
+              (Some "type Vec(a, n : Int) = {List(a) | len(_) == n}")
+              (pos_of_name n)) ps
+
+  let alias_decl vis (name : name) (ps : (name * ty option) list option) (rhs : ty) sp : decl =
+    let ps = Option.value ps ~default:[] in
+    let values = List.filter_map (fun (n, k) -> Option.map (fun t -> (n, t)) k) ps in
+    DType (vis, name, List.map fst ps, TDAlias (rhs, values), sp)
+
   (* `D -> Bool[p]` (the marker [ty_post] puts on `Bool`) is the definer form
      of an abstract refinement, `({x : D | true}) -> {Bool | _ == p(x)}`
      (design 2026-09-20 §1).  A domain that already names its binder keeps it;
@@ -879,45 +903,61 @@ type_decl:
   (* opaque type: type name public, constructors private to module *)
   | OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       let private_variants = List.map (fun v -> { v with var_vis = Private }) variants in
       DType (Public, name, tps, TDVariant private_variants, mk_span ($loc)) }
   | OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Private, name, tps, TDVariant variants, mk_span ($loc)) }
   | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Private, name, tps, TDRecord fields, mk_span ($loc)) }
   | ALWAYSLINEAR; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DAlwaysLinearType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
   (* always_linear opaque type: every binding must be consumed, and the
      constructors are private to the module, as for `opaque type`.  The
      representation of a linear container (stdlib LinearMap) stays hidden. *)
   | ALWAYSLINEAR; OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       let private_variants = List.map (fun v -> { v with var_vis = Private }) variants in
       DAlwaysLinearType (Public, name, tps, TDVariant private_variants, mk_span ($loc)) }
   | ALWAYSLINEAR; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DAlwaysLinearType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
+  (* Refinement alias: `type Pos = {Int | _ > 0}`, `type Vec(a, n : Int) =
+     {List(a) | len(_) == n}`.  The right-hand side is a refinement type (a
+     bare `type T = U` is a variant declaration); a binder form shares
+     `{ name : ty` with a record and is told apart on `|`. *)
+  | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; t = ty_app; PIPE; p = refine_pred; RBRACE
+    { alias_decl Public name tparams (TyRefine (t, None, p)) (mk_span $loc) }
+  | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; b = lower_name; COLON; t = ty; PIPE; p = refine_pred; RBRACE
+    { alias_decl Public name tparams (TyRefine (t, Some b, p)) (mk_span $loc) }
+  | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; t = ty_app; PIPE; p = refine_pred; RBRACE
+    { alias_decl Private name tparams (TyRefine (t, None, p)) (mk_span $loc) }
+  | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; b = lower_name; COLON; t = ty; PIPE; p = refine_pred; RBRACE
+    { alias_decl Private name tparams (TyRefine (t, Some b, p)) (mk_span $loc) }
   | TAG; name = upper_name
     (* Sugar: `tag Foo` ≡ `type Foo = Foo`  — a zero-arg phantom label type. *)
     { let sp = mk_span ($loc) in
@@ -1667,7 +1707,11 @@ ret_annot:
   | COLON; t = ty { t }
 
 type_params:
-  | LPAREN; ps = separated_nonempty_list(COMMA, lower_name); RPAREN { ps }
+  | LPAREN; ps = separated_nonempty_list(COMMA, type_param); RPAREN { ps }
+
+type_param:
+  | n = lower_name { (n, None) }
+  | n = lower_name; COLON; t = ty { (n, Some t) }
 
 ty_eof:
   | t = ty EOF { t }

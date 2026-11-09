@@ -599,7 +599,7 @@ let entry_alias mods_src m =
   | Some decls ->
     List.find_map
       (function
-        | DType (_, name, [], TDAlias (TyCon (rhs, [])), _) when name.txt = "Entry" -> Some rhs.txt
+        | DType (_, name, [], TDAlias (TyCon (rhs, []), _), _) when name.txt = "Entry" -> Some rhs.txt
         | _ -> None)
       decls
 
@@ -659,7 +659,7 @@ let with_aliases aliases body =
   let m = parse_and_desugar ("mod Main do\n" ^ body ^ "\nend\n") in
   let alias (name, rhs) =
     DType (Public, { txt = name; span = dummy_span }, [],
-           TDAlias (TyCon ({ txt = "Main." ^ rhs; span = dummy_span }, [])), dummy_span)
+           TDAlias (TyCon ({ txt = "Main." ^ rhs; span = dummy_span }, []), []), dummy_span)
   in
   let m = { m with mod_decls = List.map alias aliases @ m.mod_decls } in
   let (errors, _) = March_typecheck.Typecheck.check_module m in

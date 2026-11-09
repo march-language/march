@@ -327,7 +327,14 @@ and fn_param =
   | FPDefault of param * expr     (** Default value: fn greet(name, greeting \\ "Hello") *)
 
 and type_def =
-  | TDAlias of ty                              (** Type alias *)
+  | TDAlias of ty * (name * ty) list
+      (** Type alias: its right-hand side, and its VALUE parameters with their
+          sorts (`type Vec(a, n : Int) = {List(a) | len(_) == n}` has [n : Int];
+          the declaration's parameter list holds every parameter, type and
+          value, in order).  Source aliases are refinement aliases, expanded at
+          each use by [March_desugar.Desugar] (refinement-indexed aliases,
+          specs/lang/refinement-types.md); value parameters appear only in the
+          predicate. *)
   | TDVariant of variant list                  (** Sum type / ADT *)
   | TDRecord of field list                     (** Record type *)
 

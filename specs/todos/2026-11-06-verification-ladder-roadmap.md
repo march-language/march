@@ -16,8 +16,10 @@ One file per step. Grouped by effort, ordered within a group by practical payoff
    not leak.
 2. ~~`2026-11-06-proof-calc-blocks`~~ done (same) — `calc` chains with one obligation per step and per-step
    diagnostics.
-3. `2026-11-06-refinement-indexed-type-aliases` — `type Vec(a, n) = {List(a) | len(_) == n}`:
-   value-indexed types in refinement form (most of what length-indexed vectors buy).
+3. ~~`2026-11-06-refinement-indexed-type-aliases`~~ done
+   (`specs/progress/2026-11-08-refinement-indexed-type-aliases.md`) — `type Vec(a, n : Int) =
+   {List(a) | len(_) == n}`: value-indexed types in refinement form. Follow-up:
+   `2026-11-08-list-length-recursion-gap`.
 4. ~~`2026-11-06-proof-reveal-and-local-fuel`~~ done (same) — `reveal f` for `@[opaque]` functions and a
    per-proof fuel override (per-function `@[reflect(fuel: N)]` exists already).
 

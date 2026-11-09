@@ -262,7 +262,7 @@ let rec rename_decls tbl ~root cur (decls : decl list) : decl list =
   let fn_def = rename_fn_def ex ty param in
   let field (f : field) = { f with fld_ty = ty f.fld_ty } in
   let type_def = function
-    | TDAlias t -> TDAlias (ty t)
+    | TDAlias (t, vs) -> TDAlias (ty t, List.map (fun (n, s) -> (n, ty s)) vs)
     | TDVariant vs ->
       TDVariant (List.map (fun v -> { v with var_args = List.map ty v.var_args }) vs)
     | TDRecord fs -> TDRecord (List.map field fs) in
