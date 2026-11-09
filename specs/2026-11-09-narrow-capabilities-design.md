@@ -1,10 +1,10 @@
 # Narrower capabilities: environment, programs, listening, C, tables, console, task limits
 
 **Date:** 2026-11-09
-**Status:** design, not yet approved
-**Builds on:** host/method/path scopes on `IO.NetConnect` (on `main` via #1213 and #1216),
-and the dependency-grants design (`specs/2026-11-09-dependency-grants-and-restrict-design.md`,
-roadmap `specs/plans/2026-11-09-grants-restrict-roadmap.md`).
+**Status:** approved 2026-11-09; revised the same day after a builder check (§14 lists what changed)
+**Builds on:** host/method/path scopes on `IO.NetConnect` (#1213, #1216), and the
+dependency-grants design and roadmap (`specs/2026-11-09-dependency-grants-and-restrict-design.md`,
+`specs/plans/2026-11-09-grants-restrict-roadmap.md`, on `main` once #1216 merges).
 
 Every capability other than network and files is all-or-nothing today. A dependency
 granted `IO.Process` can read every environment variable and run any program, including
@@ -92,30 +92,47 @@ needs IO.Env                             -- all of them (today's meaning)
 ```
 
 - **The guarded store.** At program start the runtime copies the environment into private
-  storage and **clears the process environment**. From then on `getenv` in any C code sees
-  nothing; the only way to read a variable is `Process.env(name)` (and the stdlib wrappers
-  over it), which checks the caller's `IO.Env` scope. `Process.set_env` writes the store,
-  not the process environment.
+  storage, **clears the process environment, and overwrites the original environment
+  block** (the strings the kernel placed on the stack), so neither `getenv` nor
+  `/proc/self/environ` nor a scan of that block finds a value afterwards. From then on the
+  only way to read a variable is `Process.env(name)` (and the stdlib wrappers over it),
+  which checks the caller's `IO.Env` scope. `Process.set_env` writes the store, not the
+  process environment.
+- **The runtime's own reads.** The C runtime reads about thirty variables lazily after
+  startup (`MARCH_*`, `HOME`, `TMPDIR`, `PATH`), and OpenSSL reads its certificate
+  variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`). These read the store through a
+  runtime-internal accessor that is not checked (it is the runtime, not user code) and is
+  **not callable from `extern` blocks** (§7). OpenSSL's variables are copied to the
+  C-visible list when set, since OpenSSL calls `getenv` itself (my call).
 - **C still needs a few.** A short, documented list stays in the real process environment
   because the C library reads them for time zones and locale: `TZ`, `LANG`, `LC_ALL` and
   the `LC_*` family (my call). The project can change the list in `forge.toml`
   (`[env] visible_to_c = [...]`); the builder picks the exact spelling.
-- **Children get only what they are given.** A child process starts with the C-visible list
-  plus the variables passed explicitly at the call (`Process.run(cmd, args, env: [...])`),
-  each of which the caller must be allowed to read.
+- **Children get only what they are given.** Today the spawn builtins take no environment
+  and a child inherits the whole process environment; they gain an environment parameter
+  (`Process.run(cmd, args, env: [...])`, new). A child starts with the C-visible list,
+  **the cleaned `PATH` (§5) and `HOME` by default** (owner, 2026-11-09: most tools break
+  without them), plus the variables passed explicitly at the call, each of which the caller
+  must be allowed to read.
 - **Reading a variable is checked by name**: a literal name at compile time, any name at run
-  time. A variable that is not set and one that is out of scope are different results:
-  out of scope is an error value naming the variable and the scope, never a silent `None`
-  (a dependency should not mistake "you may not" for "unset").
-- **`/proc/self/environ`.** On Linux the original environment is still readable there.
-  Under the OS sandbox the program's own `/proc/self/environ` is denied (Landlock/bind
-  rules; seccomp cannot see paths); without the sandbox it stays readable, and the docs say
-  so. On macOS a process can always read its own memory. **Honest limit:** the store stops
-  `getenv`, child processes and casual reads, not C code that scans its own memory; only a
-  separate process stops that.
+  time. A variable that is not set and one that is out of scope are different results,
+  never a silent `None` (a dependency should not mistake "you may not" for "unset").
+  `Process.env` returns `Option` today; until every capability operation returns a `Result`
+  (roadmap phase 2), **an out-of-scope read panics** with a message naming the variable and
+  the scope (owner, 2026-11-09). From phase 2 it is an error value.
+- **Computed names.** The stdlib reads variables with computed names (`Config`, `Env`,
+  `Check`, `Topology`, `SessionNode`). Those are judged against the calling module's scope at
+  run time (phase 4); until then a computed name fails closed **only in a module that has an
+  `IO.Env` scope** — unscoped modules are unaffected.
+- **What remains.** With the original block overwritten, the values live only in the store.
+  **Honest limit:** C code that finds and reads the store in the process's memory still gets
+  them; only a separate process stops that. The store's accessors are hidden from `extern`
+  blocks (§7), so reaching it takes deliberate memory scanning, not a declared call.
 - **Every runtime.** Compiled binaries (C runtime, at startup before user code), the
   interpreter (the OCaml process environment), the JIT, and the JS target (`process.env`),
-  per the owner's "the same everywhere" rule.
+  per the owner's "the same everywhere" rule. **JS limit:** JS `extern` code can still reach
+  the environment through `require('child_process')` or by starting its own processes; the
+  JS target documents this, as `IO.Foreign` there is equivalent to unrestricted.
 
 ## 5. Running programs (`IO.Exec`)
 
@@ -128,8 +145,11 @@ needs IO.Exec                             -- any program (today's meaning)
 
 - **By name.** A name is resolved against the `PATH` captured at program start (it lives in
   the guarded store, so a dependency cannot change it without `IO.Env` to `PATH`). The
-  resolved absolute path is what runs; an absolute name in the scope (`/usr/bin/rg`) is
-  matched exactly. A program started by any other name or path is refused.
+  captured `PATH` is **cleaned**: empty entries (which mean the current directory in
+  `spawn_resolve_path`) and relative entries are dropped. The resolved absolute path is what
+  runs; an absolute name in the scope (`/usr/bin/rg`) is matched exactly. A program started
+  by any other name or path is refused. Limit, documented: a dependency that can write into
+  a directory on `PATH` can plant a program there; file-write scopes are what stop that.
 - **No shell in between.** `Process.run(command, args)` already passes arguments directly;
   that stays the only form.
 - **Tools that run other code** are refused even when listed, unless marked
@@ -142,15 +162,32 @@ needs IO.Exec                             -- any program (today's meaning)
   what child confinement is for.
 - **`args(...)`** is an optional first-argument allowlist for tools with subcommands. It is
   a guard against mistakes, not a security boundary: flags are too varied to judge.
-- **Child confinement under the OS sandbox** (owner). Seccomp filters and Seatbelt profiles
-  are inherited and can only narrow, so every child is already held to the program's
-  sandbox. In addition, just before `exec`, the child narrows itself to **the authority of
-  the code that started it**: on Linux a stricter seccomp filter plus Landlock path rules,
-  on macOS a Seatbelt profile. So the child of a dependency granted `IO.Exec("rg")` and
-  `IO.FileRead("/srv/data")` reads only under `/srv/data` and has no network. Limits: the
-  network is all-or-nothing for a child (the OS cannot filter hosts); path rules are
-  enforced on Linux and partly on macOS (the same read limit as path scopes there). Without
-  the sandbox, children are not confined, and the docs say so.
+- **Child confinement under the OS sandbox** (owner). "The OS sandbox" here is the
+  in-binary one (`--cap-sandbox`: seccomp on Linux, `sandbox_init` on macOS); forge's
+  external one (`forge cap run`) confines children the same way because it wraps the whole
+  process. Both are inherited and can only narrow, so every child is already held to the
+  program's sandbox.
+  - **Per-child narrowing, Linux only** (owner, 2026-11-09). Spawning uses `posix_spawn`
+    (`runtime/march_runtime.c`), which gives no hook in the child before `exec`, so the
+    runtime starts a small helper program instead; the helper narrows itself to **the
+    authority of the code that started the child**, then `exec`s the real program. On Linux
+    the narrowing is a stricter seccomp filter plus Landlock path rules (Landlock is new
+    work: the in-binary sandbox uses seccomp only today). So the child of a dependency
+    granted `IO.Exec("rg")` and `IO.FileRead("/srv/data")` reads only under `/srv/data`
+    (plus a fixed baseline: its own binary, shared libraries, `/etc` locale and resolver
+    files, `/dev/null`) and has no network. On macOS a sandboxed process cannot apply a
+    second, narrower profile, so children get only the program-wide sandbox; the docs say
+    so.
+  - **Knowing whose authority** a child gets needs the run-time authority context (the call
+    goes through stdlib `Process.run`), so per-child narrowing ships **after roadmap phase 4**.
+  - **A child cannot attack its parent:** the narrowed filter denies `ptrace`,
+    `process_vm_readv`/`process_vm_writev` and `kcmp` against other processes, and every
+    file descriptor not explicitly passed is closed before `exec` (a socket opened by C code
+    would otherwise defeat "no network").
+  - A child may still `exec` further programs (git hooks, pagers need it); they inherit its
+    narrowed sandbox.
+  - Limits: the network is all-or-nothing for a child (the OS cannot filter hosts); without
+    the sandbox, children are not confined, and the docs say so.
 
 ## 6. Listening (`IO.NetListen`)
 
@@ -161,9 +198,12 @@ needs IO.NetListen("0.0.0.0:443")
 ```
 
 An address (IPv4, bracketed IPv6, `localhost`) and port, or a port range on any address.
-Checked at compile time for literals and at run time on `tcp_listen` and the stdlib server
-APIs. The OS sandbox cannot filter ports with seccomp; on Linux that layer is advisory, as
-for `IO.NetListen` today.
+Today `tcp_listen` takes only a port and binds every interface (`runtime/march_http.c`), and
+the HTTP servers use a global bind host; listening gains an address parameter (new
+signatures, my call), and the scope checks the address and port, at compile time for
+literals and at run time otherwise. At the OS layer, `--cap-sandbox` already enforces
+`IO.NetListen` on Linux by denying `bind`/`listen` outright when it is withheld; the address
+and port within a granted `IO.NetListen` are not OS-enforced (seccomp cannot see them).
 
 ## 7. C libraries and symbols (`IO.Foreign`)
 
@@ -172,10 +212,23 @@ needs IO.Foreign("libsqlite3")
 needs IO.Foreign("libsqlite3", symbols("sqlite3_open", "sqlite3_exec", "sqlite3_close"))
 ```
 
-Checked at compile time against the module's `extern` blocks: the library each block links
-and the symbols it declares. A reached `extern` outside the scope is a build error. This
-shrinks and documents what C is reachable; it cannot make C safe, and C reached this way is
-still outside every other scope except the environment store (§4) and the OS sandbox.
+Checked at compile time against the module's `extern` blocks. Linking resolves names
+globally, so naming the library is not enough: **every declared symbol is checked**
+(`IO.Foreign("libsqlite3")` without `symbols(...)` admits any symbol the library's own
+headers would, judged by a symbol list the builder generates per library or the author
+supplies; my call: without a list, any symbol, and the docs say a library scope alone is
+documentation, not a boundary).
+
+Some symbols are refused under **any** `IO.Foreign` scope unless the scope names them
+explicitly, because they bypass the other capabilities: the runtime's own entry points
+(`march_*`, including the environment store's accessors and the spawn builtins), and C's
+environment and process functions (`getenv`, `setenv`, `environ`, `execve`, `execvp`,
+`posix_spawn*`, `fork`, `system`, `popen`, `dlopen`, `dlsym`). The runtime's internal symbols
+are also hidden (not exported) from user `extern` blocks.
+
+A reached `extern` outside the scope is a build error. This shrinks and documents what C is
+reachable; it cannot make C safe, and C reached this way is still outside every other scope
+except the environment store (§4) and the OS sandbox.
 
 ## 8. Shared tables (`IO.Mut`)
 
@@ -183,10 +236,13 @@ still outside every other scope except the environment store (§4) and the OS sa
 needs IO.Mut("sessions", "rate_limits")
 ```
 
-Vault tables by name. `Vault.new`/`open`/`whereis` and every operation are checked against
-the names: a literal at compile time, a computed name at run time. This also closes the
-threat model's "handle minted from a name" gap: a module cannot open another module's table
-by guessing its name.
+Vault tables by name. Creating or finding a table by name (`Vault.new`, `open`, `whereis`)
+and every **write** are checked against the names: a literal at compile time, a computed
+name at run time, so the runtime records each handle's table name. **Reads through a handle
+you already hold stay allowed** (my call): reads are deliberately uncapped today
+(`vault_get`, `vault_keys`, `vault_size`), and holding the handle is the authority someone
+gave you. This closes the threat model's "handle minted from a name" gap: a module cannot
+open another module's table by guessing its name.
 
 ## 9. Console (`IO.Console`)
 
@@ -195,7 +251,9 @@ needs IO.Console(stderr)
 ```
 
 `stdout` and/or `stderr`. A library limited to `stderr` cannot corrupt a command-line
-program's output. Checked at compile time (the console builtins name their stream).
+program's output. Checked at compile time from the builtin called. Some output builtins carry
+no capability today (`print_int`, `print_float`, `logger_write`); they are classified as
+`IO.Console` writes to their stream as part of this work.
 
 ## 10. Task limit (`IO.Spawn`)
 
@@ -203,8 +261,9 @@ program's output. Checked at compile time (the console builtins name their strea
 needs IO.Spawn(max(16))
 ```
 
-A cap on concurrent tasks started by the module's (or dependency's) code, enforced at run
-time by the authority context: spawning past the limit is an error value, never a crash.
+A cap on concurrent tasks **and actors** started by the module's (or dependency's) code
+(my call: both are concurrent work), enforced at run time by the authority context:
+spawning past the limit is an error value, never a crash.
 This is the first **limit** rather than a **scope**; memory, CPU time and request rates
 would follow the same shape later.
 
@@ -214,10 +273,11 @@ would follow the same shape later.
 |---|---|---|
 | Lattice split (`IO.Env`, `IO.Exec`), builtin remap | — | now |
 | Literal-argument checks at compile time (env names, exec names, listen addresses, foreign symbols, table names, console streams) | lattice split | now, for module `needs` |
-| Guarded environment store, in every runtime | — | now (independent) |
+| Guarded environment store, in every runtime (out-of-scope read panics until phase 2) | — | now (independent) |
 | Exec name resolution, refusal list | lattice split | now |
 | Run-time checks for computed arguments; task limit | run-time authority context (phase 4) | after phase 4 |
-| Per-child sandbox narrowing | OS sandbox work | now (independent) |
+| Per-child sandbox narrowing (Linux) | run-time authority context (phase 4), Landlock | after phase 4 |
+| `IO.Foreign` symbol refusal list, hidden runtime symbols | — | now |
 | Dependency grants and `restrict` with these forms | grants (phase 7), `restrict` (phase 6) | with those |
 
 Until phase 4, a scope whose argument the compiler cannot see is refused (fail closed),
@@ -242,3 +302,19 @@ as host scopes do.
 Option spellings inside each scope (`prefix(...)`, `port(a..b)`, `symbols(...)`); the
 `forge.toml` key for the C-visible environment list; how the per-child sandbox profile is
 built; the error variants each refusal returns.
+
+## 14. Revisions after the builder check (2026-11-09)
+
+- Owner's answers: per-child narrowing is Linux-only; a child gets the cleaned `PATH` and
+  `HOME` by default; an out-of-scope environment read panics until phase 2.
+- Corrected facts: the spawn builtins take no environment today (a parameter is new work);
+  Landlock is not used yet; `IO.NetListen` is already OS-enforced on Linux (only address and
+  port are not); some console output builtins carry no capability; overwriting the original
+  environment block empties `/proc/self/environ`, so the limit is narrower than first stated.
+- Escapes closed: `extern` blocks cannot reach the runtime's internal symbols or C's
+  environment and process functions unless named; library scopes check every symbol;
+  empty and relative `PATH` entries are dropped; a confined child cannot `ptrace` or write
+  its parent's memory and inherits no stray descriptors; the JS target's limit is documented.
+- My calls: the runtime's own variable reads go through the store unchecked; computed names
+  fail closed only in scoped modules; listening gains an address parameter; Vault reads
+  through a held handle stay allowed; the task limit counts actors.
