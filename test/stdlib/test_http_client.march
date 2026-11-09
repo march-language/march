@@ -268,6 +268,12 @@ describe "HttpClient host scope guard" do
     assert (not (HttpClient.hc_scope_permits("*.example.com", "badexample.com", 443)))
   end
 
+  test "Other verb never passes a methods scope" do
+    let req = Request(Other("get"), SchemeHttps, "api.com", None, "/", None, Nil, "")
+    assert (Result.is_err(HttpClient.hc_check_request("api.com@get", req)))
+    assert (Result.is_err(HttpClient.hc_check_request("api.com@get,post", req)))
+  end
+
   test "port scope" do
     assert (HttpClient.hc_scope_permits("example.com:8443", "example.com", 8443))
     assert (not (HttpClient.hc_scope_permits("example.com:8443", "example.com", 443)))
