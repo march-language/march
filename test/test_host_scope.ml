@@ -616,8 +616,17 @@ let test_url_path_of_literal () =
   Alcotest.(check (option string)) "prefix cut at last slash" (Some "/v1/")
     (H.url_path_of_literal ~prefix:true "https://a.test/v1/wea")
 
+let test_path_scope_declared () =
+  accepts "path scope" {|needs IO.NetConnect("api.x.test/v1/weather/", methods(get))|};
+  rejects_with "dot-dot path scope" ~expect:".."
+    {|needs IO.NetConnect("api.x.test/v1/../admin/")|};
+  (* The hint shows the path form, so the fix is obvious. *)
+  rejects_with "hint names the path form" ~expect:"api.example.com/v1/"
+    {|needs IO.NetConnect("api.x.test/v1/../admin/")|}
+
 let path_tests =
   [
+    Alcotest.test_case "path scope declared" `Quick test_path_scope_declared;
     Alcotest.test_case "path pattern parses" `Quick test_path_pattern_parses;
     Alcotest.test_case "path pattern rejects" `Quick test_path_pattern_rejects;
     Alcotest.test_case "boundary and query" `Quick test_boundary_and_query;

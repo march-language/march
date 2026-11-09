@@ -701,7 +701,17 @@ host: each module's own `needs` lines decide.
 
 **Scope syntax.** A host (`example.com`), a host and port (`example.com:8443`), any
 subdomain (`*.example.com`, which does not include `example.com` itself), or an IP
-literal. No scheme, path or userinfo; host names are compared case-insensitively. A URL
+literal, optionally followed by a path prefix (`api.example.com/v1/weather/`). No scheme or
+userinfo; host names are compared case-insensitively, paths case-sensitively.
+
+**Path prefixes** match by whole segment: `/v1/weather/` admits `/v1/weather` and
+`/v1/weather/today`, not `/v1/weatherman`; the query string never counts. A request path
+with a `.` or `..` segment, `//`, a `\`, or a percent-encoded `.`, `/` or `\` is
+refused outright rather than cleaned up, because a server may resolve it differently. A
+literal prefix proves the host but not the path (`"https://api.example.com/v1/weather/" ++
+"../admin"`), so under a path scope every request's path is checked when it is sent, and
+the compiler reports the violations it can see. A path-scoped host admits no raw
+`tcp_connect`. A URL
 with no port uses its scheme's default (80 or 443). Two options may follow, in either
 order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete`,
 `options`, and `no_redirects`. Options alone mean any host:
