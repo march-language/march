@@ -66,6 +66,29 @@ instead of building a collision of two hashes.
 `is_subset` and `eq` stay `@[assume]`: they need the hash-path invariant
 (stage C).
 
+## Fixes CI found
+
+- **Check time.** Every `--check` also checks the stdlib's own obligations,
+  and the IH-free gate rounds tried each recursive Set walk before its
+  callees' contracts (or its own hypothesis) existed: six queries ran to the
+  solver's resource limit (~0.6 s each), doubling a trivial `--check` and
+  timing out the `conformance` job. The gate now defers, in its IH-free
+  rounds, an item that calls a still-pending item (itself included); deferred
+  items are tried as their callees prove, in the IH rounds, and in a final
+  IH-free sweep with no deferral, so nothing that proved before is lost. A
+  trivial `--check` is back to the base compiler's time.
+- **Measures are lowered.** A `@[measure]` is also an ordinary function the
+  compiler lowers, and `elts` in a measure body has no runtime counterpart
+  (`--verify-tir`: "call to `elts`, which is not a function"). The Set
+  measures are `ghost pfn`, never compiled; the docs say a set-valued measure
+  a compiled program carries should be one.
+- **A stdlib file checked alone.** `march --check stdlib/set.march` (the
+  coverage corpus sweep) files `Set` as a user type of a typechecker built-in
+  name, so it was conflated and `set_elts` never axiomatised. A file in a
+  directory named `stdlib` whose name a stdlib root also has now counts as a
+  stdlib declaration ([Refine_encode.is_stdlib_file_copy]). The coverage
+  baselines gain the 15 new enforced sites; nothing is unenforced.
+
 ## Tests
 
 `nested-measure` group (`test/test_refine_nested_measure.ml`): each rule with a

@@ -2565,7 +2565,7 @@ the node type and its child list, plus one over the wrapper:
 
 ```march
 @[measure]
-pfn sentry_elts(n : SEntry(a)) : Set(a) do
+ghost pfn sentry_elts(n : SEntry(a)) : Set(a) do
   match n do
   SEmpty -> empty
   SLeaf(_, x) -> singleton(x)
@@ -2575,16 +2575,20 @@ pfn sentry_elts(n : SEntry(a)) : Set(a) do
 end
 
 @[measure]
-pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do … end
+ghost pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do … end
 
 @[measure]
 @[abstraction(elts)]
-pfn set_elts(s : Set(a)) : Set(a) do
+ghost pfn set_elts(s : Set(a)) : Set(a) do
   match s do
   HamtSet(_, node) -> sentry_elts(node)
   end
 end
 ```
+
+The measures are `ghost`: they exist only for the proofs, and `elts` in a
+measure body has no runtime counterpart, so a set-valued measure that a
+compiled program carries should be a `ghost pfn` (never compiled).
 
 **`@[abstraction(elts)]`** says what the built-in `elts` means for the
 module's own datatype: inside the module that declares it, `elts(s)` of a

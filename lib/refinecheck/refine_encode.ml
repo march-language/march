@@ -2553,14 +2553,28 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
    comment on [adt_sort_name]. Each declaration is filed under its OWN
    qualified key; [finalize_adt_canonical] decides afterwards whether that
    key also becomes the plain bare one. *)
+(* A stdlib file checked as the user file (`march --check stdlib/set.march`,
+   the coverage corpus sweep): a file in a directory named `stdlib` whose
+   name a stdlib root also has.  Its types are the stdlib's own declarations
+   (the prelude drops its copy of the module), so `Set`, a typechecker
+   built-in name too, is not a user type conflated with the built-in, and
+   `Set`'s abstraction measure axiomatises exactly as it does from the
+   prelude.  2026-11-08. *)
+let is_stdlib_file_copy (f : string) : bool =
+  Filename.basename (Filename.dirname f) = "stdlib"
+  && List.exists
+       (fun root -> Sys.file_exists (Filename.concat root (Filename.basename f)))
+       !March_typecheck.Typecheck_builtins.stdlib_roots
+
 let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
   let record_key (nm : A.name) : string =
     let name = nm.A.txt in
     (* The caller-supplied stdlib identity ([stdlib_source_files], what a
        harness passes) or the typechecker's own root-based one. *)
     let f = nm.A.span.A.file in
-    if is_stdlib_source_file f || March_typecheck.Typecheck_builtins.file_is_stdlib f then
-      Hashtbl.replace stdlib_declared name ();
+    if is_stdlib_source_file f || March_typecheck.Typecheck_builtins.file_is_stdlib f
+       || is_stdlib_file_copy f
+    then Hashtbl.replace stdlib_declared name ();
     let bare = "M_" ^ name in
     let key = adt_sort_name_at (own_path path name) name in
     Hashtbl.replace adt_decl_paths bare

@@ -43,7 +43,7 @@ mod Set do
   -- elsewhere keeps the opaque view, so its proofs only read the contracts.
 
   @[measure]
-  pfn sentry_elts(n : SEntry(a)) : Set(a) do
+  ghost pfn sentry_elts(n : SEntry(a)) : Set(a) do
     match n do
     SEmpty -> empty
     SLeaf(_, x) -> singleton(x)
@@ -53,7 +53,7 @@ mod Set do
   end
 
   @[measure]
-  pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do
+  ghost pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do
     match cs do
     Nil -> empty
     Cons(c, rest) -> union(sentry_elts(c), sentries_elts(rest))
@@ -62,7 +62,7 @@ mod Set do
 
   @[measure]
   @[abstraction(elts)]
-  pfn set_elts(s : Set(a)) : Set(a) do
+  ghost pfn set_elts(s : Set(a)) : Set(a) do
     match s do
     HamtSet(_, node) -> sentry_elts(node)
     end
