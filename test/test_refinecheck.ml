@@ -29927,6 +29927,110 @@ let hcr_variance_suite =
         let accepted = build [ "--accept-unproved"; "Tally.state,Tally.Bump,Other" ] in
         if not (contains accepted {|"accepted_unproved": ["Bump", "state"]|}) then
           Alcotest.failf "sidecar lacks the accepted laws:\n%s" accepted);
+    (* H7, tag consistency: every constructor both versions name must keep
+       its actor-message tag (Schema_diff.tag_check). A tag moves between
+       builds only when a hash collision made its key probe, and nothing
+       compared them before: these hand-written pairs force the move. *)
+    Alcotest.test_case "equal actor-message tags compared, not refused" `Quick (fun () ->
+        let h t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+        hcr_expect ~rc:0 ~has:[ "actor-message tags: unchanged (1 constructor of 1 actor compared)" ]
+          (hcr_check (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~handlers:(h 0x01000010) (st None))));
+    Alcotest.test_case "a moved actor-message tag is refused" `Quick (fun () ->
+        let h t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+        hcr_expect ~rc:1
+          ~has:[ "Tally.Bump.tag: REFUSED, Tally.Bump's actor-message tag moved: the running \
+                  version tags it 0x01000010, this build 0x01000011";
+                 "hash collision" ]
+          (hcr_check (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~handlers:(h 0x01000011) (st None)));
+        (* Not a proof obligation: no override reaches it. *)
+        hcr_expect ~rc:1 ~has:[ "Tally.Bump.tag: REFUSED" ]
+          (hcr_check ~extra:[ "--accept-unproved"; "Tally" ]
+             (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~accepted:[ "*" ] ~handlers:(h 0x01000011) (st None))));
+    Alcotest.test_case "a baseline that predates tag recording is noted, not refused" `Quick (fun () ->
+        hcr_expect ~rc:0
+          ~has:[ "Tally.tags: not compared (the running version's schema predates \
+                  actor-message tag recording"; "not a refusal" ]
+          (hcr_check (hcr_schema ~handlers:{|{"name":"Bump","params":["Int"]}|} (st None))
+             (hcr_schema ~handlers:{|{"name":"Bump","params":["Int"],"tag":16777232}|} (st None))));
+    (* The writer side: each handler's tag is recorded, it is the tag the
+       emitted code stores, and two builds that declare the same actors in a
+       different order (one with an extra actor) record the same tags, so
+       the gate passes them. *)
+    Alcotest.test_case "the writer records each handler's tag; reordered builds agree" `Quick (fun () ->
+        let dir = Filename.temp_dir "hcr_tags" "" in
+        (* A private HOME: a hit in the shared ~/.march CAS (an earlier run of
+           this same source) restores the .so and its sidecars but writes no
+           .ll, and the IR is what the recorded tags are checked against. *)
+        let home = Filename.concat dir "home" in
+        Unix.mkdir home 0o755;
+        let build name src =
+          let src_p = Filename.concat dir (name ^ ".march") in
+          let oc = open_out src_p in output_string oc src; close_out oc;
+          let so = Filename.concat dir (name ^ ".so") in
+          let rc, _, err = run_march_on_env ~cwd:dir [ ("HOME", home) ]
+              [ "--compile"; "--compile-so"; "--hot-reload"; "Main"; "-o"; so ] src_p in
+          Alcotest.(check int) ("compile " ^ name ^ "; stderr:\n" ^ err) 0 rc;
+          (so ^ ".schemas.json", Filename.concat dir (name ^ ".ll")) in
+        let actor_tally = {|  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Bump(n : Int) do { state with count: state.count + n } end
+    on Reset() do { state with count: 0 } end
+  end
+|} in
+        let actor_tally_reordered = {|  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Reset() do { state with count: 0 } end
+    on Bump(n : Int) do { state with count: state.count + n } end
+  end
+|} in
+        let actor_other = {|  actor Other do
+    state { seen : Int }
+    init  { seen: 0 }
+    on Poke() do { state with seen: state.seen + 1 } end
+  end
+|} in
+        let actor_extra = {|  actor Extra do
+    state { n : Int }
+    init  { n: 0 }
+    on Ping(k : Int) do { state with n: k } end
+  end
+|} in
+        let prog actors = "mod Main do\n" ^ String.concat "" actors
+                          ^ "  fn main() : Int do 0 end\nend\n" in
+        let a_json, a_ll = build "a" (prog [ actor_tally; actor_other ]) in
+        let b_json, _ = build "b" (prog [ actor_extra; actor_other; actor_tally_reordered ]) in
+        let tags path =
+          let schemas = March_forge.Schema_diff.parse_schemas_file path in
+          List.concat_map (fun actor ->
+              match List.assoc_opt actor schemas with
+              | None -> Alcotest.failf "%s missing from %s" actor path
+              | Some s ->
+                List.map (fun (c : March_forge.Schema_diff.ctor) ->
+                    match c.March_forge.Schema_diff.tag with
+                    | Some t -> (actor ^ "." ^ c.March_forge.Schema_diff.cname, t)
+                    | None -> Alcotest.failf "%s.%s has no tag in %s" actor
+                                c.March_forge.Schema_diff.cname path)
+                  (Option.value ~default:[] s.March_forge.Schema_diff.handlers))
+            [ "Tally"; "Other" ]
+          |> List.sort compare in
+        let ta = tags a_json and tb = tags b_json in
+        Alcotest.(check (list (pair string int))) "same tags whatever the declaration order" ta tb;
+        let ir = read_whole_file a_ll in
+        List.iter (fun (k, t) ->
+            if not (contains ir (Printf.sprintf "i32 %d" t)) then
+              Alcotest.failf "%s's recorded tag %d is not in the emitted IR" k t) ta;
+        hcr_expect ~rc:0 ~has:[ "actor-message tags: unchanged" ]
+          (let rc, _, err = run_march_on_env ~cwd:dir []
+               [ "--check-migration"; "--prior-schema"; a_json; "--new-schema"; b_json ]
+               (Filename.concat dir "b.march") in
+           let lines = List.filter (fun l -> String.length l > 10 && String.sub l 0 10 = "migration:")
+               (String.split_on_char '\n' err) in
+           (rc, lines, err)));
     (* The migrate_state path: proved once the return type is the actor's
        own state sort (a synthesised `State` of the same field set made the
        literal ambiguous, so before this a correct migration never proved

@@ -5793,6 +5793,32 @@ let compile filename =
                    h.March_ast.Ast.ah_params))
               adef.March_ast.Ast.actor_handlers
           in
+          (* H7: each handler's actor-message tag, as codegen installs it
+             (the same table over the same final module emit_module gets),
+             so the deploy gate can compare it with the running version's
+             (Schema_diff.tag_check).  Forced only when an actor is written. *)
+          let msg_tags = lazy (
+            let types = tir.March_tir.Tir.tm_types in
+            March_tir.Llvm_toplevel.actor_msg_tag_table
+              ~pins:(March_tir.Llvm_toplevel.current_migrate_pins types) types) in
+          let msg_tag actor cn =
+            let tbl = Lazy.force msg_tags in
+            let key = actor ^ "_Msg." ^ cn in
+            match Hashtbl.find_opt tbl key with
+            | Some t -> Some t
+            | None ->
+              (* A module-qualified declaration: the unique key ending in it. *)
+              let sfx = "." ^ key in
+              let sl = String.length sfx in
+              (match Hashtbl.fold (fun k t acc ->
+                   let kl = String.length k in
+                   if kl > sl && String.sub k (kl - sl) sl = sfx then t :: acc else acc)
+                   tbl [] with
+               | [ t ] -> Some t
+               | _ -> None) in
+          let tag_field actor cn = match msg_tag actor cn with
+            | Some t -> Printf.sprintf {|,"tag":%d|} t
+            | None -> "" in
           let oc = Buffer.create 1024 in
             Printf.bprintf oc "{\n";
             List.iteri (fun i (actor_name, fields) ->
@@ -5838,19 +5864,22 @@ let compile filename =
                                (String.concat ", " (List.map (Printf.sprintf "%S") ls))) in
                 let ctor_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
-                      Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
+                      Printf.sprintf {|{"name":%S,"params":[%s]%s}|} cn
                         (String.concat "," (List.map (fun t ->
-                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))
+                        (tag_field actor_name cn)) ctors) ^ "]" in
                 let handler_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
                       let params = String.concat "," (List.map (fun t ->
                           Printf.sprintf "%S" (ty_to_schema_str t)) tys) in
+                      let tag = tag_field actor_name cn in
                       match List.assoc_opt cn hrefs with
                       | Some rs when List.exists Option.is_some rs ->
-                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]}|} cn params
+                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]%s}|} cn params
                           (String.concat "," (List.map (function
                                | Some r -> Printf.sprintf "%S" r | None -> "null") rs))
-                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]}|} cn params) ctors)
+                          tag
+                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]%s}|} cn params tag) ctors)
                   ^ "]" in
                 let handlers_line = match List.assoc_opt actor_name actor_handlers with
                   | None -> ""
