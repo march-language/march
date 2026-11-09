@@ -271,6 +271,31 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
    ref itself at its own check sites. *)
 let stdlib_span_files = March_typecheck.Typecheck_builtins.stdlib_span_files
 
+(** Qualified names of the modules that are USER code: a [DMod] whose span is a
+    real file outside the stdlib root (stdlib modules carry a placeholder span).
+    Transparency for the capability ceiling is decided by this, never by a
+    module's NAME: a user module called `Yaml` is not the stdlib's. *)
+let user_module_names (decls : March_ast.Ast.decl list) : (string, unit) Hashtbl.t =
+  let seen = Hashtbl.create 16 in
+  let rec go prefix ds =
+    List.iter
+      (function
+        | March_ast.Ast.DMod (name, _, inner, sp) ->
+          let q =
+            if prefix = "" then name.March_ast.Ast.txt
+            else prefix ^ "." ^ name.March_ast.Ast.txt
+          in
+          let f = sp.March_ast.Ast.file in
+          if f <> March_ast.Ast.dummy_span.March_ast.Ast.file
+             && not (March_typecheck.Typecheck_builtins.file_is_stdlib f) then
+            Hashtbl.replace seen q ();
+          go q inner
+        | _ -> ())
+      ds
+  in
+  go "" decls;
+  seen
+
 (** The module names a batch of stdlib declarations defines.
 
     Feeds [Cap_attrib.attribute]'s [~transparent] set, so a capability reached
@@ -5235,6 +5260,7 @@ let compile filename =
        without perturbing it. *)
     let cap_attrib =
       let stdlib_mods = stdlib_module_names stdlib_decls in
+      let user_mods = user_module_names desugared.March_ast.Ast.mod_decls in
       (* A module with no `main` has no DCE roots, so pruning would keep the
          whole prepended stdlib and attribution would charge every stdlib
          module for capabilities the program never reaches — 17 violations for
@@ -5274,7 +5300,7 @@ let compile filename =
       in
       walk_prelude desugared.March_ast.Ast.mod_decls;
       March_tir.Cap_attrib.attribute
-        ~transparent:(fun m -> List.mem m stdlib_mods)
+        ~transparent:(fun m -> List.mem m stdlib_mods && not (Hashtbl.mem user_mods m))
         ~transparent_fns:(fun n ->
           (* Bare names only: a dotted name belongs to a module and is judged
              by the module predicate.  Matching the stem of a dotted name here

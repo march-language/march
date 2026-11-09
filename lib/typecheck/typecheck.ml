@@ -8519,11 +8519,13 @@ let rec check_decl env (d : Ast.decl) : env =
         | Ast.DNeeds (caps, _) ->
           List.map (fun (p, sc) -> (cap_path_of_names p, sc)) caps
         | _ -> []) decls in
+    (* Keyed by the QUALIFIED name only.  [module_caps] above also files a
+       short-name entry for its own lookups, but two modules sharing a short
+       name (`P1.Inner`, a top-level `Inner`) would then collide there and
+       whichever was declared later would judge both.  The host check resolves
+       owners by qualified name. *)
     let module_need_scopes' =
-      let with_qual =
-        (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes in
-      if cap_qname = name.txt then with_qual
-      else (name.txt, inner_need_scopes) :: with_qual
+      (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes
     in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
@@ -9222,7 +9224,8 @@ let rec check_decl env (d : Ast.decl) : env =
                  (Printf.sprintf
                     "The host scope `%s` on `%s` is not valid: %s.\n\
                      hint: write a host, a host and port, or `*.domain`, \
-                     e.g. `needs IO.NetConnect(\"api.example.com\")`."
+                     optionally followed by a path prefix, e.g. \
+                     `needs IO.NetConnect(\"api.example.com/v1/\")`."
                     path cap reason))
           else if snd (March_caps.Host_scope.split_options path) <> []
           then

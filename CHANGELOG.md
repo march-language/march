@@ -34,6 +34,14 @@ git log is authoritative for exact commits.
   compiled build. Deployment notes: `specs/features/http-and-networking.md`, and
   `examples/https_hello.march`.
 
+- **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
+  methods(get))` limits a module to a path prefix on a host, matched by whole segment
+  (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
+  counts). A path with `.`/`..` segments, `//`, a backslash or a percent-encoded `.`, `/`
+  or backslash is refused rather than normalized. Literal paths are checked at compile time;
+  every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
+  `HttpTransport.Refused`). The scope matcher is now public in `Http`
+  (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
 - **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
   Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
   law, that the comparator is a strict total order agreeing with `==`. A module can say what
@@ -812,6 +820,15 @@ git log is authoritative for exact commits.
 - **The event-loop HTTP server no longer drops pipelined requests** that arrive while a large
   response is still being written; they are served once the write finishes.
 
+- **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
+  was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
+  through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name
+  the actor or function you wrote (``handler `Go` of actor `Fetcher` ``), not compiler
+  names like `Fetcher_spawn` or `Fetch$B.T.fetch`, and two modules sharing a short name
+  (`P1.Inner`, `Inner`) keep their own host scopes whatever order they are declared in.
+- **A user module named like a stdlib module is charged for its own capabilities.** The
+  capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
+  `needs` to its callers; it now looks at where the module comes from, not its name.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its

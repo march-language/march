@@ -23,9 +23,3 @@ Phase 1 shipped (`specs/progress/2026-11-09-host-scoped-network-capabilities.md`
   scope (review 2026-11-09, I1): a confused-deputy route, documented as a limit.
 - **Host-less `@[net_dest]` on a host parameter** is rejected; a host+port judge would
   make TCP wrappers annotatable (review I4).
-- **`Other("get")` passes a GET-only scope** while sending a non-standard lowercase
-  method (review minor); the guard could compare `Other` names exactly.
-- **Ceiling transparency by name.** `Cap_attrib` (the capability ceiling) still decides
-  stdlib transparency by module NAME (`bin/main.ml`, `before_opt`); the host check now
-  uses where a declaration comes from. A user module named like a stdlib module is seen
-  through by the ceiling (pre-existing; found by the host-scope review).
