@@ -53,6 +53,15 @@ git log is authoritative for exact commits.
   is still dropped and counted when a deploy in between has no `migrate_msg` or one returns
   `None`, and the drop reason a remote sender gets names which link it was.
 
+- **Hot deploys refuse a moved actor-message tag.** Each handler's constructor tag is now
+  recorded in `.schemas.json` (`"tag"`, also on `migrate_msg_from`), and `forge deploy hot`
+  and `march --check-migration` compare it with the running version's for every
+  constructor both name. Tags are a hash of the qualified constructor name, but a hash
+  collision makes one probe to the next slot, which can move it between builds; a moved
+  tag would make queued messages misread, so the deploy is refused with the actor,
+  constructor and both tags. A running version from before tags were recorded is reported
+  as not compared, never silently passed.
+
 - **Tuples in refinement predicates.** A tuple-typed parameter can be refined
   (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
   predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a

@@ -1009,6 +1009,72 @@ let test_actor_msg_tags_stable_across_builds () =
      Alcotest.(check int) "the old type's Add carries v1's Tally.Add tag" add1 add_old
    | _ -> Alcotest.fail "unexpected ctor counts")
 
+(** H7 (specs/2026-11-04-lemmas-hcr-actors-choreography-design.md §3.4): the
+    tag function ignores declaration order. The deploy gate compares the
+    tags two builds recorded (Schema_diff.tag_check), which is only sound if
+    a reordering alone never moves one. Two builds here declare the same
+    actors with their types and their handlers in a different order, the
+    second with an unrelated extra actor and ordinary variants in between,
+    and include a pair of constructor names whose hashes land in ONE slot:
+    the case where a tag depends on the other keys in the build. Every
+    shared key gets the same tag. The colliding pair also shows the move the
+    gate exists for: the later-sorted name alone takes its hash slot, and
+    next to the other it probes to the next one. *)
+let test_actor_msg_tags_ignore_declaration_order () =
+  let module T = March_tir.Tir in
+  let module L = March_tir.Llvm_toplevel in
+  let module B = March_tir.Llvm_builtins in
+  let range = B.actor_message_tag_limit - B.actor_message_tag_base in
+  let slot key =
+    let d = Digest.string key in
+    ((Char.code d.[0] lsl 16) lor (Char.code d.[1] lsl 8) lor Char.code d.[2]) mod range in
+  (* A birthday search: ~5000 names for one shared 24-bit slot. *)
+  let seen = Hashtbl.create 8192 in
+  let rec find i =
+    let c = Printf.sprintf "C%d" i in
+    let s = slot ("Clash_Msg." ^ c) in
+    match Hashtbl.find_opt seen s with
+    | Some c0 -> (c0, c)
+    | None -> Hashtbl.add seen s c; find (i + 1) in
+  let c_a, c_b = find 0 in
+  let first, second =
+    if compare ("Clash_Msg." ^ c_a) ("Clash_Msg." ^ c_b) < 0 then (c_a, c_b) else (c_b, c_a) in
+  let v name ctors = T.TDVariant (name, List.map (fun c -> (c, [ T.TInt ])) ctors) in
+  let build_a =
+    [ v "Tally_Msg" [ "Add"; "Reset"; "Show" ]; v "Other_Msg" [ "Poke"; "Stop" ];
+      v "Clash_Msg" [ first; second ]; v "Color" [ "Red"; "Green" ] ] in
+  let build_b =
+    [ v "Extra_Msg" [ "Ping" ]; v "Clash_Msg" [ second; first ]; v "Color" [ "Green"; "Red" ];
+      v "Other_Msg" [ "Stop"; "Poke" ]; v "Tally_Msg" [ "Show"; "Reset"; "Add" ] ] in
+  let ta = L.actor_msg_tag_table ~pins:[] build_a in
+  let tb = L.actor_msg_tag_table ~pins:[] build_b in
+  let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) ta []) in
+  Alcotest.(check int) "build A has every actor-message key" 7 (List.length keys);
+  List.iter (fun k ->
+      Alcotest.(check (option int)) (k ^ " keeps its tag across the reordering")
+        (Hashtbl.find_opt ta k) (Hashtbl.find_opt tb k)) keys;
+  (* The heap tags codegen installs ([variant_ctor_tags], per declaration
+     position) name the same constructor with the same tag. *)
+  let by_name types =
+    let tbl = L.variant_ctor_tags ~pins:[] ~collision_set:(Hashtbl.create 1) types in
+    List.concat_map (function
+        | T.TDVariant (n, ctors) when March_tir.Tir_names.is_actor_msg_name n ->
+          List.map2 (fun (c, _) t -> (n ^ "." ^ c, t)) ctors (Hashtbl.find tbl n)
+        | _ -> []) types
+    |> List.filter (fun (k, _) -> not (String.length k > 10 && String.sub k 0 10 = "Extra_Msg."))
+    |> List.sort compare in
+  Alcotest.(check (list (pair string int))) "installed heap tags agree by constructor name"
+    (by_name build_a) (by_name build_b);
+  (* The collision: what the deploy gate catches. *)
+  let alone = L.actor_msg_tag_table ~pins:[] [ v "Clash_Msg" [ second ] ] in
+  let s = slot ("Clash_Msg." ^ second) in
+  Alcotest.(check int) (second ^ " alone takes its hash slot")
+    (B.actor_message_tag_base + s) (Hashtbl.find alone ("Clash_Msg." ^ second));
+  Alcotest.(check int) (second ^ " next to " ^ first ^ " probes to the next slot")
+    (B.actor_message_tag_base + ((s + 1) mod range)) (Hashtbl.find ta ("Clash_Msg." ^ second));
+  Alcotest.(check int) (first ^ " keeps its hash slot")
+    (B.actor_message_tag_base + s) (Hashtbl.find ta ("Clash_Msg." ^ first))
+
 
 (** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
     actor's handler writes its new state back via an EReuse on the actor
@@ -18323,6 +18389,8 @@ let codegen_suites =
             `Quick test_actor_foreign_msg_drop_boxed_dispatch;
           Alcotest.test_case "actor-message tags are stable across builds; migrate_msg's old type takes them" `Quick
             test_actor_msg_tags_stable_across_builds;
+          Alcotest.test_case "H7: actor-message tags ignore declaration order (with a colliding pair)" `Quick
+            test_actor_msg_tags_ignore_declaration_order;
           Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
             `Quick test_actor_struct_ereuse_unconditional;
           Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"

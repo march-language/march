@@ -155,14 +155,16 @@ let patch_migrate_fn (fd : March_ast.Ast.fn_def)
 (* strengthening-unchecked.md, design §3.3)                            *)
 (* ------------------------------------------------------------------ *)
 
-(* What one law came to.  Only [Proved] passes on its own; [Unproved] and
-   [Unchecked] pass when the law is named in --accept-unproved; [Refuted]
-   never does. *)
+(* What one law came to.  Only [Proved] and [Noted] pass on their own;
+   [Unproved] and [Unchecked] pass when the law is named in
+   --accept-unproved; [Refuted] and [Refused] never do. *)
 type verdict =
   | Proved of string            (* how: "proved", "unchanged" *)
   | Refuted
+  | Refused of string           (* a fact of the two builds, not a proof: why *)
   | Unproved of string          (* the implication that was not shown *)
   | Unchecked of string         (* why it could not be checked *)
+  | Noted of string             (* not compared, and not a refusal: why *)
 
 let conj (ps : March_ast.Ast.expr list) : March_ast.Ast.expr option =
   let module A = March_ast.Ast in
@@ -265,6 +267,7 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
     let results : (string * verdict) list ref = ref [] in
     let diags = ref [] in
     let note law v = results := (law, v) :: !results in
+    let tags_actors = ref 0 and tags_ctors = ref 0 in
 
     (* One synthesised function's postcondition, in its own error context so
        a counterexample is told apart from an undecided query. *)
@@ -280,6 +283,19 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
       match List.assoc_opt actor_name prior_schemas with
       | None -> ()   (* a new actor: no live state, no queued messages *)
       | Some (old_s : Sd.actor_schema) ->
+        (* H7: the actor-message tags of every constructor both builds name
+           (Schema_diff.tag_check).  Independent of the contracts below: a
+           moved tag misreads queued messages whatever the refinements say. *)
+        List.iter (function
+            | Sd.Tag_moved { ctor; old_tag; new_tag } ->
+              note (actor_name ^ "." ^ ctor ^ ".tag")
+                (Refused (Sd.tag_moved_message ~actor:actor_name ~ctor ~old_tag ~new_tag))
+            | Sd.Tags_unrecorded why -> note (actor_name ^ ".tags") (Noted why)
+            | Sd.Tags_agree n ->
+              (* One summary line for all of them, below: every stdlib actor
+                 the program links in agrees on every deploy. *)
+              incr tags_actors; tags_ctors := !tags_ctors + n)
+          (Sd.tag_check ~old_s ~new_s);
         let state_law = actor_name ^ ".state" in
         let new_has_refines =
           List.exists (fun (f : Sd.field) -> f.Sd.refine <> None) new_s.Sd.state_fields
@@ -399,7 +415,9 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
     List.iter (fun (law, v) ->
         (* A law checked more than once (one handler, several parameters)
            reports its weakest result. *)
-        let rank = function Refuted -> 3 | Unchecked _ -> 2 | Unproved _ -> 1 | Proved _ -> 0 in
+        let rank = function
+          | Refuted | Refused _ -> 3 | Unchecked _ -> 2 | Unproved _ -> 1
+          | Proved _ | Noted _ -> 0 in
         match Hashtbl.find_opt worst law with
         | Some w when rank w >= rank v -> ()
         | _ -> Hashtbl.replace worst law v)
@@ -410,6 +428,8 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
         let line = match v with
           | Proved how -> Printf.sprintf "%s: %s" law how
           | Refuted -> failed := true; Printf.sprintf "%s: REFUSED, a counterexample exists" law
+          | Refused why -> failed := true; Printf.sprintf "%s: REFUSED, %s" law why
+          | Noted why -> Printf.sprintf "%s: not compared (%s); not a refusal" law why
           | Unproved shows when accepted law ->
             Printf.sprintf "%s: not proved that %s; accepted by --accept-unproved" law shows
           | Unproved shows -> failed := true;
@@ -424,6 +444,11 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
         in
         Printf.eprintf "migration: %s\n" line)
       laws;
+    if !tags_actors > 0 then
+      Printf.eprintf "migration: actor-message tags: unchanged (%d constructor%s of %d actor%s \
+                      compared)\n"
+        !tags_ctors (if !tags_ctors = 1 then "" else "s")
+        !tags_actors (if !tags_actors = 1 then "" else "s");
     if !failed then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
           Printf.eprintf "%s\n\n" (March_errors.Errors.render_diagnostic ~src d))

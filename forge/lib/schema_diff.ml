@@ -12,9 +12,12 @@ type field = { name: string; ty: string; refine: string option }
 (** One message constructor: a handler of the actor, or a constructor of a
     migrate_msg's old type.  [params] are the schema type strings. *)
 type ctor = { cname: string; params: string list;
-              refines: string option list }
+              refines: string option list; tag: int option }
 (** [refines]: per parameter, its refinement over the positional names
-    [p0], [p1], ...; [] when none is refined (or an older compiler). *)
+    [p0], [p1], ...; [] when none is refined (or an older compiler).
+    [tag]: the constructor's actor-message heap tag in that build
+    ([Llvm_toplevel.actor_msg_tag_table], keyed `<Actor>_Msg.<Ctor>`);
+    [None] from a compiler that predates tag recording. *)
 
 type actor_schema = {
   compat: string;            (* "full" | "forward" | "any" *)
@@ -39,6 +42,72 @@ let messages_changed ~(old_h : ctor list) ~(new_h : ctor list) : bool =
       match List.find_opt (fun n -> n.cname = o.cname) new_h with
       | None -> true
       | Some n -> n.params <> o.params) old_h
+
+(** [migrate_msg_from] names exactly the running version's handlers [old_h]:
+    the same constructors with the same parameters (and refinements). The
+    recorded tags are left out: whether they agree is the tag check's
+    question ({!tag_check}), and a baseline from before tag recording must
+    not read as a different message type. *)
+let same_message_type (from : ctor list) (old_h : ctor list) : bool =
+  let untagged = List.map (fun c -> { c with tag = None }) in
+  untagged from = untagged old_h
+
+(** H7, tag consistency at deploy (design
+    specs/2026-11-04-lemmas-hcr-actors-choreography-design.md §3.4). A message
+    is a heap cell whose constructor tag the SENDER's build chose, and the
+    receiver's new build reads it. The tag is a stable function of the
+    qualified constructor name, except that a key whose hash slot is taken
+    probes upward, so two colliding keys can give one constructor different
+    tags in two builds (which other keys are in the build decides it). *)
+type tag_finding =
+  | Tag_moved of { ctor : string; old_tag : int; new_tag : int }
+  | Tags_unrecorded of string   (* why the tags could not be compared *)
+  | Tags_agree of int           (* this many constructors compared, all equal *)
+
+(** Compare the tags of every constructor both versions of one actor name:
+    the running version's handlers [old_s] against the new build's handlers
+    and its migrate_msg's old type (which takes the actor's tags by name).
+    A pair where either side recorded no tag is reported once, as
+    [Tags_unrecorded], never skipped silently. *)
+let tag_check ~(old_s : actor_schema) ~(new_s : actor_schema) : tag_finding list =
+  let new_ctors =
+    Option.value ~default:[] new_s.handlers @ Option.value ~default:[] new_s.migrate_msg_from in
+  match old_s.handlers with
+  | None ->
+    if new_ctors = [] then []
+    else [ Tags_unrecorded "the running version's schema predates handler recording, \
+                            so its actor-message tags are unknown" ]
+  | Some old_h ->
+    let pairs = List.filter_map (fun (o : ctor) ->
+        Option.map (fun n -> (o, n)) (List.find_opt (fun (n : ctor) -> n.cname = o.cname) new_ctors))
+        old_h in
+    let moved = List.filter_map (fun ((o : ctor), (n : ctor)) ->
+        match o.tag, n.tag with
+        | Some ot, Some nt when ot <> nt -> Some (Tag_moved { ctor = o.cname; old_tag = ot; new_tag = nt })
+        | _ -> None) pairs in
+    let old_missing = List.exists (fun ((o : ctor), _) -> o.tag = None) pairs in
+    let new_missing = List.exists (fun (_, (n : ctor)) -> n.tag = None) pairs in
+    moved
+    @ (if old_missing then
+         [ Tags_unrecorded "the running version's schema predates actor-message tag \
+                            recording, so a tag moved by a hash-collision probe cannot \
+                            be detected" ]
+       else if new_missing then
+         [ Tags_unrecorded "this build's schema records no actor-message tags" ]
+       else if moved = [] && pairs <> [] then [ Tags_agree (List.length pairs) ]
+       else [])
+
+(** The refusal text for a moved tag, the same in forge and
+    `march --check-migration`. *)
+let tag_moved_message ~(actor : string) ~ctor ~old_tag ~new_tag : string =
+  Printf.sprintf
+    "%s.%s's actor-message tag moved: the running version tags it 0x%08x, this build \
+     0x%08x. Tags are a hash of the qualified name %s_Msg.%s, and a name whose hash \
+     slot another constructor holds probes to the next free one, so a hash collision \
+     in one of the two builds moved it; a message the running version built would be \
+     read as another constructor or dropped. A restart deploys it safely; a hot \
+     deploy cannot."
+    actor ctor old_tag new_tag actor ctor
 
 (** The laws of [laws] ("Actor.law" or "Actor") that the new build's
     schemas do not carry in [accepted_unproved].  forge deploys an override
@@ -73,7 +142,8 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
         params = c |> member "params" |> to_list |> List.map to_string;
         refines = (match member "refines" c with
             | `Null -> []
-            | v -> v |> to_list |> List.map to_string_option) }) in
+            | v -> v |> to_list |> List.map to_string_option);
+        tag = (match member "tag" c with `Int t -> Some t | _ -> None) }) in
   let flag key j = match member key j with `Bool b -> b | _ -> false in
   let optional key decode j = match member key j with
     | `Null -> None | value -> Some (decode value) in

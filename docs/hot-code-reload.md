@@ -934,6 +934,7 @@ contracts imply the new ones**:
 |---|---|---|
 | The state | old field refinements and `@invariant` imply the new ones | with a `migrate_state`: of its result, from the old state; without one and with the same fields: of the state as it is |
 | A handler's parameters | each old parameter refinement implies the new one | when the message type is unchanged (otherwise `migrate_msg` converts every old message) |
+| A message's constructor tag | each constructor both versions name keeps its actor-message tag | on every deploy, with or without contracts; a moved tag can't be accepted |
 
 Loosening a contract always passes. Tightening one is refused unless it follows from the
 old contract, or a `migrate_state` re-establishes it:
@@ -975,6 +976,28 @@ whole actor). The server's audit line for the activation copies them:
 So the audit log answers "what was deployed without its contract proved, and who signed
 it." A patch built elsewhere (`forge deploy hot --so …`) must be built with the same
 `march --accept-unproved …`: forge refuses an override the patch doesn't carry.
+
+**Message tags must not move.** A queued message is a heap cell whose constructor tag the
+sender's build chose, and the new build's dispatch (or its `migrate_msg`) reads it. The tag
+is a hash of the qualified constructor name (`Tally_Msg.Bump`), so adding, removing or
+reordering handlers and actors leaves it alone. The one exception is a hash collision:
+when two names in a build hash to the same slot, the later one probes to the next free
+slot, so its tag depends on which other names the build has. Each `.schemas.json` records
+every handler's tag (`{"name":"Bump","params":["Int"],"tag":29449723}`, and the same for
+`migrate_msg_from`). `forge deploy hot` and `march --check-migration` compare them for every
+constructor the running version and the new build both name (a removed handler through the
+new `migrate_msg`'s old type), and refuse a moved tag:
+
+```
+migration: Tally.Bump.tag: REFUSED, Tally.Bump's actor-message tag moved: the running version tags it 0x01c15dfc, this build 0x01c15dfb. Tags are a hash of the qualified name Tally_Msg.Bump, and a name whose hash slot another constructor holds probes to the next free one, so a hash collision in one of the two builds moved it; a message the running version built would be read as another constructor or dropped. A restart deploys it safely; a hot deploy cannot.
+```
+
+`--accept-unproved` doesn't reach it, since it's a fact about the two builds, not a proof
+that failed. A running version built before tags were recorded can't be compared; the
+deploy goes ahead and says so (`Tally.tags: not compared (the running version's schema
+predates actor-message tag recording, …); not a refusal`, and a `NOTE:` line from forge).
+When all tags agree, `--check-migration` prints one summary line
+(`actor-message tags: unchanged (55 constructors of 10 actors compared)`).
 
 ### Migrations are checked on every build
 

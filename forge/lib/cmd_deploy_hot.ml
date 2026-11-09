@@ -1948,7 +1948,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                    `forge hot-reload migrate-msg-stub %s`)\n%!"
                   actor (String.uncapitalize_ascii actor) actor;
                 None
-              | Some f when f = oh -> None
+              | Some f when Schema_diff.same_message_type f oh -> None
               | Some _ -> Some actor) msgs_changed_actors in
           if mm_errors <> [] then begin
             List.iter (fun actor ->
@@ -1961,6 +1961,38 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
           end;
           let msgs_changed actor =
             List.exists (fun (a, _, _) -> a = actor) msgs_changed_actors in
+
+          (* H7: every constructor the running version and this build both
+             name must carry the same actor-message tag, or a message the
+             running version built is misread by the new dispatch (a
+             hash-collision probe moved it).  Checked on every deploy, not
+             only one with contracts: it is a property of the two builds. *)
+          let tag_findings =
+            List.concat_map (fun (actor, (ns : Schema_diff.actor_schema)) ->
+                match List.assoc_opt actor old_schemas with
+                | None -> []
+                | Some os ->
+                  List.map (fun f -> (actor, f)) (Schema_diff.tag_check ~old_s:os ~new_s:ns))
+              new_schemas in
+          (* Never silent: one line per reason, naming every actor it covers
+             (a baseline from an older compiler covers the stdlib's too). *)
+          let unrecorded = List.filter_map (function
+              | (a, Schema_diff.Tags_unrecorded why) -> Some (why, a) | _ -> None) tag_findings in
+          List.iter (fun why ->
+              let actors = List.filter_map (fun (w, a) -> if w = why then Some a else None)
+                  unrecorded in
+              Printf.printf "  NOTE: actor-message tags not compared for %s: %s\n%!"
+                (String.concat ", " actors) why)
+            (List.sort_uniq compare (List.map fst unrecorded));
+          let tag_moved = List.filter_map (function
+              | (actor, Schema_diff.Tag_moved { ctor; old_tag; new_tag }) ->
+                Some (Schema_diff.tag_moved_message ~actor ~ctor ~old_tag ~new_tag)
+              | _ -> None) tag_findings in
+          if tag_moved <> [] then begin
+            List.iter (Printf.eprintf "forge deploy hot: %s\n") tag_moved;
+            Unix.close fd;
+            raise (Failure "actor-message tag moved — deploy aborted")
+          end;
 
           (* Gap #3: migration VC — shell out to march --check-migration. *)
           let march_bin =
