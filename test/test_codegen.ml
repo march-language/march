@@ -15303,6 +15303,26 @@ let test_newtype_eq_operator_generic_payload_compiled () =
    mangled to [Tup_Tup_Int_x_Int_x_Int_x_Int].  The interpreter was right in
    every case; compiled code gave wrong answers, over-read, or SIGSEGVed. *)
 
+(** A module's own function shadows a bulk import wherever the `use`
+    sits: `fn sum_int` declared before `use List.*` is still the module's
+    own.  The interpreter let the later `use` rebind it and printed 3; the
+    typechecker and the compiled build use the local definition (102)
+    (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md). *)
+let test_local_fn_shadows_later_bulk_use_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_local_fn_shadows_later_use"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn sum_int(xs : List(Int)) : Int do 100 + List.length(xs) end
+  use List.*
+  fn main(_cap : Cap(IO.Console)) : () do
+    println(int_to_string(sum_int(append([1], [2]))))
+  end
+end
+|}
+    ~expected:"102"
+    ()
+
 (** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
 let test_record_eq_pair_then_triple_compiled () =
   assert_compiled_interp_parity
@@ -19280,6 +19300,8 @@ let codegen_suites =
             test_newtype_eq_operator_generic_payload_compiled;
           Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
             test_eq_operator_opaque_ctor_field_uses_poly_eq;
+          Alcotest.test_case "a local fn shadows a later `use M.*` on both backends" `Quick
+            test_local_fn_shadows_later_bulk_use_compiled;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

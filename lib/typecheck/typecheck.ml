@@ -11856,6 +11856,41 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
        | None -> ());
       seen := !seen @ [site]) own
 
+(** Reject an `alias Path, as: B` whose name [B] is also a module declared in
+    the same scope (`mod B do ... end`).  The interpreter resolved `B.g` to
+    the declared module and the compiled build to the alias target, so one
+    program printed two answers
+    (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md).
+    Stdlib declarations are not checked. *)
+let check_alias_shadows_module errors (decls : Ast.decl list) : unit =
+  let rec walk decls =
+    let mods = List.filter_map (function
+        | Ast.DMod (n, _, _, sp) -> Some (n.Ast.txt, sp)
+        | _ -> None) decls in
+    List.iter (function
+        | Ast.DAlias (ad, sp) when not (Typecheck_builtins.span_is_stdlib sp) ->
+          let short = ad.Ast.alias_name.Ast.txt in
+          (match List.assoc_opt short mods with
+           | Some msp ->
+             let target = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ad.Ast.alias_path) in
+             if target <> short then
+               Err.report errors
+                 { Err.severity = Err.Error; span = ad.Ast.alias_name.Ast.span;
+                   message = Printf.sprintf
+                       "This alias names `%s` as `%s`, but this module also declares a module `%s`.\n\
+                        A reference like `%s.f` could mean either one. Pick a different alias \
+                        name, or rename the module."
+                       target short short short;
+                   labels = [{ Err.lbl_span = msp;
+                               Err.lbl_message = Printf.sprintf "module `%s` is declared here" short }];
+                   notes = [];
+                   code = Err.Code.alias_shadows_module; fix = None }
+           | None -> ())
+        | Ast.DMod (_, _, inner, sp) when not (Typecheck_builtins.span_is_stdlib sp) -> walk inner
+        | _ -> ()) decls
+  in
+  walk decls
+
 (** The [nonexhaustive_match_spans] of the last [check_module_core] run,
     guarded matches included (see [check_exhaustiveness]).  Read only by
     [--reflect-report]'s R5 (lib/refinecheck/refine_reflect.ml): the driver's
@@ -11891,6 +11926,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       | None -> [] in
     let own = collect_json_derive_sites m.Ast.mod_decls in
     check_json_derive_collisions errors ~seed ~own;
+    check_alias_shadows_module errors m.Ast.mod_decls;
     seed @ own
   in
   let type_map = match seed_env with
