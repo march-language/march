@@ -23,6 +23,13 @@
 module Ast = March_ast.Ast
 module Typecheck = March_typecheck.Typecheck
 
+(** A nominal record type's declared type parameters, in order, filled by
+    [Lower_decls.lower_type_def].  [Tir.TDRecord] carries no parameter list,
+    and a record's field order is not its parameter order, so the
+    structural-equality generator ([Llvm_eq]) reads this to instantiate a
+    generic record named by a [TCon] (`Cell(String)`). *)
+let record_type_params : (string, string list) Hashtbl.t = Hashtbl.create 16
+
 (** Default type used when no annotation is available. A placeholder
     that will be resolved during monomorphization. *)
 let unknown_ty = Tir.TVar "_"

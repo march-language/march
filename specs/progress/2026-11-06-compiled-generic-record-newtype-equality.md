@@ -30,3 +30,15 @@ Interpreted output: `true`, `false`, `true`, `true`.
 Compiled output: `false`, `false`, `false`, `true` (exit 0).
 Reproduced with the compiler based on b7c963d74. Inspect the named-record
 resolution used by `lib/tir/llvm_eq.ml` before changing the runtime comparator.
+
+## 2026-11-09: fixed
+
+`Llvm_eq.ensure_adt_eq_fn` now resolves a `TCon` that names a nominal record of the module
+(`Kind.record_fields`, or exactly one by short name via `Kind.record_fields_short`) to the
+structural `TRecord` it names and compares it field by field with the record helper. The type
+arguments are substituted against the record's DECLARED parameters, which
+`Lower_decls.lower_type_def` now records in `Lower_types.record_type_params` (a `TDRecord`
+carries no parameter list, and its field order is not its parameter order). A generic record
+whose parameters are unknown keeps the old `march_poly_eq` fallback. Pinned by the codegen
+parity test "== on a newtype over a generic named record is structural", which also covers a
+two-parameter record declared with its fields in the opposite order.

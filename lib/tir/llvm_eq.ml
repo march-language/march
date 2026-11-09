@@ -87,6 +87,35 @@ let field_load_llty : Tir.ty -> string = function
   | Tir.TFloat -> "double"
   | _ -> "ptr"
 
+(** [TCon (type_name, ty_args)] as the structural [TRecord] it names, when
+    [type_name] is a nominal record of this module (or names exactly one by
+    its short name, [Kind.record_fields_short]) whose type arguments can be
+    substituted: its declared parameters are known
+    ([Lower_types.record_type_params]), or it is not generic.  [None]
+    otherwise, which keeps the caller's previous fallback. *)
+let nominal_record_ty (ctx : Llvm_ctx.ctx) (type_name : string) (ty_args : Tir.ty list)
+  : Tir.ty option =
+  let fields =
+    match Kind.record_fields ctx.Llvm_ctx.k_table type_name with
+    | Some fs -> Some fs
+    | None -> Kind.record_fields_short ctx.Llvm_ctx.k_table type_name
+  in
+  match fields with
+  | None -> None
+  | Some fs ->
+    let subst =
+      if ty_args = [] then Some []
+      else
+        match Hashtbl.find_opt Lower_types.record_type_params type_name with
+        | Some ps when List.length ps = List.length ty_args -> Some (List.combine ps ty_args)
+        | _ -> None
+    in
+    (match subst with
+     | None -> None
+     | Some subst ->
+       let fs = List.map (fun (n, t) -> (n, apply_ty_subst subst t)) fs in
+       Some (Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) fs)))
+
 (** Ensure a structural equality function for [ty] exists in [ctx.extra_fns].
     Returns Some llvm_fn_name (without @) or None if generation is not possible.
     Registers the name before generating the body so recursive types (e.g. List)
@@ -94,6 +123,13 @@ let field_load_llty : Tir.ty -> string = function
 let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
   match ty with
   | Tir.TCon ("Atom", []) -> None  (* Atoms stored as i64, not heap ptrs *)
+  | Tir.TCon (type_name, ty_args) when nominal_record_ty ctx type_name ty_args <> None ->
+    (* A nominal record named by its type (`Cell(String)`, the payload of a
+       newtype `Wrap(Cell(a))`): it is a single-layout record cell, so compare
+       it as the structural record it names.  It used to reach the variant
+       path below, find no constructors, and leave the caller with
+       [march_poly_eq], a pointer comparison for records. *)
+    ensure_adt_eq_fn ctx (Option.get (nominal_record_ty ctx type_name ty_args))
   | Tir.TCon (type_name, ty_args) ->
     let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
     if Hashtbl.mem ctx.Llvm_ctx.emitted_eq_fns fn_name then Some fn_name
