@@ -5863,6 +5863,12 @@ position into a real contract, obligation and assumption together, is
   state's refined fields are obliged at `init` and at every handler's result
   (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
   of the incoming `state` in every handler body.
+- (Closed 2026-11-09.) Two-state handler guarantees: `on Msg(…) ensures P do`,
+  where `state` and the bare fields in `P` are the returned state and `old(e)`
+  reads the incoming one. Proved per handler as the `@invariant` is (the
+  invariant assumed of the incoming state), a violation shows both states, and
+  each is a ledger row `<Actor>.<Msg>.ensures` listed by `--guarantees`. See
+  [Handler guarantees](actors.md#handler-guarantees-ensures-and-old).
 - (Closed 2026-11-08.) An actor's `@invariant`: an inductive invariant too,
   over its bare field names (or `state.f`), and it may call the program's own
   functions, unfolded as in any contract. The state `init` builds must

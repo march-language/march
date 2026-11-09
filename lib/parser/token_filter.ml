@@ -187,6 +187,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         promote_to Parser.GHOST ~when_:(function
           | Parser.LET | Parser.FN | Parser.PFN | Parser.LOWER_IDENT _ -> true
           | _ -> false)
+      (* Two-state specs: `on Msg(…) ensures P do`.  `ensures` is a keyword
+         only before a token that can start its predicate but never follows a
+         name in an expression (calls take parentheses), so `ensures` stays
+         an ordinary name everywhere else. *)
+      | Parser.LOWER_IDENT "ensures" ->
+        promote_to Parser.ENSURES ~when_:(function
+          | Parser.STATE -> true (* `ensures state.balance …` *)
+          | t -> starts_condition t)
       | Parser.LOWER_IDENT "calc" ->
         promote_to Parser.CALC ~when_:(function Parser.DO -> true | _ -> false)
       | Parser.LOWER_IDENT "reveal" ->

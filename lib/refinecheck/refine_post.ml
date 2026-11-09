@@ -589,6 +589,12 @@ type post_subject = {
   ps_what : string;       (* "`Counter`'s `@invariant` `p` after handler `Inc`", for `cap verified` *)
   ps_pred : string;       (* the predicate as written *)
   ps_note : string;
+  ps_after : ((string * string) list -> string option) option;
+  ps_rename : (string * string) list;
+  (* Names the check introduced, shown as the user wrote them: a handler
+     parameter renamed apart from a field (`count_arg` -> `count`). *)
+  (* A handler guarantee's: given a counterexample model, the state the
+     handler returns from it, rendered, so the message shows both states. *)
 }
 
 let post_subject : post_subject option ref = ref None
@@ -1387,7 +1393,23 @@ let check_post_stage ~root errctx ~span ?(record_sort : string option = None)
             if emit then begin
               ignore tail_e;
               let pred = pred_str ret_pred in
-              let msg, notes = post_violation ~fn_name ~pred (cx_block (model_of first)) in
+              let model = model_of first in
+              let after_model = model in
+              let model =
+                match !post_subject with
+                | Some { ps_rename = (_ :: _) as ren; _ } ->
+                  List.map (fun (k, v) -> ((match List.assoc_opt k ren with Some k' -> k' | None -> k), v)) model
+                | _ -> model
+              in
+              let after =
+                match !post_subject with
+                | Some { ps_after = Some f; _ } when after_model <> [] ->
+                  (match f after_model with
+                   | Some v -> "\n\nand the handler returns:\n\n    " ^ v
+                   | None -> "")
+                | _ -> ""
+              in
+              let msg, notes = post_violation ~fn_name ~pred (cx_block model ^ after) in
               Err.report errctx
                 { March_errors.Errors.severity = March_errors.Errors.Error
                 ; span; message = msg; labels = []

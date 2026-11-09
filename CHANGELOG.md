@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Handler guarantees: `on Msg(…) ensures P do … end`.** A handler can state how one message
+  changes the actor's state, with `old(e)` for the state the message arrived with:
+  `on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do`. Each
+  guarantee is proved per handler on every build (the `@invariant` assumed of the incoming state);
+  a handler that can break it is an error showing the incoming state, the arguments and the state
+  the handler returns, and `march --check --guarantees` lists each one beside the invariant.
+  `old` anywhere else in a refinement is the new `old_misuse` error; `ensures` and `old` remain
+  ordinary names outside a handler header and its guarantee.
 - **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
   Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
   law, that the comparator is a strict total order agreeing with `==`. A module can say what
