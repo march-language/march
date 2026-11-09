@@ -255,6 +255,114 @@ let colliding_shared_ctor_type (module_prefix : string) (ctor_name : string)
   : string option =
   Hashtbl.find_opt colliding_ctor_type_by_module (module_prefix, ctor_name)
 
+(* ── Actor message identity ───────────────────────────────────────────────
+   A [VCon] carries only its tag, so dispatch by handler NAME let a variant
+   `Tok.Inc(-1)`, or another same-state actor's `Inc`, run this actor's `Inc`
+   handler, which compiled code (globally unique message tags) drops.  When
+   the driver hands in the typechecker's types ([ctor_type_of_span]), a
+   construction of an actor message whose name some handler uses is tagged
+   `<Actor>_Msg.<Msg>` ([msg_tag_of_con]); dispatch runs such a tag only on
+   its own actor and, for a name another actor or a variant shares, drops a
+   bare tag the interpreter did not build itself ([handler_for_msg]).
+   Patterns and printing see the bare name ([strip_msg_qual]).  Without
+   types (the REPL, tests that skip the typechecker) tags stay bare and
+   dispatch is by name, as before.  Todo
+   specs/progress/2026-11-04-interp-actor-dispatch-by-name.md. *)
+
+(** The constructor's checked type name at a span, set by the driver. *)
+let ctor_type_of_span : (span -> string option) ref = ref (fun _ -> None)
+
+(** True once the driver has set [ctor_type_of_span]. *)
+let typed_messages : bool ref = ref false
+
+(** handler name -> the actors (decl names) that define it. *)
+let handler_actors : (string, string list) Hashtbl.t = Hashtbl.create 16
+
+(** Every variant constructor name declared anywhere. *)
+let variant_ctor_names : (string, unit) Hashtbl.t = Hashtbl.create 64
+
+(** The `<Actor>_Msg` prefixes [msg_tag_of_con] has put on a tag. *)
+let msg_qualified_types : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let actor_msg_suffix = "_Msg"
+
+let last_segment (s : string) : string =
+  match String.rindex_opt s '.' with
+  | Some i -> String.sub s (i + 1) (String.length s - i - 1)
+  | None -> s
+
+(** The actor whose message type is [tn] (`Counter_Msg`, possibly
+    module-qualified), when [tn] names one. *)
+let actor_of_msg_type (tn : string) : string option =
+  let t = last_segment tn in
+  let n = String.length t and k = String.length actor_msg_suffix in
+  if n > k && String.sub t (n - k) k = actor_msg_suffix then
+    let a = String.sub t 0 (n - k) in
+    if Hashtbl.fold (fun _ owners acc -> acc || List.mem a owners) handler_actors false
+    then Some a else None
+  else None
+
+let note_actor_handlers (actor : string) (handlers : actor_handler list) : unit =
+  List.iter (fun (h : actor_handler) ->
+      let owners = Option.value ~default:[] (Hashtbl.find_opt handler_actors h.ah_msg.txt) in
+      if not (List.mem actor owners) then
+        Hashtbl.replace handler_actors h.ah_msg.txt (actor :: owners))
+    handlers
+
+(** A message name that two actors' handlers, or a handler and a variant,
+    share. *)
+let shared_msg_name (n : string) : bool =
+  match Hashtbl.find_opt handler_actors n with
+  | Some (_ :: _ :: _) -> true
+  | Some [ _ ] -> Hashtbl.mem variant_ctor_names n
+  | _ -> false
+
+(** The tag for constructor [bare] built at [sp], when it is an actor
+    message whose name a handler uses. *)
+let msg_tag_of_con (bare : string) (sp : span) : string option =
+  if not (Hashtbl.mem handler_actors bare) then None
+  else match !ctor_type_of_span sp with
+    | Some tn when actor_of_msg_type tn <> None ->
+      let tn = last_segment tn in
+      Hashtbl.replace msg_qualified_types tn ();
+      Some (tn ^ "." ^ bare)
+    | _ -> None
+
+(** The handler name of an [actor_call] request ([runtime_call_prefix]). *)
+let runtime_call_handler (tag : string) : string option =
+  let k = String.length runtime_call_prefix in
+  if String.length tag > k && String.sub tag 0 k = runtime_call_prefix
+  then Some (String.sub tag k (String.length tag - k)) else None
+
+(** [tag] without a `<Actor>_Msg.` prefix [msg_tag_of_con] put there, or the
+    [runtime_call_prefix] [actor_call] put there. *)
+let strip_msg_qual (tag : string) : string =
+  match runtime_call_handler tag with Some h -> h | None ->
+  match String.rindex_opt tag '.' with
+  | Some i when Hashtbl.mem msg_qualified_types (String.sub tag 0 i) ->
+    String.sub tag (i + 1) (String.length tag - i - 1)
+  | _ -> tag
+
+(** Messages the interpreter itself enqueues, always bare. *)
+let runtime_built_msg (tag : string) : bool =
+  tag = "Shutdown" || tag = "Down" || tag = "$sys_inspect"
+
+(** The handler of actor [actor_name] (its spawn name) that runs message
+    [tag]: a `<A>_Msg.<M>` tag only on actor [A]; a bare tag by name, unless
+    the name is shared and the interpreter did not build the message. *)
+let handler_for_msg (actor_name : string) (handlers : actor_handler list) (tag : string)
+  : actor_handler option =
+  let find n = List.find_opt (fun (h : actor_handler) -> h.ah_msg.txt = n) handlers in
+  match runtime_call_handler tag with Some h -> find h | None ->
+  match String.rindex_opt tag '.' with
+  | Some i when Hashtbl.mem msg_qualified_types (String.sub tag 0 i) ->
+    let tn = String.sub tag 0 i in
+    let m = String.sub tag (i + 1) (String.length tag - i - 1) in
+    if actor_of_msg_type tn = Some (last_segment actor_name) then find m else None
+  | _ ->
+    if !typed_messages && shared_msg_name tag && not (runtime_built_msg tag) then None
+    else find tag
+
 (** Populate [type_collision_set] AND [colliding_ctor_type_by_module] by
     walking [decls] recursively (descending into [DMod], accumulating a
     "Sub.Sub2." prefix the same way [module_stack]/[current_doc_prefix] do
@@ -547,6 +655,7 @@ let pmap_threshold_value : int ref = ref 1024
    working for existing call sites (the js_of_ocaml build installs it).
    Aliasing a [ref] shares the same mutable cell. *)
 let http_fetch_hook = Eval_prim.http_fetch_hook
+let call_return_hook = Eval_prim.call_return_hook
 
 
 
@@ -784,6 +893,8 @@ type march_frame = {
   mf_name : string;
   mf_file : string;
   mf_line : int;
+  mf_span : March_ast.Ast.span;
+      (** the whole call expression, for a source excerpt with a caret *)
 }
 
 (** Per-evaluation March call stack.  Single-threaded (cooperative scheduling
@@ -791,13 +902,24 @@ type march_frame = {
 let march_stack : march_frame list ref = ref []
 
 let march_stack_push (name : string) (sp : span) : unit =
-  march_stack := { mf_name = name; mf_file = sp.file; mf_line = sp.start_line }
+  march_stack := { mf_name = name; mf_file = sp.file; mf_line = sp.start_line; mf_span = sp }
                  :: !march_stack
 
 let march_stack_pop () : unit =
   match !march_stack with _ :: rest -> march_stack := rest | [] -> ()
 
 let get_march_stack () : march_frame list = !march_stack
+
+(** Called when a message handler of an actor nobody supervises raises: the
+    actor's name, the message it was handling, its state at the time, the
+    frames of the handler's own call stack (most recent first) and the
+    exception.  The interpreter otherwise drops such a crash without a word
+    (the actor is dead, the program carries on), so the driver installs a
+    report here.  A no-op by default (the REPL, tests, the LSP). *)
+let actor_crash_hook :
+  (actor:string -> tag:string -> args:Eval_types.value list -> state:Eval_types.value
+   -> frames:march_frame list -> exn -> unit) ref =
+  ref (fun ~actor:_ ~tag:_ ~args:_ ~state:_ ~frames:_ _ -> ())
 
 let clear_march_stack () : unit = march_stack := []
 
@@ -989,7 +1111,7 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
         | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_pat
         | None -> bare_pat
     in
-    if qualified_pat <> tag then None
+    if qualified_pat <> strip_msg_qual tag then None
     else if List.length pats <> List.length args then None
     else match_list pats args
 
@@ -1067,6 +1189,7 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
 let register_type_ctors (name_txt : string) (variants : variant list) : unit =
   List.iter (fun (v : variant) ->
       Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
+      Hashtbl.replace variant_ctor_names v.var_name.txt ();
       if is_colliding_type_name name_txt then begin
         let module_prefix = current_doc_prefix () in
         let qualified_type = module_prefix ^ name_txt in
@@ -1752,6 +1875,7 @@ let span_of_expr (e : expr) : span =
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | ERefineMsg (_, _, sp) -> sp
+  | EProof (_, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -1820,8 +1944,13 @@ and apply_inner (fn_val : value) (args : value list) : value =
        this hot path. *)
     let saved = !closure_prefix_override in
     closure_prefix_override := Some defn_prefix;
+    (* [call_return_hook] is a no-op natively; in the browser REPL it is the
+       stack bounce on the return path (see [Eval_prim.call_return_hook]).
+       It runs in [~finally] so an exception unwinding a deep recursion (a
+       March panic 20000 calls down) is bounced too, not only a normal
+       return. *)
     Fun.protect
-      ~finally:(fun () -> closure_prefix_override := saved)
+      ~finally:(fun () -> closure_prefix_override := saved; !call_return_hook ())
       (fun () -> eval_expr env' body)
 
   | VBuiltin (name, f) ->
@@ -2013,7 +2142,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | exception (Eval_error _ | Match_failure _ | Assert_failure _ as e) -> raise e
      | exception e -> march_stack_pop (); raise e)
 
-  | ECon (name, args, _) ->  (* E-Con — core-march.md §4.2 *)
+  | ECon (name, args, con_sp) ->  (* E-Con — core-march.md §4.2 *)
     let arg_vals = List.map (eval_expr env) args in
     (* Strip any type qualifier from the constructor tag so that
        Result.Ok and Ok both produce VCon("Ok", …) at runtime. *)
@@ -2060,6 +2189,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
         | Some short_type_name -> prefix ^ short_type_name ^ "." ^ bare_tag
         | None -> bare_tag
     in
+    let tag =
+      if String.equal tag bare_tag then
+        Option.value ~default:tag (msg_tag_of_con bare_tag con_sp)
+      else tag in
     VCon (tag, arg_vals)
 
   | ELam (params, body, _) ->  (* E-Lam — core-march.md §4.2 *)
@@ -2436,35 +2569,39 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     apply flat_map_fn [v; k]
 
-  | EAssert (inner, sp) ->
-    (* Compiler-assisted assertion rewriting:
-       If the inner expression is a binary comparison (==, !=, <, >, <=, >=),
-       we evaluate both sides separately so we can show their values on failure.
-       Otherwise, we just evaluate the expression and check if it's true. *)
-    let comparison_ops = ["=="; "!="; "<"; ">"; "<="; ">="] in
-    let loc = Printf.sprintf "%s:%d" sp.file sp.start_line in
+  (* Proof hints are erased before anything runs ([Lemma_erase]); a tree that
+     reaches the interpreter unerased (a REPL fragment) treats them the same
+     way: a `with fuel` body runs, the rest is unit. *)
+  | EProof (PWithFuel (_, _, body), _) -> eval_block env body
+  | EProof (_, _) -> VUnit
+  | EAssert (inner, _) ->
+    (* A failed assertion raises a rendered report
+       (lib/errors/test_report.ml): the header with the asserted expression
+       under a caret, and for a comparison both sides by their source text,
+       with the first difference of an `==` marked.  A compiled program
+       prints the same report (Lower_expr's EAssert arm, march_assert.c). *)
+    let module R = March_errors.Test_report in
+    let printed = function
+      | VString s -> R.quote s
+      | v -> show_dispatch v
+    in
+    let src e = R.operand_source ~span:(span_of_expr e) e in
     (match inner with
-     | EApp (EVar op_name, [lhs; rhs], _) when List.mem op_name.txt comparison_ops ->
+     | EApp (EVar op_name, [lhs; rhs], _) when List.mem op_name.txt R.comparison_ops ->
        let lv = eval_expr env lhs in
        let rv = eval_expr env rhs in
        let op_fn = lookup op_name.txt env in
        (match apply op_fn [lv; rv] with
         | VBool true -> VUnit
-        | VBool false ->
-          raise (Assert_failure (Printf.sprintf
-            "assert failed at %s\n    left:  %s\n    right: %s"
-            loc (value_to_string lv) (value_to_string rv)))
-        | _ -> raise (Assert_failure (Printf.sprintf
-            "assert: comparison did not return Bool (at %s)" loc)))
+        | _ ->
+          let header = R.assert_header ~span:(span_of_expr inner) ~op:op_name.txt in
+          raise (Assert_failure
+                   (R.compare_report ~header ~op:op_name.txt ~lsrc:(src lhs)
+                      ~rsrc:(src rhs) (printed lv) (printed rv))))
      | _ ->
        (match eval_expr env inner with
-        | VBool true  -> VUnit
-        | VBool false ->
-          raise (Assert_failure (Printf.sprintf
-            "assert: condition was false (at %s)" loc))
-        | v ->
-          raise (Assert_failure (Printf.sprintf
-            "assert: expected Bool, got %s (at %s)" (value_to_string v) loc))))
+        | VBool true -> VUnit
+        | _ -> raise (Assert_failure (R.assert_header ~span:(span_of_expr inner) ~op:""))))
 
 (** Evaluate a match expression: try each branch until one matches.
     [match_span] is the span of the [EMatch] node, used for coverage arm tracking.
@@ -2593,6 +2730,9 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear reg_names_pending;
   pending_timers := [];
   Hashtbl.clear actor_defs_tbl;
+  Hashtbl.reset handler_actors;
+  Hashtbl.reset variant_ctor_names;
+  Hashtbl.reset msg_qualified_types;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
@@ -2771,15 +2911,17 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
             ("__drop__", [])
         in
         if msg_tag <> "__drop__" then
-          (match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
-                   inst.ai_def.actor_handlers with
+          (match handler_for_msg inst.ai_name inst.ai_def.actor_handlers msg_tag with
            | None ->
-             (* No handler for this message tag: silently drop *)
-             ()
+             (* No handler for this message (or another actor's, or a
+                variant, see [handler_for_msg]): drop it.  Consuming it is
+                progress: without [changed], a pass whose only work was a drop
+                ended [run_until_idle] with later messages still queued. *)
+             changed := true
            | Some handler ->
              if List.length handler.ah_params <> List.length msg_args then
                Printf.eprintf "run_scheduler: handler '%s' arity mismatch for actor %d\n%!"
-                 msg_tag pid
+                 (strip_msg_qual msg_tag) pid
                (* Arity mismatch: message consumed but actor not crashed.
                   The message is lost and the actor continues with unchanged state.
                   This is intentional: a mismatch is a programming error, but crashing
@@ -2843,7 +2985,15 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                   diag_report_crash ~base:stack_base
                     ~kind:(if inst.ai_supervisor <> None then 1 else 0)
                     ~pid ~supervised:(inst.ai_supervisor <> None)
-                    ~outer:msg_tag exn;
+                    ~outer:(strip_msg_qual msg_tag) exn;
+                  (if inst.ai_supervisor = None then
+                     let st = get_march_stack () in
+                     let rec take n = function
+                       | x :: rest when n > 0 -> x :: take (n - 1) rest
+                       | _ -> [] in
+                     !actor_crash_hook ~actor:inst.ai_name ~tag:(strip_msg_qual msg_tag) ~args:msg_args
+                       ~state:inst.ai_state
+                       ~frames:(take (List.length st - stack_base) st) exn);
                   clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid
@@ -3329,8 +3479,7 @@ let shutdown_actor_pid (pid : int) : unit =
         | _                -> ("__drop__", [])
       in
       if msg_tag <> "__drop__" then begin
-        match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
-                inst.ai_def.actor_handlers with
+        match handler_for_msg inst.ai_name inst.ai_def.actor_handlers msg_tag with
         | None -> ()  (* No Shutdown handler: fall through to force-kill *)
         | Some handler ->
           if List.length handler.ah_params = List.length msg_args then begin
@@ -3528,6 +3677,7 @@ let rec eval_decl (env : env) (d : decl) : env =
        module — the desugar pass turns A.B into ECon("A.B") which becomes the
        actor_name used in ESpawn. *)
     let env_ref = ref env in
+    note_actor_handlers name.txt def.actor_handlers;
     Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
     let qual = current_doc_prefix () ^ name.txt in
     if qual <> name.txt then
@@ -4168,6 +4318,7 @@ let eval_module_env (m : module_) : env =
     | DActor (_, name, def, _) :: rest ->
       (* Register actor with the shared env_ref so handlers can call module fns.
          Also register qualified name for spawn(Mod.Actor) support. *)
+      note_actor_handlers name.txt def.actor_handlers;
       Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
       let qual = current_doc_prefix () ^ name.txt in
       if qual <> name.txt then
@@ -4503,19 +4654,26 @@ type test_result =
   | TestFail of string  (** failure message *)
   | TestError of string (** unexpected exception *)
 
+(** [msg] with every non-empty line indented by [indent] (a failure report
+    has blank lines, which stay blank). *)
+let indent_lines (indent : string) (msg : string) : string =
+  String.concat "\n"
+    (List.map (fun l -> if l = "" then "" else indent ^ l)
+       (String.split_on_char '\n' msg))
+
 (** Collect all [DTest], [DSetup], and [DSetupAll] nodes from the module,
     flattening [DDescribe] groups (prefixing test names with describe label). *)
 let collect_test_decls (m : module_) :
-    expr option * expr option * (string * expr) list =
+    expr option * expr option * (string * expr * span) list =
   let setup_ref     = ref None in
   let setup_all_ref = ref None in
   let tests         = ref [] in
   let rec collect_decl prefix d =
     match d with
-    | DTest (tdef, _) ->
+    | DTest (tdef, sp) ->
       let full_name = if prefix = "" then tdef.test_name
                       else prefix ^ " " ^ tdef.test_name in
-      tests := (full_name, tdef.test_body) :: !tests
+      tests := (full_name, tdef.test_body, sp) :: !tests
     | DDescribe (name, decls, _) ->
       let new_prefix = if prefix = "" then name else prefix ^ " " ^ name in
       List.iter (collect_decl new_prefix) decls
@@ -4547,7 +4705,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
   (* Apply filter *)
   let tests = if filter = "" then tests
-              else List.filter (fun (name, _) ->
+              else List.filter (fun (name, _, _) ->
                      let lname = String.lowercase_ascii name in
                      let lpat  = String.lowercase_ascii filter in
                      let n = String.length lname and p = String.length lpat in
@@ -4566,7 +4724,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
   let total = List.length tests in
   let failures = ref [] in
   if not verbose && not quiet then Printf.printf "%!" else ();
-  List.iter (fun (name, body) ->
+  List.iter (fun (name, body, test_span) ->
     (* Run per-test setup *)
     (match setup_opt with
      | Some s -> (try let _ = eval_expr env s in ()
@@ -4579,14 +4737,27 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
     (* When capture_io is enabled, redirect print/log into a per-test buffer. *)
     let cap_buf = if capture_io then Some (Buffer.create 128) else None in
     (match cap_buf with Some b -> test_capture_buf := Some b | None -> ());
+    (* A failure is a rendered report (lib/errors/test_report.ml): an
+       assertion's or a property's as it is, any other panic inside the
+       test's own header (the `test "..."` line under a caret), as the
+       compiled runner (march_test_run) prints it. *)
+    let module R = March_errors.Test_report in
+    let panicked msg =
+      (* `panic(msg)` reaches here as "panic: msg"; the compiled runner gets
+         the bare message, and the header already says it panicked. *)
+      let msg =
+        if String.starts_with ~prefix:"panic: " msg
+        then String.sub msg 7 (String.length msg - 7) else msg in
+      if R.is_report msg then TestFail msg
+      else TestFail (R.fill_panic (R.panic_header ~span:test_span) msg) in
     let result =
       try
         let _ = eval_expr env body in
         TestPass
       with
       | Assert_failure msg -> TestFail msg
-      | Eval_error msg     -> TestError msg
-      | Match_failure msg  -> TestError ("match failure: " ^ msg)
+      | Eval_error msg     -> panicked msg
+      | Match_failure msg  -> panicked ("match failure: " ^ msg)
       | exn                -> TestError (Printexc.to_string exn)
     in
     test_capture_buf := None;
@@ -4611,8 +4782,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
         Printf.printf "  ✓ %s\n%!" name
       | TestFail msg ->
         let full = with_output msg in
-        Printf.printf "  ✗ %s\n    %s\n%!" name
-          (String.concat "\n    " (String.split_on_char '\n' full));
+        Printf.printf "  ✗ %s\n%s\n%!" name (indent_lines "    " full);
         failures := (name, full) :: !failures
       | TestError msg ->
         let full = with_output ("error: " ^ msg) in
@@ -4641,8 +4811,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
     if not verbose && !failures <> [] then begin
       Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
       List.iter (fun (name, msg) ->
-        Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
-          (String.concat "\n  " (String.split_on_char '\n' msg))
+        Printf.printf "FAIL: \"%s\"\n%s\n\n" name (indent_lines "  " msg)
       ) (List.rev !failures)
     end;
     Printf.printf "Finished: %d test%s, %d failure%s\n%!"
@@ -4783,8 +4952,7 @@ let run_doctests ?(verbose=false) ?(quiet=false) ?(filter="")
     if not verbose && !failures <> [] then begin
       Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
       List.iter (fun (name, msg) ->
-        Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
-          (String.concat "\n  " (String.split_on_char '\n' msg))
+        Printf.printf "FAIL: \"%s\"\n%s\n\n" name (indent_lines "  " msg)
       ) (List.rev !failures)
     end;
     Printf.printf "Finished: %d doctest%s, %d failure%s\n%!"

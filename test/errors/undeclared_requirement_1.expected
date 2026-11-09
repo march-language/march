@@ -1,0 +1,29 @@
+exit: 0
+-- WARNING: CAPABILITY -- errors/undeclared_requirement_1.march
+
+`first` propagates a requirement it doesn't declare. [undeclared_requirement]
+
+`List.head` requires  len(_) > 0
+but first([]) panics — "List.head: empty list"
+
+help: declare what `first` actually needs —
+        fn first(xs : {List(Int) | len(_) > 0}) : Int
+`forge fix` can apply this.
+
+8 |     List.head(xs) + 1
+        ^^^^^^^^^^^^^
+
+    `List.head_opt` is `List.head` without the requirement: it returns `Option` instead of panicking.
+        match List.head_opt(xs) do
+          Some(v) -> …
+          None -> …
+        end
+
+    fix (`forge fix` applies it):
+
+7 -   fn first(xs : List(Int)) : Int do
+7 +   fn first(xs : {List(Int) | len(_) > 0}) : Int do
+
+
+
+after fix: exit 0

@@ -1,0 +1,32 @@
+-- Refinement-indexed type aliases, worked example (specs/lang/refinement-types.md,
+-- "Refinement aliases").  `Vec(a, n)` is a list of length n: the refinement
+-- `{List(a) | len(_) == n}`, written once and used with a value argument.
+mod Vec do
+  needs IO.Console
+
+  type Vec(a, n : Int) = {List(a) | len(_) == n}
+  type Matrix(r : Int, c : Int) = {List(Vec(Int, c)) | len(_) == r}
+
+  fn replicate(n : {Int | _ >= 0}, x : Int) : Vec(Int, n) do
+    if n == 0 do Nil else Cons(x, replicate(n - 1, x)) end
+  end
+
+  fn push(n : Int, x : Int, xs : Vec(Int, n)) : Vec(Int, n + 1) do
+    Cons(x, xs)
+  end
+
+  -- Both arguments have length n: the signature says it once, through the
+  -- alias, and every call must show it.
+  fn dot(n : Int, xs : Vec(Int, n), ys : Vec(Int, n)) : Int do
+    List.fold_left(List.zip_with(xs, ys, fn (a, b) -> a * b), 0, fn (acc, p) -> acc + p)
+  end
+
+  fn rows(r : Int, c : Int, m : Matrix(r, c)) : Int do r end
+
+  fn main(cap : Cap(IO.Console)) do
+    let xs = replicate(3, 2)
+    let ys = push(2, 5, replicate(2, 5))
+    println(int_to_string(dot(3, xs, ys)))
+    println(int_to_string(rows(2, 3, [[1, 2, 3], [4, 5, 6]])))
+  end
+end

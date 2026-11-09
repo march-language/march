@@ -101,9 +101,15 @@ let cap_strict     = ref true
    `json.march` used to get this for free. *)
 let stdlib_source  = ref false
 let check_json     = ref false   (* --check-json: emit diagnostics as NDJSON to stdout *)
+(* --fix-verify-source PATH (internal): read the entry's text from PATH while
+   keeping its file name, for the child run that re-checks a fix
+   (bin/fix_verify.ml). *)
+let fix_verify_source : string option ref = ref None
 let emit_core_ast_file : string option ref = ref None  (* --emit-core-ast <file>: dump desugared core AST + verdict + diagnostics as JSON to stdout *)
 let measure_axioms = ref true    (* --no-measure-axioms: reflect @[measure]s symbolically *)
 let refine_report  = ref false   (* --refine-report: print obligation-ledger proved/violated/skipped counts *)
+let validate_projections = ref false   (* --validate-projections: M6, both projectors against Session.Theory.project (bin/session_validate.ml) *)
+let guarantees     = ref false   (* --guarantees: per actor and protocol, what this build established (bin/guarantees.ml) *)
 (* --termination-report: one line per recursive unit with its termination
    class (Refine_term, specs/2026-10-26-termination-checking-design.md).
    Report-only: nothing else reads the analysis. *)
@@ -170,6 +176,10 @@ let refine_audit   = ref false
    allocation-free and that is in the generation scope.  Consumed by
    `forge fix --contracts`.  See lib/tir/alloc_contract.ml. *)
 let report_contracts = ref false
+(* --why-copies / --why-copies-json: report where an update copies instead of
+    reusing in place (specs/2026-11-05-why-copies-design.md). *)
+let why_copies = ref false
+let why_copies_json = ref false
 let contract_scope   = ref ""    (* comma-separated globs, e.g. "Dsp.*,Audio.mix" *)
 
 (* --refine-suggest <FN> / --refine-suggest-all: propose the parameter
@@ -191,6 +201,8 @@ let refine_infer_json      = ref false
 let refine_infer_kinds     : string option ref = ref None
 let refine_infer_budget    = ref March_refinecheck.Refine_infer.default_budget
 let refine_infer_stdlib    = ref false
+(* --refine-infer-module NAME (repeatable): target only the files declaring NAME. *)
+let refine_infer_modules   : string list ref = ref []
 let allow_caller_violations = ref false
 let apply_public           = ref false
 let refine_infer_apply     = ref false
@@ -261,6 +273,10 @@ let target_str     = ref "native"  (* --target: native | wasm64-wasi | wasm32-wa
 let check_migration   = ref false
 let prior_schema_path = ref ""
 let new_schema_path   = ref ""
+(* --hcr-baseline: the deployed build's .schemas.json, whose contracts every
+   build's migrate_state / migrate_msg is checked against (H1/H2).  Empty =
+   look for forge's `.march/<name>_hot.so.schemas.json.prev`. *)
+let hcr_baseline_path = ref ""
 (* --accept-unproved: the deploy-gate laws ("Actor.state", "Actor.Handler")
    a --check-migration may leave unproved without failing. *)
 let accept_unproved : string list ref = ref []

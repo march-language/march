@@ -150,6 +150,9 @@ type lin_entry = {
   le_pending : ty option;
   le_dup : Ast.span option ref;
   le_mixed : Ast.span option ref;
+  le_where : (Ast.span * string) list ref;
+  le_exit : Err.label list ref;
+  le_poisoned : bool ref;
 }
 type ctor_info = {
   ci_type : string;
@@ -176,6 +179,7 @@ type proto_info = {
   pi_def : Ast.protocol_def;
   pi_projections : (string * session_ty) list;
   pi_span : Ast.span;
+  pi_positions : (string * (session_ty * March_ast.Protocol_states.pos) list) list;
 }
 module StrMap :
   sig
@@ -247,6 +251,8 @@ type cap_mismatch_site = {
   cm_in_fn : string;
 }
 type env = {
+  in_logical_predicate : bool;
+  in_proof_hints : bool;
   vars : scheme StrMap.t;
   types : int StrMap.t;
   ctors : ctor_info list StrMap.t;
@@ -268,6 +274,7 @@ type env = {
   sigs : (string * Ast.sig_def) list;
   mod_needs : string list;
   mod_need_scopes : (string * string option) list;
+  module_need_scopes : (string * (string * string option) list) list;
   module_caps : (string * string list) list;
   protocols : proto_info StrMap.t;
   impls : (ty * Ast.span * string option * (string * ty) list) list StrMap.t;
@@ -383,6 +390,8 @@ val check_module_needs :
 val check_deferred_imports : env -> unit
 val fn_capability_closures : env -> (string * string list) list
 val declared_cap_scopes : env -> (string * string option) list
+val declared_net_scopes :
+  env -> entry_module:string -> (string * March_caps.Host_scope.decl list) list
 val fn_own_capability_closures : env -> (string * string list) list
 val fn_transitive_capability_closures : env -> (string * string list) list
 val subst_svar : string -> session_ty -> session_ty -> session_ty

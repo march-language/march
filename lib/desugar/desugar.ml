@@ -764,6 +764,7 @@ let rec flatten_pred_quals (e : expr) : expr =
   | ELam _ | ELetFn _ | ELetQ _ | ELetStar _ | ESend _ | ESpawn _ | EPipe _
   | ESigil _ | EAssert _ | EDbg _ -> e
   | ERefineMsg (inner, msg, sp) -> ERefineMsg (go inner, msg, sp)
+  | EProof (pr, sp) -> EProof (map_proof go pr, sp)
 
 (** Structural [ty] walk whose ONLY effect is calling [flatten_pred_quals] on
     every [TyRefine] predicate it finds — mirrors [Desugar.respan_ty]'s shape
@@ -778,8 +779,235 @@ let rec flatten_pred_quals (e : expr) : expr =
     does not (a refinement in a type DEFINITION is checked where the type is
     used, not at the definition site) — covering more than the warning needs
     is harmless, so the extra site stays. *)
+(* ---- Refinement aliases ------------------------------------------------
+
+   `type Vec(a, n : Int) = {List(a) | len(_) == n}` (refinement-indexed type
+   aliases, specs/lang/refinement-types.md).  Each use is expanded here, in
+   [desugar_ty], into the refinement it abbreviates, `Vec(Int, k)` into
+   `{List(Int) | len(_) == k}`: type arguments replace the type parameters,
+   value arguments (a literal, a name, `+`/`*` of those) replace the value
+   parameters in the predicate.  Nothing downstream learns about aliases: the
+   refinement checker sees the refinement the author would have written.
+
+   Every conjunct of the expansion carries the message `expected Vec(Int, k)`
+   ([March_ast.Refine_msg]), so a violation names the alias as written at the
+   use, not its expansion; a conjunct the alias's author gave a message keeps
+   theirs.  Each expansion's conjuncts get a span of their own (the use's,
+   widened past any real column), so two uses never share a message.
+
+   The table is set per module by [desugar_module] ([with_aliases]). *)
+type alias = {
+  al_params : name list;            (* every parameter, in order *)
+  al_values : (name * ty) list;     (* the value parameters and their sorts *)
+  al_rhs : ty;                      (* a [TyRefine] *)
+  al_name : name;
+}
+
+let alias_table : (string, alias) Hashtbl.t = Hashtbl.create 8
+let alias_depth = ref 0
+
+(* Whether [x] is used as a TYPE in [t]: a value argument of an alias
+   application (`Vec(Int, c)` inside `Matrix`'s right-hand side) is a value
+   use, which is fine. *)
+let rec ty_mentions_var (x : string) (t : ty) : bool =
+  match t with
+  | TyVar n -> n.txt = x
+  | TyCon (n, ts) when Hashtbl.mem alias_table n.txt ->
+    let a = Hashtbl.find alias_table n.txt in
+    (try
+       List.exists2
+         (fun (p : name) arg ->
+           (not (List.exists (fun ((v : name), _) -> v.txt = p.txt) a.al_values)) && ty_mentions_var x arg)
+         a.al_params ts
+     with Invalid_argument _ -> List.exists (ty_mentions_var x) ts)
+  | TyCon (_, ts) | TyTuple ts -> List.exists (ty_mentions_var x) ts
+  | TyArrow (a, b) | TyNatOp (_, a, b) -> ty_mentions_var x a || ty_mentions_var x b
+  | TyRecord fs -> List.exists (fun (_, t) -> ty_mentions_var x t) fs
+  | TyLinear (_, t) | TyRefine (t, _, _) -> ty_mentions_var x t
+  | TyNat _ | TyChan _ -> false
+
+let rec collect_aliases (prefix : string) (decls : decl list) =
+  List.iter
+    (function
+      | DType (_, name, params, TDAlias ((TyRefine _ as rhs), values), _) ->
+        let a = { al_params = params; al_values = values; al_rhs = rhs; al_name = name } in
+        Hashtbl.replace alias_table name.txt a;
+        if prefix <> "" then Hashtbl.replace alias_table (prefix ^ "." ^ name.txt) a
+      | DMod (n, _, inner, _) -> collect_aliases (if prefix = "" then n.txt else prefix ^ "." ^ n.txt) inner
+      | _ -> ())
+    decls
+
+(* A value parameter is not a type: it may appear in the predicate, or as a
+   value argument of another alias, never as a type. *)
+let check_alias_kinds () =
+  Hashtbl.iter
+    (fun key (a : alias) ->
+      if key = a.al_name.txt then
+        match a.al_rhs with
+        | TyRefine (base, _, _) ->
+          List.iter
+            (fun ((v : name), _) ->
+              if ty_mentions_var v.txt base then
+                desugar_expr_error ~code:Err.Code.alias_kind_mismatch ~sp:v.span
+                  (Printf.sprintf "`%s` is a value parameter of `%s`, so it can appear in the predicate or as a value argument, not as a type in `%s`."
+                     v.txt a.al_name.txt (show_ty base)))
+            a.al_values
+        | _ -> ())
+    alias_table
+
+let with_aliases (decls : decl list) (f : unit -> 'a) : 'a =
+  let saved = Hashtbl.copy alias_table in
+  Hashtbl.reset alias_table;
+  collect_aliases "" decls;
+  check_alias_kinds ();
+  Fun.protect ~finally:(fun () -> Hashtbl.reset alias_table; Hashtbl.iter (Hashtbl.replace alias_table) saved) f
+
+let is_value_param (a : alias) (n : string) = List.exists (fun ((v : name), _) -> v.txt = n) a.al_values
+
+let rec subst_tyvars (env : (string * ty) list) (t : ty) : ty =
+  let go = subst_tyvars env in
+  match t with
+  | TyVar n -> (match List.assoc_opt n.txt env with Some t' -> t' | None -> t)
+  | TyCon (n, ts) -> TyCon (n, List.map go ts)
+  | TyArrow (a, b) -> TyArrow (go a, go b)
+  | TyTuple ts -> TyTuple (List.map go ts)
+  | TyRecord fs -> TyRecord (List.map (fun (n, t) -> (n, go t)) fs)
+  | TyLinear (l, t) -> TyLinear (l, go t)
+  | TyNatOp (op, a, b) -> TyNatOp (op, go a, go b)
+  | TyRefine (b, v, e) -> TyRefine (go b, v, e)
+  | TyNat _ | TyChan _ -> t
+
+(* Substitute [env]'s expressions for free variables of a predicate.  A
+   lambda (also a bounded quantifier's binder) shadows. *)
+let rec subst_pred (env : (string * expr) list) (e : expr) : expr =
+  if env = [] then e
+  else
+    let go = subst_pred env in
+    match e with
+    | EVar n -> (match List.assoc_opt n.txt env with Some r -> r | None -> e)
+    | EApp (f, args, sp) -> EApp (go f, List.map go args, sp)
+    | ELam (ps, body, sp) ->
+      let bound = List.map (fun (p : param) -> p.param_name.txt) ps in
+      ELam (ps, subst_pred (List.filter (fun (x, _) -> not (List.mem x bound)) env) body, sp)
+    | ETuple (es, sp) -> ETuple (List.map go es, sp)
+    | ECon (c, es, sp) -> ECon (c, List.map go es, sp)
+    | EField (x, f, sp) -> EField (go x, f, sp)
+    | EIf (c, a, b, sp) -> EIf (go c, go a, go b, sp)
+    | EAnnot (x, t, sp) -> EAnnot (go x, t, sp)
+    | ERefineMsg (x, m, sp) -> ERefineMsg (go x, m, sp)
+    | ERecord (fs, sp) -> ERecord (List.map (fun (n, x) -> (n, go x)) fs, sp)
+    | EBlock (es, sp) -> EBlock (List.map go es, sp)
+    | _ -> e
+
+(* A value argument as an expression: `3`, `n`, `n + 1`, `2 * n`. *)
+let rec value_of_ty (sp : span) (t : ty) : expr option =
+  match t with
+  | TyNat k -> Some (ELit (LitInt k, sp))
+  | TyVar n -> Some (EVar n)
+  | TyNatOp (op, a, b) -> (
+    match value_of_ty sp a, value_of_ty sp b with
+    | Some a, Some b ->
+      let f = match op with NatAdd -> "+" | NatMul -> "*" in
+      Some (EApp (EVar { txt = f; span = sp }, [ a; b ], sp))
+    | _ -> None)
+  | _ -> None
+
+let rec conjuncts (e : expr) : expr list =
+  match e with
+  | EApp (EVar { txt = "&&"; _ }, [ a; b ], _) -> conjuncts a @ conjuncts b
+  | e -> [ e ]
+
+let and_all (sp : span) = function
+  | [] -> ELit (LitBool true, sp)
+  | c :: cs -> List.fold_left (fun acc c -> EApp (EVar { txt = "&&"; span = sp }, [ acc; c ], sp)) c cs
+
+let with_top_span (sp : span) (e : expr) : expr =
+  match e with
+  | EVar n -> EVar { n with span = sp }
+  | EApp (f, args, _) -> EApp (f, args, sp)
+  | ELit (l, _) -> ELit (l, sp)
+  | EIf (c, a, b, _) -> EIf (c, a, b, sp)
+  | EField (x, f, _) -> EField (x, f, sp)
+  | e -> e
+
+(* The predicate in `_` form: a named binder is renamed to `_`. *)
+let underscore_form (binder : name option) (e : expr) : expr =
+  match binder with
+  | Some v when v.txt <> "_" -> subst_pred [ (v.txt, EVar { v with txt = "_" }) ] e
+  | _ -> e
+
+let expand_alias (a : alias) (use : name) (args : ty list) : ty option =
+  let sp = use.span in
+  let fail ~code msg = desugar_expr_error ~code ~sp msg; None in
+  if List.length args <> List.length a.al_params then
+    fail ~code:Err.Code.type_arity
+      (Printf.sprintf "`%s` takes %d parameter%s (%s), but %d %s given here."
+         a.al_name.txt (List.length a.al_params) (if List.length a.al_params = 1 then "" else "s")
+         (String.concat ", " (List.map (fun (n : name) -> n.txt) a.al_params))
+         (List.length args) (if List.length args = 1 then "is" else "are"))
+  else
+    let pairs = List.combine a.al_params args in
+    let bad =
+      List.find_map
+        (fun ((p : name), arg) ->
+          let value = is_value_param a p.txt in
+          match value, arg with
+          | true, _ when value_of_ty sp arg = None ->
+            Some (Printf.sprintf "`%s` of `%s` is a value parameter: pass a value here (a number, a name, or `+`/`*` of those), not the type `%s`."
+                    p.txt a.al_name.txt (show_ty arg))
+          | false, (TyNat _ | TyNatOp _) ->
+            Some (Printf.sprintf "`%s` of `%s` is a type parameter: pass a type here, not the value `%s`."
+                    p.txt a.al_name.txt (show_ty arg))
+          | _ -> None)
+        pairs
+    in
+    match bad with
+    | Some msg -> fail ~code:Err.Code.alias_kind_mismatch msg
+    | None ->
+      (* In the base type a value parameter can only be a nested alias's
+         value argument, so it is replaced by this use's argument as written. *)
+      let tys = List.map (fun ((p : name), t) -> (p.txt, t)) pairs in
+      let vals =
+        List.filter_map
+          (fun ((p : name), t) -> if is_value_param a p.txt then Option.map (fun e -> (p.txt, e)) (value_of_ty sp t) else None)
+          pairs
+      in
+      match a.al_rhs with
+      | TyRefine (base, binder, pred) ->
+        let shown = show_ty (TyCon (use, args)) in
+        let msg = "expected " ^ shown in
+        let pred = subst_pred vals (underscore_form binder pred) in
+        let cs =
+          List.mapi
+            (fun i c ->
+              (* A span no source text has: the use's, widened past any real
+                 column, distinct per conjunct ([March_ast.Refine_msg]). *)
+              let csp = { sp with end_col = sp.end_col + 100_000 + i } in
+              match c with
+              | ERefineMsg (inner, m, _) -> ERefineMsg (with_top_span csp inner, m, csp)
+              | c -> ERefineMsg (with_top_span csp c, msg, csp))
+            (conjuncts pred)
+        in
+        Some (TyRefine (subst_tyvars tys base, None, and_all sp cs))
+      | _ -> None
+
 let rec desugar_ty (t : ty) : ty =
   match t with
+  | TyCon (n, args) when Hashtbl.mem alias_table n.txt ->
+    let a = Hashtbl.find alias_table n.txt in
+    if !alias_depth > 32 then begin
+      desugar_expr_error ~code:Err.Code.recursive_type_alias ~sp:n.span
+        (Printf.sprintf "`%s` expands into itself." n.txt);
+      TyCon (n, args)
+    end
+    else (
+      match expand_alias a n (List.map desugar_ty args) with
+      | Some t' ->
+        incr alias_depth;
+        Fun.protect ~finally:(fun () -> decr alias_depth) (fun () -> desugar_ty t')
+      (* Reported; the alias's base type keeps later passes from
+         repeating the error. *)
+      | None -> (match a.al_rhs with TyRefine (base, _, _) -> desugar_ty base | t -> t))
   | TyCon (n, args)    -> TyCon (n, List.map desugar_ty args)
   | TyVar _            -> t
   | TyArrow (a, b)     -> TyArrow (desugar_ty a, desugar_ty b)
@@ -792,10 +1020,74 @@ let rec desugar_ty (t : ty) : ty =
   | TyRefine (t, n, e) ->
     (* Author-written conjunct messages leave the predicate here, for the
        refinement checker's diagnostics only ([March_ast.Refine_msg]). *)
-    TyRefine (desugar_ty t, n, flatten_pred_quals (March_ast.Refine_msg.strip e))
+    let e = flatten_pred_quals (March_ast.Refine_msg.strip e) in
+    (match desugar_ty t with
+     (* A refinement of an alias (`{Vec(Int, n) | p}`): one refinement whose
+        predicate is both, over `_`. *)
+     | TyRefine (base, inner_binder, inner) ->
+       let sp = March_ast.Refine_msg.span_of e in
+       TyRefine (base, None,
+                 EApp (EVar { txt = "&&"; span = sp },
+                       [ underscore_form inner_binder inner; underscore_form n e ], sp))
+     | t' -> TyRefine (t', n, e))
 
 (** Desugar [EPipe (l, r, sp)] → [EApp (r, [l], sp)].
     Works recursively; all other nodes are walked to catch nested pipes. *)
+(* ---- Property-test reports ────────────────────────────────────────────
+
+   `Check.all(g, fn xs -> ...)` and `Check.all_with(g, fn xs -> ..., cfg)`
+   become `Check.all_reported(g, prop, cfg, header, names)`: [header] is the
+   rendered `-- TEST FAILURE --` header with the call under a caret
+   (lib/errors/test_report.ml), [names] the property's parameter name, or
+   the names a single-arm `match` on it binds when it takes a tuple apart
+   (`fn pair -> match pair do (a, b) -> ... end`).  Check prints the shrunk
+   input by those names.  A plain rewrite to a March call, so the
+   interpreter and compiled tests print the same report.
+
+   Not done in a module that declares its own `Check` (the stdlib's own
+   file, or a user's), where the name may not be the stdlib's. *)
+let own_check_module = ref false
+
+let property_names (prop : expr) : string list =
+  match prop with
+  | ELam ([ p ], body, _) ->
+    let pname = p.param_name.txt in
+    let rec strip = function
+      | EBlock ([ e ], _) -> strip e
+      | e -> e in
+    let pat_name = function
+      | PatVar n -> Some n.txt
+      | PatWild _ -> Some "_"
+      | _ -> None in
+    (match strip body with
+     | EMatch (EVar { txt; _ }, [ { branch_pat = PatTuple (ps, _); branch_guard = None; _ } ], _)
+       when txt = pname ->
+       let names = List.filter_map pat_name ps in
+       if List.length names = List.length ps then names else [ pname ]
+     | _ -> if pname = "_" then [] else [ pname ])
+  | _ -> []
+
+let rewrite_property_call (f : expr) (args : expr list) (sp : span) : expr option =
+  if !own_check_module then None
+  else
+    let reported fsp g prop cfg =
+      let header =
+        March_errors.Test_report.header ~code:Err.Code.property_failed ~span:sp
+          "This property does not hold." in
+      let names =
+        List.fold_right (fun n acc ->
+          ECon ({ txt = "Cons"; span = sp }, [ ELit (LitString n, sp); acc ], sp))
+          (property_names prop) (ECon ({ txt = "Nil"; span = sp }, [], sp)) in
+      Some (EApp (EVar { txt = "Check.all_reported"; span = fsp },
+                  [ g; prop; cfg; ELit (LitString header, sp); names ], sp))
+    in
+    match f, args with
+    | EVar { txt = "Check.all"; span = fsp }, [ g; (ELam _ as prop) ] ->
+      reported fsp g prop (EApp (EVar { txt = "Check.default_config"; span = fsp }, [], sp))
+    | EVar { txt = "Check.all_with"; span = fsp }, [ g; (ELam _ as prop); cfg ] ->
+      reported fsp g prop cfg
+    | _ -> None
+
 let rec desugar_expr (e : expr) : expr =
   match e with
   (* --- Pipe: x |> f(a,b)  ⟶  f(x,a,b) --- *)
@@ -887,7 +1179,9 @@ let rec desugar_expr (e : expr) : expr =
      | ECon (name, [], _) when String.contains name.txt '.' ->
        ECon (name, args', sp)
      | _ ->
-       EApp (f', args', sp))
+       match rewrite_property_call f' args' sp with
+       | Some e -> e
+       | None -> EApp (f', args', sp))
 
   | ECon (name, args, sp) ->
     ECon (name, List.map desugar_expr args, sp)
@@ -1005,6 +1299,7 @@ let rec desugar_expr (e : expr) : expr =
 
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
+  | EProof (pr, sp) -> EProof (map_proof desugar_expr pr, sp)
 
   | ERefineMsg (inner, msg, sp) -> ERefineMsg (desugar_expr inner, msg, sp)
 
@@ -1145,6 +1440,21 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
     { def with fn_clauses = [only'] }
 
   | first :: _ ->
+    (* Ghost parameters need the fast path: the general path below matches on
+       a tuple of every argument, which would make a ghost one runtime data. *)
+    (match List.find_map (fun (c : fn_clause) ->
+         List.find_map (function
+             | FPNamed { param_lin = Ghost; param_name; _ } -> Some param_name
+             | _ -> None) c.fc_params) clauses with
+     | Some param_name ->
+       desugar_expr_error ~code:Err.Code.ghost_misuse ~sp:param_name.span
+         ~hint:"Write one clause with named parameters and no `when` guard, and \
+                match on the runtime arguments in the body."
+         (Printf.sprintf "`%s` is a ghost parameter of a function with several \
+                          clauses, a pattern parameter or a guard; ghost parameters \
+                          are supported only on a single clause of named parameters."
+            param_name.txt)
+     | None -> ());
     (* General path: synthesise fresh arg names based on first clause's arity.
 
        Except when the FIRST clause dominates — no guard, every parameter a
@@ -1240,7 +1550,7 @@ let rec desugar_decl (d : decl) : decl =
        (`type T = { x : {Int | x > 0} }`) — flatten qualified spellings
        there the same way fn signatures are handled above. *)
     let td' = match td with
-      | TDAlias t    -> TDAlias (desugar_ty t)
+      | TDAlias (t, vs) -> TDAlias (desugar_ty t, vs)
       | TDVariant vs -> TDVariant (List.map (fun v -> { v with var_args = List.map desugar_ty v.var_args }) vs)
       | TDRecord fs  -> TDRecord (List.map (fun f -> { f with fld_ty = desugar_ty f.fld_ty }) fs)
     in
@@ -1248,8 +1558,15 @@ let rec desugar_decl (d : decl) : decl =
 
   | DActor (vis, name, actor, sp) ->
     let init'     = desugar_expr actor.actor_init in
+    (* Parameter and state types, like a function's ([desugar_ty]): a
+       refinement alias in a message or the state expands here. *)
+    let param (p : param) = { p with param_ty = Option.map desugar_ty p.param_ty } in
     let handlers' = List.map (fun h ->
-        { h with ah_body = desugar_expr h.ah_body }) actor.actor_handlers in
+        { h with ah_body = desugar_expr h.ah_body; ah_params = List.map param h.ah_params })
+        actor.actor_handlers in
+    let actor = { actor with
+                  actor_state = List.map (fun f -> { f with fld_ty = desugar_ty f.fld_ty }) actor.actor_state;
+                  actor_init_params = List.map param actor.actor_init_params } in
     (* A supervised child's `init` arguments (D24) are expressions too. *)
     let sup' = Option.map (fun sc ->
         { sc with sc_fields = List.map (fun sf ->
@@ -1964,6 +2281,7 @@ let make_qualifier (prefix : string) (own_names : string list) =
     | ESend (cap, msg, sp)      -> ESend (go bound cap, go bound msg, sp)
     | ESpawn (ex, sp)           -> ESpawn (go bound ex, sp)
     | EAssert (ex, sp)          -> EAssert (go bound ex, sp)
+    | EProof (pr, sp)           -> EProof (map_proof (go bound) pr, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map (go bound) args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, go bound ex, sp)
     | ERefineMsg (ex, s, sp)        -> ERefineMsg (go bound ex, s, sp)
@@ -2157,6 +2475,7 @@ let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
     | ESend (cap, msg, sp)      -> ESend (rw cap, rw msg, sp)
     | ESpawn (ex, sp)           -> ESpawn (rw ex, sp)
     | EAssert (ex, sp)          -> EAssert (rw ex, sp)
+    | EProof (pr, sp)           -> EProof (map_proof rw pr, sp)
     | EAtom (a, args, sp)       -> EAtom (a, List.map rw args, sp)
     | ESigil (s, ex, sp)        -> ESigil (s, rw ex, sp)
     | ERefineMsg (ex, s, sp)        -> ERefineMsg (rw ex, s, sp)
@@ -2251,7 +2570,13 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
      generated in (Desugar_derive.decl_salt). *)
   Desugar_derive.reset_salt_counts ();
   March_ast.Refine_msg.begin_pass ();
+  with_aliases m.mod_decls @@ fun () ->
   Desugar_derive.with_salt_scope m.mod_name.txt @@ fun () ->
+  let saved_own_check = !own_check_module in
+  own_check_module :=
+    m.mod_name.txt = "Check"
+    || List.exists (function DMod (n, _, _, _) -> n.txt = "Check" | _ -> false) m.mod_decls;
+  Fun.protect ~finally:(fun () -> own_check_module := saved_own_check) @@ fun () ->
   check_app_main_exclusivity errors m.mod_decls;
   check_main_signature errors m.mod_decls;
   (* `@[endpoints]` protocols expand into generated nested modules here, ahead
@@ -2311,9 +2636,30 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
      (Desugar_remote): its dispatch names the actor's message constructors,
      which a nested module sees only once the actor is declared. *)
   let m = { m with mod_decls = Desugar_remote.expand errors m.mod_decls } in
+  (* An actor whose state only gained fields since the deployed build gets
+     the `<actor>_migrate_state` the user would have written
+     (Desugar_migrate_derive).  Before the two passes below, which treat it
+     as a written one.  Never in the stdlib: the baseline names user actors. *)
+  let m =
+    if !Desugar_actor_names.is_stdlib_file m.mod_name.span.file then m
+    else { m with mod_decls = Desugar_migrate_derive.expand m.mod_decls } in
   (* Hot-reload `<actor>_migrate_msg` gets its C-ABI wrapper right after it
      (Desugar_migrate). *)
   let m = { m with mod_decls = Desugar_migrate.expand m.mod_decls } in
+  (* A `--hot-reload` build's `<actor>_migrate_state` gets the live-data
+     check the reload server runs before ACTIVATE (Desugar_migrate_check). *)
+  let m = { m with mod_decls = Desugar_migrate_check.expand m.mod_decls } in
+  (* `<actor>_rollback_state` beside `<actor>_migrate_state` gets the
+     round-trip lemma (H5, Desugar_rollback); erased before anything runs. *)
+  let m =
+    if !Desugar_actor_names.is_stdlib_file m.mod_name.span.file then m
+    else { m with mod_decls = Desugar_rollback.expand m.mod_decls } in
+  (* A `@compat(simulation)` actor gets, per message, its deployed and current
+     handlers as logic-only step functions and the simulation lemma between
+     them (H3, Desugar_simulation); erased before anything runs. *)
+  let m =
+    if !Desugar_actor_names.is_stdlib_file m.mod_name.span.file then m
+    else { m with mod_decls = Desugar_simulation.expand m.mod_decls } in
   (* Collect interfaces and fns for satisfy expansion. *)
   let raw_ifaces = collect_interfaces m.mod_decls in
   let raw_fns    = collect_fns m.mod_decls in

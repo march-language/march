@@ -2,12 +2,11 @@ exit: 1
 -- ACTOR ---------------- errors/send_wrong_actor_2.march
 
 `Tally` is a message for `Labels`, but this pid is an actor `Counter` (spawned on line 22), so the message would be dropped. [send_wrong_actor]
-`Tally` is also a handler of `Counter`, but a bare `Tally` resolves to `Labels`'s, and an actor message cannot be qualified by its actor; rename one of the two handlers.
+`Tally` is also a handler of `Counter`, but a bare `Tally` resolves to `Labels`'s; qualify it by the actor: `Counter.Tally`.
 
 24 |     send(c, Tally(1))
                  ^^^^^^^^
 
-    `Counter` handles `Tally`.
 
     `c` is spawned from `Counter` here:
 
@@ -18,7 +17,7 @@ exit: 1
 
 -- HINT: NAMING --------- errors/send_wrong_actor_2.march
 
-`Tally` is a message of more than one actor (`Labels`, `Counter`), and a message cannot be qualified by its actor; rename one of the handlers. [ambiguous_constructor]
+`Tally` is a message of more than one actor (`Labels`, `Counter`); qualify it by its actor: `Labels.Tally` or `Counter.Tally`. [ambiguous_constructor]
 
 25 |     send(l, Tally(2))
                  ^^^^^^^^

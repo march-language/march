@@ -98,7 +98,7 @@ mod TopologyPlacement do
     let ranked = Topology.rank("Echo.Server", ["n0", "n1", "n2"])
     println("ranking: " ++ String.join(ranked, " > "))
     Topology.place(c, [ Topology.role("Echo.Server", Topology.count(1),
-                          fn () -> Echo_Run.offer_Server(io, c, 4, fn (s, st) -> serve_one(s, st))) ])
+                          fn () -> Echo_Run.offer_Server(c, 4, fn (s, st) -> serve_one(s, st))) ])
     println("n0's marker registered: " ++ (if Option.is_some(Vault.get(fk.names, Topology.marker("Echo.Server", "n0"))) do "yes" else "no" end))
     report(c, "placed")
     let ahead = above(ranked)

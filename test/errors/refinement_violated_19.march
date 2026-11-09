@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: if i >= 0 && i < List.length(items) do List.nth(items, i) else … end
+mod Main do
+  -- §F4: the guard is the precondition read at the call's own arguments,
+  -- the list parameter `xs` of `List.nth` included, so it names `items`.
+  -- `items` has no value in the counterexample, so the call is not run.
+  fn at(items : List(Int), i : Int) : Int do
+    if i < 0 do List.nth(items, i) else 0 end
+  end
+end

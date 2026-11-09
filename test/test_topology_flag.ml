@@ -61,7 +61,7 @@ let entry_src ?(back = "") ?(extra = "") ?(needs = "") () =
       0
     end
     fn buy(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
-      match Checkout_Run.initiate_Client(io, node, fn (s, st) ->
+      match Checkout_Run.initiate_Client(node, fn (s, st) ->
           Checkout_Client.recv_Receipt(s, Checkout_Client.send_Order(s, st, 1), fn (_m, st2) ->
             Checkout_Client.close(s, st2))) do
         Ok(_) -> 1

@@ -71,6 +71,7 @@ let rec expr_binders (acc : SS.t) (e : expr) : SS.t =
   | ECond (arms, _) -> List.fold_left (fun acc (c, b) -> go (go acc c) b) acc arms
   | EPipe (a, b, _) | ESend (a, b, _) -> go (go acc a) b
   | ERefineMsg (x, _, _) -> go acc x
+  | EProof (p, _) -> List.fold_left go acc (proof_children p)
 
 let fn_binders (acc : SS.t) (fd : fn_def) : SS.t =
   List.fold_left
@@ -174,6 +175,10 @@ let rec erase_expr (env : env) (e : expr) : expr =
   | EAtom (a, args, sp) -> EAtom (a, List.map ex args, sp)
   | ESigil (s, x, sp) -> ESigil (s, ex x, sp)
   | ERefineMsg (x, msg, sp) -> ERefineMsg (ex x, msg, sp)
+  (* Proof hints are ghost: gone before anything runs.  A `with fuel` body is
+     ordinary code and stays, as a block. *)
+  | EProof (PWithFuel (_, _, body), sp) -> EBlock (List.map ex body, sp)
+  | EProof (_, sp) -> unit_at sp
   | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg (None, _) -> e
 
 let erase_fn env (fd : fn_def) : fn_def =
@@ -251,6 +256,7 @@ let rec mentions (n : string) (decls : decl list) : bool =
     | EIf (c, t, f, _) -> [ c; t; f ]
     | ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
     | ERefineMsg (x, _, _) -> [ x ]
+    | EProof (p, _) -> proof_children p
   in
   let fn (fd : fn_def) =
     List.iter
@@ -290,6 +296,9 @@ let rec drop_unreferenced (whole : decl list) (decls : decl list) : decl list =
       (* An impl method's copy for an interface law ([Interface_laws]): only
          its lemmas used it. *)
       | DFn (fd, _) when String.starts_with ~prefix:Interface_laws.copy_prefix fd.fn_name.txt -> None
+      (* A hot-reload simulation step ([Desugar_simulation]): logic only, read
+         by its lemmas alone, never run. *)
+      | DFn (fd, _) when List.mem "hcr_logic" fd.fn_attrs -> None
       | DMod (n, v, inner, sp) -> Some (DMod (n, v, drop_unreferenced whole inner, sp))
       | DDescribe (s, inner, sp) -> Some (DDescribe (s, drop_unreferenced whole inner, sp))
       | d -> Some d)
@@ -300,23 +309,16 @@ let erase_module_with (env : env) (decls : decl list) : decl list =
   drop_unreferenced erased erased
 
 let erase_module ?(reserved : string -> bool = fun _ -> false) (decls : decl list) : decl list =
-  let rec has_lemma ds =
-    List.exists
-      (function
-        | DFn (fd, _) -> is_lemma fd
-        | DMod (_, _, inner, _) | DDescribe (_, inner, _) -> has_lemma inner
-        | _ -> false)
-      ds
-  in
-  if not (has_lemma decls) then decls else erase_module_with (env_of_decls ~reserved decls) decls
+  (* Scoped proofs also occur in modules with no lemma declarations. *)
+  erase_module_with (env_of_decls ~reserved decls) decls
 
 (* One declaration at a time (the REPLs): a lemma keeps its declaration, for
    later inputs that call it, but its body becomes `()`, so no call ever runs
    a proof. *)
 let blank_lemma_decl (d : decl) : decl =
-  match d with
-  | DFn (fd, sp) when is_lemma fd -> DFn (erase_fn { erasable = SS.empty } fd, sp)
-  | d -> d
+  match erase_decls { erasable = SS.empty } [d] with
+  | [d] -> d
+  | _ -> d
 
 (* Every lemma body in [decls] becomes `()`, nested modules included; calls
    and declarations stay (the REPLs, where a later input may call a lemma). *)

@@ -10176,7 +10176,7 @@ let test_lint_pfn_impl_method () =
 type MyInt = MyInt(Int)
 
 pfn format_inner(n: Int): String do
-  Int.to_string(n)
+  int_to_string(n)
 end
 
 interface Show(a) do
@@ -13697,6 +13697,42 @@ let test_compiled_aliased_arg_no_double_free () =
    (no response) because the accept loop was still blocked inside a
    recv() on the first (idle) connection. Under the fix, the second
    connection is served promptly regardless of the first. *)
+(* Wait until the interpreted server [child_pid] accepts on [addr].
+
+   The interpreter loads and typechecks the stdlib before it binds, so the time
+   to listen is startup time, which these tests do not measure: about 2.1s cold
+   on an idle M-series Mac, and 4.6-4.8s with the CPU oversubscribed two to one.
+   A fixed 5s budget sat right at that line, and on CI's loaded 4-vCPU `rest`
+   shard these tests failed with "never started listening" in most runs on
+   2026-11-06. So poll against a wall-clock deadline far above any startup we
+   have seen. A child that exits (a typecheck error, a port already in use) is
+   reported at once with its log, not after the deadline. *)
+let wait_for_interp_listen ~child_pid ~log_path addr =
+  let deadline = Unix.gettimeofday () +. 60.0 in
+  let log () = try In_channel.with_open_text log_path In_channel.input_all with _ -> "" in
+  let rec go () =
+    let probe = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    let up = (try Unix.connect probe addr; true with Unix.Unix_error _ -> false) in
+    (try Unix.close probe with _ -> ());
+    if not up then begin
+      (match Unix.waitpid [Unix.WNOHANG] child_pid with
+       | (0, _) -> ()
+       | (_, st) ->
+         let why = match st with
+           | Unix.WEXITED n -> Printf.sprintf "exited %d" n
+           | Unix.WSIGNALED n -> Printf.sprintf "was killed by signal %d" n
+           | Unix.WSTOPPED n -> Printf.sprintf "was stopped by signal %d" n in
+         Alcotest.failf "interpreted HTTP server %s before listening; its log:\n%s" why (log ())
+       | exception Unix.Unix_error _ -> ());
+      if Unix.gettimeofday () > deadline then
+        Alcotest.failf "interpreted HTTP server never started listening within 60s; its log:\n%s"
+          (log ());
+      Unix.sleepf 0.1;
+      go ()
+    end
+  in
+  go ()
+
 let test_interp_http_server_idle_client_does_not_block_others () =
   let exe_dir  = Filename.dirname Sys.executable_name in
   let main_exe = Filename.concat exe_dir "../bin/main.exe" in
@@ -13739,24 +13775,8 @@ let test_interp_http_server_idle_client_does_not_block_others () =
       (try ignore (Unix.waitpid [] child_pid) with _ -> ())
     in
     Fun.protect ~finally:cleanup (fun () ->
-      (* Give the child a moment to bind and start listening. Poll rather
-         than a single fixed sleep so this isn't flaky under load. *)
       let connect_addr = Unix.ADDR_INET (Unix.inet_addr_loopback, port) in
-      let rec wait_for_listen attempts =
-        if attempts <= 0 then
-          Alcotest.fail "interpreted HTTP server never started listening"
-        else
-          let probe = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-          match (try Unix.connect probe connect_addr; `Ok
-                 with Unix.Unix_error _ -> `NotYet)
-          with
-          | `Ok -> (try Unix.close probe with _ -> ())
-          | `NotYet ->
-            (try Unix.close probe with _ -> ());
-            Unix.sleepf 0.1;
-            wait_for_listen (attempts - 1)
-      in
-      wait_for_listen 50;  (* up to ~5s *)
+      wait_for_interp_listen ~child_pid ~log_path connect_addr;
 
       (* 1. Idle client: connect but never send a byte. Left open for the
          duration of the test so it can wedge the old blocking accept loop. *)
@@ -13896,21 +13916,7 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
     in
     Fun.protect ~finally:cleanup (fun () ->
       let connect_addr = Unix.ADDR_INET (Unix.inet_addr_loopback, port) in
-      let rec wait_for_listen attempts =
-        if attempts <= 0 then
-          Alcotest.fail "interpreted HTTP server never started listening"
-        else
-          let probe = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-          match (try Unix.connect probe connect_addr; `Ok
-                 with Unix.Unix_error _ -> `NotYet)
-          with
-          | `Ok -> (try Unix.close probe with _ -> ())
-          | `NotYet ->
-            (try Unix.close probe with _ -> ());
-            Unix.sleepf 0.1;
-            wait_for_listen (attempts - 1)
-      in
-      wait_for_listen 50;  (* up to ~5s *)
+      wait_for_interp_listen ~child_pid ~log_path connect_addr;
 
       (* 1. Establish a real WebSocket, then go silent. The handshake must
             actually complete — an unupgraded socket would only re-test the

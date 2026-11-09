@@ -1,0 +1,17 @@
+-- MARCH-MODE: why-copies
+-- EXPECT-ERROR: builds a new copy instead of reusing `xs` in place
+-- `xs` is still used after `List.map`, so map can't reuse its cells. The fix
+-- moves the later `let` above the call, making the map the last use.
+mod Main do
+  needs IO.Console
+
+  fn inc_all(xs : List(Int)) : List(Int) do
+    let ys = List.map(xs, fn x -> x + 1)
+    let n = List.length(xs)
+    List.append(ys, [n])
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(List.length(inc_all([1, 2, 3]))))
+  end
+end

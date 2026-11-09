@@ -3180,7 +3180,7 @@ manifest, **Check 1** (every `Cap(X)` in a function/actor/extern
 **signature** must be covered by a declared `needs`), and (§2.8.6) the
 transitive/extern-implied checks (4, 1c, 5) plus the candid three-tier
 enforcement reality (signature/transitive/extern-cap = ERROR; direct-body-
-call/extern-implied = WARNING). §2.8.8-§2.8.9 further extend §2.8 with
+call = WARNING; extern-implied became ERROR 2026-11-06). §2.8.8-§2.8.9 further extend §2.8 with
 `cap_narrow`/`root_cap` threading, the effect-inference two projections, the
 `*_migrate_state` IO-free check (Check 8), and realtime exclusion (Check 7).
 §2.8.11 covers a SEPARATE, orthogonal mechanism sharing only the `cap`
@@ -3361,8 +3361,8 @@ core enforcement rule this subsection pins:
 >
 > Check 1b (a body-scanned direct builtin call) is **also an ERROR** as of
 > 2026-08-06; it was warning-only before, and the parenthetical here said so.
-> Check 1c (an `extern` block implying `IO.Foreign`) remains warning-only and
-> was intentionally not flipped.
+> Check 1c (an `extern` block implying `IO.Foreign`) stayed warning-only until
+> 2026-11-06, when it became an **ERROR** (see the Check 1c section below).
 
 The set of signature-occurring `Cap(X)` paths (`used_caps`,
 `typecheck.ml:5468-5515`) is collected from three declaration shapes:
@@ -3553,15 +3553,16 @@ must be covered by `needs` exactly as a function signature's `Cap(X)` must
 be (§2.8.3). `accept/t50` (§2.8.7) declares `needs IO.FileSystem` covering an
 `extern "libc" : Cap(IO.FileSystem)` block and accepts.
 
-**Check 1c: extern blocks imply `IO.Foreign` (WARNING only).** Distinct
+**Check 1c: extern blocks imply `IO.Foreign` (ERROR since 2026-11-06; WARNING only before).** Distinct
 from Check 5's ERROR on the extern's *own declared* `Cap(X)`, Check 1c
 (`typecheck.ml:5627-5642`, comment "Check 1c:" at `:5627`) additionally treats
 *every* extern block, regardless of what `Cap(X)` it declares, as implying
 `IO.Foreign` (an FFI call is inherently foreign-code execution); and, per
 the extern-implied-caps computation feeding this check
 (`typecheck.ml:5559-5570`), `IO.Foreign.Blocking` too if any of the block's
-functions are marked blocking. Unlike Check 5, an uncovered `IO.Foreign`
-implication is only a **WARNING**:
+functions are marked blocking. Like Check 5, an uncovered `IO.Foreign`
+implication is an **ERROR** (it was only a **WARNING** before 2026-11-06; the
+snippet below shows the severity at the time it was written):
 
 ```ocaml
 List.iter (fun (cap_path, sp) ->
@@ -3575,9 +3576,9 @@ List.iter (fun (cap_path, sp) ->
 ```
 
 So a single `extern` block imposes **two independent capability obligations
-of two different severities**: its own declared `Cap(X)` is ERROR-enforced
-(Check 5), while the blanket `IO.Foreign` implication is WARNING-only (Check
-1c). `accept/t50` declares both `needs IO.Foreign` and `needs IO.FileSystem`
+of two different severities before 2026-11-06**: its own declared `Cap(X)` is
+ERROR-enforced (Check 5), while the blanket `IO.Foreign` implication was
+WARNING-only (Check 1c). Both are errors now. `accept/t50` declares both `needs IO.Foreign` and `needs IO.FileSystem`
 so neither fires; dropping only the `IO.Foreign` line would still `--check`
 exit 0 (a warning, not a rejection); dropping the `IO.FileSystem` line
 would exit 1 (Check 5, an error). This imbalance is easy to miss because
@@ -3634,7 +3635,7 @@ So the three-tier reality is:
 | `use`d module's declared caps uncovered | Check 4 | **ERROR** | 1 |
 | extern's own declared `Cap(X)` uncovered | Check 5 | **ERROR** | 1 |
 | body call to a cap-table builtin, uncovered | Check 1b | WARNING | 0 |
-| extern block's blanket `IO.Foreign` implication, uncovered | Check 1c | WARNING | 0 |
+| extern block's blanket `IO.Foreign` implication, uncovered | Check 1c | **ERROR** (WARNING before 2026-11-06) | 1 |
 
 "Absence of `needs` is a machine-verified guarantee of purity" (the
 tutorial's framing) applies **only** for the signature/transitive/extern-cap
@@ -5294,12 +5295,16 @@ typechecker that this document exists to pin down, not bugs:
     `Pid`'s parameter is the actor's STRUCTURAL state record and cannot name
     the actor: a message for an actor whose state has the same shape as the
     target's still typechecks and is dropped at run time on both backends.
-    One backend split remains for a handler name two actors share: a bare
-    name resolves to one owner, so the interpreter (dispatching by name) runs
-    the target's handler while compiled code drops the other actor's message.
-    When the target's state differs that is now the `send_wrong_actor` error,
-    whose advice is to rename a handler, since no qualified spelling selects
-    an actor's message (`specs/todos/2026-10-15-actor-message-ctor-cannot-be-qualified.md`).
+    For a handler name two actors share, a bare name resolves to one owner;
+    when the target's state differs that is the `send_wrong_actor` error,
+    whose advice is the actor-qualified spelling (`Counter.Tally`), which
+    selects an actor's message since 2026-11-04
+    (`specs/progress/2026-10-15-actor-message-ctor-cannot-be-qualified.md`).
+    The backend split this used to leave is closed: since 2026-11-05 the
+    interpreter tags an actor message by its checked type and drops another
+    actor's or a variant's same-named message, as compiled code does
+    (`specs/progress/2026-11-04-interp-actor-dispatch-by-name.md`,
+    `test/native/actor_shared_name_drop.march`).
     Progress entry: `specs/progress/2026-10-12-send-message-not-checked-against-pid-actor.md`.
     Cross-ref §2.6.4 and finding 18.
 
@@ -5710,11 +5715,11 @@ module a given module `use`s must have its own declared `needs` covered,
 transitively, via the same `cap_subsumes` subsumption, ERROR on violation),
 extern `Cap(X)` coverage (**Check 5**, `typecheck.ml:5684-5701`, ERROR), and
 the extern-implies-`IO.Foreign` obligation (**Check 1c**,
-`typecheck.ml:5607-5620`, WARNING-only), plus the honestly-stated three-tier
+`typecheck.ml:5607-5620`, WARNING-only when this was written; an ERROR since 2026-11-06), plus the honestly-stated three-tier
 enforcement reality that reconciles `specs/lang/capabilities.md`'s tutorial
 overclaim (F1, logged): Checks 1/4/5 (signature/transitive/extern-cap) are
 true ERRORs, exit 1; Checks 1b (body-scanned builtin call, `typecheck.ml:5588
--5605`) and 1c (extern-implied `IO.Foreign`) are WARNING-only, exit 0;
+-5605`) and 1c (extern-implied `IO.Foreign`; an ERROR since 2026-11-06) were WARNING-only, exit 0, when this was written;
 reproduced live side by side (a `Cap(IO.FileRead)` signature with no `needs`
 rejects; a body call to `file_read` with no `needs` only warns and
 `--check`s clean). Two new `accept/` programs (`t49`: an importer declaring

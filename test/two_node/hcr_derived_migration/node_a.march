@@ -1,0 +1,31 @@
+-- A derived state migration (M11): v2 adds two fields to Counter's state and
+-- writes no counter_migrate_state.  Built against v1's schema, the compiler
+-- derives it: `count` is kept, `label` and `history` take their `init`
+-- values.  The same v2 built with no baseline has no migration, and the
+-- deploy gate refuses it.
+mod Derived do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Counter do
+    state { count : {Int | _ >= 0} }
+    init { count: 0 }
+    on Tick() do { count: state.count + 1 } end
+    on Report() do
+      println("v1 count: " ++ int_to_string(state.count))
+      state
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+    let counter = spawn(Counter)
+    List.each(List.range(0, 5), fn _ -> send(counter, Tick))
+    sleep_ms(300)
+    println("ready")
+    List.each(List.range(0, 150), fn _ -> sleep_ms(100))
+    send(counter, Tick)
+    send(counter, Report)
+    sleep_ms(500)
+  end
+end

@@ -95,8 +95,14 @@ let empty_surface = { fns = []; types = [] }
 (*  Rendering (surface-syntax text, for diffing/display purposes only) *)
 (* ------------------------------------------------------------------ *)
 
+(* A default's VALUE is not part of the surface, only that there is one, so
+   it renders as `\\ _` (the formatter's own [fmt_fn_param] prints the value). *)
+let render_fn_param = function
+  | Ast.FPDefault (p, _) -> Fmt.fmt_param p ^ " \\\\ _"
+  | fp -> Fmt.fmt_fn_param fp
+
 let render_clause_params (clause : Ast.fn_clause) =
-  String.concat ", " (List.map Fmt.fmt_fn_param clause.Ast.fc_params)
+  String.concat ", " (List.map render_fn_param clause.Ast.fc_params)
 
 (** Render a function's full parameter surface across all of its clauses. *)
 let render_fn_params (fn : Ast.fn_def) =
@@ -118,7 +124,7 @@ let render_clauses (fn : Ast.fn_def) =
 
 let render_type_def (tdef : Ast.type_def) =
   match tdef with
-  | Ast.TDAlias ty -> Fmt.fmt_ty ty
+  | Ast.TDAlias (ty, _) -> Fmt.fmt_ty ty
   | Ast.TDVariant variants ->
     let var_str (v : Ast.variant) =
       match v.Ast.var_args with
@@ -426,14 +432,14 @@ let type_key (t : type_decl) =
        removed parameter changes the key: every use `Box(Int)` breaks. *)
     let tys =
       match a.ta_def with
-      | Ast.TDAlias ty -> [ ty ]
+      | Ast.TDAlias (ty, _) -> [ ty ]
       | Ast.TDVariant vs -> List.concat_map (fun v -> v.Ast.var_args) vs
       | Ast.TDRecord fs -> List.map (fun f -> f.Ast.fld_ty) fs in
     let order = List.fold_left ty_vars a.ta_params tys in
     let rn, render = canonical_renderer order in
     let body =
       match a.ta_def with
-      | Ast.TDAlias ty -> render ty
+      | Ast.TDAlias (ty, _) -> render ty
       | Ast.TDVariant vs ->
         String.concat " | "
           (List.map

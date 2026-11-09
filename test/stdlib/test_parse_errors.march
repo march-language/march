@@ -42,8 +42,8 @@ mod TestParseErrors do
   end
 
   -- Assert the rendered diagnostic for an input that must fail.
-  -- Panics with BOTH strings on mismatch: `assert (a == b)` reports only
-  -- "condition was false", which is useless when the whole point is the text.
+  -- Panics with BOTH strings and the input on mismatch; `assert (a == b)`
+  -- would show the two strings but not which input produced them.
   pfn expect_error(p : Parser.Parser(a), input : String, want : String) : Unit do
     match Parser.run(p, input) do
       Ok(_) -> panic("expected a parse error for input " ++ input)

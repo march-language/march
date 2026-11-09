@@ -11,12 +11,3 @@ hint: accept `Cap(Db.P)` as a parameter and pass it through, or call a factory i
     run `march --explain proof_cap_return`
 
 
--- HINT: CAPABILITY ----- errors/proof_cap_return_1.march
-
-This function takes `Cap(IO)` (the root capability); consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege. [cap_root_broad]
-
-23 |     fn make(cap : Cap(IO)) : Cap(Db.P) do mint_cap(cap) end
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-
-

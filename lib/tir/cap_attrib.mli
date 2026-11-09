@@ -73,6 +73,11 @@ val attribute :
     builtin of the same bare name: the entry module's own [fn dns_resolve] is
     not a DNS lookup. Its body is attributed on its own. *)
 
+val owner_of : entry:string -> string -> string
+(** The module a TIR function belongs to, as [attribute] charges it:
+    [Handler_owner] first, then the impl-mangling rule, then the module prefix;
+    an unprefixed name is the entry module's ([entry]). *)
+
 val cap_of_call : string -> string option
 (** [cap_of_call march_name] is the capability a call to [march_name] implies,
     as [attribute] resolves it.  Exposed so [test_cap_attrib_agreement] can

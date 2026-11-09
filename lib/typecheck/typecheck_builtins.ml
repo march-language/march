@@ -872,7 +872,10 @@ let builtin_bindings : (string * scheme) list =
        peak_rss_bytes.  sys_uptime_ms (System.monotonic_time) stays ambient
        too: it is process-relative elapsed time, not the wall clock
        unix_time_ms reads, and gating it would break every existing timing
-       caller granted only IO.Console.  sys_os / sys_arch return a lowercase
+       caller granted only IO.Console.  Ambient for `needs` only: `cap pure`
+       and `cap deterministic` still ban it, directly and through any stdlib
+       wrapper (Typecheck_modcaps.monotonic_clock_builtins, issue #1180).
+       sys_os / sys_arch return a lowercase
        String ("macos", "aarch64", ...): the codegen row always said TString,
        and a String is what march_sys_os/march_sys_arch can build. *)
     ("sys_os",                  Mono (TArrow (t_unit, t_string)));

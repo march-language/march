@@ -39,7 +39,7 @@ mod DrainSecondSignalA do
       Ok(h) ->
         let served = Vault.new("served")
         println("node-a: offering")
-        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st, served)) do
+        match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st, served)) do
           Err(e) -> panic(Echo_Run.error_message(e))
           Ok(_) -> idle()
         end

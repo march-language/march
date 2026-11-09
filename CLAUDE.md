@@ -110,11 +110,11 @@ scripts/run-tests.sh -q stdlib         # quick subset
 scripts/run-tests.sh stdlib_march      # the .march test files under test/stdlib/
 scripts/run-tests.sh test_jit          # REPL-JIT / --jit alcotest suite
 scripts/run-tests.sh lsp               # the LSP analysis suite (lsp/test/)
-scripts/run-tests.sh refinecheck       # z3-backed refinement-check suite (full-run only, ~4min)
+scripts/run-tests.sh refinecheck       # z3-backed refinement-check suite (full-run only; groups run 4-way, MARCH_TEST_PROCS)
 
 # Suites: compiler, eval, codegen, stdlib, stdlib_march, test_jit, lsp, utf16,
-# jsonrpc, incremental, query_cli, refinecheck. The five before refinecheck are
-# the LSP suites and live under lsp/test/, not test/. An unknown
+# jsonrpc, incremental, query_cli, refinecheck, errors, test_reports. The five
+# before refinecheck are the LSP suites and live under lsp/test/, not test/. An unknown
 # name is a hard error listing the known suites, not a confusing dune build
 # failure.
 
@@ -134,6 +134,8 @@ MARCH_BIN="$PWD/_build/default/bin/main.exe" ./_build/default/test/test_jit.exe 
 # checks for z3 and fails loudly if it's missing; direct invocation does not,
 # so check `command -v z3` yourself first.
 ./_build/default/test/test_refinecheck.exe -e
+# One process unless MARCH_TEST_PROCS=N (groups in N children); one group:
+# MARCH_TEST_GROUP=<group> ./_build/default/test/test_refinecheck.exe -e
 # The LSP suites live under lsp/test/. test_jsonrpc drives a real march-lsp
 # process over stdio, so lsp/bin/main.exe must be built or all 22 of its cases
 # die with Unix.ENOENT; and they are cwd-sensitive -- run them from the repo
@@ -209,6 +211,19 @@ lints each message for compiler-generated names the program never wrote (`$cb_ar
 `…_Msg`, `Cons`); known leaks are listed in `test/errors/internals-allowlist.txt`, which may only
 shrink. New reject programs and `--explain` pages are added by
 `scripts/seed-error-corpus.sh` (idempotent; never renames an existing case).
+
+### Golden test-failure reports
+
+`test/run_test_reports.exe` (suite `test_reports`) runs every `test/test_reports/<name>.march`
+(test modules whose tests all fail on purpose) with `march test`, compiled with
+`--compile --test`, AND with `--target js --test` under node, and requires every run's failure
+block to equal `<name>.expected` (a fixture the JS target can't build yet is listed, with its
+reason, in `js_unsupported`). It pins the report text (`lib/errors/test_report.ml`) and that the
+interpreter (OCaml), a compiled binary (`march_assert_fail` in `runtime/march_runtime.c`,
+`stdlib/check.march`) and the JS runner (`runtime/march_runtime.mjs`) print it byte for byte
+the same: the value differ exists three times, so change all three. After an intentional change:
+`UPDATE_TEST_REPORTS=1 ./_build/default/test/run_test_reports.exe -e`, then review
+`git diff test/test_reports/`.
 
 ### Refactor oracles: prove a change moved no behaviour
 
@@ -360,7 +375,7 @@ lsp/lib/                    LSP analysis: analysis (+.mli) + analysis_{types,uti
                              code_actions_{ast,diag} (the two code-action engines)
 lsp/test/                   test_lsp (Alcotest registration only) + the test bodies in
                              test_lsp_{harness,analysis,actions,perf,features,refactor,html,depot}
-stdlib/                     137 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
+stdlib/                     139 March stdlib modules (list, map, enum, sort, crypto, http, json, distributed-OTP, …)
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool (new, build, run, test, deps, search, publish subcommands)
 lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)

@@ -1989,7 +1989,7 @@ let test_schema_handlers_and_message_diff () =
     (List.map show (Option.get s.Schema_diff.migrate_msg_from));
   Alcotest.(check (list string)) "state fields still parsed" ["n"]
     (List.map (fun (f : Schema_diff.field) -> f.name) s.Schema_diff.state_fields);
-  let c n ps = { Schema_diff.cname = n; params = ps; refines = [] } in
+  let c n ps = { Schema_diff.cname = n; params = ps; refines = []; tag = None } in
   let old_h = [ c "Add" ["Int"]; c "Show" [] ] in
   Alcotest.(check bool) "adding a handler is not a message change" false
     (Schema_diff.messages_changed ~old_h ~new_h:(old_h @ [ c "Reset" [] ]));
@@ -1998,8 +1998,62 @@ let test_schema_handlers_and_message_diff () =
   Alcotest.(check bool) "changing a parameter type is" true
     (Schema_diff.messages_changed ~old_h ~new_h:[ c "Add" ["String"]; c "Show" [] ])
 
+(* H7: the deploy gate compares each constructor's actor-message tag
+   between the running version's schema and the new build's
+   (Schema_diff.tag_check). A tag moves between builds only when a hash
+   collision made one key probe; nothing compared them before. *)
+let test_schema_tag_check () =
+  let parse s = List.assoc "Tally" (Schema_diff.parse_schemas_json (Yojson.Safe.from_string s)) in
+  let schema ?(mm = "") handlers =
+    parse (Printf.sprintf {|{"Tally": {"compat": "full", "handlers": [%s],%s "state_fields": []}}|}
+             handlers (if mm = "" then "" else Printf.sprintf {| "migrate_msg_from": [%s],|} mm)) in
+  let bump t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+  let reset t = Printf.sprintf {|{"name":"Reset","params":[],"tag":%d}|} t in
+  let show = function
+    | Schema_diff.Tag_moved { ctor; old_tag; new_tag } ->
+      Printf.sprintf "moved %s %d->%d" ctor old_tag new_tag
+    | Schema_diff.Tags_unrecorded why -> "unrecorded: " ^ why
+    | Schema_diff.Tags_agree n -> Printf.sprintf "agree %d" n in
+  let check name expect old_s new_s =
+    Alcotest.(check (list string)) name expect
+      (List.map show (Schema_diff.tag_check ~old_s ~new_s)) in
+  let v1 = schema (String.concat ", " [ bump 100; reset 200 ]) in
+  Alcotest.(check (option int)) "the tag field is parsed" (Some 100)
+    (List.hd (Option.get v1.Schema_diff.handlers)).Schema_diff.tag;
+  check "equal tags agree" [ "agree 2" ] v1 (schema (String.concat ", " [ reset 200; bump 100 ]));
+  check "a new handler is not compared" [ "agree 2" ] v1
+    (schema (String.concat ", " [ bump 100; reset 200; {|{"name":"New","params":[],"tag":300}|} ]));
+  check "a moved tag is found" [ "moved Bump 100->101" ] v1
+    (schema (String.concat ", " [ bump 101; reset 200 ]));
+  (* A removed handler is compared through migrate_msg's old type, which
+     takes the actor's tags by constructor name. *)
+  check "a removed handler, through migrate_msg_from" [ "moved Reset 200->201" ] v1
+    (schema ~mm:(String.concat ", " [ bump 100; reset 201 ]) (bump 100));
+  check "migrate_msg_from agreeing" [ "agree 2" ] v1
+    (schema ~mm:(String.concat ", " [ bump 100; reset 200 ]) (bump 100));
+  let untagged = schema {|{"name":"Bump","params":["Int"]}, {"name":"Reset","params":[]}|} in
+  (match Schema_diff.tag_check ~old_s:untagged ~new_s:v1 with
+   | [ Schema_diff.Tags_unrecorded why ] ->
+     Alcotest.(check bool) ("why names the baseline: " ^ why) true
+       (String.length why > 40 && String.sub why 0 40 = "the running version's schema predates ac")
+   | fs -> Alcotest.failf "untagged baseline: %s" (String.concat "; " (List.map show fs)));
+  check "an untagged new build is reported too"
+    [ "unrecorded: this build's schema records no actor-message tags" ] v1 untagged;
+  let msg = Schema_diff.tag_moved_message ~actor:"Tally" ~ctor:"Bump" ~old_tag:0x01000010
+      ~new_tag:0x01000011 in
+  List.iter (fun frag ->
+      let hl = String.length msg and nl = String.length frag in
+      let rec go i = i + nl <= hl && (String.sub msg i nl = frag || go (i + 1)) in
+      if not (go 0) then Alcotest.failf "refusal lacks %S: %s" frag msg)
+    [ "Tally.Bump's actor-message tag moved"; "0x01000010"; "0x01000011"; "hash collision" ];
+  (* A baseline without tags is still the same message type as a tagged
+     migrate_msg_from: the tag is the tag check's business. *)
+  Alcotest.(check bool) "same_message_type ignores the recorded tags" true
+    (Schema_diff.same_message_type (Option.get v1.Schema_diff.handlers)
+       (Option.get untagged.Schema_diff.handlers))
+
 let test_migrate_msg_stub () =
-  let c n ps = { Schema_diff.cname = n; params = ps; refines = [] } in
+  let c n ps ={ Schema_diff.cname = n; params = ps; refines = []; tag = None } in
   let stub = Cmd_deploy_hot.migrate_msg_stub ~actor:"Counter"
       ~old_h:[ c "Add" ["Int"]; c "Show" [] ]
       ~new_h:[ c "Add" ["Int"]; c "Reset" [] ] () in
@@ -3236,6 +3290,52 @@ let test_refine_infer_falls_back_per_file () =
       | Ok sk -> Alcotest.(check (list string)) "each file tried on its own" [ a; b ] (List.map fst sk)
       | Error e -> Alcotest.failf "unexpected error: %s" e)
 
+(* The fallback used to run every file as its own entry, but each run loads
+   the modules its entry names, so every run inferred over (most of) the
+   project and printed the same proposals: depot printed each of its 3 metric
+   proposals 30 times.  Each proposal is printed once. *)
+let test_refine_infer_fallback_prints_each_proposal_once () =
+  if not (z3_on_path ()) then Alcotest.skip ();
+  with_dev_march_on_path (fun () ->
+      let root = Filename.temp_dir "forge_infer_once_" "" in
+      let lib = Filename.concat root "lib" in
+      Unix.mkdir lib 0o755;
+      let write n s = let f = Filename.concat lib n in Out_channel.with_open_bin f (fun oc -> output_string oc s); f in
+      let good =
+        write "good.march"
+          "mod Good do\n  fn sum_pos(_xs : List({Int | _ > 0})) : Int do 0 end\n  fn pos_only(xs : List(Int)) : List(Int) do List.filter(xs, fn y -> y > 0) end\n  pfn go(ys : List(Int)) : Int do sum_pos(pos_only(ys)) end\n  fn run() : Int do go([1]) end\nend\n" in
+      let other = write "other.march" "mod Other do\n  fn twice() : Int do Good.run() + Good.run() end\nend\n" in
+      let third = write "third.march" "mod Third do\n  fn thrice() : Int do Good.run() + Other.twice() end\nend\n" in
+      let bad = write "bad.march" "mod Bad do\n  fn oops() : Int do \"no\" end\nend\n" in
+      let env = Printf.sprintf "HOME=%s MARCH_LIB_PATH=%s " (Filename.quote root) (Filename.quote lib) in
+      flush stdout;
+      let capture = Filename.temp_file "forge_infer_once_" ".out" in
+      let saved = Unix.dup Unix.stdout in
+      let fd = Unix.openfile capture [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+      Unix.dup2 fd Unix.stdout;
+      Unix.close fd;
+      let r =
+        Fun.protect
+          ~finally:(fun () -> flush stdout; Unix.dup2 saved Unix.stdout; Unix.close saved)
+          (fun () -> March_forge.Cmd_refine.run_infer ~lib_path_env:env ~files:[ good; other; third; bad ] ~apply:false ~diff:true ())
+      in
+      let out = read_all capture in
+      (try Sys.remove capture with Sys_error _ -> ());
+      let count needle =
+        let n = String.length needle in
+        let rec go i acc =
+          match Str.search_forward (Str.regexp_string needle) out i with
+          | exception Not_found -> acc
+          | j -> go (j + n) (acc + 1)
+        in
+        ignore n; go 0 0
+      in
+      (match r with
+       | Ok sk ->
+         Alcotest.(check (list string)) ("only bad.march skipped: " ^ out) [ bad ] (List.map fst sk)
+       | Error e -> Alcotest.failf "error: %s" e);
+      Alcotest.(check int) ("the proposal printed once: " ^ out) 1 (count "+  fn pos_only(xs : List(Int)) : List({Int | _ > 0})"))
+
 let test_refine_infer_apply_whole_project () =
   if not (z3_on_path ()) then Alcotest.skip ();
   with_dev_march_on_path (fun () ->
@@ -3274,6 +3374,7 @@ let () =
       Alcotest.test_case "a clean run skips nothing" `Quick test_refine_infer_clean_run_skips_nothing;
       Alcotest.test_case "a reverted apply is an error" `Quick test_refine_infer_mismatch_is_an_error;
       Alcotest.test_case "a project that does not check as a unit falls back per file" `Quick test_refine_infer_falls_back_per_file;
+      Alcotest.test_case "the per-file fallback prints each proposal once" `Slow test_refine_infer_fallback_prints_each_proposal_once;
       Alcotest.test_case "--apply checks the project as one unit" `Slow test_refine_infer_apply_whole_project;
       Alcotest.test_case "--apply-public is passed through" `Slow test_refine_infer_apply_public;
     ];
@@ -3473,6 +3574,7 @@ let () =
       Alcotest.test_case "compact server schema baseline" `Quick test_compact_schema_baseline;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "schemas: --accept-unproved must be built into the patch" `Quick test_overrides_must_be_built_in;
+      Alcotest.test_case "schemas: actor-message tags compared at deploy (H7)" `Quick test_schema_tag_check;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;

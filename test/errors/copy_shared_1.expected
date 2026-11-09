@@ -1,0 +1,27 @@
+exit: 0
+-- WARNING: COPY ------------- errors/copy_shared_1.march
+
+`List.map` builds a new copy instead of reusing `xs` in place, because `xs` is used again afterwards. [copy_shared]
+A function can update a value in place only when it holds the only reference to it; make this call the last use of `xs` and `List.map` reuses its memory instead of allocating.
+help: move `let n = List.length(xs)` above the call.
+
+9 |     let ys = List.map(xs, fn x -> x + 1)
+                          ^^
+
+
+    `xs` is used again here, so it is still shared when `List.map` runs:
+
+10 |     let n = List.length(xs)
+                             ^^
+
+    fix (`forge fix` applies it):
+
+ 8 |   fn inc_all(xs : List(Int)) : List(Int) do
+ 9 +     let n = List.length(xs)
+10 -     let n = List.length(xs)
+
+    run `march --explain copy_shared`
+
+
+
+after fix: exit 0

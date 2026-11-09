@@ -83,6 +83,7 @@ let two_stage ?(ok : ('a -> bool) option) ~(errctx : Err.ctx) (run : unit -> 'a)
     let d1 = errctx.Err.diagnostics in
     let replay_stage1 ?(override = fun (o : Obligation.t) -> o) () =
       March_refine.Refine.last_core := [];
+      March_refine.Refine.last_assumed := [];
       List.iter (fun o -> Obligation.record (override o)) o1;
       errctx.Err.diagnostics <- d1
     in
@@ -113,6 +114,7 @@ let two_stage ?(ok : ('a -> bool) option) ~(errctx : Err.ctx) (run : unit -> 'a)
       in
       let o2 = Obligation.rollback_to saved_log in
       March_refine.Refine.last_core := [];
+      March_refine.Refine.last_assumed := [];
       let d2 = errctx.Err.diagnostics in
       let pairs =
         if List.length o1 = List.length o2 && List.for_all2 (fun a b -> key a = key b) o1 o2 then
@@ -202,6 +204,7 @@ let two_stage ?(ok : ('a -> bool) option) ~(errctx : Err.ctx) (run : unit -> 'a)
           | _ -> o
         in
         March_refine.Refine.last_core := [];
+        March_refine.Refine.last_assumed := [];
         List.iter (fun o -> Obligation.record (override o)) o1;
         (* A `refinement_unverified` hint stage 1 emitted for a skip the
            override re-labels names stage 1's reason; give it the new one

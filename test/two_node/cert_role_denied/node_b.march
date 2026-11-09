@@ -65,7 +65,7 @@ mod CertRoleDeniedB do
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        match Checkout_Run.offer_Ledger(c, h, 4, fn (s, st) -> ledger(s, st)) do
+        match Checkout_Run.offer_Ledger(h, 4, fn (s, st) -> ledger(s, st)) do
           Ok(_) -> println(me() ++ ": offering Checkout.Ledger (wrong: the certificate does not allow it)")
           Err(e) -> println(me() ++ ": offer_Ledger refused: " ++ Checkout_Run.error_message(e))
         end
@@ -80,7 +80,7 @@ mod CertRoleDeniedB do
           Ok(_) -> println(me() ++ ": forged the Checkout.Ledger offer")
           Err(_) -> println(me() ++ ": could not bind the forged offer")
         end
-        match Thumbs_Run.offer_Render(c, h, 4, fn (s, st) -> render(s, st)) do
+        match Thumbs_Run.offer_Render(h, 4, fn (s, st) -> render(s, st)) do
           Ok(_) -> println(me() ++ ": offering Thumbs.Render")
           Err(e) -> panic(Thumbs_Run.error_message(e))
         end

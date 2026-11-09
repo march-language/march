@@ -452,6 +452,43 @@ else
   fail=1
 fi
 
+# ── Check H: the explainer's data vs the lab app it was generated from ──────────
+# docs/protocol-to-cluster.md shows numbers, excerpts and diagnostics that
+# scripts/gen-explainer-data.py measured on examples/lab_app and wrote to
+# docs/_data/explainer.json. The data records the lab app's hash; an edit to the lab
+# app without a regeneration would leave the page showing counts for a program that
+# no longer exists. Needs no compiler.
+echo
+echo "== Check H: docs/_data/explainer.json vs examples/lab_app =="
+if [ -f docs/_data/explainer.json ]; then
+  if python3 scripts/gen-explainer-data.py --check-inputs; then
+    echo "  ok — explainer data matches examples/lab_app"
+  else
+    fail=1
+  fi
+else
+  echo "  ok — no explainer data yet"
+fi
+# The second explainer (docs/deploy-authority.md) has its own data and its own inputs:
+# the lab app again, and the fixtures under docs/assets/explainer/authority/.
+if [ -f docs/_data/authority.json ]; then
+  if python3 scripts/gen-authority-data.py --check-inputs; then
+    echo "  ok — authority data matches examples/lab_app and its fixtures"
+  else
+    fail=1
+  fi
+fi
+# The third (docs/one-owner.md): its inputs are the tree programs under
+# docs/assets/explainer/ownership/, the spec chapters whose phrases it quotes, and the
+# generator itself.
+if [ -f docs/_data/ownership.json ]; then
+  if python3 scripts/gen-ownership-data.py --check-inputs; then
+    echo "  ok — ownership data matches docs/assets/explainer/ownership and the pinned specs"
+  else
+    fail=1
+  fi
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "doc-lint FAILED — fix the references above, or add a doc-lint:ignore-* marker"

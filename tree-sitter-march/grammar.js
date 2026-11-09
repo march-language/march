@@ -22,6 +22,13 @@ module.exports = grammar({
 
   conflicts: $ => [
     [$.typed_hole],
+    // `reveal f` (a proof hint) vs `reveal` used as a name: the compiler's
+    // token filter decides by the next token; here GLR does.
+    [$._expr, $.reveal_expression],
+    // `forall x in ..` (a quantifier) vs `forall` used as a name.
+    [$._expr, $.bounded_quantifier],
+    // `ghost let …` / `ghost x : T` / `ghost fn …` vs `ghost` used as a name.
+    [$._expr, $.let_declaration],
     // atom optional args
     [$.atom],
     // type_def: type_identifier can be variant name or type_constructor alias
@@ -162,9 +169,11 @@ module.exports = grammar({
     ),
 
     function_def: $ => seq(
+      // `ghost fn` / `ghost pfn`: proof-only, never compiled.
+      optional('ghost'),
       // `pfn` is the private form; it never combines with `pub`.
       choice(seq(optional('pub'), 'fn'), 'pfn'),
-      field('name', choice($.identifier, alias('send', $.identifier))),
+      field('name', choice($.identifier, alias(choice('send', 'ghost'), $.identifier))),
       optional(seq('[', commaSep1(seq($.identifier, ':', $._type)), ']')),
       '(', optional(commaSep($.fn_param)), ')',
       optional(seq(':', field('return_type', $._type))),
@@ -183,7 +192,7 @@ module.exports = grammar({
 
     named_param: $ => choice(
       seq(
-        optional(choice('linear', 'affine')),
+        optional(choice('linear', 'affine', 'ghost')),
         field('name', $.identifier),
         ':', field('type', $._type),
         optional(seq('\\\\', field('default', $._expr))),
@@ -212,7 +221,7 @@ module.exports = grammar({
     ),
 
     let_declaration: $ => seq(
-      optional(choice('linear', 'affine')),
+      optional(choice('linear', 'affine', 'ghost')),
       'let', optional(choice('?', '*')), field('pattern', $._pattern), optional($.type_annotation), '=', field('value', $._expr),
     ),
 
@@ -259,7 +268,9 @@ module.exports = grammar({
     qualified_constructor: $ => seq($.type_identifier, '.', $.type_identifier),
 
     // alias() — not a new regex — to avoid duplicate-terminal conflict with identifier
-    variable_pattern: $ => alias($.identifier, $.variable_pattern),
+    variable_pattern: $ => choice(
+      alias($.identifier, $.variable_pattern),
+      alias(choice('forall', 'exists', 'ghost'), $.variable_pattern)),
 
     constructor_pattern: $ => seq(
       field('name', choice($.type_identifier, $.qualified_constructor)),
@@ -289,7 +300,15 @@ module.exports = grammar({
     // Full type rules
     _type: $ => choice(
       $.arrow_type,
+      $.type_nat_op,
       $._type_atom,
+    ),
+
+    // Type-level arithmetic (parser.mly `ty_nat_add` / `ty_nat_mul`): a
+    // refinement alias's value argument, `Vec(Int, n + 1)`.
+    type_nat_op: $ => choice(
+      prec.left(2, seq(field('left', $._type), '+', field('right', $._type))),
+      prec.left(3, seq(field('left', $._type), '*', field('right', $._type))),
     ),
 
     arrow_type: $ => prec.right(1, seq(
@@ -386,7 +405,11 @@ module.exports = grammar({
       ),
     ),
 
-    type_params: $ => seq('(', commaSep1($.type_variable), ')'),
+    // `n : Int` is a value parameter of a refinement alias:
+    // `type Vec(a, n : Int) = {List(a) | len(_) == n}`.
+    type_params: $ => seq('(', commaSep1(choice($.type_variable, $.value_param)), ')'),
+
+    value_param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
     variant: $ => seq(
       field('name', choice($.type_identifier, $.atom_literal)),
@@ -567,7 +590,14 @@ module.exports = grammar({
 
     // needs IO.Network, IO.Clock
     needs_declaration: $ => seq('needs', commaSep1($.scoped_capability)),
-    scoped_capability: $ => seq($.module_path, optional(seq('(', $.string, ')'))),
+    // A path or host scope, options after it, or options alone:
+    // IO.FileRead("/etc"), IO.NetConnect("a.com", methods(get), no_redirects),
+    // IO.NetConnect(no_redirects).
+    scoped_capability: $ => seq($.module_path, optional(seq('(', choice(
+      seq($.string, repeat(seq(',', $.scope_option))),
+      commaSep1($.scope_option),
+    ), ')'))),
+    scope_option: $ => seq($.identifier, optional(seq('(', commaSep1($.identifier), ')'))),
 
     // `cap no_panic` and friends lex as a single keyword in the compiler, so
     // the space between the two words is not free-form whitespace here either.
@@ -606,8 +636,20 @@ module.exports = grammar({
     ),
 
     // Full expression hierarchy
+    bounded_quantifier: $ => prec.right(seq(
+      field("kind", choice("forall", "exists")),
+      field("binder", $.identifier), "in",
+      field("domain", choice(
+        seq($._expr, "..", $._expr), $._expr)),
+      ",", field("body", $._expr)
+    )),
+
     _expr: $ => choice(
+      $.bounded_quantifier,
       $.assert_expression,
+      $.reveal_expression,
+      $.with_fuel_expression,
+      $.calc_expression,
       $.pipe_expression,
       $.or_expression,
       $.and_expression,
@@ -642,6 +684,10 @@ module.exports = grammar({
       $.string,
       $.boolean,
       $.identifier,
+      // `calc`, `reveal`, `forall`, `exists` and `ghost` are soft keywords
+      // (the compiler's token filter promotes them only in their proof,
+      // quantifier and ghost-code positions): elsewhere they are names.
+      alias(choice('calc', 'reveal', 'forall', 'exists', 'ghost'), $.identifier),
     ),
 
     pipe_expression: $ => prec.left(1, seq(
@@ -741,7 +787,24 @@ module.exports = grammar({
 
     send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
     spawn_expression: $ => seq('spawn', '(', commaSep1($._expr), ')'),
-    assert_expression: $ => seq('assert', field('value', $._expr)),
+    // `assert P` and the proof hint `assert P by hint` (specs/lang/lemmas.md).
+    assert_expression: $ => prec.right(seq(
+      'assert', field('value', $._expr),
+      optional(seq('by', field('hint', $._expr))),
+    )),
+    // Proof hints: `reveal f`, `with fuel(f, N) do … end`, and a `calc`
+    // chain.  The chain is read flatly (terms and `by` hints in order); the
+    // compiler gives it its structure.
+    reveal_expression: $ => prec.right(seq('reveal', field('function', $._expr))),
+    with_fuel_expression: $ => seq(
+      'with', field('name', $.identifier), '(', commaSep1($._expr), ')',
+      'do', optional($.block_body), 'end',
+    ),
+    calc_expression: $ => prec(10, seq(
+      'calc', 'do',
+      repeat1(choice(field('term', $._expr), seq('by', field('hint', $._expr)))),
+      'end',
+    )),
 
     // Sigil expressions: ~H"...", ~H"""...""", ~yaml"...".  The content is one
     // string token; nothing tokenizes the HTML or interpolations inside it.

@@ -48,6 +48,7 @@ silence into an error for a module that wants a guarantee.
 - [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
 - [The Problem They Solve](#the-problem-they-solve)
 - [Syntax](#syntax)
+  - [Refinement aliases: naming a refinement, with value parameters](#refinement-aliases-naming-a-refinement-with-value-parameters)
   - [A message for each half of a contract](#a-message-for-each-half-of-a-contract)
   - [Refinements inside containers, callbacks and folds](#refinements-inside-containers-callbacks-and-folds)
 - [How Checking Works: Definite Failure](#how-checking-works-definite-failure)
@@ -111,6 +112,7 @@ the docs, and the compiler enforces it at every call.
 |---|---|
 | Reject a bad argument at the call site | A refined parameter: `i : {Int \| _ >= 0 && _ < len(xs)}` |
 | Promise something about a result | A refined return type: `: {Int | _ >= 0}` |
+| Name a refinement once and reuse it, `Vec(Int, n)` for a list of length `n` | A [refinement alias](#refinement-aliases-naming-a-refinement-with-value-parameters): `type Vec(a, n : Int) = {List(a) \| len(_) == n}` |
 | Give a broken contract a message in the caller's terms | [`else "…"` on a conjunct](#a-message-for-each-half-of-a-contract) |
 | Talk about a list's length, a record's fields, or your own data | A [measure](#measures-refining-over-data-structures) |
 | Call your own pure function inside a predicate | [Reflection](#reflection-your-functions-in-predicates): `if is_small(n) do need_small(n) …` |
@@ -211,6 +213,61 @@ and `==`/`!=` against literals. `Bool` values take the boolean operators against
 comparisons against float literals, discharged through Z3's bit-precise IEEE-754
 theory rather than reals ([Float Refinements](#float-refinements)).
 
+## Bounded quantifiers
+
+Logical predicates can quantify over a half-open integer range or collection
+membership:
+
+```march
+{List(Int) | forall i in 0..len(_), nth(_, i) >= 0}
+{List(Int) | exists x in elts(_), x == 7}
+```
+
+Write `forall i in lo..hi, P` or `exists i in lo..hi, P`. The range contains
+integers satisfying `lo <= i && i < hi`. Empty and reversed ranges make a
+universal predicate true and an existential predicate false. Negative bounds
+are legal. `elts(xs)` and `keys(m)` bound a variable by membership in the
+collection's elements or map keys. Current collection-domain support targets
+`Int` and `Bool` elements; unsupported element sorts must remain unverified.
+
+Binders are lexical: bounds use the outer scope, and the new name is in scope
+only in the body. Quantifiers may nest. Parenthesize a quantified predicate
+when combining it with another predicate using `&&` or `||`; the comma starts
+the quantifier's body. `forall` and `exists` are contextual in binder syntax;
+ordinary calls such as `forall(...)` remain identifier uses. Unbounded forms
+are unsupported. Quantifiers are allowed in refinements and proof assertions,
+not as executable expressions.
+
+`nth(xs, i)` is a logical list-indexing operation at the list's element sort.
+Every reached access must satisfy `0 <= i && i < len(xs)`. Boolean
+short-circuit guards can establish that condition. For **both** `forall` and
+`exists`, definedness is required for every domain member, even when a single
+valid existential witness would suffice for truth. For example,
+`exists i in 0..2, nth([7], i) == 7` cannot prove: index one is invalid.
+Negating the predicate does not remove this obligation.
+Like `len` and the set vocabulary, `nth` is reserved inside predicates: a
+module's own unqualified `nth` is not consulted there, so write a differently
+named helper (or `List.nth` in ordinary code) for any other indexing meaning.
+
+A sorted-list predicate can compare adjacent positions:
+
+```march
+{List(Int) | forall i in 0..len(_) - 1, nth(_, i) <= nth(_, i + 1)}
+```
+
+An existential goal requires checked candidates. The checker tries a
+deterministic bounded set of well-sorted terms from the obligation and proof
+facts (at most 32); a candidate must establish domain membership and the body.
+An unknown result or a missing candidate does not prove the predicate. Proof
+assertions can supply candidate facts; establish the candidate's bounds as
+well as its desired property. This search is incomplete, so an unproved goal
+may need a witness even when it is mathematically true.
+
+Quantified reasoning retains the usual warning-by-default policy and strict
+`cap verified` checks. Solver limits and unsupported formulas never supply
+proved facts. Bounded quantification does not make Z3 complete for quantified
+arithmetic or recursive list properties.
+
 Multiplication by a literal keeps a query in linear arithmetic, where the
 solver is complete and fast. A product of two non-constant terms is accepted
 too — `v * v > 0` is exactly `v != 0` over the integers, and refusing it only
@@ -257,6 +314,46 @@ comparisons, which is every ordinary refinement. A division in a bare
 `Int`-valued position, such as a call's argument `f(n / d)`, is translated only
 when its divisor is a non-zero literal or is syntactically positive
 (`len(xs) + 1`).
+
+### Refinement aliases: naming a refinement, with value parameters
+
+A `type` declaration whose right-hand side is a refinement type names that refinement. Its
+parameters can be types, as usual, or **values**, written with their sort:
+
+```march
+type Pos = {Int | _ > 0}
+type Vec(a, n : Int) = {List(a) | len(_) == n}
+type Matrix(r : Int, c : Int) = {List(Vec(Int, c)) | len(_) == r}
+
+fn dot(n : Int, xs : Vec(Int, n), ys : Vec(Int, n)) : Int do … end
+fn push(n : Int, x : Int, xs : Vec(Int, n)) : Vec(Int, n + 1) do Cons(x, xs) end
+```
+
+Each use is replaced by the refinement it names, with its arguments substituted: `Vec(Int, n)`
+is exactly `{List(Int) | len(_) == n}`, the contract you would have written. Nothing new reaches
+the solver. This gives most of what length-indexed vectors give in a dependently typed language,
+without dependent type checking: the length lives in a refinement, and the checker proves it.
+
+- A **value argument** is a number, a name in scope (usually an earlier parameter), or `+` / `*` of
+  those: `Vec(Int, 3)`, `Vec(Int, n)`, `Vec(Int, n + 1)`.
+- A **value parameter** may appear only in the predicate, or as a value argument of another alias
+  (`Matrix`'s `c`). Using one as a type (`{List(n) | …}`), passing a type for it, or passing a
+  value for a type parameter is [`alias_kind_mismatch`]({{ site.baseurl }}/docs/errors/alias_kind_mismatch/).
+  Only a refinement alias takes value parameters.
+- An alias works wherever a refinement does: parameters, results, element types (`List(Pos)`),
+  record fields, `let` annotations and actor messages. A refinement of an alias,
+  `{Vec(Int, 3) | len(_) > 5}`, is both.
+- A violation names the alias as written at the use, not its expansion:
+
+```
+refinement violation: expected Vec(Int, n) [refinement_violated]
+argument `ys` of `dot` does not satisfy precondition `len(_) == n`
+note: `[4, 5]` can never satisfy `len(ys) == n`; pass a value that does
+```
+
+A conjunct the alias's author gave its own [`else` message](#a-message-for-each-half-of-a-contract)
+keeps it. The full example, with a `Matrix` whose every row is checked, is
+`test/refine/aliases/vec.march`.
 
 ### A message for each half of a contract
 
@@ -1251,8 +1348,9 @@ to annotate.
   comparison and Boolean operators.
 - It takes no function as a parameter and makes no lambda, except as described
   under [Functions that take functions](#functions-that-take-functions) below.
-- Its parameters and result are `Int`, `Bool`, data types (lists, options,
-  your own types) or type variables, and it does not return `Unit`.
+- Its parameters and result are `Int`, `Bool`, `Float`, `String`, data types
+  (lists, options, your own types), records, tuples or type variables, and it
+  does not return `Unit`.
 - It is not marked `@[opaque]`, `@[assume]` or `@[trusted]`, and its name is not
   one predicates already give a meaning (`len`, the set words, `is_<Ctor>`).
 
@@ -1290,6 +1388,44 @@ need(r)           -- proved
 Functions with several parameters, and functions that return a list or a
 `Bool`, are reflected like any other.
 
+**Floats, strings, records and tuples.**
+- **A `Float`** is a value the checker knows nothing about. Each float
+  operation (`+.`, `<`, `==` and the rest) is an unknown function of its
+  arguments. So `fn cls(f : Float, n : Int) : Int do if f < 0.0 do n else n end end`
+  gives `cls(f, 2) == 2`, but `hk(0.5) == 1` for
+  `fn hk(f : Float) : Int do if f < 1.0 do 1 else 2 end end` is not proved. Nothing
+  is ever concluded from what a float comparison returns, so NaN and `-0.0` cannot
+  mislead it.
+- **A `String`** is known only by its length in bytes (`len`, `string_byte_length`).
+  Each string literal in a body is one value with that length, different from
+  every other literal, and the same value as that literal in a predicate. With
+  `fn tag(n : Int) : String do if n > 0 do "a" else "b" end end`, both
+  `tag(1) == "a"` and `tag(1) != tag(0)` are proved.
+- **A record** is its declared type: `p.x`, `{ x: n, y: m }`, `{ p with x: n }`
+  and a `{ x, y }` pattern in a `match` or a `let` all translate. Records are
+  matched to their declared type by their field names, so a function over a
+  record is reflected only when exactly one declared record has those fields,
+  with those types, and that record takes no type parameters.
+- **A tuple** works the same way: `(a, b)` builds one, and a `(a, b)` pattern in a
+  `match` or a `let` takes one apart. A tuple or record literal may be passed to
+  a reflected function in a predicate: `sw((5, 2)) == 3`, `px({ x: 1, y: 2 }) == 3`.
+
+A variable of record type can be used in a predicate:
+- a lemma's theorem can read its record parameter's fields: `px(p) == p.x + p.y`;
+- a precondition can name another parameter's field: `n : {Int | _ > p.x}`;
+- a record passed where the callee refines a record (`{Pt | _ == a}`, `{Pt | _.x > 0}`)
+  is checked, and so is a reflected call that returns one (`need_x(bump(p))`);
+- a return type can relate the result to a record parameter: `{Int | _ == p.x}`,
+  `{Pt | _.x == p.y}`.
+
+A record literal in a predicate needs no parameter to say its type when exactly
+one declared record has those field names: `swp({ x: n, y: 1 }) == { x: 1, y: n }`.
+When two records share the field names, the literal is not translated and the
+obligation is skipped.
+
+A variable of tuple type cannot be used in a predicate yet. So a lemma that takes
+a tuple parameter, such as `swap(swap(t)) == t`, is not proved.
+
 **Steps the facts decide, up to the fuel.** The checker uses each reflected
 call's definition at the arguments it sees. When that produces another call,
 the checker expands it too, but only if which branch it takes is already
@@ -1300,6 +1436,11 @@ comparison. So `len(cat([1], [2])) == 2` is proved:
 - one step gives `Cons(1, cat(Nil, [2]))`;
 - the inner `cat(Nil, [2])` is decided (its first argument is `Nil`), so it
   expands to `[2]`.
+
+A branch whose condition calls another reflected function is decided by taking
+that call's step first. With `fn pos(n : Int) : Bool do n > 0 end` and
+`fn sgn(n : Int) : Int do if pos(n) do 1 else 0 end end`, a step through
+`sgn(x)` where `x > 0` is known goes through `pos(x)`.
 
 `len(cat(xs, ys)) == 2` with `xs` unknown is not proved: no step after the
 first is decided. When a needed step is not taken, the obligation is reported
@@ -1572,7 +1713,10 @@ end
 
 **Calling a lemma.** A call on its own line, or as `let _ = l(...)`, adds the
 theorem, instantiated at the call's arguments, as a fact for the rest of that
-block. The fact stays inside the branch the call is in. If the lemma's
+block, including the function's own refined `Int` result. A call elsewhere that
+always runs first (a named `let`, a nested block, an earlier argument, an `if`
+condition) gives the same fact; see [Lemmas]({{ site.baseurl }}/docs/lemmas/#a-call-gives-the-caller-a-fact).
+The fact stays inside the branch the call is in. If the lemma's
 parameters carry refinements, they are its hypotheses: each call has to prove
 them, and a call that can't gives no fact (`lemma_unproved_call`).
 
@@ -1676,6 +1820,13 @@ are already proved, so a check does not prove them again (see below).
 | `List.len_take(xs, n)`, for `0 <= n <= len(xs)` | `len(take(xs, n)) == n` |
 | `List.len_drop(xs, n)`, for `0 <= n <= len(xs)` | `len(drop(xs, n)) == len(xs) - n` |
 | `List.take_drop(xs, n)` | `append(take(xs, n), drop(xs, n)) == xs` |
+| `List.take_append(xs, ys)` | `take(append(xs, ys), len(xs)) == xs` |
+| `List.drop_append(xs, ys)` | `drop(append(xs, ys), len(xs)) == ys` |
+| `List.nth_opt_append(xs, ys, i)`, for `0 <= i < len(xs)` | `nth_opt(append(xs, ys), i) == nth_opt(xs, i)` |
+| `List.sum_int_append(xs, ys)` | `sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)` |
+| `List.sum_int_reverse(xs)` | `sum_int(reverse(xs)) == sum_int(xs)` |
+| `List.product_int_append(xs, ys)` | `product_int(append(xs, ys)) == product_int(xs) * product_int(ys)` |
+| `List.product_int_reverse(xs)` | `product_int(reverse(xs)) == product_int(xs)` |
 
 ```march
 fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
@@ -1685,6 +1836,14 @@ fn f(a : {List(Int) | len(_) == 1}, b : {List(Int) | len(_) == 2}) : Int do
   need3(List.append(a, b))   -- proved
 end
 ```
+
+`Math.min_int`, `Math.max_int` and `Math.clamp_int` have proved result types:
+`{Int | _ <= a && _ <= b && (_ == a || _ == b)}` for `min_int` (and dually for `max_int`),
+and `{Int | high < low || (_ >= low && _ <= high)}` for `clamp_int`, so a call with
+`low <= high` is known to be in range. The condition is in the result, not a precondition,
+so no existing call gains an obligation.
+
+`List.length(xs)` has the proved result type `{Int | _ == len(xs)}`.
 
 `List.filter`'s result also has a proved length contract,
 `len(_) <= len(xs)`, alongside the existing one about its elements.
@@ -2305,11 +2464,13 @@ variable is never reported.
 
 ### The stdlib `Set` and `Map` carry assumed contracts
 
-`Set(a)` and `Map(k, v)` are hash tries no measure can see into, so their
-element sets are stated rather than proved: every public `Set` operation
-(`empty`, `singleton`, `insert`, `remove`, `union`, `intersection`,
-`difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
-`from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
+`Set(a)` and `Map(k, v)` are hash tries. Six of `Set`'s contracts are **proved**
+against the trie: `empty`, `singleton`, `insert`, `union`, `to_list` and
+`from_list` (see [proving `Set` against its trie](#proving-set-against-its-trie)).
+They trust one law, `cmp_eq`: the comparator is a strict total order that agrees
+with `==`. The rest are stated rather than proved: the other public `Set`
+operations (`remove`, `intersection`, `difference`, `contains`, `is_subset`,
+`is_empty`, `size`, `eq`) and the key-affecting `Map` operations (`empty`, `singleton`,
 `insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
 `filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`.
 `Map.filter` also assumes an entry fact, `Map(k[p], v[p])`: every entry of its
@@ -2395,6 +2556,74 @@ contract that is not proved is still not reported unless it can never hold,
 and it does not reach call sites. `List.map` has no such contract: the
 elements of an arbitrary callback's image have no set expression.
 
+### Proving `Set` against its trie
+
+A `Set(a)` is `HamtSet(count, root)`, where a trie node is empty, a leaf, a
+collision bucket (a `List` of elements sharing a hash), or a branch holding a
+`List` of child nodes. Its contents are two measures that call each other across
+the node type and its child list, plus one over the wrapper:
+
+```march
+@[measure]
+ghost pfn sentry_elts(n : SEntry(a)) : Set(a) do
+  match n do
+  SEmpty -> empty
+  SLeaf(_, x) -> singleton(x)
+  SBranch(_, cs) -> sentries_elts(cs)
+  SCollision(_, xs) -> elts(xs)
+  end
+end
+
+@[measure]
+ghost pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do … end
+
+@[measure]
+@[abstraction(elts)]
+ghost pfn set_elts(s : Set(a)) : Set(a) do
+  match s do
+  HamtSet(_, node) -> sentry_elts(node)
+  end
+end
+```
+
+The measures are `ghost`: they exist only for the proofs, and `elts` in a
+measure body has no runtime counterpart, so a set-valued measure that a
+compiled program carries should be a `ghost pfn` (never compiled).
+
+**`@[abstraction(elts)]`** says what the built-in `elts` means for the
+module's own datatype: inside the module that declares it, `elts(s)` of a
+`Set` is `set_elts(s)`, so `insert`'s public contract
+`elts(_) == union(elts(s), singleton(elem))` is checked against the trie.
+Outside the module `elts` stays opaque, and a caller proves only through the
+contracts, exactly as before. The measure must be axiomatised (a total,
+structurally recursive `@[measure]`), take one parameter of a datatype of its
+own module, and name `elts` or `keys`.
+
+The insert path is written so each step is a contract the checker proves: the
+child insert walks the child list once (`insert_child`, mutually recursive
+with `node_insert` across the two types), a collision that meets a new hash is
+placed beside the new leaf under a fresh branch (`branch_nodes`, which
+terminates by `@[decreases(7 - lvl)]`), and the out-of-range child index
+panics, a path that never returns. The rules that make this work:
+
+- a **list match arm** states the scrutinee's elements: a `Nil` arm gives
+  `elts(xs) == empty`, a `Cons(h, t)` arm `elts(xs) == union(singleton(h), elts(t))`;
+- **`if f(args) do`** reads `f`'s `Bool` contract in both branches, as
+  `let b = f(args)` then `if b do` always did;
+- a **constructor result in an `if` branch** (`Cons(x, xs)`) reflects for an
+  `elts` contract whatever its tail is;
+- a **`panic(..)`, `todo(..)`, `unreachable(..)` or `exit(..)` tail** satisfies
+  any return contract: it never returns a value (an aborting call is the panic
+  surface's business, not the contract's);
+- a call to the **other function of a certified mutual cycle** carries its
+  induction hypothesis, in a constructor field or a list element alike.
+
+A function only gets an induction hypothesis when everything it calls is
+certified to terminate. `insert` counts its elements with `node_mem`, a
+first-order walk shaped like the insert pair, because `node_contains` recurses
+through a closure and through `list_nth_safe`'s result, which the checker cannot
+certify; `union`'s walk calls `insert`, so it inherits that requirement.
+
 ### `SortedSet` is proved, not assumed
 
 `SortedSet` is an AVL tree the checker can see into, so its tree operations
@@ -2439,8 +2668,9 @@ end                                                                             
 
 A user `@[measure]` may return a set, under the same structural gate as an
 `Int` measure. Its body uses the set vocabulary, which is bound for that body
-only; such a measure is logic, and calling it in expression position is an
-error:
+only and takes precedence over a function of the same name in scope, plus
+`elts` over a list field. Such a measure is logic, and calling it in
+expression position is an error:
 
 ```march
 type Expr = Var(Int) | Lam(Int, Expr) | App(Expr, Expr)
@@ -4720,11 +4950,11 @@ reported, never warned about. `cert=structural` holds for a cycle when:
   the argument;
 - a component name is trusted only if every binding of that name in the body is
   structural. `Cons(_, t)` of a *second* list reusing the outer `t` spoils it;
-- in a cycle of several functions, every member matches on a parameter of one type
-  **family**: the same type (`even`/`odd` on `Nat`), or types defined in terms of each
-  other (a `Tree` holding a `Forest` that holds `Tree`s). A tree recursing through a
-  `List(Tree)` of children is not certified yet, because `List` is not defined in terms of
-  `Tree`;
+- in a cycle of several functions, each member is measured on one of its parameters,
+  and every call in the cycle passes a component of the caller's parameter in the
+  callee's. The parameters may have different types: a `Tree` recursing through its
+  `List(Tree)` of children is certified, because a component has fewer constructors
+  than the value it came from, whatever its type;
 - no member names a member of its own cycle as a value (`apply(f, x)` inside `f`):
   the arguments of such a call are unknown;
 - no member calls a function value whose type mentions a **non-positive** type.
@@ -4743,7 +4973,7 @@ fn omega() : Int do w(Fix(w)) end    -- never returns
 `w` is listed with `cert=unproved:non-positive` although it is not recursive.
 `type T = T(Int -> Int)` is positive and blocks nothing.
 
-The reasons are `no-structural-arg`, `not-same-family`, `reference`, `non-positive` and
+The reasons are `no-structural-arg`, `reference`, `non-positive` and
 `unresolved` (a member calls a name the checker cannot resolve, above).
 `Int` recursion (`down(n - 1)`) is the job of a metric, below.
 
@@ -5051,7 +5281,7 @@ warning: Unknown attribute `@[decrease]` on `f`: it is ignored.
 note: did you mean `@[decreases]`?
 ```
 
-The function attributes are `@[assume]`, `@[decreases]`, `@[diverges]`,
+The function attributes are `@[abstraction]`, `@[assume]`, `@[decreases]`, `@[diverges]`,
 `@[measure]`, `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`,
 `@[trusted_linear]` and `@[vectorize]`.
 
@@ -5224,7 +5454,7 @@ reflect report: 4 functions, 1 reflected
 reflect	prog.march:3:5	noisy	no	R3:calls println (prog.march:4:4)
 reflect	prog.march:7:5	mid	no	R6:calls noisy, which is not reflected (prog.march:7:27)
 reflect	prog.march:8:5	half	reflected	unfold
-reflect	prog.march:9:5	ratio	no	R4:division by b not proved (prog.march:9:38)
+reflect	prog.march:9:5	ratio	no	R4:divides by a value nothing shows is non-zero (prog.march:9:5)
   top-level: 1 of 4 reflected
   first blocker: R3=1 R4=1 R6=1
 ```
@@ -5236,13 +5466,21 @@ The rules, in the order the report checks them:
   reflected.
 - **R2**: it terminates. A recursive function needs a `structural` or `metric`
   certificate, the same one `--termination-report` prints; `trusted`,
-  `diverges` and `unproved` do not count.
+  `diverges` and `unproved` do not count. A `metric` certificate comes from
+  `@[decreases]`, and the checker only knows it once it has walked the module,
+  so a module with one is checked twice: the second time with the certificate.
 - **R3**: no effect: no `spawn`, `send`, `dbg`, or effectful builtin such as
   `println`.
 - **R4**: it cannot fail: no `panic`, no runtime `assert`, and every `/` or `%`
-  by something other than a non-zero literal has its division obligation
-  proved (in a `cap no_panic` module). An `Int` overflow is allowed: it panics,
-  so it never gives a value the checker disagrees with.
+  by something other than a non-zero literal divides by a value the function
+  itself shows is non-zero: a parameter refined `_ != 0`, `_ > 0` or `_ < 0`,
+  or a branch that has ruled zero out (`if b == 0 do 0 else a / b end`,
+  `b != 0 && a / b > 1`). Facts it can't read as written, such as a
+  refinement `v * v > 0`, go to the solver, over the `Int` parameters only.
+  In a `cap no_panic` module the division obligation the solver proved counts
+  too.
+  An `Int` overflow is allowed: it panics, so it never gives a value the
+  checker disagrees with.
 - **R5**: every `match` covers all cases, including a guarded match whose
   unguarded arms do not cover.
 - **R6**: every callee is itself reflected, or a builtin the solver understands
@@ -5261,7 +5499,10 @@ The rules, in the order the report checks them:
 - **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.
 - **R11**: its name is not predicate vocabulary (`len`, `elts`, `keys`, the
   set operators, `is_<Ctor>`): inside a predicate such a name always means the
-  built-in.
+  built-in. When your own `len`, `elts`, `keys` or `is_<Ctor>` is in scope where
+  a predicate uses that name, the checker warns that the predicate means the
+  built-in (`predicate_vocabulary_shadowed`); rename the function to use it in
+  a predicate.
 
 A recursive group is reflected as a whole or not at all. A reflected function
 whose parameters are refined shows the guard each use will carry, for example
@@ -5622,12 +5863,34 @@ position into a real contract, obligation and assumption together, is
   state's refined fields are obliged at `init` and at every handler's result
   (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
   of the incoming `state` in every handler body.
+- (Closed 2026-11-08.) An actor's `@invariant`: an inductive invariant too,
+  over its bare field names (or `state.f`), and it may call the program's own
+  functions, unfolded as in any contract. The state `init` builds must
+  satisfy it, and each handler's result must satisfy it, given an incoming
+  `state` that does and the handler's parameter refinements (assumed exactly
+  when the body assumes them). A violation is a `return_refinement_violated`
+  error naming the actor and handler, with the breaking state and message; an
+  undecided one is a recorded skip (`<Actor>.init`, `<Actor>.<Msg>`), an error
+  under `cap verified`. A handler's sends and replies are not part of the
+  claim. Before this, the predicate was read only across a hot deploy. A
+  record-returning function benefits too: `{ r with f: e }` over a named `r`
+  reflects, `r` returned as it is no longer conflicts on sorts, a simple
+  `let` ahead of a record tail is inlined, and a binder left free in the tail
+  never turns a model into a reported counterexample.
 - (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
   0})` obliges every construction of `Inc(...)` in the program (`send`,
   `Actor.call`, a message bound to a `let` first), and the handler body
-  assumes `n > 0` exactly then. Fail closed: a message name defined by two
-  handlers, or shared with a variant constructor, is neither obliged nor
-  assumed. **Trust boundary:** a message arriving from a remote node was
+  assumes `n > 0` exactly then. A message name defined by two handlers, or
+  shared with a variant constructor, is obliged per actor (since 2026-11-04):
+  `Counter.Inc(..)` (or `Counter_Msg.Inc(..)`) is checked against `Counter`'s
+  handler, and so is a bare `Inc(..)` whose checked type is `Counter`'s message
+  type (`let m : Counter.Msg = Inc(..)`, or a `migrate_msg` result); a bare
+  shared name with no recorded type is a recorded `message-unresolved` skip.
+  The body assumes the refinement, shared name or not: both backends run a
+  message only on its own actor, dropping another actor's or a variant's value
+  of the same name (the interpreter since 2026-11-05, by the message's checked
+  type). A fresh state literal at a handler's
+  tail is checked with the assumed parameter refinements in scope. **Trust boundary:** a message arriving from a remote node was
   built by code this compiler did not check; the handler's assumption is
   stated here as that boundary, not enforced across it.
 - (Closed 2026-09-13.) A record field or a variant constructor argument:
@@ -6558,9 +6821,13 @@ edges:
   - an accumulator parameter that *grows*: the induction is on the matched
     parameter only, so the hypothesis is universally quantified over the rest.
 
+  - **mutual recursion** whose cycle is certified to terminate: a call to the
+    *other* function of the cycle carries that function's hypothesis, in a
+    constructor field or a list element alike (`Cons(node_insert(c, x), rest)`
+    inside a child-list insert). The functions of a cycle are admitted together:
+    all prove, or none does.
+
   **What is not proved (each is a recorded skip):**
-  - **mutual recursion.** The hypothesis is created only for a call to the
-    function's *own* name, so two functions that call each other prove no property.
   - **a recursive call inside a lambda, or behind a nested `match`.** Only the
     top-level `match`'s pattern equation is supplied, so an arm with a tail that sits
     under a second `match` cannot see the inner scrutinee's shape.
@@ -6835,6 +7102,18 @@ tags, `Bool`, `Float`, `String` `len`, non-empty `List`, and the stdlib
 `List.head`/`Option.unwrap` contracts) by diffing interpreted against compiled
 output on one program using all of them: an exact byte match, exit 0 both. The
 golden corpus itself remains 46/46 MATCH.
+
+---
+
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the refinement checker prints when it cannot prove a property, each with a program you can edit and re-check in the browser:
+
+- [An index that can be out of range]({{ site.baseurl }}/docs/error-messages/#index-out-of-range)
+- [A call that fails whenever its branch runs, with the counterexample the solver found]({{ site.baseurl }}/docs/error-messages/#counterexample)
+- [A return value that does not meet its refined return type]({{ site.baseurl }}/docs/error-messages/#return-refinement)
+- [A recursion the checker cannot prove terminates]({{ site.baseurl }}/docs/error-messages/#termination)
+- [A division that may be by zero in a `cap no_panic` module]({{ site.baseurl }}/docs/error-messages/#division-no-panic)
 
 ---
 

@@ -8,7 +8,9 @@
       hcr_deploy keygen <dir>                 writes <dir>/pk (base64), <dir>/sk (hex)
       hcr_deploy deploy <socket> <dir> <so> [<old .schemas.json> <old .hcr_manifest>]
                                               GRANT_CAPS=<cap,...>: the operator's
-                                              `--grant-cap`s (authorize a widening)
+                                              `--grant-cap`s (authorize a widening);
+                                              ENTRY=<file>: the build's entry, for the
+                                              migration check an actor contract needs
       hcr_deploy policy <project root> <pool> <.hcr_manifest>
                                               the node policy `forge host init` writes
                                               for <pool> (Host_init.policy_text): its
@@ -154,7 +156,8 @@ let () =
            in
            March_forge.Cmd_deploy_hot.run ~tunnel:false ~ssh_host:"local" ~remote_socket:socket
              ~signing_pubkey:pk ~sk ~manifest ~so_path:so ~old_schemas_path:old_schemas
-             ~new_schemas_path:(so ^ ".schemas.json") ~old_manifest_path:old_manifest ~grant_caps ()
+             ~new_schemas_path:(so ^ ".schemas.json") ~old_manifest_path:old_manifest ~grant_caps
+             ?entry_path:(Sys.getenv_opt "ENTRY") ()
          with Failure m -> Error m | Unix.Unix_error (e, _, _) -> Error (Unix.error_message e)
        in
        (match r with

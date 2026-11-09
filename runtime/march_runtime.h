@@ -796,6 +796,17 @@ typedef struct {
  * 0 = none).  Returns the deploy's epoch (> 0), MARCH_HCR_WAIT with [wait]
  * filled when some slot has no reclaimable version or the pin table is
  * full (nothing changed), or MARCH_HCR_ERROR (nothing changed). */
+/* Hot reload M10 (live-data migration check): run [check], a patch's
+ * __migrate_check_<Actor>, on a copy of the state of every live actor on
+ * dispatch slot [slot], each on its own thread between handlers, waiting at
+ * most [timeout_ms] in all.  0: every answer held ([*n_checked] actors;
+ * [unchecked] the conjuncts the check could not evaluate, "" when none).
+ * -1: [out] says which actor failed and why ("pid:<n> <conjunct>", or
+ * "pid:<n> timeout"). */
+int march_hcr_migrate_check(uint32_t slot, void *(*check)(void *), int64_t timeout_ms,
+                            char *out, size_t outsz, int *n_checked, char *unchecked,
+                            size_t unchecked_sz);
+
 int march_hcr_activate(march_hcr_unit *units, int n, uint32_t requested_epoch,
                        int64_t soft_ms, int64_t hard_ms, march_hcr_wait *wait);
 
@@ -1183,13 +1194,13 @@ void   *march_diag_unobserve(int64_t id);
 void   *march_diag_context_get(void);
 void   *march_diag_context_set(void *ctx);
 void    march_diag_proc_exit(void *ctx);
-void   *march_panic_site(void *file, int64_t line);
+void   *march_panic_site(void *file, int64_t line, int64_t col, int64_t end_col);
 void    march_fn_table_register(const void *table, const int64_t *len, void *text_end);
 
 /* Test harness — used by --test compiled binaries. */
 extern jmp_buf  march_test_jmp_buf;
 extern int      march_test_in_test;
-extern char     march_test_fail_buf[4096];
+extern char     march_test_fail_buf[16384];
 /* Nonzero while a catcher that HANDLES a panic is active (the test runner,
  * __try_call).  try_finally only intercepts and re-raises, so it leaves this
  * alone: a panic under it still reaches the crash observers. */
@@ -1198,3 +1209,5 @@ void    march_test_init(int32_t argc, char **argv);
 void    march_test_setup_all(void (*fn)(void));
 void    march_test_run(void (*fn)(void), const char *name, void (*setup)(void));
 int32_t march_test_report(void);
+void   *march_test_header(void *header);
+void    march_assert_fail(void *meta, void *left, void *right);

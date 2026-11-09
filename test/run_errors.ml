@@ -6,9 +6,10 @@
 
     - [<name>.expected]: the exit code, the full rendered diagnostics on stderr
       (carets, labels, notes, the [[slug]] suffix, the [march --explain]
-      pointer), every machine fix rendered as a before/after diff of the
-      lines it touches, and, when there is a fix, the result of applying
-      every fix the way [forge fix] does and checking the program again
+      pointer), every fix rendered as a before/after diff of the lines it
+      touches under a header naming its tier, and, when there is a
+      machine-applicable fix, the result of applying those fixes the way
+      [forge fix] does and checking the program again
       ([after fix: exit N], plus the first diagnostic line if any): a fix
       the plan calls mechanical must leave a program that compiles (D4);
     - [<name>.json.expected]: the [--check-json] lines, so the machine form
@@ -86,17 +87,51 @@ let jobs =
   | _ -> 8
 
 type result = { code : int; err : string; json : string;
-                mutable after : (int * string) option
+                mutable after : (int * string) option;
                 (** exit code and stderr of `--check` on the program with
-                    every fix applied; [None] when it has no fix. *) }
+                    every fix applied; [None] when it has no fix. *)
+                mutable after_json : string
+                (** the [--check-json] of that same fixed program. *) }
 
-let script ~dir ~rel =
+(* A program carrying a [-- MARCH-MODE:] line is not checked with [--check]:
+   - [why-copies]: [--why-copies] / [--why-copies-json], the Perceus copy
+     report (specs/2026-11-05-why-copies-design.md);
+   - [run]: the program is RUN (interpreted) and its stderr pinned: a
+     run-time failure report (panic, run-time error, actor crash).  There is
+     no JSON form, so its [.json.expected] is empty;
+   - [run-compiled]: the same, for the compiled binary's report. *)
+let why_copies_marker = "-- MARCH-MODE: why-copies"
+let run_marker = "-- MARCH-MODE: run"
+(* The same, compiled: what the binary prints on an unhandled failure. *)
+let compiled_marker = "-- MARCH-MODE: run-compiled"
+
+let has_sub s sub =
+  let n = String.length s and m = String.length sub in
+  let rec go i = i + m <= n && (String.sub s i m = sub || go (i + 1)) in
+  go 0
+
+let script ~dir ~rel ~src =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let home = Filename.quote (Lazy.force private_home) in
+  let rel = Filename.quote rel in
+  let human, json =
+    if has_sub src compiled_marker then
+      (* Compile, then run the binary from the same directory, so the report
+         finds the source file it quotes.  [--opt 0]: which functions are
+         still on the stack must not depend on the C compiler's inliner. *)
+      Printf.sprintf "{ HOME=%s %s --compile --opt 0 -o prog.bin %s > /dev/null 2>&1 && ./prog.bin; }"
+        home exe rel, "true"
+    else if has_sub src run_marker then
+      Printf.sprintf "HOME=%s %s %s" home exe rel, "true"
+    else
+      let h, j = if has_sub src why_copies_marker
+        then "--why-copies", "--why-copies-json" else "--check", "--check-json" in
+      Printf.sprintf "HOME=%s %s %s %s" home exe h rel,
+      Printf.sprintf "HOME=%s %s %s %s" home exe j rel in
   Printf.sprintf
-    "cd %s && HOME=%s %s --check %s > check.out 2> check.err; echo $? > check.code; \
-     HOME=%s %s --check-json %s > json.out 2> /dev/null; true"
-    (Filename.quote dir) home exe (Filename.quote rel) home exe (Filename.quote rel)
+    "cd %s && %s > check.out 2> check.err; echo $? > check.code; \
+     %s > json.out 2> /dev/null; true"
+    (Filename.quote dir) human json
 
 (* [run_jobs sources]: every (name, program text) checked in parallel;
    returns name -> result. *)
@@ -112,7 +147,7 @@ let run_jobs (sources : (string * string) list) : (string, result) Hashtbl.t =
     write_file (Filename.concat edir (name ^ ".march")) src;
     let rel = "errors/" ^ name ^ ".march" in
     let pid =
-      Unix.create_process "/bin/sh" [| "/bin/sh"; "-c"; script ~dir:tmp ~rel |]
+      Unix.create_process "/bin/sh" [| "/bin/sh"; "-c"; script ~dir:tmp ~rel ~src |]
         Unix.stdin Unix.stdout Unix.stderr in
     Hashtbl.replace running pid (name, tmp)
   in
@@ -123,7 +158,7 @@ let run_jobs (sources : (string * string) list) : (string, result) Hashtbl.t =
     let code = int_of_string (String.trim (read_file (f "check.code"))) in
     Hashtbl.replace results name
       { code; err = read_file (f "check.err"); json = read_file (f "json.out");
-        after = None };
+        after = None; after_json = "" };
     (try rm_rf tmp with _ -> ())
   in
   while not (Queue.is_empty pending) || Hashtbl.length running > 0 do
@@ -154,7 +189,15 @@ let fixes_of_json json : Yojson.Safe.t list =
   |> List.filter (fun l -> String.trim l <> "")
   |> List.filter_map (fun l ->
       match Yojson.Safe.from_string l with
-      | j -> (match Yojson.Safe.Util.member "fix" j with `Null -> None | f -> Some f)
+      | j ->
+        (* Only what `forge fix` applies: a machine-applicable fix.  A guess
+           or a fix with a placeholder is shown, not applied, and not held
+           to making the program check. *)
+        (match Yojson.Safe.Util.member "fix" j with
+         | `Null -> None
+         | f when (match Yojson.Safe.Util.member "applicability" f with
+             | `String t -> t <> "machine-applicable" | _ -> false) -> None
+         | f -> Some f)
       | exception _ -> None)
   |> List.concat_map edits_of_fix
 
@@ -215,57 +258,11 @@ let run_all (names : string list) : (string, result) Hashtbl.t =
   in
   let after = run_jobs fixed in
   Hashtbl.iter (fun n (r : result) ->
-      (Hashtbl.find results n).after <- Some (r.code, r.err)) after;
+      let o = Hashtbl.find results n in
+      o.after <- Some (r.code, r.err); o.after_json <- r.json) after;
   results
 
 (* ── Fixes as diffs ────────────────────────────────────────────────────── *)
-
-let render_fix ~src (j : Yojson.Safe.t) : string option =
-  let open Yojson.Safe.Util in
-  match member "fix" j with
-  | `Null -> None
-  | fix ->
-    let lines = Array.of_list (lines_of src) in
-    let line n = if n >= 1 && n <= Array.length lines then lines.(n - 1) else "" in
-    let buf = Buffer.create 128 in
-    let code = member "code" j |> to_string in
-    Printf.bprintf buf "fix [%s]:\n" code;
-    (* A multi-edit fix renders one hunk per edit, in source order. *)
-    let pos f = match member "kind" f |> to_string with
-      | "insert" -> (member "after_line" f |> to_int, max_int)
-      | "delete" -> (member "start_line" f |> to_int, 0)
-      | _ -> (member "start_line" f |> to_int, member "start_col" f |> to_int) in
-    let edits = List.stable_sort (fun a b -> compare (pos a) (pos b)) (edits_of_fix fix) in
-    List.iter (fun fix ->
-        match member "kind" fix |> to_string with
-        | "insert" ->
-          let after = member "after_line" fix |> to_int in
-          let text = member "text" fix |> to_string in
-          Printf.bprintf buf "@@ after line %d @@\n %s\n" after (line after);
-          List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of text)
-        | "delete" ->
-          let s = member "start_line" fix |> to_int
-          and e = member "end_line" fix |> to_int in
-          Printf.bprintf buf "@@ lines %d-%d @@\n" s e;
-          for n = s to e do Printf.bprintf buf "-%s\n" (line n) done
-        | "replace" ->
-          let sl = member "start_line" fix |> to_int
-          and sc = member "start_col" fix |> to_int
-          and el = member "end_line" fix |> to_int
-          and ec = member "end_col" fix |> to_int
-          and text = member "text" fix |> to_string in
-          let first = line sl and last = line el in
-          let clip s n = String.sub s 0 (max 0 (min n (String.length s))) in
-          let from s n =
-            let n = max 0 (min n (String.length s)) in
-            String.sub s n (String.length s - n) in
-          let after = clip first sc ^ text ^ from last ec in
-          Printf.bprintf buf "@@ lines %d-%d @@\n" sl el;
-          for n = sl to el do Printf.bprintf buf "-%s\n" (line n) done;
-          List.iter (fun l -> Printf.bprintf buf "+%s\n" l) (lines_of after)
-        | k -> Printf.bprintf buf "(unknown fix kind %s)\n" k)
-      edits;
-    Some (Buffer.contents buf)
 
 (* ── One corpus program ────────────────────────────────────────────────── *)
 
@@ -287,14 +284,6 @@ let contains hay needle =
 let render results name =
   let src = read_file (Filename.concat (errors_dir ()) (name ^ ".march")) in
   let r = Hashtbl.find results name in
-  let fixes =
-    lines_of r.json
-    |> List.filter (fun l -> String.trim l <> "")
-    |> List.filter_map (fun l ->
-        match Yojson.Safe.from_string l with
-        | j -> render_fix ~src j
-        | exception _ -> None)
-  in
   (* The program with every fix applied, checked again: its exit code and,
      if it still fails, the first diagnostic headline (the line carrying the
      [slug]), so the .expected shows what the fix leaves behind. *)
@@ -334,11 +323,9 @@ let render results name =
          | Some h when code <> 0 -> "\n" ^ String.trim h
          | _ -> "")
   in
-  let human =
-    Printf.sprintf "exit: %d\n%s%s%s" r.code r.err
-      (if fixes = [] then "" else "\n" ^ String.concat "\n" fixes)
-      after
-  in
+  (* Each fix is shown in the rendered output, under its diagnostic and
+     headed by its tier; the .json.expected pins its edit. *)
+  let human = Printf.sprintf "exit: %d\n%s%s" r.code r.err after in
   (src, human, r.json)
 
 (* The internals lint (specs/plans/2026-11-02-diagnostics-depth-plan.md §X4):
@@ -517,6 +504,69 @@ let check_style name json =
       (String.concat "\n"
          (List.map (fun (s, r, h) -> Printf.sprintf "  [%s] %s: %s" s r h) vs))
 
+(* The hint-exclusivity lint (specs/plans/2026-11-02-diagnostics-depth-plan.md
+   §X4): one diagnostic carries hints that agree, each said once.  Over each
+   case's `--check-json` diagnostics:
+
+   - [repeat]: a note repeats an earlier note or a line of the message;
+   - [help]: more than one `help:` / `hint:` line, i.e. two competing fixes
+     offered as separate advice (alternatives belong in one line);
+   - [did-you-mean]: more than one "Did you mean" suggestion;
+   - [convert]: more than one conversion hint (`Use `…` to convert`,
+     "does not coerce"): the type mismatch has one likely cause;
+   - [stacked]: a HINT on the exact span of an error, where the advisory can
+     contradict the error's own fix ([Errors.suppress_cascades] drops it).
+
+   No allowlist: the corpus is clean, and a new violation is a bug in the
+   hint selection, not something to record. *)
+let hint_violations (json : string) : string list =
+  let open Yojson.Safe.Util in
+  let ds =
+    lines_of json
+    |> List.filter_map (fun l ->
+        if String.trim l = "" then None
+        else match Yojson.Safe.from_string l with
+          | exception _ -> None
+          | j -> Some j) in
+  let span j = List.map (fun k -> member k j) [ "file"; "start_line"; "start_col"; "end_line"; "end_col" ] in
+  let sev j = match member "severity" j with `String s -> s | _ -> "" in
+  let error_spans = List.filter_map (fun j -> if sev j = "error" then Some (span j) else None) ds in
+  let norm s =
+    String.split_on_char '\n' s |> List.map String.trim
+    |> List.filter (( <> ) "") |> String.concat " " in
+  List.concat_map (fun j ->
+      let msg = match member "message" j with `String s -> s | _ -> "" in
+      let notes = match member "notes" j with
+        | `List ns -> List.filter_map (function `String s -> Some s | _ -> None) ns
+        | _ -> [] in
+      let code = match member "code" j with `String s -> s | _ -> "" in
+      let head = String.trim (List.hd (lines_of msg @ [ "" ])) in
+      let msg_lines = List.map String.trim (lines_of msg) in
+      let all_lines = msg_lines @ List.concat_map (fun n -> List.map String.trim (lines_of n)) notes in
+      let count p = List.length (List.filter p all_lines) in
+      let starts prefix l = String.starts_with ~prefix (String.lowercase_ascii l) in
+      let rec repeated seen = function
+        | [] -> false
+        | n :: rest ->
+          let k = norm n in
+          List.mem k seen || List.mem k msg_lines || repeated (k :: seen) rest in
+      List.filter_map (fun (rule, bad) ->
+          if bad then Some (Printf.sprintf "[%s] %s: %s" rule code head) else None)
+        [ ("repeat", repeated [] notes);
+          ("help", count (fun l -> starts "help:" l || starts "hint:" l) > 1);
+          ("did-you-mean", count (fun l -> contains l "Did you mean") > 1);
+          ("convert", count (fun l -> (contains l "Use `" && contains l "to convert")
+                                     || contains l "does not coerce") > 1);
+          ("stacked", sev j = "hint" && List.mem (span j) error_spans) ])
+    ds
+
+let check_hints name json =
+  match hint_violations json with
+  | [] -> ()
+  | vs ->
+    Alcotest.failf "%s: hint-exclusivity lint (see run_errors.ml):\n  %s" name
+      (String.concat "\n  " vs)
+
 (* A machine fix must fix (plan §X4): a case whose fixes leave the program
    still rejected fails, unless its source says why with
    `-- EXPECT-FIX-PARTIAL: <reason>` (the program has a second, independent
@@ -524,9 +574,47 @@ let check_style name json =
    reach exit 0 fails too, so a stale marker can't hide a later regression. *)
 let fix_partial_marker = "-- EXPECT-FIX-PARTIAL:"
 
+(* The error diagnostics of a [--check-json] run, as (slug, has a fix). *)
+let errors_of_json json : (string * bool) list =
+  let open Yojson.Safe.Util in
+  lines_of json
+  |> List.filter_map (fun l ->
+      match Yojson.Safe.from_string l with
+      | j when (try member "severity" j |> to_string = "error" with _ -> false) ->
+        let code = try member "code" j |> to_string with _ -> "" in
+        let slug = match String.index_opt code ':' with
+          | Some i -> String.sub code 0 i | None -> code in
+        Some (slug, member "fix" j <> `Null)
+      | _ -> None
+      | exception _ -> None)
+
+(* A program can carry an error that has no machine fix beside one that has
+   (a refinement violation in a `main` that also forgot its grant).  Its
+   fixes cannot reach exit 0, and need not: they pass when every error left
+   after applying them is one of the errors that offered no fix, so each
+   fix cleared what it was about and broke nothing else. *)
+let fixes_did_their_part (r : result) =
+  let before = errors_of_json r.json in
+  let after = errors_of_json r.after_json in
+  let unfixed = List.filter_map (fun (s, f) -> if f then None else Some s) before in
+  (* A syntax error stops the compiler before any later check, so the errors
+     its fix uncovers could not have been reported with it: the fix did its
+     part when the program now parses. *)
+  let parse_phase s = List.mem s [ "parse_error"; "syntax_error"; "lex_error"; "then_keyword";
+                                   "module_keyword"; "semicolon_separator" ] in
+  (before <> [] && List.for_all (fun (s, _) -> parse_phase s) before
+   && not (List.exists (fun (s, _) -> parse_phase s) after))
+  || (unfixed <> [] && List.for_all (fun (s, _) -> List.mem s unfixed) after)
+
 let check_fix_fixes ~src name (r : result) =
   let partial = contains src fix_partial_marker in
+  (* A copy report exits 0 either way: its fix must make the copy go away. *)
+  (match r.after with
+   | Some (_, err) when contains src why_copies_marker && contains err "[copy_shared]" ->
+     Alcotest.failf "%s: applying its fixes still reports a copy" name
+   | _ -> ());
   match r.after with
+  | Some (code, _) when code <> 0 && not partial && fixes_did_their_part r -> ()
   | Some (code, _) when code <> 0 && not partial ->
     Alcotest.failf "%s: applying its machine fixes leaves the program rejected \
                     (exit %d). Fix the fix, or mark the case with %S and the \
@@ -568,6 +656,7 @@ let check results name () =
   end;
   check_internals ~src name human;
   check_style name json;
+  check_hints name json;
   check_fix_fixes ~src name (Hashtbl.find (Lazy.force results) name)
 
 (* [ERRORS_ONLY=cap_,linear_used_twice_6] runs only the cases whose name

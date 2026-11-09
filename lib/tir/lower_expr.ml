@@ -102,6 +102,121 @@ let _default_dispatch = Lower_state._default_dispatch
 let resolve_iface_method = Lower_state.resolve_iface_method
 let lower_fn_def = Lower_decls.lower_fn_def
 
+(* ── Poly let-bound values: type the binding at its use site (#1173) ─── *)
+
+(** A let binder's type is tracked in [Lower_state._poly_let_uses] when it
+    still holds a real type variable.  Function-typed binders are left out:
+    a generalized lambda is specialised by [Mono] through its call sites, a
+    separate mechanism this must not second-guess. *)
+let poly_let_candidate (t : Tir.ty) : bool =
+  let rec has_fn = function
+    | Tir.TFn _ -> true
+    | Tir.TTuple ts | Tir.TCon (_, ts) -> List.exists has_fn ts
+    | Tir.TRecord fs -> List.exists (fun (_, t) -> has_fn t) fs
+    | Tir.TPtr t -> has_fn t
+    | _ -> false
+  in
+  Mono.has_tvar t && not (has_fn t)
+
+(** True when [e] BUILDS its value in a representation its static type
+    decides: constructors, record and tuple literals, literals, over leaves
+    that are literals, variables whose type holds no type variable, or another
+    tracked poly let binding (a `let y = x` chain).  Only such a binding may
+    be retyped at its use site.  A call is never one: a builtin that returns
+    a type variable hands back a value whose layout the RUNTIME fixed
+    (`record_from_list` builds a dynamic record the update lowering must keep
+    treating as erased), and a generic fn is specialised by [Mono] from its
+    arguments, not from here. *)
+let rec poly_let_rhs_ok (env : env) (e : Ast.expr) : bool =
+  match e with
+  | Ast.ELit _ -> true
+  | Ast.ECon (_, args, _) | Ast.ETuple (args, _) -> List.for_all (poly_let_rhs_ok env) args
+  | Ast.ERecord (fields, _) -> List.for_all (fun (_, fe) -> poly_let_rhs_ok env fe) fields
+  | Ast.EAnnot (inner, _, _) -> poly_let_rhs_ok env inner
+  | Ast.EVar { txt; span; _ } ->
+    Hashtbl.mem Lower_state._poly_let_uses txt
+    || (match Hashtbl.find_opt _fn_param_types txt with
+        | Some t -> not (Mono.has_tvar t)
+        | None -> not (Mono.has_tvar (ty_of_span env span)))
+  | _ -> false
+
+(** The substitution that specialises an unannotated poly let binding
+    (binder type [bty], [_fn_param_types] type [installed]) to the single type
+    every recorded use instantiates it at, or [None] to leave it as it is.
+
+    [None] when the uses disagree (the binding is used at two types, which
+    one value cannot serve), when a use's type is the lowering's unknown
+    placeholder, when no type variable actually moves, or when the
+    substituted binder type is not exactly the use type (the use is not an
+    instance of the binding, e.g. a stale type_map entry).  Every [None]
+    keeps the lowering as it was before #1173. *)
+let poly_let_specialisation (bty : Tir.ty) (installed : Tir.ty)
+    (uses : Tir.ty list) : (Mono.ty_subst * Tir.ty) option =
+  let rec has_placeholder = function
+    | Tir.TVar "_" -> true
+    | Tir.TTuple ts | Tir.TCon (_, ts) -> List.exists has_placeholder ts
+    | Tir.TRecord fs -> List.exists (fun (_, t) -> has_placeholder t) fs
+    | Tir.TFn (ps, r) -> List.exists has_placeholder (r :: ps)
+    | Tir.TPtr t -> has_placeholder t
+    | _ -> false
+  in
+  match List.sort_uniq compare uses with
+  | [use_ty] when not (has_placeholder use_ty) ->
+    let s = Mono.match_ty installed use_ty (Mono.match_ty bty use_ty []) in
+    let s = List.filter (fun (n, t) -> t <> Tir.TVar n) s in
+    if s <> [] && Mono.subst_ty s bty = use_ty then Some (s, use_ty) else None
+  | _ -> None
+
+(** Give every occurrence of the variable [name] in [body] the type [ty],
+    stopping where an inner binder ([ELet], a fn name or parameter, a case
+    branch variable) shadows [name].  Used to retype the uses of a poly let
+    binding after [poly_let_specialisation] concretized the binder. *)
+let retype_var_uses (name : string) (ty : Tir.ty) (body : Tir.expr) : Tir.expr =
+  let rv (v : Tir.var) =
+    if String.equal v.Tir.v_name name then { v with Tir.v_ty = ty } else v in
+  let ra = function Tir.AVar v -> Tir.AVar (rv v) | a -> a in
+  let ral = List.map ra in
+  let rfs = List.map (fun (n, a) -> (n, ra a)) in
+  let rec go = function
+    | Tir.EAtom a -> Tir.EAtom (ra a)
+    | Tir.EApp (f, args) -> Tir.EApp (rv f, ral args)
+    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (ra f, ral args)
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, go e1, if String.equal v.Tir.v_name name then e2 else go e2)
+    | Tir.ELetRec (fns, cont) as e ->
+      if List.exists (fun fn -> String.equal fn.Tir.fn_name name) fns then e
+      else
+        let fns' = List.map (fun fn ->
+            if List.exists (fun p -> String.equal p.Tir.v_name name) fn.Tir.fn_params
+            then fn
+            else { fn with Tir.fn_body = go fn.Tir.fn_body }) fns in
+        Tir.ELetRec (fns', go cont)
+    | Tir.ECase (a, brs, def) ->
+      Tir.ECase (ra a,
+                 List.map (fun br ->
+                     if List.exists (fun v -> String.equal v.Tir.v_name name) br.Tir.br_vars
+                     then br
+                     else { br with Tir.br_body = go br.Tir.br_body }) brs,
+                 Option.map go def)
+    | Tir.ETuple atoms -> Tir.ETuple (ral atoms)
+    | Tir.ERecord fs -> Tir.ERecord (rfs fs)
+    | Tir.EField (a, n) -> Tir.EField (ra a, n)
+    | Tir.EUpdate (a, fs) -> Tir.EUpdate (ra a, rfs fs)
+    | Tir.EAlloc (t, args) -> Tir.EAlloc (t, ral args)
+    | Tir.EStackAlloc (t, args) -> Tir.EStackAlloc (t, ral args)
+    | Tir.EFree a -> Tir.EFree (ra a)
+    | Tir.EIncRC a -> Tir.EIncRC (ra a)
+    | Tir.EDecRC a -> Tir.EDecRC (ra a)
+    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (ra a)
+    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (ra a)
+    | Tir.EReuse (a, t, args) -> Tir.EReuse (ra a, t, ral args)
+    | Tir.EAllocHole (tok, t, args, hole) ->
+      Tir.EAllocHole (Option.map ra tok, t, ral args, hole)
+    | Tir.ESetField (o, i, v) -> Tir.ESetField (ra o, i, ra v)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (go e1, go e2)
+  in
+  go body
+
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
 (** Lower an expression, ensuring the result is an atom.
@@ -130,6 +245,7 @@ let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : 
      | Some i -> !_ensure_module_lowered env (String.sub name 0 i)
      | None -> ());
     let ty = ty_of_span env span in
+    Lower_state.note_poly_let_use name ty;
     (* Use the parameter's declared type (from _fn_param_types) when available,
        rather than ty_of_span.  The type_map is shared across the whole program
        and ty_of_span may return a stale or spurious type for a parameter
@@ -227,6 +343,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     (match String.index_opt name '.' with
      | Some i -> !_ensure_module_lowered env (String.sub name 0 i)
      | None -> ());
+    if Hashtbl.mem Lower_state._poly_let_uses name then
+      Lower_state.note_poly_let_use name (ty_of_span env span);
     let ty = match Hashtbl.find_opt _fn_param_types name with
       | Some param_ty -> param_ty
       | None -> ty_of_span env span
@@ -256,9 +374,39 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         | Some ty -> Some (name, ty)
         | None -> None) pat_names
     in
-    List.iter (fun (name, sp) ->
-      Hashtbl.replace _fn_param_types name (ty_of_span env sp)) pat_names;
-    let body = lower_expr env (Ast.EBlock (rest, sp)) in
+    let installed = List.map (fun (name, sp) ->
+        let t = ty_of_span env sp in
+        Hashtbl.replace _fn_param_types name t;
+        (name, t)) pat_names in
+    (* #1173: an unannotated `let x = e` whose type still holds a type
+       variable is GENERALIZED (no value restriction), so [rhs] was lowered at
+       the scheme's residual type: `let x = None` is `alloc None('a)()`,
+       which codegen encodes under the erased Option(TVar) niche convention
+       (None = raw null).  A use at a concrete type whose representation
+       differs (Option(Float), Option(()), Option(Option(_)): Boxed) then
+       decodes the null as a heap cell and faults at 0x8.  Record the types
+       the rest of the block uses [x] at, and when they all agree, lower the
+       binding at that type instead (see [poly_let_specialisation]). *)
+    let poly_track = match b.bind_pat, b.bind_ty with
+      | Ast.PatVar n, None ->
+        (match List.assoc_opt n.txt installed with
+         | Some t when poly_let_candidate t && poly_let_rhs_ok env b.bind_expr ->
+           let saved = Hashtbl.find_opt Lower_state._poly_let_uses n.txt in
+           let uses = ref [] in
+           Hashtbl.replace Lower_state._poly_let_uses n.txt (t, uses);
+           Some (n.txt, t, saved, uses)
+         | _ -> None)
+      | _ -> None
+    in
+    let body =
+      Fun.protect
+        ~finally:(fun () -> match poly_track with
+          | Some (name, _, Some prev, _) ->
+            Hashtbl.replace Lower_state._poly_let_uses name prev
+          | Some (name, _, None, _) -> Hashtbl.remove Lower_state._poly_let_uses name
+          | None -> ())
+        (fun () -> lower_expr env (Ast.EBlock (rest, sp)))
+    in
     List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
     List.iter (fun (name, ty) -> Hashtbl.replace _fn_param_types name ty) saved_shadowed;
     (match b.bind_pat with
@@ -268,7 +416,21 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr env b.bind_expr);
          v_lin = lower_linearity b.bind_lin;
        } in
-       Tir.ELet (v, rhs, body)
+       (match poly_track with
+        | Some (_, installed_ty, _, uses) ->
+          (match poly_let_specialisation v.v_ty installed_ty !uses with
+           | Some (s, use_ty) ->
+             (* An enclosing poly binding used only through this one
+                (`let x = None; let y = x; y`) recorded its use at THIS
+                binding's type variable; now that it is known, pass it on so
+                the enclosing binding specialises too. *)
+             Hashtbl.iter (fun _ (_, outer_uses) ->
+                 outer_uses := List.map (Mono.subst_ty s) !outer_uses)
+               Lower_state._poly_let_uses;
+             Tir.ELet ({ v with v_ty = use_ty }, Mono.subst_expr s rhs,
+                       retype_var_uses n.txt use_ty body)
+           | None -> Tir.ELet (v, rhs, body))
+        | None -> Tir.ELet (v, rhs, body))
      | Ast.PatTuple (_, _) | Ast.PatRecord (_, _) ->
        (* This arm now also carries the record case (`let { x, y } = r`) via
           bind_subpat's PatRecord case below; the local names ($p, rhs_tuple_ty)
@@ -521,11 +683,16 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          && not (Lower_state.is_local_binding name) ->
     let site_var : Tir.var = {
       Tir.v_name = "__panic_site";
-      v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TUnit);
+      v_ty = Tir.TFn ([Tir.TString; Tir.TInt; Tir.TInt; Tir.TInt], Tir.TUnit);
       v_lin = Tir.Unr } in
+    (* The call's columns on its first line, for the stderr report's caret;
+       end 0 when the call runs past that line. *)
+    let end_col = if sp.Ast.end_line = sp.Ast.start_line then sp.Ast.end_col else 0 in
     let site = Tir.EApp (site_var,
                          [Tir.ALit (Ast.LitString (Provenance.display_file sp.Ast.file));
-                          Tir.ALit (Ast.LitInt sp.Ast.start_line)]) in
+                          Tir.ALit (Ast.LitInt sp.Ast.start_line);
+                          Tir.ALit (Ast.LitInt sp.Ast.start_col);
+                          Tir.ALit (Ast.LitInt end_col)]) in
     let saved = !panic_site_lowering in
     panic_site_lowering := Some call;
     let lowered =
@@ -1230,21 +1397,80 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     in
     lower_expr env flat_map_call
 
-  (* --- Assert: lower to a runtime panic call on failure (for compiled path) --- *)
+  (* --- Proof hints: erased before lowering ([Lemma_erase]); kept total. --- *)
+  | Ast.EProof (Ast.PWithFuel (_, _, body), sp) -> lower_expr env (Ast.EBlock (body, sp))
+  | Ast.EProof (_, sp) -> lower_expr env (Ast.ETuple ([], sp))
+
+  (* --- Assert: a failed assertion panics with a rendered report --- *)
   | Ast.EAssert (inner, _) ->
-    (* Lower assert to: if inner then () else panic("assertion failed")
-       Uses same CPS-based bool dispatch as EIf. *)
-    lower_to_atom_k env inner (fun cond_atom ->
-      let unit_v = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
-      let panic_var : Tir.var = {
-        v_name = "panic";
-        v_ty = Tir.TFn ([Tir.TCon ("String", [])], Tir.TCon ("Unit", []));
-        v_lin = Tir.Unr
-      } in
-      let panic_v = Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "assertion failed")]) in
+    (* The report (lib/errors/test_report.ml) is the interpreter's, byte for
+       byte: its header (the source line and caret) is rendered here, at
+       compile time, and passed to `__assert_fail` (march_assert_fail in
+       runtime/march_runtime.c) as a string constant together with the
+       operator, both sides' source text and whether each side is a String
+       (which the runtime quotes).  For a comparison the two operands are
+       bound once, compared with the same operator (same dispatch, same
+       spans), and only on failure printed with `to_string`.
+         meta = header \x1f op \x1f left source \x1f right source \x1f flags *)
+    let module R = March_errors.Test_report in
+    let inner_sp = Typecheck.span_of_expr inner in
+    let fail_var : Tir.var = {
+      v_name = "__assert_fail";
+      v_ty = Tir.TFn ([Tir.TString; Tir.TString; Tir.TString], Tir.TUnit);
+      v_lin = Tir.Unr } in
+    let unit_v = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
+    let src e = R.operand_source ~span:(Typecheck.span_of_expr e) e in
+    let check cond_atom on_fail =
       Tir.ECase (cond_atom,
         [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = unit_v }],
-        Some panic_v))
+        Some on_fail) in
+    (match inner with
+     | Ast.EApp (Ast.EVar op, [lhs; rhs], app_sp)
+       when List.mem op.txt R.comparison_ops
+            && not (Lower_state.is_local_binding op.txt) ->
+       let ty_l = ty_of_expr env lhs and ty_r = ty_of_expr env rhs in
+       let vl = fresh_var ty_l and vr = fresh_var ty_r in
+       let is_str = function
+         | Tir.TString | Tir.TCon ("String", []) -> true | _ -> false in
+       let meta = String.concat "\x1f"
+           [ R.assert_header ~span:inner_sp ~op:op.txt; op.txt; src lhs; src rhs;
+             (if is_str ty_l then "q" else "-") ^ (if is_str ty_r then "q" else "-") ] in
+       let operand (v : Tir.var) e =
+         Ast.EVar { txt = v.Tir.v_name; span = Typecheck.span_of_expr e } in
+       let cond = Ast.EApp (Ast.EVar op, [operand vl lhs; operand vr rhs], app_sp) in
+       let rhs_l = lower_expr env lhs in
+       let rhs_r = lower_expr env rhs in
+       (* The two temps are locals while the comparison is lowered, so it
+          reads them with their operands' types (the [EBlock] let rule's
+          registration, the same table). *)
+       Hashtbl.replace _fn_param_types vl.Tir.v_name ty_l;
+       Hashtbl.replace _fn_param_types vr.Tir.v_name ty_r;
+       let body =
+         Fun.protect ~finally:(fun () ->
+             Hashtbl.remove _fn_param_types vl.Tir.v_name;
+             Hashtbl.remove _fn_param_types vr.Tir.v_name)
+           (fun () ->
+              lower_to_atom_k env cond (fun c ->
+                let show (v : Tir.var) =
+                  if is_str v.Tir.v_ty then Tir.EAtom (Tir.AVar v)
+                  else
+                    Tir.EApp ({ Tir.v_name = "to_string";
+                                v_ty = Tir.TFn ([v.Tir.v_ty], Tir.TString);
+                                v_lin = Tir.Unr }, [Tir.AVar v]) in
+                let sl = fresh_var Tir.TString and sr = fresh_var Tir.TString in
+                check c
+                  (Tir.ELet (sl, show vl,
+                   Tir.ELet (sr, show vr,
+                     Tir.EApp (fail_var, [Tir.ALit (Ast.LitString meta);
+                                          Tir.AVar sl; Tir.AVar sr]))))))
+       in
+       Tir.ELet (vl, rhs_l, Tir.ELet (vr, rhs_r, body))
+     | _ ->
+       let meta = String.concat "\x1f" [ R.assert_header ~span:inner_sp ~op:""; "" ] in
+       lower_to_atom_k env inner (fun c ->
+         check c (Tir.EApp (fail_var, [Tir.ALit (Ast.LitString meta);
+                                       Tir.ALit (Ast.LitString "");
+                                       Tir.ALit (Ast.LitString "")]))))
 
   | Ast.ESigil _ ->
     failwith "lower_expr: ESigil should be desugared before lowering"

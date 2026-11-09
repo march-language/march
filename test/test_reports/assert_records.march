@@ -1,0 +1,13 @@
+-- Golden failure report for a plain (non-derived-Show) record
+-- (test/run_test_reports.ml): `to_string` on a record with no Show impl,
+-- which every target (JS included, since 2026-11-07) prints `{ x: 1, y: 2 }`.
+-- The #1171 helper collision is fixed.
+mod AssertRecords do
+  type Point = { x : Int, y : Int }
+  derive Eq for Point
+
+  test "plain record field" do
+    let p : Point = { x: 1, y: 2 }
+    assert (p == { x: 1, y: 3 })
+  end
+end

@@ -1,0 +1,123 @@
+-- `<`, `<=`, `>`, `>=` on a user type with an `Ord` impl (derived or
+-- hand-written) mean `compare(a, b) <op> 0` on every backend, as they do in the
+-- interpreter (issue #1172). Before, compiled code never called the impl: a
+-- boxed operand went to march_poly_compare (0 for two heap values, so every
+-- `<` was false and every `<=` true), a single-field newtype compared its raw
+-- payload, an unboxed ADT failed the native build with an LLVM type error, and
+-- the JS backend compared the objects with the JS operator.
+-- Derived Ord ignoring variant payloads is intentional (constructor order).
+mod Main do
+  needs IO.Console
+
+  type Color = Red | Green
+  derive Eq, Ord for Color
+
+  type Point = { x : Int, y : Int }
+  derive Eq, Ord for Point
+
+  -- Several constructors with payloads: constructor order decides.
+  type Shape = Ci(Int) | Sq(Int)
+  derive Eq, Ord for Shape
+
+  -- Hand-written impl, reversed from the declaration order.
+  type Size = Small | Large
+  impl Eq(Size) do
+    fn eq(a, b) do rank(a) == rank(b) end
+  end
+  impl Ord(Size) do
+    fn compare(a, b) do rank(a) - rank(b) end
+  end
+  fn rank(s : Size) : Int do
+    match s do
+      | Small -> 0
+      | Large -> 1
+    end
+  end
+
+  -- A newtype has no heap cell natively; its derived Ord is constructor
+  -- order, so two values of the one constructor compare equal.
+  type Wrap = Wrap(Int)
+  derive Eq, Ord for Wrap
+
+  -- Hand-written Ord on a newtype: by payload, descending.
+  type Rev = Rev(Int)
+  impl Eq(Rev) do
+    fn eq(a, b) do match (a, b) do (Rev(x), Rev(y)) -> x == y end end
+  end
+  impl Ord(Rev) do
+    fn compare(a, b) do match (a, b) do (Rev(x), Rev(y)) -> y - x end end
+  end
+
+  -- Unboxed natively (all-scalar single constructor).
+  type Pair = Pair(Int, Int)
+  derive Eq, Ord for Pair
+
+  -- Derived Ord over String and Float fields (field order decides).
+  type Item = { name : String, w : Float }
+  derive Eq, Ord for Item
+
+  -- Derived Ord on a record is lexicographic in declaration order: the first
+  -- field that differs decides, even when a later field differs the other way.
+  -- (It used to return only the last field's comparison.)
+  type P3 = { a : Int, b : Int, c : Int }
+  derive Eq, Ord for P3
+
+  -- Generic: only Mono learns the concrete type here.
+  fn lt(a, b) when Ord(a) do a < b end
+  fn ge(a, b) when Ord(a) do a >= b end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    let p : Point = { x: 1, y: 2 }
+    let q : Point = { x: 1, y: 3 }
+    println("Red < Green     " ++ bool_to_string(Red < Green))
+    println("Green > Red     " ++ bool_to_string(Green > Red))
+    println("Green <= Red    " ++ bool_to_string(Green <= Red))
+    println("Red >= Green    " ++ bool_to_string(Red >= Green))
+    println("Red <= Red      " ++ bool_to_string(Red <= Red))
+    println("p < q           " ++ bool_to_string(p < q))
+    println("q > p           " ++ bool_to_string(q > p))
+    println("p >= q          " ++ bool_to_string(p >= q))
+    println("Small < Large   " ++ bool_to_string(Small < Large))
+    println("Large <= Small  " ++ bool_to_string(Large <= Small))
+    println("Ci(1) < Sq(1)   " ++ bool_to_string(Ci(1) < Sq(1)))
+    println("Ci(1) >= Sq(1)  " ++ bool_to_string(Ci(1) >= Sq(1)))
+    println("Wrap(1) < Wrap(2)  " ++ bool_to_string(Wrap(1) < Wrap(2)))
+    println("Wrap(1) <= Wrap(2) " ++ bool_to_string(Wrap(1) <= Wrap(2)))
+    println("Rev(1) < Rev(2)  " ++ bool_to_string(Rev(1) < Rev(2)))
+    println("Rev(1) > Rev(2)  " ++ bool_to_string(Rev(1) > Rev(2)))
+    println("Pair(1,1) < Pair(1,2)  " ++ bool_to_string(Pair(1, 1) < Pair(1, 2)))
+    println("Pair(1,1) >= Pair(1,2) " ++ bool_to_string(Pair(1, 1) >= Pair(1, 2)))
+    println("lt(Red, Green)  " ++ bool_to_string(lt(Red, Green)))
+    println("lt(p, q)        " ++ bool_to_string(lt(p, q)))
+    println("lt(Large, Small) " ++ bool_to_string(lt(Large, Small)))
+    println("ge(Sq(0), Ci(9)) " ++ bool_to_string(ge(Sq(0), Ci(9))))
+    println("lt(3, 4)        " ++ bool_to_string(lt(3, 4)))
+    println("lt(\"b\", \"a\")    " ++ bool_to_string(lt("b", "a")))
+    println("lt(1.5, 0.5)    " ++ bool_to_string(lt(1.5, 0.5)))
+    let i1 : Item = { name: "a", w: 2.5 }
+    let i2 : Item = { name: "a", w: 0.5 }
+    let i3 : Item = { name: "b", w: 3.0 }
+    println("i1 > i2         " ++ bool_to_string(i1 > i2))
+    println("i1 < i3         " ++ bool_to_string(i1 < i3))
+    println("i2 <= i2        " ++ bool_to_string(i2 <= i2))
+    println("compare floats  " ++ int_to_string(compare(2.5, 0.5)) ++ " " ++ int_to_string(compare(0.5, 2.5)))
+    println("compare strings " ++ int_to_string(compare("a", "b")) ++ " " ++ int_to_string(compare("b", "b")))
+    println("compare ints    " ++ int_to_string(compare(3, 2)) ++ " " ++ int_to_string(compare(2, 3)))
+    let i4 : Item = { name: "b", w: 0.0 }
+    println("i1 < i4         " ++ bool_to_string(i1 < i4))
+    println("compare(i1, i4) " ++ int_to_string(compare(i1, i4)))
+    let r1 : P3 = { a: 1, b: 9, c: 9 }
+    let r2 : P3 = { a: 2, b: 0, c: 0 }
+    let r3 : P3 = { a: 1, b: 9, c: 0 }
+    let r4 : P3 = { a: 1, b: 0, c: 9 }
+    println("compare(r1, r2) " ++ int_to_string(compare(r1, r2)) ++ " " ++ int_to_string(compare(r2, r1)))
+    println("r1 < r2         " ++ bool_to_string(r1 < r2))
+    println("r3 < r1         " ++ bool_to_string(r3 < r1))
+    println("r4 < r3         " ++ bool_to_string(r4 < r3))
+    println("compare(r1, r1) " ++ int_to_string(compare(r1, r1)))
+    let rs = List.sort_by([r1, r2, r3, r4], fn (x, y) -> x < y)
+    println(List.fold_left(rs, "", fn (acc, r) -> acc ++ int_to_string(r.a) ++ int_to_string(r.b) ++ int_to_string(r.c) ++ " "))
+    let sorted = List.sort_by([Large, Small, Large, Small], fn (a, b) -> a < b)
+    println(List.fold_left(sorted, "", fn (acc, s) -> acc ++ int_to_string(rank(s))))
+  end
+end

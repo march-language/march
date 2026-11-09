@@ -104,7 +104,7 @@ mod Topology do
 
   doc """
   A role bound to a function (`body = "M.f"` in `[roles]`). [open] is the
-  generated `<P>_Run.offer_<R>(io, node, capacity, fn (s, caps..., st) ->
+  generated `<P>_Run.offer_<R>(node, caps..., capacity, fn (s, caps..., st) ->
   M.f(env, s, caps..., st))`.
   """
   fn role(name : String, place : TopoPlacement, open : () -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
@@ -118,7 +118,7 @@ mod Topology do
 
   doc """
   A role bound to a function, offered at [capacity] sessions: [open] is the
-  generated `fn topology_cap -> <P>_Run.offer_<R>(io, node, topology_cap,
+  generated `fn topology_cap -> <P>_Run.offer_<R>(node, caps..., topology_cap,
   ...)`. A reload that changes the role's capacity reopens its offer at the
   new size.
   """
@@ -152,7 +152,7 @@ mod Topology do
   doc """
   `actor_role`, offered at [capacity] sessions: [open] takes the actor and
   the capacity (the generated `fn (topology_a, topology_cap) ->
-  <P>_Run.offer_hosted_<R>(io, node, topology_cap, topology_a, ...)`).
+  <P>_Run.offer_hosted_<R>(node, caps..., topology_cap, topology_a, ...)`).
   """
   fn offer_actor_role(name : String, place : TopoPlacement, capacity : Int, mk : () -> Pid(a),
                       open : Pid(a) -> Int -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do

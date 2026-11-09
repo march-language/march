@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_50.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+5 |     n + "1"
+            ^^^
+
+    This is the right side of `+`, and both sides of `+` must have the same type.
+
+    the expected type comes from here:
+
+5 |     n + "1"
+        ^
+    run `march --explain type_mismatch`
+
+

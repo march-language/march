@@ -34,6 +34,267 @@ git log is authoritative for exact commits.
   compiled build. Deployment notes: `specs/features/http-and-networking.md`, and
   `examples/https_hello.march`.
 
+- **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
+  Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
+  law, that the comparator is a strict total order agreeing with `==`. A module can say what
+  `elts` (or `keys`) means for its own datatype with `@[abstraction(elts)]` on a `@[measure]`;
+  callers elsewhere keep proving through the contracts as before. The refinement checker also
+  learned what the proofs needed: a `Nil`/`Cons` match arm states the list's elements,
+  `if f(args)` uses `f`'s `Bool` contract, a `panic(..)` arm satisfies a return contract, a
+  `Cons(x, xs)` result in an `if` branch reflects, and mutually recursive functions get their
+  induction hypotheses.
+- **Host and method scopes on network access.** `needs IO.NetConnect("api.example.com",
+  methods(get, post))` limits a module, and everything it reaches, to the hosts and HTTP
+  methods it names; `no_redirects` refuses redirects. Checked at compile time and
+  fail-closed: a destination the compiler cannot see is refused (`cap_host_scope`,
+  `cap_host_unproven`). Redirects and request-step rewrites are checked at run time by
+  `HttpClient` (`OutOfScope`, `MethodRefused`, `RedirectRefused`). A helper that takes
+  the URL as a parameter marks it `@[net_dest(url)]`. See "Host and method scopes" in the
+  [capabilities reference](docs/capabilities.md).
+
+- **An actor's `@invariant` is checked on every build.** The state `init` builds must
+  satisfy it, and every handler must preserve it, given an incoming `state` that satisfies
+  it and the handler's parameter refinements. A handler that can break it is an error naming
+  the actor, the handler and the breaking state (`` `Counter`'s handler `Dec` does not
+  preserve its `@invariant`. ``). Before, `@invariant(count <= limit)` over
+  `init { count: 50, limit: 10 }` built with no diagnostic: the predicate was only read
+  across a hot deploy. The invariant may call the program's own functions
+  (`@invariant(not_137(count))`), unfolded as in any contract. `march --check --guarantees`
+  now reports it `proved`, `violated` or `not proved` instead of `not checked`.
+
+- **`@compat(simulation)`: prove a hot deploy doesn't care which side handles a message.**
+  A `--hot-reload` build records the actor's handler bodies in its schema sidecar; the next
+  build proves, per message, that handling on the deployed code then migrating equals
+  migrating then handling on the new code, or refuses with the state and message that tell
+  them apart. Handlers that call the program's own functions, use `match`, or a deploy that
+  changes the message type are reported `not checked`. `march --check --guarantees` adds a
+  `simulation` line.
+
+- **Rollback round trip for hot deploys.** Declare `<actor>_rollback_state` beside
+  `<actor>_migrate_state` and every build proves
+  `<actor>_rollback_state(<actor>_migrate_state(old)) == old`, or refuses the build with the
+  old state the rollback loses. `march --check --guarantees` adds a `rollback round trip`
+  line. Migration functions written over anonymous records are now usable in contracts and
+  lemmas (they reflect).
+
+- **Hot reload: an old message survives two message-type changes.** A message sent in an
+  actor's old format and received after two or more deploys that each changed the actor's
+  message type is now converted through each deploy's `migrate_msg` in turn, oldest first,
+  and handled. Before, it was dropped whenever more than one such deploy lay in between. It
+  is still dropped and counted when a deploy in between has no `migrate_msg` or one returns
+  `None`, and the drop reason a remote sender gets names which link it was.
+
+- **Hot deploys refuse a moved actor-message tag.** Each handler's constructor tag is now
+  recorded in `.schemas.json` (`"tag"`, also on `migrate_msg_from`), and `forge deploy hot`
+  and `march --check-migration` compare it with the running version's for every
+  constructor both name. Tags are a hash of the qualified constructor name, but a hash
+  collision makes one probe to the next slot, which can move it between builds; a moved
+  tag would make queued messages misread, so the deploy is refused with the actor,
+  constructor and both tags. A running version from before tags were recorded is reported
+  as not compared, never silently passed.
+
+- **Refinement aliases, with value parameters.** `type Pos = {Int | _ > 0}` and
+  `type Vec(a, n : Int) = {List(a) | len(_) == n}` name a refinement; each use (`Vec(Int, n)`,
+  `Vec(Int, 3)`, `Vec(Int, n + 1)`) is the refinement with its arguments substituted, in
+  parameters, results, element types, record fields, `let` annotations and actor messages. A
+  violation names the alias as written (`refinement violation: expected Vec(Int, n)`). A value
+  used as a type, or the reverse, is the new
+  [`alias_kind_mismatch`](docs/errors/alias_kind_mismatch.md). Before this, `type X = {T | p}`
+  was a syntax error. See "Refinement aliases" in the
+  [refinement types reference](docs/refinement-types.md).
+- **Ghost code.** `ghost s : T` parameters, `ghost let` bindings and `ghost fn` functions
+  carry values only a proof needs (a search tree's bounds, an abstraction), are checked by the
+  refinement checker, and are removed before the program runs: the compiled program is the one
+  without them. A ghost value may appear only in refinements, ghost arguments, lemma arguments,
+  proof hints and other ghost code; anything that would let the running program depend on one
+  is [`ghost_in_runtime`](docs/errors/ghost_in_runtime.md), and ghost code the compiler cannot
+  safely remove is [`ghost_misuse`](docs/errors/ghost_misuse.md). A `ghost fn` must be reflected
+  (pure, total, terminating). `ghost` stays an ordinary name everywhere else. See "Ghost code"
+  in the [lemmas guide](docs/lemmas.md).
+- **Tuples in refinement predicates.** A tuple-typed parameter can be refined
+  (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
+  predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
+  tuple refinement was silently not checked, and a tuple in a predicate was an unchecked skip.
+
+- **Bounded predicates:** `forall` and `exists` over half-open integer ranges,
+  `elts` and `keys`, with logical `nth` indexing, domain-wide indexing checks,
+  and checked existential candidates. Integer insertion-sort is included as a
+  verification fixture; existing public sorting implementations are unchanged.
+
+- **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
+  `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
+  gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
+  reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
+  block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
+  function's unfolding depth for the checks inside only. All four are checked by the compiler
+  and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
+  in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
+  keeps working.
+- **A warning when a predicate means the built-in, not your function.** Inside a refinement
+  predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
+  own function of that name is in scope, the checker now says so
+  (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
+- **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
+  `march --check-json`, a fix's `applicability` is `machine-applicable`,
+  `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
+  `--check-json` applies it to a copy of the file and checks the copy. Unless its own
+  error went away and nothing new appeared, the fix is printed as `maybe-incorrect`.
+  `forge fix` applies only machine-applicable fixes, and the language server marks only
+  those as the preferred quick fix, after re-checking each one on a copy of the buffer.
+  The others are labelled "a guess: check it" or "fill in the placeholder".
+- **`march --check` shows each fix under its error,** as the lines it changes
+  (`4 - old`, `4 + new`), headed by its tier. Until now only `--check-json`, the editor
+  and `forge fix` saw fixes.
+- **More errors come with a fix:**
+  - an unknown name, qualified name, constructor or record field, when the message
+    suggests exactly one replacement (a guess when another candidate is as close);
+  - a missing JSON codec: `derive Json for T` after `T`'s declaration;
+  - a type annotation on `let?` / `let*`: it is removed;
+  - a non-exhaustive `match`: the missing arm, with a `todo(...)` body to replace.
+
+  In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
+  have a machine-applicable one.
+- **`Actor.Theory`: the mailbox's promises, proved on a model and tested against the
+  runtime.** A new stdlib module models an actor's mailbox and proves, once, that one sender's
+  messages arrive in the order sent (whatever other senders, a hot-deploy hold, a stash or a
+  call waiting inside a handler do), that a late reply never answers a later `Actor.call`, and
+  that a monitor's `Down` is never dropped by a full mailbox and is delivered at most once. A
+  native fixture checks the runtime's receive order against the model.
+  `march --check --guarantees` now reports the runtime's laws as `proved (model) · tested
+  (runtime)` or `proved (model)` instead of `assumed`. See the actors chapter, "What is
+  proved about the mailbox".
+- **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
+  parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
+  parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
+  checked (including a reflected call that returns one, `need_x(bump(p))`), and a return type
+  can relate the result to a record parameter (`{Int | _ == p.x}`, `{Pt | _.x == p.y}`). A
+  record literal in a predicate is typed by its field names when exactly one record has them,
+  and reports print it as written instead of `<predicate>`.
+
+- **Stdlib laws for `List.sum_int` and `List.product_int`, and a result type on `List.length`.**
+  `List.sum_int_append(xs, ys)` proves `sum_int(append(xs, ys)) == sum_int(xs) + sum_int(ys)`,
+  `List.sum_int_reverse(xs)` proves `sum_int(reverse(xs)) == sum_int(xs)`, and
+  `product_int_append` / `product_int_reverse` do the same for products. `List.length(xs)` now
+  has the proved type `{Int | _ == len(xs)}`. The loops of `length`, `sum_int`, `product_int`,
+  `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
+  them; what they compute is unchanged.
+
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
+- **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
+  module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
+  lemmas proved once: duality is an involution, and a two-role protocol's projections are
+  dual. The compiler checks both of its own projectors against `Session.Theory.project` for
+  every protocol you write, by running it in the interpreter: `march --check --guarantees`
+  labels a protocol's projection `proved (spec) · validated (compiler)` when they agree, and
+  `march --validate-projections FILE` lists every role. See the choreography chapter,
+  "What is proved about a protocol".
+- **`forge hot-reload check` / `march --check --guarantees` say what a build guarantees.**
+  One block per actor and protocol, each line labelled `proved`, `violated`, `not proved`,
+  `not checked`, `checked (compiler)` or `assumed`, with what it rests on: state refinements,
+  `@invariant`, handler contracts, `migrate_state` (derived or written, against the deployed
+  build when there is one), `migrate_msg`, protocol projection and deadlock freedom, and the
+  runtime. It changes no verdict. Two gaps are labelled `not checked` rather than left
+  silent: `@invariant` is not checked on `init` or handler results, and no proof covers a
+  protocol's deadlock freedom. See docs/hot-code-reload.md, "What a build guarantees".
+- **`--refine-infer` proposes a relation a function keeps from its argument to its result.**
+  For `bump(a : Assoc(Int, Int)) : Assoc(Int, Int)`, which adds 1 to each value, a caller
+  that needs `Assoc({x : Int | true}, {y : Int | y > x})` gets the type proposed on both the
+  parameter and the result, checked as one step and written as two edits.
+- **`--refine-infer-module M`** limits inference to one module (standard library or yours),
+  with progress lines on stderr. `scripts/refine-infer-stdlib-sweep.sh` uses it to run
+  inference over the whole standard library one module at a time, in parallel: 98 seconds
+  instead of 48 minutes.
+- **Adding a field to an actor's state no longer needs a `migrate_state`.** When a build
+  knows the running version's schema (forge's `.schemas.json.prev`, or `--hcr-baseline`) and
+  an actor's state only gained fields whose `init` values are constants, the compiler writes
+  the migration: kept fields are copied, new ones take their `init` value. It is checked like
+  a written one, including on the live state before `ACTIVATE`, and `forge deploy hot` says
+  `migrate_state derived from the running version's state (adds history from init)`. A
+  removed or retyped field, or an `init` value that reads an `init` parameter, still needs a
+  written migration, and the refusal now says which. If a kept field's refinement was also
+  tightened, the error points at that field with the running state that breaks it. See
+  docs/hot-code-reload.md, "Derived migrations".
+- **A failing test reads like a compile error.** A failed `assert`, `Check.all` property or
+  panicking test body now prints a `-- TEST FAILURE --` report with the line under a caret,
+  the same under `march test` and `forge test` (compiled). For `assert (a == b)` it labels
+  both sides by their source text and marks the first difference: the element, field or
+  argument, a list length mismatch, or a string's first differing character. A long value
+  is elided to the path to the difference (`[…, 170, …]`). A failing property shows the run,
+  the shrunk input by the property's parameter name (`xs = [0, 1]`; `a = 39`, `b = 11` for
+  a `match`ed tuple), why it failed (with the inner assertion's report) and the seed to
+  replay. Before, compiled tests printed only `assertion failed`. The `FAIL: "name"` lines,
+  the summary lines and exit codes are unchanged.
+- `march --why-copies FILE` lists each place in your code where a function builds a new copy
+  of a list or tree instead of reusing it in place, because the value is still shared: used
+  again afterwards, also passed to the enclosing call, or captured by a closure. Each is a
+  `copy_shared` warning naming the call, the value and the reason, and when moving the later
+  use above the call is safe (its only later use, no side effects), it carries that move as a
+  fix for `forge fix`. `--why-copies-json` prints the same as NDJSON. Opt-in; stops before code
+  generation. On a 200,000-element list, making the map the last use cut peak memory from 29 MB
+  to 10 MB.
+
+- **Protocol errors draw the conversation so far.** A role body that takes a step out of
+  order (`protocol_step_order`), calls another role's step (`protocol_wrong_role`), uses a
+  `Chan`/`MPST` channel at the wrong step (`session_state_mismatch`), or takes a step on a
+  state it already closed (`linear_used_twice`) now shows the protocol's steps up to that
+  point, with the role's own steps marked `done`, the step it must take next, and the one
+  it tried; a `loop` is drawn as one round and a `choose` as the branch taken, naming the
+  others. Long conversations keep three steps of context each way. `--check-json` carries
+  the diagram as a note.
+- **Refinement errors show the failing case and what it does.** A `refinement_violated`
+  call now prints the solver's values (``for example, when `d` is `0` ``), labels where the
+  failing value came from (the parameter or `let`, and the `if` condition the call sits
+  behind), and words the guard over the call itself: `if d != 0 do safe_div(10, d) else …
+  end`, with every parameter the precondition names read at the call (`i < len(items)`,
+  not `_ < len(xs)`). A literal gets "`0` can never satisfy `b != 0`" instead of a generic
+  note, and a pass-site error no longer prints the internal `(cb_x)`. When every argument
+  is concrete and the callee needs no I/O, the call is run once in the interpreter, step
+  limited, and a failure is reported in one line: ``running `safe_div(10, 0)` panics:
+  division by zero``. A definite `return_refinement_violated` shows the run too (`but
+  bad(-1) returns -1.`). None of this changes which programs are accepted.
+- **A hot deploy checks an undecided migration on the live state before activating it.**
+  A `--hot-reload` build carries, beside each `<actor>_migrate_state` whose actor has field
+  refinements or an `@invariant`, a function that runs the migration and evaluates the new
+  contract. Before `ACTIVATE`, the reload server runs it on a copy of every live actor's
+  state. A failure refuses the deploy with the actor, its pid and the failing conjunct
+  (`ERR migration_check Counter pid:0 @invariant: not_137(count)`), and nothing changes. So
+  a migration accepted with `--accept-unproved` is still checked on the data it will meet.
+  A converted message that fails the new handler's refinements is dropped, like a `None`.
+  See docs/hot-code-reload.md, "Undecided migrations are checked on the live data".
+
+- **Hot-reload migrations are checked on every build, with a counterexample.** When an
+  obligation in an `<actor>_migrate_state` or `<actor>_migrate_msg` can't be proved, the
+  compiler runs the migration on small old values. An input whose result the new actor
+  rejects is now an error that names it: `but tally_migrate_msg(V1.Bump(0)) returns
+  Some(Tally.Bump(0))`. Before, this was a "not verified" hint. When the project was
+  hot-deployed before, the running version's state refinements
+  (`.march/<name>_hot.so.schemas.json.prev`, or `--hcr-baseline <path>`) are assumed of
+  `migrate_state`'s record parameter. A migration that is correct for the running version
+  therefore proves, and an old message the running handler refused is never offered as a
+  counterexample.
+- **An actor's message can be qualified by its actor.** When two actors (or an actor and a
+  variant) share a message name, `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
+  `Outer.Counter.Tally(1)` for a nested actor) selects `Counter`'s message on both backends.
+  A `migrate_msg` that keeps a message's name can now write `Some(Tally.Bump(n))`. The
+  `ambiguous_constructor` and `send_wrong_actor` diagnostics suggest the qualified spelling
+  instead of renaming a handler. A refined handler parameter is now checked at every
+  construction of a shared message name, by its qualifier or its type.
+
+- **More stdlib laws: `List.take_append`, `List.drop_append`, `List.nth_opt_append`, and
+  result types on `Math.min_int`, `max_int` and `clamp_int`.** The three lemmas state what
+  `take`, `drop` and `nth_opt` do on `append(xs, ys)` at `len(xs)` or an index inside `xs`;
+  calling one proves what unfolding runs out of fuel on. `min_int(a, b)` now has the type
+  `{Int | _ <= a && _ <= b && (_ == a || _ == b)}` (and dually `max_int`), and
+  `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`; the condition is in the
+  result, so no existing call gains an obligation.
+
 - **A refinement on a field of an anonymous-record parameter is now checked.** In
   `fn f(r : { v : {Int | _ > 0} })` the body may assume `r.v > 0`, and each caller must
   establish it. Before, the refinement was ignored on both sides. Likewise
@@ -193,6 +454,91 @@ git log is authoritative for exact commits.
   `progress_timeout` (30 s); a slow transfer that keeps moving is never cut. An upgraded
   WebSocket is not subject to them.
 
+- **`Math`, `Option` and `Result` are `cap verified`.** Every refinement contract and lemma in
+  them is proved, and a test now fails if a change leaves one unproved (the same now holds for
+  `Udp`, which already declared it). `List` is fully proved in ordinary programs but is not yet
+  marked, because of a name clash when it is checked on its own.
+
+- **Int `/` and `%` are faster in compiled code.** The zero-divisor check is now a test in
+  the generated code instead of a call into the runtime, so LLVM sees the division: a literal
+  divisor becomes a multiply, and a divisor the code has already tested is not tested again.
+  `bench/int_divmod.march` runs in 0.31 s instead of 0.56 s, `bench/index_loop.march` in
+  0.49 s instead of 0.64 s. A zero divisor still panics with `division by zero` /
+  `modulo by zero`.
+- **A module that calls C without `needs IO.Foreign` no longer compiles.** `extern_needs_foreign`
+  was a warning, so a dependency could reach C while `forge audit` and `forge.caps.lock` showed
+  nothing for it. It is now an error with the same `needs IO.Foreign` fix (and
+  `IO.Foreign.Blocking` for a `blocking fn`; `needs IO.Foreign` covers both). A module that
+  already declares it is unaffected. Declaring only the block's own capability (`needs Ffi`,
+  `needs LibC`) does not count: add `needs IO.Foreign` beside it. `Js.Dom`, `Js.Audio` and
+  `Js.Canvas` now do.
+
+- **Breaking:** the generated `@[endpoints]` entry points over a cluster node no longer take
+  the root capability. `<P>_Run.cluster_<R>`, `offer_<R>`, `initiate_<R>`, `offer_hosted_<R>`
+  and `cluster_hosted_<R>` take the node first: `Echo_Run.initiate_Client(node, body)`, where
+  it was `(io, node, body)`. A role with a grant line (`role Ledger needs IO.FileWrite`) takes
+  one capability per granted path after the node, which the caller supplies:
+  `Checkout_Run.offer_Ledger(node, fw, 64, body)`. A caller holding `Cap(IO)` writes
+  `cap_narrow(io)` there. To migrate, delete the first argument of each call, and add the
+  granted capabilities after the node for a role that has a grant. A program that plays its
+  roles over a cluster node therefore no longer needs `Cap(IO)` at all, and a topology pool
+  derives the capabilities its code uses: the `ingress` pool of `examples/lab_app` went from
+  `IO` to six narrow capabilities, none of them network or root. `run_<R>` and `host_<R>`,
+  which open their own connections, are unchanged. The `SessionNode` functions under these
+  (`run_cluster`, `offer_role`, `initiate`, `offer_hosted`, `start_offered_role` and the
+  hosted forms) lose their `io` parameter the same way, and `ClusterNode.with_session(node,
+  ops, body)` is the new operation they use.
+
+- `Gen.one_of` shrinks toward its earlier alternatives (list the simplest generator first).
+  The generated values are unchanged; only a failing property's shrunk counterexample can
+  differ.
+
+- Diagnostics: a `main` that performs IO without declaring a capability is now reported even
+  when the program has another error, listed after that error, so both can be fixed in one pass.
+  It used to stay hidden until the other error was fixed, then appear as a new error. The error
+  corpus's fix check now accepts a program whose fixes clear every error that has one, when the
+  errors left are the ones that offer no fix.
+
+- Diagnostics: three errors now say exactly what to write. `role_grant_exceeded` gives the widened
+  `role R needs ...` line and the body's new parameter list (each granted capability is one more
+  body parameter, so adding to the grant alone left the program rejected). `division_by_zero` on a
+  divisor that is not a parameter (a pattern binder or a `let`) suggests an `if d == 0 do ... else
+  ... end` guard, which the checker accepts, instead of a parameter annotation that cannot apply.
+  A step stranded after a `choose` branch that ends in a `loop` or `stop` (`protocol_invalid`)
+  names the branches it can move into and how a several-step branch is laid out. New
+  `march --explain` pages for `role_grant_exceeded` and `division_by_zero`.
+- A run-time failure in an interpreted program (`march FILE`) is now reported in the
+  compile-error style: what happened, the source line with a caret, then each call that led
+  there as a labelled excerpt, innermost first. It replaces the `panic: ...` line and the
+  numbered stack trace, for panics, `todo`, failed assertions and run-time errors such as
+  division by zero. `MARCH_BACKTRACE=full` still adds the standard library's calls. The exit
+  code is unchanged.
+- A compiled program that stops on an unhandled panic or run-time error now prints a report in
+  the same style in place of the single `panic: ...` line: what happened, the `panic` / `todo` /
+  `unreachable` call's source line with a caret, then the functions it was reached through,
+  each shown by its first line. A compiled program does not record the line of each call, and
+  the report says so. Source lines are read from the path given at compile time; when the file
+  is not there the report gives `file:line`. `MARCH_BACKTRACE=full` adds the standard library's
+  functions. The exit code is unchanged. Scripts that matched `panic: ` in a compiled program's
+  stderr need the new wording (`The program panicked: ...`).
+- Diagnostics, four messages that cost a second round of fixing:
+  - A syntax error in a program whose `main` prints with no `needs IO.Console` now says so in a
+    note. The compiler cannot check capabilities until the program parses, so that error used
+    to appear only after the syntax was fixed.
+  - A protocol state that is never used says what its role must do next and which function
+    takes that step; closing the conversation at the top of a protocol's `loop` says a
+    repeating branch comes back there and how to go round again.
+  - `may crash D` naming a role that is not in the protocol lists the protocol's roles, and a
+    crash branch on a role not declared `may crash` says to remove the branch.
+  - The guard a refinement error suggests for a `List` call uses `List.length(xs)`; it used
+    to print `len(xs)`, the refinement measure, which is not a function.
+- A failed `assert` outside a test prints its own report (the line and both operands), then
+  what it was reached through. Interpreted, it used to print that report inside a second
+  report's headline.
+- An unsupervised actor whose handler fails under the interpreter is now reported: the actor,
+  the message it was handling with its arguments, the failing line, and its state at the time.
+  The interpreter used to drop such a crash without printing anything.
+
 - Diagnostics: more choreography role-body mistakes are reported in protocol terms. A payload
   of the wrong type names the step and points at its line in the protocol. A body calling another
   role's functions says "`Fan_A.send_Number` is a step of role `A`, but `st` belongs to role `B`"
@@ -209,6 +555,13 @@ git log is authoritative for exact commits.
   `Recv(Int, End)` but I expected `Send(T, ...)`". `march --explain session_state_mismatch` has a
   page.
 
+- Diagnostics: linearity errors say where the value went. The label "`h` was already consumed
+  here" now adds "in the `Some(v)` arm" or "in the `else` branch", plus "every arm consumes it" when
+  all of them do. For a closure body it adds "inside a closure that can run more than once (each
+  iteration consumes it)". A linear value consumed only on paths that end in `panic` is reported as
+  "never used on a path that returns". A label points at the arm or branch that returns without
+  consuming it. A value passed straight into an expression that failed to typecheck (`clsoe(c)`,
+  `c.foo`) no longer gets a linearity error on top of the type error.
 - Diagnostics: a choreography role body that takes a step out of order is reported in protocol
   terms (`protocol_step_order`): "Role `Cons` tries to choose `more` or `done` here, but at this
   point protocol `Stream` says it must receive an `Int` from `Prod`", with a label on that
@@ -241,6 +594,17 @@ git log is authoritative for exact commits.
   to. `List.map(xs, fn x -> x + 1)` where a `List(String)` is expected now underlines `x + 1`
   and says `List.map`'s `b` is this function's result; a record or tuple result narrows to its
   wrong field or component.
+
+- Diagnostics: an `if` or `match do` whose type is known (a declared return type, an annotated
+  `let`, a parameter) blames the branch that disagrees with it. `if n >= 0 do "positive" else -1
+  end` in a function returning `Int` now underlines `"positive"` ("In the `if` branch.") instead
+  of the whole `if`, followed by a second error blaming `-1` for not matching it. An `else if`
+  chain reads as one `if`, and a `match do` arm that disagrees with the first arm is underlined
+  itself, with the two types the right way round. An operand of a binary operator is named as
+  one ("This is the left side of `++`, which joins two `String`s.", "This is the right side of
+  `+`, and both sides of `+` must have the same type.") instead of "argument #1 of a function
+  call", with the other operand as the origin, and is reported before a mismatch on the whole
+  expression that starts at the same place.
 
 - Diagnostics: a type mismatch deep inside two types now reports the whole pair, with a note
   that prints the provided type and puts a caret under each part that differs, instead of
@@ -279,6 +643,14 @@ git log is authoritative for exact commits.
   `A`", not `Post` and `Pong` from the HTTP modules. Stdlib constructors are offered only when
   nothing in your own code is in range, compiler-generated names (session states such as
   `S_end`) are never offered, and a misspelled record field gets a suggestion.
+- Diagnostics: when no name is a spelling of an unknown function, the functions in scope that
+  take the call's arguments are listed: `List.fodl(xs, 0, fn (a, b) -> a + b)` offers
+  `List.fold_left` and `List.fold_right` with their signatures. A call whose arguments fit in
+  another order says so, with the reordered call as a fix (`List.map(fn x -> x * 2, xs)`).
+  A mismatch between two plain types with no hand-written hint names an in-scope conversion
+  (`Use bool_to_string(x)…`, or your own `celsius_to_fahrenheit`). A call that fails
+  `List.head`'s or `List.nth`'s precondition suggests `head_opt` / `nth_opt` with the `match`
+  it needs. Suggestions never change type inference.
 - Diagnostics: follow-on errors are dropped when another error already explains them: the type
   mismatch after a callback-arity error, "unused variable `x`" next to a misspelled use of `x`,
   `cap_grant` while the program has other errors, `cap_ceiling` alongside the matching
@@ -329,12 +701,81 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Every cookbook "run" button runs.** 54 of the 151 March blocks on the cookbook and
+  "Coming from" pages failed when run in the sidebar REPL: they used a value from an earlier
+  block, had a placeholder body, used `1_000_000` (March has no digit separators), or need a
+  file system, sockets or the DOM. Each now runs on its own, or, when it cannot run in a
+  browser, shows only a copy button. CI runs every block.
+- The Error Messages tour shows two more examples: a protocol step stranded after a `choose`
+  branch that loops forever, and a division by a value from a pattern. The role-grant example
+  explains its new help, and the error reference lists `protocol_invalid`,
+  `protocol_same_participants`, `role_grant_exceeded` and `division_by_zero`.
+
+- **The Type System chapter is restructured for first readers** ([Type System](docs/types.md)),
+  like Pattern Matching, Interfaces and Capabilities: a plain opener, a which-type-do-I-need
+  table, a how-it-fits table, a grouped index, everyday types before the advanced ones, and
+  See also in place of Next Steps. It no longer says recursive functions need annotations;
+  inference handles them.
+- **Five more pages get the same first-reader layout:** [Module System](docs/modules.md),
+  [Sigils & Templating](docs/sigils.md), [Foreign Function Interface](docs/ffi.md),
+  [Stdlib Guide](docs/stdlib.md) and [Property Testing](docs/property-testing.md). Each
+  has a plain opener, a which-form table, a how-it-fits table linking the related
+  chapters, a grouped index with everyday sections first, Errors you'll see linking the
+  Error Messages tour and `--explain` pages where they apply, and See also in place of
+  Next Steps. Bodies are kept; the FFI page's first example now grants `main` the
+  capabilities it uses, so it type-checks, and the Modules page no longer describes
+  compiler internals or shows a stale error for a `ptype` constructor.
+- **Removed pages.** The four 1.0 claim pages (`claim-deploys`, `claim-capabilities`,
+  `claim-performance`, `claim-refinements`), the 0.3.0, 0.4.0 and 0.5.0 upgrade guides, and
+  the Findings list on the [Multi-host Lab](docs/lab.md) page. Links to them are gone; the
+  docs index links the 0.6.0 upgrade guide.
+- **A scrolling explainer for distributed March**
+  ([From a Protocol to a Cluster](docs/protocol-to-cluster.md)). It follows the lab app's
+  16-line `Order` protocol a few lines at a time, then through the compiler (what the
+  declaration rules out, and the five modules, 15 linear state types and 152 functions
+  generated from it), into the Ledger actor, and onto a four-machine cluster that loses
+  hosts and recovers. Each section has a pinned figure that changes as you scroll; the
+  cluster and the actor are simulations, labelled as such. Every number, excerpt and
+  compiler message on the page is generated by `scripts/gen-explainer-data.py` from the
+  real compiler, and doc-lint fails if the lab app changes without a regeneration. A
+  section on deploying to the running cluster is still to come.
+- **A second scrolling explainer, on what a deploy is allowed to do**
+  ([What a Deploy Is Allowed to Do](docs/deploy-authority.md)). It follows one dependency
+  update to the lab app, a library that starts opening a socket, past each check that asks
+  what code can reach: a module's `needs` lines, the grant on `main`, `forge deps` against
+  the committed capability file, the capabilities the compiler derives for each pool of a
+  topology, the generated firewall, `forge deploy hot`'s widening gate, and the node's own
+  policy. The pinned figures are one square per module of the program, and an animated
+  topology: roles placed on machines from the file, sessions flowing, a machine stopped,
+  and a patch stopped at each gate. The topology is a simulation, labelled as one. Every
+  count and tool message is generated by `scripts/gen-authority-data.py` from the real
+  compiler and forge; the page says which one line it quotes from the reference instead.
+- **A third scrolling explainer, on what one owner is worth**
+  ([What One Owner Is Worth](docs/one-owner.md)). One 31-cell tree, transformed by
+  ordinary functional code, followed four times through the question "is anyone else
+  holding this?": reused in place with zero allocation when `inc_leaves(t)` is the last
+  use; copied cell for cell when the old tree is read again, or kept in a Vault
+  (`--why-copies` finds no copy there and the run copies anyway); its two halves
+  rewritten on two tasks with no lock. Then the same question as a type: `linear` (exactly
+  once) and `affine` (at most once), with the compiler's refusals for a second use and a
+  forgotten value. Then the contract that keeps a function allocation-free: `@[no_alloc]`,
+  its `transient` form, the boxed-aggregate case, the limit that a contract is about the
+  function's own code and not its callers, and the designed, unshipped `@[alloc_bound(N)]`.
+  The pinned figures are the heap (cells with their counts, a cursor walking them, a copy
+  tree growing beside), a token moving through a linear function, and an allocation
+  ledger. Every count comes from the runtime's own allocation trace and every message from
+  the compiler, by `scripts/gen-ownership-data.py`.
 - A new Error Messages tour (`/docs/error-messages/`): 34 real compiler errors, from syntax
   slips through types, capabilities, linearity, actors, session channels, protocols and
   refinements, each with what `march --check` prints today. An error playground on the page
   comes loaded with 26 of them: edit one and check it again in the browser. The live compiler
   bundle gains `marchCheck`, which prints a program's diagnostics as `march --check` does,
   without the refinement checks (they need z3).
+- The language chapters now point at the Error Messages tour. Types, Capabilities, Linear Types,
+  Actors, Session Types, Choreography and Refinement Types each end with an "Errors you'll see"
+  list linking to the tour examples for that area, and each `/docs/errors/<code>/` page that
+  has an example on the tour links to it under "See it in the error tour". Every tour example
+  has its own anchor (`/docs/error-messages/#counterexample`).
 - The Refinement Types chapter (`/docs/refinement-types/`) drops its dated "What's new" box. Its
   "When to use refinements" table now points at refinement messages, reflection, lemmas,
   relational element refinements, abstract refinements, fold invariants, termination (`cap total`)
@@ -366,12 +807,260 @@ git log is authoritative for exact commits.
 - **The event-loop HTTP server no longer drops pipelined requests** that arrive while a large
   response is still being written; they are served once the write finishes.
 
+- **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
+  of a module whose names the checker cannot list counted against every ghost function in the
+  program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
+  own file. It now counts only against the ghost names of the file that writes it.
+- **A record-returning function's contract no longer reports a false counterexample** when
+  a field's value is bound by a `let` first (`let next = c + n` then `{ count: next }` was
+  refuted with `next = -1`). Simple `let`s are now inlined into a record result, and a name
+  the checker cannot connect to its definition never makes a model count as a
+  counterexample. `{ r with f: e }` and returning a refined record parameter unchanged are
+  now proved instead of skipped.
+- **Set measures over a tree and its list of children.** A `@[measure]`
+  could not recurse through a `List` of child nodes, the shape a HAMT branch
+  has: the termination checker refused a mutual pair over two types unless
+  each type contained the other. It now accepts any cycle in which every
+  call passes a strict pattern component. A set measure's body may also
+  apply `elts` to a list field. And on the command line, `empty` in a set
+  measure no longer resolves to a prelude function of that name, which made
+  every user set measure `invalid_measure`.
+
+- **Refinement reflection over records with type parameters.** A lemma or contract over a
+  parameter typed `Pr(Int)` (`type Pr(a) = { fst : a, snd : a }`) is now checked through the
+  reflected functions it calls (`sw(sw(p)) == p` is proved); it used to be skipped as
+  `unreflectable-predicate`. A stage-2 proof whose solver core names no definition lists only the
+  definitions its own query unfolded under `uses:`, not every one the module unfolded.
+
+- **Bounded quantifier bodies are scoped more strictly.** Inside `forall` / `exists`, a
+  measure over a call or a constructor tester whose argument mentions the binder (for
+  example `elts(mk(k))`) is now refused, so the predicate is skipped rather than ever
+  being encoded as one constant shared by every instance. Own abstract-predicate renaming
+  and inferred-lemma substitution now also reach quantifier bodies, and `nth` is
+  documented as reserved inside predicates.
+
+- **`derive Ord` on a record compares fields in declaration order.** With two or more
+  fields, the derived `compare` returned only the last field's comparison, so
+  `compare({ a: 1, b: 9 }, { a: 2, b: 0 })` was `1` and sorting by `<` put records out of
+  order. It is now lexicographic, as documented: the first field that differs decides. Same
+  on the interpreter, native and JS.
+- **`Diagnostics` and `try_finally` work on `--target js`.** A program using
+  `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
+  compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
+  use) threw `ReferenceError` at run time. Observers now receive a report, with its context and
+  the panic's location, when an error escapes `main`; the error then reaches Node as before.
+  The JS report has no backtrace; the `Diagnostics` module doc lists the other differences.
+- **`~H"..."` works in the browser REPL.** An HTML sigil failed with
+  `unbound variable: IOList.from_strings` unless something had already loaded IOList: the
+  REPL loads a stdlib module when the input names it, and a sigil names none. A sigil now
+  loads the module it expands to.
+- **A module-level `let` holding a function works outside the entry module.** With
+  `mod Cst do let inc = fn x -> x + 1 end`, a compiled `Cst.inc(4)` printed a pointer-sized
+  number natively and `[object Object]` on `--target js`, and `let g = Cst.inc` or
+  `List.map(xs, Cst.inc)` passed the wrong thing along (likewise `Cst.thunk()` for
+  `let thunk = fn () -> 42`). Native and JS builds now call it like the interpreter does.
+- **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
+  recursion (`List.map` over 20,000 elements, or a panic unwinding 20,000 calls) ran out of
+  JavaScript stack on the way back up, so the build was pinned to js_of_ocaml `< 6.5`. The
+  interpreter now resets the stack on return (and on exception unwind) as well as on call,
+  and the pin is gone.
+- **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
+
+- **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
+  gave `NaN` and the program went on; they now panic with "division by zero" / "modulo by
+  zero", as natively. `to_string` on a record or variant with no `Show` impl now builds and
+  prints what native prints (`{ x: 1, y: 2 }`), and `Check.all` property tests,
+  `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
+  A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
+  native message.
+- Check recursive local functions for unsafe non-tail calls inside non-recursive
+  functions and actor handlers, which previously escaped stack-safety diagnostics.
+
+- **Module functions used as values compile correctly.** A binding such as
+  `let k = List.length` now retains the function definition during compilation,
+  including when the binding is called with different element types.
+- **Type-qualified function names fail with an actionable diagnostic.**
+  `Int.to_string(5)` now explains that `Int` is a type and points to `to_string`,
+  instead of passing checking and failing or producing the wrong value at runtime.
+- **Endpoint generation merges equivalent unlabelled choice branches.** A bystander
+  receiving the same message in either branch now shares the message constructor
+  and continuation state, instead of receiving errors in generated code.
+
+- **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
+  such a type, and a lemma about it, can now be used in refinements. Recursion through
+  `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating
+  too.
+- **Compiled `x +. 0.0` keeps the sign of zero right** (#1185). The optimizer rewrote
+  `x +. 0.0` and `0.0 +. x` to `x`, so native and JS builds returned `-0.0` for
+  `-0.0 +. 0.0`, where IEEE 754 (and the interpreter) give `+0.0`. The rewrite now fires
+  only for `-0.0`, the real additive identity; `x -. 0.0` still simplifies and
+  `x -. -0.0` no longer does.
+- **`install.sh` verifies checksums with Apple's `/sbin/sha256sum`** (#1182). With it first
+  on `PATH`, the `curl | sh` install failed at "Verifying checksum" on macOS, because
+  Apple's `sha256sum -c` prints usage when the checklist comes on stdin without a `-`
+  operand. The installer now passes `-`.
+- **Compiled `==` on tuples of different nested shapes no longer shares one helper**
+  ([#1171](https://github.com/march-language/march/issues/1171)). `((Int, Int), Int, Int)`
+  and `((Int, Int, Int), Int)` got the same native equality helper, so unequal values
+  compared `true`. (The record half of #1171 is the record-equality fix below.)
+- **A module on `MARCH_LIB_PATH` is no longer loaded just because it declares a type or
+  constructor with the same name as one your code uses from its own module.** A module
+  that used its own `type Tally` pulled in every other lib-path module declaring a
+  `Tally`, even ones nothing referenced, and an error in any of them failed the build
+  (`--check`, `--compile` and the interpreter alike). A bare name used without being
+  defined in the same module still loads the modules that define it (#1183).
+- **`<`, `<=`, `>`, `>=` on a type with an `Ord` impl now use it in compiled code**
+  (#1172). On an enum, record, payload ADT, newtype or unboxed ADT with a derived or
+  hand-written `Ord`, and in generic `when Ord(a)` code, the operators mean
+  `compare(a, b) <op> 0` on native and `--target js`, as they already did in the
+  interpreter. Before, native strict comparisons were always false and `<=`/`>=`
+  always true, a single-field newtype compared its raw payload, an all-scalar ADT
+  such as `Pair(Int, Int)` failed the native build, and JS compared the objects.
+  `compare` on `Int`, `Float` and `String` (and so a derived `Ord` over such
+  fields) now also builds on `--target js`.
+
+- **A line starting with `(` after a record, a `do ... end` block or an interpolated
+  string is now a new statement** (#1179), as it already was after an identifier, `)`,
+  `]` or a literal. Before, `let r = { x: 1 }` followed by a `(r.x + 1)` line parsed as
+  a call on the record (`not_a_function`, then `unbound_variable` for `r`), and
+  `let g = do ... end` followed by a `("x")` line silently called `g`.
+- **`march fmt` and `forge format` no longer replace code with `...`** (#1174). A `match`
+  or `match do` in a list, tuple, record, call argument, operand or string interpolation,
+  a multi-statement lambda that is not the last argument, and an `if` with a
+  multi-statement branch inside another expression were written out as `...`,
+  `match ...` or `match do ... end`. They are now printed in full.
+- **The formatter keeps the parentheses the grammar needs** (#1175). It dropped them
+  around `if`, `match`, `fn` and `|>` operands, a called `(if ...)` or `(fn ...)`, the
+  operand of `-` or `!`, and a comparison inside a comparison. The output either did
+  not parse or meant something else: `1 + (3 |> double)` became `1 + 3 |> double`.
+- **`march fmt`, `forge format` and the language server refuse output that changes the
+  program.** The formatted text is parsed again and compared with the input. If it does
+  not parse, or parses to a different program, the file is left unchanged and `march
+  fmt` exits 1 with a message. The check found more formatter bugs, now fixed: UTF-8
+  and `${` in strings, `\r` in multi-line strings, float literals with more than 12
+  digits, default argument values, `resource`, `opaque type`, `blocking` and `raises`
+  extern functions, `linear let`, `p as a as b`, an interface's `requires`, `use A`
+  (printed as `import A`), and multi-line sigils, whose content was re-indented. Actor
+  declarations with `supervise`, `mailbox`, `@compat`, `@invariant` or `@[remote]` are
+  still not printed in full, so such files are now refused instead of losing those parts.
+- **`cap pure` and `cap deterministic` now reject monotonic clock reads and stdlib
+  wrappers over IO.** `sys_uptime_ms()` and `System.monotonic_time()` passed both caps
+  (the read needs no `IO.Clock`); they are now rejected, called directly or through any
+  stdlib function that reaches them, and still need no capability elsewhere. A
+  `cap pure` module may no longer declare any `needs`, and a `cap deterministic` module
+  may not declare `needs IO.Clock`, `IO.Random` or `IO`: those lines let stdlib wrappers
+  such as `File.read` and `DateTime.now()` through. Each is a `[pure_violation]` or
+  `[deterministic_violation]` at the `needs` line (#1180).
+- **`march --target js --test` runs the tests.** The output used to define the test blocks
+  and never call them, so a failing test exited 0 with no output; with a `main` the tests
+  were dropped and `main` ran. A program that prints did not build at all with `--test`
+  (`builtin cap_dict has no JavaScript-target implementation`). The `.mjs` now runs the
+  tests and prints the same report as a native test binary, takes `--verbose` and
+  `--filter=`, and exits 1 when a test fails. Capability mocks work there too (#1176).
+- **An output path that cannot be written is no longer an internal compiler error.**
+  `march --target js -o dist/app.mjs` with no `dist/` printed "internal compiler error" and
+  exited 3. `-o` now creates missing parent directories, for `--target js` and `--compile`
+  alike. A path that still cannot be written, such as a directory, is an error naming it,
+  with exit code 1. A source map that cannot be written is now a warning instead of being
+  skipped without a word (#1181).
+- **`string_to_float` (and `String.to_float`, `float_from_string`) accepts the same
+  strings on every backend** (#1178): C `strtod`'s grammar with the whole string consumed,
+  now written down in the language reference. On `--target js`, `"inf"`, `"-inf"` and
+  `"nan"` parsed as `None` (so a TOML `x = inf` read as `0.`), blank strings as `Some(0.)`,
+  and `"1.5 "`, `"0b11"` and `"0o17"` were accepted while hex floats (`"0x1p3"`) were not.
+  The interpreter no longer accepts `_` separators (`"1_000"`), and native builds no longer
+  accept a string with an embedded NUL or depend on the C library for `nan(...)`.
+  `float_infinity`, `float_neg_infinity`, `float_nan`, `float_epsilon`, `float_is_nan`,
+  `float_is_infinite` and `float_from_string` now compile for `--target js`.
+- **A type named like a standard-library type of another arity works in predicates.** A
+  `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
+  it unchecked. Types of the same name and the same number of parameters still are, with a
+  message saying so that now names your function.
+- **No false "not checked" warning on a qualified predicate call that is checked.** A
+  predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
+- Compiled record equality keeps helpers distinct for different record shapes,
+  avoiding wrong comparisons and crashes when a program uses several record types.
+- Refinement diagnostics preserve predicate grouping with parentheses, including
+  mixed Boolean operators, arithmetic and unary expressions.
+
+- Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
+  generated failure-handler parameters; their offer functions typecheck normally.
+- The two-node test harness now fails when a started node has no expected-output
+  file, instead of silently reporting success.
+- **A compiled program no longer segfaults when an unannotated `let x = None` is used as
+  `Option(Float)`, `Option(())` or `Option(Option(_))`** (#1173). This includes a
+  `None` stored in a record field, which crashed when the record was dropped. The
+  binding is now compiled at the type it is used at. The interpreter was already
+  correct.
+
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
+- Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
+  operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
+  is known by its byte length, and distinct literals are distinct values; record field access,
+  literals, updates and patterns, and tuple construction and patterns, all translate.
+- **`--refine-infer` no longer skips programs that `--check` accepts.** A record named like a
+  standard-library one (`type NodeInfo`, `type Member`) left a type error inside the
+  standard library that `--check` never shows, and inference then printed only "skipped,
+  the program has errors". Inference now stops on the errors `--check` stops on, and a skip
+  names the first errors it stopped on.
+- **`forge refine --infer` prints each proposal once.** When the project does not check as
+  one unit, forge checks each file on its own and infers once over the files that check.
+  Before, it inferred once per file and printed the same proposals for every file (30 times
+  on a 31-file project).
+- **Less `--refine-infer` noise.** A recursive group with nothing to infer near it is no longer
+  noted `scc-unsupported`, and a field test such as `_.step != 0` is no longer tried on an
+  `Int` or `List` value.
+- **Two compiles of one project no longer risk a torn refinement verdict.** The verdict cache
+  under `.march/cas/vc` wrote each entry in place, so a `march --check` reading an entry
+  while another process wrote it could see half a counterexample. Entries are now written
+  to a temporary file and renamed into place.
+- **Compiled property tests that return `false` now fail.** `Check.all` in a compiled test
+  (what `forge test` runs) treated a property that returned `false` as passing. Only a
+  property that panicked or failed an `assert` was caught. Under `march test` it already
+  failed. A compiled suite with such a property used to pass and now fails.
+- **More function bodies can be used in proofs.** A `match` used as a value (an argument or an
+  operand) is now unfolded. A divisor shown non-zero only by arithmetic, such as
+  `b : {Int | b * b > 0}`, now counts. A step through `if pos(n) do … end`, where `pos` is your
+  own function, is taken when the facts decide `pos(n)`.
+
+- **The interpreter no longer runs another actor's message.** A variant, or another
+  actor's message of the same name, sent to an actor ran that actor's handler under
+  `march file.march`, while compiled code dropped it. The interpreter now drops it too,
+  so a refined handler parameter holds in the handler body even when another actor or a
+  type shares the message's name. Also, a dropped message no longer ends
+  `run_until_idle()` early with later messages still queued.
+
+- **An actor handler's fresh state literal uses its parameter refinements.** With
+  `state { count : {Int | _ >= 0} }` and `on Bump(n : {Int | _ > 0})`, the result
+  `{ count: state.count + n }` stayed unverified because the check at the handler's tail ran
+  without `n > 0`. It now proves.
+- **Lemmas can use functions that divide by a parameter, or that recurse by a metric.** A
+  function with `a / b` or `a % b` is now unfolded in proofs when its own parameter refinements
+  or conditions show `b` non-zero (`b : {Int | _ != 0}`, or `if b == 0 do 0 else a / b end`). A
+  recursive function certified by `@[decreases]` is unfolded too.
+- **`forge test` / `--lemma-test` decide theorems that use `len`.** They were `not-tested`
+  with "unbound variable: len"; `len` now means a list's length or a string's byte length in
+  the interpreter and in the compiled check.
+
 - **A refined `Int` result now uses the facts before it.** `fn grow(n : {Int | _ >= 0}) :
   {Int | _ >= n}` used to stay unverified when its body was `let r = n + n` then `r`, or a
   lemma call `twice_grows(n)` then `twice(n)`, or `assert n >= 0` then `n + n`. The same facts
   already proved a call's precondition. The result is now checked with them, and a contract
   proved this way is a fact at the function's callers. Other refined result types don't use
   these facts yet.
+- **Compiled test builds no longer crash on an actor whose handlers use a capability.** In a
+  `--test` build (`forge test` compiled), an actor where one handler performs mockable IO and
+  others don't could abort after a couple of messages with "RC underflow" or a SIGBUS. depot's
+  connection `Pool` did, so every conduit test that reached Postgres crashed the run. Release
+  builds were not affected.
 - **`spawn` of something that is not an actor, and a supervise child line naming no actor or a
   missing state field, are compile errors.** `spawn(helper)` for a function, or `spawn(Job)` for
   a type's constructor, passed the checker and failed when compiled ("`helper_spawn` is not a
@@ -380,6 +1069,22 @@ git log is authoritative for exact commits.
   block's `Wroker w` (no such actor) or `Worker wx` (no field `wx` in the supervisor's state)
   stopped the compiler with an internal error; the second is now `supervise_field_missing`, with
   a did-you-mean and a fix.
+- **A lemma call gives its fact from anywhere it always runs.** A named `let u = l(..)`, a
+  statement of a nested block, a tuple element or an earlier call's argument, or an `if`
+  condition now give the theorem to what follows, as a call on its own line does. A call in a
+  branch, a lambda, or on the right of `&&`/`||` still gives nothing outside it.
+- **A user function or constructor named like a stdlib one works in a theorem.** A lemma
+  about your own `fn unwrap` (the prelude has one) or over your own `Reply` constructor
+  (`Channel.HandleResult` has one) was `unreflectable-predicate`; the call now resolves to
+  your declaration, as the typechecker does. A user type named like a stdlib type (`Tree`)
+  still can't be used, and the warning still says to rename it.
+- **A reflected function whose `let` branches unfolds.** `let b = match l do ... end` (or an
+  `if`) inside a function a theorem calls used to leave the function without equations; its
+  body now unfolds once per case.
+- **A lemma can use a hypothesis that calls your own function.** `fn h(g : {G | okz(_)}) :
+  {Unit | okz(g)}` was `lemma_unproved`: a refined parameter whose predicate calls a reflected
+  function was never assumed. It is now, in the theorem and for the recursive calls of an
+  inductive proof, and a callee's `okz(_)` precondition reads the same as `okz(g)`.
 - **`Random.range` (and so `Gen.int`) works for any span.** A range wider than the largest Int,
   such as `Gen.int(-4611686018427387903, 4611686018427387903)`, panicked with "attempt to
   subtract with overflow" since Int arithmetic began checking for overflow. A range wider
@@ -450,6 +1155,11 @@ git log is authoritative for exact commits.
 - Diagnostics: the `List.filter(fn (x, y) -> …)` hint suggests a one-parameter function instead of
   a curried one; an infinite-type error no longer stacks contradictory notes; refinement errors on
   callbacks no longer show `$cb_arg`, and their guard suggestion uses the real argument.
+- Diagnostics: a diagnostic's hints no longer repeat or contradict each other. A "consider
+  narrowing `Cap(IO)`" hint no longer sits on an error at the same place (it contradicted
+  `cap_needs`' "add `needs IO`"). An unproved lemma call is one warning, not a warning plus a hint
+  saying the same thing. `send_wrong_actor` no longer restates its qualify-it advice as a note.
+  `termination_unproved` no longer suggests the same exit twice, and names your own variable, not `n`.
 - A parameter that only its refinement mentions (`fn f(t : {Tree | size(t) < 1})`) is no longer
   reported as unused, with a fix that broke the refinement.
 
@@ -460,9 +1170,27 @@ git log is authoritative for exact commits.
   Safari. The cache is now a `Map` keyed by the string, holding at most one string of
   each length so older V8 (which hashes long strings by length) doesn't compare them
   either.
+- **`--target js`: a module-level `let` outside the entry module reads as its value**
+  (#1170). A `let` in a nested `mod`, a `MARCH_LIB_PATH` module or the standard library
+  printed `[object Object]`, and `Bytes.encode_base64` threw
+  `TypeError: s.slice is not a function`. The interpreter and native binaries were right.
+- **A top-level `fn` named like a builtin is called on `--target js`** (#1177). A user
+  `fn negate` (also reached by prefix `-x`), `fn not` (also `!x`), `fn string_length`,
+  `fn int_mod` and the like were replaced by the builtin, or, for the names JS also
+  exposes as first-class values, made the module fail to load (`Identifier 'int_xor' has
+  already been declared`). On every backend, a user `fn not` is now also called for a
+  literal argument (`not(true)`, `!false`); the optimizer used to fold those as the
+  builtin.
 
 ### Documentation
 
+- **Capabilities: monotonic time and `extern`-backed stdlib modules.** The capabilities
+  chapter says that monotonic time (`sys_uptime_ms`, `System.monotonic_time`) is not
+  gated by `IO.Clock` but is banned under `cap pure` and `cap deterministic`, describes
+  how both caps now cover stdlib wrappers, and says that the `IO.Foreign` exclusion from
+  the capability upper limit covers first-party stdlib modules built on `extern`
+  (`Js.Dom`, `Js.Canvas`), which a module can call without declaring `needs`; function
+  `needs ()` bounds and `main`'s grant still see them (#1180).
 - **Lemmas as a contract for changes.** The refinement-types chapter and the
   `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
   as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a

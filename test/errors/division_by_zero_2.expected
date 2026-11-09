@@ -8,5 +8,29 @@ Use `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of 
 19 |     10 / d
          ^^^^^^
 
+    run `march --explain division_by_zero`
 
 
+-- CAPABILITY ----------- errors/division_by_zero_2.march
+
+`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
+help: declare the grant `main` actually needs —
+        fn main(_cap_console : Cap(IO.Console)) : ()
+or grant everything with `fn main(cap : Cap(IO))`.
+`forge fix` can apply this.
+
+22 |   fn main() do
+       ^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+22 -   fn main() do
+22 +   fn main(_cap_console : Cap(IO.Console)) do
+
+    run `march --explain cap_grant`
+
+
+
+after fix: exit 1
+division by `d` in `cap no_panic` module: refinement does not rule out zero (e.g. d = 0). [division_by_zero]

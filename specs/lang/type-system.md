@@ -5,22 +5,99 @@ nav_order: 5.1
 permalink: /docs/types/
 ---
 
-> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md).
-> This chapter is the **tutorial-register companion** to
-> [`core-march-types.md`](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md), which has the FORMAL typing
-> rules (the `Γ ⊢ e : τ` judgment, cited arm-for-arm against
-> `lib/typecheck/typecheck.ml`) for the core fragment: literals, `let`,
-> lambda/application, `if`, ADT constructors and `match`, tuples/records,
-> atoms, guards, and interface-constraint discharge (`Num`/`Eq`/`Ord`/`Show`).
-> Where this chapter and `core-march-types.md` cover the same ground, this
-> chapter teaches the surface syntax and defers the "why is this well-typed"
-> rules to the formal reference rather than restating them.
+> Part of the March Language Reference; see [specs/lang/index.md](https://github.com/march-language/march/blob/main/specs/lang/index.md)
 
 # Type System
 
-March uses Hindley-Milner type inference with bidirectional checking at function boundaries. You get the convenience of inferred types with the safety of static checking.
+Every March value has a type the compiler knows before the program runs. You rarely
+write one: the compiler infers types from how values are built and used
+(Hindley-Milner inference), and checks your annotations where you do write them, at
+function boundaries. A program that type-checks cannot pass a `String` where an `Int`
+is expected, misspell a constructor or a record field, or use a value that may be
+absent as if it were there.
 
-> **New here? Read the first part.** Everything before [Dependent Types](#dependent-types) (ADTs, records, `Option`, `Result`, tuples, lists), plus [Opaque Types](#opaque-types), is the everyday type system and all you need to start writing March. [Dependent Types](#dependent-types), the safety-tool matrix, and the inference deep-dive are **advanced; come back to them later**, once the basics feel natural.
+You describe your data with your own types: variants, where a value is one of several
+shapes, and records, where it has named fields, both of which can take type
+parameters. The standard library adds `Option` for a value that may be absent,
+`Result` for an operation that can fail, tuples, lists and functions. There is no
+`null`.
+
+This page covers the everyday types first, then what March adds when they cannot say
+enough: refinement types and type-level naturals, a guide to which safety tool fits
+which guarantee, and what static types buy at runtime. The **Everyday types** and
+**Built-in types** groups below are all you need to start writing March; the rest can
+wait. The formal typing rules for the core language are in
+[`core-march-types.md`](core-march-types.md); this page teaches the surface syntax.
+
+## On this page
+
+**Start here**
+
+- [Which type do I need?](#which-type-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**Everyday types**
+
+- [Primitive Types](#primitive-types): [`Int` width and overflow](#int-width-and-overflow), [`Int` on the JavaScript target](#int-on-the-javascript-target)
+- [Type Annotations](#type-annotations)
+- [Algebraic Data Types](#algebraic-data-types-adts): [variants](#sum-types-variants), [records](#record-types), [updating and destructuring records](#updating-and-destructuring-records)
+- [Type Parameters](#type-parameters-generics): [a signature's type variables must stay generic](#a-signatures-type-variables-must-stay-generic)
+- [Type Aliases](#type-aliases)
+- [Opaque Types](#opaque-types)
+- [Qualified Types](#qualified-types)
+
+**Built-in types**
+
+- [`Option(a)`](#optiona)
+- [`Result(a, e)`](#resulta-e) and [the `let?` operator](#the-let-operator)
+- [Tuples](#tuples)
+- [Lists](#lists)
+- [Atoms](#atoms)
+- [Function Types](#function-types)
+- [Operator Reference](#operator-reference)
+
+**Beyond the basics**
+
+- [Dependent Types](#dependent-types): [refinement types](#refinement-types-value-predicates), [type-level naturals](#type-level-naturals-dimension-constraints), [choosing between the two](#choosing-between-the-two)
+- [Which Safety Tool for Which Job](#which-safety-tool-for-which-job)
+- [What's Inferred, What You Must Write](#whats-inferred-what-you-must-write)
+- [What the Type System Buys at Runtime](#what-the-type-system-buys-at-runtime)
+
+**Reference**
+
+- [The Type Hierarchy at a Glance](#the-type-hierarchy-at-a-glance)
+- [Errors you'll see](#errors-youll-see)
+- [See also](#see-also)
+
+## Which type do I need?
+
+| You want | Write |
+|---|---|
+| A value that is one of several shapes | A variant: `type Shape = Circle(Float) \| Rect(Float, Float)` |
+| A value with named fields | A record: `type User = { name : String, age : Int }` |
+| A value that may be absent | `Option(a)`: `Some(x)` or `None` |
+| An operation that can fail, with the reason | `Result(a, e)`: `Ok(x)` or `Err(e)`, propagated with `let?` |
+| A few values grouped without naming a type | A tuple: `(1, "one")` |
+| A sequence of values of one type | `List(a)`: `[1, 2, 3]` |
+| One type that works for any element type | A type parameter: `type Tree(a) = Leaf \| Node(Tree(a), a, Tree(a))` |
+| A shorter name for a type you already have | An alias: `type Name = String` |
+| A type callers can name but not build or take apart | `opaque type` inside a module; `ptype` hides the name too |
+| A tag from an open-ended set of names | An atom: `:ok`, `:pending` |
+| A number the compiler proves stays in range | A refinement: `{Int \| _ >= 0}` |
+| Two lengths the compiler proves are equal | A type-level natural: `Vector(n, a)` |
+| A resource used exactly once | `linear`; see [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+
+## How it fits with the rest of March
+
+| Concept | Where types meet it | Chapter |
+|---|---|---|
+| **Pattern matching** | `match` takes a variant, record, tuple or list apart by its shape, and checks the arms against the constructors the type declares. | [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/) |
+| **Interfaces** | A `when Ord(a)` constraint limits a type variable to types that implement an interface; `==`, `<` and `show` dispatch through `Eq`, `Ord` and `Show`; `derive` builds those implementations from a type's structure. | [Interfaces]({{ site.baseurl }}/docs/interfaces/) |
+| **Modules** | `opaque type` and `ptype` hide a type's representation outside its module; a type from another module is written `Http.Method`. | [Modules]({{ site.baseurl }}/docs/modules/) |
+| **Refinement types** | `{Int \| _ >= 0}` narrows a type to the values a predicate admits, checked by Z3 at compile time. | [Refinement Types]({{ site.baseurl }}/docs/refinement-types/) |
+| **Linear types** | `linear` and `affine` qualify a type so its values are used exactly once, or at most once. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
+| **Capabilities** | `Cap(IO.Console)` is a type: `main`'s parameter of that type grants the program the console. Capabilities are declared, never inferred. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Memory model** | Static types let the compiler specialize generic code, compile lambdas to plain data, and skip write barriers. | [Memory Model]({{ site.baseurl }}/docs/memory-model/) |
 
 ---
 
@@ -113,7 +190,8 @@ register or a list. Use `Float` (or a bignum library) for wider arithmetic.
 JS number (an IEEE-754 double), which holds integers exactly only within
 **±(2^53 - 1)** (`-9007199254740991` to `9007199254740991`). Inside that
 range every operation listed above gives the same answer as the interpreter
-and native code, including division (truncating), `int_shr` (arithmetic) and
+and native code, including division (truncating; `/` and `%` by zero panic
+with "division by zero" / "modulo by zero"), `int_shr` (arithmetic) and
 `int_popcount` (of the 63-bit pattern). Outside it, the JS target departs
 from the 63-bit rules instead of wrapping:
 
@@ -130,8 +208,6 @@ from the 63-bit rules instead of wrapping:
   when an argument or the result lies outside ±(2^53 - 1), rather than
   return a rounded value. Within the range they are exact on every bit, not
   only the low 32 that JS's own `&`, `|` and `>>` see.
-- **`/` and `%` by zero give `NaN`** instead of panicking (`int_div` and
-  `int_mod` still panic).
 - **`int_max_value()` and `int_min_value()` do not compile** for the JS
   target: ±2^62 has no exact JS number.
 
@@ -141,13 +217,40 @@ a native or wasm target. The decision to treat the JS target as a subset
 rather than emulate 63 bits with `BigInt` is recorded in
 `specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md`.
 
+### Parsing a Float
+
+`string_to_float(s)` (also `float_from_string`, and `String.to_float`, which
+wraps it in a `Result`) returns `Some(f)` exactly when C `strtod` in the "C"
+locale would consume all of `s`, and `None` otherwise. The interpreter, native
+code and `--target js` accept the same strings and round them the same way
+(to nearest, ties to even):
+
+- optional leading whitespace (space, `\t`, `\n`, `\v`, `\f`, `\r`); trailing
+  whitespace is rejected, so `" 1.5"` parses and `"1.5 "` does not;
+- an optional `+` or `-`;
+- then one of: a decimal number, digits with an optional `.` and fraction
+  or a `.` and fraction (`12`, `5.`, `.5`), optionally followed by
+  `e`/`E`, an optional sign and digits; a hex number, `0x`/`0X` then hex
+  digits with an optional `.` and hex fraction, optionally followed by
+  `p`/`P`, an optional sign and decimal digits (`0x10` is `16.`, `0x1p3` is
+  `8.`); `inf` or `infinity`; or `nan`, optionally followed by
+  `(`, letters, digits and `_`, then `)`. The words are case-insensitive.
+
+Nothing else parses: not `""` or `" "`, not `_` separators (`"1_000"`), not
+`0b`/`0o` prefixes, not an exponent without digits (`"1e"`), not an
+embedded NUL. A value too large for a double gives `Some(inf)` (`"1e400"`)
+and one too small gives `Some(0.)`. `"nan"` gives `Some(nan)`, distinct from
+`None`. The accepted set does not depend on the platform's C library: the
+native runtime checks the shape before calling `strtod`.
+
 ---
 
 ## Type Annotations
 
-Annotations are optional everywhere except:
-- Recursive functions where inference would loop
-- When you want explicit documentation
+Annotations are optional: the compiler infers the type of every binding and every
+function, recursive ones included. Write them on a function's parameters and return
+type to document its contract; the compiler then checks the body against what you
+wrote.
 
 ```march
 fn add(x : Int, y : Int) : Int do
@@ -224,9 +327,7 @@ type Config =
   | Custom({ host : String, port : Int, debug : Bool })
 ```
 
----
-
-## Working with Records
+### Updating and destructuring records
 
 Update fields with `{ base with field: value }`: this creates a new record; the original is unchanged:
 
@@ -242,54 +343,6 @@ field, whatever else it has), while a record pattern written directly as a
 function parameter is closed and must name every field. See
 [Pattern Matching](pattern-matching.md#record-patterns) for the syntax,
 punning rules, and why the parameter position differs.
-
----
-
-## Atoms
-
-An atom is a named constant with a value that is its own name. Atoms are written with a leading colon:
-
-```march
-:ok
-:error
-:pending
-:one_for_one
-```
-
-Atoms are commonly used as tags in supervision strategies, HTTP methods, and
-protocol states: an `Atom`-typed value that stores one of a few expected
-names:
-
-```march
-fn describe(status : Atom) : String do
-  match status do
-    :ok      -> "success"
-    :error   -> "failure"
-    :pending -> "in progress"
-    _        -> "unknown"
-  end
-end
-```
-
-All atom literals share the single type `Atom`: `:ok` and `:oke` (a typo)
-both typecheck fine as `Atom`, so a misspelled atom is **not** caught at the
-type level (unlike a misspelled ADT constructor, which is a compile error).
-See `core-march-types.md` §2.2 (P-Atom) for the formal rule: an atom pattern's
-type is the bare, tag-erased `Atom` regardless of the atom's name or payload
-arity.
-
-The grammar also accepts atoms as variant-constructor names in a `type`
-declaration (`type Status = :ok | :error | :pending`, parsed the same as
-`:ok(String)`-style payload variants); but, verified live 2026-07-22, this
-does not build a nominal sum type the way an `UPPER_IDENT`-constructor
-`type` does: a binding annotated `: Status` cannot be constructed or matched
-with `:ok`-style syntax (`` expected `Status` but got `Atom` ``), because
-`:ok` in expression/pattern position always denotes the one ambient `Atom`
-type, and match exhaustiveness against such a `type` declaration is not
-enforced: a `match` over an atom value still needs its own `_` catch-all
-regardless of what `type` declarations exist. Prefer plain ADTs
-(capitalized constructors) when you want an actual closed, exhaustively-
-checked sum type; reserve atoms for open-ended tags as shown above.
 
 ---
 
@@ -356,7 +409,7 @@ already has a type error, since that error is the one to fix first, including
 the `curried_lambda_over_tuple` error for `fn (k, v) -> …` passed where a
 callback over a pair is expected, which names that mistake directly.
 
-Until 2026-10-11 this was a warning, and before 2026-09-22 the body fixed the
+*History:* a warning until 2026-10-11; before 2026-09-22 the body could fix the
 variable silently.
 
 ---
@@ -377,6 +430,43 @@ taking a `String`. The reverse is not always accepted: passing a bare `String`
 where the alias `Name` is expected can be rejected, so don't rely on aliases
 being freely interchangeable in both directions. Use aliases for readability,
 not as a substitute for a distinct wrapper type.
+
+---
+
+## Opaque Types
+
+Hide a type's representation while keeping the name usable in signatures:
+
+```march
+mod Token do
+  opaque type Token = Token(String)
+
+  fn make(s : String) : Token do Token(s) end
+  fn value(t : Token) : String do
+    match t do Token(s) -> s end
+  end
+end
+```
+
+Outside `Token`, callers can use `Token` as a type but cannot construct or pattern-match it directly, only through the module's public API.
+
+For completely hidden types, use `ptype`:
+
+```march
+ptype Internal = Foo | Bar(Int)
+-- Both the type name and constructors are private
+```
+
+---
+
+## Qualified Types
+
+Types from modules are accessed with `.`:
+
+```march
+Http.Request(String)  -- Request is generic over its body type
+Http.Method
+```
 
 ---
 
@@ -541,6 +631,53 @@ List literals desugar to `Cons` chains:
 
 ---
 
+## Atoms
+
+An atom is a named constant with a value that is its own name. Atoms are written with a leading colon:
+
+```march
+:ok
+:error
+:pending
+:one_for_one
+```
+
+Atoms are commonly used as tags in supervision strategies, HTTP methods, and
+protocol states: an `Atom`-typed value that stores one of a few expected
+names:
+
+```march
+fn describe(status : Atom) : String do
+  match status do
+    :ok      -> "success"
+    :error   -> "failure"
+    :pending -> "in progress"
+    _        -> "unknown"
+  end
+end
+```
+
+All atom literals share the single type `Atom`: `:ok` and `:oke` (a typo)
+both typecheck fine as `Atom`, so a misspelled atom is **not** caught at the
+type level (unlike a misspelled ADT constructor, which is a compile error).
+See `core-march-types.md` §2.2 (P-Atom) for the formal rule: an atom pattern's
+type is the bare, tag-erased `Atom` regardless of the atom's name or payload
+arity.
+
+The grammar also accepts atoms as variant-constructor names in a `type`
+declaration (`type Status = :ok | :error | :pending`, parsed the same as
+`:ok(String)`-style payload variants), but this does not build a nominal sum
+type the way a `type` with capitalized constructors does: a binding annotated `: Status` cannot be constructed or matched
+with `:ok`-style syntax (`` expected `Status` but got `Atom` ``), because
+`:ok` in expression/pattern position always denotes the one ambient `Atom`
+type, and match exhaustiveness against such a `type` declaration is not
+enforced: a `match` over an atom value still needs its own `_` catch-all
+regardless of what `type` declarations exist. Prefer plain ADTs
+(capitalized constructors) when you want an actual closed, exhaustively-
+checked sum type; reserve atoms for open-ended tags as shown above.
+
+---
+
 ## Function Types
 
 Function types are written with `->`, right-associative:
@@ -576,13 +713,40 @@ or returned from a function, and applied later is not checked.
 
 ---
 
-## Qualified Types
+## Operator Reference
 
-Types from modules are accessed with `.`:
+| Operator | Types | Description |
+|----------|-------|-------------|
+| `+` `-` `*` `/` | any `Num` (`Int` or `Float`) | Arithmetic: polymorphic, works on either |
+| `%` | `Int` | Integer modulo (monomorphic, `Int` only) |
+| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic, `Float` only) |
+| `==` `!=` | any `Eq` | Equality / inequality |
+| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`, tuples, any type with an `Ord` impl) | Ordering: on a non-primitive type, `a < b` is `compare(a, b) < 0` |
+| `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
+| `++` | `String` | String concatenation |
+| `\|>` | any | Pipe: `x \|> f` is `f(x)` |
+
+**`+` `-` `*` `/` are `Num`-polymorphic: they work on both `Int` and `Float`
+without a dot suffix.** The dot-suffixed forms (`+.` etc.) are the
+*monomorphic* Float-only versions, useful when you want to pin a type down;
+they reject an `Int` operand rather than converting it. `%` has no dot form
+and is `Int`-only in both directions:
 
 ```march
-Http.Request(String)  -- Request is generic over its body type
-Http.Method
+let a = 1.5 +. 2.5   -- Float: correct (monomorphic +.)
+let b = 1.5 + 2.5    -- Float: also correct — + is Num-polymorphic, not Int-only
+let c = 1 +. 2       -- type error: +. is Float-only, rejects Int operands
+let d = 1.5 % 2.0     -- type error: % is Int-only, rejects Float operands
+```
+
+The pipe operator chains transformations left-to-right:
+
+```march
+[1, 2, 3, 4, 5]
+  |> List.filter(fn x -> x % 2 == 0)
+  |> List.map(fn x -> x * x)
+  |> List.fold_left(0, fn (acc, x) -> acc + x)
+-- evaluates to 20
 ```
 
 ---
@@ -692,70 +856,6 @@ argument.
 
 ---
 
-## Opaque Types
-
-Hide a type's representation while keeping the name usable in signatures:
-
-```march
-mod Token do
-  opaque type Token = Token(String)
-
-  fn make(s : String) : Token do Token(s) end
-  fn value(t : Token) : String do
-    match t do Token(s) -> s end
-  end
-end
-```
-
-Outside `Token`, callers can use `Token` as a type but cannot construct or pattern-match it directly, only through the module's public API.
-
-For completely hidden types, use `ptype`:
-
-```march
-ptype Internal = Foo | Bar(Int)
--- Both the type name and constructors are private
-```
-
----
-
-## Operator Reference
-
-| Operator | Types | Description |
-|----------|-------|-------------|
-| `+` `-` `*` `/` | any `Num` (`Int` or `Float`) | Arithmetic: polymorphic, works on either |
-| `%` | `Int` | Integer modulo (monomorphic, `Int` only) |
-| `+.` `-.` `*.` `/.` | `Float` | Float arithmetic (monomorphic, `Float` only) |
-| `==` `!=` | any `Eq` | Equality / inequality |
-| `<` `>` `<=` `>=` | any `Ord` (`Int`, `Float`, `String`) | Ordering |
-| `&&` `\|\|` `!` | `Bool` | Boolean and / or / not |
-| `++` | `String` | String concatenation |
-| `\|>` | any | Pipe: `x \|> f` is `f(x)` |
-
-**`+` `-` `*` `/` are `Num`-polymorphic: they work on both `Int` and `Float`
-without a dot suffix.** The dot-suffixed forms (`+.` etc.) are the
-*monomorphic* Float-only versions, useful when you want to pin a type down;
-they reject an `Int` operand rather than converting it. `%` has no dot form
-and is `Int`-only in both directions:
-
-```march
-let a = 1.5 +. 2.5   -- Float: correct (monomorphic +.)
-let b = 1.5 + 2.5    -- Float: also correct — + is Num-polymorphic, not Int-only
-let c = 1 +. 2       -- type error: +. is Float-only, rejects Int operands
-let d = 1.5 % 2.0     -- type error: % is Int-only, rejects Float operands
-```
-
-The pipe operator chains transformations left-to-right:
-
-```march
-[1, 2, 3, 4, 5]
-  |> List.filter(fn x -> x % 2 == 0)
-  |> List.map(fn x -> x * x)
-  |> List.fold_left(0, fn (acc, x) -> acc + x)
--- evaluates to 20
-```
-
----
-
 ## Which Safety Tool for Which Job
 
 March gives you many ways to make illegal states unrepresentable. Choose by **the
@@ -841,7 +941,7 @@ The static guarantees aren't just for catching bugs: they let the compiler
 
 ```
 Types
-├── Primitives: Int, Float, Bool, String, ()
+├── Primitives: Int, Float, Bool, String, Char, Atom, ()
 ├── Sum types: type Foo = A | B(T) | ...
 ├── Record types: type Foo = { field : T, ... }
 ├── Generic types: type Foo(a) = ...
@@ -856,9 +956,27 @@ Types
 
 ---
 
-## Next Steps
+## Errors you'll see
 
-- [Pattern Matching](pattern-matching.md): destructuring all these types
-- [Linear Types](linear-types.md): ownership and resource safety
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) walks through what the type checker prints for these mistakes, each with a program you can edit and re-check in the browser:
+
+- [A misspelled module name, and the "did you mean" that follows]({{ site.baseurl }}/docs/error-messages/#misspelled-module)
+- [A misspelled record field, matched against the fields the type has]({{ site.baseurl }}/docs/error-messages/#field-by-type)
+- [A misspelled constructor, matched against the variants the type has]({{ site.baseurl }}/docs/error-messages/#constructor-by-type)
+- [A `String` where an `Int` is expected]({{ site.baseurl }}/docs/error-messages/#string-plus-int)
+- [Two types that differ in one place, such as `List(Int)` and `List(String)`]({{ site.baseurl }}/docs/error-messages/#structural-diff)
+- [A call with too few arguments]({{ site.baseurl }}/docs/error-messages/#no-partial-application)
+- [A `let?` block whose last expression is not a `Result`]({{ site.baseurl }}/docs/error-messages/#let-question)
+- [Comparing values of a type that has no `Ord` implementation]({{ site.baseurl }}/docs/error-messages/#missing-impl)
+
+---
+
+## See also
+
+- [Pattern Matching](pattern-matching.md): taking every one of these types apart
+- [Interfaces](interfaces.md): `Eq`, `Ord`, `Show`, `Hash`, `derive`, and constraints on type variables
 - [Refinement Types](refinement-types.md): types that carry a predicate (`{Int | _ >= 0}`), checked by an SMT solver
-- [Interfaces](interfaces.md): ad-hoc polymorphism with `interface`/`impl`
+- [Linear Types](linear-types.md): ownership and resource safety
+- [Safety by Construction](safety-by-construction.md): capabilities, typestate and refinements on one function
+- [`let?`](let-propagation.md): the full reference for `Result` propagation
+- [`core-march-types.md`](core-march-types.md): the formal typing rules for the core language

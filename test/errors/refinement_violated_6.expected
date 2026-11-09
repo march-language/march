@@ -2,13 +2,19 @@ exit: 1
 -- REFINEMENT -------- errors/refinement_violated_6.march
 
 refinement violation: argument `xs` of `List.head` does not satisfy precondition `len(_) > 0` [refinement_violated]
-note: this value never satisfies it; pass one that does
+note: `[]` can never satisfy `len(xs) > 0`; pass a value that does
 
 14 |     List.head([])
          ^^^^^^^^^^^^^
 
+    running `List.head([])` panics: "List.head: empty list"
+    `List.head_opt` is `List.head` without the requirement: it returns `Option` instead of panicking.
+        match List.head_opt([]) do
+          Some(v) -> …
+          None -> …
+        end
 
-    this argument must satisfy `len(_) > 0`:
+    `xs` is `[]` here:
 
 14 |     List.head([])
                    ^^

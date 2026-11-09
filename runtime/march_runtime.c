@@ -38,7 +38,7 @@ static void migrate_msg_free(void *mm);
  * above has already pulled in, so this test is decided by the time we get
  * here.  On musl the only casualty is the symbolic C backtrace in the opt-in
  * MARCH_DEBUG_OOM forensics below; March's own call-stack backtrace
- * (march_print_backtrace) is built from our own frame table and is
+ * (failure_report) is built from the function table and is
  * unaffected. */
 #if !defined(__linux__) || defined(__GLIBC__)
 #define MARCH_HAVE_EXECINFO 1
@@ -2038,38 +2038,6 @@ void march_frame_reset(void) {
     march_call_stack_top = NULL;
 }
 
-/* Print the current call stack to stderr.
- * Stdlib frames (file starting with "stdlib/") are hidden unless
- * MARCH_BACKTRACE=full is set. */
-static void march_print_backtrace(void) {
-    /* Cache getenv on first call so it is safe even if called from a
-       signal handler in future (getenv is not async-signal-safe). */
-    static int show_full = -1;
-    if (show_full < 0) {
-        const char *env = getenv("MARCH_BACKTRACE");
-        show_full = (env && strcmp(env, "full") == 0) ? 1 : 0;
-    }
-    march_frame_t *f = march_call_stack_top;
-    if (!f) return;
-    /* Defer printing the header until we know at least one frame is visible,
-       so an all-stdlib stack produces no output when show_full is 0. */
-    int printed = 0;
-    int i = 0;
-    while (f) {
-        int is_stdlib = strncmp(f->file, "stdlib/", 7) == 0;
-        if (show_full || !is_stdlib) {
-            if (!printed) {
-                fprintf(stderr, "\nStack trace (most recent call first):\n");
-                printed = 1;
-            }
-            fprintf(stderr, "  [%d] %-24s %s:%d\n", i++, f->fn_name, f->file, f->line);
-        }
-        f = f->prev;
-    }
-    if (printed && !show_full)
-        fprintf(stderr, "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n");
-}
-
 /* ── Panic ───────────────────────────────────────────────────────────────── */
 
 /* Forward declaration so march_panic_ext / march_todo_ext can call march_panic
@@ -2207,6 +2175,8 @@ static _Thread_local jmp_buf *diag_tl_jmp = NULL;
 
 static _Thread_local void    *diag_tl_site_file = NULL;
 static _Thread_local int64_t  diag_tl_site_line = 0;
+static _Thread_local int64_t  diag_tl_site_col = 0;
+static _Thread_local int64_t  diag_tl_site_end_col = 0;
 
 static void **diag_ctx_slot(void) {
     march_proc *p = march_sched_current();
@@ -2220,18 +2190,25 @@ static void **diag_ctx_slot(void) {
  * String literal, immortal, so it is kept without a reference.  On the proc,
  * not in TLS: the prelude wrapper between here and march_panic can reach a
  * reduction check and resume on another OS thread. */
-void *march_panic_site(void *file, int64_t line) {
+void *march_panic_site(void *file, int64_t line, int64_t col, int64_t end_col) {
     march_proc *p = march_sched_current();
-    if (p) { p->diag_site_file = file; p->diag_site_line = line; }
-    else   { diag_tl_site_file = file; diag_tl_site_line = line; }
+    if (p) {
+        p->diag_site_file = file; p->diag_site_line = line;
+        p->diag_site_col = col;   p->diag_site_end_col = end_col;
+    } else {
+        diag_tl_site_file = file; diag_tl_site_line = line;
+        diag_tl_site_col = col;   diag_tl_site_end_col = end_col;
+    }
     return NULL;
 }
 
-/* Take (and clear) the recorded site. */
-static int64_t diag_take_site(void **file) {
+/* Take (and clear) the recorded site; [col] and [end_col] are its columns. */
+static int64_t diag_take_site(void **file, int64_t *col, int64_t *end_col) {
     march_proc *p = march_sched_current();
     void   **fslot = p ? &p->diag_site_file : &diag_tl_site_file;
     int64_t *lslot = p ? &p->diag_site_line : &diag_tl_site_line;
+    *col     = p ? p->diag_site_col     : diag_tl_site_col;
+    *end_col = p ? p->diag_site_end_col : diag_tl_site_end_col;
     *file = *fslot;
     int64_t line = *lslot;
     *fslot = NULL;
@@ -2310,8 +2287,28 @@ void march_diag_proc_exit(void *ctx) {
 /* The panic's own stack as return addresses, innermost first.  Native
  * unwinding through the CFI LLVM emits: no per-call instrumentation, and
  * nothing at all is paid by a program that never reports a crash. */
+#ifdef __APPLE__
+/* macOS backtrace() follows frame pointers, which compiled March functions
+ * do not keep, so it lost every caller past the first.  The unwinder reads
+ * the compact unwind info instead (glibc's backtrace() already does). */
+#include <unwind.h>
+typedef struct { void **pcs; int n, max; } diag_unwind_acc;
+static _Unwind_Reason_Code diag_unwind_step(struct _Unwind_Context *c, void *arg) {
+    diag_unwind_acc *a = (diag_unwind_acc *)arg;
+    if (a->n >= a->max) return _URC_END_OF_STACK;
+    void *ip = (void *)_Unwind_GetIP(c);
+    if (!ip) return _URC_END_OF_STACK;
+    a->pcs[a->n++] = ip;
+    return _URC_NO_REASON;
+}
+#endif
+
 static int diag_capture_stack(void **pcs, int max) {
-#ifdef MARCH_HAVE_EXECINFO
+#if defined(__APPLE__)
+    diag_unwind_acc a = { pcs, 0, max };
+    _Unwind_Backtrace(diag_unwind_step, &a);
+    return a.n;
+#elif defined(MARCH_HAVE_EXECINFO)
     return backtrace(pcs, max);
 #else
     (void)pcs; (void)max;
@@ -2562,8 +2559,176 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len,
     free(cbs);
 }
 
+/* ── The unhandled-failure report on stderr ──────────────────────────────
+ * What an unhandled panic prints before the process exits, in the layout of
+ * a compile error (lib/errors/errors.ml's render_diagnostic) and of the
+ * interpreter's report (bin/main.ml's report_runtime_failure): header,
+ * headline with its code, the panic call's source line with a caret, then
+ * the functions it was reached through.  A compiled frame carries its
+ * function's definition line only, so the report shows where each function
+ * starts and says so.  Source lines are read from the file named at compile
+ * time; when it is not there the report gives file:line instead. */
+
+#define MARCH_REPORT_MAX_CALLS 8
+
+/* Line [line] of [file] into [buf], without its newline; 0 if unreadable. */
+static int report_source_line(const char *file, int64_t line, char *buf, size_t cap) {
+    if (!file || !*file || line <= 0) return 0;
+    FILE *f = fopen(file, "r");
+    if (!f) return 0;
+    int64_t n = 1;
+    int ok = 0;
+    while (fgets(buf, (int)cap, f)) {
+        size_t l = strlen(buf);
+        int whole = l > 0 && buf[l - 1] == '\n';
+        if (n == line) {
+            while (l > 0 && (buf[l - 1] == '\n' || buf[l - 1] == '\r')) buf[--l] = '\0';
+            ok = 1;
+            break;
+        }
+        if (whole) n++;
+    }
+    fclose(f);
+    return ok;
+}
+
+static int report_digits(int64_t n) {
+    int d = 1;
+    while (n >= 10) { n /= 10; d++; }
+    return d;
+}
+
+static int report_has_prefix(const char *msg, size_t len, const char *pre) {
+    size_t pl = strlen(pre);
+    return len >= pl && memcmp(msg, pre, pl) == 0;
+}
+
+static void failure_report(const char *msg, size_t len, void *site_file,
+                           int64_t site_line, int64_t col, int64_t end_col) {
+    static int show_full = -1;
+    if (show_full < 0) {
+        const char *env = getenv("MARCH_BACKTRACE");
+        show_full = (env && strcmp(env, "full") == 0) ? 1 : 0;
+    }
+    /* The functions on the stack, innermost first; a recursion's repeats
+     * are one entry. */
+    const march_fn_info *calls[MARCH_DIAG_MAX_FRAMES];
+    int ncalls = 0, hidden = 0;
+    if (fn_table_usable()) {
+        void *pcs[MARCH_DIAG_MAX_FRAMES];
+        int npc = diag_capture_stack(pcs, MARCH_DIAG_MAX_FRAMES);
+        for (int i = 0; i < npc; i++) {
+            const march_fn_info *e = fn_table_lookup((uintptr_t)pcs[i] - 1);
+            if (!e || !e->name || !e->file) continue;
+            if (!show_full && strncmp(e->file, "stdlib/", 7) == 0) { hidden++; continue; }
+            if (ncalls > 0 && calls[ncalls - 1] == e) continue;
+            calls[ncalls++] = e;
+        }
+    }
+    char site_path[1024];
+    site_path[0] = '\0';
+    if (site_file && site_line > 0) {
+        march_string *sf = (march_string *)site_file;
+        size_t l = (size_t)sf->len < sizeof site_path - 1 ? (size_t)sf->len : sizeof site_path - 1;
+        memcpy(site_path, sf->data, l);
+        site_path[l] = '\0';
+    }
+    const char *head_file = site_path[0] ? site_path : (ncalls > 0 ? calls[0]->file : "");
+
+    /* A failed `assert` panics with its own rendered report
+     * (march_assert_fail): print that as it is, then the functions. */
+    int own_report = len >= 3 && memcmp(msg, "-- ", 3) == 0;
+    if (own_report) {
+        fwrite(msg, 1, len, stderr);
+        fputc('\n', stderr);
+        site_path[0] = '\0';
+        goto functions;
+    }
+
+    int dashes = 53 - 7 - (*head_file ? (int)strlen(head_file) + 1 : 0);
+    if (dashes < 2) dashes = 2;
+    fputs("-- RUNTIME ", stderr);
+    for (int i = 0; i < dashes; i++) fputc('-', stderr);
+    if (*head_file) fprintf(stderr, " %s", head_file);
+    fputs("\n\n", stderr);
+
+    const char *pre = PANIC_PREFIX_GET();
+    const char *code = "panic";
+    if (len == 28 && memcmp(msg, "non-exhaustive pattern match", 28) == 0) {
+        fputs("The program panicked: no pattern of this `match` matched.", stderr);
+    } else if (report_has_prefix(msg, len, "assertion failed")) {
+        fputs("An assertion failed", stderr);
+        fwrite(msg + 16, 1, len - 16, stderr);
+    } else if (report_has_prefix(msg, len, "unreachable: ")) {
+        fputs("The program reached code marked `unreachable`: ", stderr);
+        fwrite(msg + 13, 1, len - 13, stderr);
+    } else {
+        if (pre && strcmp(pre, "todo: ") == 0) fputs("The program reached a `todo`: ", stderr);
+        else if (pre) fputs("The program panicked: ", stderr);
+        else { fputs("The program stopped with a run-time error: ", stderr); code = "runtime_error"; }
+        fwrite(msg, 1, len, stderr);
+    }
+    fprintf(stderr, " [%s]\n", code);
+
+functions: ;
+    int shown = ncalls < MARCH_REPORT_MAX_CALLS ? ncalls : MARCH_REPORT_MAX_CALLS;
+    int64_t widest = site_path[0] ? site_line : 0;
+    for (int i = 0; i < shown; i++) if (calls[i]->line > widest) widest = calls[i]->line;
+    int gutter = report_digits(widest);
+    char text[1024];
+
+    if (site_path[0]) {
+        fputc('\n', stderr);
+        if (report_source_line(site_path, site_line, text, sizeof text)) {
+            int64_t tl = (int64_t)strlen(text);
+            fprintf(stderr, "%*lld | %s\n", gutter, (long long)site_line, text);
+            /* A negative column: the site is the enclosing function, not
+             * the failing expression (march_int_overflow), so no caret. */
+            if (col >= 0 && col <= tl) {
+                int64_t stop = (end_col > col && end_col <= tl) ? end_col : tl;
+                int64_t carets = stop - col > 0 ? stop - col : 1;
+                for (int64_t i = 0; i < gutter + 3 + col; i++) fputc(' ', stderr);
+                for (int64_t i = 0; i < carets; i++) fputc('^', stderr);
+                fputc('\n', stderr);
+            } else {
+                fputs("    The failure is inside this function.\n", stderr);
+            }
+        } else {
+            fprintf(stderr, "    at %s:%lld\n", site_path, (long long)site_line);
+        }
+    }
+    if (shown > 0) {
+        fputs("\n    It was reached through these functions, innermost first:\n\n", stderr);
+        const char *prev = head_file;
+        for (int i = 0; i < shown; i++) {
+            const march_fn_info *e = calls[i];
+            if (report_source_line(e->file, e->line, text, sizeof text)) {
+                if (strcmp(e->file, prev) != 0) fprintf(stderr, "    in %s:\n", e->file);
+                fprintf(stderr, "%*lld | %s\n", gutter, (long long)e->line, text);
+            } else {
+                fprintf(stderr, "    `%s`, defined at %s:%lld\n", e->name, e->file,
+                        (long long)e->line);
+            }
+            prev = e->file;
+        }
+        fputc('\n', stderr);
+        if (ncalls > shown)
+            fprintf(stderr, "    %d more not shown.\n", ncalls - shown);
+        fputs("    Each line is where that function starts: a compiled program does not record\n"
+              "    the line of each call, and leaves out functions the optimiser merged into\n"
+              "    their callers. Run the program with `march` instead of compiling it to see\n"
+              "    each call.\n", stderr);
+        if (hidden > 0)
+            fputs("    Functions of the standard library are left out; set MARCH_BACKTRACE=full\n"
+                  "    to see them.\n", stderr);
+    }
+    fputc('\n', stderr);
+}
+
 void march_panic(void *s) {
     march_string *ms = (march_string *)s;
+    void *report_file = NULL;
+    int64_t report_line = 0, site_col = 0, site_end_col = 0;
     /* Diagnostics (see "Diagnostics: crash observers" above).  First: a
      * panic raised by a crash observer itself, outside any try_finally of
      * the observer's own, ends that observer and nothing else. */
@@ -2575,7 +2740,7 @@ void march_panic(void *s) {
          * that longjmp left it set, and the next real crash went
          * unreported.) */
         void *site_file = NULL;
-        int64_t site_line = diag_take_site(&site_file);
+        int64_t site_line = diag_take_site(&site_file, &site_col, &site_end_col);
         int reraise = march_panic_reraise;
         march_panic_reraise = 0;
         jmp_buf **dj = diag_jmp_slot();
@@ -2587,6 +2752,8 @@ void march_panic(void *s) {
                                               : MARCH_DIAG_KIND_PANIC,
                           ms->data, (size_t)ms->len, site_file, site_line);
         }
+        report_file = site_file;
+        report_line = site_line;
     }
     /* In test mode, capture the message and longjmp back to the test runner
        instead of terminating the process. */
@@ -2630,10 +2797,8 @@ void march_panic(void *s) {
                                                         memory_order_relaxed) : 0,
                         -1, 0, ms->data, (size_t)ms->len);
     }
-    fprintf(stderr, "panic: ");
-    fwrite(ms->data, 1, (size_t)ms->len, stderr);
-    fputc('\n', stderr);
-    march_print_backtrace();
+    failure_report(ms->data, (size_t)ms->len, report_file, report_line,
+                   site_col, site_end_col);
     fflush(stderr);
     /* MARCH_CRASH_DUMP: the unsupervised panic leaves a dump (see
      * march_observe_snapshot.c; a no-op when unset). */
@@ -2756,7 +2921,7 @@ void march_int_overflow(int64_t op, const char *file, int64_t line) {
     };
     const char *m = (op >= 0 && op < 4) ? msgs[op] : msgs[0];
     if (file && line > 0)
-        march_panic_site(march_string_lit(file, (int64_t)strlen(file)), line);
+        march_panic_site(march_string_lit(file, (int64_t)strlen(file)), line, -1, 0);
     march_panic(march_string_lit(m, (int64_t)strlen(m)));
     abort();  /* march_panic does not return */
 }
@@ -2788,7 +2953,10 @@ int64_t march_checked_shr(int64_t a, int64_t n) {
    binaries are single-threaded during test execution. */
 jmp_buf  march_test_jmp_buf;
 int      march_test_in_test  = 0;
-char     march_test_fail_buf[4096];
+/* 16 KiB: a failed assertion's report (march_assert_fail) carries a
+   source line, both values and a caret line each, and a property failure
+   (stdlib/check.march) nests one inside its own. */
+char     march_test_fail_buf[16384];
 
 static int  test_verbose    = 0;
 static char test_filter[256] = "";
@@ -2813,6 +2981,53 @@ void march_test_init(int32_t argc, char **argv) {
             strncpy(test_filter, argv[i] + 9, sizeof(test_filter) - 1);
             test_filter[sizeof(test_filter) - 1] = '\0';
         }
+    }
+}
+
+/* The running test's panic header (march_test_header): a rendered
+   `-- TEST FAILURE --` report pointing at its `test "..."` line, with \x01
+   where the panic message goes (lib/errors/test_report.ml, panic_header).
+   The test body sets it first thing (Lower_tests); march_test_run clears
+   it before each test. */
+static const char *test_cur_header = NULL;
+static int64_t     test_cur_header_len = 0;
+
+void *march_test_header(void *header) {
+    march_string *s = (march_string *)header;
+    test_cur_header = s ? s->data : NULL;
+    test_cur_header_len = s ? s->len : 0;
+    return NULL;
+}
+
+/* The message a failed test reports: a rendered report as it is, any
+   other panic message put into the test's panic header. */
+static char *test_failure_message(void) {
+    const char *fail = march_test_fail_buf[0] ? march_test_fail_buf : "assertion failed";
+    if (strncmp(fail, "-- TEST FAILURE ", 16) == 0 || !test_cur_header)
+        return strdup(fail);
+    const char *hole = memchr(test_cur_header, '\x01', (size_t)test_cur_header_len);
+    if (!hole) return strdup(fail);
+    size_t pre = (size_t)(hole - test_cur_header);
+    size_t post = (size_t)test_cur_header_len - pre - 1;
+    size_t fl = strlen(fail);
+    char *m = (char *)malloc(pre + fl + post + 1);
+    memcpy(m, test_cur_header, pre);
+    memcpy(m + pre, fail, fl);
+    memcpy(m + pre + fl, hole + 1, post);
+    m[pre + fl + post] = '\0';
+    return m;
+}
+
+/* Print [msg] with every non-empty line indented by [indent]. */
+static void test_print_indented(const char *indent, const char *msg) {
+    const char *p = msg;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (n > 0) printf("%s%.*s", indent, (int)n, p);
+        printf("\n");
+        if (!nl) break;
+        p = nl + 1;
     }
 }
 
@@ -2875,6 +3090,8 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
     if (setup) setup();
 
     march_test_fail_buf[0] = '\0';
+    test_cur_header = NULL;
+    test_cur_header_len = 0;
     march_test_in_test = 1;
     march_panic_handled = 1;   /* a failing test is not a crash to report */
     void *frame_mark = march_frame_mark();
@@ -2896,8 +3113,10 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
         march_test_in_test = 0;
         march_panic_handled = 0;
         /* Test failed (panic / assertion) */
+        char *msg = test_failure_message();
         if (test_verbose) {
-            printf("  \xe2\x9c\x97 %s\n    %s\n", name, march_test_fail_buf);
+            printf("  \xe2\x9c\x97 %s\n", name);
+            test_print_indented("    ", msg);
             fflush(stdout);
         } else {
             printf("F");
@@ -2905,10 +3124,9 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
         }
         if (test_failure_count < MARCH_TEST_MAX_FAILURES) {
             test_failure_names[test_failure_count] = strdup(name);
-            test_failure_msgs[test_failure_count]  = strdup(
-                march_test_fail_buf[0] ? march_test_fail_buf : "assertion failed");
+            test_failure_msgs[test_failure_count]  = msg;
             test_failure_count++;
-        }
+        } else free(msg);
         test_failed++;
     }
 }
@@ -2919,8 +3137,9 @@ int32_t march_test_report(void) {
     if (test_failed > 0 && !test_verbose) {
         printf("\n%d failure(s):\n\n", test_failure_count);
         for (int i = 0; i < test_failure_count; i++) {
-            printf("FAIL: \"%s\"\n  %s\n\n",
-                   test_failure_names[i], test_failure_msgs[i]);
+            printf("FAIL: \"%s\"\n", test_failure_names[i]);
+            test_print_indented("  ", test_failure_msgs[i]);
+            printf("\n");
             free(test_failure_names[i]);
             free(test_failure_msgs[i]);
         }
@@ -2941,6 +3160,641 @@ int32_t march_test_report(void) {
     return code;
 }
 
+/* ── Test-failure reports: march_assert_fail ─────────────────────────────── */
+/*
+ * __assert_fail(meta, left, right): a failed `assert` in compiled code.
+ * Lowering (Lower_expr's EAssert arm) rendered the report's header at
+ * compile time, the source line and caret included, and passes it in [meta]
+ * with the operator, both sides' source text and a quoting flag per side,
+ * separated by \x1f.  [left] / [right] are the operands' `to_string`.  This
+ * builds the body below the header and panics with the whole report.
+ *
+ * The parser, differ and renderer are a line-for-line port of
+ * lib/errors/test_report.ml, which the interpreter runs; the two must print
+ * byte for byte the same (test/run_test_reports.ml runs every golden case
+ * both ways).  Change one, change the other.
+ *
+ * Only reached when an assertion has already failed, so it favours plain
+ * code over speed and frees what it allocates before panicking.
+ */
+
+typedef struct { char *p; size_t len, cap; } tr_buf;
+
+static void tr_add_n(tr_buf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 64;
+        while (b->len + n + 1 > cap) cap *= 2;
+        b->p = (char *)realloc(b->p, cap);
+        b->cap = cap;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+}
+static void tr_add(tr_buf *b, const char *s) { tr_add_n(b, s, strlen(s)); }
+static char *tr_take(tr_buf *b) {
+    if (!b->p) { tr_add_n(b, "", 0); }
+    char *p = b->p; b->p = NULL; b->len = b->cap = 0; return p;
+}
+static char *tr_dup_n(const char *s, size_t n) {
+    char *p = (char *)malloc(n + 1);
+    memcpy(p, s, n); p[n] = '\0'; return p;
+}
+
+#define TR_ELLIPSIS "\xe2\x80\xa6"
+#define TR_ELIDE_OVER 60
+
+static int tr_cont(char c) { return ((unsigned char)c & 0xc0) == 0x80; }
+
+static int tr_width(const char *s) {
+    int w = 0;
+    for (; *s; s++) if (!tr_cont(*s)) w++;
+    return w;
+}
+
+/* test_report.ml's [clip]: at most [max] columns, the last an ellipsis. */
+static char *tr_clip(const char *s, int max) {
+    if (tr_width(s) <= max) return tr_dup_n(s, strlen(s));
+    tr_buf b = {0};
+    int w = 0;
+    size_t i = 0, n = strlen(s);
+    while (i < n && (w < max - 1 || tr_cont(s[i]))) {
+        if (!tr_cont(s[i])) w++;
+        tr_add_n(&b, s + i, 1);
+        i++;
+    }
+    tr_add(&b, TR_ELLIPSIS);
+    return tr_take(&b);
+}
+
+/* test_report.ml's [quote]. */
+static char *tr_quote(const char *s, size_t n) {
+    tr_buf b = {0};
+    tr_add(&b, "\"");
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        char tmp[8];
+        switch (c) {
+        case '"':  tr_add(&b, "\\\""); break;
+        case '\\': tr_add(&b, "\\\\"); break;
+        case '\n': tr_add(&b, "\\n"); break;
+        case '\t': tr_add(&b, "\\t"); break;
+        case '\r': tr_add(&b, "\\r"); break;
+        default:
+            if (c < 0x20 || c == 0x7f) {
+                snprintf(tmp, sizeof tmp, "\\x%02x", c);
+                tr_add(&b, tmp);
+            } else tr_add_n(&b, (const char *)&s[i], 1);
+        }
+    }
+    tr_add(&b, "\"");
+    return tr_take(&b);
+}
+
+typedef enum { TR_LEAF, TR_STR, TR_LIST, TR_TUPLE, TR_RECORD, TR_CTOR } tr_kind;
+
+typedef struct tr_node {
+    tr_kind kind;
+    char *text;               /* LEAF/STR: the text; CTOR/RECORD: the name ("" none) */
+    const char *sep;          /* RECORD: ": " or " = " */
+    int n;
+    struct tr_node **items;
+    char **keys;              /* RECORD */
+} tr_node;
+
+static tr_node *tr_new(tr_kind k) {
+    tr_node *v = (tr_node *)calloc(1, sizeof(tr_node));
+    v->kind = k; return v;
+}
+
+static void tr_free(tr_node *v) {
+    if (!v) return;
+    for (int i = 0; i < v->n; i++) {
+        tr_free(v->items[i]);
+        if (v->keys) free(v->keys[i]);
+    }
+    free(v->items); free(v->keys); free(v->text); free(v);
+}
+
+static void tr_push(tr_node *v, tr_node *item, char *key) {
+    v->items = (tr_node **)realloc(v->items, sizeof(tr_node *) * (size_t)(v->n + 1));
+    v->items[v->n] = item;
+    if (v->kind == TR_RECORD) {
+        v->keys = (char **)realloc(v->keys, sizeof(char *) * (size_t)(v->n + 1));
+        v->keys[v->n] = key;
+    }
+    v->n++;
+}
+
+typedef struct { const char *s; size_t n, pos; int bad; } tr_parser;
+
+static int tr_is_delim(char c) {
+    return c == ',' || c == '(' || c == ')' || c == '[' || c == ']'
+        || c == '{' || c == '}' || c == '"';
+}
+
+static int tr_is_ident(const char *s) {
+    if (!*s) return 0;
+    if (!(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
+    for (const char *p = s; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.')) return 0;
+    return 1;
+}
+
+/* OCaml's String.trim: ' ', '\012', '\n', '\r', '\t'. */
+static int tr_is_trim(char c) {
+    return c == ' ' || c == '\012' || c == '\n' || c == '\r' || c == '\t';
+}
+static char *tr_trim_dup(const char *s, size_t n) {
+    size_t a = 0, b = n;
+    while (a < b && tr_is_trim(s[a])) a++;
+    while (b > a && tr_is_trim(s[b - 1])) b--;
+    return tr_dup_n(s + a, b - a);
+}
+
+static void tr_skip(tr_parser *p) { while (p->pos < p->n && p->s[p->pos] == ' ') p->pos++; }
+static int tr_peek(tr_parser *p) { return p->pos < p->n ? (unsigned char)p->s[p->pos] : -1; }
+
+static tr_node *tr_value(tr_parser *p);
+
+/* Items up to [close]; NULL on an unreadable sequence. */
+static tr_node *tr_seq(tr_parser *p, tr_kind k, char close) {
+    tr_node *v = tr_new(k);
+    tr_skip(p);
+    if (tr_peek(p) == close) { p->pos++; return v; }
+    for (;;) {
+        tr_node *x = tr_value(p);
+        if (!x) { tr_free(v); return NULL; }
+        tr_push(v, x, NULL);
+        tr_skip(p);
+        int c = tr_peek(p);
+        if (c == ',') { p->pos++; continue; }
+        if (c == close) { p->pos++; return v; }
+        tr_free(v); return NULL;
+    }
+}
+
+static tr_node *tr_fields(tr_parser *p, char *name) {
+    tr_node *v = tr_new(TR_RECORD);
+    v->text = name;
+    v->sep = NULL;
+    tr_skip(p);
+    if (tr_peek(p) == '}') { p->pos++; v->sep = ": "; return v; }
+    for (;;) {
+        tr_skip(p);
+        size_t start = p->pos;
+        while (p->pos < p->n && p->s[p->pos] != ':' && p->s[p->pos] != '='
+               && !tr_is_delim(p->s[p->pos])) p->pos++;
+        int c = tr_peek(p);
+        const char *this_sep = c == ':' ? ": " : c == '=' ? " = " : NULL;
+        if (!this_sep || (v->sep && strcmp(v->sep, this_sep) != 0)) { tr_free(v); return NULL; }
+        v->sep = this_sep;
+        char *key = tr_trim_dup(p->s + start, p->pos - start);
+        if (!tr_is_ident(key)) { free(key); tr_free(v); return NULL; }
+        p->pos++;
+        tr_node *x = tr_value(p);
+        if (!x) { free(key); tr_free(v); return NULL; }
+        tr_push(v, x, key);
+        tr_skip(p);
+        c = tr_peek(p);
+        if (c == ',') { p->pos++; continue; }
+        if (c == '}') { p->pos++; return v; }
+        tr_free(v); return NULL;
+    }
+}
+
+static tr_node *tr_value(tr_parser *p) {
+    tr_skip(p);
+    int c = tr_peek(p);
+    if (c < 0) return NULL;
+    if (c == '"') {
+        size_t start = p->pos;
+        p->pos++;
+        while (p->pos < p->n && p->s[p->pos] != '"') {
+            if (p->s[p->pos] == '\\') p->pos++;
+            p->pos++;
+        }
+        if (p->pos >= p->n) return NULL;
+        p->pos++;
+        tr_node *v = tr_new(TR_STR);
+        v->text = tr_dup_n(p->s + start, p->pos - start);
+        return v;
+    }
+    if (c == '[') { p->pos++; return tr_seq(p, TR_LIST, ']'); }
+    if (c == '(') {
+        p->pos++;
+        tr_node *v = tr_seq(p, TR_TUPLE, ')');
+        if (v && v->n == 0) { v->kind = TR_LEAF; v->text = tr_dup_n("()", 2); }
+        return v;
+    }
+    if (c == '{') { p->pos++; return tr_fields(p, tr_dup_n("", 0)); }
+    if (tr_is_delim((char)c)) return NULL;
+    size_t start = p->pos;
+    while (p->pos < p->n && !tr_is_delim(p->s[p->pos])) p->pos++;
+    char *text = tr_trim_dup(p->s + start, p->pos - start);
+    if (!*text) { free(text); return NULL; }
+    if (p->pos < p->n && p->s[p->pos] == '(' && tr_is_ident(text)) {
+        p->pos++;
+        tr_node *v = tr_seq(p, TR_CTOR, ')');
+        if (!v) { free(text); return NULL; }
+        v->text = text;
+        return v;
+    }
+    if (p->pos < p->n && p->s[p->pos] == '{' && tr_is_ident(text)) {
+        p->pos++;
+        return tr_fields(p, text);
+    }
+    tr_node *v = tr_new(TR_LEAF);
+    v->text = text;
+    return v;
+}
+
+static tr_node *tr_parse(const char *s) {
+    tr_parser p = { s, strlen(s), 0, 0 };
+    tr_node *v = tr_value(&p);
+    if (v) {
+        tr_skip(&p);
+        if (p.pos == p.n) return v;
+        tr_free(v);
+    }
+    v = tr_new(TR_LEAF);
+    v->text = tr_dup_n(s, strlen(s));
+    return v;
+}
+
+static int tr_eq(const tr_node *a, const tr_node *b) {
+    if (a->kind != b->kind || a->n != b->n) return 0;
+    if ((a->text || b->text) && (!a->text || !b->text || strcmp(a->text, b->text) != 0)) return 0;
+    if (a->kind == TR_RECORD && strcmp(a->sep, b->sep) != 0) return 0;
+    for (int i = 0; i < a->n; i++) {
+        if (a->keys && strcmp(a->keys[i], b->keys[i]) != 0) return 0;
+        if (!tr_eq(a->items[i], b->items[i])) return 0;
+    }
+    return 1;
+}
+
+static void tr_print_to(tr_buf *b, const tr_node *v) {
+    switch (v->kind) {
+    case TR_LEAF: case TR_STR: tr_add(b, v->text); return;
+    case TR_LIST: case TR_TUPLE: case TR_CTOR:
+        if (v->kind == TR_CTOR) { tr_add(b, v->text); tr_add(b, "("); }
+        else tr_add(b, v->kind == TR_LIST ? "[" : "(");
+        for (int i = 0; i < v->n; i++) {
+            if (i > 0) tr_add(b, ", ");
+            tr_print_to(b, v->items[i]);
+        }
+        tr_add(b, v->kind == TR_LIST ? "]" : ")");
+        return;
+    case TR_RECORD:
+        if (v->text[0]) { tr_add(b, v->text); tr_add(b, " "); }
+        tr_add(b, "{ ");
+        for (int i = 0; i < v->n; i++) {
+            if (i > 0) tr_add(b, ", ");
+            tr_add(b, v->keys[i]); tr_add(b, v->sep);
+            tr_print_to(b, v->items[i]);
+        }
+        tr_add(b, " }");
+        return;
+    }
+}
+static char *tr_print(const tr_node *v) { tr_buf b = {0}; tr_print_to(&b, v); return tr_take(&b); }
+
+/* A path step: an index into a list / tuple / constructor, or a field. */
+typedef struct { int is_field; int idx; const char *field; } tr_step;
+typedef enum { TRK_WHOLE, TRK_CHARS, TRK_LENGTH } tr_dkind;
+typedef struct {
+    tr_step steps[64]; int nsteps;
+    tr_dkind kind; int chars; int nl, nr;
+} tr_diff;
+
+/* test_report.ml's [first_diff]; [a] and [b] differ.  A path deeper than 64
+   steps stops there and marks the whole part. */
+static void tr_first_diff(const tr_node *a, const tr_node *b, tr_diff *d) {
+    if (d->nsteps >= 64) { d->kind = TRK_WHOLE; return; }
+    int same_shape =
+        (a->kind == TR_LIST && b->kind == TR_LIST)
+        || (a->kind == TR_TUPLE && b->kind == TR_TUPLE && a->n == b->n)
+        || (a->kind == TR_CTOR && b->kind == TR_CTOR && a->n == b->n
+            && strcmp(a->text, b->text) == 0);
+    if (same_shape) {
+        int m = a->n < b->n ? a->n : b->n;
+        for (int i = 0; i < m; i++) {
+            if (!tr_eq(a->items[i], b->items[i])) {
+                d->steps[d->nsteps].is_field = 0;
+                d->steps[d->nsteps].idx = i;
+                d->steps[d->nsteps].field = NULL;
+                d->nsteps++;
+                tr_first_diff(a->items[i], b->items[i], d);
+                return;
+            }
+        }
+        /* Only a list can get here (equal-length tuples / constructors that
+           differ have a differing item). */
+        d->kind = TRK_LENGTH; d->nl = a->n; d->nr = b->n;
+        return;
+    }
+    if (a->kind == TR_RECORD && b->kind == TR_RECORD && a->n == b->n
+        && strcmp(a->text, b->text) == 0) {
+        int keys_same = 1;
+        for (int i = 0; i < a->n; i++)
+            if (strcmp(a->keys[i], b->keys[i]) != 0) { keys_same = 0; break; }
+        if (keys_same) {
+            for (int i = 0; i < a->n; i++) {
+                if (!tr_eq(a->items[i], b->items[i])) {
+                    d->steps[d->nsteps].is_field = 1;
+                    d->steps[d->nsteps].idx = i;
+                    d->steps[d->nsteps].field = a->keys[i];
+                    d->nsteps++;
+                    tr_first_diff(a->items[i], b->items[i], d);
+                    return;
+                }
+            }
+            d->kind = TRK_WHOLE;  /* only the separators differ */
+            return;
+        }
+    }
+    if (a->kind == TR_STR && b->kind == TR_STR) {
+        size_t la = strlen(a->text), lb = strlen(b->text);
+        size_t n = la < lb ? la : lb, i = 0;
+        while (i < n && a->text[i] == b->text[i]) i++;
+        while (i > 0 && tr_cont(a->text[i])) i--;
+        d->kind = TRK_CHARS; d->chars = (int)i;
+        return;
+    }
+    d->kind = TRK_WHOLE;
+}
+
+static char *tr_path_text(const tr_diff *d, const tr_node *root) {
+    tr_buf b = {0};
+    const tr_node *v = root;
+    for (int i = 0; i < d->nsteps; i++) {
+        char tmp[32];
+        if (d->steps[i].is_field) { tr_add(&b, "."); tr_add(&b, d->steps[i].field); }
+        else if (v->kind == TR_LIST) { snprintf(tmp, sizeof tmp, "[%d]", d->steps[i].idx); tr_add(&b, tmp); }
+        else break;  /* a constructor or tuple argument: the carets show the rest */
+        v = v->items[d->steps[i].idx];
+    }
+    return tr_take(&b);
+}
+
+typedef struct {
+    tr_buf b; int col; int mcol, mwidth; int elide;
+    const tr_diff *d; int longer;
+} tr_render;
+
+static void tr_r_add(tr_render *r, const char *s) { tr_add(&r->b, s); r->col += tr_width(s); }
+static void tr_r_add_n(tr_render *r, const char *s, size_t n) {
+    char *t = tr_dup_n(s, n); tr_r_add(r, t); free(t);
+}
+static void tr_r_marked(tr_render *r, const char *s) {
+    int c = r->col; tr_r_add(r, s);
+    int w = tr_width(s);
+    r->mcol = c; r->mwidth = w > 1 ? w : 1;
+}
+static void tr_r_print(tr_render *r, const tr_node *v) {
+    char *s = tr_print(v); tr_r_add(r, s); free(s);
+}
+
+static void tr_r_str(tr_render *r, const char *s, int i) {
+    int n = (int)strlen(s);
+    if (!r->elide || tr_width(s) <= TR_ELIDE_OVER) {
+        tr_r_add_n(r, s, (size_t)i);
+        int j = i + 1;
+        while (j < n && tr_cont(s[j])) j++;
+        char *m = tr_dup_n(s + i, (size_t)(j - i)); tr_r_marked(r, m); free(m);
+        tr_r_add_n(r, s + j, (size_t)(n - j));
+        return;
+    }
+    int back = i, cols = 0;
+    while (back > 1 && cols < 20) { back--; if (!tr_cont(s[back])) cols++; }
+    int fwd = i, fcols = 0;
+    while (fwd < n - 1 && fcols < 30) { fwd++; if (fwd < n && !tr_cont(s[fwd])) fcols++; }
+    while (fwd < n && tr_cont(s[fwd])) fwd++;
+    /* Only the closing quote left: show it rather than an ellipsis. */
+    if (fwd >= n - 1) fwd = n;
+    tr_r_add(r, back > 1 ? "\"" TR_ELLIPSIS : "\"");
+    tr_r_add_n(r, s + back, (size_t)(i - back));
+    int j = i + 1;
+    while (j < n && tr_cont(s[j])) j++;
+    if (j > n) j = n;
+    char *m = tr_dup_n(s + i, (size_t)(j - i)); tr_r_marked(r, m); free(m);
+    int stop = j > fwd ? j : fwd;
+    tr_r_add_n(r, s + j, (size_t)(stop - j));
+    if (stop < n) tr_r_add(r, TR_ELLIPSIS "\"");
+}
+
+static void tr_r_target(tr_render *r, const tr_node *v) {
+    const tr_diff *d = r->d;
+    if (d->kind == TRK_CHARS && v->kind == TR_STR) { tr_r_str(r, v->text, d->chars); return; }
+    if (d->kind == TRK_LENGTH && v->kind == TR_LIST) {
+        int common = d->nl < d->nr ? d->nl : d->nr;
+        tr_r_add(r, "[");
+        if (!r->longer) {
+            if (r->elide && v->n > 0) tr_r_add(r, TR_ELLIPSIS);
+            else for (int j = 0; j < v->n; j++) { if (j > 0) tr_r_add(r, ", "); tr_r_print(r, v->items[j]); }
+            tr_r_marked(r, "]");
+            return;
+        }
+        if (common > 0) {
+            if (r->elide) tr_r_add(r, TR_ELLIPSIS ", ");
+            else for (int j = 0; j < common && j < v->n; j++) { tr_r_print(r, v->items[j]); tr_r_add(r, ", "); }
+        }
+        tr_buf e = {0};
+        if (r->elide) {
+            if (v->n > common) {
+                char *p = tr_print(v->items[common]);
+                char *c = tr_clip(p, TR_ELIDE_OVER);
+                tr_add(&e, c); free(c); free(p);
+                if (v->n > common + 1) tr_add(&e, ", " TR_ELLIPSIS);
+            }
+        } else {
+            for (int j = common; j < v->n; j++) {
+                if (j > common) tr_add(&e, ", ");
+                tr_print_to(&e, v->items[j]);
+            }
+        }
+        char *et = tr_take(&e);
+        tr_r_marked(r, et); free(et);
+        tr_r_add(r, "]");
+        return;
+    }
+    char *p = tr_print(v);
+    if (r->elide) { char *c = tr_clip(p, TR_ELIDE_OVER); free(p); p = c; }
+    tr_r_marked(r, p); free(p);
+}
+
+static void tr_r_go(tr_render *r, const tr_node *v, int step) {
+    const tr_diff *d = r->d;
+    if (step >= d->nsteps) { tr_r_target(r, v); return; }
+    const tr_step *s = &d->steps[step];
+    int i = s->idx;
+    if (i < 0 || i >= v->n) { tr_r_target(r, v); return; }
+    if (v->kind == TR_RECORD && s->is_field) {
+        if (v->text[0]) { tr_r_add(r, v->text); tr_r_add(r, " "); }
+        tr_r_add(r, "{ ");
+        if (r->elide) {
+            if (i > 0) tr_r_add(r, TR_ELLIPSIS ", ");
+            tr_r_add(r, v->keys[i]); tr_r_add(r, v->sep);
+            tr_r_go(r, v->items[i], step + 1);
+            if (i < v->n - 1) tr_r_add(r, ", " TR_ELLIPSIS);
+        } else {
+            for (int j = 0; j < v->n; j++) {
+                if (j > 0) tr_r_add(r, ", ");
+                tr_r_add(r, v->keys[j]); tr_r_add(r, v->sep);
+                if (j == i) tr_r_go(r, v->items[j], step + 1);
+                else tr_r_print(r, v->items[j]);
+            }
+        }
+        tr_r_add(r, " }");
+        return;
+    }
+    if (!s->is_field && (v->kind == TR_LIST || v->kind == TR_TUPLE || v->kind == TR_CTOR)) {
+        if (v->kind == TR_CTOR) { tr_r_add(r, v->text); tr_r_add(r, "("); }
+        else tr_r_add(r, v->kind == TR_LIST ? "[" : "(");
+        if (r->elide) {
+            if (i > 0) tr_r_add(r, TR_ELLIPSIS ", ");
+            tr_r_go(r, v->items[i], step + 1);
+            if (i < v->n - 1) tr_r_add(r, ", " TR_ELLIPSIS);
+        } else {
+            for (int j = 0; j < v->n; j++) {
+                if (j > 0) tr_r_add(r, ", ");
+                if (j == i) tr_r_go(r, v->items[j], step + 1);
+                else tr_r_print(r, v->items[j]);
+            }
+        }
+        tr_r_add(r, v->kind == TR_LIST ? "]" : ")");
+        return;
+    }
+    tr_r_target(r, v);
+}
+
+static void tr_line(tr_buf *b, const char *s) { tr_add(b, s); tr_add(b, "\n"); }
+
+static void tr_label(tr_buf *b, const char *side, const char *src, const char *printed) {
+    /* squash: drop spaces, compare */
+    tr_buf x = {0}, y = {0};
+    for (const char *p = src; *p; p++) if (*p != ' ') tr_add_n(&x, p, 1);
+    for (const char *p = printed; *p; p++) if (*p != ' ') tr_add_n(&y, p, 1);
+    char *xs = tr_take(&x), *ys = tr_take(&y);
+    tr_add(b, "    ");
+    tr_add(b, side);
+    if (src[0] && strcmp(xs, ys) != 0) { tr_add(b, " `"); tr_add(b, src); tr_add(b, "`"); }
+    tr_add(b, "\n");
+    free(xs); free(ys);
+}
+
+static void tr_value_line(tr_buf *b, const char *v, int max) {
+    char *c = tr_clip(v, max);
+    tr_add(b, "        "); tr_add(b, c); tr_add(b, "\n");
+    free(c);
+}
+
+/* test_report.ml's [compare_body]. */
+static char *tr_compare_body(const char *op, const char *lsrc, const char *rsrc,
+                             const char *l, const char *r) {
+    tr_buf b = {0};
+    if (strcmp(op, "!=") == 0) {
+        tr_line(&b, "    Both sides are:");
+        tr_value_line(&b, l, 200);
+    } else if (strcmp(op, "==") == 0 && strcmp(l, r) != 0) {
+        tr_node *lt = tr_parse(l), *rt = tr_parse(r);
+        if (tr_eq(lt, rt)) {
+            tr_label(&b, "left", lsrc, l);  tr_value_line(&b, l, 200);
+            tr_label(&b, "right", rsrc, r); tr_value_line(&b, r, 200);
+        } else {
+            tr_diff d; memset(&d, 0, sizeof d);
+            tr_first_diff(lt, rt, &d);
+            int elide = tr_width(l) > TR_ELIDE_OVER || tr_width(r) > TR_ELIDE_OVER;
+            int nl = d.kind == TRK_LENGTH ? d.nl : 0, nr = d.kind == TRK_LENGTH ? d.nr : 0;
+            for (int side = 0; side < 2; side++) {
+                tr_render rr; memset(&rr, 0, sizeof rr);
+                rr.elide = elide; rr.d = &d;
+                rr.longer = side == 0 ? nl > nr : nr > nl;
+                rr.mwidth = 1;
+                tr_r_go(&rr, side == 0 ? lt : rt, 0);
+                char *text = tr_take(&rr.b);
+                tr_label(&b, side == 0 ? "left" : "right", side == 0 ? lsrc : rsrc,
+                         side == 0 ? l : r);
+                tr_add(&b, "        "); tr_add(&b, text); tr_add(&b, "\n");
+                tr_add(&b, "        ");
+                for (int k = 0; k < rr.mcol; k++) tr_add(&b, " ");
+                for (int k = 0; k < rr.mwidth; k++) tr_add(&b, "^");
+                tr_add(&b, "\n");
+                free(text);
+            }
+            char *where = tr_path_text(&d, lt);
+            char tmp[512];
+            if (d.kind == TRK_LENGTH) {
+                tr_buf what = {0};
+                if (!where[0]) tr_add(&what, "The left list");
+                else { tr_add(&what, "`"); tr_add(&what, where); tr_add(&what, "` on the left"); }
+                char *w = tr_take(&what);
+                tr_line(&b, "");
+                tr_add(&b, "    "); tr_add(&b, w);
+                snprintf(tmp, sizeof tmp, " has %d element%s; on the right it has %d.",
+                         d.nl, d.nl == 1 ? "" : "s", d.nr);
+                tr_line(&b, tmp);
+                free(w);
+            } else if (where[0]) {
+                tr_line(&b, "");
+                tr_add(&b, "    They first differ at `"); tr_add(&b, where); tr_line(&b, "`.");
+            }
+            free(where);
+        }
+        tr_free(lt); tr_free(rt);
+    } else {
+        tr_label(&b, "left", lsrc, l);  tr_value_line(&b, l, 200);
+        tr_label(&b, "right", rsrc, r); tr_value_line(&b, r, 200);
+        if (strcmp(op, "==") == 0) {
+            tr_line(&b, "");
+            tr_line(&b, "    They print the same, so they differ in something printing");
+            tr_line(&b, "    does not show: a custom `Eq` impl, or a Float NaN.");
+        }
+    }
+    if (b.len > 0 && b.p[b.len - 1] == '\n') b.p[--b.len] = '\0';
+    return tr_take(&b);
+}
+
+/* Split [s] at the \x1f separators into at most [max] NUL-terminated copies. */
+static int tr_split(const char *s, size_t n, char **out, int max) {
+    int k = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= n && k < max; i++) {
+        if (i == n || s[i] == '\x1f') {
+            out[k++] = tr_dup_n(s + start, i - start);
+            start = i + 1;
+        }
+    }
+    return k;
+}
+
+void march_assert_fail(void *meta, void *left, void *right) {
+    march_string *ms = (march_string *)meta;
+    char *parts[5] = { NULL, NULL, NULL, NULL, NULL };
+    int k = tr_split(ms->data, (size_t)ms->len, parts, 5);
+    for (int i = k; i < 5; i++) parts[i] = tr_dup_n("", 0);
+    const char *header = parts[0], *op = parts[1], *lsrc = parts[2],
+               *rsrc = parts[3], *flags = parts[4];
+    tr_buf b = {0};
+    tr_add(&b, header);
+    if (op[0]) {
+        march_string *ls = (march_string *)left, *rs = (march_string *)right;
+        char *l = (flags[0] == 'q') ? tr_quote(ls->data, (size_t)ls->len)
+                                    : tr_dup_n(ls->data, (size_t)ls->len);
+        char *r = (flags[0] && flags[1] == 'q') ? tr_quote(rs->data, (size_t)rs->len)
+                                                : tr_dup_n(rs->data, (size_t)rs->len);
+        char *body = tr_compare_body(op, lsrc, rsrc, l, r);
+        tr_add(&b, "\n\n");
+        tr_add(&b, body);
+        free(body); free(l); free(r);
+    }
+    for (int i = 0; i < 5; i++) free(parts[i]);
+    char *msg = tr_take(&b);
+    void *s = march_string_lit(msg, (int64_t)strlen(msg));
+    free(msg);
+    march_panic(s);
+}
+
 /* ── __try_call (C: march_try_call) ─────────────────────────────────────── */
 /*
  * __try_call : (Bool -> Bool) -> Result(Bool, String)
@@ -2955,11 +3809,10 @@ int32_t march_test_report(void) {
  * returns Ok(result) on success or Err(msg) if the call panics (march_panic,
  * a failing assert, division by zero, match failure, etc.).
  *
- * The thunk MUST return an immediate (Bool) — the Ok field is stored in the
- * uniform low-bit-tagged representation ((n << 1) | 1), matching how
- * compiled March reads polymorphic ADT fields.  The Bool-only contract is
- * enforced by the typechecker signature; widening it back to a generic
- * (Bool -> a) would require distinguishing immediate from heap results here.
+ * The thunk returns a Bool in the closure ABI's uniform representation:
+ * an apply function returns `ptr`, and a Bool comes back already tagged
+ * ((b << 1) | 1, so false = 1 and true = 3).  It is stored in the Ok field
+ * verbatim, exactly as __try_call_val stores its value.
  *
  * The closure is a "fn _ -> body" workaround for (Unit -> a): the argument
  * is ignored by the lambda body, so we pass 1 (true).
@@ -3049,14 +3902,14 @@ void *march_try_call(void *thunk) {
     void     **field  = (void **)(result + 16);
     if (!panicked) {
         hdr->tag = 0;                              /* Ok */
-        /* The Ok field is a polymorphic ADT slot, so immediates must use the
-           uniform low-bit tag representation ((n << 1) | 1) that compiled
-           March emits when reading it back (ptrtoint + ashr 1).  The thunk
-           returns a raw Bool (0/1) — __try_call's March type is
-           (Bool -> Bool) -> Result(Bool, String), enforced by the
-           typechecker, so the result here is ALWAYS an immediate; storing a
-           heap pointer through this path would corrupt it. */
-        *field   = (void *)((((intptr_t)ok_result) << 1) | 1);
+        /* The Ok field is a polymorphic ADT slot holding the uniform
+           low-bit tag representation ((n << 1) | 1).  The apply function
+           already returns the Bool in that form (closures return `ptr`), so
+           it is stored verbatim.  Tagging it a second time (as this did
+           until 2026-11-05) turned `false` (1) into 3, which reads back as
+           `true`: every compiled property that returned `false` without
+           panicking passed. */
+        *field   = (void *)ok_result;
     } else {
         hdr->tag = 1;                              /* Err */
         *field   = err_str;
@@ -5141,7 +5994,7 @@ static void hcr_marker_dtor(void *msg, uint32_t epoch) {
  * One record per deploy: for each activated slot, which ring version holds
  * it and what the deploy's schema diff changed.  An actor advancing across
  * several deploys applies each one's state migration, in order; the message
- * path finds the migrate_msg of the deploy that changed the message type.
+ * path chains the migrate_msg of every deploy that changed the message type.
  * The function pointers live in the deploy's .so: callers pin that ring
  * version (march_dispatch_enter_version) and check its epoch before calling,
  * and a version that carries a migration is kept while any older epoch is
@@ -5240,24 +6093,50 @@ static int hcr_log_state_migrations(uint32_t slot, uint32_t from, uint32_t to,
     return n;
 }
 
-/* How many deploys in (from, to] changed [slot]'s message type; with
- * [last] non-NULL, the newest one's migrate_msg entry is written there. */
-static int hcr_log_msg_changes(uint32_t slot, uint32_t from, uint32_t to,
-                               hcr_mig *last) {
+/* How many deploys in (from, to] changed [slot]'s message type (the D30
+ * early-advance test; the conversion path walks hcr_log_msg_chain). */
+static int hcr_log_msg_changes(uint32_t slot, uint32_t from, uint32_t to) {
     int n = 0;
+    pthread_mutex_lock(&g_hcr_log_mu);
+    for (hcr_log_rec *r = g_hcr_log_head; r; r = r->next) {
+        if (r->epoch <= from || r->epoch > to) continue;
+        for (int i = 0; i < r->n; i++)
+            if (r->e[i].slot == slot && r->e[i].msgs_changed) n++;
+    }
+    pthread_mutex_unlock(&g_hcr_log_mu);
+    return n;
+}
+
+/* Every deploy in (from, to] that changed [slot]'s message type, in epoch
+ * order (oldest first), each with its migrate_msg (msg_fn NULL when that
+ * deploy has none).  Chaining them converts a message several message-type
+ * changes old (H6): each deploy's migrate_msg reads the previous build's
+ * format.  Fills [buf] (room for [cap]); with more, *out is malloc'd and the
+ * caller frees it when *out != buf.  Returns the count. */
+static int hcr_log_msg_chain(uint32_t slot, uint32_t from, uint32_t to,
+                             hcr_mig *buf, int cap, hcr_mig **out) {
+    int n = 0;
+    hcr_mig *m = buf;
     pthread_mutex_lock(&g_hcr_log_mu);
     for (hcr_log_rec *r = g_hcr_log_head; r; r = r->next) {
         if (r->epoch <= from || r->epoch > to) continue;
         for (int i = 0; i < r->n; i++) {
             if (r->e[i].slot != slot || !r->e[i].msgs_changed) continue;
-            n++;
-            if (last) {
-                last->epoch = r->epoch; last->ring_idx = r->e[i].ring_idx;
-                last->state_fn = NULL; last->msg_fn = r->e[i].migrate_msg_fn;
+            if (n == cap) {
+                cap *= 2;
+                hcr_mig *g = (hcr_mig *)malloc((size_t)cap * sizeof(*m));
+                if (!g) { fputs("march: out of memory (hot-reload log)\n", stderr); exit(1); }
+                memcpy(g, m, (size_t)n * sizeof(*m));
+                if (m != buf) free(m);
+                m = g;
             }
+            m[n].epoch = r->epoch; m[n].ring_idx = r->e[i].ring_idx;
+            m[n].state_fn = NULL; m[n].msg_fn = r->e[i].migrate_msg_fn;
+            n++;
         }
     }
     pthread_mutex_unlock(&g_hcr_log_mu);
+    *out = m;
     return n;
 }
 
@@ -5629,6 +6508,27 @@ static int64_t g_hcr_none_cell[3] __attribute__((aligned(16))) = {
 #define HCR_DISPATCH 0
 #define HCR_CONSUMED 1
 
+#define HCR_LINK_OK   0   /* *msgp is the converted message (ours) */
+#define HCR_LINK_NONE 1   /* migrate_msg returned None; it consumed the input */
+#define HCR_LINK_GONE 2   /* the link's version is not loaded; *msgp untouched */
+
+/* Run one deploy's migrate_msg on *msgp inside that deploy's version frame,
+ * after checking the ring slot still holds that deploy's version. */
+static int hcr_msg_link(uint32_t slot, const hcr_mig *l, void **msgp) {
+    uint32_t v;
+    if (!march_dispatch_enter_version_frame(slot, (uint32_t)l->ring_idx, &v))
+        return HCR_LINK_GONE;
+    if (march_dispatch_epoch(slot, (uint32_t)l->ring_idx) != l->epoch) {
+        march_dispatch_leave_unit(slot, v);
+        return HCR_LINK_GONE;
+    }
+    void *out = l->msg_fn(*msgp, (void *)g_hcr_none_cell);
+    march_dispatch_leave_unit(slot, v);
+    if (out == (void *)g_hcr_none_cell) return HCR_LINK_NONE;
+    *msgp = out;
+    return HCR_LINK_OK;
+}
+
 /* Apply II.4.6's message rules to a dequeued user message stamped
  * [mepoch].  HCR_DISPATCH: dispatch *msgp (possibly converted) at the
  * actor's epoch; HCR_CONSUMED: deferred, or dropped. */
@@ -5659,7 +6559,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         /* D30: a sender that has already advanced, and a message type that
          * changed in between: this message is in a format the actor's code
          * cannot read.  Move now (the marker, when it comes, is a no-op). */
-        if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch, NULL))
+        if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch))
             return HCR_DISPATCH;
         if (atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0) {
             hcr_defer(meta, *msgp, mepoch, conn, seq);
@@ -5670,38 +6570,63 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
         if (mepoch >= cur) return HCR_DISPATCH;
     }
-    /* An old-format message after the actor moved past a message-type
-     * change (D10): convert it with that deploy's migrate_msg, or drop it. */
+    /* An old-format message after the actor moved past one or more
+     * message-type changes (D10, H6): convert it with each of those deploys'
+     * migrate_msg in turn, oldest first, or drop it. */
     if (mse <= mepoch) return HCR_DISPATCH;
-    hcr_mig mm;
-    int changes = hcr_log_msg_changes(slot, mepoch, cur, &mm);
-    if (changes == 0) return HCR_DISPATCH;
-    if (changes == 1 && mm.msg_fn) {
-        uint32_t v;
-        if (march_dispatch_enter_version_frame(slot, (uint32_t)mm.ring_idx, &v)) {
-            if (march_dispatch_epoch(slot, (uint32_t)mm.ring_idx) == mm.epoch) {
-                void *out = mm.msg_fn(*msgp, (void *)g_hcr_none_cell);
-                march_dispatch_leave_unit(slot, v);
-                if (out != (void *)g_hcr_none_cell) {
-                    *msgp = out;
-                    atomic_fetch_add_explicit(&g_hcr_converted, 1, memory_order_relaxed);
-                    return HCR_DISPATCH;
-                }
-                /* None: dropped on purpose; migrate_msg consumed it. */
-                meta->hcr_dropped++;
-                atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
-                hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
-                return HCR_CONSUMED;
+    hcr_mig mbuf[4], *m;
+    int n = hcr_log_msg_chain(slot, mepoch, cur, mbuf, 4, &m);
+    if (n == 0) return HCR_DISPATCH;
+    char why[160];
+    why[0] = 0;
+    /* Every link must exist before any runs: a chain with a gap drops the
+     * message without running conversions it could not finish. */
+    for (int i = 0; i < n && !why[0]; i++)
+        if (!m[i].msg_fn) {
+            if (n == 1) snprintf(why, sizeof why, "old message format: no migrate_msg for it");
+            else snprintf(why, sizeof why,
+                          "old message format: no migrate_msg for it (message-type change %d of %d has none)",
+                          i + 1, n);
+        }
+    /* Ownership: [msg] is always the one message we own.  A link consumes
+     * its input and returns either a new message (now ours) or the None
+     * cell (nothing left to own); a link we could not enter leaves [msg]
+     * ours, to dispose below. */
+    void *msg = *msgp;
+    for (int i = 0; i < n && !why[0]; i++) {
+        int r = hcr_msg_link(slot, &m[i], &msg);
+        if (r == HCR_LINK_NONE) {
+            if (m != mbuf) free(m);
+            meta->hcr_dropped++;
+            atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
+            if (n == 1) hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
+            else {
+                snprintf(why, sizeof why,
+                         "old message format: migrate_msg returned None (link %d of %d)", i + 1, n);
+                hcr_report_drop(conn, seq, why);
             }
-            march_dispatch_leave_unit(slot, v);
+            return HCR_CONSUMED;
+        }
+        if (r == HCR_LINK_GONE) {
+            if (n == 1) snprintf(why, sizeof why, "old message format: no migrate_msg for it");
+            else snprintf(why, sizeof why,
+                          "old message format: no migrate_msg for it (link %d of %d is no longer loaded)",
+                          i + 1, n);
         }
     }
-    /* No migrate_msg (or two message-type changes in between, which one
-     * conversion cannot bridge): drop and count. */
-    march_actor_msg_dispose(*msgp);
+    if (m != mbuf) free(m);
+    if (!why[0]) {
+        *msgp = msg;
+        /* One converted message, however many links it took. */
+        atomic_fetch_add_explicit(&g_hcr_converted, 1, memory_order_relaxed);
+        return HCR_DISPATCH;
+    }
+    /* A missing or unloaded link: drop what we still own (the original, or
+     * the last link's output) and count it. */
+    march_actor_msg_dispose(msg);
     meta->hcr_dropped++;
     atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
-    hcr_report_drop(conn, seq, "old message format: no migrate_msg for it");
+    hcr_report_drop(conn, seq, why);
     return HCR_CONSUMED;
 }
 
@@ -7859,11 +8784,17 @@ void march_set_actor_caps(void *actor, void *caps) {
     march_reclaim_exit();
 }
 
+/* Returns an OWNED reference: the meta keeps its own, and the dispatch's
+ * Perceus releases the one it reads (a dispatch arm that uses no capability
+ * `dec_rc`s `$caps`). Handing back the meta's reference instead freed the
+ * record on the second message to such an actor and underflowed on a later
+ * one, in every --test build (depot's Pool under conduit's suite). */
 void *march_actor_caps(void *actor) {
     march_reclaim_enter();   /* m: resolved and used inside */
     march_actor_meta *m = find_meta(actor);
     void *caps = m ? atomic_load_explicit(&m->spawn_cap, memory_order_acquire)
                    : NULL;
+    if (caps) march_incrc(caps);
     march_reclaim_exit();
     return caps;
 }
@@ -9463,12 +10394,27 @@ static void inspect_reply(void *request, void *result) {
 /* Answer an inspect request between handlers: run the type's renderer under
  * a crash trap (a render that panics must not kill the actor) and reply
  * Ok(rendered) or Err(why). */
+static void actor_answer_migrate_check(march_actor_meta *meta, march_proc *self,
+                                       void *actor, void *request,
+                                       void *(*check)(void *));
+
 static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
                                  void *actor, void *request) {
     /* Not a message the program sent: take it back out of msgs_in. */
     if (self) atomic_store_explicit(&self->msgs_in,
         atomic_load_explicit(&self->msgs_in, memory_order_relaxed) - 1,
         memory_order_relaxed);
+    /* Field 2: a hot reload's live-data migration check (M10) instead of a
+     * render. */
+    void *(*check)(void *) = NULL;
+    {
+        void *raw = (void *)(uintptr_t)MARCH_FIELD(request, 2);
+        if (raw) memcpy(&check, &raw, sizeof(check));
+    }
+    if (check) {
+        actor_answer_migrate_check(meta, self, actor, request, check);
+        return;
+    }
     uint32_t reg_epoch = 0;
     void *clo = inspect_lookup((void *)(uintptr_t)((int64_t *)actor)[2], &reg_epoch);
     if (!clo || !self) {
@@ -9531,10 +10477,11 @@ void *march_actor_inspect(void *actor, int64_t timeout_ms) {
     MARCH_SET_TAG(reply_ref, MARCH_CALL_REPLY_TAG);
     MARCH_FIELD(reply_ref, 0) = (caller->pid << 1) | 1;
     MARCH_FIELD(reply_ref, 1) = corr;
-    void *request = march_alloc(32);
+    void *request = march_alloc(40);
     MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
     MARCH_FIELD(request, 0) = (int64_t)(uintptr_t)reply_ref;
     MARCH_FIELD(request, 1) = 0;
+    MARCH_FIELD(request, 2) = 0;   /* render, not a migration check */
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -9575,10 +10522,11 @@ int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out) {
     pthread_mutex_init(&w->mu, NULL);
     pthread_cond_init(&w->cv, NULL);
     w->refs = 2;
-    void *request = march_alloc(32);
+    void *request = march_alloc(40);
     MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
     MARCH_FIELD(request, 0) = 0;
     MARCH_FIELD(request, 1) = (int64_t)(uintptr_t)w;
+    MARCH_FIELD(request, 2) = 0;   /* render, not a migration check */
     march_reclaim_enter();
     march_actor_meta *meta = find_meta(actor);
     march_proc *gt = meta ? meta_gt(meta) : NULL;
@@ -9608,6 +10556,164 @@ int march_actor_inspect_external(int64_t pid, int64_t timeout_ms, char **out) {
     if (!done) { *out = strdup("timeout"); return 0; }
     *out = text ? text : strdup("");
     return ok;
+}
+
+/* ── Hot reload M10: the live-data migration check ─────────────────────────
+ * specs/2026-11-04-lemmas-hcr-actors-choreography-design.md §3.3 item 3.
+ * Before ACTIVATE, the reload server runs the NEW build's
+ * __migrate_check_<Actor> (Desugar_migrate_check: migrate_state, then the new
+ * state contract) on a copy of every live actor's state.  It runs on the
+ * actor's own thread between handlers, as an inspect request does (field 2
+ * holds the check), so the state is never read mid-handler.  The state is
+ * incrc'd first: the check owns one reference and releases it, and Perceus
+ * cannot reuse the live record in place.  The answer is Ok(verdict), the
+ * String the check returned ("" holds, "!p" p fails, "?p; q" p and q were not
+ * evaluable), or Err(why) when nothing was checked yet ("behind": the actor
+ * has not reached the current epoch, so its state is not the deployed
+ * shape). */
+static void actor_answer_migrate_check(march_actor_meta *meta, march_proc *self,
+                                       void *actor, void *request,
+                                       void *(*check)(void *)) {
+    if (!self) { inspect_reply(request, mk_err_cstr("no scheduler")); return; }
+    if (meta->dispatch_name_id
+            && atomic_load_explicit(&self->code_epoch, memory_order_relaxed)
+               != march_epoch_current()) {
+        inspect_reply(request, mk_err_cstr("behind"));
+        return;
+    }
+    int64_t *a = (int64_t *)actor;
+    void *state = (void *)(uintptr_t)a[4];
+    void *frame_mark = march_frame_mark();
+    jmp_buf jb;
+    jmp_buf *saved_crash = self->crash_jmp;
+    self->crash_jmp = &jb;
+    void *result;
+    if (setjmp(jb) == 0) {
+        march_incrc(state);
+        void *verdict = check(state);
+        result = mk_ok(verdict);
+    } else {
+        /* The migration (or the contract) panicked on this state: a failed
+         * check, not an unanswered one.  The copy's reference may leak. */
+        march_frame_unwind(frame_mark);
+        const char *m = self->crash_message ? self->crash_message : "panic";
+        size_t mlen = self->crash_message ? self->crash_message_len : 5;
+        char buf[256];
+        snprintf(buf, sizeof buf, "!the migration panicked: %.*s",
+                 (int)(mlen > 200 ? 200 : mlen), m);
+        free(self->crash_message);
+        self->crash_message = NULL;
+        self->crash_message_len = 0;
+        result = mk_ok(march_string_lit(buf, (int64_t)strlen(buf)));
+    }
+    self->crash_jmp = saved_crash;
+    inspect_reply(request, result);
+}
+
+/* Ask one actor to run [check]; 1 sent ([*wp] the waiter to read), 0 the
+ * actor is gone. */
+static int migrate_check_send(march_actor_meta *m, void *(*check)(void *),
+                              inspect_waiter **wp) {
+    inspect_waiter *w = (inspect_waiter *)calloc(1, sizeof *w);
+    if (!w) return 0;
+    pthread_mutex_init(&w->mu, NULL);
+    pthread_cond_init(&w->cv, NULL);
+    w->refs = 2;
+    void *request = march_alloc(40);
+    MARCH_SET_TAG(request, MARCH_SYS_INSPECT_TAG);
+    MARCH_FIELD(request, 0) = 0;
+    MARCH_FIELD(request, 1) = (int64_t)(uintptr_t)w;
+    void *raw; memcpy(&raw, &check, sizeof(raw));
+    MARCH_FIELD(request, 2) = (int64_t)(uintptr_t)raw;
+    march_reclaim_enter();
+    march_proc *gt = meta_gt(m);
+    int rc = gt ? march_sched_send_unlimited(gt, request) : MARCH_SEND_DEAD;
+    march_reclaim_exit();
+    if (rc != MARCH_SEND_OK) {
+        march_decrc(request);
+        w->refs = 1;
+        inspect_waiter_release(w);
+        return 0;
+    }
+    *wp = w;
+    return 1;
+}
+
+int march_hcr_migrate_check(uint32_t slot, void *(*check)(void *), int64_t timeout_ms,
+                            char *out, size_t outsz, int *n_checked, char *unchecked,
+                            size_t unchecked_sz) {
+    *n_checked = 0;
+    if (out && outsz) out[0] = '\0';
+    if (unchecked && unchecked_sz) unchecked[0] = '\0';
+    size_t n = 0;
+    hcr_target *t = hcr_snapshot(slot, &n);
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    int64_t deadline = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 + timeout_ms;
+    int failed = 0;
+    for (size_t i = 0; i < n && !failed; i++) {
+        march_actor_meta *m = t[i].meta;
+        int64_t pid = pe_pid_or_0(m->pe);
+        for (;;) {
+            inspect_waiter *w = NULL;
+            if (!march_is_alive(m->actor) || !migrate_check_send(m, check, &w))
+                break;                                   /* gone: nothing to check */
+            struct timespec dl = { (time_t)(deadline / 1000), (long)(deadline % 1000) * 1000000 };
+            pthread_mutex_lock(&w->mu);
+            while (!w->done)
+                if (pthread_cond_timedwait(&w->cv, &w->mu, &dl) == ETIMEDOUT) break;
+            int done = w->done, ok = w->ok;
+            char *text = w->text;
+            w->text = NULL;
+            pthread_mutex_unlock(&w->mu);
+            inspect_waiter_release(w);
+            if (!done) {
+                snprintf(out, outsz, "pid:%lld timeout", (long long)pid);
+                failed = 1;
+                free(text);
+                break;
+            }
+            if (!ok) {
+                /* "busy" (asked inside a receive) or "behind" (not at the
+                 * current epoch yet): ask again until the deadline. */
+                int retry = text && (!strcmp(text, "busy") || !strcmp(text, "behind"));
+                if (retry) {
+                    free(text);
+                    clock_gettime(CLOCK_REALTIME, &now);
+                    if ((int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 >= deadline) {
+                        snprintf(out, outsz, "pid:%lld timeout", (long long)pid);
+                        failed = 1;
+                        break;
+                    }
+                    struct timespec ms = { 0, 5 * 1000000 };
+                    nanosleep(&ms, NULL);
+                    continue;
+                }
+                if (text && !strcmp(text, "dead")) { free(text); break; }
+                snprintf(out, outsz, "pid:%lld %s", (long long)pid, text ? text : "no answer");
+                failed = 1;
+                free(text);
+                break;
+            }
+            /* Ok(verdict). */
+            if (text && text[0] == '!') {
+                snprintf(out, outsz, "pid:%lld %s", (long long)pid, text + 1);
+                failed = 1;
+            } else {
+                (*n_checked)++;
+                if (text && text[0] == '?' && unchecked && unchecked_sz)
+                    snprintf(unchecked, unchecked_sz, "%s", text + 1);
+            }
+            free(text);
+            break;
+        }
+    }
+    for (size_t i = 0; i < n; i++) {
+        march_decrc(t[i].meta->actor);
+        meta_put(t[i].meta);   /* hcr_snapshot's pin */
+    }
+    free(t);
+    return failed ? -1 : 0;
 }
 
 
@@ -10469,13 +11575,79 @@ void *march_string_last_index_of(void *s, void *sub) {
     return make_none();
 }
 
+/* The string_to_float grammar (#1178): exactly what C99 strtod accepts in the
+ * "C" locale, with the WHOLE string consumed. The interpreter
+ * (lib/eval/eval_builtins.ml, march_float_of_string) and the JS runtime
+ * (runtime/march_runtime.mjs, march_string_to_float) implement the same
+ * grammar; test/native/string_to_float_grammar.march pins all three.
+ *
+ *   ws* [+-]? ( dec | hex | "inf" | "infinity" | "nan" ( "(" [0-9A-Za-z_]* ")" )? )
+ *   dec = ( digit+ ("." digit*)? | "." digit+ ) ( [eE] [+-]? digit+ )?
+ *   hex = "0" [xX] ( xdigit+ ("." xdigit*)? | "." xdigit+ ) ( [pP] [+-]? digit+ )?
+ *   ws  = one of " \t\n\v\f\r" (leading only; trailing whitespace is rejected)
+ *
+ * inf/infinity/nan are case-insensitive. strtod is still what computes the
+ * value; this check exists so the ACCEPTED set doesn't depend on the libc:
+ * macOS's strtod also takes "nan(1 )" (glibc and musl do not), and a plain
+ * strtod stops at an embedded NUL, so "1.5\0x" parsed as 1.5. */
+static int march_ascii_ieq(const char *p, const char *word, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (march_ascii_lower(p[i]) != word[i]) return 0;
+    return 1;
+}
+
+static int march_float_syntax_ok(const char *p, int64_t n) {
+    const char *e = p + n;
+    while (p < e && (*p == ' ' || (*p >= '\t' && *p <= '\r'))) p++;
+    if (p < e && (*p == '+' || *p == '-')) p++;
+    if (p == e) return 0;
+    if (*p == 'i' || *p == 'I') {
+        int64_t r = e - p;
+        if (r == 3) return march_ascii_ieq(p, "inf", 3);
+        if (r == 8) return march_ascii_ieq(p, "infinity", 8);
+        return 0;
+    }
+    if (*p == 'n' || *p == 'N') {
+        if (e - p < 3 || !march_ascii_ieq(p, "nan", 3)) return 0;
+        p += 3;
+        if (p == e) return 1;
+        if (*p++ != '(') return 0;
+        while (p < e && ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z')
+                         || (*p >= 'A' && *p <= 'Z') || *p == '_')) p++;
+        return p + 1 == e && *p == ')';
+    }
+    int hex = 0;
+    if (e - p >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { hex = 1; p += 2; }
+#define MARCH_FLT_DIGIT(c) (((c) >= '0' && (c) <= '9') || \
+    (hex && (((c) >= 'a' && (c) <= 'f') || ((c) >= 'A' && (c) <= 'F'))))
+    int digits = 0;
+    while (p < e && MARCH_FLT_DIGIT(*p)) { p++; digits++; }
+    if (p < e && *p == '.') {
+        p++;
+        while (p < e && MARCH_FLT_DIGIT(*p)) { p++; digits++; }
+    }
+#undef MARCH_FLT_DIGIT
+    if (digits == 0) return 0;
+    if (p < e && (hex ? (*p == 'p' || *p == 'P') : (*p == 'e' || *p == 'E'))) {
+        p++;
+        if (p < e && (*p == '+' || *p == '-')) p++;
+        int ed = 0;
+        while (p < e && *p >= '0' && *p <= '9') { p++; ed++; }
+        if (ed == 0) return 0;
+    }
+    return p == e;
+}
+
 /* Returns Option(Float). Option(Float) stays BOXED (0.0 == raw 0, not niche-safe).
  * None is a heap cell with tag=0; cannot use make_none() which returns raw 0. */
 void *march_string_to_float(void *s) {
     march_string *str = (march_string *)s;
     char *end;
+    if (!march_float_syntax_ok(str->data, str->len)) {
+        return march_alloc(16);  /* boxed None: tag stays 0 */
+    }
     double f = strtod(str->data, &end);
-    if (end == str->data || *end != '\0') {
+    if (end != str->data + str->len) {
         return march_alloc(16);  /* boxed None: tag stays 0 */
     }
     /* Some(f): tag=1, one ptr field at offset 16 holding a march_alloc_float

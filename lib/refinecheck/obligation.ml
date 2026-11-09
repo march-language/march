@@ -83,6 +83,10 @@ type reason =
      call, rewrite the predicate) may be one they already applied.  Naming
      the non-linearity is the only actionable part. *)
   | Unconstrained_subject of string  (* the subject appears in no assumption *)
+  (* A bare actor-message constructor whose name another actor's handler or a
+     variant shares, built where the typechecker recorded no type, so which
+     handler's contract it must meet is unknown.  Payload: the message name. *)
+  | Message_unresolved of string
   | Nonlinear_goal                   (* the goal multiplies two non-literal terms *)
   | Opaque_application of string     (* goal names an undeclared function symbol *)
   (* The goal is a top-level conjunction and the per-conjunct discharge (over
@@ -301,12 +305,21 @@ let uses_of (o : t) : string list = Option.value ~default:[] (Hashtbl.find_opt u
 let set_uses (o : t) (u : string list) : unit = if u <> [] then Hashtbl.replace uses_tbl (uses_key o) u
 
 let record (o : t) : unit =
-  (if o.verdict = Proved && !March_refine.Refine.last_core <> [] then
-     let names =
-       List.filter_map Reflect_state.literal_function !March_refine.Refine.last_core
-       |> List.sort_uniq compare
-     in
-     set_uses o names);
+  (if o.verdict = Proved then
+     let names lits = List.filter_map Reflect_state.literal_function lits |> List.sort_uniq compare in
+     match names !March_refine.Refine.last_core with
+     | _ :: _ as used -> set_uses o used
+     (* The core named no unfolding (congruence alone, I8): the definitions
+        THIS query unfolded, not every one the stage-2 run unfolded (todo
+        2026-10-31-reflection-encoder-gaps, "`uses:` over-approximation"). *)
+     | [] ->
+       (* Declared names keep their SMT-LIB `|…|` quoting; a core is read back
+          unquoted. *)
+       let unquote l =
+         let n = String.length l in
+         if n >= 2 && l.[0] = '|' && l.[n - 1] = '|' then String.sub l 1 (n - 2) else l
+       in
+       set_uses o (names (List.map unquote !March_refine.Refine.last_assumed)));
   log := o :: !log;
   Hashtbl.replace by_span o.span (o :: Option.value ~default:[] (Hashtbl.find_opt by_span o.span))
 
@@ -381,6 +394,7 @@ let reason_name = function
      as many buckets as there are names.  The spelling belongs in the detail. *)
   | Alias_withdrawn _ -> "alias-withdrawn"
   | Unconstrained_subject _ -> "unconstrained-subject"
+  | Message_unresolved _ -> "message-unresolved"
   | Nonlinear_goal -> "nonlinear-goal"
   | Opaque_application _ -> "opaque-application"
   | Partial_conjunct _ -> "partial-conjunct"
@@ -423,6 +437,11 @@ let reason_detail = function
       spelling
   | Unconstrained_subject name ->
     Printf.sprintf "no fact the checker derived constrains `%s`" name
+  | Message_unresolved name ->
+    Printf.sprintf
+      "`%s` is a message of more than one actor (or also a variant), and no \
+       type was recorded here to say which; qualify it as `<Actor>.%s`"
+      name name
   | Nonlinear_goal ->
     "the goal multiplies two non-constant terms, and the solver is incomplete \
      on non-linear integer arithmetic"

@@ -70,7 +70,7 @@ mod HcrSessionB do
     -- failed -- the last is a LOST session.
     fn session(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
       count("started", 1)
-      match Order_Run.initiate_Buyer(c, h, fn (s, st) -> buyer(s, st, 1)) do
+      match Order_Run.initiate_Buyer(h, fn (s, st) -> buyer(s, st, 1)) do
         Ok(Session.Finished) -> count("finished", 1)
         Ok(Session.Drained(_)) -> count("drained", 1)
         Err(SessionNode.NoOffer(_, why)) ->

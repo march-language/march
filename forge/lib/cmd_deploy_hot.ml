@@ -1908,9 +1908,13 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                     d.Schema_diff.actor in
                 let migrate_sym = "__migrate_" ^ actor_mangled in
                 if so_exports_symbol so_path migrate_sym then None
-                else Some (d.Schema_diff.actor, msg)
+                else Some (d.Schema_diff.actor,
+                           msg ^ Schema_diff.not_derived_note new_schemas d.Schema_diff.actor)
             ) actor_diffs
           in
+          List.iter (fun d ->
+              Option.iter (Printf.printf "%s\n%!")
+                (Schema_diff.derived_note new_schemas d.Schema_diff.actor)) actor_diffs;
           if compat_errors <> [] then begin
             List.iter (fun (actor, msg) ->
               Printf.eprintf "forge deploy hot: actor %s — %s\n" actor msg
@@ -1944,7 +1948,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                    `forge hot-reload migrate-msg-stub %s`)\n%!"
                   actor (String.uncapitalize_ascii actor) actor;
                 None
-              | Some f when f = oh -> None
+              | Some f when Schema_diff.same_message_type f oh -> None
               | Some _ -> Some actor) msgs_changed_actors in
           if mm_errors <> [] then begin
             List.iter (fun actor ->
@@ -1957,6 +1961,38 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
           end;
           let msgs_changed actor =
             List.exists (fun (a, _, _) -> a = actor) msgs_changed_actors in
+
+          (* H7: every constructor the running version and this build both
+             name must carry the same actor-message tag, or a message the
+             running version built is misread by the new dispatch (a
+             hash-collision probe moved it).  Checked on every deploy, not
+             only one with contracts: it is a property of the two builds. *)
+          let tag_findings =
+            List.concat_map (fun (actor, (ns : Schema_diff.actor_schema)) ->
+                match List.assoc_opt actor old_schemas with
+                | None -> []
+                | Some os ->
+                  List.map (fun f -> (actor, f)) (Schema_diff.tag_check ~old_s:os ~new_s:ns))
+              new_schemas in
+          (* Never silent: one line per reason, naming every actor it covers
+             (a baseline from an older compiler covers the stdlib's too). *)
+          let unrecorded = List.filter_map (function
+              | (a, Schema_diff.Tags_unrecorded why) -> Some (why, a) | _ -> None) tag_findings in
+          List.iter (fun why ->
+              let actors = List.filter_map (fun (w, a) -> if w = why then Some a else None)
+                  unrecorded in
+              Printf.printf "  NOTE: actor-message tags not compared for %s: %s\n%!"
+                (String.concat ", " actors) why)
+            (List.sort_uniq compare (List.map fst unrecorded));
+          let tag_moved = List.filter_map (function
+              | (actor, Schema_diff.Tag_moved { ctor; old_tag; new_tag }) ->
+                Some (Schema_diff.tag_moved_message ~actor ~ctor ~old_tag ~new_tag)
+              | _ -> None) tag_findings in
+          if tag_moved <> [] then begin
+            List.iter (Printf.eprintf "forge deploy hot: %s\n") tag_moved;
+            Unix.close fd;
+            raise (Failure "actor-message tag moved — deploy aborted")
+          end;
 
           (* Gap #3: migration VC — shell out to march --check-migration. *)
           let march_bin =
@@ -2197,6 +2233,12 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
               in
               if not commit_ok then begin
                 Printf.eprintf "  COMMIT_BATCH failed: %s\n%!" commit_resp;
+                (match String.split_on_char ' ' commit_resp with
+                 | "ERR" :: "migration_check" :: actor :: rest ->
+                   Printf.eprintf
+                     "  refused: %s's new migrate_state fails on its live state (%s); \
+                      nothing was activated\n%!" actor (String.concat " " rest)
+                 | _ -> ());
                 failed := !activated  (* mark all as failed *)
               end
             end else begin
@@ -2981,3 +3023,29 @@ let run_migrate_msg_stub ~actor ?old_path ?new_path () : (string, string) result
       output_string oc (migrate_msg_stub ~actor ~old_h ?new_h ());
       close_out oc;
       Ok out
+
+(** `forge hot-reload check`: what this build establishes for its actors and
+    protocols (lemmas design §1.2, phase B), before a deploy.  Runs
+    `march --check --guarantees` on the project's entry under the project's
+    MARCH_LIB_PATH, against the last deploy's `.schemas.json.prev` when one
+    exists (so a migration is checked against the running version, and a
+    derived one is reported).  Returns march's exit code. *)
+let run_check () : (int, string) result =
+  match Project.load () with
+  | Error m -> Error m
+  | Ok proj ->
+    match Project.entry proj with
+    | Error e -> Error e
+    | Ok entry ->
+      let prev = Filename.concat (Filename.concat proj.Project.root ".march")
+          (proj.Project.name ^ "_hot.so.schemas.json.prev") in
+      let baseline =
+        if Sys.file_exists prev then " --hcr-baseline " ^ Filename.quote prev else "" in
+      let cmd =
+        Printf.sprintf "cd %s && %smarch --check --guarantees%s %s"
+          (Filename.quote proj.Project.root) (Cmd_build.lib_path_env proj) baseline
+          (Filename.quote entry)
+      in
+      (match Unix.system cmd with
+       | Unix.WEXITED n -> Ok n
+       | Unix.WSIGNALED s | Unix.WSTOPPED s -> Error (Printf.sprintf "march killed by signal %d" s))

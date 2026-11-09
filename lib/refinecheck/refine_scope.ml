@@ -195,6 +195,7 @@ let rec known_pos ~vocab (ctx : string list) (e : A.expr) : bool =
    else — an arithmetic subject, a bare variable, a call — is reflected
    without the wrap, so a non-literal divisor there must be [known_pos]. *)
 let bool_shaped (e : A.expr) : bool =
+  if March_ast.Bounded_pred.view e <> None then true else
   match e with
   | A.EApp
       (A.EVar { A.txt = "&&" | "||" | "not" | "==" | "!=" | "<" | "<=" | ">" | ">="; _ }, _, _) ->
@@ -258,9 +259,15 @@ let rec definedness (t : Smt.term) : Smt.term option =
   in
   let all ts = List.fold_left (fun acc c -> conj acc (definedness c)) None ts in
   match t with
+  | Smt.Quant (_, n, sort, guard, body) ->
+    Option.map (fun d -> Smt.Quant (true, n, sort, Smt.BoolLit true, d))
+      (conj (definedness guard) (Option.map (fun d -> Smt.Implies (guard, d)) (definedness body)))
   | Smt.And (a, b) | Smt.Implies (a, b) ->
     conj (definedness a) (Option.map (fun db -> Smt.Implies (a, db)) (definedness b))
   | Smt.Or (a, b) -> conj (definedness a) (Option.map (fun db -> Smt.Or (a, db)) (definedness b))
+  | Smt.App (m, [xs; i]) when m = list_nth_measure ->
+    conj (all [xs; i]) (Some (Smt.And (Smt.Le (Smt.IntLit 0, i),
+      Smt.Lt (i, Smt.App (list_len_measure, [xs])))))
   | Smt.Div (x, d) | Smt.Mod (x, d) -> conj (all [ x; d ]) (Some (Smt.Ne (d, Smt.IntLit 0)))
   | t -> all (Smt.children t)
 
@@ -272,7 +279,7 @@ let rec definedness (t : Smt.term) : Smt.term option =
    down still names the leaf, not each ancestor on the way up. [smt_of] is now
    this function with [Result.to_option] on the outside; the 18 existing
    callers, which want only the [option], are unchanged. *)
-let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~resolve_var
+let rec smt_of_r_marked ?(logical_binders = []) ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~resolve_var
     ~resolve_measure
     ?(resolve_field = fun _ _ -> None)
     ?(resolve_measure_app = fun _ _ -> None) ?(resolve_tester = fun _ _ -> None)
@@ -284,7 +291,7 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
      [total_div]: set by [smt_of_r] for a [bool_shaped] predicate, which it
      wraps in [definedness]; only then may a divisor be an arbitrary term. *)
   let r_in nonneg =
-    smt_of_r_marked ~vocab ~nonneg ~total_div ~resolve_var ~resolve_measure ~resolve_field
+    smt_of_r_marked ~logical_binders ~vocab ~nonneg ~total_div ~resolve_var ~resolve_measure ~resolve_field
       ~resolve_measure_app ~resolve_tester ~resolve_str_lit ~resolve_measure_call
   in
   let r = r_in nonneg in
@@ -294,9 +301,82 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
     | Error e, _ -> Error e
     | _, Error e -> Error e
   in
-  match e with
+  match March_ast.Bounded_pred.view e with
+  | Some q ->
+    if !Reflect_state.active && not !Reflect_state.arm_on then Reflect_state.frontier_seen := true;
+    let vocab = true in
+    let r = smt_of_r_marked ~logical_binders ~vocab ~nonneg ~total_div ~resolve_var ~resolve_measure ~resolve_field
+      ~resolve_measure_app ~resolve_tester ~resolve_str_lit ~resolve_measure_call in
+    let stem = Printf.sprintf "$quant$%d$%d" q.binder.span.start_line q.binder.span.start_col in
+    let rec fresh n =
+      let name = if n = 0 then stem else stem ^ "$" ^ string_of_int n in
+      if List.mem name logical_binders then fresh (n + 1) else name in
+    let name = fresh 0 in
+    let variable = Smt.Const name in
+    let inner x = if x = q.binder.txt then Some variable else resolve_var x in
+    let inner_measure m x =
+      if x <> q.binder.txt then resolve_measure m x
+      else if m = "len" then Some (Smt.App (list_len_measure, [variable]))
+      else if m = elts_measure then Some (Smt.App (list_elts_measure, [variable]))
+      else if is_axiom_measure m then Some (Smt.App (m, [variable]))
+      else None in
+    let inner_field x f = if x = q.binder.txt then None else resolve_field x f in
+    (* These two resolvers receive RAW argument expressions and resolve their
+       names in the enclosing scope, where the binder is unknown (or names a
+       different, free variable).  A binder-dependent call or tester would
+       become one constant shared by every instance of the quantifier, so
+       refuse it: the predicate is then skipped, never wrongly assumed. *)
+    let mentions_binder e = March_ast.Bounded_pred.may_mention q.binder.txt e in
+    let inner_measure_call m f cargs =
+      if List.exists mentions_binder cargs then None else resolve_measure_call m f cargs in
+    let inner_tester ctor arg = if mentions_binder arg then None else resolve_tester ctor arg in
+    let body = smt_of_r_marked ~logical_binders:(name :: logical_binders) ~vocab ~nonneg:[] ~total_div:true ~resolve_var:inner
+      ~resolve_measure:inner_measure ~resolve_field:inner_field ~resolve_measure_app ~resolve_tester:inner_tester
+      ~resolve_str_lit ~resolve_measure_call:inner_measure_call q.body in
+    let domain = match q.domain with
+      | March_ast.Bounded_pred.Range (lo, hi) ->
+        (match r lo, r hi with
+         | Ok lo, Ok hi -> Ok (Smt.SInt, Smt.And (Smt.Le (lo, variable), Smt.Lt (variable, hi)))
+         | Error e, _ | _, Error e -> Error e)
+      | March_ast.Bounded_pred.Elements set ->
+        Result.map (fun s -> (Smt.set_unknown_elem, Smt.SetMem (variable, s))) (r set) in
+    (match domain, body with
+     | Ok (sort, guard), Ok body -> Ok (Smt.Quant (q.kind = March_ast.Bounded_pred.Forall, name, sort, guard, body))
+     | Error e, _ | _, Error e -> Error e)
+  | None -> match e with
   | A.ELit (A.LitInt n, _) -> Ok (Smt.IntLit n)
   | A.ELit (A.LitBool b, _) -> Ok (Smt.BoolLit b)
+  (* A record literal with no parameter to type it (`== { x: 1, y: n }`): the
+     one record whose fields are exactly these names, when exactly one
+     unambiguous record declares that set; any other literal declines.  A
+     literal at a reflected call's record parameter is typed by the parameter
+     (the reflected-call arm below).  The field terms' sorts are checked by
+     the query's well-sortedness test like any other term's. *)
+  | A.ERecord (fs, _) -> (
+    let given = List.sort compare (List.map (fun ((n : A.name), _) -> n.A.txt) fs) in
+    let cands =
+      Hashtbl.fold
+        (fun adt ctors acc ->
+          match ctors with
+          | [ ctor ] when (not (Hashtbl.mem ambiguous_adts adt)) && Hashtbl.mem ctor_field_names ctor
+                          && Hashtbl.find_opt adt_arity adt |> Option.value ~default:0 = 0
+                          && List.sort compare (Hashtbl.find ctor_field_names ctor) = given ->
+            (adt, ctor) :: acc
+          | _ -> acc)
+        adt_ctors []
+    in
+    match cands with
+    | [ (adt, ctor) ] when List.length (List.sort_uniq compare given) = List.length given ->
+      let names = Hashtbl.find ctor_field_names ctor in
+      let rec all = function
+        | [] -> Ok []
+        | n :: rest ->
+          (match r (snd (List.find (fun ((m : A.name), _) -> m.A.txt = n) fs)) with
+           | Ok t -> Result.map (fun ts -> t :: ts) (all rest)
+           | Error e -> Error e)
+      in
+      Result.map (ctor_term adt ctor) (all names)
+    | _ -> Error e)
   (* A zero-argument constant function IS its literal (see [const_fns]);
      `_ < size_x()` reflects exactly as `_ < 128` does. *)
   | A.EApp (A.EVar { A.txt = f; _ }, [], _) when is_const_fn f ->
@@ -366,6 +446,8 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
      literal `empty`.  A set term's ELEMENT sort is left as the placeholder and
      unified per VC by [resolve_set_sorts], so no resolver here needs to know
      what a list holds. *)
+  | A.EApp (A.EVar { A.txt = "nth"; _ }, [xs; i], _) when vocab ->
+    b2 (fun xs i -> Smt.App (list_nth_measure, [xs; i])) xs i
   | A.EApp (A.EVar { A.txt = "member"; _ }, [ x; st ], _) when vocab -> b2 (fun x s -> Smt.SetMem (x, s)) x st
   | A.EApp (A.EVar { A.txt = "union"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetUnion (x, y)) a b
   | A.EApp (A.EVar { A.txt = "inter"; _ }, [ a; b ], _) when vocab -> b2 (fun x y -> Smt.SetInter (x, y)) a b
@@ -404,6 +486,15 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
        (match resolve_source_ctor ?adt:(tc_adt_at sp) ctor with
         | Some (adt, k) -> Ok (ctor_term adt k ts)
         | None -> Error e))
+  (* A tuple literal: the tuple datatype's one constructor (S3 tuples).  The
+     datatype is named by arity, so it needs no type at the site. *)
+  | A.ETuple ((_ :: _ :: _ as xs), _) ->
+    let reflected = List.map r xs in
+    (match List.find_map (function Error e -> Some e | Ok _ -> None) reflected with
+     | Some e -> Error e
+     | None ->
+       let n = List.length xs in
+       Ok (ctor_term (tuple_adt n) (tuple_ctor n) (List.map (function Ok t -> t | Error _ -> assert false) reflected)))
   (* Field access on a bare variable: s.count → selector applied to s.
      Only EVar receivers are supported; complex receivers conservatively return
      None — safe under the definite-failure soundness stance. *)
@@ -478,14 +569,39 @@ let rec smt_of_r_marked ?(vocab = true) ?(nonneg = []) ?(total_div = false) ~res
     else
       let sym = Option.get (Reflect_state.resolve_site csp) in
       let args = Reflect_state.args_at csp args in
-      let arity = match Reflect_state.sig_of sym with Some s -> List.length s.Reflect_state.fs_params | None -> -1 in
-      if List.length args <> arity then Error e
+      let psorts = match Reflect_state.sig_of sym with Some s -> s.Reflect_state.fs_params | None -> [] in
+      if List.length args <> List.length psorts || psorts = [] then Error e
       else
+        (* A construction filling a parameter of a known datatype is that
+           datatype's constructor, though another declares the name too
+           (`Reply`, also `Channel.HandleResult`'s): no other reading of the
+           call is well-typed.  Never through a conflated short name. *)
         let rec all = function
           | [] -> Ok []
-          | a :: rest -> (match r a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+          | a :: rest -> (match a with Ok t -> Result.map (fun ts -> t :: ts) (all rest) | Error e -> Error e)
+        and arg a p =
+          match a, p with
+          | A.ECon ({ A.txt = c; _ }, fargs, _), Smt.SData (adt, _)
+            when (not (Hashtbl.mem ambiguous_adts adt)) && ctor_of_adt adt c <> None ->
+            Result.map (ctor_term adt (Option.get (ctor_of_adt adt c))) (all (List.map r fargs))
+          (* A tuple literal at a tuple parameter, a record literal naming
+             every field at a record parameter: the datatype's constructor. *)
+          | A.ETuple ((_ :: _ :: _ as xs), _), Smt.SData (adt, _)
+            when adt = Printf.sprintf "$Tup%d" (List.length xs) ->
+            Result.map (ctor_term adt (tuple_ctor (List.length xs))) (all (List.map r xs))
+          | A.ERecord (fs, _), Smt.SData (adt, _) when not (Hashtbl.mem ambiguous_adts adt) -> (
+            match Hashtbl.find_opt adt_ctors adt with
+            | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor ->
+              let names = Hashtbl.find ctor_field_names ctor in
+              let given = List.map (fun ((n : A.name), _) -> n.A.txt) fs in
+              if List.sort compare given <> List.sort compare names then r a
+              else
+                Result.map (ctor_term adt ctor)
+                  (all (List.map (fun n -> r (snd (List.find (fun ((m : A.name), _) -> m.A.txt = n) fs))) names))
+            | _ -> r a)
+          | _ -> r a
         in
-        Result.map (fun ts -> Smt.App (sym, ts)) (all args)
+        Result.map (fun ts -> Smt.App (sym, ts)) (all (List.map2 arg args psorts))
   | _ -> Error e
 
 (* Every predicate and guard is marked once, here at the entry, so the
@@ -548,9 +664,44 @@ let law_method_display (s : string) : string =
     cut 0
   else s
 
-let rec pred_str (e : A.expr) : string =
-  let binop op a b = pred_str a ^ " " ^ op ^ " " ^ pred_str b in
-  match e with
+(* The levels follow parser.mly's expr_or through expr_field. Comparisons
+   are non-associative; every other binary level associates to the left. *)
+let pred_infix_precedence = function
+  | "||" -> Some 1
+  | "&&" -> Some 2
+  | ">=" | "<=" | ">" | "<" | "==" | "!=" -> Some 3
+  | "+" | "-" | "+." | "-." -> Some 4
+  | "*" | "/" | "%" | "*." | "/." -> Some 5
+  | _ -> None
+
+let rec pred_precedence = function
+  | A.ERefineMsg (inner, _, _) -> pred_precedence inner
+  | A.EApp (A.EVar { A.txt = op; _ }, [ _; _ ], _) ->
+    Option.value (pred_infix_precedence op) ~default:7
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ _ ], _) -> 6
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ _ ], sp)
+    when !Reflect_state.negate_builtin_at sp -> 6
+  | A.EApp _ -> 7
+  | A.EField _ -> 8
+  | _ -> 9
+
+let rec pred_str (e : A.expr) : string = pred_str_prec 0 e
+and pred_str_prec context (e : A.expr) : string =
+  let precedence = if March_ast.Bounded_pred.view e <> None then 0 else pred_precedence e in
+  let binop op a b =
+    (* Even associative operators retain right-nested grouping: the report
+       should reparse to the original tree, not merely an equivalent one. *)
+    let left_context = if precedence = 3 then precedence + 1 else precedence in
+    pred_str_prec left_context a ^ " " ^ op ^ " " ^ pred_str_prec (precedence + 1) b
+  in
+  let rendered = match March_ast.Bounded_pred.view e with
+  | Some q ->
+    let domain = match q.domain with
+      | March_ast.Bounded_pred.Range (lo, hi) -> pred_str lo ^ ".." ^ pred_str hi
+      | March_ast.Bounded_pred.Elements set -> pred_str set in
+    (if q.kind = March_ast.Bounded_pred.Forall then "forall " else "exists ")
+    ^ q.binder.txt ^ " in " ^ domain ^ ", " ^ pred_str q.body
+  | None -> match e with
   (* Only an undesugared predicate still carries an author message
      ([March_ast.Refine_msg]); the text is the conjunct's alone, so
      [Refine_audit.desugar_dropped] matches it against the desugared copy. *)
@@ -577,20 +728,16 @@ let rec pred_str (e : A.expr) : string =
   | A.ECon ({ A.txt = ctor; _ }, args, _) ->
     ctor ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.EVar { A.txt; _ } -> if txt = set_empty_literal then "empty" else law_method_display txt
-  | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str recv ^ "." ^ fname
+  | A.EField (recv, { A.txt = fname; _ }, _) -> pred_str_prec 8 recv ^ "." ^ fname
   | A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
                              | "+" | "-" | "*" | "/" | "%" | "+." | "-." | "*." | "/.") as op; _ },
             [ a; b ], _) ->
     binop op a b
-  (* `!` binds tighter than any infix operator, so `!(y > 0)` printed flat
-     as `!y > 0` would name a different predicate (an instantiated `!p(_)`
-     slot is the common producer, leftovers design §3.2). *)
-  | A.EApp (A.EVar { A.txt = "not"; _ },
-            [ (A.EApp (A.EVar { A.txt = ("&&" | "||" | ">=" | "<=" | ">" | "<" | "==" | "!="
-                                       | "+" | "-" | "*" | "/" | "%"); _ }, [ _; _ ], _) as a) ], _) ->
-    "!(" ^ pred_str a ^ ")"
-  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str a
-  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp -> "-" ^ pred_str a
+  | A.EApp (A.EVar { A.txt = "not"; _ }, [ a ], _) -> "!" ^ pred_str_prec 6 a
+  | A.EApp (A.EVar { A.txt = "negate"; _ }, [ a ], nsp) when !Reflect_state.negate_builtin_at nsp ->
+    let operand = pred_str_prec 6 a in
+    (* Adjacent minus signs would begin a line comment. *)
+    "-" ^ (if String.starts_with ~prefix:"-" operand then "(" ^ operand ^ ")" else operand)
   (* Any other application of a plain IDENTIFIER — an unrecognised predicate
      such as `is_prime(_)`.  It reflects to nothing, so it is exactly the case
      `cap verified` reports, and rendering it `<predicate>` would name the
@@ -602,7 +749,12 @@ let rec pred_str (e : A.expr) : string =
          && (match f.[0] with 'a' .. 'z' | 'A' .. 'Z' | '_' -> true | _ -> false) ->
     law_method_display f ^ "(" ^ String.concat ", " (List.map pred_str args) ^ ")"
   | A.ETuple ([], _) -> "()"
-  | _ -> "<predicate>"
+  | A.ETuple (xs, _) -> "(" ^ String.concat ", " (List.map pred_str xs) ^ ")"
+  (* A record literal, as written (field order kept). *)
+  | A.ERecord (fs, _) ->
+    "{ " ^ String.concat ", " (List.map (fun ((n : A.name), v) -> n.A.txt ^ ": " ^ pred_str v) fs) ^ " }"
+  | _ -> "<predicate>" in
+  if precedence < context then "(" ^ rendered ^ ")" else rendered
 
 (* Why a `/`/`%` leaf did not reflect, for the `unreflectable-predicate`
    detail and the definition-site warning; [None] for any other leaf.  Since
@@ -879,9 +1031,13 @@ let refined_param_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, Some bool_sort)
   | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
     Some (binder_name binder, pred, Some float_sort)
-  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, targs) as base), binder, pred))
     when is_adt_base base ->
-    Some (binder_name binder, pred, Some (adt_sort_name name))
+    Some (binder_name binder, pred, Some (adt_sort_name ~arity:(List.length targs) name))
+  (* A tuple (S3): the tuple datatype, named by [tuple_adt] so it is
+     registered before any query declares a constant at it. *)
+  | Some (A.TyRefine (A.TyTuple (_ :: _ :: _ as ts), binder, pred)) ->
+    Some (binder_name binder, pred, Some (tuple_adt (List.length ts)))
   | _ -> None
 
 (* A function's declared RETURN refinement together with the SMT sort of the
@@ -902,9 +1058,9 @@ let return_refine_sorted (fd : A.fn_def) : (string * A.expr * string option) opt
     Some (binder_name binder, pred, Some bool_sort)
   | Some (A.TyRefine (base, binder, pred)) when is_float_base base ->
     Some (binder_name binder, pred, Some float_sort)
-  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, _) as base), binder, pred))
+  | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, targs) as base), binder, pred))
     when is_adt_base base ->
-    Some (binder_name binder, pred, Some (adt_sort_name name))
+    Some (binder_name binder, pred, Some (adt_sort_name ~arity:(List.length targs) name))
   (* A lemma's `{Unit | P}` (reflection design §4.1): [P] never mentions the
      unit value (L1), so the result's sort is never read; the declared theorem
      is what a call admits once the lemma is proved. *)
@@ -1106,6 +1262,16 @@ let is_string_param_ty : A.ty option -> bool = function
    every parameter was declared at before, so nothing but Bool (and later
    Float) changes behaviour.  Driven by the DECLARED type, never by the actual:
    an unknown must stay unknown rather than be guessed from its argument. *)
+(* The record sort a parameter's declared type names, refined or not: `p : Pt`
+   and `p : {Pt | _.x > 0}` both answer Pt's sort name, a non-record [None]. *)
+let record_sort_of_param_ty (t : A.ty option) : string option =
+  match Option.map unlinear t with
+  | Some (A.TyRefine (b, _, _)) | Some b ->
+    (match b with
+     | A.TyCon ({ A.txt = name; _ }, []) when is_record_base b -> Some (adt_sort_name name)
+     | _ -> None)
+  | None -> None
+
 let scalar_sort_of_param_ty (t : A.ty option) : Smt.sort =
   let base = match t with Some (A.TyRefine (b, _, _)) -> Some b | t -> t in
   match base with
@@ -1133,7 +1299,7 @@ let refined_scope_ty : A.ty option -> (string * A.expr * string option) option =
     Some (binder_name binder, pred, Some float_sort)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as base), binder, pred))
     when is_record_base base ->
-    Some (binder_name binder, pred, Some (adt_sort_name name))
+    Some (binder_name binder, pred, Some (adt_sort_name ~arity:0 name))
   (* Any OTHER registered ADT — `List(Int)`, `List(a)`, a user `Tree` — at the
      MEASURE-ONLY marker.  The record arm above wins for a record, so this arm
      sees variants and applied type constructors only.
@@ -1218,6 +1384,7 @@ let rec expr_mentions (names : string list) (e : A.expr) : bool =
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> expr_mentions names a || expr_mentions names b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> expr_mentions names e
+  | A.EProof (p, _) -> List.exists (expr_mentions names) (A.proof_children p)
 
 (* Does the local function [n] ESCAPE in [e] — occur anywhere other than as
    the head of a call `n(...)`?  Passed as a value (`apply(n, 0)`), returned,
@@ -1275,6 +1442,7 @@ let rec name_escapes ?(pass_checked : string -> int -> bool = fun _ _ -> false) 
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> esc a || esc b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> esc e
+  | A.EProof (p, _) -> List.exists (esc) (A.proof_children p)
 
 (* Does [e] mention [m] FREE — an occurrence not captured by an intervening
    binder of the same name?
@@ -1337,6 +1505,7 @@ let rec expr_mentions_free (m : string) (e : A.expr) : bool =
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
+  | A.EProof (p, _) -> List.exists (free) (A.proof_children p)
 
 (* The path-context companion to [scope_shadow].  A path condition is recorded
    against a VARIABLE NAME (`is_None(x)`, `x < 0`); when an inner scope rebinds
@@ -1421,6 +1590,32 @@ let arm_excludes_nested (br : A.branch) : (string * int * string) option =
 
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
+
+(* ── List-pattern facts (2026-11-08) ──────────────────────────────────────
+   Reaching a `Nil ->` arm of `match xs` means `elts(xs)` is empty, and a
+   `Cons(h, t) ->` arm means `elts(xs) == union(singleton(h), elts(t))`,
+   whatever arm order.  The walk used to put only the opaque marker there, so
+   a Bool-valued `_ == member(x, elts(xs))` over a list match had nothing
+   connecting `elts(xs)` to the arm.  The fact is a PREDICATE, not program
+   text, so it is tagged and read with the set vocabulary on
+   ([is_pattern_fact]); the path translators otherwise read conditions with
+   it off, since `union` in a guard is the user's function. *)
+let pattern_fact_file = "<pattern-fact>"
+
+let is_pattern_fact (e : A.expr) : bool =
+  match e with A.EApp (_, _, sp) -> sp.A.file = pattern_fact_file | _ -> false
+
+let list_pattern_fact (scrut : A.expr) (pat : A.pattern) : A.expr option =
+  let sp = { A.dummy_span with A.file = pattern_fact_file } in
+  let v n = A.EVar { A.txt = n; A.span = sp } in
+  let app f args = A.EApp (v f, args, sp) in
+  match scrut, pat with
+  | A.EVar { A.txt = xs; _ }, A.PatCon ({ A.txt = "Nil"; _ }, []) ->
+    Some (app "==" [ app "elts" [ v xs ]; v "empty" ])
+  | A.EVar { A.txt = xs; _ }, A.PatCon ({ A.txt = "Cons"; _ }, [ A.PatVar h; A.PatVar t ])
+    when h.A.txt <> xs && t.A.txt <> xs ->
+    Some (app "==" [ app "elts" [ v xs ]; app "union" [ app "singleton" [ v h.A.txt ]; app "elts" [ v t.A.txt ] ] ])
+  | _ -> None
 
 (* =================================================================
    §10 The other fact channels: path, launder, recenv, cbenv
@@ -2128,7 +2323,7 @@ let elem_sig ~(name : string) ((binder, pred, sort) : string * A.expr * string o
    predicate still travels through [scope]; this records only the sort). *)
 let record_sort_of_ty : A.ty option -> string option = function
   | Some (A.TyCon ({ A.txt = name; _ }, []) as t) when is_record_base t ->
-    Some (adt_sort_name name)
+    Some (adt_sort_name ~arity:0 name)
   | Some (A.TyRefine ((A.TyCon ({ A.txt = name; _ }, []) as b), _, _)) when is_record_base b ->
     Some (adt_sort_name name)
   | _ -> None
@@ -2553,6 +2748,12 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
   go "" decls;
   tbl
 
+(* The qualified key of actor [actor]'s handler [msg] in the table
+   [collect_handler_sigs] builds: `<Actor>_Msg.<Msg>`, the typechecker's name
+   for the actor's message type, dot, the message. *)
+let actor_msg_suffix = "_Msg"
+let handler_key (actor : string) (msg : string) : string = actor ^ actor_msg_suffix ^ "." ^ msg
+
 (* ── Actor handler contracts ───────────────────────────────────────────────
    `on Inc(n : {Int | n > 0}) do ... end` declares a contract on the MESSAGE
    `Inc(...)`: the typechecker registers each handler's message as an ordinary
@@ -2569,23 +2770,39 @@ let collect_all_defs (decls : A.decl list) : (string, fn_sig option) Hashtbl.t =
    [Refine_check.visit_decl]'s `DActor` arm) no handler body assuming.
    Failing closed costs silence; failing open would check a user variant
    `Inc(-1)` against an unrelated actor's predicate, the one failure this
-   subsystem must never have. *)
+   subsystem must never have.
+
+   Every refined handler is ALSO registered under `<Actor>_Msg.<Msg>`, clash
+   or not (gap G4 of specs/2026-11-04-lemmas-hcr-actors-choreography-design.md).
+   [Refine_check.handler_resolution] uses that key for a construction it can
+   attribute to one actor: written `Tally.Bump(..)`, or bare with a recorded
+   type `Tally_Msg`.  A shared name is then obliged per actor instead of
+   not at all, and the handler body assumes it (both backends drop another
+   actor's or a variant's same-named value; see [Refine_check.visit_decl]'s
+   `DActor` arm).  Two actors of the same name (in different modules)
+   withdraw the qualified key too. *)
 let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
   let handlers : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
   let count : (string, int) Hashtbl.t = Hashtbl.create 16 in
   let ctors : (string, unit) Hashtbl.t = Hashtbl.create 16 in
   let bump n = Hashtbl.replace count n (1 + Option.value ~default:0 (Hashtbl.find_opt count n)) in
+  let qualified : (string, fn_sig) Hashtbl.t = Hashtbl.create 16 in
+  let actors : (string, int) Hashtbl.t = Hashtbl.create 8 in
   let rec go decls =
     List.iter
       (function
-        | A.DActor (_, _, ad, _) ->
+        | A.DActor (_, aname, ad, _) ->
+          Hashtbl.replace actors aname.A.txt
+            (1 + Option.value ~default:0 (Hashtbl.find_opt actors aname.A.txt));
           List.iter
             (fun (h : A.actor_handler) ->
               bump h.A.ah_msg.A.txt;
               let fd =
                 local_fn_def h.A.ah_msg h.A.ah_params None h.A.ah_body h.A.ah_msg.A.span
               in
-              Hashtbl.replace handlers h.A.ah_msg.A.txt (sig_of_fn fd))
+              let sg = sig_of_fn fd in
+              Hashtbl.replace handlers h.A.ah_msg.A.txt sg;
+              Hashtbl.replace qualified (handler_key aname.A.txt h.A.ah_msg.A.txt) sg)
             ad.A.actor_handlers
         | A.DType (_, _, _, A.TDVariant vs, _) | A.DAlwaysLinearType (_, _, _, A.TDVariant vs, _) ->
           List.iter (fun (v : A.variant) -> Hashtbl.replace ctors v.A.var_name.A.txt ()) vs
@@ -2605,6 +2822,12 @@ let collect_handler_sigs (decls : A.decl list) : (string, fn_sig) Hashtbl.t =
          && (sg.refined <> [] || has_elem_param sg) then
         Hashtbl.replace out n sg)
     handlers;
+  Hashtbl.iter
+    (fun k sg ->
+      let actor = String.sub k 0 (String.index k '.' - String.length actor_msg_suffix) in
+      if Hashtbl.find_opt actors actor = Some 1 && (sg.refined <> [] || has_elem_param sg) then
+        Hashtbl.replace out k sg)
+    qualified;
   out
 
 (* ── Stored-field contracts ────────────────────────────────────────────────

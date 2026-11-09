@@ -429,7 +429,25 @@ let cache_suite =
         let r = Solver.Sat [ ("d", "0"); ("i", "10") ] in
         Vc_cache.store ~root key r;
         Alcotest.(check bool) "hit sat" true
-          (Vc_cache.lookup ~root key = Some r)) ]
+          (Vc_cache.lookup ~root key = Some r));
+
+    (* Entries are written to a temp file and renamed into place, so a
+       concurrent reader sees the old entry or the new one, never half a
+       model.  Overwriting must replace the entry and leave no temp file. *)
+    Alcotest.test_case "store replaces an entry and leaves no temp file" `Quick (fun () ->
+        let key = "fe" ^ String.make 62 'b' in
+        Vc_cache.store ~root key (Solver.Sat [ ("d", "0") ]);
+        Vc_cache.store ~root key Solver.Unsat;
+        Vc_cache.store_core ~root key [ "a"; "b" ];
+        Alcotest.(check bool) "second store wins" true
+          (Vc_cache.lookup ~root key = Some Solver.Unsat);
+        Alcotest.(check (option (list string))) "core" (Some [ "a"; "b" ])
+          (Vc_cache.lookup_core ~root key);
+        let dir = Filename.dirname (Vc_cache.path_for ~root key) in
+        let tmps =
+          Array.to_list (Sys.readdir dir) |> List.filter (fun f -> Filename.check_suffix f ".tmp")
+        in
+        Alcotest.(check (list string)) "no temp files" [] tmps) ]
 
 let refine_suite =
   let root =

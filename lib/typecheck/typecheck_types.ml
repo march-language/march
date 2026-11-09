@@ -342,7 +342,7 @@ let rec pp_ty ?(parens = false) t =
          "{ " ^ String.concat ", " fs ^ " }")
     | TLin (Ast.Linear,        t) -> "linear " ^ pp_ty ~parens:true t
     | TLin (Ast.Affine,        t) -> "affine " ^ pp_ty ~parens:true t
-    | TLin (Ast.Unrestricted,  t) -> pp_ty t
+    | TLin ((Ast.Unrestricted | Ast.Ghost),  t) -> pp_ty t
     | TNat n                      -> string_of_int n
     | TNatOp (Ast.NatAdd, a, b)   ->
       Printf.sprintf "%s + %s" (pp_ty a) (pp_ty b)
@@ -481,6 +481,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EAssert (_, sp)         -> sp
   | Ast.ESigil (_, _, sp)       -> sp
   | Ast.ERefineMsg (_, _, sp)       -> sp
+  | Ast.EProof (_, sp)          -> sp
 
 (** The provided side of a type mismatch (D5, diagnostics plan §9): the
     sub-expression whose inferred type [p_ty] failed to meet the context,
@@ -583,6 +584,7 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   | Ast.EAssert (e, _) -> free_vars_expr bound e
   | Ast.ESigil (_, content, _) -> free_vars_expr bound content
   | Ast.ERefineMsg (content, _, _) -> free_vars_expr bound content
+  | Ast.EProof (p, _) -> List.concat_map (free_vars_expr bound) (Ast.proof_children p)
 
 and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
   match es with

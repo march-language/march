@@ -61,7 +61,37 @@ let syms : (string, fsig) Hashtbl.t = Hashtbl.create 64
     of every channel: predicates, path conditions, `let` facts, subjects. *)
 let call_sym : (March_ast.Ast.span, string) Hashtbl.t = Hashtbl.create 256
 
-let resolve_site (sp : March_ast.Ast.span) : string option = Hashtbl.find_opt call_sym sp
+(** `reveal f` (todo 2026-11-06-proof-reveal-and-local-fuel): the call sites
+    of an [@[opaque]] function that would otherwise be reflected, with its
+    symbol and display name.  Filled only when the program has a `reveal`
+    statement; a site here resolves only while its function is revealed. *)
+let hidden_call_sym : (March_ast.Ast.span, string * string) Hashtbl.t = Hashtbl.create 16
+
+(** The functions a `reveal` statement in scope has revealed, as spelled. *)
+let revealed : string list ref = ref []
+
+(** `with fuel(f, N)` in scope: [f] as spelled, and its fuel. *)
+let fuel_override : (string * int) list ref = ref []
+
+(** Does a spelling (`f`, `Inner.f`) name the function displayed [display]
+    (`f`, `Inner.f`, `M.Inner.f`)? *)
+let names_fn ~(display : string) (spelled : string) : bool =
+  display = spelled || String.ends_with ~suffix:("." ^ spelled) display
+
+let resolve_site (sp : March_ast.Ast.span) : string option =
+  match Hashtbl.find_opt call_sym sp with
+  | Some s -> Some s
+  | None -> (
+    match Hashtbl.find_opt hidden_call_sym sp with
+    | Some (s, display) when List.exists (names_fn ~display) !revealed -> Some s
+    | _ -> None)
+
+(** The fuel of the function displayed [display], under any `with fuel`
+    in scope, else [default]. *)
+let fuel_for ~(display : string) (default : int) : int =
+  match List.find_opt (fun (f, _) -> names_fn ~display f) !fuel_override with
+  | Some (_, n) -> n
+  | None -> default
 
 (** Phase 5 (D10): a specialised call site -> the expressions its logic symbol
     is applied to.  A call [g(xs, fn x -> x > k)] specialised as [g$k] passes
@@ -83,6 +113,35 @@ let instances : (string, Smt.sort list * Smt.sort) Hashtbl.t = Hashtbl.create 64
     instance, Bool-valued, uninterpreted.  Registered like a reflected symbol
     with signature [(T0, T0) -> Bool]. *)
 let eq_sym = "|r:eq|"
+
+(** §2.3 (D9): a Float operation in a reflected body is an opaque, total,
+    deterministic function, one per operator.  Never the FloatingPoint theory
+    inside a body, so NaN and signed zero are never reasoned about: the only
+    facts a proof gets are congruence (equal arguments, equal results). *)
+let float_ops : (string * (Smt.sort list * Smt.sort)) list =
+  let f = Smt.SFloat in
+  [ ("fadd", ([ f; f ], f)); ("fsub", ([ f; f ], f)); ("fmul", ([ f; f ], f)); ("fdiv", ([ f; f ], f));
+    ("fneg", ([ f ], f)); ("flt", ([ f; f ], Smt.SBool)); ("fle", ([ f; f ], Smt.SBool));
+    ("fgt", ([ f; f ], Smt.SBool)); ("fge", ([ f; f ], Smt.SBool)) ]
+
+let float_sym (op : string) : string = "|r:float:" ^ op ^ "|"
+
+let float_sig (f : string) : (Smt.sort list * Smt.sort) option =
+  List.find_map (fun (op, s) -> if float_sym op = f then Some s else None) float_ops
+
+(** §2.3 (D9): a string literal in a reflected body is a constant of the
+    opaque [$Str] sort named by its content, so every body and every
+    predicate that spells the same literal names the same value.  A query
+    that mentions one states its byte length and that it differs from every
+    other literal it mentions ([Refine_reflect.unfold]). *)
+let str_lits : (string, string) Hashtbl.t = Hashtbl.create 16
+
+let str_sort = Smt.sdata "$Str"
+
+let str_lit_sym (s : string) : string =
+  let f = "|r:str:" ^ Digest.to_hex (Digest.string s) ^ "|" in
+  Hashtbl.replace str_lits f s;
+  f
 
 (** Per stage-2 run: the unfolding budget was hit (§3.9), a depth-1 call was
     left unfolded, and the assumption literals naming each unfolding with the
@@ -276,12 +335,13 @@ let reset () =
   confirmed := false;
   Hashtbl.reset syms;
   Hashtbl.reset call_sym;
+  Hashtbl.reset hidden_call_sym;
   Hashtbl.reset site_args;
   Hashtbl.reset instances;
   Hashtbl.reset literal_owner;
   ()
 
-let is_sym (f : string) = Hashtbl.mem syms f || f = eq_sym
+let is_sym (f : string) = Hashtbl.mem syms f || f = eq_sym || float_sig f <> None || Hashtbl.mem str_lits f
 
 (** The instance symbol of base [base] at [tag]: [|r:x|] -> [|r:x@tag|]. *)
 let instance_name (base : string) (tag : string) : string =
@@ -294,7 +354,11 @@ let is_instance (f : string) = Hashtbl.mem instances f
 let sig_of (f : string) : fsig option =
   if f = eq_sym then
     Some { fs_sym = eq_sym; fs_name = "=="; fs_params = [ Smt.SParam 0; Smt.SParam 0 ]; fs_ret = Smt.SBool; fs_nvars = 1 }
-  else Hashtbl.find_opt syms f
+  else
+    match float_sig f with
+    | Some (ps, r) -> Some { fs_sym = f; fs_name = f; fs_params = ps; fs_ret = r; fs_nvars = 0 }
+    | None when Hashtbl.mem str_lits f -> Some { fs_sym = f; fs_name = f; fs_params = []; fs_ret = str_sort; fs_nvars = 0 }
+    | None -> Hashtbl.find_opt syms f
 
 (** A Bool-valued logic application (base or instance): a formula. *)
 let returns_bool (f : string) : bool =

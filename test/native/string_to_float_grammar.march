@@ -1,0 +1,168 @@
+-- #1178: string_to_float accepts ONE grammar on every backend: C `strtod`
+-- (C locale) consuming the whole string, which is what the native runtime
+-- calls. The JS runtime used `Number(s)` (blank -> 0, no `inf`/`nan`, `0b`/`0o`
+-- accepted, hex floats rejected) and the interpreter used OCaml
+-- `float_of_string` (`_` separators accepted). This file is run interpreted,
+-- compiled and as --target js, all three diffed against ONE .expected.
+-- A NaN result prints as `nan` whatever its sign bit, so the rows compare the
+-- parse, not each backend's spelling of a negative NaN.
+mod Main do
+  needs IO.Console
+
+  fn parsed(s : String) : String do
+    match string_to_float(s) do
+    Some(f) -> if f != f do "Some(nan)" else "Some(" ++ float_to_string(f) ++ ")" end
+    None -> "None"
+    end
+  end
+
+  fn p(s : String) do
+    println("[" ++ s ++ "] -> " ++ parsed(s))
+  end
+
+  fn q(label : String, s : String) do
+    println(label ++ " -> " ++ parsed(s))
+  end
+
+  -- Print the parse minus `off`, scaled by 2^1074 (k == 2, two steps of
+  -- 2^537) or 2^52, as an exact Int: a rounding row then compares integers,
+  -- not each backend's spelling of a subnormal or of 1 + 2^-52.
+  fn scaled(label : String, s : String, off : Float, k : Int) do
+    let big = math_pow(2.0, 537.0)
+    match string_to_float(s) do
+    Some(f) ->
+      let g = f -. off
+      let r = if k == 2 do (g *. big) *. big else g *. math_pow(2.0, 52.0) end
+      println(label ++ " -> Some(" ++ int_to_string(float_to_int(r)) ++ ")")
+    None -> println(label ++ " -> None")
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    -- the rows from the issue
+    p("inf")
+    p("-inf")
+    p("infinity")
+    p("INF")
+    p("nan")
+    p("NaN")
+    p("")
+    p(" ")
+    q("[tab]", "\t")
+    p("1.5 ")
+    p("0b11")
+    p("0o17")
+    p("0x1p3")
+    p("1_000")
+    -- the issue's control rows (always agreed)
+    p("1.5")
+    p("-42.5")
+    p("1e3")
+    p(".5")
+    p("5.")
+    p("0x10")
+    p("abc")
+    p("Infinity")
+    p("-Infinity")
+    -- signs, special values
+    p("+1.5")
+    p("+inf")
+    p("-nan")
+    p("+nan")
+    p("INFINITY")
+    p("iNfInItY")
+    p("infinit")
+    p("infinityx")
+    p("inf ")
+    p("nanx")
+    p("nan()")
+    p("nan(123)")
+    p("nan(abc_9)")
+    p("nan(")
+    p("nan(1")
+    p("nan(1 )")
+    p("-")
+    p("+")
+    p("--1")
+    p("+-1")
+    p("- 1")
+    -- decimal shape
+    p("1e")
+    p("e5")
+    p("1e+")
+    p("1e-2")
+    p("1E5")
+    p("1.5e+3")
+    p("00012")
+    p("1e0005")
+    p(".")
+    p(".e1")
+    p("1.5.5")
+    p("1,5")
+    p("1 .5")
+    p("1e400")
+    p("-1e400")
+    p("1e-400")
+    -- hex
+    p("0x")
+    p("0X1P-2")
+    p("0x1.8p1")
+    p("0x.8")
+    p("0x1.")
+    p("-0x10")
+    p("0xff")
+    p("0x1p")
+    p("0x1p+")
+    p("0xg")
+    p("0x.p1")
+    p("0x1.fffffffffffff8p0")
+    p("0x1p1024")
+    p("0x1.fffffffffffff8p1023")
+    -- hex rounding: round to nearest, ties to even (x 2^1074 / (x-1) x 2^52)
+    scaled("0x1p-1074 * 2^1074", "0x1p-1074", 0.0, 2)
+    scaled("0x1p-1075 * 2^1074", "0x1p-1075", 0.0, 2)
+    scaled("0x1.0000000000001p-1075 * 2^1074", "0x1.0000000000001p-1075", 0.0, 2)
+    scaled("0x1.8p-1075 * 2^1074", "0x1.8p-1075", 0.0, 2)
+    scaled("0x3p-1075 * 2^1074", "0x3p-1075", 0.0, 2)
+    scaled("0x1p-1080 * 2^1074", "0x1p-1080", 0.0, 2)
+    -- OCaml's own hex reader rounds these subnormals one ulp off
+    scaled("0x4e9e.85bc87c31aaep-1037 * 2^1074", "0x4e9e.85bc87c31aaep-1037", 0.0, 2)
+    scaled("0x150d.ee1a64e2e11dd894p-1035 * 2^1074", "0x150d.ee1a64e2e11dd894p-1035", 0.0, 2)
+    scaled("(0x1.00000000000008p0 - 1) * 2^52", "0x1.00000000000008p0", 1.0, 1)
+    scaled("(0x1.00000000000018p0 - 1) * 2^52", "0x1.00000000000018p0", 1.0, 1)
+    scaled("(0x1.000000000000080000001p0 - 1) * 2^52", "0x1.000000000000080000001p0", 1.0, 1)
+    scaled("(0x10000000000000800p-64 - 1) * 2^52", "0x10000000000000800p-64", 1.0, 1)
+    scaled("(0x00000000000000000001.8p0 - 1.5) * 2^52", "0x00000000000000000001.8p0", 1.5, 1)
+    -- whitespace: strtod skips LEADING C-locale space, never trailing
+    p(" 1.5")
+    q("[tab]-2", "\t-2")
+    q("[nl]1.5", "\n1.5")
+    q("[cr]1.5", "\r1.5")
+    q("[ff]1.5", "\x0c1.5")
+    q("[vt]1.5", "\x0b1.5")
+    q("1.5[nl]", "1.5\n")
+    p("  inf")
+    p(" 0x10")
+    -- an embedded NUL is not the end of the string
+    q("1.5[nul]", "1.5\0")
+    q("1.5[nul]9", "1.5\x009")
+    -- float_from_string is the same builtin; the float constants had no
+    -- --target js mapping at all (#1178)
+    match float_from_string("0x1p3") do
+    Some(f) -> println("float_from_string(0x1p3) -> " ++ float_to_string(f))
+    None -> println("float_from_string(0x1p3) -> None")
+    end
+    println("float_infinity -> " ++ float_to_string(float_infinity()))
+    println("float_neg_infinity -> " ++ float_to_string(float_neg_infinity()))
+    println("float_is_nan(float_nan) -> " ++ bool_to_string(float_is_nan(float_nan())))
+    println("float_is_nan(1.5) -> " ++ bool_to_string(float_is_nan(1.5)))
+    println("float_is_infinite(float_neg_infinity) -> " ++ bool_to_string(float_is_infinite(float_neg_infinity())))
+    println("float_is_infinite(float_nan) -> " ++ bool_to_string(float_is_infinite(float_nan())))
+    println("float_epsilon -> " ++ bool_to_string(float_epsilon() == math_pow(2.0, 0.0 -. 52.0)))
+    -- the Toml path that read `inf`/`nan` as 0. on JS
+    match Toml.parse("x = inf\ny = -inf\nz = 1.5e3\n") do
+    Ok(v) -> println("toml: " ++ Toml.to_string(v))
+    Err(_) -> println("toml: parse error")
+    end
+  end
+end

@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/unbound_variable_1.march","start_line":13,"start_col":20,"end_line":13,"end_col":30,"message":"I cannot find `arith_mean`.","code":"unbound_variable","fix":null,"labels":[],"notes":["These functions in scope take these arguments:\n    average(List(Float)) : Float"],"category":"NAMING"}

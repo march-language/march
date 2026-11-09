@@ -1,0 +1,24 @@
+-- A register-sized vector stored into a field, under the contract.
+mod Own do
+  needs IO.Console
+
+  type Vec3 = Vec3(Float, Float, Float)
+  type Hit = Hit(Vec3, Int)
+
+  @[no_alloc]
+  fn forward(yaw : Float, pitch : Float) : Vec3 do
+    let cp = Math.cos(pitch)
+    Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+  end
+
+  @[no_alloc]
+  fn record(yaw : Float, pitch : Float, id : Int) : Hit do
+    Hit(forward(yaw, pitch), id)
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    match record(0.5, 0.25, 3) do
+    Hit(Vec3(x, _, _), id) -> println(float_to_string(x) ++ " " ++ int_to_string(id))
+    end
+  end
+end

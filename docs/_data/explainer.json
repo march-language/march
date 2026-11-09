@@ -1,0 +1,356 @@
+{
+  "excerpts": {
+    "ledger_actor": "-- Order.Ledger, bound to an actor: one per offer, spawned with the pool's\n-- environment; it keeps the running total across sessions, so a Ledger\n-- that moves to another node starts again from 0.\nactor LedgerActor do\n  state { total : Int, node : String, sessions : LinearMap(String, Order_Ledger.Parked_Ledger) }\n  init(env : Env) { total: 0, node: env.node, sessions: LinearMap.empty_string() }\n",
+    "stock_signature": "fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield"
+  },
+  "generated": {
+    "commit": "128b0af38",
+    "date": "2026-11-06",
+    "inputs_sha256": "bd7f8d3944f8f1a782f790a3ae1a9d0a51639d087c846c735347e3df40e0145a"
+  },
+  "lab_run": {
+    "commit": "53d66f068",
+    "date": "2026-10-05",
+    "failover_result": "expected-fail",
+    "failover_s": 1,
+    "source": "specs/progress/2026-10-05-multi-host-lab.md"
+  },
+  "order": {
+    "conversation_states": 12,
+    "fingerprint": "fbc924928c002942943a81b564d2408d",
+    "functions": 152,
+    "linear_states": 15,
+    "modules": [
+      {
+        "functions": 18,
+        "linear_states": 0,
+        "name": "Order_Msg",
+        "states": []
+      },
+      {
+        "functions": 33,
+        "linear_states": 5,
+        "name": "Order_Shop",
+        "states": [
+          "S_send_Want",
+          "S_offer_have_out",
+          "S_recv_Booked",
+          "S_end"
+        ]
+      },
+      {
+        "functions": 37,
+        "linear_states": 6,
+        "name": "Order_Stock",
+        "states": [
+          "S_recv_Want",
+          "S_choose_have_out",
+          "S_send_Book",
+          "S_send_Skip",
+          "S_end"
+        ]
+      },
+      {
+        "functions": 26,
+        "linear_states": 4,
+        "name": "Order_Ledger",
+        "states": [
+          "S_offer_have_out",
+          "S_send_Booked",
+          "S_end"
+        ]
+      },
+      {
+        "functions": 38,
+        "linear_states": 0,
+        "name": "Order_Run",
+        "states": []
+      }
+    ],
+    "roles": [
+      "Shop",
+      "Stock",
+      "Ledger"
+    ],
+    "source": [
+      "@[endpoints]",
+      "protocol Order do",
+      "  role Stock needs IO.Mut",
+      "  role Ledger needs IO.Console",
+      "  loop do",
+      "    want: Shop -> Stock : Int",
+      "    choose by Stock:",
+      "      have -> Stock -> Shop : String",
+      "              book: Stock -> Ledger : Int",
+      "              booked: Ledger -> Shop : String",
+      "      out  -> Stock -> Shop : String",
+      "              skip: Stock -> Ledger : Int",
+      "              stop",
+      "    end",
+      "  end",
+      "end"
+    ],
+    "strips": {
+      "Ledger": [
+        "offer have/out",
+        "send Booked",
+        "end"
+      ],
+      "Shop": [
+        "send Want",
+        "offer have/out",
+        "recv Booked",
+        "end"
+      ],
+      "Stock": [
+        "recv Want",
+        "choose have/out",
+        "send Book",
+        "send Skip",
+        "end"
+      ]
+    },
+    "tags": [
+      "Want",
+      "Have",
+      "Book",
+      "Booked",
+      "Out",
+      "Skip"
+    ]
+  },
+  "programs": {
+    "offer_misses_branch": {
+      "body": "-- Shop handles the `have` answer and has nothing for `out`.\npfn shop(s : Cap(Session.Live), st : Order_Shop.Entry) : Order_Shop.Yield do\n  let st1 = Order_Shop.send_Want(s, st, 1)\n  Order_Shop.offer_have_out(s, st1,\n    fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)))\nend\n",
+      "cell": [
+        1,
+        3,
+        0
+      ],
+      "exit": 1,
+      "headline": "`Order_Shop.offer_have_out` takes one callback for each branch `Stock` can choose in protocol `Order` (`have` and `out`), but this call leaves out `out`. [session_offer_nonexhaustive]",
+      "output": "-- PROTOCOL ------------------- offer_misses_branch.march\n\n`Order_Shop.offer_have_out` takes one callback for each branch `Stock` can choose in protocol `Order` (`have` and `out`), but this call leaves out `out`. [session_offer_nonexhaustive]\n\n25 |     Order_Shop.offer_have_out(s, st1,\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    After `out` the conversation ends, so the fix closes it; put any other work for that branch before the `close`.\n\n    the choice is declared here:\n\n11 |       choose by Stock:\n                     ^^^^^\n\n    fix (`forge fix` applies it):\n\n26 -       fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)))\n26 +       fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)), fn (_v, st) -> Order_Shop.close(s, st))\n\n    run `march --explain session_offer_nonexhaustive`\n",
+      "source": "mod Main do\n  needs IO\n  needs Session.Live\n\n  @[endpoints]\n  protocol Order do\n    role Stock needs IO.Mut\n    role Ledger needs IO.Console\n    loop do\n      want: Shop -> Stock : Int\n      choose by Stock:\n        have -> Stock -> Shop : String\n                book: Stock -> Ledger : Int\n                booked: Ledger -> Shop : String\n        out  -> Stock -> Shop : String\n                skip: Stock -> Ledger : Int\n                stop\n      end\n    end\n  end\n\n  -- Shop handles the `have` answer and has nothing for `out`.\n  pfn shop(s : Cap(Session.Live), st : Order_Shop.Entry) : Order_Shop.Yield do\n    let st1 = Order_Shop.send_Want(s, st, 1)\n    Order_Shop.offer_have_out(s, st1,\n      fn (_v, st2) -> Order_Shop.recv_Booked(s, st2, fn (_b, st3) -> shop(s, st3)))\n  end\n\n  fn main(_c : Cap(IO)) do () end\nend\n"
+    },
+    "send_out_of_turn": {
+      "body": "-- Ledger confirms a booking nobody has asked it to make.\npfn ledger(s : Cap(Session.Live), c : Cap(IO.Console), st : Order_Ledger.Entry) : Order_Ledger.Yield do\n  ledger(s, c, Order_Ledger.send_Booked(s, st, \"booked\"))\nend\n",
+      "cell": [
+        0,
+        0,
+        0
+      ],
+      "exit": 1,
+      "headline": "Role `Ledger` tries to send a `String` to `Shop` here, but at this point protocol `Order` says it must wait for `Stock` to choose `have` or `out`. [protocol_step_order]",
+      "output": "-- PROTOCOL ---------------------- send_out_of_turn.march\n\nRole `Ledger` tries to send a `String` to `Shop` here, but at this point protocol `Order` says it must wait for `Stock` to choose `have` or `out`. [protocol_step_order]\n\n24 |     ledger(s, c, Order_Ledger.send_Booked(s, st, \"booked\"))\n                                                  ^^\n\n    Take that step with `Order_Ledger.offer_have_out` first.\n    The conversation so far, in protocol `Order`:\n\n      loop do                         (repeats)\n        want: Shop -> Stock : Int\n        choose by Stock: have | out   <- `Ledger` must do this next\n\n    `Ledger` is here: it must wait for `Stock` to choose `have` or `out`:\n\n11 |       choose by Stock:\n                     ^^^^^\n\n    `st` is the state bound here:\n\n23 |   pfn ledger(s : Cap(Session.Live), c : Cap(IO.Console), st : Order_Ledger.Entry) : Order_Ledger.Yield do\n                                                              ^^\n    run `march --explain protocol_step_order`\n",
+      "source": "mod Main do\n  needs IO\n  needs Session.Live\n\n  @[endpoints]\n  protocol Order do\n    role Stock needs IO.Mut\n    role Ledger needs IO.Console\n    loop do\n      want: Shop -> Stock : Int\n      choose by Stock:\n        have -> Stock -> Shop : String\n                book: Stock -> Ledger : Int\n                booked: Ledger -> Shop : String\n        out  -> Stock -> Shop : String\n                skip: Stock -> Ledger : Int\n                stop\n      end\n    end\n  end\n\n  -- Ledger confirms a booking nobody has asked it to make.\n  pfn ledger(s : Cap(Session.Live), c : Cap(IO.Console), st : Order_Ledger.Entry) : Order_Ledger.Yield do\n    ledger(s, c, Order_Ledger.send_Booked(s, st, \"booked\"))\n  end\n\n  fn main(_c : Cap(IO)) do () end\nend\n"
+    },
+    "skip_step": {
+      "body": "-- Stock tells Ledger to book before it has chosen `have` or `out`.\npfn stock(s : Cap(Session.Live), _m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield do\n  Order_Stock.recv_Want(s, st, fn (n, st1) ->\n    stock(s, _m, Order_Stock.send_Book(s, st1, n)))\nend\n",
+      "cell": [
+        1,
+        1,
+        0
+      ],
+      "exit": 1,
+      "headline": "Role `Stock` tries to send an `Int` to `Ledger` here, but at this point protocol `Order` says it must choose `have` or `out`. [protocol_step_order]",
+      "output": "-- PROTOCOL ----------------------------- skip_step.march\n\nRole `Stock` tries to send an `Int` to `Ledger` here, but at this point protocol `Order` says it must choose `have` or `out`. [protocol_step_order]\n\n25 |       stock(s, _m, Order_Stock.send_Book(s, st1, n)))\n                                                 ^^^\n\n    Take that step with `Order_Stock.choose_have` first.\n    The conversation so far, in protocol `Order`:\n\n      loop do                         (repeats)\n        want: Shop -> Stock : Int     done\n        choose by Stock: have | out   <- `Stock` must do this next\n\n    `Stock` is here: it must choose `have` or `out`:\n\n11 |       choose by Stock:\n                     ^^^^^\n\n    `st1` is the state bound here:\n\n24 |     Order_Stock.recv_Want(s, st, fn (n, st1) ->\n                                             ^^^\n    run `march --explain protocol_step_order`\n",
+      "source": "mod Main do\n  needs IO\n  needs Session.Live\n\n  @[endpoints]\n  protocol Order do\n    role Stock needs IO.Mut\n    role Ledger needs IO.Console\n    loop do\n      want: Shop -> Stock : Int\n      choose by Stock:\n        have -> Stock -> Shop : String\n                book: Stock -> Ledger : Int\n                booked: Ledger -> Shop : String\n        out  -> Stock -> Shop : String\n                skip: Stock -> Ledger : Int\n                stop\n      end\n    end\n  end\n\n  -- Stock tells Ledger to book before it has chosen `have` or `out`.\n  pfn stock(s : Cap(Session.Live), _m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield do\n    Order_Stock.recv_Want(s, st, fn (n, st1) ->\n      stock(s, _m, Order_Stock.send_Book(s, st1, n)))\n  end\n\n  fn main(_c : Cap(IO)) do () end\nend\n"
+    }
+  },
+  "sim": {
+    "load_per_s": 14,
+    "mailbox": {
+      "arrival_s": 0.45,
+      "backlog": 7,
+      "migrate_s": 1.2,
+      "parked": 12,
+      "restart_s": 2.5,
+      "service_s": 0.45
+    },
+    "restart_s": 1,
+    "seed": 20261105,
+    "session_s": [
+      1.2,
+      2.8
+    ]
+  },
+  "state_map": {
+    "axes": {
+      "Ledger": 3,
+      "Shop": 4,
+      "Stock": 5
+    },
+    "cells": 60,
+    "path": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        1,
+        1,
+        0
+      ],
+      [
+        1,
+        2,
+        0
+      ],
+      [
+        1,
+        3,
+        0
+      ],
+      [
+        2,
+        2,
+        0
+      ],
+      [
+        3,
+        3,
+        0
+      ],
+      [
+        1,
+        4,
+        0
+      ],
+      [
+        2,
+        0,
+        0
+      ],
+      [
+        1,
+        0,
+        1
+      ],
+      [
+        3,
+        4,
+        0
+      ],
+      [
+        1,
+        4,
+        2
+      ],
+      [
+        2,
+        0,
+        1
+      ],
+      [
+        3,
+        4,
+        2
+      ]
+    ],
+    "reachable": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        1,
+        0,
+        1
+      ],
+      [
+        1,
+        1,
+        0
+      ],
+      [
+        1,
+        2,
+        0
+      ],
+      [
+        1,
+        3,
+        0
+      ],
+      [
+        1,
+        4,
+        0
+      ],
+      [
+        1,
+        4,
+        2
+      ],
+      [
+        2,
+        0,
+        0
+      ],
+      [
+        2,
+        0,
+        1
+      ],
+      [
+        2,
+        2,
+        0
+      ],
+      [
+        3,
+        3,
+        0
+      ],
+      [
+        3,
+        4,
+        0
+      ],
+      [
+        3,
+        4,
+        2
+      ]
+    ],
+    "roles": [
+      "Shop",
+      "Stock",
+      "Ledger"
+    ]
+  },
+  "timings": {
+    "drain_hard_ms": 8000,
+    "drain_soft_ms": 3000,
+    "settle_s": 15,
+    "suspect_s": 3,
+    "swim_ack_ms": 500,
+    "swim_probe_s": 1
+  },
+  "topology": {
+    "books_hosts": [
+      "lab-3",
+      "lab-4"
+    ],
+    "ingress": "lab-1",
+    "ledger_capacity": 64,
+    "stock_capacity": 32,
+    "stock_hosts": [
+      "lab-2",
+      "lab-3",
+      "lab-4"
+    ]
+  }
+}

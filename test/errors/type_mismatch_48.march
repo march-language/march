@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X1 slice 3, guard): both branches agree with each other on `String`, so the whole `if` is the wrong part and keeps the caret.
+mod Answer do
+  fn answer(b : Bool) : Int do
+    if b do "yes" else "no" end
+  end
+  fn main() : Int do answer(true) end
+end

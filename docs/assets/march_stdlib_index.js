@@ -39,6 +39,13 @@ window.marchModuleIndex = {
     "Scheduler"
    ]
   },
+  "Actor.Theory": {
+   "file": "actor_theory.march",
+   "unavailable": null,
+   "uses": [
+    "Actor"
+   ]
+  },
   "AhoCorasick": {
    "file": "aho_corasick.march",
    "unavailable": null,
@@ -254,7 +261,9 @@ window.marchModuleIndex = {
     "NodeSend",
     "PeerReader",
     "Result",
+    "Session",
     "SessionAP",
+    "SessionNode",
     "Socket",
     "String",
     "Swim",
@@ -574,6 +583,7 @@ window.marchModuleIndex = {
    "uses": [
     "Http",
     "HttpTransport",
+    "List",
     "Result"
    ]
   },
@@ -620,6 +630,7 @@ window.marchModuleIndex = {
    "file": "audio.march",
    "unavailable": null,
    "uses": [
+    "IO",
     "Js.Dom"
    ]
   },
@@ -627,6 +638,7 @@ window.marchModuleIndex = {
    "file": "canvas.march",
    "unavailable": null,
    "uses": [
+    "IO",
     "Js.Dom"
    ]
   },
@@ -634,6 +646,7 @@ window.marchModuleIndex = {
    "file": "dom.march",
    "unavailable": null,
    "uses": [
+    "IO",
     "List"
    ]
   },
@@ -1054,6 +1067,13 @@ window.marchModuleIndex = {
     "List",
     "String",
     "Vault"
+   ]
+  },
+  "Session.Theory": {
+   "file": "session_theory.march",
+   "unavailable": null,
+   "uses": [
+    "Session"
    ]
   },
   "SessionAP": {

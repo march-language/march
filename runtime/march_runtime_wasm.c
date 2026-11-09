@@ -583,8 +583,8 @@ void march_int_overflow(int64_t op, const char *file, int64_t line) {
 
 /* Diagnostics' panic-site record (march_runtime.c): the wasm runtime has no
  * crash observers, so the site lowering emits before a panic is dropped. */
-void *march_panic_site(void *file, int64_t line) {
-    (void)file; (void)line;
+void *march_panic_site(void *file, int64_t line, int64_t col, int64_t end_col) {
+    (void)file; (void)line; (void)col; (void)end_col;
     return NULL;
 }
 

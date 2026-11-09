@@ -47,6 +47,23 @@ type lin_entry = {
   (** For a pending entry: the branch construct at which it was consumed on
       some paths that fall through but not on others.  Judged, like
       [le_dup], once the scope's close knows whether it is linear. *)
+  le_where : (Ast.span * string) list ref;
+  (** Where a consuming use sits, keyed by its span, when that is worth saying
+      in a "used more than once" label: "in the `Some(v)` arm", "in the `else`
+      branch", "inside a closure … each iteration consumes it".  Recorded by
+      the branch join and the capture check; keyed by span, so it needs no
+      save/restore across paths.  Innermost description wins. *)
+  le_exit : Err.label list ref;
+  (** Set by the branch join when the value was consumed only on paths that
+      never return: labels naming the fall-through path that left without
+      consuming it, for [linear_never_used] to point at instead of only the
+      binding. *)
+  le_poisoned : bool ref;
+  (** Set when a use of this value sits inside an expression whose type
+      check failed and came out [TError] (§X3 poison): `snik(t)` with `snik`
+      misspelled, or `t.foo` on a non-record.  The value's consumption is then
+      unknown, so no linearity error follows on it; the type error already
+      rejects the program. *)
 }
 
 (** Constructor info — populated from [DType] declarations.
@@ -154,6 +171,10 @@ type proto_info = {
   pi_def         : Ast.protocol_def;
   pi_projections : (string * session_ty) list;  (** role → local session type *)
   pi_span        : Ast.span;
+  pi_positions   : (string * (session_ty * March_ast.Protocol_states.pos) list) list;
+      (** role → each state of its projection with its place in the protocol's
+          steps, for the diagram ([March_ast.Protocol_states.diagram]); a state
+          whose place is not certain is absent. *)
 }
 
 module StrMap = Map.Make(String)
@@ -211,6 +232,14 @@ type fn_bound = {
     that type name). *)
 let actor_msg_type_name (actor : string) : string = actor ^ "_Msg"
 
+(** The [env.ctors] keys an actor message constructor is registered under:
+    bare `<Msg>`, and the actor-qualified `<Actor>.<Msg>`, `<Actor>_Msg.<Msg>`
+    and (nested) `<Mod>.<Actor>.<Msg>`, so a message whose name another actor
+    or type shares can still be written unambiguously. *)
+let actor_msg_ctor_keys ~(ci_module : string) (actor : string) (msg : string) : string list =
+  msg :: (actor ^ "." ^ msg) :: (actor_msg_type_name actor ^ "." ^ msg)
+  :: (if ci_module = "" then [] else [ ci_module ^ "." ^ actor ^ "." ^ msg ])
+
 (** The SPELLING half of the `<Actor>.Msg` alias ([Typecheck_unify.actor_msg_alias]
     adds the scope checks): [Some "<Actor>_Msg"] when [name] is `<Actor>.Msg`
     or `M.<Actor>.Msg`. *)
@@ -240,6 +269,8 @@ type cap_mismatch_site = {
 }
 
 type env = {
+  in_logical_predicate : bool;
+  in_proof_hints : bool;
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
   ctors   : ctor_info list StrMap.t;       (** Data constructor name → all infos (head = most recent) *)
@@ -311,6 +342,11 @@ type env = {
       capability as a plain string is disturbed.  [None] means unscoped.
       A capability declared twice contributes one entry per scope, so
       [needs IO.FileRead("/a"), IO.FileRead("/b")] permits both subtrees. *)
+  module_need_scopes : (string * (string * string option) list) list;
+  (** [mod_need_scopes] of each checked sub-module, keyed exactly like
+      [module_caps] (qualified and short name).  Read by host-scope checking
+      (specs/2026-11-09-host-scoped-network-capabilities-design.md), which
+      judges each module by its OWN scopes. *)
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement.
@@ -825,6 +861,8 @@ type env = {
 }
 
 let make_env errors type_map = {
+  in_logical_predicate = false;
+  in_proof_hints = false;
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   ty_aliases = StrMap.empty;
   level = 0; lin = [];
@@ -833,7 +871,7 @@ let make_env errors type_map = {
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
-  mod_needs = []; mod_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
+  mod_needs = []; mod_need_scopes = []; module_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   import_idx = make_import_index ();
   deferred_check4 = ref [];
@@ -1889,6 +1927,31 @@ let qualified_error_msg (name : string) (env : env) : string =
         in
         Printf.sprintf "Module `%s` does not export `%s`.%s" mod_name member hint
 
+(** The replacement text for a qualified name that failed to resolve, when
+    [qualified_error_msg] names exactly one: a misspelt module (`Lsit.map` ->
+    `List.map`) or one misspelt member (`List.fodl` -> `List.fold`). *)
+let qualified_fix (name : string) (env : env) : string option =
+  match split_qualified name with
+  | None -> None
+  | Some (mod_name, member) ->
+    if StrMap.mem mod_name env.local_mods then None
+    else
+      match March_modules.Module_registry.ensure_loaded mod_name with
+      | None ->
+        Option.map (fun s -> s ^ "." ^ member) (suggest_module_name mod_name)
+      | Some exports ->
+        let open March_modules.Module_registry in
+        if List.exists (fun e -> e.ex_name = member) exports.me_entries then None
+        else
+          match List.filter_map (fun e ->
+              if e.ex_public
+              && edit_distance (String.lowercase_ascii member)
+                   (String.lowercase_ascii e.ex_name) <= 2
+              then Some e.ex_name else None) exports.me_entries
+                |> List.sort_uniq compare with
+          | [ s ] -> Some (mod_name ^ "." ^ s)
+          | _ -> None
+
 (** All parent types of ctors in [env] that share [name] (multiple types may
     define the same variant). Returns list of type names (deduplicated).
     O(log n) — just a single map lookup on the ctor_info list. *)
@@ -2146,6 +2209,21 @@ let suggest_ctors ?need (name : string) (env : env) : (string * string) list =
       else (Hashtbl.add shown line (); Some line))
   |> List.filteri (fun i _ -> i < 5)
 
+(** The one constructor [unknown_ctor_hint] suggests, when it suggests one. *)
+let unknown_ctor_fix ?need (name : string) (env : env) : string option =
+  match suggest_ctors ?need name env with
+  | [ (k, _) ] -> Some k
+  | _ -> None
+
+(** A field-name guess's tier: a machine fix when no other field is as close
+    a spelling ([cont] and [count] for `conut` are both one edit away), a
+    guess otherwise. *)
+let field_guess_tier (name : string) (flds : (string * 'a) list) (guess : string) =
+  let d = edit_distance name guess in
+  if List.exists (fun (f, _) -> f <> guess && edit_distance name f <= d) flds
+  then March_errors.Errors.Maybe_incorrect
+  else March_errors.Errors.Machine_applicable
+
 (** The rest of an [unknown_constructor] error after its first sentence: a
     newline and the ranked suggestions, or why nothing is offered for a
     qualified name; empty for a bare name with no candidate in range. *)
@@ -2273,7 +2351,8 @@ let bind_vars bindings env =
 (** Extend env with a new linear/affine variable. *)
 let bind_linear ?span name lin ty env =
   let le = { le_name = name; le_lin = lin; le_used = ref false; le_first_use = ref None;
-             le_pending = None; le_dup = ref None; le_mixed = ref None } in
+             le_pending = None; le_dup = ref None; le_mixed = ref None;
+             le_where = ref []; le_exit = ref []; le_poisoned = ref false } in
   { env with
     vars = StrMap.add name (Mono ty) env.vars;
     gated_shadowed = note_gated_rebind name env.gated_shadowed;
@@ -2288,7 +2367,7 @@ let bind_linear ?span name lin ty env =
 let bind_pending ?span name ty env =
   let le = { le_name = name; le_lin = Ast.Unrestricted; le_used = ref false;
              le_first_use = ref None; le_pending = Some ty; le_dup = ref None;
-             le_mixed = ref None } in
+             le_mixed = ref None; le_where = ref []; le_exit = ref []; le_poisoned = ref false } in
   { (bind_var ?span name (Mono ty) env) with lin = le :: env.lin }
 
 (* =================================================================

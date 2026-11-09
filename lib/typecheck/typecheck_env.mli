@@ -37,6 +37,9 @@ type lin_entry = {
   le_pending : Typecheck_types.ty option;
   le_dup : Typecheck_types.Ast.span option ref;
   le_mixed : Typecheck_types.Ast.span option ref;
+  le_where : (Typecheck_types.Ast.span * string) list ref;
+  le_exit : Typecheck_types.Err.label list ref;
+  le_poisoned : bool ref;
 }
 type ctor_info = {
   ci_type : string;
@@ -64,6 +67,7 @@ type proto_info = {
   pi_def : Typecheck_types.Ast.protocol_def;
   pi_projections : (string * Typecheck_types.session_ty) list;
   pi_span : Typecheck_types.Ast.span;
+  pi_positions : (string * (Typecheck_types.session_ty * March_ast.Protocol_states.pos) list) list;
 }
 module StrMap :
   sig
@@ -136,6 +140,7 @@ type fn_bound = {
 
 (** The type synthesised for an actor's messages ([actor ^ "_Msg"]). *)
 val actor_msg_type_name : string -> string
+val actor_msg_ctor_keys : ci_module:string -> string -> string -> string list
 
 (** [Some "<Actor>_Msg"] when the name is spelled `<Actor>.Msg` (scope not checked). *)
 val actor_msg_alias_target : string -> string option
@@ -155,6 +160,8 @@ type cap_mismatch_site = {
 }
 
 type env = {
+  in_logical_predicate : bool;
+  in_proof_hints : bool;
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
   ctors : ctor_info list StrMap.t;
@@ -189,6 +196,7 @@ type env = {
   sigs : (string * Typecheck_types.Ast.sig_def) list;
   mod_needs : string list;
   mod_need_scopes : (string * string option) list;
+  module_need_scopes : (string * (string * string option) list) list;
   module_caps : (string * string list) list;
   protocols : proto_info StrMap.t;
   impls :
@@ -351,6 +359,7 @@ val resolve_qualified_type : string -> env -> env * int option
 val resolve_qualified_ctor : string -> env -> env * ctor_info option
 val is_confirmed_private_qualified : string -> env -> bool
 val qualified_error_msg : string -> env -> string
+val qualified_fix : string -> env -> string option
 val all_ctors_named : string -> env -> string list
 val all_ctor_candidates_named : string -> env -> (string * string) list
 
@@ -366,11 +375,18 @@ val spelling_max_dist : int -> int
 val actor_of_msg_type : string -> string option
 val is_generated_name : ?ctor_type:string -> string -> bool
 val could_fit : Typecheck_types.ty -> Typecheck_types.ty -> bool
+val scheme_body : Typecheck_types.scheme -> Typecheck_types.ty
+
+val module_locality : env -> string -> int
+(** 0: the current module; 1: other user code and the prelude; 2: a stdlib module. *)
+
 val suggest_var_in_scope : ?need:Typecheck_types.ty -> string -> env -> string option
 val suggest_field :
   ?need:Typecheck_types.ty -> string -> (string * Typecheck_types.ty) list -> string option
 val suggest_ctors : ?need:suggest_need -> string -> env -> (string * string) list
 val unknown_ctor_hint : ?need:suggest_need -> string -> env -> string
+val unknown_ctor_fix : ?need:suggest_need -> string -> env -> string option
+val field_guess_tier : string -> (string * 'a) list -> string -> March_errors.Errors.applicability
 (* The stdlib-only builtin table; see [Typecheck_builtins.stdlib_only]. *)
 val stdlib_only : (string * string) list ref
 

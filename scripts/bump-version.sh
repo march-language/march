@@ -144,8 +144,7 @@ cat <<NEXT
     - docs/_layouts/landing.html:466         hero badge "Early Access . v$current"
     - docs/tooling.md                        four examples pin a concrete version
 
-    Also: docs/upgrading-to-0-3-0.md is linked from nowhere on the site. Link
-    the new guide from the docs nav, and the 0.3.0 one retroactively.
+    Also: link the new guide from the "Upgrading" table in docs/index.md.
 
   dune-project stays at $version (the last released version). Nightlies derive
   $version+patch-nightly.YYYYMMDD from it via scripts/nightly-version.sh; there

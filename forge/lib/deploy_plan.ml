@@ -353,7 +353,7 @@ let actor_changes (b : build_in) : actor_change list =
            | Some nh when Schema_diff.messages_changed ~old_h:oh ~new_h:nh ->
              Some (actor, match ns.migrate_msg_from with
                | None -> `None
-               | Some f when f = oh -> `Matches
+               | Some f when Schema_diff.same_message_type f oh -> `Matches
                | Some _ -> `Wrong_old_type)
            | _ -> None)
         | _ -> None)
@@ -606,7 +606,8 @@ let classify (i : input) : plan =
         let blocked =
           List.filter_map (fun ac ->
               match ac.ac_compat_error with
-              | Some m -> Some (Printf.sprintf "actor %s: %s, and no %s_migrate_state" ac.ac_actor m (String.uncapitalize_ascii ac.ac_actor))
+              | Some m -> Some (Printf.sprintf "actor %s: %s, and no %s_migrate_state%s" ac.ac_actor m (String.uncapitalize_ascii ac.ac_actor)
+                                  (Schema_diff.not_derived_note b.b_new_schemas ac.ac_actor))
               | None -> None) acs
           @ List.filter_map (fun ac ->
               if ac.ac_migrate_msg = `Wrong_old_type then

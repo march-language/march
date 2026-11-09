@@ -187,7 +187,7 @@ mod RoleApp do
 
     fn hosted_echo(io : Cap(IO), node : Cap(ClusterNode.Live)) : Option(Int) do
       let got = Vault.new("front_hosted_echo")
-      match HostedEcho_Run.initiate_Client(io, node, fn (s, st) -> hosted_client(s, st, got, 3)) do
+      match HostedEcho_Run.initiate_Client(node, fn (s, st) -> hosted_client(s, st, got, 3)) do
         Ok(_) -> Vault.get(got, "v")
         Err(_) -> None
       end
@@ -195,7 +195,7 @@ mod RoleApp do
 
     fn echo(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
       let got = Vault.new("front_echo")
-      match Echo_Run.initiate_Client(io, node, fn (s, st) ->
+      match Echo_Run.initiate_Client(node, fn (s, st) ->
           Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->
             Vault.set(got, "v", m)
             Echo_Client.close(s, st2))) do

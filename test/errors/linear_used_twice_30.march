@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: I cannot find `clsoe`
+mod Main do
+  -- F5 / X3 poison: `clsoe(c)` is a misspelled call whose type is unknown,
+  -- so what it did with `c` is unknown too. Before F5 the later `close(c)`
+  -- added a "used more than once" error on top of the naming error; now the
+  -- naming error is the only report.
+  always_linear type Conn = Conn(Int)
+  fn close(c : Conn) : Int do match c do Conn(n) -> n end end
+  fn main() : Int do
+    let c = Conn(1)
+    let n = clsoe(c)
+    close(c)
+  end
+end

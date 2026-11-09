@@ -1535,6 +1535,17 @@ codegen. First measurement, base vs trap, interleaved on a loaded box (minimum o
 15): fib 420 → 499 ms, index_loop 651 → 690 ms, list_ops 42 → 41 ms. Detail in
 `specs/progress/2026-10-30-int-overflow-trap.md`.
 
+## bench/int_divmod.march — Int `/` and `%` zero-divisor check (2026-11-06)
+
+Three loops with an Int `/` and `%` in each iteration: digit sums (a literal divisor, 10),
+`gcd` (a variable divisor the loop has already tested against 0) and bucketing by a
+loop-invariant divisor. No divisor is ever 0. Run it, with `index_loop`, after any change to
+how Int division is emitted. First measurement (minimum user time of 7 interleaved runs,
+`--opt 2`, load average about 20): with the check an opaque call to `march_checked_div_op`,
+int_divmod 0.56 s and index_loop 0.64 s; with the check inline, 0.31 s and 0.49 s. A build
+with no check at all (unsound, measurement only) was no faster than the inline one. Detail in
+`specs/progress/2026-11-06-inline-int-divmod-check.md`.
+
 ## HTTPS server and phase deadlines (2026-11-06, macOS, loaded box)
 
 A spot check, not a Run: the Run 5 method (quiet Linux box, wrk `-c256`, order-swapped) is

@@ -106,7 +106,7 @@ mod ClusterApOfferRetire do
 
   pfn open_close(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
     if n <= 0 do () else
-      match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+      match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
         Err(e) -> panic(Echo_Run.error_message(e))
         Ok(o) ->
           visible(h, o, 10000)
@@ -119,7 +119,7 @@ mod ClusterApOfferRetire do
 
   pfn refused(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int, count : Int) : Int do
     if n <= 0 do count else
-      match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+      match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
         Err(SessionNode.AlreadyOffered(_)) -> refused(c, h, n - 1, count + 1)
         Err(e) -> panic(Echo_Run.error_message(e))
         Ok(_) -> panic("a second offer of a held name was opened")
@@ -128,7 +128,7 @@ mod ClusterApOfferRetire do
   end
 
   pfn offer_idle(c : Cap(IO), h : Cap(ClusterNode.Live), host : Pid(a)) : Result(SessionNode.Offer, SessionNode.RunError) do
-    Hosted_Run.offer_hosted_Server(c, h, 4, host,
+    Hosted_Run.offer_hosted_Server(h, 4, host,
       fn (_sid, _s) -> (),
       fn (_sid, _s, _from, _msg, _ep) -> (),
       fn (_sid, _s, _role, _cause, _ep) -> ())
@@ -158,7 +158,7 @@ mod ClusterApOfferRetire do
         retired("5 offers opened and closed", before)
 
         -- 2. Refused re-offers of a held name.
-        match Echo_Run.offer_Server(c, h, 4, fn (s, st) -> serve_one(s, st)) do
+        match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st)) do
           Err(e) -> panic(Echo_Run.error_message(e))
           Ok(o) ->
             visible(h, o, 10000)
@@ -169,7 +169,7 @@ mod ClusterApOfferRetire do
 
             -- 3. Close while a session runs under it.
             let client = task_spawn(fn _ ->
-              match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 7)) do
+              match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, 7)) do
                 Ok(_) -> 1
                 Err(e) ->
                   println("Client: " ++ Echo_Run.error_message(e))

@@ -16,6 +16,7 @@ module Smt = March_refine.Smt
    that the preamble either axiomatised or did not. *)
 let rec consts (t : Smt.term) : string list =
   match t with
+  | Smt.Quant (_, n, _, g, b) -> List.filter ((<>) n) (consts g @ consts b)
   | Smt.Const n -> [ n ]
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.concat_map consts ts
@@ -37,6 +38,7 @@ let rec consts (t : Smt.term) : string list =
 
 let rec app_heads (t : Smt.term) : string list =
   match t with
+  | Smt.Quant (_, _, _, g, b) -> app_heads g @ app_heads b
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
   | Smt.App (f, ts) | Smt.Ctor (f, _, ts) -> f :: List.concat_map app_heads ts
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> app_heads a
@@ -114,6 +116,7 @@ let known_head (f : string) : bool =
    it there would send them to rewrite a guard that is doing its job. *)
 let rec nonlinear (t : Smt.term) : bool =
   match t with
+  | Smt.Quant (_, _, _, g, b) -> nonlinear g || nonlinear b
   | Smt.Mul (_, _) -> true
   (* Division by a NON-literal divisor is non-linear in the same way. *)
   | Smt.Div (_, _) | Smt.Mod (_, _) -> true

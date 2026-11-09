@@ -42,7 +42,7 @@ mod SessionRefusedA do
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
         if await_name(h, "session:refused-1/2", 120000) do () else panic("node-a: the stale name never arrived") end
-        match Echo_Run.cluster_A(c, h, "refused-1", fn (s, st) -> role_a(s, st, 1)) do
+        match Echo_Run.cluster_A(h, "refused-1", fn (s, st) -> role_a(s, st, 1)) do
           Ok(_) -> println("A: session to a stale endpoint failed: false (it finished)")
           Err(e) ->
             let why = Echo_Run.error_message(e)
@@ -50,7 +50,7 @@ mod SessionRefusedA do
             println("A: session to a stale endpoint failed: true")
             println("A: the failure names the refusal: " ++ (if String.contains(why, "refused by node") do "true" else "false (" ++ why ++ ")" end))
         end
-        match Echo_Run.cluster_A(c, h, "refused-2", fn (s, st) -> role_a(s, st, 2)) do
+        match Echo_Run.cluster_A(h, "refused-2", fn (s, st) -> role_a(s, st, 2)) do
           Ok(_) -> println("A: next session finished")
           Err(e) -> println("A: next session failed: " ++ Echo_Run.error_message(e))
         end

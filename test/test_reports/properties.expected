@@ -1,0 +1,66 @@
+FAIL: "properties a property returning false"
+-- TEST FAILURE ----------- test_reports/properties.march
+
+This property does not hold. [property_failed]
+
+ 8 |       Check.all_with(Gen.list(Gen.int(-100, 100)), fn xs ->
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    It failed on run 4 of 100.
+
+    Smallest failing input (shrunk in 7 steps from `[-47, 83]`):
+
+        xs = [0, 1]
+
+    The property returned `false`.
+
+    Seed 42, set by the property's config.
+
+FAIL: "properties an assertion inside a property, tuple names"
+-- TEST FAILURE ----------- test_reports/properties.march
+
+This property does not hold. [property_failed]
+
+14 |       Check.all_with(Gen.tuple2(Gen.int(0, 100), Gen.int(0, 100)), fn pair ->
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    It failed on run 1 of 100.
+
+    Smallest failing input (shrunk in 3 steps from `(98, 11)`):
+
+        a = 39
+        b = 11
+
+    It failed this assertion:
+
+    This `<` comparison is false. [assert_failed]
+
+    17 |           assert (a + b < 50)
+                           ^^^^^^^^^^
+
+        left `a + b`
+            50
+        right
+            50
+
+    Seed 42, set by the property's config.
+
+FAIL: "properties a property that panics, seed from the environment"
+-- TEST FAILURE ----------- test_reports/properties.march
+
+This property does not hold. [property_failed]
+
+24 |       Check.all(Gen.int(-10, 10), fn n ->
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    It failed on run 8 of 100.
+
+    Smallest failing input:
+
+        n = 0
+
+    It panicked: int_div: division by zero
+
+    Seed 42: replay it with `forge test --seed=42`.
+
+exit 1

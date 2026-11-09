@@ -68,6 +68,7 @@ let owned_calls_env_disabled : bool Lazy.t =
 
 let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(after_fusion = fun _ -> ()) ?(before_perceus = fun ~k_table:_ _ -> ())
+    ?(after_perceus = fun _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
     ?iface_methods ?(decls = []) ?(stamp_metrics = false)
@@ -289,6 +290,8 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
   verify_borrow := Some borrow_map;
   snap "tir-perceus" tir;
   stamp_tir "perceus" tir;
+  (* --why-copies reads the RC Perceus just placed (lib/tir/copy_report.ml). *)
+  after_perceus tir;
   (* Deep-drop synthesis (lib/tir/drop.ml).  Skipped for the JS target, whose
      runtime is GC'd and ignores RC ops entirely. *)
   let tir = if is_js then tir else Drop.run ~k_table:k0 ~borrow_map tir in

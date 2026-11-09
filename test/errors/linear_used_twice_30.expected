@@ -1,0 +1,15 @@
+exit: 1
+-- NAMING ------------- errors/linear_used_twice_30.march
+
+I cannot find `clsoe`. Did you mean `close`? [unbound_variable]
+
+11 |     let n = clsoe(c)
+                 ^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+11 -     let n = clsoe(c)
+11 +     let n = close(c)
+
+

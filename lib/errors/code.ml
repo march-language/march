@@ -21,9 +21,11 @@ let abstract_refinement_misuse = "abstract_refinement_misuse"
 let abstract_refinement_unused = "abstract_refinement_unused"
 let actor_handler_state_type = "actor_handler_state_type"
 let actor_init_arity = "actor_init_arity"
+let alias_kind_mismatch = "alias_kind_mismatch"
 let ambiguous_constructor = "ambiguous_constructor"
 let annotated_tyvar_fixed = "annotated_tyvar_fixed"
 let arity_mismatch = "arity_mismatch"
+let assert_failed = "assert_failed"
 let attribute_no_effect = "attribute_no_effect"
 let builtin_arity = "builtin_arity"
 let cap_bound = "cap_bound"
@@ -35,6 +37,9 @@ let cap_dict_misuse = "cap_dict_misuse"
 let cap_dict_type = "cap_dict_type"
 let cap_grant = "cap_grant"
 let cap_grant_exceeded = "cap_grant_exceeded"
+let cap_host_annotation = "cap_host_annotation"
+let cap_host_scope = "cap_host_scope"
+let cap_host_unproven = "cap_host_unproven"
 let cap_impl_invalid = "cap_impl_invalid"
 let cap_mismatch = "cap_mismatch"
 let cap_narrow_invalid = "cap_narrow_invalid"
@@ -77,6 +82,8 @@ let invariant_not_deploy_checkable = "invariant_not_deploy_checkable"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
 let json_derive_name_collision = "json_derive_name_collision"
+let ghost_in_runtime = "ghost_in_runtime"
+let ghost_misuse = "ghost_misuse"
 let lemma_argument_impure = "lemma_argument_impure"
 let lemma_unproved = "lemma_unproved"
 let lemma_unproved_call = "lemma_unproved_call"
@@ -125,10 +132,12 @@ let pipe_into_match = "pipe_into_match"
 let pipe_match_pattern = "pipe_match_pattern"
 let portable_capture = "portable_capture"
 let predicate_eq_structural = "predicate_eq_structural"
+let predicate_vocabulary_shadowed = "predicate_vocabulary_shadowed"
 let prelude_collision = "prelude_collision"
 let proof_cap_foreign = "proof_cap_foreign"
 let proof_cap_mint_private = "proof_cap_mint_private"
 let proof_cap_return = "proof_cap_return"
+let property_failed = "property_failed"
 let protocol_crash_branches = "protocol_crash_branches"
 let protocol_empty = "protocol_empty"
 let protocol_expand_invalid = "protocol_expand_invalid"
@@ -187,6 +196,7 @@ let template_fragment_position = "template_fragment_position"
 let template_unsafe_interpolation = "template_unsafe_interpolation"
 let template_unterminated = "template_unterminated"
 let termination_unproved = "termination_unproved"
+let test_panicked = "test_panicked"
 let then_keyword = "then_keyword"
 let transition_via_mismatch = "transition_via_mismatch"
 let trusted_linear_invalid = "trusted_linear_invalid"
@@ -215,6 +225,11 @@ let unused_binding = "unused_binding"
 let unused_import = "unused_import"
 let unused_needs = "unused_needs"
 let vectorize_failed = "vectorize_failed"
+let copy_shared = "copy_shared"
+(* Run-time failures the interpreter reports in the compile-error style. *)
+let panic = "panic"
+let runtime_error = "runtime_error"
+let actor_crashed = "actor_crashed"
 
 (** Every code above, sorted. *)
 let all = [
@@ -222,9 +237,11 @@ let all = [
   abstract_refinement_unused;
   actor_handler_state_type;
   actor_init_arity;
+  alias_kind_mismatch;
   ambiguous_constructor;
   annotated_tyvar_fixed;
   arity_mismatch;
+  assert_failed;
   attribute_no_effect;
   builtin_arity;
   cap_bound;
@@ -236,6 +253,9 @@ let all = [
   cap_dict_type;
   cap_grant;
   cap_grant_exceeded;
+  cap_host_annotation;
+  cap_host_scope;
+  cap_host_unproven;
   cap_impl_invalid;
   cap_mismatch;
   cap_narrow_invalid;
@@ -278,6 +298,8 @@ let all = [
   io_not_allowed;
   island_missing_fn;
   json_derive_name_collision;
+  ghost_in_runtime;
+  ghost_misuse;
   lemma_argument_impure;
   lemma_unproved;
   lemma_unproved_call;
@@ -326,10 +348,12 @@ let all = [
   pipe_match_pattern;
   portable_capture;
   predicate_eq_structural;
+  predicate_vocabulary_shadowed;
   prelude_collision;
   proof_cap_foreign;
   proof_cap_mint_private;
   proof_cap_return;
+  property_failed;
   protocol_crash_branches;
   protocol_empty;
   protocol_expand_invalid;
@@ -388,6 +412,7 @@ let all = [
   template_unsafe_interpolation;
   template_unterminated;
   termination_unproved;
+  test_panicked;
   then_keyword;
   transition_via_mismatch;
   trusted_linear_invalid;
@@ -416,6 +441,10 @@ let all = [
   unused_import;
   unused_needs;
   vectorize_failed;
+  copy_shared;
+  panic;
+  runtime_error;
+  actor_crashed;
 ]
 
 (** [with_arg slug arg] is the code [slug ^ ":" ^ arg]. *)
@@ -458,7 +487,7 @@ let category_table : (string * string list) list = [
     not_a_variant; record_update_non_record; sig_mismatch; type_arity;
     type_mismatch ];
   "TYPE", [
-    invalid_type_bound; let_star_no_flat_map; let_star_unknown_type;
+    alias_kind_mismatch; invalid_type_bound; let_star_no_flat_map; let_star_unknown_type;
     nonregular_type; recursive_type_alias; typed_hole; unsendable_type ];
   "INTERFACE", [
     json_derive_name_collision; missing_impl; missing_method;
@@ -469,6 +498,7 @@ let category_table : (string * string list) list = [
   "CAPABILITY", [
     cap_bound; cap_bound_needs; cap_bound_iface; cap_ceiling; cap_deserialize;
     cap_dict_misuse; cap_dict_type; cap_grant; cap_grant_exceeded;
+    cap_host_annotation; cap_host_scope; cap_host_unproven;
     cap_impl_invalid; cap_mismatch; cap_narrow_invalid; cap_needs;
     cap_root_broad; cap_scope_violation; cap_widen; extern_cap_missing;
     extern_needs_foreign; import_cap_missing; invalid_cap_scope;
@@ -501,8 +531,10 @@ let category_table : (string * string list) list = [
     abstract_refinement_misuse; abstract_refinement_unused; division_by_zero;
     int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
     invariant_not_deploy_checkable;
+    ghost_in_runtime; ghost_misuse;
     lemma_argument_impure; lemma_unproved; lemma_unproved_call;
-    measure_scalar_field; predicate_eq_structural; refinement_ignored;
+    measure_scalar_field; predicate_eq_structural; predicate_vocabulary_shadowed;
+    refinement_ignored;
     refinement_unchecked; refinement_unverified; refinement_violated;
     reflect_conflict; reflect_inconsistent; return_refinement_violated;
     set_measure_call; set_refinement_type; solver_unavailable;
@@ -514,7 +546,13 @@ let category_table : (string * string list) list = [
     deterministic_violation; no_alloc; no_alloc_candidate; no_alloc_policy;
     no_alloc_transient; no_alloc_unchecked; no_extern_violation;
     no_panic_violation; pure_violation; realtime_mixed; vectorize_failed ];
+  "COPY", [ copy_shared ];
+  "RUNTIME", [ panic; runtime_error; actor_crashed ];
   "UNUSED", [ unused_binding; unused_import ];
+  (* Not compile errors: a failing `assert`, `Check.all` property or test
+     body, rendered by the test runners (lib/errors/test_report.ml) through
+     the same renderer, so a failed test reads like a diagnostic. *)
+  "TEST FAILURE", [ assert_failed; property_failed; test_panicked ];
   "PROGRAM", [
     attribute_no_effect; compiled_unsupported; internal_error; main_and_app;
     redundant_csrf_token; stdlib_internal; unknown_attribute ];

@@ -530,7 +530,11 @@ let extern_borrow_table : (string * bool list) list = [
   ("get_actor_field",           [true; true]);
   (* __panic_site keeps its String literal without a reference (literals are
      immortal) and reads nothing else. *)
-  ("__panic_site",              [true; true]);
+  ("__panic_site",              [true; true; true; true]);
+  (* march_assert_fail copies its three Strings into the report it panics
+     with; march_test_header keeps its literal without a reference. *)
+  ("__assert_fail",             [true; true; true]);
+  ("__test_header",             [true]);
   ("march_get_actor_field",     [true; true]);
   ("logger_write",              [true; true; true; true]);
   ("logger_dispatch",           [true; true; true; true]);
@@ -1302,6 +1306,10 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
            [Perceus.insert_dead_apply_param_drops].  See [Clo_flags] for the
            whole convention. *)
         if Tir_names.is_apply_fn fn.Tir.fn_name then false
+        (* The hot-reload live-data check ([Tir_names.migrate_check_suffix])
+           is called by the C reload server, which hands it one reference to
+           a copy of the live state; owned, so the check releases it. *)
+        else if Tir_names.is_migrate_check_name fn.Tir.fn_name then false
         (* An actor's dispatch fn ([Name_dispatch($actor, $msg)]) is called
            only by the C runtime's actor loop ([actor_green_thread]), which
            TRANSFERS its reference to the message: it frees a message itself

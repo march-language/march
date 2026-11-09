@@ -1,0 +1,31 @@
+mod Main do
+  type Client = Client
+  type Server = Server
+
+  protocol Order do
+    Client -> Server : Int
+    choose by Server:
+      ok  -> Server -> Client : Bool
+      err -> Server -> Client : String
+    end
+    Client -> Server : String
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Order)
+    let cc2 = Chan.send(cc, 1)
+    let (_n, sc2) = Chan.recv(sc)
+    let sc3 = Chan.send(Chan.choose(sc2, :ok), true)
+    let (label, cc3) = Chan.offer(cc2)
+    match label do
+      :ok ->
+        let (_b, cc4) = Chan.recv(cc3)
+        Chan.close(cc4)
+      :err ->
+        let (_s, cc4) = Chan.recv(cc3)
+        Chan.close(Chan.send(cc4, "thanks"))
+    end
+    let (_t, sc4) = Chan.recv(sc3)
+    Chan.close(sc4)
+  end
+end

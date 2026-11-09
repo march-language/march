@@ -1,0 +1,75 @@
+-- Golden failure reports for `assert` (test/run_test_reports.ml).
+-- Every test here FAILS on purpose; the suite pins what each one prints,
+-- interpreted and compiled.
+mod AssertValues do
+  type Role = Admin | Guest | Owner(Int)
+  type User = { name : String, tags : List(Role) }
+  derive Eq, Show for Role
+  derive Eq, Show for User
+
+  pfn long_list(n : Int) : List(Int) do
+    List.map(List.range(0, n), fn i -> i * 10)
+  end
+
+  describe "assert ==" do
+    test "nested record, list and variant" do
+      let user = { name: "ann", tags: [Admin, Owner(1), Guest] }
+      let expected = { name: "ann", tags: [Admin, Owner(2), Guest] }
+      assert (user == expected)
+    end
+
+    test "strings" do
+      assert ("hello world" == "hello word")
+    end
+
+    test "a long string shows a window" do
+      let got = "the quick brown fox jumps over the lazy dog and keeps running far away"
+      assert (got == "the quick brown fox jumps over the lazy cat and keeps running far away")
+    end
+
+    test "list is shorter" do
+      let xs = [1, 2, 3]
+      assert (xs == [1, 2, 3, 4])
+    end
+
+    test "list is longer" do
+      let xs = [1, 2, 3, 4, 5]
+      assert (xs == [1, 2, 3])
+    end
+
+    test "a long list is elided" do
+      let xs = long_list(30)
+      let ys = List.map(xs, fn x -> if x == 170 do 171 else x end)
+      assert (xs == ys)
+    end
+
+    test "tuples" do
+      assert ((1, "a", true) == (1, "a", false))
+    end
+
+    test "options in a list" do
+      assert ([Some(1), None, Some(3)] == [Some(1), Some(2), Some(3)])
+    end
+
+    test "different constructors" do
+      assert (Owner(1) == Guest)
+    end
+  end
+
+  describe "other comparisons" do
+    test "not equal" do
+      let xs = [1, 2]
+      assert (xs != [1, 2])
+    end
+
+    test "less than" do
+      let a = 7
+      assert (a * 2 < 10)
+    end
+
+    test "plain condition" do
+      let xs = [1, 2, 3]
+      assert List.is_empty(xs)
+    end
+  end
+end

@@ -27,7 +27,7 @@ mod SessionChurnB do
 
   pfn cluster_runs(c : Cap(IO), h : Cap(ClusterNode.Live), i : Int, stop : Int, ok : Int, bad : Int) : (Int, Int) do
     if i >= stop do (ok, bad) else
-      match Echo_Run.cluster_B(c, h, "churn" ++ int_to_string(i), fn (s, st) -> role_b(s, st, i % 3 == 2)) do
+      match Echo_Run.cluster_B(h, "churn" ++ int_to_string(i), fn (s, st) -> role_b(s, st, i % 3 == 2)) do
         Ok(_) -> cluster_runs(c, h, i + 1, stop, ok + 1, bad)
         Err(e) ->
           -- Only every third session is meant to fail (B leaves it): say why

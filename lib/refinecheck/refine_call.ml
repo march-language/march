@@ -257,6 +257,7 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
+  | A.EProof (p, _) -> List.exists free (A.proof_children p)
 
 (* ── Attributing a skip to a withdrawn alias ───────────────────────────────
    A withdrawn alias is only ONE of the reasons an obligation can go
@@ -547,6 +548,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
       | A.EDbg (Some e, _) -> recur e
+      | A.EProof (p, _) -> List.exists recur (A.proof_children p)
     in
     (* [pred] itself may be a top-level conjunction (`len(_) >= 0 && len(_) >
        0`), which is exactly the shape [Partial_conjunct] names: one conjunct
@@ -761,6 +763,52 @@ type call_ctx = {
          unshadowed one.  [`Na] leaves the obligation's skip as it was. *)
 }
 
+(* ── Counterexample wording (plan 2026-11-02 §F4 point 3) ──────────────
+   "for example, when `k` is `-1` and `n` is `3`": the values the solver
+   found, in source syntax, each named as the program names it. *)
+let join_when (parts : string list) : string option =
+  match List.rev parts with
+  | [] -> None
+  | [ x ] -> Some ("for example, when " ^ x)
+  | last :: rest -> Some ("for example, when " ^ String.concat ", " (List.rev rest) ^ " and " ^ last)
+
+(* A witness-confirmed assignment ([Witness.confirm_precond]). *)
+let example_of_entries (entries : (string * March_eval.Eval_types.value) list) : string option =
+  let rs =
+    List.map
+      (fun (n, v) -> Option.map (fun s -> Printf.sprintf "`%s` is `%s`" n s) (Witness.render_value v))
+      entries
+  in
+  if List.for_all Option.is_some rs then join_when (List.map Option.get rs) else None
+
+(* The raw model, when no witness confirmed it.  A pass-site obligation's
+   subject is the synthetic `$cb_x` ([Refine_check.fresh_cb_arg]): the value
+   the passed function would be given.  Other synthetic names (`$`) are
+   rendered by [render_model_entry], whose phrasing never names one. *)
+let example_of_model ~(callee : string) ~(subject : check_subject) (model : (string * string) list) : string =
+  let plain k =
+    k <> "" && (match k.[0] with 'a' .. 'z' | '_' -> true | _ -> false)
+    && String.for_all (fun c -> match c with 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' -> true | _ -> false) k
+  in
+  let parts =
+    List.map
+      (fun (k, v) ->
+        if k = "$cb_x" && subject = Callback_domain then
+          Printf.sprintf "`%s` is given `%s`" callee (pretty_smt_value v)
+        (* An element obligation's subject ([Refine_check.check_elements]). *)
+        else if k = "$elem" then Printf.sprintf "an element is `%s`" (pretty_smt_value v)
+        else if plain k then Printf.sprintf "`%s` is `%s`" k (pretty_smt_value v)
+        else Printf.sprintf "`%s`" (render_model_entry (k, v)))
+      (visible_model model)
+  in
+  Option.value ~default:"" (join_when parts)
+
+(* [inner] lies inside [outer] (same file). *)
+let span_within (inner : A.span) (outer : A.span) : bool =
+  inner.A.file = outer.A.file
+  && (inner.A.start_line, inner.A.start_col) >= (outer.A.start_line, outer.A.start_col)
+  && (inner.A.end_line, inner.A.end_col) <= (outer.A.end_line, outer.A.end_col)
+
 let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argument)
     ?(kind = Obligation.Precondition)
     ?(goal_scope_facts = false) ?(entry_label : string option)
@@ -769,6 +817,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  let quantified = March_ast.Bounded_pred.contains rp.pred
+    || List.exists (fun (_, (_, q, _)) -> March_ast.Bounded_pred.contains q) sc
+    || List.exists (fun (q, _) -> March_ast.Bounded_pred.contains q) path in
   scope_fact_dropped := false;
   (* A lemma body's pattern links (§4.3), read by stage 2 only; the `$link:`
      facts themselves translate to nothing, so stage 1 is unchanged. *)
@@ -860,7 +911,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
      never hold is reported); silent to the LEDGER is what this fixes, so a
      contract that checks nothing is distinguishable from one that passes.
      Recording is observation-only — it must never alter control flow. *)
-  let note verdict =
+  let note_plain verdict =
     (* Re-attribute BEFORE recording, not just in the error text: the ledger is
        what `--refine-report` prints, and a ledger that disagrees with the
        diagnostic is a second thing to be confused by. *)
@@ -1000,6 +1051,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            && (match r with
                | Obligation.Alias_withdrawn _ -> false
                | Obligation.Unconstrained_subject _
+               | Obligation.Message_unresolved _
                | Obligation.Opaque_application _
                | Obligation.Partial_conjunct _
                | Obligation.Parametric_source_unproved _
@@ -1034,6 +1086,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        | Obligation.Solver_undecided
        | Obligation.Sort_conflict
        | Obligation.Float_sort_gate -> unverified_hinted := true
+       | Obligation.Message_unresolved _
        | Obligation.Unconstrained_subject _
        | Obligation.Opaque_application _
        | Obligation.Partial_conjunct _
@@ -1050,6 +1103,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       let body =
         match r with
         | Obligation.Unconstrained_subject _
+        | Obligation.Message_unresolved _
         | Obligation.Opaque_application _
         | Obligation.Partial_conjunct _
         | Obligation.Parametric_source_unproved _
@@ -1088,6 +1142,101 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       in
       Err.hint ~code:Err.Code.refinement_unverified errctx ~span (display_measures body)
     | _ -> ()
+  in
+  (* A skip inside a hot-reload migration is decided by running it (see
+     [Witness.confirm_migration]): its parameter is every old value the
+     runtime can hand it, so an input whose result the new build rejects is a
+     definite failure, reported as one, with the input. *)
+  let migration_counterexample () =
+    if subject <> Argument || is_stdlib_source_file span.A.file then None
+    else
+      match !enclosing_fn with
+      | None -> None
+      | Some fd ->
+        let fname = fd.A.fn_name.A.txt in
+        let actor =
+          Witness.last_segment
+            (match String.index_opt fname '_' with
+             | Some _ ->
+               let suffix = match Witness.is_migration_fn fd with
+                 | Some `State -> "_migrate_state" | Some `Msg -> "_migrate_msg" | None -> "" in
+               String.sub fname 0 (String.length fname - String.length suffix)
+             | None -> fname)
+        in
+        (* The obligation must be on the new build's own state or message:
+           `Tally`'s record literal, or a `Tally` message constructor.  A
+           helper record built along the way is not what the runtime hands
+           the new code, and its field need not share a name with a state
+           field by accident. *)
+        let owner_is_actor q = String.lowercase_ascii (Witness.last_segment q) = actor in
+        let site =
+          match Witness.is_migration_fn fd with
+          | Some `State when owner_is_actor callee ->
+            Option.map (fun f -> Witness.State_field f) (List.nth_opt sg.param_names rp.idx)
+          | Some `Msg ->
+            let qual = match String.rindex_opt callee '.' with
+              | Some i -> Some (String.sub callee 0 i) | None -> None in
+            if (match qual with Some q -> owner_is_actor q | None -> true) then
+              Some (Witness.Msg_arg { ctor = callee; idx = rp.idx; names = sg.param_names })
+            else None
+          | _ -> None
+        in
+        Option.bind site (fun site ->
+            Witness.confirm_migration ~fn:fd ~site ~pred:rp.pred ~binder:rp.binder)
+  in
+  let note verdict =
+    match verdict with
+    | Obligation.Skipped _ when not !trusted_fn -> (
+      match migration_counterexample () with
+      | None -> note_plain verdict
+      | Some (fname, old, ret) ->
+        note_plain Obligation.Violated;
+        let what, where =
+          match Witness.is_migration_fn (Option.get !enclosing_fn) with
+          | Some `State ->
+            ( "a state the new actor rejects",
+              match List.nth_opt sg.param_names rp.idx with
+              | Some f -> Printf.sprintf " (field `%s`)" f
+              | None -> "" )
+          | _ -> ("a message the new handler rejects", "")
+        in
+        let short = Witness.last_segment fname in
+        (match List.assoc_opt short !Hcr_baseline.derived with
+         | Some fields ->
+           (* A derived migration (M11): the user wrote no function, so the
+              error is about the state change, at the field. *)
+           let field = List.nth_opt sg.param_names rp.idx in
+           let span =
+             match Option.bind field (fun f -> List.assoc_opt f fields) with
+             | Some sp -> sp
+             | None -> span
+           in
+           Err.report errctx
+             { Err.severity = Err.Error; span; labels = []; code = Err.Code.refinement_violated;
+               fix = None;
+               message =
+                 display_measures
+                   (Printf.sprintf
+                      "A running `%s` can hold a state this version rejects.\n\n\
+                       `%s` requires  %s%s\n\
+                       but the running state %s would become %s"
+                      callee callee (pred_str rp.pred) where old ret);
+               notes =
+                 [ Printf.sprintf
+                     "the state only gained fields, so the compiler derived `%s`: it keeps \
+                      every old field and gives each new one its `init` value"
+                     short;
+                   Printf.sprintf "write `%s` yourself to convert the old values" short ] }
+         | None ->
+        Err.error ~code:Err.Code.refinement_violated errctx ~span
+          (display_measures
+             (Printf.sprintf
+                "`%s` can produce %s.\n\n\
+                 `%s` requires  %s%s\n\
+                 but %s(%s) returns %s"
+                (Witness.last_segment fname) what callee (pred_str rp.pred) where
+                (Witness.last_segment fname) old ret))))
+    | _ -> note_plain verdict
   in
   match List.nth_opt args rp.idx with
   | None -> ()
@@ -1292,6 +1441,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
             (fun s' c' ->
               if s' <> s then push_structural (Smt.Ne (Smt.Const c, Smt.Const c')))
             str_lit_tbl;
+          (* Stage 2: the same literal in a reflected body (D9). *)
+          if !Reflect_state.arm_on then
+            push_structural (Smt.Eq (Smt.Const c, Smt.App (Reflect_state.str_lit_sym s, [])));
           (* ...and the mirror of [declare_str_const]'s registration: if THIS
              is the empty literal, every string constant already declared
              gains its `!= "" -> len > 0` implication. *)
@@ -1422,8 +1574,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       decls := (nm, s) :: !decls;
       Smt.Const nm
     in
-    let record_self sort_name : Smt.term option =
-      match self_actual with
+    let rec record_term sort_name (actual : A.expr) : Smt.term option =
+      match actual with
       | A.ERecord (fields, _) ->
         reflect_record_literal ~opaque:opaque_field sort_name fields scalar_arg
       | A.EVar { A.txt = x; _ } ->
@@ -1476,6 +1628,32 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          has already cleared [ret] on every signature whose postcondition the
          DEFINITION side did not prove, so anything [postcond] returns is a
          fact rather than a trusted contract. *)
+      (* Reflection stage 2: a reflected call returning this record is its
+         logic symbol over its arguments, a record argument through this same
+         function and a scalar one through [reflect_scalar]; any other
+         argument declines.  Stage 1 only notes the frontier. *)
+      | A.EApp (A.EVar _, (_ :: _ as cargs), csp) when Reflect_state.stage2_call_at csp -> (
+        let sym = Option.get (Reflect_state.resolve_site csp) in
+        match Reflect_state.sig_of sym with
+        | Some fs when fs.Reflect_state.fs_ret = adt_sort sort_name ->
+          let cargs = Reflect_state.args_at csp cargs in
+          if List.length cargs <> List.length fs.Reflect_state.fs_params then None
+          else
+            let parts =
+              List.map2
+                (fun a p ->
+                  match p with
+                  | Smt.SData (n, []) when is_record_sort n ->
+                    let t = record_term n a in
+                    if t <> None && not (List.mem n !adt_sorts) then adt_sorts := n :: !adt_sorts;
+                    t
+                  | (Smt.SInt | Smt.SBool | Smt.SFloat) as sort -> absorb (reflect_scalar ~postcond ~sort sc a)
+                  | _ -> None)
+                cargs fs.Reflect_state.fs_params
+            in
+            if List.exists Option.is_none parts then None
+            else Some (Smt.App (sym, List.map Option.get parts))
+        | _ -> None)
       | A.EApp (A.EVar { A.txt = fname; _ }, cargs, _) -> (
         match postcond fname cargs with
         | Some (b, q, Some srt) when srt = sort_name ->
@@ -1498,6 +1676,30 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           Some c
         | _ -> None)
       | _ -> None
+    in
+    let record_self sort_name = record_term sort_name self_actual in
+    (* The record sort a callee parameter OTHER than the refined one is declared
+       at, and the term for its actual (memoized: one actual, one term). *)
+    let callee_record_sort name =
+      match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
+      | Some ty -> record_sort_of_param_ty ty
+      | None -> None
+    in
+    let callee_record_terms : (string, Smt.term option) Hashtbl.t = Hashtbl.create 4 in
+    let callee_record_term name =
+      match Hashtbl.find_opt callee_record_terms name with
+      | Some t -> t
+      | None ->
+        let t =
+          match callee_record_sort name, actual_of_name name with
+          | Some s, Some a ->
+            let t = record_term s a in
+            if t <> None && not (List.mem s !adt_sorts) then adt_sorts := s :: !adt_sorts;
+            t
+          | _ -> None
+        in
+        Hashtbl.replace callee_record_terms name t;
+        t
     in
     (* [`Other] = every non-record subject — Int, String and variant ADT — each
        handled by its own resolver below, unchanged.
@@ -1552,7 +1754,24 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        and it additionally keeps the `>= 0` assumption from being asserted
        twice.) *)
     let measure_var_cache : (string, Smt.term option) Hashtbl.t = Hashtbl.create 8 in
+    let quantified_element = function Smt.SInt | Smt.SBool -> true | _ -> false in
+    let quantified_set_sort m x =
+      match caller_sort_of x with
+      | Some (Smt.SData (adt, element :: _))
+        when (m = "keys" && adt = adt_sort_name ~arity:2 "Map")
+          || (m = elts_measure && (adt = list_adt || adt = adt_sort_name ~arity:1 "Set")) ->
+        if quantified_element element then Some element else None
+      | _ -> None in
     let measure_of_var m x =
+      if quantified && x = "_" then None else
+      if quantified && is_builtin_set_measure m && quantified_set_sort m x = None then None else
+      if quantified && m = "len" && caller_dt x = Some list_adt
+         && quantified_set_sort elts_measure x = None then None else
+      if quantified && (m = "len" || m = elts_measure) && caller_dt x = Some list_adt then begin
+        let sort = Option.value (caller_sort_of x) ~default:(adt_sort list_adt) in
+        decls := (x, sort) :: !decls;
+        Some (Smt.App ((if m = "len" then list_len_measure else list_elts_measure), [Smt.Const x]))
+      end else
       let nm = m ^ "$" ^ x in
       match Hashtbl.find_opt measure_var_cache nm with
       | Some cached -> cached
@@ -1562,7 +1781,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            ([resolve_set_sorts] settles it per VC); every other measure is
            an Int. *)
         if is_builtin_set_measure m || is_set_measure m then
-          decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls
+          decls := (nm, Smt.SSet (if quantified && is_builtin_set_measure m then
+            Option.get (quantified_set_sort m x) else Smt.set_unknown_elem)) :: !decls
         else decls := (nm, Smt.SInt) :: !decls;
         (* `len` is known non-negative; user measures get no axiom in v1 (sound;
            guarded uses still discharge via the path context). *)
@@ -1596,6 +1816,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        inside the loader stops a cycle of facts naming each other. *)
     let load_name_fact_ref : (string -> unit) ref = ref (fun _ -> ()) in
     let foreign_var name =
+      if quantified && name = "_" then None else begin
       !load_name_fact_ref name;
       if Hashtbl.mem str_names name then None
       (* A caller `String` (design B3): pinned into the `Str` sort like any
@@ -1611,6 +1832,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
           Some (Smt.Const name, (name, adt_sort adt))
         | None -> Some (Smt.Const name, (name, caller_scalar_of name))
+      end
     in
     (* Route measures through the SAME memo the goal side uses, so a promise
        about `len(xs)` and a goal about `len(xs)` land on the one `len$xs`
@@ -1803,7 +2025,43 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          | _ -> ());
       t
     in
+    (* A proved list-valued call carries a quantified contract as one typed
+       value. Its indexing and length reads must share this constant; reducing
+       the recursive function's body instead loses its induction theorem. *)
+    let list_contract = function
+      | A.EApp (A.EVar {A.txt = f; _}, args, _) ->
+        (let result = postcond f args in
+         match result with
+         | Some (b, q, Some marker) when marker = list_adt || marker = meas_sort_prefix ^ list_adt -> Some (b, q)
+         | _ -> None)
+      | _ -> None in
+    let reflect_actual sort actual =
+      match quantified, sort, (if quantified then list_contract actual else None) with
+      | true, Smt.SData (adt, args), _ when adt = list_adt
+          && (match args with [elem] -> not (quantified_element elem) | _ -> true) -> None
+      | true, Smt.SData (adt, _), Some (b, q) when adt = list_adt ->
+        incr ret_ctr;
+        let nm = Printf.sprintf "$quant_result%d" !ret_ctr in
+        let value = Smt.Const nm in
+        let extra = ref [] in
+        let rv n =
+          if n = b || n = "_" then Some value
+          else Option.map (fun (t, d) -> extra := d :: !extra; t) (foreign_var n) in
+        let rm m n =
+          if n = b || n = "_" then
+            if m = "len" then Some (Smt.App (list_len_measure, [value]))
+            else if m = elts_measure then Some (Smt.App (list_elts_measure, [value]))
+            else None
+          else foreign_measure m n in
+        let facts = match smt_of ~resolve_var:rv ~resolve_measure:rm q with Some t -> [t] | None -> [] in
+        Some (value, (nm, sort) :: !extra, facts)
+      | _ -> reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
+          ~foreign_field:arg_resolve_field ~foreign_len ~sort sc actual in
     let resolve_var name =
+      if quantified then
+        (match (if is_self name then Some self_actual else actual_of_name name) with
+         | Some (A.EVar {A.txt = x; _}) -> !load_scope_measure_facts_ref x
+         | _ -> ());
       (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
          choice is driven by a DECLARED type (the refinement's own base type for
          the binder, the callee's parameter type otherwise), never inferred from
@@ -1819,12 +2077,26 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       else if (not (is_self name)) && name_is_str name then
         (match actual_of_name name with Some a -> reflect_str name a | None -> None)
       else if is_self name then
+        (* Stage 2: a refined value of datatype type is its datatype sort, as
+           the named spelling below already is, so `okz(_)` meets a reflected
+           call over the actual exactly as `okz(g)` does (todo
+           2026-11-04-lemma-hypothesis-reflected-call-not-assumed). *)
+        (* A tuple has no scalar reading at all (S3 tuples): its datatype
+           sort in both stages, or a path fact over it (`if p == q`) declares
+           the same name at `$Tup2` beside the stage-1 `Int`. *)
+        let sort =
+          match List.nth_opt sg.param_tys rp.idx with
+          | Some (Some ty) -> (
+            match instance_sort_of_ty ty with
+            | Smt.SData (n, _) as s when n <> "Elem" && (!Reflect_state.arm_on || quantified || is_tuple_adt n) -> s
+            | _ -> self_scalar)
+          | _ -> self_scalar
+        in
         mark_self name
           (absorb
              (reflect_cached "$self" (fun () ->
-                  reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                    ~foreign_field:arg_resolve_field ~foreign_len
-                    ~sort:self_scalar sc self_actual)))
+                  reflect_actual sort self_actual)))
+      else if callee_record_sort name <> None then callee_record_term name
       else
         match actual_of_name name with
         | Some a ->
@@ -1832,17 +2104,16 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              sort, so it can meet a reflected call over the same value (the
              Int default below is what stage 1 has always used). *)
           let sort =
-            if not !Reflect_state.arm_on then scalar_of_name name
-            else
-              match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
-              | Some (Some ty) -> (match instance_sort_of_ty ty with Smt.SData (n, _) as s when n <> "Elem" -> s | _ -> scalar_of_name name)
-              | _ -> scalar_of_name name
+            match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
+            | Some (Some ty) -> (
+              match instance_sort_of_ty ty with
+              | Smt.SData (n, _) as s when n <> "Elem" && (!Reflect_state.arm_on || quantified || is_tuple_adt n) -> s
+              | _ -> scalar_of_name name)
+            | _ -> scalar_of_name name
           in
           absorb
             (reflect_cached name (fun () ->
-                 reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                   ~foreign_field:arg_resolve_field ~foreign_len
-                   ~sort sc a))
+                 reflect_actual sort a))
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
@@ -1850,7 +2121,15 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           (* …unless it is a caller-scope RECORD, which lives at a datatype sort.
              Declaring it `Int` here would put one symbol at two sorts; dropping
              the sub-term instead just loses a fact (silence). *)
-          else if is_recvar name then None
+          else if is_recvar name then begin
+            (* …and is then that record's constant at its datatype sort, the
+               one a field read projects from ([path_resolve_field]), so `p` in a lemma's
+               theorem (`swp(swp(p)) == p`) and `p.x` meet on one symbol. *)
+            let sort_name = List.assoc name re in
+            decls := (name, adt_sort sort_name) :: !decls;
+            if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
+            Some (Smt.Const name)
+          end
           else begin
             (match caller_dt name with
              | Some adt ->
@@ -1935,7 +2214,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              substitution) and reflects through the caller's own resolver,
              the same way [rm] below treats a measure over a foreign name. *)
           let rv n =
-            if is_self_spelling n then None
+            if is_self_spelling n then
+              if quantified && caller_dt x = Some list_adt then begin
+                let sort = Option.value (caller_sort_of x) ~default:(adt_sort list_adt) in
+                decls := (x, sort) :: !decls;
+                Some (Smt.Const x)
+              end else None
             else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
           in
           (* ── A RELATIONAL carried predicate's OTHER names ───────────────────
@@ -2031,7 +2315,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           let rmc m f cargs = if is_call_measure m then set_of_call m f cargs else None in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
                    ~resolve_measure_call:rmc q with
-           | Some qa -> push_user qa
+           | Some qa ->
+             push_user qa
            | None -> ())
         | _ -> ()
       end
@@ -2347,6 +2632,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          | None -> None)
     in
     let resolve_measure m name =
+      let actual = if is_self name then Some self_actual else actual_of_name name in
+      if quantified && (m = "len" || m = elts_measure)
+         && Option.bind actual list_contract <> None then
+        Option.map (fun t -> Smt.App ((if m = "len" then list_len_measure else list_elts_measure), [t]))
+          (resolve_var name)
+      else
       (* `len` OVERLOAD RESOLUTION.  The string meaning is taken only when the
          subject's DECLARED base type is String — the refinement's own base type
          for the binder, the callee's parameter type for a cross-argument name.
@@ -2489,9 +2780,33 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        record path installs one; every other path keeps [smt_of]'s default
        (which returns None, dropping any field-bearing predicate). *)
     let resolve_field =
-      match mode with
-      | `Record (sort_name, t) -> make_field_resolver rp.binder sort_name t
-      | `Other | `Skip -> fun _ _ -> None
+      let own =
+        match mode with
+        | `Record (sort_name, t) -> make_field_resolver rp.binder sort_name t
+        | `Other | `Skip -> fun _ _ -> None
+      in
+      (* Then another callee parameter of record type (`_ > p.x`), its actual's
+         record term; then a caller-scope record ([path_resolve_field], a
+         lemma's own record parameter in its theorem). *)
+      fun varname fname ->
+        match own varname fname with
+        | Some _ as t -> t
+        | None ->
+          if (not (is_self varname)) && callee_record_sort varname <> None then
+            match callee_record_term varname, callee_record_sort varname with
+            | Some t, Some s -> make_field_resolver varname s t varname fname
+            | _ -> None
+          else if (not (is_self varname)) && not (List.mem_assoc varname name_pos) then
+            match List.assoc_opt varname re with
+            | None -> None
+            | Some sort_name ->
+              (match make_field_resolver varname sort_name (Smt.Const varname) varname fname with
+               | None -> None
+               | Some t ->
+                 decls := (varname, adt_sort sort_name) :: !decls;
+                 if not (List.mem sort_name !adt_sorts) then adt_sorts := sort_name :: !adt_sorts;
+                 Some t)
+          else None
     in
     (* A measure applied to a non-variable term — `len(v.history)` where
        `v.history` is a field selector.  Mirrors check_post: evaluate
@@ -2553,6 +2868,11 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
       (* Stage 2: `len` of a reflected call's term (`len(append(xs, ys))` in a
          lemma's theorem) is the list measure over it, which the call's
          unfolding and `$len`'s own equations meet -- the subject arm's rule. *)
+      (* …a reflected String result's (D9): its byte length. *)
+      | "len", Smt.App (f, _)
+        when !Reflect_state.arm_on && string_len_available ()
+             && (match Reflect_state.sig_of f with Some s -> s.Reflect_state.fs_ret = Reflect_state.str_sort | None -> false) ->
+        Some (Smt.App (strlen_fn, [ arg ]))
       | "len", Smt.App (f, _) when !Reflect_state.arm_on && (Reflect_state.is_sym f || Reflect_state.is_instance f) ->
         Some (Smt.App (list_len_measure, [ arg ]))
       (* …and of a list constructor term (`len(Cons(h, acc))` in an induction
@@ -2624,7 +2944,15 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
         List.iter
           (fun c -> Option.iter (fun k -> load_scope_tester_facts adt k name) (ctor_of_adt adt c))
           goal_ctors;
-        match reflect_dt adt (A.EVar { A.txt = name; A.span }) with
+        (* A tuple at its instance (S3): the goal declares a tuple-typed
+           parameter at `$Tup2(Int, Int)`, so the guard's copy of the same
+           name must not be the bare `$Tup2`. *)
+        let args =
+          match caller_sort_of name with
+          | Some (Smt.SData (a, args)) when is_tuple_adt a -> Some args
+          | _ -> None
+        in
+        match reflect_dt ?args adt (A.EVar { A.txt = name; A.span }) with
         | Some t ->
           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
           Some t
@@ -3112,6 +3440,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        | Some (decls, goal, assumptions, measure_instances) ->
        let assumptions = card_facts decls goal assumptions in
        let sort_of n = List.assoc_opt n decls in
+       (* Rejected speculative scope facts must not leave an anonymous
+          placeholder declaration in a quantified query. `_` is not a legal
+          SMT constant name, and has no free occurrence in the surviving VC. *)
+       let decls =
+         if quantified && not (List.exists (fun t -> List.mem "_" (Smt.free_names t)) (goal :: assumptions))
+         then List.filter (fun (n, _) -> n <> "_") decls else decls in
        let vc = { Smt.decls; assumptions; goal } in
        (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,
           then float-rewrite-and-wellsortedness) applied to [user_assume]
@@ -3332,31 +3666,113 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              (* Point at the offending argument itself. The call span covers the
                 whole expression, which on a multi-argument call underlines
                 everything and singles out nothing. *)
-             let labels =
-               match subject, List.nth_opt args rp.idx with
-               | Argument, Some a ->
-                 let sp = arg_span span a in
-                 if sp = span then []
-                 else
-                   [{ Err.lbl_span = sp;
-                      Err.lbl_message =
-                        display_measures
-                          (Printf.sprintf "this argument must satisfy `%s`"
-                             (pred_str rp.pred)) }]
-               | _ -> []
+             (* The author's words for the conjunct(s) this call breaks lead
+                the message, and the line under them names the argument and
+                exactly those conjuncts.  Without a message the whole
+                predicate is quoted, as it always was. *)
+             let broken =
+               refuted_messages
+                 ~refuted:(fun g ->
+                   Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not g }
+                   = Refine.Verified)
+                 ~goal rp.pred
              in
-             (* The inline example: prefer a witness-validated, shrunk,
-                source-syntax assignment over the raw model rendering —
-                fall back to the raw one whenever anything in the pipeline
-                (an undecodable sort, an unevaluable path fact) refuses. *)
-             let cx_str =
-               let fallback () = format_cx (model_of first) in
-               match subject, List.nth_opt args rp.idx with
+             (* What the rest of the diagnostic says, in the reader's names
+                (plan 2026-11-02 §F4).  The predicate's binder (`_`, or a
+                named `v`) stands for the argument; the reader wrote neither
+                at the call.  [failing] is the part of the predicate this call
+                breaks; [over_args] reads a predicate at the call's own
+                actuals, the other parameters it names (`_ < len(xs)`)
+                included, so `if i < len(items)` and never `if _ < len(xs)`. *)
+             let arg_opt = match subject with Argument -> List.nth_opt args rp.idx | _ -> None in
+             let real_param =
+               match List.nth_opt sg.param_names rp.idx with
+               | Some p when p <> "" && p.[0] <> '$' && entry_label = None -> Some p
+               | _ -> None
+             in
+             let failing =
+               match broken with
+               | [] -> rp.pred
+               | (p, _) :: rest ->
+                 List.fold_left
+                   (fun acc (q, _) ->
+                     A.EApp (A.EVar { A.txt = "&&"; A.span = A.dummy_span }, [ acc; q ], A.dummy_span))
+                   p rest
+             in
+             let binder_names =
+               rp.binder :: "_" :: (match real_param with Some p -> [ p ] | None -> [])
+             in
+             let over_args (arg : A.expr) (p : A.expr) : A.expr =
+               let others =
+                 List.concat
+                   (List.mapi
+                      (fun i pn ->
+                        if i = rp.idx || pn = "" || pn.[0] = '$' || List.mem pn binder_names then []
+                        else match List.nth_opt args i with Some a -> [ (pn, a) ] | None -> [])
+                      sg.param_names)
+               in
+               subst_params (List.map (fun b -> (b, arg)) binder_names @ others) p
+             in
+             let over_param (p : A.expr) : A.expr option =
+               Option.map
+                 (fun pn ->
+                   let x = A.EVar { A.txt = pn; A.span = A.dummy_span } in
+                   subst_params (List.map (fun b -> (b, x)) binder_names) p)
+                 real_param
+             in
+             (* [pred_str] prints `<predicate>` for a form it cannot spell
+                (a record literal read into `v.port >= 1`); such a rendering
+                is not shown, the parameter-named or declared one is. *)
+             (* …nor is a field read off a record literal (`{ port: 0 }.port`),
+                which [pred_str] spells since record literals print as
+                written: no one writes that, so the named rendering wins. *)
+             let printable (p : A.expr) : string option =
+               let t = pred_str p in
+               let ph = "<predicate>" and fl = "}." in
+               let has ph =
+                 let n = String.length ph and m = String.length t in
+                 let rec go i = i + n <= m && (String.sub t i n = ph || go (i + 1)) in
+                 go 0
+               in
+               if has ph || has fl then None else Some t
+             in
+             let at_arg_or_named (a : A.expr) (p : A.expr) : string =
+               match printable (over_args a p) with
+               | Some t -> t
+               | None ->
+                 (match Option.bind (over_param p) printable with
+                  | Some t -> t
+                  | None -> pred_str p)
+             in
+             (* The argument as written, for quoting; the printer's spelling
+                only when the source cannot be read. *)
+             let src_text (a : A.expr) : string =
+               match March_typecheck.Typecheck_suggest.text_of (arg_span span a) with
+               | Some t when t <> "" && not (String.contains t '\n') -> t
+               | _ -> pred_str a
+             in
+             (* A closed argument's value (`0 - 5` is `-5`), when it folds. *)
+             let closed_value (a : A.expr) : string option =
+               if Witness.free_vars a <> [] then None
+               else
+                 Witness.uncharged (fun () ->
+                     Option.bind (Witness.eval_operand ~lookup:(fun _ -> None) a) Witness.render_value)
+             in
+             (* The counterexample, as the line "for example, when `k` is
+                `-1`": prefer a witness-validated, shrunk, source-syntax
+                assignment over the raw model — fall back to the raw one
+                whenever anything in the pipeline (an undecodable sort, an
+                unevaluable path fact) refuses.  A confirmed assignment is
+                also kept for [Refine_check]'s run of the call (§F4's
+                "what happens when it runs"). *)
+             let example =
+               let fallback () = example_of_model ~callee ~subject (model_of first) in
+               match arg_opt with
                (* A closed argument (`Array.get(v, -1)`) IS its own example: the
                   message already quotes the call, and the raw model names only
                   solver symbols. *)
-               | Argument, Some arg when Witness.free_vars arg = [] -> ""
-               | Argument, Some arg ->
+               | Some arg when Witness.free_vars arg = [] -> ""
+               | Some arg ->
                  (match
                     Witness.confirm_precond ~sc ~path ~pred:rp.pred
                       ~binder:rp.binder ~arg ~model:(model_of first)
@@ -3365,34 +3781,103 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                     (* The interpreter reproduced this violation: a stage-2
                        proof of it would contradict a real run (I7). *)
                     Reflect_state.confirmed := true;
-                    (match Witness.render_entries entries with
-                     | Some s -> Printf.sprintf " (e.g. %s)" s
+                    Witness.record_example span entries;
+                    (match example_of_entries entries with
+                     | Some s -> s
                      | None -> fallback ())
                   | None -> fallback ())
-               | _ -> fallback ()
+               | None -> fallback ()
              in
-             (* The author's words for the conjunct(s) this call breaks lead
-                the message, and the line under them names the argument and
-                exactly those conjuncts.  Without a message the whole
-                predicate is quoted, as it always was. *)
+             let labels =
+               match arg_opt with
+               | Some a ->
+                 let sp = arg_span span a in
+                 let at_arg =
+                   if sp = span then []
+                   else
+                     let msg =
+                       match closed_value a, real_param with
+                       | Some v, Some pn -> Printf.sprintf "`%s` is `%s` here" pn v
+                       | Some v, None -> Printf.sprintf "the argument is `%s` here" v
+                       | None, _ ->
+                         Printf.sprintf "this argument must satisfy `%s`" (at_arg_or_named a failing)
+                     in
+                     [ { Err.lbl_span = sp; Err.lbl_message = display_measures msg } ]
+                 in
+                 (* Where the failing value came from (§F4 point 4): the
+                    binding of each name the argument is built from.  A
+                    refined one says what it is known to satisfy, which is
+                    the refinement to strengthen. *)
+                 let from_binding =
+                   List.filter_map
+                     (fun x ->
+                       match List.assoc_opt x binds with
+                       | Some bsp
+                         when bsp.A.file = span.A.file && bsp.A.start_line > 0
+                              && not (span_within bsp span) ->
+                         let known =
+                           match List.assoc_opt x sc with
+                           | Some (b, p, _) ->
+                             let xv = A.EVar { A.txt = x; A.span = A.dummy_span } in
+                             Printf.sprintf ", where `%s` is known"
+                               (pred_str (subst_params [ (b, xv); ("_", xv) ] p))
+                           | None -> ""
+                         in
+                         Some
+                           { Err.lbl_span = bsp;
+                             Err.lbl_message =
+                               display_measures (Printf.sprintf "`%s` comes from here%s" x known) }
+                       | _ -> None)
+                     (Witness.free_vars a)
+                 in
+                 (* The branch the call sits on, when its condition names
+                    the argument: the value fails BECAUSE of it (`if
+                    List.length(ys) == 0 do head(ys) …`).  Only a condition
+                    written in the source; a fact the checker derived (a
+                    `match` arm's narrowing) has no text of its own. *)
+                 let fv = Witness.free_vars a in
+                 let from_guard =
+                   List.filter_map
+                     (fun ((c : A.expr), negated) ->
+                       let csp = arg_span A.dummy_span c in
+                       if csp = A.dummy_span || csp.A.file <> span.A.file || span_within span csp
+                          || not (List.exists (fun x -> List.mem x fv) (Witness.free_vars c))
+                       then None
+                       else
+                         match March_typecheck.Typecheck_suggest.text_of csp with
+                         | Some t
+                           when t <> "" && not (String.contains t '\n')
+                                (* the text is the condition, not a scrutinee a
+                                   synthesized `is_None(p)` borrowed its span from *)
+                                && (match c with
+                                    | A.EApp (A.EVar { A.txt = hd; _ }, _, _) ->
+                                      let n = String.length hd and m = String.length t in
+                                      let rec has i = i + n <= m && (String.sub t i n = hd || has (i + 1)) in
+                                      has 0
+                                    | _ -> false) ->
+                           Some
+                             { Err.lbl_span = csp;
+                               Err.lbl_message =
+                                 Printf.sprintf "the call is reached only when this is %s"
+                                   (if negated then "false" else "true") }
+                         | _ -> None)
+                     path
+                 in
+                 at_arg @ from_binding @ from_guard
+               | None -> []
+             in
              let headline =
-               match
-                 refuted_messages
-                   ~refuted:(fun g ->
-                     Refine.discharge ~root ~preamble { vc with Smt.goal = Smt.Not g }
-                     = Refine.Verified)
-                   ~goal rp.pred
-               with
+               match broken with
                | [] ->
-                 Printf.sprintf "%s does not satisfy %s `%s`%s" param_label obligation_noun
-                   (pred_str rp.pred) cx_str
+                 Printf.sprintf "%s does not satisfy %s `%s`" param_label obligation_noun
+                   (pred_str rp.pred)
                | broken ->
-                 Printf.sprintf "%s\n%s does not satisfy %s `%s`%s"
+                 Printf.sprintf "%s\n%s does not satisfy %s `%s`"
                    (String.concat "; " (List.map snd broken))
                    param_label obligation_noun
                    (String.concat " && " (List.map (fun (p, _) -> pred_str p) broken))
-                   cx_str
              in
+             let headline = if example = "" then headline else headline ^ "\n" ^ example in
              Err.report errctx
                { Err.severity = Err.Error; span;
                  message = display_measures @@ Printf.sprintf
@@ -3402,21 +3887,53 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                     | Argument ->
                       (* The guard is the predicate over the ARGUMENT, not
                          over its binder (`if _ >= 0` is not March); a closed
-                         argument (`f(-3)`) can't be guarded at all. *)
-                      (match List.nth_opt args rp.idx with
+                         argument (`f(-3)`) can't be guarded at all, so the
+                         note says the literal can never satisfy it. *)
+                      (match arg_opt with
                        | Some arg when Witness.free_vars arg = [] ->
-                         "note: this value never satisfies it; pass one that does"
+                         (match over_param failing with
+                          | Some named ->
+                            Printf.sprintf "note: `%s` can never satisfy `%s`; pass a value that does"
+                              (src_text arg) (pred_str named)
+                          | None ->
+                            (match printable (over_args arg failing) with
+                             | Some t -> Printf.sprintf "note: `%s` is never true; pass a value that does" t
+                             | None -> "note: this value never satisfies it; pass one that does"))
+                       | Some arg when printable (over_args arg rp.pred) = None ->
+                         "note: guard the call or pass a value known to satisfy it"
                        | Some arg ->
-                         let binders =
-                           rp.binder :: "_"
-                           :: (match List.nth_opt sg.param_names rp.idx with
-                               | Some p -> [ p ] | None -> []) in
-                         let guard =
-                           subst_params (List.map (fun b -> (b, arg)) binders) rp.pred in
+                         (* The guard around the call itself, as the plan's
+                            `if n >= 0 do f(n) else … end`, when the call is
+                            one line of source. *)
+                         let call_text =
+                           match March_typecheck.Typecheck_suggest.text_of span with
+                           | Some t when t <> "" && not (String.contains t '\n') -> t
+                           | _ -> "…"
+                         in
+                         (* The guard is code to paste: the measure `len`
+                            is not a function, so for a `List.` call spell
+                            it as the function that is. *)
+                         let code_guard g =
+                           if not (String.starts_with ~prefix:"List." call_text) then g
+                           else begin
+                             let n = String.length g in
+                             let buf = Buffer.create (n + 16) in
+                             let ident c = match c with
+                               | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '.' -> true
+                               | _ -> false in
+                             let i = ref 0 in
+                             while !i < n do
+                               if !i + 4 <= n && String.sub g !i 4 = "len("
+                                  && (!i = 0 || not (ident g.[!i - 1]))
+                               then (Buffer.add_string buf "List.length("; i := !i + 4)
+                               else (Buffer.add_char buf g.[!i]; incr i)
+                             done;
+                             Buffer.contents buf
+                           end in
                          Printf.sprintf
-                           "note: guard the call (e.g. `if %s do …`) or pass a value known to \
-                            satisfy it"
-                           (pred_str guard)
+                           "note: guard the call (e.g. `if %s do %s else … end`) or pass a value \
+                            known to satisfy it"
+                           (code_guard (pred_str (over_args arg rp.pred))) call_text
                        | None ->
                          "note: guard the call or pass a value known to satisfy it")
                     | Bound_expr ->

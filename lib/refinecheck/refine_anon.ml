@@ -62,10 +62,60 @@ let conj ~(span : A.span) (ps : A.expr list) : A.expr =
   | p :: rest ->
     List.fold_left (fun acc q -> A.EApp (A.EVar { A.txt = "&&"; A.span = span }, [ acc; q ], span)) p rest
 
+(* The hot-reload migration functions (H5 of the lemmas design): every
+   anonymous record in their signatures is lifted, refined or not, so the
+   functions reflect (an anonymous record has no sort) and the rollback round
+   trip `<a>_rollback_state(<a>_migrate_state(old)) == old`
+   ([Desugar_rollback]) can unfold both. *)
+let lifts_all (name : string) : bool =
+  let contains sub =
+    let n = String.length name and k = String.length sub in
+    let rec at i = i + k <= n && (String.sub name i k = sub || at (i + 1)) in
+    at 0
+  in
+  List.exists (fun sfx -> String.ends_with ~suffix:sfx name)
+    [ "_migrate_state"; "_rollback_state"; "_rollback_roundtrip" ]
+  (* H3's generated steps and lemma (Desugar_simulation). *)
+  || List.exists contains [ "__old_step__"; "__new_step__"; "_simulates__" ]
+
+let rec strip_refine (t : A.ty) : A.ty =
+  match t with A.TyRefine (b, _, _) | A.TyLinear (_, b) -> strip_refine b | t -> t
+
+(* A record shape, by field name, with each field's type stripped of
+   refinements: `{ a, b }` written in two orders is one shape, so a
+   migration's result and its rollback's parameter meet. *)
+let shape_key (fs : (A.name * A.ty) list) : string =
+  String.concat ";"
+    (List.sort compare
+       (List.map (fun ((n : A.name), t) -> n.A.txt ^ ":" ^ A.show_ty (strip_refine t)) fs))
+
+(* The record types the module declares, by shape.  Reflection resolves an
+   anonymous record type by its field set and declines when two sorts share
+   one, so a shape a declared type already has is lifted to IT, never to a
+   synthetic twin.  (An actor's state sort shares a migration result's field
+   set too; [Refine_reflect.record_of_fields_inst] sets it aside, since no
+   value outside the actor's own handlers has that sort.) *)
+let declared_shapes (ds : A.decl list) : (string * string) list =
+  let rec go acc (ds : A.decl list) =
+    List.fold_left
+      (fun acc (d : A.decl) ->
+        match d with
+        | A.DType (_, n, [], A.TDRecord fields, _) ->
+          (shape_key (List.map (fun (f : A.field) -> (f.A.fld_name, f.A.fld_ty)) fields), n.A.txt) :: acc
+        | A.DMod (_, _, inner, _) -> go acc inner
+        | _ -> acc)
+      acc ds
+  in
+  go [] ds
+
 let lift (m : A.module_) : A.module_ =
   let synth : (string * (string * A.decl)) list ref = ref [] in   (* shape key -> name, decl *)
+  let declared = declared_shapes m.A.mod_decls in
   let type_for ~(span : A.span) (plain : (A.name * A.ty) list) : string =
-    let key = String.concat ";" (List.map (fun ((n : A.name), t) -> n.A.txt ^ ":" ^ A.show_ty t) plain) in
+    let key = shape_key plain in
+    match List.filter (fun (k, _) -> k = key) declared with
+    | [ (_, name) ] -> name
+    | _ ->
     match List.assoc_opt key !synth with
     | Some (name, _) -> name
     | None ->
@@ -75,10 +125,12 @@ let lift (m : A.module_) : A.module_ =
       synth := (key, (name, decl)) :: !synth;
       name
   in
-  let lift_ty ~(span : A.span) (t : A.ty) : A.ty option =
+  let lift_ty ?(all = false) ~(span : A.span) (t : A.ty) : A.ty option =
     match strip_linear t with
     | A.TyRecord fs ->
       (match split_fields ~span fs with
+       | None when all && fs <> [] ->
+         Some (A.TyCon ({ A.txt = type_for ~span fs; A.span = span }, []))
        | None -> None
        | Some (plain, preds) ->
          let name = type_for ~span plain in
@@ -86,14 +138,14 @@ let lift (m : A.module_) : A.module_ =
                            Some { A.txt = "_"; A.span = span }, conj ~span preds)))
     | _ -> None
   in
-  let lift_param (fp : A.fn_param) : A.fn_param =
+  let lift_param ?(all = false) (fp : A.fn_param) : A.fn_param =
     match fp with
     | A.FPNamed ({ A.param_ty = Some t; _ } as p) ->
-      (match lift_ty ~span:p.A.param_name.A.span t with
+      (match lift_ty ~all ~span:p.A.param_name.A.span t with
        | Some t' -> A.FPNamed { p with A.param_ty = Some t' }
        | None -> fp)
     | A.FPDefault (({ A.param_ty = Some t; _ } as p), d) ->
-      (match lift_ty ~span:p.A.param_name.A.span t with
+      (match lift_ty ~all ~span:p.A.param_name.A.span t with
        | Some t' -> A.FPDefault ({ p with A.param_ty = Some t' }, d)
        | None -> fp)
     | _ -> fp
@@ -103,12 +155,24 @@ let lift (m : A.module_) : A.module_ =
       (fun (d : A.decl) ->
         match d with
         | A.DFn (fd, sp) ->
+          let all = lifts_all fd.A.fn_name.A.txt in
           let clauses = List.map (fun (c : A.fn_clause) ->
-              let ps = List.map lift_param c.A.fc_params in
+              let ps = List.map (lift_param ~all) c.A.fc_params in
               if List.for_all2 ( == ) ps c.A.fc_params then c else { c with A.fc_params = ps })
               fd.A.fn_clauses in
-          if List.for_all2 ( == ) clauses fd.A.fn_clauses then d
-          else A.DFn ({ fd with A.fn_clauses = clauses }, sp)
+          (* A migration's RESULT too: its field refinements become the
+             return refinement, exactly as a parameter's become the
+             parameter's. *)
+          let ret =
+            match (if all then fd.A.fn_ret_ty else None) with
+            | Some t ->
+              (match lift_ty ~all ~span:fd.A.fn_name.A.span t with
+               | Some t' -> Some t'
+               | None -> fd.A.fn_ret_ty)
+            | None -> fd.A.fn_ret_ty
+          in
+          if List.for_all2 ( == ) clauses fd.A.fn_clauses && ret == fd.A.fn_ret_ty then d
+          else A.DFn ({ fd with A.fn_clauses = clauses; fn_ret_ty = ret }, sp)
         | A.DMod (n, v, inner, sp) ->
           let inner' = decls inner in
           if List.for_all2 ( == ) inner' inner then d else A.DMod (n, v, inner', sp)

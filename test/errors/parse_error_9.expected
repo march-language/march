@@ -7,4 +7,14 @@ A `let?` binding can't have a type annotation — its type is inferred from the 
                ^
 
     let? name = result_expr
+    After this is fixed, `main` will also need permission to print: add `needs IO.Console` to the module, and give `main` the grant, `fn main(_console : Cap(IO.Console))`.
+
+    fix (`forge fix` applies it):
+
+8 -     let? x : Int = get()
+8 +     let? x = get()
+
     run `march --explain parse_error`
+
+after fix: exit 1
+`main` prints, but module `R11LetqTypeAnnotation` declares no `needs IO.Console`, and `main` is granted nothing. [cap_needs]

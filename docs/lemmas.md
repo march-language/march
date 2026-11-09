@@ -46,6 +46,8 @@ chapter has the reference summary.
 - [Induction: a recursive call](#induction-a-recursive-call)
 - [Steps: `assert` inside a lemma](#steps-assert-inside-a-lemma)
 - [Decided steps and fuel](#decided-steps-and-fuel)
+- [Proof hints: `assert … by`, `calc`, `reveal`, `with fuel`](#proof-hints-assert--by-calc-reveal-with-fuel)
+- [Ghost code: proof-only parameters, bindings and functions](#ghost-code-proof-only-parameters-bindings-and-functions)
 - [When a lemma does not prove](#when-a-lemma-does-not-prove)
 - [When a lemma is false](#when-a-lemma-is-false)
 
@@ -82,7 +84,11 @@ chapter has the reference summary.
 | The checker to know a fact it can't work out by itself | A `@[lemma]` that proves it, called before the place that needs it |
 | A proof by induction over a list or tree | A lemma that matches on the value and calls itself on the smaller part |
 | To spell out one step of a longer proof | `assert step` inside the lemma |
-| The checker to follow a function's calls further | `@[reflect(fuel: N)]` on that function (default 2, at most 8) |
+| The checker to follow a function's calls further | `@[reflect(fuel: N)]` on that function (default 2, at most 8), or `with fuel(f, N) do … end` for one proof |
+| A step proved with helper facts that should not leak | `assert P by do … end` |
+| A chain of equalities or inequalities, each step checked | `calc do … end` |
+| An `@[opaque]` function's definition, for one proof | `reveal f` |
+| A value only the proof needs (a bound, an abstraction, a history) | A `ghost` parameter, `ghost let` or `ghost fn`: checked, then erased |
 | A theorem that only holds for some inputs | Refined parameters on the lemma: `n : {Int \| _ >= 0}` |
 | Every lemma in a module to be proved, or the build fails | `cap verified` in that module |
 | To know whether a law you can't prove yet is even true | Leave it unproved; `forge test` tests it on generated inputs |
@@ -385,6 +391,183 @@ the function **is** reflected, so a later edit that adds a `println` is an error
 every proof that used the function. Fuel outside 1 to 8 is the same error. Use `@[opaque]`
 to keep a function out of the logic.
 
+## Proof hints: `assert … by`, `calc`, `reveal`, `with fuel`
+
+Four statements help a proof along without changing what the program does. All four are
+checked by the compiler and then erased: none of them runs (a `with fuel` body is ordinary
+code and does run). They work in any function, not only in lemmas.
+
+**`assert P by hint`** proves `P` using the hint's facts, then gives the code after it `P`, and
+only `P`. The hint is one lemma call, or a `do … end` block of lemma calls, `let`s and
+asserts:
+
+```march
+mod Main do
+  fn need_eq(a : Int, _b : {Int | _ == a}) : Int do 0 end
+
+  fn total(xs : List(Int), ys : List(Int)) : Int do
+    assert List.sum_int(List.append(xs, ys)) == List.sum_int(xs) + List.sum_int(ys) by do
+      List.sum_int_append(xs, ys)
+    end
+    need_eq(List.sum_int(xs) + List.sum_int(ys), List.sum_int(List.append(xs, ys)))
+  end
+
+  fn main() : Int do 0 end
+end
+```
+
+A plain lemma call does the same job, but its fact then stays for the rest of the block, in
+every later query. That makes later checks slower, and a later proof can end up resting on a
+fact you did not mean it to use. With `assert … by` the helper facts stay inside the hint.
+Unlike a plain `assert`, which is checked when the program runs, `assert … by` is checked by
+the compiler only: a `P` it cannot prove is reported (`unverified`, or an error under
+`cap verified`) and is not assumed afterwards. Every assertion and helper precondition
+inside the hint must also be proved, even if the final goal is independently true.
+
+Hints follow the same purity and termination restrictions as lemmas: effectful,
+panicking, divergent, and unreflectable calls are rejected. This validation also runs
+when reflection is disabled. Hint bindings have their own lexical scope; a binding
+that shadows a name used in `P` is rejected, so rename that local binding. A final
+`if` or `match` in the hint must establish `P` at every branch exit.
+
+**`calc`** writes a proof as a chain. Each step compares the previous term with the next
+(`==`, `<`, `<=`, `>`, `>=`) and may have its own hint; each step is proved on its own, so a
+step that does not follow is reported by its number (`calc step 2`). Every proved step is a
+fact afterwards, so a chain of `==` and `<=` gives the caller the first term `<=` the last.
+
+```march
+mod Main do
+  fn need_eq(a : Int, _b : {Int | _ == a}) : Int do 0 end
+
+  fn swapped(xs : List(Int), ys : List(Int)) : Int do
+    calc do
+      List.sum_int(List.append(xs, ys))
+      == List.sum_int(xs) + List.sum_int(ys) by List.sum_int_append(xs, ys)
+      == List.sum_int(ys) + List.sum_int(xs)
+    end
+    need_eq(List.sum_int(ys) + List.sum_int(xs), List.sum_int(List.append(xs, ys)))
+  end
+
+  fn main() : Int do 0 end
+end
+```
+
+Steps are written on their own lines starting with the operator; the terms between them are
+ordinary expressions (a comparison inside a term needs parentheses).
+
+**`reveal f`** lets the rest of its block use the definition of an `@[opaque]` function, as if
+it were reflected. Outside that block `f` stays opaque, so the cost of unfolding it is paid
+only where a proof needs it. It applies to a function that `@[opaque]` is the only reason for
+keeping out of the logic, and that does not call itself: a recursive `@[opaque]` function
+stays opaque.
+
+**`with fuel(f, N) do … end`** runs its body with `f`'s fuel set to `N` (1 to 8; a value outside
+that range is taken as the nearest bound) for the checks inside, instead of raising `@[reflect(fuel: N)]` for every caller. A `reflect-fuel`
+skip says which function ran out.
+
+## Ghost code: proof-only parameters, bindings and functions
+
+Some contracts talk about a value the program never computes: the bounds every key of a search
+tree lies between, the set a structure represents, the input a loop started from. **Ghost code**
+carries such a value for the proof and is removed before the program runs, as lemmas are.
+There are three forms:
+
+```march
+ghost fn bst(t : Tree, lo : Int, hi : Int) : Bool do … end        -- a proof-only function
+fn contains(ghost lo : Int, ghost hi : Int, t : {Tree | bst(_, lo, hi)}, x : Int) : Bool do … end
+ghost let top = hi                                                 -- a proof-only binding
+```
+
+- A **`ghost fn`** (or `ghost pfn`) is never compiled. The refinement checker reflects it, so it
+  must be pure, total and terminating ([`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/)
+  otherwise), and it may take `@[reflect(fuel: N)]`.
+- A **ghost parameter** (`ghost s : T`) is an ordinary parameter to the checker: other
+  parameters' refinements and the result's may mention it, and a caller passes an argument for
+  it. The compiled function has no such parameter, and its callers pass nothing.
+- A **`ghost let`** names a proof-only value inside a body.
+
+`ghost` is a keyword only in these three places. `let ghost = 1`, `fn ghost()` and `ghost(x)`
+still use it as a name.
+
+### The rule: ghost values never reach the running program
+
+A ghost value may appear only where nothing runs: in refinements, in another ghost binding, as
+a ghost argument, as a lemma argument, in a proof hint (`assert … by`, `calc`) and in a ghost
+function's body. Anywhere else is
+[`ghost_in_runtime`]({{ site.baseurl }}/docs/errors/ghost_in_runtime/): a runtime branch, a
+return value, a pattern match, a closure, an argument to a runtime parameter. So no behaviour
+of the program can depend on ghost code, and deleting it changes nothing that runs. Ghost code
+also may not use a `linear` or `affine` value, since removing that use would change which part
+of the program consumes it.
+
+Erasure is the same kind of pass as lemma erasure: it runs after the refinement checker, reads
+only the syntax, and gives the same program with or without a solver. To remove the right
+arguments without the typechecker it resolves calls conservatively. A bare call `f(…)` is
+ghost when it is written in the file that declares ghost `f` and no local of that name shadows
+it. So a ghost function's name must not also be a function, value or import visible there, nor
+a global or builtin (`map`, for one). A qualified call `M.f(…)` is ghost when the program's
+module `M` declares ghost `f`, so `List.member(…)` is never confused with a user's ghost
+`member`. A name that breaks this is
+[`ghost_misuse`]({{ site.baseurl }}/docs/errors/ghost_misuse/).
+
+### Example: a search tree's order
+
+On the tree alone, "every key in the left subtree is smaller" needs a quantifier. With two
+ghost bounds it is a recursive `Bool` function the checker unfolds, and the lookup below proves
+that each recursive call searches an ordered subtree. The bounds exist only in the proof:
+
+```march
+mod Bst do
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[reflect(fuel: 4)]
+  ghost fn bst(t : Tree, lo : Int, hi : Int) : Bool do
+    match t do
+    Leaf -> true
+    Node(l, v, r) -> lo < v && v < hi && bst(l, lo, v) && bst(r, v, hi)
+    end
+  end
+
+  @[lemma]
+  fn split(l : Tree, v : Int, r : Tree, lo : Int, hi : Int)
+      : {Unit | !bst(Node(l, v, r), lo, hi) || (lo < v && v < hi && bst(l, lo, v) && bst(r, v, hi))} do
+    ()
+  end
+
+  fn contains(ghost lo : Int, ghost hi : Int, t : {Tree | bst(_, lo, hi)}, x : Int) : Bool do
+    match t do
+    Leaf -> false
+    Node(l, v, r) ->
+      split(l, v, r, lo, hi)
+      if x < v do contains(lo, v, l, x)              -- proved: bst(l, lo, v)
+      else
+        if x > v do contains(v, hi, r, x)            -- proved: bst(r, v, hi)
+        else true end
+      end
+    end
+  end
+
+  fn main() : Int do
+    if contains(0, 10, Node(Node(Leaf, 1, Leaf), 5, Leaf), 1) do 1 else 0 end   -- proved
+  end
+end
+```
+
+The compiled `contains` takes `t` and `x` only, and the program is the one you would get by
+deleting `bst`, `split` and every ghost parameter and argument (the compiler's test suite checks
+the IR is identical). The full example, with a membership function and a lemma that a key
+outside the bounds is absent, is `test/refine/ghost/bst.march`.
+
+### Not yet
+
+- Ghost parameters go on a module-level `fn` with one clause of named parameters and no `when`
+  guard, not on impl methods or local functions; a function with ghost parameters is called
+  directly, never passed as a value.
+- A `Bool` result contract stated with a ghost function (`contains`'s `_ == mem(t, x)`) is not
+  proved yet, for the reason given in [What lemmas don't do (yet)](#what-lemmas-dont-do-yet):
+  only an `Int` result contract uses the facts of its body.
+- Ghost state for actors (a handler's message history) is planned after these rules settle.
+
 ## When a lemma does not prove
 
 When the checker can't show the theorem at every place the body returns, the lemma is
@@ -463,9 +646,24 @@ A lemma call on its own line (or `let _ = cat_nil(xs)`) adds the theorem, with t
 arguments in place of the parameters, as a fact for the rest of that block. The call
 `cat_nil(xs)` adds `cat(xs, Nil) == xs`; `cat_nil(ys)` would add `cat(ys, Nil) == ys`.
 
-Put the call before the place that needs the fact, in the same block. The fact is used by
-the calls that follow: their preconditions, and the refined arguments passed to them, as in
-[Your first lemma](#your-first-lemma).
+Put the call before the place that needs the fact. The fact is used by what follows: the
+preconditions of later calls, the refined arguments passed to them, as in
+[Your first lemma](#your-first-lemma), and the function's own refined `Int` result.
+
+The call doesn't have to be a statement of its own. A call that always runs before the
+place that needs the fact gives the fact there, wherever it sits:
+
+| The call is | Its fact reaches |
+|---|---|
+| A statement, or `let _ = l(..)` | the rest of the block |
+| A named `let u = l(..)`, or inside another `let`'s right-hand side | the rest of the block |
+| A statement of a nested `do ... end` block | the rest of that block, and the rest of the outer one |
+| An argument of an earlier call, or a tuple element | the statements after the one it is in |
+| Part of an `if` condition | both branches, and the statements after the `if` |
+
+A call that may not run gives nothing after it: one in an `if` or `match` branch (outside
+that branch), in a lambda, or on the right of `&&` or `||`. A fact that names a variable
+bound again after the call (`let l = Nil0`) is dropped, since it is about the old value.
 
 ## Hypotheses: refined parameters
 
@@ -512,6 +710,40 @@ An ordinary call with an unproved precondition might still be fine at run time. 
 never runs, so the checker's only safe choice is to give nothing.
 [`lemma_unproved_call`]({{ site.baseurl }}/docs/errors/lemma_unproved_call/) is a warning, and an
 error under `cap verified`.
+
+A hypothesis can call your own functions, and an inductive proof can rely on it. Here
+`okz(g)` says every message in `g` carries 0, and the lemma uses it twice: to prove the
+recursive call's hypothesis `okz(k)`, and in the step itself (the message's own `s` is 0):
+
+```march
+mod Main do
+  type G = GEnd | GMsg(Int, G)
+
+  fn okz(g : G) : Bool do
+    match g do
+      GEnd -> true
+      GMsg(s, k) -> s == 0 && okz(k)
+    end
+  end
+
+  fn cnt(g : G) : Int do
+    match g do
+      GEnd -> 0
+      GMsg(s, k) -> s + cnt(k)
+    end
+  end
+
+  @[lemma]
+  fn okz_cnt(g : {G | okz(_)}) : {Unit | cnt(g) == 0} do
+    match g do
+      GEnd -> ()
+      GMsg(_, k) -> okz_cnt(k)
+    end
+  end
+
+  fn main() : Int do 0 end
+end
+```
 
 ## A fact stays in its branch
 
@@ -628,17 +860,24 @@ end
 ```
 
 This module builds. Replace the body of `cat_nil` with `()` and the build fails with
-`lemma_unproved`. What `cap verified` promises in full, and what it relies on, is on
-[Claim: Refinement Types]({{ site.baseurl }}/docs/claim-refinements/).
+`lemma_unproved`.
 
 ## Lemmas from the standard library
 
 The standard library proves lemmas about `List`: `List.append_nil`, `List.append_assoc`,
 `List.len_append`, `List.reverse_reverse`, `List.reverse_append`, `List.len_reverse`,
-`List.len_take`, `List.len_drop` and `List.take_drop`. You call them like your own lemmas, so
+`List.len_take`, `List.len_drop`, `List.take_drop`, `List.take_append`, `List.drop_append`,
+`List.nth_opt_append`, `List.sum_int_append`, `List.sum_int_reverse`, `List.product_int_append`
+and `List.product_int_reverse`, and about protocols in `Session.Theory` (`dual_dual`,
+`project_dual`, `pairwise`, `projections_compose`, `progress`; see [What is proved about a protocol]({{ site.baseurl }}/docs/choreography/#what-is-proved-about-a-protocol)).
+You call them like your own lemmas, so
 you don't need to re-prove `reverse(reverse(xs)) == xs` in every project. The manifest
 `stdlib/lemmas.verified` lists the ones that are proved; a listed lemma is admitted without
 re-proving it on every build.
+
+`Math.min_int`, `Math.max_int` and `Math.clamp_int` state their laws in their result types
+instead, so you get them without a call: `min_int(a, b)` is at most `a` and `b` and is one of
+them, and `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`.
 
 ## Which lemma to call: `--refine-infer`
 
@@ -752,6 +991,8 @@ lemma-test: RED (1 lemma false on a concrete input)
 - An **admitted** lemma (`cat_nil`) is checked too; see the next section.
 - An `Int` overflow is reported as `overflow?`, not as a counterexample, because the proofs
   treat `Int` as unbounded ([below](#what-lemmas-dont-do-yet)).
+- A theorem may use the logic's `len` (a list's length, a string's length in bytes). The
+  test gives it the same meaning, in the interpreter and in the compiled check.
 - A lemma whose parameter type has no input generator (a `String`, a `Float`, a record) is
   `not-tested`.
 
@@ -903,10 +1144,11 @@ build checks it, so a reviewer doesn't have to.
   higher-order functions (`map` composition, `filter` run twice) can't be stated yet. The
   functions a theorem calls must be reflected, and a reflected function takes no function
   parameter.
-- **No quantifiers in a theorem.** A theorem is about the lemma's parameters, for all of
-  them at once. It can't say "there exists" or nest a "for all" inside, and a caller gets
-  the theorem only for the arguments of a call. To use a law at several values, call the
-  lemma once for each.
+- **Quantifiers must be bounded.** Theorem predicates and proof assertions can use
+  `forall i in lo..hi, P`, `exists i in lo..hi, P`, and membership domains
+  `elts(xs)` / `keys(m)`. See [Bounded quantifiers]({{ site.baseurl }}/docs/refinement-types/#bounded-quantifiers)
+  for scope, indexing definedness, and checked existential candidates. Unbounded
+  quantification and higher-order theorems remain unsupported.
 - **Only an `Int` result contract uses the facts before it.** A function whose result type
   is a refined `Int` is checked with the facts of its body: an earlier `let`, a lemma call or
   `assert` before the result, and the unfolding of a reflected call as the result.
@@ -922,6 +1164,15 @@ build checks it, so a reviewer doesn't have to.
   Any other refined result (`fn flush(xs : List(Int)) : {List(Int) | _ == xs}`, a `Bool`, a
   record) does not use those facts yet. State the need at the call that has it, as
   `need_eq` does on this page.
+- **A lemma call inside a call's own arguments doesn't help that call.** In
+  `need(cnt(l), cnt_nn(l))`, the fact from `cnt_nn(l)` reaches the statements after this one,
+  not `need`'s own precondition: the checker reads a call's precondition before its
+  arguments. Call the lemma on the line before.
+- **A user type named like a stdlib type can't be used in a theorem.** A user `type Tree`
+  shares its short name with `OrderedMap.Tree`, and the checker cannot yet tell the two
+  apart, so a function over it isn't used in a theorem (the warning says so). Rename the type.
+  A user function or constructor named like a stdlib one (`fn unwrap`, a `Reply`
+  constructor) is fine: the call resolves to your own.
 - **`String`, `Bytes` and `Float` theorems are limited.** The logic treats `String` and
   `Bytes` contents as opaque, so a round-trip law such as `decode(encode(s)) == s` can't be
   proved yet. `forge test` can't generate `String` or `Float` inputs for a lemma either.
@@ -933,8 +1184,6 @@ build checks it, so a reviewer doesn't have to.
 
 - [Refinement Types]({{ site.baseurl }}/docs/refinement-types/): the checker lemmas feed, and
   its [reference summary of lemmas]({{ site.baseurl }}/docs/refinement-types/#lemmas-proving-what-one-unfolding-cannot)
-- [Claim: Refinement Types]({{ site.baseurl }}/docs/claim-refinements/): what `cap verified`
-  promises, and the trusted base it rests on
 - [Pattern Matching]({{ site.baseurl }}/docs/pattern-matching/): `match`, which splits a proof
   into cases
 - Error pages: [`invalid_lemma`]({{ site.baseurl }}/docs/errors/invalid_lemma/),

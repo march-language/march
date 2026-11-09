@@ -10,4 +10,5 @@ A file may have only one top-level `mod`; everything else must live inside it. [
         fn helper() do ... end
         fn main() do ... end
     end
+    After this is fixed, `main` will also need permission to print: add `needs IO.Console` to the module, and give `main` the grant, `fn main(_console : Cap(IO.Console))`.
     run `march --explain parse_error`

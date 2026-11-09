@@ -9,11 +9,11 @@ exit: 1
 
     Add `derive Eq for Shape` after the type to get the structural one, or write `impl Eq(Shape) do ... end`.
 
+    fix (`forge fix` applies it):
+
+4 |   type Shape = Circle(Int) | Square(Int)
+5 +   derive Eq for Shape
 
 
-fix [missing_impl]:
-@@ after line 4 @@
-   type Shape = Circle(Int) | Square(Int)
-+  derive Eq for Shape
 
 after fix: exit 0

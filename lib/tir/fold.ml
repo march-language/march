@@ -34,7 +34,17 @@ let mk_float f = Tir.EAtom (Tir.ALit (March_ast.Ast.LitFloat f))
 let mk_bool b = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool b))
 let mk_string s = Tir.EAtom (Tir.ALit (March_ast.Ast.LitString s))
 
-let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
+(* True when the module defines a top-level fn named `not`.  A user fn owns
+   that name (an entry-module fn may shadow a builtin: see
+   lib/modules/prelude_collision.ml; llvm_emit's [shadows_dispatched_builtin]
+   and js_emit's [shadows_js_builtin] route its call sites to it), so a call
+   `not(x)` in the TIR is THAT fn: folding `not(<literal>)` by name skips it,
+   and rewriting `x == false` to `not x` would call it (#1177).  The same
+   tm_fns membership the backends test. *)
+let has_user_not (m : Tir.tir_module) =
+  List.exists (fun (fd : Tir.fn_def) -> fd.Tir.fn_name = "not") m.Tir.tm_fns
+
+let rec fold_expr ~user_not ~changed : Tir.expr -> Tir.expr = function
   (* Integer arithmetic on two literals *)
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt a); Tir.ALit (March_ast.Ast.LitInt b)])
     when List.mem f.Tir.v_name int_ops ->
@@ -50,7 +60,8 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
      | None   -> Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitFloat a); Tir.ALit (March_ast.Ast.LitFloat b)]))
 
   (* not <bool_literal> *)
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)]) when f.Tir.v_name = "not" ->
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)])
+    when f.Tir.v_name = "not" && not user_not ->
     changed := true; mk_bool (not b)
 
   (* false && rhs → false
@@ -68,12 +79,12 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.ECase (Tir.ALit (March_ast.Ast.LitBool true),
                [{ Tir.br_tag; br_body; _ }], _)
     when br_tag = Tir_names.synthetic_true_tag ->
-    changed := true; fold_expr ~changed br_body
+    changed := true; fold_expr ~user_not ~changed br_body
 
   | Tir.ECase (Tir.ALit (March_ast.Ast.LitBool false),
                [{ Tir.br_tag; _ }], Some else_e)
     when br_tag = Tir_names.synthetic_true_tag ->
-    changed := true; fold_expr ~changed else_e
+    changed := true; fold_expr ~user_not ~changed else_e
 
   (* ECase with LitBool false scrutinee and no default — unreachable in practice
      (March lowering always emits a default branch for if/else), fall through to recurse *)
@@ -139,11 +150,11 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
     when f.Tir.v_name = "==" ->
     changed := true; Tir.EAtom x
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitBool false)])
-    when f.Tir.v_name = "==" ->
+    when f.Tir.v_name = "==" && not user_not ->
     let not_v = { Tir.v_name = "not"; v_ty = Tir.TFn ([Tir.TBool], Tir.TBool); v_lin = Tir.Unr } in
     changed := true; Tir.EApp (not_v, [x])
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); x])
-    when f.Tir.v_name = "==" ->
+    when f.Tir.v_name = "==" && not user_not ->
     let not_v = { Tir.v_name = "not"; v_ty = Tir.TFn ([Tir.TBool], Tir.TBool); v_lin = Tir.Unr } in
     changed := true; Tir.EApp (not_v, [x])
 
@@ -160,22 +171,23 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
 
   (* Recurse into all other nodes *)
   | Tir.ELet (v, rhs, body) ->
-    Tir.ELet (v, fold_expr ~changed rhs, fold_expr ~changed body)
+    Tir.ELet (v, fold_expr ~user_not ~changed rhs, fold_expr ~user_not ~changed body)
   | Tir.ECase (a, branches, default) ->
     let branches' = List.map (fun b ->
-      { b with Tir.br_body = fold_expr ~changed b.Tir.br_body }) branches in
-    let default' = Option.map (fold_expr ~changed) default in
+      { b with Tir.br_body = fold_expr ~user_not ~changed b.Tir.br_body }) branches in
+    let default' = Option.map (fold_expr ~user_not ~changed) default in
     Tir.ECase (a, branches', default')
   | Tir.ELetRec (fns, body) ->
     let fns' = List.map (fun fd ->
-      { fd with Tir.fn_body = fold_expr ~changed fd.Tir.fn_body }) fns in
-    Tir.ELetRec (fns', fold_expr ~changed body)
+      { fd with Tir.fn_body = fold_expr ~user_not ~changed fd.Tir.fn_body }) fns in
+    Tir.ELetRec (fns', fold_expr ~user_not ~changed body)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (fold_expr ~changed e1, fold_expr ~changed e2)
+    Tir.ESeq (fold_expr ~user_not ~changed e1, fold_expr ~user_not ~changed e2)
   | other -> other
 
-let run_fn ~changed fd =
-  { fd with Tir.fn_body = fold_expr ~changed fd.Tir.fn_body }
+let run_fn ?(user_not = false) ~changed fd =
+  { fd with Tir.fn_body = fold_expr ~user_not ~changed fd.Tir.fn_body }
 
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
-  { m with Tir.tm_fns = List.map (run_fn ~changed) m.Tir.tm_fns }
+  let user_not = has_user_not m in
+  { m with Tir.tm_fns = List.map (run_fn ~user_not ~changed) m.Tir.tm_fns }

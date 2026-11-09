@@ -1,0 +1,29 @@
+exit: 1
+-- PROTOCOL ---------- errors/protocol_step_order_4.march
+
+Role `A` tries to send an `Int` to `B` here, but at this point protocol `Pump` says it must choose `go` or `quit`. [protocol_step_order]
+
+25 |       Pump_A.recv_Tock(s, Pump_A.send_Tick(s, st3, 2), fn (_m, st4) ->
+                                                   ^^^
+
+    Take that step with `Pump_A.choose_go` first.
+    The conversation so far, in protocol `Pump`:
+
+      hello: A -> B : String     done
+      loop do                    (repeats)
+        tick:  A -> B : Int      done   <- `A` tried this again
+        tock:  B -> A : Int      done
+        choose by A: go | quit   <- `A` must do this next
+
+    `A` is here: it must choose `go` or `quit`:
+
+14 |       choose by A:
+                     ^
+
+    `st3` is the state bound here:
+
+24 |     Pump_A.recv_Tock(s, st2, fn (_n, st3) ->
+                                          ^^^
+    run `march --explain protocol_step_order`
+
+

@@ -24,8 +24,7 @@ assumes, and what it does not do. Three older pages each describe a part of it, 
 
 Where this page and one of those disagree, this page is the one checked against the code,
 and the other is a bug to fix. Every behaviour below was checked against the compiler
-on 2026-10-30. The [capabilities claim]({{ site.baseurl }}/docs/claim-capabilities/) is the
-short version of this page.
+on 2026-10-30.
 
 ## Who the attacker is
 
@@ -81,6 +80,14 @@ the module that declares them.
 
 **Per-role grants.** A protocol role declared `role Ledger needs IO.FileWrite` gets its
 grant checked the same way `main`'s is: its code may reach only what the role names.
+
+**Host and method scopes.** A module that declares `needs IO.NetConnect("host")`, with
+optional `methods(...)` and `no_redirects`, may reach only those hosts with those
+methods, through everything it reaches (`[cap_host_scope]`, `[cap_host_unproven]`). It is
+fail-closed: a destination the compiler cannot see is refused. Redirects and
+step-rewritten requests are checked at run time by `HttpClient`. Compile path only; not
+OS-enforced; a dependency's own code is bounded only once `main`'s grant takes a scope
+(planned). See [host scopes]({{ site.baseurl }}/docs/capabilities/#host-scopes).
 
 ### 2. What is checked per function
 
@@ -170,9 +177,9 @@ filesystem exception. Read-only reload and observe queries remain available.
 
 An `extern` block calls C, and the compiler's knowledge stops there. The rules:
 
-- A module with an `extern` block should declare `needs IO.Foreign`. If it doesn't, the
-  compiler warns (`[extern_needs_foreign]`).
-  This is still a warning, not an error.
+- A module with an `extern` block must declare `needs IO.Foreign`. If it doesn't, the
+  build fails (`[extern_needs_foreign]`). It was only a warning before 2026-11-06, which
+  let a dependency reach C without showing up in `forge audit` or `forge.caps.lock`.
 - A program that reaches an `extern` block can't be built under any grant narrower than
   `Cap(IO)`: a narrow grant over C code would be a lie, so the compiler refuses it.
 - `forge audit` and `forge cap inspect` report `IO.Foreign`; read it as "the rest of this

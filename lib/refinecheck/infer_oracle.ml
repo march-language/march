@@ -426,6 +426,60 @@ let best_whole ?allow_caller_violations ~(root : string) ~(decls : A.decl list) 
     in
     go None [] tys
 
+(* A relation kept from a parameter to the return (`bump`, 2026-10-25 todo):
+   the return alone is not TRUE without the parameter's relation, and the
+   parameter alone closes nothing, so both take the same whole type [t] in one
+   atomic probe.
+   - TRUE: the element-return gate, under the parameter hypothesis;
+   - caller impact: the precondition rule, a new violation at a caller refuses
+     (unless [allow_caller_violations]);
+   - USEFUL: a site closes, nothing opens, no more new skips than closes.
+   Only for a return slot whose function has a parameter of the same base;
+   the first parameter that admits an accept wins.  Returns the type, the
+   parameter and the verdict. *)
+let best_joint ?(allow_caller_violations = false) ~(root : string) ~(decls : A.decl list) (s : IS.slot)
+    (tys : A.ty list) ~(budget : int ref) : (A.ty * string * verdict) option * (A.ty * verdict) list =
+  Obligation.with_scratch @@ fun () ->
+  match s.IS.path, prepare ~root ~decls s with
+  | IS.Return, Some cx -> (
+    let s = { s with IS.fd = cx.fd0 } in
+    let params =
+      match s.IS.fd.A.fn_clauses with
+      | c :: _ -> List.filter (fun (_, pt) -> IS.same_ty pt s.IS.base) (PI.named_params c)
+      | [] -> []
+    in
+    let judge hyp =
+      with_elem_table @@ fun () ->
+      let defs = defs_with cx hyp in
+      let tree = cx.rebuild hyp in
+      if not (elem_ret_holds ~root ~defs tree ~fn:cx.qualified) then
+        Reject ("not-true", "the checker does not prove this return under the parameter's relation")
+      else
+        let after = PI.walk_ledger ~root ~defs tree in
+        let delta = diff ~before:cx.base ~after in
+        let caller_viol = List.filter (fun (k : LD.key) -> not (cx.in_body k.LD.span)) (LD.new_violated delta) in
+        if caller_viol <> [] && not allow_caller_violations then
+          Refuse
+            { PI.rf_reason = "caller-violation";
+              rf_sites = List.sort_uniq compare (List.map (fun (k : LD.key) -> k.LD.span) caller_viol) }
+        else if LD.opened delta <> [] then Reject ("opens-site", "a previously proved obligation is no longer proved")
+        else if not (PI.admissible delta) then Reject ("not-useful", "closes no caller site")
+        else Accept { closes = LD.closed delta; new_skipped = LD.new_skipped delta }
+    in
+    let rec go verdicts = function
+      | [] -> (None, List.rev verdicts)
+      | (t, _) :: _ when !budget <= 0 -> (None, List.rev ((t, Reject ("budget", "probe budget exhausted")) :: verdicts))
+      | (t, x) :: tl -> (
+        decr budget;
+        let hyp = IS.install_ty { s with IS.fd = IS.install_ty s t; path = IS.Param x } t in
+        let v = try with_hyp_def cx hyp @@ fun () -> judge hyp with e -> Reject ("not-true", "probe raised: " ^ Printexc.to_string e) in
+        match v with
+        | Accept _ -> (Some (t, x, v), List.rev verdicts)
+        | _ -> go ((t, v) :: verdicts) tl)
+    in
+    go [] (List.concat_map (fun t -> List.map (fun (x, _) -> (t, x)) params) tys))
+  | _ -> (None, [])
+
 (* TRUE only (no USEFUL): does the checker prove [c] at return slot [s]?  The
    demand-chain step of the fixpoint (design §3.3) asks this of a callee link
    before installing it tentatively. *)

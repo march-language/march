@@ -1,5 +1,5 @@
 -- types (0) --
--- fns (60) --
+-- fns (65) --
 ## List.all
 fn List.all(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
@@ -40,7 +40,7 @@ fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
 go in
 let $t397 : '_ = <=(size, 0) in
 case $t397 of
-  True() -> __panic_site("stdlib/list.march", 1021);
+  True() -> __panic_site("stdlib/list.march", 1024, 20, 63);
 panic("List.chunks: size must be positive")
   _ -> let $t398 : '_ = alloc Nil() in
 go(xs, $t398)
@@ -207,7 +207,7 @@ fn List.head(xs : List('a)) : 'a =
   case xs of
   Cons($f23, $f24) -> let h : '_ = $f23 in
 h
-  Nil() -> __panic_site("stdlib/list.march", 134);
+  Nil() -> __panic_site("stdlib/list.march", 134, 18, 48);
 panic("List.head: empty list")
   _ -> panic("non-exhaustive pattern match")
 
@@ -235,7 +235,7 @@ fn List.is_empty(xs : List('a)) : Bool =
 ## List.last
 fn List.last(xs : List('a)) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 203);
+  Nil() -> __panic_site("stdlib/list.march", 203, 18, 48);
 panic("List.last: empty list")
   Cons($f47, $f48) -> case $f48 of
   Nil() -> let x : '_ = $f47 in
@@ -246,9 +246,17 @@ List.last(t)
 
 ## List.length
 fn List.length(xs : List('a)) : Int =
-  let go : (List('a), Int) -> Int = letrec [go] in
-go in
-go(xs, 0)
+  ();
+List.length_onto(xs, 0)
+
+## List.length_onto
+fn List.length_onto(lst : List('a), acc : Int) : Int =
+  case lst of
+  Nil() -> acc
+  Cons($f74, $f75) -> let t : '_ = $f75 in
+let $t73 : '_ = +(acc, 1) in
+List.length_onto(t, $t73)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.map
 fn List.map(xs : List('a), f : ('a) -> 'b) : List('b) =
@@ -261,16 +269,26 @@ let $t96 : '_ = List.map(t, f) in
 alloc Cons($t95, $t96)
   _ -> panic("non-exhaustive pattern match")
 
+## List.max_onto
+fn List.max_onto(lst : List(Int), m : Int) : Int =
+  case lst of
+  Nil() -> m
+  Cons($f491, $f492) -> let r : '_ = $f492 in
+let x : '_ = $f491 in
+let $t490 : '_ = >(x, m) in
+case $t490 of
+  True() -> List.max_onto(r, x)
+  _ -> List.max_onto(r, m)
+  _ -> panic("non-exhaustive pattern match")
+
 ## List.maximum_int
 fn List.maximum_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = letrec [go] in
-go in
-case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1195);
+  case xs of
+  Nil() -> __panic_site("stdlib/list.march", 1198, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f491, $f492) -> let t : '_ = $f492 in
-let h : '_ = $f491 in
-go(t, h)
+  Cons($f484, $f485) -> let t : '_ = $f485 in
+let h : '_ = $f484 in
+List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
@@ -279,22 +297,32 @@ fn List.member(xs : List('a), x : 'a) : Bool =
 $lam0_member in
 List.any(xs, $t498)
 
+## List.min_onto
+fn List.min_onto(lst : List(Int), m : Int) : Int =
+  case lst of
+  Nil() -> m
+  Cons($f478, $f479) -> let r : '_ = $f479 in
+let x : '_ = $f478 in
+let $t477 : '_ = <(x, m) in
+case $t477 of
+  True() -> List.min_onto(r, x)
+  _ -> List.min_onto(r, m)
+  _ -> panic("non-exhaustive pattern match")
+
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = letrec [go] in
-go in
-case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1174);
+  case xs of
+  Nil() -> __panic_site("stdlib/list.march", 1175, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f478, $f479) -> let t : '_ = $f479 in
-let h : '_ = $f478 in
-go(t, h)
+  Cons($f471, $f472) -> let t : '_ = $f472 in
+let h : '_ = $f471 in
+List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.nth
 fn List.nth(xs : List('a), n : Int) : 'a =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 227);
+  Nil() -> __panic_site("stdlib/list.march", 227, 18, 56);
 panic("List.nth: index out of bounds")
   Cons($f59, $f60) -> let t : '_ = $f60 in
 let h : '_ = $f59 in
@@ -420,9 +448,17 @@ List.fold_left(partials, identity, combine)
 
 ## List.product_int
 fn List.product_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = letrec [go] in
-go in
-go(xs, 1)
+  List.product_onto(xs, 1)
+
+## List.product_onto
+fn List.product_onto(lst : List(Int), acc : Int) : Int =
+  case lst of
+  Nil() -> acc
+  Cons($f465, $f466) -> let t : '_ = $f466 in
+let x : '_ = $f465 in
+let $t464 : '_ = *(acc, x) in
+List.product_onto(t, $t464)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.range
 fn List.range(start : Int, stop : Int) : List(Int) =
@@ -436,7 +472,7 @@ go($t17, $t18)
 fn List.range_step(start : Int, stop : Int, step : Int) : List(Int) =
   let $t19 : '_ = ==(step, 0) in
 case $t19 of
-  True() -> __panic_site("stdlib/list.march", 99);
+  True() -> __panic_site("stdlib/list.march", 99, 20, 67);
 panic("List.range_step: step must be non-zero")
   _ -> List.range_step_go(start, stop, step)
 
@@ -511,16 +547,24 @@ go(xs, n, $t373)
 
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
-  let go : (List(Int), Int) -> Int = letrec [go] in
-go in
-go(xs, 0)
+  List.sum_onto(xs, 0)
+
+## List.sum_onto
+fn List.sum_onto(lst : List(Int), acc : Int) : Int =
+  case lst of
+  Nil() -> acc
+  Cons($f458, $f459) -> let t : '_ = $f459 in
+let x : '_ = $f458 in
+let $t457 : '_ = +(acc, x) in
+List.sum_onto(t, $t457)
+  _ -> panic("non-exhaustive pattern match")
 
 ## List.tail
 fn List.tail(xs : List('a)) : List('a) =
   case xs of
   Cons($f29, $f30) -> let t : '_ = $f30 in
 t
-  Nil() -> __panic_site("stdlib/list.march", 152);
+  Nil() -> __panic_site("stdlib/list.march", 152, 18, 48);
 panic("List.tail: empty list")
   _ -> panic("non-exhaustive pattern match")
 

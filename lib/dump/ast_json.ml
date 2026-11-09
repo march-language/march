@@ -89,6 +89,7 @@ let linearity_to_json (l : linearity) : string =
   | Unrestricted -> Dump.json_obj [ ("kind", Dump.json_string "Unrestricted") ]
   | Linear -> Dump.json_obj [ ("kind", Dump.json_string "Linear") ]
   | Affine -> Dump.json_obj [ ("kind", Dump.json_string "Affine") ]
+  | Ghost -> Dump.json_obj [ ("kind", Dump.json_string "Ghost") ]
 
 let visibility_to_json (v : visibility) : string =
   match v with
@@ -109,6 +110,7 @@ let lin_str : linearity -> string = function
   | Linear -> "linear"
   | Affine -> "affine"
   | Unrestricted -> "unrestricted"
+  | Ghost -> "ghost"
 
 let natop_str : nat_op -> string = function
   | NatAdd -> "add"
@@ -504,6 +506,17 @@ let rec expr_to_json (e : expr) : string =
       ("span", span_to_json span);
       rty;
     ]
+  | EProof (p, span) ->
+    let sub = match p with
+      | PAssertBy _ -> "assert_by" | PReveal _ -> "reveal"
+      | PWithFuel _ -> "with_fuel" | PCalc _ -> "calc" in
+    Dump.json_obj [
+      ("kind", Dump.json_string "EProof");
+      ("proof", Dump.json_string sub);
+      ("exprs", Dump.json_list (List.map expr_to_json (proof_children p)));
+      ("span", span_to_json span);
+      rty;
+    ]
   | EAssert (e, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "EAssert");
@@ -878,8 +891,9 @@ and fn_param_to_json (fp : fn_param) : string =
 
 and type_def_to_json (td : type_def) : string =
   match td with
-  | TDAlias ty ->
-    Dump.json_obj [ ("kind", Dump.json_string "TDAlias"); ("ty", ty_to_json ty) ]
+  | TDAlias (ty, values) ->
+    Dump.json_obj [ ("kind", Dump.json_string "TDAlias"); ("ty", ty_to_json ty);
+                    ("values", Dump.json_list (List.map (fun ((n : name), t) -> Dump.json_obj [ ("name", Dump.json_string n.txt); ("ty", ty_to_json t) ]) values)) ]
   | TDVariant variants ->
     Dump.json_obj [
       ("kind", Dump.json_string "TDVariant");

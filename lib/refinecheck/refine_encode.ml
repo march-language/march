@@ -249,12 +249,30 @@ let sort_conflict (ds : (string * Smt.sort) list) : bool =
 
    [mentions_str] deliberately stops at [strlen_fn]: `($strlen c)` is an Int and
    may be added, compared and multiplied like any other. *)
+(* A reflected symbol's signature (reflection §3.2): its `$Str` positions. *)
+let reflected_sig (f : string) : (Smt.sort list * Smt.sort) option =
+  match Reflect_state.sig_of f with
+  | Some s -> Some (s.Reflect_state.fs_params, s.Reflect_state.fs_ret)
+  | None -> None
+
+let str_sorted (s : Smt.sort) = s = Smt.sdata str_sort
+
 let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   let m = mentions_str is_str in
   match t with
+  | Smt.Quant (_, n, sort, g, b) ->
+    let local x = if x = n then str_sorted sort else is_str x in
+    mentions_str local g || mentions_str local b
   | Smt.App (f, [ _ ]) when f = strlen_fn -> false
   (* Bool-valued; its arguments' sorts are [abstract_preamble]'s concern. *)
   | Smt.App (f, _) when is_abs_sym f -> false
+  (* A reflected function (D9): a `$Str` result is a string; a string at a
+     `$Str` parameter is well sorted there. *)
+  | Smt.App (f, args) when reflected_sig f <> None ->
+    let ps, r = Option.get (reflected_sig f) in
+    str_sorted r
+    || (if List.length ps <> List.length args then List.exists m args
+        else List.exists2 (fun p a -> if str_sorted p && str_term is_str a then false else m a) ps args)
   | Smt.Const c -> is_str c
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   (* A datatype tester ranges over an ADT sort, never over `Str`; it only
@@ -275,6 +293,18 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetMem _ | Smt.SetUnion _ | Smt.SetInter _
   | Smt.SetDiff _ | Smt.SetSub _ | Smt.SetCard _ -> false
 
+(* A `$Str`-sorted term: a string constant, or a reflected function's `$Str`
+   result over well-placed arguments. *)
+and str_term (is_str : string -> bool) (t : Smt.term) : bool =
+  match t with
+  | Smt.Const c -> is_str c
+  | Smt.App (f, args) -> (
+    match reflected_sig f with
+    | Some (ps, r) when str_sorted r && List.length ps = List.length args ->
+      List.for_all2 (fun p a -> if str_sorted p then str_term is_str a else not (mentions_str is_str a)) ps args
+    | _ -> false)
+  | _ -> false
+
 (* Is [t] a set-valued term?  Used by the guards below so a set operand is
    never mistaken for an Int one. *)
 let is_set_term (sort_of : string -> Smt.sort option) (t : Smt.term) : bool =
@@ -287,11 +317,15 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   let w = wellsorted is_str and m = mentions_str is_str in
   let int_side a = (not (m a)) && w a in
   match t with
+  | Smt.Quant (_, n, sort, g, b) ->
+    let local x = if x = n then str_sorted sort else is_str x in
+    wellsorted local g && wellsorted local b
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> true
-  | Smt.App (f, [ a ]) when f = strlen_fn ->
-    (match a with Smt.Const c -> is_str c | _ -> false)
+  | Smt.App (f, [ a ]) when f = strlen_fn -> str_term is_str a
   (* Declared at its arguments' own sorts by [abstract_preamble]. *)
   | Smt.App (f, _) when is_abs_sym f -> true
+  | Smt.App (f, args) when reflected_sig f <> None && List.length args = List.length (fst (Option.get (reflected_sig f))) ->
+    List.for_all2 (fun p a -> if str_sorted p then str_term is_str a else int_side a) (fst (Option.get (reflected_sig f))) args
   | Smt.App (_, args) -> List.for_all int_side args
   (* A constructor field may be a `Str` constant (a `String` payload) as
      readily as an Int term; each argument is checked on its own. *)
@@ -304,6 +338,7 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Eq (a, b) | Smt.Ne (a, b) ->
     (match a, b with
      | Smt.Const x, Smt.Const y when is_str x && is_str y -> true
+     | a, b when str_term is_str a && str_term is_str b -> true
      (* Set equality is extensional array equality; both sides are checked as
         set terms.  A set constant (`elts$xs`) is a bare [Const] here and
         passes as an "int side" — [resolve_set_sorts] is what pins its sort
@@ -343,6 +378,7 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
 let rec abs_apps (t : Smt.term) : (string * Smt.term list) list =
   let m = abs_apps in
   match t with
+  | Smt.Quant (_, _, _, g, b) -> m g @ m b
   | Smt.App (f, args) when is_abs_sym f -> (f, args) :: List.concat_map m args
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.concat_map m args
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) -> m a
@@ -405,7 +441,14 @@ let abstract_preamble (vc : Smt.vc) : string =
    would then accept `-0.0`, a divisor every bit as bad as `+0.0`.  `fp.eq` is
    IEEE equality: `+0.0 = -0.0`, and NaN equals nothing including itself. *)
 let float_term (is_float : string -> bool) (t : Smt.term) : bool =
-  match t with Smt.FloatLit _ -> true | Smt.Const c -> is_float c | _ -> false
+  match t with
+  | Smt.FloatLit _ -> true
+  | Smt.Const c -> is_float c
+  (* A reflected function's Float result (reflection D9: the checker's Float
+     sort, its body's operations opaque). *)
+  | Smt.App (f, _) -> (
+    match Reflect_state.sig_of f with Some s -> s.Reflect_state.fs_ret = Smt.SFloat | None -> false)
+  | _ -> false
 
 let rec fp_rewrite (is_float : string -> bool) (t : Smt.term) : Smt.term =
   let f = fp_rewrite is_float and fl = float_term is_float in
@@ -427,9 +470,20 @@ let rec fp_rewrite (is_float : string -> bool) (t : Smt.term) : Smt.term =
 let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   let m = mentions_float is_float in
   match t with
+  | Smt.Quant (_, n, sort, g, b) ->
+    let local x = if x = n then sort = Smt.SFloat else is_float x in
+    mentions_float local g || mentions_float local b
   | Smt.FloatLit _ -> true
   | Smt.Const c -> is_float c
   | Smt.IntLit _ | Smt.BoolLit _ -> false
+  (* A reflected function applied to a float at a Float parameter is well
+     sorted there; its result is a float only through [float_term]. *)
+  | Smt.App (f, args) when Reflect_state.sig_of f <> None -> (
+    let ps = (Option.get (Reflect_state.sig_of f)).Reflect_state.fs_params in
+    (match Reflect_state.sig_of f with Some s -> s.Reflect_state.fs_ret = Smt.SFloat | None -> false)
+    ||
+    if List.length ps <> List.length args then List.exists m args
+    else List.exists2 (fun p a -> if p = Smt.SFloat && float_term is_float a then false else m a) ps args)
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a)
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> m a
@@ -481,6 +535,11 @@ let rec float_wellsorted (is_float : string -> bool) (t : Smt.term) : bool =
 let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) : bool =
   let w = formula_wellsorted sort_of in
   match t with
+  | Smt.Quant (_, n, sort, g, b) ->
+    (* An unresolved element binder is constrained to Bool here; exact sort
+       inference later checks that constraint against its membership domain. *)
+    let local x = if x = n then Some (if sort = Smt.set_unknown_elem then Smt.SBool else sort) else sort_of x in
+    formula_wellsorted local g && formula_wellsorted local b
   | Smt.BoolLit _ | Smt.IsCtor _ | Smt.IsCtorAt _ -> true
   | Smt.Const c -> sort_of c = Some Smt.SBool
   | Smt.Not a -> w a
@@ -498,6 +557,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   | Smt.App (f, _) when is_abs_sym f -> true
   (* A reflected Bool-valued function (reflection §3.2: Bool is a sort). *)
   | Smt.App (f, _) when Reflect_state.returns_bool f -> true
+  | Smt.App ("$nth", [_; _]) -> true
   (* Nothing else in this checker declares an uninterpreted function at `Bool`
      (measures and selectors return Int or a datatype), so an application in
      Boolean position is a sort error just as arithmetic and literals are. *)
@@ -594,6 +654,7 @@ let rec mark_set_empty (e : A.expr) : A.expr =
     | _ -> m x
   in
   match e with
+  | A.ELam (ps, b, sp) -> A.ELam (ps, m b, sp)
   | A.EApp ((A.EVar { A.txt = ("union" | "inter" | "diff" | "subset"); _ } as hd), [ a; b ], sp) ->
     A.EApp (hd, [ as_set a; as_set b ], sp)
   | A.EApp ((A.EVar { A.txt = "member"; _ } as hd), [ x; st ], sp) ->
@@ -613,10 +674,18 @@ let rec mark_set_empty (e : A.expr) : A.expr =
 
 let classify_pred (binder : string) (params : string list) (pred : A.expr) : pred_scope =
   let used = ref [] and bad = ref false in
+  let bound = ref [] in
   let rec go (e : A.expr) =
-    match e with
+    match March_ast.Bounded_pred.view e with
+    | Some q ->
+      List.iter go (March_ast.Bounded_pred.domain_exprs q.domain);
+      let old = !bound in
+      bound := q.binder.txt :: old;
+      go q.body;
+      bound := old
+    | None -> match e with
     | A.EVar { A.txt; _ } ->
-      if txt = binder || txt = "_" then ()
+      if List.mem txt !bound || txt = binder || txt = "_" then ()
       (* The set literal, as marked by [mark_set_empty], names no value.  A
          bare `empty` anywhere else is an ordinary name and is classified
          like one below. *)
@@ -660,7 +729,19 @@ let classify_pred (binder : string) (params : string list) (pred : A.expr) : pre
    that happens to share a measure's name must not rewrite the call itself. *)
 let rec subst_params_marked (env : (string * A.expr) list) (e : A.expr) : A.expr =
   let go = subst_params_marked env in
-  match e with
+  match March_ast.Bounded_pred.view e with
+  | Some q ->
+    let used = March_ast.Bounded_pred.names e
+      @ List.concat_map (fun (n, e) -> n :: March_ast.Bounded_pred.names e) env in
+    let rec fresh i =
+      let n = "$bound$" ^ string_of_int i in
+      if List.mem n used then fresh (i + 1) else n in
+    let binder = {q.binder with A.txt = fresh 0} in
+    let body = subst_params_marked [(q.binder.txt, A.EVar binder)] q.body in
+    March_ast.Bounded_pred.make {q with binder;
+      domain = March_ast.Bounded_pred.map_domain go q.domain;
+      body = subst_params_marked (List.remove_assoc q.binder.txt env) body}
+  | None -> match e with
   | A.EVar { A.txt; _ } -> (match List.assoc_opt txt env with Some a -> a | None -> e)
   | A.EApp ((A.EVar _ as hd), args, sp) -> A.EApp (hd, List.map go args, sp)
   | A.EApp (f, args, sp) -> A.EApp (go f, List.map go args, sp)
@@ -1385,6 +1466,7 @@ let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
   List.iter (fun (_, s) -> match s with Smt.SSet e -> add e | _ -> ()) vc.Smt.decls;
   let rec go (t : Smt.term) =
     match t with
+    | Smt.Quant (_, _, _, g, b) -> go g; go b
     | Smt.SetEmpty e -> add e
     | Smt.SetSng (e, x) -> add e; go x
     | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
@@ -1486,7 +1568,7 @@ let ctor_of_tester (m : string) : string option =
 
 (* True iff the checker attaches meaning to [m] applied inside a predicate. *)
 let known_predicate_fn (m : string) : bool =
-  is_predicate_operator m || is_measure_app m || ctor_of_tester m <> None
+  m = "nth" || March_ast.Bounded_pred.is_symbol m || is_predicate_operator m || is_measure_app m || ctor_of_tester m <> None
   || is_const_fn m
 
 (* ── Set vocabulary: reserved names, and the well-formed application ──────
@@ -1564,6 +1646,12 @@ let measure_preamble : string ref = ref ""
 (* ctor name -> field names in declaration order.  Populated for TDRecord
    1-ctor datatypes; used to map EField/ERecord field names to selector indices. *)
 let ctor_field_names : (string, string list) Hashtbl.t = Hashtbl.create 16
+
+(* The datatypes that are an actor's state ([register_field_sorts_once]'s
+   `DActor` arm), by datatype key: a record sort no value outside the
+   actor's own handlers has, which [Refine_reflect.record_of_fields_inst]
+   sets aside when another record sort shares its field set. *)
+let actor_state_adts : (string, unit) Hashtbl.t = Hashtbl.create 8
 
 (* ── Which constructor field carries which TYPE PARAMETER ──────────────────
    Container subtyping (P3 design §2a) needs, per constructor, whether each
@@ -1779,9 +1867,27 @@ let adt_decl_paths : (string, (string * string) list) Hashtbl.t = Hashtbl.create
    stdlib's own declaration of it).  The other built-ins are not entered in
    [adt_decl_paths]: their bare key carries no constructors here, and filing
    them there would make an unseeded name's preferred declarant empty. *)
-let short_name_conflated (short : string) : bool =
+let short_name_conflated ?arity (short : string) : bool =
   match Hashtbl.find_opt adt_decl_paths ("M_" ^ short) with
   | None | Some [] -> false
+  | Some entries when arity <> None ->
+    (* At one ARITY (todo 2026-11-03-reflect-type-name-clash-with-stdlib):
+       the typechecker never unifies two types that take different numbers of
+       arguments (`expected Tree but got Tree(Int, Int)`), so only the
+       declarants of the same arity are conflated with each other.  A
+       declarant whose arity is not recorded counts at every arity, and so
+       does a built-in name the typechecker records no arity for. *)
+    let n = Option.get arity in
+    let at_n key = match Hashtbl.find_opt adt_arity key with Some k -> k = n | None -> true in
+    let same = List.filter (fun (_, key) -> at_n key) entries in
+    List.length same >= 2
+    || (same <> []
+        && List.mem short builtin_type_names
+        && (not (List.mem short seeded_builtin_names))
+        && (not (Hashtbl.mem stdlib_declared short))
+        && (match List.assoc_opt short March_typecheck.Typecheck_builtins.builtin_types with
+            | Some k -> k = n
+            | None -> true))
   | Some entries ->
     (* ENTRIES, not distinct paths (review round 3): two declarations at one
        module path (`type Zq` twice, a reopened `mod A`, a user `mod
@@ -1830,9 +1936,18 @@ let canonical_type_name (name : string) : string =
         | _ -> name)
      | None -> name)
 
-let adt_sort_name (march_name : string) : string =
+let adt_sort_name ?arity (march_name : string) : string =
   let bare = "M_" ^ canonical_type_name march_name in
-  match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare
+  let preferred () = match Hashtbl.find_opt adt_canonical bare with Some key -> key | None -> bare in
+  match arity, Hashtbl.find_opt adt_decl_paths bare with
+  (* Two or more declarants of the short name: the one of this arity, when
+     exactly one declares it (todo 2026-11-03-reflect-type-name-clash-with-
+     stdlib).  Otherwise the preferred declarant, as before. *)
+  | Some n, Some (_ :: _ :: _ as entries) -> (
+    match List.filter (fun (_, key) -> Hashtbl.find_opt adt_arity key = Some n) entries with
+    | [ (_, key) ] -> key
+    | _ -> preferred ())
+  | _ -> preferred ()
 
 (* Is the type a reference to [name] resolves to opaque?  Only when EVERY
    declaration of that bare name is ([adt_decl_paths]): the checker's bare
@@ -2019,9 +2134,31 @@ let finalize_ctor_names () : unit =
     (fun bare entries ->
       let short = String.sub bare 2 (String.length bare - 2) in
       if short_name_conflated short then begin
-        List.iter (fun (_, key) -> Hashtbl.replace ambiguous_adts key ()) entries;
-        (* The bare key too: a single declarant was re-filed there. *)
-        Hashtbl.replace ambiguous_adts bare ()
+        (* Per declarant, at its own arity: a user `type Tree` beside the
+           stdlib's `Tree(k, v)` is not conflated with it, so its
+           constructors stay usable; two declarants of one arity are. *)
+        let ambiguous key =
+          match Hashtbl.find_opt adt_arity key with
+          | Some n -> short_name_conflated ~arity:n short
+          | None -> true
+        in
+        List.iter (fun (_, key) -> if ambiguous key then Hashtbl.replace ambiguous_adts key ()) entries;
+        (* The bare key too, unless it IS an unambiguous declarant's key: a
+           stray unqualified reference must not pick a constructor list. *)
+        if not (List.exists (fun (_, key) -> key = bare && not (ambiguous key)) entries) then
+          Hashtbl.replace ambiguous_adts bare ();
+        (* And the declarant an arity-less lookup prefers when no declarant
+           sits at the top level ([adt_canonical], the first one registered:
+           usually the stdlib's).  A caller that resolves the name without the
+           reference's arity must not get that declarant's constructors for a
+           value of another one's type: `Tree(a)` in a nested user module took
+           `OrderedMap.Tree(k, v)`'s field roles and proved a plain `Int`
+           field positive (review C1 of 2026-11-06).  The arity-aware path
+           ([adt_sort_name ~arity]) is unaffected for every other declarant. *)
+        match Hashtbl.find_opt adt_canonical bare with
+        | Some preferred when not (List.exists (fun (p, _) -> p = "" || p = builtin_path) entries) ->
+          Hashtbl.replace ambiguous_adts preferred ()
+        | _ -> ()
       end)
     adt_decl_paths;
   let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) adt_ctors []) in
@@ -2145,8 +2282,30 @@ let is_record_sort (s : string) : bool =
    arguments, e.g. `Option(Int)`.  The ADT-tag feature dispatches on this. *)
 let is_adt_base (t : A.ty) : bool =
   match t with
-  | A.TyCon ({ A.txt = name; _ }, _) -> Hashtbl.mem adt_ctors (adt_sort_name name)
+  | A.TyCon ({ A.txt = name; _ }, args) -> Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) name)
   | _ -> false
+
+(* The tuple datatype of arity [n] (reflection §3.2: tuples are datatypes):
+   one constructor `$tup<n>` over the datatype's own [n] parameters, its
+   selectors `$tup<n>_<i>`.  `$` cannot occur in a March name, so neither can
+   collide with a user's.  Registered on first use (a reflected function's
+   signature or body), so a module that never reflects a tuple declares
+   nothing new. *)
+let tuple_ctor (n : int) : string = Printf.sprintf "$tup%d" n
+
+(* Is [adt] a tuple datatype ([tuple_adt])? *)
+let is_tuple_adt (adt : string) : bool = String.starts_with ~prefix:"$Tup" adt
+
+let tuple_adt (n : int) : string =
+  let adt = Printf.sprintf "$Tup%d" n in
+  if not (Hashtbl.mem adt_ctors adt) then begin
+    let ctor = tuple_ctor n in
+    Hashtbl.replace adt_ctors adt [ ctor ];
+    Hashtbl.replace adt_arity adt n;
+    set_ctor_fields adt ctor (List.init n (fun i -> Smt.SParam i));
+    Hashtbl.replace ctor_param_fields ctor (List.init n (fun i -> Param i))
+  end;
+  adt
 
 (* The SMT sort a measure sees for a constructor field: Int/Bool concrete, ANY
    registered ADT (self or another — so cross-ADT measure calls are well-sorted,
@@ -2162,8 +2321,12 @@ let rec instance_sort_of_ty (t : A.ty) : Smt.sort =
   | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> instance_sort_of_ty b
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
-  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    let adt = adt_sort_name txt in
+  (* A tuple is the datatype [tuple_adt n] at its components' sorts (todo
+     2026-11-04-stdlib-lemma-sweep-s3): before, it was `Elem`, so a
+     tuple-typed parameter in a predicate was declared Int. *)
+  | A.TyTuple (_ :: _ :: _ as ts) -> Smt.SData (tuple_adt (List.length ts), List.map instance_sort_of_ty ts)
+  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) txt) ->
+    let adt = adt_sort_name ~arity:(List.length args) txt in
     let n = try Hashtbl.find adt_arity adt with Not_found -> 0 in
     if n = 0 then Smt.sdata adt
     else
@@ -2199,8 +2362,9 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
     match strip t with
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
-    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name n) ->
-      let adt = adt_sort_name n in
+    | T.TTuple (_ :: _ :: _ as ts) -> Smt.SData (tuple_adt (List.length ts), List.map inst ts)
+    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) n) ->
+      let adt = adt_sort_name ~arity:(List.length args) n in
       let k = try Hashtbl.find adt_arity adt with Not_found -> 0 in
       if k = 0 then Smt.sdata adt
       else
@@ -2213,12 +2377,14 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
   | T.TCon ("Bool", []) -> Some Smt.SBool
   | T.TCon ("Float", []) -> Some Smt.SFloat
   | T.TCon ("String", []) -> Some (Smt.sdata str_sort)
+  (* A tuple value: the tuple datatype at its components' sorts. *)
+  | T.TTuple (_ :: _ :: _) as ty -> Some (inst ty)
   (* No `Set(t)` -> `SSet` arm: a March `Set` VALUE is a datatype here (the
      stdlib's `type Set(a) = …`), and the SMT set sort is only ever the
      result of a set measure over it (`elts(s)`, `keys(m)`), never the sort
      of the value itself. *)
-  | T.TCon (n, _) as ty ->
-    let adt = adt_sort_name n in
+  | T.TCon (n, args) as ty ->
+    let adt = adt_sort_name ~arity:(List.length args) n in
     (match Hashtbl.find_opt adt_ctors adt with
      | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> None
      | Some _ -> Some (inst ty)
@@ -2238,9 +2404,9 @@ let caller_sort_at (sp : A.span) : Smt.sort option =
    type name two modules declare (`A.T`, `B.T`) does not ([adt_sort_name]'s
    preferred declarant would be a guess), a record is not a variant, and
    anything that is not a registered datatype is unknown. *)
-let rec adt_of_type_name (n : string) : string option =
+let rec adt_of_type_name ?arity (n : string) : string option =
   match String.rindex_opt n '.' with
-  | None -> adt_of_short_type_name n
+  | None -> adt_of_short_type_name ?arity n
   | Some i ->
     (* A QUALIFIED name resolves EXACTLY or not at all (review round 4):
        `Counter.Msg` is not whatever `Msg` some other module declares.  As
@@ -2259,18 +2425,19 @@ let rec adt_of_type_name (n : string) : string option =
         | _ -> false)
       | None -> false
     in
-    if exact then adt_of_short_type_name t
+    if exact then adt_of_short_type_name ?arity t
     else (
       match March_typecheck.Typecheck_env.actor_msg_alias_target n with
-      | Some target when Hashtbl.mem adt_decl_paths ("M_" ^ target) -> adt_of_type_name target
+      | Some target when Hashtbl.mem adt_decl_paths ("M_" ^ target) -> adt_of_type_name ?arity target
       | _ -> Some ambiguous_adt_sentinel)
 
-and adt_of_short_type_name (short : string) : string option =
+and adt_of_short_type_name ?arity (short : string) : string option =
   (* KNOWN but conflated: a sentinel that resolves no constructor, so the
-     caller declines rather than falling back to the name alone. *)
-  if short_name_conflated short then Some ambiguous_adt_sentinel
+     caller declines rather than falling back to the name alone.  With the
+     reference's [arity], conflated only with a declarant of that arity. *)
+  if short_name_conflated ?arity short then Some ambiguous_adt_sentinel
   else
-    let adt = adt_sort_name short in
+    let adt = adt_sort_name ?arity short in
     (* A KNOWN type that is not a registered variant (`Int`, `String`, a
        record, a built-in or synthesised type the checker does not model) is
        the sentinel too, never "unknown" (review round 3): no constructor of
@@ -2284,7 +2451,7 @@ let adt_of_tc_ty (t : March_typecheck.Typecheck.ty) : string option =
   let module T = March_typecheck.Typecheck in
   let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
   match strip t with
-  | T.TCon (n, _) -> adt_of_type_name n
+  | T.TCon (n, args) -> adt_of_type_name ~arity:(List.length args) n
   (* A type variable is the one genuinely unknown type. *)
   | T.TVar _ -> None
   | _ -> Some ambiguous_adt_sentinel
@@ -2293,7 +2460,7 @@ let adt_of_tc_ty (t : March_typecheck.Typecheck.ty) : string option =
 let rec adt_of_decl_ty (t : A.ty) : string option =
   match t with
   | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> adt_of_decl_ty b
-  | A.TyCon (n, _) -> adt_of_type_name n.A.txt
+  | A.TyCon (n, args) -> adt_of_type_name ~arity:(List.length args) n.A.txt
   | A.TyVar _ -> None
   | _ -> Some ambiguous_adt_sentinel
 
@@ -2363,8 +2530,8 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
      datatype's parameters where the field names one, and `Elem` otherwise.
      [resolve_sorts] reconciles a field's concrete instance with the terms
      placed in it.) *)
-  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name txt) ->
-    let adt = adt_sort_name txt in
+  | A.TyCon ({ A.txt; _ }, args) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) txt) ->
+    let adt = adt_sort_name ~arity:(List.length args) txt in
     let n = try Hashtbl.find adt_arity adt with Not_found -> 0 in
     if n = 0 then Smt.sdata adt
     else
@@ -2386,14 +2553,28 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
    comment on [adt_sort_name]. Each declaration is filed under its OWN
    qualified key; [finalize_adt_canonical] decides afterwards whether that
    key also becomes the plain bare one. *)
+(* A stdlib file checked as the user file (`march --check stdlib/set.march`,
+   the coverage corpus sweep): a file in a directory named `stdlib` whose
+   name a stdlib root also has.  Its types are the stdlib's own declarations
+   (the prelude drops its copy of the module), so `Set`, a typechecker
+   built-in name too, is not a user type conflated with the built-in, and
+   `Set`'s abstraction measure axiomatises exactly as it does from the
+   prelude.  2026-11-08. *)
+let is_stdlib_file_copy (f : string) : bool =
+  Filename.basename (Filename.dirname f) = "stdlib"
+  && List.exists
+       (fun root -> Sys.file_exists (Filename.concat root (Filename.basename f)))
+       !March_typecheck.Typecheck_builtins.stdlib_roots
+
 let rec register_adt_names ?(path : string = "") (decls : A.decl list) : unit =
   let record_key (nm : A.name) : string =
     let name = nm.A.txt in
     (* The caller-supplied stdlib identity ([stdlib_source_files], what a
        harness passes) or the typechecker's own root-based one. *)
     let f = nm.A.span.A.file in
-    if is_stdlib_source_file f || March_typecheck.Typecheck_builtins.file_is_stdlib f then
-      Hashtbl.replace stdlib_declared name ();
+    if is_stdlib_source_file f || March_typecheck.Typecheck_builtins.file_is_stdlib f
+       || is_stdlib_file_copy f
+    then Hashtbl.replace stdlib_declared name ();
     let bare = "M_" ^ name in
     let key = adt_sort_name_at (own_path path name) name in
     Hashtbl.replace adt_decl_paths bare
@@ -2570,6 +2751,7 @@ let rec register_field_sorts_once ?(path : string = "") (decls : A.decl list) : 
       | A.DActor (_, name, ad, _) ->
         let own = decl_key path name.A.txt in
         let ctor = ctor_smt_name own name.A.txt in
+        Hashtbl.replace actor_state_adts own ();
         set_ctor_fields own ctor
           (List.map (fun (f : A.field) -> smt_sort_of_field f.A.fld_ty) ad.A.actor_state);
         Hashtbl.replace ctor_field_names ctor
@@ -2605,8 +2787,8 @@ let clause_param_adt (c : A.fn_clause) : (string * string) option =
   match c.A.fc_params with
   | A.FPNamed p :: _ -> (
       match p.A.param_ty with
-      | Some (A.TyCon (adt, _)) when Hashtbl.mem adt_ctors (adt_sort_name adt.A.txt) ->
-        Some (p.A.param_name.A.txt, adt_sort_name adt.A.txt)
+      | Some (A.TyCon (adt, args)) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) adt.A.txt) ->
+        Some (p.A.param_name.A.txt, adt_sort_name ~arity:(List.length args) adt.A.txt)
       | _ -> None)
   | _ -> None
 
@@ -2895,6 +3077,65 @@ let measure_arms (param : string) (body : A.expr) : (string * string list * A.ex
    structurally decreasing, hence total: axiomatising it is sound.  `len` and
    non-axiomatised measures are not [allowed], so an arm calling one stays
    untranslatable (symbolic fallback).  None => untranslatable. *)
+let measure_instance_name (m : string) (adt : string) (args : Smt.sort list) : string =
+  m ^ "$" ^ Smt.set_elem_tag (Smt.SData (adt, args))
+
+(* ── Built-in list measures over list STRUCTURE (plan step 2.1) ─────────────
+   Call-site checking treats `len(xs)`/`elts(xs)` as per-variable constants
+   (`len$xs`, `elts$xs`) and folds literal lists; nothing there walks list
+   cells.  A proof by induction over a list must, so the Tier 2 check reflects
+   `len`/`elts` of a list TERM to these two internal measures.  [resolve_sorts]
+   types them and renames each to its list instance (`$len$M_List$Int`), and
+   [query_instance_preamble] declares every instance with its recursion
+   axioms.  The `$` keeps both names out of the March namespace and apart from
+   the `len$x` constants. *)
+let list_len_measure = "$len"
+let list_elts_measure = "$elts"
+let list_nth_measure = "$nth"
+let is_list_structure_measure (m : string) : bool = m = list_len_measure || m = list_elts_measure || m = list_nth_measure
+let list_adt : string = adt_sort_name "List"
+
+(* The declarations and axioms of list measure [m] at list instance [args]. *)
+let list_measure_text (name : string) (m : string) (args : Smt.sort list) : string =
+  let lst = Smt.string_of_sort (Smt.SData (list_adt, args)) in
+  let elem =
+    Smt.string_of_sort (Smt.render_elem_sort (match args with e :: _ -> e | [] -> Smt.sdata "Elem"))
+  in
+  let nil = Printf.sprintf "(as Nil %s)" lst and cons = Printf.sprintf "((as Cons %s) h t)" lst in
+  let recursion rhs =
+    Printf.sprintf "(assert (forall ((h %s) (t %s)) (! (= (%s %s) %s) :pattern ((%s %s)))))\n"
+      elem lst name cons rhs name cons
+  in
+  if m = list_nth_measure then
+    Printf.sprintf "(declare-fun %s (%s Int) %s)\n" name lst elem
+    ^ Printf.sprintf
+        "(assert (forall ((h %s) (t %s) (i Int)) (! (=> (>= i 0) (= (%s %s i) (ite (= i 0) h (%s t (- i 1))))) :pattern ((%s %s i)))))\n"
+        elem lst name cons name name cons
+  else if m = list_len_measure then
+    Printf.sprintf "(declare-fun %s (%s) Int)\n" name lst
+    ^ Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n" lst name name
+    ^ Printf.sprintf "(assert (= (%s %s) 0))\n" name nil
+    ^ recursion (Printf.sprintf "(+ 1 (%s t))" name)
+  else
+    let set = Printf.sprintf "(Array %s Bool)" elem in
+    Printf.sprintf "(declare-fun %s (%s) %s)\n" name lst set
+    ^ Printf.sprintf "(assert (= (%s %s) ((as const %s) false)))\n" name nil set
+    ^ recursion (Printf.sprintf "(store (%s t) h true)" name)
+
+(* The list instances of [list_elts_measure] arms applied (instance symbol,
+   list arguments): the caller declares each with its axioms. *)
+let arm_list_requests : (string * Smt.sort list) list ref = ref []
+
+let is_list_elts_instance (m : string) : bool =
+  String.starts_with ~prefix:(list_elts_measure ^ "$") m
+
+(* [list_measure_text] split into its `declare-fun` and its axioms. *)
+let list_elts_decl_and_axioms (iname : string) (args : Smt.sort list) : string * string =
+  let text = list_measure_text iname list_elts_measure args in
+  match String.index_opt text '\n' with
+  | Some i -> (String.sub text 0 (i + 1), String.sub text (i + 1) (String.length text - i - 1))
+  | None -> (text, "")
+
 let rec smt_of_axiom_body ~self ~allowed (bound : string list) (e : A.expr) : Smt.term option =
   let r = smt_of_axiom_body ~self ~allowed bound in
   match e with
@@ -2909,6 +3150,10 @@ let rec smt_of_axiom_body ~self ~allowed (bound : string list) (e : A.expr) : Sm
     (match r a, r b with Some x, Some y -> Some (Smt.Sub (x, y)) | _ -> None)
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ A.ELit (A.LitInt k, _); b ], _) ->
     Option.map (fun y -> Smt.MulLit (k, y)) (r b)
+  (* A list field's elements (a HAMT collision bucket): the built-in list
+     measure, renamed to the field's list instance by [arm_axiom]. *)
+  | A.EApp (A.EVar { A.txt = "elts"; _ }, [ A.EVar { A.txt = v; _ } ], _) when List.mem v bound ->
+    Some (Smt.App (list_elts_measure, [ Smt.Const v ]))
   (* The set vocabulary, for a set-valued measure body (design §4.4).  A
      bound payload variable may be an ELEMENT (`singleton(x)`); element sorts
      are pinned to the measure's declared sort by [arm_axiom]. *)
@@ -3131,6 +3376,10 @@ let rec axiom_body_sort ?(elem_of : string -> Smt.sort option = fun m -> Hashtbl
   | Smt.Const v -> List.assoc_opt v env
   | Smt.Add (a, b) | Smt.Sub (a, b) -> int2 a b
   | Smt.MulLit (_, a) -> if go a = Some Smt.SInt then Some Smt.SInt else None
+  | Smt.App (m, [ Smt.Const v ]) when is_list_elts_instance m -> (
+    match List.assoc_opt v env with
+    | Some (Smt.SData (_, [ e ])) -> Some (Smt.SSet e)
+    | _ -> None)
   | Smt.App (m, _) ->
     (* An instance symbol `m$…` has its measure's result sort.  [elem_of]
        lets the caller answer for the SELF measure at the instance it is
@@ -3169,7 +3418,7 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
        NOT be one (and vice versa), or the axiom is ill-sorted. *)
     let is_set = function
       | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _ -> true
-      | Smt.App (m, _) -> Hashtbl.mem set_measure_elem m
+      | Smt.App (m, _) -> m = list_elts_measure || Hashtbl.mem set_measure_elem m
       | _ -> false
     in
     if is_set bsmt <> Hashtbl.mem set_measure_elem name then None
@@ -3202,6 +3451,13 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
     let env = if List.length vars = List.length sorts then List.combine vars sorts else [] in
     let rec rename (t : Smt.term) : Smt.term =
       match t with
+      | Smt.App (m, [ Smt.Const v ]) when m = list_elts_measure -> (
+        match List.assoc_opt v env with
+        | Some (Smt.SData (adt, a)) when adt = list_adt ->
+          let iname = measure_instance_name list_elts_measure list_adt a in
+          arm_list_requests := (iname, a) :: !arm_list_requests;
+          Smt.App (iname, [ Smt.Const v ])
+        | _ -> t)
       | Smt.App (m, [ Smt.Const v ]) when (m = name || allowed m) && List.mem_assoc v env ->
         let decl = try Hashtbl.find measure_decl_args m with Not_found -> [] in
         (match List.assoc v env with
@@ -3328,8 +3584,17 @@ let instance_measure_text ?(skip : string list = []) ?(axiom_sink : (string -> s
         let arms = try Hashtbl.find axiom_measure_arms m with Not_found -> [] in
         let allowed x = Hashtbl.mem axiom_measures x in
         arm_instance_requests := [];
+        arm_list_requests := [];
         let translated = List.map (fun arm -> arm_axiom ~allowed ~args ~self_name:iname m arm) arms in
         let further = !arm_instance_requests in
+        List.iter
+          (fun (lname, largs) ->
+            if not (Hashtbl.mem done_ lname) then begin
+              Hashtbl.replace done_ lname ();
+              arg_sorts := Smt.SData (list_adt, largs) :: !arg_sorts;
+              Buffer.add_string decls (list_measure_text lname list_elts_measure largs)
+            end)
+          (List.sort_uniq compare !arm_list_requests);
         if arms <> [] && List.for_all Option.is_some translated then begin
           let emit text =
             match axiom_sink with Some sink -> sink iname text | None -> Buffer.add_string axioms text
@@ -3645,6 +3910,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
       axiomatized;
     (* … then the recursion-equation axioms. *)
     arm_instance_requests := [];
+    arm_list_requests := [];
     List.iter
       (fun (name, _, arms) ->
         List.iter
@@ -3658,7 +3924,18 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
        needs that instance declared before any axiom mentions it. *)
     let requested = !arm_instance_requests in
     let text, names, instance_sorts = instance_measure_text ~axiom_sink:add_measure_axiom requested in
-    global_instance_names := names;
+    (* The list instances an arm's `elts(field)` names (a HAMT collision
+       bucket), declared here with the measures; their quantified axioms are
+       filed by symbol like every other measure's. *)
+    let lists = List.sort_uniq compare !arm_list_requests in
+    List.iter
+      (fun (iname, args) ->
+        let d, ax = list_elts_decl_and_axioms iname args in
+        Buffer.add_string buf d;
+        add_measure_axiom iname ax)
+      lists;
+    global_instance_names := names @ List.map fst lists;
+    let instance_sorts = instance_sorts @ List.map (fun (_, a) -> Smt.SData (list_adt, a)) lists in
     Buffer.add_string buf text;
     let covered = adt_closure (List.map (fun (_, adt, _) -> adt) all_axiomatized) in
     (* The instances measures are declared at, beyond the `Elem` ones. *)
@@ -3712,6 +3989,7 @@ let register_builtin_adts () : unit =
   Hashtbl.replace ctor_param_fields "Err" [ Param 1 ]
 
 
+
 (* =================================================================
    Sort resolution for a finished query
    (specs/plans/set-refinements-strengthening-plan.md step 1.3)
@@ -3751,48 +4029,13 @@ type isort =
    the rewritten query; the caller attaches that instance's declarations. *)
 type measure_instance = { mi_name : string; mi_measure : string; mi_adt : string; mi_args : Smt.sort list }
 
-let measure_instance_name (m : string) (adt : string) (args : Smt.sort list) : string =
-  m ^ "$" ^ Smt.set_elem_tag (Smt.SData (adt, args))
-
-(* ── Built-in list measures over list STRUCTURE (plan step 2.1) ─────────────
-   Call-site checking treats `len(xs)`/`elts(xs)` as per-variable constants
-   (`len$xs`, `elts$xs`) and folds literal lists; nothing there walks list
-   cells.  A proof by induction over a list must, so the Tier 2 check reflects
-   `len`/`elts` of a list TERM to these two internal measures.  [resolve_sorts]
-   types them and renames each to its list instance (`$len$M_List$Int`), and
-   [query_instance_preamble] declares every instance with its recursion
-   axioms.  The `$` keeps both names out of the March namespace and apart from
-   the `len$x` constants. *)
-let list_len_measure = "$len"
-let list_elts_measure = "$elts"
-let is_list_structure_measure (m : string) : bool = m = list_len_measure || m = list_elts_measure
-let list_adt : string = adt_sort_name "List"
-
-(* The declarations and axioms of list measure [m] at list instance [args]. *)
-let list_measure_text (name : string) (m : string) (args : Smt.sort list) : string =
-  let lst = Smt.string_of_sort (Smt.SData (list_adt, args)) in
-  let elem =
-    Smt.string_of_sort (Smt.render_elem_sort (match args with e :: _ -> e | [] -> Smt.sdata "Elem"))
-  in
-  let nil = Printf.sprintf "(as Nil %s)" lst and cons = Printf.sprintf "((as Cons %s) h t)" lst in
-  let recursion rhs =
-    Printf.sprintf "(assert (forall ((h %s) (t %s)) (! (= (%s %s) %s) :pattern ((%s %s)))))\n"
-      elem lst name cons rhs name cons
-  in
-  if m = list_len_measure then
-    Printf.sprintf "(declare-fun %s (%s) Int)\n" name lst
-    ^ Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n" lst name name
-    ^ Printf.sprintf "(assert (= (%s %s) 0))\n" name nil
-    ^ recursion (Printf.sprintf "(+ 1 (%s t))" name)
-  else
-    let set = Printf.sprintf "(Array %s Bool)" elem in
-    Printf.sprintf "(declare-fun %s (%s) %s)\n" name lst set
-    ^ Printf.sprintf "(assert (= (%s %s) ((as const %s) false)))\n" name nil set
-    ^ recursion (Printf.sprintf "(store (%s t) h true)" name)
-
 let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     (assumptions : Smt.term list)
     : ((string * Smt.sort) list * Smt.term * Smt.term list * measure_instance list) option =
+  let rec bounded_logic = function
+    | Smt.Quant _ | Smt.App ("$nth", _) -> true
+    | t -> List.exists bounded_logic (Smt.children t) in
+  let logical = List.exists bounded_logic (goal :: assumptions) in
   let bind : (int, isort) Hashtbl.t = Hashtbl.create 32 in
   let next = ref 0 in
   let fresh () = let i = !next in incr next; IVar i in
@@ -3883,6 +4126,15 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
   let slot t = slots := t :: !slots in
   let rec infer (t : Smt.term) : isort =
     match t with
+    | Smt.Quant (_, n, sort, g, b) ->
+      let old = Hashtbl.find_opt const_sort n in
+      let v = of_sort sort in
+      Hashtbl.replace const_sort n v;
+      slot v;
+      unify (infer g) IBool;
+      unify (infer b) IBool;
+      (match old with None -> Hashtbl.remove const_sort n | Some t -> Hashtbl.replace const_sort n t);
+      IBool
     | Smt.Const c -> sort_of_const c
     | Smt.IntLit _ -> IInt
     | Smt.BoolLit _ -> IBool
@@ -3899,10 +4151,11 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       unify ta tb; ta
     | Smt.MulLit (_, a) | Smt.DivLit (a, _) | Smt.ModLit (a, _) | Smt.Neg a ->
       unify (infer a) IInt; IInt
-    | Smt.Not a -> ignore (infer a); IBool
+    | Smt.Not a -> let s = infer a in if logical then unify s IBool; IBool
     | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) ->
-      let _ = infer a in
-      let _ = infer b in
+      let sa = infer a in
+      let sb = infer b in
+      if logical then (unify sa IBool; unify sb IBool);
       IBool
     | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
     | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b) | Smt.FpGe (a, b) ->
@@ -3932,6 +4185,12 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     | Smt.App (f, [ a ]) when f = strlen_fn ->
       unify (infer a) (INamed (str_sort, [])); IInt
     | Smt.App (f, args) when is_abs_sym f -> List.iter (fun a -> ignore (infer a)) args; IBool
+    | Smt.App (m, [a; i]) when m = list_nth_measure ->
+      let params, it = fresh_instance list_adt in
+      unify (infer a) it;
+      unify (infer i) IInt;
+      slot it;
+      if Array.length params > 0 then params.(0) else fresh ()
     | Smt.App (m, [ a ]) when is_list_structure_measure m ->
       let params, it = fresh_instance list_adt in
       unify (infer a) it;
@@ -4020,7 +4279,8 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       slot v;
       IInt
   in
-  let _ = infer goal in
+  let goal_sort = infer goal in
+  if logical then unify goal_sort IBool;
   List.iter (fun a -> ignore (infer a)) assumptions;
   if !conflict then None
   else begin
@@ -4050,6 +4310,10 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     let instances = ref [] in
     let rec rewrite (t : Smt.term) : Smt.term =
       match t with
+      | Smt.Quant (q, n, _, g, b) ->
+        let sort = to_sort (pop ()) in
+        let g = rewrite g in
+        Smt.Quant (q, n, sort, g, rewrite b)
       | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> t
       | Smt.Add (a, b) -> let a' = rewrite a in Smt.Add (a', rewrite b)
       | Smt.Sub (a, b) -> let a' = rewrite a in Smt.Sub (a', rewrite b)
@@ -4096,6 +4360,14 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
            Smt.IsCtorAt (c, inst, n, a')
          | _ -> Smt.IsCtor (c, a'))
       | Smt.App (f, [ a ]) when f = strlen_fn -> Smt.App (f, [ rewrite a ])
+      | Smt.App (m, [a; i]) when m = list_nth_measure ->
+        let a = rewrite a in
+        let i = rewrite i in
+        let args = match to_sort (pop ()) with Smt.SData (_, args) -> args | _ -> [] in
+        let name = measure_instance_name m list_adt args in
+        if not (List.exists (fun inst -> inst.mi_name = name) !instances) then
+          instances := {mi_name = name; mi_measure = m; mi_adt = list_adt; mi_args = args} :: !instances;
+        Smt.App (name, [a; i])
       | Smt.App (m, [ a ]) when is_list_structure_measure m ->
         let a' = rewrite a in
         let args = match to_sort (pop ()) with Smt.SData (_, args) -> args | _ -> [] in
@@ -4183,6 +4455,7 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
    set element sorts. *)
 let rec term_sorts (acc : Smt.sort list) (t : Smt.term) : Smt.sort list =
   match t with
+  | Smt.Quant (_, _, sort, g, b) -> term_sorts (term_sorts (sort :: acc) g) b
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> acc
   | Smt.App (_, args) -> List.fold_left term_sorts acc args
   | Smt.Ctor (_, s, args) -> List.fold_left term_sorts (s :: acc) args
@@ -4243,6 +4516,10 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
   in
   (* The built-in list measures need no measure preamble, so they are declared
      whether or not [measures] is set. *)
+  let list_mis =
+    if measures then List.filter (fun mi -> not (List.mem mi.mi_name !global_instance_names)) list_mis
+    else list_mis
+  in
   let ltext =
     String.concat "" (List.map (fun mi -> list_measure_text mi.mi_name mi.mi_measure mi.mi_args) list_mis)
   in
@@ -4336,6 +4613,12 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
       "(declare-sort Elem 0)\n"
     else elem
   in
+  (* A reflected symbol over the opaque `$Str` (reflection D9) in a query that
+     declared no string: the sort and `$strlen` it needs. *)
+  let elem =
+    if contains rdecls "$Str" && not (contains declared "(declare-sort $Str 0)") then string_preamble ^ elem
+    else elem
+  in
   (* D17 (reflection §7.1): a stage-2 query names the logic hash of every
      reflected definition in its frontier, so the cache key states what the
      proof depends on (a body edit, a change of reflectability, a type's Eq
@@ -4410,6 +4693,27 @@ let resolve_sorts (decls : (string * Smt.sort) list) (goal : Smt.term)
               | _ -> None)
             | _ -> None)
           decls
+  in
+  (* A quantified goal about a pattern-bound tail needs the reverse view
+     of nth's recurrence. Instantiate only for the concrete pattern links in
+     this query: a global reverse axiom triggers on unrelated list terms. *)
+  let rec has_quant = function
+    | Smt.Quant _ -> true
+    | t -> List.exists has_quant (Smt.children t) in
+  let assumptions =
+    if not !Reflect_state.arm_on || not (List.exists has_quant (goal :: assumptions)) then assumptions
+    else assumptions @ List.filter_map (fun (tail, xs, ctor, field) ->
+      match field, List.assoc_opt xs decls, List.assoc_opt tail decls with
+      | 1, Some (Smt.SData (a, _)), Some (Smt.SData (b, _))
+        when a = list_adt && b = list_adt
+             && List.mem ctor (Option.value ~default:[] (Hashtbl.find_opt adt_ctors list_adt)) ->
+        let n = "$nth_index" in
+        let i = Smt.Const n in
+        Some (Smt.Quant (true, n, Smt.SInt,
+          Smt.And (Smt.Ge (i, Smt.IntLit 0), Smt.IsCtor (ctor, Smt.Const xs)),
+          Smt.Eq (Smt.App (list_nth_measure, [Smt.Const tail; i]),
+            Smt.App (list_nth_measure, [Smt.Const xs; Smt.Add (i, Smt.IntLit 1)]))))
+      | _ -> None) !Reflect_state.links
   in
   match resolve_sorts_exact decls goal assumptions with
   | Some r -> Some r
@@ -4707,6 +5011,7 @@ let children : A.expr -> A.expr list = function
   | A.EPipe (a, b, _) -> [ a; b ]
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> [ e ]
+  | A.EProof (p, _) -> A.proof_children p
   | A.ESend (a, b, _) -> [ a; b ]
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> [ e1; e2 ]
 
@@ -4802,6 +5107,31 @@ let structural_subvars ?(params : string list = []) (param : string) (body : A.e
                List.iter (fun v -> Hashtbl.replace set v ()) vs
              | _ -> ())
            brs
+       (* `match (a, b) do (C(…), D(…)) -> …`: a component of the scrutinee
+          tuple that is structural here contributes the variables of ITS
+          constructor sub-pattern, position by position (todo
+          2026-11-06-derived-eq-recursive-type-unreflected: a derived `Eq`
+          recurses this way).  A variable bound by another position's
+          pattern is a component of that position's value, not of this one. *)
+       | A.EMatch (A.ETuple (comps, _), brs, _) ->
+         List.iteri
+           (fun i (c : A.expr) ->
+             match c with
+             | A.EVar s when is_struct ~live s.A.txt ->
+               List.iter
+                 (fun (br : A.branch) ->
+                   match br.A.branch_pat with
+                   | A.PatTuple (pats, _) when List.length pats = List.length comps -> (
+                     match List.nth pats i with
+                     | A.PatCon (_, sub) ->
+                       let vs = List.concat_map pat_vars sub in
+                       occ := vs @ !occ;
+                       List.iter (fun v -> Hashtbl.replace set v ()) vs
+                     | _ -> ())
+                   | _ -> ())
+                 brs
+             | _ -> ())
+           comps
        | _ -> ());
       match e with
       | A.EBlock (es, _) ->

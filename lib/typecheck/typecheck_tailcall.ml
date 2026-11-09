@@ -192,6 +192,8 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
   | Ast.EAssert (ex, _) -> collect_direct_fn_calls fn_names ex
   | Ast.ESigil (_, content, _) -> collect_direct_fn_calls fn_names content
   | Ast.ERefineMsg (content, _, _) -> collect_direct_fn_calls fn_names content
+  | Ast.EProof (p, _) ->
+    List.fold_left (fun acc x -> StringSet.union acc (collect_direct_fn_calls fn_names x)) StringSet.empty (Ast.proof_children p)
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _)       -> StringSet.empty
 
@@ -555,8 +557,9 @@ let rec check_tail_position
           StringSet.empty iparams
       in
       check_tail_position errors (StringSet.singleton iname.txt) iname.txt iparams_set ibody
-    (* ── lambda: new scope, skip outer recursive-name check ── *)
-    | Ast.ELam _ -> ()
+    (* A lambda starts a fresh call frame, but can contain named recursive locals. *)
+    | Ast.ELam (_, body, _) ->
+      check_tail_position errors StringSet.empty "" StringSet.empty body
     (* ── transparent ── *)
     | Ast.EAnnot (ex, _, _) -> chk in_tail names params smaller ctx ex
     (* ── non-tail contexts ── *)
@@ -589,22 +592,26 @@ let rec check_tail_position
        up INSIDE a callback lambda handed to `flat_map`, so it is never in
        tail position relative to the enclosing function no matter what
        `in_tail` says here. Treat it exactly like `ELam` above: a fresh
-       scope, not walked further by THIS check -- a self-recursive call
-       inside `cont` is an ordinary non-tail call through a closure, not a
-       tail-position violation. *)
-    | Ast.ELetStar (_, r, _, _) ->
-      chk false names params smaller "right-hand side of `let*`" r
+       scope -- calls to the enclosing function are not tail-position
+       violations, but named local functions still need their own check. *)
+    | Ast.ELetStar (_, r, cont, _) ->
+      chk false names params smaller "right-hand side of `let*`" r;
+      check_tail_position errors StringSet.empty "" StringSet.empty cont
     | Ast.EAssert (ex, _)     -> chk false names params smaller "assert expression" ex
     | Ast.ESigil (_, content, _) -> chk false names params smaller "sigil content" content
     | Ast.ERefineMsg (content, _, _) -> chk false names params smaller "refinement predicate" content
+    (* A `with fuel` body is ordinary code that erasure keeps as a block, so it
+       inherits the tail position; the other proof statements are ghost. *)
+    | Ast.EProof (Ast.PWithFuel (_, _, body), sp) -> chk in_tail names params smaller ctx (Ast.EBlock (body, sp))
+    | Ast.EProof (p, _) -> List.iter (chk false names params smaller "proof statement") (Ast.proof_children p)
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()
   in
   chk true recursive_names fn_params init_smaller "" body
 
-(** Run tail-call enforcement for all [DFn] declarations in [decls]
-    (at a single scope level).  Recurses into [DMod] sub-modules.
+(** Run tail-call enforcement for [DFn] declarations and [DActor] handlers
+    in [decls] (at a single scope level). Recurses into [DMod] sub-modules.
 
     [mod_path] is the accumulated dotted path of the enclosing [DMod]s, with a
     trailing dot ("" at the top level, then "Inner.", then "Outer.Inner.").
@@ -721,7 +728,7 @@ let rec enforce_tail_calls_in_decls
   List.iter (fun scc ->
     List.iter (fun nm -> Hashtbl.replace scc_of nm scc) scc
   ) sccs;
-  (* Check each function that participates in recursion *)
+  (* Visit every body: even a non-recursive function can contain recursive locals. *)
   List.iter (function
     | Ast.DFn (def, _) ->
       (match def.fn_clauses with
@@ -734,11 +741,14 @@ let rec enforce_tail_calls_in_decls
            List.length scc > 1 ||
            StringSet.mem def.fn_name.txt direct
          in
-         (* A `@[lemma]` never runs (reflection design §4.5): no stack to warn about. *)
-         if is_recursive && not (List.mem "no_warn_recursion" def.fn_attrs) && not (List.mem "lemma" def.fn_attrs) then begin
+         (* A `@[lemma]` never runs (reflection design §4.5), nor does a
+            `ghost fn` (it is erased before lowering): no stack to warn about. *)
+         if not (List.mem "no_warn_recursion" def.fn_attrs) && not (List.mem "lemma" def.fn_attrs)
+            && not (List.mem "ghost" def.fn_attrs) then begin
            (* [check_tail_position] matches [EVar]s, so the recursive-name set
               has to be in the CALL-SITE namespace, not the bare one. *)
            let rec_set =
+             if not is_recursive then StringSet.empty else
              List.fold_left (fun acc bare ->
                List.fold_left (fun acc p -> StringSet.add (p ^ bare) acc)
                  acc prefixes
@@ -772,6 +782,13 @@ let rec enforce_tail_calls_in_decls
              def.fn_name.txt fn_params clause.Ast.fc_body
          end
        | _ -> ())
+    | Ast.DActor (_, _, actor, _) ->
+      (* Handlers cannot call themselves by name; only their local functions
+         participate in this check. *)
+      List.iter (fun (handler : Ast.actor_handler) ->
+        check_tail_position errors StringSet.empty "" StringSet.empty
+          handler.ah_body
+      ) (Ast.actor_body_handlers actor)
     | Ast.DMod (name, _, inner_decls, _) ->
       enforce_tail_calls_in_decls
         ~mod_path:(mod_path ^ name.txt ^ ".") ~file_mod errors inner_decls

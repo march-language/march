@@ -1,0 +1,81 @@
+{
+  "format": 1,
+  "current": {
+    "protocol": "Order",
+    "fingerprint": "fbc924928c002942943a81b564d2408d",
+    "roles": [ "Shop", "Stock", "Ledger" ],
+    "steps": [
+      {
+        "loop": [
+          {
+            "msg": {
+              "from": "Shop",
+              "to": "Stock",
+              "tag": "Want",
+              "payload": "Int"
+            }
+          },
+          {
+            "choose": {
+              "by": "Stock",
+              "branches": [
+                {
+                  "label": "have",
+                  "steps": [
+                    {
+                      "msg": {
+                        "from": "Stock",
+                        "to": "Shop",
+                        "tag": "Have",
+                        "payload": "String"
+                      }
+                    },
+                    {
+                      "msg": {
+                        "from": "Stock",
+                        "to": "Ledger",
+                        "tag": "Book",
+                        "payload": "Int"
+                      }
+                    },
+                    {
+                      "msg": {
+                        "from": "Ledger",
+                        "to": "Shop",
+                        "tag": "Booked",
+                        "payload": "String"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "out",
+                  "steps": [
+                    {
+                      "msg": {
+                        "from": "Stock",
+                        "to": "Shop",
+                        "tag": "Out",
+                        "payload": "String"
+                      }
+                    },
+                    {
+                      "msg": {
+                        "from": "Stock",
+                        "to": "Ledger",
+                        "tag": "Skip",
+                        "payload": "Int"
+                      }
+                    },
+                    "stop"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "previous": null
+}

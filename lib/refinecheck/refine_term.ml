@@ -224,7 +224,7 @@ let collect_types (decls : A.decl list) : (string, tdecl) Hashtbl.t =
       match td with
       | A.TDVariant vs -> List.concat_map (fun (v : A.variant) -> v.A.var_args) vs
       | A.TDRecord fs -> List.map (fun (f : A.field) -> f.A.fld_ty) fs
-      | A.TDAlias t -> [ t ]
+      | A.TDAlias (t, _) -> [ t ]
     in
     let prev = match Hashtbl.find_opt tbl name with Some p -> p.t_fields | None -> [] in
     Hashtbl.replace tbl name
@@ -474,11 +474,16 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
      basename, line, column): two positions under one key is an ambiguity
      ([graph.ambiguous]).  [globals] keeps its last-wins entry. *)
   let reg_pos : (string, (string * int * int) list) Hashtbl.t = Hashtbl.create 256 in
+  (* …and each one's file and unit, for [lookup]'s own-file rule. *)
+  let reg_ids : (string, (string * int) list) Hashtbl.t = Hashtbl.create 256 in
   let register_key key (sp : A.span) id =
     Hashtbl.replace globals key id;
     let pos = (Filename.basename sp.A.file, sp.A.start_line, sp.A.start_col) in
     let old = Option.value ~default:[] (Hashtbl.find_opt reg_pos key) in
-    if not (List.mem pos old) then Hashtbl.replace reg_pos key (pos :: old)
+    if not (List.mem pos old) then begin
+      Hashtbl.replace reg_pos key (pos :: old);
+      Hashtbl.replace reg_ids key ((sp.A.file, id) :: Option.value ~default:[] (Hashtbl.find_opt reg_ids key))
+    end
   in
   (* Every module path registered ("A.B."), so an [alias] name that is also a
      module name in scope is seen. *)
@@ -559,6 +564,13 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
           let id = fn_unit ~name:(mod_path ^ def.A.fn_name.A.txt) def in
           List.iter (fun p -> register_key (p ^ def.A.fn_name.A.txt) def.A.fn_name.A.span id) prefixes
         | A.DActor (_, name, actor, _) ->
+          (* The `@invariant` is walked once, with the first handler: the
+             refinement checker obliges it at every handler's result
+             (Refine_check, the `DActor` arm), and its calls resolve by span
+             like any predicate's, so they need sites here. *)
+          let inv = ref (Option.map (fun e ->
+              (e, List.map (fun (f : A.field) -> f.A.fld_name.A.txt) actor.A.actor_state))
+              actor.A.actor_invariant) in
           List.iter
             (fun (h : A.actor_handler) ->
               let params = List.map (fun (p : A.param) -> Some p.A.param_name.A.txt) h.A.ah_params in
@@ -571,7 +583,9 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
                   ~clauses:[ { o_params = params; o_body = h.A.ah_body } ]
                   ~attrs:[] ()
               in
-              pending := `Handler (id, h, scope) :: !pending)
+              let this_inv = !inv in
+              inv := None;
+              pending := `Handler (id, h, scope, this_inv) :: !pending)
             (A.actor_body_handlers actor)
         | A.DImpl (idf, _) ->
           (* An [impl] method is reached only by dispatch (never by bare
@@ -651,6 +665,25 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
      `List.fold_left` to an entry file's unrelated top-level `fold_left`
      (measured: `Deque.fold_left` came out as a two-member SCC with it). *)
   let cur = ref { sc_path = ""; sc_aliases = []; sc_uses = [] } in
+  (* The file of the declaration being walked ("" when unknown). *)
+  let cur_file = ref "" in
+  (* A key two declarations share, where exactly one is in the walked
+     declaration's own (non-stdlib) file and every other is the stdlib's (a
+     user `fn unwrap` beside the prelude's): the typechecker resolves the
+     file's own, so this is no ambiguity.  Stdlib code still sees both. *)
+  let own_file_decl key =
+    let f = !cur_file in
+    if f = "" || March_typecheck.Typecheck_builtins.file_is_stdlib f then None
+    else
+      match Hashtbl.find_opt reg_ids key with
+      | Some ids -> (
+        match List.partition (fun (file, _) -> file = f) ids with
+        | [ (_, id) ], others
+          when others <> [] && List.for_all (fun (file, _) -> March_typecheck.Typecheck_builtins.file_is_stdlib file) others ->
+          Some id
+        | _ -> None)
+      | None -> None
+  in
   let candidates path =
     (* "A.B." -> ["A.B."; "A."; ""] *)
     let segs = String.split_on_char '.' path |> List.filter (( <> ) "") in
@@ -671,7 +704,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     | A.UseExcept ns -> not (List.exists (fun (m : A.name) -> m.A.txt = n) ns)
     | A.UseSingle -> false
   in
-  let lookup ?(track = false) tbl n =
+  let lookup ?(track = false) ?(prefer = fun _ -> None) tbl n =
     if track then begin
       (* An alias whose name is also a module visible here: which one a
          dotted name means is the typechecker's call, not ours. *)
@@ -695,6 +728,10 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       List.find_map
         (fun p ->
           match Hashtbl.find_opt tbl (p ^ n) with
+          (* A bare name only: a dotted one (`List.append` under a nested
+             `mod List`) is resolved differently by the two backends, so it
+             stays ambiguous (review C-A). *)
+          | Some _ when (not (String.contains n '.')) && prefer (p ^ n) <> None -> prefer (p ^ n)
           | Some r ->
             if track then begin
               (* Two declarations under this key, or a [use] at the same
@@ -754,7 +791,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
      vocabulary ([union], [singleton], ...: [Typecheck]'s [body_env] for such
      a measure), total logical operations with no runtime body. *)
   let set_measure = ref false in
-  let set_measure_vocab = [ "union"; "inter"; "diff"; "singleton"; "member"; "subset"; "empty" ] in
+  let set_measure_vocab = [ "union"; "inter"; "diff"; "singleton"; "member"; "subset"; "empty"; "elts" ] in
   let is_set_measure (def : A.fn_def) =
     let rec is_set (t : A.ty) =
       match t with
@@ -768,18 +805,23 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     match SM.find_opt n env with
     | Some (Fn id) -> T_unit id
     | Some (Var | Param) -> T_value
+    (* Before the globals, as in the typechecker: its [body_env] binds the
+       set vocabulary OVER the module scope, so inside a set measure
+       `empty` is the empty set even where a global `empty` exists (the
+       prelude declares several).  Resolving the global first named that
+       function as a value and refused every set measure on the command line. *)
+    | None when !set_measure && List.mem n set_measure_vocab -> T_trusted
     | None -> (
       let found =
-        match lookup ~track:true globals n with
+        match lookup ~track:true ~prefer:own_file_decl globals n with
         | Some id -> Some id
-        | None when arity >= 0 -> lookup ~track:true globals (Printf.sprintf "%s$%d" n arity)
+        | None when arity >= 0 -> lookup ~track:true ~prefer:own_file_decl globals (Printf.sprintf "%s$%d" n arity)
         | None -> None
       in
       match found with
       | Some id -> T_unit id
       | None ->
         if lookup externs_tbl n <> None then T_trusted
-        else if !set_measure && List.mem n set_measure_vocab then T_trusted
         else begin
           let user_ifs = Hashtbl.find_all iface_methods n in
           let builtin = Hashtbl.find_opt (Lazy.force builtin_table) n in
@@ -872,9 +914,21 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
         List.iter w args
     in
     match e with
+    | A.EProof (A.PReveal _, _) -> ()
+    | A.EProof (A.PWithFuel (_, _, body), sp) -> w (A.EBlock (body, sp))
+    | A.EProof (A.PAssertBy (p, hs), sp) ->
+      let saved = !in_lemma and saved_assert = !in_lemma_assert in
+      Fun.protect ~finally:(fun () -> in_lemma := saved; in_lemma_assert := saved_assert)
+        (fun () -> in_lemma := true; in_lemma_assert := true; w p; in_lemma_assert := false; w (A.EBlock (hs, sp)))
     | A.EAssert (x, _) when !in_lemma ->
       in_lemma_assert := true;
       Fun.protect ~finally:(fun () -> in_lemma_assert := false) (fun () -> w x)
+    | e when !in_lemma_assert && March_ast.Bounded_pred.view e <> None ->
+      let q = Option.get (March_ast.Bounded_pred.view e) in
+      List.iter w (March_ast.Bounded_pred.domain_exprs q.domain);
+      walk ~src ~owner ~lam (bind_vars env [q.binder.txt]) q.body
+    | A.EApp (A.EVar {A.txt = ("nth" | "elts" | "keys"); _}, args, _) when !in_lemma_assert ->
+      List.iter w args
     | A.EApp (f, args, sp) -> call f args sp
     | A.EPipe (l, A.EVar n, sp) -> call (A.EVar n) [ l ] sp
     | A.EPipe (l, A.EApp (f, args, _), sp) -> call f (l :: args) sp
@@ -887,6 +941,9 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
       | T_unit dst -> site (S_unit dst); ref_edge dst
       | T_impls (ds, by_value) -> site (S_impls ds); List.iter (ref_edge ~dispatch:by_value) ds
       | T_value -> ()
+      (* `empty` in a set measure is the empty-set constant of the logic, a
+         literal, not a function named as a value. *)
+      | T_trusted when !set_measure && List.mem n.A.txt set_measure_vocab -> ()
       | T_trusted ->
         (* A builtin or extern named as a value; never a local (that is
            [T_value]), never an operator. *)
@@ -949,6 +1006,7 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
     (function
       | `Fn (id, (def : A.fn_def), scope) ->
         cur := scope;
+        cur_file := def.A.fn_name.A.span.A.file;
         set_measure := is_set_measure def;
         in_lemma := List.mem "lemma" def.A.fn_attrs;
         List.iter
@@ -961,17 +1019,22 @@ let build_graph ?type_map ~(file_mod : string) (decls : A.decl list) : graph =
             Option.iter (walk ~src:id ~owner ~lam:false env) c.A.fc_guard;
             walk ~src:id ~owner ~lam:false env c.A.fc_body)
           def.A.fn_clauses
-      | `Handler (id, (h : A.actor_handler), scope) ->
+      | `Handler (id, (h : A.actor_handler), scope, inv) ->
         cur := scope;
+        cur_file := "";
         set_measure := false;
         in_lemma := false;
         let params = List.map (fun (p : A.param) -> p.A.param_name.A.txt) h.A.ah_params in
         let owner = { o_params = List.map Option.some params; o_body = h.A.ah_body } in
         (* A handler body also sees the actor's [state] (the typechecker's
            [handler_env]): a local value, never a callee to resolve. *)
-        walk ~src:id ~owner ~lam:false (bind_params (bind_vars SM.empty [ "state" ]) params) h.A.ah_body
+        walk ~src:id ~owner ~lam:false (bind_params (bind_vars SM.empty [ "state" ]) params) h.A.ah_body;
+        Option.iter
+          (fun (e, fields) -> walk ~src:id ~owner ~lam:false (bind_vars SM.empty ("state" :: fields)) e)
+          inv
       | `Expr (id, (owner : owner), scope) ->
         cur := scope;
+        cur_file := "";
         set_measure := false;
         in_lemma := false;
         walk ~src:id ~owner ~lam:false
@@ -1321,33 +1384,10 @@ let cert_name = function
   | Unproved r -> "unproved:" ^ r
   | Diverges -> "diverges"
 
-(* The ADT a parameter position holds: its declared head constructor, else
-   the typechecker's (a merged multi-head function's [__arg0] is unannotated). *)
-let param_head ?type_map (u : unit_) (i : int) : string option =
-  let rec head (t : A.ty) =
-    match t with
-    | A.TyCon (n, _) -> Some (bare n.A.txt)
-    | A.TyRefine (t, _, _) | A.TyLinear (_, t) -> head t
-    | _ -> None
-  in
-  match List.nth_opt u.u_param_tys i with
-  | Some (Some t) -> head t
-  | _ -> (
-    match (type_map, List.nth_opt u.u_param_spans i) with
-    | Some tm, Some (Some sp) -> (
-      match Hashtbl.find_opt tm sp with
-      | Some t -> (
-        match March_typecheck.Typecheck.repr t with
-        | March_typecheck.Typecheck.TCon (n, _) -> Some (bare n)
-        | _ -> None)
-      | None -> None)
-    | _ -> None)
-
 (* The SCC certificate.  [nonpos_call u]: unit [u] calls a function value
    whose static type mentions a non-positive type (or, with no type recorded,
    any non-positive type exists at all). *)
-let certify ?type_map g ~(nonpos_call : int -> bool) ~(same_family : string -> string -> bool)
-    (scc : int list) : cert =
+let certify g ~(nonpos_call : int -> bool) (scc : int list) : cert =
   let members = scc in
   let es = List.concat_map (intra g) members in
   if List.exists (fun u -> is_diverges g.units.(u)) members then Diverges
@@ -1391,25 +1431,31 @@ let certify ?type_map g ~(nonpos_call : int -> bool) ~(same_family : string -> s
       then Structural
       else Unproved "no-structural-arg"
     | _ ->
-      (* Mutual: every member matches on a parameter of ONE TYPE FAMILY: the
-         same ADT, or ADTs defined in terms of each other (`RTree`/`RForest`).
-         §3.3 says "the same ADT"; that rejects the mutual measures over
-         mutually-recursive datatypes the measure feature has always accepted
-         (test group `mutual-mc`), and a strict component shrinks a value's
-         constructor depth whichever type of the family it has, so the
-         family is the sound reading (phase-1 progress note, ruling).
-         Candidate types come from the first member's positions; the search
-         is capped, and running out of budget is "unproved", never "proved". *)
-      let head u i = param_head ?type_map g.units.(u) i in
-      let first = List.hd members in
-      let adts =
-        List.sort_uniq compare (List.filter_map (head first) (List.init (arity first) Fun.id))
-      in
-      let positions adt u =
-        List.filter
-          (fun i -> match head u i with Some h -> same_family adt h | None -> false)
-          (List.init (arity u) Fun.id)
-      in
+      (* Mutual: every member gets one parameter position, and every edge
+         passes a strict pattern component of its source's position at its
+         destination's.  The positions may hold DIFFERENT types: a `Tree`
+         recursing through its `List(Tree)` children, `Map.node_fold` and its
+         `go` (specs/todos/2026-10-27-termination-structural-certificate-gaps.md).
+
+         Soundness: take a value's size to be its constructor count.  March
+         values are finite and acyclic (call-by-value, F11), and a strict
+         pattern component is a proper subterm, so it is strictly smaller
+         whatever type it has.  Around any cycle of the SCC each edge passes
+         a proper subterm of the previous position's value, so the sizes
+         strictly fall and no infinite call chain exists.  A function-valued
+         component cannot carry the chain on: the callee would have to match
+         on it to produce the next component, and a closure has no pattern;
+         a call through a value of a non-positive type, and a reference
+         edge, were refused above.  Phase 1 asked for one TYPE FAMILY
+         (`RTree`/`RForest`); the size argument never needed it, and the
+         family rule only refused the List-of-children cycles.  Every edge
+         still needs a bare component variable, so passing the parameter
+         itself or a value built from it is unproved (`mutual_cross_param`,
+         `mutual_cross_built` in test/test_refine_term.ml).
+
+         The assignment search is capped; running out of budget is
+         "unproved", never "proved". *)
+      let positions u = List.init (arity u) Fun.id in
       let budget = ref 4096 in
       let rec search assigned = function
         | [] ->
@@ -1422,21 +1468,10 @@ let certify ?type_map g ~(nonpos_call : int -> bool) ~(same_family : string -> s
               !budget > 0 && search ((u, i) :: assigned) rest)
             cands
       in
-      let same_adt = ref false in
-      let ok =
-        List.exists
-          (fun adt ->
-            let cands = List.map (fun u -> (u, positions adt u)) members in
-            if List.exists (fun (_, c) -> c = []) cands then false
-            else begin
-              same_adt := true;
-              search [] cands
-            end)
-          adts
-      in
-      if ok then Structural
-      else if !same_adt then Unproved "no-structural-arg"
-      else Unproved "not-same-family"
+      let cands = List.map (fun u -> (u, positions u)) members in
+      if List.exists (fun (_, c) -> c = []) cands then Unproved "no-structural-arg"
+      else if search [] cands then Structural
+      else Unproved "no-structural-arg"
   end
 
 (* ── Metrics and SMT obligations (§3.3-§3.5), phase 2 ──────────────────── *)
@@ -1472,7 +1507,10 @@ let param_kind ?type_map (u : unit_) (i : int) : pkind =
     | _ -> PUnknown)
 
 let rec free_names (e : A.expr) : string list =
-  match e with
+  match March_ast.Bounded_pred.view e with
+  | Some q -> List.concat_map free_names (March_ast.Bounded_pred.domain_exprs q.domain)
+    @ List.filter ((<>) q.binder.txt) (free_names q.body)
+  | None -> match e with
   | A.EVar n -> [ n.A.txt ]
   (* An application's head names a function, operator or measure. *)
   | A.EApp (A.EVar _, args, _) -> List.concat_map free_names args
@@ -1762,11 +1800,7 @@ let analyze ?(type_map : (A.span, March_typecheck.Typecheck.ty) Hashtbl.t option
         if Option.value known ~default:true then Hashtbl.replace nonpos_units u ())
       graph.fv_calls;
   let nonpos_call u = Hashtbl.mem nonpos_units u in
-  let reaches = reach_fn (collect_types decls) in
-  let same_family a b = a = b || (reaches a b && reaches b a) in
-  let certs =
-    Array.map (fun scc -> certify ?type_map graph ~nonpos_call ~same_family scc) graph.sccs
-  in
+  let certs = Array.map (fun scc -> certify graph ~nonpos_call scc) graph.sccs in
   let cert_of u = cert_name certs.(graph.scc_of.(u)) in
   let kind_name u = match u.u_kind with Top -> "top" | Local -> "local" | Handler -> "handler" in
   let ev = event_reach graph in
@@ -2105,8 +2139,24 @@ let culprit_text (g : graph) (u : int) (c : culprit) : string =
       callee
 
 (** The unit declared at [span] (a declaring name's span), if any. *)
+let unit_index : (graph * (A.span, unit_) Hashtbl.t) option ref = ref None
+
 let unit_at (g : graph) (span : A.span) : unit_ option =
-  Array.find_opt (fun u -> u.u_span = span) g.units
+  (* Indexed once per graph: callers ask once per pending obligation and per
+     SCC, and a linear scan of every unit there was most of a stdlib check. *)
+  let tbl =
+    match !unit_index with
+    | Some (g', t) when g' == g -> t
+    | _ ->
+      let t = Hashtbl.create (2 * Array.length g.units + 1) in
+      (* The first unit declared at a span wins, as with [Array.find_opt]. *)
+      for i = Array.length g.units - 1 downto 0 do
+        Hashtbl.replace t g.units.(i).u_span g.units.(i)
+      done;
+      unit_index := Some (g, t);
+      t
+  in
+  Hashtbl.find_opt tbl span
 
 (* ── Inference (§3.5), phase 5 ────────────────────────────────────────── *)
 

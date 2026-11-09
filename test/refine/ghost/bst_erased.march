@@ -1,0 +1,93 @@
+-- bst.march with its ghost code removed by hand, line for line (the
+-- ghost functions, lemmas, ghost parameters and arguments and the `ghost
+-- let` are blank lines here).  Both must compile to the same LLVM IR, up
+-- to the file name (test_refine_ghost.ml).
+--
+--
+--
+--
+mod Bst do
+  needs IO.Console
+
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  -- Membership by walking every node.  Logic only: never compiled.
+
+
+
+
+
+
+
+  -- Every key lies strictly between lo and hi, recursively.
+
+
+
+
+
+
+
+
+  -- A node's order gives its children's, with the node's key as the new bound.
+
+
+
+
+
+
+  -- A key outside the bounds is not in an ordered tree (induction on t).
+
+
+
+
+
+
+
+
+
+
+
+  -- Search one side only.  Each recursive call must show the subtree is
+  -- ordered between the narrowed ghost bounds, from the ghost precondition.
+  fn contains(t : Tree, x : Int) : Bool do
+    match t do
+    Leaf -> false
+    Node(l, v, r) ->
+
+      if x < v do
+
+        contains(l, x)
+      else
+        if x > v do
+
+          contains(r, x)
+        else true end
+      end
+    end
+  end
+
+  -- A caller passes ghost arguments the same way, here from its own ghost
+  -- parameters, and may name intermediate ghost values with `ghost let`.
+  fn count_in(t : Tree, xs : List(Int), acc : Int) : Int do
+    match xs do
+    Nil -> acc
+    Cons(x, rest) ->
+
+      let here = if contains(t, x) do 1 else 0 end
+      count_in(t, rest, acc + here)
+    end
+  end
+
+  -- A closure may pass ghost arguments too.  It captures `t`, and after
+  -- erasure nothing else: the ghost bounds were never runtime values.
+  fn hits(t : Tree, xs : List(Int)) : List(Bool) do
+    List.map(xs, fn x -> contains(t, x))
+  end
+
+  fn main(cap : Cap(IO.Console)) do
+    let n = count_in(Node(Node(Leaf, 1, Leaf), 5, Node(Leaf, 9, Leaf)), [1, 4, 5, 9, 12], 0)
+    println(int_to_string(n))
+    let found = hits(Node(Node(Leaf, 1, Leaf), 5, Node(Leaf, 9, Leaf)), [5, 6])
+    println(if List.length(found) == 2 do "two" else "?" end)
+  end
+end

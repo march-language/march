@@ -54,7 +54,7 @@ let run
       | _ -> None) decls
   in
   (* Lower a test-body expression to a zero-arg TIR function. *)
-  let lower_test_body test_env ~mod_prefix ~direct_fn_names display_name body =
+  let lower_test_body test_env ~mod_prefix ~direct_fn_names ~test_span display_name body =
     let fn_name = Tir_names.test_fn_name !test_counter in
     incr test_counter;
     (* Register the enclosing module's own function names as current-module
@@ -66,6 +66,16 @@ let run
        the wrong-arity stdlib function (arg dropped → uninitialized param). *)
     let body' = Lower_state.with_current_module_fns direct_fn_names
         (fun () -> Lower_match.lower_expr test_env body) in
+    (* First thing the test does: hand the runner its panic header (the
+       `test "..."` line under a caret, lib/errors/test_report.ml), which
+       march_test_run fills with the message if the body panics. *)
+    let body' =
+      let header = March_errors.Test_report.panic_header ~span:test_span in
+      let hv : Tir.var = {
+        v_name = "__test_header";
+        v_ty = Tir.TFn ([Tir.TString], Tir.TUnit);
+        v_lin = Tir.Unr } in
+      Tir.ESeq (Tir.EApp (hv, [Tir.ALit (Ast.LitString header)]), body') in
     let fn : Tir.fn_def = {
       fn_name;
       fn_params = [];
@@ -91,10 +101,11 @@ let run
   let rec collect_tests test_env prefix ~mod_prefix ~direct_fn_names decls =
     List.iter (fun d ->
       match d with
-      | Ast.DTest (tdef, _) ->
+      | Ast.DTest (tdef, test_span) ->
         let display = if prefix = "" then tdef.Ast.test_name
                       else prefix ^ " " ^ tdef.Ast.test_name in
-        lower_test_body test_env ~mod_prefix ~direct_fn_names display tdef.Ast.test_body
+        lower_test_body test_env ~mod_prefix ~direct_fn_names ~test_span
+          display tdef.Ast.test_body
       | Ast.DDescribe (label, inner, _) ->
         let new_prefix = if prefix = "" then label else prefix ^ " " ^ label in
         collect_tests test_env new_prefix ~mod_prefix ~direct_fn_names inner

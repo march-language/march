@@ -1,0 +1,1384 @@
+-- Session.Theory: the logic of March's protocols, and laws about it.
+--
+-- A protocol (`protocol P do ... end`) is a global type: who sends what to
+-- whom, where a role chooses, where it loops.  Each role runs its
+-- projection, a local type.  The compiler projects twice, in OCaml (the
+-- `Chan(Role, Proto)` typechecker and the `@[endpoints]` generator); this
+-- module is the specification both are validated against
+-- (`march --check --guarantees`, lemmas design §5.2, M6), and the laws below
+-- are proved once, here, for every protocol.
+--
+-- SessionRoles, labels and payload types are `Int` ids: the logic treats `String`
+-- contents as opaque, and the compiler maps names to ids when it emits a
+-- protocol as a `SessionGlobal`.
+--
+-- A loop is `GLoop(body, after)`.  The body's end is `GVar(0)`, the loop's
+-- own back-edge (de Bruijn: the nearest enclosing loop); `after` is what a
+-- role that takes no part in the body does next.  `stop` is `GEnd`.  A
+-- choice's branches each carry the rest of the protocol (the steps after the
+-- choice are appended to every branch).
+mod Session.Theory do
+
+  -- A global protocol over role, label and payload ids.
+  type SessionGlobal = GEnd
+              | GMsg(Int, Int, Int, SessionGlobal)
+              | GChoice(Int, SessionGBranches)
+              | GLoop(SessionGlobal, SessionGlobal)
+              | GVar(Int)
+
+  -- A choice's labelled branches.
+  type SessionGBranches = GBNil | GBCons(Int, SessionGlobal, SessionGBranches)
+
+  -- One role's view: send to or receive from a peer, choose or offer a label, loop.
+  type SessionLocal = LEnd
+             | LSend(Int, Int, SessionLocal)
+             | LRecv(Int, Int, SessionLocal)
+             | LChoose(SessionLBranches)
+             | LOffer(SessionLBranches)
+             | LRec(SessionLocal)
+             | LVar(Int)
+
+  -- A local choice's labelled branches.
+  type SessionLBranches = LBNil | LBCons(Int, SessionLocal, SessionLBranches)
+
+  derive Eq for SessionGlobal
+  derive Eq for SessionGBranches
+  derive Eq for SessionLocal
+  derive Eq for SessionLBranches
+
+  -- ── duality ──────────────────────────────────────────────────────────
+
+  doc "The other end of a conversation: every send a receive, every choice an offer."
+  fn dual(l : SessionLocal) : SessionLocal do
+    match l do
+      LEnd -> LEnd
+      LSend(p, t, k) -> LRecv(p, t, dual(k))
+      LRecv(p, t, k) -> LSend(p, t, dual(k))
+      LChoose(bs) -> LOffer(dual_bs(bs))
+      LOffer(bs) -> LChoose(dual_bs(bs))
+      LRec(k) -> LRec(dual(k))
+      LVar(i) -> LVar(i)
+    end
+  end
+
+  doc "`dual` on every branch."
+  fn dual_bs(bs : SessionLBranches) : SessionLBranches do
+    match bs do
+      LBNil -> LBNil
+      LBCons(lab, k, rest) -> LBCons(lab, dual(k), dual_bs(rest))
+    end
+  end
+
+  doc "`l` with every peer replaced by 0: a two-party conversation, where the peer is implied."
+  fn erase(l : SessionLocal) : SessionLocal do
+    match l do
+      LEnd -> LEnd
+      LSend(_, t, k) -> LSend(0, t, erase(k))
+      LRecv(_, t, k) -> LRecv(0, t, erase(k))
+      LChoose(bs) -> LChoose(erase_bs(bs))
+      LOffer(bs) -> LOffer(erase_bs(bs))
+      LRec(k) -> LRec(erase(k))
+      LVar(i) -> LVar(i)
+    end
+  end
+
+  doc "`erase` on every branch."
+  fn erase_bs(bs : SessionLBranches) : SessionLBranches do
+    match bs do
+      LBNil -> LBNil
+      LBCons(lab, k, rest) -> LBCons(lab, erase(k), erase_bs(rest))
+    end
+  end
+
+  -- ── projection ───────────────────────────────────────────────────────
+
+  doc "Structural equality of local types, written out so the logic can use it (a derived `Eq` on a recursive type is not yet reflected)."
+  fn same(a : SessionLocal, b : SessionLocal) : Bool do
+    match a do
+      LEnd -> match b do
+        LEnd -> true
+        _ -> false
+      end
+      LSend(p, t, k) -> match b do
+        LSend(q, u, j) -> p == q && t == u && same(k, j)
+        _ -> false
+      end
+      LRecv(p, t, k) -> match b do
+        LRecv(q, u, j) -> p == q && t == u && same(k, j)
+        _ -> false
+      end
+      LChoose(xs) -> match b do
+        LChoose(ys) -> same_bs(xs, ys)
+        _ -> false
+      end
+      LOffer(xs) -> match b do
+        LOffer(ys) -> same_bs(xs, ys)
+        _ -> false
+      end
+      LRec(k) -> match b do
+        LRec(j) -> same(k, j)
+        _ -> false
+      end
+      LVar(i) -> match b do
+        LVar(j) -> i == j
+        _ -> false
+      end
+    end
+  end
+
+  doc "`same` on branch lists."
+  fn same_bs(xs : SessionLBranches, ys : SessionLBranches) : Bool do
+    match xs do
+      LBNil -> match ys do
+        LBNil -> true
+        _ -> false
+      end
+      LBCons(l, k, rest) -> match ys do
+        LBCons(m, j, more) -> l == m && same(k, j) && same_bs(rest, more)
+        _ -> false
+      end
+    end
+  end
+
+  doc "Whether every branch is `l`."
+  fn all_same(bs : SessionLBranches, l : SessionLocal) : Bool do
+    match bs do
+      LBNil -> true
+      LBCons(_, k, rest) -> same(k, l) && all_same(rest, l)
+    end
+  end
+
+  doc "A role that does not choose sees the branches merged: in a multiparty protocol, one branch when every branch is the same (it never learns the label), else an offer."
+  fn merge(bs : SessionLBranches, multiparty : Bool) : SessionLocal do
+    match bs do
+      LBNil -> LOffer(LBNil)
+      LBCons(_, first, rest) ->
+        if multiparty && all_same(rest, first) do first else LOffer(bs) end
+    end
+  end
+
+  doc "A loop's projection: no loop at all when the role takes no part in the body."
+  fn loop_of(body : SessionLocal, after : SessionLocal) : SessionLocal do
+    match body do
+      LVar(_) -> after
+      LEnd -> LRec(body)
+      LSend(_, _, _) -> LRec(body)
+      LRecv(_, _, _) -> LRec(body)
+      LChoose(_) -> LRec(body)
+      LOffer(_) -> LRec(body)
+      LRec(_) -> LRec(body)
+    end
+  end
+
+  doc "Role `r`'s projection of `g`.  `multiparty` is true for more than two roles: only then may a non-chooser merge a choice's branches."
+  fn project(g : SessionGlobal, r : Int, multiparty : Bool) : SessionLocal do
+    match g do
+      GEnd -> LEnd
+      GVar(i) -> LVar(i)
+      GMsg(from, to, t, k) ->
+        if from == r do LSend(to, t, project(k, r, multiparty))
+        else if to == r do LRecv(from, t, project(k, r, multiparty))
+        else project(k, r, multiparty) end end
+      GChoice(c, bs) ->
+        if c == r do LChoose(project_bs(bs, r, multiparty))
+        else merge(project_bs(bs, r, multiparty), multiparty) end
+      GLoop(body, after) -> loop_of(project(body, r, multiparty), project(after, r, multiparty))
+    end
+  end
+
+  doc "`project` on every branch."
+  fn project_bs(bs : SessionGBranches, r : Int, multiparty : Bool) : SessionLBranches do
+    match bs do
+      GBNil -> LBNil
+      GBCons(lab, k, rest) -> LBCons(lab, project(k, r, multiparty), project_bs(rest, r, multiparty))
+    end
+  end
+
+  doc "Every branch begins with a receive from `c`."
+  fn heads_from(bs : SessionLBranches, c : Int) : Bool do
+    match bs do
+      LBNil -> true
+      LBCons(_, k, rest) ->
+        match k do
+          LRecv(p, _, _) -> p == c && heads_from(rest, c)
+          _ -> false
+        end
+    end
+  end
+
+  doc "A role that does not choose is told the choice: its branches are all the same, or each begins with the chooser's message."
+  fn told(bs : SessionLBranches, c : Int) : Bool do
+    match bs do
+      LBNil -> true
+      LBCons(_, first, rest) -> all_same(rest, first) || heads_from(bs, c)
+    end
+  end
+
+  doc "Role `r` learns every choice it must: in a multiparty protocol, a role whose branches differ receives the chooser's message first (a two-party offer is told by the label)."
+  fn informed(g : SessionGlobal, r : Int, multiparty : Bool) : Bool do
+    match g do
+      GEnd -> true
+      GVar(_) -> true
+      GMsg(_, _, _, k) -> informed(k, r, multiparty)
+      GChoice(c, bs) ->
+        (c == r || !multiparty || told(project_bs(bs, r, multiparty), c)) && informed_bs(bs, r, multiparty)
+      GLoop(body, after) -> informed(body, r, multiparty) && informed(after, r, multiparty)
+    end
+  end
+
+  doc "`informed` on every branch."
+  fn informed_bs(bs : SessionGBranches, r : Int, multiparty : Bool) : Bool do
+    match bs do
+      GBNil -> true
+      GBCons(_, k, rest) -> informed(k, r, multiparty) && informed_bs(rest, r, multiparty)
+    end
+  end
+
+  doc "Role `x`'s part of `l`: the actions with peer `x`, peers erased (two parties, so the peer is implied), and a choice whose branches then all look alike is no choice."
+  fn restrict(l : SessionLocal, x : Int) : SessionLocal do
+    match l do
+      LEnd -> LEnd
+      LSend(p, t, k) -> if p == x do LSend(0, t, restrict(k, x)) else restrict(k, x) end
+      LRecv(p, t, k) -> if p == x do LRecv(0, t, restrict(k, x)) else restrict(k, x) end
+      LChoose(bs) -> collapse(restrict_bs(bs, x), true)
+      LOffer(bs) -> collapse(restrict_bs(bs, x), false)
+      LRec(k) -> LRec(restrict(k, x))
+      LVar(i) -> LVar(i)
+    end
+  end
+
+  doc "`restrict` on every branch."
+  fn restrict_bs(bs : SessionLBranches, x : Int) : SessionLBranches do
+    match bs do
+      LBNil -> LBNil
+      LBCons(lab, k, rest) -> LBCons(lab, restrict(k, x), restrict_bs(rest, x))
+    end
+  end
+
+  doc "Restricted branches: one branch when all look alike, else a choice (`as_choice`) or an offer."
+  fn collapse(rb : SessionLBranches, as_choice : Bool) : SessionLocal do
+    match rb do
+      LBNil -> if as_choice do LChoose(LBNil) else LOffer(LBNil) end
+      LBCons(_, first, rest) ->
+        if all_same(rest, first) do first
+        else if as_choice do LChoose(rb) else LOffer(rb) end end
+    end
+  end
+
+  -- ── which protocols ──────────────────────────────────────────────────
+
+  doc "Every message and choice of `g` is between roles `a` and `b`."
+  fn binary(g : SessionGlobal, a : Int, b : Int) : Bool do
+    match g do
+      GEnd -> true
+      GVar(_) -> true
+      GMsg(from, to, _, k) ->
+        ((from == a && to == b) || (from == b && to == a)) && binary(k, a, b)
+      GChoice(c, bs) -> (c == a || c == b) && binary_bs(bs, a, b)
+      GLoop(body, after) -> binary(body, a, b) && binary(after, a, b)
+    end
+  end
+
+  doc "`binary` on every branch."
+  fn binary_bs(bs : SessionGBranches, a : Int, b : Int) : Bool do
+    match bs do
+      GBNil -> true
+      GBCons(_, k, rest) -> binary(k, a, b) && binary_bs(rest, a, b)
+    end
+  end
+
+  -- ── laws ─────────────────────────────────────────────────────────────
+
+  doc "C1. Duality is an involution."
+  @[lemma]
+  fn dual_dual(l : SessionLocal) : {Unit | dual(dual(l)) == l} do
+    match l do
+      LEnd -> ()
+      LSend(_, _, k) -> dual_dual(k)
+      LRecv(_, _, k) -> dual_dual(k)
+      LChoose(bs) -> dual_dual_bs(bs)
+      LOffer(bs) -> dual_dual_bs(bs)
+      LRec(k) -> dual_dual(k)
+      LVar(_) -> ()
+    end
+  end
+
+  doc "C1 on every branch."
+  @[lemma]
+  fn dual_dual_bs(bs : SessionLBranches) : {Unit | dual_bs(dual_bs(bs)) == bs} do
+    match bs do
+      LBNil -> ()
+      LBCons(_, k, rest) ->
+        dual_dual(k)
+        dual_dual_bs(rest)
+    end
+  end
+
+  doc "Duality commutes with leaving out a loop no one takes part in."
+  @[lemma]
+  fn dual_loop_of(body : SessionLocal, after : SessionLocal)
+    : {Unit | dual(loop_of(body, after)) == loop_of(dual(body), dual(after))} do
+    match body do
+      LVar(_) -> ()
+      LEnd -> ()
+      LSend(_, _, _) -> ()
+      LRecv(_, _, _) -> ()
+      LChoose(_) -> ()
+      LOffer(_) -> ()
+      LRec(_) -> ()
+    end
+  end
+
+  doc "`same` is structural equality."
+  @[lemma]
+  fn same_eq(a : SessionLocal, b : SessionLocal) : {Unit | same(a, b) == (a == b)} do
+    match a do
+      LEnd -> ()
+      LSend(_, _, k) -> match b do
+        LSend(_, _, j) -> same_eq(k, j)
+        _ -> ()
+      end
+      LRecv(_, _, k) -> match b do
+        LRecv(_, _, j) -> same_eq(k, j)
+        _ -> ()
+      end
+      LChoose(xs) -> match b do
+        LChoose(ys) -> same_eq_bs(xs, ys)
+        _ -> ()
+      end
+      LOffer(xs) -> match b do
+        LOffer(ys) -> same_eq_bs(xs, ys)
+        _ -> ()
+      end
+      LRec(k) -> match b do
+        LRec(j) -> same_eq(k, j)
+        _ -> ()
+      end
+      LVar(_) -> ()
+    end
+  end
+
+  doc "`same_bs` is structural equality."
+  @[lemma]
+  fn same_eq_bs(xs : SessionLBranches, ys : SessionLBranches) : {Unit | same_bs(xs, ys) == (xs == ys)} do
+    match xs do
+      LBNil -> ()
+      LBCons(_, k, rest) -> match ys do
+        LBCons(_, j, more) ->
+          same_eq(k, j)
+          same_eq_bs(rest, more)
+        _ -> ()
+      end
+    end
+  end
+
+  doc "Erasing peers commutes with leaving out a loop no one takes part in."
+  @[lemma]
+  fn erase_loop_of(body : SessionLocal, after : SessionLocal)
+    : {Unit | erase(loop_of(body, after)) == loop_of(erase(body), erase(after))} do
+    match body do
+      LVar(_) -> ()
+      LEnd -> ()
+      LSend(_, _, _) -> ()
+      LRecv(_, _, _) -> ()
+      LChoose(_) -> ()
+      LOffer(_) -> ()
+      LRec(_) -> ()
+    end
+  end
+
+  doc "In a binary protocol a choice is always offered, never merged."
+  @[lemma]
+  fn merge_binary(bs : SessionLBranches) : {Unit | merge(bs, false) == LOffer(bs)} do
+    match bs do
+      LBNil -> ()
+      LBCons(_, _, _) -> ()
+    end
+  end
+
+  doc "C2. A binary protocol's two projections are dual (peers erased: each has one)."
+  @[lemma]
+  fn project_dual(a : Int, b : {Int | _ != a}, g : SessionGlobal)
+    : {Unit | !binary(g, a, b) || erase(project(g, b, false)) == dual(erase(project(g, a, false)))} do
+    match g do
+      GEnd -> ()
+      GVar(_) -> ()
+      GMsg(_, _, _, k) -> project_dual(a, b, k)
+      GChoice(_, bs) ->
+        project_dual_bs(a, b, bs)
+        let pa = project_bs(bs, a, false)
+        let pb = project_bs(bs, b, false)
+        merge_binary(pa)
+        merge_binary(pb)
+      GLoop(body, after) ->
+        project_dual(a, b, body)
+        project_dual(a, b, after)
+        let ba = project(body, a, false)
+        let aa = project(after, a, false)
+        let bb = project(body, b, false)
+        let ab = project(after, b, false)
+        erase_loop_of(ba, aa)
+        erase_loop_of(bb, ab)
+        let eba = erase(ba)
+        let eaa = erase(aa)
+        dual_loop_of(eba, eaa)
+    end
+  end
+
+  doc "C2 on every branch."
+  @[lemma]
+  fn project_dual_bs(a : Int, b : {Int | _ != a}, bs : SessionGBranches)
+    : {Unit | !binary_bs(bs, a, b) || erase_bs(project_bs(bs, b, false)) == dual_bs(erase_bs(project_bs(bs, a, false)))} do
+    match bs do
+      GBNil -> ()
+      GBCons(_, k, rest) ->
+        project_dual(a, b, k)
+        project_dual_bs(a, b, rest)
+    end
+  end
+
+  -- ── the fragment C3-C5 cover ──────────────────────────────────────────
+
+  -- The roles of a configuration (its own list type: see Session.Theory's
+  -- progress note on a reflected function over the stdlib List).
+  type SessionRoles = RoleEnd | RoleThen(Int, SessionRoles)
+
+  --
+  -- Loop-free (`stop` is GEnd), crash-free, and every choice DIRECTED: each
+  -- branch begins with the chooser's message to one receiver, and every
+  -- other role's branches project alike (it never needs the label).  The
+  -- semantics is synchronous: a message is one step of sender and receiver
+  -- together (choreography.md "Message order").
+
+  doc "Whether `r` is in the role list."
+  fn has(rs : SessionRoles, r : Int) : Bool do
+    match rs do
+      RoleEnd -> false
+      RoleThen(x, rest) -> x == r || has(rest, r)
+    end
+  end
+
+  doc "The receiver of a choice's first branch head (-1 when there is none)."
+  fn dest(bs : SessionGBranches) : Int do
+    match bs do
+      GBCons(_, g, _) ->
+        match g do
+          GMsg(_, t, _, _) -> t
+          _ -> 0 - 1
+        end
+      GBNil -> 0 - 1
+    end
+  end
+
+  doc "Every branch begins with a message from `c` to `t`."
+  fn directed(bs : SessionGBranches, c : Int, t : Int) : Bool do
+    match bs do
+      GBNil -> true
+      GBCons(_, g, rest) ->
+        match g do
+          GMsg(f, to, _, _) -> f == c && to == t && directed(rest, c, t)
+          _ -> false
+        end
+    end
+  end
+
+  doc "A non-empty branch list whose branches all project alike."
+  fn merged(pbs : SessionLBranches) : Bool do
+    match pbs do
+      LBNil -> false
+      LBCons(_, first, rest) -> all_same(rest, first)
+    end
+  end
+
+  doc "Role `r` takes part in choice `bs` by `c` correctly: it is the chooser, the receiver of every branch head, or its branches project alike."
+  fn role_ok(c : Int, bs : SessionGBranches, r : Int, multiparty : Bool) : Bool do
+    r == c || r == dest(bs) || (multiparty && merged(project_bs(bs, r, multiparty)))
+  end
+
+  doc "`role_ok` for every role of `rs`."
+  fn bystanders_merged(rs : SessionRoles, c : Int, bs : SessionGBranches, multiparty : Bool) : Bool do
+    match rs do
+      RoleEnd -> true
+      RoleThen(r, rest) -> role_ok(c, bs, r, multiparty) && bystanders_merged(rest, c, bs, multiparty)
+    end
+  end
+
+  doc "Whether a choice has any branch."
+  fn nonempty(bs : SessionGBranches) : Bool do
+    match bs do
+      GBNil -> false
+      GBCons(_, _, _) -> true
+    end
+  end
+
+  doc "A directed choice: branches, each beginning with a message from `c` to one other role."
+  fn choice_ok(c : Int, bs : SessionGBranches) : Bool do
+    nonempty(bs) && dest(bs) != c && directed(bs, c, dest(bs))
+  end
+
+  doc "`g` is in the fragment C3-C5 cover, over the roles `rs`: loop-free, every message between two different roles of `rs`, every choice directed with its bystanders merged."
+  fn in_fragment(g : SessionGlobal, rs : SessionRoles, multiparty : Bool) : Bool do
+    match g do
+      GEnd -> true
+      GVar(_) -> false
+      GLoop(_, _) -> false
+      GMsg(f, t, _, k) -> f != t && has(rs, f) && has(rs, t) && in_fragment(k, rs, multiparty)
+      GChoice(c, bs) ->
+        choice_ok(c, bs) && has(rs, c) && has(rs, dest(bs))
+          && bystanders_merged(rs, c, bs, multiparty) && in_fragment_bs(bs, rs, multiparty)
+    end
+  end
+
+  doc "`in_fragment` on every branch."
+  fn in_fragment_bs(bs : SessionGBranches, rs : SessionRoles, multiparty : Bool) : Bool do
+    match bs do
+      GBNil -> true
+      GBCons(_, g, rest) -> in_fragment(g, rs, multiparty) && in_fragment_bs(rest, rs, multiparty)
+    end
+  end
+
+  -- ── configurations and steps ─────────────────────────────────────────
+
+  -- A sequence of steps.
+  type SessionActs = ActEnd | ActThen(SessionAct, SessionActs)
+
+  -- The labels to take at successive choices.
+  type SessionPicks = PickEnd | PickThen(Int, SessionPicks)
+
+  -- One step of the whole system: a message, or a choice whose label rides
+  -- on the chooser's first message (chooser, receiver, label, payload).
+  type SessionAct = ActMsg(Int, Int, Int) | ActPick(Int, Int, Int, Int)
+
+  -- Every role with its local type.
+  type SessionCfg = CfgEnd | CfgRole(Int, SessionLocal, SessionCfg)
+
+  -- The result of a step.
+  type SessionCfgStep = CfgStuck | CfgMoved(SessionCfg)
+
+  -- One role's part of a step.
+  type SessionLStep = StepBad | StepOk(SessionLocal)
+
+  derive Eq for SessionAct
+  derive Eq for SessionActs
+  derive Eq for SessionPicks
+  derive Eq for SessionCfg
+  derive Eq for SessionCfgStep
+  derive Eq for SessionLStep
+
+  doc "The configuration of `g`: every role of `rs` runs its projection."
+  fn config(g : SessionGlobal, rs : SessionRoles, multiparty : Bool) : SessionCfg do
+    match rs do
+      RoleEnd -> CfgEnd
+      RoleThen(r, rest) -> CfgRole(r, project(g, r, multiparty), config(g, rest, multiparty))
+    end
+  end
+
+  doc "Whether role `r` is in the configuration."
+  fn present(cfg : SessionCfg, r : Int) : Bool do
+    match cfg do
+      CfgEnd -> false
+      CfgRole(x, _, rest) -> x == r || present(rest, r)
+    end
+  end
+
+  doc "Send `p` to `t`, if that is what `l` does next."
+  fn send_step(l : SessionLocal, t : Int, p : Int) : SessionLStep do
+    match l do
+      LSend(x, y, k) -> if x == t && y == p do StepOk(k) else StepBad end
+      _ -> StepBad
+    end
+  end
+
+  doc "Receive `p` from `f`, if that is what `l` does next."
+  fn recv_step(l : SessionLocal, f : Int, p : Int) : SessionLStep do
+    match l do
+      LRecv(x, y, k) -> if x == f && y == p do StepOk(k) else StepBad end
+      _ -> StepBad
+    end
+  end
+
+  doc "The first branch labelled `lab`."
+  fn find(bs : SessionLBranches, lab : Int) : SessionLStep do
+    match bs do
+      LBNil -> StepBad
+      LBCons(l, k, rest) -> if l == lab do StepOk(k) else find(rest, lab) end
+    end
+  end
+
+  doc "Choose `lab` and send its first message."
+  @[reflect(fuel: 4)]
+  fn choose_step(l : SessionLocal, lab : Int, t : Int, p : Int) : SessionLStep do
+    match l do
+      LChoose(bs) ->
+        match find(bs, lab) do
+          StepOk(k) -> send_step(k, t, p)
+          StepBad -> StepBad
+        end
+      _ -> StepBad
+    end
+  end
+
+  doc "Receive the chooser's first message of branch `lab`: from an offer, or from a merged receive."
+  @[reflect(fuel: 4)]
+  fn offer_step(l : SessionLocal, lab : Int, c : Int, p : Int) : SessionLStep do
+    match l do
+      LOffer(bs) ->
+        match find(bs, lab) do
+          StepOk(k) -> recv_step(k, c, p)
+          StepBad -> StepBad
+        end
+      LRecv(_, _, _) -> recv_step(l, c, p)
+      _ -> StepBad
+    end
+  end
+
+  doc "Role `r`'s part in step `a`; a role not in it stays as it is."
+  @[reflect(fuel: 4)]
+  fn act(r : Int, l : SessionLocal, a : SessionAct) : SessionLStep do
+    match a do
+      ActMsg(f, t, p) ->
+        if r == f do send_step(l, t, p) else if r == t do recv_step(l, f, p) else StepOk(l) end end
+      ActPick(c, t, lab, p) ->
+        if r == c do choose_step(l, lab, t, p) else if r == t do offer_step(l, lab, c, p) else StepOk(l) end end
+    end
+  end
+
+  doc "Every role takes its part in `a`."
+  fn apply(cfg : SessionCfg, a : SessionAct) : SessionCfgStep do
+    match cfg do
+      CfgEnd -> CfgMoved(CfgEnd)
+      CfgRole(r, l, rest) ->
+        match act(r, l, a) do
+          StepBad -> CfgStuck
+          StepOk(l2) ->
+            match apply(rest, a) do
+              CfgStuck -> CfgStuck
+              CfgMoved(c2) -> CfgMoved(CfgRole(r, l2, c2))
+            end
+        end
+    end
+  end
+
+  doc "The sender of `a`."
+  fn act_from(a : SessionAct) : Int do
+    match a do
+      ActMsg(f, _, _) -> f
+      ActPick(c, _, _, _) -> c
+    end
+  end
+
+  doc "The receiver of `a`."
+  fn act_to(a : SessionAct) : Int do
+    match a do
+      ActMsg(_, t, _) -> t
+      ActPick(_, t, _, _) -> t
+    end
+  end
+
+  doc "One synchronous step: both parties are there and each can take its part."
+  fn step(cfg : SessionCfg, a : SessionAct) : SessionCfgStep do
+    if present(cfg, act_from(a)) && present(cfg, act_to(a)) do apply(cfg, a) else CfgStuck end
+  end
+
+  doc "Run the steps in order."
+  fn run(cfg : SessionCfg, acts : SessionActs) : SessionCfgStep do
+    match acts do
+      ActEnd -> CfgMoved(cfg)
+      ActThen(a, rest) ->
+        match step(cfg, a) do
+          CfgStuck -> CfgStuck
+          CfgMoved(c2) -> run(c2, rest)
+        end
+    end
+  end
+
+  -- ── the protocol's own run ───────────────────────────────────────────
+
+  doc "Whether some branch is labelled `lab`."
+  fn has_label(bs : SessionGBranches, lab : Int) : Bool do
+    match bs do
+      GBNil -> false
+      GBCons(l, _, rest) -> l == lab || has_label(rest, lab)
+    end
+  end
+
+  doc "The first branch's label."
+  fn first_label(bs : SessionGBranches) : Int do
+    match bs do
+      GBNil -> 0
+      GBCons(l, _, _) -> l
+    end
+  end
+
+  doc "The first branch labelled `lab` (GEnd when there is none)."
+  @[reflect(fuel: 4)]
+  fn gbranch(bs : SessionGBranches, lab : Int) : SessionGlobal do
+    match bs do
+      GBNil -> GEnd
+      GBCons(l, g, rest) -> if l == lab do g else gbranch(rest, lab) end
+    end
+  end
+
+  doc "The payload of branch `lab`'s first message."
+  fn gpay(bs : SessionGBranches, lab : Int) : Int do
+    match bs do
+      GBNil -> 0
+      GBCons(l, g, rest) ->
+        if l == lab do
+          match g do
+            GMsg(_, _, p, _) -> p
+            _ -> 0
+          end
+        else gpay(rest, lab) end
+    end
+  end
+
+  doc "What follows branch `lab`'s first message."
+  fn gcont(bs : SessionGBranches, lab : Int) : SessionGlobal do
+    match bs do
+      GBNil -> GEnd
+      GBCons(l, g, rest) ->
+        if l == lab do
+          match g do
+            GMsg(_, _, _, k) -> k
+            _ -> GEnd
+          end
+        else gcont(rest, lab) end
+    end
+  end
+
+  doc "The first branch's local type (LEnd when there is none)."
+  fn lhead(bs : SessionLBranches) : SessionLocal do
+    match bs do
+      LBNil -> LEnd
+      LBCons(_, k, _) -> k
+    end
+  end
+
+  doc "The label `picks` asks for, when there is such a branch; else the first."
+  fn pick(bs : SessionGBranches, picks : SessionPicks) : Int do
+    match picks do
+      PickEnd -> first_label(bs)
+      PickThen(l, _) -> if has_label(bs, l) do l else first_label(bs) end
+    end
+  end
+
+  doc "The rest of `picks` after one choice."
+  fn rest_picks(picks : SessionPicks) : SessionPicks do
+    match picks do
+      PickEnd -> PickEnd
+      PickThen(_, rest) -> rest
+    end
+  end
+
+  doc "The steps of `g` when each choice takes the label `picks` lists in turn (loop-free)."
+  fn trace(g : SessionGlobal, picks : SessionPicks) : SessionActs do
+    match g do
+      GEnd -> ActEnd
+      GVar(_) -> ActEnd
+      GLoop(_, _) -> ActEnd
+      GMsg(f, t, p, k) -> ActThen(ActMsg(f, t, p), trace(k, picks))
+      GChoice(c, bs) -> trace_bs(bs, c, dest(bs), pick(bs, picks), rest_picks(picks))
+    end
+  end
+
+  doc "The steps of branch `lab`: the chooser's first message carries the label."
+  fn trace_bs(bs : SessionGBranches, c : Int, t : Int, lab : Int, picks : SessionPicks) : SessionActs do
+    match bs do
+      GBNil -> ActEnd
+      GBCons(l, g, rest) ->
+        if l == lab do
+          match g do
+            GMsg(_, _, p, k) -> ActThen(ActPick(c, t, lab, p), trace(k, picks))
+            _ -> ActEnd
+          end
+        else trace_bs(rest, c, t, lab, picks) end
+    end
+  end
+
+  -- ── C4 and C5: the projections run the protocol ──────────────────────
+
+  doc "A configuration has exactly the roles it was built from."
+  @[lemma]
+  fn present_config(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, r : Int)
+    : {Unit | present(config(g, rs, multiparty), r) == has(rs, r)} do
+    match rs do
+      RoleEnd -> ()
+      RoleThen(_, rest) -> present_config(g, rest, multiparty, r)
+    end
+  end
+
+  doc "One role's part in a message step: it ends at its projection of what follows."
+  @[lemma]
+  fn act_msg(f : Int, t : {Int | _ != f}, p : Int, k : SessionGlobal, r : Int, multiparty : Bool)
+    : {Unit | act(r, project(GMsg(f, t, p, k), r, multiparty), ActMsg(f, t, p)) == StepOk(project(k, r, multiparty))} do
+    let rest = project(k, r, multiparty)
+    if r == f do
+      assert project(GMsg(f, t, p, k), r, multiparty) == LSend(t, p, rest)
+      assert send_step(LSend(t, p, rest), t, p) == StepOk(rest)
+    else if r == t do
+      assert project(GMsg(f, t, p, k), r, multiparty) == LRecv(f, p, rest)
+      assert recv_step(LRecv(f, p, rest), f, p) == StepOk(rest)
+    else
+      assert project(GMsg(f, t, p, k), r, multiparty) == rest
+    end end
+  end
+
+  doc "Every role takes its part in a message step."
+  @[lemma]
+  fn apply_msg(f : Int, t : {Int | _ != f}, p : Int, k : SessionGlobal, rs : SessionRoles, multiparty : Bool)
+    : {Unit | apply(config(GMsg(f, t, p, k), rs, multiparty), ActMsg(f, t, p)) == CfgMoved(config(k, rs, multiparty))} do
+    match rs do
+      RoleEnd -> ()
+      RoleThen(r, rest) ->
+        act_msg(f, t, p, k, r, multiparty)
+        apply_msg(f, t, p, k, rest, multiparty)
+    end
+  end
+
+  doc "Subject reduction for a message: its step takes the configuration of `GMsg(f, t, p, k)` to that of `k`."
+  @[lemma]
+  fn step_msg(f : Int, t : {Int | _ != f}, p : Int, k : SessionGlobal, rs : SessionRoles, multiparty : Bool)
+    : {Unit | !(has(rs, f) && has(rs, t)) || step(config(GMsg(f, t, p, k), rs, multiparty), ActMsg(f, t, p)) == CfgMoved(config(k, rs, multiparty))} do
+    present_config(GMsg(f, t, p, k), rs, multiparty, f)
+    present_config(GMsg(f, t, p, k), rs, multiparty, t)
+    apply_msg(f, t, p, k, rs, multiparty)
+    assert act_from(ActMsg(f, t, p)) == f
+    assert act_to(ActMsg(f, t, p)) == t
+  end
+
+  doc "Looking up a label in a projected choice gives the projection of that branch."
+  @[lemma]
+  fn find_project(bs : SessionGBranches, r : Int, multiparty : Bool, lab : Int)
+    : {Unit | !has_label(bs, lab) || find(project_bs(bs, r, multiparty), lab) == StepOk(project(gbranch(bs, lab), r, multiparty))} do
+    match bs do
+      GBNil -> ()
+      GBCons(_, _, rest) -> find_project(rest, r, multiparty, lab)
+    end
+  end
+
+  doc "In branches that are all `first`, a lookup finds `first` or nothing."
+  @[lemma]
+  fn find_all_same(rest : SessionLBranches, first : SessionLocal, lab : Int)
+    : {Unit | !all_same(rest, first) || find(rest, lab) == StepBad || find(rest, lab) == StepOk(first)} do
+    match rest do
+      LBNil -> ()
+      LBCons(_, k, more) ->
+        same_eq(k, first)
+        find_all_same(more, first, lab)
+    end
+  end
+
+  doc "In merged branches, a lookup finds the first branch or nothing."
+  @[lemma]
+  fn find_merged(pbs : SessionLBranches, lab : Int)
+    : {Unit | !merged(pbs) || find(pbs, lab) == StepBad || find(pbs, lab) == StepOk(lhead(pbs))} do
+    match pbs do
+      LBNil -> ()
+      LBCons(_, first, rest) -> find_all_same(rest, first, lab)
+    end
+  end
+
+  doc "How a non-chooser sees a choice: merged into its first branch, or an offer."
+  @[lemma]
+  fn merge_cases(pbs : SessionLBranches, multiparty : Bool)
+    : {Unit | !merged(pbs) && !multiparty && merge(pbs, multiparty) == LOffer(pbs)
+              || (multiparty && merged(pbs) && merge(pbs, multiparty) == lhead(pbs))
+              || (!(multiparty && merged(pbs)) && merge(pbs, multiparty) == LOffer(pbs))} do
+    match pbs do
+      LBNil -> ()
+      LBCons(_, _, _) -> ()
+    end
+  end
+
+  doc "In a directed choice, branch `lab` is the chooser's message to the receiver."
+  @[lemma]
+  fn directed_branch(bs : SessionGBranches, c : Int, t : Int, lab : Int)
+    : {Unit | !(directed(bs, c, t) && has_label(bs, lab)) || gbranch(bs, lab) == GMsg(c, t, gpay(bs, lab), gcont(bs, lab))} do
+    match bs do
+      GBNil -> ()
+      GBCons(_, _, rest) -> directed_branch(rest, c, t, lab)
+    end
+  end
+
+  doc "One role's part in a choice step: it ends at its projection of what follows branch `lab`'s first message."
+  @[lemma]
+  fn act_pick(c : Int, bs : SessionGBranches, multiparty : Bool, lab : Int, r : Int)
+    : {Unit | !(choice_ok(c, bs) && role_ok(c, bs, r, multiparty) && has_label(bs, lab))
+              || act(r, project(GChoice(c, bs), r, multiparty), ActPick(c, dest(bs), lab, gpay(bs, lab)))
+                 == StepOk(project(gcont(bs, lab), r, multiparty))} do
+    if choice_ok(c, bs) && role_ok(c, bs, r, multiparty) && has_label(bs, lab) do
+      let t = dest(bs)
+      let p = gpay(bs, lab)
+      let k = gcont(bs, lab)
+      let pbs = project_bs(bs, r, multiparty)
+      let after = project(k, r, multiparty)
+      assert directed(bs, c, t)
+      find_project(bs, r, multiparty, lab)
+      directed_branch(bs, c, t, lab)
+      let g = gbranch(bs, lab)
+      assert g == GMsg(c, t, p, k)
+      assert find(pbs, lab) == StepOk(project(g, r, multiparty))
+      assert find(pbs, lab) == StepOk(project(GMsg(c, t, p, k), r, multiparty))
+      if r == c do
+        assert project(GChoice(c, bs), r, multiparty) == LChoose(pbs)
+        assert project(GMsg(c, t, p, k), r, multiparty) == LSend(t, p, after)
+        assert find(pbs, lab) == StepOk(LSend(t, p, after))
+        assert send_step(LSend(t, p, after), t, p) == StepOk(after)
+        assert choose_step(LChoose(pbs), lab, t, p) == StepOk(after)
+        assert act(r, LChoose(pbs), ActPick(c, t, lab, p)) == StepOk(after)
+      else
+        assert project(GChoice(c, bs), r, multiparty) == merge(pbs, multiparty)
+        merge_cases(pbs, multiparty)
+        find_merged(pbs, lab)
+        if r == t do
+          assert project(GMsg(c, t, p, k), r, multiparty) == LRecv(c, p, after)
+          assert find(pbs, lab) == StepOk(LRecv(c, p, after))
+          assert recv_step(LRecv(c, p, after), c, p) == StepOk(after)
+          if multiparty && merged(pbs) do
+            assert lhead(pbs) == LRecv(c, p, after)
+            assert offer_step(LRecv(c, p, after), lab, c, p) == StepOk(after)
+            assert act(r, LRecv(c, p, after), ActPick(c, t, lab, p)) == StepOk(after)
+            assert merge(pbs, multiparty) == LRecv(c, p, after)
+          else
+            assert offer_step(LOffer(pbs), lab, c, p) == StepOk(after)
+            assert act(r, LOffer(pbs), ActPick(c, t, lab, p)) == StepOk(after)
+            assert merge(pbs, multiparty) == LOffer(pbs)
+          end
+        else
+          assert project(GMsg(c, t, p, k), r, multiparty) == after
+          assert merge(pbs, multiparty) == lhead(pbs)
+          assert lhead(pbs) == after
+          assert act(r, after, ActPick(c, t, lab, p)) == StepOk(after)
+        end
+      end
+    else
+      ()
+    end
+  end
+
+  doc "Every role takes its part in a choice step."
+  @[lemma]
+  fn apply_pick(c : Int, bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, lab : Int)
+    : {Unit | !(choice_ok(c, bs) && bystanders_merged(rs, c, bs, multiparty) && has_label(bs, lab))
+              || apply(config(GChoice(c, bs), rs, multiparty), ActPick(c, dest(bs), lab, gpay(bs, lab)))
+                 == CfgMoved(config(gcont(bs, lab), rs, multiparty))} do
+    match rs do
+      RoleEnd -> ()
+      RoleThen(r, rest) ->
+        act_pick(c, bs, multiparty, lab, r)
+        apply_pick(c, bs, rest, multiparty, lab)
+    end
+  end
+
+  doc "Subject reduction for a choice: its step takes the configuration of the choice to that of what follows branch `lab`'s first message."
+  @[lemma]
+  fn step_pick(c : Int, bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, lab : Int)
+    : {Unit | !(choice_ok(c, bs) && bystanders_merged(rs, c, bs, multiparty) && has_label(bs, lab) && has(rs, c) && has(rs, dest(bs)))
+              || step(config(GChoice(c, bs), rs, multiparty), ActPick(c, dest(bs), lab, gpay(bs, lab)))
+                 == CfgMoved(config(gcont(bs, lab), rs, multiparty))} do
+    let t = dest(bs)
+    present_config(GChoice(c, bs), rs, multiparty, c)
+    present_config(GChoice(c, bs), rs, multiparty, t)
+    apply_pick(c, bs, rs, multiparty, lab)
+  end
+
+  doc "A choice's trace: the chooser's first message, carrying the label, then the branch."
+  @[lemma]
+  fn trace_bs_found(bs : SessionGBranches, c : Int, t : Int, lab : Int, picks : SessionPicks)
+    : {Unit | !(directed(bs, c, t) && has_label(bs, lab))
+              || trace_bs(bs, c, t, lab, picks) == ActThen(ActPick(c, t, lab, gpay(bs, lab)), trace(gcont(bs, lab), picks))} do
+    match bs do
+      GBNil -> ()
+      GBCons(l, g, rest) ->
+        if l == lab do
+          assert gbranch(bs, lab) == g
+          match g do
+            GMsg(_, _, _, _) -> ()
+            _ -> ()
+          end
+        else
+          trace_bs_found(rest, c, t, lab, picks)
+          assert gbranch(bs, lab) == gbranch(rest, lab)
+          assert gpay(bs, lab) == gpay(rest, lab)
+          assert gcont(bs, lab) == gcont(rest, lab)
+        end
+    end
+  end
+
+  doc "The label a choice takes is one of its branches."
+  @[lemma]
+  fn pick_has(bs : SessionGBranches, picks : SessionPicks) : {Unit | !nonempty(bs) || has_label(bs, pick(bs, picks))} do
+    match bs do
+      GBNil -> ()
+      GBCons(_, _, _) -> ()
+    end
+  end
+
+  doc "Every role of the configuration is done."
+  fn all_done(cfg : SessionCfg) : Bool do
+    match cfg do
+      CfgEnd -> true
+      CfgRole(_, l, rest) ->
+        match l do
+          LEnd -> all_done(rest)
+          _ -> false
+        end
+    end
+  end
+
+  doc "The run took every step and every role is done."
+  fn finished(r : SessionCfgStep) : Bool do
+    match r do
+      CfgStuck -> false
+      CfgMoved(cfg) -> all_done(cfg)
+    end
+  end
+
+  doc "C4's statement for one protocol: run on its own trace, the configuration of its projections takes every step and ends with every role done."
+  fn composes(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, picks : SessionPicks) : Bool do
+    finished(run(config(g, rs, multiparty), trace(g, picks)))
+  end
+
+  doc "The configuration of a finished protocol has every role done."
+  @[lemma]
+  fn end_done(rs : SessionRoles, multiparty : Bool) : {Unit | all_done(config(GEnd, rs, multiparty))} do
+    match rs do
+      RoleEnd -> ()
+      RoleThen(_, rest) -> end_done(rest, multiparty)
+    end
+  end
+
+  doc "C4's message step: if what follows runs to the end, so does the message and what follows."
+  @[lemma]
+  fn compose_msg(f : Int, t : Int, p : Int, k : SessionGlobal, rs : SessionRoles, multiparty : Bool, picks : SessionPicks)
+    : {Unit | !in_fragment(GMsg(f, t, p, k), rs, multiparty)
+              || (in_fragment(k, rs, multiparty) && (!finished(run(config(k, rs, multiparty), trace(k, picks))) || finished(run(config(GMsg(f, t, p, k), rs, multiparty), trace(GMsg(f, t, p, k), picks)))))} do
+    if in_fragment(GMsg(f, t, p, k), rs, multiparty) do
+      assert f != t && has(rs, f) && has(rs, t) && in_fragment(k, rs, multiparty)
+      step_msg(f, t, p, k, rs, multiparty)
+      assert trace(GMsg(f, t, p, k), picks) == ActThen(ActMsg(f, t, p), trace(k, picks))
+      assert step(config(GMsg(f, t, p, k), rs, multiparty), ActMsg(f, t, p)) == CfgMoved(config(k, rs, multiparty))
+      assert run(config(GMsg(f, t, p, k), rs, multiparty), trace(GMsg(f, t, p, k), picks))
+             == run(config(k, rs, multiparty), trace(k, picks))
+      assert finished(run(config(GMsg(f, t, p, k), rs, multiparty), trace(GMsg(f, t, p, k), picks))) == finished(run(config(k, rs, multiparty), trace(k, picks)))
+    else
+      ()
+    end
+  end
+
+  doc "C4's choice step: if what follows the chosen branch's first message runs to the end, so does the choice."
+  @[lemma]
+  fn compose_pick(c : Int, bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, picks : SessionPicks)
+    : {Unit | !in_fragment(GChoice(c, bs), rs, multiparty)
+              || (in_fragment_bs(bs, rs, multiparty)
+                  && (!finished(run(config(gcont(bs, pick(bs, picks)), rs, multiparty), trace(gcont(bs, pick(bs, picks)), rest_picks(picks))))
+                      || finished(run(config(GChoice(c, bs), rs, multiparty), trace(GChoice(c, bs), picks)))))} do
+    let lab = pick(bs, picks)
+    let more = rest_picks(picks)
+    let t = dest(bs)
+    pick_has(bs, picks)
+    trace_bs_found(bs, c, t, lab, more)
+    step_pick(c, bs, rs, multiparty, lab)
+    if in_fragment(GChoice(c, bs), rs, multiparty) do
+      assert choice_ok(c, bs) && has(rs, c) && has(rs, t) && bystanders_merged(rs, c, bs, multiparty)
+      assert in_fragment_bs(bs, rs, multiparty)
+      assert nonempty(bs) && directed(bs, c, t)
+      assert has_label(bs, lab)
+      assert trace(GChoice(c, bs), picks) == trace_bs(bs, c, t, lab, more)
+      assert trace(GChoice(c, bs), picks) == ActThen(ActPick(c, t, lab, gpay(bs, lab)), trace(gcont(bs, lab), more))
+      assert step(config(GChoice(c, bs), rs, multiparty), ActPick(c, t, lab, gpay(bs, lab))) == CfgMoved(config(gcont(bs, lab), rs, multiparty))
+      assert run(config(GChoice(c, bs), rs, multiparty), trace(GChoice(c, bs), picks))
+             == run(config(gcont(bs, lab), rs, multiparty), trace(gcont(bs, lab), more))
+      assert finished(run(config(GChoice(c, bs), rs, multiparty), trace(GChoice(c, bs), picks))) == finished(run(config(gcont(bs, lab), rs, multiparty), trace(gcont(bs, lab), more)))
+    else
+      ()
+    end
+  end
+
+  doc "C4. The projections compose back to the protocol: run on the protocol's own trace, the configuration of every role's projection takes every step and ends with every role done."
+  @[lemma]
+  fn projections_compose(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, picks : SessionPicks)
+    : {Unit | !in_fragment(g, rs, multiparty) || finished(run(config(g, rs, multiparty), trace(g, picks)))} do
+    match g do
+      GEnd ->
+        end_done(rs, multiparty)
+        assert trace(GEnd, picks) == ActEnd
+      GVar(_) -> ()
+      GLoop(_, _) -> ()
+      GMsg(f, t, p, k) ->
+        projections_compose(k, rs, multiparty, picks)
+        compose_msg(f, t, p, k, rs, multiparty, picks)
+      GChoice(c, bs) ->
+        let lab = pick(bs, picks)
+        let more = rest_picks(picks)
+        projections_compose_bs(bs, rs, multiparty, lab, more)
+        compose_pick(c, bs, rs, multiparty, picks)
+    end
+  end
+
+  doc "C4 for what follows branch `lab`'s first message."
+  @[lemma]
+  fn projections_compose_bs(bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, lab : Int, picks : SessionPicks)
+    : {Unit | !in_fragment_bs(bs, rs, multiparty) || finished(run(config(gcont(bs, lab), rs, multiparty), trace(gcont(bs, lab), picks)))} do
+    match bs do
+      GBNil ->
+        end_done(rs, multiparty)
+        assert gcont(bs, lab) == GEnd
+        assert trace(GEnd, picks) == ActEnd
+      GBCons(l, g, rest) ->
+        match g do
+          GMsg(_, _, _, k) ->
+            assert !in_fragment_bs(bs, rs, multiparty) || (in_fragment(g, rs, multiparty) && in_fragment_bs(rest, rs, multiparty))
+            assert !in_fragment(g, rs, multiparty) || in_fragment(k, rs, multiparty)
+            if l == lab do
+              assert gcont(bs, lab) == k
+              projections_compose(k, rs, multiparty, picks)
+            else
+              assert gcont(bs, lab) == gcont(rest, lab)
+              projections_compose_bs(rest, rs, multiparty, lab, picks)
+            end
+          _ ->
+            assert !in_fragment_bs(bs, rs, multiparty) || in_fragment_bs(rest, rs, multiparty)
+            if l == lab do
+              end_done(rs, multiparty)
+              assert gcont(bs, lab) == GEnd
+              assert trace(GEnd, picks) == ActEnd
+            else
+              assert gcont(bs, lab) == gcont(rest, lab)
+              projections_compose_bs(rest, rs, multiparty, lab, picks)
+            end
+        end
+    end
+  end
+
+  doc "The first step of the protocol's trace (a no-op message when there is none)."
+  fn first_act(g : SessionGlobal, picks : SessionPicks) : SessionAct do
+    match trace(g, picks) do
+      ActEnd -> ActMsg(0, 0, 0)
+      ActThen(a, _) -> a
+    end
+  end
+
+  doc "C5. Deadlock freedom (synchronous, the fragment): while the protocol has a next step, the configuration of the projections can take it."
+  @[lemma]
+  fn progress(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, picks : SessionPicks)
+    : {Unit | !in_fragment(g, rs, multiparty) || trace(g, picks) == ActEnd
+              || step(config(g, rs, multiparty), first_act(g, picks)) != CfgStuck} do
+    match g do
+      GEnd -> ()
+      GVar(_) -> ()
+      GLoop(_, _) -> ()
+      GMsg(f, t, p, k) -> if f != t do step_msg(f, t, p, k, rs, multiparty) else () end
+      GChoice(c, bs) ->
+        let lab = pick(bs, picks)
+        let t = dest(bs)
+        let more = rest_picks(picks)
+        pick_has(bs, picks)
+        trace_bs_found(bs, c, t, lab, more)
+        step_pick(c, bs, rs, multiparty, lab)
+    end
+  end
+
+  -- ── C3: pairwise duality ─────────────────────────────────────────────
+
+  doc "Duality keeps branches alike."
+  @[lemma]
+  fn all_same_dual(rest : SessionLBranches, first : SessionLocal)
+    : {Unit | all_same(dual_bs(rest), dual(first)) == all_same(rest, first)} do
+    match rest do
+      LBNil -> ()
+      LBCons(_, k, more) ->
+        same_eq(dual(k), dual(first))
+        same_eq(k, first)
+        dual_dual(k)
+        dual_dual(first)
+        all_same_dual(more, first)
+    end
+  end
+
+  doc "Duality keeps a choice merged."
+  @[lemma]
+  fn merged_dual(rb : SessionLBranches) : {Unit | merged(dual_bs(rb)) == merged(rb)} do
+    match rb do
+      LBNil -> ()
+      LBCons(_, first, rest) -> all_same_dual(rest, first)
+    end
+  end
+
+  doc "The first branch of the dual is the dual of the first branch."
+  @[lemma]
+  fn lhead_dual(rb : SessionLBranches) : {Unit | lhead(dual_bs(rb)) == dual(lhead(rb))} do
+    match rb do
+      LBNil -> ()
+      LBCons(_, _, _) -> ()
+    end
+  end
+
+  doc "A choice and an offer over dual branches are dual."
+  @[lemma]
+  fn collapse_dual(rb : SessionLBranches)
+    : {Unit | collapse(dual_bs(rb), true) == dual(collapse(rb, false))
+              && collapse(dual_bs(rb), false) == dual(collapse(rb, true))} do
+    match rb do
+      LBNil -> ()
+      LBCons(_, first, rest) -> all_same_dual(rest, first)
+    end
+  end
+
+  doc "Merged branches collapse to their first."
+  @[lemma]
+  fn collapse_merged(rb : SessionLBranches, as_choice : Bool)
+    : {Unit | !merged(rb) || collapse(rb, as_choice) == lhead(rb)} do
+    match rb do
+      LBNil -> ()
+      LBCons(_, _, _) -> ()
+    end
+  end
+
+  doc "Restricting keeps branches alike."
+  @[lemma]
+  fn restrict_all_same(rest : SessionLBranches, first : SessionLocal, x : Int)
+    : {Unit | !all_same(rest, first) || all_same(restrict_bs(rest, x), restrict(first, x))} do
+    match rest do
+      LBNil -> ()
+      LBCons(_, k, more) ->
+        same_eq(k, first)
+        same_eq(restrict(k, x), restrict(first, x))
+        restrict_all_same(more, first, x)
+    end
+  end
+
+  doc "Restricting keeps a choice merged, and commutes with taking its first branch."
+  @[lemma]
+  fn merged_restrict(pbs : SessionLBranches, x : Int)
+    : {Unit | !merged(pbs) || (merged(restrict_bs(pbs, x)) && lhead(restrict_bs(pbs, x)) == restrict(lhead(pbs), x))} do
+    match pbs do
+      LBNil -> ()
+      LBCons(_, first, rest) -> restrict_all_same(rest, first, x)
+    end
+  end
+
+  doc "A role's part of a choice, restricted to a peer: its branches restricted and collapsed, a choice for the chooser and an offer for anyone else."
+  @[lemma]
+  fn restrict_choice(c : Int, bs : SessionGBranches, r : Int, x : Int, multiparty : Bool)
+    : {Unit | restrict(project(GChoice(c, bs), r, multiparty), x)
+              == collapse(restrict_bs(project_bs(bs, r, multiparty), x), r == c)} do
+    let pbs = project_bs(bs, r, multiparty)
+    let rb = restrict_bs(pbs, x)
+    if r == c do
+      assert project(GChoice(c, bs), r, multiparty) == LChoose(pbs)
+      assert restrict(LChoose(pbs), x) == collapse(rb, true)
+    else
+      assert project(GChoice(c, bs), r, multiparty) == merge(pbs, multiparty)
+      merge_cases(pbs, multiparty)
+      merged_restrict(pbs, x)
+      collapse_merged(rb, false)
+      assert restrict(LOffer(pbs), x) == collapse(rb, false)
+    end
+  end
+
+  doc "A role of `rs` takes part in a choice of the fragment correctly."
+  @[lemma]
+  fn role_ok_has(rs : SessionRoles, c : Int, bs : SessionGBranches, multiparty : Bool, r : Int)
+    : {Unit | !(bystanders_merged(rs, c, bs, multiparty) && has(rs, r)) || role_ok(c, bs, r, multiparty)} do
+    match rs do
+      RoleEnd -> ()
+      RoleThen(_, rest) -> role_ok_has(rest, c, bs, multiparty, r)
+    end
+  end
+
+  doc "C3 at a choice: with each branch's restrictions dual, the choice's are."
+  @[lemma]
+  fn pairwise_choice(c : Int, bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, p : Int, q : {Int | _ != p})
+    : {Unit | !(in_fragment(GChoice(c, bs), rs, multiparty) && has(rs, p) && has(rs, q))
+              || restrict_bs(project_bs(bs, p, multiparty), q) != dual_bs(restrict_bs(project_bs(bs, q, multiparty), p))
+              || restrict(project(GChoice(c, bs), p, multiparty), q) == dual(restrict(project(GChoice(c, bs), q, multiparty), p))} do
+    let pbp = project_bs(bs, p, multiparty)
+    let pbq = project_bs(bs, q, multiparty)
+    let rbp = restrict_bs(pbp, q)
+    let rbq = restrict_bs(pbq, p)
+    restrict_choice(c, bs, p, q, multiparty)
+    restrict_choice(c, bs, q, p, multiparty)
+    collapse_dual(rbq)
+    role_ok_has(rs, c, bs, multiparty, p)
+    role_ok_has(rs, c, bs, multiparty, q)
+    merged_restrict(pbp, q)
+    merged_restrict(pbq, p)
+    merged_dual(rbq)
+    lhead_dual(rbq)
+    collapse_merged(rbq, false)
+    collapse_merged(dual_bs(rbq), false)
+  end
+
+  doc "C3. Pairwise duality (the fragment): for two roles of a protocol, what one does with the other is the dual of what the other does with it."
+  @[lemma]
+  fn pairwise(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, p : Int, q : {Int | _ != p})
+    : {Unit | !(in_fragment(g, rs, multiparty) && has(rs, p) && has(rs, q))
+              || restrict(project(g, p, multiparty), q) == dual(restrict(project(g, q, multiparty), p))} do
+    match g do
+      GEnd -> ()
+      GVar(_) -> ()
+      GLoop(_, _) -> ()
+      GMsg(f, t, pay, k) ->
+        pairwise(k, rs, multiparty, p, q)
+        assert !in_fragment(GMsg(f, t, pay, k), rs, multiparty) || in_fragment(k, rs, multiparty)
+        let pk = project(k, p, multiparty)
+        let qk = project(k, q, multiparty)
+        let rp = restrict(pk, q)
+        let rq = restrict(qk, p)
+        if p == f do
+          assert project(GMsg(f, t, pay, k), p, multiparty) == LSend(t, pay, pk)
+          if q == t do
+            assert project(GMsg(f, t, pay, k), q, multiparty) == LRecv(f, pay, qk)
+            assert restrict(LSend(t, pay, pk), q) == LSend(0, pay, rp)
+            assert restrict(LRecv(f, pay, qk), p) == LRecv(0, pay, rq)
+            assert dual(LRecv(0, pay, rq)) == LSend(0, pay, dual(rq))
+          else
+            assert project(GMsg(f, t, pay, k), q, multiparty) == qk
+            assert restrict(LSend(t, pay, pk), q) == rp
+          end
+        else if p == t do
+          assert project(GMsg(f, t, pay, k), p, multiparty) == LRecv(f, pay, pk)
+          if q == f do
+            assert project(GMsg(f, t, pay, k), q, multiparty) == LSend(t, pay, qk)
+            assert restrict(LRecv(f, pay, pk), q) == LRecv(0, pay, rp)
+            assert restrict(LSend(t, pay, qk), p) == LSend(0, pay, rq)
+            assert dual(LSend(0, pay, rq)) == LRecv(0, pay, dual(rq))
+          else
+            assert project(GMsg(f, t, pay, k), q, multiparty) == qk
+            assert restrict(LRecv(f, pay, pk), q) == rp
+          end
+        else
+          assert project(GMsg(f, t, pay, k), p, multiparty) == pk
+          if q == f do
+            assert project(GMsg(f, t, pay, k), q, multiparty) == LSend(t, pay, qk)
+            assert restrict(LSend(t, pay, qk), p) == rq
+          else if q == t do
+            assert project(GMsg(f, t, pay, k), q, multiparty) == LRecv(f, pay, qk)
+            assert restrict(LRecv(f, pay, qk), p) == rq
+          else
+            assert project(GMsg(f, t, pay, k), q, multiparty) == qk
+          end end
+        end end
+      GChoice(c, bs) ->
+        assert !in_fragment(GChoice(c, bs), rs, multiparty) || in_fragment_bs(bs, rs, multiparty)
+        pairwise_bs(bs, rs, multiparty, p, q)
+        pairwise_choice(c, bs, rs, multiparty, p, q)
+    end
+  end
+
+  doc "C3 on every branch."
+  @[lemma]
+  fn pairwise_bs(bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, p : Int, q : {Int | _ != p})
+    : {Unit | !(in_fragment_bs(bs, rs, multiparty) && has(rs, p) && has(rs, q))
+              || restrict_bs(project_bs(bs, p, multiparty), q) == dual_bs(restrict_bs(project_bs(bs, q, multiparty), p))} do
+    match bs do
+      GBNil -> ()
+      GBCons(_, g, rest) ->
+        assert !in_fragment_bs(bs, rs, multiparty) || (in_fragment(g, rs, multiparty) && in_fragment_bs(rest, rs, multiparty))
+        pairwise(g, rs, multiparty, p, q)
+        pairwise_bs(rest, rs, multiparty, p, q)
+    end
+  end
+end

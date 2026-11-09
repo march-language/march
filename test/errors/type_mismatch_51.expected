@@ -1,0 +1,49 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_51.march
+
+expected `List(a)` but got `Int -> Int`. [type_mismatch]
+
+9 |     let ys = List.map(fn x -> x * 2, xs)
+                          ^^^^^^^^^^^^^
+
+    This is argument #1 of a function call.
+    This value is a function. Did you forget to apply it to its arguments?
+    The two arguments are the other way round: `List.map(xs, fn x -> x * 2)` fits.
+
+    the expected type comes from here:
+
+9 |     let ys = List.map(fn x -> x * 2, xs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+9 -     let ys = List.map(fn x -> x * 2, xs)
+9 +     let ys = List.map(xs, fn x -> x * 2)
+
+    run `march --explain type_mismatch`
+
+
+-- TYPE MISMATCH ---------- errors/type_mismatch_51.march
+
+expected `a -> b` but got `List(Int)`. [type_mismatch]
+
+9 |     let ys = List.map(fn x -> x * 2, xs)
+                                         ^^
+
+    This is argument #2 of a function call.
+    A function was expected here.
+    Did you mean to pass this as a callback?
+
+    the expected type comes from here:
+
+9 |     let ys = List.map(fn x -> x * 2, xs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `xs` was bound here as `List(Int)`:
+
+8 |     let xs = [1, 2, 3]
+            ^^
+
+
+
+after fix: exit 0

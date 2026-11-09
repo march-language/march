@@ -1,0 +1,43 @@
+-- Int `/` and `%` benchmark: the zero-divisor check each one carries.
+--
+--   1. digit sums: a literal divisor (10), which LLVM turns into a multiply
+--      once it can see the division;
+--   2. gcd: a variable divisor already tested against 0 by the loop itself;
+--   3. bucketing: a loop-invariant divisor.
+--
+-- No divisor is ever 0, so the result is the same however the check is
+-- emitted; only the time moves.  2026-11-06: the check moved from an opaque
+-- runtime call to an inline test (specs/progress/2026-11-06-inline-int-divmod-check.md).
+-- Usage: march --compile --opt 2 bench/int_divmod.march -o /tmp/int_divmod && /tmp/int_divmod
+
+mod IntDivmod do
+  needs IO.Console
+
+pfn digits(n : Int, acc : Int) : Int do
+  if n == 0 do acc else digits(n / 10, acc + n % 10) end
+end
+
+pfn sum_digits(i : Int, stop : Int, acc : Int) : Int do
+  if i == stop do acc else sum_digits(i + 1, stop, acc + digits(i, 0)) end
+end
+
+pfn gcd(a : Int, b : Int) : Int do
+  if b == 0 do a else gcd(b, a % b) end
+end
+
+pfn sum_gcd(i : Int, stop : Int, acc : Int) : Int do
+  if i == stop do acc else sum_gcd(i + 1, stop, acc + gcd(i * 7919, i + 104729)) end
+end
+
+pfn bucket(i : Int, stop : Int, k : Int, acc : Int) : Int do
+  if i == stop do acc else bucket(i + 1, stop, k, acc + i / k + i % k) end
+end
+
+fn main(_cap_console : Cap(IO.Console)) : () do
+  let a = sum_digits(0, 20000000, 0)
+  let b = sum_gcd(1, 3000000, 0)
+  let c = bucket(0, 100000000, 37, 0)
+  println(int_to_string(a) ++ " " ++ int_to_string(b) ++ " " ++ int_to_string(c))
+end
+
+end

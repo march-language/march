@@ -91,7 +91,7 @@ owner_of_test_module() {
     march_test_stdlib_suite) echo stdlib ;;
     march_test_snapshots|run_snapshots) echo @test/runtest-run_snapshots ;;
     march_test_helpers) echo FULL ;;
-    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|test_stdlib_march|test_jit|test_refinecheck)
+    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|test_stdlib_march|test_jit|test_refinecheck)
       echo "${stanza#run_}" ;;
     "") ;;
     *) echo "@test/runtest-$stanza" ;;
@@ -101,6 +101,9 @@ owner_of_test_module() {
 classify() {
   local f="$1" o
   case "$f" in
+    # ── the distributed explainer: generator, data, scripts and their tests ──
+    examples/lab_app/*|scripts/gen-explainer-data.py|scripts/gen-authority-data.py|scripts/gen-ownership-data.py|scripts/render-explainer-fallbacks.js|scripts/check-explainer-budget.py|docs/_data/explainer.json|docs/_data/authority.json|docs/_data/ownership.json|docs/deploy-authority.md|docs/one-owner.md|docs/assets/explainer/*|docs/_includes/explainer.html|docs/protocol-to-cluster.md|test/explainer/*)
+      add CHECKS scripts/check-docs.sh scripts/check-explainer.sh; reason "$f" "explainer data + doc-lint" ;;
     # ── docs and design records: lint only ───────────────────────────────
     *.md|docs/*|specs/progress/*|specs/todos/*|specs/plans/*|specs/impl/*|specs/features/*)
       add CHECKS scripts/check-docs.sh; reason "$f" "doc-lint" ;;
@@ -115,32 +118,32 @@ classify() {
       add CHECKS scripts/check-tree-sitter.sh; add ORACLES types ir
       reason "$f" "front-end suites, tree-sitter, types+ir oracles" ;;
     lib/ast/*|lib/desugar/*)
-      add SUITES compiler eval codegen stdlib stdlib_march errors $ALL_LSP; add ORACLES types ir
+      add SUITES compiler eval codegen stdlib stdlib_march errors test_reports $ALL_LSP; add ORACLES types ir
       reason "$f" "front-end suites, types+ir oracles" ;;
     lib/typecheck/*|lib/modules/*|lib/resolver/*)
       add SUITES compiler eval codegen stdlib stdlib_march errors refinecheck $ALL_LSP
       add ORACLES types refine
       reason "$f" "front-end suites + refinecheck, types+refine oracles" ;;
     lib/errors/*)
-      add SUITES compiler errors $ALL_LSP; add ORACLES types
-      reason "$f" "compiler, errors, lsp; types oracle" ;;
+      add SUITES compiler errors test_reports $ALL_LSP; add ORACLES types
+      reason "$f" "compiler, errors, test_reports, lsp; types oracle" ;;
 
     # ── back end ──────────────────────────────────────────────────────────
     lib/tir/*|lib/codegen/*)
-      add SUITES codegen stdlib compiler test_jit; add DUNE @test/runtest-run_snapshots
+      add SUITES codegen stdlib compiler test_jit test_reports; add DUNE @test/runtest-run_snapshots
       add ORACLES ir; add CHECKS "scripts/determinism-oracle.sh"
-      reason "$f" "codegen, stdlib, compiler, jit, snapshots; ir + determinism oracles" ;;
+      reason "$f" "codegen, stdlib, compiler, jit, test_reports, snapshots; ir + determinism oracles" ;;
     runtime/*)
-      add SUITES codegen stdlib test_jit
+      add SUITES codegen stdlib test_jit test_reports
       add CHECKS scripts/check-runtime-sources.sh scripts/check-actor-rc-stores.sh
       note "runtime: two-node and sanitizer sweeps not run (scripts/two-node.sh, specs/lang/golden/sanitize.sh)"
-      reason "$f" "codegen, stdlib, jit; runtime manifest + actor-rc checks" ;;
+      reason "$f" "codegen, stdlib, jit, test_reports; runtime manifest + actor-rc checks" ;;
     lib/jit/*|lib/repl/*)
       add SUITES test_jit compiler eval; reason "$f" "jit, compiler, eval" ;;
     lib/eval/*)
-      add SUITES eval stdlib stdlib_march compiler
+      add SUITES eval stdlib stdlib_march compiler test_reports
       note "lib/eval: the ir oracle cannot see the interpreter; bench/run_interp_bench.sh --modes interp for perf"
-      reason "$f" "eval, stdlib, stdlib_march, compiler" ;;
+      reason "$f" "eval, stdlib, stdlib_march, compiler, test_reports" ;;
 
     # ── checkers and tooling libraries ────────────────────────────────────
     lib/refine/*)
@@ -163,13 +166,14 @@ classify() {
     lsp/*)
       add SUITES $ALL_LSP; reason "$f" "lsp suites" ;;
     bin/*)
-      add SUITES compiler codegen errors test_jit; reason "$f" "compiler, codegen, errors, jit" ;;
+      add SUITES compiler codegen errors test_jit test_reports
+      reason "$f" "compiler, codegen, errors, jit, test_reports" ;;
 
     # ── stdlib: every program reads it ────────────────────────────────────
     stdlib/*)
-      add SUITES stdlib stdlib_march eval codegen compiler errors
+      add SUITES stdlib stdlib_march eval codegen compiler errors test_reports
       add ORACLES refine ir; add CHECKS scripts/check-docs.sh
-      reason "$f" "stdlib, stdlib_march, eval, codegen, compiler, errors; refine+ir oracles" ;;
+      reason "$f" "stdlib, stdlib_march, eval, codegen, compiler, errors, test_reports; refine+ir oracles" ;;
 
     # ── tests and fixtures: the runner that owns them ─────────────────────
     test/native/*|test/snapshots/*)
@@ -177,6 +181,7 @@ classify() {
       reason "$f" "codegen, snapshots; ir oracle" ;;
     test/stdlib/*) add SUITES stdlib_march; reason "$f" "stdlib_march" ;;
     test/errors/*) add SUITES errors; reason "$f" "errors" ;;
+    test/test_reports/*) add SUITES test_reports; reason "$f" "test_reports" ;;
     test/two_node/*)
       note "two-node: scripts/two-node.sh <scenario> (not run here)"; reason "$f" "two-node (note only)" ;;
     test/dune) FULL=1; reason "$f" "FULL (test wiring)" ;;
@@ -198,6 +203,8 @@ classify() {
       add CHECKS scripts/check-tree-sitter.sh; reason "$f" "tree-sitter" ;;
     scripts/run-tests.sh|scripts/test-run-tests.sh)
       add CHECKS scripts/test-run-tests.sh; reason "$f" "test-run-tests.sh" ;;
+    scripts/two-node.sh|scripts/test-two-node.sh)
+      add CHECKS scripts/test-two-node.sh; reason "$f" "test-two-node.sh" ;;
     scripts/affected.sh|scripts/test-affected.sh)
       add CHECKS scripts/test-affected.sh; reason "$f" "test-affected.sh" ;;
     scripts/determinism-oracle.sh)

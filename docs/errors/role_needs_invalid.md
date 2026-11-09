@@ -70,3 +70,7 @@ keep every remaining role in agreement about which path the conversation
 took.
 
 See also: [when a role may crash](../choreography.md#when-a-role-may-crash).
+
+## See it in the error tour
+
+- [A crash nobody handles]({{ site.baseurl }}/docs/error-messages/#may-crash)

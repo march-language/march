@@ -1,0 +1,12 @@
+exit: 1
+-- NAMING --------------- errors/unbound_variable_1.march
+
+I cannot find `arith_mean`. [unbound_variable]
+
+13 |     let m : Float = arith_mean([1.0, 2.0, 4.5])
+                         ^^^^^^^^^^
+
+    These functions in scope take these arguments:
+        average(List(Float)) : Float
+
+

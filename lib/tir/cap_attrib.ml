@@ -139,6 +139,30 @@ let rec walk ~is_defined ~bound (caps, callees) (e : Tir.expr) =
   | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a ->
     (add_atoms caps [ a ], callees)
 
+(* The module a TIR function belongs to.  See [attribute]'s comments. *)
+let owner_of ~(entry : string) (fn_name : string) : string =
+  match Handler_owner.owner_of fn_name with
+  | Some o -> o
+  | None ->
+    (* An impl method's TIR name is the iface mangling
+       `[Prefix.]Iface$Ty.method`.  Taking the last-dot prefix as the owner
+       yielded the SYNTHETIC module `Iface$Ty` — which no `needs` line can
+       declare for, so a correctly-declared program was unfixably rejected
+       ("module `Save$Thing` uses `IO.FileWrite` ...").  The owner is what
+       precedes the mangled segment: the module that declared the impl, or
+       the entry module when nothing does. *)
+    let n =
+      if Tir_names.is_iface_mangled fn_name then
+        match String.index_opt fn_name '$' with
+        | Some j ->
+          (match String.rindex_from_opt fn_name j '.' with
+           | Some i -> String.sub fn_name 0 i
+           | None -> "")
+        | None -> fn_name
+      else Hot_reload.module_of_name fn_name
+    in
+    (match n with "" -> entry | o -> o)
+
 let attribute ?(transparent = fun _ -> false)
     ?(transparent_fns = fun _ -> false) (m : Tir.tir_module) :
     (string * string) list =
@@ -151,29 +175,7 @@ let attribute ?(transparent = fun _ -> false)
      short spelling), so deriving ownership from the name charges every
      nested module's handler to the entry module.  Lowering records the
      declaring module out-of-band; only then fall back to the name. *)
-  let owner_of fn_name =
-    match Handler_owner.owner_of fn_name with
-    | Some o -> o
-    | None ->
-      (* An impl method's TIR name is the iface mangling
-         `[Prefix.]Iface$Ty.method`.  Taking the last-dot prefix as the owner
-         yielded the SYNTHETIC module `Iface$Ty` — which no `needs` line can
-         declare for, so a correctly-declared program was unfixably rejected
-         ("module `Save$Thing` uses `IO.FileWrite` ...").  The owner is what
-         precedes the mangled segment: the module that declared the impl, or
-         the entry module when nothing does. *)
-      let n =
-        if Tir_names.is_iface_mangled fn_name then
-          match String.index_opt fn_name '$' with
-          | Some j ->
-            (match String.rindex_from_opt fn_name j '.' with
-             | Some i -> String.sub fn_name 0 i
-             | None -> "")
-          | None -> fn_name
-        else Hot_reload.module_of_name fn_name
-      in
-      (match n with "" -> entry | o -> o)
-  in
+  let owner_of = owner_of ~entry in
   (* The entry module is the program itself; seeing through it would leave a
      capability with nowhere to land. *)
   let is_transparent owner = owner <> entry && transparent owner in

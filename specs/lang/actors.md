@@ -68,6 +68,7 @@ state while it runs.
 
 - [Builtins Reference](#builtins-reference)
 - [Interpreted vs compiled](#interpreted-vs-compiled)
+- [What is proved about the mailbox](#what-is-proved-about-the-mailbox)
 - [See also](#see-also)
 
 ## Choosing a concurrency primitive
@@ -254,8 +255,26 @@ stdlib type) already declares is ambiguous: writing `send(counter, Ping(…))` w
 stdlib also declares a `Ping` constructor is rejected (`Constructor \`Ping\` is defined by
 multiple types … Use a qualified form to disambiguate`). Pick message names unlikely to
 collide (e.g. `Increment`, `Poke`). Two actors that both declare a handler of the same
-name are the sharp case: a bare name resolves to only one of them, and no qualified
-spelling selects an actor's message today, so rename one of the handlers.
+name are the sharp case: a bare name resolves to only one of them. Qualify the message by
+its actor to select the other: `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
+`Outer.Counter.Tally(1)` from outside a nested module). The same spelling separates an
+actor's message from a variant constructor of the same name, which a `migrate_msg` that
+keeps a message's name needs:
+
+```march
+fn tally_migrate_msg(m : V1.Msg) : Option(Tally.Msg) do
+  match m do
+    V1.Bump(n) -> Some(Tally.Bump(n))
+    V1.Reset -> None
+  end
+end
+```
+
+A handler's parameter refinement is obliged at every construction of its message, shared
+name or not: through the written qualifier, or the construction's type
+([refinement types](refinement-types.md)), and the handler body assumes it. Both backends
+run a message only on its own actor: a variant or another actor's message of the same
+name, sent to the pid, is dropped.
 
 **A `send` is checked against the target, one side only.** When the pid's type shows
 its actor's state, a message of an actor with a different state is a compile error
@@ -1274,6 +1293,40 @@ For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload ty
 see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6;
 for the scheduler and lowering internals, see the implementation reference
 (`specs/impl/index.md`).
+
+---
+
+## What is proved about the mailbox
+
+The mailbox lives in the runtime, so no March function implements it. The standard library's
+`Actor.Theory` (`stdlib/actor_theory.march`) is a model of it: a queue of envelopes (a
+message with its sender, a monitor's `Down`, a reply to an `Actor.call`), with the laws this
+chapter promises proved about the model:
+
+| Law | Says |
+|---|---|
+| `enq_self`, `enq_other` | one sender's messages are received in the order it sent them; another sender's message does not change that |
+| `replay_order` | messages set aside during a hot deploy, or stashed, are replayed in front, in order |
+| `call_keeps_others` | an `Actor.call` waiting inside a handler takes only its reply; everything else stays, in order |
+| `stale_reply_ignored`, `call_reply_cat` | a late reply to an earlier call never answers a later one |
+| `down_never_dropped`, `down_at_most_once` | a monitor's `Down` is never dropped by a full mailbox, and is delivered at most once |
+
+A model is only as good as its match with the runtime, so the runtime is tested against it:
+the native fixture `actor_theory_conformance` has three senders message one actor
+concurrently, replays the order the actor handled them through `Actor.Theory.from_sender`,
+and checks each sender's messages arrived in order. `march --check --guarantees` reports each
+law as `proved (model) · tested (runtime)` when a fixture tests the runtime against it, and
+`proved (model)` when none does yet (`Down` delivery, today). Neither is a proof about the
+runtime itself.
+
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints for common actor mistakes, each with a program you can edit and re-check in the browser:
+
+- [Spawning a misspelled actor name]({{ site.baseurl }}/docs/error-messages/#misspelled-actor)
+- [A message sent with an argument of the wrong type]({{ site.baseurl }}/docs/error-messages/#message-argument)
+- [A handler that forgets to return the new state]({{ site.baseurl }}/docs/error-messages/#handler-returns-state)
+- [A message sent to an actor that does not handle it]({{ site.baseurl }}/docs/error-messages/#send-wrong-actor)
 
 ---
 

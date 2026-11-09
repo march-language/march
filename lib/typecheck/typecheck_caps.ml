@@ -100,6 +100,7 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
   | Ast.EAssert (ex, _) -> cap_annots_in_expr acc ex
   | Ast.ESigil (_, content, _) -> cap_annots_in_expr acc content
   | Ast.ERefineMsg (content, _, _) -> cap_annots_in_expr acc content
+  | Ast.EProof (p, _) -> List.fold_left cap_annots_in_expr acc (Ast.proof_children p)
   | Ast.EDbg (None, _) -> acc
   | Ast.EHole _ -> acc
   | Ast.EResultRef _ -> acc
@@ -122,6 +123,7 @@ let is_migrate_fn_name (fn_name : string) : bool =
   (* "_migrate_state", and the message-migration pair (DD step 6):
      "_migrate_msg" and its generated "_migrate_msg__hcr" wrapper. *)
   has "_migrate_state" || has "_migrate_msg" || has "_migrate_msg__hcr"
+  || has "_migrate_state__check"
 
 (** [fn_transitive_capability_closures_tbl env] is each function's capability set
     including everything it reaches through the reference graph:
@@ -1396,7 +1398,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
          | Some (c, use_sp, subject) when not (List.mem cap_path !check1_reported) ->
            check1_reported := cap_path :: !check1_reported;
            Err.report env.errors
-             { Err.severity = Err.Error; span = use_sp; code; fix = Some fix; notes = [];
+             { Err.severity = Err.Error; span = use_sp; code; fix = Some (Err.fix fix); notes = [];
                labels = [ { Err.lbl_span = sp;
                             lbl_message = Printf.sprintf "`Cap(%s)` is named here too" cap_path } ];
                message =
@@ -1499,9 +1501,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      Err.report env.errors
        { Err.severity = Err.Error; span = first_span; labels; notes = [];
          code = Err.Code.with_arg Err.Code.cap_needs (String.concat "," caps);
-         fix = Some (Err.FInsert {
+         fix = Some (Err.fix (Err.FInsert {
              after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
-             text = fix_lines });
+             text = fix_lines }));
          message =
            Printf.sprintf
              "%s %s, but module `%s` declares no `needs %s`%s.\n\
@@ -1516,11 +1518,13 @@ let check_module_needs (env : env) (mod_name : Ast.name)
              (if others = [] then "this" else "these")
              display_lines })
   ;
-  (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns) — warning only *)
+  (* Check 1c: extern blocks imply IO.Foreign (and IO.Foreign.Blocking for blocking fns).
+     An ERROR since 2026-11-06: a module that calls C without declaring it made
+     `forge audit` and `forge.caps.lock` blind to that dependency reaching C. *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     if not covered then
-      Err.warning_with_fix ~code:Err.Code.extern_needs_foreign env.errors ~span:sp
+      Err.error_with_fix ~code:Err.Code.extern_needs_foreign env.errors ~span:sp
         ~fix:(Err.FInsert {
           after_line = mod_name.March_ast.Ast.span.March_ast.Ast.start_line;
           text = "  needs " ^ cap_path })
@@ -2242,6 +2246,15 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
      tag, then its schema) at spans no excerpt can show: report the type once,
      at each handler's annotation of it ([DActor] records them). *)
   let remote_reported = Hashtbl.create 4 in
+  (* The fix the note describes: `derive Json for T` on the line after
+     [T]'s declaration, at its indentation, when [T] is declared in the file
+     the error is reported in. *)
+  let derive_json_fix (at : Ast.span) s =
+    match Hashtbl.find_opt env.decl_sites ("type:" ^ s) with
+    | Some (tsp : Ast.span) when tsp.Ast.start_line > 0 && tsp.Ast.file = at.Ast.file ->
+      Some (Err.fix (Err.FInsert { after_line = tsp.Ast.end_line;
+                                   text = String.make tsp.Ast.start_col ' ' ^ "derive Json for " ^ s }))
+    | _ -> None in
   let remote_codec_missing sp s =
     if not (Hashtbl.mem remote_reported s) then begin
       Hashtbl.add remote_reported s ();
@@ -2272,7 +2285,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
                 MPCode s; MPText ", which has no JSON codec.";
                 MPBreak;
                 MPText "A remote message crosses the network as JSON, and its type's name is its wire tag."];
-            labels = []; code = Err.Code.codec_missing; fix = None;
+            labels = []; code = Err.Code.codec_missing; fix = derive_json_fix tsp s;
             notes = [ render_parts [
                 MPText "Add "; MPCode ("derive Json for " ^ s);
                 MPText " next to its declaration."] ] }
@@ -2314,7 +2327,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
            else
              Err.report env.errors
                { Err.severity = Err.Error; span = sp; labels = [];
-                 code = Err.Code.codec_missing; fix = None;
+                 code = Err.Code.codec_missing; fix = derive_json_fix sp s;
                  message = render_parts [
                      MPCode callee; MPText " needs a JSON codec for ";
                      MPCode s; MPText ", and none is derived.";
@@ -2586,6 +2599,37 @@ let fn_capability_closures (env : env) : (string * string list) list =
 
 let declared_cap_scopes (env : env) : (string * string option) list =
   List.sort_uniq compare env.mod_need_scopes
+
+(* [declared_net_scopes env ~entry_module] — each module's HOST scopes on
+   IO.NetConnect, keyed like [module_caps] (the entry module, unwrapped by
+   desugar, under [entry_module]).  [[]] means the module is not host-scoped:
+   it declares no scoped IO.NetConnect, or it also holds an UNSCOPED grant
+   covering IO.NetConnect (IO, IO.Network, IO.NetConnect), which permits any
+   host.  An invalid scope was already reported by the DNeeds check and is
+   skipped here. *)
+let declared_net_scopes (env : env) ~(entry_module : string)
+    : (string * March_caps.Host_scope.decl list) list =
+  let decls_of (scopes : (string * string option) list) =
+    let unscoped =
+      List.exists
+        (fun (c, sc) ->
+           sc = None && March_caps.Cap_lattice.cap_subsumes c "IO.NetConnect")
+        scopes
+    in
+    if unscoped then []
+    else
+      List.filter_map
+        (fun (c, sc) ->
+           match sc with
+           | Some s when March_caps.Cap_scope.is_host_scopable c -> (
+               match March_caps.Host_scope.parse_decl (Some s) with
+               | Ok d -> Some d
+               | Error _ -> None)
+           | _ -> None)
+        scopes
+  in
+  (entry_module, decls_of env.mod_need_scopes)
+  :: List.map (fun (m, scopes) -> (m, decls_of scopes)) env.module_need_scopes
 
 let fn_own_capability_closures (env : env) : (string * string list) list =
   (* Sort by key for the same determinism reason as [fn_capability_closures]. *)

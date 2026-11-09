@@ -54,9 +54,20 @@ expected `String` but got `Int`. [type_mismatch]              ← the message, a
   pages are on this site, listed under [Error reference](#error-reference).
 - **One mistake, one error.** When a mistake would cause others downstream, March reports
   the mistake and holds back the errors that only follow from it.
-- **Fixes as edits.** Many errors also carry a machine-applicable fix. `march --check-json`
-  includes it as a text edit, the [language server](lsp.md) offers it as a quick fix, and
-  `forge fix` applies it.
+- **Fixes as edits.** Many errors also carry a fix. `march --check` shows it under the
+  error as the lines it changes (`4 - old`, `4 + new`), `march --check-json` includes it
+  as a text edit, and the [language server](lsp.md) offers it as a quick fix. Each fix has
+  a tier, the `applicability` field of the edit, and the heading `--check` gives it:
+  - `machine-applicable` ("fix (`forge fix` applies it)"): safe to apply unasked. Before
+    showing one, `--check` and `--check-json` apply it to a copy of the file and check the
+    copy, and the editor does the same before offering it. The fix keeps this tier only if
+    its own error is gone and no new error or warning appeared. `forge fix` applies these,
+    and the editor marks them as the preferred quick fix.
+  - `has-placeholders` ("fix, with a placeholder to fill in"): the right shape with a
+    part to fill in, such as the missing `match` arm whose body is `todo("handle None")`.
+  - `maybe-incorrect` ("possible fix (a guess: check it before applying it)"): one
+    plausible repair among several, such as a field name with another field spelled just
+    as close. It is offered and never applied unasked.
 
 ---
 
@@ -64,6 +75,8 @@ expected `String` but got `Int`. [type_mismatch]              ← the message, a
 
 The first errors most people meet come from habits other languages taught: `then`,
 `elif`, semicolons, curried calls. March names the habit and shows the March form.
+
+<a id="then"></a>
 
 ### `then` instead of `do`
 
@@ -95,12 +108,20 @@ I don't recognize `then` here — March uses do/end blocks instead. [then_keywor
     else
         expr2
     end
+
+    fix (`forge fix` applies it):
+
+5 -     if n > 0 then 1 else 0 end
+5 +     if n > 0 do 1 else 0 end
+
     run `march --explain then_keyword`
 ```
 <!-- /error-tour -->
 
 It recognises the keyword from another language and shows the whole `if` shape to copy.
 <button class="ep-try" data-error-example="01-then">Try it</button>
+
+<a id="if-without-else"></a>
 
 ### An `if` without an `else`
 
@@ -140,6 +161,8 @@ March `if` expressions always need an `else` branch: [parse_error]
 rule rather than "unexpected token `end`".
 <button class="ep-try" data-error-example="02-if-without-else">Try it</button>
 
+<a id="else-if-chain"></a>
+
 ### An `else if` chain one `end` short
 
 <!-- error-tour: 03-else-if-chain -->
@@ -165,6 +188,12 @@ This `if` (line 3) needs its own `end`: the `end` on line 4 belongs to an outer 
 
     I only noticed at the end of the file.
     `else if` is a nested `if` in the else position, so each `if` needs its own `end`: a two-branch chain ends `end end`, a three-branch chain `end end end`.
+
+    fix (`forge fix` applies it):
+
+3 |     if a do 1 else if b do 2 else 3 end
+4 +     end
+
     run `march --explain parse_error`
 ```
 <!-- /error-tour -->
@@ -173,6 +202,8 @@ A missing `end` is usually noticed far from where it belongs. This message point
 `if` that is missing it, says it only noticed at the end of the file, and says how many
 `end`s a chain needs.
 <button class="ep-try" data-error-example="03-else-if-chain">Try it</button>
+
+<a id="semicolon"></a>
 
 ### Semicolons
 
@@ -201,12 +232,21 @@ Unexpected `;`: March separates expressions with newlines, not semicolons. [semi
                  ^
 
     Put each expression on its own line.
+
+    fix (`forge fix` applies it):
+
+5 -     let x = 1; let y = 2
+5 +     let x = 1
+6 +     let y = 2
+
     run `march --explain semicolon_separator`
 ```
 <!-- /error-tour -->
 
 The caret is on the `;` itself, and the note says what to write instead.
 <button class="ep-try" data-error-example="04-semicolon">Try it</button>
+
+<a id="curried-call"></a>
 
 ### A curried call
 
@@ -247,6 +287,8 @@ and gives the two things you probably meant.
 A misspelling gets a suggestion, and the suggestion is chosen by what fits, not only by
 spelling.
 
+<a id="misspelled-module"></a>
+
 ### A misspelled module
 
 <!-- error-tour: 06-misspelled-module -->
@@ -272,12 +314,20 @@ Unknown module `Lsit`. Did you mean `List`? [unknown_qualified_name]
 5 |     Lsit.length([1, 2])
         ^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+5 -     Lsit.length([1, 2])
+5 +     List.length([1, 2])
+
     run `march --explain unknown_qualified_name`
 ```
 <!-- /error-tour -->
 
 The suggestion comes from the standard library's modules. (The playground can't show
 this one: it suggests from the module files on disk, which a browser doesn't have.)
+
+<a id="field-by-type"></a>
 
 ### A misspelled record field
 
@@ -300,12 +350,20 @@ The fields I see are: cont, count
 
 4 |     let n : Int = r.conut
                       ^^^^^^^
+
+
+    possible fix (a guess: check it before applying it):
+
+4 -     let n : Int = r.conut
+4 +     let n : Int = r.count
 ```
 <!-- /error-tour -->
 
 `cont` is the closer spelling, but it holds a `String` and the annotation wants an `Int`,
 so March suggests `count`. It also lists the fields the record does have.
 <button class="ep-try" data-error-example="07-field-by-type">Try it</button>
+
+<a id="constructor-by-type"></a>
 
 ### A misspelled constructor
 
@@ -330,6 +388,12 @@ Did you mean `Postal` (from type `Mail`)?
 
 6 |     let m : Mail = Posts(1)
                        ^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+6 -     let m : Mail = Posts(1)
+6 +     let m : Mail = Postal(1)
 ```
 <!-- /error-tour -->
 
@@ -345,6 +409,8 @@ comes from.
 A type error puts its caret on the subterm whose type is wrong, says where the expected
 type came from, and, when the two types share a structure, shows only the part that
 differs.
+
+<a id="string-plus-int"></a>
 
 ### A `String` where an `Int` is
 
@@ -371,13 +437,13 @@ expected `String` but got `Int`. [type_mismatch]
 5 |     "item " ++ n
                    ^
 
-    This is argument #2 of a function call.
+    This is the right side of `++`, which joins two `String`s.
     Use `int_to_string(x)` to convert an Int to a String.
 
     the expected type comes from here:
 
 5 |     "item " ++ n
-        ^^^^^^^^^^^^
+        ^^^^^^^
 
     `n` was bound here as `Int`:
 
@@ -390,6 +456,8 @@ expected `String` but got `Int`. [type_mismatch]
 The caret is on `n`, not on the whole `++`. Two labels show where `String` is required
 and where `n` got its type, and the note names the conversion function.
 <button class="ep-try" data-error-example="09-string-plus-int">Try it</button>
+
+<a id="structural-diff"></a>
 
 ### Two types that differ in one place
 
@@ -440,6 +508,8 @@ underlines just `String`. With a large record or nested type, this saves compari
 full.
 <button class="ep-try" data-error-example="10-structural-diff">Try it</button>
 
+<a id="no-partial-application"></a>
+
 ### Too few arguments
 
 <!-- error-tour: 11-no-partial-application -->
@@ -474,6 +544,8 @@ March has no partial application — a call must supply all arguments.
 Coming from a curried language, `add(1)` looks like partial application. The message says
 March has none, and shows where `add` got its two parameters.
 <button class="ep-try" data-error-example="11-no-partial-application">Try it</button>
+
+<a id="let-question"></a>
 
 ### A `let?` whose body is not a `Result`
 
@@ -516,6 +588,8 @@ expected `Result(Int, String)` but got `Int`. [type_mismatch]
 The note explains that rule instead of reporting a bare `Int` vs `Result` clash.
 <button class="ep-try" data-error-example="12-let-question">Try it</button>
 
+<a id="missing-impl"></a>
+
 ### Comparing a type that has no ordering
 
 <!-- error-tour: 13-missing-impl -->
@@ -543,6 +617,11 @@ end
                    ^^^^^
 
     Add `derive Ord for Hue` after the type to get the structural one, or write `impl Ord(Hue) do ... end`.
+
+    fix (`forge fix` applies it):
+
+4 |   type Hue = Red | Blue
+5 +   derive Ord for Hue
 ```
 <!-- /error-tour -->
 
@@ -558,6 +637,8 @@ In March, a program can only do the IO it was granted. `main` receives its capab
 as parameters, and each module declares the ones it uses with `needs` (see
 [Capabilities](capabilities.md)). The errors talk about access in plain terms: "writes a
 file", "the console capability".
+
+<a id="main-no-grant"></a>
 
 ### `main` with no grant
 
@@ -584,6 +665,12 @@ or grant everything with `fn main(cap : Cap(IO))`.
 4 |   fn main() do
       ^^^^^^^^^^^^
 
+
+    fix (`forge fix` applies it):
+
+4 -   fn main() do
+4 +   fn main(_cap_console : Cap(IO.Console)) do
+
     run `march --explain cap_grant`
 ```
 <!-- /error-tour -->
@@ -591,6 +678,8 @@ or grant everything with `fn main(cap : Cap(IO))`.
 It works out which capability the program actually reaches and writes the narrowest
 signature for `main`. `forge fix` applies it.
 <button class="ep-try" data-error-example="14-main-no-grant">Try it</button>
+
+<a id="missing-needs"></a>
 
 ### Writing a file without saying so
 
@@ -632,6 +721,14 @@ and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : 
 
 9 |   fn main(c : Cap(IO.Console)) do
              ^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+1 | mod Main do
+2 +   needs IO.FileWrite
+9 -   fn main(c : Cap(IO.Console)) do
+9 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+
     run `march --explain cap_needs`
 ```
 <!-- /error-tour -->
@@ -640,6 +737,8 @@ Two things are missing: the module's `needs IO.FileWrite` line, and a grant on `
 They are reported as one error, with the call chain from `main` and both edits in the
 hint.
 <button class="ep-try" data-error-example="15-missing-needs">Try it</button>
+
+<a id="wrong-capability"></a>
 
 ### Passing the wrong capability
 
@@ -685,6 +784,15 @@ end
 
 6 |   fn main(c : Cap(IO.Console)) do println(read(c)) end
              ^^^^^^^^^^^^^^^^^^^^^
+
+    fix (`forge fix` applies it):
+
+1 | mod Main do
+2 +   needs IO.FileRead
+6 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
+6 +   fn main(c : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) do println(read(c)) end
+6 -   fn main(c : Cap(IO.Console)) do println(read(c)) end
+6 +   fn main(c : Cap(IO.Console)) do println(read(_cap_fileread)) end
 ```
 <!-- /error-tour -->
 
@@ -700,6 +808,8 @@ other, then shows every place the fix touches.
 A linear value must be used exactly once: not copied, not dropped (see
 [Linear types](linear-types.md)). Each error points at both uses, or at the place the
 value was lost.
+
+<a id="linear-used-twice"></a>
 
 ### Used twice
 
@@ -742,6 +852,8 @@ Linear values must be consumed exactly once — they cannot be copied or ignored
 The caret is on the second use and a label marks the first, even though both are on the
 same line.
 <button class="ep-try" data-error-example="17-linear-used-twice">Try it</button>
+
+<a id="linear-some-branches"></a>
 
 ### Consumed on some branches only
 
@@ -794,6 +906,8 @@ It names a branch that consumes the token and one that silently drops it, and su
 `panic(…)` for a branch that never returns.
 <button class="ep-try" data-error-example="18-linear-some-branches">Try it</button>
 
+<a id="linear-captured"></a>
+
 ### Captured by a closure
 
 <!-- error-tour: 19-linear-captured -->
@@ -839,6 +953,8 @@ the value as a parameter).
 Actor errors use the actor's own words: its messages, its state, the pid you spawned (see
 [Actors](actors.md)).
 
+<a id="misspelled-actor"></a>
+
 ### A misspelled actor
 
 <!-- error-tour: 20-misspelled-actor -->
@@ -867,12 +983,20 @@ Did you mean `Counter`?
 
 11 |     let p = spawn(Countr)
                        ^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+11 -     let p = spawn(Countr)
+11 +     let p = spawn(Counter)
 ```
 <!-- /error-tour -->
 
 Inside `spawn(…)` March is looking for an actor, so it calls `Countr` an actor and
 suggests one.
 <button class="ep-try" data-error-example="20-misspelled-actor">Try it</button>
+
+<a id="message-argument"></a>
 
 ### The wrong argument in a message
 
@@ -915,6 +1039,8 @@ expected `Int` but got `String`. [type_mismatch]
 The expected type comes from the handler's parameter, so the label points into the actor
 at `k : Int`, not at a generated message type.
 <button class="ep-try" data-error-example="21-message-argument">Try it</button>
+
+<a id="handler-returns-state"></a>
 
 ### A handler that forgets to return the state
 
@@ -959,6 +1085,8 @@ A handler's result becomes the actor's next state. The message says so, and sinc
 handler returns an `Int` and the state has one `Int` field, it suggests
 `{ state with n: … }`.
 <button class="ep-try" data-error-example="22-handler-returns-state">Try it</button>
+
+<a id="send-wrong-actor"></a>
 
 ### A message sent to the wrong actor
 
@@ -1017,6 +1145,8 @@ actor does handle.
 A `protocol` gives each end of a channel a script of sends and receives (see
 [Session types](session-types.md)). The errors are phrased in terms of that script, not
 the session-type notation the checker uses internally.
+
+<a id="channel-wrong-step"></a>
 
 ### A step out of order
 
@@ -1079,6 +1209,79 @@ Each error says what the channel must do next and spells out the rest of its scr
 received anything.
 <button class="ep-try" data-error-example="24-channel-wrong-step">Try it</button>
 
+<a id="channel-close-early"></a>
+
+### A channel closed before its last step
+
+<!-- error-tour: 35-channel-close-early -->
+```march
+mod Main do
+  type Client = Client
+  type Server = Server
+
+  protocol Order do
+    Client -> Server : Int
+    choose by Server:
+      ok  -> Server -> Client : Bool
+      err -> Server -> Client : String
+    end
+    Client -> Server : String
+  end
+
+  fn main() do
+    let (cc, sc) = Chan.new(Order)
+    let cc2 = Chan.send(cc, 1)
+    let (_n, sc2) = Chan.recv(sc)
+    let sc3 = Chan.send(Chan.choose(sc2, :ok), true)
+    let (label, cc3) = Chan.offer(cc2)
+    match label do
+      :ok ->
+        let (_b, cc4) = Chan.recv(cc3)
+        Chan.close(cc4)
+      :err ->
+        let (_s, cc4) = Chan.recv(cc3)
+        Chan.close(Chan.send(cc4, "thanks"))
+    end
+    let (_t, sc4) = Chan.recv(sc3)
+    Chan.close(sc4)
+  end
+end
+```
+
+```text
+-- PROTOCOL ------------------- channel-close-early.march
+
+`Chan.close` can't close this channel here: at this point the channel must send a `String`. [session_state_mismatch]
+
+23 |         Chan.close(cc4)
+             ^^^^^^^^^^^^^^^
+
+    What is left on this channel: send a `String`, then close.
+    The conversation so far, in protocol `Order`:
+
+      Client -> Server : Int       done
+      choose by Server: ok | err   done
+      Client -> Server : String    <- `Client` must do this next
+
+    the channel is `Client`'s end of protocol `Order`, declared here:
+
+ 5 |   protocol Order do
+       ^^^^^^^^^^^^^^^^^
+    run `march --explain session_state_mismatch`
+```
+<!-- /error-tour -->
+
+When the protocol has more than two steps, the error also draws the conversation so far,
+one step per line in the order the protocol declares them. `done` marks the steps this end
+has already taken; a `choose` is drawn with all its branches when the channel has gone
+past it. The arrow on the right (`` <- `Client` must do this next ``) is where the channel is
+now, and the headline says what the call tried instead. Here the `ok` branch closes the
+client's end, but every branch of the `choose` leads to the client's last `String`. A
+two-step protocol like `Echo` above gets no diagram, because the headline already says
+everything it would.
+
+<a id="offer-not-exhaustive"></a>
+
 ### An offer left unhandled
 
 <!-- error-tour: 25-offer-not-exhaustive -->
@@ -1116,6 +1319,8 @@ The protocol's `offer` branches are: :ok, :err.
 
 17 |     match label do
                ^^^^^^^^
+
+    run `march --explain session_offer_nonexhaustive`
 ```
 <!-- /error-tour -->
 
@@ -1130,6 +1335,8 @@ is an error, and the message names the branch you missed.
 A protocol is checked when you declare it, before any code runs it. With `@[endpoints]`,
 March generates each role's API and checks that the role's code follows the protocol (see
 [Choreography](choreography.md)).
+
+<a id="step-after-loop"></a>
 
 ### A step that can never run
 
@@ -1165,12 +1372,62 @@ Protocol `Ticker`: this step can never run — it comes after a `loop`, and a `l
 
 7 |       A -> B : Int
           ^
+    run `march --explain protocol_invalid`
 ```
 <!-- /error-tour -->
 
 The message explains why the step is unreachable, and a label points at the loop that
 never ends.
 <button class="ep-try" data-error-example="26-step-after-loop">Try it</button>
+
+<a id="step-after-choose"></a>
+
+### A step after a branch that loops forever
+
+<!-- error-tour: 35-step-after-choose -->
+```march
+mod Main do
+  type A = A
+  type B = B
+
+  protocol Batch do
+    choose by A:
+      more -> loop do A -> B : Int end
+      done -> A -> B : Bool
+    end
+    B -> A : Bool
+  end
+
+  fn main() do
+    ()
+  end
+end
+```
+
+```text
+-- PROTOCOL --------------------- step-after-choose.march
+
+Protocol `Batch`: this step can never run in the `choose` branch that ends in a `loop` — the steps after a `choose` are projected into EVERY branch. Move it into the `done` branch, after its last step. A branch with several steps lists them on the lines after `done ->`, one per line, indented under the label (no `do`/`end`). [protocol_invalid]
+
+10 |     B -> A : Bool
+         ^
+
+
+    this `loop` repeats forever:
+
+7 |       more -> loop do A -> B : Int end
+                          ^
+    run `march --explain protocol_invalid`
+```
+<!-- /error-tour -->
+
+The steps after a `choose` run at the end of every branch, so the `more` branch, which
+loops forever, can never reach `B -> A : Bool`. The message names the branch that can
+(`done`) and shows how a branch with several steps is written: one step per line under
+`done ->`, with no `do`/`end`.
+<button class="ep-try" data-error-example="35-step-after-choose">Try it</button>
+
+<a id="may-crash"></a>
 
 ### A crash nobody handles
 
@@ -1201,6 +1458,15 @@ Protocol `Logging`: `C` may crash, so `C -> I : ...` needs `or crash do ... end`
         ^
 
     The crash branch is the rest of the conversation when `C` is gone. It must begin, for `L`, with a message from `I`; the fix sends one each, for you to change to what the conversation should do.
+
+    fix (`forge fix` applies it):
+
+ 9 |     C -> I : String
+10 +       or crash do
+11 +         I -> L : String
+12 +       end
+
+    run `march --explain role_needs_invalid`
 ```
 <!-- /error-tour -->
 
@@ -1208,6 +1474,8 @@ Once a role `may crash`, every message from it needs a plan for when it doesn't 
 The error asks the question the protocol must answer: what does `I` do if `C` crashes
 before sending? The machine fix adds an `or crash` branch for you to fill in.
 <button class="ep-try" data-error-example="27-may-crash">Try it</button>
+
+<a id="role-skips-a-step"></a>
 
 ### A role that skips a step
 
@@ -1246,6 +1514,11 @@ Role `Cons` tries to choose `more` or `done` here, but at this point protocol `S
                                                          ^^
 
     Take that step with `Stream_Cons.recv_Msg_Prod_Cons_1` first.
+    The conversation so far, in protocol `Stream`:
+
+      loop do                         (repeats)
+        Prod -> Cons : Int            <- `Cons` must do this next
+        choose by Cons: more | done   <- `Cons` tried this
 
     `Cons` is here: it must receive an `Int` from `Prod`:
 
@@ -1264,6 +1537,90 @@ The role's code calls a generated function, but the error is about the protocol:
 `Cons` tried to do, the step it skipped (with a "you are here" label on the protocol
 line), and which function takes that step. (The playground can't load the session
 runtime this one needs.)
+
+The diagram draws the whole conversation, not only `Cons`'s side, up to the step that
+went wrong. Read it top to bottom. A `loop` is drawn as one round, marked `(repeats)`, with
+its steps indented under it. Two arrows sit in the right-hand column: one on the step
+`Cons` must take next and one on the step it tried, so the gap between them is what
+`Cons` skipped. A `choose` that `Cons` has not reached yet is drawn on one line with its
+branches (`more | done`).
+
+<a id="role-repeats-a-step"></a>
+
+### A role that repeats a step
+
+<!-- error-tour: 36-role-repeats-a-step -->
+```march
+mod Main do
+  needs IO
+  needs Session.Live
+
+  @[endpoints]
+  protocol Pump do
+    hello: A -> B : String
+    loop do
+      tick: A -> B : Int
+      tock: B -> A : Int
+      choose by A:
+        go   -> A -> B : Bool
+        quit -> A -> B : Bool
+                stop
+      end
+    end
+  end
+
+  pfn role_a(s : Cap(Session.Live), st : Pump_A.Entry) : Pump_A.Yield do
+    let st1 = Pump_A.send_Hello(s, st, "hi")
+    let st2 = Pump_A.send_Tick(s, st1, 1)
+    Pump_A.recv_Tock(s, st2, fn (_n, st3) ->
+      Pump_A.recv_Tock(s, Pump_A.send_Tick(s, st3, 2), fn (_m, st4) ->
+        Pump_A.close(s, Pump_A.choose_quit(s, st4, true))))
+  end
+
+  fn main(_c : Cap(IO)) do () end
+end
+```
+
+```text
+-- PROTOCOL ------------------- role-repeats-a-step.march
+
+Role `A` tries to send an `Int` to `B` here, but at this point protocol `Pump` says it must choose `go` or `quit`. [protocol_step_order]
+
+23 |       Pump_A.recv_Tock(s, Pump_A.send_Tick(s, st3, 2), fn (_m, st4) ->
+                                                   ^^^
+
+    Take that step with `Pump_A.choose_go` first.
+    The conversation so far, in protocol `Pump`:
+
+      hello: A -> B : String     done
+      loop do                    (repeats)
+        tick:  A -> B : Int      done   <- `A` tried this again
+        tock:  B -> A : Int      done
+        choose by A: go | quit   <- `A` must do this next
+
+    `A` is here: it must choose `go` or `quit`:
+
+11 |       choose by A:
+                     ^
+
+    `st3` is the state bound here:
+
+22 |     Pump_A.recv_Tock(s, st2, fn (_n, st3) ->
+                                          ^^^
+    run `march --explain protocol_step_order`
+```
+<!-- /error-tour -->
+
+Inside a loop, a role's next step can come earlier in the protocol than the one it just
+took. Here `A` went round again without choosing whether to go on. The diagram marks the
+steps of this round as `done` and the one `A` tried as `tried this again`. The `choose` it
+must make next is drawn on one line with its branches, since `A` has not picked one. Once
+a role is inside a branch, the diagram shows the branch it took and names the others in
+the right-hand column (`` other branch: `more` ``). A long conversation keeps three steps of
+context and shortens the rest to `… N earlier steps`. (The playground can't load the
+session runtime this one needs.)
+
+<a id="role-grant"></a>
 
 ### A role reaching past its grant
 
@@ -1311,7 +1668,7 @@ end
 -- CAPABILITY -------------------------- role-grant.march
 
 The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)` (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
-help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
 
 21 |     let _ = file_write("/tmp/n", int_to_string(n))
                  ^^^^^^^^^^
@@ -1336,12 +1693,15 @@ help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remov
 
 9 |     role Cons needs IO.Console
         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain role_grant_exceeded`
 ```
 <!-- /error-tour -->
 
 A role can carry its own capability grant. The file write is two calls deep, and the
 error traces the path from the role's body to `file_write`, then shows the grant it
-breaks.
+breaks. The help writes out the widened `role Cons needs` line. It also gives the body's
+new parameter list: the body takes one `Cap` for each capability in the grant, so
+widening the grant adds a parameter too.
 
 ---
 
@@ -1350,8 +1710,13 @@ breaks.
 A refinement type adds a condition to a type, like `{Int | _ >= 0}` or
 `{List(Int) | len(_) > 0}`, and March proves those conditions at compile time with the z3
 solver (see [Refinement types](refinement-types.md)). When a proof fails, the error gives
-a concrete counterexample. These need z3, so the playground can't run them; install March
-to try them.
+a concrete counterexample, points at where the failing value came from, and writes the
+guard over your own names. When every argument of the failing call is a known value and
+the function does no I/O, the compiler also runs that call once in its interpreter and
+says what happens. These need z3, so the playground can't run them; install March to try
+them.
+
+<a id="index-out-of-range"></a>
 
 ### An index that is out of range
 
@@ -1373,13 +1738,19 @@ end
 
 refinement violation: index must be less than the list's length [refinement_violated]
 argument `n` of `List.nth` does not satisfy precondition `_ < len(xs)`
-note: this value never satisfies it; pass one that does
+note: `7` can never satisfy `n < len(xs)`; pass a value that does
 
 3 |     List.nth([1, 2, 3], 7)
         ^^^^^^^^^^^^^^^^^^^^^^
 
+    running `List.nth([1, 2, 3], 7)` panics: "List.nth: index out of bounds"
+    `List.nth_opt` is `List.nth` without the requirement: it returns `Option` instead of panicking.
+        match List.nth_opt([1, 2, 3], 7) do
+          Some(v) -> …
+          None -> …
+        end
 
-    this argument must satisfy `_ >= 0 && _ < len(xs)`:
+    `n` is `7` here:
 
 3 |     List.nth([1, 2, 3], 7)
                             ^
@@ -1388,7 +1759,11 @@ note: this value never satisfies it; pass one that does
 <!-- /error-tour -->
 
 `List.nth` requires an index below the list's length. The solver knows the literal list
-has three elements, so this call can never succeed, and the note says so.
+has three elements, so this call can never succeed, and the note says so. Every argument is
+a value, so the compiler also runs the call once in its interpreter and reports what
+happens: `List.nth` panics.
+
+<a id="counterexample"></a>
 
 ### A guard that proves the opposite
 
@@ -1419,24 +1794,39 @@ end
 ```text
 -- REFINEMENT ---------------------- counterexample.march
 
-refinement violation: argument `xs` of `head_of` does not satisfy precondition `len(_) > 0` (e.g. ys = []) [refinement_violated]
-note: guard the call (e.g. `if len(ys) > 0 do …`) or pass a value known to satisfy it
+refinement violation: argument `xs` of `head_of` does not satisfy precondition `len(_) > 0` [refinement_violated]
+for example, when `ys` is `[]`
+note: guard the call (e.g. `if len(ys) > 0 do head_of(ys) else … end`) or pass a value known to satisfy it
 
 11 |       head_of(ys)
            ^^^^^^^^^^^
 
+    running `head_of([])` panics: "empty"
 
-    this argument must satisfy `len(_) > 0`:
+    this argument must satisfy `len(ys) > 0`:
 
 11 |       head_of(ys)
                    ^^
+
+    `ys` comes from here:
+
+9 |   fn first_or_zero(ys : List(Int)) : Int do
+                       ^^
+
+    the call is reached only when this is true:
+
+10 |     if List.length(ys) == 0 do
+            ^^^^^^^^^^^^^^^^^^^^
     run `march --explain refinement_violated`
 ```
 <!-- /error-tour -->
 
 Inside this branch `ys` is known to be empty, so the call fails whenever it runs. The
-counterexample (`ys = []`) shows when, and the note suggests the guard that would make it
-safe.
+counterexample (`ys` is `[]`) shows when, the labels point at where `ys` comes from and at
+the condition that leads here, and the note suggests the guard that would make the call
+safe. Running `head_of([])` shows the panic the guard prevents.
+
+<a id="return-refinement"></a>
 
 ### A return type that isn't met
 
@@ -1464,9 +1854,7 @@ The return type requires:
 
     _ >= 0
 
-A counterexample was found:
-
-    n = -1
+but magnitude(-1) returns -1.
 
 4 |   fn magnitude(n : Int) : {Int | _ >= 0} do
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1475,8 +1863,10 @@ A counterexample was found:
 ```
 <!-- /error-tour -->
 
-The function body is checked against its own return type, and the counterexample
-`n = -1` is an input that returns a negative number.
+The function body is checked against its own return type, and the counterexample is
+run: `magnitude(-1)` returns `-1`, a negative number.
+
+<a id="termination"></a>
 
 ### A recursion that may not stop
 
@@ -1499,7 +1889,7 @@ end
 
 `down` is not shown to terminate: the recursive call `down(n - 1)` is not shown to decrease `n`: e.g. n = -1 [termination_unproved]
 note: the exit `n == 0` misses a negative `n`; `n <= 0` covers it.
-note: a metric must stay at least 0 and fall at every recursive call (left to right, for several components). Guard the recursion (an exit such as `n <= 0`), refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.
+note: a metric must stay at least 0 and fall at every recursive call (left to right, for several components). Otherwise refine the parameter (`{Int | _ >= 0}`), or write a metric that does fall.
 
 4 |     if n == 0 do 0 else down(n - 1) end
                             ^^^^^^^^^^^
@@ -1510,6 +1900,8 @@ note: a metric must stay at least 0 and fall at every recursive call (left to ri
 
 This one is a warning (the program still compiles). It finds the input that never
 reaches the base case (`n = -1`) and suggests the one-character fix, `n <= 0`.
+
+<a id="division-no-panic"></a>
 
 ### Division in a module that promised not to panic
 
@@ -1538,12 +1930,358 @@ Use `Math.checked_div` or `Math.checked_mod` to return `Option(Int)` instead of 
 
 6 |     10 / d
         ^^^^^^
+
+    run `march --explain division_by_zero`
 ```
 <!-- /error-tour -->
 
 `cap no_panic` is a promise the module makes, so a divisor that might be zero is an error.
 The refinement on `d` holds for every integer, zero included, so it proves nothing. The
 message offers two ways out.
+
+<a id="division-pattern"></a>
+
+### Dividing by a value from a pattern
+
+<!-- error-tour: 36-division-pattern -->
+```march
+mod Main do
+  needs IO.Console
+  cap no_panic
+
+  type Stats = Stats(Int, Int)
+
+  fn average(s : Stats) : Int do
+    match s do
+      Stats(total, count) -> total / count
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(average(Stats(10, 2))))
+  end
+end
+```
+
+```text
+-- REFINEMENT -------------------- division-pattern.march
+
+division by `count` in `cap no_panic` module may be by zero — no refinement proves `count ≠ 0`. [division_by_zero]
+
+`count` is not a function parameter, so no refinement annotation reaches it. Guard the division instead, which the checker reads as proof: `if count == 0 do <fallback> else ... / count end`. Or use `Math.checked_div` or `Math.checked_mod`, which return `Option(Int)` instead of panicking.
+
+9 |       Stats(total, count) -> total / count
+                                 ^^^^^^^^^^^^^
+
+    run `march --explain division_by_zero`
+```
+<!-- /error-tour -->
+
+Here the divisor comes out of a pattern, not a parameter, so there is no annotation to
+add. The message says so and gives the fix that always works: a guard. The checker reads
+`if count == 0 do ... else ... end`, so the division in the `else` branch is proved.
+
+---
+
+## 10. Performance: why a copy happens
+
+March updates a list or a tree in place when the function rebuilding it holds the only
+reference to it. When something else still holds the value, the function allocates a new
+copy instead: the program is still correct, only slower. Nothing in an ordinary check
+says so, because nothing is wrong. `march --why-copies` is the report you ask for when
+you want to know. The playground only checks programs, so it can't show this one.
+
+<a id="copy-shared"></a>
+
+### A list that is used again after `List.map`
+
+<!-- error-tour: 35-copy-shared --why-copies -->
+```march
+mod Main do
+  needs IO.Console
+
+  fn inc_all(xs : List(Int)) : List(Int) do
+    let ys = List.map(xs, fn x -> x + 1)
+    let n = List.length(xs)
+    List.append(ys, [n])
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(List.length(inc_all([1, 2, 3]))))
+  end
+end
+```
+
+```text
+-- WARNING: COPY ---------------------- copy-shared.march
+
+`List.map` builds a new copy instead of reusing `xs` in place, because `xs` is used again afterwards. [copy_shared]
+A function can update a value in place only when it holds the only reference to it; make this call the last use of `xs` and `List.map` reuses its memory instead of allocating.
+help: move `let n = List.length(xs)` above the call.
+
+5 |     let ys = List.map(xs, fn x -> x + 1)
+                          ^^
+
+
+    `xs` is used again here, so it is still shared when `List.map` runs:
+
+6 |     let n = List.length(xs)
+                            ^^
+
+    fix (`forge fix` applies it):
+
+4 |   fn inc_all(xs : List(Int)) : List(Int) do
+5 +     let n = List.length(xs)
+6 -     let n = List.length(xs)
+
+    run `march --explain copy_shared`
+```
+<!-- /error-tour -->
+
+`List.map` could have rewritten `xs`'s cells in place, but `List.length(xs)` on the next
+line still needs the old list, so it built a new one. The warning points at both lines and
+offers the fix: take the length first. The fix appears only when moving the later line is
+safe (it is the value's only later use and has no side effects); `forge fix` can apply it.
+The same report names two other reasons a value stays shared: it is also passed to the
+enclosing call, or a closure captured it. See the
+[memory model]({{ site.baseurl }}/docs/memory-model/#when-reuse-fires-vs-falls-back).
+
+---
+
+## 11. Run-time failures
+
+Some mistakes only show when the program runs. `march FILE` reports them the way it
+reports a compile error: what happened, the line with a caret, and then each call that
+led there, innermost first. The playground only checks programs, so it can't show these.
+
+<a id="runtime-panic"></a>
+
+### A panic two calls deep
+
+<!-- error-tour: 36-panic --run -->
+```march
+mod Main do
+  needs IO.Console
+
+  fn price(code : String) : Int do
+    match code do
+    "a" -> 1
+    _ -> panic("unknown product code: " ++ code)
+    end
+  end
+
+  fn total(codes : List(String)) : Int do
+    List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    println(int_to_string(total(["a", "zz"])))
+  end
+end
+```
+
+```text
+-- RUNTIME ---------------------------------- panic.march
+
+The program panicked: unknown product code: zz [panic]
+
+7 |     _ -> panic("unknown product code: " ++ code)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Calls inside the standard library are left out; set MARCH_BACKTRACE=full to see them.
+
+    `price` was called here:
+
+12 |     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+                                                       ^^^^^^^^
+
+    `List.fold_left` was called here:
+
+12 |     List.fold_left(codes, 0, fn (acc, c) -> acc + price(c))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `total` was called here:
+
+16 |     println(int_to_string(total(["a", "zz"])))
+                               ^^^^^^^^^^^^^^^^^^
+```
+<!-- /error-tour -->
+
+A compiled program prints the same header, headline and `panic` line. Below that it lists
+the functions the panic was reached through, each by its first line, because a compiled
+program doesn't record the line of each call.
+
+The first excerpt is the `panic` itself. Each one after it is a call on the way there:
+`price` was called from the function passed to `List.fold_left`, which `total` called,
+which `main` called. Calls inside the standard library are left out unless you set
+`MARCH_BACKTRACE=full`.
+
+<a id="runtime-actor-crash"></a>
+
+### An actor that crashes
+
+<!-- error-tour: 37-actor-crash --run -->
+```march
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do
+      if k < 0 do panic("negative bump") else { state with n: state.n + k } end
+    end
+  end
+
+  fn main(_console : Cap(IO.Console), _spawn : Cap(IO.Spawn)) do
+    let pid = spawn(Counter)
+    send(pid, Bump(1))
+    send(pid, Bump(-5))
+    run_until_idle()
+    println("done")
+  end
+end
+```
+
+```text
+-- RUNTIME ---------------------------- actor-crash.march
+
+Actor `Counter` crashed while handling `Bump(-5)`: negative bump [actor_crashed]
+
+9 |       if k < 0 do panic("negative bump") else { state with n: state.n + k } end
+                      ^^^^^^^^^^^^^^^^^^^^^^
+
+    Its state when it crashed: { n: 1 }
+    Nothing supervises this `Counter`, so it stays dead and later messages to it are dropped. The rest of the program keeps running.
+```
+<!-- /error-tour -->
+
+An actor's crash doesn't stop the program, so it would be easy to miss. The report names
+the actor, the message it was handling (with its arguments), where the handler failed, and
+the actor's state at the time. It also says what happens next: nobody supervises this
+`Counter`, so it stays dead. A supervised actor is restarted by its supervisor instead, and
+no report is printed.
+
+---
+
+## 12. Test failures
+
+A failing test is reported the same way, by `march test` and by `forge test` (which runs
+the tests compiled; both print the same report). These are run-time failures, not compiler
+errors, so the playground can't show them: it only checks programs. Install March and run
+`march test` on the examples to try them.
+
+<a id="assert-diff"></a>
+
+### An `assert ==` that fails
+
+<!-- error-tour: 35-assert-diff --test -->
+```march
+mod Main do
+  type Role = Admin | Guest | Owner(Int)
+  type User = { name : String, tags : List(Role) }
+  derive Eq, Show for Role
+  derive Eq, Show for User
+
+  pfn load_user() : User do
+    { name: "ann", tags: [Admin, Owner(1), Guest] }
+  end
+
+  test "the loaded user" do
+    let user = load_user()
+    let expected = { name: "ann", tags: [Admin, Owner(2), Guest] }
+    assert (user == expected)
+  end
+end
+```
+
+```text
+FAIL: "the loaded user"
+-- TEST FAILURE ----------------------- assert-diff.march
+
+The two sides of this `==` are not equal. [assert_failed]
+
+14 |     assert (user == expected)
+                 ^^^^^^^^^^^^^^^^
+
+    left `user`
+        User { name = ann, tags = [Admin, Owner(1), Guest] }
+                                                ^
+    right `expected`
+        User { name = ann, tags = [Admin, Owner(2), Guest] }
+                                                ^
+
+    They first differ at `.tags[1]`.
+```
+<!-- /error-tour -->
+
+Each side is labelled with the expression that produced it, and the carets mark where the
+two values first differ, not just that they differ. A value too long for one line is
+shown only along the path to the difference, with everything else as `…`; a list of the
+wrong length and a string that differs partway through are pointed at the same way.
+
+<a id="property-counterexample"></a>
+
+### A property that fails
+
+<!-- error-tour: 36-property-counterexample --test -->
+```march
+mod Main do
+  needs IO.Process, IO.Clock
+
+  pfn total(a : Int, b : Int) : Int do
+    a + b
+  end
+
+  test "sums stay under 50" do
+    Check.all(Gen.tuple2(Gen.int(0, 100), Gen.int(0, 100)), fn pair ->
+      match pair do
+      (a, b) ->
+        assert (total(a, b) < 50)
+        true
+      end
+    )
+  end
+end
+```
+
+```text
+FAIL: "sums stay under 50"
+-- TEST FAILURE ----------- property-counterexample.march
+
+This property does not hold. [property_failed]
+
+ 9 |     Check.all(Gen.tuple2(Gen.int(0, 100), Gen.int(0, 100)), fn pair ->
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    It failed on run 1 of 100.
+
+    Smallest failing input (shrunk in 3 steps from `(98, 11)`):
+
+        a = 39
+        b = 11
+
+    It failed this assertion:
+
+    This `<` comparison is false. [assert_failed]
+
+    12 |         assert (total(a, b) < 50)
+                         ^^^^^^^^^^^^^^^^
+
+        left `total(a, b)`
+            50
+        right
+            50
+
+    Seed 42: replay it with `forge test --seed=42`.
+```
+<!-- /error-tour -->
+
+`Check.all` tries the property on 100 generated inputs. When one fails, it shrinks it to a
+smallest input that still fails and names each part by the property's own parameters
+(`a` and `b`, which the `match` takes apart). Then it shows the failed assertion inside
+it. The seed reproduces the run: `forge test --seed=42`.
 
 ---
 
@@ -1561,3 +2299,6 @@ Every code that has a `march --explain` page also has one on this site:
 | Actors | [`spawn_not_actor`]({{ site.baseurl }}/docs/errors/spawn_not_actor/) · [`send_wrong_actor`]({{ site.baseurl }}/docs/errors/send_wrong_actor/) · [`actor_handler_state_type`]({{ site.baseurl }}/docs/errors/actor_handler_state_type/) · [`supervise_field_missing`]({{ site.baseurl }}/docs/errors/supervise_field_missing/) · [`codec_missing`]({{ site.baseurl }}/docs/errors/codec_missing/) |
 | Sessions and protocols | [`session_state_mismatch`]({{ site.baseurl }}/docs/errors/session_state_mismatch/) · [`protocol_step_order`]({{ site.baseurl }}/docs/errors/protocol_step_order/) |
 | Refinements and proofs | [`refinement_violated`]({{ site.baseurl }}/docs/errors/refinement_violated/) · [`termination_unproved`]({{ site.baseurl }}/docs/errors/termination_unproved/) · [`invalid_decreases`]({{ site.baseurl }}/docs/errors/invalid_decreases/) · [`predicate_eq_structural`]({{ site.baseurl }}/docs/errors/predicate_eq_structural/) · [`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/) · [`invalid_lemma`]({{ site.baseurl }}/docs/errors/invalid_lemma/) · [`lemma_unproved`]({{ site.baseurl }}/docs/errors/lemma_unproved/) · [`lemma_unproved_call`]({{ site.baseurl }}/docs/errors/lemma_unproved_call/) · [`lemma_argument_impure`]({{ site.baseurl }}/docs/errors/lemma_argument_impure/) · [`diverges_conflict`]({{ site.baseurl }}/docs/errors/diverges_conflict/) · [`solver_unavailable`]({{ site.baseurl }}/docs/errors/solver_unavailable/) · [`solver_version_mismatch`]({{ site.baseurl }}/docs/errors/solver_version_mismatch/) |
+| Performance | [`copy_shared`]({{ site.baseurl }}/docs/errors/copy_shared/) |
+| Sessions and protocols | [`session_state_mismatch`]({{ site.baseurl }}/docs/errors/session_state_mismatch/) · [`protocol_step_order`]({{ site.baseurl }}/docs/errors/protocol_step_order/) · [`protocol_invalid`]({{ site.baseurl }}/docs/errors/protocol_invalid/) · [`protocol_same_participants`]({{ site.baseurl }}/docs/errors/protocol_same_participants/) · [`role_grant_exceeded`]({{ site.baseurl }}/docs/errors/role_grant_exceeded/) |
+| Refinements and proofs | [`refinement_violated`]({{ site.baseurl }}/docs/errors/refinement_violated/) · [`division_by_zero`]({{ site.baseurl }}/docs/errors/division_by_zero/) · [`termination_unproved`]({{ site.baseurl }}/docs/errors/termination_unproved/) · [`invalid_decreases`]({{ site.baseurl }}/docs/errors/invalid_decreases/) · [`predicate_eq_structural`]({{ site.baseurl }}/docs/errors/predicate_eq_structural/) · [`invalid_reflect`]({{ site.baseurl }}/docs/errors/invalid_reflect/) · [`invalid_lemma`]({{ site.baseurl }}/docs/errors/invalid_lemma/) · [`lemma_unproved`]({{ site.baseurl }}/docs/errors/lemma_unproved/) · [`lemma_unproved_call`]({{ site.baseurl }}/docs/errors/lemma_unproved_call/) · [`lemma_argument_impure`]({{ site.baseurl }}/docs/errors/lemma_argument_impure/) · [`diverges_conflict`]({{ site.baseurl }}/docs/errors/diverges_conflict/) · [`solver_unavailable`]({{ site.baseurl }}/docs/errors/solver_unavailable/) · [`solver_version_mismatch`]({{ site.baseurl }}/docs/errors/solver_version_mismatch/) |

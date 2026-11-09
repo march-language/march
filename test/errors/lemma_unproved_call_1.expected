@@ -6,16 +6,7 @@ this call of the lemma `dbl_nonneg` gives no facts: its precondition is not prov
 10 |     dbl_nonneg(k)
          ^^^^^^^^^^^^^
 
+    Its precondition is `_ >= 0`; no fact the checker derived constrains `k`.
     run `march --explain lemma_unproved_call`
-
-
--- HINT: REFINEMENT -- errors/lemma_unproved_call_1.march
-
-precondition `_ >= 0` on `dbl_nonneg` was NOT verified here. [refinement_unverified]
-no fact the checker derived constrains `k`
-
-10 |     dbl_nonneg(k)
-         ^^^^^^^^^^^^^
-
 
 

@@ -1,0 +1,34 @@
+-- MARCH-MODE: why-copies
+-- EXPECT-ERROR: builds a new copy instead of reusing `t` in place
+-- A user function that rebuilds a tree in place (`bump` reuses each node it
+-- matches), called on a tree that is used twice more afterwards: no fix,
+-- since moving one later use would not make the call the last.
+mod Main do
+  needs IO.Console
+
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  @[no_warn_recursion]
+  fn bump(t : Tree) : Tree do
+    match t do
+    Leaf -> Leaf
+    Node(l, v, r) -> Node(bump(l), v + 1, bump(r))
+    end
+  end
+
+  @[no_warn_recursion]
+  fn size(t : Tree) : Int do
+    match t do
+    Leaf -> 0
+    Node(l, _, r) -> size(l) + 1 + size(r)
+    end
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let t = Node(Leaf, 1, Node(Leaf, 2, Leaf))
+    let u = bump(t)
+    let a = size(t)
+    let b = size(t)
+    println(int_to_string(size(u) + a + b))
+  end
+end

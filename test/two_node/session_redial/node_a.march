@@ -35,13 +35,13 @@ mod SessionRedialA do
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
         println("A: registering")
-        match Echo_Run.cluster_A(c, h, "redial-1", fn (s, st) -> role_a(s, st, 1)) do
+        match Echo_Run.cluster_A(h, "redial-1", fn (s, st) -> role_a(s, st, 1)) do
           Ok(_) -> println("A: cut-off session failed: false (it finished)")
           Err(e) ->
             IO.warn("A: redial-1: " ++ Echo_Run.error_message(e))
             println("A: cut-off session failed: true")
         end
-        match Echo_Run.cluster_A(c, h, "redial-2", fn (s, st) -> role_a(s, st, 2)) do
+        match Echo_Run.cluster_A(h, "redial-2", fn (s, st) -> role_a(s, st, 2)) do
           Ok(_) -> println("A: next session finished")
           Err(e) -> println("A: next session failed: " ++ Echo_Run.error_message(e))
         end

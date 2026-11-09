@@ -29,7 +29,7 @@ mod DrainInitiatedB do
   end
 
   pfn session(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
-    match Echo_Run.initiate_Client(c, h, fn (s, st) -> ask(s, st, 7)) do
+    match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, 7)) do
       Ok(_) -> ()
       Err(e) -> println("Client: " ++ SessionNode.run_error_message(e))
     end

@@ -193,6 +193,7 @@ and respan_expr (e : expr) : expr =
   | ELetQ (p, e1, e2, _) -> ELetQ (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
   | ELetStar (p, e1, e2, _) -> ELetStar (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
   | EAssert (e, _)       -> EAssert (respan_expr e, fresh_synthetic_span ())
+  | EProof (p, _)        -> EProof (map_proof respan_expr p, fresh_synthetic_span ())
   | ESigil (s, e, _)     -> ESigil (s, respan_expr e, fresh_synthetic_span ())
   | ERefineMsg (e, s, _)     -> ERefineMsg (respan_expr e, s, fresh_synthetic_span ())
 
@@ -510,43 +511,20 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                        bind_lin = Unrestricted; bind_expr = cmp_e }, dummy_span)
              ) fields
            in
-           let final_cmp name i =
-             if i = List.length fields - 1 then EVar (mk_name name)
-             else
-               EIf (EApp (EVar (mk_name "!="),
-                          [EVar (mk_name name); ELit (LitInt 0, dummy_span)],
-                          dummy_span),
-                    EVar (mk_name name),
-                    EVar (mk_name (Printf.sprintf "_cmp%d" (i + 1))),
-                    dummy_span)
-           in
-           let last_name = Printf.sprintf "_cmp%d" (List.length fields - 1) in
-           let result =
-             List.fold_right (fun (i, f) acc ->
-                 ignore f;
-                 let cname = Printf.sprintf "_cmp%d" i in
-                 if i = List.length fields - 1 then EVar (mk_name last_name)
-                 else
-                   EIf (EApp (EVar (mk_name "!="),
-                              [EVar (mk_name cname); ELit (LitInt 0, dummy_span)],
-                              dummy_span),
-                        EVar (mk_name cname),
-                        acc,
-                        dummy_span)
-               ) (List.mapi (fun i f -> (i, f)) fields |> List.rev |> List.tl |> List.rev)
-               (EVar (mk_name last_name))
-           in
-           ignore result;
-           ignore final_cmp;
+           (* Lexicographic in declaration order: the FIRST field's test is
+              the outermost `if`, the last field the innermost fallback.  The
+              fold used to run over the reversed list, which made the last
+              field outermost and returned only its comparison. *)
+           let last = List.length fields - 1 in
            EBlock (stmts @ [
              List.fold_right (fun (i, _f) acc ->
                  let cname = Printf.sprintf "_cmp%d" i in
-                 if i = List.length fields - 1 then EVar (mk_name cname)
+                 if i = last then EVar (mk_name cname)
                  else EIf (EApp (EVar (mk_name "!="),
                                  [EVar (mk_name cname); ELit (LitInt 0, dummy_span)],
                                  dummy_span),
                            EVar (mk_name cname), acc, dummy_span)
-               ) (List.mapi (fun i f -> (i, f)) fields |> List.rev) (ELit (LitInt 0, dummy_span))
+               ) (List.mapi (fun i f -> (i, f)) fields) (ELit (LitInt 0, dummy_span))
            ], dummy_span))
       | TDAlias _ ->
         EApp (EVar (mk_name "compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)

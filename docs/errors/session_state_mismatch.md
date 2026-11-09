@@ -14,7 +14,9 @@ is the step that side is at, and each `Chan.send`, `Chan.recv`, `Chan.choose`,
 protocol does not allow at that step, such as a second send where the protocol
 says receive, or a close before the last message, is this error. It says what
 the call tries, what the channel must do instead, the steps left on the
-channel, and which protocol and role the channel follows.
+channel, and which protocol and role the channel follows. For a protocol of
+more than two steps it also draws the conversation so far, marking the step
+the channel is at.
 
 ## A program that triggers it
 
@@ -75,3 +77,8 @@ lose data at run time. Typing the channel by its protocol step catches the
 mismatch at the call that goes out of order.
 
 See also: [the language reference](../choreography.md).
+
+## See it in the error tour
+
+- [A step out of order]({{ site.baseurl }}/docs/error-messages/#channel-wrong-step)
+- [A channel closed before its last step]({{ site.baseurl }}/docs/error-messages/#channel-close-early)

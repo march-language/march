@@ -279,6 +279,7 @@ pick_port
 port_settled=0                # see start_node: PORT is only movable before
                               # anything has been told which port to use
 pid_a=""; pid_b=""; pid_c=""  # bash 3 (macOS): no associative arrays
+started_nodes=""             # persists after wait_exit / kill_node clear a PID
 pid_of() { eval "echo \"\$pid_$1\""; }
 
 link_dropped=0
@@ -443,6 +444,7 @@ start_node() {
     MARCH_PEER_PORT=$PORT run_node "$work/node_a" >> "$work/a.out" 2>> "$work/a.err" &
     pid_a=$!
   fi
+  started_nodes="$started_nodes $n"
   port_settled=1
 }
 
@@ -515,7 +517,14 @@ source "$dir/scenario.sh"
 status=0
 ORDERED=${ORDERED:-0}
 for n in a b c; do
-  [ -f "$dir/node_$n.expected" ] || continue
+  if [ ! -f "$dir/node_$n.expected" ]; then
+    case " $started_nodes " in
+      *" $n "*)
+        echo "two-node[$scenario]: started node-$n has no node_$n.expected" >&2
+        status=1 ;;
+    esac
+    continue
+  fi
   if [ "$ORDERED" = 1 ]; then normalise() { cat "$1"; }; else normalise() { LC_ALL=C sort "$1"; }; fi
   if ! normalise "$work/$n.out" | diff -u "$dir/node_$n.expected" - > "$work/$n.diff"; then
     echo "two-node[$scenario]: node-$n output differs from node_$n.expected:" >&2

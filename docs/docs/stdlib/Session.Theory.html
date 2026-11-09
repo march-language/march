@@ -1,0 +1,656 @@
+<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Session.Theory — March Docs</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style>
+/* Dark theme (default) — deep navy with cyan accent, matching the March homepage */
+:root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
+--acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
+--faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
+
+/* Light theme overrides */
+[data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
+--acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
+--faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
+
+/* Reset + base */
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}
+
+/* Top bar */
+#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:60px;background:var(--bg-nav);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}
+#topbar .brand{font-family:'Lora',Georgia,serif;font-size:18px;font-weight:600;color:var(--text);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
+#topbar .brand svg{width:20px;height:20px}
+#topbar .actions{display:flex;align-items:center;gap:12px}
+#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px;transition:all .15s}
+#theme-toggle:hover{color:var(--text);border-color:var(--acc)}
+#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}
+#search-trigger:hover{border-color:var(--acc);color:var(--text)}
+#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}
+
+/* Content wrapper (sidebar + main) */
+.content-wrap{display:flex;flex:1;overflow:hidden}
+
+/* Typography */
+code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
+pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
+code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
+h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
+h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
+p{margin:8px 0}
+
+/* Sidebar */
+#sb{width:248px;min-width:208px;background:var(--sb);border-right:1px solid var(--bdr);padding:8px 10px 28px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;flex-shrink:0}
+#sb::-webkit-scrollbar{width:5px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}#sb::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+.sb-section{padding:0}
+.sb-heading{font-family:'JetBrains Mono','Fira Code',monospace;font-size:10px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.16em;padding:20px 10px 8px;user-select:none}
+
+/* Generic nav link (top-level + sub-items) */
+.sl{display:block;padding:5px 10px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--dim);transition:color .12s,background .12s}
+.sl:hover{background:color-mix(in oklab,var(--acc) 9%,transparent);color:var(--text);text-decoration:none}
+.sl.active{color:var(--acc);font-weight:500}
+.sb-section>.sl.active,.sb-sub .sl.active{background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+
+/* Hierarchical sidebar groups */
+.sb-group{margin:1px 0}
+.sb-group-hdr{display:flex;align-items:center;border-radius:6px;cursor:pointer;user-select:none;transition:background .12s}
+.sb-group-hdr:hover{background:color-mix(in oklab,var(--acc) 9%,transparent)}
+.sb-group-hdr:hover .sl,.sb-group-hdr:hover .sb-chevron{color:var(--text)}
+.sb-group-hdr:has(.sl.active){background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+.sb-group-hdr .sl{flex:1;padding-left:1px}
+.sb-chevron{font-size:9px;transition:transform .15s,color .12s;width:20px;align-self:stretch;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--faint)}
+.sb-group.open>.sb-group-hdr .sb-chevron{transform:rotate(90deg);color:var(--acc)}
+.sb-sub{display:none;margin:1px 0 6px 19px;padding-left:8px;border-left:1px solid var(--bdr)}
+.sb-group.open .sb-sub{display:block}
+.sb-sub .sl{font-size:12px;padding:3px 8px;color:var(--dim)}
+.sb-sub .sl:hover{color:var(--text)}
+.sb-kind{display:inline-block;width:12px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.03em;margin-right:8px;text-transform:uppercase;text-align:center}
+
+/* Main content */
+#main{flex:1;padding:40px max(52px,calc(50% - 574px));min-width:0;overflow-y:auto;height:calc(100vh - 60px)}
+
+/* Breadcrumb */
+.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}
+.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}
+.breadcrumb .sep{color:var(--bdr)}
+
+/* Module doc card */
+.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}
+
+/* Items */
+.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}
+.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}
+.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}
+.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}
+
+/* Badges */
+.badge{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.08em;padding:2px 9px;border-radius:100px;text-transform:uppercase;flex-shrink:0;border:1px solid transparent}
+.bfn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn);border-color:color-mix(in oklab,var(--fn) 24%,transparent)}
+.bpfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 30%,transparent)}
+.bty{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty);border-color:color-mix(in oklab,var(--ty) 24%,transparent)}
+.bpt{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 26%,transparent)}
+.bif{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if);border-color:color-mix(in oklab,var(--if) 24%,transparent)}
+
+/* Item content */
+.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}
+.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.laws h4{margin:12px 0 4px;font-size:13px;color:var(--dim)}.laws ul{margin:0;padding-left:18px}.law-by{color:var(--dim);font-size:12px}.law-st{font-size:11px;padding:1px 6px;border-radius:8px;border:1px solid var(--bdr);color:var(--dim)}.law-ok{color:var(--acc)}
+.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}
+.ib.open{display:block}
+
+/* Source + anchor links */
+.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}
+.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}
+.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}
+.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}
+
+/* Module cards (index page) */
+.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}
+.mc:hover{border-color:var(--acc);transform:translateY(-1px)}
+.mc h3{font-family:'Lora',Georgia,serif;color:var(--acc);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}
+.mc p{font-size:13px;color:var(--dim);margin-top:6px}
+.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}
+.st span{display:flex;align-items:center;gap:4px}
+
+/* Copy button */
+.pre-wrap{position:relative}
+.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}
+.pre-wrap:hover .copy-btn{opacity:1}
+.copy-btn:hover{color:var(--text);border-color:var(--acc)}
+.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}
+
+/* Search overlay (Cmd+K) */
+#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}
+#search-overlay.open{display:flex}
+#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}
+#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}
+#search-input::placeholder{color:var(--dim)}
+#sr{max-height:50vh;overflow-y:auto;padding:8px}
+#sr:empty{display:none}
+.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}
+.sr-item:hover{background:var(--card);text-decoration:none}
+.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}
+.sr-fn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn)}.sr-type{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty)}
+.sr-interface{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if)}.sr-module{background:color-mix(in oklab,var(--acc) 13%,transparent);color:var(--acc)}
+.sr-pfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv)}.sr-ptype{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv)}
+.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}
+.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}
+.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}
+
+/* Admonitions */
+.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}
+.admonition.warning{border-left-color:var(--ty)}
+.admonition.note{border-left-color:var(--acc2)}
+
+/* Lists */
+ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
+
+/* Guide body */
+.guide-body{line-height:1.8;font-size:15px}
+.guide-body h3{font-family:'Lora',Georgia,serif;font-size:1.4rem;margin:30px 0 12px;color:var(--bright);font-weight:600;letter-spacing:-.01em}
+.guide-body h4{font-family:'Lora',Georgia,serif;font-size:1.1rem;margin:24px 0 10px;color:var(--bright);font-weight:600}
+
+/* Code blocks follow theme tokens (light code surface in light mode, like the main page) */
+
+/* Responsive */
+@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}
+</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Actor.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Actor.html">Actor</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Actor.Theory.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Actor.Theory.html">Actor.Theory</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="AhoCorasick.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="AhoCorasick.html">AhoCorasick</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Array.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Array.html">Array</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Base64.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Base64.html">Base64</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="BigInt.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="BigInt.html">BigInt</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Bytes.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Bytes.html">Bytes</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="CRDT.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="CRDT.html">CRDT</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Channel.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Channel.html">Channel</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ChannelServer.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ChannelServer.html">ChannelServer</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ChannelSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ChannelSocket.html">ChannelSocket</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Char.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Char.html">Char</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Check.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Check.html">Check</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Cli.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Cli.html">Cli</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Cluster.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Cluster.html">Cluster</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterAuth.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterAuth.html">ClusterAuth</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterConn.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterConn.html">ClusterConn</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterLoad.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterLoad.html">ClusterLoad</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ClusterNode.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ClusterNode.html">ClusterNode</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Compress.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Compress.html">Compress</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Config.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Config.html">Config</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ConsistentHash.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ConsistentHash.html">ConsistentHash</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Control.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Control.html">Control</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Crypto.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Crypto.html">Crypto</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Csv.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Csv.html">Csv</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DataFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DataFrame.html">DataFrame</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DateTime.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DateTime.html">DateTime</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Decimal.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Decimal.html">Decimal</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Deque.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Deque.html">Deque</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnose.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Diagnose.html">Diagnose</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Diagnostics.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Diagnostics.html">Diagnostics</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Dir.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Dir.html">Dir</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DistLink.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DistLink.html">DistLink</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="DistSupervisor.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="DistSupervisor.html">DistSupervisor</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Dns.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Dns.html">Dns</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Duration.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Duration.html">Duration</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Enum.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Enum.html">Enum</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Env.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Env.html">Env</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="File.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="File.html">File</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Flow.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Flow.html">Flow</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Forge.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Forge.html">Forge</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Gen.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Gen.html">Gen</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="GlobalPid.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="GlobalPid.html">GlobalPid</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="GlobalRegistry.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="GlobalRegistry.html">GlobalRegistry</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Hamt.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Hamt.html">Hamt</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Handle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Handle.html">Handle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Handshake.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Handshake.html">Handshake</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HashMap.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HashMap.html">HashMap</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Html.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Html.html">Html</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Http.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Http.html">Http</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HttpClient.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HttpClient.html">HttpClient</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HttpServer.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HttpServer.html">HttpServer</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="HttpTransport.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="HttpTransport.html">HttpTransport</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="IO.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="IO.html">IO</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="IOList.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="IOList.html">IOList</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Iterable.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Iterable.html">Iterable</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Js.Audio.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Js.Audio.html">Js.Audio</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Js.Canvas.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Js.Canvas.html">Js.Canvas</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Js.Dom.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Js.Dom.html">Js.Dom</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Json.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Json.html">Json</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="JsonStream.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="JsonStream.html">JsonStream</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="LazyNicheProbe.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="LazyNicheProbe.html">LazyNicheProbe</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="LinearMap.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="LinearMap.html">LinearMap</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="List.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="List.html">List</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Logger.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Logger.html">Logger</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Map.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Map.html">Map</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Math.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Math.html">Math</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Membership.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Membership.html">Membership</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Merkle.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Merkle.html">Merkle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlDsa.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlDsa.html">MlDsa</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="MlKem.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="MlKem.html">MlKem</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Msgpack.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Msgpack.html">Msgpack</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NativeArray.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NativeArray.html">NativeArray</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NetFrame.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetFrame.html">NetFrame</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NetKernel.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NetKernel.html">NetKernel</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Node.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Node.html">Node</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeCall.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeCall.html">NodeCall</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeCert.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeCert.html">NodeCert</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeIdentity.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeIdentity.html">NodeIdentity</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeQueue.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeQueue.html">NodeQueue</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeRpc.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeRpc.html">NodeRpc</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="NodeSend.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="NodeSend.html">NodeSend</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Option.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Option.html">Option</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="OrderedMap.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="OrderedMap.html">OrderedMap</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Parallel.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Parallel.html">Parallel</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Parser.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Parser.html">Parser</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Path.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Path.html">Path</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="PeerReader.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="PeerReader.html">PeerReader</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="PeerRegistry.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="PeerRegistry.html">PeerRegistry</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Plot.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Plot.html">Plot</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Prelude.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Prelude.html">Prelude</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Presence.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Presence.html">Presence</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Process.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Process.html">Process</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="PubSub.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="PubSub.html">PubSub</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Queue.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Queue.html">Queue</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="RRB.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="RRB.html">RRB</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Random.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Random.html">Random</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Range.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Range.html">Range</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Recon.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Recon.html">Recon</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Regex.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Regex.html">Regex</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="RemoteCall.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="RemoteCall.html">RemoteCall</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Result.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Result.html">Result</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="RingBuf.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="RingBuf.html">RingBuf</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Scheduler.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Scheduler.html">Scheduler</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Seq.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Seq.html">Seq</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Session.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Session.html">Session</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Session.Theory.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Session.Theory.html">Session.Theory</a></div><div class="sb-sub"><a class="sl" href="Session.Theory.html#type-SessionGlobal"><span class="sb-kind" style="color:var(--ty)">T</span>SessionGlobal</a>
+<a class="sl" href="Session.Theory.html#type-SessionGBranches"><span class="sb-kind" style="color:var(--ty)">T</span>SessionGBranches</a>
+<a class="sl" href="Session.Theory.html#type-SessionLocal"><span class="sb-kind" style="color:var(--ty)">T</span>SessionLocal</a>
+<a class="sl" href="Session.Theory.html#type-SessionLBranches"><span class="sb-kind" style="color:var(--ty)">T</span>SessionLBranches</a>
+<a class="sl" href="Session.Theory.html#type-SessionRoles"><span class="sb-kind" style="color:var(--ty)">T</span>SessionRoles</a>
+<a class="sl" href="Session.Theory.html#type-SessionActs"><span class="sb-kind" style="color:var(--ty)">T</span>SessionActs</a>
+<a class="sl" href="Session.Theory.html#type-SessionPicks"><span class="sb-kind" style="color:var(--ty)">T</span>SessionPicks</a>
+<a class="sl" href="Session.Theory.html#type-SessionAct"><span class="sb-kind" style="color:var(--ty)">T</span>SessionAct</a>
+<a class="sl" href="Session.Theory.html#type-SessionCfg"><span class="sb-kind" style="color:var(--ty)">T</span>SessionCfg</a>
+<a class="sl" href="Session.Theory.html#type-SessionCfgStep"><span class="sb-kind" style="color:var(--ty)">T</span>SessionCfgStep</a>
+<a class="sl" href="Session.Theory.html#type-SessionLStep"><span class="sb-kind" style="color:var(--ty)">T</span>SessionLStep</a>
+<a class="sl" href="Session.Theory.html#fn-act"><span class="sb-kind" style="color:var(--fn)">F</span>act</a>
+<a class="sl" href="Session.Theory.html#fn-act_from"><span class="sb-kind" style="color:var(--fn)">F</span>act_from</a>
+<a class="sl" href="Session.Theory.html#fn-act_msg"><span class="sb-kind" style="color:var(--fn)">F</span>act_msg</a>
+<a class="sl" href="Session.Theory.html#fn-act_pick"><span class="sb-kind" style="color:var(--fn)">F</span>act_pick</a>
+<a class="sl" href="Session.Theory.html#fn-act_to"><span class="sb-kind" style="color:var(--fn)">F</span>act_to</a>
+<a class="sl" href="Session.Theory.html#fn-all_done"><span class="sb-kind" style="color:var(--fn)">F</span>all_done</a>
+<a class="sl" href="Session.Theory.html#fn-all_same"><span class="sb-kind" style="color:var(--fn)">F</span>all_same</a>
+<a class="sl" href="Session.Theory.html#fn-all_same_dual"><span class="sb-kind" style="color:var(--fn)">F</span>all_same_dual</a>
+<a class="sl" href="Session.Theory.html#fn-apply"><span class="sb-kind" style="color:var(--fn)">F</span>apply</a>
+<a class="sl" href="Session.Theory.html#fn-apply_msg"><span class="sb-kind" style="color:var(--fn)">F</span>apply_msg</a>
+<a class="sl" href="Session.Theory.html#fn-apply_pick"><span class="sb-kind" style="color:var(--fn)">F</span>apply_pick</a>
+<a class="sl" href="Session.Theory.html#fn-binary"><span class="sb-kind" style="color:var(--fn)">F</span>binary</a>
+<a class="sl" href="Session.Theory.html#fn-binary_bs"><span class="sb-kind" style="color:var(--fn)">F</span>binary_bs</a>
+<a class="sl" href="Session.Theory.html#fn-bystanders_merged"><span class="sb-kind" style="color:var(--fn)">F</span>bystanders_merged</a>
+<a class="sl" href="Session.Theory.html#fn-choice_ok"><span class="sb-kind" style="color:var(--fn)">F</span>choice_ok</a>
+<a class="sl" href="Session.Theory.html#fn-choose_step"><span class="sb-kind" style="color:var(--fn)">F</span>choose_step</a>
+<a class="sl" href="Session.Theory.html#fn-collapse"><span class="sb-kind" style="color:var(--fn)">F</span>collapse</a>
+<a class="sl" href="Session.Theory.html#fn-collapse_dual"><span class="sb-kind" style="color:var(--fn)">F</span>collapse_dual</a>
+<a class="sl" href="Session.Theory.html#fn-collapse_merged"><span class="sb-kind" style="color:var(--fn)">F</span>collapse_merged</a>
+<a class="sl" href="Session.Theory.html#fn-compose_msg"><span class="sb-kind" style="color:var(--fn)">F</span>compose_msg</a>
+<a class="sl" href="Session.Theory.html#fn-compose_pick"><span class="sb-kind" style="color:var(--fn)">F</span>compose_pick</a>
+<a class="sl" href="Session.Theory.html#fn-composes"><span class="sb-kind" style="color:var(--fn)">F</span>composes</a>
+<a class="sl" href="Session.Theory.html#fn-config"><span class="sb-kind" style="color:var(--fn)">F</span>config</a>
+<a class="sl" href="Session.Theory.html#fn-dest"><span class="sb-kind" style="color:var(--fn)">F</span>dest</a>
+<a class="sl" href="Session.Theory.html#fn-directed"><span class="sb-kind" style="color:var(--fn)">F</span>directed</a>
+<a class="sl" href="Session.Theory.html#fn-directed_branch"><span class="sb-kind" style="color:var(--fn)">F</span>directed_branch</a>
+<a class="sl" href="Session.Theory.html#fn-dual"><span class="sb-kind" style="color:var(--fn)">F</span>dual</a>
+<a class="sl" href="Session.Theory.html#fn-dual_bs"><span class="sb-kind" style="color:var(--fn)">F</span>dual_bs</a>
+<a class="sl" href="Session.Theory.html#fn-dual_dual"><span class="sb-kind" style="color:var(--fn)">F</span>dual_dual</a>
+<a class="sl" href="Session.Theory.html#fn-dual_dual_bs"><span class="sb-kind" style="color:var(--fn)">F</span>dual_dual_bs</a>
+<a class="sl" href="Session.Theory.html#fn-dual_loop_of"><span class="sb-kind" style="color:var(--fn)">F</span>dual_loop_of</a>
+<a class="sl" href="Session.Theory.html#fn-end_done"><span class="sb-kind" style="color:var(--fn)">F</span>end_done</a>
+<a class="sl" href="Session.Theory.html#fn-erase"><span class="sb-kind" style="color:var(--fn)">F</span>erase</a>
+<a class="sl" href="Session.Theory.html#fn-erase_bs"><span class="sb-kind" style="color:var(--fn)">F</span>erase_bs</a>
+<a class="sl" href="Session.Theory.html#fn-erase_loop_of"><span class="sb-kind" style="color:var(--fn)">F</span>erase_loop_of</a>
+<a class="sl" href="Session.Theory.html#fn-find"><span class="sb-kind" style="color:var(--fn)">F</span>find</a>
+<a class="sl" href="Session.Theory.html#fn-find_all_same"><span class="sb-kind" style="color:var(--fn)">F</span>find_all_same</a>
+<a class="sl" href="Session.Theory.html#fn-find_merged"><span class="sb-kind" style="color:var(--fn)">F</span>find_merged</a>
+<a class="sl" href="Session.Theory.html#fn-find_project"><span class="sb-kind" style="color:var(--fn)">F</span>find_project</a>
+<a class="sl" href="Session.Theory.html#fn-finished"><span class="sb-kind" style="color:var(--fn)">F</span>finished</a>
+<a class="sl" href="Session.Theory.html#fn-first_act"><span class="sb-kind" style="color:var(--fn)">F</span>first_act</a>
+<a class="sl" href="Session.Theory.html#fn-first_label"><span class="sb-kind" style="color:var(--fn)">F</span>first_label</a>
+<a class="sl" href="Session.Theory.html#fn-gbranch"><span class="sb-kind" style="color:var(--fn)">F</span>gbranch</a>
+<a class="sl" href="Session.Theory.html#fn-gcont"><span class="sb-kind" style="color:var(--fn)">F</span>gcont</a>
+<a class="sl" href="Session.Theory.html#fn-gpay"><span class="sb-kind" style="color:var(--fn)">F</span>gpay</a>
+<a class="sl" href="Session.Theory.html#fn-has"><span class="sb-kind" style="color:var(--fn)">F</span>has</a>
+<a class="sl" href="Session.Theory.html#fn-has_label"><span class="sb-kind" style="color:var(--fn)">F</span>has_label</a>
+<a class="sl" href="Session.Theory.html#fn-heads_from"><span class="sb-kind" style="color:var(--fn)">F</span>heads_from</a>
+<a class="sl" href="Session.Theory.html#fn-in_fragment"><span class="sb-kind" style="color:var(--fn)">F</span>in_fragment</a>
+<a class="sl" href="Session.Theory.html#fn-in_fragment_bs"><span class="sb-kind" style="color:var(--fn)">F</span>in_fragment_bs</a>
+<a class="sl" href="Session.Theory.html#fn-informed"><span class="sb-kind" style="color:var(--fn)">F</span>informed</a>
+<a class="sl" href="Session.Theory.html#fn-informed_bs"><span class="sb-kind" style="color:var(--fn)">F</span>informed_bs</a>
+<a class="sl" href="Session.Theory.html#fn-lhead"><span class="sb-kind" style="color:var(--fn)">F</span>lhead</a>
+<a class="sl" href="Session.Theory.html#fn-lhead_dual"><span class="sb-kind" style="color:var(--fn)">F</span>lhead_dual</a>
+<a class="sl" href="Session.Theory.html#fn-loop_of"><span class="sb-kind" style="color:var(--fn)">F</span>loop_of</a>
+<a class="sl" href="Session.Theory.html#fn-merge"><span class="sb-kind" style="color:var(--fn)">F</span>merge</a>
+<a class="sl" href="Session.Theory.html#fn-merge_binary"><span class="sb-kind" style="color:var(--fn)">F</span>merge_binary</a>
+<a class="sl" href="Session.Theory.html#fn-merge_cases"><span class="sb-kind" style="color:var(--fn)">F</span>merge_cases</a>
+<a class="sl" href="Session.Theory.html#fn-merged"><span class="sb-kind" style="color:var(--fn)">F</span>merged</a>
+<a class="sl" href="Session.Theory.html#fn-merged_dual"><span class="sb-kind" style="color:var(--fn)">F</span>merged_dual</a>
+<a class="sl" href="Session.Theory.html#fn-merged_restrict"><span class="sb-kind" style="color:var(--fn)">F</span>merged_restrict</a>
+<a class="sl" href="Session.Theory.html#fn-nonempty"><span class="sb-kind" style="color:var(--fn)">F</span>nonempty</a>
+<a class="sl" href="Session.Theory.html#fn-offer_step"><span class="sb-kind" style="color:var(--fn)">F</span>offer_step</a>
+<a class="sl" href="Session.Theory.html#fn-pairwise"><span class="sb-kind" style="color:var(--fn)">F</span>pairwise</a>
+<a class="sl" href="Session.Theory.html#fn-pairwise_bs"><span class="sb-kind" style="color:var(--fn)">F</span>pairwise_bs</a>
+<a class="sl" href="Session.Theory.html#fn-pairwise_choice"><span class="sb-kind" style="color:var(--fn)">F</span>pairwise_choice</a>
+<a class="sl" href="Session.Theory.html#fn-pick"><span class="sb-kind" style="color:var(--fn)">F</span>pick</a>
+<a class="sl" href="Session.Theory.html#fn-pick_has"><span class="sb-kind" style="color:var(--fn)">F</span>pick_has</a>
+<a class="sl" href="Session.Theory.html#fn-present"><span class="sb-kind" style="color:var(--fn)">F</span>present</a>
+<a class="sl" href="Session.Theory.html#fn-present_config"><span class="sb-kind" style="color:var(--fn)">F</span>present_config</a>
+<a class="sl" href="Session.Theory.html#fn-progress"><span class="sb-kind" style="color:var(--fn)">F</span>progress</a>
+<a class="sl" href="Session.Theory.html#fn-project"><span class="sb-kind" style="color:var(--fn)">F</span>project</a>
+<a class="sl" href="Session.Theory.html#fn-project_bs"><span class="sb-kind" style="color:var(--fn)">F</span>project_bs</a>
+<a class="sl" href="Session.Theory.html#fn-project_dual"><span class="sb-kind" style="color:var(--fn)">F</span>project_dual</a>
+<a class="sl" href="Session.Theory.html#fn-project_dual_bs"><span class="sb-kind" style="color:var(--fn)">F</span>project_dual_bs</a>
+<a class="sl" href="Session.Theory.html#fn-projections_compose"><span class="sb-kind" style="color:var(--fn)">F</span>projections_compose</a>
+<a class="sl" href="Session.Theory.html#fn-projections_compose_bs"><span class="sb-kind" style="color:var(--fn)">F</span>projections_compose_bs</a>
+<a class="sl" href="Session.Theory.html#fn-recv_step"><span class="sb-kind" style="color:var(--fn)">F</span>recv_step</a>
+<a class="sl" href="Session.Theory.html#fn-rest_picks"><span class="sb-kind" style="color:var(--fn)">F</span>rest_picks</a>
+<a class="sl" href="Session.Theory.html#fn-restrict"><span class="sb-kind" style="color:var(--fn)">F</span>restrict</a>
+<a class="sl" href="Session.Theory.html#fn-restrict_all_same"><span class="sb-kind" style="color:var(--fn)">F</span>restrict_all_same</a>
+<a class="sl" href="Session.Theory.html#fn-restrict_bs"><span class="sb-kind" style="color:var(--fn)">F</span>restrict_bs</a>
+<a class="sl" href="Session.Theory.html#fn-restrict_choice"><span class="sb-kind" style="color:var(--fn)">F</span>restrict_choice</a>
+<a class="sl" href="Session.Theory.html#fn-role_ok"><span class="sb-kind" style="color:var(--fn)">F</span>role_ok</a>
+<a class="sl" href="Session.Theory.html#fn-role_ok_has"><span class="sb-kind" style="color:var(--fn)">F</span>role_ok_has</a>
+<a class="sl" href="Session.Theory.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a>
+<a class="sl" href="Session.Theory.html#fn-same"><span class="sb-kind" style="color:var(--fn)">F</span>same</a>
+<a class="sl" href="Session.Theory.html#fn-same_bs"><span class="sb-kind" style="color:var(--fn)">F</span>same_bs</a>
+<a class="sl" href="Session.Theory.html#fn-same_eq"><span class="sb-kind" style="color:var(--fn)">F</span>same_eq</a>
+<a class="sl" href="Session.Theory.html#fn-same_eq_bs"><span class="sb-kind" style="color:var(--fn)">F</span>same_eq_bs</a>
+<a class="sl" href="Session.Theory.html#fn-send_step"><span class="sb-kind" style="color:var(--fn)">F</span>send_step</a>
+<a class="sl" href="Session.Theory.html#fn-step"><span class="sb-kind" style="color:var(--fn)">F</span>step</a>
+<a class="sl" href="Session.Theory.html#fn-step_msg"><span class="sb-kind" style="color:var(--fn)">F</span>step_msg</a>
+<a class="sl" href="Session.Theory.html#fn-step_pick"><span class="sb-kind" style="color:var(--fn)">F</span>step_pick</a>
+<a class="sl" href="Session.Theory.html#fn-told"><span class="sb-kind" style="color:var(--fn)">F</span>told</a>
+<a class="sl" href="Session.Theory.html#fn-trace"><span class="sb-kind" style="color:var(--fn)">F</span>trace</a>
+<a class="sl" href="Session.Theory.html#fn-trace_bs"><span class="sb-kind" style="color:var(--fn)">F</span>trace_bs</a>
+<a class="sl" href="Session.Theory.html#fn-trace_bs_found"><span class="sb-kind" style="color:var(--fn)">F</span>trace_bs_found</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SessionAP.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SessionAP.html">SessionAP</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SessionNode.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SessionNode.html">SessionNode</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Set.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Set.html">Set</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="ShellRender.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="ShellRender.html">ShellRender</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Sigil.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Sigil.html">Sigil</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Signal.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Signal.html">Signal</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Simd.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Simd.html">Simd</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Socket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Socket.html">Socket</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Sort.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Sort.html">Sort</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SortedSet.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SortedSet.html">SortedSet</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Stats.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Stats.html">Stats</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="String.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="String.html">String</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Swim.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Swim.html">Swim</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="SwimDriver.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="SwimDriver.html">SwimDriver</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="System.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="System.html">System</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Task.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Task.html">Task</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Test.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Test.html">Test</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Tls.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Tls.html">Tls</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Toml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Toml.html">Toml</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Topology.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Topology.html">Topology</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Trace.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Trace.html">Trace</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Tuple.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Tuple.html">Tuple</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="UUID.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="UUID.html">UUID</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Udp.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Udp.html">Udp</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Uri.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Uri.html">Uri</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Vault.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Vault.html">Vault</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="VectorClock.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="VectorClock.html">VectorClock</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="WebSocket.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WebSocket.html">WebSocket</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="WorkDispatch.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="WorkDispatch.html">WorkDispatch</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Xml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Xml.html">Xml</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Yaml.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Yaml.html">Yaml</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Session.Theory</span></nav><h1>Session.Theory</h1><div class="mdoc"><p>Session.Theory: the logic of March's protocols, and laws about it.</p><p>A protocol (<code>protocol P do ... end</code>) is a global type: who sends what to whom, where a role chooses, where it loops.  Each role runs its projection, a local type.  The compiler projects twice, in OCaml (the <code>Chan(Role, Proto)</code> typechecker and the <code>@[endpoints]</code> generator); this module is the specification both are validated against (<code>march --check --guarantees</code>, lemmas design §5.2, M6), and the laws below are proved once, here, for every protocol.</p><p>SessionRoles, labels and payload types are <code>Int</code> ids: the logic treats <code>String</code> contents as opaque, and the compiler maps names to ids when it emits a protocol as a <code>SessionGlobal</code>.</p><p>A loop is <code>GLoop(body, after)</code>.  The body's end is <code>GVar(0)</code>, the loop's own back-edge (de Bruijn: the nearest enclosing loop); <code>after</code> is what a role that takes no part in the body does next.  <code>stop</code> is <code>GEnd</code>.  A choice's branches each carry the rest of the protocol (the steps after the choice are appended to every branch).</p></div><h2>Types</h2><div class="item" id="type-SessionGlobal"><div class="ih"><span class="badge bty">type</span><span class="name">SessionGlobal</span><span class="sig"><a href="#type-SessionGlobal">SessionGlobal</a> = GEnd</span><a class="anchor-link" href="#type-SessionGlobal" title="Link">#</a></div><div class="ib"><p>A global protocol over role, label and payload ids.</p></div></div>
+<div class="item" id="type-SessionGBranches"><div class="ih"><span class="badge bty">type</span><span class="name">SessionGBranches</span><span class="sig"><a href="#type-SessionGBranches">SessionGBranches</a> = GBNil | GBCons(Int, <a href="#type-SessionGlobal">SessionGlobal</a>, <a href="#type-SessionGBranches">SessionGBranches</a>)</span><a class="anchor-link" href="#type-SessionGBranches" title="Link">#</a></div><div class="ib"><p>A choice's labelled branches.</p></div></div>
+<div class="item" id="type-SessionLocal"><div class="ih"><span class="badge bty">type</span><span class="name">SessionLocal</span><span class="sig"><a href="#type-SessionLocal">SessionLocal</a> = LEnd</span><a class="anchor-link" href="#type-SessionLocal" title="Link">#</a></div><div class="ib"><p>One role's view: send to or receive from a peer, choose or offer a label, loop.</p></div></div>
+<div class="item" id="type-SessionLBranches"><div class="ih"><span class="badge bty">type</span><span class="name">SessionLBranches</span><span class="sig"><a href="#type-SessionLBranches">SessionLBranches</a> = LBNil | LBCons(Int, <a href="#type-SessionLocal">SessionLocal</a>, <a href="#type-SessionLBranches">SessionLBranches</a>)</span><a class="anchor-link" href="#type-SessionLBranches" title="Link">#</a></div><div class="ib"><p>A local choice's labelled branches.</p></div></div>
+<div class="item" id="type-SessionRoles"><div class="ih"><span class="badge bty">type</span><span class="name">SessionRoles</span><span class="sig"><a href="#type-SessionRoles">SessionRoles</a> = RoleEnd | RoleThen(Int, <a href="#type-SessionRoles">SessionRoles</a>)</span><a class="anchor-link" href="#type-SessionRoles" title="Link">#</a></div><div class="ib"><p>The roles of a configuration (its own list type: see Session.Theory's progress note on a reflected function over the stdlib List).</p></div></div>
+<div class="item" id="type-SessionActs"><div class="ih"><span class="badge bty">type</span><span class="name">SessionActs</span><span class="sig"><a href="#type-SessionActs">SessionActs</a> = ActEnd | ActThen(<a href="#type-SessionAct">SessionAct</a>, <a href="#type-SessionActs">SessionActs</a>)</span><a class="anchor-link" href="#type-SessionActs" title="Link">#</a></div><div class="ib"><p>A sequence of steps.</p></div></div>
+<div class="item" id="type-SessionPicks"><div class="ih"><span class="badge bty">type</span><span class="name">SessionPicks</span><span class="sig"><a href="#type-SessionPicks">SessionPicks</a> = PickEnd | PickThen(Int, <a href="#type-SessionPicks">SessionPicks</a>)</span><a class="anchor-link" href="#type-SessionPicks" title="Link">#</a></div><div class="ib"><p>The labels to take at successive choices.</p></div></div>
+<div class="item" id="type-SessionAct"><div class="ih"><span class="badge bty">type</span><span class="name">SessionAct</span><span class="sig"><a href="#type-SessionAct">SessionAct</a> = ActMsg(Int, Int, Int) | ActPick(Int, Int, Int, Int)</span><a class="anchor-link" href="#type-SessionAct" title="Link">#</a></div><div class="ib"><p>One step of the whole system: a message, or a choice whose label rides on the chooser's first message (chooser, receiver, label, payload).</p></div></div>
+<div class="item" id="type-SessionCfg"><div class="ih"><span class="badge bty">type</span><span class="name">SessionCfg</span><span class="sig"><a href="#type-SessionCfg">SessionCfg</a> = CfgEnd | CfgRole(Int, <a href="#type-SessionLocal">SessionLocal</a>, <a href="#type-SessionCfg">SessionCfg</a>)</span><a class="anchor-link" href="#type-SessionCfg" title="Link">#</a></div><div class="ib"><p>Every role with its local type.</p></div></div>
+<div class="item" id="type-SessionCfgStep"><div class="ih"><span class="badge bty">type</span><span class="name">SessionCfgStep</span><span class="sig"><a href="#type-SessionCfgStep">SessionCfgStep</a> = CfgStuck | CfgMoved(<a href="#type-SessionCfg">SessionCfg</a>)</span><a class="anchor-link" href="#type-SessionCfgStep" title="Link">#</a></div><div class="ib"><p>The result of a step.</p></div></div>
+<div class="item" id="type-SessionLStep"><div class="ih"><span class="badge bty">type</span><span class="name">SessionLStep</span><span class="sig"><a href="#type-SessionLStep">SessionLStep</a> = StepBad | StepOk(<a href="#type-SessionLocal">SessionLocal</a>)</span><a class="anchor-link" href="#type-SessionLStep" title="Link">#</a></div><div class="ib"><p>One role's part of a step.</p></div></div><h2>Functions</h2><div class="item" id="fn-act"><div class="ih"><span class="badge bfn">fn</span><span class="name">act</span><span class="sig">act(r : Int, l : <a href="#type-SessionLocal">SessionLocal</a>, a : <a href="#type-SessionAct">SessionAct</a>) : <a href="#type-SessionLStep">SessionLStep</a></span><a class="anchor-link" href="#fn-act" title="Link">#</a></div><div class="ib"><p>Role <code>r</code>'s part in step <code>a</code>; a role not in it stays as it is.</p></div></div>
+<div class="item" id="fn-act_from"><div class="ih"><span class="badge bfn">fn</span><span class="name">act_from</span><span class="sig">act_from(a : <a href="#type-SessionAct">SessionAct</a>) : Int</span><a class="anchor-link" href="#fn-act_from" title="Link">#</a></div><div class="ib"><p>The sender of <code>a</code>.</p></div></div>
+<div class="item" id="fn-act_msg"><div class="ih"><span class="badge bfn">fn</span><span class="name">act_msg</span><span class="sig">act_msg(f : Int, t : {Int | _ != f}, p : Int, k : <a href="#type-SessionGlobal">SessionGlobal</a>, r : Int, multiparty : Bool)</span><a class="anchor-link" href="#fn-act_msg" title="Link">#</a></div><div class="ib"><p>One role's part in a message step: it ends at its projection of what follows.</p></div></div>
+<div class="item" id="fn-act_pick"><div class="ih"><span class="badge bfn">fn</span><span class="name">act_pick</span><span class="sig">act_pick(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, multiparty : Bool, lab : Int, r : Int)</span><a class="anchor-link" href="#fn-act_pick" title="Link">#</a></div><div class="ib"><p>One role's part in a choice step: it ends at its projection of what follows branch <code>lab</code>'s first message.</p></div></div>
+<div class="item" id="fn-act_to"><div class="ih"><span class="badge bfn">fn</span><span class="name">act_to</span><span class="sig">act_to(a : <a href="#type-SessionAct">SessionAct</a>) : Int</span><a class="anchor-link" href="#fn-act_to" title="Link">#</a></div><div class="ib"><p>The receiver of <code>a</code>.</p></div></div>
+<div class="item" id="fn-all_done"><div class="ih"><span class="badge bfn">fn</span><span class="name">all_done</span><span class="sig">all_done(cfg : <a href="#type-SessionCfg">SessionCfg</a>) : Bool</span><a class="anchor-link" href="#fn-all_done" title="Link">#</a></div><div class="ib"><p>Every role of the configuration is done.</p><div class="laws"><h4>Laws</h4><ul><li><code>all_done(config(GEnd, rs, multiparty))</code> <span class="law-by">(lemma <code>end_done</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-all_same"><div class="ih"><span class="badge bfn">fn</span><span class="name">all_same</span><span class="sig">all_same(bs : <a href="#type-SessionLBranches">SessionLBranches</a>, l : <a href="#type-SessionLocal">SessionLocal</a>) : Bool</span><a class="anchor-link" href="#fn-all_same" title="Link">#</a></div><div class="ib"><p>Whether every branch is <code>l</code>.</p></div></div>
+<div class="item" id="fn-all_same_dual"><div class="ih"><span class="badge bfn">fn</span><span class="name">all_same_dual</span><span class="sig">all_same_dual(rest : <a href="#type-SessionLBranches">SessionLBranches</a>, first : <a href="#type-SessionLocal">SessionLocal</a>)</span><a class="anchor-link" href="#fn-all_same_dual" title="Link">#</a></div><div class="ib"><p>Duality keeps branches alike.</p></div></div>
+<div class="item" id="fn-apply"><div class="ih"><span class="badge bfn">fn</span><span class="name">apply</span><span class="sig">apply(cfg : <a href="#type-SessionCfg">SessionCfg</a>, a : <a href="#type-SessionAct">SessionAct</a>) : <a href="#type-SessionCfgStep">SessionCfgStep</a></span><a class="anchor-link" href="#fn-apply" title="Link">#</a></div><div class="ib"><p>Every role takes its part in <code>a</code>.</p></div></div>
+<div class="item" id="fn-apply_msg"><div class="ih"><span class="badge bfn">fn</span><span class="name">apply_msg</span><span class="sig">apply_msg(f : Int, t : {Int | _ != f}, p : Int, k : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool)</span><a class="anchor-link" href="#fn-apply_msg" title="Link">#</a></div><div class="ib"><p>Every role takes its part in a message step.</p></div></div>
+<div class="item" id="fn-apply_pick"><div class="ih"><span class="badge bfn">fn</span><span class="name">apply_pick</span><span class="sig">apply_pick(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, lab : Int)</span><a class="anchor-link" href="#fn-apply_pick" title="Link">#</a></div><div class="ib"><p>Every role takes its part in a choice step.</p></div></div>
+<div class="item" id="fn-binary"><div class="ih"><span class="badge bfn">fn</span><span class="name">binary</span><span class="sig">binary(g : <a href="#type-SessionGlobal">SessionGlobal</a>, a : Int, b : Int) : Bool</span><a class="anchor-link" href="#fn-binary" title="Link">#</a></div><div class="ib"><p>Every message and choice of <code>g</code> is between roles <code>a</code> and <code>b</code>.</p></div></div>
+<div class="item" id="fn-binary_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">binary_bs</span><span class="sig">binary_bs(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, a : Int, b : Int) : Bool</span><a class="anchor-link" href="#fn-binary_bs" title="Link">#</a></div><div class="ib"><p><code>binary</code> on every branch.</p></div></div>
+<div class="item" id="fn-bystanders_merged"><div class="ih"><span class="badge bfn">fn</span><span class="name">bystanders_merged</span><span class="sig">bystanders_merged(rs : <a href="#type-SessionRoles">SessionRoles</a>, c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, multiparty : Bool) : Bool</span><a class="anchor-link" href="#fn-bystanders_merged" title="Link">#</a></div><div class="ib"><p><code>role_ok</code> for every role of <code>rs</code>.</p></div></div>
+<div class="item" id="fn-choice_ok"><div class="ih"><span class="badge bfn">fn</span><span class="name">choice_ok</span><span class="sig">choice_ok(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>) : Bool</span><a class="anchor-link" href="#fn-choice_ok" title="Link">#</a></div><div class="ib"><p>A directed choice: branches, each beginning with a message from <code>c</code> to one other role.</p></div></div>
+<div class="item" id="fn-choose_step"><div class="ih"><span class="badge bfn">fn</span><span class="name">choose_step</span><span class="sig">choose_step(l : <a href="#type-SessionLocal">SessionLocal</a>, lab : Int, t : Int, p : Int) : <a href="#type-SessionLStep">SessionLStep</a></span><a class="anchor-link" href="#fn-choose_step" title="Link">#</a></div><div class="ib"><p>Choose <code>lab</code> and send its first message.</p></div></div>
+<div class="item" id="fn-collapse"><div class="ih"><span class="badge bfn">fn</span><span class="name">collapse</span><span class="sig">collapse(rb : <a href="#type-SessionLBranches">SessionLBranches</a>, as_choice : Bool) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-collapse" title="Link">#</a></div><div class="ib"><p>Restricted branches: one branch when all look alike, else a choice (<code>as_choice</code>) or an offer.</p></div></div>
+<div class="item" id="fn-collapse_dual"><div class="ih"><span class="badge bfn">fn</span><span class="name">collapse_dual</span><span class="sig">collapse_dual(rb : <a href="#type-SessionLBranches">SessionLBranches</a>)</span><a class="anchor-link" href="#fn-collapse_dual" title="Link">#</a></div><div class="ib"><p>A choice and an offer over dual branches are dual.</p></div></div>
+<div class="item" id="fn-collapse_merged"><div class="ih"><span class="badge bfn">fn</span><span class="name">collapse_merged</span><span class="sig">collapse_merged(rb : <a href="#type-SessionLBranches">SessionLBranches</a>, as_choice : Bool)</span><a class="anchor-link" href="#fn-collapse_merged" title="Link">#</a></div><div class="ib"><p>Merged branches collapse to their first.</p></div></div>
+<div class="item" id="fn-compose_msg"><div class="ih"><span class="badge bfn">fn</span><span class="name">compose_msg</span><span class="sig">compose_msg(f : Int, t : Int, p : Int, k : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, picks : <a href="#type-SessionPicks">SessionPicks</a>)</span><a class="anchor-link" href="#fn-compose_msg" title="Link">#</a></div><div class="ib"><p>C4's message step: if what follows runs to the end, so does the message and what follows.</p></div></div>
+<div class="item" id="fn-compose_pick"><div class="ih"><span class="badge bfn">fn</span><span class="name">compose_pick</span><span class="sig">compose_pick(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, picks : <a href="#type-SessionPicks">SessionPicks</a>)</span><a class="anchor-link" href="#fn-compose_pick" title="Link">#</a></div><div class="ib"><p>C4's choice step: if what follows the chosen branch's first message runs to the end, so does the choice.</p></div></div>
+<div class="item" id="fn-composes"><div class="ih"><span class="badge bfn">fn</span><span class="name">composes</span><span class="sig">composes(g : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, picks : <a href="#type-SessionPicks">SessionPicks</a>) : Bool</span><a class="anchor-link" href="#fn-composes" title="Link">#</a></div><div class="ib"><p>C4's statement for one protocol: run on its own trace, the configuration of its projections takes every step and ends with every role done.</p></div></div>
+<div class="item" id="fn-config"><div class="ih"><span class="badge bfn">fn</span><span class="name">config</span><span class="sig">config(g : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool) : <a href="#type-SessionCfg">SessionCfg</a></span><a class="anchor-link" href="#fn-config" title="Link">#</a></div><div class="ib"><p>The configuration of <code>g</code>: every role of <code>rs</code> runs its projection.</p><div class="laws"><h4>Laws</h4><ul><li><code>all_done(config(GEnd, rs, multiparty))</code> <span class="law-by">(lemma <code>end_done</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-dest"><div class="ih"><span class="badge bfn">fn</span><span class="name">dest</span><span class="sig">dest(bs : <a href="#type-SessionGBranches">SessionGBranches</a>) : Int</span><a class="anchor-link" href="#fn-dest" title="Link">#</a></div><div class="ib"><p>The receiver of a choice's first branch head (-1 when there is none).</p></div></div>
+<div class="item" id="fn-directed"><div class="ih"><span class="badge bfn">fn</span><span class="name">directed</span><span class="sig">directed(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, c : Int, t : Int) : Bool</span><a class="anchor-link" href="#fn-directed" title="Link">#</a></div><div class="ib"><p>Every branch begins with a message from <code>c</code> to <code>t</code>.</p></div></div>
+<div class="item" id="fn-directed_branch"><div class="ih"><span class="badge bfn">fn</span><span class="name">directed_branch</span><span class="sig">directed_branch(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, c : Int, t : Int, lab : Int)</span><a class="anchor-link" href="#fn-directed_branch" title="Link">#</a></div><div class="ib"><p>In a directed choice, branch <code>lab</code> is the chooser's message to the receiver.</p></div></div>
+<div class="item" id="fn-dual"><div class="ih"><span class="badge bfn">fn</span><span class="name">dual</span><span class="sig">dual(l : <a href="#type-SessionLocal">SessionLocal</a>) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-dual" title="Link">#</a></div><div class="ib"><p>The other end of a conversation: every send a receive, every choice an offer.</p><div class="laws"><h4>Laws</h4><ul><li><code>dual(dual(l)) == l</code> <span class="law-by">(lemma <code>dual_dual</code>)</span> <span class="law-st law-ok">proved</span></li>
+<li><code>lhead(dual_bs(rb)) == dual(lhead(rb))</code> <span class="law-by">(lemma <code>lhead_dual</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-dual_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">dual_bs</span><span class="sig">dual_bs(bs : <a href="#type-SessionLBranches">SessionLBranches</a>) : <a href="#type-SessionLBranches">SessionLBranches</a></span><a class="anchor-link" href="#fn-dual_bs" title="Link">#</a></div><div class="ib"><p><code>dual</code> on every branch.</p><div class="laws"><h4>Laws</h4><ul><li><code>dual_bs(dual_bs(bs)) == bs</code> <span class="law-by">(lemma <code>dual_dual_bs</code>)</span> <span class="law-st law-ok">proved</span></li>
+<li><code>merged(dual_bs(rb)) == merged(rb)</code> <span class="law-by">(lemma <code>merged_dual</code>)</span> <span class="law-st law-ok">proved</span></li>
+<li><code>lhead(dual_bs(rb)) == dual(lhead(rb))</code> <span class="law-by">(lemma <code>lhead_dual</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-dual_dual"><div class="ih"><span class="badge bfn">fn</span><span class="name">dual_dual</span><span class="sig">dual_dual(l : <a href="#type-SessionLocal">SessionLocal</a>) : {Unit | dual(dual(l)) == l}</span><a class="anchor-link" href="#fn-dual_dual" title="Link">#</a></div><div class="ib"><p>C1. Duality is an involution.</p></div></div>
+<div class="item" id="fn-dual_dual_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">dual_dual_bs</span><span class="sig">dual_dual_bs(bs : <a href="#type-SessionLBranches">SessionLBranches</a>) : {Unit | dual_bs(dual_bs(bs)) == bs}</span><a class="anchor-link" href="#fn-dual_dual_bs" title="Link">#</a></div><div class="ib"><p>C1 on every branch.</p></div></div>
+<div class="item" id="fn-dual_loop_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">dual_loop_of</span><span class="sig">dual_loop_of(body : <a href="#type-SessionLocal">SessionLocal</a>, after : <a href="#type-SessionLocal">SessionLocal</a>)</span><a class="anchor-link" href="#fn-dual_loop_of" title="Link">#</a></div><div class="ib"><p>Duality commutes with leaving out a loop no one takes part in.</p></div></div>
+<div class="item" id="fn-end_done"><div class="ih"><span class="badge bfn">fn</span><span class="name">end_done</span><span class="sig">end_done(rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool) : {Unit | all_done(config(GEnd, rs, multiparty))}</span><a class="anchor-link" href="#fn-end_done" title="Link">#</a></div><div class="ib"><p>The configuration of a finished protocol has every role done.</p></div></div>
+<div class="item" id="fn-erase"><div class="ih"><span class="badge bfn">fn</span><span class="name">erase</span><span class="sig">erase(l : <a href="#type-SessionLocal">SessionLocal</a>) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-erase" title="Link">#</a></div><div class="ib"><p><code>l</code> with every peer replaced by 0: a two-party conversation, where the peer is implied.</p></div></div>
+<div class="item" id="fn-erase_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">erase_bs</span><span class="sig">erase_bs(bs : <a href="#type-SessionLBranches">SessionLBranches</a>) : <a href="#type-SessionLBranches">SessionLBranches</a></span><a class="anchor-link" href="#fn-erase_bs" title="Link">#</a></div><div class="ib"><p><code>erase</code> on every branch.</p></div></div>
+<div class="item" id="fn-erase_loop_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">erase_loop_of</span><span class="sig">erase_loop_of(body : <a href="#type-SessionLocal">SessionLocal</a>, after : <a href="#type-SessionLocal">SessionLocal</a>)</span><a class="anchor-link" href="#fn-erase_loop_of" title="Link">#</a></div><div class="ib"><p>Erasing peers commutes with leaving out a loop no one takes part in.</p></div></div>
+<div class="item" id="fn-find"><div class="ih"><span class="badge bfn">fn</span><span class="name">find</span><span class="sig">find(bs : <a href="#type-SessionLBranches">SessionLBranches</a>, lab : Int) : <a href="#type-SessionLStep">SessionLStep</a></span><a class="anchor-link" href="#fn-find" title="Link">#</a></div><div class="ib"><p>The first branch labelled <code>lab</code>.</p></div></div>
+<div class="item" id="fn-find_all_same"><div class="ih"><span class="badge bfn">fn</span><span class="name">find_all_same</span><span class="sig">find_all_same(rest : <a href="#type-SessionLBranches">SessionLBranches</a>, first : <a href="#type-SessionLocal">SessionLocal</a>, lab : Int)</span><a class="anchor-link" href="#fn-find_all_same" title="Link">#</a></div><div class="ib"><p>In branches that are all <code>first</code>, a lookup finds <code>first</code> or nothing.</p></div></div>
+<div class="item" id="fn-find_merged"><div class="ih"><span class="badge bfn">fn</span><span class="name">find_merged</span><span class="sig">find_merged(pbs : <a href="#type-SessionLBranches">SessionLBranches</a>, lab : Int)</span><a class="anchor-link" href="#fn-find_merged" title="Link">#</a></div><div class="ib"><p>In merged branches, a lookup finds the first branch or nothing.</p></div></div>
+<div class="item" id="fn-find_project"><div class="ih"><span class="badge bfn">fn</span><span class="name">find_project</span><span class="sig">find_project(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, r : Int, multiparty : Bool, lab : Int)</span><a class="anchor-link" href="#fn-find_project" title="Link">#</a></div><div class="ib"><p>Looking up a label in a projected choice gives the projection of that branch.</p></div></div>
+<div class="item" id="fn-finished"><div class="ih"><span class="badge bfn">fn</span><span class="name">finished</span><span class="sig">finished(r : <a href="#type-SessionCfgStep">SessionCfgStep</a>) : Bool</span><a class="anchor-link" href="#fn-finished" title="Link">#</a></div><div class="ib"><p>The run took every step and every role is done.</p></div></div>
+<div class="item" id="fn-first_act"><div class="ih"><span class="badge bfn">fn</span><span class="name">first_act</span><span class="sig">first_act(g : <a href="#type-SessionGlobal">SessionGlobal</a>, picks : <a href="#type-SessionPicks">SessionPicks</a>) : <a href="#type-SessionAct">SessionAct</a></span><a class="anchor-link" href="#fn-first_act" title="Link">#</a></div><div class="ib"><p>The first step of the protocol's trace (a no-op message when there is none).</p></div></div>
+<div class="item" id="fn-first_label"><div class="ih"><span class="badge bfn">fn</span><span class="name">first_label</span><span class="sig">first_label(bs : <a href="#type-SessionGBranches">SessionGBranches</a>) : Int</span><a class="anchor-link" href="#fn-first_label" title="Link">#</a></div><div class="ib"><p>The first branch's label.</p></div></div>
+<div class="item" id="fn-gbranch"><div class="ih"><span class="badge bfn">fn</span><span class="name">gbranch</span><span class="sig">gbranch(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, lab : Int) : <a href="#type-SessionGlobal">SessionGlobal</a></span><a class="anchor-link" href="#fn-gbranch" title="Link">#</a></div><div class="ib"><p>The first branch labelled <code>lab</code> (GEnd when there is none).</p></div></div>
+<div class="item" id="fn-gcont"><div class="ih"><span class="badge bfn">fn</span><span class="name">gcont</span><span class="sig">gcont(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, lab : Int) : <a href="#type-SessionGlobal">SessionGlobal</a></span><a class="anchor-link" href="#fn-gcont" title="Link">#</a></div><div class="ib"><p>What follows branch <code>lab</code>'s first message.</p></div></div>
+<div class="item" id="fn-gpay"><div class="ih"><span class="badge bfn">fn</span><span class="name">gpay</span><span class="sig">gpay(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, lab : Int) : Int</span><a class="anchor-link" href="#fn-gpay" title="Link">#</a></div><div class="ib"><p>The payload of branch <code>lab</code>'s first message.</p></div></div>
+<div class="item" id="fn-has"><div class="ih"><span class="badge bfn">fn</span><span class="name">has</span><span class="sig">has(rs : <a href="#type-SessionRoles">SessionRoles</a>, r : Int) : Bool</span><a class="anchor-link" href="#fn-has" title="Link">#</a></div><div class="ib"><p>Whether <code>r</code> is in the role list.</p></div></div>
+<div class="item" id="fn-has_label"><div class="ih"><span class="badge bfn">fn</span><span class="name">has_label</span><span class="sig">has_label(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, lab : Int) : Bool</span><a class="anchor-link" href="#fn-has_label" title="Link">#</a></div><div class="ib"><p>Whether some branch is labelled <code>lab</code>.</p><div class="laws"><h4>Laws</h4><ul><li><code>!nonempty(bs) || has_label(bs, pick(bs, picks))</code> <span class="law-by">(lemma <code>pick_has</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-heads_from"><div class="ih"><span class="badge bfn">fn</span><span class="name">heads_from</span><span class="sig">heads_from(bs : <a href="#type-SessionLBranches">SessionLBranches</a>, c : Int) : Bool</span><a class="anchor-link" href="#fn-heads_from" title="Link">#</a></div><div class="ib"><p>Every branch begins with a receive from <code>c</code>.</p></div></div>
+<div class="item" id="fn-in_fragment"><div class="ih"><span class="badge bfn">fn</span><span class="name">in_fragment</span><span class="sig">in_fragment(g : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool) : Bool</span><a class="anchor-link" href="#fn-in_fragment" title="Link">#</a></div><div class="ib"><p><code>g</code> is in the fragment C3-C5 cover, over the roles <code>rs</code>: loop-free, every message between two different roles of <code>rs</code>, every choice directed with its bystanders merged.</p></div></div>
+<div class="item" id="fn-in_fragment_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">in_fragment_bs</span><span class="sig">in_fragment_bs(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool) : Bool</span><a class="anchor-link" href="#fn-in_fragment_bs" title="Link">#</a></div><div class="ib"><p><code>in_fragment</code> on every branch.</p></div></div>
+<div class="item" id="fn-informed"><div class="ih"><span class="badge bfn">fn</span><span class="name">informed</span><span class="sig">informed(g : <a href="#type-SessionGlobal">SessionGlobal</a>, r : Int, multiparty : Bool) : Bool</span><a class="anchor-link" href="#fn-informed" title="Link">#</a></div><div class="ib"><p>Role <code>r</code> learns every choice it must: in a multiparty protocol, a role whose branches differ receives the chooser's message first (a two-party offer is told by the label).</p></div></div>
+<div class="item" id="fn-informed_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">informed_bs</span><span class="sig">informed_bs(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, r : Int, multiparty : Bool) : Bool</span><a class="anchor-link" href="#fn-informed_bs" title="Link">#</a></div><div class="ib"><p><code>informed</code> on every branch.</p></div></div>
+<div class="item" id="fn-lhead"><div class="ih"><span class="badge bfn">fn</span><span class="name">lhead</span><span class="sig">lhead(bs : <a href="#type-SessionLBranches">SessionLBranches</a>) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-lhead" title="Link">#</a></div><div class="ib"><p>The first branch's local type (LEnd when there is none).</p><div class="laws"><h4>Laws</h4><ul><li><code>lhead(dual_bs(rb)) == dual(lhead(rb))</code> <span class="law-by">(lemma <code>lhead_dual</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-lhead_dual"><div class="ih"><span class="badge bfn">fn</span><span class="name">lhead_dual</span><span class="sig">lhead_dual(rb : <a href="#type-SessionLBranches">SessionLBranches</a>) : {Unit | lhead(dual_bs(rb)) == dual(lhead(rb))}</span><a class="anchor-link" href="#fn-lhead_dual" title="Link">#</a></div><div class="ib"><p>The first branch of the dual is the dual of the first branch.</p></div></div>
+<div class="item" id="fn-loop_of"><div class="ih"><span class="badge bfn">fn</span><span class="name">loop_of</span><span class="sig">loop_of(body : <a href="#type-SessionLocal">SessionLocal</a>, after : <a href="#type-SessionLocal">SessionLocal</a>) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-loop_of" title="Link">#</a></div><div class="ib"><p>A loop's projection: no loop at all when the role takes no part in the body.</p></div></div>
+<div class="item" id="fn-merge"><div class="ih"><span class="badge bfn">fn</span><span class="name">merge</span><span class="sig">merge(bs : <a href="#type-SessionLBranches">SessionLBranches</a>, multiparty : Bool) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-merge" title="Link">#</a></div><div class="ib"><p>A role that does not choose sees the branches merged: in a multiparty protocol, one branch when every branch is the same (it never learns the label), else an offer.</p><div class="laws"><h4>Laws</h4><ul><li><code>merge(bs, false) == LOffer(bs)</code> <span class="law-by">(lemma <code>merge_binary</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-merge_binary"><div class="ih"><span class="badge bfn">fn</span><span class="name">merge_binary</span><span class="sig">merge_binary(bs : <a href="#type-SessionLBranches">SessionLBranches</a>) : {Unit | merge(bs, false) == LOffer(bs)}</span><a class="anchor-link" href="#fn-merge_binary" title="Link">#</a></div><div class="ib"><p>In a binary protocol a choice is always offered, never merged.</p></div></div>
+<div class="item" id="fn-merge_cases"><div class="ih"><span class="badge bfn">fn</span><span class="name">merge_cases</span><span class="sig">merge_cases(pbs : <a href="#type-SessionLBranches">SessionLBranches</a>, multiparty : Bool)</span><a class="anchor-link" href="#fn-merge_cases" title="Link">#</a></div><div class="ib"><p>How a non-chooser sees a choice: merged into its first branch, or an offer.</p></div></div>
+<div class="item" id="fn-merged"><div class="ih"><span class="badge bfn">fn</span><span class="name">merged</span><span class="sig">merged(pbs : <a href="#type-SessionLBranches">SessionLBranches</a>) : Bool</span><a class="anchor-link" href="#fn-merged" title="Link">#</a></div><div class="ib"><p>A non-empty branch list whose branches all project alike.</p><div class="laws"><h4>Laws</h4><ul><li><code>merged(dual_bs(rb)) == merged(rb)</code> <span class="law-by">(lemma <code>merged_dual</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-merged_dual"><div class="ih"><span class="badge bfn">fn</span><span class="name">merged_dual</span><span class="sig">merged_dual(rb : <a href="#type-SessionLBranches">SessionLBranches</a>) : {Unit | merged(dual_bs(rb)) == merged(rb)}</span><a class="anchor-link" href="#fn-merged_dual" title="Link">#</a></div><div class="ib"><p>Duality keeps a choice merged.</p></div></div>
+<div class="item" id="fn-merged_restrict"><div class="ih"><span class="badge bfn">fn</span><span class="name">merged_restrict</span><span class="sig">merged_restrict(pbs : <a href="#type-SessionLBranches">SessionLBranches</a>, x : Int)</span><a class="anchor-link" href="#fn-merged_restrict" title="Link">#</a></div><div class="ib"><p>Restricting keeps a choice merged, and commutes with taking its first branch.</p></div></div>
+<div class="item" id="fn-nonempty"><div class="ih"><span class="badge bfn">fn</span><span class="name">nonempty</span><span class="sig">nonempty(bs : <a href="#type-SessionGBranches">SessionGBranches</a>) : Bool</span><a class="anchor-link" href="#fn-nonempty" title="Link">#</a></div><div class="ib"><p>Whether a choice has any branch.</p><div class="laws"><h4>Laws</h4><ul><li><code>!nonempty(bs) || has_label(bs, pick(bs, picks))</code> <span class="law-by">(lemma <code>pick_has</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-offer_step"><div class="ih"><span class="badge bfn">fn</span><span class="name">offer_step</span><span class="sig">offer_step(l : <a href="#type-SessionLocal">SessionLocal</a>, lab : Int, c : Int, p : Int) : <a href="#type-SessionLStep">SessionLStep</a></span><a class="anchor-link" href="#fn-offer_step" title="Link">#</a></div><div class="ib"><p>Receive the chooser's first message of branch <code>lab</code>: from an offer, or from a merged receive.</p></div></div>
+<div class="item" id="fn-pairwise"><div class="ih"><span class="badge bfn">fn</span><span class="name">pairwise</span><span class="sig">pairwise(g : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, p : Int, q : {Int | _ != p})</span><a class="anchor-link" href="#fn-pairwise" title="Link">#</a></div><div class="ib"><p>C3. Pairwise duality (the fragment): for two roles of a protocol, what one does with the other is the dual of what the other does with it.</p></div></div>
+<div class="item" id="fn-pairwise_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">pairwise_bs</span><span class="sig">pairwise_bs(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, p : Int, q : {Int | _ != p})</span><a class="anchor-link" href="#fn-pairwise_bs" title="Link">#</a></div><div class="ib"><p>C3 on every branch.</p></div></div>
+<div class="item" id="fn-pairwise_choice"><div class="ih"><span class="badge bfn">fn</span><span class="name">pairwise_choice</span><span class="sig">pairwise_choice(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, p : Int, q : {Int | _ != p})</span><a class="anchor-link" href="#fn-pairwise_choice" title="Link">#</a></div><div class="ib"><p>C3 at a choice: with each branch's restrictions dual, the choice's are.</p></div></div>
+<div class="item" id="fn-pick"><div class="ih"><span class="badge bfn">fn</span><span class="name">pick</span><span class="sig">pick(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, picks : <a href="#type-SessionPicks">SessionPicks</a>) : Int</span><a class="anchor-link" href="#fn-pick" title="Link">#</a></div><div class="ib"><p>The label <code>picks</code> asks for, when there is such a branch; else the first.</p><div class="laws"><h4>Laws</h4><ul><li><code>!nonempty(bs) || has_label(bs, pick(bs, picks))</code> <span class="law-by">(lemma <code>pick_has</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-pick_has"><div class="ih"><span class="badge bfn">fn</span><span class="name">pick_has</span><span class="sig">pick_has(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, picks : <a href="#type-SessionPicks">SessionPicks</a>) : {Unit | !nonempty(bs) || has_label(bs, pick(bs, picks))}</span><a class="anchor-link" href="#fn-pick_has" title="Link">#</a></div><div class="ib"><p>The label a choice takes is one of its branches.</p></div></div>
+<div class="item" id="fn-present"><div class="ih"><span class="badge bfn">fn</span><span class="name">present</span><span class="sig">present(cfg : <a href="#type-SessionCfg">SessionCfg</a>, r : Int) : Bool</span><a class="anchor-link" href="#fn-present" title="Link">#</a></div><div class="ib"><p>Whether role <code>r</code> is in the configuration.</p></div></div>
+<div class="item" id="fn-present_config"><div class="ih"><span class="badge bfn">fn</span><span class="name">present_config</span><span class="sig">present_config(g : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, r : Int)</span><a class="anchor-link" href="#fn-present_config" title="Link">#</a></div><div class="ib"><p>A configuration has exactly the roles it was built from.</p></div></div>
+<div class="item" id="fn-progress"><div class="ih"><span class="badge bfn">fn</span><span class="name">progress</span><span class="sig">progress(g : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, picks : <a href="#type-SessionPicks">SessionPicks</a>)</span><a class="anchor-link" href="#fn-progress" title="Link">#</a></div><div class="ib"><p>C5. Deadlock freedom (synchronous, the fragment): while the protocol has a next step, the configuration of the projections can take it.</p></div></div>
+<div class="item" id="fn-project"><div class="ih"><span class="badge bfn">fn</span><span class="name">project</span><span class="sig">project(g : <a href="#type-SessionGlobal">SessionGlobal</a>, r : Int, multiparty : Bool) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-project" title="Link">#</a></div><div class="ib"><p>Role <code>r</code>'s projection of <code>g</code>.  <code>multiparty</code> is true for more than two roles: only then may a non-chooser merge a choice's branches.</p></div></div>
+<div class="item" id="fn-project_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">project_bs</span><span class="sig">project_bs(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, r : Int, multiparty : Bool) : <a href="#type-SessionLBranches">SessionLBranches</a></span><a class="anchor-link" href="#fn-project_bs" title="Link">#</a></div><div class="ib"><p><code>project</code> on every branch.</p></div></div>
+<div class="item" id="fn-project_dual"><div class="ih"><span class="badge bfn">fn</span><span class="name">project_dual</span><span class="sig">project_dual(a : Int, b : {Int | _ != a}, g : <a href="#type-SessionGlobal">SessionGlobal</a>)</span><a class="anchor-link" href="#fn-project_dual" title="Link">#</a></div><div class="ib"><p>C2. A binary protocol's two projections are dual (peers erased: each has one).</p></div></div>
+<div class="item" id="fn-project_dual_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">project_dual_bs</span><span class="sig">project_dual_bs(a : Int, b : {Int | _ != a}, bs : <a href="#type-SessionGBranches">SessionGBranches</a>)</span><a class="anchor-link" href="#fn-project_dual_bs" title="Link">#</a></div><div class="ib"><p>C2 on every branch.</p></div></div>
+<div class="item" id="fn-projections_compose"><div class="ih"><span class="badge bfn">fn</span><span class="name">projections_compose</span><span class="sig">projections_compose(g : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, picks : <a href="#type-SessionPicks">SessionPicks</a>)</span><a class="anchor-link" href="#fn-projections_compose" title="Link">#</a></div><div class="ib"><p>C4. The projections compose back to the protocol: run on the protocol's own trace, the configuration of every role's projection takes every step and ends with every role done.</p></div></div>
+<div class="item" id="fn-projections_compose_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">projections_compose_bs</span><span class="sig">projections_compose_bs(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, lab : Int, picks : <a href="#type-SessionPicks">SessionPicks</a>)</span><a class="anchor-link" href="#fn-projections_compose_bs" title="Link">#</a></div><div class="ib"><p>C4 for what follows branch <code>lab</code>'s first message.</p></div></div>
+<div class="item" id="fn-recv_step"><div class="ih"><span class="badge bfn">fn</span><span class="name">recv_step</span><span class="sig">recv_step(l : <a href="#type-SessionLocal">SessionLocal</a>, f : Int, p : Int) : <a href="#type-SessionLStep">SessionLStep</a></span><a class="anchor-link" href="#fn-recv_step" title="Link">#</a></div><div class="ib"><p>Receive <code>p</code> from <code>f</code>, if that is what <code>l</code> does next.</p></div></div>
+<div class="item" id="fn-rest_picks"><div class="ih"><span class="badge bfn">fn</span><span class="name">rest_picks</span><span class="sig">rest_picks(picks : <a href="#type-SessionPicks">SessionPicks</a>) : <a href="#type-SessionPicks">SessionPicks</a></span><a class="anchor-link" href="#fn-rest_picks" title="Link">#</a></div><div class="ib"><p>The rest of <code>picks</code> after one choice.</p></div></div>
+<div class="item" id="fn-restrict"><div class="ih"><span class="badge bfn">fn</span><span class="name">restrict</span><span class="sig">restrict(l : <a href="#type-SessionLocal">SessionLocal</a>, x : Int) : <a href="#type-SessionLocal">SessionLocal</a></span><a class="anchor-link" href="#fn-restrict" title="Link">#</a></div><div class="ib"><p>Role <code>x</code>'s part of <code>l</code>: the actions with peer <code>x</code>, peers erased (two parties, so the peer is implied), and a choice whose branches then all look alike is no choice.</p></div></div>
+<div class="item" id="fn-restrict_all_same"><div class="ih"><span class="badge bfn">fn</span><span class="name">restrict_all_same</span><span class="sig">restrict_all_same(rest : <a href="#type-SessionLBranches">SessionLBranches</a>, first : <a href="#type-SessionLocal">SessionLocal</a>, x : Int)</span><a class="anchor-link" href="#fn-restrict_all_same" title="Link">#</a></div><div class="ib"><p>Restricting keeps branches alike.</p></div></div>
+<div class="item" id="fn-restrict_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">restrict_bs</span><span class="sig">restrict_bs(bs : <a href="#type-SessionLBranches">SessionLBranches</a>, x : Int) : <a href="#type-SessionLBranches">SessionLBranches</a></span><a class="anchor-link" href="#fn-restrict_bs" title="Link">#</a></div><div class="ib"><p><code>restrict</code> on every branch.</p></div></div>
+<div class="item" id="fn-restrict_choice"><div class="ih"><span class="badge bfn">fn</span><span class="name">restrict_choice</span><span class="sig">restrict_choice(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, r : Int, x : Int, multiparty : Bool)</span><a class="anchor-link" href="#fn-restrict_choice" title="Link">#</a></div><div class="ib"><p>A role's part of a choice, restricted to a peer: its branches restricted and collapsed, a choice for the chooser and an offer for anyone else.</p></div></div>
+<div class="item" id="fn-role_ok"><div class="ih"><span class="badge bfn">fn</span><span class="name">role_ok</span><span class="sig">role_ok(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, r : Int, multiparty : Bool) : Bool</span><a class="anchor-link" href="#fn-role_ok" title="Link">#</a></div><div class="ib"><p>Role <code>r</code> takes part in choice <code>bs</code> by <code>c</code> correctly: it is the chooser, the receiver of every branch head, or its branches project alike.</p></div></div>
+<div class="item" id="fn-role_ok_has"><div class="ih"><span class="badge bfn">fn</span><span class="name">role_ok_has</span><span class="sig">role_ok_has(rs : <a href="#type-SessionRoles">SessionRoles</a>, c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, multiparty : Bool, r : Int)</span><a class="anchor-link" href="#fn-role_ok_has" title="Link">#</a></div><div class="ib"><p>A role of <code>rs</code> takes part in a choice of the fragment correctly.</p></div></div>
+<div class="item" id="fn-run"><div class="ih"><span class="badge bfn">fn</span><span class="name">run</span><span class="sig">run(cfg : <a href="#type-SessionCfg">SessionCfg</a>, acts : <a href="#type-SessionActs">SessionActs</a>) : <a href="#type-SessionCfgStep">SessionCfgStep</a></span><a class="anchor-link" href="#fn-run" title="Link">#</a></div><div class="ib"><p>Run the steps in order.</p></div></div>
+<div class="item" id="fn-same"><div class="ih"><span class="badge bfn">fn</span><span class="name">same</span><span class="sig">same(a : <a href="#type-SessionLocal">SessionLocal</a>, b : <a href="#type-SessionLocal">SessionLocal</a>) : Bool</span><a class="anchor-link" href="#fn-same" title="Link">#</a></div><div class="ib"><p>Structural equality of local types, written out so the logic can use it (a derived <code>Eq</code> on a recursive type is not yet reflected).</p><div class="laws"><h4>Laws</h4><ul><li><code>same(a, b) == (a == b)</code> <span class="law-by">(lemma <code>same_eq</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-same_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">same_bs</span><span class="sig">same_bs(xs : <a href="#type-SessionLBranches">SessionLBranches</a>, ys : <a href="#type-SessionLBranches">SessionLBranches</a>) : Bool</span><a class="anchor-link" href="#fn-same_bs" title="Link">#</a></div><div class="ib"><p><code>same</code> on branch lists.</p><div class="laws"><h4>Laws</h4><ul><li><code>same_bs(xs, ys) == (xs == ys)</code> <span class="law-by">(lemma <code>same_eq_bs</code>)</span> <span class="law-st law-ok">proved</span></li></ul></div></div></div>
+<div class="item" id="fn-same_eq"><div class="ih"><span class="badge bfn">fn</span><span class="name">same_eq</span><span class="sig">same_eq(a : <a href="#type-SessionLocal">SessionLocal</a>, b : <a href="#type-SessionLocal">SessionLocal</a>) : {Unit | same(a, b) == (a == b)}</span><a class="anchor-link" href="#fn-same_eq" title="Link">#</a></div><div class="ib"><p><code>same</code> is structural equality.</p></div></div>
+<div class="item" id="fn-same_eq_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">same_eq_bs</span><span class="sig">same_eq_bs(xs : <a href="#type-SessionLBranches">SessionLBranches</a>, ys : <a href="#type-SessionLBranches">SessionLBranches</a>) : {Unit | same_bs(xs, ys) == (xs == ys)}</span><a class="anchor-link" href="#fn-same_eq_bs" title="Link">#</a></div><div class="ib"><p><code>same_bs</code> is structural equality.</p></div></div>
+<div class="item" id="fn-send_step"><div class="ih"><span class="badge bfn">fn</span><span class="name">send_step</span><span class="sig">send_step(l : <a href="#type-SessionLocal">SessionLocal</a>, t : Int, p : Int) : <a href="#type-SessionLStep">SessionLStep</a></span><a class="anchor-link" href="#fn-send_step" title="Link">#</a></div><div class="ib"><p>Send <code>p</code> to <code>t</code>, if that is what <code>l</code> does next.</p></div></div>
+<div class="item" id="fn-step"><div class="ih"><span class="badge bfn">fn</span><span class="name">step</span><span class="sig">step(cfg : <a href="#type-SessionCfg">SessionCfg</a>, a : <a href="#type-SessionAct">SessionAct</a>) : <a href="#type-SessionCfgStep">SessionCfgStep</a></span><a class="anchor-link" href="#fn-step" title="Link">#</a></div><div class="ib"><p>One synchronous step: both parties are there and each can take its part.</p></div></div>
+<div class="item" id="fn-step_msg"><div class="ih"><span class="badge bfn">fn</span><span class="name">step_msg</span><span class="sig">step_msg(f : Int, t : {Int | _ != f}, p : Int, k : <a href="#type-SessionGlobal">SessionGlobal</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool)</span><a class="anchor-link" href="#fn-step_msg" title="Link">#</a></div><div class="ib"><p>Subject reduction for a message: its step takes the configuration of <code>GMsg(f, t, p, k)</code> to that of <code>k</code>.</p></div></div>
+<div class="item" id="fn-step_pick"><div class="ih"><span class="badge bfn">fn</span><span class="name">step_pick</span><span class="sig">step_pick(c : Int, bs : <a href="#type-SessionGBranches">SessionGBranches</a>, rs : <a href="#type-SessionRoles">SessionRoles</a>, multiparty : Bool, lab : Int)</span><a class="anchor-link" href="#fn-step_pick" title="Link">#</a></div><div class="ib"><p>Subject reduction for a choice: its step takes the configuration of the choice to that of what follows branch <code>lab</code>'s first message.</p></div></div>
+<div class="item" id="fn-told"><div class="ih"><span class="badge bfn">fn</span><span class="name">told</span><span class="sig">told(bs : <a href="#type-SessionLBranches">SessionLBranches</a>, c : Int) : Bool</span><a class="anchor-link" href="#fn-told" title="Link">#</a></div><div class="ib"><p>A role that does not choose is told the choice: its branches are all the same, or each begins with the chooser's message.</p></div></div>
+<div class="item" id="fn-trace"><div class="ih"><span class="badge bfn">fn</span><span class="name">trace</span><span class="sig">trace(g : <a href="#type-SessionGlobal">SessionGlobal</a>, picks : <a href="#type-SessionPicks">SessionPicks</a>) : <a href="#type-SessionActs">SessionActs</a></span><a class="anchor-link" href="#fn-trace" title="Link">#</a></div><div class="ib"><p>The steps of <code>g</code> when each choice takes the label <code>picks</code> lists in turn (loop-free).</p></div></div>
+<div class="item" id="fn-trace_bs"><div class="ih"><span class="badge bfn">fn</span><span class="name">trace_bs</span><span class="sig">trace_bs(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, c : Int, t : Int, lab : Int, picks : <a href="#type-SessionPicks">SessionPicks</a>) : <a href="#type-SessionActs">SessionActs</a></span><a class="anchor-link" href="#fn-trace_bs" title="Link">#</a></div><div class="ib"><p>The steps of branch <code>lab</code>: the chooser's first message carries the label.</p></div></div>
+<div class="item" id="fn-trace_bs_found"><div class="ih"><span class="badge bfn">fn</span><span class="name">trace_bs_found</span><span class="sig">trace_bs_found(bs : <a href="#type-SessionGBranches">SessionGBranches</a>, c : Int, t : Int, lab : Int, picks : <a href="#type-SessionPicks">SessionPicks</a>)</span><a class="anchor-link" href="#fn-trace_bs_found" title="Link">#</a></div><div class="ib"><p>A choice's trace: the chooser's first message, carrying the label, then the branch.</p></div></div></main></div><script>
+/* Theme toggle */
+/* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
+function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+function getTheme(){var t=lsGet('march-doc-theme');
+if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);
+var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');
+if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}
+function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';lsSet('march-doc-theme',t);applyTheme(t);}
+applyTheme(getTheme());
+
+/* Search overlay */
+function openSearch(){loadSI();document.getElementById('search-overlay').classList.add('open');
+var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}
+function closeSearch(){document.getElementById('search-overlay').classList.remove('open');
+var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}
+
+/* DOMContentLoaded */
+document.addEventListener('DOMContentLoaded',function(){
+
+/* Collapsible items */
+document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){
+if(e.target.classList.contains('anchor-link'))return;
+var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});
+
+/* Active sidebar link + auto-expand current module group */
+var path=window.location.pathname;
+document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});
+
+/* Sidebar group toggle (chevron click expands/collapses) */
+document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){
+if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});
+
+/* Copy buttons on pre blocks */
+document.querySelectorAll('.ib pre').forEach(function(pre){
+var wrap=document.createElement('div');wrap.className='pre-wrap';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);
+var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';
+btn.addEventListener('click',function(e){e.stopPropagation();
+var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;
+navigator.clipboard.writeText(text).then(function(){
+btn.textContent='Copied!';btn.classList.add('copied');
+setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);
+}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});
+wrap.appendChild(btn);});
+
+/* Open anchor from URL hash */
+if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}
+
+/* Cmd+K search shortcut */
+document.addEventListener('keydown',function(e){
+if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}
+if(e.key==='Escape')closeSearch();});
+
+});
+
+/* Cross-module search: loads search-index.json, fuzzy matches, renders results */
+/* The index covers every module (~400 KB for the stdlib), so it is fetched the
+   first time search is opened (or the search button is hovered), not with every
+   page. A query typed before it arrives is re-run when it lands. */
+var SI=null,SIloading=false;
+function loadSI(){if(SI||SIloading)return;SIloading=true;
+fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;
+var q=document.getElementById('search-input');if(q&&q.value.trim())q.dispatchEvent(new Event('input'));})
+.catch(function(){SIloading=false;});}
+var STR=document.getElementById('search-trigger');if(STR)STR.addEventListener('mouseenter',loadSI);
+
+/* Levenshtein distance */
+function ld(a,b){
+if(!a.length)return b.length;if(!b.length)return a.length;
+var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];
+for(var j=0;j<=a.length;j++)m[0][j]=j;
+for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){
+m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);
+}return m[b.length][a.length];}
+
+/* Fuzzy scoring: returns 0 if no match */
+function fs(q,t){
+if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();
+/* Exact match */
+if(tl===ql)return 10000;
+/* Starts with */
+if(tl.indexOf(ql)===0)return 5000-tl.length;
+/* Substring */
+var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;
+/* Word boundary match (camelCase, snake_case) */
+var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');
+for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}
+/* Levenshtein for short queries */
+if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));
+if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}
+return 0;}
+
+/* Score an entry against a query */
+function scoreEntry(q,e){
+return Math.max(
+fs(q,e.n)*4, /* name match (highest weight) */
+fs(q,e.s)*2, /* signature match */
+fs(q,e.m)*2, /* module name match */
+fs(q,e.d) /* doc string match (lowest weight) */
+);}
+
+/* Render search results */
+function renderSR(results){
+var el=document.getElementById('sr');if(!el)return;
+if(!results.length){el.className='';el.innerHTML='';return;}
+el.className='open';var h='';
+for(var i=0;i<results.length;i++){
+var e=results[i].entry,k=e.k,href=e.m+'.html';
+if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);
+else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);
+else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);
+var kc='sr-'+k;
+h+='<a class="sr-item" href="'+href+'">'+
+'<span class="sr-kind '+kc+'">'+k+'</span>'+
+'<span class="sr-name">'+esc(e.n)+'</span>'+
+'<span class="sr-mod">'+esc(e.m)+'</span></a>';
+if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';
+if(i<results.length-1)h+='<div class="sr-sep"></div>';
+}el.innerHTML=h;}
+
+/* HTML escape helper */
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+/* Search handler — uses the modal search input */
+var si=document.getElementById('search-input');
+if(si)si.addEventListener('input',function(){
+var q=this.value.trim();
+if(!q||!SI){renderSR([]);return;}
+var results=[];
+for(var i=0;i<SI.length;i++){
+var sc=scoreEntry(q,SI[i]);
+if(sc>0)results.push({entry:SI[i],score:sc});
+}
+results.sort(function(a,b){return b.score-a.score;});
+renderSR(results.slice(0,25));
+});
+</script></body></html>

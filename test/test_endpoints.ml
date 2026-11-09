@@ -599,7 +599,7 @@ let entry_alias mods_src m =
   | Some decls ->
     List.find_map
       (function
-        | DType (_, name, [], TDAlias (TyCon (rhs, [])), _) when name.txt = "Entry" -> Some rhs.txt
+        | DType (_, name, [], TDAlias (TyCon (rhs, []), _), _) when name.txt = "Entry" -> Some rhs.txt
         | _ -> None)
       decls
 
@@ -659,7 +659,7 @@ let with_aliases aliases body =
   let m = parse_and_desugar ("mod Main do\n" ^ body ^ "\nend\n") in
   let alias (name, rhs) =
     DType (Public, { txt = name; span = dummy_span }, [],
-           TDAlias (TyCon ({ txt = "Main." ^ rhs; span = dummy_span }, [])), dummy_span)
+           TDAlias (TyCon ({ txt = "Main." ^ rhs; span = dummy_span }, []), []), dummy_span)
   in
   let m = { m with mod_decls = List.map alias aliases @ m.mod_decls } in
   let (errors, _) = March_typecheck.Typecheck.check_module m in
@@ -1768,6 +1768,58 @@ let ungranted_body_type_unchanged =
          ("String -> " ^ session ^ " -> ()") (param_ty src "Stream_Run" "offer_hosted_Cons" "start");
        Alcotest.(check int) "no narrowing" 0 (narrow_count src "Stream_Run" "run_Cons"))
 
+(* ── the cluster fronts take what the runner needs, not `Cap(IO)` ─────── *)
+
+(** The parameter names of [f] in generated module [m], in order. *)
+let param_names src m f : string list =
+  let mod_ = parse_and_desugar src in
+  let decls =
+    List.find_map (function DMod (nm, _, ds, _) when nm.txt = m -> Some ds | _ -> None) mod_.mod_decls
+    |> Option.get
+  in
+  let fd = List.find_map (function DFn (fd, _) when fd.fn_name.txt = f -> Some fd | _ -> None) decls |> Option.get in
+  List.filter_map (function FPNamed pr -> Some pr.param_name.txt | _ -> None) (List.hd fd.fn_clauses).fc_params
+
+(* A front over a running cluster node is given the node, and the node can
+   attach a session itself (`ClusterNode.with_session`), so the front has no
+   use for the root capability.  The role's grant is then the CALLER's to
+   hand over: one parameter per `needs` path, after the node, passed on to the
+   body unchanged.  A front that took `Cap(IO)` and narrowed it made every
+   program that plays a role hold the root capability. *)
+let cluster_fronts_take_no_root =
+  Alcotest.test_case "a cluster front takes the node and one Cap per granted path, never Cap(IO)" `Quick
+    (fun () ->
+       let src = wrap stream_granted in
+       let names f = param_names src "Stream_Run" f in
+       let g = [ "io_console"; "io_filewrite" ] in
+       let check f expected = Alcotest.(check (list string)) f expected (names f) in
+       check "cluster_Cons" ([ "node" ] @ g @ [ "session"; "body" ]);
+       check "offer_Cons" ([ "node" ] @ g @ [ "capacity"; "body" ]);
+       check "offer_work_Cons" ([ "node" ] @ g @ [ "capacity"; "body" ]);
+       check "__offer_work_start_Cons" ([ "node" ] @ g @ [ "session"; "abandoned"; "body" ]);
+       check "initiate_Cons" ([ "node" ] @ g @ [ "body" ]);
+       check "offer_hosted_Cons" ([ "node" ] @ g @ [ "capacity"; "host"; "start"; "deliver"; "cancel" ]);
+       check "offer_work_hosted_Cons" ([ "node" ] @ g @ [ "capacity"; "host"; "start"; "deliver"; "cancel" ]);
+       check "__offer_work_hosted_start_Cons"
+         ([ "node" ] @ g @ [ "session"; "abandoned"; "host"; "start"; "deliver"; "cancel" ]);
+       check "cluster_hosted_Cons" ([ "node" ] @ g @ [ "session"; "host"; "start"; "deliver"; "cancel" ]);
+       check "offer_Prod" [ "node"; "io_console"; "capacity"; "body" ];
+       Alcotest.(check string) "the grant parameter's type" "Cap(IO.FileWrite)"
+         (param_ty src "Stream_Run" "offer_Cons" "io_filewrite");
+       (* nothing to narrow from: the caps arrive as given *)
+       List.iter (fun f -> Alcotest.(check int) (f ^ " narrows nothing") 0 (narrow_count src "Stream_Run" f))
+         [ "cluster_Cons"; "offer_Cons"; "offer_work_Cons"; "__offer_work_start_Cons"; "initiate_Cons";
+           "offer_hosted_Cons"; "offer_work_hosted_Cons"; "__offer_work_hosted_start_Cons"; "cluster_hosted_Cons" ];
+       (* a role with no grant: the node and the front's own arguments *)
+       let plain = wrap stream in
+       Alcotest.(check (list string)) "ungranted offer" [ "node"; "capacity"; "body" ]
+         (param_names plain "Stream_Run" "offer_Cons");
+       Alcotest.(check (list string)) "ungranted initiate" [ "node"; "body" ]
+         (param_names plain "Stream_Run" "initiate_Cons");
+       (* the runner with connections of its own still starts from the root *)
+       Alcotest.(check (list string)) "run_Cons" [ "io"; "node_id"; "secret"; "addrs"; "body" ]
+         (names "run_Cons"))
+
 (* Against the real stdlib (`SessionNode` is not in the thin one): a body
    written with the grant typechecks at the runner, one written without it
    does not, and the error names the cap the body did not take. *)
@@ -1877,6 +1929,41 @@ let cli_role_grant_violation =
          (contains_text out "The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`"
           && contains_text out "the body calls `cons` here"
           && contains_text out "`cons` calls `save` here"))
+
+(* The same walk from the fronts over a cluster node.  The hosted ones pin
+   where the callbacks sit now that the grant's parameters come before them:
+   a walk that looked one place early would take `host` for `start` and find
+   nothing.  `offer_work_` and `offer_work_hosted_`, which only a topology
+   app's generated `main` calls, are not walked:
+   specs/todos/2026-11-05-topology-role-grant-unenforced.md. *)
+let cli_role_grant_cluster_fronts =
+  Alcotest.test_case "CLI: the grant is checked at the cluster fronts, hosted ones included" `Slow
+    (fun () ->
+       let with_call call =
+         let src = replace_all ~needle:"  needs Session.Live\n" ~by:"  needs Session.Live\n  needs ClusterNode.Live\n  needs IO.Spawn\n" violation_src in
+         let src = replace_all ~needle:"  fn main(c : Cap(IO)) do\n"
+             ~by:"  actor Host do\n    state { n : Int }\n    init { n: 0 }\n    on Ping() do state end\n  end\n  fn main(c : Cap(IO)) do\n    let node = ClusterNode.attach(c, ClusterNode.ops_stub(\"n\"))\n    let h = spawn(Host)\n" src in
+         replace_all
+           ~needle:"Stream_Run.run_Cons(c, \"n\", \"s\", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))"
+           ~by:call src
+       in
+       let body = "fn (s, con, st) -> cons(s, con, st)" in
+       let hosted = "h, fn (_sid, _s, _con) -> save(1), fn (_sid, _s, _f, _m, _e) -> (), fn (_sid, _s, _r, _w, _e) -> ()" in
+       List.iter
+         (fun (front, call) ->
+            let rc, out = check_cli (with_call call) in
+            Alcotest.(check int) (front ^ ": exit code (output: " ^ out ^ ")") 1 rc;
+            Alcotest.(check bool) (front ^ ": names the grant (output: " ^ out ^ ")") true
+              (contains_text out "the role is granted only `Cap(IO.Console)`");
+            (* widening the grant here is three edits, not two: the call
+               takes the grant as arguments, and the help says so *)
+            Alcotest.(check bool) (front ^ ": the help names the call's new argument (output: " ^ out ^ ")") true
+              (contains_text out "so it gains an argument: a `Cap(IO.FileWrite)`"))
+         [ ("cluster_", "Stream_Run.cluster_Cons(node, cap_narrow(c), \"sid\", " ^ body ^ ")");
+           ("offer_", "Stream_Run.offer_Cons(node, cap_narrow(c), 4, " ^ body ^ ")");
+           ("initiate_", "Stream_Run.initiate_Cons(node, cap_narrow(c), " ^ body ^ ")");
+           ("offer_hosted_", "Stream_Run.offer_hosted_Cons(node, cap_narrow(c), 4, " ^ hosted ^ ")");
+           ("cluster_hosted_", "Stream_Run.cluster_hosted_Cons(node, cap_narrow(c), \"sid\", " ^ hosted ^ ")") ])
 
 let cli_role_grant_named_body =
   Alcotest.test_case "CLI: a named function passed as the body is walked too" `Quick (fun () ->
@@ -2458,6 +2545,205 @@ let two_step_branch_skip = bad "skipping a choose branch's second step is a type
   end
 |}))
 
+(* Unlabelled messages shared by alternatives must use the same wire tag,
+   while successive messages and explicitly labelled alternatives stay distinct. *)
+let shared_bystander = {|
+  @[endpoints]
+  protocol Three do
+    choose by A:
+      go -> A -> B : Int
+            B -> C : Int
+      halt -> A -> B : String
+              B -> C : Int
+    end
+  end
+|}
+
+let shared_bystander_ok = ok "identical unlabelled bystander receives merge"
+  (wrap (shared_bystander ^ {|
+  pfn b(s : Cap(Session.Live), st : Three_B.S_offer_go_halt) : Three_B.Yield do
+    Three_B.offer_go_halt(s, st,
+      fn (_n, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 1)),
+      fn (_text, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 2)))
+  end
+  pfn c(s : Cap(Session.Live), st : Three_C.S_recv_Msg_B_C_1) : Three_C.Yield do
+    Three_C.recv_Msg_B_C_1(s, st, fn (_n, next) -> Three_C.close(s, next))
+  end
+|}))
+
+let shared_bystander_shape =
+  Alcotest.test_case "a merged bystander receives from the sender without a fabricated choice" `Quick
+    (fun () ->
+       let mods = generated (wrap shared_bystander) in
+       Alcotest.(check bool) "receive from B" true (has_fn mods "Three_C" "recv_Msg_B_C_1");
+       Alcotest.(check bool) "no offer from A" false (has_fn mods "Three_C" "offer_go_halt");
+       Alcotest.(check bool) "B sends the same tag on both paths" false
+         (has_fn mods "Three_B" "send_Msg_B_C_2"))
+
+let shared_bystander_tags =
+  Alcotest.test_case "choice tags preserve payloads, labels, sequential steps and nested sharing" `Quick
+    (fun () ->
+       let module E = March_desugar.Desugar_endpoints in
+       let n txt = { txt; span = dummy_span } in
+       let int = TyCon (n "Int", []) and str = TyCon (n "String", []) in
+       let msg ?label t = ProtoMsg (n "B", n "C", t, Option.map n label) in
+       let choice branches = ProtoChoice (n "A", List.map (fun (label, tail) ->
+           (n label, ProtoMsg (n "A", n "B", int, None) :: tail)) branches) in
+       let steps = [choice [
+           "go", [msg int; msg int; msg ~label:"first" int; msg str];
+           "halt", [msg int; msg int; msg ~label:"second" int; msg int]]] in
+       let annotate steps =
+         match E.annotate (March_errors.Errors.create ()) ~proto:"Three" ~span:dummy_span steps with
+         | Some xs -> xs | None -> Alcotest.fail "annotation failed" in
+       let rec tags = function
+         | E.AMsg ("B", "C", _, ctor) -> [ctor]
+         | E.AChoice (_, arms) -> List.concat_map (fun (_, xs) -> List.concat_map tags xs) arms
+         | _ -> [] in
+       (match annotate steps with
+        | [E.AChoice (_, [(_, a); (_, b)])] ->
+          let a = List.concat_map tags a and b = List.concat_map tags b in
+          Alcotest.(check (list string)) "different tails keep their tags, labels and payloads distinct"
+            ["Msg_B_C_4"; "Msg_B_C_5"; "Second"; "Msg_B_C_6"] b;
+          Alcotest.(check (list string)) "first branch unchanged"
+            ["Msg_B_C_1"; "Msg_B_C_2"; "First"; "Msg_B_C_3"] a
+        | _ -> Alcotest.fail "expected two branches");
+       (match annotate [choice ["go", [msg int; msg int]; "halt", [msg int; msg int]]] with
+        | [E.AChoice (_, [(_, a); (_, b)])] ->
+          Alcotest.(check (list string)) "successive messages stay distinct"
+            ["Msg_B_C_1"; "Msg_B_C_2"] (List.concat_map tags a);
+          Alcotest.(check (list string)) "equivalent sequential tails share their tags"
+            (List.concat_map tags a) (List.concat_map tags b)
+        | _ -> Alcotest.fail "expected sequential branches");
+       let nested = choice ["inner_go", [msg int]; "inner_halt", [msg int]] in
+       match annotate [choice ["outer_go", [nested]; "outer_halt", [nested]]] with
+       | [E.AChoice (_, [(_, a); (_, b)])] ->
+         Alcotest.(check (list string)) "nested alternatives keep a shared tag"
+           ["Msg_B_C_1"; "Msg_B_C_1"] (List.concat_map tags a);
+         Alcotest.(check (list string)) "outer alternatives share nested tags"
+           (List.concat_map tags a) (List.concat_map tags b)
+       | _ -> Alcotest.fail "expected nested branches")
+
+let choice_distinct_continuations = ok "equal payloads with different continuations retain separate APIs" (wrap {|
+  @[endpoints]
+  protocol Different do
+    choose by A:
+      go -> A -> B : Int
+            A -> B : Int
+            A -> B : String
+      halt -> A -> B : Int
+              A -> B : Int
+              A -> B : Bool
+    end
+  end
+|})
+
+let choice_reserved_head_labels =
+  Alcotest.test_case "Msg-prefixed choice labels retain distinct wire constructors" `Quick
+    (fun () ->
+       let src = wrap {|
+         @[endpoints]
+         protocol Labels do
+           choose by A:
+             msg_yes -> A -> B : Int
+             msg_no -> A -> B : Int
+           end
+         end
+       |} in
+       Alcotest.(check (option (list string))) "branch tags"
+         (Some ["Msg_yes"; "Msg_no"]) (variant_ctors src "Labels_Msg" "Labels_Message");
+       Alcotest.(check (list string)) "generated code typechecks" []
+         (error_messages (typecheck_with_stdlib src)))
+
+let choice_atomic_boundaries =
+  Alcotest.test_case "atomic and ordinary loop alternatives retain separate drain behavior" `Quick
+    (fun () ->
+       let src = wrap {|
+         @[endpoints]
+         protocol Boundaries do
+           choose by A:
+             atomic -> A -> B : Int
+                       loop atomic do
+                         A -> B : Int
+                       end
+             ordinary -> A -> B : Int
+                         loop do
+                           A -> B : Int
+                         end
+           end
+         end
+       |} in
+       let mods = generated src in
+       Alcotest.(check bool) "atomic transition" true (has_fn mods "Boundaries_B" "recv_Msg_A_B_1");
+       Alcotest.(check bool) "ordinary transition stays distinct" true
+         (has_fn mods "Boundaries_B" "recv_Msg_A_B_2");
+       Alcotest.(check int) "atomic receive is not a drain boundary" 0
+         (count_calls src "Boundaries_B" "recv_Msg_A_B_1" "Session.suspend_at_boundary");
+       Alcotest.(check int) "ordinary receive is a drain boundary" 1
+         (count_calls src "Boundaries_B" "recv_Msg_A_B_2" "Session.suspend_at_boundary");
+       Alcotest.(check (list string)) "generated code typechecks" []
+         (error_messages (typecheck_with_stdlib src)))
+
+let shared_bystander_native =
+  Alcotest.test_case "both shared bystander paths deliver on interpreter and native backends" `Slow
+    (fun () ->
+       let src = {|mod SharedChoice do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs Session.Live
+  @[endpoints]
+  protocol Three do
+    choose by A:
+      go -> A -> B : Int
+            B -> C : Int
+      halt -> A -> B : String
+              B -> C : Int
+    end
+  end
+
+  pfn b(s : Cap(Session.Live), st : Three_B.S_offer_go_halt) : Three_B.Yield do
+    Three_B.offer_go_halt(s, st,
+      fn (_n, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 11)),
+      fn (_text, next) -> Three_B.close(s, Three_B.send_Msg_B_C_1(s, next, 22)))
+  end
+  pfn c(s : Cap(Session.Live), st : Three_C.S_recv_Msg_B_C_1) : Three_C.Yield do
+    Three_C.recv_Msg_B_C_1(s, st, fn (n, next) ->
+      print_line(int_to_string(n))
+      Three_C.close(s, next))
+  end
+  fn main(io : Cap(IO)) do
+    let t = Session.in_process()
+    let s = Session.attach(io, t.ops)
+    let _ = c(s, Three_C.register(s, 0))
+    let _ = b(s, Three_B.register(s, 0))
+    let _ = Three_A.close(s, Three_A.choose_go(s, Three_A.register(s, 0), 1))
+    t.drain(())
+    let u = Session.in_process()
+    let q = Session.attach(io, u.ops)
+    let _ = c(q, Three_C.register(q, 0))
+    let _ = b(q, Three_B.register(q, 0))
+    let _ = Three_A.close(q, Three_A.choose_halt(q, Three_A.register(q, 0), "halt"))
+    u.drain(())
+  end
+end
+|} in
+       let expected = "11\n22\n" in
+       let rc, out = check_cli ~flags:"" src in
+       Alcotest.(check int) ("interpreter exit: " ^ out) 0 rc;
+       Alcotest.(check string) "interpreter delivers both branches" expected out;
+       let binary = Filename.temp_file "endpoints_shared" ".exe" in
+       let output = Filename.temp_file "endpoints_shared" ".out" in
+       Fun.protect ~finally:(fun () ->
+           List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [binary; output])
+         (fun () ->
+            let rc, out = check_cli ~flags:("--compile -o " ^ Filename.quote binary) src in
+            Alcotest.(check int) ("compile exit: " ^ out) 0 rc;
+            let rc = Sys.command (Printf.sprintf "%s > %s 2>&1"
+                (Filename.quote binary) (Filename.quote output)) in
+            let out = In_channel.with_open_bin output In_channel.input_all in
+            Alcotest.(check int) ("native exit: " ^ out) 0 rc;
+            Alcotest.(check string) "native delivers both branches" expected out))
+
 (* ── protocol evolution: the compatibility table (build step 9) ────────── *)
 
 (* Plan 6.4 / II.5.  Rule one: the old and new annotated step lists are
@@ -2697,18 +2983,47 @@ let d25_quiet =
        Alcotest.(check int) "labelled" 0 (List.length (d25_warnings ~topology:[ "Tri" ] tri_labelled_v1));
        Alcotest.(check int) "qualified name matches" 1 (List.length (d25_warnings ~topology:[ "Main.Tri" ] tri_v1)))
 
+(* Labels belong to the protocol, not the generated handler namespace. *)
+let handler_label_collisions = ok "cancel and drain labels do not shadow failure handlers" (wrap {|
+  @[endpoints]
+  protocol Labels do
+    choose by A:
+      cancel -> A -> B : Int
+      drain -> A -> B : Bool
+      branch_cancel -> A -> B : String
+    end
+  end
+  pfn receive_cancel(s : Cap(Session.Live), st : Labels_B.S_offer_cancel_drain_branch_cancel) : Labels_B.Yield do
+    Labels_B.offer_cancel_drain_branch_cancel_or(s, st,
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_role, _cause, token) -> Labels_B.cancelled(s, token))
+  end
+  pfn receive_drain(s : Cap(Session.Live), st : Labels_B.S_offer_cancel_drain_branch_cancel) : Labels_B.Yield do
+    Labels_B.offer_cancel_drain_branch_cancel_or_drain(s, st,
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_v, next) -> Labels_B.close(s, next),
+      fn (_role, _messages, token) -> Labels_B.drained(s, token))
+  end
+|})
+
 let tests =
-  [ stream_shape;
+  [ handler_label_collisions; stream_shape;
     two_step_branch_shape; two_step_branch_ok; two_step_branch_skip;
+    shared_bystander_ok; shared_bystander_shape; shared_bystander_tags;
+    choice_distinct_continuations; choice_reserved_head_labels; choice_atomic_boundaries;
+    shared_bystander_native;
     peers_shape; granted_peers_take_the_caps; chaos_user_payload_generator; peers_typecheck;
     cli_script_mismatch_panics; cli_script_runs_out_panics;
-    cli_role_grant_violation; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
+    cli_role_grant_violation; cli_role_grant_cluster_fronts; cli_role_grant_named_body; cli_role_grant_widened_ok; cli_role_grant_wider_than_main;
     cli_role_grant_hosted_actor; cli_dump_role_authority;
     cli_role_grant_let_bound_body; cli_role_grant_parameter_body; cli_role_grant_aliased_fn;
     cli_role_grant_local_closure; cli_role_grant_call_built_body; cli_role_grant_direct_builtin;
     cli_role_grant_unresolvable_body_warns; cli_role_grant_wrong_cap_type;
     cli_dump_role_authority_local_closures; cli_role_needs_non_io; cli_grants_not_in_program_fingerprint;
-    granted_body_type; ungranted_body_type_unchanged; cli_granted_body_ok; cli_granted_body_missing_caps;
+    granted_body_type; ungranted_body_type_unchanged; cluster_fronts_take_no_root; cli_granted_body_ok; cli_granted_body_missing_caps;
     grants_not_in_fingerprint; role_needs_ok; role_identifier_ok; role_needs_unknown_cap;
     role_needs_unknown_role; role_needs_twice; role_needs_after_message; role_needs_nested; msg_type_named_after_protocol; two_protocols_distinct_msg_types; two_protocols_ok;
     cli_pid_one_arg; cli_no_unreachable_catch_all; cli_derive_eq_single_ctor; relay_shape; no_attr_no_generation; bad_branch_head; same_label_two_payloads;

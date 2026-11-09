@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_fn_bounds test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple)
+ (modules test_compiler test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_host_scope test_cap_net_scope test_cap_fn_bounds test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_format march_ctxesc march_modules march_resolver march_forge march_lint march_jit yojson alcotest str unix threads.posix))
 
 (library
@@ -838,6 +838,48 @@
  (deps    (file test_actor_registry_runner))
  (action  (run ./test_actor_registry_runner)))
 
+; ── march_actor_caps hands out an owned reference ─────────────────────────
+; The dispatch of an actor with spawn-captured capabilities (--test builds)
+; releases the record it reads in every capability-free arm, so each read
+; must be a new reference. Returning the meta's own freed the record on the
+; second message. Fake actor, no scheduler; same link set as
+; test_actor_registry_runner above.
+(rule
+ (targets test_actor_caps_runner)
+ (deps    test_actor_caps.c
+          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
+          ../runtime/march_heap.c ../runtime/march_heap.h
+          ../runtime/march_gc.c ../runtime/march_gc.h
+          ../runtime/march_message.c ../runtime/march_message.h
+          ../runtime/march_deque.h
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+          ../runtime/march_remote_registry.c
+          ; Every header these .c files include must be a declared dep: dune's
+          ; CI sandbox copies ONLY declared deps into the build dir, so an
+          ; undeclared header compiles fine locally (where the source tree is
+          ; visible) and fails in CI with "file not found". Globbing the whole
+          ; runtime header set is what keeps that from recurring per-header.
+          (glob_files ../runtime/*.h))
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_actor_caps.c ../runtime/march_runtime.c
+               ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_actor_caps_runner))
+ (action  (run ./test_actor_caps_runner)))
+
 
 ; ── HCR capability-lattice C table unit test ──────────────────────────────
 ; Verifies runtime/march_cap_lattice.{h,c} (generated from
@@ -1383,17 +1425,25 @@
  (modules test_caps)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
+;; test_refinecheck runs as ONE alcotest process unless MARCH_TEST_PROCS=N
+;; (N > 1) is set, as CI's refinecheck shard and scripts/run-tests.sh do: then
+;; its groups run in N child processes (Test_helpers.run_groups). Its
+;; compiler-driving cases start each fresh project with the stdlib's own
+;; verdicts already cached (Test_helpers.seed_vc_cache); the test program's
+;; obligations are still solved cold. MARCH_TEST_VC_SEED=0 turns that off.
 (test
  (name test_refinecheck)
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
- (modules test_refinecheck test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage)
+ (modules test_refinecheck test_refine_quantifier test_refine_ghost test_refine_alias test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars test_refine_pred_names test_refine_proof_hints test_refine_nested_measure)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
  ; the syntactic ban in the typechecker AND the proof-based pass here.
- (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler march_test_helpers march_refactor alcotest str unix)
+ ; march_forge: the `hcr-variance` group reads the .schemas.json a build
+ ; writes with the deploy gate's own parser (Schema_diff).
+ (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler march_test_helpers march_refactor march_forge alcotest str unix)
  ; The `audit-flag` group shells out to the REAL compiled driver: the
  ; --refine-audit flag, its printer, and the early-CAS bypass it needs all
  ; live in bin/main.ml, which this test binary does not (and should not)
@@ -1407,7 +1457,9 @@
  ; reason (and this test group always runs relative to the repo root, not
  ; the sandbox, per its own require_repo_root check).
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)
-   (source_tree ../test/native) (source_tree refine_audit) (source_tree refine/reflect)))
+   (source_tree ../test/native) (source_tree refine_audit) (source_tree refine/reflect) (source_tree refine/quantifiers)
+   (source_tree refine/aliases)
+   (source_tree refine/ghost)))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;
@@ -2018,6 +2070,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/tuple_ord.expected native_tuple_ord.out)))
+
+; `<`/`<=`/`>`/`>=` on an ADT, record, newtype or unboxed ADT with an Ord
+; impl (derived or hand-written), and in generic `when Ord(a)` code, mean
+; `compare(a, b) <op> 0` (issue #1172): Mono routes them through the prelude's
+; `__ord_lt` & co. Before, native compared heap cells via march_poly_compare
+; (always 0), a newtype by raw payload, an unboxed ADT failed the LLVM build,
+; and JS used the JS operator on objects. Same fixture on both backends.
+(rule
+ (targets native_adt_ord_operators native_adt_ord_operators.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/adt_ord_operators.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_adt_ord_operators native/adt_ord_operators.march)
+   (with-stdout-to native_adt_ord_operators.out (system "./native_adt_ord_operators")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/adt_ord_operators.expected native_adt_ord_operators.out)))
+
+(rule
+ (targets js_adt_ord_operators.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/adt_ord_operators.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_adt_ord_operators.mjs native/adt_ord_operators.march)))
+
+(rule
+ (targets js_adt_ord_operators.out)
+ (deps js_adt_ord_operators.mjs march_runtime.mjs)
+ (action (with-stdout-to js_adt_ord_operators.out (run node js_adt_ord_operators.mjs))))
+
+(rule (alias runtest) (action (diff native/adt_ord_operators.expected js_adt_ord_operators.out)))
 
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
@@ -3245,6 +3332,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/trace_boundary.expected native_trace_boundary.out)))
 
+;; The live-data migration check's generated functions (M10,
+;; lib/desugar/desugar_migrate_check.ml): `<actor>_migrate_state__check`'s
+;; verdicts and the guarded `<actor>_migrate_msg__hcr`, called directly from a
+;; --hot-reload build.  Compiled only: the functions exist only there.  The
+;; deploy path itself is test/two_node/hcr_migration_check.
+(rule
+ (targets hcr_migration_check_fns hcr_migration_check_fns.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file hcr_migration_check/check_fns.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --hot-reload CheckFns --accept-unproved Counter.state
+        -o hcr_migration_check_fns hcr_migration_check/check_fns.march)
+   (with-stdout-to hcr_migration_check_fns.out (system "./hcr_migration_check_fns")))))
+
+(rule
+ (alias runtest)
+ (action (diff hcr_migration_check/check_fns.expected hcr_migration_check_fns.out)))
+
 ;; Trace actor events (Sent / Received / Spawned / Exited / Dropped), the
 ;; pid filter, kind filter and limits.  Same policy file as trace_boundary.
 (rule
@@ -3848,6 +3956,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff cap_mock/cap_mock_actor.expected cap_mock_actor.out)))
+
+; ── Capability capture survives MANY messages (test-only build) ──────────
+; cap_mock_actor sends each actor one message, from a program with a `main`.
+; Without a `main`, the dispatch releases the spawn-captured record in every
+; capability-free arm; when march_actor_caps returned the meta's own reference
+; the second message freed it and a later one underflowed (depot's Pool under
+; conduit's suite). Timing-dependent end to end; test_actor_caps_runner pins
+; the reference count itself.
+(rule
+ (targets cap_mock_actor_many_bin cap_mock_actor_many.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file cap_mock/cap_mock_actor_many.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o cap_mock_actor_many_bin
+        cap_mock/cap_mock_actor_many.march)
+   (with-stdout-to cap_mock_actor_many.out (system "./cap_mock_actor_many_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff cap_mock/cap_mock_actor_many.expected cap_mock_actor_many.out)))
 
 ; ── Capability mocking reaching an actor that performs TWO capabilities ───
 ; cap_mock_actor above pins capture at spawn for an actor over one capability.
@@ -8657,6 +8788,117 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_let_shadowing.expected js_let_shadowing.out)))
 
+; Regression (#1170): a module-level `let` outside the entry module (nested
+; mod, stdlib Bytes.b64_alphabet) is a zero-param fn in TIR; --target js read
+; it as its `$clo` wrapper ([object Object]) instead of calling it.
+(rule
+ (targets js_module_let_value.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_value.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_value.mjs native/module_let_value.march)))
+
+(rule
+ (targets js_module_let_value.out)
+ (deps js_module_let_value.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_value.out (run node js_module_let_value.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_value.expected js_module_let_value.out)))
+
+; Regression: a function-typed module-level `let` outside the entry module
+; (`mod Cst do let inc = fn x -> x + 1 end`) is a zero-param fn returning the
+; closure.  `Cst.inc(4)` passed 4 to it and `let g = Cst.inc` took the fn itself:
+; native printed pointers, --target js `[object Object]`.  All three diffed
+; against ONE .expected, the interpreter's.
+(rule
+ (targets native_module_let_fn native_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_module_let_fn
+        native/module_let_fn.march)
+   (with-stdout-to native_module_let_fn.out
+        (system "./native_module_let_fn")))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected native_module_let_fn.out)))
+
+(rule
+ (targets js_module_let_fn.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_fn.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_fn.mjs native/module_let_fn.march)))
+
+(rule
+ (targets js_module_let_fn.out)
+ (deps js_module_let_fn.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_fn.out (run node js_module_let_fn.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected js_module_let_fn.out)))
+
+(rule
+ (targets interp_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (with-stdout-to interp_module_let_fn.out
+    (run %{exe:../bin/main.exe} native/module_let_fn.march))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected interp_module_let_fn.out)))
+
+; Regression (#1177): an entry-module fn named like a bare-name-dispatched
+; builtin (negate, not, string_length, int_xor) must be called on --target js
+; and natively (the `not(<literal>)` fold ignored it on both).
+(rule
+ (targets js_shadowed_negate_not.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_negate_not.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_negate_not.mjs native/shadowed_negate_not.march)))
+
+(rule
+ (targets js_shadowed_negate_not.out)
+ (deps js_shadowed_negate_not.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_negate_not.out (run node js_shadowed_negate_not.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_negate_not.expected js_shadowed_negate_not.out)))
+
+(rule
+ (targets native_shadowed_negate_not native_shadowed_negate_not.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/shadowed_negate_not.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadowed_negate_not
+        native/shadowed_negate_not.march)
+   (with-stdout-to native_shadowed_negate_not.out
+        (system "./native_shadowed_negate_not")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadowed_negate_not.expected native_shadowed_negate_not.out)))
+
+; The native shadowed-builtin witness on --target js: a user `fn int_mod`
+; collided with the first-class `const int_mod = {...}` builtin wrapper.
+(rule
+ (targets js_shadowed_builtin_name.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_name.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_builtin_name.mjs native/shadowed_builtin_name.march)))
+
+(rule
+ (targets js_shadowed_builtin_name.out)
+ (deps js_shadowed_builtin_name.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_builtin_name.out (run node js_shadowed_builtin_name.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_builtin_name.expected js_shadowed_builtin_name.out)))
+
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
  (targets js_extern_import.mjs)
@@ -9276,6 +9518,68 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/nested_actor_msg_from_parent.expected interp_nested_actor_msg_from_parent.out)))
+
+; ── Actor messages qualified by their actor (`Plus.Tally`, `Plus_Msg.Tally`) ──
+(rule
+ (targets native_actor_msg_qualified native_actor_msg_qualified.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_msg_qualified.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_msg_qualified
+        native/actor_msg_qualified.march)
+   (with-stdout-to native_actor_msg_qualified.out
+        (system "./native_actor_msg_qualified")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_msg_qualified.expected native_actor_msg_qualified.out)))
+
+(rule
+ (targets interp_actor_msg_qualified.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/actor_msg_qualified.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_actor_msg_qualified.out
+   (run %{exe:../bin/main.exe} native/actor_msg_qualified.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_msg_qualified.expected interp_actor_msg_qualified.out)))
+
+; ── A same-named message of a variant or another actor is dropped, both backends ──
+(rule
+ (targets native_actor_shared_name_drop native_actor_shared_name_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/actor_shared_name_drop.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_shared_name_drop
+        native/actor_shared_name_drop.march)
+   (with-stdout-to native_actor_shared_name_drop.out
+        (system "./native_actor_shared_name_drop")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_shared_name_drop.expected native_actor_shared_name_drop.out)))
+
+(rule
+ (targets interp_actor_shared_name_drop.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file native/actor_shared_name_drop.march)
+       (source_tree ../stdlib))
+ (action
+  (with-stdout-to interp_actor_shared_name_drop.out
+   (run %{exe:../bin/main.exe} native/actor_shared_name_drop.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_shared_name_drop.expected interp_actor_shared_name_drop.out)))
 
 ; ── Same-named actors in sibling modules and at the root stay distinct ──
 (rule
@@ -12216,6 +12520,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/string_to_float_option.expected native_string_to_float_option.out)))
 
+; ── #1178: string_to_float accepts ONE grammar (C strtod, whole string) on
+; every backend. The same fixture runs compiled, interpreted and as
+; --target js, and all three are diffed against ONE .expected.
+(rule
+ (targets native_string_to_float_grammar native_string_to_float_grammar.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_string_to_float_grammar
+        native/string_to_float_grammar.march)
+   (with-stdout-to native_string_to_float_grammar.out
+        (system "./native_string_to_float_grammar")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected native_string_to_float_grammar.out)))
+
+(rule
+ (targets interp_string_to_float_grammar.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march))
+ (action
+  (with-stdout-to interp_string_to_float_grammar.out
+    (run %{exe:../bin/main.exe} native/string_to_float_grammar.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected interp_string_to_float_grammar.out)))
+
+(rule
+ (targets js_string_to_float_grammar.mjs)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_string_to_float_grammar.mjs native/string_to_float_grammar.march)))
+
+(rule
+ (targets js_string_to_float_grammar.out)
+ (deps js_string_to_float_grammar.mjs march_runtime.mjs)
+ (action (with-stdout-to js_string_to_float_grammar.out (run node js_string_to_float_grammar.mjs))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected js_string_to_float_grammar.out)))
+
 (rule
  (targets native_html_safe_raw native_html_safe_raw.out)
  (deps (file %{exe:../bin/main.exe})
@@ -13090,6 +13443,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/mailbox_bounded.expected native_mailbox_bounded.out)))
+
+; ── Actor.Theory trace conformance (lemmas design §4.2, M8) ──────────────
+; (compiled) Three senders each send 50 numbered messages to one logger; the
+; logger's handling order, replayed through Actor.Theory.from_sender (the
+; function the proved ordering laws enq_self / enq_other are about), must
+; give each sender 1..50.  Uses List/Actor/Actor.Theory, hence ../stdlib.
+(rule
+ (targets native_actor_theory_conformance native_actor_theory_conformance.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_theory_conformance.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_theory_conformance
+        native/actor_theory_conformance.march)
+   (with-stdout-to native_actor_theory_conformance.out
+        (system "./native_actor_theory_conformance")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_theory_conformance.expected native_actor_theory_conformance.out)))
 
 ; ── Named registry (Task 4): Actor.register/whereis/unregister ───────────
 ; (compiled) ───────────────────────────────────────────────────────────
@@ -14635,6 +15017,22 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (modules run_errors)
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
+ (action (run %{test} -e)))
+
+; Golden test-failure reports (lib/errors/test_report.ml): every
+; test/test_reports/*.march (all of whose tests fail on purpose) run with
+; `march test` and compiled with --compile --test; both runs' failure blocks
+; must equal <name>.expected. Regenerate with
+; UPDATE_TEST_REPORTS=1 ./_build/default/test/run_test_reports.exe -e (see the
+; header of test/run_test_reports.ml).
+(test
+ (name run_test_reports)
+ (enabled_if (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1))   ; see "CI sharding" above
+ (modules run_test_reports)
+ (libraries march_test_helpers alcotest unix)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree test_reports))
  (action (run %{test} -e)))
 
 ;  Nested constructor pattern on a ctor name a stdlib type also declares

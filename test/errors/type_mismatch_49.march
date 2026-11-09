@@ -1,0 +1,12 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X1 slice 3): a literal in the wrong branch narrows further, to its wrong field.
+mod Server do
+  type Cfg = { host : String, port : Int }
+  fn cfg(local : Bool) : Cfg do
+    if local do { host: "localhost", port: 8080 } else { host: "example.com", port: "443" } end
+  end
+  fn main() : Int do
+    let c = cfg(true)
+    c.port
+  end
+end

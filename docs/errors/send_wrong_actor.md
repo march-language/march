@@ -73,3 +73,7 @@ would compile and the message would silently disappear at run time, which is
 the hardest kind of bug to find in a message-passing program.
 
 See also: [the language reference](../actors.md).
+
+## See it in the error tour
+
+- [A message sent to the wrong actor]({{ site.baseurl }}/docs/error-messages/#send-wrong-actor)

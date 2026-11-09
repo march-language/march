@@ -1,0 +1,23 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_53.march
+
+expected `String` but got `Bool`. [type_mismatch]
+
+9 |     let label : String = ready
+                             ^^^^^
+
+    I got this expectation from the type annotation.
+    Use `bool_to_string(x)` to convert a `Bool` to a `String`.
+
+    the expected type comes from here:
+
+9 |     let label : String = ready
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `ready` was bound here as `Bool`:
+
+8 |     let ready = 3 > 2
+            ^^^^^
+    run `march --explain type_mismatch`
+
+

@@ -65,6 +65,37 @@ let read_whole_file (path : string) : string =
   let s = really_input_string ic (in_channel_length ic) in
   close_in ic; s
 
+(* An output path that cannot be written is the user's filesystem, not a
+   compiler bug: a plain error naming the path, exit 1 (issue #1181; it used
+   to reach the catch-all handler and print an internal compiler error). *)
+let output_path_error (path : string) (reason : string) : 'a =
+  Printf.eprintf "march: error: cannot write the output %s: %s\n%!" path reason;
+  exit 1
+
+(* Make [path] writable as a build output: create its missing parent
+   directories (`-o dist/app.mjs` with no `dist/` yet), and reject up front a
+   path that is a directory or sits under a non-directory. *)
+let prepare_output_path (path : string) : unit =
+  if Sys.file_exists path && Sys.is_directory path then
+    output_path_error path "it is a directory";
+  let dir = Filename.dirname path in
+  (try mkdir_p dir with
+   | Unix.Unix_error (e, _, _) ->
+     output_path_error path
+       (Printf.sprintf "cannot create the directory %s (%s)" dir (Unix.error_message e))
+   | Sys_error msg -> output_path_error path msg);
+  if not (Sys.file_exists dir && Sys.is_directory dir) then
+    output_path_error path (dir ^ " is not a directory")
+
+(* Write [contents] to the output [path], reporting a failure as
+   [output_path_error] rather than letting [Sys_error] escape. *)
+let write_output_file (path : string) (contents : string) : unit =
+  try
+    let oc = open_out_bin path in
+    Fun.protect ~finally:(fun () -> close_out_noerr oc)
+      (fun () -> output_string oc contents; close_out oc)
+  with Sys_error msg -> output_path_error path msg
+
 let bundle_js_modules ~(src_file : string) ~(out_bin : string) : unit =
   let out_dir = Filename.dirname out_bin in
   let roots =
@@ -875,14 +906,50 @@ let lemma_reserved n =
      @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings)
     n
 
-let erase_lemmas_in ~(whole : March_ast.Ast.module_) (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
-  let env = March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved whole.March_ast.Ast.mod_decls in
-  { m with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.erase_module_with env m.March_ast.Ast.mod_decls }
+(* Ghost code (lib/desugar/ghost.ml) is erased right after lemmas, by the
+   same name-resolution rule.  The typechecker has already reported a ghost
+   name that collides with another binding; a check seeded without the
+   stdlib cannot see one there, so the erasure refuses rather than leave a
+   ghost argument in the running program. *)
+let module_exports path =
+  Option.map
+    (fun (me : March_modules.Module_registry.module_exports) ->
+      List.filter_map
+        (fun (e : March_modules.Module_registry.export_entry) -> if e.ex_public then Some e.ex_name else None)
+        me.me_entries)
+    (March_modules.Module_registry.ensure_loaded path)
 
-let erase_lemmas (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+let erase_ghost ?errors ~top ~(whole : March_ast.Ast.decl list) (decls : March_ast.Ast.decl list) =
+  try March_desugar.Ghost.erase ~reserved:lemma_reserved ~exports:module_exports ~top ~whole decls
+  with March_desugar.Ghost.Not_erasable (sp, msg) -> (
+    match errors with
+    (* The typechecker already reported it, and the driver stops on that
+       before anything lowers. *)
+    | Some errors
+      when List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               let c = March_errors.Errors.Code.slug_of d.March_errors.Errors.code in
+               c = March_errors.Errors.Code.ghost_in_runtime || c = March_errors.Errors.Code.ghost_misuse)
+             errors.March_errors.Errors.diagnostics -> decls
+    (* Otherwise nothing downstream would stop a program whose ghost code
+       could not be removed, so stop here. *)
+    | _ ->
+      Printf.eprintf "%s:%d:%d: error: %s [%s]\n%!" sp.March_ast.Ast.file sp.March_ast.Ast.start_line
+        sp.March_ast.Ast.start_col msg March_errors.Errors.Code.ghost_misuse;
+      exit 1)
+
+let erase_lemmas_in ?errors ~(whole : March_ast.Ast.module_) (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  let env = March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved whole.March_ast.Ast.mod_decls in
+  let decls = March_desugar.Lemma_erase.erase_module_with env m.March_ast.Ast.mod_decls in
   { m with
     March_ast.Ast.mod_decls =
-      March_desugar.Lemma_erase.erase_module ~reserved:lemma_reserved m.March_ast.Ast.mod_decls }
+      erase_ghost ?errors ~top:whole.March_ast.Ast.mod_name.March_ast.Ast.txt ~whole:whole.March_ast.Ast.mod_decls decls }
+
+let erase_lemmas ?errors (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  let decls = March_desugar.Lemma_erase.erase_module ~reserved:lemma_reserved m.March_ast.Ast.mod_decls in
+  { m with
+    March_ast.Ast.mod_decls =
+      erase_ghost ?errors ~top:m.March_ast.Ast.mod_name.March_ast.Ast.txt ~whole:m.March_ast.Ast.mod_decls decls }
 
 (* --refine-report-sites=all (reflection design §6.1): one line per
    obligation of any verdict, so a run can be compared site by site against a
@@ -970,7 +1037,10 @@ let reflect_rows ~type_map ~(recheck : unit -> unit)
       division =
         (fun sp ->
           match List.filter (fun (o : O.t) -> o.O.kind = O.Division) (O.obligations_at sp) with
-          | [] -> None
+          (* No ledger entry (a module without `cap no_panic`): the encoder
+             decided it on the template; its R4 verdict replaces the row's
+             below. *)
+          | [] -> Some O.Proved
           | os ->
             if List.for_all (fun (o : O.t) -> o.O.verdict = O.Proved) os then Some O.Proved
             else Some (List.hd os).O.verdict);
@@ -978,7 +1048,13 @@ let reflect_rows ~type_map ~(recheck : unit -> unit)
       vocab = (fun s -> s = "len" || List.mem s RE.set_vocabulary || RE.ctor_of_tester s <> None);
       pred_fn = (fun s -> s = "len" || RE.known_predicate_fn s) }
   in
-  RR.analyze inputs t m.March_ast.Ast.mod_decls
+  List.map
+    (fun (r : RR.row) ->
+      match r.RR.r_verdict, Hashtbl.find_opt RR.encoder_blocked r.RR.r_span with
+      | RR.Reflected _, Some txt when String.length txt > 3 && String.sub txt 0 3 = "R4:" ->
+        { r with RR.r_verdict = RR.Blocked { RR.b_rule = 4; b_text = String.sub txt 3 (String.length txt - 3); b_span = r.RR.r_span } }
+      | _ -> r)
+    (RR.analyze inputs t m.March_ast.Ast.mod_decls)
 
 let user_span ~filename ~user_files (span : March_ast.Ast.span) =
   let f = span.March_ast.Ast.file in
@@ -1301,6 +1377,11 @@ let infer_edit (src : string) (p : March_refinecheck.Refine_infer.proposal) : st
       | _ -> None)
     | _ -> None
   else
+    match p.March_refinecheck.Refine_infer.joint_param, slot.IS.path with
+    | Some x, IS.Return ->
+      (* A joint relational proposal: the parameter and the return. *)
+      Option.bind (RE.splice ~src ~line ~fn ~param:x ~annotation:ann) (fun src -> RE.splice_return ~src ~line ~fn ~annotation:ann)
+    | _ ->
     match slot.IS.path with
     | IS.Lambda_param { line; col; param } -> RE.splice_lambda_param ~src ~line ~col ~param ~annotation:ann
     | path -> (
@@ -1364,6 +1445,12 @@ let infer_applicable (p : March_refinecheck.Refine_infer.proposal)
     ~(accepted : March_refinecheck.Refine_infer.proposal list) : string option =
   let module RI = March_refinecheck.Refine_infer in
   if p.RI.external_callers && not !apply_public then Some "external-callers"
+  (* The stdlib is written only with --refine-infer-stdlib (design §4.3):
+     --refine-infer-module can make a stdlib function a target, never a file
+     to write. *)
+  else if (not !refine_infer_stdlib)
+          && List.mem (proposal_file p) !March_refinecheck.Refine_check.stdlib_source_files
+  then Some "stdlib-needs-refine-infer-stdlib"
   else
     let file = proposal_file p in
     match read_file_opt file with
@@ -1523,6 +1610,7 @@ let print_refine_infer ~filename ~user_files desugared =
   let r =
     RI.run ~root:(Sys.getcwd ()) ~kinds ~budget:!refine_infer_budget
       ~allow_caller_violations:!allow_caller_violations ~stdlib:!refine_infer_stdlib ~decreases
+      ~modules:!refine_infer_modules ~progress:(!refine_infer_stdlib || !refine_infer_modules <> [])
       ?applicable:(if !refine_infer_apply || !refine_infer_diff then Some infer_applicable else None)
       ~applicable_decreases ~lemmas ~applicable_lemmas ~is_user desugared
   in
@@ -1562,7 +1650,8 @@ let print_refine_infer ~filename ~user_files desugared =
         Printf.printf "  %s (%s:%d)  %s : %s  [%s, closes %d]%s\n" p.RI.slot.IS.fn sp.March_ast.Ast.file
           sp.March_ast.Ast.start_line (IJ.path_text p.RI.slot.IS.path) p.RI.annotation (IJ.kind_text p.RI.slot)
           (List.length p.RI.closes)
-          (if p.RI.external_callers && not !apply_public then "  (external callers: not applied without --apply-public)" else ""))
+          ((match p.RI.joint_param with Some x -> Printf.sprintf "  (with parameter %s)" x | None -> "")
+           ^ if p.RI.external_callers && not !apply_public then "  (external callers: not applied without --apply-public)" else ""))
       r.RI.proposals;
     List.iter
       (fun ((s : IS.slot), pred, (rf : March_refinecheck.Precond_infer.refusal)) ->
@@ -2752,6 +2841,7 @@ let build_cas_key ~(target : March_tir.Llvm_emit.target_config)
         (* --protocol-baseline: the previous protocol versions decide the
            generated `<P>_Msg.compat()` table, so they are part of the binary. *)
         @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+        @ Schema_migration.baseline_cas_tag ()
         @ (match !shell_ident_tag with Some t -> ["sident:" ^ t] | None -> [])
         @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
             (List.sort compare !March_desugar.Desugar_endpoints.expand_labels)) in
@@ -2803,20 +2893,34 @@ let resolve_imports ~source_file m =
      see Resolver.resolve_imports's [strict_parse] doc. *)
   March_resolver.Resolver.resolve_imports ~strict_parse:!do_test ~source_file m
 
-(** Format [filename] in-place.  Returns true if the file was changed. *)
+(** Format [filename]: [Some (changed, formatted)], or [None] when the
+    formatter's output does not parse back to the same program (a formatter
+    bug).  [None] has already been reported; the caller must not write
+    anything.  Exits on a source that does not parse. *)
 let fmt_file filename =
   let src = read_file filename in
-  let formatted =
-    match March_format.Format.format_source_result ~filename
-            ~stuck:"Parse error (cannot format)" src with
-    | Ok formatted -> formatted
-    | Error diags ->
-      List.iter (fun d ->
-        Printf.eprintf "%s\n"
-          (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
-      exit 1
+  let refuse why =
+    Printf.eprintf
+      "march fmt: %s: not formatted: %s. This is a formatter bug; the file \
+       was left unchanged.\n%!" filename why;
+    None
   in
-  formatted <> src, formatted
+  match
+    March_format.Format.format_source_result ~filename
+      ~stuck:"Parse error (cannot format)" src
+  with
+  | exception e -> refuse ("the formatter raised " ^ Printexc.to_string e)
+  | Error diags ->
+    List.iter (fun d ->
+      Printf.eprintf "%s\n"
+        (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
+    exit 1
+  | Ok formatted ->
+    (* The round-trip check (#1174, #1175): never write output that does not
+       re-parse to the same AST as the input. *)
+    match March_format.Format.verify_format ~filename ~src formatted with
+    | Ok () -> Some (formatted <> src, formatted)
+    | Error why -> refuse why
 
 (** Collect all .march files under a directory recursively.
     Tolerant of unreadable entries: a permission-denied subdirectory (whose
@@ -2920,6 +3024,7 @@ let run_test_cmd args =
         exit 1
     in
     let desugar_errors = March_errors.Errors.create () in
+    Schema_migration.load_derive_baseline ~filename;
     let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
     if March_errors.Errors.has_errors desugar_errors then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
@@ -2969,6 +3074,7 @@ let run_test_cmd args =
        --refine-infer; a plain --check never infers. *)
     March_refinecheck.Refine_term.infer :=
       !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
+    Schema_migration.load_baseline ~filename;
     March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
       ~stdlib_files:(stdlib_span_files stdlib_decls)
       ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -2978,6 +3084,10 @@ let run_test_cmd args =
     if !refine_report then print_refine_report ~filename ~user_files ();
     if !refine_report_sites && not !refine_report_sites_all then
       print_refine_report_sites ~filename ~user_files ();
+    if !validate_projections then Session_validate.print module_ast.March_ast.Ast.mod_decls;
+    if !guarantees then
+      Guarantees.print ~filename ~user_files ~surface:module_ast.March_ast.Ast.mod_decls
+        desugared.March_ast.Ast.mod_decls;
     if !termination_report then
       print_termination_report ~filename ~user_files ~type_map desugared;
     if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -3133,8 +3243,8 @@ let run_test_cmd args =
     List.iter (fun (filename, failures) ->
       Printf.printf "%s\n" filename;
       List.iter (fun (name, msg) ->
-        Printf.printf "  FAIL: \"%s\"\n    %s\n\n" name
-          (String.concat "\n    " (String.split_on_char '\n' msg))
+        Printf.printf "  FAIL: \"%s\"\n%s\n\n" name
+          (March_eval.Eval.indent_lines "    " msg)
       ) failures
     ) (List.rev !all_file_failures)
   end;
@@ -3168,12 +3278,21 @@ let run_fmt args =
      with End_of_file -> ());
     let src = Buffer.contents buf in
     let filename = match !targets with f :: _ -> f | [] -> "<stdin>" in
-    let formatted =
-      try March_format.Format.format_source ~filename src
-      with _ -> src
-    in
-    print_string formatted;
-    exit 0
+    (* Unparseable input is echoed unchanged (exit 0), as before.  Output
+       that fails the round-trip check is a formatter bug: the input is
+       echoed so an editor that pipes through this loses nothing, and the
+       exit code says it was not formatted. *)
+    (match March_format.Format.format_source_result ~filename src with
+     | exception _ | Error _ -> print_string src; exit 0
+     | Ok formatted ->
+       match March_format.Format.verify_format ~filename ~src formatted with
+       | Ok () -> print_string formatted; exit 0
+       | Error why ->
+         print_string src;
+         Printf.eprintf
+           "march fmt: %s: not formatted: %s. This is a formatter bug; the \
+            input is printed unchanged.\n%!" filename why;
+         exit 1)
   end;
   let targets = List.rev !targets in
   let files = List.concat_map (fun target ->
@@ -3186,21 +3305,24 @@ let run_fmt args =
     Printf.eprintf "march fmt: no files specified\n"; exit 1
   end;
   let any_changed = ref false in
+  let any_refused = ref false in
   List.iter (fun f ->
-    let changed, formatted = fmt_file f in
-    if !check_mode then begin
-      if changed then begin
-        Printf.eprintf "%s: not formatted\n" f;
-        any_changed := true
+    match fmt_file f with
+    | None -> any_refused := true
+    | Some (changed, formatted) ->
+      if !check_mode then begin
+        if changed then begin
+          Printf.eprintf "%s: not formatted\n" f;
+          any_changed := true
+        end
+      end else begin
+        if changed then begin
+          write_file f formatted;
+          Printf.printf "formatted %s\n%!" f
+        end
       end
-    end else begin
-      if changed then begin
-        write_file f formatted;
-        Printf.printf "formatted %s\n%!" f
-      end
-    end
   ) files;
-  if !check_mode && !any_changed then exit 1
+  if !any_refused || (!check_mode && !any_changed) then exit 1
   else exit 0
 
 
@@ -3525,10 +3647,10 @@ let write_impl_hashes basename (h_sccs : March_cas.Pipeline.hashed_scc list) =
      any of them (a new sibling can become reachable);
    - every recorded load-set file still exists;
    - every recorded NON-loaded sibling whose bytes changed still parses, has
-     no global-effect declaration, and none of its anchors (its module name,
-     type and constructor names: Resolver.provided_anchor_names) is a token
-     of the entry or a loaded file (Resolver.referenced_name_tokens): i.e.
-     the resolver would prune it again.
+     no global-effect declaration, and is reached by no seed of the entry or
+     a loaded file (Resolver.seed_reaches: its module name, or a type or
+     constructor name that source does not define itself): i.e. the
+     resolver would prune it again.
    Anything else falls back to today's full-directory key. *)
 
 let loadset_version = "march-loadset v1"
@@ -3607,20 +3729,30 @@ let valid_loadset ~path ~entry_real ~src ~walked : string list option =
              unlisted in
          if changed = [] then Some listed
          else begin
-           let tokens = Hashtbl.create 256 in
-           List.iter (fun t ->
-               Hashtbl.iter (fun k () -> Hashtbl.replace tokens k ())
-                 (March_resolver.Resolver.referenced_name_tokens t))
-             (src :: List.filter_map read_opt listed);
+           (* Each source's own type/ctor names do not reach a same-named
+              module (Resolver.seed_reaches); a file that no longer parses
+              keeps them all, which only errs toward the full walk. *)
+           let seeds =
+             List.map (fun (f, t) ->
+                 let own_decls =
+                   match March_parser.Parse.module_ ~filename:f t with
+                   | Ok m -> m.March_ast.Ast.mod_decls
+                   | Error _ -> [] in
+                 March_resolver.Resolver.ref_seed ~own_decls t)
+               ((entry_real, src)
+                :: List.filter_map (fun f -> Option.map (fun t -> (f, t)) (read_opt f))
+                  listed) in
            let still_pruned (f, b) =
              match March_parser.Parse.module_ ~filename:f b with
              | Error _ -> false
              | Ok m ->
                let decls = m.March_ast.Ast.mod_decls in
+               let mod_name = m.March_ast.Ast.mod_name.March_ast.Ast.txt in
+               let anchors = March_resolver.Resolver.provided_anchor_names decls in
                not (March_resolver.Resolver.has_global_effect_decl decls)
-               && not (List.exists (fun a -> Hashtbl.mem tokens a)
-                         (m.March_ast.Ast.mod_name.March_ast.Ast.txt
-                          :: March_resolver.Resolver.provided_anchor_names decls))
+               && not (List.exists (fun seed ->
+                   March_resolver.Resolver.seed_reaches seed ~mod_name ~anchors)
+                   seeds)
            in
            if List.for_all still_pruned changed then Some listed else None
          end
@@ -3697,12 +3829,13 @@ let depend_store : (user_files:string list -> artifact:string -> diag:string -> 
   ref None
 
 let compile filename =
+  Schema_migration.cas_entry := filename;
   (* Enable backtraces so an internal-error report (below) is actionable
      even without OCAMLRUNPARAM=b. *)
   Printexc.record_backtrace true;
   let is_js_target = parse_target !target_str = March_tir.Llvm_emit.Js in
   let src =
-    try read_file filename
+    try read_file (Option.value !fix_verify_source ~default:filename)
     with Sys_error msg ->
       Printf.eprintf "march: %s\n" msg;
       exit 1
@@ -3710,11 +3843,13 @@ let compile filename =
   load_protocol_inputs ();
   (* --fmt: format the source file before compiling *)
   if !do_fmt then begin
-    let changed, formatted = fmt_file filename in
-    if changed then begin
-      write_file filename formatted;
-      Printf.eprintf "formatted %s\n%!" filename
-    end
+    match fmt_file filename with
+    | None -> exit 1
+    | Some (changed, formatted) ->
+      if changed then begin
+        write_file filename formatted;
+        Printf.eprintf "formatted %s\n%!" filename
+      end
   end;
   (* Early source-hash CAS: read all input bytes, compute hash, and exit
      before parsing if sources are unchanged since the last successful run.
@@ -3727,10 +3862,10 @@ let compile filename =
        --refine-report came to look broken.  Correctness of a diagnostic flag
        beats a cache hit on the run that asked for the diagnostic. *)
     if
-      refine_suggest_active () || !refine_report || !refine_report_sites || !refine_audit
+      refine_suggest_active () || !refine_report || !guarantees || !validate_projections || !refine_report_sites || !refine_audit
       || !termination_report || !reflect_report || !refine_report_sites_all
       || !reflect_deps || !reflect_parity || !emit_lemma_manifest || !lemma_test || !law_coverage
-      || !report_contracts
+      || !report_contracts || !why_copies || !why_copies_json
       (* --dump-role-authority prints from inside the typechecker, which a warm
          `check` artifact skips entirely: CI saw an empty report after an
          earlier plain --check of the same source (PR #596). *)
@@ -3885,6 +4020,7 @@ let compile filename =
           @ z3_cas_tag ()
           @ (if !cap_strict then ["capstrict"] else [])
           @ (match !protocol_baseline_tag with Some t -> ["pbase:" ^ t] | None -> [])
+          @ Schema_migration.baseline_cas_tag ()
           @ List.map (fun (p, l) -> "pexpand:" ^ p ^ ":" ^ l)
               (List.sort compare !March_desugar.Desugar_endpoints.expand_labels) in
         let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags in
@@ -3980,6 +4116,54 @@ let compile filename =
     match March_parser.Parse.module_ ~filename src with
     | Ok m -> m
     | Error diags ->
+      (* A syntax error stops the compiler before it can check capabilities,
+         so the commonest second error (a `main` that prints with no grant)
+         only showed up after the syntax was fixed.  Say it now, from the
+         text alone: a zero-argument `main` whose body calls `println` /
+         `print`, in a file with no `needs IO...` line. *)
+      let diags =
+        let lines = String.split_on_char '\n' src in
+        let indent l =
+          let n = String.length l in
+          let rec go i = if i < n && l.[i] = ' ' then go (i + 1) else i in go 0 in
+        let trimmed l = String.trim l in
+        (* [sub] as a call, not the tail of a longer name. *)
+        let calls l sub =
+          let n = String.length l and m = String.length sub in
+          let ident c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                        || (c >= '0' && c <= '9') || c = '_' || c = '.' in
+          let rec go i =
+            i + m <= n
+            && ((String.sub l i m = sub && (i = 0 || not (ident l.[i - 1]))) || go (i + 1)) in
+          go 0 in
+        let code_of l = match String.index_opt l '-' with
+          | Some i when i + 1 < String.length l && l.[i + 1] = '-' -> String.sub l 0 i
+          | _ -> l in
+        let lines = List.map code_of lines in
+        let no_needs = not (List.exists (fun l ->
+            String.starts_with ~prefix:"needs IO" (trimmed l)) lines) in
+        let rec main_body = function
+          | [] -> None
+          | l :: rest when String.starts_with ~prefix:"fn main()" (trimmed l) ->
+            let ind = indent l in
+            let rec take acc = function
+              | [] -> List.rev acc
+              | x :: _ when trimmed x = "end" && indent x <= ind -> List.rev acc
+              | x :: xs -> take (x :: acc) xs in
+            Some (l :: take [] rest)
+          | _ :: rest -> main_body rest in
+        let prints = match main_body lines with
+          | Some body -> List.exists (fun l -> calls l "println(" || calls l "print(") body
+          | None -> false in
+        match diags with
+        | d :: rest when no_needs && prints ->
+          { d with March_errors.Errors.notes = d.March_errors.Errors.notes @ [
+                "After this is fixed, `main` will also need permission to print: add \
+                 `needs IO.Console` to the module, and give `main` the grant, \
+                 `fn main(_console : Cap(IO.Console))`." ] } :: rest
+        | _ -> diags in
+      (* The fix is shown under the error with the tier it earned. *)
+      let diags = Fix_verify.verify_parse ~filename ~src diags in
       List.iter (fun d ->
         Printf.eprintf "%s\n"
           (March_errors.Errors.render_diagnostic ~src ~filename d)) diags;
@@ -4003,6 +4187,12 @@ let compile filename =
   in
   (* Desugar *)
   let desugar_errors = March_errors.Errors.create () in
+  (* A hot-reload build carries the live-data check for each state
+     migration (M10, Desugar_migrate_check). *)
+  March_desugar.Desugar_migrate_check.enabled := Option.is_some !hot_reload_prefix;
+  (* A state that only gained fields since the deployed build gets its
+     migration derived (M11, Desugar_migrate_derive). *)
+  Schema_migration.load_derive_baseline ~filename;
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
   (* Desugar's diagnostics are not printed here: they join the typechecker's
      below (before cascade suppression), so they are rendered, sorted, put
@@ -4272,7 +4462,18 @@ let compile filename =
      Taken BEFORE the refinement passes, whose own findings (an unproven
      obligation under `cap verified`, a violation) are exactly what inference
      is for and must not gate it. *)
-  let typed_ok = not (March_errors.Errors.has_errors errors) in
+  (* Gated on the errors `--check` rejects on: those in a user file.  A type
+     error located in a stdlib file is never printed and never fails `--check`
+     (a user record named like a stdlib one, e.g. `NodeInfo`, leaves one in
+     cluster_node.march), so gating on it skipped inference on a program the
+     user had nothing to fix in.  With --refine-infer-stdlib the stdlib is a
+     target, so its errors gate too, and the skip line names them. *)
+  let infer_gate_errors =
+    List.filter (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error
+        && (!refine_infer_stdlib || !refine_infer_modules <> [] || user_diag ~filename ~user_files d))
+      (March_errors.Errors.sorted errors) in
+  let typed_ok = infer_gate_errors = [] in
   (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
   let audit_result = ref [] in
   (* --termination-report demands every recursive SCC of user code (design
@@ -4282,6 +4483,7 @@ let compile filename =
      --refine-infer; a plain --check never infers. *)
   March_refinecheck.Refine_term.infer :=
     !termination_report || !refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff;
+  Schema_migration.load_baseline ~filename;
   March_refinecheck.Refine_check.check_module ~measure_axioms:!measure_axioms
     ~stdlib_files:(stdlib_span_files stdlib_decls)
     ?audit:(if !refine_audit then Some (fun r -> audit_result := r) else None)
@@ -4291,6 +4493,10 @@ let compile filename =
   if !refine_report then print_refine_report ~filename ~user_files ();
   if !refine_report_sites && not !refine_report_sites_all then
     print_refine_report_sites ~filename ~user_files ();
+  if !validate_projections then Session_validate.print module_ast.March_ast.Ast.mod_decls;
+  if !guarantees then
+    Guarantees.print ~filename ~user_files ~surface:module_ast.March_ast.Ast.mod_decls
+      desugared.March_ast.Ast.mod_decls;
   if !termination_report then
     print_termination_report ~filename ~user_files ~type_map desugared;
   if !refine_audit then print_refine_audit ~filename ~user_files !audit_result;
@@ -4357,8 +4563,17 @@ let compile filename =
   (* Never propose on a program that does not check: the tree may be half
      typed, and a proposal would describe a program that does not exist. *)
   if (!refine_infer || !refine_infer_json || !refine_infer_apply || !refine_infer_diff) then begin
-    if not typed_ok then
-      prerr_endline "--refine-infer: skipped, the program has errors (fix them first)"
+    if not typed_ok then begin
+      prerr_endline "--refine-infer: skipped, the program has errors (fix them first)";
+      (* Name where, so a skip is never the only line: the first three. *)
+      List.iteri (fun i (d : March_errors.Errors.diagnostic) ->
+          if i < 3 then
+            let msg = match String.index_opt d.message '\n' with
+              | Some j -> String.sub d.message 0 j | None -> d.message in
+            Printf.eprintf "  %s:%d: %s\n" d.span.March_ast.Ast.file
+              d.span.March_ast.Ast.start_line msg)
+        infer_gate_errors
+    end
     else print_refine_infer ~filename ~user_files desugared
   end;
   (* Cap-infer: emit hints at call sites missing a `needs` declaration. *)
@@ -4380,14 +4595,14 @@ let compile filename =
   stamp "typecheck";
   (* Lemma erasure (§4.5): after the refinement checker, before anything
      lowers, interprets or JIT-compiles the program. *)
-  let user_only_desugared = erase_lemmas_in ~whole:desugared user_only_desugared in
+  let user_only_desugared = erase_lemmas_in ~errors ~whole:desugared user_only_desugared in
   (* The shell's identity table hashes source regions that run from one
      declaration to the next, so it must see the declarations the node's
      build hashed (before erasure, see "The shell's identity table" above):
      erasure drops lemma declarations, which moves where the one before them
      (the stdlib's `impl Eq(List(a))`) ends. *)
   let shell_client_decls = desugared.March_ast.Ast.mod_decls in
-  let desugared = erase_lemmas desugared in
+  let desugared = erase_lemmas ~errors desugared in
   (* Allocation contracts (`cap no_alloc` modules and @[no_alloc] functions)
      are judged on lowered TIR.  --check lowers on demand for them (below);
      the interpreter and --jit never lower, so they give one
@@ -4431,7 +4646,7 @@ let compile filename =
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
-    ) diags;
+    ) (Fix_verify.verify ~src ~verifiable:is_user_file diags);
     exit 0
   end;
   let frontend_rejected =
@@ -4481,11 +4696,17 @@ let compile filename =
   (* Under --shell, only errors: they stop the session.  The program's
      warnings and refinement hints are the build's business, and a real
      project (forgepm) printed screens of them before the first prompt. *)
+  (* Under --check each fix is shown with the tier it earned on a re-check,
+     as --check-json prints it.  A build or run shows the tier the compiler
+     declared: re-checking there would rerun a compile. *)
+  let shown =
+    if !do_check && !shell_socket = None
+    then Fix_verify.verify ~src ~verifiable:is_user_file diags else diags in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d
          && (!shell_socket = None || d.severity = March_errors.Errors.Error) then
         emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
-    ) diags;
+    ) shown;
   (* --shell: the program typechecked as the node's build did; hand it to the
      remote shell instead of running or compiling it (bin/shell_cmd.ml). *)
   (match !shell_socket with
@@ -4644,6 +4865,141 @@ let compile filename =
            `Fatal error: exception Failure` plus a backtrace and rc=2. *)
         Printf.eprintf "march: internal error while lowering to TIR: %s\n%!" msg;
         exit 1
+    in
+    (* Host scopes on IO.NetConnect (lib/tir/net_scope.ml;
+       specs/2026-11-09-host-scoped-network-capabilities-design.md).  Here,
+       straight after lowering, because function names are still source names
+       and a call's arguments are still the literals the program wrote.  The
+       check refuses a host-scoped module's network use whose destination it
+       cannot prove inside the scope; the rewrite then points that module's
+       redirect-capable HttpClient calls at their scope-checking twins. *)
+    let tir =
+      let scopes =
+        March_typecheck.Typecheck.declared_net_scopes typecheck_env
+          ~entry_module:tir.March_tir.Tir.tm_name
+      in
+      if List.for_all (fun (_, ds) -> ds = []) scopes then tir
+      else begin
+        let stdlib_mods = stdlib_module_names stdlib_decls in
+        let prelude_fns = Hashtbl.create 64 in
+        (* "Transparent" (stdlib) is decided by where a declaration COMES FROM,
+           never by its name: a user module named `Yaml`, or an entry-module
+           function named like a prelude one, is user code and is checked
+           (a by-name test let both escape the check entirely). *)
+        let user_mods = Hashtbl.create 16 in
+        let user_entry_fns = Hashtbl.create 64 in
+        let annotated = ref [] in
+        let rec walk prefix (decls : March_ast.Ast.decl list) =
+          List.iter (fun (d : March_ast.Ast.decl) ->
+              match d with
+              | March_ast.Ast.DFn (fd, sp) ->
+                let name = fd.March_ast.Ast.fn_name.March_ast.Ast.txt in
+                let from_stdlib = March_typecheck.Typecheck_builtins.file_is_stdlib sp.March_ast.Ast.file in
+                if prefix = "" && from_stdlib then Hashtbl.replace prelude_fns name ();
+                if prefix = "" && not from_stdlib then
+                  Hashtbl.replace user_entry_fns name ();
+                (match March_caps.Net_dest.net_dest_attr fd.March_ast.Ast.fn_attrs with
+                 | None -> ()
+                 | Some p ->
+                   let params =
+                     match fd.March_ast.Ast.fn_clauses with
+                     | c :: _ ->
+                       List.map (function
+                           | March_ast.Ast.FPNamed prm | March_ast.Ast.FPDefault (prm, _) ->
+                             prm.March_ast.Ast.param_name.March_ast.Ast.txt
+                           | March_ast.Ast.FPPat (March_ast.Ast.PatVar n) -> n.March_ast.Ast.txt
+                           | March_ast.Ast.FPPat _ -> "")
+                         c.March_ast.Ast.fc_params
+                     | [] -> []
+                   in
+                   let rec index i = function
+                     | [] -> None
+                     | x :: rest -> if x = p then Some i else index (i + 1) rest
+                   in
+                   Option.iter (fun i ->
+                       annotated := ((if prefix = "" then name else prefix ^ "." ^ name), i)
+                                    :: !annotated)
+                     (index 0 params))
+              | March_ast.Ast.DMod (n, _, inner, msp) ->
+                let full =
+                  if prefix = "" then n.March_ast.Ast.txt
+                  else prefix ^ "." ^ n.March_ast.Ast.txt
+                in
+                (* Stdlib modules carry a placeholder span; a user module (the
+                   program's or a dependency's) has a real file outside the
+                   stdlib root. *)
+                let f = msp.March_ast.Ast.file in
+                if f <> March_ast.Ast.dummy_span.March_ast.Ast.file
+                   && not (March_typecheck.Typecheck_builtins.file_is_stdlib f) then
+                  Hashtbl.replace user_mods full ();
+                walk full inner
+              | _ -> ()) decls
+        in
+        walk "" desugared.March_ast.Ast.mod_decls;
+        walk "" stdlib_decls;
+        if Sys.getenv_opt "MARCH_DUMP_NET_SCOPE" = Some "1" then begin
+          List.iter (fun (m, ds) ->
+              if ds <> [] then
+                Printf.eprintf "net-scope: module %s scoped to %s\n" m
+                  (March_caps.Host_scope.encode_spec ds)) scopes;
+          List.iter (fun (n, i) ->
+              Printf.eprintf "net-scope: @[net_dest] %s param %d\n" n i) !annotated
+        end;
+        let violations =
+          March_tir.Net_scope.check ~scopes
+            ~transparent:(fun m -> List.mem m stdlib_mods && not (Hashtbl.mem user_mods m))
+            ~transparent_fns:(fun n ->
+                not (String.contains n '.') && Hashtbl.mem prelude_fns n
+                && not (Hashtbl.mem user_entry_fns n))
+            ~annotated:(List.sort_uniq compare !annotated) tir
+        in
+        if violations <> [] then begin
+          let (module_spans, _) = cap_ceiling_module_spans
+              ~entry_owner:tir.March_tir.Tir.tm_name
+              ~entry_span:desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+              desugared.March_ast.Ast.mod_decls
+          in
+          (* One diagnostic per module (TIR carries no call spans, so it points
+             at the module), its first violation as the message and the rest
+             listed after it. *)
+          let owners =
+            List.sort_uniq compare
+              (List.map (fun (v : March_tir.Net_scope.violation) -> v.owner) violations)
+          in
+          let ctx = March_errors.Errors.create () in
+          List.iter (fun owner ->
+              let vs =
+                List.filter (fun (v : March_tir.Net_scope.violation) -> v.owner = owner)
+                  violations
+              in
+              match vs with
+              | [] -> ()
+              | first :: rest ->
+                let msg =
+                  if rest = [] then first.message
+                  else
+                    first.message ^ "\n\nAlso in module `" ^ owner ^ "`:\n"
+                    ^ String.concat "\n"
+                        (List.map (fun (v : March_tir.Net_scope.violation) ->
+                             "- [" ^ v.code ^ "] " ^ v.message) rest)
+                in
+                let span =
+                  match List.assoc_opt owner module_spans with
+                  | Some sp -> sp
+                  | None -> desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+                in
+                if span = March_ast.Ast.dummy_span then
+                  Printf.eprintf "-- CAPABILITY --\n%s [%s]\n\n" msg first.code
+                else March_errors.Errors.error ctx ~span ~code:first.code msg)
+            owners;
+          List.iter (fun (d : March_errors.Errors.diagnostic) ->
+              Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
+            (March_errors.Errors.sorted ctx);
+          Printf.eprintf "%d host-scope violation(s).\n%!" (List.length violations);
+          exit 1
+        end;
+        March_tir.Net_scope.rewrite ~scopes tir
+      end
     in
     (* Capability-passing analysis dump.  Immediately after lowering is the one
        point where a TIR fn's name is still exactly its source name, which is
@@ -5148,6 +5504,7 @@ let compile filename =
             then Some n else None)
           tir.March_tir.Tir.tm_fns
     in
+    let why_copies_tir = ref None and why_copies_pre = ref None in
     let pipe =
       try
       March_tir.Contract_pipeline.run
@@ -5157,6 +5514,10 @@ let compile filename =
             if !dump_phases then
               phases := March_dump.Dump.tir_phase m label :: !phases)
         ~after_fusion:policy_audit ~before_opt
+        ~before_perceus:(fun ~k_table:_ m -> if !why_copies || !why_copies_json then
+                            why_copies_pre := Some m)
+        ~after_perceus:(fun m -> if !why_copies || !why_copies_json then
+                           why_copies_tir := Some m)
         ~wasm_island:(parse_target !target_str = March_tir.Llvm_emit.Wasm32Unknown)
         ~is_js:is_js_target ~hot_reload:(hr_config ()) ~iface_methods
         ~decls:contract_decls ~stamp_metrics:!do_timings
@@ -5203,6 +5564,40 @@ let compile filename =
     if List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error) vectorize_diags
     then exit 1;
+    (* --why-copies: the copies Perceus could not avoid, in the user's own
+       code, mapped back to source (lib/tir/copy_report.ml).  A report, like
+       --report-contracts: no code generation, no binary. *)
+    if !why_copies || !why_copies_json then begin
+      let module C = March_tir.Copy_report in
+      let is_user (sp : March_ast.Ast.span) =
+        sp.March_ast.Ast.file = filename || List.mem sp.March_ast.Ast.file user_files in
+      let sites = match !why_copies_tir with Some m -> C.analyze m | None -> [] in
+      let decls = user_only_desugared.March_ast.Ast.mod_decls in
+      let is_pure_call = match !why_copies_pre with
+        | Some m -> C.pure_call_oracle m | None -> (fun _ -> false) in
+      let seen = Hashtbl.create 16 in
+      let diags = List.filter_map (fun (s : C.site) ->
+          match March_tir.Provenance.effective_span s.C.host with
+          | Some host_span when is_user host_span ->
+            (match C.locate ~decls ~source:src ~is_pure_call ~host_span s with
+             | Some l when not (Hashtbl.mem seen (l.C.call_arg, s.C.var)) ->
+               Hashtbl.replace seen (l.C.call_arg, s.C.var) ();
+               Some (C.diagnostic s l)
+             | _ -> None)
+          | _ -> None) sites in
+      let diags = List.sort (fun (a : March_errors.Errors.diagnostic) b ->
+          compare (a.span.March_ast.Ast.start_line, a.span.March_ast.Ast.start_col)
+            (b.span.March_ast.Ast.start_line, b.span.March_ast.Ast.start_col)) diags in
+      if !why_copies_json then
+        List.iter (fun d -> print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")) diags
+      else if diags = [] then
+        print_endline "No copies found: every value passed to a function that reuses it in place is its last use."
+      else
+        List.iter (fun d ->
+            emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)))
+          diags;
+      exit 0
+    end;
     (* --report-contracts: the generation half of the contract feature.  Emits
        the same NDJSON shape --check-json does, with a fix placing @[no_alloc]
        directly before each verified-clean in-scope declaration's `fn` (see
@@ -5235,8 +5630,8 @@ let compile filename =
                   "`%s` is %s; add %s to keep it that way."
                   d.March_tir.Alloc_contract.d_name verdict attr;
               labels = []; notes = []; code = March_errors.Code.no_alloc_candidate;
-              fix = Some (contract_attr_fix ~src ~filename ~read_file
-                            d.March_tir.Alloc_contract.d_decl_span attr) }
+              fix = Some (March_errors.Errors.fix (contract_attr_fix ~src ~filename ~read_file
+                            d.March_tir.Alloc_contract.d_decl_span attr)) }
           in
           print_string (March_errors.Errors.render_diagnostic_json diag ^ "\n"))
         cands;
@@ -5569,6 +5964,32 @@ let compile filename =
                    h.March_ast.Ast.ah_params))
               adef.March_ast.Ast.actor_handlers
           in
+          (* H7: each handler's actor-message tag, as codegen installs it
+             (the same table over the same final module emit_module gets),
+             so the deploy gate can compare it with the running version's
+             (Schema_diff.tag_check).  Forced only when an actor is written. *)
+          let msg_tags = lazy (
+            let types = tir.March_tir.Tir.tm_types in
+            March_tir.Llvm_toplevel.actor_msg_tag_table
+              ~pins:(March_tir.Llvm_toplevel.current_migrate_pins types) types) in
+          let msg_tag actor cn =
+            let tbl = Lazy.force msg_tags in
+            let key = actor ^ "_Msg." ^ cn in
+            match Hashtbl.find_opt tbl key with
+            | Some t -> Some t
+            | None ->
+              (* A module-qualified declaration: the unique key ending in it. *)
+              let sfx = "." ^ key in
+              let sl = String.length sfx in
+              (match Hashtbl.fold (fun k t acc ->
+                   let kl = String.length k in
+                   if kl > sl && String.sub k (kl - sl) sl = sfx then t :: acc else acc)
+                   tbl [] with
+               | [ t ] -> Some t
+               | _ -> None) in
+          let tag_field actor cn = match msg_tag actor cn with
+            | Some t -> Printf.sprintf {|,"tag":%d|} t
+            | None -> "" in
           let oc = Buffer.create 1024 in
             Printf.bprintf oc "{\n";
             List.iteri (fun i (actor_name, fields) ->
@@ -5614,19 +6035,22 @@ let compile filename =
                                (String.concat ", " (List.map (Printf.sprintf "%S") ls))) in
                 let ctor_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
-                      Printf.sprintf {|{"name":%S,"params":[%s]}|} cn
+                      Printf.sprintf {|{"name":%S,"params":[%s]%s}|} cn
                         (String.concat "," (List.map (fun t ->
-                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))) ctors) ^ "]" in
+                             Printf.sprintf "%S" (ty_to_schema_str t)) tys))
+                        (tag_field actor_name cn)) ctors) ^ "]" in
                 let handler_list ctors =
                   "[" ^ String.concat ", " (List.map (fun (cn, tys) ->
                       let params = String.concat "," (List.map (fun t ->
                           Printf.sprintf "%S" (ty_to_schema_str t)) tys) in
+                      let tag = tag_field actor_name cn in
                       match List.assoc_opt cn hrefs with
                       | Some rs when List.exists Option.is_some rs ->
-                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]}|} cn params
+                        Printf.sprintf {|{"name":%S,"params":[%s],"refines":[%s]%s}|} cn params
                           (String.concat "," (List.map (function
                                | Some r -> Printf.sprintf "%S" r | None -> "null") rs))
-                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]}|} cn params) ctors)
+                          tag
+                      | _ -> Printf.sprintf {|{"name":%S,"params":[%s]%s}|} cn params tag) ctors)
                   ^ "]" in
                 let handlers_line = match List.assoc_opt actor_name actor_handlers with
                   | None -> ""
@@ -5634,9 +6058,41 @@ let compile filename =
                 let mm_line = match List.assoc_opt actor_name actor_migrate_msg_from with
                   | None -> ""
                   | Some c -> Printf.sprintf "    \"migrate_msg_from\": %s,\n" (ctor_list c) in
+                (* M11: whether this build's migrate_state was derived from the
+                   deployed schema, or why it could not be, for the deploy gate. *)
+                let derive_line =
+                  match List.assoc_opt actor_name
+                          !March_desugar.Desugar_migrate_derive.report with
+                  | Some (March_desugar.Desugar_migrate_derive.Derived added) ->
+                    Printf.sprintf "    \"migrate_derived\": [%s],\n"
+                      (String.concat ", " (List.map (Printf.sprintf "%S") added))
+                  | Some (March_desugar.Desugar_migrate_derive.Not_derived why) ->
+                    Printf.sprintf "    \"migrate_not_derived\": %S,\n" why
+                  | None -> "" in
+                (* H3: a `@compat(simulation)` actor's handler bodies, as
+                   source, so the NEXT build can check that migrating
+                   commutes with handling (Desugar_simulation). *)
+                let steps_line =
+                  match adef with
+                  | Some a when compat = March_desugar.Desugar_simulation.compat ->
+                    Printf.sprintf "    \"steps\": [%s],\n"
+                      (String.concat ", "
+                         (List.map (fun (h : March_ast.Ast.actor_handler) ->
+                              Printf.sprintf {|{"msg":%s,"params":[%s],"body":%s}|}
+                                (Schema_migration.json_string h.March_ast.Ast.ah_msg.March_ast.Ast.txt)
+                                (String.concat ","
+                                   (List.map (fun (p : March_ast.Ast.param) ->
+                                        Schema_migration.json_string
+                                          p.March_ast.Ast.param_name.March_ast.Ast.txt)
+                                       h.March_ast.Ast.ah_params))
+                                (Schema_migration.json_string
+                                   (March_format.Format.expr_inline h.March_ast.Ast.ah_body)))
+                             a.March_ast.Ast.actor_handlers))
+                  | _ -> "" in
                 Printf.bprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat contracts_line invariant_line handlers_line mm_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat contracts_line invariant_line handlers_line mm_line derive_line
+                  steps_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.bprintf oc "}\n";
@@ -5690,6 +6146,7 @@ let compile filename =
           else if target = March_tir.Llvm_emit.Js then basename ^ ".mjs"
           else basename
         in
+        prepare_output_path out_bin;
         (* JS target: skip LLVM/clang entirely *)
         if target = March_tir.Llvm_emit.Js then begin
           let tir_for_js = if !opt_enabled then March_tir.Opt.run tir else tir in
@@ -5698,7 +6155,16 @@ let compile filename =
              desktop entry beside its browser one) kept its C-backed externs
              alive and failed the JS build. *)
           let tir_for_js =
-            if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
+            if tir_for_js.March_tir.Tir.tm_tests <> [] then
+              (* --test: the output runs the tests, not `main` (issue
+                 #1176), so root at them and their setup blocks; rooting
+                 at `main` alone pruned every test away. *)
+              March_tir.Dce.prune_unreachable
+                ~roots:(List.map fst tir_for_js.March_tir.Tir.tm_tests
+                        @ [ March_tir.Tir_names.setup_fn_name;
+                            March_tir.Tir_names.setup_all_fn_name ])
+                tir_for_js
+            else if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
                  tir_for_js.March_tir.Tir.tm_fns
             then March_tir.Dce.prune_unreachable ~roots:[ "main" ] tir_for_js
             else tir_for_js in
@@ -5730,16 +6196,20 @@ let compile filename =
             | None -> js
             | Some map_json ->
               let map_path = Filename.concat (Filename.dirname out_bin) map_name in
-              (try
-                let oc2 = open_out map_path in
-                output_string oc2 map_json;
-                close_out oc2
-               with Sys_error _ -> ());
-              js ^ "//# sourceMappingURL=" ^ map_name ^ "\n"
+              (* The map is a debugging aid: failing to write it is a warning,
+                 and the output then names no map it cannot find. *)
+              (match
+                 let oc2 = open_out_bin map_path in
+                 Fun.protect ~finally:(fun () -> close_out_noerr oc2)
+                   (fun () -> output_string oc2 map_json; close_out oc2)
+               with
+               | () -> js ^ "//# sourceMappingURL=" ^ map_name ^ "\n"
+               | exception Sys_error msg ->
+                 Printf.eprintf "march: warning: cannot write the source map %s: %s\n%!"
+                   map_path msg;
+                 js)
           in
-          let oc = open_out out_bin in
-          output_string oc js;
-          close_out oc;
+          write_output_file out_bin js;
           (* Put every module the output imports beside it, unless
              --no-copy-runtime is given (e.g. when dune manages them). *)
           if not !no_copy_runtime then bundle_js_modules ~src_file:filename ~out_bin;
@@ -7074,8 +7544,98 @@ let compile filename =
           Printf.eprintf "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n"
       end
     in
+    (* A run-time failure in the compile-error style: what happened, the
+       source line with a caret, then the chain of calls that led there as
+       labelled excerpts.  [frames] is most recent first; each frame's span
+       is a call expression (frame 0's is the failing call itself).  Falls
+       back to [fallback] when no frame points into a file to show.
+       MARCH_BACKTRACE=full shows the standard library's frames too. *)
+    let report_runtime_failure ~code ~headline ?(notes = []) ~fallback
+        (all : March_eval.Eval.march_frame list) =
+      let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+      let is_stdlib path =
+        (match find_stdlib_dir () with
+         | Some p when String.starts_with ~prefix:(p ^ "/") path -> true
+         | _ -> false)
+        || Filename.basename (Filename.dirname path) = "stdlib" in
+      let real = List.filter (fun f ->
+          f.March_eval.Eval.mf_file <> "<none>" && f.March_eval.Eval.mf_line > 0) all in
+      let frames = if show_full then real
+        else List.filter (fun f -> not (is_stdlib f.March_eval.Eval.mf_file)) real in
+      match frames with
+      | [] -> fallback ()
+      | top :: callers ->
+        let max_callers = 8 in
+        let rec take n = function
+          | x :: rest when n > 0 -> x :: take (n - 1) rest | _ -> [] in
+        let shown = take max_callers callers in
+        (* Each caller frame's span is a call expression and its name the
+           function called, so the labels read outward from the failure. *)
+        let labels = List.map (fun (f : March_eval.Eval.march_frame) ->
+            { March_errors.Errors.lbl_span = f.March_eval.Eval.mf_span;
+              lbl_message = Printf.sprintf "`%s` was called here" f.March_eval.Eval.mf_name })
+            shown in
+        let more = List.length callers - List.length shown in
+        (* The prelude's `panic` / `todo` wrappers are the failure's own
+           machinery, not calls worth pointing a reader at. *)
+        let hidden = List.length (List.filter (fun (f : March_eval.Eval.march_frame) ->
+            Filename.basename f.March_eval.Eval.mf_file <> "prelude.march") real)
+                     - List.length frames in
+        let notes = notes
+          @ (if more > 0 then
+               [ Printf.sprintf "%d more call%s not shown." more (if more = 1 then "" else "s") ]
+             else [])
+          @ (if hidden > 0 && not show_full then
+               [ "Calls inside the standard library are left out; set MARCH_BACKTRACE=full to see them." ]
+             else []) in
+        let d = { March_errors.Errors.severity = March_errors.Errors.Error;
+                  span = top.March_eval.Eval.mf_span; message = headline;
+                  labels; notes; code; fix = None } in
+        emit_diag_text (Printf.sprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
+    in
+    let strip prefix s =
+      if String.starts_with ~prefix s
+      then Some (String.sub s (String.length prefix) (String.length s - String.length prefix))
+      else None in
+    (* The headline and code for an interpreter failure message. *)
+    let classify msg =
+      match strip "panic: " msg, strip "todo: " msg, strip "unreachable: " msg with
+      | Some m, _, _ -> (March_errors.Code.panic, "The program panicked: " ^ m)
+      | _, Some m, _ -> (March_errors.Code.panic, "The program reached a `todo`: " ^ m)
+      | _, _, Some m -> (March_errors.Code.panic, "The program reached code marked `unreachable`: " ^ m)
+      | _ -> (March_errors.Code.runtime_error, "The program stopped with a run-time error: " ^ msg) in
+    March_eval.Eval.actor_crash_hook := (fun ~actor ~tag ~args ~state ~frames exn ->
+        let msg = match exn with
+          | March_eval.Eval.Eval_error m -> m
+          | March_eval.Eval.Match_failure m -> "no pattern matched: " ^ m
+          | March_eval.Eval.Assert_failure m -> m
+          | e -> Printexc.to_string e in
+        let reason = match strip "panic: " msg with Some m -> m | None -> msg in
+        let show v = March_eval.Eval.value_to_string_pretty ~width:100 v in
+        let message = if args = [] then tag
+          else Printf.sprintf "%s(%s)" tag (String.concat ", " (List.map show args)) in
+        let headline = Printf.sprintf
+            "Actor `%s` crashed while handling `%s`: %s" actor message reason in
+        let notes = [
+          Printf.sprintf "Its state when it crashed: %s" (show state);
+          Printf.sprintf "Nothing supervises this `%s`, so it stays dead and later messages \
+                          to it are dropped. The rest of the program keeps running." actor ] in
+        report_runtime_failure ~code:March_errors.Code.actor_crashed ~headline ~notes
+          ~fallback:(fun () -> Printf.eprintf "%s\n%s\n%!" headline (String.concat "\n" notes))
+          frames);
     March_eval.Eval.clear_march_stack ();
     setup_interpreter_ffi ();
+    (* Actor message identity: the interpreter tags an actor message by its
+       checked type, so dispatch drops another actor's (or a variant's)
+       same-named message as compiled code does. *)
+    March_eval.Eval.ctor_type_of_span := (fun sp ->
+        match Hashtbl.find_opt type_map sp with
+        | Some t ->
+          (match March_typecheck.Typecheck.repr t with
+           | March_typecheck.Typecheck.TCon (n, _) -> Some n
+           | _ -> None)
+        | None -> None);
+    March_eval.Eval.typed_messages := true;
     (try
        (try March_eval.Eval.run_module desugared
         with
@@ -7091,16 +7651,50 @@ let compile filename =
        (* panic_/todo_/unreachable_ builtins already prefix their messages with
           "panic: " / "todo: " / "unreachable: " — print as-is. *)
        let hint = March_eval.Eval.interface_method_hint desugared msg in
-       Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
-       print_march_backtrace ();
+       let code, headline = classify msg in
+       report_runtime_failure ~code ~headline
+         ~notes:(match hint with Some h -> [ String.trim h ] | None -> [])
+         ~fallback:(fun () ->
+             Printf.eprintf "%s%s\n" msg (Option.value hint ~default:"");
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | March_eval.Eval.Match_failure msg ->
-       Printf.eprintf "panic: match failure — %s\n" msg;
-       print_march_backtrace ();
+       (* A panic compiled too ("non-exhaustive pattern match"). *)
+       report_runtime_failure ~code:March_errors.Code.panic
+         ~headline:("The program panicked: no pattern of this `match` matched. " ^ msg)
+         ~fallback:(fun () ->
+             Printf.eprintf "panic: match failure — %s\n" msg;
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
+       exit 1
+     | March_eval.Eval.Assert_failure msg when String.starts_with ~prefix:"-- " msg ->
+       (* A failed `assert` carries its own rendered report (the line, the
+          operands; lib/errors/test_report.ml): print it as it is, then the
+          calls that led there. *)
+       Printf.eprintf "%s\n" msg;
+       let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+       let calls = List.filter (fun (f : March_eval.Eval.march_frame) ->
+           f.March_eval.Eval.mf_file <> "<none>" && f.March_eval.Eval.mf_line > 0
+           && (show_full
+               || Filename.basename (Filename.dirname f.March_eval.Eval.mf_file) <> "stdlib"))
+           (March_eval.Eval.get_march_stack ()) in
+       if calls <> [] then begin
+         Printf.eprintf "\n    It was reached through these calls, innermost first:\n\n";
+         List.iteri (fun i (f : March_eval.Eval.march_frame) ->
+             if i < 8 then
+               Printf.eprintf "    `%s` was called at %s:%d\n" f.March_eval.Eval.mf_name
+                 f.March_eval.Eval.mf_file f.March_eval.Eval.mf_line) calls
+       end;
+       Printf.eprintf "\n%!";
        exit 1
      | March_eval.Eval.Assert_failure msg ->
-       Printf.eprintf "panic: %s\n" msg;
-       print_march_backtrace ();
+       report_runtime_failure ~code:March_errors.Code.panic
+         ~headline:("An assertion failed: " ^ msg)
+         ~fallback:(fun () ->
+             Printf.eprintf "panic: %s\n" msg;
+             print_march_backtrace ())
+         (March_eval.Eval.get_march_stack ());
        exit 1
      | Unix.Unix_error (Unix.EINTR, syscall, _) ->
        (* SIGINT interrupted a blocking syscall (accept/select/recv) —
@@ -7779,11 +8373,21 @@ let () =
          print_string (March_errors.Explain.explain code); exit 0),
      "SLUG Print the explanation page for a diagnostic code (the [slug] at the end of an error's first line)");
     ("--check-json", Arg.Set check_json,  " Emit diagnostics as NDJSON to stdout (for tooling such as forge fix)");
+    ("--fix-verify-source", Arg.String (fun p -> fix_verify_source := Some p),
+     "PATH (internal) Read the source text from PATH, keeping the file name given; used to re-check a fix");
     ("--no-measure-axioms", Arg.Clear measure_axioms, " Reflect @[measure] functions symbolically instead of axiomatising them (skips datatype/quantifier reasoning and the soundness gate)");
+    ("--why-copies", Arg.Set why_copies,
+     " Report each place in your code where a function builds a new copy of a value instead of reusing it in place, because the value is used again afterwards; with a fix that reorders when that is safe. Stops before code generation");
+    ("--why-copies-json", Arg.Set why_copies_json,
+     " --why-copies as NDJSON, the --check-json shape (for tooling and forge fix)");
     ("--report-contracts", Arg.Set report_contracts,
      " With --compile: emit one --check-json-shaped line per function verified allocation-free that should carry @[no_alloc] (consumed by `forge fix --contracts`). Stops before code generation, so no binary is written");
     ("--contract-scope", Arg.Set_string contract_scope,
      "<globs>  Comma-separated module/function globs (e.g. 'Dsp.*,Audio.mix') that --report-contracts considers in scope even without in-place reuse");
+    ("--guarantees", Arg.Unit (fun () -> guarantees := true; do_check := true),
+     " Typecheck and refinement-check the file, then print one labelled line per actor and protocol (proved, violated, not proved, not checked, checked (compiler), assumed) with what it rests on; changes no verdict");
+    ("--validate-projections", Arg.Unit (fun () -> validate_projections := true; do_check := true),
+     " Typecheck the file, then check both protocol projectors against Session.Theory.project for every protocol and role (one line each; exit 1 if one disagrees, a compiler bug)");
     ("--refine-report", Arg.Set refine_report,
      " Print a summary of refinement obligations: proved, violated, and skipped by reason (user code and user+stdlib)");
     ("--termination-report", Arg.Set termination_report,
@@ -7830,6 +8434,8 @@ let () =
      "<k1,..,k7,decreases,lemma>  Restrict --refine-infer to these candidate kinds (decreases: termination metrics; lemma: lemma calls)");
     ("--refine-infer-budget", Arg.Set_int refine_infer_budget, "<N>  Global probe budget for --refine-infer (default 3000)");
     ("--refine-infer-stdlib", Arg.Set refine_infer_stdlib, " Let --refine-infer also target stdlib functions");
+    ("--refine-infer-module", Arg.String (fun m -> refine_infer_modules := !refine_infer_modules @ [ m ]),
+     "<M>  Let --refine-infer target only module M's file (stdlib or not; repeatable): one bounded run per module of a stdlib sweep");
     ("--allow-caller-violations", Arg.Set allow_caller_violations,
      " Let --refine-infer propose a precondition that turns an existing caller into a violation");
     ("--refine-infer-apply", Arg.Set refine_infer_apply,
@@ -7838,7 +8444,7 @@ let () =
     ("--apply-public", Arg.Set apply_public, " With --apply: also apply proposals on public functions with no in-unit callers");
     ("--refine-suggest-budget", Arg.Set_int refine_suggest_budget,
      "<N>  Cap the hypothesis re-checks --refine-suggest may spend per function (default 200)");
-    ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
+    ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile, or --target js for a test-runner .mjs)");
     ("--emit-io-ops", Arg.Set emit_io_ops, " Print the generated per-IO-capability dictionary module (stdlib/io_ops.march) and exit");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
@@ -7863,6 +8469,8 @@ let () =
      "<path>  Prior .schemas.json for --check-migration");
     ("--new-schema", Arg.Set_string new_schema_path,
      "<path>  New .schemas.json for --check-migration");
+    ("--hcr-baseline", Arg.Set_string hcr_baseline_path,
+     "<path>  The deployed build's .schemas.json: its contracts are hypotheses for this build's migrate_state/migrate_msg (default: forge's .march/<name>_hot.so.schemas.json.prev)");
     ("--accept-unproved",
      Arg.String (fun s ->
          accept_unproved := !accept_unproved @ List.filter (( <> ) "") (String.split_on_char ',' s)),
@@ -7922,6 +8530,9 @@ let () =
   March_tir.Llvm_toplevel.debug_info := !debug_info;
   (* --target js implies --compile (skip JIT, emit .mjs) *)
   if !target_str = "js" || !target_str = "javascript" then do_compile := true;
+  (* --why-copies runs the compile pipeline through Perceus and stops before
+     code generation (like --report-contracts), so it implies --compile. *)
+  if !why_copies || !why_copies_json then do_compile := true;
   (* --dump-role-authority is a report the typechecker prints; nothing runs. *)
   if !dump_role_authority then do_check := true;
   (* Propagate --pmap-threshold to the interpreter (codegen reads it via

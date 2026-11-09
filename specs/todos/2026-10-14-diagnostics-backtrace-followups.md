@@ -35,5 +35,16 @@ a compiler-emitted function table (no dladdr, so Linux too).
    now `march_panic_handled`) are process globals, so a `try_finally` or
    `__try_call` on one scheduler thread can catch a panic raised on another.
    Pre-existing; the crash observers inherit it. Move them onto `march_proc`.
-7. **wasm / js backends.** The `diag_*` builtins exist in the native runtime
-   and the interpreter only.
+7. **wasm backend.** The `diag_*` builtins exist in the native runtime, the
+   interpreter and the JS target (done: `progress/2026-11-07-diag-builtins-js.md`),
+   not in the wasm runtime (`runtime/march_runtime_wasm.c`).
+
+Done since (`progress/2026-11-05-runtime-failure-reports.md`): the interpreter renders an
+unhandled failure and an unsupervised actor crash as a diagnostic with source excerpts (frames
+carry their call's span). Item 4 is done too
+(`progress/2026-11-06-compiled-failure-reports.md`): a compiled unhandled panic prints the
+report, with the panic call's line and caret and the functions on the stack by definition line
+(item 1, the exact line of each call, is what would make it match the interpreter's). Still
+open on the compiled side: a line for `assert`, non-exhaustive matches, `unwrap` and run-time
+errors (item 3), and the same actor report compiled (message and state at the crash; a compiled unsupervised actor
+panic exits the process, where the interpreter carries on, itself a divergence to settle).

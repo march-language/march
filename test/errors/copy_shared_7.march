@@ -1,0 +1,22 @@
+-- MARCH-MODE: why-copies
+-- EXPECT-ERROR: builds a new copy instead of reusing `xs` in place
+-- The later use can panic, so moving it above the map could change which
+-- failure the program reports: no fix is offered.
+mod Main do
+  needs IO.Console
+
+  fn checked_len(xs : List(Int)) : Int do
+    let n = List.length(xs)
+    if n > 1000 do panic("too long") else n end
+  end
+
+  fn inc_all(xs : List(Int)) : List(Int) do
+    let ys = List.map(xs, fn x -> x + 1)
+    let n = checked_len(xs)
+    List.append(ys, [n])
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(int_to_string(List.length(inc_all([1, 2, 3]))))
+  end
+end

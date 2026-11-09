@@ -59,6 +59,8 @@ let lower_linearity : Ast.linearity -> Tir.linearity = function
   | Ast.Linear       -> Tir.Lin
   | Ast.Affine       -> Tir.Aff
   | Ast.Unrestricted -> Tir.Unr
+  (* Ghost bindings are erased before lowering ([March_desugar.Ghost]). *)
+  | Ast.Ghost        -> Tir.Unr
 
 (** Convert an internal typechecker type to a TIR type.
     [Typecheck.TArrow] is curried; we uncurry into [Tir.TFn].

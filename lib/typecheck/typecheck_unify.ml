@@ -232,13 +232,22 @@ let report_protocol_wrong_role env ~span ~provided
     | _ -> [] in
   let module_of call = match String.rindex_opt call '.' with
     | Some i -> String.sub call 0 i | None -> call in
+  let diagram = match here.ps_pos with
+    | Some p ->
+      March_ast.Protocol_states.diagram ~proto:here.ps_proto ~role:here.ps_role
+        ~subject:(Printf.sprintf "`%s`" here.ps_role) ~here:p
+        ?tried:(Option.map (fun q ->
+            (q, Printf.sprintf "`%s` tried this, but it is `%s`'s step" here.ps_role wanted.ps_role))
+            wanted.ps_pos) ()
+    | None -> None in
   Err.report env.errors
     { Err.severity = Error; span; message;
       labels = you_are_here @ binder;
       notes = [ Printf.sprintf "At this point `%s` must %s: take that step with `%s`."
                   here.ps_role here.ps_doing here.ps_call;
                 Printf.sprintf "If this body is meant to play `%s`, give it a `%s` state instead."
-                  wanted.ps_role (module_of wanted.ps_call) ];
+                  wanted.ps_role (module_of wanted.ps_call) ]
+              @ Option.to_list diagram;
       code = Err.Code.protocol_wrong_role; fix = None }
 
 (** A role body taking a step the protocol does not allow at that point,
@@ -268,10 +277,37 @@ let report_protocol_step_order env ~span ~provided
          [ { Err.lbl_span = bsp; lbl_message = Printf.sprintf "`%s` is the state bound here" n } ]
        | _ -> [])
     | _ -> [] in
+  (* The conversation drawn out: the step tried is marked where it sits,
+     after the step due (skipped ahead), or before it (taken again: the
+     loop's next round, or a step on a state already used). *)
+  let diagram = match here.ps_pos with
+    | Some p ->
+      let tried = Option.map (fun q ->
+          let again = March_ast.Protocol_states.pos_before q p in
+          (q, if wanted.ps_doing = "close the conversation"
+              then Printf.sprintf "`%s` tried to close here" here.ps_role
+              else Printf.sprintf "`%s` tried this%s" here.ps_role (if again then " again" else "")))
+          wanted.ps_pos in
+      March_ast.Protocol_states.diagram ~proto:here.ps_proto ~role:here.ps_role
+        ~subject:(Printf.sprintf "`%s`" here.ps_role) ~here:p ?tried ()
+    | None -> None in
+  (* Closing at the top of a `loop`: the usual cause is a branch that
+     repeats, whose callback closed where it should have gone round again. *)
+  let repeat_note =
+    match here.ps_pos with
+    | Some p when wanted.ps_doing = "close the conversation"
+                  && March_ast.Protocol_states.at_loop_start ~proto:here.ps_proto p ->
+      [ Printf.sprintf
+          "This state is the top of protocol `%s`'s `loop`, where a branch that repeats \
+           comes back to. To go round again, pass the state to a function that takes it \
+           as a parameter (usually `%s`'s own function, called again) instead of closing."
+          here.ps_proto here.ps_role ]
+    | _ -> [] in
   Err.report env.errors
     { Err.severity = Error; span; message;
       labels = you_are_here @ binder;
-      notes = [ Printf.sprintf "Take that step with `%s` first." here.ps_call ];
+      notes = Printf.sprintf "Take that step with `%s` first." here.ps_call
+              :: repeat_note @ Option.to_list diagram;
       code = Err.Code.protocol_step_order; fix = None }
 
 (* A capability for another capability: its own message (§F1). *)
@@ -411,7 +447,10 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff exp
   (* With a diff the two roots share a head, so these hints, about the
      roots, don't apply; the ones for the parts would name the wrong value. *)
   let common_hint =
-    if diff <> None then [] else common_mismatch_hint expected found
+    if diff <> None then [] else
+      match common_mismatch_hint expected found with
+      | [] -> Option.to_list (Typecheck_suggest.conversion_note env expected found)
+      | hs -> hs
   in
   (* Same-printed-name explanation.  Two shapes reach here: a genuine
      global-namespace collision, and (commoner) a parameterised record type
@@ -513,12 +552,10 @@ and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff exp
          callback?" under it contradicted it), and the more specific
          session / same-name explanations pre-empt the generic one. *)
       notes =
-        (if occurs_violation then occurs_note
-         else
-           why_note @ mismatch_note
-           @ (match session_hint, same_name_note with
-              | (_ :: _ as h), _ | [], (_ :: _ as h) -> h
-              | [], [] -> common_hint));
+        Err.first_cause
+          [ occurs_note;
+            why_note @ mismatch_note
+            @ Err.first_cause [ session_hint; same_name_note; common_hint ] ];
       code = Err.Code.type_mismatch; fix = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
@@ -697,7 +734,7 @@ let pp_ty_diff env ~elide ~targets t =
       match repr t with
       | TLin (Ast.Linear, i) -> add "linear "; go ~parens:true rpath i
       | TLin (Ast.Affine, i) -> add "affine "; go ~parens:true rpath i
-      | TLin (Ast.Unrestricted, i) -> go ~parens rpath i
+      | TLin ((Ast.Unrestricted | Ast.Ghost), i) -> go ~parens rpath i
       | TCon (name, (_ :: _ as args)) ->
         add name; add "(";
         List.iteri (fun i a -> if i > 0 then add ", "; go (DArg (name, i + 1) :: rpath) a) args;
@@ -1513,7 +1550,8 @@ let bind_linear_field_sentinels varname ty env =
         | Some lin ->
           let key = varname ^ "#" ^ fname in
           let le = { le_name = key; le_lin = lin; le_used = ref false; le_first_use = ref None;
-                     le_pending = None; le_dup = ref None; le_mixed = ref None } in
+                     le_pending = None; le_dup = ref None; le_mixed = ref None;
+                     le_where = ref []; le_exit = ref []; le_poisoned = ref false } in
           { acc_env with lin = le :: acc_env.lin }
         | _ -> acc_env
       ) env flds

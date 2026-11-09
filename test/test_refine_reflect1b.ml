@@ -438,9 +438,10 @@ let parity =
         Alcotest.(check string) "a refined parameter: only inputs inside pre_f" "agree" (parity_status out "pos_only");
         if parity_row out "guarded" <> None then Alcotest.fail "guarded is R5-blocked, so it is not in the net");
     gated "parity: a logic side that fails on every input is not-compared, not overflow? (review round 1)" (fun () ->
-        (* k compares Floats (no template); f calls it, so f's logic side has
-           no definition on any input while the interpreter overflows at the
-           maximum Int.  Zero inputs compared: no evidence either way. *)
+        (* k compares Floats with the opaque Float `==` (D9), which the
+           evaluator does not model; f calls it, so f's logic side fails on
+           every input while the interpreter overflows at the maximum Int.
+           Zero inputs compared: no evidence either way. *)
         let src =
           {|mod P3 do
   fn k(n : Int) : Int do
@@ -452,15 +453,18 @@ end
         in
         let out = run ~args:"--check --reflect-parity" src in
         Alcotest.(check string) "f" "not-compared" (parity_status out "f");
-        Alcotest.(check string) "k (reflected, no logic definition)" "not-compared" (parity_status out "k"));
+        Alcotest.(check string) "k (reflected, the opaque Float ==)" "not-compared" (parity_status out "k"));
     gated "parity: a reflected function with no logic definition is listed, not dropped (review round 1)" (fun () ->
         let src =
           {|mod P1 do
   fn f(n : Int, x : Float) : Int do
     if x == x do n + 1 else n end
   end
+  type Bx = { v : Int }
+  type By = { v : Int }
   fn g(n : Int) : Int do
-    if 2.0 == 2.0 do n + 1 else n - 1 end
+    let b = { v: n }
+    b.v + 1
   end
 end
 |}
@@ -480,6 +484,31 @@ end
           Alcotest.failf "a run with no compared input says so:\n%s" out;
         if contains (run ~args:"--check --reflect-parity" parity_src) "NOTHING COMPARED" then
           Alcotest.fail "the parity program compares inputs");
+    (* §3.2: a tuple or record drawn as an input is a tuple or record to the
+       interpreter, and a tuple or record result is read back as one. *)
+    gated "parity: functions over tuples and records agree" (fun () ->
+        let src =
+          {|mod PT do
+  type Pt = { x : Int, y : Int }
+  fn sw(t : (Int, Int)) : Int do match t do (a, b) -> a - b end end
+  fn fst2(t : (Int, Bool)) : Int do
+    let (a, _) = t
+    a
+  end
+  fn swp(t : (Int, Int)) : (Int, Int) do match t do (a, b) -> (b, a) end end
+  fn px(p : Pt) : Int do p.x - p.y end
+  fn bump(p : Pt) : Pt do { p with x: p.y } end
+  fn sx(p : Pt) : Int do
+    let { x, y } = p
+    x - 2 * y
+  end
+end
+|}
+        in
+        let out = run ~args:"--check --reflect-parity" src in
+        List.iter
+          (fun f -> Alcotest.(check string) f "agree" (parity_status out f))
+          [ "sw"; "fst2"; "swp"; "px"; "bump"; "sx" ]);
     gated "parity RED: an arms-swapped term_of_body is a mismatch" (fun () ->
         let out = run ~env:"MARCH_REFLECT_PERTURB=swap-arms" ~args:"--check --reflect-parity" parity_src in
         Alcotest.(check string) "absv" "MISMATCH" (parity_status out "absv");
@@ -1309,3 +1338,37 @@ let builtin_names_cover_signatures =
             if not (List.mem n names) then
               Alcotest.failf "%s (named by a builtin signature) is missing from builtin_type_names" n)
           [ "CancelToken"; "TimerRef"; "DownReason"; "Option"; "Int" ]) ]
+
+(* `uses:` when a stage-2 proof's unsat core names no unfolding (congruence
+   alone, I8): the definitions that query assumed, not every unfolding the
+   whole stage-2 run made (todo 2026-10-31-reflection-encoder-gaps, "`uses:`
+   over-approximation").  Driven at [Obligation.record], where the query's
+   core and assumptions meet. *)
+let uses_query_frontier =
+  let module O = March_refinecheck.Obligation in
+  let module R = March_refine.Refine in
+  let ob callee =
+    { O.span = March_ast.Ast.dummy_span; callee; predicate = "_ == a"; verdict = O.Proved
+    ; kind = O.Precondition; inst = None }
+  in
+  [ Alcotest.test_case "an empty core reports the query's own frontier" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [];
+            R.last_assumed := [ "|$ru_1:f|"; "|$ru_2:f|" ];
+            let o = ob "need_eq_a" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [ "f" ] (O.uses_of o)));
+    Alcotest.test_case "a core naming an unfolding still wins over the query's frontier" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [ "$ru_2:g" ];
+            R.last_assumed := [ "|$ru_1:f|"; "|$ru_2:g|" ];
+            let o = ob "need_eq_b" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [ "g" ] (O.uses_of o)));
+    Alcotest.test_case "a stage-1 proof (no assumptions) records no uses" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [];
+            R.last_assumed := [];
+            let o = ob "need_eq_c" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [] (O.uses_of o))) ]

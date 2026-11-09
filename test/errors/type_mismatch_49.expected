@@ -1,0 +1,18 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_49.march
+
+expected `Int` but got `String`. [type_mismatch]
+
+6 |     if local do { host: "localhost", port: 8080 } else { host: "example.com", port: "443" } end
+                                                                                        ^^^^^
+
+    In the `port` field of the `else` branch.
+    This is the declared return type of `cfg`.
+
+    the expected type comes from here:
+
+5 |   fn cfg(local : Bool) : Cfg do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

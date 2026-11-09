@@ -7,6 +7,14 @@ Role `Prod` tries to close the conversation here, but at this point protocol `St
                               ^^
 
     Take that step with `Stream_Prod.send_Msg_Prod_Cons_1` first.
+    This state is the top of protocol `Stream`'s `loop`, where a branch that repeats comes back to. To go round again, pass the state to a function that takes it as a parameter (usually `Prod`'s own function, called again) instead of closing.
+    The conversation so far, in protocol `Stream`:
+
+      loop do                   (repeats)
+        Prod -> Cons : Int      <- `Prod` must do this next
+        choose by Cons: done    other branch: `more`
+          Cons -> Prod : Bool
+          stop                  <- `Prod` tried to close here
 
     `Prod` is here: it must send an `Int` to `Cons`:
 

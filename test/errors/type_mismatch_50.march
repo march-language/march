@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: expected `Int` but got `String`
+-- REJECT (§X1 slice 3): an operand of `+` is a side of an operator, and the left side is where its type came from.
+mod Total do
+  fn total(n : Int) : Int do
+    n + "1"
+  end
+  fn main() : Int do total(2) end
+end

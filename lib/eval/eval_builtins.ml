@@ -24,6 +24,116 @@ let strip_trailing_cr s =
   let n = String.length s in
   if n > 0 && s.[n - 1] = '\r' then String.sub s 0 (n - 1) else s
 
+(* string_to_float / float_from_string (#1178): exactly what C strtod accepts in
+   the "C" locale with the WHOLE string consumed, which is the native runtime's
+   grammar (march_float_syntax_ok in runtime/march_runtime.c states it; the JS
+   runtime matches too, and test/native/string_to_float_grammar.march pins all
+   three backends). Leading C whitespace is skipped, trailing is not; inf,
+   infinity and nan (optionally nan(chars)) are case-insensitive; hex floats are
+   accepted. OCaml's [float_of_string] is not that grammar on its own: it also
+   takes `_` separators ("1_000") and hands nan(...) to the host libc. So the
+   shape is checked here and [float_of_string] only computes a decimal value.
+   Hex goes through [hex_float] below: OCaml's own hex reader rounds twice in
+   the subnormal range (0x4e9e.85bc87c31aaep-1037 came out one ulp high). *)
+
+(* [digits] (hex, no point) times 2^[e], correctly rounded: to nearest, ties to
+   even, with gradual underflow, as strtod rounds it. The first 57+ bits are
+   kept exactly in [m]; any nonzero digit past them only sets [sticky], which
+   is all a rounding decision needs. *)
+let hex_float (digits : string) (e : int) : float =
+  let m = ref 0 and extra = ref 0 and sticky = ref false in
+  String.iter (fun c ->
+      let d = match c with
+        | '0' .. '9' -> Char.code c - Char.code '0'
+        | 'a' .. 'f' -> Char.code c - Char.code 'a' + 10
+        | _ -> Char.code c - Char.code 'A' + 10 in
+      if !m lsr 56 = 0 then m := (!m lsl 4) lor d
+      else begin extra := !extra + 4; if d <> 0 then sticky := true end)
+    digits;
+  if !m = 0 then 0.0
+  else begin
+    let e = e + !extra in
+    let rec bits n acc = if n = 0 then acc else bits (n lsr 1) (acc + 1) in
+    let bl = bits !m 0 in
+    let top = bl + e in                (* m * 2^e lies in [2^(top-1), 2^top) *)
+    if top > 1025 then Float.infinity
+    else if top < -1075 then 0.0
+    else begin
+      let keep = min 53 (top + 1074) in  (* bits a double keeps here *)
+      let shift = bl - keep in
+      if shift <= 0 then Float.ldexp (float_of_int !m) e
+      else begin
+        let q = !m lsr shift in
+        let rem = !m land ((1 lsl shift) - 1) in
+        let half = 1 lsl (shift - 1) in
+        let up = rem > half || (rem = half && (!sticky || q land 1 = 1)) in
+        let q = if up then q + 1 else q in
+        Float.ldexp (float_of_int q) (e + shift)
+      end
+    end
+  end
+
+let march_float_of_string (s : string) : float option =
+  let n = String.length s in
+  let i = ref 0 in
+  while !i < n && (s.[!i] = ' ' || (s.[!i] >= '\t' && s.[!i] <= '\r')) do incr i done;
+  let neg = !i < n && s.[!i] = '-' in
+  if !i < n && (s.[!i] = '+' || s.[!i] = '-') then incr i;
+  let body = String.sub s !i (n - !i) in
+  let len = String.length body in
+  let lower = String.lowercase_ascii body in
+  let is_dec c = c >= '0' && c <= '9' in
+  let is_hex c = is_dec c || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') in
+  let numeric () : float option =
+    (* [digits ("." digits?)? | "." digits] then an optional exponent *)
+    let hex = len >= 2 && body.[0] = '0' && (body.[1] = 'x' || body.[1] = 'X') in
+    let dig = if hex then is_hex else is_dec in
+    let buf = Buffer.create len in       (* the digits, point dropped *)
+    let nfrac = ref 0 in
+    let p = ref (if hex then 2 else 0) in
+    while !p < len && dig body.[!p] do Buffer.add_char buf body.[!p]; incr p done;
+    if !p < len && body.[!p] = '.' then begin
+      incr p;
+      while !p < len && dig body.[!p] do
+        Buffer.add_char buf body.[!p]; incr p; incr nfrac
+      done
+    end;
+    let exp_ok, pexp =
+      if !p < len
+         && (if hex then body.[!p] = 'p' || body.[!p] = 'P'
+             else body.[!p] = 'e' || body.[!p] = 'E') then begin
+        incr p;
+        let eneg = !p < len && body.[!p] = '-' in
+        if !p < len && (body.[!p] = '+' || body.[!p] = '-') then incr p;
+        let ne = ref 0 and v = ref 0 in
+        while !p < len && is_dec body.[!p] do
+          (* saturate: anything this large is already inf or 0 *)
+          if !v < 100_000_000 then
+            v := !v * 10 + (Char.code body.[!p] - Char.code '0');
+          incr p; incr ne
+        done;
+        (!ne > 0, if eneg then - !v else !v)
+      end else (true, 0)
+    in
+    if Buffer.length buf = 0 || not exp_ok || !p <> len then None
+    else if hex then Some (hex_float (Buffer.contents buf) (pexp - 4 * !nfrac))
+    else
+      (* A validated decimal body (no sign, no `_`, no whitespace) is a
+         subset of what [float_of_string] reads; it is strtod underneath. *)
+      float_of_string_opt body
+  in
+  let nan_chars c = is_dec c || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_' in
+  let is_nan () =
+    lower = "nan"
+    || (len >= 5 && String.sub lower 0 4 = "nan(" && body.[len - 1] = ')'
+        && String.for_all nan_chars (String.sub body 4 (len - 5)))
+  in
+  let sign f = if neg then -. f else f in
+  if len = 0 then None
+  else if lower = "inf" || lower = "infinity" then Some (sign Float.infinity)
+  else if is_nan () then Some (sign Float.nan)
+  else Option.map sign (numeric ())
+
 (* __try_call / __try_call_val: run the thunk (a 1-arg lambda whose argument
    is ignored) and reflect any runtime failure as Err.  The failure is handled
    here, so the frames a panic leaves on the March stack for a backtrace are
@@ -1132,13 +1242,15 @@ let base_env : env =
         | _ -> eval_error "float_epsilon: no arguments"))
   ; ("float_from_string", VBuiltin ("float_from_string", function
         | [VString s] ->
-          (try VCon ("Some", [VFloat (float_of_string s)])
-           with Failure _ -> VCon ("None", []))
+          (match march_float_of_string s with
+           | Some f -> VCon ("Some", [VFloat f])
+           | None -> VCon ("None", []))
         | _ -> eval_error "float_from_string: expected string"))
   ; ("string_to_float", VBuiltin ("string_to_float", function
         | [VString s] ->
-          (try VCon ("Some", [VFloat (float_of_string s)])
-           with Failure _ -> VCon ("None", []))
+          (match march_float_of_string s with
+           | Some f -> VCon ("Some", [VFloat f])
+           | None -> VCon ("None", []))
         | _ -> eval_error "string_to_float: expected string"))
   ; ("float_to_string", VBuiltin ("float_to_string", function
         | [VFloat f] -> VString (string_of_float f)
@@ -4561,7 +4673,7 @@ let base_env : env =
               | None ->
                 VCon ("Err", [VString "no reply (timeout or unhandled Call)"])
               | Some hname ->
-                mailbox_enqueue inst (VCon (hname, [VInt ref_id]));
+                mailbox_enqueue inst (VCon (runtime_call_prefix ^ hname, [VInt ref_id]));
                 !run_scheduler_hook ();
                 (* timeout_ms is a REAL wall-clock deadline, not decoration.
                    The interpreter's scheduler runs a handler to completion

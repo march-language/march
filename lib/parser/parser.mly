@@ -39,6 +39,30 @@
     March_errors.Errors.parse_error_extra := (code, fix);
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
+  let pos_of_name (n : name) : Lexing.position =
+    { Lexing.pos_fname = n.span.file; pos_lnum = n.span.start_line; pos_bol = 0;
+      pos_cnum = n.span.start_col }
+
+  (* A type declaration's parameters: `a` (a type) or `n : Int` (a value, only
+     on a refinement alias, `type Vec(a, n : Int) = {List(a) | len(_) == n}`). *)
+  let plain_tparams (ps : (name * ty option) list option) : name list =
+    match ps with
+    | None -> []
+    | Some ps ->
+      List.map (fun ((n : name), k) ->
+          match k with
+          | None -> n
+          | Some _ ->
+            error_raise
+              (Printf.sprintf "`%s : …` is a value parameter, which only a refinement alias can take:" n.txt)
+              (Some "type Vec(a, n : Int) = {List(a) | len(_) == n}")
+              (pos_of_name n)) ps
+
+  let alias_decl vis (name : name) (ps : (name * ty option) list option) (rhs : ty) sp : decl =
+    let ps = Option.value ps ~default:[] in
+    let values = List.filter_map (fun (n, k) -> Option.map (fun t -> (n, t)) k) ps in
+    DType (vis, name, List.map fst ps, TDAlias (rhs, values), sp)
+
   (* `D -> Bool[p]` (the marker [ty_post] puts on `Bool`) is the definer form
      of an abstract refinement, `({x : D | true}) -> {Bool | _ == p(x)}`
      (design 2026-09-20 §1).  A domain that already names its binder keeps it;
@@ -444,6 +468,7 @@
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
+%token CALC REVEAL FORALL EXISTS GHOST
 %token DBG DOC
 %token <string> SIGIL_PREFIX
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
@@ -464,7 +489,7 @@
 %token LPAREN_STMT
 %token AT INVARIANT
 %token ARROW PIPE_ARROW
-%token EQUALS COLON COMMA PIPE DOT
+%token EQUALS COLON COMMA PIPE DOT DOTDOT
 %token PLUSPLUS PLUS MINUS STAR SLASH PERCENT
 %token PLUSDOT MINUSDOT STARDOT SLASHDOT
 %token LT GT EQEQ NEQ LEQ GEQ
@@ -481,6 +506,9 @@
      prec_hole: bare ? hole; below LOWER_IDENT so ?foo shifts the ident.
      prec_atom: bare UPPER_IDENT or ATOM; below LPAREN so Foo() shifts (.
      prec_app:  expr_field pass-through; below LPAREN so f() shifts (. *)
+(* `assert assert p by h`: the inner assert takes the `by` (shift). *)
+%nonassoc prec_assert
+%nonassoc BY
 %nonassoc prec_hole
 %nonassoc LOWER_IDENT
 %nonassoc prec_atom
@@ -652,7 +680,7 @@ decl:
               None $startpos(attrs_args)) attrs;
       match d with
       | DFn (def, span) ->
-        DFn ({ def with fn_doc = Some s; fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
+        DFn ({ def with fn_doc = Some s; fn_attrs = attrs @ def.fn_attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
   | attrs_args = nonempty_list(fn_attr); d = fn_decl
     { let attrs = List.map fst attrs_args in
@@ -668,7 +696,7 @@ decl:
                  (String.sub a 9 (String.length a - 9)))
               None $startpos(attrs_args)) attrs;
       match d with
-      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
+      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs @ def.fn_attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = protocol_decl
     { let attrs = List.map fst attrs in (* The one protocol attribute is `@[endpoints]`: generate typed session
@@ -765,6 +793,12 @@ fn_decl_name:
   | SEND           { mk_name "send" $loc }
 
 fn_decl:
+  (* `ghost fn` / `ghost pfn` (specs/lang/lemmas.md, Ghost code): a function
+     that exists only for proofs, reflected and never compiled. *)
+  | GHOST; d = fn_decl
+    { match d with
+      | DFn (def, span) -> DFn ({ def with fn_attrs = "ghost" :: def.fn_attrs }, span)
+      | d -> d }
   | FN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
     DO; body = block_body; END
@@ -856,6 +890,8 @@ fn_param:
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Linear } }
   | AFFINE; name = soft_lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Affine } }
+  | GHOST; name = soft_lower_name; COLON; t = ty
+    { FPNamed { param_name = name; param_ty = Some t; param_lin = Ghost } }
   | name = soft_lower_name; DSLASH; default_e = expr
     { FPDefault ({ param_name = name; param_ty = None; param_lin = Unrestricted }, default_e) }
   | name = soft_lower_name; COLON; t = ty; DSLASH; default_e = expr
@@ -875,45 +911,61 @@ type_decl:
   (* opaque type: type name public, constructors private to module *)
   | OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       let private_variants = List.map (fun v -> { v with var_vis = Private }) variants in
       DType (Public, name, tps, TDVariant private_variants, mk_span ($loc)) }
   | OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Private, name, tps, TDVariant variants, mk_span ($loc)) }
   | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DType (Private, name, tps, TDRecord fields, mk_span ($loc)) }
   | ALWAYSLINEAR; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DAlwaysLinearType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
   (* always_linear opaque type: every binding must be consumed, and the
      constructors are private to the module, as for `opaque type`.  The
      representation of a linear container (stdlib LinearMap) stays hidden. *)
   | ALWAYSLINEAR; OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       let private_variants = List.map (fun v -> { v with var_vis = Private }) variants in
       DAlwaysLinearType (Public, name, tps, TDVariant private_variants, mk_span ($loc)) }
   | ALWAYSLINEAR; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
-    { let tps = match tparams with Some ps -> ps | None -> [] in
+    { let tps = plain_tparams tparams in
       DAlwaysLinearType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
+  (* Refinement alias: `type Pos = {Int | _ > 0}`, `type Vec(a, n : Int) =
+     {List(a) | len(_) == n}`.  The right-hand side is a refinement type (a
+     bare `type T = U` is a variant declaration); a binder form shares
+     `{ name : ty` with a record and is told apart on `|`. *)
+  | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; t = ty_app; PIPE; p = refine_pred; RBRACE
+    { alias_decl Public name tparams (TyRefine (t, None, p)) (mk_span $loc) }
+  | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; b = lower_name; COLON; t = ty; PIPE; p = refine_pred; RBRACE
+    { alias_decl Public name tparams (TyRefine (t, Some b, p)) (mk_span $loc) }
+  | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; t = ty_app; PIPE; p = refine_pred; RBRACE
+    { alias_decl Private name tparams (TyRefine (t, None, p)) (mk_span $loc) }
+  | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; b = lower_name; COLON; t = ty; PIPE; p = refine_pred; RBRACE
+    { alias_decl Private name tparams (TyRefine (t, Some b, p)) (mk_span $loc) }
   | TAG; name = upper_name
     (* Sugar: `tag Foo` ≡ `type Foo = Foo`  — a zero-arg phantom label type. *)
     { let sp = mk_span ($loc) in
@@ -1397,9 +1449,25 @@ needs_decl:
   | NEEDS; caps = separated_nonempty_list(COMMA, scoped_cap_path)
     { DNeeds (caps, mk_span ($loc)) }
 
+(* A scope may carry options after a comma, and options alone stand for "any
+   host": needs IO.NetConnect("example.com", methods(get), no_redirects),
+   needs IO.NetConnect(no_redirects).  The options ride in the scope string as
+   "<scope>;<option>;..." so the AST type of [DNeeds] does not change; the
+   typechecker validates them (lib/caps/host_scope.ml). *)
 scoped_cap_path:
   | p = cap_path { (p, None) }
   | p = cap_path; LPAREN; s = STRING; RPAREN { (p, Some s) }
+  | p = cap_path; LPAREN; s = STRING; COMMA;
+    os = separated_nonempty_list(COMMA, scope_option); RPAREN
+    { (p, Some (s ^ ";" ^ String.concat ";" os)) }
+  | p = cap_path; LPAREN; os = separated_nonempty_list(COMMA, scope_option); RPAREN
+    { (p, Some (";" ^ String.concat ";" os)) }
+
+(* `no_redirects`, or `methods(get, head)` stored as "methods=get,head". *)
+scope_option:
+  | o = LOWER_IDENT { o }
+  | o = LOWER_IDENT; LPAREN; vs = separated_nonempty_list(COMMA, LOWER_IDENT); RPAREN
+    { o ^ "=" ^ String.concat "," vs }
 
 cap_path:
   | id = upper_name { [id] }
@@ -1555,8 +1623,26 @@ impl_item:
   | attrs_args = nonempty_list(fn_attr); d = fn_decl
     { match d with
       | DFn (def, span) ->
-        DFn ({ def with fn_attrs = List.map fst attrs_args; fn_attr_args = attr_args_of attrs_args }, span)
+        DFn ({ def with fn_attrs = List.map fst attrs_args @ def.fn_attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
+
+bounded_pred:
+  | kind = quantifier_kind; binder = lower_name; IN; domain = bounded_domain; COMMA; body = expr
+    { let open March_ast.Bounded_pred in
+      (match domain with
+       | Elements (EApp (EVar {txt = ("elts" | "keys"); _}, [_], _)) | Range _ -> ()
+       | Elements _ -> error_raise "A bounded set domain must be `elts(xs)` or `keys(map)`." None $startpos(domain));
+      make {kind; binder; domain; body; span = mk_span $loc} }
+  | _kind = quantifier_kind; _binder = lower_name; error
+    { error_raise "Quantifiers require a bound: use `in lo..hi`, `in elts(xs)`, or `in keys(map)`." None $startpos($3) }
+
+quantifier_kind:
+  | FORALL { March_ast.Bounded_pred.Forall }
+  | EXISTS { March_ast.Bounded_pred.Exists }
+
+bounded_domain:
+  | lo = expr_add; DOTDOT; hi = expr_add { March_ast.Bounded_pred.Range (lo, hi) }
+  | s = expr_add { March_ast.Bounded_pred.Elements s }
 
 constraint_expr:
   | path = upper_dot_path; LPAREN; t = ty; RPAREN
@@ -1645,7 +1731,11 @@ ret_annot:
   | COLON; t = ty { t }
 
 type_params:
-  | LPAREN; ps = separated_nonempty_list(COMMA, lower_name); RPAREN { ps }
+  | LPAREN; ps = separated_nonempty_list(COMMA, type_param); RPAREN { ps }
+
+type_param:
+  | n = lower_name { (n, None) }
+  | n = lower_name; COLON; t = ty { (n, Some t) }
 
 ty_eof:
   | t = ty EOF { t }
@@ -1775,6 +1865,9 @@ block_expr:
   | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = e },
             mk_span ($loc)) }
+  | GHOST; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Ghost; bind_expr = e },
+            mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
   (* Stops at the `:`: the rule exists only to report this error, and parsing
@@ -1836,9 +1929,11 @@ block_expr:
 
 
 expr:
+  | q = bounded_pred { q }
   | e = expr_pipe { e }
-  | ASSERT; e = expr
+  | ASSERT; e = expr %prec prec_assert
     { EAssert (e, mk_span ($loc)) }
+  | p = proof_stmt { p }
   | FN; ARROW; body = lambda_body
     { ELam ([], body, mk_span ($loc)) }
   | FN; ps = lambda_params; ARROW; body = lambda_body
@@ -1939,10 +2034,45 @@ lambda_stmts:
   | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = ev },
             mk_span ($loc)) :: rest }
+  | GHOST; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Ghost; bind_expr = ev },
+            mk_span ($loc)) :: rest }
   | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
     { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
   | LET; STAR; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
     { ELetStar (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }
+
+(** Proof hints (the 2026-11-06 proof-hint todos): ghost statements the refinement
+    checker reads and erasure removes.  `by`, `calc` and `reveal` are
+    keywords; `fuel` is checked by name after `with`. *)
+proof_stmt:
+  | ASSERT; e = expr; BY; h = proof_hint
+    { EProof (PAssertBy (e, h), mk_span ($loc)) }
+  | REVEAL; f = expr_field
+    { EProof (PReveal f, mk_span ($loc)) }
+  | WITH; fuel = LOWER_IDENT; LPAREN; f = expr_field; COMMA; n = INT; RPAREN; DO; body = block_body; END
+    { if fuel <> "fuel" then
+        error_raise "I was expecting `with fuel(f, N) do … end` here:"
+          (Some "with fuel(f, 4) do\n    …\nend") $startpos(fuel);
+      EProof (PWithFuel (f, n, [ body ]), mk_span ($loc)) }
+  | CALC; DO; e0 = expr_add; steps = nonempty_list(calc_step); END
+    { EProof (PCalc (e0, steps), mk_span ($loc)) }
+
+(* A `do … end` hint is an ordinary block expression ([expr_atom]); the
+   refinement checker reads its statements. *)
+proof_hint:
+  | e = expr_app { [ e ] }
+
+calc_step:
+  | op = calc_op; rhs = expr_add; h = option(preceded(BY, proof_hint))
+    { { cs_op = op; cs_rhs = rhs; cs_hint = Option.value h ~default:[]; cs_span = mk_span ($loc) } }
+
+calc_op:
+  | EQEQ { "==" }
+  | LT { "<" }
+  | LEQ { "<=" }
+  | GT { ">" }
+  | GEQ { ">=" }
 
 expr_pipe:
   | l = expr_pipe; PIPE_ARROW; r = expr_or
@@ -2024,9 +2154,11 @@ call_arg:
     A parenthesized lambda `(fn ... -> ...)` is unaffected: it still goes
     through [expr] via [expr_atom]'s `LPAREN expr RPAREN`. *)
 expr_no_bare_lambda:
+  | q = bounded_pred { q }
   | e = expr_pipe { e }
   | ASSERT; e = expr
     { EAssert (e, mk_span ($loc)) }
+  | p = proof_stmt { p }
   | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END
     { EIf (cond, t, f, mk_span ($loc)) }
   | IF; cond = expr; THEN; t = expr; ELSE; f = expr

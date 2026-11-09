@@ -166,6 +166,36 @@ let referenced_name_tokens text =
   done;
   tbl
 
+(** One reachability seed: the name tokens a source references
+    ([referenced_name_tokens]) and the type/constructor names that source
+    itself provides ([provided_anchor_names] of its own decls). *)
+type ref_seed = {
+  seed_tokens : (string, unit) Hashtbl.t;
+  seed_own : (string, unit) Hashtbl.t;
+}
+
+let ref_seed ~(own_decls : March_ast.Ast.decl list) text =
+  let own = Hashtbl.create 16 in
+  List.iter (fun a -> Hashtbl.replace own a ()) (provided_anchor_names own_decls);
+  { seed_tokens = referenced_name_tokens text; seed_own = own }
+
+(** Does [seed] reach a module named [mod_name] whose type/constructor names
+    are [anchors]?  Its module name always counts.  A type or constructor name
+    counts only when the seed's source does not define that name itself: a
+    bare name a module defines resolves to its own definition (a constructor
+    shared with another type resolves to the current module's), so it cannot
+    mean another module's same-named type.  Without that exception, every
+    discovered module declaring a common type name (`Tally`, `State`, ...)
+    was loaded as soon as one module used its own type of that name, and an
+    error in any of them failed the build (#1183).  A bare name the source
+    uses WITHOUT defining it still reaches every definer, since such a name
+    resolves program-wide. *)
+let seed_reaches seed ~mod_name ~anchors =
+  Hashtbl.mem seed.seed_tokens mod_name
+  || List.exists (fun a ->
+      Hashtbl.mem seed.seed_tokens a && not (Hashtbl.mem seed.seed_own a))
+    anchors
+
 let read_file path =
   let ic = open_in_bin path in
   let n  = in_channel_length ic in
@@ -292,7 +322,7 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
      Seeds step-2 reachability analysis so that a qualified reference made
      from an explicitly-imported module (e.g. `use App` then `App.Sub.foo`)
      still keeps [App.Sub] in the build. *)
-  let loaded_srcs : string list ref = ref [] in
+  let loaded_srcs : (string * March_ast.Ast.decl list) list ref = ref [] in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in
   let dummy_span = March_ast.Ast.dummy_span in
   (* Pre-mark the entry file so auto-discovery never re-loads it.
@@ -393,14 +423,15 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
                   Printf.sprintf "Cannot read `%s`: %s." file_path msg) :: !errors;
                 ""
             in
-            if src <> "" then loaded_srcs := src :: !loaded_srcs;
             if src = "" then []
             else
               match parse_march_file file_path src with
               | Error msg ->
+                loaded_srcs := (src, []) :: !loaded_srcs;
                 errors := (mod_name, from_span, msg) :: !errors; []
               | Ok ast ->
                 let ast = March_desugar.Desugar.desugar_module ~is_entry:false ast in
+                loaded_srcs := (src, ast.March_ast.Ast.mod_decls) :: !loaded_srcs;
                 (* Mark resolved BEFORE recursing so cycles don't duplicate. *)
                 Hashtbl.add resolved mod_name [];
                 let transitive = load_refs ast.March_ast.Ast.mod_decls in
@@ -536,17 +567,17 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
       let pruning_enabled = entry_src <> None in
       let reachable : (string, unit) Hashtbl.t = Hashtbl.create 64 in
       if pruning_enabled then begin
-        (* For each discovered module: its declared name, the reachability
-           anchors that keep it (module name + provided type/ctor names), and
-           the module-name tokens its own source references (transitive spread). *)
+        (* For each discovered module: its declared name, the type/ctor names
+           that also keep it (see [seed_reaches]), and the seed of its own
+           source (transitive spread). *)
         let discovered =
           List.map (fun (_, _, _, ast, src) ->
-              let mn = mod_name_of ast in
-              let anchors = mn :: provided_anchor_names ast.March_ast.Ast.mod_decls in
-              (mn, anchors, referenced_name_tokens src))
+              let decls = ast.March_ast.Ast.mod_decls in
+              (mod_name_of ast, provided_anchor_names decls,
+               ref_seed ~own_decls:decls src))
             all_parsed
         in
-        let queue : (string, unit) Hashtbl.t Queue.t = Queue.create () in
+        let queue : ref_seed Queue.t = Queue.create () in
         (* A module kept UNCONDITIONALLY below (via [has_global_effect_decl] —
            e.g. a sibling test file with its own `describe` blocks, which is
            never the compile entry but is still emitted) must also have its
@@ -560,21 +591,24 @@ let resolve_imports ?(extra_lib_paths = []) ?(auto_discover = true)
            module" error at typecheck time instead of a pruning diagnostic. *)
         let unconditional_srcs =
           List.filter_map (fun (_, _, _, ast, src) ->
-              if has_global_effect_decl ast.March_ast.Ast.mod_decls
-              then Some src else None)
+              let decls = ast.March_ast.Ast.mod_decls in
+              if has_global_effect_decl decls then Some (src, decls) else None)
             all_parsed
         in
         let seed_texts =
-          (match entry_src with Some s -> [s] | None -> []) @ !loaded_srcs
-          @ unconditional_srcs in
-        List.iter (fun t -> Queue.add (referenced_name_tokens t) queue) seed_texts;
+          (match entry_src with
+           | Some s -> [(s, m.March_ast.Ast.mod_decls)]
+           | None -> [])
+          @ !loaded_srcs @ unconditional_srcs in
+        List.iter (fun (t, own_decls) -> Queue.add (ref_seed ~own_decls t) queue)
+          seed_texts;
         while not (Queue.is_empty queue) do
-          let toks = Queue.take queue in
-          List.iter (fun (mn, anchors, own_toks) ->
+          let seed = Queue.take queue in
+          List.iter (fun (mn, anchors, own_seed) ->
               if not (Hashtbl.mem reachable mn)
-                 && List.exists (fun a -> Hashtbl.mem toks a) anchors then begin
+                 && seed_reaches seed ~mod_name:mn ~anchors then begin
                 Hashtbl.add reachable mn ();
-                Queue.add own_toks queue
+                Queue.add own_seed queue
               end)
             discovered
         done

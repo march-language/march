@@ -117,13 +117,22 @@ let lin_display_name n =
     between two sites: without the label the reader knows only that the value
     was already gone, not what took it. *)
 let report_double_use ?(notes = []) env ~lin le ~span =
+  if not !(le.le_poisoned) then
   let name = lin_display_name le.le_name in
   let labels =
     match !(le.le_first_use) with
     | None -> []
     | Some first ->
+      (* F5: say WHERE the first consumption sits when that is not plain
+         straight-line code: one arm of a `match`, one branch of an `if`, or
+         a closure body that runs once per iteration. *)
+      let where =
+        match List.assoc_opt first !(le.le_where) with
+        | Some w -> ", " ^ w
+        | None -> ""
+      in
       [{ Err.lbl_span = first;
-         Err.lbl_message = Printf.sprintf "`%s` was already consumed here" name }]
+         Err.lbl_message = Printf.sprintf "`%s` was already consumed here%s" name where }]
   in
   let message =
     match lin with
@@ -196,7 +205,7 @@ let record_use_noted ?(notes = []) name span env =
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true;
        if !(le.le_first_use) = None then le.le_first_use := Some span
-     | Ast.Unrestricted -> ())
+     | Ast.Unrestricted | Ast.Ghost -> ())
 
 let record_use name span env = record_use_noted name span env
 
@@ -390,11 +399,53 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
     ) env bindings
 
 let report_linear_never_used env ~scope_span le =
-  Err.error ~code:Err.Code.linear_never_used env.errors ~span:scope_span
-    (Printf.sprintf
-       "The linear value `%s` was never used.\n\
-        Linear values must be consumed exactly once — did you \
-        mean to pass it somewhere?" (lin_display_name le.le_name))
+  if not !(le.le_poisoned) then
+  match !(le.le_exit) with
+  | [] ->
+    (* A protocol state left unused: say what the role must do with it. *)
+    let notes =
+      let ty = match lookup_var le.le_name env with
+        | Some (Mono t) | Some (Poly (_, _, t)) -> Some (repr t)
+        | None -> None in
+      match ty with
+      | Some (TCon (n, _)) ->
+        (match March_ast.Protocol_states.find_all n with
+         | [ i ] ->
+           let again =
+             match i.March_ast.Protocol_states.ps_pos with
+             | Some p when March_ast.Protocol_states.at_loop_start
+                             ~proto:i.March_ast.Protocol_states.ps_proto p ->
+               " This is the top of the protocol's `loop`: to go round again, pass it \
+                to a function that takes this state as a parameter."
+             | _ -> "" in
+           [ Printf.sprintf
+               "`%s` is role `%s`'s place in protocol `%s`: next it must %s. \
+                Take that step with `%s`.%s"
+               (lin_display_name le.le_name) i.March_ast.Protocol_states.ps_role
+               i.March_ast.Protocol_states.ps_proto i.March_ast.Protocol_states.ps_doing
+               i.March_ast.Protocol_states.ps_call again ]
+         | _ -> [])
+      | _ -> [] in
+    Err.report env.errors
+      { Err.severity = Err.Error; span = scope_span;
+        message =
+          Printf.sprintf
+            "The linear value `%s` was never used.\n\
+             Linear values must be consumed exactly once — did you \
+             mean to pass it somewhere?" (lin_display_name le.le_name);
+        labels = []; notes; code = Err.Code.linear_never_used; fix = None }
+  | labels ->
+    (* F5: it IS consumed, but only on paths that never return; name the
+       path that returns without consuming it ([join_linear_paths]). *)
+    Err.report env.errors
+      { Err.severity = Err.Error; span = scope_span;
+        message =
+          Printf.sprintf
+            "The linear value `%s` was never used on a path that returns.\n\
+             It is consumed only on paths that never return (they end in \
+             `panic`), so wherever the function does return the value is \
+             dropped. Consume it on that path too." (lin_display_name le.le_name);
+        labels; notes = []; code = Err.Code.linear_never_used; fix = None }
 
 (** After a scope closes, check that every in-scope linear var was used. *)
 let check_linear_all_consumed env ~scope_span in_scope_names =
@@ -567,7 +618,7 @@ let rec judge_pending ?(defer = true) env ~scope_span entries =
             | Some span -> report_double_use env ~lin le ~span
             | None -> ());
            (match !(le.le_mixed) with
-            | Some span when lin = Ast.Linear ->
+            | Some span when lin = Ast.Linear && not !(le.le_poisoned) ->
               Err.error ~code:Err.Code.linear_mixed_consumption env.errors ~span (mixed_message (lin_display_name le.le_name))
             | _ -> ());
            if lin = Ast.Linear && not !(le.le_used) then
@@ -753,10 +804,9 @@ let actor_enclosing env (sp : Ast.span) =
       then Some (String.sub k n (String.length k - n)) else acc) env.decl_sites None
 
 (** The [ambiguous_constructor] hint for a constructor several types define.
-    An actor's message type is generated (`<Actor>_Msg`) and cannot be named
-    in a program, so it is described as the actor's message and never offered
-    as the qualifier; when every candidate is an actor message, the advice is
-    to rename a handler. *)
+    An actor's message is described as the actor's message and qualified by
+    the actor (`Counter.Tally`, which [register_actor_ctors] registers), not
+    by its generated `<Actor>_Msg` type name. *)
 let ambiguous_ctor_hint env ctor all_types =
   let actor_of t =
     let is_msg = match StrMap.find_opt ctor env.ctors with
@@ -771,18 +821,20 @@ let ambiguous_ctor_hint env ctor all_types =
     | Some a -> Printf.sprintf "a message of actor `%s`" a
     | None -> "`" ^ t ^ "`"
   in
-  let listed = String.concat ", " (List.map describe all_types) in
-  match List.filter (fun t -> actor_of t = None) all_types with
-  | t :: _ ->
+  let qualified t =
+    Printf.sprintf "`%s.%s`" (Option.value ~default:t (actor_of t)) ctor in
+  let spellings = String.concat " or " (List.map qualified all_types) in
+  if List.for_all (fun t -> actor_of t <> None) all_types then
     Printf.sprintf
-      "Constructor `%s` is defined by multiple types (%s). \
-       Use a qualified form to disambiguate, e.g. `%s.%s`." ctor listed t ctor
-  | [] ->
-    Printf.sprintf
-      "`%s` is a message of more than one actor (%s), and a message cannot be \
-       qualified by its actor; rename one of the handlers." ctor
+      "`%s` is a message of more than one actor (%s); qualify it by its actor: %s." ctor
       (String.concat ", " (List.filter_map (fun t ->
            Option.map (fun a -> "`" ^ a ^ "`") (actor_of t)) all_types))
+      spellings
+  else
+    Printf.sprintf
+      "Constructor `%s` is defined by multiple types (%s). \
+       Use a qualified form to disambiguate: %s." ctor
+      (String.concat ", " (List.map describe all_types)) spellings
 
 (** Infer the type that a pattern *expects*, and return the list of
     (name, scheme) bindings it introduces.
@@ -790,6 +842,13 @@ let ambiguous_ctor_hint env ctor all_types =
     We don't yet resolve constructor types through a type registry —
     ADT patterns produce fresh type variables.  That will be fixed
     when [DType] declarations populate the type registry. *)
+(* The span of a name as written, when the node's span covers more (a
+   constructor's span runs over its arguments): its first line, from its
+   start for the name's length. *)
+let name_only (name : Ast.name) : Ast.span =
+  { name.span with Ast.end_line = name.span.Ast.start_line;
+                   end_col = name.span.Ast.start_col + String.length name.txt }
+
 let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
   report_duplicate_pattern_binders env pat;
@@ -889,11 +948,14 @@ let rec infer_pattern ?expected env (pat : Ast.pattern)
      in
      match ci_opt with
      | None ->
-       let hint =
-         unknown_ctor_hint ?need:(Option.map (fun t -> NeedType t) expected) name.txt env in
-       Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-         (Printf.sprintf "I don't know a constructor called `%s`.%s"
-            name.txt hint);
+       let need = Option.map (fun t -> NeedType t) expected in
+       let hint = unknown_ctor_hint ?need name.txt env in
+       let msg = Printf.sprintf "I don't know a constructor called `%s`.%s" name.txt hint in
+       (match unknown_ctor_fix ?need name.txt env with
+        | Some k ->
+          Err.error_with_fix ~code:Err.Code.unknown_constructor env.errors ~span:name.span
+            ~fix:(Err.FReplace { span = name_only name; text = k }) msg
+        | None -> Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span msg);
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
@@ -1185,14 +1247,23 @@ let capture_snapshot env = List.map (fun le -> (le, !(le.le_used))) env.lin
     local [fn ... end], could capture a linear value and duplicate it. *)
 let check_captures env ~span snapshot =
   List.iter (fun (le, was_used) ->
-      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then
+      if not was_used && !(le.le_used) && effective_lin env le <> Ast.Unrestricted then begin
+        (* F5: a later use of [le] is a double use whose first consumption
+           sits in this closure body, which runs once per call. *)
+        (match !(le.le_first_use) with
+         | Some sp when not (List.mem_assoc sp !(le.le_where)) ->
+           le.le_where :=
+             (sp, "inside a closure that can run more than once (each \
+                   iteration consumes it)") :: !(le.le_where)
+         | _ -> ());
         let name = lin_display_name le.le_name in
         Err.error ~code:Err.Code.linear_captured env.errors ~span
           (Printf.sprintf
              "The linear value `%s` cannot be captured by a closure.\n\
               A closure may be called multiple times, which would violate \
               the exactly-once guarantee.\n\
-              Pass `%s` as a parameter to the closure instead." name name))
+              Pass `%s` as a parameter to the closure instead." name name)
+      end)
     snapshot
 
 (* ── Linear discards by a wildcard ─────────────────────────────────── *)
@@ -1219,7 +1290,49 @@ let rec path_diverges (e : Ast.expr) =
 
 (* ── Linear values across branches ───────────────────────────────── *)
 
+(** A match arm's pattern as the user wrote it, for naming the arm in a
+    linearity label ("the `Some(v)` arm").  [None] when it would be too long
+    to read inline; the caller then names the arm by its line. *)
+let show_arm_pattern (p : Ast.pattern) : string option =
+  let lit = function
+    | Ast.LitInt n -> string_of_int n
+    | Ast.LitFloat f -> Printf.sprintf "%g" f
+    | Ast.LitString s -> Printf.sprintf "%S" s
+    | Ast.LitBool b -> string_of_bool b
+    | Ast.LitAtom a -> ":" ^ a
+  in
+  let rec go (p : Ast.pattern) =
+    match p with
+    | Ast.PatWild _ -> "_"
+    | Ast.PatVar n -> n.txt
+    | Ast.PatCon (n, []) -> n.txt
+    | Ast.PatCon (n, ps) -> n.txt ^ "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatAtom (a, [], _) -> ":" ^ a
+    | Ast.PatAtom (a, ps, _) -> ":" ^ a ^ "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatTuple (ps, _) -> "(" ^ String.concat ", " (List.map go ps) ^ ")"
+    | Ast.PatLit (l, _) -> lit l
+    | Ast.PatRecord (fs, _) ->
+      "{ " ^ String.concat ", " (List.map (fun ((n : Ast.name), fp) ->
+          match fp with
+          | Ast.PatVar v when v.txt = n.txt -> n.txt
+          | _ -> n.txt ^ ": " ^ go fp) fs) ^ " }"
+    | Ast.PatAs (p, n, _) -> go p ^ " as " ^ n.txt
+    | Ast.PatOr (ps, _) -> String.concat " | " (List.map go ps)
+  in
+  let s = go p in
+  if String.length s <= 40 && not (String.contains s '$') then Some s else None
+
+(** The noun phrase naming one arm of a [match]: "the `Some(v)` arm", or "the
+    arm on line N" for a pattern too long to quote. *)
+let describe_arm (br : Ast.branch) =
+  match show_arm_pattern br.branch_pat with
+  | Some p -> Printf.sprintf "the `%s` arm" p
+  | None ->
+    Printf.sprintf "the arm on line %d" (span_of_expr br.branch_body).Ast.start_line
+
+
 let report_mixed_consumption env ~span le ~consumed_at ~skipped =
+  if not !(le.le_poisoned) then
   let name = lin_display_name le.le_name in
   let labels =
     (match consumed_at with
@@ -1250,15 +1363,33 @@ let report_mixed_consumption env ~span le ~consumed_at ~skipped =
     reported here for a decided entry and recorded in [le_mixed] for a pending
     one, and the entry is then marked consumed so the scope's close does not
     add a second report. *)
-let join_linear_paths env ~span snapshot results =
-  let results = List.map (fun (body, flags) -> (body, Array.of_list flags)) results in
+let join_linear_paths ?all_note env ~span snapshot results =
+  let results =
+    List.map (fun (body, desc, flags) -> (body, desc, Array.of_list flags)) results in
   List.iteri (fun i (le, was, was_first) ->
-      let per_path = List.map (fun (body, flags) -> (body, flags.(i))) results in
-      let any_used = List.exists (fun (_, (u, _)) -> u) per_path in
-      let first_span = List.find_map (fun (_, (u, sp)) -> if u then sp else None) per_path in
+      let per_path = List.map (fun (body, desc, flags) -> (body, desc, flags.(i))) results in
+      let any_used = List.exists (fun (_, _, (u, _)) -> u) per_path in
+      let first_span = List.find_map (fun (_, _, (u, sp)) -> if u then sp else None) per_path in
       let union () =
         le.le_used := any_used;
         le.le_first_use := (if any_used then first_span else was_first)
+      in
+      (* F5: remember which path each consuming use sits on, for a later
+         "used more than once" label.  An inner construct has already said
+         where its own uses sit, and the innermost description is the one
+         that locates the use, so an existing entry is kept. *)
+      let note_where ~every =
+        List.iter (fun (_, desc, (u, sp)) ->
+            match desc, sp with
+            | Some d, Some sp when u && not (List.mem_assoc sp !(le.le_where)) ->
+              let w =
+                match all_note with
+                | Some n when every -> Printf.sprintf "in %s (%s)" d n
+                | _ -> "in " ^ d
+              in
+              le.le_where := (sp, w) :: !(le.le_where)
+            | _ -> ())
+          per_path
       in
       if was then begin
         le.le_used := true; le.le_first_use := was_first
@@ -1277,20 +1408,47 @@ let join_linear_paths env ~span snapshot results =
         in
         let strict = (le.le_pending <> None || le.le_lin = Ast.Linear) && not is_channel in
         let fall =
-          List.filter (fun (body, _) ->
+          List.filter (fun (body, _, _) ->
               match body with Some e -> not (path_diverges e) | None -> true)
             per_path
         in
-        let used_fall = List.filter (fun (_, (u, _)) -> u) fall in
+        let used_fall = List.filter (fun (_, _, (u, _)) -> u) fall in
+        let every_path =
+          List.length per_path > 1
+          && List.for_all (fun (_, _, (u, _)) -> u) per_path in
+        if any_used then note_where ~every:every_path;
         if not strict || fall = [] || not any_used
            || List.length used_fall = List.length fall then union ()
         else if used_fall = [] then begin
           (* Consumed only on paths that never return: nothing after them runs,
-             so on every path that does return it is still unconsumed. *)
+             so on every path that does return it is still unconsumed.  F5:
+             keep the paths for [report_linear_never_used] to name. *)
+          let name = lin_display_name le.le_name in
+          let consumed =
+            List.find_map (fun (_, _, (u, sp)) -> if u then sp else None) per_path in
+          let skipped =
+            List.find_map (fun (body, desc, _) ->
+                match body with Some e -> Some (e, desc) | None -> None) fall in
+          le.le_exit :=
+            (match consumed with
+             | Some sp ->
+               [ { Err.lbl_span = sp;
+                   Err.lbl_message =
+                     Printf.sprintf "`%s` is consumed here, but this path never returns" name } ]
+             | None -> [])
+            @ (match skipped with
+               | Some (e, desc) ->
+                 [ { Err.lbl_span = span_of_expr e;
+                     Err.lbl_message =
+                       Printf.sprintf "%s returns without consuming `%s`"
+                         (match desc with
+                          | Some d -> String.capitalize_ascii d
+                          | None -> "This path") name } ]
+               | None -> []);
           le.le_used := false; le.le_first_use := was_first
         end else begin
-          let consumed_at = match used_fall with (_, (_, sp)) :: _ -> sp | [] -> None in
-          let skipped = List.find_map (fun (body, (u, _)) -> if u then None else body) fall in
+          let consumed_at = match used_fall with (_, _, (_, sp)) :: _ -> sp | [] -> None in
+          let skipped = List.find_map (fun (body, _, (u, _)) -> if u then None else body) fall in
           (match le.le_pending with
            | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some span
            | None -> report_mixed_consumption env ~span le ~consumed_at ~skipped);
@@ -1615,7 +1773,7 @@ let pending_suggest_need : (Ast.span * suggest_need) option ref = ref None
 
 let with_suggest_need (e : Ast.expr) (need : suggest_need) (f : unit -> 'a) : 'a =
   match e with
-  | Ast.ECon _ | Ast.EVar _ | Ast.EField _ ->
+  | Ast.ECon _ | Ast.EVar _ | Ast.EField _ | Ast.EApp _ ->
     let saved = !pending_suggest_need in
     pending_suggest_need := Some (span_of_expr e, need);
     Fun.protect ~finally:(fun () -> pending_suggest_need := saved) f
@@ -1630,6 +1788,79 @@ let suggest_type_at (sp : Ast.span) : ty option =
   match suggest_need_at sp with
   | Some (NeedType t) -> Some t
   | _ -> None
+
+(** The diagnostics reported since [mark] (newest first). *)
+let diags_since (env : env) (mark : Err.diagnostic list) : Err.diagnostic list =
+  let rec go = function
+    | l when l == mark -> []
+    | [] -> []
+    | d :: r -> d :: go r in
+  go env.errors.Err.diagnostics
+
+(** The report, made since [mark], that [name] is unknown, when it offered
+    no spelling: "I cannot find `f`." or "Module `Q` does not export `f`."
+    (X8 tier 2 adds the functions that fit the call to exactly these). *)
+let unknown_callee_diag (env : env) (name : Ast.name) (mark : Err.diagnostic list)
+  : Err.diagnostic option =
+  let plain = match split_qualified name.txt with
+    | Some (q, m) -> Printf.sprintf "Module `%s` does not export `%s`." q m
+    | None -> Printf.sprintf "I cannot find `%s`." name.txt in
+  List.find_opt (fun (d : Err.diagnostic) ->
+      d.Err.span = name.span && d.Err.message = plain
+      && (let sl = Err.slug_of_code d.Err.code in
+          sl = Err.Code.unbound_variable || sl = Err.Code.unknown_qualified_name))
+    (diags_since env mark)
+
+(** [inner] lies within [outer]. *)
+let span_within (inner : Ast.span) (outer : Ast.span) : bool =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line, inner.Ast.start_col) >= (outer.Ast.start_line, outer.Ast.start_col)
+  && (inner.Ast.end_line, inner.Ast.end_col) <= (outer.Ast.end_line, outer.Ast.end_col)
+
+(** X8 tier 2, argument permutations: when a call of [name] reported a type
+    mismatch in its arguments (since [mark]) and the function takes the
+    same arguments in exactly one other order, say so on the first of those
+    reports, with the reordered call as its fix. *)
+let suggest_argument_order (env : env) (name : Ast.name) (args : Ast.expr list)
+    (mark : Err.diagnostic list) : unit =
+  if List.length args < 2 || String.contains name.txt '$' then ()
+  else
+    let arg_spans = List.map span_of_expr args in
+    let in_args (d : Err.diagnostic) =
+      Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+      && List.exists (span_within d.Err.span) arg_spans in
+    match List.rev (List.filter in_args (diags_since env mark)) with
+    | [] -> ()
+    | first :: _ ->
+      match lookup_var name.txt env with
+      | None -> ()
+      | Some sch ->
+        match Typecheck_suggest.permutation env (scheme_body sch) args with
+        | None -> ()
+        | Some order ->
+          let texts = List.map Typecheck_suggest.text_of arg_spans in
+          let note, fix =
+            if List.exists Option.is_none texts
+            || List.exists (fun t -> String.contains (Option.get t) '\n') texts then
+              let positions = List.map (fun i -> Printf.sprintf "#%d" (i + 1)) order in
+              (Printf.sprintf "`%s` takes these arguments in another order: %s."
+                 name.txt (String.concat ", " positions), None)
+            else
+              let texts = Array.of_list (List.map Option.get texts) in
+              let reordered = String.concat ", " (List.map (fun i -> texts.(i)) order) in
+              let first_sp = List.hd arg_spans
+              and last_sp = List.nth arg_spans (List.length arg_spans - 1) in
+              let what = if List.length args = 2 then "The two arguments are the other way round"
+                else "These arguments are in the wrong order" in
+              (Printf.sprintf "%s: `%s(%s)` fits." what name.txt reordered,
+               Some (Err.FReplace { span = { first_sp with Ast.end_line = last_sp.Ast.end_line;
+                                                           end_col = last_sp.Ast.end_col };
+                                    text = reordered })) in
+          env.errors.Err.diagnostics <- List.map (fun (x : Err.diagnostic) ->
+              if x == first then
+                { x with Err.notes = x.Err.notes @ [ note ];
+                         fix = (match x.Err.fix with None -> Err.fix_opt fix | f -> f) }
+              else x) env.errors.Err.diagnostics
 
 (** What a name written as `spawn`'s actor (or a supervise block's child) is
     when it is certainly not an actor: [Some "a constructor of type `T`"],
@@ -1696,7 +1927,7 @@ let report_not_actor env ~(where : string) (n : Ast.name) : bool =
           message = Printf.sprintf "I don't know an actor called `%s`.%s" n.txt second;
           labels = []; notes = [];
           code = Err.Code.unknown_constructor;
-          fix = Option.map (fun g -> Err.FReplace { span = n.span; text = g }) guess };
+          fix = Err.fix_opt (Option.map (fun g -> Err.FReplace { span = n.span; text = g }) guess) };
       true
     end
 
@@ -1801,13 +2032,11 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
          in
          let advice = match alternatives, ctor_name with
            | a :: _, Some c ->
-             ignore a;
              Printf.sprintf
-               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s, \
-                and an actor message cannot be qualified by its actor; rename \
-                one of the two handlers."
+               "`%s` is also a handler of %s, but a bare `%s` resolves to `%s`'s; \
+                qualify it by the actor: `%s.%s`."
                c (String.concat ", " (List.map (fun a -> "`" ^ a ^ "`") alternatives))
-               c owner_name
+               c owner_name a c
            | _ ->
              Printf.sprintf "Send it to a pid spawned from `%s`, or send this actor one \
                              of its own messages." owner_name
@@ -1849,7 +2078,8 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
            | None -> [], []
            | Some a ->
              let own = StrMap.fold (fun cname cis acc ->
-                 if List.exists (fun (ci : ctor_info) ->
+                 if not (String.contains cname '.')   (* bare keys, not `A.Msg` *)
+                 && List.exists (fun (ci : ctor_info) ->
                      ci.ci_is_actor_msg && ci.ci_type = a ^ msg_sfx) cis
                  then cname :: acc else acc) env.ctors []
                        |> List.sort_uniq String.compare in
@@ -1866,10 +2096,15 @@ let check_send_target env ~(span : Ast.span) (pid_ty : ty) ?pid_expr (msg : Ast.
                        lbl_message = Printf.sprintf "actor `%s` is declared here" a } ]
                  | _ -> []
              in
-             let notes = match own with
-               | [] -> []
-               | ms -> [ Printf.sprintf "`%s` handles %s." a
-                           (String.concat ", " (List.map (fun m -> "`" ^ m ^ "`") ms)) ]
+             (* One likely cause (§X4): when the advice already names this
+                actor's own handler of the same message, listing what the
+                actor handles only restates it. *)
+             let notes =
+               if List.mem a alternatives then []
+               else match own with
+                 | [] -> []
+                 | ms -> [ Printf.sprintf "`%s` handles %s." a
+                             (String.concat ", " (List.map (fun m -> "`" ^ m ^ "`") ms)) ]
              in
              labels, notes
          in
@@ -2114,7 +2349,9 @@ let session_plan st =
   String.concat ", then " (go 4 st [])
 
 (** The protocol and role a channel at [st] follows, when exactly one
-    protocol's projection has [st] as one of its states. *)
+    protocol's projection has [st] as one of its states, and where in the
+    protocol's steps that state is, when every state equal to it sits in
+    one place. *)
 let channel_origin env st =
   let rec states seen t =
     if List.exists (fun x -> x == t) seen then seen else
@@ -2127,7 +2364,12 @@ let channel_origin env st =
   let hits = StrMap.fold (fun pname (pi : proto_info) acc ->
       List.fold_left (fun acc (role, proj) ->
           if List.exists (fun x -> session_ty_exact_equal x st) (states [] proj)
-          then (pname, role, pi.pi_span) :: acc else acc) acc pi.pi_projections)
+          then begin
+            let places = List.sort_uniq compare (List.filter_map (fun (x, p) ->
+                if session_ty_exact_equal x st then Some p else None)
+                (Option.value ~default:[] (List.assoc_opt role pi.pi_positions))) in
+            (pname, role, pi.pi_span, (match places with [ p ] -> Some p | _ -> None)) :: acc
+          end else acc) acc pi.pi_projections)
       env.protocols [] in
   match hits with [ h ] -> Some h | _ -> None
 
@@ -2136,16 +2378,23 @@ let channel_origin env st =
 let report_session_state env ~span ~op ~doing st =
   let origin = channel_origin env st in
   let labels = match origin with
-    | Some (pname, role, psp) ->
+    | Some (pname, role, psp, _) ->
       [ { Err.lbl_span = psp;
           lbl_message = Printf.sprintf "the channel is `%s`'s end of protocol `%s`, declared here" role pname } ]
     | None -> [] in
+  (* The conversation drawn out to the step the channel is at.  The call
+     is not a step of the protocol, so nothing marks what it tried. *)
+  let diagram = match origin with
+    | Some (pname, role, _, Some p) ->
+      March_ast.Protocol_states.diagram ~proto:pname ~role
+        ~subject:(Printf.sprintf "`%s`" role) ~here:p ()
+    | _ -> None in
   Err.report env.errors
     { Err.severity = Error; span;
       message = Printf.sprintf "`%s` can't %s here: at this point the channel must %s."
           op doing (session_step_text st);
       labels;
-      notes = [ "What is left on this channel: " ^ session_plan st ^ "." ];
+      notes = ("What is left on this channel: " ^ session_plan st ^ ".") :: Option.to_list diagram;
       code = Err.Code.session_state_mismatch; fix = None }
 
 (** The part of [t] at [path], seeing through linearity and nominal records. *)
@@ -2276,9 +2525,229 @@ let relocate_callback_mismatch env ~mark (e : Ast.expr) sp inferred expected =
      | _ -> ())
   | _ -> ()
 
+(* -----------------------------------------------------------------
+   Operands of a binary operator (§X1, slice 3).
+   ----------------------------------------------------------------- *)
+
+let binary_operators =
+  [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/.";
+    "<"; "<="; ">"; ">="; "=="; "!="; "&&"; "||" ]
+
+(** The type a literal has on its face, if it is one. *)
+let literal_ty (e : Ast.expr) =
+  match e with
+  | Ast.ELit (Ast.LitInt _, _) -> Some t_int
+  | Ast.ELit (Ast.LitFloat _, _) -> Some t_float
+  | Ast.ELit (Ast.LitString _, _) -> Some t_string
+  | Ast.ELit (Ast.LitBool _, _) -> Some t_bool
+  | _ -> None
+
+(** The reason an operand of [op] (type [f_ty], operands [args]) is checked
+    against its parameter type: a side of an operator, not "argument #1 of a
+    function call".  The expected type's origin is the other operand when that
+    one is known to have it: always, for an operator whose sides share a type
+    variable (`x + "one"`: the left side decided it); for one with a fixed
+    type (`x ++ "no"`), when the other side is a literal of that type or was
+    already inferred as it. *)
+let operand_reason env op f_ty args =
+  let left, right = match args with [ l; r ] -> (l, r) | _ -> assert false in
+  let side idx = if idx = 0 then "left" else "right" in
+  (* Read now, before the left operand binds a shared variable. *)
+  let generic = match repr f_ty with
+    | TArrow (p, _) -> (match repr p with TVar _ -> true | _ -> false)
+    | _ -> false in
+  fun idx ->
+    let other = if idx = 0 then right else left in
+    let osp = span_of_expr other in
+    match repr f_ty with
+    | TArrow (p, _) ->
+      (match repr p with
+       | _ when generic ->
+         let text = Printf.sprintf
+             "This is the %s side of `%s`, and both sides of `%s` must have the same type."
+             (side idx) op op in
+         if idx = 1 then Some (RBecause (RFnArg (osp, idx), text)) else Some (RBuiltin text)
+       | pt ->
+         let text =
+           if op = "++" then
+             Printf.sprintf "This is the %s side of `++`, which joins two `String`s." (side idx)
+           else Printf.sprintf "This is the %s side of `%s`, which takes two `%s`s."
+               (side idx) op (pp_ty pt) in
+         let other_ty = match literal_ty other with
+           | Some t -> Some t
+           | None when idx = 1 -> Hashtbl.find_opt env.type_map osp
+           | None -> None in
+         (match other_ty with
+          | Some t when not (types_apart env 0 t pt) && (match repr t with TVar _ | TError -> false | _ -> true) ->
+            Some (RBecause (RFnArg (osp, idx), text))
+          | _ -> Some (RBuiltin text)))
+    | _ -> None
+
+(* -----------------------------------------------------------------
+   `if` / `match do` branches against a known type (§X1, slice 3).
+   ----------------------------------------------------------------- *)
+
+let if_branches_note = "Both branches of an if expression must return the same type."
+let cond_arms_note = "All arms of a `match do` must return the same type."
+
+(** The diagnostics added since [mark], newest first. *)
+let errors_since env ~mark =
+  let rec fresh l = if l == mark then [] else match l with [] -> [] | d :: r -> d :: fresh r in
+  fresh env.errors.Err.diagnostics
+
+(** The expression a branch's value comes from: a block's last one. *)
+let rec branch_leaf (e : Ast.expr) =
+  match e with
+  | Ast.EBlock ((_ :: _ as es), _) -> branch_leaf (List.nth es (List.length es - 1))
+  | e -> e
+
+(** Report [provided] where [required] was needed, as [unify] would (with a
+    §X2 diff when they differ below the root), without unifying. *)
+let report_pair env ~span ~reason ~provided prov req =
+  match diff_mismatch_message env ~provided:prov ~required:req with
+  | Some diff ->
+    report_type_mismatch env ~span ~occurs_violation:false ~reason ~provided ~diff prov req
+  | None -> report_mismatch env ~span ~reason ~provided prov req
+
+(** The value positions of an `if` / `match do` in tail position, through
+    nested ones: each leaf expression with its path (outermost first) and the
+    span its branch-agreement check reports at. *)
+let rec branch_leaves ?(else_if = false) (e : Ast.expr) path =
+  let sub (b : Ast.expr) seg =
+    let leaf = branch_leaf b in
+    match leaf with
+    | Ast.EIf _ | Ast.ECond _ -> branch_leaves leaf (path @ [ seg ])
+    | _ -> [ (leaf, path @ [ seg ]) ] in
+  match e with
+  | Ast.EIf (_, t, f, _) ->
+    (* An `else if` chain reads as one `if`: its branches are named
+       `else if` and `else`, not an `else` of an `else`. *)
+    sub t (if else_if then "an `else if` branch" else "the `if` branch")
+    @ (match branch_leaf f with
+       | Ast.EIf _ as inner -> branch_leaves ~else_if:true inner path
+       | _ -> sub f "the `else` branch")
+  | Ast.ECond (arms, _) ->
+    let nth i = match i with
+      | 0 -> "first" | 1 -> "second" | 2 -> "third" | 3 -> "fourth" | 4 -> "fifth"
+      | i -> Printf.sprintf "%dth" (i + 1) in
+    List.concat_map (fun x -> x)
+      (List.mapi (fun i (_, b) -> sub b (Printf.sprintf "the %s arm" (nth i))) arms)
+  | _ -> []
+
+(** Move the type mismatch [check_expr] just reported on an `if` or
+    `match do` [e] (span [sp]) against a known [expected] onto the branches
+    that disagree with it.  `if b do "yes" else 2 end` in a function returning
+    `Int` used to underline the whole `if`, and then `2` for not matching
+    `"yes"`: the branch that is right.  Read-only, like the literal case:
+    each branch's type comes from [type_map]. *)
+let relocate_branch_mismatch env ~mark ~reason (e : Ast.expr) sp (expected : ty) =
+  match e, repr expected with
+  | (Ast.EIf _ | Ast.ECond _), (TCon _ | TTuple _ | TRecord _ | TArrow _) ->
+    let leaves = branch_leaves e [] in
+    let typed = List.filter_map (fun (l, path) ->
+        Option.map (fun t -> (l, path, t))
+          (Hashtbl.find_opt env.type_map (span_of_expr l))) leaves in
+    let apart = List.filter (fun (_, _, t) -> types_apart env 0 t expected) typed in
+    let added = errors_since env ~mark in
+    let leaf_spans = List.map (fun (l, _) -> span_of_expr l) leaves in
+    let agreement (d : Err.diagnostic) =
+      Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+      && (List.mem if_branches_note d.Err.notes || List.mem cond_arms_note d.Err.notes)
+      && List.mem d.Err.span leaf_spans in
+    let outer (d : Err.diagnostic) =
+      d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch in
+    let ours = List.filter (fun d -> agreement d || outer d) added in
+    (* Only when every leaf's type is known, some disagree, and either one
+       fits (so the others are plainly the wrong ones) or the branches also
+       disagree among themselves.  Branches that all agree on the wrong type
+       leave the error on the whole expression. *)
+    if List.length typed = List.length leaves && apart <> [] && ours <> []
+       && (List.length apart < List.length typed || List.exists agreement ours)
+    then begin
+      env.errors.Err.diagnostics <-
+        List.filter (fun x -> not (List.memq x ours)) env.errors.Err.diagnostics;
+      List.iter (fun (l, path, t) ->
+          let before = env.errors.Err.diagnostics in
+          (* A literal leaf narrows further, to its wrong part (slice 1). *)
+          let psp, pty, pexp, path =
+            match locate_literal_part env l expected [] with
+            | Some (psp, (_ :: _ as lpath), pty, pexp) when psp <> span_of_expr l ->
+              (psp, pty, pexp, path @ lpath)
+            | _ -> (span_of_expr l, t, expected, path) in
+          let provided =
+            if psp = span_of_expr l then provided_of_expr l t
+            else { p_span = psp; p_ty = pty; p_name = None } in
+          report_pair env ~span:psp ~reason ~provided pty pexp;
+          let note = Printf.sprintf "In %s." (String.concat " of " (List.rev path)) in
+          env.errors.Err.diagnostics <-
+            List.map (fun (x : Err.diagnostic) ->
+                if List.memq x (errors_since env ~mark:before)
+                then { x with Err.notes = note :: x.Err.notes } else x)
+              env.errors.Err.diagnostics)
+        apart
+    end
+  | _ -> ()
+
+(** A `++` whose result is not what its context needs (§X1): its operands
+    may each be wrong too, and those mismatches run the other way round
+    (`x ++ "no"` in an `Int` function: `x` is not a `String`, and the result
+    is not an `Int`), so say where the `String` comes from. *)
+let explain_concat_result env ~mark (e : Ast.expr) sp =
+  match e with
+  | Ast.EApp (Ast.EVar { txt = "++"; _ }, [ _; _ ], _) ->
+    let note = "`++` joins two `String`s, so its result is a `String`." in
+    let target (d : Err.diagnostic) =
+      d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+      && not (List.mem note d.Err.notes) in
+    (* Rebuild the list only when there is something to change: callers
+       detect "an error was added" by the list's physical identity (§X3
+       poisoning), and a needless copy reads as a new error to them. *)
+    if List.exists target (errors_since env ~mark) then begin
+      let added = errors_since env ~mark in
+      env.errors.Err.diagnostics <-
+        List.map (fun (d : Err.diagnostic) ->
+            if List.memq d added && target d
+            then { d with Err.notes = d.Err.notes @ [ note ] } else d)
+          env.errors.Err.diagnostics
+    end
+  | _ -> ()
+
+(** Poison (§X3, F5): [e] failed its type check, an error was reported
+    inside it, and its type came out [TError].  A linear value passed to it
+    directly (`snik(t)` with `snik` misspelled, `t.foo` on a non-record) has
+    an unknown fate, so no linearity error follows on it ([le_poisoned]).
+    Only DIRECT operands: in `sink(t) + "x"` the call `sink(t)` checked fine
+    and its consumption of [t] is real. *)
+let poison_linear_operands env (e : Ast.expr) =
+  let operands =
+    match e with
+    | Ast.EApp (_, args, _) | Ast.ECon (_, args, _) -> args
+    | Ast.EField (base, _, _) -> [ base ]
+    | _ -> []
+  in
+  let rec var_span (o : Ast.expr) =
+    match o with
+    | Ast.EVar _ | Ast.EField (Ast.EVar _, _, _) -> Some (span_of_expr o)
+    | Ast.EAnnot (inner, _, _) -> var_span inner
+    | _ -> None
+  in
+  let within (inner : Ast.span) (outer : Ast.span) =
+    inner.file = outer.file
+    && (inner.start_line, inner.start_col) >= (outer.start_line, outer.start_col)
+    && (inner.end_line, inner.end_col) <= (outer.end_line, outer.end_col)
+  in
+  let spans = List.filter_map var_span operands in
+  if spans <> [] then
+    List.iter (fun le ->
+        match !(le.le_first_use) with
+        | Some u when List.exists (within u) spans -> le.le_poisoned := true
+        | _ -> ())
+      env.lin
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
+  let errors_mark = env.errors.Err.diagnostics in
   let result =
     match e with
     (* ── Literals ─────────────────────────────────────────────────── *)
@@ -2402,6 +2871,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
               modules) — so this guard cannot misfire on that case. *)
            Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span (qualified_error_msg name.txt env);
            TError
+         | _ when (match split_qualified name.txt with
+                   | Some (q, member) when not (String.contains member '.') ->
+                     q <> env.current_module
+                     && not (StrMap.mem q env.local_mods)
+                     && (StrMap.mem q env.types || StrMap.mem q env.records
+                         || StrMap.mem q env.ty_aliases)
+                   | _ -> false) ->
+           (* A type is not a value namespace. The suffix fallback used to
+              type Int.to_string as to_string while leaving the qualified
+              AST name unresolved in both execution backends. Real module
+              and interface exports have already resolved above. The current
+              module may also name a type (including its implicit capability);
+              its own qualified private calls still need the suffix fallback. *)
+           let q, member = Option.get (split_qualified name.txt) in
+           let hint = match lookup_var member env with
+             | Some _ -> Printf.sprintf " Write `%s` without the type qualifier." member
+             | None -> " Use an exported module member or an unqualified function." in
+           Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span
+             (Printf.sprintf "`%s` is a type, not a module.%s" q hint);
+           TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
@@ -2421,9 +2910,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
               module, no `Q.`-prefixed binding) is a misspelled module, not a
               path to strip: stripping `Lsit.` off `Lsit.length` resolved the
               builtin `length`, so the typo checked clean and failed only at
-              run time with "unbound variable: Lsit.length".  A qualifier
-              that names a TYPE keeps the fallback: `Int.to_string(n)` is
-              how programs spell the bare `to_string` on an Int. *)
+              run time with "unbound variable: Lsit.length". Type qualifiers
+              are rejected separately above. *)
            let unknown_single_qualifier =
              match split_qualified name.txt with
              | Some (q, member) when not (String.contains member '.') ->
@@ -2438,20 +2926,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
            (match (if unknown_single_qualifier then None else try_suffix name.txt) with
             | Some sch -> instantiate ~use_span:name.span ~use_name:name.txt env.level env sch
             | None ->
-              let msg =
+              let msg, guess =
                 if String.contains name.txt '.' then
-                  qualified_error_msg name.txt env
+                  qualified_error_msg name.txt env, qualified_fix name.txt env
                 else begin
                   let base = Printf.sprintf "I cannot find `%s`." name.txt in
                   match suggest_var_in_scope ?need:(suggest_type_at name.span) name.txt env with
-                  | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s
-                  | None   -> base
+                  | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s, Some s
+                  | None   -> base, None
                 end
               in
               let code =
                 if String.contains name.txt '.' then Err.Code.unknown_qualified_name
                 else Err.Code.unbound_variable in
-              Err.error ~code env.errors ~span:name.span msg;
+              (* The one name the message suggests is the fix; `--check-json`
+                 re-checks it before calling it machine-applicable. *)
+              (match guess with
+               | Some g ->
+                 Err.error_with_fix ~code env.errors ~span:name.span
+                   ~fix:(Err.FReplace { span = name.span; text = g }) msg
+               | None -> Err.error ~code env.errors ~span:name.span msg);
               TError))
 
     (* ── Type annotations ─────────────────────────────────────────── *)
@@ -2472,6 +2966,44 @@ let rec infer_expr env (e : Ast.expr) : ty =
           notes   = [ "Fill this hole with an expression of the type shown above." ];
           code    = Err.Code.typed_hole; fix = None };
       t
+
+    | Ast.EApp (_, _, sp) when March_ast.Bounded_pred.view e <> None ->
+      if not env.in_logical_predicate then begin
+        Err.error ~code:Err.Code.type_mismatch env.errors ~span:sp
+          "Bounded quantifiers are predicate-only: use a refinement or an erased proof assertion.";
+        TError
+      end else begin
+        let q = Option.get (March_ast.Bounded_pred.view e) in
+        let binder_ty = match q.domain with
+          | March_ast.Bounded_pred.Range (lo, hi) ->
+            check_expr env lo t_int ~reason:None;
+            check_expr env hi t_int ~reason:None;
+            t_int
+          | March_ast.Bounded_pred.Elements set ->
+            (match repr (infer_expr env set) with
+             | TCon ("$LogicSet", [a]) -> a
+             | _ -> Err.error ~code:Err.Code.type_mismatch env.errors ~span:sp "A quantified set domain must be elts(xs) or keys(map)."; TError) in
+        let local = bind_var q.binder.txt (Mono binder_ty) env in
+        check_expr local q.body t_bool ~reason:None;
+        Hashtbl.replace env.type_map sp t_bool;
+        t_bool
+      end
+    | Ast.EApp (Ast.EVar {txt = "nth"; _}, [xs; i], sp) when env.in_logical_predicate ->
+      let a = fresh_var env.level in
+      check_expr env xs (TCon ("List", [a])) ~reason:None;
+      check_expr env i t_int ~reason:None;
+      Hashtbl.replace env.type_map sp a;
+      a
+    | Ast.EApp (Ast.EVar {txt = ("elts" | "keys") as m; _}, [xs], sp) when env.in_logical_predicate ->
+      let a = fresh_var env.level in
+      let actual = infer_expr env xs in
+      if m = "keys" then unify env ~span:sp ~reason:None actual (TCon ("Map", [a; fresh_var env.level]))
+      else (match repr actual with
+        | TCon ("Set", [elem]) -> unify env ~span:sp ~reason:None elem a
+        | _ -> unify env ~span:sp ~reason:None actual (TCon ("List", [a])));
+      let ty = TCon ("$LogicSet", [a]) in
+      Hashtbl.replace env.type_map sp ty;
+      ty
 
     (* ── Function application ─────────────────────────────────────── *)
     (* ── Session channel operations (special casing for session type advancement) ── *)
@@ -3209,6 +3741,11 @@ let rec infer_expr env (e : Ast.expr) : ty =
            | None -> f)
         | _ -> f
       in
+      (* X8 tier 2: what the call must produce, and the diagnostics before
+         the callee is inferred, so an unknown callee's report can be found
+         and given the functions that fit the call. *)
+      let call_need = suggest_type_at sp in
+      let mark_callee = env.errors.Err.diagnostics in
       let f_ty = infer_expr env f in
       (* An empty-parens call `f()` of a LOCAL value whose type is not yet
          known — typically an unannotated parameter, `fn apply(f) do f() end`
@@ -3398,7 +3935,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                       else []);
              code = Err.Code.arity_mismatch;
              fix = (match wildcard with
-                    | Some w when fix_here -> Some (Err.FReplace { span = w; text = "fn" })
+                    | Some w when fix_here -> Some (Err.fix (Err.FReplace { span = w; text = "fn" }))
                     | _ -> None) };
          let rec peel n t =
            if n <= 0 then t
@@ -3454,7 +3991,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                         [ Printf.sprintf "Add a callback `fn (value, next_state) -> ...` for %s, \
                                           in the order the protocol lists the branches."
                             (ticks missing) ]);
-             code = Err.Code.session_offer_nonexhaustive; fix };
+             code = Err.Code.session_offer_nonexhaustive; fix = Err.fix_opt fix };
          TError
        | Some (name, arity, n_args, def_span), _, _ ->
          List.iter (fun a -> ignore (infer_expr env a)) args;
@@ -3490,6 +4027,29 @@ let rec infer_expr env (e : Ast.expr) : ty =
                Remove the `()` and use `%s` directly."
               name.txt (pp_ty (repr f_ty)) name.txt);
          TError
+       | None, None, _
+         when (match f with
+             | Ast.EVar name -> unknown_callee_diag env name mark_callee <> None
+             | _ -> false) ->
+         (* An unknown callee whose spelling matched nothing (X8 tier 2):
+            infer the arguments as the [TError] callee would, then name the
+            functions in scope that take them. *)
+         check_callback_arities env f args;
+         let name = match f with Ast.EVar n -> n | _ -> assert false in
+         let d = Option.get (unknown_callee_diag env name mark_callee) in
+         let arg_tys = List.map (fun a -> infer_expr env a) args in
+         let qual, member = match split_qualified name.txt with
+           | Some (q, m) -> Some q, m
+           | None -> None, name.txt in
+         let fits = Typecheck_suggest.search_by_call env ~qual ~name:member
+             ~arg_tys ~ret:call_need in
+         (match Typecheck_suggest.call_fits_note ~qual fits with
+          | Some note ->
+            env.errors.Err.diagnostics <- List.map (fun (x : Err.diagnostic) ->
+                if x == d then { x with Err.notes = x.Err.notes @ [ note ] } else x)
+                env.errors.Err.diagnostics
+          | None -> ());
+         TError
        | None, None, _ ->
          check_callback_arities env f args;
          (* A generated protocol step's payload (§F3): a mismatch there names
@@ -3499,12 +4059,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
              (match March_ast.Protocol_states.find_call name.txt with
               | Some i when i.ps_branches = [] ->
                 let at = Option.value i.ps_span ~default:sp in
-                Some (2, RBecause (RFnArg (at, 2),
+                Some (fun idx -> if idx <> 2 then None else
+                       Some (RBecause (RFnArg (at, 2),
                                    Printf.sprintf "This is the step's payload: protocol `%s` says `%s` must %s here."
-                                     i.ps_proto i.ps_role i.ps_doing))
+                                     i.ps_proto i.ps_role i.ps_doing)))
+              | _ when List.mem name.txt binary_operators && List.length args = 2 ->
+                Some (operand_reason env name.txt f_ty args)
               | _ -> None)
            | _ -> None in
+         let mark_args = env.errors.Err.diagnostics in
          let res = infer_app ?payload env sp f_ty args 0 in
+         (match f with
+          | Ast.EVar name -> suggest_argument_order env name args mark_args
+          | _ -> ());
          (* If [f] is a cap-narrow-factory fn (its body launders a cap_narrow
             result — recorded in check_fn), taint the call's result so the unify
             hook fires when it is later bound to a proof cap.  This closes the
@@ -3542,10 +4109,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
         | Some _ | None -> ());
        match ci_opt with
        | None ->
-         let hint = unknown_ctor_hint ?need:(suggest_need_at sp) name.txt env in
-         Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span
-           (Printf.sprintf "I don't know a constructor called `%s`.%s"
-              name.txt hint);
+         let need = suggest_need_at sp in
+         let hint = unknown_ctor_hint ?need name.txt env in
+         let msg = Printf.sprintf "I don't know a constructor called `%s`.%s" name.txt hint in
+         (match unknown_ctor_fix ?need name.txt env with
+          | Some k ->
+            Err.error_with_fix ~code:Err.Code.unknown_constructor env.errors ~span:name.span
+              ~fix:(Err.FReplace { span = name_only name; text = k }) msg
+          | None -> Err.error ~code:Err.Code.unknown_constructor env.errors ~span:name.span msg);
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
        | Some ci ->
@@ -3717,7 +4288,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
                        whose fname second;
                    labels = []; notes = [];
                    code = Err.Code.unknown_record_field;
-                   fix = Option.map (fun g -> Err.FReplace { span = fsp; text = g })
+                   fix = Option.map (fun g ->
+                       Err.fix ~tier:(field_guess_tier fname all_flds g)
+                         (Err.FReplace { span = fsp; text = g }))
                        (if span == fsp then guess else None) }
            ) update_tys;
          base_ty
@@ -3819,15 +4392,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
              | _ -> ());
             t
           | None   ->
-            Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp
-              (Printf.sprintf
+            let guess = suggest_field ?need:(suggest_type_at sp) name.txt flds in
+            let msg = Printf.sprintf
                  "This record does not have a field called `%s`.%s\n\
                   The fields I see are: %s"
                  name.txt
-                 (match suggest_field ?need:(suggest_type_at sp) name.txt flds with
+                 (match guess with
                   | Some f -> Printf.sprintf " Did you mean `%s`?" f
                   | None -> "")
-                 (String.concat ", " (List.map fst flds)));
+                 (String.concat ", " (List.map fst flds)) in
+            (match guess with
+             | Some g when name.span.Ast.start_line > 0 ->
+               Err.error_with_fix ~code:Err.Code.unknown_record_field env.errors ~span:sp
+                 ~tier:(field_guess_tier name.txt flds g)
+                 ~fix:(Err.FReplace { span = name.span; text = g }) msg
+             | _ -> Err.error ~code:Err.Code.unknown_record_field env.errors ~span:sp msg);
             TError)
        | _ ->
          (match repr e_ty with
@@ -3911,15 +4490,15 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (* The two branches are mutually exclusive, so each may consume the same
          outer linear value once — the same rule match arms get. *)
       let r_then = ref TError and r_else = ref TError in
-      iter_paths_linear env ~span:_sp
-        [ (Some then_, fun () -> r_then := infer_expr env then_);
-          (Some else_, fun () -> r_else := infer_expr env else_) ];
+      iter_paths_linear ~all_note:"both branches consume it" env ~span:_sp
+        [ (Some then_, Some "the `if` branch", fun () -> r_then := infer_expr env then_);
+          (Some else_, Some "the `else` branch", fun () -> r_else := infer_expr env else_) ];
       let t_then = !r_then in
       let t_else = !r_else in
       (* Point primary error at the else branch; label points at then branch
          (the source of the expected type), making both branches visible. *)
-      let then_sp = span_of_expr then_ in
-      let else_sp = span_of_expr else_ in
+      let then_sp = span_of_expr (branch_leaf then_) in
+      let else_sp = span_of_expr (branch_leaf else_) in
       unify env ~span:else_sp
         ~reason:(Some (RBecause (RMatchArm then_sp,
           "Both branches of an if expression must return the same type.")))
@@ -3960,6 +4539,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let ty = infer_expr env body_e in
            results :=
              (Some body_e,
+              Some (Printf.sprintf "the arm on line %d" (span_of_expr body_e).Ast.start_line),
               List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot)
              :: !results;
            List.iter (fun (le, was, was_span) ->
@@ -3973,9 +4553,27 @@ let rec infer_expr env (e : Ast.expr) : ty =
              check_expr env cond_e t_bool
                ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
              let arm_ty = run_body body_e in
-             unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
+             (* Unify as before (the order decides which variable links to
+                which), but report a disagreement at this arm, against the
+                first arm's type (§X1): the whole `match do` was underlined,
+                with the two types the wrong way round. *)
+             let saved = env.errors.Err.diagnostics in
+             unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty;
+             let added = errors_since env ~mark:saved in
+             if added <> []
+                && List.for_all (fun (d : Err.diagnostic) ->
+                    d.Err.span = sp && Err.slug_of_code d.Err.code = Err.Code.type_mismatch) added
+             then begin
+               env.errors.Err.diagnostics <- saved;
+               let leaf = branch_leaf body_e in
+               report_pair env ~span:(span_of_expr leaf)
+                 ~reason:(Some (RBecause (RMatchArm (span_of_expr (branch_leaf first_body)),
+                                          cond_arms_note)))
+                 ~provided:(provided_of_expr leaf arm_ty) arm_ty result_ty
+             end
            ) rest;
-         join_linear_paths env ~span:sp snapshot (List.rev !results);
+         join_linear_paths ~all_note:"every arm consumes it" env ~span:sp snapshot
+           (List.rev !results);
          result_ty)
 
     (* ── Pipes / Sigils — must be desugared before reaching us ───── *)
@@ -4100,9 +4698,39 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── Test assertion ─────────────────────────────────────────────── *)
     | Ast.EAssert (inner, sp) ->
       (* The inner expression must be Bool. Assert evaluates to Unit. *)
-      check_expr env inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
+      check_expr {env with in_logical_predicate = env.in_proof_hints} inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
       Hashtbl.replace env.type_map sp t_unit;
       t_unit
+
+    (* ── Proof hints (ghost; erased after the refinement checker) ─────── *)
+    | Ast.EProof (p, sp) ->
+      let hints hs = List.iter (fun h -> ignore (infer_expr {env with in_proof_hints = true} h)) hs in
+      let ty =
+        match p with
+        | Ast.PAssertBy (pred, hs) ->
+          check_expr {env with in_logical_predicate = true} pred t_bool ~reason:(Some (RBuiltin "assert … by expects a Bool expression"));
+          hints hs;
+          t_unit
+        | Ast.PReveal f ->
+          ignore (infer_expr env f);
+          t_unit
+        | Ast.PWithFuel (f, _, body) ->
+          ignore (infer_expr env f);
+          infer_block env body
+        | Ast.PCalc (e0, steps) ->
+          (* Each step is `prev op rhs`, typed as that comparison would be. *)
+          ignore
+            (List.fold_left
+               (fun prev (st : Ast.calc_step) ->
+                 let cmp = Ast.EApp (Ast.EVar { Ast.txt = st.Ast.cs_op; Ast.span = st.Ast.cs_span }, [ prev; st.Ast.cs_rhs ], st.Ast.cs_span) in
+                 check_expr env cmp t_bool ~reason:(Some (RBuiltin "a calc step compares its two sides"));
+                 hints st.Ast.cs_hint;
+                 st.Ast.cs_rhs)
+               e0 steps);
+          t_unit
+      in
+      Hashtbl.replace env.type_map sp ty;
+      ty
 
     (* ── Local recursive named function (block-scoped) ─────────────── *)
     | Ast.ELetFn (name, params, ret_ann, body, sp) ->
@@ -4173,7 +4801,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
              if not was && !(le.le_used) then
                match le.le_pending with
                | Some _ -> if !(le.le_mixed) = None then le.le_mixed := Some sp
-               | None when le.le_lin = Ast.Linear ->
+               | None when le.le_lin = Ast.Linear && not !(le.le_poisoned) ->
                  let name = lin_display_name le.le_name in
                  Err.error ~code:Err.Code.linear_unconsumed_early_return env.errors ~span:sp
                    (Printf.sprintf
@@ -4286,6 +4914,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
                `flat_map` — its type could not be determined here.";
             TError))
   in
+  if env.lin <> [] && (match repr result with TError -> true | _ -> false)
+     && Err.error_since env.errors errors_mark then
+    poison_linear_operands env e;
   Hashtbl.replace env.type_map (span_of_expr e) (repr result);
   result
 
@@ -4456,7 +5087,9 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
       with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
     unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected;
     relocate_literal_mismatch env ~mark ~reason e sp expected;
-    relocate_callback_mismatch env ~mark e sp inferred expected
+    relocate_callback_mismatch env ~mark e sp inferred expected;
+    relocate_branch_mismatch env ~mark ~reason e sp expected;
+    explain_concat_result env ~mark e sp
 
 (** Thread function application through argument list, tracking arg index. *)
 and infer_app ?payload env span f_ty args idx =
@@ -4494,8 +5127,8 @@ and infer_app ?payload env span f_ty args idx =
       walk param_ty; !acc in
     check_expr env arg param_ty
       ~reason:(Some (match payload with
-          | Some (i, r) when i = idx -> r
-          | _ -> RFnArg (span, idx)));
+          | Some f -> Option.value (f idx) ~default:(RFnArg (span, idx))
+          | None -> RFnArg (span, idx)));
     (* Poison (§X3): when an argument fails its type check and the call's
        result shares a type variable with that parameter, the variable is
        now bound to whatever the failed check left it, so the result is
@@ -4661,8 +5294,9 @@ and with_offer_refinement env scrut (br : Ast.branch) (f : unit -> unit) =
     mutable flag would otherwise raise across arms, while still catching a
     genuine double-use WITHIN a single arm. *)
 and iter_arms_linear env ~span (branches : Ast.branch list) (f : Ast.branch -> unit) : unit =
-  iter_paths_linear env ~span
-    (List.map (fun (br : Ast.branch) -> (Some br.branch_body, fun () -> f br)) branches)
+  iter_paths_linear ~all_note:"every arm consumes it" env ~span
+    (List.map (fun (br : Ast.branch) ->
+         (Some br.branch_body, Some (describe_arm br), fun () -> f br)) branches)
 
 (** The mutual-exclusion discipline itself, over an arbitrary list of paths.
     Every branching construct in the language shares it: [EMatch] arms via
@@ -4683,19 +5317,20 @@ and iter_arms_linear env ~span (branches : Ast.branch list) (f : Ast.branch -> u
     the first path to consume a value would leave its span behind, and a
     genuine double-use in a LATER path would point at a line in a sibling path
     that never ran on the same execution. *)
-and iter_paths_linear env ~span (paths : (Ast.expr option * (unit -> unit)) list) : unit =
+and iter_paths_linear ?all_note env ~span
+    (paths : (Ast.expr option * string option * (unit -> unit)) list) : unit =
   let snapshot =
     List.map (fun le -> (le, !(le.le_used), !(le.le_first_use))) env.lin
   in
   let results =
-    List.map (fun (body, run_path) ->
+    List.map (fun (body, desc, run_path) ->
         List.iter (fun (le, was, was_span) ->
             le.le_used := was; le.le_first_use := was_span) snapshot;
         run_path ();
-        (body, List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot))
+        (body, desc, List.map (fun (le, _, _) -> (!(le.le_used), !(le.le_first_use))) snapshot))
       paths
   in
-  join_linear_paths env ~span snapshot results
+  join_linear_paths ?all_note env ~span snapshot results
 
 (** Infer the result type of a match expression. *)
 and infer_match env span scrut scrut_ty branches =
@@ -4852,7 +5487,8 @@ and infer_block env exprs =
        constructor, auto-promote the binding to Linear.
        Otherwise, propagate linearity from the RHS expression type. *)
     let auto_lin =
-      match b.bind_lin with
+      (* `ghost let` is erased; it binds like a plain `let`. *)
+      match (if b.bind_lin = Ast.Ghost then Ast.Unrestricted else b.bind_lin) with
       | Ast.Unrestricted ->
         let rty = repr rhs_ty in
         (match rty with
@@ -5228,8 +5864,10 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in
-  if p.param_lin <> Ast.Unrestricted then mark_linear_ok env t;
+  if p.param_lin = Ast.Linear || p.param_lin = Ast.Affine then mark_linear_ok env t;
   let effective_lin = match p.param_lin with
+    (* A ghost parameter is erased; it carries no use obligation. *)
+    | Ast.Ghost -> Ast.Unrestricted
     | Ast.Unrestricted ->
       (match repr t with
        | t when holds_linear env t -> Ast.Linear
@@ -5609,8 +6247,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Some ann -> surface_ty env' ~tvars:fn_tvars ann
                 | None -> fresh_var env'.level
               in
-              if p.param_lin <> Ast.Unrestricted then mark_linear_ok env' t;
+              if p.param_lin = Ast.Linear || p.param_lin = Ast.Affine then mark_linear_ok env' t;
               let effective_lin = match p.param_lin with
+                | Ast.Ghost -> Ast.Unrestricted
                 | Ast.Unrestricted ->
                   (match repr t with
                    | t when holds_linear env' t -> Ast.Linear
@@ -5672,7 +6311,8 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          require declaring-module + public provenance. Lambdas inherit this
          (they don't call check_fn); nested named fns/modules reset it via their
          own check_fn. *)
-      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public) } in
+      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public);
+        in_logical_predicate = false; in_proof_hints = List.mem "lemma" def.fn_attrs } in
 
       (* `@[trusted_linear(v)]` (specs/progress/2026-09-18-linear-map.md): the
          stdlib's LinearMap kernel.  Callers may instantiate the signature's
@@ -5691,6 +6331,34 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       let body_env =
         if trusted_vars = [] then body_env
         else { body_env with trusted_linear_body = true } in
+
+      (* `@[net_dest(p)]`: parameter [p] carries a URL destination, so a
+         host-scoped caller's argument is checked against its scope
+         (specs/2026-11-09-host-scoped-network-capabilities-design.md §4).
+         What the body does with [p] is checked on the compile path
+         (lib/tir/net_scope.ml); here only that [p] names a parameter. *)
+      (match March_caps.Net_dest.net_dest_attr def.fn_attrs with
+       | None -> ()
+       | Some p ->
+         let names =
+           match def.fn_clauses with
+           | c :: _ ->
+             List.filter_map (function
+                 | Ast.FPNamed prm | Ast.FPDefault (prm, _) -> Some prm.Ast.param_name.txt
+                 | Ast.FPPat (Ast.PatVar n) -> Some n.txt
+                 | Ast.FPPat _ -> None) c.Ast.fc_params
+           | [] -> []
+         in
+         if not (List.mem p names) then
+           Err.error ~code:Err.Code.cap_host_annotation env.errors
+             ~span:def.fn_name.span
+             (Printf.sprintf
+                "`@[net_dest(%s)]` on `%s` names no parameter: `%s` should be \
+                 the parameter that carries the URL.\n\
+                 hint: the parameters are %s."
+                p def.fn_name.txt p
+                (if names = [] then "unnamed patterns"
+                 else String.concat ", " (List.map (fun n -> "`" ^ n ^ "`") names))));
 
       (* ── A set-valued `@[measure]` body is LOGIC, not code ──────────────────
          (specs/2026-09-13-set-refinements-design.md §4.4, plan §2.1 option 1.)
@@ -5724,7 +6392,10 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               ("singleton", poly1 (fun a -> TArrow (a, t_set a)));
               ("member", poly1 (fun a -> TArrow (a, TArrow (t_set a, t_bool))));
               ("subset", poly1 (fun a -> TArrow (t_set a, TArrow (t_set a, t_bool))));
-              ("empty", poly1 (fun a -> t_set a)) ]
+              ("empty", poly1 (fun a -> t_set a));
+              (* A list's elements, the predicate vocabulary's [elts]: a
+                 HAMT branch's collision bucket is a [List(a)]. *)
+              ("elts", poly1 (fun a -> TArrow (TCon ("List", [ a ]), t_set a))) ]
             body_env
         end
         else body_env
@@ -6374,7 +7045,7 @@ let report_missing_impl ?(builtin_class = false) env ~span ~site iface ty =
   in
   Err.report env.errors
     { Err.severity = Err.Error; span; message = msg; labels = bound_label; notes;
-      code = Err.Code.missing_impl; fix }
+      code = Err.Code.missing_impl; fix = Err.fix_opt fix }
 
 (** Discharge all pending Num/Ord/CInterface constraints accumulated during
     inference.  Called at each declaration boundary (DFn, DLet) to verify
@@ -6803,7 +7474,13 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
         List.iter
           (fun (r : Ast.name) ->
              if not (List.mem r.txt all_roles) then
-               err ~span:r.span (Printf.sprintf "`may crash %s` names a role that is not in the protocol." r.txt)
+               err ~span:r.span
+                 (Printf.sprintf
+                    "`may crash %s` names a role that is not in the protocol; its roles are %s. \
+                     Remove it unless one of them can crash: a role that may crash needs an \
+                     `or crash do ... end` branch on each message it sends."
+                    r.txt
+                    (String.concat ", " (List.map (fun x -> "`" ^ x ^ "`") all_roles)))
              else if List.mem r.txt !crashers then
                err ~span:r.span (Printf.sprintf "`may crash` lists `%s` twice." r.txt)
              else crashers := r.txt :: !crashers)
@@ -6947,7 +7624,7 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
                          change to what the conversation should do."
                         s.txt (String.concat ", " (List.map (fun x -> "`" ^ x ^ "`") others)) r.txt ]);
             code = Err.Code.role_needs_invalid;
-            fix = Some (Err.FInsert { after_line = s.span.end_line; text }) }
+            fix = Some (Err.fix (Err.FInsert { after_line = s.span.end_line; text })) }
       end;
       walk ~tail ~dead rest
     | Ast.ProtoCrashOr (inner, crash, csp) :: rest ->
@@ -6959,7 +7636,12 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
                 err ~span:x.span (Printf.sprintf "`%s` has crashed, so it cannot take part in its own crash branch (%s)." x.txt (step_text s r)))
            [ s; r ];
          if not (may_crash s.txt) then
-           err ~span:csp (Printf.sprintf "`%s` is not declared `may crash`, so %s cannot have a crash branch." s.txt (step_text s r))
+           err ~span:csp
+             (Printf.sprintf
+                "`%s` is not declared `may crash`, so %s cannot have a crash branch. \
+                 Remove the `or crash do ... end` after it. Declaring `may crash %s` instead \
+                 asks for more: every other role must then be told about the crash."
+                s.txt (step_text s r) s.txt)
          else begin
            if List.mem s.txt (roles_in crash) then
              err ~span:csp
@@ -7033,7 +7715,8 @@ let check_crash_branches env ~proto (pdef : Ast.protocol_def) : unit =
 
 (** Register actor [name] as a zero-arg constructor (so `spawn(Name)`
     typechecks) and each `on Msg(...)` handler as a constructor of
-    "<Name>_Msg", owned by module [ci_module].  ALL params are included,
+    "<Name>_Msg", owned by module [ci_module], under every key
+    [actor_msg_ctor_keys] lists.  ALL params are included,
     annotated or not, so constructor arity is always correct; an unannotated
     one gets a unique TyVar placeholder ("$p<i>_<Msg>") that instantiates to a
     fresh unification variable, so `send(pid, Msg(x))` typechecks even when
@@ -7061,7 +7744,9 @@ let register_actor_ctors ~ci_module env (name : Ast.name) (actor : Ast.actor_def
       let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                  ci_arg_tys = arg_tys; ci_module; ci_vis = Ast.Public;
                  ci_is_actor_msg = true } in
-      { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+      { acc_env with ctors =
+          List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+            (actor_msg_ctor_keys ~ci_module name.txt h.ah_msg.txt) }
     ) env actor.actor_handlers
 
 let rec check_decl env (d : Ast.decl) : env =
@@ -7296,7 +7981,7 @@ let rec check_decl env (d : Ast.decl) : env =
          ) fields in
        register_record_name ~name:name.txt (List.map fst field_pairs);
        { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
-     | Ast.TDAlias rhs ->
+     | Ast.TDAlias (rhs, _) ->
        (* A transparent alias: record the right-hand side so [surface_ty]
           resolves a mention of this name to it.  Keyed by the QUALIFIED name
           inside a module — see [ty_aliases]'s comment for why the bare key is
@@ -7437,7 +8122,7 @@ let rec check_decl env (d : Ast.decl) : env =
                           sf.sf_name.txt);
                  labels = []; notes = [];
                  code = Err.Code.supervise_field_missing;
-                 fix = Option.map (fun g -> Err.FReplace { span = sf.sf_name.span; text = g }) guess }
+                 fix = Err.fix_opt (Option.map (fun g -> Err.FReplace { span = sf.sf_name.span; text = g }) guess) }
            end;
            match sf.sf_ty with
            | Ast.TyCon (child, []) when report_not_actor env ~where:"this supervise block" child ->
@@ -7830,6 +8515,16 @@ let rec check_decl env (d : Ast.decl) : env =
       if cap_qname = name.txt then with_qual
       else (name.txt, inner_needs) :: with_qual
     in
+    let inner_need_scopes = List.concat_map (function
+        | Ast.DNeeds (caps, _) ->
+          List.map (fun (p, sc) -> (cap_path_of_names p, sc)) caps
+        | _ -> []) decls in
+    let module_need_scopes' =
+      let with_qual =
+        (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes in
+      if cap_qname = name.txt then with_qual
+      else (name.txt, inner_need_scopes) :: with_qual
+    in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
        Export both the local name ("JobRow") and the fully-qualified name
@@ -7869,6 +8564,7 @@ let rec check_decl env (d : Ast.decl) : env =
       param_call_arities =
         StrMap.union (fun _k a _ -> Some a) new_param_call_arities env'.param_call_arities;
       module_caps = module_caps';
+      module_need_scopes = module_need_scopes';
       proof_caps = inner_env.proof_caps;
       cap_dicts = inner_env.cap_dicts;
       always_linear_types = inner_env.always_linear_types;
@@ -7954,7 +8650,26 @@ let rec check_decl env (d : Ast.decl) : env =
       Err.report env.errors
         { Err.severity = Error; span = Option.value first ~default:sp; message = msg;
           labels = loop_lbl; notes = []; code = Err.Code.protocol_invalid; fix = None } in
-    let rec check_unreachable_after_loop ~tail steps =
+    (* Where the stranded steps can go: the sibling branches of the nearest
+       enclosing `choose` that do not end in a `loop` or `stop`, and the
+       layout a several-step branch takes.  "Move it inside the branches"
+       alone left a one-turn answer guessing the syntax (`done -> do ... end`,
+       which does not parse), so name the branches and show the shape. *)
+    let move_advice ~live what =
+      let where = match live with
+        | [] -> "Move " ^ what ^ " into the branches that can reach " ^ what
+        | [ l ] -> Printf.sprintf "Move %s into the `%s` branch, after its last step" what l
+        | ls -> Printf.sprintf "Move %s into the %s branches, after each one's last step" what
+                  (String.concat " and " (List.map (Printf.sprintf "`%s`") ls)) in
+      Printf.sprintf
+        "%s. A branch with several steps lists them on the lines after `%s ->`, \
+         one per line, indented under the label (no `do`/`end`)."
+        where (match live with l :: _ -> l | [] -> "label") in
+    let ends_terminal (arm : Ast.protocol_step list) =
+      match List.rev arm with
+      | (Ast.ProtoLoop _ | Ast.ProtoStop _) :: _ -> true
+      | _ -> false in
+    let rec check_unreachable_after_loop ?(live = []) ~tail steps =
       match steps with
       | Ast.ProtoLoop (inner, _) :: rest ->
         check_unreachable_after_loop ~tail:[] inner;
@@ -7969,10 +8684,10 @@ let rec check_decl env (d : Ast.decl) : env =
             (Printf.sprintf
                "Protocol `%s`: this step can never run in the `choose` branch that \
                 ends in a `loop` — the steps after a `choose` are projected into \
-                EVERY branch. Move it inside the branches that can reach it."
-               name.txt)
+                EVERY branch. %s"
+               name.txt (move_advice ~live "it"))
       | Ast.ProtoStop stop_sp :: rest ->
-        (* `stop` projects to `SEnd` unconditionally (see [project_steps]),
+        (* `stop` projects to `SEnd` unconditionally (see [project_steps_at]),
            discarding both [rest] here and the enclosing [tail] — same
            unreachability shape as `loop`, just via early exit instead of
            looping forever. *)
@@ -7988,23 +8703,29 @@ let rec check_decl env (d : Ast.decl) : env =
                "Protocol `%s`: this `choose` branch ends in `stop`, but the \
                 protocol continues after the `choose` — those following steps \
                 are projected into EVERY branch, so they can never run in this \
-                one. Move them inside the branches that can reach them."
-               name.txt)
+                one. %s"
+               name.txt (move_advice ~live "them"))
       | Ast.ProtoChoice (_, branches) :: rest ->
+        let live =
+          List.filter_map
+            (fun ((l : Ast.name), arm) -> if ends_terminal arm then None else Some l.txt)
+            branches in
         List.iter (fun (_, arm) ->
-            check_unreachable_after_loop ~tail:(rest @ tail) arm) branches;
-        check_unreachable_after_loop ~tail rest
+            check_unreachable_after_loop ~live ~tail:(rest @ tail) arm) branches;
+        check_unreachable_after_loop ~live ~tail rest
       | Ast.ProtoCrashOr (_, crash, _) :: rest ->
         (* A crash branch ENDS the protocol (or the loop it is in): it has no
            tail of its own to fall into. *)
         check_unreachable_after_loop ~tail:[] crash;
         check_unreachable_after_loop ~tail rest
-      | _ :: rest -> check_unreachable_after_loop ~tail rest
+      | _ :: rest -> check_unreachable_after_loop ~live ~tail rest
       | [] -> ()
     in
     check_unreachable_after_loop ~tail:[] pdef.proto_steps;
     (* Project the protocol onto each role and verify duality. *)
-    let projections = project_protocol env ~span:sp ~proto_name:name.txt pdef in
+    let projections, positions = project_protocol env ~span:sp ~proto_name:name.txt pdef in
+    theory_view env ~proto_name:name.txt pdef projections;
+    March_ast.Protocol_states.record_protocol ~proto:name.txt pdef.proto_steps;
     let participants = List.map fst projections in
     if participants <> [] && List.length participants < 2 then
       Err.warning ~code:Err.Code.protocol_single_participant env.errors ~span:sp
@@ -8017,7 +8738,7 @@ let rec check_decl env (d : Ast.decl) : env =
        2026-07-24: it fired on every ordinary protocol, including the
        reference chapter's own Echo example). *)
     (* Check against previously-declared protocols for cross-protocol conflicts. *)
-    let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp } in
+    let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp; pi_positions = positions } in
     let new_env = { env with protocols = StrMap.add name.txt pi env.protocols } in
     (if StrMap.cardinal new_env.protocols > 1 then
        StrMap.iter (fun other_name other_pi ->
@@ -8473,15 +9194,43 @@ let rec check_decl env (d : Ast.decl) : env =
             | (n : Ast.name) :: _ -> n.span
             | [] -> sp
           in
+          let is_net_cap = March_caps.Cap_lattice.cap_subsumes "IO.Network" cap in
           if not (March_caps.Cap_scope.is_scopable cap) then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+              (if is_net_cap then
+                 Printf.sprintf
+                   "`%s` does not take a path scope or a host scope; only \
+                    `IO.NetConnect` takes a host, so `(\"%s\")` would be \
+                    ignored.\n\
+                    hint: scope the outbound capability instead, e.g. \
+                    `needs IO.NetConnect(\"%s\")`; it also bounds the TLS \
+                    connections built on it."
+                   cap path path
+               else
+                 Printf.sprintf
+                   "`%s` does not take a path scope; only filesystem \
+                    capabilities do (`IO.FileRead`, `IO.FileWrite`, \
+                    `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
+                    hint: remove the scope, or scope the filesystem capability \
+                    you mean, e.g. `needs IO.FileSystem(\"%s\")`."
+                   cap path path)
+          else if March_caps.Cap_scope.is_host_scopable cap then
+            (match March_caps.Host_scope.parse_decl (Some path) with
+             | Ok _ -> ()
+             | Error reason ->
+               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+                 (Printf.sprintf
+                    "The host scope `%s` on `%s` is not valid: %s.\n\
+                     hint: write a host, a host and port, or `*.domain`, \
+                     e.g. `needs IO.NetConnect(\"api.example.com\")`."
+                    path cap reason))
+          else if snd (March_caps.Host_scope.split_options path) <> []
+          then
+            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
-                 "`%s` does not take a path scope; only filesystem \
-                  capabilities do (`IO.FileRead`, `IO.FileWrite`, \
-                  `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
-                  hint: remove the scope, or scope the filesystem capability \
-                  you mean, e.g. `needs IO.FileSystem(\"%s\")`."
-                 cap path path)
+                 "`%s` takes no options; `no_redirects` and `methods(...)` \
+                  apply only to `IO.NetConnect`."
+                 cap)
           else if not (March_caps.Cap_scope.is_absolute path) then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
@@ -9313,7 +10062,7 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
                   (L.the_capability have);
               labels;
               notes = [ L.relation ~have ~need; help ];
-              fix } in
+              fix = Err.fix_opt fix } in
           (* The callee's signature naming `Cap(X)` in a module without
              `needs X`: the same missing authority, so one report. *)
           let d' =
@@ -9330,7 +10079,7 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
                                        Printf.sprintf "`Cap(%s)` is named here, and the module declares no `needs %s`"
                                          need need } ];
                   notes = d'.Err.notes @ [ Printf.sprintf "and add `needs %s` to the module." need ];
-                  fix = Err.multi_fix [ n.Err.fix; d'.Err.fix ] }
+                  fix = Err.merge_fixes [ n.Err.fix; d'.Err.fix ] }
               | None -> d'
           in
           cap_diag_replace env.errors d d')
@@ -9474,7 +10223,7 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                labels = d.Err.labels
                         @ [ { Err.lbl_span = params_span;
                               lbl_message = "`main` is granted nothing here" } ];
-               fix = Err.multi_fix [ d.Err.fix; Some grant_fix ] }
+               fix = Err.merge_fixes [ d.Err.fix; Some (Err.fix grant_fix) ] }
          | None ->
          Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
            ~fix:grant_fix
@@ -9589,11 +10338,11 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                                    and give `main` a `Cap(%s)` parameter: `fn main(…, %s)`."
                      head show_grant rest c param_hint;
                  labels = d.Err.labels @ hops @ [ grant_label ];
-                 fix = Err.multi_fix [ d.Err.fix; param_fix ] }
+                 fix = Err.merge_fixes [ d.Err.fix; Err.fix_opt param_fix ] }
            | _ ->
            Err.report env.errors
              { Err.severity = Err.Error; span = primary; labels; notes = [];
-               code = Err.Code.cap_grant_exceeded; fix = param_fix;
+               code = Err.Code.cap_grant_exceeded; fix = Err.fix_opt param_fix;
                message =
              Printf.sprintf
                 "`main` is granted %s, but the program reaches `%s`%s. \
@@ -9722,6 +10471,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (_, _, _, body, _) -> go body
   | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
@@ -9798,6 +10548,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (name, ps, _, body, _) ->
     (* outside a block: only its own body sees it *)
@@ -9824,8 +10575,12 @@ type role_root = {
 
 (* The runner front a called name is, if any: (protocol, role, callback
    positions).  A hosted front's callbacks start at [start]; a body front's
-   is the last argument ([-1]). *)
-let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int ]) option =
+   is the last argument ([-1]).  A CLUSTER hosted front (`offer_hosted_R`,
+   `cluster_hosted_R`) takes the role's grant as parameters after the node,
+   one per path, so its callbacks start that many places later:
+   [`Hosted_after_grant start] is the position with an empty grant. *)
+let role_front_of (name : string)
+  : (string * string * [ `Body | `Hosted of int | `Hosted_after_grant of int ]) option =
   match String.rindex_opt name '.' with
   | None -> None
   | Some i ->
@@ -9850,10 +10605,10 @@ let role_front_of (name : string) : (string * string * [ `Body | `Hosted of int 
       in
       (* longer prefixes first *)
       match strip "offer_hosted_" with
-      | Some r -> Some (proto, r, `Hosted 4)
+      | Some r -> Some (proto, r, `Hosted_after_grant 3)
       | None -> (
         match strip "cluster_hosted_" with
-        | Some r -> Some (proto, r, `Hosted 4)
+        | Some r -> Some (proto, r, `Hosted_after_grant 3)
         | None -> (
           match strip "host_" with
           | Some r -> Some (proto, strip_or r, `Hosted 5)
@@ -9905,7 +10660,11 @@ let find_role_roots (env : env) : role_root list =
                          match List.rev args with
                          | e :: _ -> root "body" None e
                          | [] -> ())
-                       | `Hosted start ->
+                       | (`Hosted _ | `Hosted_after_grant _) as k ->
+                         let start = match k with
+                           | `Hosted start -> start
+                           | `Hosted_after_grant start -> start + List.length grant
+                         in
                          let host = Option.bind (nth (start - 1)) host_of in
                          List.iteri
                            (fun j what -> Option.iter (root what host) (nth (start + j)))
@@ -10234,6 +10993,52 @@ let solve_role_roots (env : env)
     | _ -> solve_role_roots_full env in
   Option.map (fun s -> (s.rs_keyed, s.rs_own, s.rs_refs, s.rs_rows)) solved
 
+(* The `help:` of a [role_grant_exceeded] error.  Widening the grant is not the
+   whole edit: the body takes one `Cap` per granted path, in the grant's order,
+   between `Cap(Session.Live)` and the state (D34, [Desugar_endpoints.grants_of]),
+   so the new path is also a new parameter.  Saying only "add it to the grant"
+   left every one-turn answer rejected by the arity error that edit causes, so
+   the help spells out the grant line and the body's new parameter list.
+   A front over a cluster node ([front] is not `run_` or `host_`) takes the
+   grant as arguments too, after the node, so there the call is a third edit
+   and the help names it. *)
+let role_grant_help ~role ~proto ~(grant : string list) ~cap ~front : string =
+  let param_name path =
+    let last = match String.rindex_opt path '.' with
+      | Some i -> String.sub path (i + 1) (String.length path - i - 1)
+      | None -> path in
+    let b = Buffer.create 16 in
+    String.iteri
+      (fun i ch ->
+         if ch >= 'A' && ch <= 'Z' then begin
+           if i > 0 then Buffer.add_char b '_';
+           Buffer.add_char b (Char.lowercase_ascii ch)
+         end else Buffer.add_char b ch)
+      last;
+    (* `cap_` keeps the name off the builtins (`file_write` is one). *)
+    "cap_" ^ Buffer.contents b
+  in
+  let widened = grant @ [ cap ] in
+  let call_note =
+    let leaf = match String.rindex_opt front '.' with
+      | Some i -> String.sub front (i + 1) (String.length front - i - 1)
+      | None -> front in
+    if List.exists (fun p -> String.starts_with ~prefix:p leaf) [ "run_"; "host_" ] then ""
+    else
+      Printf.sprintf
+        " The call to `%s` takes the grant as well, one `Cap` per granted capability after \
+         the node, so it gains an argument: a `Cap(%s)`, last of them (`cap_narrow(io)` where \
+         the caller holds a wider capability `io`)."
+        front cap
+  in
+  Printf.sprintf
+    "help: add `%s` to the grant in protocol `%s`: `role %s needs %s`. The body then takes \
+     one `Cap` per granted capability, in the grant's order, between the session capability \
+     and the state, so it gains a parameter: `fn (s, %s, st) -> ...`.%s Pass `%s` on to any \
+     function the body hands its capabilities to. Or remove the use."
+    cap proto role (String.concat ", " widened)
+    (String.concat ", " (List.map param_name widened)) call_note (param_name cap)
+
 let check_role_grants (env : env) (decls : Ast.decl list) : unit =
   if Hashtbl.length env.role_grants = 0 then ()
   else begin
@@ -10359,19 +11164,19 @@ let check_role_grants (env : env) (decls : Ast.decl list) : unit =
                           Printf.sprintf
                             "The %s of role `%s` %s, but the role is granted only %s \
                              (`role %s needs %s`). A role's grant bounds everything its code \
-                             reaches, as `main`'s grant bounds the program.\n\
-                             help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
+                             reaches, as `main`'s grant bounds the program.\n%s"
                             r.rr_what r.rr_role (March_caps.Cap_lattice.action c) show_grant
-                            r.rr_role (String.concat ", " r.rr_grant) c r.rr_role r.rr_proto }
+                            r.rr_role (String.concat ", " r.rr_grant)
+                            (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c ~front:r.rr_front) }
                   | None ->
                   Err.error ~code:Err.Code.role_grant_exceeded env.errors ~span:r.rr_span
                     (Printf.sprintf
                        "Role `%s.%s` is granted %s (`role %s needs %s`), but %s reaches `%s`%s. \
                         A role's grant bounds everything its code reaches, as `main`'s grant bounds \
-                        the program.\n\
-                        help: add `%s` to `role %s needs ...` in protocol `%s`, or remove the use."
+                        the program.\n%s"
                        r.rr_proto r.rr_role show_grant r.rr_role (String.concat ", " r.rr_grant)
-                       (label r) c chain c r.rr_role r.rr_proto))
+                       (label r) c chain
+                       (role_grant_help ~role:r.rr_role ~proto:r.rr_proto ~grant:r.rr_grant ~cap:c ~front:r.rr_front)))
              (List.sort_uniq String.compare (caps_of k));
            (* Not statically known: the callback itself, a local it invokes,
               or (the solver's `unknown`) a value of untraceable origin that
@@ -11223,7 +12028,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | Ast.TDAlias rhs ->
+           | Ast.TDAlias (rhs, _) ->
              (* Seed the alias for a SIBLING that mentions it: the declaring
                 module's own [check_decl] runs later, so a referrer checked
                 before it would otherwise see `Mod.Entry` as an unknown type.
@@ -11323,7 +12128,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
             let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
-            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+            { acc_env with ctors =
+                List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+                  (actor_msg_ctor_keys ~ci_module:m.Ast.mod_name.txt name.txt h.ah_msg.txt) }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }
@@ -11468,6 +12275,29 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     check_deterministic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
+  (* Ghost code (lib/desugar/ghost.ml): a ghost value reaches only ghost
+     positions, and no linear value is observed by ghost code. *)
+  March_desugar.Ghost.check errors m.Ast.mod_decls ~top:m.Ast.mod_name.Ast.txt
+    (* A check seeded with the stdlib's environment has no stdlib
+       declarations to scan: its globals are the seed's names. *)
+    ~globals:(fun n -> match seed_env with Some (se : env) -> StrMap.mem n se.vars | None -> false)
+    ~exports:(fun path ->
+        Option.map
+          (fun (me : March_modules.Module_registry.module_exports) ->
+            List.filter_map
+              (fun (e : March_modules.Module_registry.export_entry) ->
+                if e.ex_public then Some e.ex_name else None)
+              me.me_entries)
+          (March_modules.Module_registry.ensure_loaded path))
+    ~reserved:(March_desugar.Lemma_erase.reserved_by
+                 (List.map fst Typecheck_builtins.builtin_bindings
+                  @ List.map fst Typecheck_builtins.builtin_interface_bindings))
+    ~is_linear:(fun sp ->
+        match Hashtbl.find_opt type_map sp with
+        | Some t ->
+          holds_linear final_env t
+          || (match repr t with TLin ((Ast.Linear | Ast.Affine), _) -> true | _ -> false)
+        | None -> false);
   (* Pass 3: tail-call enforcement *)
   check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
@@ -11624,7 +12454,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | Ast.TDAlias rhs ->
+           | Ast.TDAlias (rhs, _) ->
              (* Seed the alias for a SIBLING that mentions it: the declaring
                 module's own [check_decl] runs later, so a referrer checked
                 before it would otherwise see `Mod.Entry` as an unknown type.
@@ -11709,7 +12539,9 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
             let ci = { ci_type = actor_msg_type_name name.txt; ci_params = [];
                        ci_arg_tys = arg_tys; ci_module = m.Ast.mod_name.txt; ci_vis = Ast.Public;
                        ci_is_actor_msg = true } in
-            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+            { acc_env with ctors =
+                List.fold_left (fun ctors k -> add_ctor k ci ctors) acc_env.ctors
+                  (actor_msg_ctor_keys ~ci_module:m.Ast.mod_name.txt name.txt h.ah_msg.txt) }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }
