@@ -18398,6 +18398,7 @@ let compiler_suites =
       ("cap_package", Test_cap_package.tests);
       ("cap_scope", Test_cap_scope.tests);
       ("host_scope", Test_host_scope.tests);
+      ("cap_net_scope", Test_cap_net_scope.tests);
       ("cap_fn_bounds", Test_cap_fn_bounds.tests);
       ("cap_ceiling", Test_cap_ceiling.tests);
       ("alloc_contract", Test_alloc_contract.tests);

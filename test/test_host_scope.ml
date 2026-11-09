@@ -147,8 +147,299 @@ let test_permits_union () =
   Alcotest.(check bool) "an any-host decl = unscoped" true
     (H.permits (decls [ "a.com"; ";no_redirects" ]) ~host:"c.com" ~port:443)
 
-let tests =
+(* ── Declarations (Task 2) ───────────────────────────────────────────── *)
+
+let errors_of src = Test_helpers.typecheck src
+
+let messages ctx =
+  List.map (fun (d : March_errors.Errors.diagnostic) -> d.message)
+    (March_errors.Errors.sorted ctx)
+
+let decl_src decl =
+  Printf.sprintf
+    {|mod HostDecl do
+  %s
+  fn f(x : Int) : Int do x end
+end
+|}
+    decl
+
+let accepts name decl =
+  let ctx = errors_of (decl_src decl) in
+  if March_errors.Errors.has_errors ctx then
+    Alcotest.failf "%s should typecheck:\n%s" name
+      (String.concat "\n" (messages ctx))
+
+let rejects_with name ~expect decl =
+  let ctx = errors_of (decl_src decl) in
+  if not (March_errors.Errors.has_errors ctx) then
+    Alcotest.failf "%s should be rejected" name;
+  if not (List.exists
+            (fun m ->
+               match Str.search_forward (Str.regexp_string expect) m 0 with
+               | _ -> true
+               | exception Not_found -> false)
+            (messages ctx))
+  then
+    Alcotest.failf "%s rejected, but not with %S:\n%s" name expect
+      (String.concat "\n" (messages ctx))
+
+let test_net_scope_accepted () =
+  accepts "host scope" {|needs IO.NetConnect("example.com")|};
+  accepts "two hosts" {|needs IO.NetConnect("example.com"), IO.NetConnect("*.foo.com:8443")|}
+
+let test_net_scope_bad_pattern () =
+  rejects_with "scheme in scope" ~expect:"scheme"
+    {|needs IO.NetConnect("https://example.com")|};
+  rejects_with "path in scope" ~expect:"path"
+    {|needs IO.NetConnect("example.com/api")|}
+
+let test_other_net_caps_rejected () =
+  rejects_with "TLS scope" ~expect:"IO.NetConnect"
+    {|needs IO.NetConnect.TLS("example.com")|};
+  rejects_with "Network scope" ~expect:"does not take"
+    {|needs IO.Network("example.com")|}
+
+let test_no_redirects_parses () =
+  accepts "host + no_redirects" {|needs IO.NetConnect("example.com", no_redirects)|};
+  accepts "bare no_redirects" {|needs IO.NetConnect(no_redirects)|};
+  rejects_with "no_redirects on a filesystem cap" ~expect:"no_redirects"
+    {|needs IO.FileRead("/etc", no_redirects)|}
+
+let test_fs_scope_unchanged () =
+  accepts "fs scope" {|needs IO.FileRead("/etc/myapp")|};
+  rejects_with "relative fs scope" ~expect:"relative path"
+    {|needs IO.FileRead("etc")|}
+
+let test_fs_manifest_ignores_net () =
+  Alcotest.(check (option string)) "no FS manifest for a host scope" None
+    (March_caps.Cap_scope.manifest_json [ ("IO.NetConnect", Some "a.com") ])
+
+let test_declared_net_scopes_per_module () =
+  let src =
+    {|mod Top do
+  mod A do
+    needs IO.NetConnect("a.com")
+    fn f(x : Int) : Int do x end
+  end
+  mod B do
+    needs IO.NetConnect("b.com", no_redirects)
+    fn g(x : Int) : Int do x end
+  end
+  mod C do
+    needs IO.NetConnect
+    fn h(x : Int) : Int do x end
+  end
+  fn main() : Int do 1 end
+end
+|}
+  in
+  let ctx, _, env =
+    March_typecheck.Typecheck.check_module_full (Test_helpers.parse_and_desugar src)
+  in
+  if March_errors.Errors.has_errors ctx then
+    Alcotest.failf "fixture should typecheck:\n%s" (String.concat "\n" (messages ctx));
+  let scopes = March_typecheck.Typecheck.declared_net_scopes env ~entry_module:"Top" in
+  let hosts m =
+    match List.assoc_opt m scopes with
+    | None -> Alcotest.failf "no entry for module %s" m
+    | Some ds ->
+      List.concat_map
+        (fun (d : H.decl) ->
+           List.map
+             (fun p -> H.pattern_to_string p ^ if d.no_redirects then "!" else "")
+             d.patterns)
+        ds
+  in
+  Alcotest.(check (list string)) "A" [ "a.com" ] (hosts "A");
+  Alcotest.(check (list string)) "B" [ "b.com!" ] (hosts "B");
+  Alcotest.(check (list string)) "C is unscoped" [] (hosts "C")
+
+let test_format_roundtrip () =
+  let src =
+    "mod F do\n  needs IO.NetConnect(\"a.com\", no_redirects), IO.NetConnect(no_redirects)\nend\n"
+  in
+  let out = March_format.Format.format_source ~filename:"f.march" src in
+  List.iter
+    (fun want ->
+       match Str.search_forward (Str.regexp_string want) out 0 with
+       | _ -> ()
+       | exception Not_found -> Alcotest.failf "formatted output lacks %S:\n%s" want out)
+    [ {|IO.NetConnect("a.com", no_redirects)|}; {|IO.NetConnect(no_redirects)|} ]
+
+(* ── The run-time matcher and parser agree with the compile-time ones ──── *)
+
+let compiler_exe =
+  Filename.concat (Filename.dirname Sys.executable_name) "../bin/main.exe"
+
+let run_march src =
+  let f = Filename.temp_file "host_scope_diff" ".march" in
+  let oc = open_out f in
+  output_string oc src;
+  close_out oc;
+  let out = Filename.temp_file "host_scope_diff" ".out" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s %s > %s 2>&1 </dev/null" (Filename.quote compiler_exe)
+         (Filename.quote f) (Filename.quote out))
+  in
+  let ic = open_in out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  Sys.remove f;
+  Sys.remove out;
+  if rc <> 0 then Alcotest.failf "march program failed (rc=%d):\n%s" rc s;
+  String.split_on_char '\n' (String.trim s)
+
+let march_str s = "\"" ^ String.escaped s ^ "\""
+
+let matcher_corpus =
+  [ ("", "anything.test", 443); ("example.com", "example.com", 443);
+    ("example.com", "Example.COM.", 80); ("example.com", "foo.com", 443);
+    ("example.com,foo.com", "foo.com", 443); ("*.example.com", "api.example.com", 443);
+    ("*.example.com", "a.b.example.com", 8443); ("*.example.com", "example.com", 443);
+    ("*.example.com", "badexample.com", 443); ("example.com:8443", "example.com", 8443);
+    ("example.com:8443", "example.com", 443); ("!example.com", "example.com", 443);
+    ("!", "whatever.test", 443); ("203.0.113.7", "203.0.113.7", 80);
+    ("[2001:db8::1]:443", "[2001:db8::1]", 443); ("[2001:db8::1]:443", "[2001:db8::1]", 80) ]
+
+let test_matcher_agrees () =
+  let lines =
+    List.map
+      (fun (spec, host, port) ->
+         Printf.sprintf
+           "    println(if HttpClient.hc_scope_permits(%s, %s, %d) do \"true\" else \"false\" end)"
+           (march_str spec) (march_str host) port)
+      matcher_corpus
+  in
+  let src =
+    Printf.sprintf
+      "mod Diff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      (String.concat "\n" lines)
+  in
+  let got = run_march src in
+  Alcotest.(check int) "one line per case" (List.length matcher_corpus) (List.length got);
+  List.iter2
+    (fun (spec, host, port) line ->
+       let want = H.permits (H.decode_spec spec) ~host ~port in
+       Alcotest.(check string)
+         (Printf.sprintf "%S admits %s:%d" spec host port)
+         (string_of_bool want) line)
+    matcher_corpus got
+
+let url_corpus =
+  [ "http://example.com/"; "https://example.com"; "https://example.com:8443/x";
+    "https://Example.COM./x"; "http://203.0.113.7:8080/a?b=c"; "https://a-b.c-d.test/p" ]
+
+let test_url_parser_agrees () =
+  let lines =
+    List.map
+      (fun u ->
+         Printf.sprintf
+           "    match Http.parse_url(%s) do\n    Ok(r) -> println(Http.host(r) ++ \" \" ++ int_to_string(HttpClient.hc_effective_port(Http.scheme(r), Http.port(r))))\n    Err(_) -> println(\"ERR\")\n    end"
+           (march_str u))
+      url_corpus
+  in
+  let src =
+    Printf.sprintf
+      "mod UrlDiff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      (String.concat "\n" lines)
+  in
+  let got = run_march src in
+  Alcotest.(check int) "one line per URL" (List.length url_corpus) (List.length got);
+  List.iter2
+    (fun u line ->
+       match H.authority_of_url ~prefix:false u with
+       | None -> Alcotest.failf "corpus URL %S should be host-evident" u
+       | Some a -> (
+           match String.split_on_char ' ' line with
+           | [ host; port ] ->
+             Alcotest.(check string) (u ^ " host") a.a_host (H.normalize_host host);
+             Alcotest.(check string) (u ^ " port") (string_of_int a.a_port) port
+           | _ -> Alcotest.failf "%S: runtime said %S" u line))
+    url_corpus got
+
+(* ── Destination table (Task 4) ──────────────────────────────────────── *)
+
+module D = March_caps.Net_dest
+
+let test_every_net_builtin_classified () =
+  let missing =
+    List.filter_map
+      (fun (name, cap) ->
+         if D.is_network_cap cap && D.builtin_dest name = None then Some name
+         else None)
+      March_typecheck.Typecheck.builtin_cap_table
+  in
+  Alcotest.(check (list string)) "network builtins without a destination row" []
+    missing
+
+let test_tls_connect_is_handle () =
+  Alcotest.(check bool) "tls_connect's hostname is not a destination" true
+    (D.builtin_dest "tls_connect" = Some D.Handle);
+  Alcotest.(check bool) "tcp_connect takes a host" true
+    (D.builtin_dest "tcp_connect" = Some (D.Host (0, Some 1)))
+
+let test_bad_net_dest_param () =
+  let src =
+    {|mod BadDest do
+  @[net_dest(nope)]
+  fn f(url : String) : String do url end
+end
+|}
+  in
+  let ctx = errors_of src in
+  if not
+       (List.exists
+          (fun m ->
+             match Str.search_forward (Str.regexp_string "nope") m 0 with
+             | _ -> true
+             | exception Not_found -> false)
+          (messages ctx))
+  then
+    Alcotest.failf "@[net_dest(nope)] should be rejected naming `nope`:\n%s"
+      (String.concat "\n" (messages ctx))
+
+let test_good_net_dest_param () =
+  let src =
+    {|mod GoodDest do
+  @[net_dest(url)]
+  fn f(url : String) : String do url end
+end
+|}
+  in
+  let ctx = errors_of src in
+  if March_errors.Errors.has_errors ctx then
+    Alcotest.failf "@[net_dest(url)] should typecheck:\n%s"
+      (String.concat "\n" (messages ctx))
+
+let dest_tests =
   [
+    Alcotest.test_case "every network builtin classified" `Quick
+      test_every_net_builtin_classified;
+    Alcotest.test_case "tls_connect is a handle op" `Quick test_tls_connect_is_handle;
+    Alcotest.test_case "bad @[net_dest] param" `Quick test_bad_net_dest_param;
+    Alcotest.test_case "good @[net_dest] param" `Quick test_good_net_dest_param;
+  ]
+
+let decl_tests =
+  [
+    Alcotest.test_case "net scope accepted" `Quick test_net_scope_accepted;
+    Alcotest.test_case "net scope bad pattern" `Quick test_net_scope_bad_pattern;
+    Alcotest.test_case "other net caps rejected" `Quick test_other_net_caps_rejected;
+    Alcotest.test_case "no_redirects parses" `Quick test_no_redirects_parses;
+    Alcotest.test_case "fs scope unchanged" `Quick test_fs_scope_unchanged;
+    Alcotest.test_case "fs manifest ignores net" `Quick test_fs_manifest_ignores_net;
+    Alcotest.test_case "declared net scopes per module" `Quick
+      test_declared_net_scopes_per_module;
+    Alcotest.test_case "format roundtrip" `Quick test_format_roundtrip;
+    Alcotest.test_case "matcher agrees with the stdlib" `Slow test_matcher_agrees;
+    Alcotest.test_case "URL parser agrees with Http.parse_url" `Slow
+      test_url_parser_agrees;
+  ]
+
+let tests =
+  decl_tests @ dest_tests @ [
     Alcotest.test_case "patterns rejected" `Quick test_parse_rejects;
     Alcotest.test_case "patterns accepted" `Quick test_parse_accepts;
     Alcotest.test_case "wildcard" `Quick test_wildcard;

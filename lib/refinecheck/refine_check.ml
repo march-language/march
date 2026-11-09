@@ -8852,7 +8852,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "assume"; "decreases"; "diverges"; "ghost"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
+  [ "assume"; "decreases"; "diverges"; "ghost"; "lemma"; "measure"; "net_dest"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)

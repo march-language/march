@@ -1422,7 +1422,18 @@ and emit_decl ctx = function
          let path = String.concat "." (List.map (fun n -> n.txt) cap) in
          match scope with
          | None -> path
-         | Some sc -> Printf.sprintf "%s(%s)" path (quote_string sc)) caps in
+         | Some sc ->
+           (* An option rides in the scope string as "<scope>;<option>"
+              (parser.mly, [scoped_cap_path]); print it back as written. *)
+           (match String.rindex_opt sc ';' with
+            | Some i
+              when let o = String.sub sc (i + 1) (String.length sc - i - 1) in
+                   o <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') o ->
+              let s = String.sub sc 0 i
+              and o = String.sub sc (i + 1) (String.length sc - i - 1) in
+              if s = "" then Printf.sprintf "%s(%s)" path o
+              else Printf.sprintf "%s(%s, %s)" path (quote_string s) o
+            | _ -> Printf.sprintf "%s(%s)" path (quote_string sc))) caps in
     line ctx (Printf.sprintf "needs %s" (String.concat ", " cs))
 
   | DProofCap (name, dict, _) ->

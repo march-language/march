@@ -10338,6 +10338,10 @@
       "required": true,
       "types": [
         {
+          "type": "identifier",
+          "named": true
+        },
+        {
           "type": "module_path",
           "named": true
         },

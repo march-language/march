@@ -342,6 +342,11 @@ type env = {
       capability as a plain string is disturbed.  [None] means unscoped.
       A capability declared twice contributes one entry per scope, so
       [needs IO.FileRead("/a"), IO.FileRead("/b")] permits both subtrees. *)
+  module_need_scopes : (string * (string * string option) list) list;
+  (** [mod_need_scopes] of each checked sub-module, keyed exactly like
+      [module_caps] (qualified and short name).  Read by host-scope checking
+      (specs/2026-11-09-host-scoped-network-capabilities-design.md), which
+      judges each module by its OWN scopes. *)
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement.
@@ -866,7 +871,7 @@ let make_env errors type_map = {
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
-  mod_needs = []; mod_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
+  mod_needs = []; mod_need_scopes = []; module_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   import_idx = make_import_index ();
   deferred_check4 = ref [];

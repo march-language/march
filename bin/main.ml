@@ -4866,6 +4866,123 @@ let compile filename =
         Printf.eprintf "march: internal error while lowering to TIR: %s\n%!" msg;
         exit 1
     in
+    (* Host scopes on IO.NetConnect (lib/tir/net_scope.ml;
+       specs/2026-11-09-host-scoped-network-capabilities-design.md).  Here,
+       straight after lowering, because function names are still source names
+       and a call's arguments are still the literals the program wrote.  The
+       check refuses a host-scoped module's network use whose destination it
+       cannot prove inside the scope; the rewrite then points that module's
+       redirect-capable HttpClient calls at their scope-checking twins. *)
+    let tir =
+      let scopes =
+        March_typecheck.Typecheck.declared_net_scopes typecheck_env
+          ~entry_module:tir.March_tir.Tir.tm_name
+      in
+      if List.for_all (fun (_, ds) -> ds = []) scopes then tir
+      else begin
+        let stdlib_mods = stdlib_module_names stdlib_decls in
+        let stdlib_files = stdlib_span_files stdlib_decls in
+        let prelude_fns = Hashtbl.create 64 in
+        let annotated = ref [] in
+        let rec walk prefix (decls : March_ast.Ast.decl list) =
+          List.iter (fun (d : March_ast.Ast.decl) ->
+              match d with
+              | March_ast.Ast.DFn (fd, sp) ->
+                let name = fd.March_ast.Ast.fn_name.March_ast.Ast.txt in
+                if prefix = "" && List.mem sp.March_ast.Ast.file stdlib_files then
+                  Hashtbl.replace prelude_fns name ();
+                (match March_caps.Net_dest.net_dest_attr fd.March_ast.Ast.fn_attrs with
+                 | None -> ()
+                 | Some p ->
+                   let params =
+                     match fd.March_ast.Ast.fn_clauses with
+                     | c :: _ ->
+                       List.map (function
+                           | March_ast.Ast.FPNamed prm | March_ast.Ast.FPDefault (prm, _) ->
+                             prm.March_ast.Ast.param_name.March_ast.Ast.txt
+                           | March_ast.Ast.FPPat (March_ast.Ast.PatVar n) -> n.March_ast.Ast.txt
+                           | March_ast.Ast.FPPat _ -> "")
+                         c.March_ast.Ast.fc_params
+                     | [] -> []
+                   in
+                   let rec index i = function
+                     | [] -> None
+                     | x :: rest -> if x = p then Some i else index (i + 1) rest
+                   in
+                   Option.iter (fun i ->
+                       annotated := ((if prefix = "" then name else prefix ^ "." ^ name), i)
+                                    :: !annotated)
+                     (index 0 params))
+              | March_ast.Ast.DMod (n, _, inner, _) ->
+                walk (if prefix = "" then n.March_ast.Ast.txt
+                      else prefix ^ "." ^ n.March_ast.Ast.txt) inner
+              | _ -> ()) decls
+        in
+        walk "" desugared.March_ast.Ast.mod_decls;
+        walk "" stdlib_decls;
+        if Sys.getenv_opt "MARCH_DUMP_NET_SCOPE" = Some "1" then begin
+          List.iter (fun (m, ds) ->
+              if ds <> [] then
+                Printf.eprintf "net-scope: module %s scoped to %s\n" m
+                  (March_caps.Host_scope.encode_spec ds)) scopes;
+          List.iter (fun (n, i) ->
+              Printf.eprintf "net-scope: @[net_dest] %s param %d\n" n i) !annotated
+        end;
+        let violations =
+          March_tir.Net_scope.check ~scopes
+            ~transparent:(fun m -> List.mem m stdlib_mods)
+            ~transparent_fns:(fun n ->
+                not (String.contains n '.') && Hashtbl.mem prelude_fns n)
+            ~annotated:(List.sort_uniq compare !annotated) tir
+        in
+        if violations <> [] then begin
+          let (module_spans, _) = cap_ceiling_module_spans
+              ~entry_owner:tir.March_tir.Tir.tm_name
+              ~entry_span:desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+              desugared.March_ast.Ast.mod_decls
+          in
+          (* One diagnostic per module (TIR carries no call spans, so it points
+             at the module), its first violation as the message and the rest
+             listed after it. *)
+          let owners =
+            List.sort_uniq compare
+              (List.map (fun (v : March_tir.Net_scope.violation) -> v.owner) violations)
+          in
+          let ctx = March_errors.Errors.create () in
+          List.iter (fun owner ->
+              let vs =
+                List.filter (fun (v : March_tir.Net_scope.violation) -> v.owner = owner)
+                  violations
+              in
+              match vs with
+              | [] -> ()
+              | first :: rest ->
+                let msg =
+                  if rest = [] then first.message
+                  else
+                    first.message ^ "\n\nAlso in module `" ^ owner ^ "`:\n"
+                    ^ String.concat "\n"
+                        (List.map (fun (v : March_tir.Net_scope.violation) ->
+                             "- [" ^ v.code ^ "] " ^ v.message) rest)
+                in
+                let span =
+                  match List.assoc_opt owner module_spans with
+                  | Some sp -> sp
+                  | None -> desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+                in
+                if span = March_ast.Ast.dummy_span then
+                  Printf.eprintf "-- CAPABILITY --\n%s [%s]\n\n" msg first.code
+                else March_errors.Errors.error ctx ~span ~code:first.code msg)
+            owners;
+          List.iter (fun (d : March_errors.Errors.diagnostic) ->
+              Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
+            (March_errors.Errors.sorted ctx);
+          Printf.eprintf "%d host-scope violation(s).\n%!" (List.length violations);
+          exit 1
+        end;
+        March_tir.Net_scope.rewrite ~scopes tir
+      end
+    in
     (* Capability-passing analysis dump.  Immediately after lowering is the one
        point where a TIR fn's name is still exactly its source name, which is
        what the analysis keys on. *)

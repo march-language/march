@@ -6332,6 +6332,34 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
         if trusted_vars = [] then body_env
         else { body_env with trusted_linear_body = true } in
 
+      (* `@[net_dest(p)]`: parameter [p] carries a URL destination, so a
+         host-scoped caller's argument is checked against its scope
+         (specs/2026-11-09-host-scoped-network-capabilities-design.md §4).
+         What the body does with [p] is checked on the compile path
+         (lib/tir/net_scope.ml); here only that [p] names a parameter. *)
+      (match March_caps.Net_dest.net_dest_attr def.fn_attrs with
+       | None -> ()
+       | Some p ->
+         let names =
+           match def.fn_clauses with
+           | c :: _ ->
+             List.filter_map (function
+                 | Ast.FPNamed prm | Ast.FPDefault (prm, _) -> Some prm.Ast.param_name.txt
+                 | Ast.FPPat (Ast.PatVar n) -> Some n.txt
+                 | Ast.FPPat _ -> None) c.Ast.fc_params
+           | [] -> []
+         in
+         if not (List.mem p names) then
+           Err.error ~code:Err.Code.cap_host_annotation env.errors
+             ~span:def.fn_name.span
+             (Printf.sprintf
+                "`@[net_dest(%s)]` on `%s` names no parameter: `%s` should be \
+                 the parameter that carries the URL.\n\
+                 hint: the parameters are %s."
+                p def.fn_name.txt p
+                (if names = [] then "unnamed patterns"
+                 else String.concat ", " (List.map (fun n -> "`" ^ n ^ "`") names))));
+
       (* ── A set-valued `@[measure]` body is LOGIC, not code ──────────────────
          (specs/2026-09-13-set-refinements-design.md §4.4, plan §2.1 option 1.)
          Its body may use the refinement checker's set vocabulary — `union`,
@@ -8487,6 +8515,16 @@ let rec check_decl env (d : Ast.decl) : env =
       if cap_qname = name.txt then with_qual
       else (name.txt, inner_needs) :: with_qual
     in
+    let inner_need_scopes = List.concat_map (function
+        | Ast.DNeeds (caps, _) ->
+          List.map (fun (p, sc) -> (cap_path_of_names p, sc)) caps
+        | _ -> []) decls in
+    let module_need_scopes' =
+      let with_qual =
+        (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes in
+      if cap_qname = name.txt then with_qual
+      else (name.txt, inner_need_scopes) :: with_qual
+    in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
        Export both the local name ("JobRow") and the fully-qualified name
@@ -8526,6 +8564,7 @@ let rec check_decl env (d : Ast.decl) : env =
       param_call_arities =
         StrMap.union (fun _k a _ -> Some a) new_param_call_arities env'.param_call_arities;
       module_caps = module_caps';
+      module_need_scopes = module_need_scopes';
       proof_caps = inner_env.proof_caps;
       cap_dicts = inner_env.cap_dicts;
       always_linear_types = inner_env.always_linear_types;
@@ -9155,15 +9194,48 @@ let rec check_decl env (d : Ast.decl) : env =
             | (n : Ast.name) :: _ -> n.span
             | [] -> sp
           in
+          let is_net_cap = March_caps.Cap_lattice.cap_subsumes "IO.Network" cap in
           if not (March_caps.Cap_scope.is_scopable cap) then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+              (if is_net_cap then
+                 Printf.sprintf
+                   "`%s` does not take a path scope or a host scope; only \
+                    `IO.NetConnect` takes a host, so `(\"%s\")` would be \
+                    ignored.\n\
+                    hint: scope the outbound capability instead, e.g. \
+                    `needs IO.NetConnect(\"%s\")`; it also bounds the TLS \
+                    connections built on it."
+                   cap path path
+               else
+                 Printf.sprintf
+                   "`%s` does not take a path scope; only filesystem \
+                    capabilities do (`IO.FileRead`, `IO.FileWrite`, \
+                    `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
+                    hint: remove the scope, or scope the filesystem capability \
+                    you mean, e.g. `needs IO.FileSystem(\"%s\")`."
+                   cap path path)
+          else if March_caps.Cap_scope.is_host_scopable cap then
+            (match March_caps.Host_scope.parse_decl (Some path) with
+             | Ok _ -> ()
+             | Error reason ->
+               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+                 (Printf.sprintf
+                    "The host scope `%s` on `%s` is not valid: %s.\n\
+                     hint: write a host, a host and port, or `*.domain`, \
+                     e.g. `needs IO.NetConnect(\"api.example.com\")`."
+                    path cap reason))
+          else if (match String.rindex_opt path ';' with
+              | None -> false
+              | Some i ->
+                let opt = String.sub path (i + 1) (String.length path - i - 1) in
+                opt <> ""
+                && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') opt)
+          then
+            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
-                 "`%s` does not take a path scope; only filesystem \
-                  capabilities do (`IO.FileRead`, `IO.FileWrite`, \
-                  `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
-                  hint: remove the scope, or scope the filesystem capability \
-                  you mean, e.g. `needs IO.FileSystem(\"%s\")`."
-                 cap path path)
+                 "`%s` takes no options; `no_redirects` applies only to \
+                  `IO.NetConnect`."
+                 cap)
           else if not (March_caps.Cap_scope.is_absolute path) then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf

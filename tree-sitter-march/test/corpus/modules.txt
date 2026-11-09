@@ -192,3 +192,37 @@ end
         (type_constructor))
       (block_body
         (identifier)))))
+
+================================================================================
+Host scopes and the no_redirects option
+================================================================================
+
+mod A do
+  needs IO.NetConnect("example.com"), IO.NetConnect("foo.com", no_redirects)
+  needs IO.NetConnect(no_redirects)
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (needs_declaration
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (string))
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (string)
+        (identifier)))
+    (needs_declaration
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (identifier)))))

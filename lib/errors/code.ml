@@ -37,6 +37,9 @@ let cap_dict_misuse = "cap_dict_misuse"
 let cap_dict_type = "cap_dict_type"
 let cap_grant = "cap_grant"
 let cap_grant_exceeded = "cap_grant_exceeded"
+let cap_host_annotation = "cap_host_annotation"
+let cap_host_scope = "cap_host_scope"
+let cap_host_unproven = "cap_host_unproven"
 let cap_impl_invalid = "cap_impl_invalid"
 let cap_mismatch = "cap_mismatch"
 let cap_narrow_invalid = "cap_narrow_invalid"
@@ -250,6 +253,9 @@ let all = [
   cap_dict_type;
   cap_grant;
   cap_grant_exceeded;
+  cap_host_annotation;
+  cap_host_scope;
+  cap_host_unproven;
   cap_impl_invalid;
   cap_mismatch;
   cap_narrow_invalid;
@@ -492,6 +498,7 @@ let category_table : (string * string list) list = [
   "CAPABILITY", [
     cap_bound; cap_bound_needs; cap_bound_iface; cap_ceiling; cap_deserialize;
     cap_dict_misuse; cap_dict_type; cap_grant; cap_grant_exceeded;
+    cap_host_annotation; cap_host_scope; cap_host_unproven;
     cap_impl_invalid; cap_mismatch; cap_narrow_invalid; cap_needs;
     cap_root_broad; cap_scope_violation; cap_widen; extern_cap_missing;
     extern_needs_foreign; import_cap_missing; invalid_cap_scope;

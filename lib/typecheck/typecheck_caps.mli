@@ -55,3 +55,5 @@ val fn_capability_closures : env -> (string * string list) list
 val fn_own_capability_closures : env -> (string * string list) list
 val fn_transitive_capability_closures : env -> (string * string list) list
 val declared_cap_scopes : env -> (string * string option) list
+val declared_net_scopes :
+  env -> entry_module:string -> (string * March_caps.Host_scope.decl list) list
