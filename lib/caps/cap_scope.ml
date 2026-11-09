@@ -46,7 +46,10 @@ let scope_subsumes (a : string option) (b : string option) : bool =
 let is_scopable (cap : string) : bool =
   match cap with
   | "IO.FileRead" | "IO.FileWrite" | "IO.FileSystem" -> true
+  | "IO.NetConnect" -> true (* a HOST scope: lib/caps/host_scope.ml *)
   | _ -> false
+
+let is_host_scopable (cap : string) : bool = cap = "IO.NetConnect"
 
 (* ── Scope manifest (embedded in compiled binaries) ─────────────────── *)
 

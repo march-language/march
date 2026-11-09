@@ -27,6 +27,9 @@ mod HttpClient do
     HttpTransportError(TransportError)
     | StepError(String, String)
     | TooManyRedirects(Int)
+    | OutOfScope(String)
+    | RedirectRefused(String)
+    | MethodRefused(String)
 
   -- Step entry types: wrap a name + function
   type RequestStepEntry = RequestStepEntry(String, a)
@@ -409,6 +412,237 @@ mod HttpClient do
     end
   end
 
+  -- -----------------------------------------------------------------------
+  -- Host-scope guard (specs/2026-11-09-host-scoped-network-capabilities-design.md)
+  --
+  -- A module that declares `needs IO.NetConnect("host")` has its HttpClient
+  -- calls rewritten by the compiler to the private `*_scoped` variants
+  -- below, which receive the module's scope as a string: "" for any host,
+  -- otherwise ","-separated host patterns (`host`, `host:port`, `*.suffix`),
+  -- each prefixed with "!" when the declaration says `no_redirects`.  These
+  -- helpers check the destinations the client decides on by itself: a
+  -- redirect's target and the host after request steps.  The matching must
+  -- agree with lib/caps/host_scope.ml (test/test_host_scope.ml compares them).
+  -- -----------------------------------------------------------------------
+
+  pfn hc_norm_host(h) do
+    let l = string_to_lowercase(h)
+    if string_ends_with(l, ".") do string_slice(l, 0, string_byte_length(l) - 1)
+    else l
+    end
+  end
+
+  -- A host the guard will vouch for: letters, digits, `-` and `.`, or a
+  -- bracketed IPv6 literal. Anything else (a NUL byte ends the C string the
+  -- resolver sees) could connect somewhere the pattern match did not describe.
+  pfn hc_valid_host(h) do
+    if string_starts_with(h, "[") do
+      string_ends_with(h, "]") && hc_all_chars(h, 1, string_byte_length(h) - 1, true)
+    else string_byte_length(h) > 0 && hc_all_chars(h, 0, string_byte_length(h), false)
+    end
+  end
+
+  pfn hc_all_chars(h, i, stop, v6) do
+    if i >= stop do true
+    else do
+      let c = string_slice(h, i, 1)
+      let lc = string_to_lowercase(c)
+      let ok =
+        string_contains("abcdefghijklmnopqrstuvwxyz0123456789-.", lc) && c != ""
+        || (v6 && (c == ":"))
+      if ok do hc_all_chars(h, i + 1, stop, v6) else false end
+    end
+    end
+  end
+
+  pfn hc_split_port(body) do
+    if string_starts_with(body, "[") do
+      match string_index_of(body, "]") do
+      None -> (body, None)
+      Some(i) -> do
+        let rest = string_slice(body, i + 1, string_byte_length(body) - i - 1)
+        let h = string_slice(body, 0, i + 1)
+        if string_starts_with(rest, ":") do
+          (h, string_to_int(string_slice(rest, 1, string_byte_length(rest) - 1)))
+        else (h, None)
+        end
+      end
+      end
+    else
+      match string_last_index_of(body, ":") do
+      None -> (body, None)
+      Some(i) ->
+        (string_slice(body, 0, i),
+         string_to_int(string_slice(body, i + 1, string_byte_length(body) - i - 1)))
+      end
+    end
+  end
+
+  pfn hc_pattern_matches(body, host, port) do
+    match hc_split_port(body) do
+    (hpart, pport) -> do
+      let port_ok = match pport do
+        None -> true
+        Some(p) -> p == port
+        end
+      let h = hc_norm_host(host)
+      let pat = hc_norm_host(hpart)
+      if not(port_ok) do false
+      else if string_starts_with(pat, "*.") do
+        let suffix = string_slice(pat, 1, string_byte_length(pat) - 1)
+        string_byte_length(h) > string_byte_length(suffix) && string_ends_with(h, suffix)
+      else h == pat
+      end end
+    end
+    end
+  end
+
+  -- An entry is `[!]host[@get+head]`; `meth` "" means "any method will do".
+  pfn hc_any_entry(entries, host, port, only_no_redirects, meth) do
+    match entries do
+    Nil -> false
+    Cons(e, rest) -> do
+      let nr = string_starts_with(e, "!")
+      let e1 = if nr do string_slice(e, 1, string_byte_length(e) - 1) else e end
+      let (body, ms) = match string_index_of(e1, "@") do
+        None -> (e1, "")
+        Some(i) -> (string_slice(e1, 0, i),
+                    string_slice(e1, i + 1, string_byte_length(e1) - i - 1))
+        end
+      let covers = body == "" || hc_pattern_matches(body, host, port)
+      let method_ok =
+        meth == "" || ms == "" || List.member(string_split(ms, "+"), meth)
+      if covers && method_ok && (not(only_no_redirects) || nr) do true
+      else hc_any_entry(rest, host, port, only_no_redirects, meth)
+      end
+    end
+    end
+  end
+
+  doc """
+  Whether a host-scope string admits `host` on `port`. `""` admits
+  everything; otherwise one of its comma-separated patterns must match.
+
+  ## Examples
+
+      march> HttpClient.hc_scope_permits("example.com", "Example.COM", 443)
+      true
+      march> HttpClient.hc_scope_permits("*.example.com", "example.com", 443)
+      false
+  """
+  fn hc_scope_permits(spec, host, port) do
+    if spec == "" do true
+    else hc_any_entry(string_split(spec, ","), host, port, false, "")
+    end
+  end
+
+  doc """
+  Whether a host-scope string admits an HTTP `meth` (lowercase: `"get"`,
+  `"post"`, ...) to `host` on `port`: some entry covers the host and lists
+  the method, or lists none.
+
+  ## Examples
+
+      march> HttpClient.hc_scope_permits_method("api.com@get", "api.com", 443, "post")
+      false
+      march> HttpClient.hc_scope_permits_method("api.com", "api.com", 443, "post")
+      true
+  """
+  fn hc_scope_permits_method(spec, host, port, meth) do
+    if spec == "" do true
+    else hc_any_entry(string_split(spec, ","), host, port, false, meth)
+    end
+  end
+
+  pfn hc_method_lower(m) do
+    match m do
+    Get -> "get"
+    Post -> "post"
+    Put -> "put"
+    Patch -> "patch"
+    Delete -> "delete"
+    Head -> "head"
+    Options -> "options"
+    Trace -> "trace"
+    Connect -> "connect"
+    Other(x) -> string_to_lowercase(x)
+    end
+  end
+
+  pfn hc_method_upper(m) do
+    match m do
+    Get -> "GET"
+    Post -> "POST"
+    Put -> "PUT"
+    Patch -> "PATCH"
+    Delete -> "DELETE"
+    Head -> "HEAD"
+    Options -> "OPTIONS"
+    Trace -> "TRACE"
+    Connect -> "CONNECT"
+    Other(x) -> x
+    end
+  end
+
+  doc """
+  Whether a host-scope string forbids following any redirect from `host`:
+  a `!`-marked (`no_redirects`) pattern covers it.
+
+  ## Examples
+
+      march> HttpClient.hc_scope_forbids_redirects("!example.com", "example.com", 443)
+      true
+      march> HttpClient.hc_scope_forbids_redirects("example.com", "example.com", 443)
+      false
+  """
+  fn hc_scope_forbids_redirects(spec, host, port) do
+    if spec == "" do false
+    else hc_any_entry(string_split(spec, ","), host, port, true, "")
+    end
+  end
+
+  pfn hc_req_port(req) do hc_effective_port(Http.scheme(req), Http.port(req)) end
+
+  doc """
+  `Ok(())` when the scope admits the request's host, effective port and
+  method; else `Err(OutOfScope(host))`, or `Err(MethodRefused("POST host"))`
+  when only the method is refused. Checked before every request a scoped
+  call sends.
+
+  ## Examples
+
+      march> HttpClient.hc_check_request("example.com", Result.unwrap(Http.get("https://foo.com/")))
+      Err(OutOfScope("foo.com"))
+  """
+  fn hc_check_request(spec, req) do
+    let host = Http.host(req)
+    let port = hc_req_port(req)
+    let m = Http.method(req)
+    if spec != "" && not(hc_valid_host(host)) do Err(OutOfScope(host))
+    else if not(hc_scope_permits(spec, host, port)) do Err(OutOfScope(host))
+    else if hc_scope_permits_method(spec, host, port, hc_method_lower(m)) do Ok(())
+    else Err(MethodRefused(hc_method_upper(m) ++ " " ++ host))
+    end end end
+  end
+
+  doc """
+  Whether a scoped call may follow a redirect from `from_req` to
+  `target_req`: `Err(RedirectRefused(host))` under `no_redirects`,
+  `Err(OutOfScope(host))` when the target is outside the scope.
+
+  ## Examples
+
+      march> HttpClient.hc_redirect_target("", Result.unwrap(Http.get("https://a.com/")), Result.unwrap(Http.get("https://b.com/")))
+      Ok(())
+  """
+  fn hc_redirect_target(spec, from_req, target_req) do
+    if spec == "" do Ok(())
+    else if hc_scope_forbids_redirects(spec, Http.host(from_req), hc_req_port(from_req)) do
+      Err(RedirectRefused(Http.host(target_req)))
+    else hc_check_request(spec, target_req)
+    end end
+  end
+
   doc """
   True when two requests share an origin: same scheme, same host
   (case-insensitive) and same effective port.
@@ -454,6 +688,10 @@ mod HttpClient do
       Ok(302)
   """
   fn handle_redirects(req, resp, max, count) do
+    handle_redirects_scoped(req, resp, max, count, "")
+  end
+
+  pfn handle_redirects_scoped(req, resp, max, count, scope) do
     if max == 0 do Ok(resp)
     else if not(Http.response_is_redirect(resp)) do Ok(resp)
     else if count >= max do Err(TooManyRedirects(count))
@@ -481,9 +719,14 @@ mod HttpClient do
             -- Relative Location: same origin, headers preserved.
             Http.set_body(Http.set_method(Http.set_path(req, location), Get), "")
           end
-        match HttpTransport.request(redirect_req) do
-        Err(e) -> Err(HttpTransportError(e))
-        Ok(new_resp) -> handle_redirects(redirect_req, new_resp, max, count + 1)
+        match hc_redirect_target(scope, req, redirect_req) do
+        Err(e) -> Err(e)
+        Ok(_) ->
+          match HttpTransport.request(redirect_req) do
+          Err(e) -> Err(HttpTransportError(e))
+          Ok(new_resp) ->
+            handle_redirects_scoped(redirect_req, new_resp, max, count + 1, scope)
+          end
         end
       end
       end
@@ -505,14 +748,21 @@ mod HttpClient do
   the result of the error steps.
   """
   fn run_on_fd(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req) do
+    run_on_fd_scoped(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req, "")
+  end
+
+  pfn run_on_fd_scoped(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req, scope) do
     match run_request_steps(req_steps, req) do
     Err(e) -> run_error_steps(err_steps, req, e)
-    Ok(transformed_req) -> do
+    Ok(transformed_req) ->
+      match hc_check_request(scope, transformed_req) do
+      Err(e) -> Err(e)
+      Ok(_) -> do
       match transport_keepalive(fd, transformed_req, max_retries + 1) do
       Err(transport_err) ->
         run_error_steps(err_steps, transformed_req, HttpTransportError(transport_err))
       Ok((_, resp)) ->
-        match handle_redirects(transformed_req, resp, max_redir, 0) do
+        match handle_redirects_scoped(transformed_req, resp, max_redir, 0, scope) do
         Err(e) -> run_error_steps(err_steps, transformed_req, e)
         Ok(final_resp) ->
           match run_response_steps(resp_steps, transformed_req, final_resp) do
@@ -521,7 +771,8 @@ mod HttpClient do
           end
         end
       end
-    end
+      end
+      end
     end
   end
 
@@ -546,17 +797,22 @@ mod HttpClient do
         Err(e) -> "request failed"
       end
   """
-  fn run(client, req) do
+  fn run(client, req) do run_scoped(client, req, "") end
+
+  pfn run_scoped(client, req, scope) do
     match client do
     Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) -> do
       match run_request_steps(req_steps, req) do
       Err(e) -> run_error_steps(err_steps, req, e)
       Ok(transformed_req) ->
+        match hc_check_request(scope, transformed_req) do
+        Err(e) -> Err(e)
+        Ok(_) ->
         match transport_with_retry(transformed_req, max_retries) do
         Err(transport_err) ->
           run_error_steps(err_steps, transformed_req, HttpTransportError(transport_err))
         Ok(resp) ->
-          match handle_redirects(transformed_req, resp, max_redir, 0) do
+          match handle_redirects_scoped(transformed_req, resp, max_redir, 0, scope) do
           Err(e) -> run_error_steps(err_steps, transformed_req, e)
           Ok(final_resp) ->
             match run_response_steps(resp_steps, transformed_req, final_resp) do
@@ -564,6 +820,7 @@ mod HttpClient do
             Ok((_, response)) -> Ok(response)
             end
           end
+        end
         end
       end
     end
@@ -594,7 +851,12 @@ mod HttpClient do
       march> HttpClient.with_connection(HttpClient.new_client(), "bad", fn d -> 1)
       Err(StepError("url", "invalid url: bad"))
   """
+  @[net_dest(url)]
   fn with_connection(client, url, callback) do
+    with_connection_scoped(client, url, callback, "")
+  end
+
+  pfn with_connection_scoped(client, url, callback, scope) do
     match Http.parse_url(url) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     Ok(base_req) -> do
@@ -604,7 +866,7 @@ mod HttpClient do
         match client do
         Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) -> do
           fn do_request(req) do
-            run_on_fd(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req)
+            run_on_fd_scoped(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req, scope)
           end
           let result = callback(do_request)
           tcp_close(fd)
@@ -636,7 +898,12 @@ mod HttpClient do
       march> HttpClient.stream_get(HttpClient.new_client(), "bad", fn c -> c)
       Err(StepError("url", "invalid url: bad"))
   """
+  @[net_dest(url)]
   fn stream_get(client, url, on_chunk) do
+    stream_get_scoped(client, url, on_chunk, "")
+  end
+
+  pfn stream_get_scoped(client, url, on_chunk, scope) do
     match Http.get(url) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     Ok(req) -> do
@@ -646,6 +913,9 @@ mod HttpClient do
         match run_request_steps(req_steps, req) do
         Err(e) -> Err(e)
         Ok(transformed_req) ->
+          match hc_check_request(scope, transformed_req) do
+          Err(e) -> Err(e)
+          Ok(_) ->
           match HttpTransport.connect(transformed_req) do
           Err(e) -> Err(HttpTransportError(e))
           Ok(fd) -> do
@@ -655,6 +925,7 @@ mod HttpClient do
             Err(e) -> Err(HttpTransportError(e))
             Ok((status, headers, last)) -> Ok((status, headers, last))
             end
+          end
           end
           end
         end
@@ -679,10 +950,13 @@ mod HttpClient do
       march> HttpClient.get(HttpClient.new_client(), "not a url")
       Err(StepError("url", "invalid url: not a url"))
   """
-  fn get(client, url) do
+  @[net_dest(url)]
+  fn get(client, url) do get_scoped(client, url, "") end
+
+  pfn get_scoped(client, url, scope) do
     match Http.get(url) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
-    Ok(req) -> run(client, Http.set_body(req, ""))
+    Ok(req) -> run_scoped(client, Http.set_body(req, ""), scope)
     end
   end
 
@@ -699,10 +973,13 @@ mod HttpClient do
       march> HttpClient.post(HttpClient.new_client(), "ftp://x", "body")
       Err(StepError("url", "invalid url: ftp://x"))
   """
-  fn post(client, url, bdy) do
+  @[net_dest(url)]
+  fn post(client, url, bdy) do post_scoped(client, url, bdy, "") end
+
+  pfn post_scoped(client, url, bdy, scope) do
     match Http.post(url, bdy) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
-    Ok(req) -> run(client, req)
+    Ok(req) -> run_scoped(client, req, scope)
     end
   end
 
@@ -714,10 +991,13 @@ mod HttpClient do
 
       HttpClient.put_request(client, "http://api.example.com/users/1", body)
   """
-  fn put_request(client, url, bdy) do
+  @[net_dest(url)]
+  fn put_request(client, url, bdy) do put_request_scoped(client, url, bdy, "") end
+
+  pfn put_request_scoped(client, url, bdy, scope) do
     match Http.put(url, bdy) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
-    Ok(req) -> run(client, req)
+    Ok(req) -> run_scoped(client, req, scope)
     end
   end
 
@@ -730,10 +1010,13 @@ mod HttpClient do
       march> HttpClient.delete(HttpClient.new_client(), "bad")
       Err(StepError("url", "invalid url: bad"))
   """
-  fn delete(client, url) do
+  @[net_dest(url)]
+  fn delete(client, url) do delete_scoped(client, url, "") end
+
+  pfn delete_scoped(client, url, scope) do
     match Http.delete(url) do
     Err(_) -> Err(StepError("url", "invalid url: " ++ url))
-    Ok(req) -> run(client, Http.set_body(req, ""))
+    Ok(req) -> run_scoped(client, Http.set_body(req, ""), scope)
     end
   end
 

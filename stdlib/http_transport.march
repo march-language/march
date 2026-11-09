@@ -419,6 +419,7 @@ mod HttpTransport do
       march> HttpTransport.simple_get("ftp://example.com/")
       Err(ConnParseError("invalid scheme: ftp://example.com/"))
   """
+  @[net_dest(url)]
   fn simple_get(url) do
     match Http.get(url) do
     Err(InvalidScheme(s)) -> Err(ConnParseError("invalid scheme: " ++ s))

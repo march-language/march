@@ -244,4 +244,119 @@ describe "HttpClient redirect cross-origin auth stripping" do
   end
 end
 
+describe "HttpClient host scope guard" do
+  -- The run-time half of host scopes
+  -- (specs/2026-11-09-host-scoped-network-capabilities-design.md): a scope
+  -- string is "" (any host) or ","-separated host patterns, "!" marking
+  -- no_redirects. It must agree with lib/caps/host_scope.ml.
+  test "scope empty permits anything" do
+    assert (HttpClient.hc_scope_permits("", "anything.example", 443))
+  end
+
+  test "scope permits listed host only" do
+    assert (HttpClient.hc_scope_permits("example.com,foo.com", "foo.com", 443))
+    assert (not (HttpClient.hc_scope_permits("example.com", "foo.com", 443)))
+  end
+
+  test "host comparison normalizes case and trailing dot" do
+    assert (HttpClient.hc_scope_permits("example.com", "Example.COM.", 443))
+  end
+
+  test "wildcard scope" do
+    assert (HttpClient.hc_scope_permits("*.example.com", "api.example.com", 443))
+    assert (not (HttpClient.hc_scope_permits("*.example.com", "example.com", 443)))
+    assert (not (HttpClient.hc_scope_permits("*.example.com", "badexample.com", 443)))
+  end
+
+  test "port scope" do
+    assert (HttpClient.hc_scope_permits("example.com:8443", "example.com", 8443))
+    assert (not (HttpClient.hc_scope_permits("example.com:8443", "example.com", 443)))
+  end
+
+  test "relative redirect follows under a scope" do
+    let from = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "example.com", None, "/next", None, Nil, "")
+    match HttpClient.hc_redirect_target("example.com", from, target) do
+    Ok(_) -> ()
+    Err(_) -> assert false
+    end
+  end
+
+  test "relative redirect refused under no_redirects" do
+    let from = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "example.com", None, "/next", None, Nil, "")
+    match HttpClient.hc_redirect_target("!example.com", from, target) do
+    Err(RedirectRefused(h)) -> assert (h == "example.com")
+    _ -> assert false
+    end
+  end
+
+  test "cross-host redirect refused" do
+    let from = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
+    match HttpClient.hc_redirect_target("example.com", from, target) do
+    Err(OutOfScope(h)) -> assert (h == "foo.com")
+    _ -> assert false
+    end
+  end
+
+  test "cross-host redirect allowed when both hosts are scoped" do
+    let from = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
+    match HttpClient.hc_redirect_target("example.com,foo.com", from, target) do
+    Ok(_) -> ()
+    Err(_) -> assert false
+    end
+  end
+
+  test "unscoped follows a cross-host redirect" do
+    let from = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
+    match HttpClient.hc_redirect_target("", from, target) do
+    Ok(_) -> ()
+    Err(_) -> assert false
+    end
+  end
+
+  test "method scope admits listed methods only" do
+    assert (HttpClient.hc_scope_permits_method("api.com@get+head", "api.com", 443, "get"))
+    assert (not (HttpClient.hc_scope_permits_method("api.com@get+head", "api.com", 443, "post")))
+    assert (HttpClient.hc_scope_permits_method("api.com@get,api.com@post", "api.com", 443, "post"))
+    assert (HttpClient.hc_scope_permits_method("api.com", "api.com", 443, "delete"))
+  end
+
+  test "POST refused under a GET-only scope" do
+    let req = Request(Post, SchemeHttps, "api.com", None, "/", None, Nil, "")
+    match HttpClient.hc_check_request("api.com@get", req) do
+    Err(MethodRefused(m)) -> assert (m == "POST api.com")
+    _ -> assert false
+    end
+  end
+
+  test "redirect refused when GET is not allowed on the target" do
+    let from = Request(Post, SchemeHttps, "api.com", None, "/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "api.com", None, "/next", None, Nil, "")
+    match HttpClient.hc_redirect_target("api.com@post", from, target) do
+    Err(MethodRefused(m)) -> assert (m == "GET api.com")
+    _ -> assert false
+    end
+  end
+
+  test "a host with a NUL byte is refused" do
+    let req = Request(Get, SchemeHttps, "127.0.0.1\0.example.com", None, "/", None, Nil, "")
+    match HttpClient.hc_check_request("*.example.com", req) do
+    Err(OutOfScope(_)) -> ()
+    _ -> assert false
+    end
+  end
+
+  test "out-of-scope request is refused before connecting" do
+    let req = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
+    match HttpClient.hc_check_request("example.com", req) do
+    Err(OutOfScope(h)) -> assert (h == "foo.com")
+    _ -> assert false
+    end
+  end
+end
+
 end

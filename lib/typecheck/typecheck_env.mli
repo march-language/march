@@ -196,6 +196,7 @@ type env = {
   sigs : (string * Typecheck_types.Ast.sig_def) list;
   mod_needs : string list;
   mod_need_scopes : (string * string option) list;
+  module_need_scopes : (string * (string * string option) list) list;
   module_caps : (string * string list) list;
   protocols : proto_info StrMap.t;
   impls :

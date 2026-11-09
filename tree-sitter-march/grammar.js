@@ -590,7 +590,14 @@ module.exports = grammar({
 
     // needs IO.Network, IO.Clock
     needs_declaration: $ => seq('needs', commaSep1($.scoped_capability)),
-    scoped_capability: $ => seq($.module_path, optional(seq('(', $.string, ')'))),
+    // A path or host scope, options after it, or options alone:
+    // IO.FileRead("/etc"), IO.NetConnect("a.com", methods(get), no_redirects),
+    // IO.NetConnect(no_redirects).
+    scoped_capability: $ => seq($.module_path, optional(seq('(', choice(
+      seq($.string, repeat(seq(',', $.scope_option))),
+      commaSep1($.scope_option),
+    ), ')'))),
+    scope_option: $ => seq($.identifier, optional(seq('(', commaSep1($.identifier), ')'))),
 
     // `cap no_panic` and friends lex as a single keyword in the compiler, so
     // the space between the two words is not free-form whitespace here either.

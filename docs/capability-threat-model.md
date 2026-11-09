@@ -81,6 +81,14 @@ the module that declares them.
 **Per-role grants.** A protocol role declared `role Ledger needs IO.FileWrite` gets its
 grant checked the same way `main`'s is: its code may reach only what the role names.
 
+**Host and method scopes.** A module that declares `needs IO.NetConnect("host")`, with
+optional `methods(...)` and `no_redirects`, may reach only those hosts with those
+methods, through everything it reaches (`[cap_host_scope]`, `[cap_host_unproven]`). It is
+fail-closed: a destination the compiler cannot see is refused. Redirects and
+step-rewritten requests are checked at run time by `HttpClient`. Compile path only; not
+OS-enforced; a dependency's own code is bounded only once `main`'s grant takes a scope
+(planned). See [host scopes]({{ site.baseurl }}/docs/capabilities/#host-scopes).
+
 ### 2. What is checked per function
 
 Inside a module, every function shares that module's `needs` unless it **declares** a
