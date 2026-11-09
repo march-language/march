@@ -741,7 +741,7 @@ let rec ty_key_in ~(types : ty_defs) ~(seen : string list) ~(subst : (string * s
 
 and td_key_in ~types ~seen ~subst (td : type_def) : string =
   match td with
-  | TDAlias t -> "=" ^ ty_key_in ~types ~seen ~subst t
+  | TDAlias (t, _) -> "=" ^ ty_key_in ~types ~seen ~subst t
   | TDVariant vs ->
     String.concat "|"
       (List.map
@@ -1909,7 +1909,7 @@ let role_module (errors : Err.ctx) ~proto ~span ~(roles : string list) ~(nctors 
      `Crashed_<Role>`, `Cancelled_<Role>` and the functions).  A role
      literally named `Entry` is no clash either: role names only ever appear
      as a SUFFIX here. *)
-  let entry_alias = DType (Public, n "Entry", [], TDAlias (sty entry), sp) in
+  let entry_alias = DType (Public, n "Entry", [], TDAlias (sty entry, []), sp) in
   let register =
     fn "register" [ ("s", t_cap_session); ("ap", t_int) ] (sty entry)
       (con entry [ app "Session.register" [ var "s"; var "ap"; role_idx role ] ])

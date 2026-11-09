@@ -124,7 +124,7 @@ let render_clauses (fn : Ast.fn_def) =
 
 let render_type_def (tdef : Ast.type_def) =
   match tdef with
-  | Ast.TDAlias ty -> Fmt.fmt_ty ty
+  | Ast.TDAlias (ty, _) -> Fmt.fmt_ty ty
   | Ast.TDVariant variants ->
     let var_str (v : Ast.variant) =
       match v.Ast.var_args with
@@ -432,14 +432,14 @@ let type_key (t : type_decl) =
        removed parameter changes the key: every use `Box(Int)` breaks. *)
     let tys =
       match a.ta_def with
-      | Ast.TDAlias ty -> [ ty ]
+      | Ast.TDAlias (ty, _) -> [ ty ]
       | Ast.TDVariant vs -> List.concat_map (fun v -> v.Ast.var_args) vs
       | Ast.TDRecord fs -> List.map (fun f -> f.Ast.fld_ty) fs in
     let order = List.fold_left ty_vars a.ta_params tys in
     let rn, render = canonical_renderer order in
     let body =
       match a.ta_def with
-      | Ast.TDAlias ty -> render ty
+      | Ast.TDAlias (ty, _) -> render ty
       | Ast.TDVariant vs ->
         String.concat " | "
           (List.map

@@ -66,7 +66,7 @@ let caps_in_type_def (td : Ast.type_def) : string list =
   | Ast.TDVariant variants ->
     List.concat_map (fun (v : Ast.variant) ->
         List.concat_map caps_in_ty v.var_args) variants
-  | Ast.TDAlias t -> caps_in_ty t
+  | Ast.TDAlias (t, _) -> caps_in_ty t
 
 (** [mentions_tycon name ty] — does a type constructor called [name] occur
     anywhere in [ty]?  Same walk as [caps_in_ty], same exhaustiveness
@@ -98,4 +98,4 @@ let type_def_mentions_tycon (name : string) (td : Ast.type_def) : bool =
   | Ast.TDVariant variants ->
     List.exists (fun (v : Ast.variant) ->
         List.exists (mentions_tycon name) v.var_args) variants
-  | Ast.TDAlias t -> mentions_tycon name t
+  | Ast.TDAlias (t, _) -> mentions_tycon name t

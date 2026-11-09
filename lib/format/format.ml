@@ -1201,8 +1201,19 @@ and emit_decl ctx = function
       | []  -> ""
       | ps' -> Printf.sprintf "(%s)" (String.concat ", " (List.map (fun n -> n.txt) ps'))
     in
+    (* A value parameter of a refinement alias carries its sort. *)
+    let ps = match tdef with
+      | TDAlias (_, (_ :: _ as values)) ->
+        Printf.sprintf "(%s)"
+          (String.concat ", "
+             (List.map (fun (n : name) ->
+                  match List.find_opt (fun ((v : name), _) -> v.txt = n.txt) values with
+                  | Some (_, sort) -> Printf.sprintf "%s : %s" n.txt (fmt_ty sort)
+                  | None -> n.txt) params))
+      | _ -> ps
+    in
     (match tdef with
-     | TDAlias ty ->
+     | TDAlias (ty, _) ->
        line ctx (Printf.sprintf "%s %s%s = %s" tkw name.txt ps (fmt_ty ty))
      | TDVariant variants ->
        let var_str { var_name; var_args; var_vis = _ } =
@@ -1238,8 +1249,19 @@ and emit_decl ctx = function
       | []  -> ""
       | ps' -> Printf.sprintf "(%s)" (String.concat ", " (List.map (fun n -> n.txt) ps'))
     in
+    (* A value parameter of a refinement alias carries its sort. *)
+    let ps = match tdef with
+      | TDAlias (_, (_ :: _ as values)) ->
+        Printf.sprintf "(%s)"
+          (String.concat ", "
+             (List.map (fun (n : name) ->
+                  match List.find_opt (fun ((v : name), _) -> v.txt = n.txt) values with
+                  | Some (_, sort) -> Printf.sprintf "%s : %s" n.txt (fmt_ty sort)
+                  | None -> n.txt) params))
+      | _ -> ps
+    in
     (match tdef with
-     | TDAlias ty ->
+     | TDAlias (ty, _) ->
        line ctx (Printf.sprintf "%s %s%s = %s" tkw name.txt ps (fmt_ty ty))
 
      | TDVariant variants ->

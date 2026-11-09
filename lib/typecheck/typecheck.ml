@@ -7953,7 +7953,7 @@ let rec check_decl env (d : Ast.decl) : env =
          ) fields in
        register_record_name ~name:name.txt (List.map fst field_pairs);
        { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
-     | Ast.TDAlias rhs ->
+     | Ast.TDAlias (rhs, _) ->
        (* A transparent alias: record the right-hand side so [surface_ty]
           resolves a mention of this name to it.  Keyed by the QUALIFIED name
           inside a module — see [ty_aliases]'s comment for why the bare key is
@@ -11961,7 +11961,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | Ast.TDAlias rhs ->
+           | Ast.TDAlias (rhs, _) ->
              (* Seed the alias for a SIBLING that mentions it: the declaring
                 module's own [check_decl] runs later, so a referrer checked
                 before it would otherwise see `Mod.Entry` as an unknown type.
@@ -12387,7 +12387,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | Ast.TDAlias rhs ->
+           | Ast.TDAlias (rhs, _) ->
              (* Seed the alias for a SIBLING that mentions it: the declaring
                 module's own [check_decl] runs later, so a referrer checked
                 before it would otherwise see `Mod.Entry` as an unknown type.
