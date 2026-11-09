@@ -356,6 +356,72 @@ describe "HttpClient host scope guard" do
     end
   end
 
+  test "path scope admits its prefix" do
+    let req = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/today", None, Nil, "")
+    match HttpClient.hc_check_request("a.test/v1/weather/", req) do
+    Ok(_) -> ()
+    Err(_) -> assert false
+    end
+  end
+
+  test "path scope refuses another path" do
+    let req = Request(Get, SchemeHttps, "a.test", None, "/v1/admin", None, Nil, "")
+    match HttpClient.hc_check_request("a.test/v1/weather/", req) do
+    Err(PathRefused(p)) -> assert (p == "a.test/v1/admin")
+    _ -> assert false
+    end
+  end
+
+  test "dot-dot after the prefix is refused" do
+    let req = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/../admin", None, Nil, "")
+    match HttpClient.hc_check_request("a.test/v1/weather/", req) do
+    Err(PathRefused(_)) -> ()
+    _ -> assert false
+    end
+  end
+
+  test "encoded slash is refused" do
+    let req = Request(Get, SchemeHttps, "a.test", None, "/v1/weather%2F..%2Fadmin", None, Nil, "")
+    match HttpClient.hc_check_request("a.test/v1/weather/", req) do
+    Err(PathRefused(_)) -> ()
+    _ -> assert false
+    end
+  end
+
+  test "query does not count" do
+    let req = Request(Get, SchemeHttps, "a.test", None, "/v1/weather", Some("city=x"), Nil, "")
+    match HttpClient.hc_check_request("a.test/v1/weather/", req) do
+    Ok(_) -> ()
+    Err(_) -> assert false
+    end
+  end
+
+  test "redirect to another path on the same host is refused" do
+    let from = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "a.test", None, "/v2/", None, Nil, "")
+    match HttpClient.hc_redirect_target("a.test/v1/weather/", from, target) do
+    Err(PathRefused(_)) -> ()
+    _ -> assert false
+    end
+  end
+
+  test "CRLF in a path is refused" do
+    let req = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin", None, Nil, "")
+    match HttpClient.hc_check_request("a.test/v1/weather/", req) do
+    Err(PathRefused(_)) -> ()
+    _ -> assert false
+    end
+  end
+
+  test "semicolon dot segment and double encoding are refused" do
+    let a = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/..;/admin", None, Nil, "")
+    let b = Request(Get, SchemeHttps, "a.test", None, "/v1/weather/%252e%252e/admin", None, Nil, "")
+    match (HttpClient.hc_check_request("a.test/v1/weather/", a), HttpClient.hc_check_request("a.test/v1/weather/", b)) do
+    (Err(PathRefused(_)), Err(PathRefused(_))) -> ()
+    _ -> assert false
+    end
+  end
+
   test "out-of-scope request is refused before connecting" do
     let req = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
     match HttpClient.hc_check_request("example.com", req) do

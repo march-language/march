@@ -9224,7 +9224,8 @@ let rec check_decl env (d : Ast.decl) : env =
                  (Printf.sprintf
                     "The host scope `%s` on `%s` is not valid: %s.\n\
                      hint: write a host, a host and port, or `*.domain`, \
-                     e.g. `needs IO.NetConnect(\"api.example.com\")`."
+                     optionally followed by a path prefix, e.g. \
+                     `needs IO.NetConnect(\"api.example.com/v1/\")`."
                     path cap reason))
           else if snd (March_caps.Host_scope.split_options path) <> []
           then
