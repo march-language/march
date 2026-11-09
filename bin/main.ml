@@ -6648,7 +6648,7 @@ let compile filename =
                 Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s%s" http_c sha1_c2 base64_c2
                   (opt_file2 simd_c) (opt_file2 sched_c2) (opt_file2 resp_c)
                   (opt_file2 io_c) (opt_file2 evloop_c) (opt_file2 udp_c)
-                  (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2 ^ codec_c2)
+                  (opt_file2 tls_c2 ^ opt_file2 (Filename.concat runtime_dir "march_tls_session.c") ^ opt_file2 (Filename.concat runtime_dir "march_tls_server.c") ^ opt_file2 (Filename.concat runtime_dir "march_https.c") ^ opt_file2 (Filename.concat runtime_dir "march_https_tls.c")) (opt_file2 extras_c2) (opt_file2 compress_c2 ^ codec_c2)
               else
                 (* march_extras.c references base64_encode (base64.c) and sha1
                    (sha1.c), so link them whenever extras is linked — independent

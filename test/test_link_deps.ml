@@ -200,8 +200,34 @@ let test_missing_codec_refused () =
   Alcotest.(check bool) ("before any C is compiled or linked\n" ^ out) false
     (has "undefined" || has "error:")
 
+(* HttpServer reaches TLS only through HttpServer.tls: a plain-HTTP server
+   links no OpenSSL (the always-linked HTTP runtime calls the TLS code
+   through runtime/march_tls_ops.h's table, and listen calls the configure
+   builtin only through a closure tls() builds), an HTTPS one does.  Compiled
+   only: a server does not exit. *)
+let http_server_src ~tls =
+  Printf.sprintf
+    "mod Srv do\n  needs IO.NetListen\n\
+     \  fn main(_l : Cap(IO.NetListen)) : Unit do\n\
+     \    HttpServer.new(18099)\n\
+     %s\
+     \    |> HttpServer.plug(fn c -> HttpServer.text(c, 200, \"ok\"))\n\
+     \    |> HttpServer.listen()\n  end\nend\n"
+    (if tls then "    |> HttpServer.tls(HttpServer.TlsFiles(\"c.pem\", \"k.pem\"))\n" else "")
+
+let test_http_server_tls_only_when_used () =
+  if not (is_macos || is_linux) then Alcotest.skip ();
+  with_dir @@ fun dir ->
+  let plain = deps (compile ~dir "httpplain" (http_server_src ~tls:false)) in
+  Alcotest.(check bool) ("a plain HTTP server loads no OpenSSL " ^ show plain) false
+    (List.mem "ssl" plain || List.mem "crypto" plain);
+  let https = deps (compile ~dir "httpstls" (http_server_src ~tls:true)) in
+  Alcotest.(check bool) ("an HTTPS server loads OpenSSL " ^ show https) true
+    (List.mem "ssl" https && List.mem "crypto" https)
+
 let tests = [
   Alcotest.test_case "a codec this host lacks is a compile error naming the package" `Slow test_missing_codec_refused;
+  Alcotest.test_case "an HTTP server loads OpenSSL only when it serves HTTPS" `Slow test_http_server_tls_only_when_used;
   Alcotest.test_case "dependency set follows what the program reaches" `Slow test_deps_follow_reach;
   Alcotest.test_case "every member loose (old link): hello loads OpenSSL" `Slow test_loose_members_load_everything;
   Alcotest.test_case "--hot-reload keeps the whole runtime" `Slow test_hot_reload_keeps_runtime;

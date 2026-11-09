@@ -556,7 +556,7 @@ references inside interface method signatures and impl headers are not tracked
 
 ## 5. Stdlib Manifest
 
-138 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+139 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -1246,7 +1246,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     138 March stdlib modules
+stdlib/                     139 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server

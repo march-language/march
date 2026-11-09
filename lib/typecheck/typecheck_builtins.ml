@@ -293,6 +293,10 @@ let builtin_cap_table : (string * string) list = [
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
   ("http_server_bind_host", "IO.NetListen");
+  ("http_server_plain_listener", "IO.NetListen");
+  ("http_server_set_timeouts",   "IO.NetListen");
+  ("http_server_tls_configure",  "IO.NetListen");
+  ("http_server_reload_tls",     "IO.NetListen");
   (* IO.Process *)
   ("process_env",           "IO.Process");
   ("process_set_env",       "IO.Process");
@@ -1289,6 +1293,17 @@ let builtin_bindings : (string * scheme) list =
     ("http_server_wait",        Mono (TArrow (t_int, t_unit)));
     (* http_server_bind_host(host) -> Unit: the IPv4 address later listens bind to *)
     ("http_server_bind_host",   Mono (TArrow (t_string, t_unit)));
+    (* HTTPS (march_https.c). kind: 0 = cert/key file paths, 1 = PEM text. *)
+    (* http_server_tls_configure(kind, a, b, poll_secs, wait_for_cert) -> Result(Int, String) *)
+    ("http_server_tls_configure", Mono (TArrow (t_int, TArrow (t_string, TArrow (t_string, TArrow (t_int, TArrow (t_int, TCon ("Result", [t_int; t_string]))))))));
+    (* http_server_set_timeouts(handshake_secs, header_secs, progress_secs) -> Unit *)
+    ("http_server_set_timeouts",  Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_unit)))));
+    (* http_server_reload_tls(kind, a, b) -> Result(Int, String) *)
+    ("http_server_reload_tls",    Mono (TArrow (t_int, TArrow (t_string, TArrow (t_string, TCon ("Result", [t_int; t_string]))))));
+    (* http_server_plain_listener(port, pipeline_fn) -> Unit: an extra plain-HTTP port for the next listen *)
+    ("http_server_plain_listener", poly1 (fun a -> TArrow (t_int, TArrow (TArrow (a, a), t_unit))));
+    (* http_conn_is_tls(fd) -> Bool: the connection on fd runs over TLS *)
+    ("http_conn_is_tls",          Mono (TArrow (t_int, t_bool)));
     (* WebSocket builtins — WsFrame and SelectResult declared in websocket.march *)
     ("ws_recv",   Mono (TArrow (t_int, TCon ("WsFrame", []))));
     ("ws_send",   Mono (TArrow (t_int, TArrow (TCon ("WsFrame", []), t_unit))));

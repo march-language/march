@@ -288,6 +288,10 @@ let extern_borrow_table : (string * bool list) list = [
     (* march_http_server_bind_host copies the host's bytes into a stack
        buffer for inet_pton and keeps nothing. *)
   ("http_server_bind_host", [true]);
+  (* march_https.c copies or reads its path / PEM Strings (into C buffers or
+     an OpenSSL context) and keeps nothing. *)
+  ("http_server_tls_configure", [false; true; true; false; false]);
+  ("http_server_reload_tls",    [false; true; true]);
   (* ── Vault (march_extras.c), audited 2026-10-01: every one copies its
      table/name/key into C (vault_key_cstr) and takes its OWN reference to a
      stored value (march_incrc), never storing or releasing the caller's.
@@ -681,6 +685,8 @@ let extern_owned_builtins : string list = [
     "logger_add_context"; "logger_add_field"; "spawn";
     "spawn_supervised"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
+    (* stores its pipeline closure for the whole server run (march_https.c) *)
+    "http_server_plain_listener";
     "file_close"; "file_read_line"; "file_read_chunk";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
     (* typed_array_create STORES its default value in every slot: the

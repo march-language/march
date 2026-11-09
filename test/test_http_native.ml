@@ -148,9 +148,10 @@ type server_ctx = {
   request_bytes   : meth:string -> path:string -> body:string -> keep_alive:bool -> string;
   read_response   : Unix.file_descr -> string ref -> deadline:float -> int * string * string;
   check_response  : string -> exp_status:int -> exp_body:string -> int * string * string -> unit;
+  read_log        : unit -> string;   (* the server's stdout+stderr so far *)
 }
 
-let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
+let with_compiled_server ?(extra_env = [||]) ?ready_port ~variant ~slug ~evloop ~server_src (k : server_ctx -> unit) =
   (* Without this, writing to a socket whose peer has just crashed kills THIS
      process with SIGPIPE — the test would die instead of reporting the dead
      server, which is the whole point of the exercise.  Ignoring it turns the
@@ -271,7 +272,8 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
     let env =
       Array.append (Unix.environment ())
         [| Printf.sprintf "MARCH_TEST_HTTP_PORT=%d" !port
-         ; (if evloop then "MARCH_HTTP_EVLOOP=1" else "MARCH_HTTP_EVLOOP=0") |] in
+         ; (if evloop then "MARCH_HTTP_EVLOOP=1" else "MARCH_HTTP_EVLOOP=0") |]
+      |> fun base -> Array.append base extra_env in
     let pid =
       Unix.create_process_env bin [| bin |] env Unix.stdin log_fd log_fd in
     Unix.close log_fd;
@@ -282,9 +284,14 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
      hung server must fail in finite time rather than wedge the suite. *)
   let ready_timeout = 90.0 in
   let addr () = Unix.ADDR_INET (Unix.inet_addr_loopback, !port) in
+  (* Readiness is a connect to the main port, or to [ready_port] for a
+     server whose main port is deliberately not bound yet. *)
+  let ready_addr () = match ready_port with
+    | Some p -> Unix.ADDR_INET (Unix.inet_addr_loopback, p)
+    | None -> addr () in
   let try_connect () =
     let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-    match Unix.connect s (addr ()) with
+    match Unix.connect s (ready_addr ()) with
     | () -> (try Unix.close s with _ -> ()); true
     | exception Unix.Unix_error _ -> (try Unix.close s with _ -> ()); false
   in
@@ -351,7 +358,11 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
      the OTHER variant's banner is the real regression, and still fails
      below. *)
   let banner_deadline = Unix.gettimeofday () +. 30.0 in
-  let want = if evloop then "(event-loop)" else "thread pool" in
+  (* The pool's sequential variant (MARCH_HTTP_SEQUENTIAL) starts no pool;
+     it announces "(sequential)" instead. *)
+  let sequential = Array.mem "MARCH_HTTP_SEQUENTIAL=1" extra_env in
+  let want =
+    if evloop then "(event-loop)" else if sequential then "(sequential)" else "thread pool" in
   let rec await_banner () =
     let b = read_log () in
     if find_from b want 0 <> None then b
@@ -360,7 +371,7 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
   in
   let banner = await_banner () in
   let saw_evloop = find_from banner "(event-loop)" 0 <> None in
-  let saw_pool   = find_from banner "thread pool"  0 <> None in
+  let saw_pool   = find_from banner want 0 <> None in
   if evloop && not saw_evloop then
     bail "asked for the EVENT LOOP but the server did not announce it — the \
           runtime implementation selector (march_http_evloop_enabled) is \
@@ -486,7 +497,8 @@ let with_compiled_server ~variant ~slug ~evloop ~server_src (k : server_ctx -> u
       send;
       request_bytes;
       read_response;
-      check_response })
+      check_response;
+      read_log })
 
 (* ── The original exercise: 65 requests, bodies, keep-alive, pipelining ── *)
 (* Resident set size of [pid] in KiB via ps(1); identical flag on macOS and
