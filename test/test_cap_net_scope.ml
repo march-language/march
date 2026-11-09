@@ -341,8 +341,89 @@ let test_wrapper_method_checked () =
             ^ simple_get_post "url" ^ "\n    end"))
        (fn_go {|C.send("https://example.com/x")|}))
 
+(* ── Review fixes ──────────────────────────────────────────────────── *)
+
+(* C1: a user module that happens to share a stdlib module's NAME is still
+   user code; "transparent" must not be decided by name. *)
+let test_stdlib_named_user_module_checked () =
+  (* Before the fix this compiled: `Yaml` was taken for the stdlib and its
+     fixed reach to evil.com was never charged to A. *)
+  rejects "user module named Yaml" ~code:"cap_host_scope" ~mentions:[ "evil.com" ]
+    (program
+       ~extra:
+         ("\n  mod Yaml do\n    needs IO.NetConnect\n    @[net_dest(u)]\n    fn fetch2(u : String) : String do\n      "
+         ^ simple_get {|"https://evil.com/x"|} ^ "\n    end\n  end\n")
+       (fn_go {|Yaml.fetch2("https://example.com/")|}))
+
+(* C2: an entry-module function sharing a prelude function's name. *)
+let test_prelude_named_entry_fn_checked () =
+  let src =
+    {|mod Main do
+  needs IO.NetConnect("example.com"), IO.Console
+  @[net_dest(x)]
+  fn inspect(x : String) : String do
+    match HttpTransport.simple_get("https://evil.com/x") do
+      Ok(_) -> x
+      Err(_) -> "err"
+    end
+  end
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(inspect("https://example.com/"))
+  end
+end
+|}
+  in
+  let rc, out = run_compiler src in
+  if rc = 0 then Alcotest.fail "entry fn named like a prelude fn escaped the check";
+  if not (contains out "evil.com" || contains out "cap_host_annotation") then
+    Alcotest.failf "rejected, but not for the scope:\n%s" out
+
+(* C3: a NUL byte ends the C string getaddrinfo sees. *)
+let test_nul_host_rejected () =
+  rejects "NUL in a tcp_connect host" ~code:"cap_host_unproven"
+    (program
+       ~a_needs:{|needs IO.NetConnect("*.example.com")|}
+       (fn_go
+          {|match tcp_connect("127.0.0.1\0.example.com", 18932) do
+        Ok(_) -> p
+        Err(e) -> e
+      end|}))
+
+(* I3: a host-less declaration admits any host, so a computed URL is fine;
+   only the method (and, at run time, redirects) is checked. *)
+let test_any_host_computed_url () =
+  accepts "computed URL under methods(get)"
+    (program ~a_needs:{|needs IO.NetConnect(methods(get))|}
+       (fn_go (client_call "get(HttpClient.new_client(), p)")));
+  accepts "computed URL under no_redirects"
+    (program ~a_needs:{|needs IO.NetConnect(no_redirects)|}
+       (fn_go (simple_get "p")));
+  rejects "computed URL, wrong method" ~code:"cap_host_scope" ~mentions:[ "POST" ]
+    (program ~a_needs:{|needs IO.NetConnect(methods(get))|}
+       (fn_go (client_call {|post(HttpClient.new_client(), p, "b")|})))
+
+(* I4: @[net_dest] names a URL; a host parameter cannot be judged. *)
+let test_net_dest_on_host_param_rejected () =
+  rejects "net_dest forwarding to tcp_connect's host" ~code:"cap_host_annotation"
+    (program
+       ~extra:
+         (c_module
+            {|    @[net_dest(h)]
+    fn dial(h : String) : String do
+      match tcp_connect(h, 443) do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end
+    end|})
+       (fn_go {|C.dial("example.com")|}))
+
 let tests =
   [
+    Alcotest.test_case "stdlib-named user module checked" `Slow test_stdlib_named_user_module_checked;
+    Alcotest.test_case "prelude-named entry fn checked" `Slow test_prelude_named_entry_fn_checked;
+    Alcotest.test_case "NUL host rejected" `Slow test_nul_host_rejected;
+    Alcotest.test_case "any-host computed URL" `Slow test_any_host_computed_url;
+    Alcotest.test_case "net_dest on a host param rejected" `Slow test_net_dest_on_host_param_rejected;
     Alcotest.test_case "method refused" `Slow test_method_refused;
     Alcotest.test_case "method allowed" `Slow test_method_allowed;
     Alcotest.test_case "module-wide methods" `Slow test_module_wide_methods;

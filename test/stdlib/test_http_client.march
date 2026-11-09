@@ -342,6 +342,14 @@ describe "HttpClient host scope guard" do
     end
   end
 
+  test "a host with a NUL byte is refused" do
+    let req = Request(Get, SchemeHttps, "127.0.0.1\0.example.com", None, "/", None, Nil, "")
+    match HttpClient.hc_check_request("*.example.com", req) do
+    Err(OutOfScope(_)) -> ()
+    _ -> assert false
+    end
+  end
+
   test "out-of-scope request is refused before connecting" do
     let req = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
     match HttpClient.hc_check_request("example.com", req) do

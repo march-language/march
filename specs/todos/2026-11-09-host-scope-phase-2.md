@@ -18,3 +18,14 @@ Phase 1 shipped (`specs/progress/2026-11-09-host-scoped-network-capabilities.md`
 - **Per-role grants** for protocol roles.
 - **Under `--check` and the interpreter.** The check runs on the compile path only.
 - **Call-site spans.** Violations point at the module (post-lowering TIR has no spans).
+- **Actor messages to a handed-in pid.** A scoped module sending a message to an actor
+  in an unscoped module (pid supplied by `main`) is not checked against the sender's
+  scope (review 2026-11-09, I1): a confused-deputy route, documented as a limit.
+- **Host-less `@[net_dest]` on a host parameter** is rejected; a host+port judge would
+  make TCP wrappers annotatable (review I4).
+- **`Other("get")` passes a GET-only scope** while sending a non-standard lowercase
+  method (review minor); the guard could compare `Other` names exactly.
+- **Ceiling transparency by name.** `Cap_attrib` (the capability ceiling) still decides
+  stdlib transparency by module NAME (`bin/main.ml`, `before_opt`); the host check now
+  uses where a declaration comes from. A user module named like a stdlib module is seen
+  through by the ceiling (pre-existing; found by the host-scope review).

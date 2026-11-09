@@ -432,6 +432,29 @@ mod HttpClient do
     end
   end
 
+  -- A host the guard will vouch for: letters, digits, `-` and `.`, or a
+  -- bracketed IPv6 literal. Anything else (a NUL byte ends the C string the
+  -- resolver sees) could connect somewhere the pattern match did not describe.
+  pfn hc_valid_host(h) do
+    if string_starts_with(h, "[") do
+      string_ends_with(h, "]") && hc_all_chars(h, 1, string_byte_length(h) - 1, true)
+    else string_byte_length(h) > 0 && hc_all_chars(h, 0, string_byte_length(h), false)
+    end
+  end
+
+  pfn hc_all_chars(h, i, stop, v6) do
+    if i >= stop do true
+    else do
+      let c = string_slice(h, i, 1)
+      let lc = string_to_lowercase(c)
+      let ok =
+        string_contains("abcdefghijklmnopqrstuvwxyz0123456789-.", lc) && c != ""
+        || (v6 && (c == ":"))
+      if ok do hc_all_chars(h, i + 1, stop, v6) else false end
+    end
+    end
+  end
+
   pfn hc_split_port(body) do
     if string_starts_with(body, "[") do
       match string_index_of(body, "]") do
@@ -595,10 +618,11 @@ mod HttpClient do
     let host = Http.host(req)
     let port = hc_req_port(req)
     let m = Http.method(req)
-    if not(hc_scope_permits(spec, host, port)) do Err(OutOfScope(host))
+    if spec != "" && not(hc_valid_host(host)) do Err(OutOfScope(host))
+    else if not(hc_scope_permits(spec, host, port)) do Err(OutOfScope(host))
     else if hc_scope_permits_method(spec, host, port, hc_method_lower(m)) do Ok(())
     else Err(MethodRefused(hc_method_upper(m) ++ " " ++ host))
-    end end
+    end end end
   end
 
   doc """

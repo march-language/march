@@ -4881,16 +4881,23 @@ let compile filename =
       if List.for_all (fun (_, ds) -> ds = []) scopes then tir
       else begin
         let stdlib_mods = stdlib_module_names stdlib_decls in
-        let stdlib_files = stdlib_span_files stdlib_decls in
         let prelude_fns = Hashtbl.create 64 in
+        (* "Transparent" (stdlib) is decided by where a declaration COMES FROM,
+           never by its name: a user module named `Yaml`, or an entry-module
+           function named like a prelude one, is user code and is checked
+           (a by-name test let both escape the check entirely). *)
+        let user_mods = Hashtbl.create 16 in
+        let user_entry_fns = Hashtbl.create 64 in
         let annotated = ref [] in
         let rec walk prefix (decls : March_ast.Ast.decl list) =
           List.iter (fun (d : March_ast.Ast.decl) ->
               match d with
               | March_ast.Ast.DFn (fd, sp) ->
                 let name = fd.March_ast.Ast.fn_name.March_ast.Ast.txt in
-                if prefix = "" && List.mem sp.March_ast.Ast.file stdlib_files then
-                  Hashtbl.replace prelude_fns name ();
+                let from_stdlib = March_typecheck.Typecheck_builtins.file_is_stdlib sp.March_ast.Ast.file in
+                if prefix = "" && from_stdlib then Hashtbl.replace prelude_fns name ();
+                if prefix = "" && not from_stdlib then
+                  Hashtbl.replace user_entry_fns name ();
                 (match March_caps.Net_dest.net_dest_attr fd.March_ast.Ast.fn_attrs with
                  | None -> ()
                  | Some p ->
@@ -4913,9 +4920,19 @@ let compile filename =
                        annotated := ((if prefix = "" then name else prefix ^ "." ^ name), i)
                                     :: !annotated)
                      (index 0 params))
-              | March_ast.Ast.DMod (n, _, inner, _) ->
-                walk (if prefix = "" then n.March_ast.Ast.txt
-                      else prefix ^ "." ^ n.March_ast.Ast.txt) inner
+              | March_ast.Ast.DMod (n, _, inner, msp) ->
+                let full =
+                  if prefix = "" then n.March_ast.Ast.txt
+                  else prefix ^ "." ^ n.March_ast.Ast.txt
+                in
+                (* Stdlib modules carry a placeholder span; a user module (the
+                   program's or a dependency's) has a real file outside the
+                   stdlib root. *)
+                let f = msp.March_ast.Ast.file in
+                if f <> March_ast.Ast.dummy_span.March_ast.Ast.file
+                   && not (March_typecheck.Typecheck_builtins.file_is_stdlib f) then
+                  Hashtbl.replace user_mods full ();
+                walk full inner
               | _ -> ()) decls
         in
         walk "" desugared.March_ast.Ast.mod_decls;
@@ -4930,9 +4947,10 @@ let compile filename =
         end;
         let violations =
           March_tir.Net_scope.check ~scopes
-            ~transparent:(fun m -> List.mem m stdlib_mods)
+            ~transparent:(fun m -> List.mem m stdlib_mods && not (Hashtbl.mem user_mods m))
             ~transparent_fns:(fun n ->
-                not (String.contains n '.') && Hashtbl.mem prelude_fns n)
+                not (String.contains n '.') && Hashtbl.mem prelude_fns n
+                && not (Hashtbl.mem user_entry_fns n))
             ~annotated:(List.sort_uniq compare !annotated) tir
         in
         if violations <> [] then begin

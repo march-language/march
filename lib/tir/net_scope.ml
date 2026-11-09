@@ -232,8 +232,18 @@ let url_evidence ?(meths = [ MDynamic ]) ~(callee : string) (v : value) : result
 
 let host_evidence ~(callee : string) (host : value) (port : value option) : result =
   match (host, port) with
-  | VLit h, Some (VInt p) ->
-    Fixed [ { auth = { H.a_host = H.normalize_host h; a_port = p }; meth = MRaw } ]
+  | VLit h, Some (VInt p) -> (
+      (* The host must be a plain name or IP literal: anything else (a NUL
+         byte, which ends the C string getaddrinfo sees; a space; a scheme)
+         could connect somewhere the suffix match did not describe. *)
+      match H.parse_pattern h with
+      | Ok pat when (not pat.H.wildcard) && pat.H.port = None ->
+        Fixed [ { auth = { H.a_host = pat.H.host; a_port = p }; meth = MRaw } ]
+      | _ ->
+        Opaque
+          (Printf.sprintf
+             "the host %S passed to `%s` is not a plain host name or IP literal"
+             h callee))
   | VLit _, _ ->
     Opaque (Printf.sprintf "the port passed to `%s` is not a literal" callee)
   | _ -> Opaque (Printf.sprintf "the host passed to `%s` is not a literal" callee)
@@ -426,6 +436,45 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
     in
     String.concat ", " (List.map String.uppercase_ascii (List.sort_uniq compare ms))
   in
+  (* A host-less declaration admits ANY host, so a direct call to a URL entry
+     point (or a raw connection) needs no visible host there: only its method
+     is judged, and the run-time guard checks redirects and steps.  [`No]
+     when no host-less declaration applies, or the call is not a direct
+     entry point. *)
+  let any_host_methods ds =
+    let ms =
+      List.concat_map
+        (fun (d : H.decl) ->
+           if d.patterns = [] then
+             match d.methods with Some ms -> ms | None -> H.http_methods
+           else [])
+        ds
+    in
+    String.concat ", " (List.map String.uppercase_ascii (List.sort_uniq compare ms))
+  in
+  let any_host_fallback (ds : H.decl list) (s : site) =
+    let anyhost = List.filter (fun (d : H.decl) -> d.patterns = []) ds in
+    if anyhost = [] then `No
+    else
+      let c = s.callee in
+      let is_url_entry =
+        (is_defined c && see_through c && annotation c <> None)
+        || (match D.builtin_dest c with Some (D.Url _) -> true | _ -> false)
+      in
+      let is_raw = match D.builtin_dest c with Some (D.Host _) -> true | _ -> false in
+      if is_url_entry then
+        match D.method_of c with
+        | None -> `Ok
+        | Some m ->
+          if List.exists
+               (fun (d : H.decl) ->
+                  match d.methods with None -> true | Some ms -> List.mem m ms)
+               anyhost
+          then `Ok
+          else `Method m
+      else if is_raw && List.exists (fun (d : H.decl) -> d.methods = None) anyhost then `Ok
+      else `No
+  in
   let subject n =
     let base = match String.rindex_opt n '.' with
       | Some i -> String.sub n (i + 1) (String.length n - i - 1)
@@ -479,6 +528,17 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
                                 (subject i.name) a.a_host o)
                          | _ -> ())
                     uses
+                | Some (Opaque why) when any_host_fallback ds s <> `No ->
+                  (match any_host_fallback ds s with
+                   | `Method m ->
+                     add March_errors.Code.cap_host_scope o i.name
+                       (Printf.sprintf
+                          "%s sends %s, but module `%s` allows only %s.\n\
+                           hint: add `%s` to its `methods(...)`, or use a method it \
+                           already allows."
+                          (subject i.name) (String.uppercase_ascii m) o
+                          (any_host_methods ds) m)
+                   | _ -> ignore why)
                 | Some (Opaque why) ->
                   add March_errors.Code.cap_host_unproven o i.name
                     (Printf.sprintf
@@ -527,9 +587,10 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
              | At (c, j) -> (
                  if is_defined c then annotation c = Some j
                  else
+                   (* A URL position only: a host argument's caller could not
+                      be judged (its port is a separate argument). *)
                    match D.builtin_dest c with
                    | Some (D.Url j') -> j = j'
-                   | Some (D.Host (j', _)) -> j = j'
                    | _ -> false)
            in
            let bad = List.filter (fun (q, u) -> q = k && not (allowed u)) i.param_uses in

@@ -737,7 +737,13 @@ client refuses, before connecting, a request outside it: `HttpClient.OutOfScope(
 `MethodRefused("POST host")`, or under `no_redirects` `RedirectRefused(host)`.
 
 **Limits.** Host scopes are checked on the `--compile` path only, like the
-[upper limit](#cap-strict); `--check` and the interpreter do not run them. They bound the
+[upper limit](#cap-strict). `march --check` reports nothing about them, and a program run
+by the interpreter, the REPL or the JIT gets neither the check nor the run-time guard, so
+it follows redirects freely. Only a compiled binary has the protection described here.
+A message a scoped module sends to an actor it was handed (a pid from `main`) runs that
+actor's handler under the handler's module, not the sender's: the same rule as a function
+handed in as a parameter. A scoped module that spawns a network-reaching actor itself is
+refused. They bound the
 name a module connects to, not the address it resolves to, and no OS sandbox enforces
 them: what C code reached through `extern` does is outside them, as it is outside every
 check here. A scoped module cannot call a stdlib server API (its socket handles are plain
