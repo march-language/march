@@ -5869,9 +5869,30 @@ let compile filename =
                   | Some (March_desugar.Desugar_migrate_derive.Not_derived why) ->
                     Printf.sprintf "    \"migrate_not_derived\": %S,\n" why
                   | None -> "" in
+                (* H3: a `@compat(simulation)` actor's handler bodies, as
+                   source, so the NEXT build can check that migrating
+                   commutes with handling (Desugar_simulation). *)
+                let steps_line =
+                  match adef with
+                  | Some a when compat = March_desugar.Desugar_simulation.compat ->
+                    Printf.sprintf "    \"steps\": [%s],\n"
+                      (String.concat ", "
+                         (List.map (fun (h : March_ast.Ast.actor_handler) ->
+                              Printf.sprintf {|{"msg":%s,"params":[%s],"body":%s}|}
+                                (Schema_migration.json_string h.March_ast.Ast.ah_msg.March_ast.Ast.txt)
+                                (String.concat ","
+                                   (List.map (fun (p : March_ast.Ast.param) ->
+                                        Schema_migration.json_string
+                                          p.March_ast.Ast.param_name.March_ast.Ast.txt)
+                                       h.March_ast.Ast.ah_params))
+                                (Schema_migration.json_string
+                                   (March_format.Format.expr_inline h.March_ast.Ast.ah_body)))
+                             a.March_ast.Ast.actor_handlers))
+                  | _ -> "" in
                 Printf.bprintf oc
-                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s%s    \"state_fields\": %s\n  }%s\n"
-                  actor_name compat contracts_line invariant_line handlers_line mm_line derive_line field_lines
+                  "  %S: {\n    \"compat\": %S,\n%s%s%s%s%s%s    \"state_fields\": %s\n  }%s\n"
+                  actor_name compat contracts_line invariant_line handlers_line mm_line derive_line
+                  steps_line field_lines
                   (if i < List.length actor_schemas - 1 then "," else "")
               ) actor_schemas;
             Printf.bprintf oc "}\n";

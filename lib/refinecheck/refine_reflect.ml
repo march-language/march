@@ -1748,6 +1748,14 @@ let record_of_fields_inst (sort : T.ty -> Smt.sort) (fs : (string * T.ty) list)
         | _ -> acc)
       RE.adt_ctors []
   in
+  (* An actor's state sort shares its field set with the migration that
+     builds it (an anonymous `{ count, label }` result); no value outside the
+     actor's handlers has that sort, so it gives way to the one other. *)
+  let cands =
+    match List.filter (fun (adt, _, _) -> not (Hashtbl.mem RE.actor_state_adts adt)) cands with
+    | [ c ] when List.length cands > 1 -> [ c ]
+    | _ -> cands
+  in
   match cands with
   | [ (adt, ctor, ns) ] when not (Hashtbl.mem RE.ambiguous_adts adt) -> (
     let arity = Option.value ~default:0 (Hashtbl.find_opt RE.adt_arity adt) in

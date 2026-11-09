@@ -507,6 +507,71 @@ let load_baseline ~(filename : string) : unit =
               (name, { B.field_names; fields; handlers }))
             schemas))
 
+(** A JSON string literal (RFC 8259): quotes, backslashes and control
+    characters escaped, UTF-8 left as it is.  OCaml's [%S] writes decimal
+    escapes JSON rejects, which a handler body's string literal would hit. *)
+let json_string (s : string) : string =
+  let b = Buffer.create (String.length s + 2) in
+  Buffer.add_char b '"';
+  String.iter
+    (fun c ->
+      match c with
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | '\n' -> Buffer.add_string b "\\n"
+      | '\r' -> Buffer.add_string b "\\r"
+      | '\t' -> Buffer.add_string b "\\t"
+      | c when Char.code c < 0x20 -> Buffer.add_string b (Printf.sprintf "\\u%04x" (Char.code c))
+      | c -> Buffer.add_char b c)
+    s;
+  Buffer.add_char b '"';
+  Buffer.contents b
+
+(** H3: the deployed build's handler steps and state field types, for the
+    simulation law (Desugar_simulation).  Read straight from the sidecar's
+    JSON (`"steps"`, written for `@compat(simulation)` actors).  A step whose
+    body or a field whose type does not parse leaves that actor out, and the
+    pass then reports it as having no deployed step. *)
+let load_simulation_baseline (path : string option) : unit =
+  let module D = March_desugar.Desugar_simulation in
+  D.report := [];
+  D.baseline :=
+    (match path with
+     | None -> []
+     | Some file ->
+       (try
+          let open Yojson.Safe.Util in
+          let parse_with f s = try Some (f (Lexing.from_string s)) with _ -> None in
+          Yojson.Safe.from_file file |> to_assoc
+          |> List.filter_map (fun (actor, j) ->
+              match member "steps" j with
+              | `Null -> None
+              | steps ->
+                let fields =
+                  member "state_fields" j |> to_list
+                  |> List.map (fun f ->
+                      ( f |> member "name" |> to_string,
+                        parse_with March_parser.Parse.ty_of_lexbuf (f |> member "ty" |> to_string) ))
+                in
+                let steps =
+                  steps |> to_list
+                  |> List.map (fun st ->
+                      ( st |> member "msg" |> to_string,
+                        st |> member "params" |> to_list |> List.map to_string,
+                        parse_with March_parser.Parse.expr_of_lexbuf (st |> member "body" |> to_string) ))
+                in
+                if List.exists (fun (_, t) -> t = None) fields
+                   || List.exists (fun (_, _, b) -> b = None) steps
+                then None
+                else
+                  Some
+                    ( actor,
+                      { D.fields = List.map (fun (n, t) -> (n, Option.get t)) fields;
+                        steps =
+                          List.map (fun (msg, params, b) -> { D.msg; params; body = Option.get b }) steps }
+                    ))
+        with _ -> []))
+
 (** The deployed state layouts, for the derived migrations
     (Desugar_migrate_derive, M11).  Called before desugar; an unreadable
     baseline derives nothing, and the deploy gate then asks for a written
@@ -514,6 +579,7 @@ let load_baseline ~(filename : string) : unit =
 let load_derive_baseline ~(filename : string) : unit =
   let module Sd = March_forge.Schema_diff in
   let module D = March_desugar.Desugar_migrate_derive in
+  load_simulation_baseline (find_baseline ~filename);
   D.report := [];
   D.origins := [];
   D.baseline :=

@@ -5750,6 +5750,20 @@ position into a real contract, obligation and assumption together, is
   state's refined fields are obliged at `init` and at every handler's result
   (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
   of the incoming `state` in every handler body.
+- (Closed 2026-11-08.) An actor's `@invariant`: an inductive invariant too,
+  over its bare field names (or `state.f`), and it may call the program's own
+  functions, unfolded as in any contract. The state `init` builds must
+  satisfy it, and each handler's result must satisfy it, given an incoming
+  `state` that does and the handler's parameter refinements (assumed exactly
+  when the body assumes them). A violation is a `return_refinement_violated`
+  error naming the actor and handler, with the breaking state and message; an
+  undecided one is a recorded skip (`<Actor>.init`, `<Actor>.<Msg>`), an error
+  under `cap verified`. A handler's sends and replies are not part of the
+  claim. Before this, the predicate was read only across a hot deploy. A
+  record-returning function benefits too: `{ r with f: e }` over a named `r`
+  reflects, `r` returned as it is no longer conflicts on sorts, a simple
+  `let` ahead of a record tail is inlined, and a binder left free in the tail
+  never turns a model into a reported counterexample.
 - (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
   0})` obliges every construction of `Inc(...)` in the program (`send`,
   `Actor.call`, a message bound to a `let` first), and the handler body

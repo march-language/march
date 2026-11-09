@@ -7976,6 +7976,107 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         visit ~root errctx defs ctx path [] sc re cb (if enforced then cont_of_fnparams ps else [])
           h.A.ah_body)
       ad.A.actor_handlers;
+    (* (4) The `@invariant` as an INDUCTIVE invariant (todo
+       2026-11-06-invariant-unchecked-on-init-and-handlers; phase F of
+       specs/2026-11-04-lemmas-hcr-actors-choreography-design.md).  Before
+       this, the predicate was only read across a hot deploy, so
+       `@invariant(count <= limit)` over `init { count: 50, limit: 10 }` built
+       with no diagnostic.  Now `init` must establish it and every handler
+       must re-establish it of the state it returns, assuming it of the
+       incoming `state`: together, a theorem about every state a live actor
+       can hold, which is what the deploy gate already takes it for.
+
+       Each is stated as a function returning the state under
+       `{v : <Actor> | inv(v)}` and checked by [check_fn_post_verdict], the
+       return-contract checker (counterexamples, `cap verified` escalation,
+       the ledger), worded as the invariant's ([with_post_subject]).  A
+       handler's parameters carry their refinements exactly when the body
+       walk above assumes them ([enforced]); `init`'s are stripped, as
+       above.  The predicate's bare field names (and `state.f`) read the
+       state, the spelling the schema and the deploy gate use.
+
+       Scope (the inductive-invariants todo's boundary): a handler's sends
+       and replies are other actors' business and not part of the claim; a
+       restart re-runs `init`, which is checked; a hot migration installs a
+       state the deploy gate checks against the new invariant. *)
+    (match ad.A.actor_invariant with
+     | Some inv when not !calls_only_walk ->
+       let a = aname.A.txt in
+       let nm sp s = { A.txt = s; A.span = sp } in
+       let fields = List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state in
+       (* Each field read keeps the span it was written at: reflection looks
+          a call argument's type up by span, so a synthesized span left
+          `not_137(count)` an unreflectable predicate. *)
+       let rec inv_of sp b (e : A.expr) : A.expr =
+         let go = inv_of sp b in
+         match e with
+         | A.EVar v when v.A.txt = "state" -> A.EVar { v with A.txt = b }
+         | A.EVar v when List.mem v.A.txt fields ->
+           A.EField (A.EVar { v with A.txt = b }, v, v.A.span)
+         | A.EApp ((A.EVar _ as hd), args, asp) -> A.EApp (hd, List.map go args, asp)
+         | A.EApp (f, args, asp) -> A.EApp (go f, List.map go args, asp)
+         | A.EField (r, n, fsp) -> A.EField (go r, n, fsp)
+         | A.ETuple (es, tsp) -> A.ETuple (List.map go es, tsp)
+         | A.ECon (c, es, csp) -> A.ECon (c, List.map go es, csp)
+         | A.EAnnot (x, t, asp) -> A.EAnnot (go x, t, asp)
+         | A.EIf (c, t, f, isp) -> A.EIf (go c, go t, go f, isp)
+         | _ -> e
+       in
+       let inv_of sp b = inv_of sp b inv in
+       let inv_ty sp b = A.TyRefine (A.TyCon (nm sp a, []), Some (nm sp b), inv_of sp b) in
+       let shown = pred_str inv in
+       let as_fn ~name ~sp ps body : A.fn_def =
+         { A.fn_name = nm sp name; fn_vis = A.Private; fn_doc = None; fn_attrs = [];
+           fn_ret_ty = Some (inv_ty sp "v");
+           fn_clauses =
+             [ { A.fc_params = List.map (fun p -> A.FPNamed p) ps; fc_guard = None; fc_body = body;
+                 fc_span = sp; fc_params_span = sp } ];
+           fn_bounds = []; fn_attr_args = []; fn_needs = None }
+       in
+       (* The context [visit_fn] gives a top-level function's return check:
+          the module path reflection resolves user functions under (an
+          invariant calling `not_137(count)` was an unreflectable skip
+          without it), proved callee returns, and the scalar tail demand. *)
+       let check ~headline ~what ~note fd =
+         let saved_prefix = !Refine_post.lemma_prefix in
+         Refine_post.lemma_prefix := ctx.modpath;
+         Fun.protect ~finally:(fun () -> Refine_post.lemma_prefix := saved_prefix) @@ fun () ->
+         with_post_subject
+           { ps_headline = headline; ps_requires = "The invariant requires"; ps_what = what;
+             ps_pred = shown; ps_note = note }
+           (fun () ->
+             with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+                 with_post_lookup (postcond_of ctx defs) (fun () ->
+                     ignore (check_fn_post_verdict ~root errctx fd))))
+       in
+       let init_sp = March_typecheck.Typecheck.span_of_expr ad.A.actor_init in
+       check
+         ~headline:(Printf.sprintf "`%s`'s `init` does not establish its `@invariant`." a)
+         ~what:(Printf.sprintf "`%s`'s `@invariant` `%s` at `init`" a shown)
+         ~note:"The state `init` builds must satisfy the actor's `@invariant`."
+         (as_fn ~name:(a ^ ".init") ~sp:init_sp
+            (strip_params_refinements ad.A.actor_init_params) ad.A.actor_init);
+       List.iter
+         (fun (h : A.actor_handler) ->
+           let m = h.A.ah_msg.A.txt in
+           let enforced =
+             Hashtbl.mem !handler_sigs m
+             || Hashtbl.mem !handler_sigs (Refine_scope.handler_key a m) in
+           let ps = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
+           let sp = h.A.ah_msg.A.span in
+           let state_p =
+             { A.param_name = nm sp "state"; param_ty = Some (inv_ty sp "s");
+               param_lin = A.Unrestricted } in
+           check
+             ~headline:
+               (Printf.sprintf "`%s`'s handler `%s` does not preserve its `@invariant`." a m)
+             ~what:(Printf.sprintf "`%s`'s `@invariant` `%s` after handler `%s`" a shown m)
+             ~note:
+               "Every handler must return a state satisfying the `@invariant`, given a \
+                `state` that satisfies it."
+             (as_fn ~name:(a ^ "." ^ m) ~sp (state_p :: ps) h.A.ah_body))
+         ad.A.actor_handlers
+     | _ -> ());
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)
     Option.iter visit_expr ad.A.actor_invariant
@@ -8019,6 +8120,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear ctor_field_sorts_poly;
   Hashtbl.clear ctor_field_sorts;
   Hashtbl.clear ctor_field_names;
+  Hashtbl.clear actor_state_adts;
   Hashtbl.clear ctor_param_fields;
   Hashtbl.clear ctor_field_params;
   Hashtbl.clear ctor_field_joint;
@@ -8931,7 +9033,9 @@ let warn_unknown_attributes errctx (decls : A.decl list) : unit =
     List.iter
       (fun a ->
         let name = match String.index_opt a ':' with Some i -> String.sub a 0 i | None -> a in
-        if not (List.mem name known_fn_attributes) then begin
+        (* `hcr_logic` marks the simulation steps Desugar_simulation
+           generates; no user writes it, so it is not offered either. *)
+        if name <> "hcr_logic" && not (List.mem name known_fn_attributes) then begin
           let near =
             List.filter (fun k -> edit_distance k name <= 2) known_fn_attributes
             |> List.sort (fun x y -> compare (edit_distance x name) (edit_distance y name))
@@ -9710,6 +9814,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_sorts_poly;
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
+  Hashtbl.reset actor_state_adts;
   Hashtbl.reset ctor_param_fields;
   Hashtbl.reset ctor_field_params;
   Hashtbl.reset ctor_field_joint;

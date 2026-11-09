@@ -60,6 +60,15 @@ Phases (design §7):
 - **F.** Baseline invariants as migration hypotheses, the migration-simulation law, rollback
   round trip, chained `migrate_msg`, tag checks at deploy. Handlers reflected as
   `<Actor>.step` with an inductive `@invariant` moved to its own todo
-  (`2026-11-06-actor-inductive-invariants`), which F builds on.
+  (`2026-11-06-actor-inductive-invariants`), which F builds on. Started 2026-11-08: the
+  `@invariant` is obliged at `init` and at every handler's result on every build (progress
+  `2026-11-08-invariant-unchecked-on-init-and-handlers`), so a deployed baseline's
+  invariant is now a checked fact, not only an assumption. The rest landed 2026-11-08 on
+  `feat/hcr-phase-f`: M2 (an invariant calling the program's functions, progress
+  `2026-11-08-invariant-unchecked-on-init-and-handlers`), H5 (`2026-11-08-hcr-rollback-roundtrip`),
+  M3 with H3 behind `@compat(simulation)` (`2026-11-08-hcr-simulation-law`), M7 with H6
+  (`2026-11-08-hcr-chained-migrate-msg`) and C6's tag check (`2026-11-08-hcr-tag-consistency-check`).
+  Residuals are in each progress file; the user-facing `<Actor>.step` for hand-written
+  lemmas and `proved (inductive)` stay in `2026-11-06-actor-inductive-invariants`.
 
 Move this file to `specs/progress/` when phase F lands, or split it per phase as phases land.

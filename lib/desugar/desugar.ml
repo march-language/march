@@ -2390,6 +2390,17 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
   (* A `--hot-reload` build's `<actor>_migrate_state` gets the live-data
      check the reload server runs before ACTIVATE (Desugar_migrate_check). *)
   let m = { m with mod_decls = Desugar_migrate_check.expand m.mod_decls } in
+  (* `<actor>_rollback_state` beside `<actor>_migrate_state` gets the
+     round-trip lemma (H5, Desugar_rollback); erased before anything runs. *)
+  let m =
+    if !Desugar_actor_names.is_stdlib_file m.mod_name.span.file then m
+    else { m with mod_decls = Desugar_rollback.expand m.mod_decls } in
+  (* A `@compat(simulation)` actor gets, per message, its deployed and current
+     handlers as logic-only step functions and the simulation lemma between
+     them (H3, Desugar_simulation); erased before anything runs. *)
+  let m =
+    if !Desugar_actor_names.is_stdlib_file m.mod_name.span.file then m
+    else { m with mod_decls = Desugar_simulation.expand m.mod_decls } in
   (* Collect interfaces and fns for satisfy expansion. *)
   let raw_ifaces = collect_interfaces m.mod_decls in
   let raw_fns    = collect_fns m.mod_decls in

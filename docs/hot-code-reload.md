@@ -141,6 +141,33 @@ preserves newer state. Re-uploading the original artifact without that migration
 refused. The rollback integration scenario verifies service continuity, restored
 behavior and increasing release counters; automatic rollback is not provided.
 
+You can write the reverse migration ahead of time, beside the forward one, and have the
+compiler check that rolling back loses nothing. Name it `<actor>_rollback_state`:
+
+```march
+fn counter_migrate_state(old : { count : Int, announced : Bool }) : { count : Int, announced : Bool, label : Int } do
+  { count: old.count, announced: old.announced, label: 2 }
+end
+
+fn counter_rollback_state(new : { count : Int, announced : Bool, label : Int }) : { count : Int, announced : Bool } do
+  { count: new.count, announced: new.announced }
+end
+```
+
+Every build then proves `counter_rollback_state(counter_migrate_state(old)) == old` for
+every `old` the forward migration accepts. The law is a compiler-generated lemma,
+`counter_rollback_roundtrip`; it never runs. A rollback that drops something is an
+error with the state it loses:
+
+```
+the lemma `counter_rollback_roundtrip` is false: its theorem `counter_rollback_state(counter_migrate_state(old)) == old` does not hold at old = { count: 3, announced: true } [refinement_violated]
+```
+
+`forge hot-reload check` prints a `rollback round trip` line for the actor. The rollback
+deploy itself is unchanged: its `migrate_state` is this function. The check unfolds both
+functions, so it covers what the refinement checker can reflect; a state with a `String`
+field is reported `not proved` for now.
+
 ## Server setup
 
 The server binary listens on a Unix domain socket for reload requests. Pass the socket path at startup:
@@ -651,7 +678,7 @@ For production deployments, `full` is safest: every state transition then has a 
 
 ## Verifying migration soundness with `@invariant`
 
-If your actor has a state invariant (a condition that must hold for every live actor), you can annotate it and the compiler will **prove** that your `migrate_state` function preserves it before the deploy is allowed through.
+If your actor has a state invariant (a condition that must hold for every live actor), you can annotate it. Every build checks that it holds for every state the actor can reach (see [below](#an-invariant-holds-for-every-live-actor)), and on a deploy the compiler **proves** that your `migrate_state` function preserves it before the deploy is allowed through.
 
 ```march
 -- The actor invariant: count is always non-negative
@@ -727,6 +754,105 @@ end
 
 Both satisfy `len(history) == count`. The compiler verifies this using an SMT solver; no input can slip through.
 
+### An invariant holds for every live actor
+
+Every build, not only a deploy, checks the `@invariant` as an inductive invariant:
+
+- the state `init` builds must satisfy it;
+- every handler, given a `state` that satisfies it and a message that satisfies the
+  handler's parameter refinements, must return a state that satisfies it.
+
+Together these make it true of every state a live actor can hold, which is what the
+deploy check takes it for. A handler that can break it is an error with the state and
+message that break it:
+
+```march
+mod App do
+  @invariant(count >= 0)
+  actor Counter do
+    state { count : Int }
+    init { count: 0 }
+    on Inc(n : {Int | _ > 0}) do { state with count: state.count + n } end
+    on Dec() do { state with count: state.count - 1 } end
+  end
+end
+```
+
+```
+-- REFINEMENT ----------------------------- counter.march
+
+`Counter`'s handler `Dec` does not preserve its `@invariant`. [return_refinement_violated]
+
+The invariant requires:
+
+    count >= 0
+
+A counterexample was found:
+
+    state = { count: 0 }
+
+7 |     on Dec() do { state with count: state.count - 1 } end
+           ^^^
+
+    Every handler must return a state satisfying the `@invariant`, given a `state` that satisfies it.
+```
+
+Guarding the decrement (`if state.count > 0 do ... else state end`) proves it. `Inc` proves
+only because its parameter is refined: with `n : Int`, `n = -1` breaks it.
+
+The invariant may call the program's own functions (`@invariant(not_137(count))`): the
+check unfolds them as it does in any contract, and a function it can't use there (an
+`@[opaque]` one, say) leaves the invariant `not proved`.
+
+What the check covers: the value each handler returns. A handler's sends and
+`Actor.reply` calls are other actors' business and play no part. A restart re-runs `init`,
+which is checked. A hot deploy installs the migrated state, which the deploy checks
+against the new invariant. An invariant the checker can't decide (one that calls a
+function it can't reflect, say) is not an error, except in a `cap verified` module, where
+every obligation must be discharged.
+
+---
+
+## Proving a deploy is a simulation: `@compat(simulation)`
+
+A message can be handled on either side of a deploy: queued messages run on the old code,
+later ones on the new. When the new code is meant to behave like the old (a refactor, a
+performance fix, a new field it only carries along), you can have the compiler prove that it
+doesn't matter which side handles a message: handling it on the old code and then migrating
+gives the same state as migrating first and handling it on the new code.
+
+```march
+@compat(simulation)
+actor Tally do
+  state { count : Int }
+  init  { count: 1 }
+  on Bump(n : Int) do { state with count: state.count + n } end
+end
+```
+
+`@compat(simulation)` is the `full` shape policy plus this law. A `--hot-reload` build of
+such an actor records each handler's body in its schema sidecar. The next build, checked
+against that deployed sidecar, proves for every message both versions handle
+
+```
+new_Bump(migrate_state(s), n) == migrate_state(old_Bump(s, n))
+```
+
+with `migrate_state` the identity when the state didn't change. A handler that now does
+something else fails with the state and message that tell them apart, and
+`forge hot-reload check` prints a `simulation` line, one verdict per message. A handler the
+deployed build didn't have passes: no deployed message names it.
+
+A send, a reply or a print in statement position is not part of the law: it doesn't change
+the state. A handler body is carried across builds only when it reads nothing but the state,
+its parameters, literals and `let`s, and calls only operators and standard-library modules;
+otherwise (a call of your own function, which the deployed build may define differently, or
+a `match`) that message's verdict is `not checked`, with the reason. A deploy that changes
+the message type (`migrate_msg`) is `not checked` for now.
+
+Most deploys change what a handler does on purpose, and are not simulations; leave the
+attribute off for them.
+
 ---
 
 ## What expressions are allowed in `@invariant`
@@ -761,9 +887,9 @@ check as `forge check`, against the last deploy's schema when there is one
 error, with the same exit code.
 
 ```
-actor Counter: not checked
+actor Counter: proved
   state refinements        proved: 3 sites in init and handlers
-  @invariant               not checked: init and handler results are not checked against it; a hot deploy checks it on the migrated state
+  @invariant               proved: 3 sites at init and after each handler
   handler contracts        proved: 1 site where a message is built
   migrate_state (derived)  proved: 1 site against the deployed build
 protocol Relay (2 roles): proved (spec) · validated (compiler)
@@ -787,9 +913,9 @@ runtime: proved (model)
 | `proved (spec) · validated (compiler)` | The compiler's projection agrees with `Session.Theory.project`, so the laws the standard library proves about it hold (see the choreography chapter, "What is proved about a protocol"). |
 | `assumed` | The trust boundary: messages from other nodes to an `@[remote]` actor. |
 
-A block's header is its weakest line, `assumed` aside. `@invariant` is reported
-`not checked` today: it is used only across a hot deploy (as the migration's goal and, from
-the deployed build, as a hypothesis). A protocol's deadlock freedom is proved for the
+A block's header is its weakest line, `assumed` aside. `@invariant` counts one site for
+`init` and one for each handler's result (a handler with two branches returning a state has
+two). A protocol's deadlock freedom is proved for the
 fragment the choreography chapter describes ("What is proved about a protocol"), and
 `not checked`, with the reason, outside it (a loop, for one).
 

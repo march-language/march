@@ -21,6 +21,31 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **An actor's `@invariant` is checked on every build.** The state `init` builds must
+  satisfy it, and every handler must preserve it, given an incoming `state` that satisfies
+  it and the handler's parameter refinements. A handler that can break it is an error naming
+  the actor, the handler and the breaking state (`` `Counter`'s handler `Dec` does not
+  preserve its `@invariant`. ``). Before, `@invariant(count <= limit)` over
+  `init { count: 50, limit: 10 }` built with no diagnostic: the predicate was only read
+  across a hot deploy. The invariant may call the program's own functions
+  (`@invariant(not_137(count))`), unfolded as in any contract. `march --check --guarantees`
+  now reports it `proved`, `violated` or `not proved` instead of `not checked`.
+
+- **`@compat(simulation)`: prove a hot deploy doesn't care which side handles a message.**
+  A `--hot-reload` build records the actor's handler bodies in its schema sidecar; the next
+  build proves, per message, that handling on the deployed code then migrating equals
+  migrating then handling on the new code, or refuses with the state and message that tell
+  them apart. Handlers that call the program's own functions, use `match`, or a deploy that
+  changes the message type are reported `not checked`. `march --check --guarantees` adds a
+  `simulation` line.
+
+- **Rollback round trip for hot deploys.** Declare `<actor>_rollback_state` beside
+  `<actor>_migrate_state` and every build proves
+  `<actor>_rollback_state(<actor>_migrate_state(old)) == old`, or refuses the build with the
+  old state the rollback loses. `march --check --guarantees` adds a `rollback round trip`
+  line. Migration functions written over anonymous records are now usable in contracts and
+  lemmas (they reflect).
+
 - **Tuples in refinement predicates.** A tuple-typed parameter can be refined
   (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
   predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
@@ -704,6 +729,13 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A record-returning function's contract no longer reports a false counterexample** when
+  a field's value is bound by a `let` first (`let next = c + n` then `{ count: next }` was
+  refuted with `next = -1`). Simple `let`s are now inlined into a record result, and a name
+  the checker cannot connect to its definition never makes a model count as a
+  counterexample. `{ r with f: e }` and returning a refined record parameter unchanged are
+  now proved instead of skipped.
 
 - **Refinement reflection over records with type parameters.** A lemma or contract over a
   parameter typed `Pr(Int)` (`type Pr(a) = { fst : a, snd : a }`) is now checked through the
