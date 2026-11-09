@@ -21,6 +21,19 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **HTTPS for `HttpServer`.** `HttpServer.tls(server, TlsFiles(cert, key))` (or `TlsPem`)
+  serves HTTP/1.1 over TLS on both server modes, with `wss://` through the unchanged
+  `WebSocket` API. Certificates rotate without a restart: `TlsFiles` are re-read every
+  `tls_poll_interval` seconds (default 60) and `HttpServer.reload_tls(src)` installs a pair on
+  demand; a pair that doesn't load, doesn't match or has expired is refused and the current
+  one stays. `tls_wait_for_cert` starts without a certificate so the first one can be obtained
+  through the server itself. `plain_listener(server, port, plugs)` serves a second, plain-HTTP
+  port from the same `listen`, with `redirect_to_https`, `HttpAcme.webroot` (certbot
+  `--webroot`) and `acme_responder` as plugs for it; `scheme(conn)` says which one a request came in on.
+  New timeouts `tls_handshake_timeout`, `header_timeout` and `progress_timeout`. Needs a
+  compiled build. Deployment notes: `specs/features/http-and-networking.md`, and
+  `examples/https_hello.march`.
+
 - **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
   Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
   law, that the comparator is a strict total order agreeing with `==`. A module can say what
@@ -433,6 +446,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`HttpServer.idle_timeout` is enforced on both server modes,** and requests have
+  deadlines. The event loop ignored `idle_timeout` and the thread pool used a fixed 10 s;
+  both now close a keep-alive connection after the configured value (60 s by default). A
+  request whose headers take longer than `header_timeout` (30 s from the first byte) is
+  closed, and so is a body upload or a response write that makes no progress for
+  `progress_timeout` (30 s); a slow transfer that keeps moving is never cut. An upgraded
+  WebSocket is not subject to them.
+
 - **`Math`, `Option` and `Result` are `cap verified`.** Every refinement contract and lemma in
   them is proved, and a test now fails if a change leaves one unproved (the same now holds for
   `Udp`, which already declared it). `List` is fully proved in ordinary programs but is not yet
@@ -787,6 +808,9 @@ git log is authoritative for exact commits.
   shared-secret proof was right; it now uses `Crypto.secure_compare`. `to_html`'s cell and header
   escaping replaced only the FIRST `&`, `<`, `>` and `"`, so a cell like `<b>x</b><script>` reached
   the page with a raw `<script>` (XSS); every occurrence is now escaped, and `'` too.
+- **`Tls.server_ctx` no longer leaks its ALPN buffer** when the context is freed.
+- **The event-loop HTTP server no longer drops pipelined requests** that arrive while a large
+  response is still being written; they are served once the write finishes.
 
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the

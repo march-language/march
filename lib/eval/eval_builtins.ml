@@ -3231,6 +3231,28 @@ let base_env : env =
         http_bind_addr := a;
         VUnit
       | _ -> eval_error "http_server_bind_host(host)"))
+  (* HTTPS is compiled-only: the interpreter's HTTP server (eval_net.ml) has
+     no TLS, and a TLS configuration must never quietly serve plain HTTP.
+     The plain listener is not implemented here either, so it fails the same
+     loud way; the timeouts stay advisory under the interpreter. *)
+  ; ("http_server_tls_configure", VBuiltin ("http_server_tls_configure", function
+      | [VInt _; VString _; VString _; VInt _; VInt _] ->
+        eval_error "HttpServer: HTTPS and plain_listener need a compiled build (march --compile / forge build)"
+      | _ -> eval_error "http_server_tls_configure(kind, a, b, poll_secs, wait_for_cert)"))
+  ; ("http_server_plain_listener", VBuiltin ("http_server_plain_listener", function
+      | [VInt _; _] ->
+        eval_error "HttpServer: HTTPS and plain_listener need a compiled build (march --compile / forge build)"
+      | _ -> eval_error "http_server_plain_listener(port, pipeline)"))
+  ; ("http_server_set_timeouts", VBuiltin ("http_server_set_timeouts", function
+      | [VInt _; VInt _; VInt _] -> VUnit
+      | _ -> eval_error "http_server_set_timeouts(handshake_secs, header_secs, progress_secs)"))
+  ; ("http_server_reload_tls", VBuiltin ("http_server_reload_tls", function
+      | [VInt _; VString _; VString _] ->
+        VCon ("Err", [VString "reload_tls: no TLS server is configured"])
+      | _ -> eval_error "http_server_reload_tls(kind, a, b)"))
+  ; ("http_conn_is_tls", VBuiltin ("http_conn_is_tls", function
+      | [VInt _] -> VBool false
+      | _ -> eval_error "http_conn_is_tls(fd)"))
   ; ("http_server_wait", VBuiltin ("http_server_wait", function
       | [VInt pid] ->
         (try ignore (Unix.waitpid [] pid) with _ -> ());
