@@ -3209,12 +3209,19 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
          lookup, to a sibling's call that is not an eligible span. *)
       Fun.protect ~finally:(fun () -> ih_at := saved) (fun () -> List.for_all verdict items)
     in
-    let rec ih_rounds (todo : gate_item list) (fresh : string list option) =
+    let rec ih_rounds ?(defer = true) (todo : gate_item list) (fresh : string list option) =
       let admitted = ref [] in
       List.iter
         (fun g ->
           let items = List.filter (fun (k, _, _, _) -> List.exists (fun (k', _, _, _) -> k' = k) todo) g.ig_items in
-          if items <> [] && List.exists (eligible fresh) items && check_group g items then begin
+          (* Callee first here too: a group one of whose members calls a
+             pending item OUTSIDE the group waits for it (see [calls_pending]). *)
+          let outside =
+            List.filter (fun (k, _, _, _) -> not (List.exists (fun (k', _, _, _) -> k' = k) g.ig_items)) todo
+          in
+          if items <> [] && List.exists (eligible fresh) items
+             && ((not defer) || not (List.exists (calls_pending outside) items))
+             && check_group g items then begin
             List.iter (fun (k, _, _, sg) -> Hashtbl.replace defs k (Some sg)) items;
             admitted := items @ !admitted
           end)
@@ -3233,13 +3240,18 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
           (fun item ->
             (not (in_group item))
             && ((fresh <> None && eligible fresh item) || eligible (Some (names_of !admitted)) item)
+            && ((not defer) || not (calls_pending todo item))
             && check item)
           todo
       in
       let progress = !admitted @ proved in
-      if progress <> [] && rest <> [] then ih_rounds rest (Some (names_of progress)) else rest
+      if progress <> [] && rest <> [] then ih_rounds ~defer rest (Some (names_of progress)) else rest
     in
-    final_sweep (if rest <> [] then ih_rounds rest None else [])
+    let rest = if rest <> [] then ih_rounds rest None else [] in
+    (* Once the deferring rounds stall, every group still pending is tried
+       with its hypothesis and no deferral, then the IH-free sweep. *)
+    let rest = if rest <> [] then ih_rounds ~defer:false rest None else [] in
+    final_sweep rest
 
 (* The IH-free gate: what every caller outside [Refine_check.check_module]
    (the inference probes) runs. *)
