@@ -22,3 +22,17 @@ CI passes only because it starts cold. Any other path the binary embeds (runtime
 locations) is exposed the same way. Fix: put the entry's realpath (`entry_real`) into the key,
 at least when the artifact embeds it, and add a test that compiles one source from two
 directories and checks the second binary's report path.
+
+## 2026-11-09: fixed
+
+Both source-level digests in `bin/main.ml` (the walk digest and `depend_digest`, which keys the
+next run and the stored artifact) now start with the entry path **as written on the command
+line**. That spelling, not the realpath, is what a build embeds: a runtime panic prints
+`-- RUNTIME -- p.march` for `march --compile p.march` and the absolute path for
+`march --compile /abs/p.march`, and a `--test` failure report does the same. So `/a/m.march`
+then `/b/m.march` no longer share an artifact, while two projects that both build `m.march`
+from their own directory embed the same text and still share one (B7.3's global-store hit is
+unchanged).
+
+Pinned by `test/test_cas_b7.ml` "the entry path as written is part of the source-level key"
+(red before the fix: B was a source-level hit and its panic named A's file).

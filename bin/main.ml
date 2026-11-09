@@ -3668,10 +3668,22 @@ let loadset_path ~store_root ~entry_real ~walked =
   Printf.sprintf "%s/loadsets/%s" store_root
     (Digest.to_hex (Digest.string (String.concat "\x00" (entry_real :: walked))))
 
-(* The depend-mode digest: entry bytes + stdlib digest + each loaded file's
-   path and bytes, in sorted order.  [None] if a listed file cannot be read. *)
-let depend_digest ~src ~stdlib_hash ~(listed : string list) : string option =
+(* The depend-mode digest: the entry path as written + its bytes + stdlib
+   digest + each loaded file's path and bytes, in sorted order.  [None] if a
+   listed file cannot be read.
+
+   The entry path is part of it, SPELLED AS GIVEN on the command line,
+   because that spelling is what a build embeds: a `--test` failure report
+   names the file, a runtime panic its location, a replayed diagnostic its
+   path.  Without it the same source compiled as `/a/m.march` and then as
+   `/b/m.march` was served the first binary, whose reports named /a
+   (specs/progress/2026-11-07-cas-key-omits-entry-path.md).  The spelling,
+   not the realpath: two projects that both build `m.march` from their own
+   directory embed the same text and still share an artifact (B7.3), while
+   `m.march` and `/abs/m.march` in one directory embed different text. *)
+let depend_digest ~entry_spelling ~src ~stdlib_hash ~(listed : string list) : string option =
   let buf = Buffer.create (64 * 1024) in
+  Buffer.add_string buf ("entry:" ^ entry_spelling ^ "\x00");
   Buffer.add_string buf src;
   Buffer.add_string buf stdlib_hash;
   let ok = List.for_all (fun f ->
@@ -3905,6 +3917,8 @@ let compile filename =
         List.filter (fun d -> d <> "") (String.split_on_char ':' lib_path) in
       let entry_real =
         (try Unix.realpath filename with Unix.Unix_error _ -> filename) in
+      (* The entry's path as written is an input too: see [depend_digest]. *)
+      Buffer.add_string buf ("\x00entry:" ^ filename ^ "\x00");
       let walked = Filename.dirname filename :: lib_dirs in
       let walk_hash () =
       List.iter (fun dir ->
@@ -3936,7 +3950,7 @@ let compile filename =
            List.filter (fun f -> f <> entry_real) (files_in walked)) in
         match valid_loadset ~path:ls_path ~entry_real ~src ~walked with
         | Some listed ->
-          (match depend_digest ~src ~stdlib_hash ~listed with
+          (match depend_digest ~entry_spelling:filename ~src ~stdlib_hash ~listed with
            | Some h -> (h, "depend", listed)
            | None -> walk ())
         | None -> walk ()
@@ -3977,7 +3991,7 @@ let compile filename =
       let register_depend_store (key_of : string -> string) store =
         depend_store := Some (fun ~user_files ~artifact ~diag ->
             let listed = canonical_listed ~entry_real user_files in
-            match depend_digest ~src ~stdlib_hash ~listed with
+            match depend_digest ~entry_spelling:filename ~src ~stdlib_hash ~listed with
             | None -> ()
             | Some dep_hash ->
               let dep_ch = key_of dep_hash in
