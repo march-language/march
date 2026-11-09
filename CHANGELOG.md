@@ -803,6 +803,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`ClusterAuth.verify` compares HMAC proofs in constant time, and `DataFrame.to_html` escapes
+  every special character.** `verify` used `==`, whose running time leaks how much of a forged
+  shared-secret proof was right; it now uses `Crypto.secure_compare`. `to_html`'s cell and header
+  escaping replaced only the FIRST `&`, `<`, `>` and `"`, so a cell like `<b>x</b><script>` reached
+  the page with a raw `<script>` (XSS); every occurrence is now escaped, and `'` too.
 - **`Tls.server_ctx` no longer leaks its ALPN buffer** when the context is freed.
 - **The event-loop HTTP server no longer drops pipelined requests** that arrive while a large
   response is still being written; they are served once the write finishes.
