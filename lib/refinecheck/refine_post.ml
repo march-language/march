@@ -2966,14 +2966,33 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
       List.exists (fun n -> List.mem n names || List.mem (short n) names) called
   in
   let names_of proved = List.concat_map (fun (k, _, _, _) -> [ k; short k ]) proved in
+  (* ── Callee first (2026-11-08) ───────────────────────────────────────────
+     In the IH-free rounds an item that calls a still-pending item (itself
+     included) is deferred: its callee's contract, or its own hypothesis, is
+     not there yet, so the query is all but hopeless, and a hopeless query
+     over quantified measure axioms runs to the solver's resource limit.
+     Six such attempts in `Set`'s walks doubled the time of every `--check`.
+     A deferred item is tried once its callees are proved (the [fresh] rule
+     below), in the IH rounds, which assume strictly more, or in the final
+     IH-free sweep, which tries every item still pending with no deferral:
+     nothing that proved before is lost, only the wasted attempts. *)
+  let calls_pending (todo : gate_item list) (_, _, (fd : A.fn_def), _) =
+    let names = names_of todo in
+    List.exists
+      (fun n -> List.mem n names || List.mem (short n) names)
+      (List.concat_map (fun (c : A.fn_clause) -> calls_of [] c.A.fc_body) fd.A.fn_clauses)
+  in
   (* Returns what is still unproved when no round makes progress. *)
-  let rec rounds (todo : gate_item list) (fresh : string list option) : gate_item list =
+  let rec rounds ?(defer = true) (todo : gate_item list) (fresh : string list option) : gate_item list =
     let proved, rest =
-      List.partition (fun item -> eligible fresh item && check item) todo
+      List.partition
+        (fun item -> eligible fresh item && ((not defer) || not (calls_pending todo item)) && check item)
+        todo
     in
-    if proved <> [] && rest <> [] then rounds rest (Some (names_of proved)) else rest
+    if proved <> [] && rest <> [] then rounds ~defer rest (Some (names_of proved)) else rest
   in
   let rest = rounds (List.rev !pending) None in
+  let final_sweep (todo : gate_item list) = if todo <> [] then ignore (rounds ~defer:false todo None) in
   (* ── Termination phase 3: the IH rounds (§4.2) ──────────────────────────
      Only after the IH-free fixpoint has stalled, so a contract that proves
      without the hypothesis is admitted exactly as before.  [ih] decides the
@@ -2984,7 +3003,7 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
      prove.  A group that fails is retried only when a contract it calls is
      proved later; an ordinary item is retried as before. *)
   match ih with
-  | None -> ()
+  | None -> final_sweep rest
   | Some ih ->
     (* Called even with nothing pending: the element-return gate and the
        walk read the [ih_spans] it fills. *)
@@ -3050,9 +3069,9 @@ let gate_unverified_posts_ih ~root ?(ih : (gate_item list -> ih_group list) opti
           todo
       in
       let progress = !admitted @ proved in
-      if progress <> [] && rest <> [] then ih_rounds rest (Some (names_of progress))
+      if progress <> [] && rest <> [] then ih_rounds rest (Some (names_of progress)) else rest
     in
-    if rest <> [] then ih_rounds rest None
+    final_sweep (if rest <> [] then ih_rounds rest None else [])
 
 (* The IH-free gate: what every caller outside [Refine_check.check_module]
    (the inference probes) runs. *)
