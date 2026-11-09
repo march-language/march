@@ -1,0 +1,12 @@
+exit: 1
+-- REFINEMENT --------------- errors/ghost_misuse_1.march
+
+`step` has ghost parameters, so it can only be called directly. [ghost_misuse]
+
+3 |   fn steps() do step end
+                    ^^^^
+
+    Call it directly; passing it as a value would need its ghost arguments at runtime.
+    run `march --explain ghost_misuse`
+
+

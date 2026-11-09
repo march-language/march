@@ -315,7 +315,7 @@ let rec fmt_ty = function
     let f (n, t) = Printf.sprintf "%s : %s" n.txt (fmt_ty t) in
     Printf.sprintf "{ %s }" (String.concat ", " (List.map f flds))
   | TyLinear (lin, t)        ->
-    (match lin with Unrestricted -> "" | Linear -> "linear " | Affine -> "affine ") ^ fmt_ty t
+    (match lin with Unrestricted | Ghost -> "" | Linear -> "linear " | Affine -> "affine ") ^ fmt_ty t
   | TyNat n                  -> string_of_int n
   | TyNatOp (op, a, b)       ->
     let s = match op with NatAdd -> "+" | NatMul -> "*" in
@@ -365,7 +365,7 @@ and fmt_pats ps = String.concat ", " (List.map fmt_pat ps)
 (* ------------------------------------------------------------------ *)
 
 let fmt_lin = function
-  | Unrestricted -> "" | Linear -> "linear " | Affine -> "affine "
+  | Unrestricted -> "" | Linear -> "linear " | Affine -> "affine " | Ghost -> "ghost "
 
 let fmt_param p =
   let l = fmt_lin p.param_lin in
@@ -1555,6 +1555,8 @@ and emit_decl ctx = function
 
 and emit_fn ctx fn =
   let kw  = match fn.fn_vis with Public -> "fn" | Private -> "pfn" in
+  (* `ghost fn` is written as a keyword, stored as the attribute "ghost". *)
+  let kw  = if List.mem "ghost" fn.fn_attrs then "ghost " ^ kw else kw in
   let ret = match fn.fn_ret_ty with
     | None   -> ""
     | Some t -> Printf.sprintf " : %s" (fmt_ty t)
@@ -1613,7 +1615,7 @@ and emit_fn ctx fn =
             | None -> a)
         in
         line ctx (Printf.sprintf "@[%s]" text))
-      fn.fn_attrs
+      (List.filter (fun a -> a <> "ghost") fn.fn_attrs)
   in
   match fn.fn_clauses with
   | [] -> ()

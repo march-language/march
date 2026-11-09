@@ -2598,8 +2598,9 @@ end                                                                             
 
 A user `@[measure]` may return a set, under the same structural gate as an
 `Int` measure. Its body uses the set vocabulary, which is bound for that body
-only; such a measure is logic, and calling it in expression position is an
-error:
+only and takes precedence over a function of the same name in scope, plus
+`elts` over a list field. Such a measure is logic, and calling it in
+expression position is an error:
 
 ```march
 type Expr = Var(Int) | Lam(Int, Expr) | App(Expr, Expr)
@@ -4879,11 +4880,11 @@ reported, never warned about. `cert=structural` holds for a cycle when:
   the argument;
 - a component name is trusted only if every binding of that name in the body is
   structural. `Cons(_, t)` of a *second* list reusing the outer `t` spoils it;
-- in a cycle of several functions, every member matches on a parameter of one type
-  **family**: the same type (`even`/`odd` on `Nat`), or types defined in terms of each
-  other (a `Tree` holding a `Forest` that holds `Tree`s). A tree recursing through a
-  `List(Tree)` of children is not certified yet, because `List` is not defined in terms of
-  `Tree`;
+- in a cycle of several functions, each member is measured on one of its parameters,
+  and every call in the cycle passes a component of the caller's parameter in the
+  callee's. The parameters may have different types: a `Tree` recursing through its
+  `List(Tree)` of children is certified, because a component has fewer constructors
+  than the value it came from, whatever its type;
 - no member names a member of its own cycle as a value (`apply(f, x)` inside `f`):
   the arguments of such a call are unknown;
 - no member calls a function value whose type mentions a **non-positive** type.
@@ -4902,7 +4903,7 @@ fn omega() : Int do w(Fix(w)) end    -- never returns
 `w` is listed with `cert=unproved:non-positive` although it is not recursive.
 `type T = T(Int -> Int)` is positive and blocks nothing.
 
-The reasons are `no-structural-arg`, `not-same-family`, `reference`, `non-positive` and
+The reasons are `no-structural-arg`, `reference`, `non-positive` and
 `unresolved` (a member calls a name the checker cannot resolve, above).
 `Int` recursion (`down(n - 1)`) is the job of a metric, below.
 

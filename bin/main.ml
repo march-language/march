@@ -906,14 +906,50 @@ let lemma_reserved n =
      @ List.map fst March_typecheck.Typecheck_builtins.builtin_interface_bindings)
     n
 
-let erase_lemmas_in ~(whole : March_ast.Ast.module_) (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
-  let env = March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved whole.March_ast.Ast.mod_decls in
-  { m with March_ast.Ast.mod_decls = March_desugar.Lemma_erase.erase_module_with env m.March_ast.Ast.mod_decls }
+(* Ghost code (lib/desugar/ghost.ml) is erased right after lemmas, by the
+   same name-resolution rule.  The typechecker has already reported a ghost
+   name that collides with another binding; a check seeded without the
+   stdlib cannot see one there, so the erasure refuses rather than leave a
+   ghost argument in the running program. *)
+let module_exports path =
+  Option.map
+    (fun (me : March_modules.Module_registry.module_exports) ->
+      List.filter_map
+        (fun (e : March_modules.Module_registry.export_entry) -> if e.ex_public then Some e.ex_name else None)
+        me.me_entries)
+    (March_modules.Module_registry.ensure_loaded path)
 
-let erase_lemmas (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+let erase_ghost ?errors ~top ~(whole : March_ast.Ast.decl list) (decls : March_ast.Ast.decl list) =
+  try March_desugar.Ghost.erase ~reserved:lemma_reserved ~exports:module_exports ~top ~whole decls
+  with March_desugar.Ghost.Not_erasable (sp, msg) -> (
+    match errors with
+    (* The typechecker already reported it, and the driver stops on that
+       before anything lowers. *)
+    | Some errors
+      when List.exists
+             (fun (d : March_errors.Errors.diagnostic) ->
+               let c = March_errors.Errors.Code.slug_of d.March_errors.Errors.code in
+               c = March_errors.Errors.Code.ghost_in_runtime || c = March_errors.Errors.Code.ghost_misuse)
+             errors.March_errors.Errors.diagnostics -> decls
+    (* Otherwise nothing downstream would stop a program whose ghost code
+       could not be removed, so stop here. *)
+    | _ ->
+      Printf.eprintf "%s:%d:%d: error: %s [%s]\n%!" sp.March_ast.Ast.file sp.March_ast.Ast.start_line
+        sp.March_ast.Ast.start_col msg March_errors.Errors.Code.ghost_misuse;
+      exit 1)
+
+let erase_lemmas_in ?errors ~(whole : March_ast.Ast.module_) (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  let env = March_desugar.Lemma_erase.env_of_decls ~reserved:lemma_reserved whole.March_ast.Ast.mod_decls in
+  let decls = March_desugar.Lemma_erase.erase_module_with env m.March_ast.Ast.mod_decls in
   { m with
     March_ast.Ast.mod_decls =
-      March_desugar.Lemma_erase.erase_module ~reserved:lemma_reserved m.March_ast.Ast.mod_decls }
+      erase_ghost ?errors ~top:whole.March_ast.Ast.mod_name.March_ast.Ast.txt ~whole:whole.March_ast.Ast.mod_decls decls }
+
+let erase_lemmas ?errors (m : March_ast.Ast.module_) : March_ast.Ast.module_ =
+  let decls = March_desugar.Lemma_erase.erase_module ~reserved:lemma_reserved m.March_ast.Ast.mod_decls in
+  { m with
+    March_ast.Ast.mod_decls =
+      erase_ghost ?errors ~top:m.March_ast.Ast.mod_name.March_ast.Ast.txt ~whole:m.March_ast.Ast.mod_decls decls }
 
 (* --refine-report-sites=all (reflection design §6.1): one line per
    obligation of any verdict, so a run can be compared site by site against a
@@ -4559,14 +4595,14 @@ let compile filename =
   stamp "typecheck";
   (* Lemma erasure (§4.5): after the refinement checker, before anything
      lowers, interprets or JIT-compiles the program. *)
-  let user_only_desugared = erase_lemmas_in ~whole:desugared user_only_desugared in
+  let user_only_desugared = erase_lemmas_in ~errors ~whole:desugared user_only_desugared in
   (* The shell's identity table hashes source regions that run from one
      declaration to the next, so it must see the declarations the node's
      build hashed (before erasure, see "The shell's identity table" above):
      erasure drops lemma declarations, which moves where the one before them
      (the stdlib's `impl Eq(List(a))`) ends. *)
   let shell_client_decls = desugared.March_ast.Ast.mod_decls in
-  let desugared = erase_lemmas desugared in
+  let desugared = erase_lemmas ~errors desugared in
   (* Allocation contracts (`cap no_alloc` modules and @[no_alloc] functions)
      are judged on lowered TIR.  --check lowers on demand for them (below);
      the interpreter and --jit never lower, so they give one

@@ -75,18 +75,19 @@ measure (`sorted_set_elts`) with one trusted comparator law (`compare_by`). Set 
 
 **Compiler blockers found by a probe (a user-space copy of `SEntry`).**
 
-1. **A measure cannot recurse through a second type.** The contents of a trie need `ne` over
+1. **(FIXED 2026-11-08) A measure cannot recurse through a second type.** The contents of a trie need `ne` over
    `SEntry(a)` and `ces` over its `List(SEntry(a))` children, each calling the other; both are
    rejected `invalid_measure` ("not structurally recursive"). This is the cross-type mutual
    recursion item of `2026-10-27-termination-structural-certificate-gaps`, applied to measures.
    The alternative, an inline children datatype in the runtime representation, still crosses
    two types and changes a hot data structure.
-2. **`elts` over a `List` is not callable inside a measure body** (`unbound_variable`), so a
+2. **(FIXED 2026-11-08) `elts` over a `List` is not callable inside a measure body** (`unbound_variable`), so a
    collision bucket's contents need a hand-written list measure or that builtin opened to
    measure bodies.
 3. `eq` is a closure parameter (`cmp_eq(cmp, a, b)`). The `SortedSet` precedent is one
    `@[assume]` law on the comparator wrapper; `cmp_eq` would get `{Bool | _ == (a == b)}`.
 
-**Stages.** (A) mutual measures across a datatype and its `List`; (B) prove the
+**Stages.** (A) mutual measures across a datatype and its `List` (DONE 2026-11-08,
+blockers 1 and 2 fixed: `specs/progress/2026-11-08-nested-set-measures.md`); (B) prove the
 invariant-free contracts (`insert` first, the end-to-end gate); (C) bit laws and `WF`, then
 `contains`, `remove`, `size`; (D) Map, which is the same trie with values.

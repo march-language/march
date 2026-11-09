@@ -342,7 +342,7 @@ let rec pp_ty ?(parens = false) t =
          "{ " ^ String.concat ", " fs ^ " }")
     | TLin (Ast.Linear,        t) -> "linear " ^ pp_ty ~parens:true t
     | TLin (Ast.Affine,        t) -> "affine " ^ pp_ty ~parens:true t
-    | TLin (Ast.Unrestricted,  t) -> pp_ty t
+    | TLin ((Ast.Unrestricted | Ast.Ghost),  t) -> pp_ty t
     | TNat n                      -> string_of_int n
     | TNatOp (Ast.NatAdd, a, b)   ->
       Printf.sprintf "%s + %s" (pp_ty a) (pp_ty b)

@@ -4934,6 +4934,26 @@ let post_walk_ok = ref false
    or a hypothesis like `okz(g)` never reaches `okz(k)` and the induction
    hypothesis is withheld. *)
 let lemma_body : bool ref = ref false
+
+(* `ghost fn` names of the module being checked (lib/desugar/ghost.ml).  A
+   match arm whose scope holds a hypothesis about one gets the lemma body's
+   pattern links (§4.3): a ghost specification is about structure the
+   program never computes, and those links are what let the checker unfold
+   it at the matched constructor.  Gated, like the quantified case, so a
+   program without ghost code sends the solver exactly what it did before. *)
+let ghost_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let rec mentions_ghost_fn (e : A.expr) : bool =
+  match e with
+  | A.EApp (f, args, _) ->
+    (match f with
+     | A.EVar { A.txt; _ } -> Hashtbl.mem ghost_fn_names (March_desugar.Lemma_erase.last_segment txt)
+     | _ -> false)
+    || mentions_ghost_fn f || List.exists mentions_ghost_fn args
+  | A.ELam (_, b, _) | A.EAnnot (b, _, _) | A.ERefineMsg (b, _, _) | A.EField (b, _, _) -> mentions_ghost_fn b
+  | A.EIf (c, a, b, _) -> mentions_ghost_fn c || mentions_ghost_fn a || mentions_ghost_fn b
+  | A.ETuple (es, _) | A.ECon (_, es, _) -> List.exists mentions_ghost_fn es
+  | _ -> false
 let proof_depth = ref 0
 let proof_assertions : (A.span, bool) Hashtbl.t = Hashtbl.create 16
 let proof_results : (A.span, (A.expr * bool) list) Hashtbl.t = Hashtbl.create 16
@@ -6051,7 +6071,9 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
               (* Inside a lemma (§4.3): each component bound by name, as a
                  selector of the scrutinee, for stage 2. *)
               match !lemma_walk <> None || !lemma_body
-                    || List.exists (fun (_, (_, q, _)) -> March_ast.Bounded_pred.contains q) sc,
+                    || List.exists (fun (_, (_, q, _)) -> March_ast.Bounded_pred.contains q) sc
+                    || (Hashtbl.length ghost_fn_names > 0
+                        && List.exists (fun (_, (_, q, _)) -> mentions_ghost_fn q) sc),
                     resolve_tested_ctor subj_adt ctor.A.txt, br.A.branch_pat with
               | true, Some (_, k), A.PatCon (_, ps) ->
                 List.concat
@@ -8830,7 +8852,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "assume"; "decreases"; "diverges"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
+  [ "assume"; "decreases"; "diverges"; "ghost"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)
@@ -9203,7 +9225,7 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
              function, an interface method, a builtin or an extern, so it may diverge"
             (String.concat ", " names)
         | "no-int-parameter" -> "a function in its recursive cycle has no Int parameter to measure"
-        | "no-structural-arg" | "not-same-family" ->
+        | "no-structural-arg" ->
           "no argument shrinks structurally at every recursive call, and no Int metric was checked"
         | "shadowed" ->
           "a recursive call sits under a binding that reuses a parameter the metric names, so \
@@ -9651,6 +9673,16 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let m = Hcr_baseline.strengthen m in
   let m = Refine_anon.lift m in
   call_type_map := type_map;
+  Hashtbl.reset ghost_fn_names;
+  let rec note_ghost (ds : A.decl list) =
+    List.iter
+      (function
+        | A.DFn (fd, _) when March_desugar.Ghost.is_ghost_fn fd -> Hashtbl.replace ghost_fn_names fd.A.fn_name.A.txt ()
+        | A.DMod (_, _, inner, _) -> note_ghost inner
+        | _ -> ())
+      ds
+  in
+  note_ghost m.A.mod_decls;
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
      checking a later module that reuses a qualified type name with a different
@@ -9972,7 +10004,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     List.concat_map
       (function
         | A.DFn (fd, _)
-          when List.exists (fun a -> a = "reflect" || String.starts_with ~prefix:"reflect:" a) fd.A.fn_attrs
+          when List.exists (fun a -> a = "reflect" || a = "ghost" || String.starts_with ~prefix:"reflect:" a) fd.A.fn_attrs
                && not (List.mem "lemma" fd.A.fn_attrs) -> [ fd ]
         | A.DMod (_, _, inner, _) -> reflect_fns inner
         | _ -> [])
@@ -9981,7 +10013,10 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   List.iter
     (fun (fd : A.fn_def) ->
       let name = fd.A.fn_name.A.txt and span = fd.A.fn_name.A.span in
-      let bad why = Err.error ~code:Err.Code.invalid_reflect errctx ~span (Printf.sprintf "`@[reflect]` on `%s`: %s" name why) in
+      (* A ghost function is never compiled, so it exists only as its
+         reflection: the same assertion, phrased for the keyword. *)
+      let what = if List.mem "ghost" fd.A.fn_attrs then "ghost function" else "`@[reflect]` on" in
+      let bad why = Err.error ~code:Err.Code.invalid_reflect errctx ~span (Printf.sprintf "%s `%s`: %s" what name why) in
       let payloads =
         List.filter_map
           (fun a -> if String.starts_with ~prefix:"reflect:" a then Some (String.sub a 8 (String.length a - 8)) else None)

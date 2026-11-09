@@ -3056,6 +3056,65 @@ let measure_arms (param : string) (body : A.expr) : (string * string list * A.ex
    structurally decreasing, hence total: axiomatising it is sound.  `len` and
    non-axiomatised measures are not [allowed], so an arm calling one stays
    untranslatable (symbolic fallback).  None => untranslatable. *)
+let measure_instance_name (m : string) (adt : string) (args : Smt.sort list) : string =
+  m ^ "$" ^ Smt.set_elem_tag (Smt.SData (adt, args))
+
+(* ── Built-in list measures over list STRUCTURE (plan step 2.1) ─────────────
+   Call-site checking treats `len(xs)`/`elts(xs)` as per-variable constants
+   (`len$xs`, `elts$xs`) and folds literal lists; nothing there walks list
+   cells.  A proof by induction over a list must, so the Tier 2 check reflects
+   `len`/`elts` of a list TERM to these two internal measures.  [resolve_sorts]
+   types them and renames each to its list instance (`$len$M_List$Int`), and
+   [query_instance_preamble] declares every instance with its recursion
+   axioms.  The `$` keeps both names out of the March namespace and apart from
+   the `len$x` constants. *)
+let list_len_measure = "$len"
+let list_elts_measure = "$elts"
+let list_nth_measure = "$nth"
+let is_list_structure_measure (m : string) : bool = m = list_len_measure || m = list_elts_measure || m = list_nth_measure
+let list_adt : string = adt_sort_name "List"
+
+(* The declarations and axioms of list measure [m] at list instance [args]. *)
+let list_measure_text (name : string) (m : string) (args : Smt.sort list) : string =
+  let lst = Smt.string_of_sort (Smt.SData (list_adt, args)) in
+  let elem =
+    Smt.string_of_sort (Smt.render_elem_sort (match args with e :: _ -> e | [] -> Smt.sdata "Elem"))
+  in
+  let nil = Printf.sprintf "(as Nil %s)" lst and cons = Printf.sprintf "((as Cons %s) h t)" lst in
+  let recursion rhs =
+    Printf.sprintf "(assert (forall ((h %s) (t %s)) (! (= (%s %s) %s) :pattern ((%s %s)))))\n"
+      elem lst name cons rhs name cons
+  in
+  if m = list_nth_measure then
+    Printf.sprintf "(declare-fun %s (%s Int) %s)\n" name lst elem
+    ^ Printf.sprintf
+        "(assert (forall ((h %s) (t %s) (i Int)) (! (=> (>= i 0) (= (%s %s i) (ite (= i 0) h (%s t (- i 1))))) :pattern ((%s %s i)))))\n"
+        elem lst name cons name name cons
+  else if m = list_len_measure then
+    Printf.sprintf "(declare-fun %s (%s) Int)\n" name lst
+    ^ Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n" lst name name
+    ^ Printf.sprintf "(assert (= (%s %s) 0))\n" name nil
+    ^ recursion (Printf.sprintf "(+ 1 (%s t))" name)
+  else
+    let set = Printf.sprintf "(Array %s Bool)" elem in
+    Printf.sprintf "(declare-fun %s (%s) %s)\n" name lst set
+    ^ Printf.sprintf "(assert (= (%s %s) ((as const %s) false)))\n" name nil set
+    ^ recursion (Printf.sprintf "(store (%s t) h true)" name)
+
+(* The list instances of [list_elts_measure] arms applied (instance symbol,
+   list arguments): the caller declares each with its axioms. *)
+let arm_list_requests : (string * Smt.sort list) list ref = ref []
+
+let is_list_elts_instance (m : string) : bool =
+  String.starts_with ~prefix:(list_elts_measure ^ "$") m
+
+(* [list_measure_text] split into its `declare-fun` and its axioms. *)
+let list_elts_decl_and_axioms (iname : string) (args : Smt.sort list) : string * string =
+  let text = list_measure_text iname list_elts_measure args in
+  match String.index_opt text '\n' with
+  | Some i -> (String.sub text 0 (i + 1), String.sub text (i + 1) (String.length text - i - 1))
+  | None -> (text, "")
+
 let rec smt_of_axiom_body ~self ~allowed (bound : string list) (e : A.expr) : Smt.term option =
   let r = smt_of_axiom_body ~self ~allowed bound in
   match e with
@@ -3070,6 +3129,10 @@ let rec smt_of_axiom_body ~self ~allowed (bound : string list) (e : A.expr) : Sm
     (match r a, r b with Some x, Some y -> Some (Smt.Sub (x, y)) | _ -> None)
   | A.EApp (A.EVar { A.txt = "*"; _ }, [ A.ELit (A.LitInt k, _); b ], _) ->
     Option.map (fun y -> Smt.MulLit (k, y)) (r b)
+  (* A list field's elements (a HAMT collision bucket): the built-in list
+     measure, renamed to the field's list instance by [arm_axiom]. *)
+  | A.EApp (A.EVar { A.txt = "elts"; _ }, [ A.EVar { A.txt = v; _ } ], _) when List.mem v bound ->
+    Some (Smt.App (list_elts_measure, [ Smt.Const v ]))
   (* The set vocabulary, for a set-valued measure body (design §4.4).  A
      bound payload variable may be an ELEMENT (`singleton(x)`); element sorts
      are pinned to the measure's declared sort by [arm_axiom]. *)
@@ -3292,6 +3355,10 @@ let rec axiom_body_sort ?(elem_of : string -> Smt.sort option = fun m -> Hashtbl
   | Smt.Const v -> List.assoc_opt v env
   | Smt.Add (a, b) | Smt.Sub (a, b) -> int2 a b
   | Smt.MulLit (_, a) -> if go a = Some Smt.SInt then Some Smt.SInt else None
+  | Smt.App (m, [ Smt.Const v ]) when is_list_elts_instance m -> (
+    match List.assoc_opt v env with
+    | Some (Smt.SData (_, [ e ])) -> Some (Smt.SSet e)
+    | _ -> None)
   | Smt.App (m, _) ->
     (* An instance symbol `m$…` has its measure's result sort.  [elem_of]
        lets the caller answer for the SELF measure at the instance it is
@@ -3330,7 +3397,7 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
        NOT be one (and vice versa), or the axiom is ill-sorted. *)
     let is_set = function
       | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetUnion _ | Smt.SetInter _ | Smt.SetDiff _ -> true
-      | Smt.App (m, _) -> Hashtbl.mem set_measure_elem m
+      | Smt.App (m, _) -> m = list_elts_measure || Hashtbl.mem set_measure_elem m
       | _ -> false
     in
     if is_set bsmt <> Hashtbl.mem set_measure_elem name then None
@@ -3363,6 +3430,13 @@ let arm_axiom ~allowed ?(args : Smt.sort list option) ?(self_name : string optio
     let env = if List.length vars = List.length sorts then List.combine vars sorts else [] in
     let rec rename (t : Smt.term) : Smt.term =
       match t with
+      | Smt.App (m, [ Smt.Const v ]) when m = list_elts_measure -> (
+        match List.assoc_opt v env with
+        | Some (Smt.SData (adt, a)) when adt = list_adt ->
+          let iname = measure_instance_name list_elts_measure list_adt a in
+          arm_list_requests := (iname, a) :: !arm_list_requests;
+          Smt.App (iname, [ Smt.Const v ])
+        | _ -> t)
       | Smt.App (m, [ Smt.Const v ]) when (m = name || allowed m) && List.mem_assoc v env ->
         let decl = try Hashtbl.find measure_decl_args m with Not_found -> [] in
         (match List.assoc v env with
@@ -3489,8 +3563,17 @@ let instance_measure_text ?(skip : string list = []) ?(axiom_sink : (string -> s
         let arms = try Hashtbl.find axiom_measure_arms m with Not_found -> [] in
         let allowed x = Hashtbl.mem axiom_measures x in
         arm_instance_requests := [];
+        arm_list_requests := [];
         let translated = List.map (fun arm -> arm_axiom ~allowed ~args ~self_name:iname m arm) arms in
         let further = !arm_instance_requests in
+        List.iter
+          (fun (lname, largs) ->
+            if not (Hashtbl.mem done_ lname) then begin
+              Hashtbl.replace done_ lname ();
+              arg_sorts := Smt.SData (list_adt, largs) :: !arg_sorts;
+              Buffer.add_string decls (list_measure_text lname list_elts_measure largs)
+            end)
+          (List.sort_uniq compare !arm_list_requests);
         if arms <> [] && List.for_all Option.is_some translated then begin
           let emit text =
             match axiom_sink with Some sink -> sink iname text | None -> Buffer.add_string axioms text
@@ -3806,6 +3889,7 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
       axiomatized;
     (* … then the recursion-equation axioms. *)
     arm_instance_requests := [];
+    arm_list_requests := [];
     List.iter
       (fun (name, _, arms) ->
         List.iter
@@ -3819,7 +3903,18 @@ let build_measure_preamble (mdefs : (string * A.fn_def) list) : unit =
        needs that instance declared before any axiom mentions it. *)
     let requested = !arm_instance_requests in
     let text, names, instance_sorts = instance_measure_text ~axiom_sink:add_measure_axiom requested in
-    global_instance_names := names;
+    (* The list instances an arm's `elts(field)` names (a HAMT collision
+       bucket), declared here with the measures; their quantified axioms are
+       filed by symbol like every other measure's. *)
+    let lists = List.sort_uniq compare !arm_list_requests in
+    List.iter
+      (fun (iname, args) ->
+        let d, ax = list_elts_decl_and_axioms iname args in
+        Buffer.add_string buf d;
+        add_measure_axiom iname ax)
+      lists;
+    global_instance_names := names @ List.map fst lists;
+    let instance_sorts = instance_sorts @ List.map (fun (_, a) -> Smt.SData (list_adt, a)) lists in
     Buffer.add_string buf text;
     let covered = adt_closure (List.map (fun (_, adt, _) -> adt) all_axiomatized) in
     (* The instances measures are declared at, beyond the `Elem` ones. *)
@@ -3912,51 +4007,6 @@ type isort =
 (* An axiom-measure application resolved at a non-`Elem` instance, renamed in
    the rewritten query; the caller attaches that instance's declarations. *)
 type measure_instance = { mi_name : string; mi_measure : string; mi_adt : string; mi_args : Smt.sort list }
-
-let measure_instance_name (m : string) (adt : string) (args : Smt.sort list) : string =
-  m ^ "$" ^ Smt.set_elem_tag (Smt.SData (adt, args))
-
-(* ── Built-in list measures over list STRUCTURE (plan step 2.1) ─────────────
-   Call-site checking treats `len(xs)`/`elts(xs)` as per-variable constants
-   (`len$xs`, `elts$xs`) and folds literal lists; nothing there walks list
-   cells.  A proof by induction over a list must, so the Tier 2 check reflects
-   `len`/`elts` of a list TERM to these two internal measures.  [resolve_sorts]
-   types them and renames each to its list instance (`$len$M_List$Int`), and
-   [query_instance_preamble] declares every instance with its recursion
-   axioms.  The `$` keeps both names out of the March namespace and apart from
-   the `len$x` constants. *)
-let list_len_measure = "$len"
-let list_elts_measure = "$elts"
-let list_nth_measure = "$nth"
-let is_list_structure_measure (m : string) : bool = m = list_len_measure || m = list_elts_measure || m = list_nth_measure
-let list_adt : string = adt_sort_name "List"
-
-(* The declarations and axioms of list measure [m] at list instance [args]. *)
-let list_measure_text (name : string) (m : string) (args : Smt.sort list) : string =
-  let lst = Smt.string_of_sort (Smt.SData (list_adt, args)) in
-  let elem =
-    Smt.string_of_sort (Smt.render_elem_sort (match args with e :: _ -> e | [] -> Smt.sdata "Elem"))
-  in
-  let nil = Printf.sprintf "(as Nil %s)" lst and cons = Printf.sprintf "((as Cons %s) h t)" lst in
-  let recursion rhs =
-    Printf.sprintf "(assert (forall ((h %s) (t %s)) (! (= (%s %s) %s) :pattern ((%s %s)))))\n"
-      elem lst name cons rhs name cons
-  in
-  if m = list_nth_measure then
-    Printf.sprintf "(declare-fun %s (%s Int) %s)\n" name lst elem
-    ^ Printf.sprintf
-        "(assert (forall ((h %s) (t %s) (i Int)) (! (=> (>= i 0) (= (%s %s i) (ite (= i 0) h (%s t (- i 1))))) :pattern ((%s %s i)))))\n"
-        elem lst name cons name name cons
-  else if m = list_len_measure then
-    Printf.sprintf "(declare-fun %s (%s) Int)\n" name lst
-    ^ Printf.sprintf "(assert (forall ((x %s)) (! (>= (%s x) 0) :pattern ((%s x)))))\n" lst name name
-    ^ Printf.sprintf "(assert (= (%s %s) 0))\n" name nil
-    ^ recursion (Printf.sprintf "(+ 1 (%s t))" name)
-  else
-    let set = Printf.sprintf "(Array %s Bool)" elem in
-    Printf.sprintf "(declare-fun %s (%s) %s)\n" name lst set
-    ^ Printf.sprintf "(assert (= (%s %s) ((as const %s) false)))\n" name nil set
-    ^ recursion (Printf.sprintf "(store (%s t) h true)" name)
 
 let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
     (assumptions : Smt.term list)
@@ -4445,6 +4495,10 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
   in
   (* The built-in list measures need no measure preamble, so they are declared
      whether or not [measures] is set. *)
+  let list_mis =
+    if measures then List.filter (fun mi -> not (List.mem mi.mi_name !global_instance_names)) list_mis
+    else list_mis
+  in
   let ltext =
     String.concat "" (List.map (fun mi -> list_measure_text mi.mi_name mi.mi_measure mi.mi_args) list_mis)
   in
