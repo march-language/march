@@ -13,6 +13,9 @@ type pattern = {
   host : string;  (** normalized; for a wildcard, the suffix after [*.] *)
   wildcard : bool;  (** [*.suffix]: any name ending in [.suffix], not the suffix itself *)
   port : int option;  (** [None]: any port *)
+  path : string list option;
+      (** a path prefix as segments ([/v1/weather/] is [["v1"; "weather"]]);
+          [None]: any path *)
 }
 
 type decl = {
@@ -56,8 +59,32 @@ val permits_method : decl list -> host:string -> port:int -> meth:string -> bool
     by listing it or by listing no methods. [[]] is unscoped (true). *)
 
 val permits_raw : decl list -> host:string -> port:int -> bool
-(** A raw connection shows no method, so it needs a declaration covering the
-    destination with no [methods(...)]. *)
+(** A raw connection shows no method and no path, so it needs a declaration
+    covering the destination with no [methods(...)] and no path. *)
+
+val path_ok : string -> bool
+(** A request path the guard will judge at all: no [.] or [..] segment, no
+    [//], no [\\], no percent-encoded [.], [/] or [\\]. Refused, not
+    normalized. The query and fragment are ignored. *)
+
+val path_within : prefix:string list -> string -> bool
+(** Segment-wise: [/v1/weather/] admits [/v1/weather] and [/v1/weather/x], not
+    [/v1/weatherman]. Query and fragment ignored. *)
+
+val permits_request :
+  decl list -> host:string -> port:int -> meth:string option -> path:string option -> bool
+(** The full check. [meth = None]: the method is not known (not checked here).
+    [path = None]: the path is not known, which a path-scoped pattern does not
+    admit (use {!permits_host_ignoring_path} where the run-time guard will
+    check the path). [[]] is unscoped (true). *)
+
+val permits_host_ignoring_path :
+  decl list -> host:string -> port:int -> meth:string option -> bool
+
+val url_path_of_literal : prefix:bool -> string -> string option
+(** The path of a literal URL ([~prefix:false], query stripped, [/] when
+    absent), or the path part of a literal prefix up to and including its
+    last [/] ([~prefix:true]). *)
 
 val forbids_redirects : decl list -> host:string -> port:int -> bool
 (** Some declaration with [no_redirects] covers this destination. *)
