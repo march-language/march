@@ -841,6 +841,10 @@ git log is authoritative for exact commits.
 - **`not p(n)` negates.** `not` followed directly by an operand parsed as two statements, a
   discarded `not` and the operand, so `else not p(n) end` returned `p(n)` un-negated. `not x` is now
   the prefix `!x`; `not(x)` is unchanged.
+- **The build cache no longer serves a binary built from another path.** Compiling the same
+  source as `/a/m.march` and then `/b/m.march` reused the first binary, whose panic locations
+  and `--test` failure reports named `/a/m.march`. The entry path as written is now part of the
+  cache key.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
