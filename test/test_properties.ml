@@ -54,7 +54,7 @@ let stdlib_file_list = [
   "map.march"; "math.march"; "string.march"; "iolist.march"; "html.march";
   "sigil.march"; "http.march"; "http_transport.march"; "http_client.march";
   "seq.march"; "path.march"; "file.march"; "dir.march"; "sort.march";
-  "csv.march"; "websocket.march"; "http_server.march"; "iterable.march";
+  "csv.march"; "websocket.march"; "http_server.march"; "http_acme.march"; "iterable.march";
   "set.march"; "hash_map.march"; "array.march"; "bigint.march"; "decimal.march";
   "duration.march"; "bytes.march"; "msgpack.march"; "toml.march"; "xml.march";
   "yaml.march"; "socket.march"; "dns.march"; "process.march"; "io.march";

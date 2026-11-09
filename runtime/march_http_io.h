@@ -48,6 +48,8 @@ typedef enum {
 /* Maximum pipelined requests parsed from a single buffer slice. */
 #define EVLOOP_PIPELINE_BATCH 32
 
+typedef struct march_tls_session march_tls_session_t;   /* march_tls_session.h */
+
 typedef struct conn_state conn_state_t;
 struct conn_state {
     int           fd;
@@ -84,6 +86,33 @@ struct conn_state {
     void         *pending_release[EVLOOP_PIPELINE_BATCH];
     int           pending_release_n;
 
+    /* ── Deadline (march_http_evloop.c) ──────────────────────────────── */
+    /* Each connection is in exactly one timed phase (TLS handshake, idle,
+     * headers, body, write) or none (an upgraded WebSocket). deadline_ms is
+     * when that phase gives up; heap_pos is the connection's 1-based slot
+     * in its thread's deadline heap, 0 when it is not in it (so a zeroed
+     * conn_state_t is correctly "not timed"). */
+    int64_t       deadline_ms;
+    int           timed_phase;
+    int           heap_pos;
+
+    /* ── TLS and listener (march_http_evloop.c) ─────────────────────── */
+    /* tls is NULL for a plain connection, which then never touches the
+     * fields below it. For a TLS connection, rbuf holds DECRYPTED bytes;
+     * response plaintext is encrypted into the session and its ciphertext
+     * collected in cout, which this connection owns until it is sent. */
+    march_tls_session_t *tls;
+    char         *cout;
+    size_t        cout_len, cout_pos, cout_cap;
+    void         *pipeline;              /* the accepting listener's pipeline */
+
+    /* A WebSocket upgrade waiting for this connection's earlier responses
+     * to drain before the fd goes to its handler thread (TLS only). */
+    int           ws_pending;
+    void         *ws_closure;            /* one reference, for the handler call */
+    char         *ws_key;                /* Sec-WebSocket-Key, malloc'd copy */
+    size_t        ws_key_len;
+
     /* ── Free-list link ─────────────────────────────────────────────── */
     conn_state_t *next_free;
 };
@@ -112,6 +141,20 @@ io_result_t march_recv_nonblocking(conn_state_t *c);
  *   IO_ERROR    — fatal write error */
 io_result_t march_send_nonblocking(conn_state_t *c);
 
+/* ── TLS edges ────────────────────────────────────────────────────────── */
+
+/* Encrypt the plaintext in iov[0..n) into c->tls; 0 ok, -1 on a TLS error.
+ * The bytes are copied: the caller may release them immediately. */
+int march_tls_write_iov(conn_state_t *c, const struct iovec *iov, int n);
+
+/* Collect the session's pending ciphertext into c->cout and send what the
+ * socket takes. IO_COMPLETE when nothing is left, IO_PARTIAL on EAGAIN,
+ * IO_ERROR on a send error. *sent (may be NULL) gets the bytes sent. */
+io_result_t march_tls_flush(conn_state_t *c, size_t *sent);
+
+/* Release c->cout (on close or detach). */
+void march_tls_conn_free_out(conn_state_t *c);
+
 /* ── Connection state pool (per-thread) ──────────────────────────────── */
 
 /* Allocate a conn_state_t from the calling thread's free-list, or malloc
@@ -123,6 +166,9 @@ conn_state_t *conn_state_alloc(void);
 void conn_state_free(conn_state_t *c);
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
+
+/* 1 if buf[0..len) contains CRLFCRLF, the end of a request's headers. */
+int march_http_has_header_end(const char *buf, size_t len);
 
 /* Set fd to O_NONBLOCK.  Returns 0 on success, -1 on error. */
 int march_set_nonblocking(int fd);
