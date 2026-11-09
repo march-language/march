@@ -1,7 +1,9 @@
 (* Host scopes on IO.NetConnect.  See host_scope.mli. *)
 
 type pattern = { host : string; wildcard : bool; port : int option }
-type decl = { patterns : pattern list; no_redirects : bool }
+type decl = { patterns : pattern list; no_redirects : bool; methods : string list option }
+
+let http_methods = [ "get"; "head"; "post"; "put"; "patch"; "delete"; "options" ]
 type authority = { a_host : string; a_port : int }
 
 let normalize_host (h : string) : string =
@@ -108,22 +110,64 @@ let pattern_to_string (p : pattern) : string =
   ^ p.host
   ^ match p.port with None -> "" | Some n -> ":" ^ string_of_int n
 
+let is_option_text (o : string) : bool =
+  let word w = w <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') w in
+  match String.index_opt o '=' with
+  | None -> word o
+  | Some i ->
+    word (String.sub o 0 i)
+    && List.for_all word (String.split_on_char ',' (String.sub o (i + 1) (String.length o - i - 1)))
+
+let split_options (s : string) : string * string list =
+  match String.split_on_char ';' s with
+  | scope :: (_ :: _ as opts) when List.for_all is_option_text opts -> (scope, opts)
+  | _ -> (s, [])
+
+let parse_methods (v : string) : (string list, string) result =
+  let ms = String.split_on_char ',' v in
+  if v = "" then Error "`methods(...)` needs at least one method"
+  else
+    match List.find_opt (fun m -> not (List.mem m http_methods)) ms with
+    | Some m ->
+      Error
+        (Printf.sprintf "`%s` is not an HTTP method a scope can name; use %s" m
+           (String.concat ", " (List.map (fun m -> "`" ^ m ^ "`") http_methods)))
+    | None -> Ok (List.sort_uniq compare ms)
+
 let parse_decl (scope : string option) : (decl, string) result =
   match scope with
-  | None -> Ok { patterns = []; no_redirects = false }
+  | None -> Ok { patterns = []; no_redirects = false; methods = None }
   | Some s -> (
-      let pattern_of p =
-        if p = "" then Ok [] else Result.map (fun x -> [ x ]) (parse_pattern p)
-      in
       match String.split_on_char ';' s with
-      | [ p ] ->
-        if p = "" then Error "a host scope cannot be empty"
-        else Result.map (fun ps -> { patterns = ps; no_redirects = false }) (pattern_of p)
-      | [ p; "no_redirects" ] ->
-        Result.map (fun ps -> { patterns = ps; no_redirects = true }) (pattern_of p)
-      | [ _; opt ] ->
-        Error (Printf.sprintf "unknown option `%s`: the only option is `no_redirects`" opt)
-      | _ -> Error "a host scope takes at most one option, `no_redirects`")
+      | [] -> Error "a host scope cannot be empty"
+      | p :: opts ->
+        if p = "" && opts = [] then Error "a host scope cannot be empty"
+        else
+          let pats =
+            if p = "" then Ok [] else Result.map (fun x -> [ x ]) (parse_pattern p)
+          in
+          let rec go d = function
+            | [] -> Ok d
+            | "no_redirects" :: rest ->
+              if d.no_redirects then Error "`no_redirects` is given twice"
+              else go { d with no_redirects = true } rest
+            | o :: rest
+              when String.length o >= 8 && String.sub o 0 8 = "methods=" -> (
+                if d.methods <> None then Error "`methods(...)` is given twice"
+                else
+                  match parse_methods (String.sub o 8 (String.length o - 8)) with
+                  | Ok ms -> go { d with methods = Some ms } rest
+                  | Error e -> Error e)
+            | o :: _ ->
+              Error
+                (Printf.sprintf
+                   "unknown option `%s`: the options are `no_redirects` and \
+                    `methods(...)`"
+                   o)
+          in
+          match pats with
+          | Error e -> Error e
+          | Ok patterns -> go { patterns; no_redirects = false; methods = None } opts)
 
 let matches (p : pattern) ~(host : string) ~(port : int) : bool =
   let h = normalize_host host in
@@ -141,6 +185,18 @@ let decl_covers (d : decl) ~host ~port =
 
 let permits (ds : decl list) ~(host : string) ~(port : int) : bool =
   ds = [] || List.exists (fun d -> decl_covers d ~host ~port) ds
+
+let permits_method (ds : decl list) ~(host : string) ~(port : int) ~(meth : string) :
+    bool =
+  ds = []
+  || List.exists
+       (fun d ->
+          decl_covers d ~host ~port
+          && match d.methods with None -> true | Some ms -> List.mem meth ms)
+       ds
+
+let permits_raw (ds : decl list) ~(host : string) ~(port : int) : bool =
+  ds = [] || List.exists (fun d -> d.methods = None && decl_covers d ~host ~port) ds
 
 let forbids_redirects (ds : decl list) ~(host : string) ~(port : int) : bool =
   List.exists (fun d -> d.no_redirects && decl_covers d ~host ~port) ds
@@ -190,7 +246,8 @@ let encode_spec (ds : decl list) : string =
     (List.map
        (fun d ->
           (if d.no_redirects then "!" else "")
-          ^ match d.patterns with [] -> "" | p :: _ -> pattern_to_string p)
+          ^ (match d.patterns with [] -> "" | p :: _ -> pattern_to_string p)
+          ^ match d.methods with None -> "" | Some ms -> "@" ^ String.concat "+" ms)
        ds)
 
 let decode_spec (s : string) : decl list =
@@ -200,9 +257,16 @@ let decode_spec (s : string) : decl list =
       (fun e ->
          let no_redirects = e <> "" && e.[0] = '!' in
          let body = if no_redirects then String.sub e 1 (String.length e - 1) else e in
-         if body = "" then { patterns = []; no_redirects }
+         let body, methods =
+           match String.index_opt body '@' with
+           | None -> (body, None)
+           | Some i ->
+             ( String.sub body 0 i,
+               Some (String.split_on_char '+' (String.sub body (i + 1) (String.length body - i - 1))) )
+         in
+         if body = "" then { patterns = []; no_redirects; methods }
          else
            match parse_pattern body with
-           | Ok p -> { patterns = [ p ]; no_redirects }
+           | Ok p -> { patterns = [ p ]; no_redirects; methods }
            | Error msg -> invalid_arg ("Host_scope.decode_spec: " ^ msg))
       (String.split_on_char ',' s)

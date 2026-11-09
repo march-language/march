@@ -280,8 +280,74 @@ let test_diagnostic_shape () =
     (fun want -> if not (contains out want) then Alcotest.failf "missing %S:\n%s" want out)
     [ "[cap_host_scope]"; "foo.com"; "Also in module `A`"; "cap_host_unproven" ]
 
+(* ── Method scopes (Task 8) ─────────────────────────────────────────── *)
+
+let client_call fn_and_args =
+  Printf.sprintf
+    {|match HttpClient.%s do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end|}
+    fn_and_args
+
+let simple_get_post url =
+  client_call (Printf.sprintf {|post(HttpClient.new_client(), %s, "b")|} url)
+
+let test_method_refused () =
+  rejects "POST from a GET-only module" ~code:"cap_host_scope" ~mentions:[ "POST" ]
+    (program
+       ~a_needs:{|needs IO.NetConnect("example.com", methods(get))|}
+       (fn_go (client_call {|post(HttpClient.new_client(), "https://example.com/x", p)|})))
+
+let test_method_allowed () =
+  accepts "POST from a module allowed get and post"
+    (program
+       ~a_needs:{|needs IO.NetConnect("example.com", methods(get, post))|}
+       (fn_go (client_call {|post(HttpClient.new_client(), "https://example.com/x", p)|})));
+  accepts "GET from a GET-only module"
+    (program
+       ~a_needs:{|needs IO.NetConnect("example.com", methods(get))|}
+       (fn_go (simple_get {|"https://example.com/" ++ p|})))
+
+let test_module_wide_methods () =
+  rejects "DELETE under module-wide methods(get)" ~code:"cap_host_scope" ~mentions:[ "DELETE" ]
+    (program ~a_needs:{|needs IO.NetConnect(methods(get))|}
+       (fn_go (client_call {|delete(HttpClient.new_client(), "https://anywhere.test/" ++ p)|})));
+  accepts "GET anywhere under module-wide methods(get)"
+    (program ~a_needs:{|needs IO.NetConnect(methods(get))|}
+       (fn_go (simple_get {|"https://anywhere.test/" ++ p|})))
+
+let test_raw_tcp_on_method_scoped_host () =
+  rejects "raw tcp_connect to a method-scoped host" ~code:"cap_host_unproven"
+    (program
+       ~a_needs:{|needs IO.NetConnect("example.com", methods(get))|}
+       (fn_go
+          {|match tcp_connect("example.com", 443) do
+        Ok(_) -> p
+        Err(_) -> "err"
+      end|}))
+
+let test_wrapper_method_checked () =
+  (* A wrapper in another module that reaches HttpClient is refused outright
+     (the redirect guard cannot follow a scope through another module yet),
+     so a POSTing wrapper cannot launder a GET-only module's request. *)
+  rejects "annotated wrapper that POSTs, from a GET-only module" ~code:"cap_host_unproven"
+    ~mentions:[ "C.send" ]
+    (program
+       ~a_needs:{|needs IO.NetConnect("example.com", methods(get))|}
+       ~extra:
+         (c_module
+            ("    @[net_dest(url)]\n    fn send(url : String) : String do\n      "
+            ^ simple_get_post "url" ^ "\n    end"))
+       (fn_go {|C.send("https://example.com/x")|}))
+
 let tests =
   [
+    Alcotest.test_case "method refused" `Slow test_method_refused;
+    Alcotest.test_case "method allowed" `Slow test_method_allowed;
+    Alcotest.test_case "module-wide methods" `Slow test_module_wide_methods;
+    Alcotest.test_case "raw tcp on a method-scoped host" `Slow test_raw_tcp_on_method_scoped_host;
+    Alcotest.test_case "wrapper method checked" `Slow test_wrapper_method_checked;
     Alcotest.test_case "rewrite targets the twin" `Slow test_rewrite_targets_twin;
     Alcotest.test_case "unscoped not rewritten" `Slow test_unscoped_not_rewritten;
     Alcotest.test_case "diagnostic shape" `Slow test_diagnostic_shape;

@@ -9224,17 +9224,12 @@ let rec check_decl env (d : Ast.decl) : env =
                      hint: write a host, a host and port, or `*.domain`, \
                      e.g. `needs IO.NetConnect(\"api.example.com\")`."
                     path cap reason))
-          else if (match String.rindex_opt path ';' with
-              | None -> false
-              | Some i ->
-                let opt = String.sub path (i + 1) (String.length path - i - 1) in
-                opt <> ""
-                && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') opt)
+          else if snd (March_caps.Host_scope.split_options path) <> []
           then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
-                 "`%s` takes no options; `no_redirects` applies only to \
-                  `IO.NetConnect`."
+                 "`%s` takes no options; `no_redirects` and `methods(...)` \
+                  apply only to `IO.NetConnect`."
                  cap)
           else if not (March_caps.Cap_scope.is_absolute path) then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span

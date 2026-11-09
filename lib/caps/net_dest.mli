@@ -32,3 +32,9 @@ val redirect_capable : string -> bool
 val net_dest_attr : string list -> string option
 (** The parameter named by a [@[net_dest(p)]] attribute in a function's
     [fn_attrs] (stored as ["net_dest:p"]). *)
+
+val method_of : string -> string option
+(** The fixed HTTP method (lowercase) of a URL entry point, for method
+    scopes: [HttpClient.post] is ["post"]. [None] when the method is decided
+    at run time ([HttpClient.with_connection]) or the name is not an entry
+    point; the run-time guard checks those. *)

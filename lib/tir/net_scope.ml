@@ -190,19 +190,26 @@ let fixpoint (infos : fn_info list) ~(is_defined : string -> bool)
 
 (* ── The check ────────────────────────────────────────────────────── *)
 
-type result = Fixed of H.authority list | Opaque of string
+(* How a request is made: an HTTP method the compiler can see, a raw
+   connection (no method at all), or an HTTP method decided at run time (the
+   guard in HttpClient checks it). *)
+type meth = MHttp of string | MRaw | MDynamic
+
+type dest_use = { auth : H.authority; meth : meth }
+
+type result = Fixed of dest_use list | Opaque of string
 
 let combine (rs : result list) : result =
   match List.find_opt (function Opaque _ -> true | Fixed _ -> false) rs with
   | Some o -> o
   | None -> Fixed (List.concat_map (function Fixed a -> a | Opaque _ -> []) rs)
 
-let url_evidence ~(callee : string) (v : value) : result =
+let url_evidence ?(meths = [ MDynamic ]) ~(callee : string) (v : value) : result =
   let opaque why = Opaque (Printf.sprintf "the URL passed to `%s` %s" callee why) in
   match v with
   | VLit s -> (
       match H.authority_of_url ~prefix:false s with
-      | Some a -> Fixed [ a ]
+      | Some a -> Fixed (List.map (fun meth -> { auth = a; meth }) meths)
       | None ->
         opaque
           (Printf.sprintf
@@ -212,7 +219,7 @@ let url_evidence ~(callee : string) (v : value) : result =
              s))
   | VPrefix s -> (
       match H.authority_of_url ~prefix:true s with
-      | Some a -> Fixed [ a ]
+      | Some a -> Fixed (List.map (fun meth -> { auth = a; meth }) meths)
       | None ->
         opaque
           (Printf.sprintf
@@ -225,7 +232,8 @@ let url_evidence ~(callee : string) (v : value) : result =
 
 let host_evidence ~(callee : string) (host : value) (port : value option) : result =
   match (host, port) with
-  | VLit h, Some (VInt p) -> Fixed [ { H.a_host = H.normalize_host h; a_port = p } ]
+  | VLit h, Some (VInt p) ->
+    Fixed [ { auth = { H.a_host = H.normalize_host h; a_port = p }; meth = MRaw } ]
   | VLit _, _ ->
     Opaque (Printf.sprintf "the port passed to `%s` is not a literal" callee)
   | _ -> Opaque (Printf.sprintf "the host passed to `%s` is not a literal" callee)
@@ -300,7 +308,9 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
       if not (Hashtbl.mem reaches c) then None
       else if see_through c then
         match annotation c with
-        | Some k -> if forwards k then None else Some (url_evidence ~callee:c (nth_value s.args k))
+        | Some k ->
+          if forwards k then None
+          else Some (url_evidence ~meths:(entry_meths c) ~callee:c (nth_value s.args k))
         | None ->
           Some
             (Opaque
@@ -320,7 +330,8 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
         match annotation c with
         | Some k ->
           let own =
-            if forwards k then Fixed [] else url_evidence ~callee:c (nth_value s.args k)
+            if forwards k then Fixed []
+            else url_evidence ~meths:(forwarded_meths c k) ~callee:c (nth_value s.args k)
           in
           Some (combine [ own; annotated_rest c k ])
         | None -> (
@@ -336,7 +347,9 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
                       c)))
     else
       match D.builtin_dest c with
-      | Some (D.Url k) -> if forwards k then None else Some (url_evidence ~callee:c (nth_value s.args k))
+      | Some (D.Url k) ->
+        if forwards k then None
+        else Some (url_evidence ~meths:(entry_meths c) ~callee:c (nth_value s.args k))
       | Some (D.Host (k, j)) ->
         if forwards k then None
         else Some (host_evidence ~callee:c (nth_value s.args k) (Option.map (nth_value s.args) j))
@@ -352,6 +365,37 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
           (Opaque
              (Printf.sprintf "`%s` takes an address in a form the compiler does not read" c))
       | Some (D.Inbound | D.Neutral) | None -> None
+  (* The method an entry point uses, as far as the compiler can see. *)
+  and entry_meths (c : string) : meth list =
+    match D.method_of c with Some m -> [ MHttp m ] | None -> [ MDynamic ]
+  (* The methods an annotated function uses on the URL it forwards: those of
+     the calls it forwards the parameter to. *)
+  and forwarded_meths (n : string) (k : int) : meth list =
+    let i = Hashtbl.find info_of n in
+    let ms =
+      List.concat_map
+        (fun s ->
+             List.concat
+               (List.mapi
+                  (fun j v ->
+                     match v with
+                     | VParam q when q = k ->
+                       if is_defined s.callee then
+                         (match annotation s.callee with
+                          | Some j' when j' = j ->
+                            if see_through s.callee then entry_meths s.callee
+                            else forwarded_meths s.callee j
+                          | _ -> [])
+                       else (
+                         match D.builtin_dest s.callee with
+                         | Some (D.Url j') when j' = j -> entry_meths s.callee
+                         | Some (D.Host (j', _)) when j' = j -> [ MRaw ]
+                         | _ -> [])
+                     | _ -> [])
+                  s.args))
+        i.sites
+    in
+    if ms = [] then [ MDynamic ] else List.sort_uniq compare ms
   (* What an annotated function reaches besides forwarding its parameter. *)
   and annotated_rest (n : string) (k : int) : result =
     let i = Hashtbl.find info_of n in
@@ -371,6 +415,17 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
             | ps -> List.map (fun p -> "`" ^ H.pattern_to_string p ^ "`") ps)
          ds)
   in
+  let allowed_methods ds (a : H.authority) =
+    let ms =
+      List.concat_map
+        (fun (d : H.decl) ->
+           if H.permits [ d ] ~host:a.a_host ~port:a.a_port then
+             match d.methods with Some ms -> ms | None -> H.http_methods
+           else [])
+        ds
+    in
+    String.concat ", " (List.map String.uppercase_ascii (List.sort_uniq compare ms))
+  in
   let subject n =
     let base = match String.rindex_opt n '.' with
       | Some i -> String.sub n (i + 1) (String.length n - i - 1)
@@ -389,9 +444,10 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
              (fun s ->
                 match site_result ~forwarding:None s with
                 | None -> ()
-                | Some (Fixed auths) ->
+                | Some (Fixed uses) ->
                   List.iter
-                    (fun (a : H.authority) ->
+                    (fun (u : dest_use) ->
+                       let a = u.auth in
                        if not (H.permits ds ~host:a.a_host ~port:a.a_port) then
                          add March_errors.Code.cap_host_scope o i.name
                            (Printf.sprintf
@@ -400,8 +456,29 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
                                hint: add `needs IO.NetConnect(\"%s\")` to module `%s`, \
                                or connect to a host it already names."
                               (subject i.name) a.a_host a.a_port o (pattern_list ds)
-                              a.a_host o))
-                    auths
+                              a.a_host o)
+                       else
+                         match u.meth with
+                         | MHttp m when not (H.permits_method ds ~host:a.a_host ~port:a.a_port ~meth:m) ->
+                           add March_errors.Code.cap_host_scope o i.name
+                             (Printf.sprintf
+                                "%s sends %s to `%s`, but module `%s` allows only %s \
+                                 there.\n\
+                                 hint: add `%s` to that host's `methods(...)` in module \
+                                 `%s`, or use a method it already allows."
+                                (subject i.name) (String.uppercase_ascii m) a.a_host o
+                                (allowed_methods ds a) m o)
+                         | MRaw when not (H.permits_raw ds ~host:a.a_host ~port:a.a_port) ->
+                           add March_errors.Code.cap_host_unproven o i.name
+                             (Printf.sprintf
+                                "%s opens a raw connection to `%s`, but module `%s` \
+                                 scopes that host by HTTP method, and a raw connection \
+                                 shows no method.\n\
+                                 hint: use HttpClient or HttpTransport, or declare the \
+                                 host without `methods(...)`."
+                                (subject i.name) a.a_host o)
+                         | _ -> ())
+                    uses
                 | Some (Opaque why) ->
                   add March_errors.Code.cap_host_unproven o i.name
                     (Printf.sprintf

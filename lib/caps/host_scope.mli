@@ -18,7 +18,13 @@ type pattern = {
 type decl = {
   patterns : pattern list;  (** [[]]: any host *)
   no_redirects : bool;
+  methods : string list option;
+      (** [None]: every method; else the allowed lowercase verbs, sorted *)
 }
+
+val http_methods : string list
+(** The verbs a [methods(...)] option may name: the standard ones of
+    [Http.Method] ([get], [head], [post], [put], [patch], [delete], [options]). *)
 
 val normalize_host : string -> string
 (** ASCII lowercase, one trailing [.] stripped. No DNS, no punycode. *)
@@ -30,6 +36,11 @@ val parse_pattern : string -> (pattern, string) result
 
 val pattern_to_string : pattern -> string
 
+val split_options : string -> string * string list
+(** Split a stored scope string into the scope and its options
+    (["a.com;methods=get;no_redirects"] -> [("a.com", ["methods=get"; "no_redirects"])]).
+    A string whose tail is not option-shaped is all scope. *)
+
 val parse_decl : string option -> (decl, string) result
 (** One [needs] declaration's scope. [None] is unscoped. *)
 
@@ -39,6 +50,14 @@ val matches : pattern -> host:string -> port:int -> bool
 val permits : decl list -> host:string -> port:int -> bool
 (** The declarations of one module for [IO.NetConnect]. [[]] means the module
     is not scoped (true); so does any declaration with no pattern. *)
+
+val permits_method : decl list -> host:string -> port:int -> meth:string -> bool
+(** Some declaration covers the destination and allows [meth] (lowercase),
+    by listing it or by listing no methods. [[]] is unscoped (true). *)
+
+val permits_raw : decl list -> host:string -> port:int -> bool
+(** A raw connection shows no method, so it needs a declaration covering the
+    destination with no [methods(...)]. *)
 
 val forbids_redirects : decl list -> host:string -> port:int -> bool
 (** Some declaration with [no_redirects] covers this destination. *)
@@ -58,7 +77,8 @@ val authority_of_url : prefix:bool -> string -> authority option
 val encode_spec : decl list -> string
 (** The run-time form the stdlib guard reads: [""] for no scoping, otherwise
     [,]-separated entries, each a pattern, with a leading [!] for
-    [no_redirects] ([!] alone: any host, no redirects). *)
+    [no_redirects] ([!] alone: any host, no redirects) and a trailing
+    [@get+head] for [methods(get, head)]. *)
 
 val decode_spec : string -> decl list
 (** Inverse of {!encode_spec}. Raises [Invalid_argument] on a malformed spec. *)

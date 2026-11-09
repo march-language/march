@@ -327,6 +327,37 @@ let test_matcher_agrees () =
          (string_of_bool want) line)
     matcher_corpus got
 
+let method_corpus =
+  [ ("api.com@get", "api.com", 443, "get"); ("api.com@get", "api.com", 443, "post");
+    ("api.com@get+head", "api.com", 443, "head"); ("api.com@get,api.com@post", "api.com", 443, "post");
+    ("api.com", "api.com", 443, "delete"); ("@get", "any.test", 443, "get");
+    ("@get", "any.test", 443, "put"); ("!api.com@post", "api.com", 443, "post");
+    ("other.com@get", "api.com", 443, "get"); ("", "api.com", 443, "patch") ]
+
+let test_method_matcher_agrees () =
+  let lines =
+    List.map
+      (fun (spec, host, port, m) ->
+         Printf.sprintf
+           "    println(if HttpClient.hc_scope_permits_method(%s, %s, %d, %s) do \"true\" else \"false\" end)"
+           (march_str spec) (march_str host) port (march_str m))
+      method_corpus
+  in
+  let src =
+    Printf.sprintf
+      "mod MDiff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      (String.concat "\n" lines)
+  in
+  let got = run_march src in
+  Alcotest.(check int) "one line per case" (List.length method_corpus) (List.length got);
+  List.iter2
+    (fun (spec, host, port, m) line ->
+       let want = H.permits_method (H.decode_spec spec) ~host ~port ~meth:m in
+       Alcotest.(check string)
+         (Printf.sprintf "%S admits %s %s:%d" spec m host port)
+         (string_of_bool want) line)
+    method_corpus got
+
 let url_corpus =
   [ "http://example.com/"; "https://example.com"; "https://example.com:8443/x";
     "https://Example.COM./x"; "http://203.0.113.7:8080/a?b=c"; "https://a-b.c-d.test/p" ]
@@ -434,12 +465,101 @@ let decl_tests =
       test_declared_net_scopes_per_module;
     Alcotest.test_case "format roundtrip" `Quick test_format_roundtrip;
     Alcotest.test_case "matcher agrees with the stdlib" `Slow test_matcher_agrees;
+    Alcotest.test_case "method matcher agrees with the stdlib" `Slow
+      test_method_matcher_agrees;
     Alcotest.test_case "URL parser agrees with Http.parse_url" `Slow
       test_url_parser_agrees;
   ]
 
+(* ── Method scopes (Task 8) ─────────────────────────────────────────── *)
+
+let test_methods_decl () =
+  (match H.parse_decl (Some "a.com;methods=get,head") with
+   | Ok d ->
+     Alcotest.(check (option (list string))) "methods" (Some [ "get"; "head" ]) d.methods;
+     Alcotest.(check bool) "no flag" false d.no_redirects
+   | Error e -> Alcotest.fail e);
+  (match H.parse_decl (Some "a.com;methods=post;no_redirects") with
+   | Ok d ->
+     Alcotest.(check (option (list string))) "methods" (Some [ "post" ]) d.methods;
+     Alcotest.(check bool) "flag" true d.no_redirects
+   | Error e -> Alcotest.fail e);
+  (match H.parse_decl (Some "a.com") with
+   | Ok d -> Alcotest.(check (option (list string))) "any method" None d.methods
+   | Error e -> Alcotest.fail e);
+  List.iter
+    (fun s ->
+       match H.parse_decl (Some s) with
+       | Ok _ -> Alcotest.failf "%S should be rejected" s
+       | Error _ -> ())
+    [ "a.com;methods=trace"; "a.com;methods=gett"; "a.com;methods=";
+      "a.com;methods=get;methods=post"; "a.com;no_redirects;no_redirects" ]
+
+let test_permits_method () =
+  let ds = decls [ "api.com;methods=get"; "api.com;methods=post"; "w.com" ] in
+  let p h m = H.permits_method ds ~host:h ~port:443 ~meth:m in
+  Alcotest.(check bool) "get" true (p "api.com" "get");
+  Alcotest.(check bool) "post (second declaration)" true (p "api.com" "post");
+  Alcotest.(check bool) "delete" false (p "api.com" "delete");
+  Alcotest.(check bool) "unlisted methods on w.com" true (p "w.com" "delete");
+  Alcotest.(check bool) "uncovered host" false (p "x.com" "get");
+  Alcotest.(check bool) "module-wide get only" false
+    (H.permits_method (decls [ ";methods=get" ]) ~host:"any.test" ~port:443 ~meth:"post");
+  Alcotest.(check bool) "unscoped module" true
+    (H.permits_method [] ~host:"any.test" ~port:443 ~meth:"post")
+
+let test_permits_raw () =
+  Alcotest.(check bool) "method-scoped host refuses raw" false
+    (H.permits_raw (decls [ "api.com;methods=get" ]) ~host:"api.com" ~port:443);
+  Alcotest.(check bool) "method-free declaration allows raw" true
+    (H.permits_raw (decls [ "api.com;methods=get"; "api.com" ]) ~host:"api.com" ~port:443)
+
+let test_spec_roundtrip_methods () =
+  List.iter
+    (fun l ->
+       let ds = decls l in
+       Alcotest.(check bool) (String.concat "|" l) true
+         (H.decode_spec (H.encode_spec ds) = ds))
+    [ [ "a.com;methods=get,head" ]; [ "a.com;methods=post;no_redirects"; ";methods=get" ] ]
+
+let test_methods_syntax () =
+  accepts "methods option" {|needs IO.NetConnect("api.example.com", methods(get, head))|};
+  accepts "methods then no_redirects"
+    {|needs IO.NetConnect("api.example.com", methods(post), no_redirects)|};
+  accepts "no_redirects then methods"
+    {|needs IO.NetConnect("api.example.com", no_redirects, methods(post))|};
+  accepts "module-wide methods" {|needs IO.NetConnect(methods(get))|};
+  rejects_with "unknown verb" ~expect:"trace" {|needs IO.NetConnect("a.com", methods(trace))|};
+  rejects_with "methods twice" ~expect:"twice"
+    {|needs IO.NetConnect("a.com", methods(get), methods(post))|};
+  rejects_with "methods on a filesystem cap" ~expect:"no options"
+    {|needs IO.FileRead("/etc", methods(get))|}
+
+let test_methods_format_roundtrip () =
+  let src =
+    "mod F do\n  needs IO.NetConnect(\"a.com\", methods(get, head), no_redirects), IO.NetConnect(methods(post))\nend\n"
+  in
+  let out = March_format.Format.format_source ~filename:"f.march" src in
+  List.iter
+    (fun want ->
+       match Str.search_forward (Str.regexp_string want) out 0 with
+       | _ -> ()
+       | exception Not_found -> Alcotest.failf "formatted output lacks %S:\n%s" want out)
+    [ {|IO.NetConnect("a.com", methods(get, head), no_redirects)|};
+      {|IO.NetConnect(methods(post))|} ]
+
+let method_tests =
+  [
+    Alcotest.test_case "methods syntax" `Quick test_methods_syntax;
+    Alcotest.test_case "methods format roundtrip" `Quick test_methods_format_roundtrip;
+    Alcotest.test_case "methods decl" `Quick test_methods_decl;
+    Alcotest.test_case "permits method" `Quick test_permits_method;
+    Alcotest.test_case "permits raw" `Quick test_permits_raw;
+    Alcotest.test_case "spec roundtrip with methods" `Quick test_spec_roundtrip_methods;
+  ]
+
 let tests =
-  decl_tests @ dest_tests @ [
+  method_tests @ decl_tests @ dest_tests @ [
     Alcotest.test_case "patterns rejected" `Quick test_parse_rejects;
     Alcotest.test_case "patterns accepted" `Quick test_parse_accepts;
     Alcotest.test_case "wildcard" `Quick test_wildcard;

@@ -56,3 +56,11 @@ let net_dest_attr (attrs : string list) : string option =
          Some (String.sub a n (String.length a - n))
        else None)
     attrs
+
+let method_of (name : string) : string option =
+  match name with
+  | "HttpTransport.simple_get" | "HttpClient.get" | "HttpClient.stream_get" -> Some "get"
+  | "HttpClient.post" -> Some "post"
+  | "HttpClient.put_request" -> Some "put"
+  | "HttpClient.delete" -> Some "delete"
+  | _ -> None

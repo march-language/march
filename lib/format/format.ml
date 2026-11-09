@@ -1423,16 +1423,31 @@ and emit_decl ctx = function
          match scope with
          | None -> path
          | Some sc ->
-           (* An option rides in the scope string as "<scope>;<option>"
-              (parser.mly, [scoped_cap_path]); print it back as written. *)
-           (match String.rindex_opt sc ';' with
-            | Some i
-              when let o = String.sub sc (i + 1) (String.length sc - i - 1) in
-                   o <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') o ->
-              let s = String.sub sc 0 i
-              and o = String.sub sc (i + 1) (String.length sc - i - 1) in
-              if s = "" then Printf.sprintf "%s(%s)" path o
-              else Printf.sprintf "%s(%s, %s)" path (quote_string s) o
+           (* Options ride in the scope string as "<scope>;<option>;..."
+              (parser.mly, [scoped_cap_path]; Host_scope.split_options is the
+              same split); print them back as written. *)
+           let word w = w <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') w in
+           let is_opt o =
+             match String.index_opt o '=' with
+             | None -> word o
+             | Some i ->
+               word (String.sub o 0 i)
+               && List.for_all word
+                    (String.split_on_char ',' (String.sub o (i + 1) (String.length o - i - 1)))
+           in
+           let show_opt o =
+             match String.index_opt o '=' with
+             | None -> o
+             | Some i ->
+               Printf.sprintf "%s(%s)" (String.sub o 0 i)
+                 (String.concat ", "
+                    (String.split_on_char ',' (String.sub o (i + 1) (String.length o - i - 1))))
+           in
+           (match String.split_on_char ';' sc with
+            | s :: (_ :: _ as opts) when List.for_all is_opt opts ->
+              let os = String.concat ", " (List.map show_opt opts) in
+              if s = "" then Printf.sprintf "%s(%s)" path os
+              else Printf.sprintf "%s(%s, %s)" path (quote_string s) os
             | _ -> Printf.sprintf "%s(%s)" path (quote_string sc))) caps in
     line ctx (Printf.sprintf "needs %s" (String.concat ", " cs))
 

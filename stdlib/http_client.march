@@ -29,6 +29,7 @@ mod HttpClient do
     | TooManyRedirects(Int)
     | OutOfScope(String)
     | RedirectRefused(String)
+    | MethodRefused(String)
 
   -- Step entry types: wrap a name + function
   type RequestStepEntry = RequestStepEntry(String, a)
@@ -473,15 +474,23 @@ mod HttpClient do
     end
   end
 
-  pfn hc_any_entry(entries, host, port, only_no_redirects) do
+  -- An entry is `[!]host[@get+head]`; `meth` "" means "any method will do".
+  pfn hc_any_entry(entries, host, port, only_no_redirects, meth) do
     match entries do
     Nil -> false
     Cons(e, rest) -> do
       let nr = string_starts_with(e, "!")
-      let body = if nr do string_slice(e, 1, string_byte_length(e) - 1) else e end
+      let e1 = if nr do string_slice(e, 1, string_byte_length(e) - 1) else e end
+      let (body, ms) = match string_index_of(e1, "@") do
+        None -> (e1, "")
+        Some(i) -> (string_slice(e1, 0, i),
+                    string_slice(e1, i + 1, string_byte_length(e1) - i - 1))
+        end
       let covers = body == "" || hc_pattern_matches(body, host, port)
-      if covers && (not(only_no_redirects) || nr) do true
-      else hc_any_entry(rest, host, port, only_no_redirects)
+      let method_ok =
+        meth == "" || ms == "" || List.member(string_split(ms, "+"), meth)
+      if covers && method_ok && (not(only_no_redirects) || nr) do true
+      else hc_any_entry(rest, host, port, only_no_redirects, meth)
       end
     end
     end
@@ -500,7 +509,55 @@ mod HttpClient do
   """
   fn hc_scope_permits(spec, host, port) do
     if spec == "" do true
-    else hc_any_entry(string_split(spec, ","), host, port, false)
+    else hc_any_entry(string_split(spec, ","), host, port, false, "")
+    end
+  end
+
+  doc """
+  Whether a host-scope string admits an HTTP `meth` (lowercase: `"get"`,
+  `"post"`, ...) to `host` on `port`: some entry covers the host and lists
+  the method, or lists none.
+
+  ## Examples
+
+      march> HttpClient.hc_scope_permits_method("api.com@get", "api.com", 443, "post")
+      false
+      march> HttpClient.hc_scope_permits_method("api.com", "api.com", 443, "post")
+      true
+  """
+  fn hc_scope_permits_method(spec, host, port, meth) do
+    if spec == "" do true
+    else hc_any_entry(string_split(spec, ","), host, port, false, meth)
+    end
+  end
+
+  pfn hc_method_lower(m) do
+    match m do
+    Get -> "get"
+    Post -> "post"
+    Put -> "put"
+    Patch -> "patch"
+    Delete -> "delete"
+    Head -> "head"
+    Options -> "options"
+    Trace -> "trace"
+    Connect -> "connect"
+    Other(x) -> string_to_lowercase(x)
+    end
+  end
+
+  pfn hc_method_upper(m) do
+    match m do
+    Get -> "GET"
+    Post -> "POST"
+    Put -> "PUT"
+    Patch -> "PATCH"
+    Delete -> "DELETE"
+    Head -> "HEAD"
+    Options -> "OPTIONS"
+    Trace -> "TRACE"
+    Connect -> "CONNECT"
+    Other(x) -> x
     end
   end
 
@@ -517,16 +574,17 @@ mod HttpClient do
   """
   fn hc_scope_forbids_redirects(spec, host, port) do
     if spec == "" do false
-    else hc_any_entry(string_split(spec, ","), host, port, true)
+    else hc_any_entry(string_split(spec, ","), host, port, true, "")
     end
   end
 
   pfn hc_req_port(req) do hc_effective_port(Http.scheme(req), Http.port(req)) end
 
   doc """
-  `Ok(())` when the scope admits the request's host and effective port,
-  else `Err(OutOfScope(host))`. Checked before every connection a scoped
-  call makes.
+  `Ok(())` when the scope admits the request's host, effective port and
+  method; else `Err(OutOfScope(host))`, or `Err(MethodRefused("POST host"))`
+  when only the method is refused. Checked before every request a scoped
+  call sends.
 
   ## Examples
 
@@ -534,9 +592,13 @@ mod HttpClient do
       Err(OutOfScope("foo.com"))
   """
   fn hc_check_request(spec, req) do
-    if hc_scope_permits(spec, Http.host(req), hc_req_port(req)) do Ok(())
-    else Err(OutOfScope(Http.host(req)))
-    end
+    let host = Http.host(req)
+    let port = hc_req_port(req)
+    let m = Http.method(req)
+    if not(hc_scope_permits(spec, host, port)) do Err(OutOfScope(host))
+    else if hc_scope_permits_method(spec, host, port, hc_method_lower(m)) do Ok(())
+    else Err(MethodRefused(hc_method_upper(m) ++ " " ++ host))
+    end end
   end
 
   doc """

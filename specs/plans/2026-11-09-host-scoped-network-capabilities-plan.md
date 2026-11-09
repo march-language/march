@@ -214,6 +214,15 @@ Rules (spec §4, implemented as written there):
 - [ ] **Step 6:** `march --compile --opt 2 bench/list_ops.march -o /tmp/hs_list_ops && /tmp/hs_list_ops` runs; compile time of `bench/list_ops.march` within noise of `main` (the pass is linear).
 - [ ] **Step 7: Commit** `feat(caps): wire host-scope check and redirect-guard rewrite into --compile`.
 
+### Task 8: Method scopes (added 2026-11-09)
+
+**Spec:** design §3 "Method scopes".
+
+**Files:** `lib/caps/host_scope.ml(i)` (decl `methods : string list option`; `permits_method`, `permits_raw`; spec entries `host@get+head`), `lib/parser/parser.mly` + `tree-sitter-march/grammar.js` + `lib/format/format.ml` (option list: `no_redirects`, `methods(v, ...)`; stored as `"<host>;no_redirects;methods=get,head"`), `lib/caps/net_dest.ml(i)` (`method_of : string -> string option` for the URL entry points), `lib/tir/net_scope.ml` (results carry the method; raw `Host` dests need a method-free declaration), `stdlib/http_client.march` (`hc_scope_permits_method`, `MethodRefused(String)`, the guard checks `Http.method(req)`), tests in `test/test_host_scope.ml`, `test/stdlib/test_http_client.march`, `test/test_cap_net_scope.ml`.
+
+- [ ] Failing tests: algebra (`methods_decl`, `permits_method`, `permits_raw`, spec roundtrip with methods), declarations (bad verb rejected, duplicate `methods` rejected, both option orders parse, formatter round-trip), March guard (`POST` refused under `@get`, redirect GET refused under `@post`), end to end (A `methods(get)` calling `HttpClient.post` → `cap_host_scope` naming `POST`; B `methods(get, post)` ok; module-wide `methods(get)`; `tcp_connect` to a method-scoped host unproven; annotated wrapper forwarding to `HttpClient.post` from a GET-only module rejected).
+- [ ] Implement; all host-scope suites green; regression suites green; commit `feat(caps): method scopes on IO.NetConnect`.
+
 ### Task 7: Documentation and records
 
 **Files:**

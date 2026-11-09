@@ -219,10 +219,39 @@ end
           (type_identifier)
           (type_identifier))
         (string)
-        (identifier)))
+        (scope_option
+          (identifier))))
     (needs_declaration
       (scoped_capability
         (module_path
           (type_identifier)
           (type_identifier))
-        (identifier)))))
+        (scope_option
+          (identifier))))))
+
+================================================================================
+Method scopes
+================================================================================
+
+mod B do
+  needs IO.NetConnect("api.example.com", methods(get, post), no_redirects)
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (needs_declaration
+      (scoped_capability
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (string)
+        (scope_option
+          (identifier)
+          (identifier)
+          (identifier))
+        (scope_option
+          (identifier))))))

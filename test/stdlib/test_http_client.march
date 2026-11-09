@@ -318,6 +318,30 @@ describe "HttpClient host scope guard" do
     end
   end
 
+  test "method scope admits listed methods only" do
+    assert (HttpClient.hc_scope_permits_method("api.com@get+head", "api.com", 443, "get"))
+    assert (not (HttpClient.hc_scope_permits_method("api.com@get+head", "api.com", 443, "post")))
+    assert (HttpClient.hc_scope_permits_method("api.com@get,api.com@post", "api.com", 443, "post"))
+    assert (HttpClient.hc_scope_permits_method("api.com", "api.com", 443, "delete"))
+  end
+
+  test "POST refused under a GET-only scope" do
+    let req = Request(Post, SchemeHttps, "api.com", None, "/", None, Nil, "")
+    match HttpClient.hc_check_request("api.com@get", req) do
+    Err(MethodRefused(m)) -> assert (m == "POST api.com")
+    _ -> assert false
+    end
+  end
+
+  test "redirect refused when GET is not allowed on the target" do
+    let from = Request(Post, SchemeHttps, "api.com", None, "/", None, Nil, "")
+    let target = Request(Get, SchemeHttps, "api.com", None, "/next", None, Nil, "")
+    match HttpClient.hc_redirect_target("api.com@post", from, target) do
+    Err(MethodRefused(m)) -> assert (m == "GET api.com")
+    _ -> assert false
+    end
+  end
+
   test "out-of-scope request is refused before connecting" do
     let req = Request(Get, SchemeHttps, "foo.com", None, "/", None, Nil, "")
     match HttpClient.hc_check_request("example.com", req) do
