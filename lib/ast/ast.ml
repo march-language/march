@@ -22,6 +22,10 @@ type linearity =
   | Unrestricted  (** Normal value, can be used any number of times *)
   | Linear        (** Must be used exactly once *)
   | Affine        (** Must be used at most once *)
+  | Ghost         (** Proof-only (`ghost x : T`, `ghost let`): used only by
+                      refinements, lemmas and other ghost code, and erased
+                      before the program runs ([March_desugar.Ghost]).  Never
+                      the qualifier of a type ([TyLinear]). *)
 
 (** Visibility qualifiers for module system. *)
 type visibility =
@@ -573,7 +577,7 @@ let rec show_ty = function
     Printf.sprintf "{ %s }" (String.concat ", " fs)
   | TyLinear (Linear, t) -> "linear " ^ show_ty t
   | TyLinear (Affine, t) -> "affine " ^ show_ty t
-  | TyLinear (Unrestricted, t) -> show_ty t
+  | TyLinear ((Unrestricted | Ghost), t) -> show_ty t
   | TyNat n -> string_of_int n
   | TyNatOp (NatAdd, a, b) -> Printf.sprintf "%s + %s" (show_ty a) (show_ty b)
   | TyNatOp (NatMul, a, b) -> Printf.sprintf "%s * %s" (show_ty a) (show_ty b)

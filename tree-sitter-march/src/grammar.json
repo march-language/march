@@ -723,6 +723,18 @@
           "type": "CHOICE",
           "members": [
             {
+              "type": "STRING",
+              "value": "ghost"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
               "type": "SEQ",
               "members": [
                 {
@@ -762,8 +774,17 @@
               {
                 "type": "ALIAS",
                 "content": {
-                  "type": "STRING",
-                  "value": "send"
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "STRING",
+                      "value": "send"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "ghost"
+                    }
+                  ]
                 },
                 "named": true,
                 "value": "identifier"
@@ -1043,6 +1064,10 @@
                     {
                       "type": "STRING",
                       "value": "affine"
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "ghost"
                     }
                   ]
                 },
@@ -1294,6 +1319,10 @@
                 {
                   "type": "STRING",
                   "value": "affine"
+                },
+                {
+                  "type": "STRING",
+                  "value": "ghost"
                 }
               ]
             },
@@ -1666,6 +1695,10 @@
               {
                 "type": "STRING",
                 "value": "exists"
+              },
+              {
+                "type": "STRING",
+                "value": "ghost"
               }
             ]
           },
@@ -5210,6 +5243,10 @@
               {
                 "type": "STRING",
                 "value": "exists"
+              },
+              {
+                "type": "STRING",
+                "value": "ghost"
               }
             ]
           },
@@ -6961,6 +6998,10 @@
     [
       "_expr",
       "bounded_quantifier"
+    ],
+    [
+      "_expr",
+      "let_declaration"
     ],
     [
       "atom"

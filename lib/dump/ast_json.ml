@@ -89,6 +89,7 @@ let linearity_to_json (l : linearity) : string =
   | Unrestricted -> Dump.json_obj [ ("kind", Dump.json_string "Unrestricted") ]
   | Linear -> Dump.json_obj [ ("kind", Dump.json_string "Linear") ]
   | Affine -> Dump.json_obj [ ("kind", Dump.json_string "Affine") ]
+  | Ghost -> Dump.json_obj [ ("kind", Dump.json_string "Ghost") ]
 
 let visibility_to_json (v : visibility) : string =
   match v with
@@ -109,6 +110,7 @@ let lin_str : linearity -> string = function
   | Linear -> "linear"
   | Affine -> "affine"
   | Unrestricted -> "unrestricted"
+  | Ghost -> "ghost"
 
 let natop_str : nat_op -> string = function
   | NatAdd -> "add"

@@ -78,6 +78,8 @@ let invariant_not_deploy_checkable = "invariant_not_deploy_checkable"
 let io_not_allowed = "io_not_allowed"
 let island_missing_fn = "island_missing_fn"
 let json_derive_name_collision = "json_derive_name_collision"
+let ghost_in_runtime = "ghost_in_runtime"
+let ghost_misuse = "ghost_misuse"
 let lemma_argument_impure = "lemma_argument_impure"
 let lemma_unproved = "lemma_unproved"
 let lemma_unproved_call = "lemma_unproved_call"
@@ -288,6 +290,8 @@ let all = [
   io_not_allowed;
   island_missing_fn;
   json_derive_name_collision;
+  ghost_in_runtime;
+  ghost_misuse;
   lemma_argument_impure;
   lemma_unproved;
   lemma_unproved_call;
@@ -518,6 +522,7 @@ let category_table : (string * string list) list = [
     abstract_refinement_misuse; abstract_refinement_unused; division_by_zero;
     int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
     invariant_not_deploy_checkable;
+    ghost_in_runtime; ghost_misuse;
     lemma_argument_impure; lemma_unproved; lemma_unproved_call;
     measure_scalar_field; predicate_eq_structural; predicate_vocabulary_shadowed;
     refinement_ignored;

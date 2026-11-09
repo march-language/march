@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Ghost code.** `ghost s : T` parameters, `ghost let` bindings and `ghost fn` functions
+  carry values only a proof needs (a search tree's bounds, an abstraction), are checked by the
+  refinement checker, and are removed before the program runs: the compiled program is the one
+  without them. A ghost value may appear only in refinements, ghost arguments, lemma arguments,
+  proof hints and other ghost code; anything that would let the running program depend on one
+  is [`ghost_in_runtime`](docs/errors/ghost_in_runtime.md), and ghost code the compiler cannot
+  safely remove is [`ghost_misuse`](docs/errors/ghost_misuse.md). A `ghost fn` must be reflected
+  (pure, total, terminating). `ghost` stays an ordinary name everywhere else. See "Ghost code"
+  in the [lemmas guide](docs/lemmas.md).
 - **Tuples in refinement predicates.** A tuple-typed parameter can be refined
   (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
   predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a

@@ -179,6 +179,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         promote_to Parser.FORALL ~when_:(function Parser.LOWER_IDENT _ -> true | _ -> false)
       | Parser.LOWER_IDENT "exists" ->
         promote_to Parser.EXISTS ~when_:(function Parser.LOWER_IDENT _ -> true | _ -> false)
+      (* Ghost code: `ghost` is a keyword only before `let`, `fn`/`pfn` or a
+         parameter name (`ghost s : Set(Int)`).  A name is never followed by
+         another name in an expression (calls take parentheses), so
+         `let ghost = …`, `ghost(…)` and `fn ghost()` keep the ordinary name. *)
+      | Parser.LOWER_IDENT "ghost" ->
+        promote_to Parser.GHOST ~when_:(function
+          | Parser.LET | Parser.FN | Parser.PFN | Parser.LOWER_IDENT _ -> true
+          | _ -> false)
       | Parser.LOWER_IDENT "calc" ->
         promote_to Parser.CALC ~when_:(function Parser.DO -> true | _ -> false)
       | Parser.LOWER_IDENT "reveal" ->
