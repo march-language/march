@@ -1,0 +1,50 @@
+---
+layout: docs
+title: "ghost_misuse"
+permalink: /docs/errors/ghost_misuse/
+---
+
+# `ghost_misuse`: ghost code the compiler cannot safely erase
+
+Ghost code is removed before the program runs, and the compiler resolves calls to ghost
+functions without the typechecker, conservatively. This error reports ghost code it cannot
+remove safely:
+- a ghost function whose name something else visible at its calls also has: another function or
+  value in the same file, a global such as a prelude function or builtin, or a name a
+  `use M.*` brings in;
+- a function with ghost parameters used as a value rather than called;
+- a ghost parameter on an impl method, a local function, or a function with several clauses,
+  a pattern parameter or a `when` guard;
+- `ghost` on a lemma's or ghost function's parameter (they are proof-only already);
+- a ghost parameter of a `linear` or `affine` type, or ghost code that uses a linear value.
+
+## A program that triggers it
+
+```march
+mod Main do
+  fn step(ghost before : Int, x : {Int | _ == before}) : {Int | _ == before + 1} do x + 1 end
+  fn steps() do step end
+end
+```
+
+## The fix
+
+Call the function directly, so the compiler can drop its ghost arguments:
+
+```march
+mod Main do
+  fn step(ghost before : Int, x : {Int | _ == before}) : {Int | _ == before + 1} do x + 1 end
+  fn twice(x : Int) : Int do step(x + 1, step(x, x)) end
+end
+```
+
+For a name collision, rename the ghost function to a name nothing else visible there has. For a
+wildcard import, import the names you need, `use M.{f, g}`.
+
+## Why the rule exists
+
+A ghost argument left in place would become runtime data, and a ghost parameter left on a
+function value would need its argument at run time. Rather than guess, the compiler refuses the
+program and says which rule it cannot satisfy.
+
+See also: [the lemmas guide](../lemmas.md#ghost-code-proof-only-parameters-bindings-and-functions), `ghost_in_runtime`.

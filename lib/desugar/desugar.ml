@@ -1204,6 +1204,21 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
     { def with fn_clauses = [only'] }
 
   | first :: _ ->
+    (* Ghost parameters need the fast path: the general path below matches on
+       a tuple of every argument, which would make a ghost one runtime data. *)
+    (match List.find_map (fun (c : fn_clause) ->
+         List.find_map (function
+             | FPNamed { param_lin = Ghost; param_name; _ } -> Some param_name
+             | _ -> None) c.fc_params) clauses with
+     | Some param_name ->
+       desugar_expr_error ~code:Err.Code.ghost_misuse ~sp:param_name.span
+         ~hint:"Write one clause with named parameters and no `when` guard, and \
+                match on the runtime arguments in the body."
+         (Printf.sprintf "`%s` is a ghost parameter of a function with several \
+                          clauses, a pattern parameter or a guard; ghost parameters \
+                          are supported only on a single clause of named parameters."
+            param_name.txt)
+     | None -> ());
     (* General path: synthesise fresh arg names based on first clause's arity.
 
        Except when the FIRST clause dominates — no guard, every parameter a

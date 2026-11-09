@@ -444,7 +444,7 @@
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
-%token CALC REVEAL FORALL EXISTS
+%token CALC REVEAL FORALL EXISTS GHOST
 %token DBG DOC
 %token <string> SIGIL_PREFIX
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
@@ -656,7 +656,7 @@ decl:
               None $startpos(attrs_args)) attrs;
       match d with
       | DFn (def, span) ->
-        DFn ({ def with fn_doc = Some s; fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
+        DFn ({ def with fn_doc = Some s; fn_attrs = attrs @ def.fn_attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
   | attrs_args = nonempty_list(fn_attr); d = fn_decl
     { let attrs = List.map fst attrs_args in
@@ -672,7 +672,7 @@ decl:
                  (String.sub a 9 (String.length a - 9)))
               None $startpos(attrs_args)) attrs;
       match d with
-      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs; fn_attr_args = attr_args_of attrs_args }, span)
+      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs @ def.fn_attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
   | attrs = nonempty_list(fn_attr); d = protocol_decl
     { let attrs = List.map fst attrs in (* The one protocol attribute is `@[endpoints]`: generate typed session
@@ -769,6 +769,12 @@ fn_decl_name:
   | SEND           { mk_name "send" $loc }
 
 fn_decl:
+  (* `ghost fn` / `ghost pfn` (specs/lang/lemmas.md, Ghost code): a function
+     that exists only for proofs, reflected and never compiled. *)
+  | GHOST; d = fn_decl
+    { match d with
+      | DFn (def, span) -> DFn ({ def with fn_attrs = "ghost" :: def.fn_attrs }, span)
+      | d -> d }
   | FN; name = fn_decl_name; _lp = LPAREN; params = separated_list(COMMA, fn_param); _rp = RPAREN;
     ret = option(ret_annot); needs = option(fn_needs_clause); guard = option(when_guard);
     DO; body = block_body; END
@@ -860,6 +866,8 @@ fn_param:
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Linear } }
   | AFFINE; name = soft_lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Affine } }
+  | GHOST; name = soft_lower_name; COLON; t = ty
+    { FPNamed { param_name = name; param_ty = Some t; param_lin = Ghost } }
   | name = soft_lower_name; DSLASH; default_e = expr
     { FPDefault ({ param_name = name; param_ty = None; param_lin = Unrestricted }, default_e) }
   | name = soft_lower_name; COLON; t = ty; DSLASH; default_e = expr
@@ -1559,7 +1567,7 @@ impl_item:
   | attrs_args = nonempty_list(fn_attr); d = fn_decl
     { match d with
       | DFn (def, span) ->
-        DFn ({ def with fn_attrs = List.map fst attrs_args; fn_attr_args = attr_args_of attrs_args }, span)
+        DFn ({ def with fn_attrs = List.map fst attrs_args @ def.fn_attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
 
 bounded_pred:
@@ -1797,6 +1805,9 @@ block_expr:
   | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = e },
             mk_span ($loc)) }
+  | GHOST; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Ghost; bind_expr = e },
+            mk_span ($loc)) }
   | LET; QUESTION; p = simple_pattern; EQUALS; e = expr
     { ELetQ (p, e, EBlock ([], mk_span ($loc)), mk_span ($loc)) }
   (* Stops at the `:`: the rule exists only to report this error, and parsing
@@ -1962,6 +1973,9 @@ lambda_stmts:
             mk_span ($loc)) :: rest }
   | AFFINE; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Affine; bind_expr = ev },
+            mk_span ($loc)) :: rest }
+  | GHOST; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Ghost; bind_expr = ev },
             mk_span ($loc)) :: rest }
   | LET; QUESTION; p = simple_pattern; EQUALS; ev = expr; rest = lambda_stmts
     { ELetQ (p, ev, EBlock ([], mk_span ($loc)), mk_span ($loc)) :: rest }

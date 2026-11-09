@@ -734,7 +734,7 @@ let pp_ty_diff env ~elide ~targets t =
       match repr t with
       | TLin (Ast.Linear, i) -> add "linear "; go ~parens:true rpath i
       | TLin (Ast.Affine, i) -> add "affine "; go ~parens:true rpath i
-      | TLin (Ast.Unrestricted, i) -> go ~parens rpath i
+      | TLin ((Ast.Unrestricted | Ast.Ghost), i) -> go ~parens rpath i
       | TCon (name, (_ :: _ as args)) ->
         add name; add "(";
         List.iteri (fun i a -> if i > 0 then add ", "; go (DArg (name, i + 1) :: rpath) a) args;
