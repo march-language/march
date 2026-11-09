@@ -76,7 +76,7 @@ connections, sessions in flight, and the warm process.
 |---|---|
 | A function body, an actor handler, a nested module's function | Hot patch of just that function |
 | An actor's state shape | Hot patch plus a `migrate_state` (or a `@compat` annotation) |
-| An actor's message type | Hot patch plus a `migrate_msg`, or old-format messages are dropped and counted |
+| An actor's message type | Hot patch plus a `migrate_msg`, or old-format messages are dropped and counted; a message several such changes old goes through each deploy's `migrate_msg` in order |
 | A function's signature | Hot patch; every caller must be in the same batch, unless the server supports epoch-tagged dispatch |
 | A protocol a `choose` branch was added to | Hot patch, receivers of the choice before its chooser |
 | `main`, a topology hook, generated protocol code, the standard library, the runtime | A restart; `forge deploy` plans it for you |
@@ -571,6 +571,8 @@ end
 ```
 
 `Counter.Msg` names the actor's message type (the type its `on` handlers define). When the old type and the actor share a message name, qualify the new one by the actor: `CounterMsgV.Inc(n) -> Some(Counter.Inc(n))`. `forge hot-reload migrate-msg-stub Counter` writes this stub from the running version's handlers (add `--new <build>.so.schemas.json` to map kept handlers to themselves and removed or changed ones to `None`). The function is checked like `migrate_state`: it must be IO-free, take exactly one annotated parameter, return `Option(<Actor>.Msg)`, and match exhaustively. `forge deploy hot` refuses the deploy if its old type does not match the running version's handlers.
+
+Each deploy's `migrate_msg` converts from the build before it to its own. A message that is two or more message-type changes old (its sender is still pinned to an epoch before both deploys) is converted through each of those deploys' `migrate_msg` in turn, oldest first, and then handled. If any deploy in between has no `migrate_msg`, the message is dropped and counted without running any of them; if one returns `None` (or its result fails that build's handler refinements), the message is dropped and counted there. A drop reported to a remote sender says which link it was (`migrate_msg returned None (link 2 of 2)`, `message-type change 2 of 2 has none`). A message converted through several links counts once in the `converted` counter.
 
 ### Drains
 
