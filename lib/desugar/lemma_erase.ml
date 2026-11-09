@@ -296,6 +296,9 @@ let rec drop_unreferenced (whole : decl list) (decls : decl list) : decl list =
       (* An impl method's copy for an interface law ([Interface_laws]): only
          its lemmas used it. *)
       | DFn (fd, _) when String.starts_with ~prefix:Interface_laws.copy_prefix fd.fn_name.txt -> None
+      (* A hot-reload simulation step ([Desugar_simulation]): logic only, read
+         by its lemmas alone, never run. *)
+      | DFn (fd, _) when List.mem "hcr_logic" fd.fn_attrs -> None
       | DMod (n, v, inner, sp) -> Some (DMod (n, v, drop_unreferenced whole inner, sp))
       | DDescribe (s, inner, sp) -> Some (DDescribe (s, drop_unreferenced whole inner, sp))
       | d -> Some d)

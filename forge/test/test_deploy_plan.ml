@@ -43,7 +43,7 @@ let schema ?(compat = "full") ?handlers ?migrate_msg_from fields =
     state_fields = List.map (fun (name, ty) -> { Schema_diff.name; ty; refine = None }) fields; handlers; migrate_msg_from;
     contracts = true; unsupported = false; accepted = []; derived = None; not_derived = None }
 
-let ctor cname params = { Schema_diff.cname; params; refines = [] }
+let ctor cname params = { Schema_diff.cname; params; refines = []; tag = None }
 
 let topology_text = {|
 [roles]

@@ -353,7 +353,7 @@ let actor_changes (b : build_in) : actor_change list =
            | Some nh when Schema_diff.messages_changed ~old_h:oh ~new_h:nh ->
              Some (actor, match ns.migrate_msg_from with
                | None -> `None
-               | Some f when f = oh -> `Matches
+               | Some f when Schema_diff.same_message_type f oh -> `Matches
                | Some _ -> `Wrong_old_type)
            | _ -> None)
         | _ -> None)

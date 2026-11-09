@@ -5994,7 +5994,7 @@ static void hcr_marker_dtor(void *msg, uint32_t epoch) {
  * One record per deploy: for each activated slot, which ring version holds
  * it and what the deploy's schema diff changed.  An actor advancing across
  * several deploys applies each one's state migration, in order; the message
- * path finds the migrate_msg of the deploy that changed the message type.
+ * path chains the migrate_msg of every deploy that changed the message type.
  * The function pointers live in the deploy's .so: callers pin that ring
  * version (march_dispatch_enter_version) and check its epoch before calling,
  * and a version that carries a migration is kept while any older epoch is
@@ -6093,24 +6093,50 @@ static int hcr_log_state_migrations(uint32_t slot, uint32_t from, uint32_t to,
     return n;
 }
 
-/* How many deploys in (from, to] changed [slot]'s message type; with
- * [last] non-NULL, the newest one's migrate_msg entry is written there. */
-static int hcr_log_msg_changes(uint32_t slot, uint32_t from, uint32_t to,
-                               hcr_mig *last) {
+/* How many deploys in (from, to] changed [slot]'s message type (the D30
+ * early-advance test; the conversion path walks hcr_log_msg_chain). */
+static int hcr_log_msg_changes(uint32_t slot, uint32_t from, uint32_t to) {
     int n = 0;
+    pthread_mutex_lock(&g_hcr_log_mu);
+    for (hcr_log_rec *r = g_hcr_log_head; r; r = r->next) {
+        if (r->epoch <= from || r->epoch > to) continue;
+        for (int i = 0; i < r->n; i++)
+            if (r->e[i].slot == slot && r->e[i].msgs_changed) n++;
+    }
+    pthread_mutex_unlock(&g_hcr_log_mu);
+    return n;
+}
+
+/* Every deploy in (from, to] that changed [slot]'s message type, in epoch
+ * order (oldest first), each with its migrate_msg (msg_fn NULL when that
+ * deploy has none).  Chaining them converts a message several message-type
+ * changes old (H6): each deploy's migrate_msg reads the previous build's
+ * format.  Fills [buf] (room for [cap]); with more, *out is malloc'd and the
+ * caller frees it when *out != buf.  Returns the count. */
+static int hcr_log_msg_chain(uint32_t slot, uint32_t from, uint32_t to,
+                             hcr_mig *buf, int cap, hcr_mig **out) {
+    int n = 0;
+    hcr_mig *m = buf;
     pthread_mutex_lock(&g_hcr_log_mu);
     for (hcr_log_rec *r = g_hcr_log_head; r; r = r->next) {
         if (r->epoch <= from || r->epoch > to) continue;
         for (int i = 0; i < r->n; i++) {
             if (r->e[i].slot != slot || !r->e[i].msgs_changed) continue;
-            n++;
-            if (last) {
-                last->epoch = r->epoch; last->ring_idx = r->e[i].ring_idx;
-                last->state_fn = NULL; last->msg_fn = r->e[i].migrate_msg_fn;
+            if (n == cap) {
+                cap *= 2;
+                hcr_mig *g = (hcr_mig *)malloc((size_t)cap * sizeof(*m));
+                if (!g) { fputs("march: out of memory (hot-reload log)\n", stderr); exit(1); }
+                memcpy(g, m, (size_t)n * sizeof(*m));
+                if (m != buf) free(m);
+                m = g;
             }
+            m[n].epoch = r->epoch; m[n].ring_idx = r->e[i].ring_idx;
+            m[n].state_fn = NULL; m[n].msg_fn = r->e[i].migrate_msg_fn;
+            n++;
         }
     }
     pthread_mutex_unlock(&g_hcr_log_mu);
+    *out = m;
     return n;
 }
 
@@ -6482,6 +6508,27 @@ static int64_t g_hcr_none_cell[3] __attribute__((aligned(16))) = {
 #define HCR_DISPATCH 0
 #define HCR_CONSUMED 1
 
+#define HCR_LINK_OK   0   /* *msgp is the converted message (ours) */
+#define HCR_LINK_NONE 1   /* migrate_msg returned None; it consumed the input */
+#define HCR_LINK_GONE 2   /* the link's version is not loaded; *msgp untouched */
+
+/* Run one deploy's migrate_msg on *msgp inside that deploy's version frame,
+ * after checking the ring slot still holds that deploy's version. */
+static int hcr_msg_link(uint32_t slot, const hcr_mig *l, void **msgp) {
+    uint32_t v;
+    if (!march_dispatch_enter_version_frame(slot, (uint32_t)l->ring_idx, &v))
+        return HCR_LINK_GONE;
+    if (march_dispatch_epoch(slot, (uint32_t)l->ring_idx) != l->epoch) {
+        march_dispatch_leave_unit(slot, v);
+        return HCR_LINK_GONE;
+    }
+    void *out = l->msg_fn(*msgp, (void *)g_hcr_none_cell);
+    march_dispatch_leave_unit(slot, v);
+    if (out == (void *)g_hcr_none_cell) return HCR_LINK_NONE;
+    *msgp = out;
+    return HCR_LINK_OK;
+}
+
 /* Apply II.4.6's message rules to a dequeued user message stamped
  * [mepoch].  HCR_DISPATCH: dispatch *msgp (possibly converted) at the
  * actor's epoch; HCR_CONSUMED: deferred, or dropped. */
@@ -6512,7 +6559,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         /* D30: a sender that has already advanced, and a message type that
          * changed in between: this message is in a format the actor's code
          * cannot read.  Move now (the marker, when it comes, is a no-op). */
-        if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch, NULL))
+        if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch))
             return HCR_DISPATCH;
         if (atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0) {
             hcr_defer(meta, *msgp, mepoch, conn, seq);
@@ -6523,38 +6570,63 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
         if (mepoch >= cur) return HCR_DISPATCH;
     }
-    /* An old-format message after the actor moved past a message-type
-     * change (D10): convert it with that deploy's migrate_msg, or drop it. */
+    /* An old-format message after the actor moved past one or more
+     * message-type changes (D10, H6): convert it with each of those deploys'
+     * migrate_msg in turn, oldest first, or drop it. */
     if (mse <= mepoch) return HCR_DISPATCH;
-    hcr_mig mm;
-    int changes = hcr_log_msg_changes(slot, mepoch, cur, &mm);
-    if (changes == 0) return HCR_DISPATCH;
-    if (changes == 1 && mm.msg_fn) {
-        uint32_t v;
-        if (march_dispatch_enter_version_frame(slot, (uint32_t)mm.ring_idx, &v)) {
-            if (march_dispatch_epoch(slot, (uint32_t)mm.ring_idx) == mm.epoch) {
-                void *out = mm.msg_fn(*msgp, (void *)g_hcr_none_cell);
-                march_dispatch_leave_unit(slot, v);
-                if (out != (void *)g_hcr_none_cell) {
-                    *msgp = out;
-                    atomic_fetch_add_explicit(&g_hcr_converted, 1, memory_order_relaxed);
-                    return HCR_DISPATCH;
-                }
-                /* None: dropped on purpose; migrate_msg consumed it. */
-                meta->hcr_dropped++;
-                atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
-                hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
-                return HCR_CONSUMED;
+    hcr_mig mbuf[4], *m;
+    int n = hcr_log_msg_chain(slot, mepoch, cur, mbuf, 4, &m);
+    if (n == 0) return HCR_DISPATCH;
+    char why[160];
+    why[0] = 0;
+    /* Every link must exist before any runs: a chain with a gap drops the
+     * message without running conversions it could not finish. */
+    for (int i = 0; i < n && !why[0]; i++)
+        if (!m[i].msg_fn) {
+            if (n == 1) snprintf(why, sizeof why, "old message format: no migrate_msg for it");
+            else snprintf(why, sizeof why,
+                          "old message format: no migrate_msg for it (message-type change %d of %d has none)",
+                          i + 1, n);
+        }
+    /* Ownership: [msg] is always the one message we own.  A link consumes
+     * its input and returns either a new message (now ours) or the None
+     * cell (nothing left to own); a link we could not enter leaves [msg]
+     * ours, to dispose below. */
+    void *msg = *msgp;
+    for (int i = 0; i < n && !why[0]; i++) {
+        int r = hcr_msg_link(slot, &m[i], &msg);
+        if (r == HCR_LINK_NONE) {
+            if (m != mbuf) free(m);
+            meta->hcr_dropped++;
+            atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
+            if (n == 1) hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
+            else {
+                snprintf(why, sizeof why,
+                         "old message format: migrate_msg returned None (link %d of %d)", i + 1, n);
+                hcr_report_drop(conn, seq, why);
             }
-            march_dispatch_leave_unit(slot, v);
+            return HCR_CONSUMED;
+        }
+        if (r == HCR_LINK_GONE) {
+            if (n == 1) snprintf(why, sizeof why, "old message format: no migrate_msg for it");
+            else snprintf(why, sizeof why,
+                          "old message format: no migrate_msg for it (link %d of %d is no longer loaded)",
+                          i + 1, n);
         }
     }
-    /* No migrate_msg (or two message-type changes in between, which one
-     * conversion cannot bridge): drop and count. */
-    march_actor_msg_dispose(*msgp);
+    if (m != mbuf) free(m);
+    if (!why[0]) {
+        *msgp = msg;
+        /* One converted message, however many links it took. */
+        atomic_fetch_add_explicit(&g_hcr_converted, 1, memory_order_relaxed);
+        return HCR_DISPATCH;
+    }
+    /* A missing or unloaded link: drop what we still own (the original, or
+     * the last link's output) and count it. */
+    march_actor_msg_dispose(msg);
     meta->hcr_dropped++;
     atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
-    hcr_report_drop(conn, seq, "old message format: no migrate_msg for it");
+    hcr_report_drop(conn, seq, why);
     return HCR_CONSUMED;
 }
 

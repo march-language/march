@@ -32,7 +32,11 @@ Design (agreed 2026-11-06):
 4. **The suggestion**: when a deploy removes exactly one field and adds one of the same type,
    the refusal proposes the clause as a machine fix (`forge fix`). Never applied on a guess.
 5. **Derived rollback**: the reverse of a COPY is the copy back (`count := total`), so
-   rolling back loses nothing.
+   rolling back loses nothing. Since 2026-11-08 this need not be trusted: emit it as
+   `<actor>_rollback_state` and the generated `<actor>_rollback_roundtrip` lemma (H5,
+   progress `2026-11-08-hcr-rollback-roundtrip`) proves it on every build. Shares the
+   mechanism with todo `2026-11-08-hcr-derive-rollback-state` (the add-only case); do that
+   one first.
 
 Also open from M11: actors in nested modules are matched by exact schema name
 (`Outer__Actor`) and so are not derived.

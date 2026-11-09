@@ -160,14 +160,23 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
     | None when refined_fields -> [ line "state refinements" (Not_proved, "no state is built where the checker sees it") ]
     | None -> []
   in
+  (* The `@invariant` as an inductive invariant: `init` establishes it and
+     each handler preserves it.  [Refine_check]'s `DActor` arm files one
+     postcondition per site, named `<Actor>.init` and `<Actor>.<Msg>`. *)
+  let is_inv (o : O.t) =
+    o.O.kind = O.Postcondition
+    && (o.O.callee = name ^ ".init"
+        || List.exists (fun h -> o.O.callee = name ^ "." ^ h) handlers)
+  in
   let invariant_line =
     match ad.A.actor_invariant with
     | None -> []
     | Some _ ->
-      [ line "@invariant"
-          ( Not_checked,
-            "init and handler results are not checked against it; a hot deploy checks \
-             it on the migrated state" ) ]
+      (match summarise ~where:"at init and after each handler" (List.filter is_inv obs) with
+       | Some s -> [ line "@invariant" s ]
+       | None ->
+         [ line "@invariant"
+             (Not_checked, "no init or handler result was checked against it") ])
   in
   let msg_line =
     match summarise ~where:"where a message is built" msgs with
@@ -209,13 +218,91 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
        | Some s -> [ line "migrate_msg" s ]
        | None -> [ line "migrate_msg" (Proved, "converts to no refined message") ])
   in
+  (* H5: `<actor>_rollback_state` beside the migration gets the generated
+     round-trip lemma `<actor>_rollback_roundtrip` (Desugar_rollback). *)
+  let rollback_line =
+    match fn_span "_rollback_state" with
+    | None -> []
+    | Some _ ->
+      let rt = low ^ "_rollback_roundtrip" in
+      (* A refuted lemma keeps its stage-1 skip in the ledger; the refutation
+         itself is [Refine_call.lemma_refuted] (the build's error). *)
+      let refuted =
+        Hashtbl.fold
+          (fun name at acc ->
+            if acc = None && (name = rt || String.ends_with ~suffix:("." ^ rt) name) then Some at
+            else acc)
+          March_refinecheck.Refine_call.lemma_refuted None
+      in
+      match refuted with
+      | Some at ->
+        [ line "rollback round trip"
+            (Violated, Printf.sprintf "rolling back loses part of the old state at %s" at) ]
+      | None ->
+      (match
+         summarise ~where:"rolling back loses nothing the old version had"
+           (List.filter (fun (o : O.t) -> o.O.kind = O.Postcondition && o.O.callee = rt) obs)
+       with
+       | Some (l, _) when l = Proved ->
+         [ line "rollback round trip" (Proved, "rollback_state(migrate_state(old)) == old for every old state") ]
+       | Some s -> [ line "rollback round trip" s ]
+       | None ->
+         [ line "rollback round trip"
+             (Not_checked, "no migrate_state to pair rollback_state with") ])
+  in
+  (* H3 (Desugar_simulation): per message, migrating commutes with handling,
+     for a `@compat(simulation)` actor. *)
+  let simulation_line =
+    if ad.A.actor_compat <> March_desugar.Desugar_simulation.compat then []
+    else
+      let module S = March_desugar.Desugar_simulation in
+      let lemma_refuted name =
+        Hashtbl.fold
+          (fun n at acc ->
+            if acc = None && (n = name || String.ends_with ~suffix:("." ^ name) n) then Some at else acc)
+          March_refinecheck.Refine_call.lemma_refuted None
+      in
+      match List.assoc_opt name !S.report with
+      | None | Some [] ->
+        [ line "simulation"
+            ( Not_checked,
+              "no deployed build with handler steps is known (a deploy of this \
+               @compat(simulation) actor records them)" ) ]
+      | Some outs ->
+        let per =
+          List.map
+            (fun (m, o) ->
+              match o with
+              | S.Not_checked why -> (m, Not_checked, why)
+              | S.New_handler -> (m, Proved, "a new handler: no deployed message names it")
+              | S.Checked lemma -> (
+                match lemma_refuted lemma with
+                | Some at -> (m, Violated, "differs at " ^ at)
+                | None -> (
+                  match
+                    summarise ~where:""
+                      (List.filter (fun (o : O.t) -> o.O.kind = O.Postcondition && o.O.callee = lemma) obs)
+                  with
+                  | Some (Proved, _) -> (m, Proved, "commutes")
+                  | Some (l, d) -> (m, l, d)
+                  | None -> (m, Not_proved, "no verdict recorded"))))
+            outs
+        in
+        let worst =
+          List.fold_left (fun acc (_, l, _) -> if rank l < rank acc then l else acc) Proved per
+        in
+        [ line "simulation"
+            ( worst,
+              String.concat "; " (List.map (fun (m, l, d) -> Printf.sprintf "%s %s (%s)" m (label_text l) d) per) ) ]
+  in
   let remote_line =
     if ad.A.actor_remote then
       [ line "messages from other nodes"
           (Assumed, "a remote sender's message is not checked against the handler contracts") ]
     else []
   in
-  state_line @ invariant_line @ msg_line @ migrate_state_line @ migrate_msg_line @ remote_line
+  state_line @ invariant_line @ msg_line @ migrate_state_line @ migrate_msg_line @ rollback_line
+  @ simulation_line @ remote_line
 
 (* The protocol's lines from its translation-validation rows
    ([Session_validate], M6): a projection that agrees with
