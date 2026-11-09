@@ -714,6 +714,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Set measures over a tree and its list of children.** A `@[measure]`
+  could not recurse through a `List` of child nodes, the shape a HAMT branch
+  has: the termination checker refused a mutual pair over two types unless
+  each type contained the other. It now accepts any cycle in which every
+  call passes a strict pattern component. A set measure's body may also
+  apply `elts` to a list field. And on the command line, `empty` in a set
+  measure no longer resolves to a prelude function of that name, which made
+  every user set measure `invalid_measure`.
+
 - **Refinement reflection over records with type parameters.** A lemma or contract over a
   parameter typed `Pr(Int)` (`type Pr(a) = { fst : a, snd : a }`) is now checked through the
   reflected functions it calls (`sw(sw(p)) == p` is proved); it used to be skipped as
