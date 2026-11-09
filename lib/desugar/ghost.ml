@@ -29,8 +29,11 @@
      there could mean shares the name: another declaration of that file, a
      global (a top-level or prelude declaration, a builtin) or a `use` import;
    - a qualified call `M.f(…)` (`M` possibly an `alias`) is ghost only when
-     a module of the program named `M` declares ghost `f`.  The stdlib
-     declares no ghost code, so `List.map` never matches a user's ghost `map`.
+     a module of the program named `M` declares ghost `f`.  The stdlib's
+     only ghost code is private (Set's `elts` measures), so `List.map`
+     never matches a user's ghost `map`.
+   A wildcard import whose names cannot be listed counts against the ghost
+   names of its own file only: a bare call never resolves anywhere else.
 
    Not supported yet (each rejected with [ghost_misuse]): ghost parameters
    on impl methods, on local functions and on a function with several
@@ -505,10 +508,14 @@ let rec fold_fns f acc (decls : decl list) =
    the lemmas whose bare calls cannot be resolved. *)
 let check_names errors ~reserved ~exports ~globals (sigs : sigs) (decls : decl list) : sigs =
   let collides, unknown = collisions ~reserved ~exports ~globals decls in
+  (* A bare call resolves only in the file declaring the ghost name, so only
+     a wildcard import written in that file can bring in a rival. *)
+  let unknown_in (fd : fn_def) = List.filter (fun (_, (sp : span)) -> sp.file = fd.fn_name.span.file) unknown in
   let shapes = Hashtbl.create 8 in
   fold_fns
     (fun sigs fd ->
       let n = fd.fn_name.txt in
+      let unknown = unknown_in fd in
       if Lemma_erase.is_lemma fd then
         if collides fd || unknown <> [] then { sigs with unresolved = SS.add n sigs.unresolved } else sigs
       else if is_special fd then begin

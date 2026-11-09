@@ -152,6 +152,19 @@ let accepts =
             "mod R do\n  needs IO.Console\n  fn member(x : Int, ghost s : Int) : Int do x end\n  fn main(cap : Cap(IO.Console)) do\n    let a = if List.member([1, 2], 2) do member(7, 0) else 0 end\n    println(int_to_string(a))\n  end\nend\n"
         in
         if not (printed out "7") then Alcotest.failf "expected 7:\n%s" out);
+    (* A bare ghost call resolves only in its own file, so a wildcard
+       import elsewhere (here a library module importing the entry, whose
+       exports cannot be listed while it is loading) leaves the stdlib's
+       ghost Set measures resolvable.  It once refused every program with
+       such an import: "`use TqCtorEntry.*` may also bring in a
+       `set_elts`". *)
+    Alcotest.test_case "a wildcard import in another file leaves stdlib ghost code alone" `Quick (fun () ->
+        let out =
+          U.run_lib ~args:"--check"
+            ~lib:[ ("sib.march", "mod GhSib do\n  import GhEntry\n  fn two() : Int do 2 end\nend\n") ]
+            "mod GhEntry do\n  fn three() : Int do 1 + GhSib.two() end\nend\n"
+        in
+        if U.contains out "[ghost_" then Alcotest.failf "expected no ghost diagnostic:\n%s" out);
     accepted "a local shadows a ghost fn"
       "mod R do\n  ghost fn h(n : Int) : Int do n end\n  fn f(x : Int) : Int do\n    let h = fn y -> y + 1\n    h(x)\n  end\nend\n";
     Alcotest.test_case "qualified call into a nested module runs" `Quick (fun () ->

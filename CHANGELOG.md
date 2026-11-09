@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
+  Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
+  law, that the comparator is a strict total order agreeing with `==`. A module can say what
+  `elts` (or `keys`) means for its own datatype with `@[abstraction(elts)]` on a `@[measure]`;
+  callers elsewhere keep proving through the contracts as before. The refinement checker also
+  learned what the proofs needed: a `Nil`/`Cons` match arm states the list's elements,
+  `if f(args)` uses `f`'s `Bool` contract, a `panic(..)` arm satisfies a return contract, a
+  `Cons(x, xs)` result in an `if` branch reflects, and mutually recursive functions get their
+  induction hypotheses.
 - **Host and method scopes on network access.** `needs IO.NetConnect("api.example.com",
   methods(get, post))` limits a module, and everything it reaches, to the hosts and HTTP
   methods it names; `no_redirects` refuses redirects. Checked at compile time and
@@ -782,7 +791,10 @@ git log is authoritative for exact commits.
 - **A user module named like a stdlib module is charged for its own capabilities.** The
   capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
   `needs` to its callers; it now looks at where the module comes from, not its name.
-
+- **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
+  of a module whose names the checker cannot list counted against every ghost function in the
+  program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
+  own file. It now counts only against the ghost names of the file that writes it.
 - **A record-returning function's contract no longer reports a false counterexample** when
   a field's value is bound by a `let` first (`let next = c + n` then `{ count: next }` was
   refuted with `next = -1`). Simple `let`s are now inlined into a record result, and a name
