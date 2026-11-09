@@ -891,8 +891,9 @@ and fn_param_to_json (fp : fn_param) : string =
 
 and type_def_to_json (td : type_def) : string =
   match td with
-  | TDAlias ty ->
-    Dump.json_obj [ ("kind", Dump.json_string "TDAlias"); ("ty", ty_to_json ty) ]
+  | TDAlias (ty, values) ->
+    Dump.json_obj [ ("kind", Dump.json_string "TDAlias"); ("ty", ty_to_json ty);
+                    ("values", Dump.json_list (List.map (fun ((n : name), t) -> Dump.json_obj [ ("name", Dump.json_string n.txt); ("ty", ty_to_json t) ]) values)) ]
   | TDVariant variants ->
     Dump.json_obj [
       ("kind", Dump.json_string "TDVariant");

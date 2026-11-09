@@ -224,7 +224,7 @@ let collect_types (decls : A.decl list) : (string, tdecl) Hashtbl.t =
       match td with
       | A.TDVariant vs -> List.concat_map (fun (v : A.variant) -> v.A.var_args) vs
       | A.TDRecord fs -> List.map (fun (f : A.field) -> f.A.fld_ty) fs
-      | A.TDAlias t -> [ t ]
+      | A.TDAlias (t, _) -> [ t ]
     in
     let prev = match Hashtbl.find_opt tbl name with Some p -> p.t_fields | None -> [] in
     Hashtbl.replace tbl name

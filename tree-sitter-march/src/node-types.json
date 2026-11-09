@@ -1152,6 +1152,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -4252,6 +4256,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -4347,6 +4355,10 @@
           },
           {
             "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
             "named": true
           },
           {
@@ -4451,6 +4463,10 @@
           },
           {
             "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
             "named": true
           },
           {
@@ -4794,6 +4810,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -4862,6 +4882,10 @@
         },
         {
           "type": "type_nat",
+          "named": true
+        },
+        {
+          "type": "type_nat_op",
           "named": true
         },
         {
@@ -5120,6 +5144,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -5185,6 +5213,10 @@
           },
           {
             "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
             "named": true
           },
           {
@@ -5307,6 +5339,10 @@
           },
           {
             "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
             "named": true
           },
           {
@@ -5469,6 +5505,10 @@
           },
           {
             "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
             "named": true
           },
           {
@@ -6649,6 +6689,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -7165,6 +7209,10 @@
           },
           {
             "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
             "named": true
           },
           {
@@ -7911,6 +7959,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -8619,6 +8671,10 @@
           "named": true
         },
         {
+          "type": "type_nat_op",
+          "named": true
+        },
+        {
           "type": "type_variable",
           "named": true
         },
@@ -9132,6 +9188,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -9608,6 +9668,10 @@
             "named": true
           },
           {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
             "type": "type_variable",
             "named": true
           },
@@ -9868,6 +9932,10 @@
           },
           {
             "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
             "named": true
           },
           {
@@ -10898,6 +10966,10 @@
           "named": true
         },
         {
+          "type": "type_nat_op",
+          "named": true
+        },
+        {
           "type": "type_variable",
           "named": true
         },
@@ -11503,6 +11575,10 @@
           "named": true
         },
         {
+          "type": "type_nat_op",
+          "named": true
+        },
+        {
           "type": "type_variable",
           "named": true
         },
@@ -11563,6 +11639,10 @@
         },
         {
           "type": "type_nat",
+          "named": true
+        },
+        {
+          "type": "type_nat_op",
           "named": true
         },
         {
@@ -11641,6 +11721,10 @@
         },
         {
           "type": "type_nat",
+          "named": true
+        },
+        {
+          "type": "type_nat_op",
           "named": true
         },
         {
@@ -11733,6 +11817,10 @@
           "named": true
         },
         {
+          "type": "type_nat_op",
+          "named": true
+        },
+        {
           "type": "type_params",
           "named": true
         },
@@ -11767,6 +11855,136 @@
     }
   },
   {
+    "type": "type_nat_op",
+    "named": true,
+    "fields": {
+      "left": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "abstract_refinement_type",
+            "named": true
+          },
+          {
+            "type": "arrow_type",
+            "named": true
+          },
+          {
+            "type": "linear_type",
+            "named": true
+          },
+          {
+            "type": "parenthesized_type",
+            "named": true
+          },
+          {
+            "type": "qualified_type",
+            "named": true
+          },
+          {
+            "type": "record_type",
+            "named": true
+          },
+          {
+            "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_application",
+            "named": true
+          },
+          {
+            "type": "type_constructor",
+            "named": true
+          },
+          {
+            "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
+            "type": "type_variable",
+            "named": true
+          },
+          {
+            "type": "unit_type",
+            "named": true
+          }
+        ]
+      },
+      "right": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "abstract_refinement_type",
+            "named": true
+          },
+          {
+            "type": "arrow_type",
+            "named": true
+          },
+          {
+            "type": "linear_type",
+            "named": true
+          },
+          {
+            "type": "parenthesized_type",
+            "named": true
+          },
+          {
+            "type": "qualified_type",
+            "named": true
+          },
+          {
+            "type": "record_type",
+            "named": true
+          },
+          {
+            "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_application",
+            "named": true
+          },
+          {
+            "type": "type_constructor",
+            "named": true
+          },
+          {
+            "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
+            "type": "type_variable",
+            "named": true
+          },
+          {
+            "type": "unit_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "type_params",
     "named": true,
     "fields": {},
@@ -11776,6 +11994,10 @@
       "types": [
         {
           "type": "type_variable",
+          "named": true
+        },
+        {
+          "type": "value_param",
           "named": true
         }
       ]
@@ -12023,6 +12245,84 @@
     }
   },
   {
+    "type": "value_param",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "abstract_refinement_type",
+            "named": true
+          },
+          {
+            "type": "arrow_type",
+            "named": true
+          },
+          {
+            "type": "linear_type",
+            "named": true
+          },
+          {
+            "type": "parenthesized_type",
+            "named": true
+          },
+          {
+            "type": "qualified_type",
+            "named": true
+          },
+          {
+            "type": "record_type",
+            "named": true
+          },
+          {
+            "type": "refinement_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_application",
+            "named": true
+          },
+          {
+            "type": "type_constructor",
+            "named": true
+          },
+          {
+            "type": "type_nat",
+            "named": true
+          },
+          {
+            "type": "type_nat_op",
+            "named": true
+          },
+          {
+            "type": "type_variable",
+            "named": true
+          },
+          {
+            "type": "unit_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "variable_pattern",
     "named": true,
     "fields": {},
@@ -12102,6 +12402,10 @@
         },
         {
           "type": "type_nat",
+          "named": true
+        },
+        {
+          "type": "type_nat_op",
           "named": true
         },
         {

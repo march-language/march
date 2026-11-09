@@ -1,0 +1,11 @@
+exit: 1
+-- TYPE -------------- errors/alias_kind_mismatch_1.march
+
+`n` of `Vec` is a value parameter: pass a value here (a number, a name, or `+`/`*` of those), not the type `Int`. [alias_kind_mismatch]
+
+4 |   fn first(xs : Vec(Int, Int)) : Int do List.length(xs) end
+                    ^^^
+
+    run `march --explain alias_kind_mismatch`
+
+
