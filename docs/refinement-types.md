@@ -2422,11 +2422,13 @@ variable is never reported.
 
 ### The stdlib `Set` and `Map` carry assumed contracts
 
-`Set(a)` and `Map(k, v)` are hash tries no measure can see into, so their
-element sets are stated rather than proved: every public `Set` operation
-(`empty`, `singleton`, `insert`, `remove`, `union`, `intersection`,
-`difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
-`from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
+`Set(a)` and `Map(k, v)` are hash tries. Six of `Set`'s contracts are **proved**
+against the trie: `empty`, `singleton`, `insert`, `union`, `to_list` and
+`from_list` (see [proving `Set` against its trie](#proving-set-against-its-trie)).
+They trust one law, `cmp_eq`: the comparator is a strict total order that agrees
+with `==`. The rest are stated rather than proved: the other public `Set`
+operations (`remove`, `intersection`, `difference`, `contains`, `is_subset`,
+`is_empty`, `size`, `eq`) and the key-affecting `Map` operations (`empty`, `singleton`,
 `insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
 `filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`.
 `Map.filter` also assumes an entry fact, `Map(k[p], v[p])`: every entry of its
@@ -2511,6 +2513,70 @@ declaration order, so two functions cannot prove each other's claims. A
 contract that is not proved is still not reported unless it can never hold,
 and it does not reach call sites. `List.map` has no such contract: the
 elements of an arbitrary callback's image have no set expression.
+
+### Proving `Set` against its trie
+
+A `Set(a)` is `HamtSet(count, root)`, where a trie node is empty, a leaf, a
+collision bucket (a `List` of elements sharing a hash), or a branch holding a
+`List` of child nodes. Its contents are two measures that call each other across
+the node type and its child list, plus one over the wrapper:
+
+```march
+@[measure]
+pfn sentry_elts(n : SEntry(a)) : Set(a) do
+  match n do
+  SEmpty -> empty
+  SLeaf(_, x) -> singleton(x)
+  SBranch(_, cs) -> sentries_elts(cs)
+  SCollision(_, xs) -> elts(xs)
+  end
+end
+
+@[measure]
+pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do … end
+
+@[measure]
+@[abstraction(elts)]
+pfn set_elts(s : Set(a)) : Set(a) do
+  match s do
+  HamtSet(_, node) -> sentry_elts(node)
+  end
+end
+```
+
+**`@[abstraction(elts)]`** says what the built-in `elts` means for the
+module's own datatype: inside the module that declares it, `elts(s)` of a
+`Set` is `set_elts(s)`, so `insert`'s public contract
+`elts(_) == union(elts(s), singleton(elem))` is checked against the trie.
+Outside the module `elts` stays opaque, and a caller proves only through the
+contracts, exactly as before. The measure must be axiomatised (a total,
+structurally recursive `@[measure]`), take one parameter of a datatype of its
+own module, and name `elts` or `keys`.
+
+The insert path is written so each step is a contract the checker proves: the
+child insert walks the child list once (`insert_child`, mutually recursive
+with `node_insert` across the two types), a collision that meets a new hash is
+placed beside the new leaf under a fresh branch (`branch_nodes`, which
+terminates by `@[decreases(7 - lvl)]`), and the out-of-range child index
+panics, a path that never returns. The rules that make this work:
+
+- a **list match arm** states the scrutinee's elements: a `Nil` arm gives
+  `elts(xs) == empty`, a `Cons(h, t)` arm `elts(xs) == union(singleton(h), elts(t))`;
+- **`if f(args) do`** reads `f`'s `Bool` contract in both branches, as
+  `let b = f(args)` then `if b do` always did;
+- a **constructor result in an `if` branch** (`Cons(x, xs)`) reflects for an
+  `elts` contract whatever its tail is;
+- a **`panic(..)`, `todo(..)`, `unreachable(..)` or `exit(..)` tail** satisfies
+  any return contract: it never returns a value (an aborting call is the panic
+  surface's business, not the contract's);
+- a call to the **other function of a certified mutual cycle** carries its
+  induction hypothesis, in a constructor field or a list element alike.
+
+A function only gets an induction hypothesis when everything it calls is
+certified to terminate. `insert` counts its elements with `node_mem`, a
+first-order walk shaped like the insert pair, because `node_contains` recurses
+through a closure and through `list_nth_safe`'s result, which the checker cannot
+certify; `union`'s walk calls `insert`, so it inherits that requirement.
 
 ### `SortedSet` is proved, not assumed
 
@@ -5169,7 +5235,7 @@ warning: Unknown attribute `@[decrease]` on `f`: it is ignored.
 note: did you mean `@[decreases]`?
 ```
 
-The function attributes are `@[assume]`, `@[decreases]`, `@[diverges]`,
+The function attributes are `@[abstraction]`, `@[assume]`, `@[decreases]`, `@[diverges]`,
 `@[measure]`, `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`,
 `@[trusted_linear]` and `@[vectorize]`.
 
@@ -6695,9 +6761,13 @@ edges:
   - an accumulator parameter that *grows*: the induction is on the matched
     parameter only, so the hypothesis is universally quantified over the rest.
 
+  - **mutual recursion** whose cycle is certified to terminate: a call to the
+    *other* function of the cycle carries that function's hypothesis, in a
+    constructor field or a list element alike (`Cons(node_insert(c, x), rest)`
+    inside a child-list insert). The functions of a cycle are admitted together:
+    all prove, or none does.
+
   **What is not proved (each is a recorded skip):**
-  - **mutual recursion.** The hypothesis is created only for a call to the
-    function's *own* name, so two functions that call each other prove no property.
   - **a recursive call inside a lambda, or behind a nested `match`.** Only the
     top-level `match`'s pattern equation is supplied, so an arm with a tail that sits
     under a second `match` cannot see the inner scrutinee's shape.

@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
+  Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
+  law, that the comparator is a strict total order agreeing with `==`. A module can say what
+  `elts` (or `keys`) means for its own datatype with `@[abstraction(elts)]` on a `@[measure]`;
+  callers elsewhere keep proving through the contracts as before. The refinement checker also
+  learned what the proofs needed: a `Nil`/`Cons` match arm states the list's elements,
+  `if f(args)` uses `f`'s `Bool` contract, a `panic(..)` arm satisfies a return contract, a
+  `Cons(x, xs)` result in an `if` branch reflects, and mutually recursive functions get their
+  induction hypotheses.
+
 - **Ghost code.** `ghost s : T` parameters, `ghost let` bindings and `ghost fn` functions
   carry values only a proof needs (a search tree's bounds, an abstraction), are checked by the
   refinement checker, and are removed before the program runs: the compiled program is the one

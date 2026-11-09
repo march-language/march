@@ -1591,6 +1591,32 @@ let arm_excludes_nested (br : A.branch) : (string * int * string) option =
 let path_shadow (path : (A.expr * bool) list) (names : string list) : (A.expr * bool) list =
   if names = [] then path else List.filter (fun (c, _) -> not (expr_mentions names c)) path
 
+(* ── List-pattern facts (2026-11-08) ──────────────────────────────────────
+   Reaching a `Nil ->` arm of `match xs` means `elts(xs)` is empty, and a
+   `Cons(h, t) ->` arm means `elts(xs) == union(singleton(h), elts(t))`,
+   whatever arm order.  The walk used to put only the opaque marker there, so
+   a Bool-valued `_ == member(x, elts(xs))` over a list match had nothing
+   connecting `elts(xs)` to the arm.  The fact is a PREDICATE, not program
+   text, so it is tagged and read with the set vocabulary on
+   ([is_pattern_fact]); the path translators otherwise read conditions with
+   it off, since `union` in a guard is the user's function. *)
+let pattern_fact_file = "<pattern-fact>"
+
+let is_pattern_fact (e : A.expr) : bool =
+  match e with A.EApp (_, _, sp) -> sp.A.file = pattern_fact_file | _ -> false
+
+let list_pattern_fact (scrut : A.expr) (pat : A.pattern) : A.expr option =
+  let sp = { A.dummy_span with A.file = pattern_fact_file } in
+  let v n = A.EVar { A.txt = n; A.span = sp } in
+  let app f args = A.EApp (v f, args, sp) in
+  match scrut, pat with
+  | A.EVar { A.txt = xs; _ }, A.PatCon ({ A.txt = "Nil"; _ }, []) ->
+    Some (app "==" [ app "elts" [ v xs ]; v "empty" ])
+  | A.EVar { A.txt = xs; _ }, A.PatCon ({ A.txt = "Cons"; _ }, [ A.PatVar h; A.PatVar t ])
+    when h.A.txt <> xs && t.A.txt <> xs ->
+    Some (app "==" [ app "elts" [ v xs ]; app "union" [ app "singleton" [ v h.A.txt ]; app "elts" [ v t.A.txt ] ] ])
+  | _ -> None
+
 (* =================================================================
    §10 The other fact channels: path, launder, recenv, cbenv
    ================================================================= *)

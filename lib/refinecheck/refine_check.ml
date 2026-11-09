@@ -8083,6 +8083,17 @@ let register_types_for_check (decls : A.decl list) : unit =
    duplicate-named measure from axiomatisation outright (below, under
    [measure_axioms]) is the variant proven safe so far; see
    specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md. *)
+(* Every function carrying `@[abstraction(..)]`, with its module path. *)
+let rec collect_abstraction_fns ?(prefix = "") (decls : A.decl list) : (string * A.fn_def) list =
+  List.concat_map
+    (function
+      | A.DFn (fd, _) when List.exists (String.starts_with ~prefix:"abstraction:") fd.A.fn_attrs ->
+        [ (prefix, fd) ]
+      | A.DMod (n, _, ds, _) ->
+        collect_abstraction_fns ~prefix:(if prefix = "" then n.A.txt else prefix ^ "." ^ n.A.txt) ds
+      | _ -> [])
+    decls
+
 let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
   List.concat_map
     (function
@@ -8852,7 +8863,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "assume"; "decreases"; "diverges"; "ghost"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
+  [ "abstraction"; "assume"; "decreases"; "diverges"; "ghost"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)
@@ -10334,6 +10345,39 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
           msgs)
       mfns;
+    (* `@[abstraction(elts)]` / `@[abstraction(keys)]` (2026-11-08): an
+       axiomatised measure over one of the module's datatypes stands for the
+       built-in measure on that type, inside its module only
+       ([Refine_post.abstraction_measure]). *)
+    Hashtbl.reset Refine_post.abstractions;
+    List.iter
+      (fun (modpath, (fd : A.fn_def)) ->
+        List.iter
+          (fun a ->
+            match String.index_opt a ':' with
+            | Some i when String.sub a 0 i = "abstraction" -> (
+              let bm = String.sub a (i + 1) (String.length a - i - 1) in
+              let err msg =
+                Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
+                  (Printf.sprintf "@[abstraction(%s)] on `%s` %s" bm fd.A.fn_name.A.txt msg)
+              in
+              if not (List.mem "measure" fd.A.fn_attrs) then
+                err "needs @[measure]: the attribute names the measure that stands for the built-in one"
+              else if not (is_builtin_set_measure bm) then
+                err "names no built-in set measure; the ones it can stand for are `elts` and `keys`"
+              else
+                match fd.A.fn_clauses with
+                | [ { A.fc_params = [ A.FPNamed { A.param_ty = Some (A.TyCon (tn, targs)); _ } ]; _ } ]
+                  when not (String.contains tn.A.txt '.') ->
+                  if is_axiom_measure fd.A.fn_name.A.txt then
+                    Hashtbl.replace Refine_post.abstractions
+                      (adt_sort_name ~arity:(List.length targs) tn.A.txt)
+                      (bm, fd.A.fn_name.A.txt, modpath)
+                  else err "is not axiomatised, so it cannot stand for the built-in measure"
+                | _ -> err "must take one parameter whose type is a datatype of its own module")
+            | _ -> ())
+          fd.A.fn_attrs)
+      (collect_abstraction_fns m.A.mod_decls);
     (* Scalar-field measure notice.  A measure reading a scalar constructor
        field (`Array.length` reading `PVec`'s count) is axiomatised correctly;
        since 2026-09-13 (P3 design §4a) call-site reflection places that field

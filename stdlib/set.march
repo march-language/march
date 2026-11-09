@@ -36,6 +36,38 @@ mod Set do
 
   ptype Set(a) = HamtSet(Int, SEntry(a))
 
+  -- ── The abstract contents ─────────────────────────────────────────────────
+  -- A node's elements and its child list's elements call each other across
+  -- two types (a branch holds a List of children).  `set_elts` is what `elts`
+  -- means for a Set inside this module (`@[abstraction(elts)]`); a caller
+  -- elsewhere keeps the opaque view, so its proofs only read the contracts.
+
+  @[measure]
+  pfn sentry_elts(n : SEntry(a)) : Set(a) do
+    match n do
+    SEmpty -> empty
+    SLeaf(_, x) -> singleton(x)
+    SBranch(_, cs) -> sentries_elts(cs)
+    SCollision(_, xs) -> elts(xs)
+    end
+  end
+
+  @[measure]
+  pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do
+    match cs do
+    Nil -> empty
+    Cons(c, rest) -> union(sentry_elts(c), sentries_elts(rest))
+    end
+  end
+
+  @[measure]
+  @[abstraction(elts)]
+  pfn set_elts(s : Set(a)) : Set(a) do
+    match s do
+    HamtSet(_, node) -> sentry_elts(node)
+    end
+  end
+
   -- ── Private helpers ────────────────────────────────────────────────────────
 
   pfn lst_rev(lst) do
@@ -48,11 +80,15 @@ mod Set do
     go(lst, Nil)
   end
 
-  pfn cmp_eq(cmp, a, b) do
-    let lt_ab = cmp(a)
-    let lt_ba = cmp(b)
-    if lt_ab(b) do false
-    else if lt_ba(a) do false
+  -- The one law the contents proofs trust: `cmp` is a strict total order
+  -- that agrees with `==`, so "neither is below the other" is equality.  Every
+  -- comparator-taking function documents the same requirement.
+  @[assume]
+  pfn cmp_eq(cmp : a -> a -> Bool, x : a, y : a) : {Bool | _ == (x == y)} do
+    let lt_xy = cmp(x)
+    let lt_yx = cmp(y)
+    if lt_xy(y) do false
+    else if lt_yx(x) do false
     else true end end
   end
 
@@ -80,21 +116,11 @@ mod Set do
     int_and(bitmap, int_not(int_shl(1, idx)))
   end
 
-  pfn list_insert_at(lst, idx, elem) do
-    fn rev_onto(rev_xs, ys) do
-      match rev_xs do
-      Nil -> ys
-      Cons(h, t) -> rev_onto(t, Cons(h, ys))
-      end
+  pfn insert_at(lst : List(SEntry(a)), idx : Int, e : SEntry(a)) : {List(SEntry(a)) | sentries_elts(_) == union(sentries_elts(lst), sentry_elts(e))} do
+    match lst do
+    Nil -> Cons(e, Nil)
+    Cons(h, t) -> if idx == 0 do Cons(e, lst) else Cons(h, insert_at(t, idx - 1, e)) end
     end
-    fn go(xs, i, acc) do
-      if i == 0 do rev_onto(acc, Cons(elem, xs))
-      else match xs do
-        Nil        -> rev_onto(acc, Cons(elem, Nil))
-        Cons(h, t) -> go(t, i - 1, Cons(h, acc))
-        end end
-    end
-    go(lst, idx, Nil)
   end
 
   pfn list_replace_at(lst, idx, elem) do
@@ -151,9 +177,15 @@ mod Set do
     end
   end
 
-  pfn coll_insert_elem(elems, x, eq) do
-    if coll_has(elems, x, eq) do elems
-    else Cons(x, elems) end
+  pfn coll_mem(elems : List(a), x : a, cmp : a -> a -> Bool) : {Bool | _ == member(x, elts(elems))} do
+    match elems do
+    Nil -> false
+    Cons(e, rest) -> if cmp_eq(cmp, e, x) do true else coll_mem(rest, x, cmp) end
+    end
+  end
+
+  pfn coll_add(elems : List(a), x : a, cmp : a -> a -> Bool) : {List(a) | elts(_) == union(elts(elems), singleton(x))} do
+    if coll_mem(elems, x, cmp) do elems else Cons(x, elems) end
   end
 
   pfn coll_remove_elem(elems, x, eq) do
@@ -195,73 +227,87 @@ mod Set do
     end
   end
 
-  pfn make_branch(h1, x1, h2, x2, level) do
-    fn apply_slots(node, slots) do
-      match slots do
-      Nil -> node
-      Cons(s, rest) ->
-        apply_slots(SBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
-      end
+  -- Two nodes with distinct hashes, placed under the levels where their
+  -- slots agree.  Each level a pair shares a slot wraps it in a one-child
+  -- branch (`wrap_slots`, innermost first).
+  pfn wrap_slots(nd : SEntry(a), slots : List(Int)) : {SEntry(a) | sentry_elts(_) == sentry_elts(nd)} do
+    match slots do
+    Nil -> nd
+    Cons(s, rest) -> wrap_slots(SBranch(bitmap_set(0, s), Cons(nd, Nil)), rest)
     end
-    fn go(lvl, slots_acc) do
-      if lvl > 6 do
-        apply_slots(SCollision(h1, Cons(x1, Cons(x2, Nil))), slots_acc)
-      else do
-        let s1 = hash_slot(h1, lvl)
-        let s2 = hash_slot(h2, lvl)
-        if s1 == s2 do
-          go(lvl + 1, Cons(s1, slots_acc))
-        else do
-          let leaf1 = SLeaf(h1, x1)
-          let leaf2 = SLeaf(h2, x2)
-          let bm = bitmap_set(bitmap_set(0, s1), s2)
-          let base_node =
-            if s1 < s2 do SBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
-            else SBranch(bm, Cons(leaf2, Cons(leaf1, Nil))) end
-          apply_slots(base_node, slots_acc) end
-        end end
-      end
-    end
-    go(level, Nil)
   end
 
-  pfn node_insert(node, x, h, eq, level) do
+  pfn wrap_pair(bm : Int, first : SEntry(a), second : SEntry(a), slots : List(Int)) : {SEntry(a) | sentry_elts(_) == union(sentry_elts(first), sentry_elts(second))} do
+    wrap_slots(SBranch(bm, Cons(first, Cons(second, Nil))), slots)
+  end
+
+  -- Hashes are 30 bits (`key_hash`), five per level, so two distinct hashes
+  -- differ at some level below 6 and the `lvl > 6` arm is unreachable.
+  @[decreases(7 - lvl)]
+  pfn branch_nodes(h1 : Int, n1 : SEntry(a), h2 : Int, n2 : SEntry(a), lvl : Int, acc : List(Int)) : {SEntry(a) | sentry_elts(_) == union(sentry_elts(n1), sentry_elts(n2))} do
+    if lvl > 6 do panic("Set: two distinct hashes share every slot")
+    else do
+      let s1 = hash_slot(h1, lvl)
+      let s2 = hash_slot(h2, lvl)
+      if s1 == s2 do
+        branch_nodes(h1, n1, h2, n2, lvl + 1, Cons(s1, acc))
+      else do
+        let bm = bitmap_set(bitmap_set(0, s1), s2)
+        if s1 < s2 do wrap_pair(bm, n1, n2, acc) else wrap_pair(bm, n2, n1, acc) end
+      end end
+    end end
+  end
+
+  -- Insert into the child at `idx`, in one pass over the child list.
+  pfn insert_child(cs : List(SEntry(a)), idx : Int, x : a, h : Int, cmp : a -> a -> Bool, level : Int) : {List(SEntry(a)) | sentries_elts(_) == union(sentries_elts(cs), singleton(x))} do
+    match cs do
+    Nil -> panic("Set: HAMT node index out of range")
+    Cons(c, rest) ->
+      if idx == 0 do Cons(node_insert(c, x, h, cmp, level), rest)
+      else Cons(c, insert_child(rest, idx - 1, x, h, cmp, level)) end
+    end
+  end
+
+  -- Membership by the hash path, first-order and structurally recursive (a
+  -- branch's child is found by walking its list), so a function calling it
+  -- keeps its induction hypotheses: `node_contains` recurses through a closure
+  -- and through `list_nth_safe`'s result, which the checker cannot certify.
+  pfn node_mem(node : SEntry(a), x : a, h : Int, cmp : a -> a -> Bool, level : Int) : Bool do
+    match node do
+    SEmpty -> false
+    SLeaf(lh, lx) -> lh == h && cmp_eq(cmp, lx, x)
+    SCollision(ch, elems) -> ch == h && coll_mem(elems, x, cmp)
+    SBranch(bitmap, children) ->
+      let slot = hash_slot(h, level)
+      if bitmap_has(bitmap, slot) do child_mem(children, bitmap_rank(bitmap, slot), x, h, cmp, level + 1)
+      else false end
+    end
+  end
+
+  pfn child_mem(cs : List(SEntry(a)), idx : Int, x : a, h : Int, cmp : a -> a -> Bool, level : Int) : Bool do
+    match cs do
+    Nil -> panic("Set: HAMT node index out of range")
+    Cons(c, rest) ->
+      if idx == 0 do node_mem(c, x, h, cmp, level)
+      else child_mem(rest, idx - 1, x, h, cmp, level) end
+    end
+  end
+
+  pfn node_insert(node : SEntry(a), x : a, h : Int, cmp : a -> a -> Bool, level : Int) : {SEntry(a) | sentry_elts(_) == union(sentry_elts(node), singleton(x))} do
     match node do
     SEmpty -> SLeaf(h, x)
-    SLeaf(lh, lx) -> do
+    SLeaf(lh, lx) ->
       if lh == h do
-        if eq(lx, x) do node
-        else SCollision(h, Cons(lx, Cons(x, Nil))) end
-      else
-        make_branch(lh, lx, h, x, level)
-      end
-    end
-    SCollision(ch, elems) -> do
-      if ch == h do
-        SCollision(ch, coll_insert_elem(elems, x, eq))
-      else do
-        fn expand(nd, es) do
-          match es do
-          Nil -> nd
-          Cons(e, rest) ->
-            expand(node_insert(nd, e, ch, eq, level), rest)
-          end
-        end
-        expand(node_insert(SEmpty, x, h, eq, level), elems) end
-      end
-    end
-    SBranch(bitmap, children) -> do
+        if cmp_eq(cmp, lx, x) do node else SCollision(h, Cons(lx, Cons(x, Nil))) end
+      else branch_nodes(lh, node, h, SLeaf(h, x), level, Nil) end
+    SCollision(ch, elems) ->
+      if ch == h do SCollision(ch, coll_add(elems, x, cmp))
+      else branch_nodes(ch, node, h, SLeaf(h, x), level, Nil) end
+    SBranch(bitmap, children) ->
       let slot = hash_slot(h, level)
-      if bitmap_has(bitmap, slot) do
-        let idx = bitmap_rank(bitmap, slot)
-        let child = list_nth_safe(children, idx)
-        let new_child = node_insert(child, x, h, eq, level + 1)
-        SBranch(bitmap, list_replace_at(children, idx, new_child))
-      else do
-        let idx = bitmap_rank(bitmap, slot)
-        SBranch(bitmap_set(bitmap, slot), list_insert_at(children, idx, SLeaf(h, x)))
-      end end
-    end
+      let idx = bitmap_rank(bitmap, slot)
+      if bitmap_has(bitmap, slot) do SBranch(bitmap, insert_child(children, idx, x, h, cmp, level + 1))
+      else SBranch(bitmap_set(bitmap, slot), insert_at(children, idx, SLeaf(h, x))) end
     end
   end
 
@@ -361,6 +407,58 @@ mod Set do
     end
   end
 
+  -- ── First-order walks over the contents ────────────────────────────────────
+  -- `union`, `from_list` and `to_list` visit elements in `node_fold`'s order
+  -- (a collision's list in order, a branch's children in order) as plain
+  -- recursion, so each states what it adds to its accumulator.
+
+  pfn insert_list(acc : Set(a), xs : List(a), cmp : a -> a -> Bool) : {Set(a) | elts(_) == union(elts(acc), elts(xs))} do
+    match xs do
+    Nil -> acc
+    Cons(x, rest) -> insert_list(insert(acc, x, cmp), rest, cmp)
+    end
+  end
+
+  pfn insert_node(acc : Set(a), node : SEntry(a), cmp : a -> a -> Bool) : {Set(a) | elts(_) == union(elts(acc), sentry_elts(node))} do
+    match node do
+    SEmpty -> acc
+    SLeaf(_, x) -> insert(acc, x, cmp)
+    SCollision(_, xs) -> insert_list(acc, xs, cmp)
+    SBranch(_, cs) -> insert_children(acc, cs, cmp)
+    end
+  end
+
+  pfn insert_children(acc : Set(a), cs : List(SEntry(a)), cmp : a -> a -> Bool) : {Set(a) | elts(_) == union(elts(acc), sentries_elts(cs))} do
+    match cs do
+    Nil -> acc
+    Cons(c, rest) -> insert_children(insert_node(acc, c, cmp), rest, cmp)
+    end
+  end
+
+  pfn list_rev_onto(xs : List(a), acc : List(a)) : {List(a) | elts(_) == union(elts(xs), elts(acc))} do
+    match xs do
+    Nil -> acc
+    Cons(x, rest) -> list_rev_onto(rest, Cons(x, acc))
+    end
+  end
+
+  -- The elements in reverse traversal order, onto `acc`.
+  pfn node_rev_onto(node : SEntry(a), acc : List(a)) : {List(a) | elts(_) == union(sentry_elts(node), elts(acc))} do
+    match node do
+    SEmpty -> acc
+    SLeaf(_, x) -> Cons(x, acc)
+    SCollision(_, xs) -> list_rev_onto(xs, acc)
+    SBranch(_, cs) -> children_rev_onto(cs, acc)
+    end
+  end
+
+  pfn children_rev_onto(cs : List(SEntry(a)), acc : List(a)) : {List(a) | elts(_) == union(sentries_elts(cs), elts(acc))} do
+    match cs do
+    Nil -> acc
+    Cons(c, rest) -> children_rev_onto(rest, node_rev_onto(c, acc))
+    end
+  end
+
   -- ── Public API ─────────────────────────────────────────────────────────────
 
   doc """
@@ -371,12 +469,9 @@ mod Set do
       march> Set.size(Set.empty())
       0
 
-  This contract is ASSUMED, not proved: the set of elements is a fact about
-  the abstract set (`elts`) the refinement checker takes on faith, and it
-  holds only when `cmp` is a strict total order consistent with `==` on the
-  element type. See docs/refinement-types.md, "Set Refinements".
+  This contract is proved against the trie. See docs/refinement-types.md,
+  "Set Refinements".
   """
-  @[assume]
   fn empty() : {Set(a) | elts(_) == empty} do
     HamtSet(0, SEmpty)
   end
@@ -389,13 +484,10 @@ mod Set do
       march> Set.to_list(Set.singleton("a"))
       ["a"]
 
-  This contract is ASSUMED, not proved: the set of elements is a fact about
-  the abstract set (`elts`) the refinement checker takes on faith, and it
-  holds only when `cmp` is a strict total order consistent with `==` on the
-  element type. See docs/refinement-types.md, "Set Refinements".
+  This contract is proved against the trie. See docs/refinement-types.md,
+  "Set Refinements".
   """
-  @[assume]
-  fn singleton(x) : {Set(a) | elts(_) == singleton(x)} do
+  fn singleton(x : a) : {Set(a) | elts(_) == singleton(x)} do
     let h = key_hash(x)
     HamtSet(1, SLeaf(h, x))
   end
@@ -488,19 +580,16 @@ mod Set do
       march> Set.size(Set.insert(s2, 1, fn a -> fn b -> a < b))
       2
 
-  This contract is ASSUMED, not proved: the set of elements is a fact about
-  the abstract set (`elts`) the refinement checker takes on faith, and it
-  holds only when `cmp` is a strict total order consistent with `==` on the
-  element type. See docs/refinement-types.md, "Set Refinements".
+  This contract is proved against the trie, trusting one law: `cmp` is a
+  strict total order consistent with `==` on the element type. See
+  docs/refinement-types.md, "Set Refinements".
   """
-  @[assume]
-  fn insert(s, elem, cmp) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do
+  fn insert(s : Set(a), elem : a, cmp : a -> a -> Bool) : {Set(a) | elts(_) == union(elts(s), singleton(elem))} do
     match s do
     HamtSet(n, node) -> do
       let h = key_hash(elem)
-      let eq = fn (a, b) -> cmp_eq(cmp, a, b)
-      let already = node_contains(node, elem, h, eq, 0)
-      HamtSet(if already do n else n + 1 end, node_insert(node, elem, h, eq, 0))
+      let already = node_mem(node, elem, h, cmp, 0)
+      HamtSet(if already do n else n + 1 end, node_insert(node, elem, h, cmp, 0))
     end
     end
   end
@@ -549,18 +638,13 @@ mod Set do
       march> List.sort_by(Set.to_list(Set.union(ua, ub, fn a -> fn b -> a < b)), fn (x, y) -> x < y)
       [1, 2, 3]
 
-  This contract is ASSUMED, not proved: the set of elements is a fact about
-  the abstract set (`elts`) the refinement checker takes on faith, and it
-  holds only when `cmp` is a strict total order consistent with `==` on the
-  element type. See docs/refinement-types.md, "Set Refinements".
+  This contract is proved against the trie, trusting one law: `cmp` is a
+  strict total order consistent with `==` on the element type. See
+  docs/refinement-types.md, "Set Refinements".
   """
-  @[assume]
-  fn union(a, b, cmp) : {Set(a) | elts(_) == union(elts(a), elts(b))} do
-    fn go(acc, x) do
-      insert(acc, x, cmp)
-    end
+  fn union(a : Set(a), b : Set(a), cmp : a -> a -> Bool) : {Set(a) | elts(_) == union(elts(a), elts(b))} do
     match b do
-    HamtSet(_, node) -> node_fold(a, node, go)
+    HamtSet(_, node) -> insert_node(a, node, cmp)
     end
   end
 
@@ -664,18 +748,12 @@ mod Set do
       march> List.sort_by(Set.to_list(Set.from_list(["b", "a", "b"], fn a -> fn b -> a < b)), fn (x, y) -> x < y)
       ["a", "b"]
 
-  This contract is ASSUMED, not proved: the set of elements is a fact about
-  the abstract set (`elts`) the refinement checker takes on faith, and it
-  holds only when `cmp` is a strict total order consistent with `==` on the
-  element type. See docs/refinement-types.md, "Set Refinements".
+  This contract is proved against the trie. See docs/refinement-types.md,
+  "Set Refinements".
   """
-  @[assume]
-  fn to_list(s) : {List(a) | elts(_) == elts(s)} do
+  fn to_list(s : Set(a)) : {List(a) | elts(_) == elts(s)} do
     match s do
-    HamtSet(_, node) -> do
-      let acc = node_fold(Nil, node, fn (xs, x) -> Cons(x, xs))
-      lst_rev(acc)
-    end
+    HamtSet(_, node) -> list_rev_onto(node_rev_onto(node, Nil), Nil)
     end
   end
 
@@ -690,20 +768,12 @@ mod Set do
       march> Set.is_empty(Set.from_list([], fn a -> fn b -> a < b))
       true
 
-  This contract is ASSUMED, not proved: the set of elements is a fact about
-  the abstract set (`elts`) the refinement checker takes on faith, and it
-  holds only when `cmp` is a strict total order consistent with `==` on the
-  element type. See docs/refinement-types.md, "Set Refinements".
+  This contract is proved against the trie, trusting one law: `cmp` is a
+  strict total order consistent with `==` on the element type. See
+  docs/refinement-types.md, "Set Refinements".
   """
-  @[assume]
-  fn from_list(xs, cmp) : {Set(a) | elts(_) == elts(xs)} do
-    fn go(lst, acc) do
-      match lst do
-      Nil -> acc
-      Cons(x, rest) -> go(rest, insert(acc, x, cmp))
-      end
-    end
-    go(xs, empty())
+  fn from_list(xs : List(a), cmp : a -> a -> Bool) : {Set(a) | elts(_) == elts(xs)} do
+    insert_list(empty(), xs, cmp)
   end
 
   doc """
