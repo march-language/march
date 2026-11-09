@@ -782,6 +782,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`ClusterAuth.verify` compares HMAC proofs in constant time, and `DataFrame.to_html` escapes
+  every special character.** `verify` used `==`, whose running time leaks how much of a forged
+  shared-secret proof was right; it now uses `Crypto.secure_compare`. `to_html`'s cell and header
+  escaping replaced only the FIRST `&`, `<`, `>` and `"`, so a cell like `<b>x</b><script>` reached
+  the page with a raw `<script>` (XSS); every occurrence is now escaped, and `'` too.
+
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
