@@ -89,5 +89,7 @@ measure (`sorted_set_elts`) with one trusted comparator law (`compare_by`). Set 
 
 **Stages.** (A) mutual measures across a datatype and its `List` (DONE 2026-11-08,
 blockers 1 and 2 fixed: `specs/progress/2026-11-08-nested-set-measures.md`); (B) prove the
-invariant-free contracts (`insert` first, the end-to-end gate); (C) bit laws and `WF`, then
+invariant-free contracts (`insert` first, the end-to-end gate) (DONE 2026-11-08 for `empty`,
+`singleton`, `insert`, `union`, `to_list`, `from_list`, blocker 3 as the one `@[assume]` law on
+`cmp_eq`: `specs/progress/2026-11-08-set-stage-b-proved-contracts.md`); (C) bit laws and `WF`, then
 `contains`, `remove`, `size`; (D) Map, which is the same trie with values.

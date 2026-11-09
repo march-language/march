@@ -2845,12 +2845,13 @@ end|}));
   fn probe() : Int do needs_empty(insr(Leaf, 5)) end
 end|}));
 
-    (* MUTUAL recursion is NOT supported: the IH is minted only for a call to
-       the function's OWN name, so `f`'s call to `g` reflects to nothing and
-       neither postcondition is proven.  Asserted as silence and documented in
-       specs/lang/refinement-types.md rather than made to work. *)
-    gated "mutual recursion gets no induction hypothesis (silent)" (fun () ->
-        Alcotest.(check bool) "no error" false
+    (* MUTUAL recursion (2026-11-08): `f`'s call to `g` inside the certified
+       SCC carries `g`'s hypothesis, so both postconditions prove, and the
+       proved `sz(f(A)) == 1` makes `needs_empty(f(A))` a definite violation.
+       Before, the IH was minted only for a call to the function's own name
+       and this was silent. *)
+    gated "mutual recursion gets the induction hypothesis" (fun () ->
+        Alcotest.(check bool) "definite error" true
           (has_refine_error
              {|mod P do
   type T = A | B(T)
