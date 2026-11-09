@@ -1449,9 +1449,25 @@ needs_decl:
   | NEEDS; caps = separated_nonempty_list(COMMA, scoped_cap_path)
     { DNeeds (caps, mk_span ($loc)) }
 
+(* A scope may carry options after a comma, and options alone stand for "any
+   host": needs IO.NetConnect("example.com", methods(get), no_redirects),
+   needs IO.NetConnect(no_redirects).  The options ride in the scope string as
+   "<scope>;<option>;..." so the AST type of [DNeeds] does not change; the
+   typechecker validates them (lib/caps/host_scope.ml). *)
 scoped_cap_path:
   | p = cap_path { (p, None) }
   | p = cap_path; LPAREN; s = STRING; RPAREN { (p, Some s) }
+  | p = cap_path; LPAREN; s = STRING; COMMA;
+    os = separated_nonempty_list(COMMA, scope_option); RPAREN
+    { (p, Some (s ^ ";" ^ String.concat ";" os)) }
+  | p = cap_path; LPAREN; os = separated_nonempty_list(COMMA, scope_option); RPAREN
+    { (p, Some (";" ^ String.concat ";" os)) }
+
+(* `no_redirects`, or `methods(get, head)` stored as "methods=get,head". *)
+scope_option:
+  | o = LOWER_IDENT { o }
+  | o = LOWER_IDENT; LPAREN; vs = separated_nonempty_list(COMMA, LOWER_IDENT); RPAREN
+    { o ^ "=" ^ String.concat "," vs }
 
 cap_path:
   | id = upper_name { [id] }

@@ -2600,6 +2600,37 @@ let fn_capability_closures (env : env) : (string * string list) list =
 let declared_cap_scopes (env : env) : (string * string option) list =
   List.sort_uniq compare env.mod_need_scopes
 
+(* [declared_net_scopes env ~entry_module] — each module's HOST scopes on
+   IO.NetConnect, keyed like [module_caps] (the entry module, unwrapped by
+   desugar, under [entry_module]).  [[]] means the module is not host-scoped:
+   it declares no scoped IO.NetConnect, or it also holds an UNSCOPED grant
+   covering IO.NetConnect (IO, IO.Network, IO.NetConnect), which permits any
+   host.  An invalid scope was already reported by the DNeeds check and is
+   skipped here. *)
+let declared_net_scopes (env : env) ~(entry_module : string)
+    : (string * March_caps.Host_scope.decl list) list =
+  let decls_of (scopes : (string * string option) list) =
+    let unscoped =
+      List.exists
+        (fun (c, sc) ->
+           sc = None && March_caps.Cap_lattice.cap_subsumes c "IO.NetConnect")
+        scopes
+    in
+    if unscoped then []
+    else
+      List.filter_map
+        (fun (c, sc) ->
+           match sc with
+           | Some s when March_caps.Cap_scope.is_host_scopable c -> (
+               match March_caps.Host_scope.parse_decl (Some s) with
+               | Ok d -> Some d
+               | Error _ -> None)
+           | _ -> None)
+        scopes
+  in
+  (entry_module, decls_of env.mod_need_scopes)
+  :: List.map (fun (m, scopes) -> (m, decls_of scopes)) env.module_need_scopes
+
 let fn_own_capability_closures (env : env) : (string * string list) list =
   (* Sort by key for the same determinism reason as [fn_capability_closures]. *)
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) env.own_cap_closures []

@@ -10330,6 +10330,21 @@
     }
   },
   {
+    "type": "scope_option",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "scoped_capability",
     "named": true,
     "fields": {},
@@ -10339,6 +10354,10 @@
       "types": [
         {
           "type": "module_path",
+          "named": true
+        },
+        {
+          "type": "scope_option",
           "named": true
         },
         {

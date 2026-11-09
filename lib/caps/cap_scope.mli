@@ -37,9 +37,13 @@ val scope_subsumes : string option -> string option -> bool
     subsumes [None]: narrowing to a directory grants strictly less. *)
 
 val is_scopable : string -> bool
-(** Whether a capability accepts a scope at all. Only filesystem capabilities
-    do; a scope elsewhere is rejected rather than ignored, because an ignored
-    scope reads as enforcement that is not there. *)
+(** Whether a capability accepts a scope at all: the filesystem capabilities
+    take a path scope and [IO.NetConnect] takes a host scope
+    ({!Host_scope}). A scope elsewhere is rejected rather than ignored,
+    because an ignored scope reads as enforcement that is not there. *)
+
+val is_host_scopable : string -> bool
+(** [IO.NetConnect], the one capability whose scope is a host, not a path. *)
 
 (** {1 Scope manifest}
 

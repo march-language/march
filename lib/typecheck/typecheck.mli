@@ -274,6 +274,7 @@ type env = {
   sigs : (string * Ast.sig_def) list;
   mod_needs : string list;
   mod_need_scopes : (string * string option) list;
+  module_need_scopes : (string * (string * string option) list) list;
   module_caps : (string * string list) list;
   protocols : proto_info StrMap.t;
   impls : (ty * Ast.span * string option * (string * ty) list) list StrMap.t;
@@ -389,6 +390,8 @@ val check_module_needs :
 val check_deferred_imports : env -> unit
 val fn_capability_closures : env -> (string * string list) list
 val declared_cap_scopes : env -> (string * string option) list
+val declared_net_scopes :
+  env -> entry_module:string -> (string * March_caps.Host_scope.decl list) list
 val fn_own_capability_closures : env -> (string * string list) list
 val fn_transitive_capability_closures : env -> (string * string list) list
 val subst_svar : string -> session_ty -> session_ty -> session_ty
