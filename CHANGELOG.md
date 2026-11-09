@@ -29,6 +29,48 @@ git log is authoritative for exact commits.
   `HttpClient` (`OutOfScope`, `MethodRefused`, `RedirectRefused`). A helper that takes
   the URL as a parameter marks it `@[net_dest(url)]`. See "Host and method scopes" in the
   [capabilities reference](docs/capabilities.md).
+
+- **An actor's `@invariant` is checked on every build.** The state `init` builds must
+  satisfy it, and every handler must preserve it, given an incoming `state` that satisfies
+  it and the handler's parameter refinements. A handler that can break it is an error naming
+  the actor, the handler and the breaking state (`` `Counter`'s handler `Dec` does not
+  preserve its `@invariant`. ``). Before, `@invariant(count <= limit)` over
+  `init { count: 50, limit: 10 }` built with no diagnostic: the predicate was only read
+  across a hot deploy. The invariant may call the program's own functions
+  (`@invariant(not_137(count))`), unfolded as in any contract. `march --check --guarantees`
+  now reports it `proved`, `violated` or `not proved` instead of `not checked`.
+
+- **`@compat(simulation)`: prove a hot deploy doesn't care which side handles a message.**
+  A `--hot-reload` build records the actor's handler bodies in its schema sidecar; the next
+  build proves, per message, that handling on the deployed code then migrating equals
+  migrating then handling on the new code, or refuses with the state and message that tell
+  them apart. Handlers that call the program's own functions, use `match`, or a deploy that
+  changes the message type are reported `not checked`. `march --check --guarantees` adds a
+  `simulation` line.
+
+- **Rollback round trip for hot deploys.** Declare `<actor>_rollback_state` beside
+  `<actor>_migrate_state` and every build proves
+  `<actor>_rollback_state(<actor>_migrate_state(old)) == old`, or refuses the build with the
+  old state the rollback loses. `march --check --guarantees` adds a `rollback round trip`
+  line. Migration functions written over anonymous records are now usable in contracts and
+  lemmas (they reflect).
+
+- **Hot reload: an old message survives two message-type changes.** A message sent in an
+  actor's old format and received after two or more deploys that each changed the actor's
+  message type is now converted through each deploy's `migrate_msg` in turn, oldest first,
+  and handled. Before, it was dropped whenever more than one such deploy lay in between. It
+  is still dropped and counted when a deploy in between has no `migrate_msg` or one returns
+  `None`, and the drop reason a remote sender gets names which link it was.
+
+- **Hot deploys refuse a moved actor-message tag.** Each handler's constructor tag is now
+  recorded in `.schemas.json` (`"tag"`, also on `migrate_msg_from`), and `forge deploy hot`
+  and `march --check-migration` compare it with the running version's for every
+  constructor both name. Tags are a hash of the qualified constructor name, but a hash
+  collision makes one probe to the next slot, which can move it between builds; a moved
+  tag would make queued messages misread, so the deploy is refused with the actor,
+  constructor and both tags. A running version from before tags were recorded is reported
+  as not compared, never silently passed.
+
 - **Refinement aliases, with value parameters.** `type Pos = {Int | _ > 0}` and
   `type Vec(a, n : Int) = {List(a) | len(_) == n}` name a refinement; each use (`Vec(Int, n)`,
   `Vec(Int, 3)`, `Vec(Int, n + 1)`) is the refinement with its arguments substituted, in
@@ -731,6 +773,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A record-returning function's contract no longer reports a false counterexample** when
+  a field's value is bound by a `let` first (`let next = c + n` then `{ count: next }` was
+  refuted with `next = -1`). Simple `let`s are now inlined into a record result, and a name
+  the checker cannot connect to its definition never makes a model count as a
+  counterexample. `{ r with f: e }` and returning a refined record parameter unchanged are
+  now proved instead of skipped.
 - **Set measures over a tree and its list of children.** A `@[measure]`
   could not recurse through a `List` of child nodes, the shape a HAMT branch
   has: the termination checker refused a mutual pair over two types unless

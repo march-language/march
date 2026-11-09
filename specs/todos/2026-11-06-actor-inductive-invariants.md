@@ -20,6 +20,15 @@ it; today it is checked where it is cheap and otherwise trusted at deploy.
   `claude/reflect-record-predicate-vars`).
 - `@invariant` grammar checks (phase A: an unsupported expression is an error).
 
+## Status
+
+2026-11-08: steps 2 and 4 landed in today's vocabulary, without reflecting the handlers
+(progress `2026-11-08-invariant-unchecked-on-init-and-handlers`): `inv(init)` and
+`inv(s) && R(m) ==> inv(handler result)` are obliged per actor on every build, and
+`--guarantees` reads them (labelled `proved`, not yet `proved (inductive)`). Open: step 1
+(`<Actor>.step`), the `proved (inductive)` label with its boundaries, reply refinements
+(step 3), and the restart/migration boundary statements below.
+
 ## Shape
 
 1. Reflect each handler as `<Actor>.step(state, msg) : state` (one arm per message

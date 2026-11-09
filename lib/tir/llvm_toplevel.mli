@@ -84,6 +84,13 @@ val clo_drop_registration :
 val actor_msg_tag_table :
   pins:(string * string) list -> Tir.type_def list -> (string, int) Hashtbl.t
 
+(** This compilation's [Migrate_msg_pins] over [types], as (old type
+    declaration, `<Actor>_Msg`): the [pins] {!variant_ctor_tags} and
+    [build_ctor_info] use by default. The `.schemas.json` writer passes it to
+    {!actor_msg_tag_table} so the tags it records are the ones codegen
+    installs. *)
+val current_migrate_pins : Tir.type_def list -> (string * string) list
+
 (** Per-constructor heap tags for a [type_def list], in declaration order,
     exactly as {!build_ctor_info} installs them: [type_name -> tag list].
 

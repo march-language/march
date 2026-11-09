@@ -87,3 +87,29 @@ Across these steps, record proof coverage, manual annotations/hints, solver reso
 checking cost and transitive trusted assumptions. Include broken implementations and exhausted
 budgets alongside successful examples. Preserve the existing quantifier-free path and distinguish
 `proved`, `not proved`, `assumed`, and runtime-conformance evidence throughout.
+
+## Research survey additions (2026-11-08)
+
+`specs/2026-11-08-auto-active-verifier-lessons.md` surveys Dafny, Verus, F*, Liquid Haskell, Why3,
+SPARK and the industrial record (AWS, Microsoft, AdaCore). Its strongest finding is that the
+costliest practical problem is proof **stability and explainability**, not expressiveness. Filed
+as one item each:
+
+- Stability first (strong evidence): `2026-11-08-verifier-stability-mode`,
+  `2026-11-08-verifier-minimal-context`, `2026-11-08-verifier-isolated-solver-modes` (also
+  needed by step 11's bit-level HAMT laws).
+- Explainability: `2026-11-08-verifier-proof-dependency-diagnostics`,
+  `2026-11-08-verifier-failure-triage`, `2026-11-08-verifier-structured-diagnostics-for-agents`.
+- Where false proofs come from: `2026-11-08-verifier-encoding-validation` (the interpreter as
+  the encoding's oracle) and `2026-11-08-verifier-executable-specs`.
+- Language: `2026-11-08-verifier-boundary-invariants-and-closed-specs` (also needed by step 11),
+  `2026-11-08-verifier-collection-spec-features` (multisets, `=~=`, `assert forall … by`).
+- Adoption and later: `2026-11-08-verifier-assurance-levels`,
+  `2026-11-08-verifier-actor-protocol-tokens`, `2026-11-08-verifier-unsat-core-hint-replay`.
+
+The survey argues for deprioritizing step 9 (checked solver proofs: no surveyed false proof came
+from a solver bug, so `verifier-encoding-validation` buys more), step 8 (Lean export: large
+effort, and a small trusted base rarely drove adoption) and step 13 (proof scripts: experts asked
+for visibility and focus toggles, not tactics). Step 10 (unbounded quantified lemmas) should
+follow the stability work, since quantifiers are the main cause of instability.
+

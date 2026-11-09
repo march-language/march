@@ -25656,6 +25656,285 @@ let session_theory_suite =
                  (String.split_on_char '\n' out)))
           [ "add_z"; "add_z2"; "add_z3" ]) ]
 
+(* `@invariant` as an INDUCTIVE invariant (todo
+   2026-11-06-invariant-unchecked-on-init-and-handlers; phase F of
+   specs/2026-11-04-lemmas-hcr-actors-choreography-design.md): `init` must
+   establish it and every handler must preserve it, assuming it of the
+   incoming `state` and the message's refinement.  Each case asserts the
+   ledger rows `<Actor>.init` / `<Actor>.<Msg>` (postconditions), never just
+   the absence of an error. *)
+let actor_invariant_suite =
+  let run src =
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    March_refinecheck.Obligation.reset ();
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let errors =
+      String.concat "\n"
+        (List.filter_map
+           (fun (d : March_errors.Errors.diagnostic) ->
+             if d.March_errors.Errors.severity = March_errors.Errors.Error then
+               Some d.March_errors.Errors.message
+             else None)
+           ctx.March_errors.Errors.diagnostics)
+    in
+    let module O = March_refinecheck.Obligation in
+    let rows =
+      List.filter_map
+        (fun (o : O.t) ->
+          if o.O.kind = O.Postcondition && String.contains o.O.callee '.' then
+            Some
+              (Printf.sprintf "%s %s" o.O.callee
+                 (match o.O.verdict with
+                  | O.Proved -> "proved"
+                  | O.Violated -> "violated"
+                  | O.Trusted -> "trusted"
+                  | O.Skipped _ -> "skip"))
+          else None)
+        (O.all ())
+    in
+    (errors, List.sort_uniq compare rows)
+  in
+  let rows_are label expected rows =
+    Alcotest.(check (list string)) label (List.sort_uniq compare expected) rows
+  in
+  let counter ~dec =
+    "mod C do\n\
+    \  @invariant(count >= 0)\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : {Int | _ > 0}) do { state with count: state.count + n } end\n\
+    \    on Dec() do " ^ dec ^ " end\n\
+    \    on Reset() do { count: 0 } end\n\
+    \  end\n\
+    end\n"
+  in
+  [ gated "the guarded counter proves at init and after every handler" (fun () ->
+        let errors, rows =
+          run (counter ~dec:"if state.count > 0 do { state with count: state.count - 1 } else state end")
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "every site proved"
+          [ "Counter.init proved"; "Counter.Inc proved"; "Counter.Dec proved"; "Counter.Reset proved" ]
+          rows);
+
+    gated "an unguarded decrement is refused with the breaking state" (fun () ->
+        let errors, rows = run (counter ~dec:"{ state with count: state.count - 1 }") in
+        Alcotest.(check bool) "names the handler" true
+          (contains errors "`Counter`'s handler `Dec` does not preserve its `@invariant`.");
+        Alcotest.(check bool) "states the invariant as written" true
+          (contains errors "The invariant requires:\n\n    count >= 0");
+        Alcotest.(check bool) "the counterexample state" true (contains errors "state = { count: 0 }");
+        rows_are "only Dec violated"
+          [ "Counter.init proved"; "Counter.Inc proved"; "Counter.Dec violated"; "Counter.Reset proved" ]
+          rows);
+
+    gated "a bad init is refused, and an unrefined message breaks the invariant" (fun () ->
+        let errors, rows =
+          run
+            "mod P1 do\n\
+            \  @invariant(count <= limit)\n\
+            \  actor Counter do\n\
+            \    state { count : Int, limit : Int }\n\
+            \    init { count: 50, limit: 10 }\n\
+            \    on Inc(n : Int) do { state with count: state.count + n } end\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check bool) "init" true
+          (contains errors "`Counter`'s `init` does not establish its `@invariant`.");
+        Alcotest.(check bool) "Inc" true
+          (contains errors "`Counter`'s handler `Inc` does not preserve its `@invariant`.");
+        rows_are "both violated" [ "Counter.init violated"; "Counter.Inc violated" ] rows);
+
+    gated "two actors sharing a message name are checked each against its own" (fun () ->
+        let errors, rows =
+          run
+            "mod Two do\n\
+            \  @invariant(count >= 0)\n\
+            \  actor A do\n\
+            \    state { count : Int }\n\
+            \    init { count: 0 }\n\
+            \    on Bump(n : {Int | _ > 0}) do { state with count: state.count + n } end\n\
+            \  end\n\
+            \  @invariant(total >= 0)\n\
+            \  actor B do\n\
+            \    state { total : Int }\n\
+            \    init { total: 0 }\n\
+            \    on Bump(n : Int) do { state with total: state.total + n } end\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check bool) "B's Bump" true
+          (contains errors "`B`'s handler `Bump` does not preserve its `@invariant`.");
+        Alcotest.(check bool) "not A's" false (contains errors "`A`'s handler");
+        rows_are "per actor"
+          [ "A.init proved"; "A.Bump proved"; "B.init proved"; "B.Bump violated" ] rows);
+
+    gated "a call handler's reply is not part of the claim; a let-bound field value is" (fun () ->
+        (* `state.count` spells a field too; the `let` is inlined, so `next`
+           is not a free value a model may pick (it was: `next = -1`). *)
+        let errors, rows =
+          run
+            "mod Call do\n\
+            \  @invariant(state.count >= 0)\n\
+            \  actor Counter do\n\
+            \    state { count : Int }\n\
+            \    init { count: 0 }\n\
+            \    on GetCount(reply_to) do\n\
+            \      Actor.reply(reply_to, state.count)\n\
+            \      state\n\
+            \    end\n\
+            \    on Inc(n : {Int | _ > 0}) do\n\
+            \      let next = state.count + n\n\
+            \      { state with count: next }\n\
+            \    end\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "proved"
+          [ "Counter.init proved"; "Counter.GetCount proved"; "Counter.Inc proved" ] rows);
+
+    gated "an undecidable invariant is a skip, an error only under cap verified" (fun () ->
+        let src ~cap =
+          "mod U do\n" ^ (if cap then "  cap verified\n" else "")
+          ^ "  @[opaque]\n\
+            \  fn wobble(n : Int) : Bool do n >= 0 end\n\
+            \  @invariant(wobble(count))\n\
+            \  actor Counter do\n\
+            \    state { count : Int }\n\
+            \    init { count: 0 }\n\
+            \    on Inc() do { state with count: state.count + 1 } end\n\
+            \  end\n\
+            end\n"
+        in
+        let errors, rows = run (src ~cap:false) in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "skipped" [ "Counter.init skip"; "Counter.Inc skip" ] rows;
+        let errors, _ = run (src ~cap:true) in
+        Alcotest.(check bool) "cap verified names the invariant and the handler" true
+          (contains errors
+             "cannot verify `Counter`'s `@invariant` `wobble(count)` after handler `Inc`"));
+
+    gated "an invariant calling the program's own function is reflected (M2)" (fun () ->
+        (* The invariant's call resolves by span like any predicate's: its
+           sites come from Refine_term walking the @invariant with the actor,
+           and the check runs under the module's reflection prefix. *)
+        let src ~guard =
+          "mod M do\n\
+          \  fn not_137(n : Int) : Bool do n != 137 end\n\
+          \  @invariant(not_137(count))\n\
+          \  actor A do\n\
+          \    state { count : Int }\n\
+          \    init { count: 0 }\n\
+          \    on Inc() do " ^ guard ^ " end\n\
+          \  end\n\
+          end\n"
+        in
+        let errors, rows =
+          run (src ~guard:"if state.count < 100 do { state with count: state.count + 1 } else state end")
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "proved through not_137" [ "A.init proved"; "A.Inc proved" ] rows;
+        let errors, rows = run (src ~guard:"{ state with count: state.count + 1 }") in
+        Alcotest.(check bool) "Inc can reach 137" true
+          (contains errors "`A`'s handler `Inc` does not preserve its `@invariant`.");
+        rows_are "Inc violated" [ "A.init proved"; "A.Inc violated" ] rows);
+
+    gated "a record return reads a let-bound field; a destructuring let is no counterexample" (fun () ->
+        (* The return-contract fixes this slice needed, on plain functions:
+           `{ r with f: e }` reflects, `r` returned as is is its own sort,
+           and an un-inlined binder makes a model no counterexample. *)
+        let errors, rows =
+          run
+            "mod R do\n\
+            \  type CS = { count : Int }\n\
+            \  fn upd(s : {s : CS | s.count >= 0}, n : {Int | _ > 0}) : {v : CS | v.count >= 0} do\n\
+            \    let next = s.count + n\n\
+            \    { s with count: next }\n\
+            \  end\n\
+            \  fn same(s : {s : CS | s.count >= 0}) : {v : CS | v.count >= 0} do s end\n\
+            \  fn tup(s : {s : CS | s.count >= 0}, n : {Int | _ > 0}) : {v : CS | v.count >= 0} do\n\
+            \    let (a, b) = (s.count + n, 0)\n\
+            \    { count: a + b }\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        let module O = March_refinecheck.Obligation in
+        let verdict f =
+          match List.find_opt (fun (o : O.t) -> o.O.callee = f && o.O.kind = O.Postcondition) (O.all ()) with
+          | Some { O.verdict = O.Proved; _ } -> "proved"
+          | Some { O.verdict = O.Violated; _ } -> "violated"
+          | Some { O.verdict = O.Skipped _; _ } -> "skip"
+          | Some _ -> "other"
+          | None -> "none"
+        in
+        ignore rows;
+        Alcotest.(check string) "upd" "proved" (verdict "upd");
+        Alcotest.(check string) "same" "proved" (verdict "same");
+        Alcotest.(check bool) "tup is not violated" true (verdict "tup" <> "violated")) ]
+
+(* H5, the rollback round trip (phase F of
+   specs/2026-11-04-lemmas-hcr-actors-choreography-design.md):
+   `<actor>_rollback_state` beside `<actor>_migrate_state` gets the generated
+   lemma `<actor>_rollback_roundtrip` (Desugar_rollback), whose two functions
+   reflect because Refine_anon lifts every anonymous record in their
+   signatures, reusing a declared type of the same shape, and reflection lets
+   an actor's state sort give way to the record type it shares a field set
+   with. *)
+let hcr_rollback_suite =
+  let prog ~rollback =
+    "mod R do\n\
+    \  actor Counter do\n\
+    \    state { count : Int, announced : Bool, label : Int }\n\
+    \    init { count: 0, announced: false, label: 2 }\n\
+    \    on Tick() do { state with count: state.count + 1 } end\n\
+    \  end\n\
+    \  fn counter_migrate_state(old : { count : Int, announced : Bool }) : { count : Int, announced : Bool, label : Int } do\n\
+    \    { count: old.count, announced: old.announced, label: 2 }\n\
+    \  end\n\
+    \  fn counter_rollback_state(new : { count : Int, announced : Bool, label : Int }) : { count : Int, announced : Bool } do\n\
+    \    " ^ rollback ^ "\n\
+    \  end\n\
+    end\n"
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  [ gated "a faithful rollback proves the round trip" (fun () ->
+        let code, out =
+          run_cli "--check --guarantees" (prog ~rollback:"{ count: new.count, announced: new.announced }")
+        in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "actor Counter: proved";
+        has out "rollback round trip  proved: rollback_state(migrate_state(old)) == old for every old state");
+    gated "a lossy rollback is refused with the old state it loses" (fun () ->
+        let code, out =
+          run_cli "--check --guarantees" (prog ~rollback:"{ count: new.count, announced: false }")
+        in
+        Alcotest.(check bool) "rejected" true (code <> 0);
+        has out "the lemma `counter_rollback_roundtrip` is false";
+        has out "announced: true";
+        has out "rollback round trip  violated: rolling back loses part of the old state");
+    gated "no rollback_state: no round-trip lemma, no line" (fun () ->
+        let src =
+          "mod N do\n\
+          \  actor Counter do\n\
+          \    state { count : Int, label : Int }\n\
+          \    init { count: 0, label: 2 }\n\
+          \    on Tick() do state end\n\
+          \  end\n\
+          \  fn counter_migrate_state(old : { count : Int }) : { count : Int, label : Int } do\n\
+          \    { count: old.count, label: 2 }\n\
+          \  end\n\
+          end\n"
+        in
+        let _, out = run_cli "--check --guarantees" src in
+        Alcotest.(check bool) "no rollback line" false (contains out "rollback round trip");
+        Alcotest.(check bool) "no lemma" false (contains out "counter_rollback_roundtrip")) ]
+
 (* `--guarantees` (lemmas phase B, bin/guarantees.ml): one labelled block per
    actor and protocol, read off the ledger after the check; it changes no
    verdict. *)
@@ -25671,12 +25950,14 @@ let guarantees_suite =
   in
   let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
   let first_line out = List.hd (String.split_on_char '\n' out) in
-  [ Alcotest.test_case "proved state, unchecked @invariant, the runtime proved on a model" `Quick (fun () ->
-        let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(count <= limit)\n" ~init:"0" ()) in
+  [ Alcotest.test_case "proved state, proved @invariant, the runtime proved on a model" `Quick (fun () ->
+        let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(limit == 10)\n" ~init:"0" ()) in
         Alcotest.(check int) "accepted" 0 code;
-        Alcotest.(check string) "the invariant decides the summary" "actor Counter: not checked" (first_line out);
+        Alcotest.(check string) "summary" "actor Counter: proved" (first_line out);
         has out "state refinements  proved: ";
-        has out "@invariant         not checked: init and handler results are not checked against it";
+        (* Inductive since 2026-11-08 (todo invariant-unchecked-on-init-and-
+           handlers): init and Inc's result, each checked. *)
+        has out "@invariant         proved: 2 sites at init and after each handler";
         has out "handler contracts";
         (* Actor.Theory: the runtime's laws are proved on a model, and tested
            against the runtime where a fixture covers them. *)
@@ -29823,6 +30104,107 @@ let hcr_tally_src =
 end
 |}
 
+(* H3, migration is a simulation (phase F of
+   specs/2026-11-04-lemmas-hcr-actors-choreography-design.md;
+   lib/desugar/desugar_simulation.ml).  End to end: v1 is built with
+   `--hot-reload`, which writes each `@compat(simulation)` handler's body into
+   the sidecar (`"steps"`); v2 is checked against that sidecar, which
+   generates the step functions and one lemma per message. *)
+let hcr_simulation_suite =
+  let v1 =
+    {|mod Main do
+  @compat(simulation)
+  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Bump(n : Int) do
+      let next = state.count + n
+      { state with count: next }
+    end
+  end
+  fn main() : Int do 0 end
+end
+|}
+  in
+  let v2 ~fields ~init ~bump ~extra =
+    "mod Main do\n\
+    \  @compat(simulation)\n\
+    \  actor Tally do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n\
+    \    on Bump(n : Int) do " ^ bump ^ " end\n\
+    \    on Reset() do { state with count: 0 } end\n\
+    \  end\n" ^ extra ^ "\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  (* The deployed sidecar, built once per case in its own dir. *)
+  let with_baseline f =
+    let dir = Filename.temp_dir "hcr_sim" "" in
+    let src_p = Filename.concat dir "app.march" in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc v1);
+    let so = Filename.concat dir "v1.so" in
+    let rc, _, err =
+      run_march_on_env ~cwd:dir [] [ "--compile"; "--compile-so"; "--hot-reload"; "Main"; "-o"; so ] src_p
+    in
+    Alcotest.(check int) ("v1 compiles; stderr:\n" ^ err) 0 rc;
+    let sidecar = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat dir "base.schemas.json") (fun oc -> output_string oc sidecar);
+    f dir sidecar
+  in
+  let check dir src =
+    Out_channel.with_open_bin (Filename.concat dir "m.march") (fun oc -> output_string oc src);
+    run_cli_in dir "--check --guarantees --hcr-baseline base.schemas.json"
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  [ Alcotest.test_case "the sidecar records a simulation actor's handler bodies" `Quick (fun () ->
+        with_baseline (fun _ sidecar ->
+            has sidecar {|"compat": "simulation"|};
+            has sidecar {|"steps": [{"msg":"Bump","params":["n"],"body":|}));
+    gated "an unchanged handler commutes; a new one has no deployed messages" (fun () ->
+        with_baseline (fun dir _ ->
+            let code, out =
+              check dir
+                (v2 ~fields:"count : Int" ~init:"count: 1" ~bump:"{ state with count: state.count + n }" ~extra:"")
+            in
+            Alcotest.(check int) "accepted" 0 code;
+            has out "simulation";
+            has out "Bump proved (commutes)";
+            has out "Reset proved (a new handler: no deployed message names it)"));
+    gated "a handler that now does something else does not commute" (fun () ->
+        with_baseline (fun dir _ ->
+            let code, out =
+              check dir
+                (v2 ~fields:"count : Int" ~init:"count: 1" ~bump:"{ state with count: state.count + n + 1 }"
+                   ~extra:"")
+            in
+            Alcotest.(check bool) "rejected" true (code <> 0);
+            has out "the lemma `tally_simulates__Bump`";
+            has out "when `n` is";
+            has out "Bump violated";
+            Alcotest.(check bool) "no unknown-attribute warning" false (contains out "unknown_attribute")));
+    gated "with a migrate_state, handling commutes with migrating" (fun () ->
+        with_baseline (fun dir _ ->
+            let code, out =
+              check dir
+                (v2 ~fields:"count : Int, hits : Int" ~init:"count: 1, hits: 0"
+                   ~bump:"{ state with count: state.count + n }"
+                   ~extra:
+                     "  fn tally_migrate_state(old : { count : Int }) : { count : Int, hits : Int } do\n\
+                     \    { count: old.count, hits: 0 }\n\
+                     \  end")
+            in
+            Alcotest.(check int) "accepted" 0 code;
+            has out "Bump proved (commutes)"));
+    gated "a body outside the carried grammar is not checked, with the reason" (fun () ->
+        with_baseline (fun dir _ ->
+            let _, out =
+              check dir
+                (v2 ~fields:"count : Int" ~init:"count: 1" ~bump:"{ state with count: bump(state.count, n) }"
+                   ~extra:"  fn bump(a : Int, b : Int) : Int do a + b end")
+            in
+            has out "Bump not checked (this handler: it calls `bump`, which the deployed build may define differently)")) ]
+
 (* Runs `--check-migration` from [prior] to [next] (schema JSON text) over
    [src]; returns the exit code and the `migration:` lines. *)
 let hcr_check ?(src = hcr_tally_src) ?(extra = []) (prior : string) (next : string) =
@@ -29927,6 +30309,110 @@ let hcr_variance_suite =
         let accepted = build [ "--accept-unproved"; "Tally.state,Tally.Bump,Other" ] in
         if not (contains accepted {|"accepted_unproved": ["Bump", "state"]|}) then
           Alcotest.failf "sidecar lacks the accepted laws:\n%s" accepted);
+    (* H7, tag consistency: every constructor both versions name must keep
+       its actor-message tag (Schema_diff.tag_check). A tag moves between
+       builds only when a hash collision made its key probe, and nothing
+       compared them before: these hand-written pairs force the move. *)
+    Alcotest.test_case "equal actor-message tags compared, not refused" `Quick (fun () ->
+        let h t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+        hcr_expect ~rc:0 ~has:[ "actor-message tags: unchanged (1 constructor of 1 actor compared)" ]
+          (hcr_check (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~handlers:(h 0x01000010) (st None))));
+    Alcotest.test_case "a moved actor-message tag is refused" `Quick (fun () ->
+        let h t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+        hcr_expect ~rc:1
+          ~has:[ "Tally.Bump.tag: REFUSED, Tally.Bump's actor-message tag moved: the running \
+                  version tags it 0x01000010, this build 0x01000011";
+                 "hash collision" ]
+          (hcr_check (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~handlers:(h 0x01000011) (st None)));
+        (* Not a proof obligation: no override reaches it. *)
+        hcr_expect ~rc:1 ~has:[ "Tally.Bump.tag: REFUSED" ]
+          (hcr_check ~extra:[ "--accept-unproved"; "Tally" ]
+             (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~accepted:[ "*" ] ~handlers:(h 0x01000011) (st None))));
+    Alcotest.test_case "a baseline that predates tag recording is noted, not refused" `Quick (fun () ->
+        hcr_expect ~rc:0
+          ~has:[ "Tally.tags: not compared (the running version's schema predates \
+                  actor-message tag recording"; "not a refusal" ]
+          (hcr_check (hcr_schema ~handlers:{|{"name":"Bump","params":["Int"]}|} (st None))
+             (hcr_schema ~handlers:{|{"name":"Bump","params":["Int"],"tag":16777232}|} (st None))));
+    (* The writer side: each handler's tag is recorded, it is the tag the
+       emitted code stores, and two builds that declare the same actors in a
+       different order (one with an extra actor) record the same tags, so
+       the gate passes them. *)
+    Alcotest.test_case "the writer records each handler's tag; reordered builds agree" `Quick (fun () ->
+        let dir = Filename.temp_dir "hcr_tags" "" in
+        (* A private HOME: a hit in the shared ~/.march CAS (an earlier run of
+           this same source) restores the .so and its sidecars but writes no
+           .ll, and the IR is what the recorded tags are checked against. *)
+        let home = Filename.concat dir "home" in
+        Unix.mkdir home 0o755;
+        let build name src =
+          let src_p = Filename.concat dir (name ^ ".march") in
+          let oc = open_out src_p in output_string oc src; close_out oc;
+          let so = Filename.concat dir (name ^ ".so") in
+          let rc, _, err = run_march_on_env ~cwd:dir [ ("HOME", home) ]
+              [ "--compile"; "--compile-so"; "--hot-reload"; "Main"; "-o"; so ] src_p in
+          Alcotest.(check int) ("compile " ^ name ^ "; stderr:\n" ^ err) 0 rc;
+          (so ^ ".schemas.json", Filename.concat dir (name ^ ".ll")) in
+        let actor_tally = {|  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Bump(n : Int) do { state with count: state.count + n } end
+    on Reset() do { state with count: 0 } end
+  end
+|} in
+        let actor_tally_reordered = {|  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Reset() do { state with count: 0 } end
+    on Bump(n : Int) do { state with count: state.count + n } end
+  end
+|} in
+        let actor_other = {|  actor Other do
+    state { seen : Int }
+    init  { seen: 0 }
+    on Poke() do { state with seen: state.seen + 1 } end
+  end
+|} in
+        let actor_extra = {|  actor Extra do
+    state { n : Int }
+    init  { n: 0 }
+    on Ping(k : Int) do { state with n: k } end
+  end
+|} in
+        let prog actors = "mod Main do\n" ^ String.concat "" actors
+                          ^ "  fn main() : Int do 0 end\nend\n" in
+        let a_json, a_ll = build "a" (prog [ actor_tally; actor_other ]) in
+        let b_json, _ = build "b" (prog [ actor_extra; actor_other; actor_tally_reordered ]) in
+        let tags path =
+          let schemas = March_forge.Schema_diff.parse_schemas_file path in
+          List.concat_map (fun actor ->
+              match List.assoc_opt actor schemas with
+              | None -> Alcotest.failf "%s missing from %s" actor path
+              | Some s ->
+                List.map (fun (c : March_forge.Schema_diff.ctor) ->
+                    match c.March_forge.Schema_diff.tag with
+                    | Some t -> (actor ^ "." ^ c.March_forge.Schema_diff.cname, t)
+                    | None -> Alcotest.failf "%s.%s has no tag in %s" actor
+                                c.March_forge.Schema_diff.cname path)
+                  (Option.value ~default:[] s.March_forge.Schema_diff.handlers))
+            [ "Tally"; "Other" ]
+          |> List.sort compare in
+        let ta = tags a_json and tb = tags b_json in
+        Alcotest.(check (list (pair string int))) "same tags whatever the declaration order" ta tb;
+        let ir = read_whole_file a_ll in
+        List.iter (fun (k, t) ->
+            if not (contains ir (Printf.sprintf "i32 %d" t)) then
+              Alcotest.failf "%s's recorded tag %d is not in the emitted IR" k t) ta;
+        hcr_expect ~rc:0 ~has:[ "actor-message tags: unchanged" ]
+          (let rc, _, err = run_march_on_env ~cwd:dir []
+               [ "--check-migration"; "--prior-schema"; a_json; "--new-schema"; b_json ]
+               (Filename.concat dir "b.march") in
+           let lines = List.filter (fun l -> String.length l > 10 && String.sub l 0 10 = "migration:")
+               (String.split_on_char '\n' err) in
+           (rc, lines, err)));
     (* The migrate_state path: proved once the return type is the actor's
        own state sort (a synthesised `State` of the same field set made the
        literal ambiguous, so before this a correct migration never proved
@@ -30052,6 +30538,9 @@ let () =
       ("hcr-migration", hcr_migration_suite);
       ("hcr-derived-migration", hcr_derived_migration_suite);
       ("guarantees", guarantees_suite);
+      ("actor-invariant", actor_invariant_suite);
+      ("hcr-rollback", hcr_rollback_suite);
+      ("hcr-simulation", hcr_simulation_suite);
       ("session-theory", session_theory_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
