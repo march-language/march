@@ -15303,6 +15303,36 @@ let test_newtype_eq_operator_generic_payload_compiled () =
    mangled to [Tup_Tup_Int_x_Int_x_Int_x_Int].  The interpreter was right in
    every case; compiled code gave wrong answers, over-read, or SIGSEGVed. *)
 
+(** `not p(n)` is `!p(n)`: it used to parse as two block statements, a
+    discarded `not` and the value `p(n)`, so the `else` branch returned
+    `p(n)` un-negated on both backends
+    (specs/progress/2026-10-29-not-at-block-start-parses-as-two-statements.md). *)
+let test_not_before_operand_is_prefix_not () =
+  assert_compiled_interp_parity
+    ~name:"march_not_before_operand"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn p(n : Int) : Bool do n > 5 end
+  fn branch(n : Int) : Bool do
+    if n >= 0 do false else not p(n) end
+  end
+  fn arms(n : Int) : Bool do
+    match n do
+      0 -> not true
+      _ -> not not p(n)
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    println(bool_to_string(branch(-1)))
+    println(bool_to_string(branch(-9)))
+    println(bool_to_string(arms(0)) ++ " " ++ bool_to_string(arms(9)))
+    println(bool_to_string(not(true)))
+  end
+end
+|}
+    ~expected:"true\ntrue\nfalse true\nfalse"
+    ()
+
 (** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
 let test_record_eq_pair_then_triple_compiled () =
   assert_compiled_interp_parity
@@ -19280,6 +19310,8 @@ let codegen_suites =
             test_newtype_eq_operator_generic_payload_compiled;
           Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
             test_eq_operator_opaque_ctor_field_uses_poly_eq;
+          Alcotest.test_case "`not p(n)` at a block start is `!p(n)`" `Quick
+            test_not_before_operand_is_prefix_not;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

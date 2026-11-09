@@ -782,6 +782,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`not p(n)` negates.** `not` followed directly by an operand parsed as two statements, a
+  discarded `not` and the operand, so `else not p(n) end` returned `p(n)` un-negated. `not x` is now
+  the prefix `!x`; `not(x)` is unchanged.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
