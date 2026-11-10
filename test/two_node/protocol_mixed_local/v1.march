@@ -2,6 +2,10 @@
 -- with `--emit-protocols`, to write the baseline node_a.march is built
 -- against (its `choose by Shop` has no `later` branch).
 mod OrderV1 do
+  -- The generated endpoints perform IO (console, mutable state, network,
+  -- processes, spawning), which the capability ceiling holds to this line
+  -- under --check as under --compile.
+  needs IO
   @[endpoints]
   protocol Order do
     loop do
