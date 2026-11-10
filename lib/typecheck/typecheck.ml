@@ -2533,6 +2533,15 @@ let binary_operators =
   [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/.";
     "<"; "<="; ">"; ">="; "=="; "!="; "&&"; "||" ]
 
+(* A literal value, possibly negated, or a bare atom: what `x == <it>`
+   compares a value against, never a [Result]. *)
+let rec plain_literal (e : Ast.expr) =
+  match e with
+  | Ast.ELit _ -> true
+  | Ast.EAtom (_, [], _) -> true
+  | Ast.EApp (Ast.EVar n, [ x ], _) when n.Ast.txt = "negate" -> plain_literal x
+  | _ -> false
+
 (* Operators whose operands are never a capability operation's
    [Result(T, CapError)] on purpose (`==` is: `println(x) == Ok(())`). *)
 let cap_operand_operators =
@@ -2748,6 +2757,34 @@ let poison_linear_operands env (e : Ast.expr) =
         | Some u when List.exists (within u) spans -> le.le_poisoned := true
         | _ -> ())
       env.lin
+
+(** A `match` over a capability operation's [Result(T, CapError)] written
+    for the [T] (`match Process.env("HOME") do Some(v) -> ... end`, from
+    before operations could be refused): report [cap_result_unhandled] on the
+    scrutinee, with the [Authority.must] fix, and return [T] for the arms to
+    check against.  Only when some arm's pattern is shaped like a value and
+    none is an [Ok]/[Err] pattern: a match that handles the [Result] (or binds
+    it whole) is left alone. *)
+let cap_scrutinee env (scrut : Ast.expr) (scrut_ty : ty) (branches : Ast.branch list) : ty =
+  match repr scrut_ty with
+  | TCon ("Result", [ p; err ]) when is_cap_error_ty err ->
+    let rec heads (pat : Ast.pattern) = match pat with
+      | Ast.PatAs (q, _, _) -> heads q
+      | Ast.PatOr (qs, _) -> List.concat_map heads qs
+      | Ast.PatWild _ | Ast.PatVar _ -> []
+      | Ast.PatCon (n, _) ->
+        let short = match String.rindex_opt n.Ast.txt '.' with
+          | Some i -> String.sub n.Ast.txt (i + 1) (String.length n.Ast.txt - i - 1)
+          | None -> n.Ast.txt in
+        [ (if short = "Ok" || short = "Err" then `Result else `Value) ]
+      | _ -> [ `Value ] in
+    let hs = List.concat_map (fun (b : Ast.branch) -> heads b.Ast.branch_pat) branches in
+    if hs <> [] && not (List.mem `Result hs) then begin
+      report_cap_result_unhandled env ~span:(span_of_expr scrut)
+        ~provided:(provided_of_expr scrut scrut_ty) ~payload:p scrut_ty p;
+      p
+    end else scrut_ty
+  | _ -> scrut_ty
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
@@ -4073,8 +4110,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
               | _ -> None)
            | _ -> None in
          let mark_args = env.errors.Err.diagnostics in
-         let cap_op = match f with
-           | Ast.EVar name -> List.mem name.txt cap_operand_operators && List.length args = 2
+         let cap_op = match f, args with
+           | Ast.EVar name, [ _; right ] ->
+             List.mem name.txt cap_operand_operators
+             (* `==`/`!=` compare Results on purpose (`println(x) == Ok(())`);
+                against a plain literal (`Env.get(k, "") == "1"`) it is the
+                value that was meant. *)
+             || ((name.txt = "==" || name.txt = "!=") && plain_literal right)
            | _ -> false in
          let res = infer_app ?payload ~cap_op env sp f_ty args 0 in
          (match f with
@@ -4242,7 +4284,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── match ────────────────────────────────────────────────────── *)
     | Ast.EMatch (scrut, branches, sp) ->
-      let scrut_ty = infer_expr env scrut in
+      let scrut_ty = cap_scrutinee env scrut (infer_expr env scrut) branches in
       infer_match env sp scrut scrut_ty branches
 
     (* ── Tuples ───────────────────────────────────────────────────── *)
@@ -5028,7 +5070,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* Match in check mode: check each arm against expected *)
   | Ast.EMatch (scrut, branches, msp), _ ->
-    let scrut_ty = infer_expr env scrut in
+    let scrut_ty = cap_scrutinee env scrut (infer_expr env scrut) branches in
     iter_arms_linear env ~span:msp branches (fun (br : Ast.branch) ->
         let (bindings, pat_ty), wilds =
           with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
@@ -5479,6 +5521,12 @@ and infer_block env exprs =
     (match b.bind_pat with
      | Ast.PatVar name ->
        Hashtbl.replace env.type_map name.span (repr rhs_ty);
+       (* `let t = Vault.new("x")`: a later use of [t] that wanted the value
+          gets its cap_result_unhandled fix here, on the operation. *)
+       (match repr rhs_ty with
+        | TCon ("Result", [ _; err ]) when is_cap_error_ty err ->
+          Hashtbl.replace cap_result_rhs name.span (span_of_expr b.bind_expr)
+        | _ -> ());
        (match b.bind_expr with
         | Ast.ESpawn (_, ssp) -> Hashtbl.replace env.decl_sites (spawn_site_key name.span) ssp
         | _ -> ())

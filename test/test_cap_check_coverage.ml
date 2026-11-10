@@ -21,8 +21,6 @@ module Ops = March_caps.Cap_ops
    delete their rows as they add the checks; what remains at the end is
    reasoned. *)
 let allowlist : ((string * string) * string) list = [
-  (("Check.is_skipped", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Check.resolve_seed", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
   (("ClusterConn.listen", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.credentials", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.config_from_env", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
@@ -41,13 +39,6 @@ let allowlist : ((string * string) * string) list = [
   (("ClusterNode.start", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Config.global_table", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Config.global_table", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Config.from_env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Config.from_env_int", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Config.from_env_bool", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Config.env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Config.is_dev", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Config.is_test", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Config.is_prod", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
   (("Config.new_store", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Config.new_store", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Csv.each_row", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
@@ -61,11 +52,6 @@ let allowlist : ((string * string) * string) list = [
   (("Dir.rm_rf", "dir_rm_rf"), "TODO ocap-p1 Task 10 (files/network)");
   (("Dir.exists", "dir_exists"), "TODO ocap-p1 Task 10 (files/network)");
   (("Dns.resolve", "dns_resolve"), "TODO ocap-p1 Task 10 (files/network)");
-  (("Env.get", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Env.require", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Env.get_int", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Env.get_bool", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Env.is_set", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
   (("File.read", "file_read"), "TODO ocap-p1 Task 10 (files/network)");
   (("File.read_lines", "file_read"), "TODO ocap-p1 Task 10 (files/network)");
   (("File.exists", "file_exists"), "TODO ocap-p1 Task 10 (files/network)");
@@ -96,15 +82,6 @@ let allowlist : ((string * string) * string) list = [
   (("NetKernel.handshake_auth", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Parallel.pmap_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Parallel.preduce_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Process.run", "process_spawn_sync"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.run_stream", "process_spawn_lines"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.set_env", "process_set_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.cwd", "process_cwd"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.exit", "process_exit"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.argv", "process_argv"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.pid", "process_pid"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Process.spawn_async", "process_spawn_async"), "TODO ocap-p1 Task 8 (process/env)");
   (("Seq.from_file_lines", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("Seq.from_file_chunks", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("SessionNode.start_link", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
@@ -120,13 +97,6 @@ let allowlist : ((string * string) * string) list = [
   (("Signal.raise", "signal_raise_self"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Socket.connect", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
   (("Socket.connect_timeout", "tcp_connect_timeout"), "TODO ocap-p1 Task 10 (files/network)");
-  (("System.env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("System.put_env", "process_set_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("System.argv", "process_argv"), "TODO ocap-p1 Task 8 (process/env)");
-  (("System.cwd", "process_cwd"), "TODO ocap-p1 Task 8 (process/env)");
-  (("System.pid", "process_pid"), "TODO ocap-p1 Task 8 (process/env)");
-  (("System.exit", "process_exit"), "TODO ocap-p1 Task 8 (process/env)");
-  (("System.cmd", "process_spawn_sync"), "TODO ocap-p1 Task 8 (process/env)");
   (("Task.async", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Task.async_stream", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Task.async_stream_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");

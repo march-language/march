@@ -430,8 +430,18 @@ let cap_result_fix ~(payload : ty) (sp : Ast.span) : Err.fix_kind =
      | None -> wrap "Authority.ignore(")
   | _ -> wrap "Authority.must("
 
+(* Binder span of `let x = <capability operation>` -> the operation's span,
+   so a use of [x] that wanted the value is fixed once, at the binding. *)
+let cap_result_rhs : (Ast.span, Ast.span) Hashtbl.t = Hashtbl.create 16
+
 let report_cap_result_unhandled env ~span ?provided ~payload provided_ty required =
-  let at = match provided with Some p -> p.p_span | None -> span in
+  let at = match provided with
+    | Some { p_name = Some x; p_span; _ } ->
+      (match StrMap.find_opt x env.binder_spans with
+       | Some b -> (match Hashtbl.find_opt cap_result_rhs b with Some r -> r | None -> p_span)
+       | None -> p_span)
+    | Some p -> p.p_span
+    | None -> span in
   let unit = match repr payload with TTuple [] -> true | _ -> false in
   Err.report env.errors
     { Err.severity = Error; span = at;

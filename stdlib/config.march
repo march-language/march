@@ -492,24 +492,26 @@ mod Config do
   Load a String value from an environment variable and store it under `key`.
   Uses `default_val` if the env var is not set (a set-but-empty variable
   stores `""`). Always stores, overwriting any previous value; returns the
-  value stored.
+  value stored, or `Err(CapError(...))` (storing nothing) when reading the
+  variable is refused.
 
   ## Examples
 
       march> let secret = Config.key(:myapp, :secret, Config.string())
       march> Config.from_env(secret, "MARCH_DOCTEST_NEVER_SET", "dev-secret")
-      "dev-secret"
+      Ok("dev-secret")
       march> let secret = Config.key(:myapp, :secret, Config.string())
       march> Config.get_with_default(secret, "")
       "dev-secret"
   """
-  fn from_env(k : Key(String), env_var : String, default_val : String) : String do
-    let value = match process_env(env_var) do
-      Some(v) -> v
+  fn from_env(k : Key(String), env_var : String, default_val : String) : Result(String, CapError) do
+    let? v = Process.env(env_var)
+    let value = match v do
+      Some(s) -> s
       None    -> default_val
     end
     put(k, value)
-    value
+    Ok(value)
   end
 
   doc """
@@ -520,10 +522,11 @@ mod Config do
   ## Examples
 
       march> Config.from_env_int(Config.key(:myapp, :workers, Config.int()), "MARCH_DOCTEST_NEVER_SET", 4)
-      4
+      Ok(4)
   """
-  fn from_env_int(k : Key(Int), env_var : String, default_val : Int) : Int do
-    let value = match process_env(env_var) do
+  fn from_env_int(k : Key(Int), env_var : String, default_val : Int) : Result(Int, CapError) do
+    let? v = Process.env(env_var)
+    let value = match v do
       Some(s) ->
         match string_to_int(s) do
           Some(n) -> n
@@ -532,7 +535,7 @@ mod Config do
       None -> default_val
     end
     put(k, value)
-    value
+    Ok(value)
   end
 
   doc """
@@ -544,15 +547,16 @@ mod Config do
   ## Examples
 
       march> Config.from_env_bool(Config.key(:myapp, :verbose, Config.bool()), "MARCH_DOCTEST_NEVER_SET", true)
-      true
+      Ok(true)
   """
-  fn from_env_bool(k : Key(Bool), env_var : String, default_val : Bool) : Bool do
-    let value = match process_env(env_var) do
+  fn from_env_bool(k : Key(Bool), env_var : String, default_val : Bool) : Result(Bool, CapError) do
+    let? v = Process.env(env_var)
+    let value = match v do
       Some(s) -> s == "true" || s == "1" || s == "yes"
       None    -> default_val
     end
     put(k, value)
-    value
+    Ok(value)
   end
 
   -- ── Environment detection ─────────────────────────────────────────────────
@@ -563,43 +567,39 @@ mod Config do
   gives :test, and anything else (including unset) gives :dev.
 
       match Config.env() do
-        :prod -> enable_caching()
-        _     -> ()
+        Ok(:prod) -> enable_caching()
+        _         -> ()
       end
+
+  `Err(CapError(...))` when reading MARCH_ENV is refused; so for the three
+  predicates below.
   """
-  fn env() do
-    match process_env("MARCH_ENV") do
-    Some("prod") -> :prod
-    Some("test") -> :test
-    Some("dev")  -> :dev
-    Some(_)      -> :dev
-    None         -> :dev
+  fn env() : Result(Atom, CapError) do
+    let? v = Process.env("MARCH_ENV")
+    match v do
+    Some("prod") -> Ok(:prod)
+    Some("test") -> Ok(:test)
+    Some(_)      -> Ok(:dev)
+    None         -> Ok(:dev)
     end
   end
 
   doc "True unless MARCH_ENV is \"prod\" or \"test\" (so an unset or unrecognised MARCH_ENV counts as :dev)."
-  fn is_dev() do
-    match process_env("MARCH_ENV") do
-    Some("prod") -> false
-    Some("test") -> false
-    _            -> true
-    end
+  fn is_dev() : Result(Bool, CapError) do
+    let? e = env()
+    Ok(e == :dev)
   end
 
   doc "True if MARCH_ENV is exactly \"test\"."
-  fn is_test() do
-    match process_env("MARCH_ENV") do
-    Some("test") -> true
-    _            -> false
-    end
+  fn is_test() : Result(Bool, CapError) do
+    let? e = env()
+    Ok(e == :test)
   end
 
   doc "True if MARCH_ENV is exactly \"prod\"."
-  fn is_prod() do
-    match process_env("MARCH_ENV") do
-    Some("prod") -> true
-    _            -> false
-    end
+  fn is_prod() : Result(Bool, CapError) do
+    let? e = env()
+    Ok(e == :prod)
   end
 
   -- ── Validation ────────────────────────────────────────────────────────────

@@ -64,6 +64,8 @@ let js_unsupported : (string * string) list = [
      on JS by the refuse_* fixtures. *)
   ("console_read_byte", "verdict needs `process_exit`, and `io_read_byte`; the JS target has neither");
   ("console_refused", "verdict needs `process_exit`, and `io_read_line`; the JS target has neither");
+  ("process_allowed", "the JS target has no `process_set_env` or `process_spawn_sync`");
+  ("process_refused", "the JS target has no `process_exit`");
 ]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)

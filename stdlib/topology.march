@@ -186,7 +186,7 @@ mod Topology do
   end
 
   doc "This node's labels: MARCH_NODE_LABELS, comma-separated (set by the launcher from the overlay)."
-  fn node_labels() : List(String) do labels_of(Env.get("MARCH_NODE_LABELS", "")) end
+  fn node_labels() : List(String) do labels_of(Authority.must(Env.get("MARCH_NODE_LABELS", ""))) end
 
   doc "A node's rendezvous score for [role]: every node computes the same one."
   fn score(role_name : String, node_id : String) : String do
@@ -302,9 +302,9 @@ mod Topology do
       if String.starts_with(nm, prefix) do Some(String.slice(nm, k, String.byte_size(nm) - k)) else None end)
   end
 
-  pfn settle_ms() : Int do Env.get_int("MARCH_PLACEMENT_SETTLE_MS", 15000) end
-  pfn tick_ms() : Int do Env.get_int("MARCH_PLACEMENT_TICK_MS", 200) end
-  pfn hook_timeout_ms() : Int do Env.get_int("MARCH_HOOK_TIMEOUT_MS", 10000) end
+  pfn settle_ms() : Int do Authority.must(Env.get_int("MARCH_PLACEMENT_SETTLE_MS", 15000)) end
+  pfn tick_ms() : Int do Authority.must(Env.get_int("MARCH_PLACEMENT_TICK_MS", 200)) end
+  pfn hook_timeout_ms() : Int do Authority.must(Env.get_int("MARCH_HOOK_TIMEOUT_MS", 10000)) end
 
   -- ── per-node state ────────────────────────────────────────────────────
 
@@ -544,7 +544,7 @@ mod Topology do
   --   set of open offers changes, an offer closes (the holder may be gone),
   --   or after a backoff that doubles from 1 s to 60 s -- never silently
   --   every tick.
-  pfn conflict_grace_ms() : Int do Env.get_int("MARCH_PLACEMENT_CONFLICT_GRACE_MS", 5000) end
+  pfn conflict_grace_ms() : Int do Authority.must(Env.get_int("MARCH_PLACEMENT_CONFLICT_GRACE_MS", 5000)) end
 
   -- This node's open offers, as a string that changes whenever one opens or
   -- closes (a reopened role gets a fresh offer id).
@@ -1231,7 +1231,7 @@ mod Topology do
   rejects stops the program via `start_failed`.
   """
   fn config_from_env() : ClusterNode.CnConfig do
-    if Env.is_set("MARCH_NODE_CERT") do
+    if Authority.must(Env.is_set("MARCH_NODE_CERT")) do
       -- Certificate mode (dd step 11): the node's certificate, key and the
       -- operator's public key come from the environment, as `ClusterNode.config_from_env` reads them.
       match ClusterNode.config_from_env() do
@@ -1242,12 +1242,12 @@ mod Topology do
   end
 
   pfn config_plain_from_env() : ClusterNode.CnConfig do
-    let name = Env.get("MARCH_NODE_NAME", "local-1")
-    let port = Env.get_int("MARCH_NODE_PORT", 7946)
-    let seeds = labels_of(Env.get("MARCH_CLUSTER_NODES", ""))
-    let creation = Env.get_int("MARCH_NODE_CREATION", unix_time_ms())
-    ClusterNode.config(name, port, Env.get("MARCH_NODE_ADVERTISE", ""), seeds,
-                       Env.get("MARCH_CLUSTER_SECRET", "march-cluster"), creation)
+    let name = Authority.must(Env.get("MARCH_NODE_NAME", "local-1"))
+    let port = Authority.must(Env.get_int("MARCH_NODE_PORT", 7946))
+    let seeds = labels_of(Authority.must(Env.get("MARCH_CLUSTER_NODES", "")))
+    let creation = Authority.must(Env.get_int("MARCH_NODE_CREATION", unix_time_ms()))
+    ClusterNode.config(name, port, Authority.must(Env.get("MARCH_NODE_ADVERTISE", "")), seeds,
+                       Authority.must(Env.get("MARCH_CLUSTER_SECRET", "march-cluster")), creation)
   end
 
   doc """

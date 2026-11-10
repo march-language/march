@@ -33,7 +33,7 @@ mod Cluster do
       []
   """
   fn from_env() : List(NodeAddr) do
-    match System.env("MARCH_CLUSTER_NODES") do
+    match Authority.must(System.env("MARCH_CLUSTER_NODES")) do
       None      -> []
       Some(val) ->
         val

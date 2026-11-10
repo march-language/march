@@ -237,14 +237,14 @@ describe "Config.from_env" do
   test "loads string from env var" do
     process_set_env("MARCH_CFG_TEST_HOST_1", "db.example.com")
     let host = Config.key(:cfg_env_test_a, :host, Config.string())
-    let result = Config.from_env(host, "MARCH_CFG_TEST_HOST_1", "localhost")
+    let result = Authority.must(Config.from_env(host, "MARCH_CFG_TEST_HOST_1", "localhost"))
     assert (result == "db.example.com")
     assert (Config.get(host) == Some("db.example.com"))
   end
 
   test "uses default when env var not set" do
     let host = Config.key(:cfg_env_test_b, :host, Config.string())
-    let result = Config.from_env(host, "MARCH_CFG_UNSET_HOST_XYZ", "localhost")
+    let result = Authority.must(Config.from_env(host, "MARCH_CFG_UNSET_HOST_XYZ", "localhost"))
     assert (result == "localhost")
     assert (Config.get(host) == Some("localhost"))
   end
@@ -252,37 +252,37 @@ describe "Config.from_env" do
   test "from_env_int parses integer from env var" do
     process_set_env("MARCH_CFG_TEST_PORT_1", "5432")
     let port = Config.key(:cfg_env_test_c, :port, Config.int())
-    let result = Config.from_env_int(port, "MARCH_CFG_TEST_PORT_1", 3000)
+    let result = Authority.must(Config.from_env_int(port, "MARCH_CFG_TEST_PORT_1", 3000))
     assert (result == 5432)
     assert (Config.get(port) == Some(5432))
   end
 
   test "from_env_int uses default when env var not set" do
-    let result = Config.from_env_int(Config.key(:cfg_env_test_d, :port, Config.int()), "MARCH_CFG_UNSET_PORT_XYZ", 4000)
+    let result = Authority.must(Config.from_env_int(Config.key(:cfg_env_test_d, :port, Config.int()), "MARCH_CFG_UNSET_PORT_XYZ", 4000))
     assert (result == 4000)
   end
 
   test "from_env_int uses default when value is not an integer" do
     process_set_env("MARCH_CFG_TEST_BAD_PORT_1", "not-a-port")
-    let result = Config.from_env_int(Config.key(:cfg_env_test_e, :port, Config.int()), "MARCH_CFG_TEST_BAD_PORT_1", 4000)
+    let result = Authority.must(Config.from_env_int(Config.key(:cfg_env_test_e, :port, Config.int()), "MARCH_CFG_TEST_BAD_PORT_1", 4000))
     assert (result == 4000)
   end
 
   test "from_env_bool reads true from env var" do
     process_set_env("MARCH_CFG_TEST_DEBUG_1", "true")
     let result = Config.from_env_bool(Config.key(:cfg_env_test_f, :debug, Config.bool()), "MARCH_CFG_TEST_DEBUG_1", false)
-    assert result
+    assert Authority.must(result)
   end
 
   test "from_env_bool reads false from env var" do
     process_set_env("MARCH_CFG_TEST_DEBUG_2", "false")
     let result = Config.from_env_bool(Config.key(:cfg_env_test_g, :debug, Config.bool()), "MARCH_CFG_TEST_DEBUG_2", true)
-    assert not(result)
+    assert not(Authority.must(result))
   end
 
   test "from_env_bool uses default when not set" do
     let result = Config.from_env_bool(Config.key(:cfg_env_test_h, :debug, Config.bool()), "MARCH_CFG_UNSET_DEBUG_XYZ", false)
-    assert not(result)
+    assert not(Authority.must(result))
   end
 
 end
@@ -324,32 +324,32 @@ describe "Config.env" do
 
   test "env detection: set to test" do
     process_set_env("MARCH_ENV", "test")
-    assert (Config.env() == :test)
-    assert (Config.is_test())
-    assert not(Config.is_dev())
-    assert not(Config.is_prod())
+    assert (Authority.must(Config.env()) == :test)
+    assert (Authority.must(Config.is_test()))
+    assert not(Authority.must(Config.is_dev()))
+    assert not(Authority.must(Config.is_prod()))
   end
 
   test "env detection: set to prod" do
     process_set_env("MARCH_ENV", "prod")
-    assert (Config.env() == :prod)
-    assert (Config.is_prod())
-    assert not(Config.is_dev())
-    assert not(Config.is_test())
+    assert (Authority.must(Config.env()) == :prod)
+    assert (Authority.must(Config.is_prod()))
+    assert not(Authority.must(Config.is_dev()))
+    assert not(Authority.must(Config.is_test()))
   end
 
   test "env detection: set to dev" do
     process_set_env("MARCH_ENV", "dev")
-    assert (Config.env() == :dev)
-    assert (Config.is_dev())
-    assert not(Config.is_test())
-    assert not(Config.is_prod())
+    assert (Authority.must(Config.env()) == :dev)
+    assert (Authority.must(Config.is_dev()))
+    assert not(Authority.must(Config.is_test()))
+    assert not(Authority.must(Config.is_prod()))
   end
 
   test "env defaults to dev for unknown value" do
     process_set_env("MARCH_ENV", "staging")
-    assert (Config.env() == :dev)
-    assert (Config.is_dev())
+    assert (Authority.must(Config.env()) == :dev)
+    assert (Authority.must(Config.is_dev()))
   end
 
 end

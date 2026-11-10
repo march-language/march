@@ -1,0 +1,21 @@
+-- REFUSE: IO.Clock
+-- Environment reads allowed: an unset variable is Ok(None), a set one
+-- Ok(Some(v)); Env's default applies only to unset; a program that cannot
+-- start is Ok(Err(_)), not a refusal.
+mod ProcessAllowed do
+  needs IO.Console
+  needs IO.Process
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    println(Process.env("MARCH_CONF_NEVER_SET") == Ok(None))
+    println(Process.set_env("MARCH_CONF_SET", "yes") == Ok(()))
+    println(Process.env("MARCH_CONF_SET") == Ok(Some("yes")))
+    println(Env.get("MARCH_CONF_NEVER_SET", "default") == Ok("default"))
+    println(Env.get_bool("MARCH_CONF_SET", false) == Ok(true))
+    match Process.run("march-conformance-no-such-program", []) do
+    Ok(Err(_)) -> println("cannot start: Ok(Err(_))")
+    Ok(Ok(_)) -> println("ran?")
+    Err(e) -> println(Authority.describe(e))
+    end
+  end
+end

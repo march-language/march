@@ -134,13 +134,13 @@ mod System do
   Get the value of an environment variable.
   Returns Some(value) if set, None if not set.
   """
-  fn env(name : String) : Option(String) do
-    process_env(name)
+  fn env(name : String) : Result(Option(String), CapError) do
+    Process.env(name)
   end
 
   doc "Set an environment variable."
-  fn put_env(name : String, value : String) : Unit do
-    process_set_env(name, value)
+  fn put_env(name : String, value : String) : Result((), CapError) do
+    Process.set_env(name, value)
   end
 
   -- ---- Process metadata ----
@@ -149,39 +149,41 @@ mod System do
   Return command-line arguments as List(String).
   argv()[0] is the path to the executable.
   """
-  fn argv() : List(String) do
-    process_argv()
+  fn argv() : Result(List(String), CapError) do
+    Process.argv()
   end
 
   doc "Return the current working directory as a String."
-  fn cwd() : String do
-    process_cwd()
+  fn cwd() : Result(String, CapError) do
+    Process.cwd()
   end
 
   doc "Return the OS-level PID of the current process as an Int."
-  fn pid() : Int do
-    process_pid()
+  fn pid() : Result(Int, CapError) do
+    Process.pid()
   end
 
   doc "Terminate the process with the given exit code."
-  fn exit(code : Int) : Unit do
-    process_exit(code)
+  fn exit(code : Int) : Result((), CapError) do
+    Process.exit(code)
   end
 
   -- ---- Subprocess execution ----
 
   doc """
   Run an external command synchronously, capturing stdout.
-  Returns Ok(ProcessResult(exit_code, stdout, stderr)) or Err(msg); a
-  missing or non-executable command is Err("cannot execute <cmd>: <reason>").
+  Returns Ok(Ok(ProcessResult(exit_code, stdout, stderr))) or Ok(Err(msg));
+  a missing or non-executable command is Ok(Err("cannot execute <cmd>:
+  <reason>")), and a refused spawn is Err(CapError(...)).
 
       match System.cmd("git", ["status"]) do
-      Ok(r)    -> println(System.stdout(r))
-      Err(msg) -> IO.warn("cmd failed: " ++ msg)
+      Ok(Ok(r))    -> println(System.stdout(r))
+      Ok(Err(msg)) -> IO.warn("cmd failed: " ++ msg)
+      Err(e)       -> IO.warn(Authority.describe(e))
       end
   """
-  fn cmd(command : String, args : List(String)) : Result(ProcessResult, String) do
-    process_spawn_sync(command, args)
+  fn cmd(command : String, args : List(String)) : Result(Result(ProcessResult, String), CapError) do
+    Process.run(command, args)
   end
 
   doc "Extract the exit code from a ProcessResult."

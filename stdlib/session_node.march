@@ -297,7 +297,7 @@ mod SessionNode do
     end
   end
 
-  pfn queue_limit() : Int do Env.get_int("MARCH_SESSION_QUEUE_MAX_BYTES", 67108864) end
+  pfn queue_limit() : Int do Authority.must(Env.get_int("MARCH_SESSION_QUEUE_MAX_BYTES", 67108864)) end
 
   -- More than [limit] bytes are queued for [l]'s peer and unread: it has
   -- stopped reading, and it is given up on, once. Standalone, the
@@ -1438,8 +1438,8 @@ mod SessionNode do
   -- <= 0 turns the heartbeat off) and MARCH_SESSION_TIMEOUT_MS (default
   -- 10000).
   pfn heartbeat_config() : (Int, Int) do
-    let interval = Env.get_int("MARCH_SESSION_HEARTBEAT_MS", 1000)
-    let timeout = Env.get_int("MARCH_SESSION_TIMEOUT_MS", 10000)
+    let interval = Authority.must(Env.get_int("MARCH_SESSION_HEARTBEAT_MS", 1000))
+    let timeout = Authority.must(Env.get_int("MARCH_SESSION_TIMEOUT_MS", 10000))
     (interval, if interval > 0 do timeout / interval else 0 end)
   end
 
@@ -1783,7 +1783,7 @@ mod SessionNode do
   -- for a role to connect, and for each handshake and hello once it has.
   -- MARCH_SESSION_CONNECT_MS (default 20000); <= 0 waits for ever.
   pfn connect_ms() : Int do
-    Env.get_int("MARCH_SESSION_CONNECT_MS", 20000)
+    Authority.must(Env.get_int("MARCH_SESSION_CONNECT_MS", 20000))
   end
 
   -- Dial [a] every 100 ms until it answers or [attempts] run out (connect_ms
@@ -3267,7 +3267,7 @@ mod SessionNode do
   -- role, fingerprint, host actor pid) and the session id, so a delivery
   -- that reaches the wrong session or host shows up in a passing run's log.
   -- Read once per offer; off, it prints nothing.
-  pfn hosted_trace_on() : Bool do Env.get("MARCH_SESSION_TRACE_HOSTED", "") == "1" end
+  pfn hosted_trace_on() : Bool do Env.get("MARCH_SESSION_TRACE_HOSTED", "") == Ok("1") end
 
   pfn hosted_trace(enabled : Bool, what : String, event : String, sid : String, detail : String) : () do
     if enabled do print_stderr("session_node: hosted " ++ event ++ " " ++ what ++ " sid=" ++ sid

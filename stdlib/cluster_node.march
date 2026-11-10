@@ -138,7 +138,7 @@ mod ClusterNode do
   end
 
   pfn env_or(name : String, dflt : String) : String do
-    match System.env(name) do
+    match Authority.must(System.env(name)) do
       Some(v) -> if String.is_empty(v) do dflt else v end
       None -> dflt
     end
@@ -270,7 +270,7 @@ mod ClusterNode do
   when they change (`replace_cert`; `cert_files`).
   """
   fn config_from_env() : Result(CnConfig, String) do
-    match System.env("MARCH_NODE_NAME") do
+    match Authority.must(System.env("MARCH_NODE_NAME")) do
       None -> Err("cluster_node: MARCH_NODE_NAME is not set")
       Some(name) ->
         match String.to_int(env_or("MARCH_NODE_PORT", "")) do

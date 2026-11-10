@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: This capability operation returns
+mod Main do
+  needs IO.Console
+  needs IO.Process
+
+  -- A match written for the Option an environment read used to return: the
+  -- fix wraps the scrutinee in `Authority.must(...)` and leaves the arms.
+  fn home() : String do
+    match Process.env("HOME") do
+    Some(v) -> v
+    None -> "/"
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    println(home())
+  end
+end

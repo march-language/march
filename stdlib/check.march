@@ -61,13 +61,22 @@ mod Check do
   -- ---- Skip check ----
 
   pfn is_skipped() : Bool do
-    match process_env("MARCH_SKIP_PROPERTIES") do
+    match env_or_none("MARCH_SKIP_PROPERTIES") do
     Some("1") -> true
     _         -> false
     end
   end
 
   -- ---- Seed resolution ----
+
+  -- A variable's value, a refused read counting as unset: a property run
+  -- must not fail on its configuration.
+  pfn env_or_none(name : String) : Option(String) do
+    match Process.env(name) do
+    Ok(v) -> v
+    Err(_) -> None
+    end
+  end
 
   pfn clock_seed() : Int do
     match System.now() do
@@ -82,7 +91,9 @@ mod Check do
     None    ->
       -- A refused clock gives seed 0: a property run must not fail on its
       -- seed.
-      match process_env("MARCH_PROP_SEED") do
+      -- A refused environment read counts as unset (the seed then comes from
+      -- the clock, or is 0).
+      match env_or_none("MARCH_PROP_SEED") do
       Some(s) ->
         match string_to_int(s) do
         Some(n) -> n
