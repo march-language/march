@@ -604,7 +604,7 @@ Integer arithmetic: `+`, `-`, `*`, `/`, `%`
 Float arithmetic: `+.`, `-.`, `*.`, `/.`
 String/list concat: `++`
 Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
-Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
+Logic: `&&`, `||`, `!` (prefix not; `not x` with an operand right after it is the same `!x`, so `not p(n)` is `!p(n)`), unary `-` (negate)
 
 Each `++` allocates and copies both operands into a new string/list. A chain
 of them (`a ++ b ++ c`) is collapsed by the compiler into a single concat: two

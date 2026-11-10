@@ -58,3 +58,7 @@ An `if` that tests an Int before a `match` on the list
 (`if idx <= 0 do … else match lst do … end end`) is solver-undecided even over a
 plain `List(a)`. The same function with the `match` outermost proves. Filed as
 `specs/todos/2026-11-08-refine-if-before-match-induction.md`.
+
+Closure note (2026-11-09): this also closed `specs/todos/2026-11-08-set-measure-empty-invalid-measure.md`
+(a `Tree` `content` measure with `Leaf -> empty` refused as `invalid_measure`); its repro, wrapped
+in a `mod`, checks clean with no `invalid_measure` on `c3cd49c76`.
