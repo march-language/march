@@ -850,6 +850,16 @@ git log is authoritative for exact commits.
   builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the
   capture first, so the builtin read freed memory. ASAN caught it in `HttpServer.tls`; on macOS
   the freed bytes usually survived. The release now waits until the call returns.
+- **A user fn named like `show`, `eq`, `compare` or `hash` no longer swaps places with the
+  interface method in compiled code.** A generic `fn show(r)` printed `Ok(pos)` where the
+  interpreter printed `pos`; a `fn show(r : T)` took over `println` of every `T`; `fn compare`
+  and `fn hash` returned the built-in answer; and `Util.eq(1, 1)` in a user `mod Util` ran
+  `Eq`. Each now runs the user's fn for the user's calls and the method everywhere else, on both
+  backends.
+- **A module named like a stdlib module no longer loses its functions to the stdlib's.** With
+  `mod List do fn sum_int(xs : List(Int)) : Int do 42 end end` in the program, compiled
+  `List.sum_int([1, 2])` returned the stdlib's `3`, and so did an interpreted call to `sum_int`
+  from inside the module; both now return `42`, and the rest of the stdlib `List` still works.
 - **Security: an HTTP request can no longer smuggle a second request.** The request
   serializer copied the method, host, path, query and headers into the request verbatim, so
   a path such as `"/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"` (from user input, say)

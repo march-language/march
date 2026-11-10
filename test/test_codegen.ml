@@ -15818,6 +15818,143 @@ end
     ~expected:"102"
     ()
 
+(* ── User names that are also stdlib / interface names ─────────────────────
+   A user fn named like an interface method (`show`, `eq`, `compare`, `hash`)
+   or a fn in a user module named like a stdlib module (`mod List`) used to
+   share one TIR symbol with the stdlib's meaning, so mono / the linker picked
+   one for every caller.  Lowering now gives the user's definition its own
+   name ([Tir_names.builtin_shadow_name]).
+   specs/progress/2026-11-10-user-stdlib-name-collisions.md *)
+
+(** A generic user `fn show(r)` lost to `Show$Result.show` in mono. *)
+let test_user_generic_show_vs_show_iface_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_generic_show"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn show(r) do
+    match r do
+      Ok(s) -> s
+      Err(e) -> e
+    end
+  end
+  fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(mk(1)))
+    println(mk(2))
+  end
+end
+|}
+    ~expected:"pos\nOk(pos)"
+    ()
+
+(** The converse: an annotated user `show` of the very type `println`'s
+    internal `show(x)` sees captured the prelude's call. *)
+let test_user_typed_show_does_not_capture_println_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_typed_show"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn show(r : Result(String, String)) : String do
+    match r do
+      Ok(s) -> s
+      Err(e) -> e
+    end
+  end
+  fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(mk(1)))
+    println(mk(2))
+    println(to_string(mk(3)))
+  end
+end
+|}
+    ~expected:"pos\nOk(pos)\nOk(pos)"
+    ()
+
+(** A user `show` of a type with its own `Show` impl: `println` uses the impl. *)
+let test_user_show_vs_own_show_impl_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_show_vs_impl"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Box = Box(Int)
+  fn show(_b : Box) : String do "user-show" end
+  impl Show(Box) do
+    fn show(b) do match b do Box(n) -> "Box " ++ int_to_string(n) end end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(Box(1)))
+    println(Box(2))
+  end
+end
+|}
+    ~expected:"user-show\nBox 2"
+    ()
+
+(** User `compare` / `hash`: the user's call runs the user's fn, the
+    prelude's `<` / `==` keep the interface. *)
+let test_user_compare_hash_vs_iface_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_compare_hash"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn compare(_a, _b) do 99 end
+  fn hash(_x) do 7 end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(compare(1, 2)))
+    println(int_to_string(hash("x")))
+    println(to_string((1, 2) < (1, 3)))
+    println(to_string(Some(1) == Some(1)))
+  end
+end
+|}
+    ~expected:"99\n7\ntrue\ntrue"
+    ()
+
+(** A nested user module's fn named like an interface method. *)
+let test_nested_module_fn_named_like_iface_method_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_nested_util_eq"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Util do
+    fn eq(a, b) do a != b end
+    fn both(a, b) do eq(a, b) && eq(b, a) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(to_string(Util.eq(1, 1)))
+    println(to_string(Util.eq("a", "b")))
+    println(to_string(Util.both(1, 2)))
+  end
+end
+|}
+    ~expected:"false\ntrue\ntrue"
+    ()
+
+(** An entry-level `mod List` whose fn has the stdlib's exact signature:
+    one symbol `List.sum_int`, the stdlib's won.  The rest of the stdlib
+    `List` stays reachable. *)
+let test_user_module_named_like_stdlib_module_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_mod_list"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod List do
+    fn sum_int(_xs : List(Int)) : Int do 42 end
+    fn twice(xs : List(Int)) : Int do sum_int(xs) + sum_int(xs) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(List.sum_int([1, 2])))
+    println(int_to_string(List.twice([1, 2])))
+    println(int_to_string(List.length([1, 2, 3])))
+    println(int_to_string(Enum.sum([1, 2, 3])))
+  end
+end
+|}
+    ~expected:"42\n84\n3\n6"
+    ()
+
 (** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
 let test_record_eq_pair_then_triple_compiled () =
   assert_compiled_interp_parity
@@ -19912,6 +20049,18 @@ let codegen_suites =
             test_newtype_over_generic_record_eq_compiled;
           Alcotest.test_case "a local fn shadows a later `use M.*` on both backends" `Quick
             test_local_fn_shadows_later_bulk_use_compiled;
+          Alcotest.test_case "user generic `fn show` vs the Show method" `Quick
+            test_user_generic_show_vs_show_iface_compiled;
+          Alcotest.test_case "user typed `fn show` does not capture println's show" `Quick
+            test_user_typed_show_does_not_capture_println_compiled;
+          Alcotest.test_case "user `fn show` vs the type's own Show impl" `Quick
+            test_user_show_vs_own_show_impl_compiled;
+          Alcotest.test_case "user `fn compare`/`fn hash` vs the interfaces" `Quick
+            test_user_compare_hash_vs_iface_compiled;
+          Alcotest.test_case "nested module fn named like an interface method" `Quick
+            test_nested_module_fn_named_like_iface_method_compiled;
+          Alcotest.test_case "entry `mod List` vs the stdlib List" `Quick
+            test_user_module_named_like_stdlib_module_compiled;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

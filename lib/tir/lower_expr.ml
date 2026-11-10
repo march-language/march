@@ -910,7 +910,12 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
            (match args with
             | first_arg :: _
               when not (Hashtbl.mem !_current_module_fns name)
-                && not (Lower_state.is_local_binding name) ->
+                && not (Lower_state.is_local_binding name)
+                (* A user module's fn named like an interface method
+                   (`Util.eq`): the qualified call is the user's fn, never
+                   the method [resolve_iface_method] finds by stripping the
+                   module prefix.  See [Lower_state._entry_builtin_shadows]. *)
+                && not (Hashtbl.mem !Lower_state._builtin_shadows name) ->
               (* `to_string` is a universal formatter that is SEMANTICALLY
                  identical to `show` on any type with a Show impl (verified: the
                  interpreter's `to_string` and `show` produce byte-identical
