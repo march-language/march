@@ -27,6 +27,13 @@ type comp_state = CompOff | CompOn of { items: string list; sel: int }
     Uses plain text rendering (no syntax highlight). [cur] and the buffer
     are both byte-based (ASCII), so cursor placement is correct for ASCII
     input; multi-byte UTF-8 characters may show a garbled cursor glyph. *)
+(* ocap phase 1: a capability operation used for its effect (`println("hi")`)
+   returns [Ok(())] of type [Result((), CapError)]; echoing that after every
+   line would be noise, so the REPL stays quiet for it as it does for [()]. A
+   refusal still echoes. *)
+let quiet_cap_ok (ty_str : string) (value_str : string) : bool =
+  ty_str = "Result((), CapError)" && value_str = "Ok(())"
+
 let make_input_img s cur =
   let n = String.length s in
   let left  = String.sub s 0 cur in
@@ -1039,7 +1046,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                    let eval_via_interp () =
                      let v = March_eval.Eval.eval_expr !env e' in
                      let vs = March_eval.Eval.value_to_string_pretty v in
-                     if not scroll_mode then Printf.printf "= %s\n%!" vs;
+                     if not scroll_mode && not (quiet_cap_ok ty_str vs) then
+                       Printf.printf "= %s\n%!" vs;
                      if not scroll_mode && !show_type then
                        Printf.printf "- : %s\n%!" ty_str;
                      Result_vars.push result_h v ty_str;
@@ -1058,7 +1066,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                           let m = wrap_expr_as_module e' in
                           let (_ty, result_str) =
                             March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
-                          if not scroll_mode then Printf.printf "= %s\n%!" result_str;
+                          if not scroll_mode && not (quiet_cap_ok ty_str result_str) then
+                            Printf.printf "= %s\n%!" result_str;
                           if !show_type then
                             Printf.printf "- : %s\n%!" ty_str;
                           if tc_ok then
