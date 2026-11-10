@@ -16,7 +16,7 @@ mod Dir do
   ## Examples
 
       march> Dir.list("/this/path/does/not/exist")
-      Err(NotFound("/this/path/does/not/exist"))
+      Ok(Err(NotFound("/this/path/does/not/exist")))
   """
   fn list(path) do
     let? _ = Authority.check("IO.FileRead", path)
@@ -33,7 +33,7 @@ mod Dir do
   ## Examples
 
       march> Dir.list_full("/this/path/does/not/exist")
-      Err(NotFound("/this/path/does/not/exist"))
+      Ok(Err(NotFound("/this/path/does/not/exist")))
   """
   fn list_full(path) do
     let? _ = Authority.check("IO.FileRead", path)
@@ -133,9 +133,9 @@ mod Dir do
   ## Examples
 
       march> Dir.exists("/")
-      true
+      Ok(true)
       march> Dir.exists("/this/path/does/not/exist")
-      false
+      Ok(false)
   """
   fn exists(path) : Result(Bool, CapError) do
     let? _ = Authority.check("IO.FileRead", path)

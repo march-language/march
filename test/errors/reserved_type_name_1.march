@@ -11,5 +11,5 @@ mod Main do
       OnlyR(n) -> n
     end
   end
-  fn main(cap : Cap(IO)) : Unit do println(int_to_string(f(OnlyR(1)))) end
+  fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(f(OnlyR(1))))) end
 end

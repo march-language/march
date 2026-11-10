@@ -19,7 +19,7 @@
 --
 -- A table handle is `Vault(v)`, phantom in the type of the values it holds:
 --
---     march> let counters = Vault.new("counters")  -- Vault(v), v not yet chosen
+--     march> let counters = Authority.must(Vault.new("counters"))  -- Vault(v), v not yet chosen
 --     march> Vault.set(counters, "hits", 1)  -- v := Int
 --     march> Vault.get(counters, "hits")  -- Option(Int)
 --     Some(1)

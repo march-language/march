@@ -119,10 +119,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_int_demo")
+      march> let s = Authority.must(Config.new_store("codec_int_demo"))
       march> let k = Config.key(:myapp, :workers, Config.int())
       march> Config.store_put(s, k, 4)
-      march> let s = Config.new_store("codec_int_demo")
+      march> let s = Authority.must(Config.new_store("codec_int_demo"))
       march> let k = Config.key(:myapp, :workers, Config.int())
       march> Config.store_get(s, k)
       Some(4)
@@ -134,10 +134,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_float_demo")
+      march> let s = Authority.must(Config.new_store("codec_float_demo"))
       march> let k = Config.key(:myapp, :ratio, Config.float())
       march> Config.store_put(s, k, 0.5)
-      march> let s = Config.new_store("codec_float_demo")
+      march> let s = Authority.must(Config.new_store("codec_float_demo"))
       march> let k = Config.key(:myapp, :ratio, Config.float())
       march> Config.store_get(s, k)
       Some(0.5)
@@ -149,10 +149,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_string_demo")
+      march> let s = Authority.must(Config.new_store("codec_string_demo"))
       march> let k = Config.key(:myapp, :name, Config.string())
       march> Config.store_put(s, k, "demo")
-      march> let s = Config.new_store("codec_string_demo")
+      march> let s = Authority.must(Config.new_store("codec_string_demo"))
       march> let k = Config.key(:myapp, :name, Config.string())
       march> Config.store_get(s, k)
       Some("demo")
@@ -164,10 +164,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_bool_demo")
+      march> let s = Authority.must(Config.new_store("codec_bool_demo"))
       march> let k = Config.key(:myapp, :debug, Config.bool())
       march> Config.store_put(s, k, true)
-      march> let s = Config.new_store("codec_bool_demo")
+      march> let s = Authority.must(Config.new_store("codec_bool_demo"))
       march> let k = Config.key(:myapp, :debug, Config.bool())
       march> Config.store_get(s, k)
       Some(true)
@@ -179,10 +179,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_atom_demo")
+      march> let s = Authority.must(Config.new_store("codec_atom_demo"))
       march> let k = Config.key(:myapp, :mode, Config.atom())
       march> Config.store_put(s, k, :fast)
-      march> let s = Config.new_store("codec_atom_demo")
+      march> let s = Authority.must(Config.new_store("codec_atom_demo"))
       march> let k = Config.key(:myapp, :mode, Config.atom())
       march> Config.store_get(s, k)
       Some(:fast)
@@ -206,10 +206,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_list_demo")
+      march> let s = Authority.must(Config.new_store("codec_list_demo"))
       march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
       march> Config.store_put(s, k, [:a, :b])
-      march> let s = Config.new_store("codec_list_demo")
+      march> let s = Authority.must(Config.new_store("codec_list_demo"))
       march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
       march> Config.store_get(s, k)
       Some([:a, :b])
@@ -755,10 +755,10 @@ mod Config do
   ## Examples
 
       march> let k = Config.key(:myapp, :retries, Config.int())
-      march> let store = Config.new_store("store_put_demo")
+      march> let store = Authority.must(Config.new_store("store_put_demo"))
       march> Config.store_put(store, k, 3)
       march> let k = Config.key(:myapp, :retries, Config.int())
-      march> let store = Config.new_store("store_put_demo")
+      march> let store = Authority.must(Config.new_store("store_put_demo"))
       march> Option.unwrap_or(Config.store_get(store, k), 0)
       3
       march> let k = Config.key(:myapp, :retries, Config.int())
@@ -775,7 +775,7 @@ mod Config do
 
   ## Examples
 
-      march> let store = Config.new_store("store_get_demo")
+      march> let store = Authority.must(Config.new_store("store_get_demo"))
       march> Config.store_get(store, Config.key(:myapp, :limit, Config.int()))
       None
   """
@@ -789,7 +789,7 @@ mod Config do
   ## Examples
 
       march> let host = Config.key(:myapp, :host, Config.string())
-      march> let store = Config.new_store("store_fetch_demo")
+      march> let store = Authority.must(Config.new_store("store_fetch_demo"))
       march> Config.store_fetch(store, Config.key(:test, :host, Config.string()))
       Err(KeyMissing(":test/:host"))
   """

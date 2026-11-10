@@ -13,7 +13,7 @@ mod CeilApp do
   mod Dep do
     needs IO.Console
     fn slurp(p : String) : String do
-      match File.read(p) do
+      match Authority.must(File.read(p)) do
         Ok(s) -> s
         Err(_) -> ""
       end
@@ -21,5 +21,6 @@ mod CeilApp do
   end
   fn main(cap_console : Cap(IO.Console), cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.slurp("/etc/passwd"))
+    ()
   end
 end
