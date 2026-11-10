@@ -12278,6 +12278,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     check_deterministic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
+  (* Two-state specs (lib/desugar/two_state.ml): `old(e)` only in a
+     handler's `ensures`. *)
+  March_desugar.Two_state.check errors m.Ast.mod_decls;
   (* Ghost code (lib/desugar/ghost.ml): a ghost value reaches only ghost
      positions, and no linear value is observed by ghost code. *)
   March_desugar.Ghost.check errors m.Ast.mod_decls ~top:m.Ast.mod_name.Ast.txt

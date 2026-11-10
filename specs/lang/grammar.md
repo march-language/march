@@ -2168,7 +2168,7 @@ actor_decl ::= "actor" upper_name "do"
                  actor_handler*
                "end"
 
-actor_handler ::= "on" upper_name "(" param,* ")" "do" block_body "end"
+actor_handler ::= "on" upper_name "(" param,* ")" ("ensures" expr)? "do" block_body "end"
 ```
 
 (`actor_decl` at `parser.mly:490–505`; `actor_handler` at

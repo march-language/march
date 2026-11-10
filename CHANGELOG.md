@@ -29,6 +29,14 @@ git log is authoritative for exact commits.
   every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
   `HttpTransport.Refused`). The scope matcher is now public in `Http`
   (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
+- **Handler guarantees: `on Msg(…) ensures P do … end`.** A handler can state how one message
+  changes the actor's state, with `old(e)` for the state the message arrived with:
+  `on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do`. Each
+  guarantee is proved per handler on every build (the `@invariant` assumed of the incoming state);
+  a handler that can break it is an error showing the incoming state, the arguments and the state
+  the handler returns, and `march --check --guarantees` lists each one beside the invariant.
+  `old` anywhere else in a refinement is the new `old_misuse` error; `ensures` and `old` remain
+  ordinary names outside a handler header and its guarantee.
 - **HTTPS for `HttpServer`.** `HttpServer.tls(server, TlsFiles(cert, key))` (or `TlsPem`)
   serves HTTP/1.1 over TLS on both server modes, with `wss://` through the unchanged
   `WebSocket` API. Certificates rotate without a restart: `TlsFiles` are re-read every

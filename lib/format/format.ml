@@ -1480,7 +1480,10 @@ and emit_decl ctx = function
       List.iter (fun h ->
         nl ctx;
         let ps = String.concat ", " (List.map fmt_param h.ah_params) in
-        line ctx (Printf.sprintf "on %s(%s) do" h.ah_msg.txt ps);
+        let ens = match h.ah_ensures with
+          | Some e -> " ensures " ^ render ctx.indent lv_expr e
+          | None -> "" in
+        line ctx (Printf.sprintf "on %s(%s)%s do" h.ah_msg.txt ps ens);
         indented ctx (fun () -> emit_body ctx h.ah_body);
         line ctx "end"
       ) actor.actor_handlers;
