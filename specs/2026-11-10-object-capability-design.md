@@ -108,22 +108,23 @@ authority.
 
 | By | What the receiver gets |
 |---|---|
-| A direct call to a named function | The caller's current authority, narrowed by the callee's limits |
+| A direct call to a named function | The caller's current authority, narrowed by the callee's own `needs` clause if it has one |
 | A function value (closure, named function used as a value, partial application) | The authority current where the value was made (§5) |
 | An actor | Holding its pid is the right to send to it; the actor runs under the authority current where it was spawned (§7) |
 | A handle | The one resource it names, for the operations the handle type offers (§6) |
 
 **How it shrinks.** One operation: intersection with a list of scopes. Allowlists
 intersect, limits such as `IO.Spawn(max(n))` take the smaller number, and an unscoped kind
-survives only when both sides allow it. Four things perform it:
+survives only when both sides allow it. Three things perform it on the current authority,
+and what they set holds for everything reached by direct calls from inside:
 
-- a module's `needs` line, around every function the module defines;
 - a function's `needs` clause, around that function;
 - a `restrict ... do ... end` block, around the block;
 - a `forge.toml` grant, around every function in the dependency's package.
 
-These are the same thing at four sizes (my call). The rest of the document says "limit"
-for all four. Nothing ever widens the current authority.
+These are the same thing at three sizes (my call). A module's `needs` line is different
+(owner, 2026-11-10): it limits only the operations the module's own code performs (§4)
+and does not change the current authority. Nothing ever widens the current authority.
 
 ## 4. `needs` as a limit
 
@@ -134,24 +135,31 @@ mod Uploader do
 end
 ```
 
-- While a function of `Uploader` runs, the current authority is the caller's authority
-  intersected with the module's `needs`. If the caller had no network authority,
-  `Uploader.push` has none either, whatever its `needs` says.
-- **The limit covers everything the function reaches by direct calls** (my call, and the
-  one the owner should look at first; §19). This is what a per-function `needs` clause
-  already means today ("everything the function reaches"); the module line now means the
-  same. So a module that calls `Uploader.push` must itself allow `IO.FileRead` and
-  `IO.NetConnect` for that call to succeed, and the compiler says so at build time.
-- **Function values are not charged to the module that calls them.** A function value
-  runs under its own captured authority (§5). This is today's rule for per-function
-  bounds ("callbacks are charged to whoever supplies them") made general, and it is how
-  objects carry authority through code that declares nothing: `Report.print(weather)` in
-  the opening example.
-- A module with no `needs` line has the empty limit, as today.
-- The compile-time check is today's ceiling and per-function-bound check, applied to the
-  module's transitive direct-call reach. Today's refusal of "untraceable" calls under a
-  narrow bound goes away: a call through a function value is never charged, so there is
-  nothing to trace.
+- An operation written in `Uploader` must pass two checks: it is inside the current
+  authority (what the caller had), and it is inside `Uploader`'s `needs`. If the caller
+  had no network authority, `Uploader.push` has none either, whatever its `needs` says.
+- **A module's `needs` limits the module's own operations only** (owner, 2026-11-10).
+  This is today's rule: the operations its code performs, including the ones it performs
+  through the stdlib, which are charged to the calling module as now. A module that calls
+  `Uploader.push` needs no line for it, an interface method is charged to the impl's
+  module and not to the generic code between, and stdlib modules need no new lines.
+- So `needs ()` on a module says "this module's code performs no outside-world operation
+  itself", not "calling it is harmless". The transitive boundaries are a function's
+  `needs` clause, `restrict` and grants.
+- **A function's `needs` clause stays transitive**, as today: it bounds everything the
+  function reaches by direct calls.
+- **Function values are charged to nobody who calls them.** A function value runs under
+  its own captured authority (§5). This is today's rule for per-function bounds
+  ("callbacks are charged to whoever supplies them") made general, and it is how objects
+  carry authority through code that declares nothing: `Report.print(weather)` in the
+  opening example.
+- A module with no `needs` line may perform no operation of its own, as today.
+- The compile-time checks are today's ceiling and per-function-bound checks. Today's
+  refusal of "untraceable" calls under a narrow function bound goes away: a call through
+  a function value is never charged, so there is nothing to trace.
+- At run time a module's scoped `needs` is checked only where the target is computed (the
+  compiler has proved the literal ones); a module line never needs a frame on the
+  current authority.
 - Broad limits are cheap to write because they grant nothing. `needs IO.NetConnect` on an
   HTTP library lets it do whatever its caller allows.
 
@@ -230,8 +238,8 @@ authority: the open was checked.
 - **A pid is a capability** (my call). Holding a `Pid(a)` is the right to send it
   messages; a send checks nothing else. A closure that captures a pid captures the pid,
   not the actor's authority.
-- **An actor runs under the authority current at its `spawn`**, narrowed by the limits of
-  the module that defines it. A message does not carry the sender's authority (owner,
+- **An actor runs under the authority current at its `spawn`**; its handlers'
+  operations are charged to the module that defines it. A message does not carry the sender's authority (owner,
   2026-11-09: actors are their own principals). So a restricted block can log through an
   unrestricted logger actor it was handed, and a worker spawned inside `restrict` is
   restricted for life.
@@ -449,7 +457,7 @@ authority of the function values they are given.
 | Superseded design | This design |
 |---|---|
 | A module's `needs` gives it that authority | `needs` only limits; authority comes from the caller |
-| Limits apply to a module's own operations | Limits apply to everything reached by direct calls |
+| A module's `needs` covers its own operations | The same; unchanged (owner, 2026-11-10) |
 | Callbacks run under the dependency's grant | Function values run under the authority they captured |
 | Lambdas inside `restrict` enter its frame | Every function value captures where it is made (same result inside `restrict`, now general) |
 | `Cap(X)` parameters and `cap_narrow` for libraries | Closures, actors and handles; no capability parameters |
@@ -466,8 +474,8 @@ Everything else in that document (path-scope rules, `restrict` syntax, grant syn
 **Migration.** Breaking, pre-1.0, each step with a `forge fix` rewrite and a
 `### Changed` CHANGELOG entry (my call on the list):
 
-- Intermediate modules gain the `needs` lines their direct-call reach requires. The
-  compiler's diagnostic names the missing line and the chain; `forge fix` adds it.
+- Module `needs` lines do not change. A program whose `main` asks for less than its
+  modules use gets a diagnostic naming the operation and the chain.
 - `fn main(cap : Cap(X))` becomes `fn main() : () needs X`; `Cap(IO.*)` parameters that
   were only passed along are removed.
 - Integer file, socket and process handles become the handle types.
@@ -482,7 +490,7 @@ Everything else in that document (path-scope rules, `restrict` syntax, grant syn
 | 1 | Every capability operation returns `Result` | — | 2 |
 | 2 | Handles for every kind (§6), raw integer builtins stdlib-only, name lookups checked | — | 3, widened |
 | 3 | Compile-time checks under `--check`, the interpreter and the REPL | — | 5 |
-| 4 | Run-time authority in every runtime: current authority, limits as intersection, capture by function values, spawn and restart, `main`'s `needs` and launcher narrowing, transitive module limits, the conformance suite | 1, 2 | 4, widened |
+| 4 | Run-time authority in every runtime: current authority, limits as intersection, capture by function values, spawn and restart, `main`'s `needs` and launcher narrowing, the conformance suite | 1, 2 | 4, widened |
 | 5 | `restrict` and scope values | 3, 4 | 6 |
 | 6 | Dependency grants | 3, 4 | 7 |
 | 7 | `mock`; retire `Cap(IO.*)`, `cap_narrow`, `with_cap`; `Actor.Introspect` as a kind | 4 | replaces 8 |
@@ -495,7 +503,8 @@ Old phase 1 (path scopes) is done. The narrow-capabilities design refers to "pha
 
 - **No authority from a declaration**: a module with `needs IO.NetConnect` called from a
   caller without it is refused, at build time when the chain is visible and at run time
-  when it is not.
+  when it is not. A module with `needs ()` may call a module that does IO; a generic
+  `needs ()` module may call an interface method whose impl logs.
 - **Capture**: a closure made under `restrict` and called outside is still narrowed; one
   made outside and called inside is not; a named function used as a value behaves as the
   equivalent lambda; a partial application likewise; a closure stored in a record, a list
@@ -526,12 +535,10 @@ Old phase 1 (path scopes) is done. The narrow-capabilities design refers to "pha
 
 Most important first.
 
-1. **Limits are transitive over direct calls** (§4). A module's `needs` bounds everything
-   its functions reach, so intermediate modules must list what they reach. The
-   alternative: a limit covers only the module's own operations, and authority passes
-   through intermediate modules untouched. That is less churn, but then a module's
-   `needs` says nothing about what calling it can do, and only `restrict` and grants are
-   real boundaries.
+1. **Module-level code** (§21): top-level `let`s run under the launch authority narrowed
+   by the module's `needs` and its package's grant; a function value created there
+   captures nothing. (The earlier first item, transitive module limits, was decided by
+   the owner on 2026-11-10: own operations only, §4.)
 2. **A function value runs under its captured authority alone** (§5), which makes
    callbacks into dependencies run with the caller's authority.
 3. **`main`'s `needs` clause is the program's request; the launcher may narrow it**
@@ -561,40 +568,34 @@ operations; how long the deprecated `main(cap : Cap(X))` form is accepted.
 
 ## 21. Revisions after the builder check
 
-A fresh reader asked five questions. Two are open and go to the owner; three are settled
-here as my calls.
+A fresh reader asked five questions. One went to the owner and is decided; the rest are
+settled here as my calls.
 
-**Open, for the owner**
+**Decided by the owner (2026-11-10)**
 
-- **Transitive or own-operations limits (§4, §19 item 1).** The check found two more costs
-  of the transitive rule. An interface method called from a generic module (`show`,
-  `compare`) would be bounded by that module's `needs`, so a user impl that logs is
-  refused when reached through a `needs ()` library, the reverse of today's rule ("a call
-  through an interface is charged what the impls actually reach"). And about 100 of the
-  139 stdlib modules have no `needs` line, so the stdlib would need either lines
-  everywhere or a stated exemption. Under the alternative (a module's `needs` limits only
-  the operations its own code performs, as today; `restrict`, grants and function-level
-  `needs` remain the transitive boundaries) neither arises, module limits need no
-  run-time frame, and no intermediate module gains a line. **My recommendation is now the
-  alternative.** §3, §4, §16 and §17 are written for the transitive rule and change if
-  the owner agrees.
-- **Module-level code.** Proposed: a module's top-level `let`s run under the launch
+- **A module's `needs` limits its own operations only.** The first draft made it
+  transitive over direct calls. The check showed what that cost: an interface method
+  called from a generic `needs ()` module would have been refused when its impl logs
+  (the reverse of today's rule), about 100 of the 139 stdlib modules would have needed
+  `needs` lines or an exemption, and every intermediate module would have gained a line.
+  §3, §4, §16, §17 and §18 now describe the own-operations rule.
+
+**Settled (my calls)**
+
+- **Module-level code.** A module's top-level `let`s run under the launch
   authority narrowed by the module's `needs` and its package's grant, so existing
   top-level effects keep working; but a function value created there captures nothing and
   behaves as a named function (it runs under its caller's authority). Otherwise a
   dependency could park a closure holding launch authority at top level, and any
   `restrict`ed caller could use it. An actor spawned at top level does keep that
   authority: it is the own-behalf service of §7, bounded by the grant.
-
-**Settled (my calls)**
-
 - **Launches without a `main`.** A test file's request is its module's `needs` line, and
   `march test` grants it; doctests likewise; an `app` declaration's request is its
   module's `needs`; the REPL runs with the full authority of the person at the terminal.
   `--grant` narrows all of them.
 - **Interface methods** are direct calls to named functions: an impl runs under its
-  caller's authority narrowed by the impl module's limits. (Whether the generic module in
-  between also bounds it is the open question above.)
+  caller's authority, and its operations are charged to the impl's module. The generic
+  module in between does not bound it.
 - **Other consumers of `Cap(IO)`.** A choreography `role R needs ...` becomes a limit
   around the role's body, with no generated `Cap` parameters; `--dump-role-authority`
   stays. The functions that take `Cap(IO)` as a composition-root witness (`Actor.debug`,
