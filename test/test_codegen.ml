@@ -14213,7 +14213,8 @@ let test_int_divmod_inline_ir () =
         (has b ("dz_trap[0-9]*:\n *%[a-z0-9_]+ = call i64 @" ^ helper ^ "(i64 %[^,]*, i64 0)\n *unreachable")))
     [ ("q", "sdiv", "march_checked_div_op"); ("r", "srem", "march_checked_mod_op") ]
 
-(** An overflow (or an Int division by zero) nobody catches ends the
+(** An overflow (or an Int division by zero, or an out-of-range Float -> Int
+    conversion) nobody catches ends the
     program like any panic, with its message, on all three backends: the interpreter, compiled code (stderr
     "... run-time error: ..."), and --target js (an uncaught Error).  The JS operands are
     powers of two, exact in a double, so the 63-bit boundary is reachable
@@ -14266,7 +14267,110 @@ let test_int_overflow_uncaught_panic () =
          quotient with no zero test), so the program printed "NaN" and went
          on instead of panicking. *)
       ("march_divz", "h / (h - h)", "division by zero");
-      ("march_modz", "h % (h - h)", "modulo by zero") ]
+      ("march_modz", "h % (h - h)", "modulo by zero");
+      (* Float -> Int out of range (#1230): 2^122 printed -1 natively and
+         5.316911983139664e+36 on JS, and the program went on. *)
+      ("march_f2i_range", "float_floor(int_to_float(h) *. int_to_float(h))",
+       "float_floor: value out of Int range") ]
+
+(** Float -> Int conversions panic on NaN, the infinities and a result
+    outside [-2^62, 2^62) (#1230), with the same message on the interpreter,
+    compiled code and --target js.  Before the fix the interpreter and native
+    code returned what the host's conversion gave (`-1` for 1e20 and +inf, `0`
+    for NaN, -2^62 for 2^62: a C `(int64_t)` cast is undefined there and arm64
+    saturates), and JS returned the double itself (`1e20`, `NaN`).  Inputs are
+    parsed at run time so no folder sees them, except two literal rows: the
+    folder must leave an out-of-range literal to panic at run time and still
+    fold an in-range one.  The first-class rows (`rows(float_floor, xs)`)
+    reach the JS closure wrappers, the direct rows the inlined calls.  The
+    edge rows are the largest in-range doubles each side (2^62 - 1024 and
+    -2^62).  The Math and Json rows are the stdlib callers that round-trip
+    through Int: they must keep returning NaN, infinities and 1e20 as Floats
+    rather than panic. *)
+let test_float_to_int_range_panics () =
+  let name = "march_float_to_int_range" in
+  let src =
+    "mod FloatToIntRange do\n\
+    \  needs IO.Console\n\
+    \  fn show(r) : String do\n\
+    \    match r do\n\
+    \      Ok(v) -> int_to_string(v)\n\
+    \      Err(e) -> e\n\
+    \    end\n\
+    \  end\n\
+    \  fn fits(r) : String do\n\
+    \    match r do\n\
+    \      Ok(_) -> \"ok\"\n\
+    \      Err(e) -> e\n\
+    \    end\n\
+    \  end\n\
+    \  fn parse(s : String) : Float do\n\
+    \    match string_to_float(s) do\n\
+    \      Some(v) -> v\n\
+    \      None -> 0.0\n\
+    \    end\n\
+    \  end\n\
+    \  fn rows(conv, xs) do\n\
+    \    match xs do\n\
+    \      Nil -> ()\n\
+    \      Cons(x, rest) ->\n\
+    \        println(fits(__try_call_val(fn _ -> conv(x))))\n\
+    \        rows(conv, rest)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let inf = parse(\"Infinity\")\n\
+    \    let xs = [inf -. inf, inf, 0.0 -. inf, parse(\"1e20\"), parse(\"-1e20\"),\n\
+    \              parse(\"4611686018427387904\"), parse(\"-4611686018427388928\"),\n\
+    \              parse(\"4611686018427386880\"), parse(\"-4611686018427387904\")]\n\
+    \    rows(float_to_int, xs)\n\
+    \    rows(float_truncate, xs)\n\
+    \    rows(float_floor, xs)\n\
+    \    rows(float_ceil, xs)\n\
+    \    rows(float_round, xs)\n\
+    \    println(show(__try_call_val(fn _ -> float_to_int(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_floor(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_ceil(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_round(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_to_int(parse(\"1e20\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_round(inf -. inf))))\n\
+    \    println(show(__try_call_val(fn _ -> float_floor(100000000000000000000.0))))\n\
+    \    println(show(__try_call_val(fn _ -> float_ceil(2.5))))\n\
+    \    println(float_to_string(Math.floor(parse(\"1e20\"))))\n\
+    \    println(float_to_string(Math.round(inf -. inf)))\n\
+    \    println(float_to_string(Math.truncate(0.0 -. inf)))\n\
+    \    println(float_to_string(Math.ceil(parse(\"-2.5\"))))\n\
+    \    println(Json.to_string(Json.Number(parse(\"1e20\"))))\n\
+    \    println(Json.to_string(Json.Number(inf -. inf)))\n\
+    \    println(Json.to_string(Json.Number(parse(\"42\"))))\n\
+    \  end\n\
+     end\n" in
+  let convs = [ "float_to_int"; "float_truncate"; "float_floor"; "float_ceil"; "float_round" ] in
+  let matrix = String.concat "" (List.map (fun op ->
+      op ^ ": cannot convert NaN to Int\n"
+      ^ String.concat "" (List.init 6 (fun _ -> op ^ ": value out of Int range\n"))
+      ^ "ok\nok\n") convs) in
+  let expected = matrix ^
+    "-2\n-3\n-2\n-3\n\
+     float_to_int: value out of Int range\n\
+     float_round: cannot convert NaN to Int\n\
+     float_floor: value out of Int range\n\
+     3\n\
+     1e+20\nnan\n-inf\n-2.\n\
+     1e+20\nnan\n42" in
+  assert_compiled_interp_parity ~name ~src ~expected ();
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Float -> Int range)"
+  else begin
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name:(name ^ "_js") src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1" (Filename.quote mjs)) in
+    Alcotest.(check string) (name ^ ": JS output") expected (String.trim js_out)
+  end
 
 (** A shift count outside [0, 62] (and a negative int_pow exponent) panics
     on both backends with the interpreter's message.  Compiled, a non-literal
@@ -19187,6 +19291,8 @@ let codegen_suites =
             test_int_divmod_inline_ir;
           Alcotest.test_case "uncaught Int overflow / div by zero panics with its message, exit 1 (interp, compiled, JS)" `Quick
             test_int_overflow_uncaught_panic;
+          Alcotest.test_case "Float -> Int panics on NaN, infinities and out of range (#1230; interp, compiled, JS)" `Quick
+            test_float_to_int_range_panics;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
           Alcotest.test_case "--target js Diagnostics: observers, context, location match the interpreter" `Quick
