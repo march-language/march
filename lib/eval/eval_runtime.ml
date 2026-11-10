@@ -206,6 +206,7 @@ let rec value_to_string v =
   | VRingBuf r ->
     Printf.sprintf "RingBuf(size=%d, cap=%d)" r.rb_size r.rb_cap
   | VResource _ -> "#<resource>"
+  | VHandle c -> Eval_handle.to_string c
 
 
 (* ── Moved verbatim from eval.ml (Task 1.3) so that eval_builtins.ml

@@ -127,6 +127,15 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
   ("march_actor_stop",  [true; false]);
+  (* Handle-box primitives (ocap phase 2): each only reads the box; the
+     box's own count is the caller's. handle_new takes three Ints. *)
+  ("handle_new",        [false; false; false]);
+  ("handle_enter",      [true; false]);
+  ("handle_leave",      [true]);
+  ("handle_close",      [true]);
+  ("handle_detach",     [true]);
+  ("handle_is_closed",  [true]);
+  ("handle_aux",        [true]);
   ("is_alive",          [true]);
   ("march_is_alive",    [true]);
   ("actor_is_draining", [true]);

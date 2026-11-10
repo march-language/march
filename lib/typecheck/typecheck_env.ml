@@ -1240,18 +1240,34 @@ let test_build = ref false
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
 
+(** The keys of [Typecheck_builtins.builtin_types], installed by that module
+    when it loads (it depends on this one).  Read by [canon_type_name]. *)
+let builtin_type_keys : (string, unit) Hashtbl.t = Hashtbl.create 64
+
 (** The canonical spelling of a type-constructor name that denotes a type of
     [arity] parameters.  March has a single global type namespace: a type
     declared inside a module has its BARE name as its identity, so a qualified
     `Mod.T` collapses to `T` whenever `T` is a type of the same arity in scope
     (otherwise the name is returned unchanged).  Shared by [surface_ty] (a
     written annotation) and [canon_qualified_tcons] (a builtin signature typed
-    in OCaml), so the two routes can never disagree about a type's identity. *)
+    in OCaml), so the two routes can never disagree about a type's identity.
+
+    Two exceptions (ocap phase 2), both so that a builtin type keeps its own
+   identity:
+   - a qualified name that is itself a builtin type is never rewritten:
+     `IO.Process` is the capability, not the handle type `Process`, and
+     `File.Handle` is not a user's bare `Handle`;
+   - a qualified name is never rewritten INTO a reserved builtin name
+     ([Typecheck_nominal.reserved_builtin_names], the handle types, which no
+     declaration may own): a user's `App.Socket` that is not a nominal
+     identity names no type at all, rather than the handle box. *)
 let canon_type_name env name arity =
   if Typecheck_nominal.is_identity name then name else
+  if Hashtbl.mem builtin_type_keys name then name else
   match String.rindex_opt name '.' with
   | Some i ->
     let bare = String.sub name (i + 1) (String.length name - i - 1) in
+    if Typecheck_nominal.is_reserved bare then name else
     (match lookup_type bare env with Some a when a = arity -> bare | _ -> name)
   | None -> name
 
@@ -2320,7 +2336,17 @@ let stdlib_only : (string * string) list ref =
       ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`");
       (* DD step 12a: runs a request line through the node's own reload-socket
          dispatch; only the control plane's Agent relays operator-signed lines. *)
-      ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)") ]
+      ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)");
+      (* ocap phase 2 (Task 2): the handle-box primitives. A handle is an
+         unforgeable reference to an opened resource; user code gets one only
+         from a checked open in the stdlib. *)
+      ("handle_new", "handles are made by their module's open functions");
+      ("handle_enter", "handles are made by their module's open functions");
+      ("handle_leave", "handles are made by their module's open functions");
+      ("handle_close", "handles are made by their module's open functions");
+      ("handle_detach", "handles are made by their module's open functions");
+      ("handle_is_closed", "handles are made by their module's open functions");
+      ("handle_aux", "handles are made by their module's open functions") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

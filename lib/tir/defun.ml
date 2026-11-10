@@ -103,6 +103,10 @@ let builtin_names : StringSet.t =
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "pid_to_int"; "get_actor_field";
+      (* Handle-box primitives (ocap phase 2): direct calls, so the borrow
+         table applies (an indirect call would own every argument). *)
+      "handle_new"; "handle_enter"; "handle_leave"; "handle_close";
+      "handle_detach"; "handle_is_closed"; "handle_aux";
       (* The supervise-block spawn glue's registration calls (lower_actor.ml).
          Their TFn-typed vars used to fall into the indirect-call rewrite, and
          an ECallPtr never consults Borrow's extern table, so Perceus dup'd

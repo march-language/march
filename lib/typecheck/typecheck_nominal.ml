@@ -74,6 +74,19 @@ let ref_identity (n : A.name) : string option =
 let decl_identity (n : A.name) : string =
   match ref_identity n with Some id -> id | None -> n.A.txt
 
+(** Bare names of builtin types that have no declaration anywhere: the
+    handle types of ocap phase 2 (spec §6; the dotted [File.Handle] and
+    [File.Dir] cannot be declared under their own spelling).  A user variant
+    declared with one of these short names always gets a qualified identity,
+    even when it is the only declaration, and even at the entry module's top
+    level: if it kept the bare name it WOULD be the builtin, and a user module
+    could forge a handle by unifying its own type with the box.  [is_reserved]
+    is also what the lowering reads to send the builtin, and only the builtin,
+    to the reserved TIR handle type. *)
+let reserved_builtin_names = [ "Socket"; "Listener"; "Process" ]
+
+let is_reserved (short : string) : bool = List.mem short reserved_builtin_names
+
 let short_of q =
   match String.rindex_opt q '.' with
   | Some i -> String.sub q (i + 1) (String.length q - i - 1)
@@ -89,8 +102,11 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
   let decls_at : (string * string, [ `Variant of A.name * int | `Other ]) Hashtbl.t =
     Hashtbl.create 64 in
   let variant_paths : (string, string list) Hashtbl.t = Hashtbl.create 64 in
+  (* A reserved builtin name counts even in a stdlib-owned file: the stdlib
+     declares none, so the only such file is an entry checked with
+     `--stdlib-source`, which must not own the handle type either. *)
   let user_decl (n : A.name) =
-    n.A.span <> A.dummy_span && not (is_stdlib n.A.span) in
+    n.A.span <> A.dummy_span && (not (is_stdlib n.A.span) || is_reserved n.A.txt) in
   let rec collect path (ds : A.decl list) =
     List.iter (function
         | A.DType (_, n, ps, A.TDVariant _, _)
@@ -110,22 +126,27 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
   collect "" m.A.mod_decls;
   let colliding = Hashtbl.create 16 in
   Hashtbl.iter (fun short paths ->
-      if List.length paths >= 2 then Hashtbl.replace colliding short ()) variant_paths;
+      if List.length paths >= 2 || is_reserved short then
+        Hashtbl.replace colliding short ()) variant_paths;
   if Hashtbl.length colliding = 0 then ()
   else begin
     let entry = m.A.mod_name.A.txt in
+    (* The identity of [short] declared at [path].  A reserved name is
+       qualified by the entry module too, so it is never the bare builtin. *)
+    let ident path short =
+      if is_reserved short then join (join entry path) short else join path short in
     (* Declarations get their identity. *)
     Hashtbl.iter (fun (path, short) d ->
         match d with
         | `Variant (n, arity) when Hashtbl.mem colliding short ->
-          let id = join path short in
+          let id = ident path short in
           Hashtbl.replace refs n.A.span id;
           Hashtbl.replace arity_tbl id arity;
           Hashtbl.replace short_tbl id short
         | _ -> ()) decls_at;
     let identity_at path short =
       match Hashtbl.find_opt decls_at (path, short) with
-      | Some (`Variant _) -> Some (join path short)
+      | Some (`Variant _) -> Some (ident path short)
       | Some `Other -> None
       | None -> raise Not_found
     in
@@ -159,7 +180,7 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
               List.find_map (fun pre ->
                   let cand = if pre = "" then "" else join p pre in
                   match Hashtbl.find_opt decls_at (cand, short) with
-                  | Some (`Variant _) -> Some (join cand short)
+                  | Some (`Variant _) -> Some (ident cand short)
                   | _ -> None) prefixes
             in
             (match found with Some _ -> found | None -> go rest)

@@ -64,14 +64,14 @@ mod ChannelServer do
   -- ── Channel configuration ──────────────────────────────────────────────────
 
   -- Runtime configuration for a single channel process.
-  --   socket         — the Channel.Socket for this join
+  --   socket         — the Channel.ChannelSocket for this join
   --   join_fn        — fn(topic, params, socket) -> Result(state, String)
   --   handle_in_fn   — fn(ref, event, payload, state, socket) -> HandleResult
   --   handle_info_fn — fn(msg, state, socket) -> HandleResult
   --   leave_fn       — fn(reason, state, socket) -> Unit
   --   pubsub_shard   — pid of the PubSub shard actor for this topic
   type ChannelConfig(a, b, c, d, e) = ChannelConfig(
-    a,    -- socket (Channel.Socket)
+    a,    -- socket (Channel.ChannelSocket)
     b,    -- join_fn
     c,    -- handle_in_fn
     d,    -- handle_info_fn
@@ -94,7 +94,7 @@ mod ChannelServer do
   end
 
   doc """
-  The Channel.Socket of a config.
+  The Channel.ChannelSocket of a config.
 
   ## Examples
 

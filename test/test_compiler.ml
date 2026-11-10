@@ -18420,8 +18420,104 @@ let test_callarity_aliases_matching_ok () =
   end|}) in
   Alcotest.(check bool) "matching aliases / lambda callee: no error" false (has_errors ctx)
 
+(* ── ocap phase 2: handle types (specs/plans/2026-11-10-ocap-p2-handles-plan.md,
+   Task 2).  File.Handle, File.Dir, Socket, Listener and Process are builtin,
+   implementation-less types over the runtime's handle box. *)
+let test_handle_type_names_resolve () =
+  let ok = typecheck {|mod App do
+  fn f(h : File.Handle) : File.Dir do f(h) end
+  fn g(s : Socket, l : Listener, p : Process, d : File.Dir) : (Socket, Listener, Process, File.Dir) do
+    (s, l, p, d)
+  end
+end|} in
+  Alcotest.(check bool) "every handle type name resolves" false (has_errors ok);
+  let bad = typecheck {|mod App do
+  fn g(s : Socket) : Int do s end
+end|} in
+  Alcotest.(check bool) "Socket does not unify with Int" true (has_errors bad);
+  Alcotest.(check bool) "the error names Socket" true (has_error_with bad "Socket");
+  Alcotest.(check bool) "the error names Int" true (has_error_with bad "Int")
+
+(* The typestate Handle(r, s) of stdlib/handle.march is always_linear under
+   the bare name "Handle"; File.Handle must not inherit that. *)
+let test_file_handle_is_not_linear () =
+  let ctx = typecheck {|mod App do
+  fn twice(h : File.Handle) : (File.Handle, File.Handle) do (h, h) end
+  fn use_twice(h : File.Handle) : Int do
+    let (a, b) = twice(h)
+    let _ = twice(a)
+    let _ = twice(b)
+    let _ = twice(h)
+    0
+  end
+end|} in
+  Alcotest.(check bool) "a File.Handle used twice is not a linearity error" false
+    (has_errors ctx)
+
+let test_handle_eq_is_type_error () =
+  let ctx = typecheck {|mod App do
+  fn same(a : Socket, b : Socket) : Bool do a == b end
+end|} in
+  Alcotest.(check bool) "== on two Sockets is a type error" true
+    (has_error_with ctx "does not implement interface `Eq`")
+
+(* R6 (a): a qualified builtin type is never canonicalised to a bare
+   builtin of the same arity: `IO.Process` is the capability, not the
+   handle type `Process`. *)
+let test_cap_io_process_narrow () =
+  let ctx = typecheck {|mod App do
+  needs IO
+  fn narrow(io : Cap(IO)) : Cap(IO.Process) do cap_narrow(io) end
+end|} in
+  Alcotest.(check bool) "cap_narrow to Cap(IO.Process) is accepted" false
+    (has_error_with ctx "cannot be widened");
+  Alcotest.(check bool) "no error at all" false (has_errors ctx)
+
+(* R6 (b): a user module type named Process is its own type, never the
+   builtin handle type, so a value of it cannot pass as a handle. *)
+let test_user_process_is_not_the_handle () =
+  let ctx = typecheck {|mod App do
+  mod Inner do
+    type Process = P(Int)
+    fn mk() : Process do P(1) end
+  end
+  fn use_it(_p : Process) : Int do 0 end
+  fn go() : Int do use_it(Inner.mk()) end
+end|} in
+  Alcotest.(check bool) "Inner.Process does not unify with Process" true (has_errors ctx);
+  let msgs = List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+      if d.severity = March_errors.Errors.Error then Some d.message else None)
+      ctx.March_errors.Errors.diagnostics in
+  let named = List.exists (fun m ->
+      Test_helpers.contains "Inner.Process" m
+      && Test_helpers.contains "Process" (
+        (* the builtin, spelled bare: strip the qualified one first *)
+        Str.global_replace (Str.regexp_string "Inner.Process") "" m)) msgs in
+  Alcotest.(check bool) ("the error names both types:\n" ^ String.concat "\n" msgs) true named;
+  (* and the user's own type works as usual inside its module *)
+  let ok = typecheck {|mod App do
+  type Process = P(Int, Int)
+  fn mk() : Process do P(1, 2) end
+  fn first(p : Process) : Int do
+    match p do
+      P(a, _) -> a
+    end
+  end
+  fn go() : Int do first(mk()) + first(App.mk()) end
+end|} in
+  Alcotest.(check bool) "a user's own Process type checks" false (has_errors ok)
+
+let handle_types_suite =
+  ("handle types",
+   [ Alcotest.test_case "handle_type_names_resolve" `Quick test_handle_type_names_resolve;
+     Alcotest.test_case "file_handle_is_not_linear" `Quick test_file_handle_is_not_linear;
+     Alcotest.test_case "handle_eq_is_type_error" `Quick test_handle_eq_is_type_error;
+     Alcotest.test_case "cap_io_process_narrow" `Quick test_cap_io_process_narrow;
+     Alcotest.test_case "user_process_is_not_the_handle" `Quick test_user_process_is_not_the_handle ])
+
 let compiler_suites =
   [
+      handle_types_suite;
       sigil_interp_suite;
       csrf_suite;
       ("repl_cache", Test_repl_cache.tests);

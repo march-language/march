@@ -34,6 +34,21 @@ let record_type_params : (string, string list) Hashtbl.t = Hashtbl.create 16
     that will be resolved during monomorphization. *)
 let unknown_ty = Tir.TVar "_"
 
+(** The ONE TIR type every builtin handle type lowers to (ocap phase 2):
+    [File.Handle], [File.Dir], [Socket], [Listener], [Process] are all the
+    runtime's handle box (runtime/march_handle.c), whose kind lives in the
+    box, not the type.  The TIR keys types by short name, so a user module's
+    own `type Process = P(Int, Int)` (a qualified nominal identity in the
+    typechecker, see [Typecheck_nominal.reserved_builtin_names]) would
+    otherwise lower to the same [TCon "Process"] as the handle, and Perceus
+    would drop a box as that user record.  `$` cannot start a declared type
+    name. *)
+let handle_tir_name = "$Handle"
+
+let handle_type_names = [ "File.Handle"; "File.Dir"; "Socket"; "Listener"; "Process" ]
+
+let is_handle_type_name (n : string) : bool = List.mem n handle_type_names
+
 (** Convert surface types to TIR types.
     Pre-monomorphization, type variables become [TVar].
 
@@ -47,6 +62,11 @@ let rec lower_ty (t : Ast.ty) : Tir.ty =
   | Ast.TyCon ({ txt = "Bool"; _ }, [])   -> Tir.TBool
   | Ast.TyCon ({ txt = "String"; _ }, []) -> Tir.TString
   | Ast.TyCon ({ txt = "Unit"; _ }, [])   -> Tir.TUnit
+  | Ast.TyCon (({ txt = name; _ } as n), [])
+    when is_handle_type_name name
+      && March_typecheck.Typecheck_nominal.ref_identity n = None ->
+    (* the builtin handle type, not a user type of that short name *)
+    Tir.TCon (handle_tir_name, [])
   | Ast.TyCon ({ txt = name; _ }, args)   ->
     Tir.TCon (name, List.map lower_ty args)
   | Ast.TyVar { txt = name; _ }          -> Tir.TVar name
@@ -82,6 +102,10 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
   | Typecheck.TCon ("Bool",   []) -> Tir.TBool
   | Typecheck.TCon ("String", []) -> Tir.TString
   | Typecheck.TCon ("Unit",   []) -> Tir.TUnit
+  | Typecheck.TCon (name, []) when is_handle_type_name name ->
+    (* A user type of that short name has a qualified identity, so an exact
+       handle name here is always the builtin ([handle_tir_name]). *)
+    Tir.TCon (handle_tir_name, [])
   | Typecheck.TCon (name, args)   ->
     (* A colliding variant's typecheck identity (`A.Note`) is the bare name
        to every backend (see [March_typecheck.Typecheck_nominal]). *)

@@ -16565,6 +16565,14 @@ declare void @march_actor_inspect_store(ptr %s)
 declare ptr  @march_actor_inspect(ptr %actor, i64 %timeout_ms)
 declare i64  @march_pid_index_of(ptr %actor)
 declare ptr  @march_value_to_string(ptr %v)
+; Handle-box builtins (ocap phase 2)
+declare ptr  @march_handle_new(i64 %kind, i64 %raw, i64 %aux)
+declare i64  @march_handle_enter(ptr %h, i64 %kind)
+declare void @march_handle_leave(ptr %h)
+declare i64  @march_handle_close(ptr %h)
+declare i64  @march_handle_detach(ptr %h)
+declare i64  @march_handle_is_closed(ptr %h)
+declare i64  @march_handle_aux(ptr %h)
 ; Session-typed channel builtins (binary)
 declare ptr  @march_chan_new(ptr %proto_name)
 declare ptr  @march_chan_send(ptr %ep, ptr %val)
@@ -18599,8 +18607,64 @@ let test_string_alloc_uses_march_allocator () =
   Alcotest.(check bool) "march_string_alloc routes through march_obj_malloc" true
     (Test_helpers.contains "march_string *s = march_obj_malloc" source)
 
+(* ocap phase 2, Task 2: the handle primitives, compiled. The fixtures are
+   shared with the other backend's suite (Test_helpers.handle_*_src). *)
+let test_handle_primitive_roundtrip () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:true ~name:"handle_roundtrip" handle_roundtrip_src in
+  if rc <> 0 then Alcotest.failf "handle roundtrip exited %d:\n%s" rc out;
+  let last =
+    match List.rev (List.filter (fun l -> String.trim l <> "")
+                      (String.split_on_char '\n' out)) with
+    | l :: _ -> String.trim l
+    | [] -> ""
+  in
+  Alcotest.(check string) "raw, first close, enter after close, second close"
+    handle_roundtrip_expected last
+
+let test_handle_in_generic_containers () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:true ~name:"handle_containers" handle_containers_src in
+  if rc <> 0 then Alcotest.failf "handle containers exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("prints #<Socket>:\n" ^ out) true (contains "#<Socket>" out);
+  Alcotest.(check bool) ("prints #<Socket closed> after close:\n" ^ out) true
+    (contains "#<Socket closed>" out);
+  Alcotest.(check bool) ("never prints the raw descriptor as a field:\n" ^ out) false
+    (contains "Socket(7" out)
+
+(* R7: a user `App.Process` record and a builtin `Process` box in one
+   compiled program; the TIR lowers the builtin to `$Handle`, so Perceus
+   never drops the box as the user's P(Int, Int). Output must equal the
+   interpreter's. *)
+let test_handle_vs_user_type_named_process () =
+  let (rc, compiled) =
+    run_handle_fixture ~compiled:true ~name:"handle_vs_user" handle_vs_user_type_src in
+  if rc <> 0 then Alcotest.failf "compiled handle-vs-user-type exited %d:\n%s" rc compiled;
+  let (irc, interp) =
+    run_handle_fixture ~compiled:false ~name:"handle_vs_user_i" handle_vs_user_type_src in
+  if irc <> 0 then Alcotest.failf "interpreted handle-vs-user-type exited %d:\n%s" irc interp;
+  let program_lines out =
+    let ls = List.map String.trim (String.split_on_char '\n' out) in
+    let rec drop_to = function
+      | l :: rest when l = "3,4" -> l :: rest
+      | _ :: rest -> drop_to rest
+      | [] -> []
+    in
+    List.filter (( <> ) "") (drop_to ls)
+  in
+  Alcotest.(check (list string)) "compiled output = interpreted output"
+    (program_lines interp) (program_lines compiled);
+  Alcotest.(check (list string)) "the program's output"
+    [ "3,4"; "[#<Socket>, #<Socket>]"; "[P(3, 4), P(5, 6)]"; "#<Socket closed>" ]
+    (program_lines compiled)
+
 let codegen_suites =
   [
+      ( "handle primitives", [
+          Alcotest.test_case "handle_primitive_roundtrip" `Quick test_handle_primitive_roundtrip;
+          Alcotest.test_case "handle_in_generic_containers" `Quick test_handle_in_generic_containers;
+          Alcotest.test_case "handle_vs_user_type_named_process" `Quick
+            test_handle_vs_user_type_named_process ] );
       ( "string_allocator", [
           Alcotest.test_case "strings use the March object allocator" `Quick
             test_string_alloc_uses_march_allocator;

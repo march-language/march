@@ -347,14 +347,17 @@ let test_shipped_table () =
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
     [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
-      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request" ]
+      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request";
+      "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
+      "handle_is_closed"; "handle_aux" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
         (contains ~needle:"`Actor.introspect`" hint))
     (List.filter (fun (name, _) -> name <> "observe_count_send" && name <> "actor_inspect" && name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn" && name <> "epoch_holds" && name <> "reload_request"
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
-                             && name <> "delivery_failed_watch")
+                             && name <> "delivery_failed_watch"
+                             && not (String.length name > 7 && String.sub name 0 7 = "handle_"))
        !TB.stdlib_only);
   Alcotest.(check bool) "actor_inspect suggestion names Actor.debug" true
     (contains ~needle:"`Actor.debug`" (List.assoc "actor_inspect" !TB.stdlib_only));
@@ -368,6 +371,38 @@ let test_shipped_table () =
     actor_whereis(n)
   end
 end|}) "`actor_whereis` is internal to the standard library; use `Actor.whereis(cap, name)`")
+
+(* ocap phase 2 (Task 2): the seven handle primitives are stdlib-only, and
+   each points the user at the module open functions that make handles. *)
+let handle_primitives =
+  [ "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
+    "handle_is_closed"; "handle_aux" ]
+
+let test_handle_primitives_gated () =
+  let ctx = typecheck {|mod App do
+  fn forge() do
+    handle_new(3, 0, 0)
+  end
+end|} in
+  let gate =
+    List.find_opt (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error
+        && contains ~needle:"`handle_new` is internal to the standard library" d.message)
+      ctx.March_errors.Errors.diagnostics
+  in
+  (match gate with
+   | None -> Alcotest.fail "user code calling handle_new(3, 0, 0) is not gated"
+   | Some d ->
+     Alcotest.(check string) "the code is stdlib_internal"
+       March_errors.Errors.Code.stdlib_internal d.code;
+     Alcotest.(check bool) "the message names \"handles are made by\"" true
+       (contains ~needle:"handles are made by" d.message));
+  List.iter (fun name ->
+      Alcotest.(check bool) (name ^ " is in the shipped table") true
+        (match List.assoc_opt name !TB.stdlib_only with
+         | Some hint -> contains ~needle:"handles are made by their module's open functions" hint
+         | None -> false))
+    handle_primitives
 
 (* ── Adversarial sweep over the shipped table ─────────────────────────────
    Every gated name, in every spelling the review's findings list (and
@@ -622,6 +657,7 @@ let tests =
          test_driver_rejects_user_json_march;
        Alcotest.test_case "shipped table gates the four forging builtins" `Quick
          test_shipped_table;
+       Alcotest.test_case "handle_primitives_gated" `Quick test_handle_primitives_gated;
        Alcotest.test_case "adversarial sweep: every name, every spelling, same text" `Quick
          test_adversarial_sweep;
        Alcotest.test_case "sweep negative control: rebound names are silent" `Quick

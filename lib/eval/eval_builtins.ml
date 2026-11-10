@@ -6061,3 +6061,44 @@ let base_env : env =
   ]
   (* UDP datagrams: lib/eval/eval_udp.ml mirrors runtime/march_udp.c. *)
   @ Eval_udp.builtins
+
+(* Handle boxes (lib/eval/eval_handle.ml): each kind's release runs the raw
+   closer the stdlib used before boxes existed, looked up in the table above,
+   so the box and the raw builtin can never disagree on how a resource is
+   freed.  Mirrors runtime/march_handle.c's release_kind:
+   - DIR closes its fd as TCP does ([tcp_close] is a bare close);
+   - TLS closes the session, then its socket (the aux word);
+   - PROCESS closes the child's streams without killing or reaping it
+     (march_process_release_slot), the first half of [process_wait_proc];
+   - TCP_BORROWED releases nothing. *)
+let () =
+  let raw_closer name =
+    match List.assoc_opt name base_env with
+    | Some (VBuiltin (_, f)) -> (fun v -> ignore (f [v]))
+    | _ -> failwith ("Eval_builtins: handle releaser needs builtin " ^ name)
+  in
+  let file_close = raw_closer "file_close"
+  and tcp_close = raw_closer "tcp_close"
+  and udp_close = raw_closer "udp_close"
+  and tls_close = raw_closer "tls_close"
+  and tls_ctx_free = raw_closer "tls_ctx_free" in
+  let open Eval_handle in
+  set_releaser kind_file (fun raw _ -> file_close raw);
+  set_releaser kind_dir (fun raw _ -> tcp_close raw);
+  set_releaser kind_tcp (fun raw _ -> tcp_close raw);
+  set_releaser kind_listener (fun raw _ -> tcp_close raw);
+  set_releaser kind_udp (fun raw _ -> udp_close raw);
+  set_releaser kind_tls (fun raw aux -> tls_close raw; tcp_close aux);
+  set_releaser kind_tls_ctx (fun raw _ -> tls_ctx_free raw);
+  set_releaser kind_process (fun raw _ ->
+      match raw with
+      | VInt id ->
+        (match Hashtbl.find_opt live_proc_tbl id with
+         | Some (ic, oc, _) ->
+           (try close_in_noerr ic with _ -> ());
+           (try close_out_noerr oc with _ -> ());
+           Hashtbl.remove live_proc_tbl id
+         | None -> ())
+      | _ -> ())
+
+let base_env : env = base_env @ Eval_handle.builtins

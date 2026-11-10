@@ -5684,8 +5684,36 @@ let test_default_method_across_files () =
   let code, out = sh (exe ^ " --compile -o prog run.march && ./prog") in
   if code <> 0 || last out <> "42" then Alcotest.failf "compiled: expected 42 (exit %d):\n%s" code out
 
+(* ocap phase 2, Task 2: the handle primitives, interpreted. The fixtures are
+   shared with the other backend's suite (Test_helpers.handle_*_src). *)
+let test_handle_primitive_roundtrip () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"handle_roundtrip" handle_roundtrip_src in
+  if rc <> 0 then Alcotest.failf "handle roundtrip exited %d:\n%s" rc out;
+  let last =
+    match List.rev (List.filter (fun l -> String.trim l <> "")
+                      (String.split_on_char '\n' out)) with
+    | l :: _ -> String.trim l
+    | [] -> ""
+  in
+  Alcotest.(check string) "raw, first close, enter after close, second close"
+    handle_roundtrip_expected last
+
+let test_handle_in_generic_containers () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"handle_containers" handle_containers_src in
+  if rc <> 0 then Alcotest.failf "handle containers exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("prints #<Socket>:\n" ^ out) true (contains "#<Socket>" out);
+  Alcotest.(check bool) ("prints #<Socket closed> after close:\n" ^ out) true
+    (contains "#<Socket closed>" out);
+  Alcotest.(check bool) ("never prints the raw descriptor as a field:\n" ^ out) false
+    (contains "Socket(7" out)
+
 let eval_suites =
   [
+      ( "handle primitives", [
+          Alcotest.test_case "handle_primitive_roundtrip" `Quick test_handle_primitive_roundtrip;
+          Alcotest.test_case "handle_in_generic_containers" `Quick test_handle_in_generic_containers ] );
       ( "march_test_cli", [
           Alcotest.test_case "fresh runtime per test file" `Quick test_march_test_fresh_runtime_per_file;
           Alcotest.test_case "default method of an impl in another file" `Quick test_default_method_across_files ] );

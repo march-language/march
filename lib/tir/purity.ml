@@ -73,6 +73,9 @@ let impure_prefixes = [
   "vault_"; "dist_"; "signal_"; "ws_"; "logger_"; "ring_buf_"; "remote_";
   "diag_";
   "csv_"; "dns_"; "socket_"; "udp_";
+  (* handle boxes (ocap phase 2): handle_new mints a resource (two calls with
+     the same arguments are two boxes), the rest read or change its state *)
+  "handle_";
 ]
 
 let impure_suffixes = [ "_set"; "_store" ]

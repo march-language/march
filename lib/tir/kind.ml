@@ -73,7 +73,13 @@ let unboxed_llvm_name (type_name : string) : string =
    their short spelling must never resolve to an unboxed declaration:
    [Process.LiveProcess] ([process_spawn_async]: "tag=0, 2 int64 fields") and
    [Bytes] ([compress_bytes_from_raw]; a newtype, listed for the record). *)
-let c_boxed_types = [ "Bytes"; "LiveProcess" ]
+let c_boxed_types = [ "Bytes"; "LiveProcess";
+                       (* ocap phase 2: every builtin handle type lowers to
+                          this one reserved name ([Lower_types.handle_tir_name]),
+                          a runtime handle box (runtime/march_handle.c): boxed
+                          and counted by [needs_rc_of]'s TCon arm, and no
+                          declaration can own the name. *)
+                       "$Handle" ]
 
 (* Index every QUALIFIED unboxed key by its short name.  A short name two
    unboxed keys share is left out (ambiguous; the collision set forces those

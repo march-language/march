@@ -470,6 +470,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
+  `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
+  connection (ocap phase 2). A module's own variant named `Socket`, `Listener` or
+  `Process` is still allowed and is always a type distinct from the builtin, never
+  unified with it. Code that only goes through `Channel.new_socket` and
+  the `Channel.socket_*` accessors is unaffected; code that names the type or matches
+  on the constructor renames it.
+
 - **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
   NaN, the infinities and a result outside Int's range** (#1230), with
   `float_floor: value out of Int range` or `float_floor: cannot convert NaN to Int`, the same

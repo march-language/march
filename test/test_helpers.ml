@@ -2688,3 +2688,90 @@ let run_groups name (groups : (string * unit Alcotest.test_case list) list) =
            (String.concat "\n" (List.map (fun (g, why) -> Printf.sprintf "  %s (%s)" g why) fs)));
       exit (if !failed = [] then 0 else 1)
     end
+
+(* ── ocap phase 2, Task 2: handle-primitive fixtures ─────────────────────
+   Shared by test_eval.ml (interpreted) and test_codegen.ml (compiled), so
+   both backends run the very same program and must print the same thing.
+   The primitives are stdlib-only; the tests run each fixture with
+   `--stdlib-source`. Kind 4 is TCP_BORROWED, whose release is a no-op, so
+   the raw value 7 is never really closed. *)
+let handle_roundtrip_src = {|mod HandleRoundtrip do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let h : Socket = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    let raw = handle_enter(h, 3) -- kind TCP
+    handle_leave(h)
+    let first = handle_close(h)
+    let after = handle_enter(h, 3) -- kind TCP
+    let second = handle_close(h)
+    println("[" ++ int_to_string(raw) ++ ", " ++ bool_to_string(first) ++ ", "
+            ++ int_to_string(after) ++ ", " ++ bool_to_string(second) ++ "]")
+  end
+end
+|}
+
+let handle_roundtrip_expected = "[7, true, -1, false]"
+
+let handle_containers_src = {|mod HandleContainers do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let h : Socket = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    let xs : List(Socket) = [h, h]
+    let m : Map(String, Socket) = Map.singleton("a", h)
+    let r = { sock: h, n: 1 }
+    println(inspect(xs))
+    println(inspect(m))
+    println(inspect(r))
+    let _ = handle_close(h)
+    println(inspect(h))
+    println(int_to_string(List.length(xs)))
+  end
+end
+|}
+
+(* A user module type named like a handle type (`App.Process`), next to a
+   builtin `Process` box: the TIR must keep the two apart (R7). *)
+let handle_vs_user_type_src = {|mod Main do
+  needs IO.Console
+  mod App do
+    type Process = P(Int, Int)
+    fn mk(a : Int, b : Int) : Process do P(a, b) end
+    fn show(p : Process) : String do
+      match p do
+        P(a, b) -> int_to_string(a) ++ "," ++ int_to_string(b)
+      end
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let p = App.mk(3, 4)
+    let h : Process = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    let hs : List(Process) = [h, h]
+    let ps = [p, App.mk(5, 6)]
+    println(App.show(p))
+    println(inspect(hs))
+    println(inspect(ps))
+    let _ = handle_close(h)
+    println(inspect(h))
+  end
+end
+|}
+
+(** Run [src] (written to a fresh temp dir as [name].march) with the
+    compiler under a private HOME, as a stdlib source; [compiled] builds it
+    with `--compile` first. Returns (exit code, combined output). *)
+let run_handle_fixture ~compiled ~name src =
+  let main_exe = find_main_exe () in
+  let dir = Filename.temp_dir ("march_" ^ name) "" in
+  let file = Filename.concat dir (name ^ ".march") in
+  Out_channel.with_open_bin file (fun oc -> output_string oc src);
+  let q = Filename.quote in
+  let cmd =
+    if compiled then
+      Printf.sprintf "cd %s && HOME=%s %s --compile --stdlib-source -o %s %s && %s"
+        (q dir) (q dir) (q main_exe) (q (Filename.concat dir "prog")) (q file)
+        (q (Filename.concat dir "prog"))
+    else
+      Printf.sprintf "cd %s && HOME=%s %s --stdlib-source %s"
+        (q dir) (q dir) (q main_exe) (q file)
+  in
+  run_capture cmd
