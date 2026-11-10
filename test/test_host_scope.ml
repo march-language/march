@@ -27,7 +27,7 @@ let test_parse_rejects () =
        match H.parse_pattern s with
        | Ok _ -> Alcotest.failf "pattern %S should be rejected" s
        | Error _ -> ())
-    [ "https://a.com"; "a.com/x"; "u@a.com"; "a..com"; "*"; "a.*.com";
+    [ "https://a.com"; "a.com/../x"; "u@a.com"; "a..com"; "*"; "a.*.com";
       "\xc3\xa9.com"; ""; "*.com:"; "a.com:0"; "a.com:99999" ]
 
 let test_parse_accepts () =
@@ -191,8 +191,8 @@ let test_net_scope_accepted () =
 let test_net_scope_bad_pattern () =
   rejects_with "scheme in scope" ~expect:"scheme"
     {|needs IO.NetConnect("https://example.com")|};
-  rejects_with "path in scope" ~expect:"path"
-    {|needs IO.NetConnect("example.com/api")|}
+  rejects_with "dot segment in a path scope" ~expect:".."
+    {|needs IO.NetConnect("example.com/../api/")|}
 
 let test_other_net_caps_rejected () =
   rejects_with "TLS scope" ~expect:"IO.NetConnect"
@@ -358,6 +358,52 @@ let test_method_matcher_agrees () =
          (string_of_bool want) line)
     method_corpus got
 
+let path_corpus =
+  [ ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/today");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weatherman");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/../admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/%2e%2e/x");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather//x");
+    ("a.test/v1/weather/@get", "a.test", 443, "post", "/v1/weather/x");
+    ("a.test/v1/x/,a.test/v2/", "a.test", 443, "get", "/v2/y");
+    ("a.test/v1/x/,a.test/v2/", "a.test", 443, "get", "/v1/y");
+    ("a.test", "a.test", 443, "get", "/anything/../x");
+    ("", "a.test", 443, "get", "/x");
+    ("a.test:8443/v1/", "a.test", 443, "get", "/v1/x");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/..;/admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/%252e%252e/admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/#/../../admin");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather?x=1");
+    ("a.test/v1/weather/", "a.test", 443, "get", "/v1/weather/a%20b") ]
+
+let test_path_matcher_agrees () =
+  let lines =
+    List.map
+      (fun (spec, host, port, m, path) ->
+         Printf.sprintf
+           "    println(if Http.scope_permits_request(%s, %s, %d, %s, %s) do \"true\" else \"false\" end)"
+           (march_str spec) (march_str host) port (march_str m) (march_str path))
+      path_corpus
+  in
+  let src =
+    Printf.sprintf
+      "mod PDiff do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) do\n%s\n  end\nend\n"
+      (String.concat "\n" lines)
+  in
+  let got = run_march src in
+  Alcotest.(check int) "one line per case" (List.length path_corpus) (List.length got);
+  List.iter2
+    (fun (spec, host, port, m, path) line ->
+       let want =
+         H.permits_request (H.decode_spec spec) ~host ~port ~meth:(Some m) ~path:(Some path)
+       in
+       Alcotest.(check string)
+         (Printf.sprintf "%S admits %s %s%s" spec m host path)
+         (string_of_bool want) line)
+    path_corpus got
+
 let url_corpus =
   [ "http://example.com/"; "https://example.com"; "https://example.com:8443/x";
     "https://Example.COM./x"; "http://203.0.113.7:8080/a?b=c"; "https://a-b.c-d.test/p" ]
@@ -467,6 +513,8 @@ let decl_tests =
     Alcotest.test_case "matcher agrees with the stdlib" `Slow test_matcher_agrees;
     Alcotest.test_case "method matcher agrees with the stdlib" `Slow
       test_method_matcher_agrees;
+    Alcotest.test_case "path matcher agrees with the stdlib" `Slow
+      test_path_matcher_agrees;
     Alcotest.test_case "URL parser agrees with Http.parse_url" `Slow
       test_url_parser_agrees;
   ]
@@ -548,8 +596,116 @@ let test_methods_format_roundtrip () =
     [ {|IO.NetConnect("a.com", methods(get, head), no_redirects)|};
       {|IO.NetConnect(methods(post))|} ]
 
-let method_tests =
+(* ── Path prefixes (path-scopes plan, Task 1) ──────────────────────── *)
+
+let test_path_pattern_parses () =
+  let p = pat "api.x.test/v1/weather/" in
+  Alcotest.(check string) "host" "api.x.test" p.host;
+  Alcotest.(check (option (list string))) "path" (Some [ "v1"; "weather" ]) p.path;
+  let q = pat "api.x.test:8443/v1/" in
+  Alcotest.(check (option int)) "port kept" (Some 8443) q.port;
+  Alcotest.(check (option (list string))) "path" (Some [ "v1" ]) q.path;
+  Alcotest.(check (option (list string))) "host-only has no path" None (pat "api.x.test").path
+
+let test_path_pattern_rejects () =
+  List.iter
+    (fun s ->
+       match H.parse_pattern s with
+       | Ok _ -> Alcotest.failf "pattern %S should be rejected" s
+       | Error _ -> ())
+    [ "a.test/v1/../x/"; "a.test/v1//x/"; "a.test/%2e/"; "a.test/v1?x"; "a.test/v1#x";
+      "a.test/a\\b/"; "a.test/./x/" ]
+
+let test_boundary_and_query () =
+  let w p = H.path_within ~prefix:[ "v1"; "weather" ] p in
+  List.iter (fun p -> Alcotest.(check bool) p true (w p))
+    [ "/v1/weather"; "/v1/weather/"; "/v1/weather/today"; "/v1/weather?x=1" ];
+  List.iter (fun p -> Alcotest.(check bool) p false (w p))
+    [ "/v1/weatherman"; "/v1"; "/" ]
+
+let test_refused_encodings () =
+  List.iter (fun p -> Alcotest.(check bool) p false (H.path_ok p))
+    [ "/v1/./x"; "/v1/../x"; "/v1//x"; "/v1/%2e%2e/x"; "/v1/%2E/x"; "/v1%2fx"; "/v1%2Fx";
+      "/v1%5cx"; "/v1\\x" ];
+  List.iter (fun p -> Alcotest.(check bool) p true (H.path_ok p))
+    [ "/v1/weather/today"; "/v1/a%20b"; "/" ]
+
+let test_two_prefixes () =
+  let ds = decls [ "a.test/v1/x/"; "a.test/v2/" ] in
+  let ok p = H.permits_request ds ~host:"a.test" ~port:443 ~meth:None ~path:(Some p) in
+  Alcotest.(check bool) "v1/x/1" true (ok "/v1/x/1");
+  Alcotest.(check bool) "v2/y" true (ok "/v2/y");
+  Alcotest.(check bool) "v1/y" false (ok "/v1/y");
+  Alcotest.(check bool) "unknown path under path scopes" false
+    (H.permits_request ds ~host:"a.test" ~port:443 ~meth:None ~path:None);
+  Alcotest.(check bool) "unknown path, host-level only" true
+    (H.permits_host_ignoring_path ds ~host:"a.test" ~port:443 ~meth:None);
+  Alcotest.(check bool) "bad path refused even if under the prefix" false
+    (ok "/v2/../admin")
+
+let test_raw_refused_under_path () =
+  Alcotest.(check bool) "raw to a path-scoped host" false
+    (H.permits_raw (decls [ "a.test/v1/" ]) ~host:"a.test" ~port:443)
+
+let test_spec_roundtrip_paths () =
+  List.iter
+    (fun l ->
+       let ds = decls l in
+       Alcotest.(check bool) (String.concat "|" l) true (H.decode_spec (H.encode_spec ds) = ds))
+    [ [ "a.test/v1/weather/" ]; [ "a.test:8443/v1/;methods=get;no_redirects"; "b.test" ] ]
+
+let test_url_path_of_literal () =
+  Alcotest.(check (option string)) "whole URL" (Some "/v1/w")
+    (H.url_path_of_literal ~prefix:false "https://a.test/v1/w?q=1");
+  Alcotest.(check (option string)) "whole URL, no path" (Some "/")
+    (H.url_path_of_literal ~prefix:false "https://a.test");
+  Alcotest.(check (option string)) "prefix" (Some "/v1/")
+    (H.url_path_of_literal ~prefix:true "https://a.test/v1/");
+  Alcotest.(check (option string)) "prefix cut at last slash" (Some "/v1/")
+    (H.url_path_of_literal ~prefix:true "https://a.test/v1/wea")
+
+let test_path_scope_declared () =
+  accepts "path scope" {|needs IO.NetConnect("api.x.test/v1/weather/", methods(get))|};
+  rejects_with "dot-dot path scope" ~expect:".."
+    {|needs IO.NetConnect("api.x.test/v1/../admin/")|};
+  (* The hint shows the path form, so the fix is obvious. *)
+  rejects_with "hint names the path form" ~expect:"api.example.com/v1/"
+    {|needs IO.NetConnect("api.x.test/v1/../admin/")|}
+
+(* Review fixes (path scopes): a path is judged only when every byte is a
+   plain path character; CR/LF/space would smuggle a second request. *)
+let test_path_ok_allowlist () =
+  List.iter (fun p -> Alcotest.(check bool) (String.escaped p) false (H.path_ok p))
+    [ "/v1/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"; "/v1/x y"; "/v1/x\000"; "/v1/x\r";
+      "/v1/..;/admin"; "/v1/a;b"; "/v1/%252e%252e/x"; "/v1/x#/../../admin"; "/v1/x?y";
+      "/v1/\xc3\xa9"; "/v1/%2"; "/v1/%zz"; "/v1/%00"; "/v1/%0d%0a" ];
+  List.iter (fun p -> Alcotest.(check bool) p true (H.path_ok p))
+    [ "/v1/a%20b"; "/v1/a:b@c"; "/v1/a,b"; "/v1/weather/today"; "/" ]
+
+let test_literal_path_keeps_fragment () =
+  (* As Http.parse_url does: the path runs to `?`, and a `#` stays in it. *)
+  Alcotest.(check (option string)) "fragment kept" (Some "/v1/w#frag")
+    (H.url_path_of_literal ~prefix:false "https://a.test/v1/w#frag");
+  Alcotest.(check (option string)) "query cut" (Some "/v1/w")
+    (H.url_path_of_literal ~prefix:false "https://a.test/v1/w?q=1#f")
+
+let path_tests =
   [
+    Alcotest.test_case "path_ok allowlist" `Quick test_path_ok_allowlist;
+    Alcotest.test_case "literal path keeps fragment" `Quick test_literal_path_keeps_fragment;
+    Alcotest.test_case "path scope declared" `Quick test_path_scope_declared;
+    Alcotest.test_case "path pattern parses" `Quick test_path_pattern_parses;
+    Alcotest.test_case "path pattern rejects" `Quick test_path_pattern_rejects;
+    Alcotest.test_case "boundary and query" `Quick test_boundary_and_query;
+    Alcotest.test_case "refused encodings" `Quick test_refused_encodings;
+    Alcotest.test_case "two prefixes" `Quick test_two_prefixes;
+    Alcotest.test_case "raw refused under path" `Quick test_raw_refused_under_path;
+    Alcotest.test_case "spec roundtrip with paths" `Quick test_spec_roundtrip_paths;
+    Alcotest.test_case "url path of literal" `Quick test_url_path_of_literal;
+  ]
+
+let method_tests =
+  path_tests @ [
     Alcotest.test_case "methods syntax" `Quick test_methods_syntax;
     Alcotest.test_case "methods format roundtrip" `Quick test_methods_format_roundtrip;
     Alcotest.test_case "methods decl" `Quick test_methods_decl;

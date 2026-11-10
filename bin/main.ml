@@ -271,6 +271,31 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
    ref itself at its own check sites. *)
 let stdlib_span_files = March_typecheck.Typecheck_builtins.stdlib_span_files
 
+(** Qualified names of the modules that are USER code: a [DMod] whose span is a
+    real file outside the stdlib root (stdlib modules carry a placeholder span).
+    Transparency for the capability ceiling is decided by this, never by a
+    module's NAME: a user module called `Yaml` is not the stdlib's. *)
+let user_module_names (decls : March_ast.Ast.decl list) : (string, unit) Hashtbl.t =
+  let seen = Hashtbl.create 16 in
+  let rec go prefix ds =
+    List.iter
+      (function
+        | March_ast.Ast.DMod (name, _, inner, sp) ->
+          let q =
+            if prefix = "" then name.March_ast.Ast.txt
+            else prefix ^ "." ^ name.March_ast.Ast.txt
+          in
+          let f = sp.March_ast.Ast.file in
+          if f <> March_ast.Ast.dummy_span.March_ast.Ast.file
+             && not (March_typecheck.Typecheck_builtins.file_is_stdlib f) then
+            Hashtbl.replace seen q ();
+          go q inner
+        | _ -> ())
+      ds
+  in
+  go "" decls;
+  seen
+
 (** The module names a batch of stdlib declarations defines.
 
     Feeds [Cap_attrib.attribute]'s [~transparent] set, so a capability reached
@@ -3668,10 +3693,22 @@ let loadset_path ~store_root ~entry_real ~walked =
   Printf.sprintf "%s/loadsets/%s" store_root
     (Digest.to_hex (Digest.string (String.concat "\x00" (entry_real :: walked))))
 
-(* The depend-mode digest: entry bytes + stdlib digest + each loaded file's
-   path and bytes, in sorted order.  [None] if a listed file cannot be read. *)
-let depend_digest ~src ~stdlib_hash ~(listed : string list) : string option =
+(* The depend-mode digest: the entry path as written + its bytes + stdlib
+   digest + each loaded file's path and bytes, in sorted order.  [None] if a
+   listed file cannot be read.
+
+   The entry path is part of it, SPELLED AS GIVEN on the command line,
+   because that spelling is what a build embeds: a `--test` failure report
+   names the file, a runtime panic its location, a replayed diagnostic its
+   path.  Without it the same source compiled as `/a/m.march` and then as
+   `/b/m.march` was served the first binary, whose reports named /a
+   (specs/progress/2026-11-07-cas-key-omits-entry-path.md).  The spelling,
+   not the realpath: two projects that both build `m.march` from their own
+   directory embed the same text and still share an artifact (B7.3), while
+   `m.march` and `/abs/m.march` in one directory embed different text. *)
+let depend_digest ~entry_spelling ~src ~stdlib_hash ~(listed : string list) : string option =
   let buf = Buffer.create (64 * 1024) in
+  Buffer.add_string buf ("entry:" ^ entry_spelling ^ "\x00");
   Buffer.add_string buf src;
   Buffer.add_string buf stdlib_hash;
   let ok = List.for_all (fun f ->
@@ -3905,6 +3942,8 @@ let compile filename =
         List.filter (fun d -> d <> "") (String.split_on_char ':' lib_path) in
       let entry_real =
         (try Unix.realpath filename with Unix.Unix_error _ -> filename) in
+      (* The entry's path as written is an input too: see [depend_digest]. *)
+      Buffer.add_string buf ("\x00entry:" ^ filename ^ "\x00");
       let walked = Filename.dirname filename :: lib_dirs in
       let walk_hash () =
       List.iter (fun dir ->
@@ -3936,7 +3975,7 @@ let compile filename =
            List.filter (fun f -> f <> entry_real) (files_in walked)) in
         match valid_loadset ~path:ls_path ~entry_real ~src ~walked with
         | Some listed ->
-          (match depend_digest ~src ~stdlib_hash ~listed with
+          (match depend_digest ~entry_spelling:filename ~src ~stdlib_hash ~listed with
            | Some h -> (h, "depend", listed)
            | None -> walk ())
         | None -> walk ()
@@ -3977,7 +4016,7 @@ let compile filename =
       let register_depend_store (key_of : string -> string) store =
         depend_store := Some (fun ~user_files ~artifact ~diag ->
             let listed = canonical_listed ~entry_real user_files in
-            match depend_digest ~src ~stdlib_hash ~listed with
+            match depend_digest ~entry_spelling:filename ~src ~stdlib_hash ~listed with
             | None -> ()
             | Some dep_hash ->
               let dep_ch = key_of dep_hash in
@@ -5235,6 +5274,7 @@ let compile filename =
        without perturbing it. *)
     let cap_attrib =
       let stdlib_mods = stdlib_module_names stdlib_decls in
+      let user_mods = user_module_names desugared.March_ast.Ast.mod_decls in
       (* A module with no `main` has no DCE roots, so pruning would keep the
          whole prepended stdlib and attribution would charge every stdlib
          module for capabilities the program never reaches — 17 violations for
@@ -5274,7 +5314,7 @@ let compile filename =
       in
       walk_prelude desugared.March_ast.Ast.mod_decls;
       March_tir.Cap_attrib.attribute
-        ~transparent:(fun m -> List.mem m stdlib_mods)
+        ~transparent:(fun m -> List.mem m stdlib_mods && not (Hashtbl.mem user_mods m))
         ~transparent_fns:(fun n ->
           (* Bare names only: a dotted name belongs to a module and is judged
              by the module predicate.  Matching the stem of a dotted name here

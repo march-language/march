@@ -1,0 +1,10 @@
+exit: 1
+-- NAMING ------------- errors/reserved_type_name_1.march
+
+Type `DownReason` is reserved by the local-monitor runtime ABI and cannot be redeclared here. Rename it, or declare it inside a nested module. [reserved_type_name]
+
+8 |   type DownReason = OnlyR(Int)
+           ^^^^^^^^^^
+
+
+

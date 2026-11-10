@@ -15,3 +15,17 @@ installed compiler links the runtime `.so` on the *user's* machine.
 Fix direction: at link time, check that a baked archive path exists and otherwise fall back
 (Homebrew/`/usr/local` `-L… -lblake3`, then pkg-config). Or link the runtime `.so` against
 the copy of blake3 the compiler binary already carries.
+
+## Fixed (2026-11-09)
+
+The runtime `.so` (`Toolchain.ensure_runtime_so`) now compiles the portable BLAKE3 vendored
+under `runtime/third_party/blake3` (`blake3.c`, `blake3_dispatch.c`, `blake3_portable.c`, with
+every SIMD backend disabled), exactly as the compiled driver in `bin/main.ml` already did. It
+links no host libblake3, so no build-machine path can reach a link done on the user's machine.
+`blake3_link_flags` is gone. `March_cas.Blake3_flags` (and so the static linking of the
+compiler's own OCaml stubs) is unchanged. The vendored headers join the `.so` cache key.
+
+Test: `test_jit` "runtime .so carries vendored blake3" (Slow) builds the runtime `.so` in a
+private HOME and checks it defines `blake3_hasher_init` and names no libblake3 among its
+dynamic dependencies. The original failure needs a release build run on a Mac without
+`/opt/homebrew/lib/libblake3.a`; only a release build can confirm it end to end.

@@ -16636,6 +16636,51 @@ let test_stdlib_dist_supervisor_cli_check () =
        "exact `--check stdlib/dist_supervisor.march` succeeds; output:\n%s" output)
     0 rc
 
+(* `Down`/`DownReason` are the local-monitor ABI's reserved type names.  An
+   entry module redeclaring one at top level used to typecheck (the guard
+   compared [current_module] against [enclosing_package], which the stdlib
+   baseline leaves as "StdlibBaseline") and then crash [Llvm_toplevel]
+   ("reserved monitor ABI type DownReason has an incompatible declaration").
+   It is a [reserved_type_name] error now; a nested module's type is
+   qualified in TIR and may still shadow the name. *)
+let reserved_type_name_errors src =
+  let ctx = typecheck src in
+  List.filter (fun (d : March_errors.Errors.diagnostic) ->
+      d.code = March_errors.Errors.Code.reserved_type_name)
+    (March_errors.Errors.sorted ctx)
+
+let test_reserved_down_reason_top_level () =
+  let errs = reserved_type_name_errors {|mod M do
+    type DownReason = OnlyR(Int)
+    fn f(x : DownReason) : Int do
+      match x do
+        OnlyR(_) -> 1
+        _ -> 0
+      end
+    end
+    fn g() : Int do f(DownReason.Killed) end
+  end|} in
+  Alcotest.(check int) "top-level `type DownReason` is reserved_type_name" 1
+    (List.length errs)
+
+let test_reserved_down_top_level () =
+  let errs = reserved_type_name_errors {|mod M do
+    type Down = D(Int)
+  end|} in
+  Alcotest.(check int) "top-level `type Down` is reserved_type_name" 1
+    (List.length errs)
+
+let test_reserved_down_reason_nested_ok () =
+  let errs = reserved_type_name_errors {|mod M do
+    mod Sub do
+      type DownReason = OnlyR(Int)
+      fn mk() : DownReason do OnlyR(3) end
+    end
+    fn g() : Int do match Sub.mk() do Sub.OnlyR(n) -> n end end
+  end|} in
+  Alcotest.(check int) "nested `type DownReason` may shadow" 0
+    (List.length errs)
+
 (* ── Green guards: the fix must not over-reject legitimate entry-qualified use ── *)
 
 let test_entry_qual_same_type_ok () =
@@ -19609,6 +19654,9 @@ let compiler_suites =
           Alcotest.test_case "range.march reduce: curried, no internal error"         `Quick test_stdlib_range_reduce_curried;
           Alcotest.test_case "dist_link.march exact CLI check"                         `Quick test_stdlib_dist_link_cli_check;
           Alcotest.test_case "dist_supervisor.march exact CLI check"                   `Quick test_stdlib_dist_supervisor_cli_check;
+          Alcotest.test_case "top-level type DownReason is reserved"               `Quick test_reserved_down_reason_top_level;
+          Alcotest.test_case "top-level type Down is reserved"                     `Quick test_reserved_down_top_level;
+          Alcotest.test_case "nested type DownReason may shadow"                   `Quick test_reserved_down_reason_nested_ok;
           Alcotest.test_case "Main.id used at Int only: no error"                 `Quick test_entry_qual_same_type_ok;
           Alcotest.test_case "Main.id used at Int AND String: no error"           `Quick test_entry_qual_polymorphic_ok;
           Alcotest.test_case "Main.identity (a->a) used at Int: no error"         `Quick test_entry_qual_annotated_same_tvar_ok;

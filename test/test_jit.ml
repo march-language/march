@@ -844,6 +844,57 @@ let test_prelude_so_loads_cross_process () =
             so (Printexc.to_string exn))
         preludes
 
+(* Regression (2026-11-04 todo, release-binary-bakes-homebrew-libblake3):
+   the runtime .so the interpreter/JIT dlopens used to link the libblake3
+   the compiler's BUILD machine had (March_cas.Blake3_flags), so a release
+   binary carried `/opt/homebrew/lib/libblake3.a` into the user's link and
+   failed wherever that file was missing.  The .so now compiles the vendored
+   portable BLAKE3 instead: it must DEFINE blake3_hasher_init and name no
+   libblake3 among its dynamic dependencies.  (A static archive leaves no
+   load command, so the dependency check alone would not catch the old
+   bug; it guards the -lblake3 dylib tier.  The real proof is that no host
+   flags reach the link at all, which only a release build on a machine
+   without the archive exercises.) *)
+let test_runtime_so_carries_vendored_blake3 () =
+  match march_bin () with
+  | None ->
+    Alcotest.(check pass) "runtime .so blake3 (skipped: no main.exe)" () ()
+  | Some bin ->
+    let (code, out) = run_jit_repl ~backend:"clang" bin ["1 + 1"; ":quit"] in
+    Alcotest.(check int)
+      (Printf.sprintf "populating REPL session exits 0 (output: %s)" out) 0 code;
+    let cache_dir = Filename.concat (Lazy.force session_home) ".cache/march" in
+    let runtimes =
+      (try Sys.readdir cache_dir with Sys_error _ -> [||]) |> Array.to_list
+      |> List.filter (fun f ->
+          contains ~needle:"libmarch_runtime" f && Filename.check_suffix f ".so")
+      |> List.map (Filename.concat cache_dir) in
+    let capture cmd =
+      let ic = Unix.open_process_in (cmd ^ " 2>&1") in
+      let buf = Buffer.create 4096 in
+      (try while true do Buffer.add_channel buf ic 1 done
+       with End_of_file -> ());
+      ignore (Unix.close_process_in ic);
+      Buffer.contents buf in
+    let is_macos = Sys.file_exists "/System/Library/CoreServices" in
+    if runtimes = [] then
+      Alcotest.(check pass) "runtime .so blake3 (skipped: no cached runtime)" () ()
+    else
+      List.iter (fun so ->
+          let q = Filename.quote so in
+          let deps =
+            if is_macos then capture ("otool -L " ^ q)
+            else capture ("objdump -p " ^ q ^ " | grep NEEDED") in
+          Alcotest.(check bool)
+            (Printf.sprintf "%s links no host libblake3:\n%s" so deps)
+            false (contains ~needle:"blake3" deps);
+          let syms =
+            capture ((if is_macos then "nm -gU " else "nm -g --defined-only ") ^ q) in
+          Alcotest.(check bool)
+            (Printf.sprintf "%s defines blake3_hasher_init" so)
+            true (contains ~needle:"blake3_hasher_init" syms))
+        runtimes
+
 (* Regression: mutually tail-recursive functions must become a LOOP under
    --jit, exactly as they do when compiled.
 
@@ -1309,6 +1360,8 @@ let () =
       Alcotest.test_case "shell emit_object targets" `Quick test_emit_object_targets;
       Alcotest.test_case "prelude .so loads cross-process" `Slow
         test_prelude_so_loads_cross_process;
+      Alcotest.test_case "runtime .so carries vendored blake3" `Slow
+        test_runtime_so_carries_vendored_blake3;
       Alcotest.test_case "orc_two_consecutive_fns" `Slow
         test_orc_two_consecutive_fns;
       Alcotest.test_case "orc_lazy_int_normalisation" `Slow

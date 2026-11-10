@@ -1,0 +1,15 @@
+-- EXPECT-ERROR: Type `DownReason` is reserved by the local-monitor runtime ABI
+mod Main do
+  needs IO
+  -- `Down` and `DownReason` are the runtime's local-monitor message types.
+  -- The entry module's top-level types reach the backend under their bare
+  -- names, so redeclaring one here would clash with the built-in layout.
+  -- A nested module (`mod Sub do type DownReason ... end`) may shadow it.
+  type DownReason = OnlyR(Int)
+  fn f(x : DownReason) : Int do
+    match x do
+      OnlyR(n) -> n
+    end
+  end
+  fn main(cap : Cap(IO)) : Unit do println(int_to_string(f(OnlyR(1)))) end
+end
