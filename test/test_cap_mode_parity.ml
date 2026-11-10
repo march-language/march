@@ -24,10 +24,11 @@ type fixture = {
   expect : string list;  (** sorted capability codes; [] = accept *)
   skip : (string * string) list;
       (** (mode, reason): a mode the fixture does not apply to *)
+  warn_only : bool;  (** [expect] are warnings: the program is accepted *)
 }
 
-let fx ?(lib = []) ?repl ?(skip = []) name expect src =
-  { name; src; lib; repl; expect; skip }
+let fx ?(lib = []) ?repl ?(skip = []) ?(warn_only = false) name expect src =
+  { name; src; lib; repl; expect; skip; warn_only }
 
 (* `march check` checks a package: it wraps every file's module as a nested
    module of one synthetic module, so a file's `main` is not the program's
@@ -225,6 +226,17 @@ let dep_main =
 end
 |}
 
+let unlowerable =
+  {|mod Main do
+  needs IO.Console
+  fn main(c : Cap(IO.Console)) do
+    println("before")
+    App.stop()
+    println("after")
+  end
+end
+|}
+
 let fixtures =
   [
     fx "ceiling_stdlib" [ "cap_ceiling" ] (ceiling_stdlib "IO.Console")
@@ -257,6 +269,11 @@ let fixtures =
       ~repl:(host_scope_repl "q");
     fx "dep_module" [ "cap_ceiling" ] dep_main ~lib:(dep_lib "IO.Console");
     fx "dep_module_ok" [] dep_main ~lib:(dep_lib "IO.Console, IO.FileRead");
+    (* An interpreter-only builtin cannot be lowered: the modes that lower on
+       demand warn that the TIR checks did not run, and still run it. *)
+    fx "unlowerable" [ "cap_unchecked" ] ~warn_only:true unlowerable
+      ~skip:[ ("compile", "the compiled backend rejects it (compiled_unsupported)");
+              ("jit", "the JIT lowers the program itself and refuses it (an internal-error exit, not this phase's: specs/todos/2026-11-10-jit-ice-on-interpreter-only-builtin.md)") ];
   ]
 
 (* ── Modes ─────────────────────────────────────────────────────────────── *)
@@ -269,35 +286,12 @@ let modes =
    phase lands; must be empty when it is done. *)
 let known_gaps : (string * string) list =
   [
-    (* check *)
-    ("ceiling_value", "check");
-    ("host_scope", "check");
-    ("host_unproven", "check");
-    (* check_json *)
-    ("ceiling_value", "check_json");
-    ("host_scope", "check_json");
-    ("host_unproven", "check_json");
-    (* emit_core_ast *)
-    ("ceiling_value", "emit_core_ast");
-    ("host_scope", "emit_core_ast");
-    ("host_unproven", "emit_core_ast");
     (* march_check *)
+    ("unlowerable", "march_check");
     ("ceiling_stdlib", "march_check");
     ("dep_module", "march_check");
     ("host_scope", "march_check");
     ("host_unproven", "march_check");
-    (* interp *)
-    ("ceiling_stdlib", "interp");
-    ("ceiling_value", "interp");
-    ("dep_module", "interp");
-    ("host_scope", "interp");
-    ("host_unproven", "interp");
-    (* jit *)
-    ("ceiling_stdlib", "jit");
-    ("ceiling_value", "jit");
-    ("dep_module", "jit");
-    ("host_scope", "jit");
-    ("host_unproven", "jit");
     (* repl *)
     ("ceiling_stdlib", "repl");
     ("fn_bound", "repl");
@@ -422,7 +416,7 @@ let run_mode (f : fixture) (mode : string) : (bool * string list) option =
   | m -> Alcotest.failf "unknown mode %s" m
 
 let agrees (f : fixture) (rejected, codes) =
-  codes = f.expect && rejected = (f.expect <> [])
+  codes = f.expect && rejected = (f.expect <> [] && not f.warn_only)
 
 (* CAP_PARITY_ONLY=fn_bound,host_scope limits a run to those fixtures (the
    edit loop; the full run gates). *)
@@ -453,7 +447,7 @@ let test_modes_agree () =
                 problems :=
                   Printf.sprintf "%s/%s: expected %s [%s], got %s [%s]" f.name
                     mode
-                    (if f.expect = [] then "accept" else "reject")
+                    (if f.expect = [] || f.warn_only then "accept" else "reject")
                     (String.concat " " f.expect)
                     (if rejected then "reject" else "accept")
                     (String.concat " " codes)

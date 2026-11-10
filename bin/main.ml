@@ -2802,6 +2802,107 @@ let write_file path contents =
     (Re-exported from the shared resolver for callers below.) *)
 let collect_lib_files = March_resolver.Resolver.collect_lib_files
 
+(* ── TIR-side capability checks outside --compile (ocap phase 3) ──────────
+   [cap_findings_of] turns [Cap_static.check_program]'s outcome into the
+   findings every mode prints; a program the compiler cannot lower gets one
+   [cap_unchecked] warning instead of a verdict. *)
+let cap_findings_of (input : March_driver.Cap_static.input)
+    (outcome : March_driver.Cap_static.outcome) : March_driver.Cap_static.finding list =
+  match outcome with
+  | March_driver.Cap_static.Checked fs -> fs
+  | March_driver.Cap_static.Unchecked why ->
+    let why =
+      let n = String.length why in
+      if n > 0 && why.[n - 1] = '.' then String.sub why 0 (n - 1) else why in
+    let ctx = March_errors.Errors.create () in
+    March_errors.Errors.warning ctx ~code:March_errors.Code.cap_unchecked
+      ~span:input.March_driver.Cap_static.desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+      (Printf.sprintf
+         "The capability ceiling and host scopes were not checked: the \
+          compiler cannot build this program (%s).\n\
+          help: `march --compile` rejects it for that reason; every other \
+          capability check ran."
+         why);
+    List.map (fun d -> March_driver.Cap_static.Diag d) (March_errors.Errors.sorted ctx)
+
+let cap_findings_rejected (fs : March_driver.Cap_static.finding list) =
+  List.exists (function
+      | March_driver.Cap_static.Bare _ -> true
+      | March_driver.Cap_static.Diag d -> d.severity = March_errors.Errors.Error) fs
+
+let print_cap_findings ~src ~filename ~read_file fs =
+  List.iter (function
+      | March_driver.Cap_static.Bare text -> Printf.eprintf "%s" text
+      | March_driver.Cap_static.Diag d ->
+        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
+    fs
+
+(* The interpreter's cached verdict: a program whose TIR-side capability
+   checks came back clean is not lowered again until something it is built
+   from changes.  Keyed like the --check source key's full walk: the entry's
+   bytes and path, the stdlib, every .march file in the entry's directory and
+   on MARCH_LIB_PATH (so a dependency's edit is a miss), the flags that change
+   the verdict, and (through [compilation_hash]) the compiler and runtime. *)
+let interp_cap_cache_key ~src ~filename ~is_js ~test_mode : string option =
+  try
+    let stdlib_hash = match stdlib_source_hash ~for_js:is_js () with
+      | Some (_, h, _) -> h
+      | None -> "" in
+    let buf = Buffer.create (64 * 1024) in
+    Buffer.add_string buf src;
+    Buffer.add_string buf stdlib_hash;
+    Buffer.add_string buf ("\x00entry:" ^ filename ^ "\x00");
+    let lib_path = try Sys.getenv "MARCH_LIB_PATH" with Not_found -> "" in
+    let lib_dirs = List.filter (fun d -> d <> "") (String.split_on_char ':' lib_path) in
+    let entry_real = (try Unix.realpath filename with Unix.Unix_error _ -> filename) in
+    List.iter (fun dir ->
+        List.iter (fun fp ->
+            let fp_real = (try Unix.realpath fp with Unix.Unix_error _ -> fp) in
+            if fp_real <> entry_real then begin
+              Buffer.add_string buf ("\x00" ^ fp ^ "\x00");
+              (try Buffer.add_string buf (read_file fp) with Sys_error _ -> ())
+            end)
+          (List.sort String.compare (collect_lib_files dir)))
+      (Filename.dirname filename :: lib_dirs);
+    let flags =
+      (if !stdlib_source then ["stdlib-source"] else [])
+      @ (if !cap_strict then ["capstrict"] else [])
+      @ (if test_mode then ["test"] else [])
+      @ (if is_js then ["js"] else []) in
+    Some (March_cas.Cas.compilation_hash
+            ("src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)))
+            ~target:"capcheck" ~flags)
+  with Sys_error _ | Unix.Unix_error _ | Failure _ -> None
+
+(* The interpreter, --jit and `march test`: run the TIR-side checks before
+   the program runs; print what they find; exit 1 on a violation.  A clean
+   verdict is cached (above).  A [cap_unchecked] warning is printed every run
+   and never cached. *)
+let run_interp_cap_checks ~(input : March_driver.Cap_static.input) ~test_mode ~is_js =
+  let src = input.March_driver.Cap_static.src
+  and filename = input.March_driver.Cap_static.filename
+  and read_file = input.March_driver.Cap_static.read_file in
+  let key = interp_cap_cache_key ~src ~filename ~is_js ~test_mode in
+  let store = lazy (March_cas.Cas.create ~project_root:(Sys.getcwd ()) ()) in
+  let hit =
+    match key with
+    | Some ch ->
+      (try March_cas.Cas.lookup_artifact (Lazy.force store) ch <> None
+       with Sys_error _ | Unix.Unix_error _ -> false)
+    | None -> false in
+  if not hit then begin
+    let fs =
+      cap_findings_of input
+        (March_driver.Cap_static.check_program ~test_mode ~opt:!opt_enabled ~is_js input) in
+    print_cap_findings ~src ~filename ~read_file fs;
+    if cap_findings_rejected fs then exit 1;
+    match key with
+    | Some ch when fs = [] ->
+      (try March_cas.Cas.store_artifact (Lazy.force store) ch filename
+       with Sys_error _ | Unix.Unix_error _ -> ())
+    | _ -> ()
+  end
+
 (** Cross-file import resolution — single shared implementation in
     lib/resolver (also used by the REPL and the LSP), so editor
     diagnostics, REPL loads, and forge builds resolve modules identically. *)
@@ -2973,7 +3074,13 @@ let run_test_cmd args =
        syntactic ban must leave the contracted names to it.  Set BEFORE
        [check_module] — the flag is read during that call. *)
     March_typecheck.Typecheck.proof_based_panic_surface := true;
-    let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
+    (* The capability checks run here as in every other mode (ocap phase 3):
+       the typecheck-side ceiling now, the TIR-side ones once the front end
+       is clean (below). *)
+    March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+    March_typecheck.Typecheck.cap_strict_ceiling := !cap_strict;
+    let (errors, type_map, test_tc_env) =
+      March_typecheck.Typecheck.check_module_full desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     (* NOTE: --refine-audit cannot actually reach this pipeline from the CLI
        today. `march test` is dispatched to [run_test_cmd], whose own
@@ -3071,6 +3178,10 @@ let run_test_cmd args =
       ) diags;
       exit 1
     end;
+    run_interp_cap_checks ~test_mode:true ~is_js:false
+      ~input:{ March_driver.Cap_static.desugared; stdlib_decls;
+               tc_env = test_tc_env; type_map; src; filename; read_file;
+               cap_strict = !cap_strict };
     (* `cap no_alloc` / @[no_alloc] are judged on lowered TIR, which
        `march test` never builds: say so (once) rather than stay silent.  This
        path prints only errors above, so the hint is printed on its own. *)
@@ -4216,15 +4327,16 @@ let compile filename =
   if !stdlib_source then
     March_typecheck.Typecheck.stdlib_source_files :=
       filename :: !March_typecheck.Typecheck.stdlib_source_files;
-  (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
-     (`--check`/`--check-json`/`--emit-core-ast`), where the `--compile`
-     path's TIR-side [Cap_ceiling] never runs. On a full `--compile` this
-     stays off so the two ceilings do not double-report; the TIR one is the
-     authoritative complete check there. --emit-core-ast must match --check
-     here or its "verdict" says accept on a program --check rejects. Respects
-     `--no-cap-strict` for parity. *)
+  (* The typecheck-side capability ceiling runs in every mode except a full
+     compile: --check, --check-json, --emit-core-ast, the interpreter and
+     --jit.  It is a cheap subset of the TIR-side ceiling, so its errors stop
+     a program before anything is lowered; the TIR-side check
+     ([Cap_static.check_program]) then runs only on a front-end-clean
+     program, so nothing is reported twice.  On a full `--compile` it stays
+     off: the compile path's own TIR ceiling is the check there, and the two
+     would double-report.  Respects `--no-cap-strict`. *)
   March_typecheck.Typecheck.cap_strict_ceiling :=
-    !cap_strict && (!do_check || !check_json || !emit_core_ast_file <> None);
+    !cap_strict && not (!dump_tir || !emit_llvm || !do_compile || !dump_phases);
   March_typecheck.Typecheck.dump_role_authority := !dump_role_authority;
   (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
      syntactic ban must leave the contracted names to it.  Set BEFORE
@@ -4438,11 +4550,42 @@ let compile filename =
   let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
       d.severity = March_errors.Errors.Error && is_user_file d
     ) diags in
+  (* Input to the TIR-side capability checks (lib/driver/cap_static.ml),
+     shared by every mode. *)
+  let cap_static_input = {
+    March_driver.Cap_static.desugared; stdlib_decls; tc_env = typecheck_env;
+    type_map; src; filename; read_file; cap_strict = !cap_strict } in
+  let print_cap_findings = print_cap_findings ~src ~filename ~read_file in
+  (* The TIR-side capability checks for the modes that do not lower the
+     program themselves (--check, --check-json, --emit-core-ast, the
+     interpreter, --jit): lowered on demand by [Cap_static.check_program].
+     Forced only on a front-end-clean program.  A program the compiler cannot
+     lower is not rejected for it: one [cap_unchecked] warning says why. *)
+  let cap_findings = lazy (
+    cap_findings_of cap_static_input
+      (March_driver.Cap_static.check_program ~test_mode:!do_test ~opt:!opt_enabled
+         ~is_js:is_js_target cap_static_input)) in
+  let cap_diags () =
+    List.filter_map (function
+        | March_driver.Cap_static.Diag d -> Some d
+        | March_driver.Cap_static.Bare _ -> None) (Lazy.force cap_findings) in
+  let cap_rejected () = cap_findings_rejected (Lazy.force cap_findings) in
   if !check_json then begin
+    (* The TIR-side capability checks too, on a front-end-clean program, so
+       `forge fix` and the editor see what --check rejects.  A finding with
+       no span has no JSON form: it goes to stderr as --check prints it. *)
+    let cap =
+      if has_user_errors || has_resolve_errors || has_desugar_errors then []
+      else begin
+        List.iter (function
+            | March_driver.Cap_static.Bare text -> prerr_string text
+            | March_driver.Cap_static.Diag _ -> ()) (Lazy.force cap_findings);
+        cap_diags ()
+      end in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
-    ) (Fix_verify.verify ~src ~verifiable:is_user_file diags);
+    ) (Fix_verify.verify ~src ~verifiable:is_user_file (diags @ cap));
     exit 0
   end;
   let frontend_rejected =
@@ -4458,17 +4601,6 @@ let compile filename =
      lowering failure downgrades to a [no_alloc_unchecked] warning per
      obligation.  Forced only on a front-end-clean program, as --check only
      reaches it then. *)
-  (* Input to the TIR-side capability checks (lib/driver/cap_static.ml),
-     shared by every mode. *)
-  let cap_static_input = {
-    March_driver.Cap_static.desugared; stdlib_decls; tc_env = typecheck_env;
-    type_map; src; filename; read_file; cap_strict = !cap_strict } in
-  let print_cap_findings findings =
-    List.iter (function
-        | March_driver.Cap_static.Bare text -> Printf.eprintf "%s" text
-        | March_driver.Cap_static.Diag d ->
-          Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
-      findings in
   let contract_diags = lazy (
     List.filter is_user_file
       (March_tir.Contract_pipeline.check_contracts ~type_map
@@ -4496,9 +4628,11 @@ let compile filename =
   in
   if !emit_core_ast_file <> None then begin
     let contract = if frontend_rejected then [] else Lazy.force contract_diags in
+    let cap = if frontend_rejected then [] else cap_diags () in
     Emit_core_ast.run ~topology:topology_json ~filename ~user_files ~user_ast ~type_map
-      ~diags:(diags @ contract) ~is_user_file ~typecheck_env
-      ~rejected:(frontend_rejected || contract_rejected ())
+      ~diags:(diags @ contract @ cap) ~is_user_file ~typecheck_env
+      ~rejected:(frontend_rejected || contract_rejected ()
+                 || ((not frontend_rejected) && cap_rejected ()))
   end;
   (* Under --shell, only errors: they stop the session.  The program's
      warnings and refinement hints are the build's business, and a real
@@ -4593,6 +4727,11 @@ let compile filename =
   in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
+  (* The interpreter and --jit: the TIR-side capability checks run before
+     the program does (ocap phase 3). *)
+  if interpreting && not frontend_rejected && not !check_migration then
+    run_interp_cap_checks ~input:cap_static_input ~test_mode:!do_test
+      ~is_js:is_js_target;
   if not frontend_rejected then emit_protocols ();
   if frontend_rejected then exit 1
   (* --check: stop after typecheck.  Diagnostics above already printed; we just
@@ -4606,6 +4745,9 @@ let compile filename =
         Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
       ) contract_diags;
     if contract_rejected () then exit 1;
+    (* The capability ceiling and host scopes, on lowered TIR. *)
+    print_cap_findings (Lazy.force cap_findings);
+    if cap_rejected () then exit 1;
     (* Cache successful check result so the next identical-source invocation
        exits immediately without re-running the typecheck pipeline (the early
        CAS hit at the top of this function does `exit 0` printing nothing).
@@ -4623,6 +4765,7 @@ let compile filename =
        diagnostics are emitted — only whether the cache may suppress them. *)
     let printed_user_diag =
       List.exists is_user_file diags || contract_diags <> []
+      || Lazy.force cap_findings <> []
     in
     (match source_cas_state with
      | Some (src_store, src_ch) when not printed_user_diag ->

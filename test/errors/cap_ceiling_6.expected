@@ -1,0 +1,20 @@
+exit: 1
+-- CAPABILITY ---------------- errors/cap_ceiling_6.march
+
+Module `Inner` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
+help: add `needs IO.FileRead` to the module body.
+
+4 |     needs IO.Console
+        ^^^^^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+4 |     needs IO.Console
+5 +     needs IO.FileRead
+
+    run `march --explain cap_ceiling`
+
+
+
+after fix: exit 0

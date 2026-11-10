@@ -476,9 +476,18 @@ let module_caps (i : input) ~(pre_opt : March_tir.Tir.tir_module) =
    i.tc_env.March_typecheck.Typecheck.mod_needs)
   :: i.tc_env.March_typecheck.Typecheck.module_caps
 
+(* A stdlib file checked as the entry (`march --check stdlib/map.march`, the
+   types oracle, the stdlib self-checks): every module in it is the stdlib's,
+   which the ceiling sees through rather than judges (ocap design §4: stdlib
+   modules need no `needs` lines; their operations are charged to callers).
+   The entry module is never transparent to attribution, so without this
+   the ceiling charged stdlib modules for their own wrappers. *)
+let entry_is_stdlib (i : input) =
+  March_typecheck.Typecheck_builtins.file_is_stdlib i.filename
+
 let ceiling_findings (i : input) ~(pre_opt : March_tir.Tir.tir_module)
     ~(attribution : (string * string) list) : report =
-  if not i.cap_strict then empty
+  if not i.cap_strict || entry_is_stdlib i then empty
   else begin
     let flat_caps = List.sort_uniq compare (List.map fst attribution) in
     let (module_spans, module_is_header) = cap_ceiling_module_spans
@@ -546,6 +555,12 @@ let one_line why =
    [before_opt] hook), so attribution sees the same TIR.  A lowering failure
    is [Unchecked], never a rejection: the caller warns and runs the program. *)
 let check_program ?(test_mode = false) ~opt ~is_js (i : input) : outcome =
+  let scoped =
+    List.exists (fun (_, ds) -> ds <> [])
+      (March_typecheck.Typecheck.declared_net_scopes i.tc_env
+         ~entry_module:i.desugared.March_ast.Ast.mod_name.March_ast.Ast.txt)
+  in
+  if not ((i.cap_strict && not (entry_is_stdlib i)) || scoped) then Checked [] else
   match
     (try
        let tir =
@@ -570,6 +585,7 @@ let check_program ?(test_mode = false) ~opt ~is_js (i : input) : outcome =
      | (Out_of_memory | Stack_overflow) as e -> raise e
      | March_errors.Errors.Diagnostic_exn d ->
        Error (one_line d.March_errors.Errors.message)
+     | March_tir.Mono.Repr_disagreement msg -> Error (one_line msg)
      | Failure msg -> Error (one_line msg)
      | e -> Error (one_line (Printexc.to_string e)))
   with
