@@ -468,21 +468,25 @@ mod Seq do
       end
   """
   fn from_file_lines(path) do
-    match file_open(path) do
-    Err(e) -> Err(e)
-    Ok(fd) -> do
-      fn do_lines(a, f) do
-        match file_read_line(fd) do
-        None -> do
-          file_close(fd)
-          a
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_open(path) do
+      Err(e) -> Err(e)
+      Ok(fd) -> do
+        fn do_lines(a, f) do
+          match file_read_line(fd) do
+          None -> do
+            file_close(fd)
+            a
+          end
+          Some(line) -> do_lines(f(a, line), f)
+          end
         end
-        Some(line) -> do_lines(f(a, line), f)
-        end
+        Ok(Seq(fn(acc, f) -> do_lines(acc, f)))
       end
-      Ok(Seq(fn(acc, f) -> do_lines(acc, f)))
+      end
     end
-    end
+    Ok(perform())
   end
 
   doc """
@@ -492,21 +496,25 @@ mod Seq do
   EOF, so consume to completion (`to_list`, `fold`, etc.).
   """
   fn from_file_chunks(path, size) do
-    match file_open(path) do
-    Err(e) -> Err(e)
-    Ok(fd) -> do
-      fn do_chunks(a, f) do
-        match file_read_chunk(fd, size) do
-        None -> do
-          file_close(fd)
-          a
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_open(path) do
+      Err(e) -> Err(e)
+      Ok(fd) -> do
+        fn do_chunks(a, f) do
+          match file_read_chunk(fd, size) do
+          None -> do
+            file_close(fd)
+            a
+          end
+          Some(chunk) -> do_chunks(f(a, chunk), f)
+          end
         end
-        Some(chunk) -> do_chunks(f(a, chunk), f)
-        end
+        Ok(Seq(fn(acc, f) -> do_chunks(acc, f)))
       end
-      Ok(Seq(fn(acc, f) -> do_chunks(acc, f)))
+      end
     end
-    end
+    Ok(perform())
   end
 
   doc """

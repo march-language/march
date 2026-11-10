@@ -7,21 +7,21 @@ mod TestDir do
 
 describe "Dir.exists" do
   test "returns false for nonexistent path" do
-    assert (not (Dir.exists("/tmp/march_td_noexist_00")))
+    assert (not (Authority.must(Dir.exists("/tmp/march_td_noexist_00"))))
   end
 
   test "returns true after mkdir" do
     let path = "/tmp/march_td_exists_01"
     let _ = Dir.rm_rf(path)
     let _ = Dir.mkdir(path)
-    assert (Dir.exists(path))
+    assert (Authority.must(Dir.exists(path)))
     let _ = Dir.rm_rf(path)
   end
 
   test "returns false for a file path" do
     let path = "/tmp/march_td_file_02"
     let _ = File.write(path, "data")
-    assert (not (Dir.exists(path)))
+    assert (not (Authority.must(Dir.exists(path))))
     let _ = File.delete(path)
   end
 end
@@ -34,7 +34,7 @@ describe "Dir.mkdir" do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (Dir.exists(path))
+    assert (Authority.must(Dir.exists(path)))
     let _ = Dir.rm_rf(path)
   end
 
@@ -111,7 +111,7 @@ describe "Dir.mkdir_p" do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (Dir.exists(nested))
+    assert (Authority.must(Dir.exists(nested)))
     let _ = Dir.rm_rf(base)
   end
 end
@@ -125,7 +125,7 @@ describe "Dir.rmdir" do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (not (Dir.exists(path)))
+    assert (not (Authority.must(Dir.exists(path))))
   end
 
   test "fails on non-empty directory" do
@@ -153,7 +153,7 @@ describe "Dir.rm_rf" do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (not (Dir.exists(path)))
+    assert (not (Authority.must(Dir.exists(path))))
   end
 
   test "rm_rf on nonexistent does not panic" do

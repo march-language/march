@@ -149,8 +149,8 @@ mod ClusterNode do
   pfn env_file(name : String) : String do
     let v = env_or(name, "")
     if String.is_empty(v) do ""
-    else if File.exists(v) do
-      match File.read(v) do
+    else if Authority.must(File.exists(v)) do
+      match Authority.must(File.read(v)) do
         Ok(text) -> String.trim(text)
         Err(_) -> v
       end
@@ -161,13 +161,13 @@ mod ClusterNode do
   -- certificate was given as a file; MARCH_NODE_CERT_POLL_MS, default 10 s.
   pfn cert_files_from_env() : Option(CertFiles) do
     let cp = env_or("MARCH_NODE_CERT", "")
-    if File.exists(cp) do
+    if Authority.must(File.exists(cp)) do
       let kp = env_or("MARCH_NODE_KEY", "")
       let poll = match String.to_int(env_or("MARCH_NODE_CERT_POLL_MS", "")) do
         Ok(n) -> if n > 0 do n else 10000 end
         Err(_) -> 10000
       end
-      Some({ cert: cp, key: if File.exists(kp) do kp else "" end, poll_ms: poll })
+      Some({ cert: cp, key: if Authority.must(File.exists(kp)) do kp else "" end, poll_ms: poll })
     else None end
   end
 
@@ -2647,7 +2647,7 @@ mod ClusterNode do
   -- as CertRefused and tried again when either file changes.
 
   pfn read_trimmed(path : String) : String do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Ok(t) -> String.trim(t)
       Err(_) -> ""
     end

@@ -395,7 +395,7 @@ mod Topology do
     -- before `main` ran.  Only that copy: the unsigned file is what the
     -- build was started with, and is read on SIGHUP as before.
     let _ = match process_env("MARCH_TOPOLOGY_VERIFIED_FILE") do
-      Some(p) -> if File.exists(p) do apply_file(st, p, "start") else false end
+      Some(p) -> if Authority.must(File.exists(p)) do apply_file(st, p, "start") else false end
       None -> false
     end
     Signal.watch(Signal.Hup, fn -> reload(node))
@@ -913,7 +913,7 @@ mod Topology do
   -- With MARCH_HCR_REQUIRE_RELEASE=1 the unsigned file is never read.
   pfn topology_source() : Result(String, String) do
     let verified = match process_env("MARCH_TOPOLOGY_VERIFIED_FILE") do
-      Some(p) -> if File.exists(p) do Some(p) else None end
+      Some(p) -> if Authority.must(File.exists(p)) do Some(p) else None end
       None -> None
     end
     match verified do
@@ -934,7 +934,7 @@ mod Topology do
   -- the roles this build contains.  True when applied; a file that cannot be
   -- read or parsed changes nothing and is reported under [why].
   pfn apply_file(st : TopoState, path : String, why : String) : Bool do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Err(_) ->
         report(why ++ ": could not read " ++ path ++ "; placement unchanged")
         false
@@ -1045,9 +1045,9 @@ mod Topology do
         let text = status_text(node)
         if Vault.get(st.strs, "status") == Some(text) do () else
           let tmp = path ++ ".tmp"
-          match File.write(tmp, text) do
+          match Authority.must(File.write(tmp, text)) do
             Ok(_) ->
-              let _ = File.rename(tmp, path)
+              let _ = Authority.must(File.rename(tmp, path))
               Vault.set(st.strs, "status", text)
             Err(_) -> ()
           end

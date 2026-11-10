@@ -28,20 +28,20 @@ end
 
 describe "File.exists" do
   test "returns false for nonexistent path" do
-    assert (not (File.exists("/tmp/march_tf_noexist_00")))
+    assert (not (Authority.must(File.exists("/tmp/march_tf_noexist_00"))))
   end
 
   test "returns true after write" do
     let path = "/tmp/march_tf_exists_01"
     write_ok(path, "hello")
-    assert (File.exists(path))
+    assert (Authority.must(File.exists(path)))
     let _ = File.delete(path)
   end
 
   test "returns false for file path when checking dir" do
     let path = "/tmp/march_tf_exists_02"
     write_ok(path, "data")
-    assert (not (Dir.exists(path)))
+    assert (not (Authority.must(Dir.exists(path))))
     let _ = File.delete(path)
   end
 end
@@ -129,7 +129,7 @@ describe "File.copy" do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (File.exists(dest))
+    assert (Authority.must(File.exists(dest)))
     assert (read_ok(dest) == "hello world")
     let _ = File.delete(src)
     let _ = File.delete(dest)
@@ -145,8 +145,8 @@ describe "File.rename" do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (File.exists(dest))
-    assert (not (File.exists(src)))
+    assert (Authority.must(File.exists(dest)))
+    assert (not (Authority.must(File.exists(src))))
     let _ = File.delete(dest)
   end
 end
@@ -181,7 +181,7 @@ describe "File.delete" do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (not (File.exists(path)))
+    assert (not (Authority.must(File.exists(path))))
   end
 
   test "returns Err for nonexistent" do

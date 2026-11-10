@@ -2779,7 +2779,21 @@ let cap_scrutinee env (scrut : Ast.expr) (scrut_ty : ty) (branches : Ast.branch 
         [ (if short = "Ok" || short = "Err" then `Result else `Value) ]
       | _ -> [ `Value ] in
     let hs = List.concat_map (fun (b : Ast.branch) -> heads b.Ast.branch_pat) branches in
-    if hs <> [] && not (List.mem `Result hs) then begin
+    (* Written for an operation's own Result, now nested inside the capability
+       one (`match File.read(p) do ... Err(NotFound(_)) -> ... end`): some
+       `Err(...)` arm names a constructor other than [CapError]. *)
+    let nested_inner =
+      (match repr p with TCon ("Result", [ _; _ ]) -> true | _ -> false)
+      && List.exists (fun (b : Ast.branch) ->
+          let rec err_ctor (pat : Ast.pattern) = match pat with
+            | Ast.PatAs (q, _, _) -> err_ctor q
+            | Ast.PatOr (qs, _) -> List.exists err_ctor qs
+            | Ast.PatCon (n, [ Ast.PatCon (inner, _) ])
+              when (n.Ast.txt = "Err" || n.Ast.txt = "Result.Err")
+                   && inner.Ast.txt <> "CapError" -> true
+            | _ -> false in
+          err_ctor b.Ast.branch_pat) branches in
+    if (hs <> [] && not (List.mem `Result hs)) || nested_inner then begin
       report_cap_result_unhandled env ~span:(span_of_expr scrut)
         ~provided:(provided_of_expr scrut scrut_ty) ~payload:p scrut_ty p;
       p

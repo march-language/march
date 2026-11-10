@@ -1,0 +1,7 @@
+IO.FileRead("/etc/hosts") refused by the launch grant (IO.FileRead, IO.FileWrite)
+IO.FileRead("/etc/hosts") refused by the launch grant (IO.FileRead, IO.FileWrite)
+IO.FileWrite("/tmp/march_conf_x") refused by the launch grant (IO.FileRead, IO.FileWrite)
+IO.FileRead("/etc/hosts") refused by the launch grant (IO.FileRead, IO.FileWrite)
+IO.FileRead("/tmp") refused by the launch grant (IO.FileRead, IO.FileWrite)
+IO.FileWrite("/tmp/march_conf_dir") refused by the launch grant (IO.FileRead, IO.FileWrite)
+exit 0

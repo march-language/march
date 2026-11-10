@@ -1,5 +1,10 @@
 -- File module: filesystem I/O.
--- All I/O functions except `exists` return Result(value, FileError).
+-- Every function here is a capability operation (IO.FileRead / IO.FileWrite
+-- on the path) and returns `Result(T, CapError)`: `Err(CapError(...))` when
+-- the current authority refuses it (specs/2026-11-10-object-capability-
+-- design.md §15). For all but `exists`, `T` is `Result(value, FileError)`:
+-- `Ok(Err(NotFound(p)))` is a missing file, `Err(CapError(...))` a refused
+-- read.
 -- Use with_lines / with_chunks for streaming.  The file handle is
 -- closed when the callback returns *and* if the callback panics —
 -- these wrappers delegate to the runtime `try_finally` primitive to
@@ -29,13 +34,18 @@ mod File do
   ## Examples
 
       match File.read("config.toml") do
-        Ok(text) -> parse(text)
-        Err(NotFound(p)) -> defaults()
-        Err(e) -> panic("cannot read config")
+        Ok(Ok(text)) -> parse(text)
+        Ok(Err(NotFound(p))) -> defaults()
+        Ok(Err(e)) -> panic("cannot read config")
+        Err(refused) -> panic(Authority.describe(refused))
       end
   """
   fn read(path) do
-    file_read(path)
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      file_read(path)
+    end
+    Ok(perform())
   end
 
   doc """
@@ -50,21 +60,25 @@ mod File do
       File.read_lines("notes.txt")   -- Ok(["a", "b"])
   """
   fn read_lines(path) do
-    match file_read(path) do
-    Err(e) -> Err(e)
-    Ok(s) -> do
-      let lines = String.split(s, "\n")
-      -- Strip all trailing empty strings (from trailing newlines)
-      fn strip_trailing(xs) do
-        match List.reverse(xs) do
-        Nil -> Nil
-        Cons("", rest) -> strip_trailing(List.reverse(rest))
-        ig -> xs
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_read(path) do
+      Err(e) -> Err(e)
+      Ok(s) -> do
+        let lines = String.split(s, "\n")
+        -- Strip all trailing empty strings (from trailing newlines)
+        fn strip_trailing(xs) do
+          match List.reverse(xs) do
+          Nil -> Nil
+          Cons("", rest) -> strip_trailing(List.reverse(rest))
+          ig -> xs
+          end
         end
+        Ok(strip_trailing(lines))
       end
-      Ok(strip_trailing(lines))
+      end
     end
-    end
+    Ok(perform())
   end
 
   doc """
@@ -75,8 +89,12 @@ mod File do
 
       if File.exists("out.log") do File.delete("out.log") else Ok(:ok) end
   """
-  fn exists(path) do
-    file_exists(path)
+  fn exists(path) : Result(Bool, CapError) do
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      file_exists(path)
+    end
+    Ok(perform())
   end
 
   doc """
@@ -92,7 +110,11 @@ mod File do
       end
   """
   fn stat(path) do
-    file_stat(path)
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      file_stat(path)
+    end
+    Ok(perform())
   end
 
   doc """
@@ -100,10 +122,14 @@ mod File do
   (`Ok(mtime)`), or the `FileError` from `stat`.
   """
   fn mtime(path) do
-    match file_stat(path) do
-    Err(e) -> Err(e)
-    Ok(FileStat(_, _, m, _)) -> Ok(m)
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_stat(path) do
+      Err(e) -> Err(e)
+      Ok(FileStat(_, _, m, _)) -> Ok(m)
+      end
     end
+    Ok(perform())
   end
 
   -- Write
@@ -117,7 +143,13 @@ mod File do
 
       File.write("out.txt", "hello\n")
   """
-  fn write(path, data) do file_write(path, data) end
+  fn write(path, data) do
+    let? _ = Authority.check("IO.FileWrite", path)
+    fn perform() do
+      file_write(path, data)
+    end
+    Ok(perform())
+  end
   doc """
   Append `data` to the end of `path`, creating the file if it does not
   exist. Returns `Ok(:ok)` or `Err(FileError)`.
@@ -126,23 +158,49 @@ mod File do
 
       File.append("app.log", "started\n")
   """
-  fn append(path, data) do file_append(path, data) end
+  fn append(path, data) do
+    let? _ = Authority.check("IO.FileWrite", path)
+    fn perform() do
+      file_append(path, data)
+    end
+    Ok(perform())
+  end
   doc """
   Delete the file at `path`. Returns `Ok(:ok)`, or `Err(FileError)` if it
   does not exist or cannot be removed. Use `Dir.rmdir` / `Dir.rm_rf` for
   directories.
   """
-  fn delete(path) do file_delete(path) end
+  fn delete(path) do
+    let? _ = Authority.check("IO.FileWrite", path)
+    fn perform() do
+      file_delete(path)
+    end
+    Ok(perform())
+  end
   doc """
   Copy the contents of `src` to `dest`, creating or overwriting `dest`.
   Returns `Ok(:ok)` or `Err(FileError)` (reported as `IoError(msg)`).
   """
-  fn copy(src, dest) do file_copy(src, dest) end
+  fn copy(src, dest) do
+    let? _ = Authority.check("IO.FileRead", src)
+    let? _ = Authority.check("IO.FileWrite", dest)
+    fn perform() do
+      file_copy(src, dest)
+    end
+    Ok(perform())
+  end
   doc """
   Rename (move) `src` to `dest`, replacing `dest` if it exists. Returns
   `Ok(:ok)` or `Err(IoError("<src>: <reason>"))`.
   """
-  fn rename(src, dest) do file_rename(src, dest) end
+  fn rename(src, dest) do
+    let? _ = Authority.check("IO.FileWrite", src)
+    let? _ = Authority.check("IO.FileWrite", dest)
+    fn perform() do
+      file_rename(src, dest)
+    end
+    Ok(perform())
+  end
 
   -- Streaming: closed when callback returns OR panics (via try_finally).
 
@@ -165,23 +223,27 @@ mod File do
           if String.contains(line, "ERROR") do n + 1 else n end))
   """
   fn with_lines(path, callback) do
-    match file_open(path) do
-    Err(e) -> Err(e)
-    Ok(fd) -> do
-      fn do_lines(a, f) do
-        match file_read_line(fd) do
-        None -> a
-        Some(line) -> do_lines(f(a, line), f)
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_open(path) do
+      Err(e) -> Err(e)
+      Ok(fd) -> do
+        fn do_lines(a, f) do
+          match file_read_line(fd) do
+          None -> a
+          Some(line) -> do_lines(f(a, line), f)
+          end
         end
+        let seq = Seq(fn(acc, f) -> do_lines(acc, f))
+        let result = try_finally(
+          fn _ -> callback(seq),
+          fn _ -> file_close(fd)
+        )
+        Ok(result)
       end
-      let seq = Seq(fn(acc, f) -> do_lines(acc, f))
-      let result = try_finally(
-        fn _ -> callback(seq),
-        fn _ -> file_close(fd)
-      )
-      Ok(result)
+      end
     end
-    end
+    Ok(perform())
   end
 
   doc """
@@ -195,23 +257,27 @@ mod File do
         Seq.fold(chunks, 0, fn (n, c) -> n + string_byte_length(c)))
   """
   fn with_chunks(path, size, callback) do
-    match file_open(path) do
-    Err(e) -> Err(e)
-    Ok(fd) -> do
-      fn do_chunks(a, f) do
-        match file_read_chunk(fd, size) do
-        None -> a
-        Some(chunk) -> do_chunks(f(a, chunk), f)
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_open(path) do
+      Err(e) -> Err(e)
+      Ok(fd) -> do
+        fn do_chunks(a, f) do
+          match file_read_chunk(fd, size) do
+          None -> a
+          Some(chunk) -> do_chunks(f(a, chunk), f)
+          end
         end
+        let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
+        let result = try_finally(
+          fn _ -> callback(seq),
+          fn _ -> file_close(fd)
+        )
+        Ok(result)
       end
-      let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
-      let result = try_finally(
-        fn _ -> callback(seq),
-        fn _ -> file_close(fd)
-      )
-      Ok(result)
+      end
     end
-    end
+    Ok(perform())
   end
 
   -- Low-level callbacks (side-effect iteration)
@@ -237,14 +303,18 @@ mod File do
       File.each_line("names.txt", fn name -> println("hello " ++ name))
   """
   fn each_line(path, f) do
-    match file_open(path) do
-    Err(e) -> Err(e)
-    Ok(fd) -> do
-      each_line_loop(fd, f)
-      file_close(fd)
-      Ok(:ok)
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_open(path) do
+      Err(e) -> Err(e)
+      Ok(fd) -> do
+        each_line_loop(fd, f)
+        file_close(fd)
+        Ok(:ok)
+      end
+      end
     end
-    end
+    Ok(perform())
   end
 
   -- Internal helper: recursively reads chunks. Used by each_chunk.
@@ -264,14 +334,18 @@ mod File do
   opened. The file is NOT closed if `f` panics (use `with_chunks` for that).
   """
   fn each_chunk(path, size, f) do
-    match file_open(path) do
-    Err(e) -> Err(e)
-    Ok(fd) -> do
-      each_chunk_loop(fd, size, f)
-      file_close(fd)
-      Ok(:ok)
+    let? _ = Authority.check("IO.FileRead", path)
+    fn perform() do
+      match file_open(path) do
+      Err(e) -> Err(e)
+      Ok(fd) -> do
+        each_chunk_loop(fd, size, f)
+        file_close(fd)
+        Ok(:ok)
+      end
+      end
     end
-    end
+    Ok(perform())
   end
 
 end
