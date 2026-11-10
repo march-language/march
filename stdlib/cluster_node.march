@@ -2162,7 +2162,7 @@ mod ClusterNode do
 
   pfn dial_one(h : CnHandle, cfg : CnConfig, me : NodeIdentity.Identity, host : String, port : Int, role : String)
       : Result((Int, NetKernel.Authed), (String, Bool)) do
-    match Socket.connect_timeout(host, port, cfg.dial_timeout_ms) do
+    match Authority.must(Socket.connect_timeout(host, port, cfg.dial_timeout_ms)) do
       Err(e) ->
         let msg = Socket.error_message(e)
         Err((msg, refused_msg(msg)))
@@ -2914,7 +2914,7 @@ mod ClusterNode do
     -- under a parked accept does not wake it on every platform.)
     match split_addr(h.advertise) do
       Some((_host, port)) ->
-        match Socket.connect_timeout("127.0.0.1", port, 500) do
+        match Authority.must(Socket.connect_timeout("127.0.0.1", port, 500)) do
           Ok(fd) -> tcp_close(fd)
           Err(_) -> ()
         end

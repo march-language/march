@@ -74,7 +74,7 @@ mod ClusterConn do
   end
 
   pfn dial(host, port, my_id, auth, role, timeout_ms) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Err(e) -> Err(Socket.error_message(e))
       Ok(fd) ->
         match handshake_within(fd, my_id, auth, role, timeout_ms) do
@@ -229,7 +229,7 @@ mod ClusterConn do
   pre-split peers and fixtures; new code uses `connect_split_auth`.
   """
   fn connect_to_peer(reg, host, port, my_id, secret) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Err(e) -> Err(Socket.error_message(e))
       Ok(fd) ->
         finish(reg, fd, NetKernel.handshake(fd, my_id, secret, NetKernel.fresh_nonce()))

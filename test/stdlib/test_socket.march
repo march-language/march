@@ -70,14 +70,14 @@ mod TestSocket do
 
     test "connection refused returns Err" do
       -- Port 1 is almost universally not listening; ECONNREFUSED or similar.
-      match Socket.connect("127.0.0.1", 1) do
+      match Authority.must(Socket.connect("127.0.0.1", 1)) do
       Err(_) -> ()
       Ok(_)  -> panic("expected connection to fail on port 1")
       end
     end
 
     test "invalid port returns Err" do
-      match Socket.connect("127.0.0.1", 99999) do
+      match Authority.must(Socket.connect("127.0.0.1", 99999)) do
       Err(_) -> ()
       Ok(_)  -> panic("expected connection to fail on port 99999")
       end
@@ -90,7 +90,7 @@ mod TestSocket do
   describe "with_connection" do
 
     test "propagates connect error" do
-      let result = Socket.with_connection("127.0.0.1", 1, fn fd -> Ok(fd))
+      let result = Authority.must(Socket.with_connection("127.0.0.1", 1, fn fd -> Ok(fd)))
       match result do
       Err(_) -> ()
       Ok(_)  -> panic("expected error")
