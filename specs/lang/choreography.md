@@ -1447,9 +1447,10 @@ node's (SWIM) and the heartbeat settings do not apply.
 - Messages are encoded as JSON, so every payload type needs a JSON codec. Built-in types
   have one; for your own types, add `derive Json for YourType`.
 - A protocol's name must be unique in the whole program, the standard library included,
-  and so must the name of each payload type that derives `Json`. A derived codec is
-  found by the type's short name, so two `P_Message` types (or two `Note`s) declared in
-  different modules conflict. The conflict is a compile error
+  and so must the name of each payload record type that derives `Json`. A derived record
+  codec is found by the type's short name, so two `P_Message` types (or two record types
+  named `Note`) declared in different modules conflict. Two variant types named `Note` in
+  two of your modules are two types, and both may derive `Json`. The conflict is a compile error
   (`json_derive_name_collision`) that names both types and points at both `derive`
   sites.
 - After a hot deploy, `Topology.reoffer` reopens a role under its new fingerprint only if

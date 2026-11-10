@@ -545,6 +545,8 @@ let () =
     ("json_collision", [
       Alcotest.test_case "derive Json on same-short-name types in two modules"
         `Quick (run_stdlib_test "test_json_collision.march" "TestJsonCollision");
+      Alcotest.test_case "same-short-name variant types are distinct (Show/Eq/Json)"
+        `Quick (run_stdlib_test "test_same_short_name_types.march" "TestSameShortNameTypes");
     ]);
     ("msgpack", [
       Alcotest.test_case "Msgpack module"

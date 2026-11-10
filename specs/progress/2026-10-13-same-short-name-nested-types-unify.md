@@ -52,3 +52,24 @@ errors (a Changed entry).
 differ (the typechecker never unifies those), so a user `type Tree` beside the stdlib's
 `OrderedMap.Tree(k, v)` works in predicates (`specs/progress/2026-11-06-predicate-names.md`).
 Same-arity names still make the checker skip, and wait on this todo.
+
+## 2026-11-09: fixed (stage 1 of the design)
+
+`lib/typecheck/typecheck_nominal.ml` gives every VARIANT type whose short name the checked
+program declares at two or more module paths its own identity (`A.Note`; the bare name at the
+entry module's top level). Each written type is resolved once, by its lexical scope, and the
+answer is recorded against its span, so `surface_ty`, the env-less fn-signature prebind
+(`prebind_fn_scheme`) and impl heads (`register_impl_shape`) all read the same identity, and a
+constructor's argument types mean what its declaration meant from every use site. Constructors
+carry the identity as `ci_type` (all seven registration sites go through
+`Typecheck_nominal.decl_identity`), so exhaustiveness and pattern checks see exactly one
+type's constructors. `canon_type_name` leaves an identity alone. Backends stay bare:
+`Lower_types.convert_ty` maps an identity back to its short name, so TIR, mangling and the CAS
+are unchanged (ir-oracle: 0 changed). A short name declared once has no entry, so programs
+without a collision typecheck exactly as before. Stdlib declarations are not counted.
+
+The repro is now `expected `B.Note` but got `A.Note``, pinned by
+`specs/lang/types/reject/t457_same_short_name_variants_do_not_unify.march`.
+
+Still open, in `specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md`: a user
+type named like a built-in or stdlib type (design stage 3).

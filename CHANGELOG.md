@@ -433,6 +433,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Two variant types with the same short name in different modules are two types.** `A.Note`
+  and `B.Note` used to be one type to the typechecker, so a value of one was accepted where the
+  other was expected and the program then failed at run time. Passing one where the other is
+  expected is now a type error (`expected `B.Note` but got `A.Note``); a program that mixed them
+  needs fixing. Both may now `derive Json`, and each `from_json` decodes with its own type's codec.
+  Two same-short-name record types that both derive Json are still rejected. A user type named
+  like a built-in or stdlib type is still the same type as it (not yet fixed).
 - **`Math`, `Option` and `Result` are `cap verified`.** Every refinement contract and lemma in
   them is proved, and a test now fails if a change leaves one unproved (the same now holds for
   `Udp`, which already declared it). `List` is fully proved in ordinary programs but is not yet
@@ -782,6 +789,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
+  When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
+  interpreter ran whichever impl registered last on both types' values; compiled code was right.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its

@@ -1248,6 +1248,7 @@ let lookup_type name env = StrMap.find_opt name env.types
     written annotation) and [canon_qualified_tcons] (a builtin signature typed
     in OCaml), so the two routes can never disagree about a type's identity. *)
 let canon_type_name env name arity =
+  if Typecheck_nominal.is_identity name then name else
   match String.rindex_opt name '.' with
   | Some i ->
     let bare = String.sub name (i + 1) (String.length name - i - 1) in

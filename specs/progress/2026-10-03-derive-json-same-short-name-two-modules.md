@@ -385,3 +385,26 @@ because this pass is design-only. None of it is in the tree.
    a stdlib type then gets its own identity, and so does a user
    `@[endpoints]` protocol named like a stdlib one. This stage needs the
    archived plan's "the Stage 1 shim must be total" care.
+
+## 2026-11-09: fixed for variant types (design stage 1)
+
+With nominal identity for colliding variant types
+(`lib/typecheck/typecheck_nominal.ml`, see
+`specs/progress/2026-10-13-same-short-name-nested-types-unify.md`), `from_json`'s dispatch
+records `A.Note` / `B.Note`. Both backends already resolved the qualified name (the compiled
+`JsonFrom$A.Note.from_json` symbol; the interpreter's qualified `impl_tbl` slot), so the repro
+prints `A 3` / `B 3` interpreted and compiled. `check_json_derive_collisions` now reports only a
+pair in which one side has no identity: two same-short-name RECORD types (stage 2, still
+rejected). `t318` is now that record case (its golden twin `test/errors/json_derive_name_collision_1`
+too); the variant repro is `specs/lang/golden/g48_same_short_name_types.march` and
+`test/stdlib/test_same_short_name_types.march`.
+
+The interpreter's type-dispatched builtins (`show`, `==`/`eq`, `compare`, `hash`) also read a
+colliding type's qualified `impl_tbl` slot first now (`Eval_runtime.find_impl_for`): before, a
+derived Show/Eq on two same-short-name types shared one last-writer-wins slot, so a value of one
+ran the other's impl. A constructor name two types declare is not trusted for that lookup
+(`ambiguous_ctor_tags`), and a nested type's impl no longer takes over the bare slot of an
+entry-level type of the same name (`bare_slot_exact`).
+
+Still open: stage 2 (records) and stage 3 (stdlib / registry types; a user protocol named like a
+stdlib protocol).

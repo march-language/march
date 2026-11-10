@@ -6703,6 +6703,8 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
          let v = fresh_var 1 in
          tvars := M.add n.txt v !tvars;
          v)
+    | Ast.TyCon (n, args) when Typecheck_nominal.ref_identity n <> None ->
+      TCon (Option.get (Typecheck_nominal.ref_identity n), List.map lenient_ty args)
     | Ast.TyCon (n, args)  ->
       let args' = List.map lenient_ty args in
       (* Expand a record type name to its structural form, exactly as
@@ -7921,6 +7923,10 @@ let rec check_decl env (d : Ast.decl) : env =
       env
     end else
     let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
+    let env1 =
+      let id = Typecheck_nominal.decl_identity name in
+      if id = name.txt then env1
+      else { env1 with types = StrMap.add id (List.length params) env1.types } in
     (match typedef with
      | Ast.TDVariant variants ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -7941,7 +7947,7 @@ let rec check_decl env (d : Ast.decl) : env =
            | None -> (v.var_name.txt, v.var_name.span) :: seen
          ) [] variants in
        List.fold_left (fun e (v : Ast.variant) ->
-           let ci = { ci_type    = name.txt
+           let ci = { ci_type    = Typecheck_nominal.decl_identity name
                     ; ci_params  = param_names
                     ; ci_arg_tys = v.var_args
                     ; ci_module  = env.current_module
@@ -9518,11 +9524,17 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
          `Config`).  Returning None falls back to the [fresh_var] placeholder,
          which unifies with anything and imposes no false constraint; the
          callee's own [check_fn] still derives and enforces its real type. *)
+      (match Typecheck_nominal.ref_identity name with
+       | Some id ->
+         (match opt_all (List.map conv args) with
+          | Some args' -> Some (TCon (id, args'))
+          | None -> None)
+       | None ->
       if String.contains name.txt '.' then None
       else
         (match opt_all (List.map conv args) with
          | Some args' -> Some (TCon (name.txt, args'))
-         | None -> None)
+         | None -> None))
     | Ast.TyVar v ->
       (match List.assoc_opt v.txt !tvars with
        | Some t -> Some t
@@ -11817,7 +11829,14 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
   in
   let seen = ref seed in
   List.iter (fun ((q, sp) as site) ->
-      (match List.find_opt (fun (q', _) -> q' <> q && short q' = short q) !seen with
+      (* Two colliding VARIANT types have their own identities
+         ([Typecheck_nominal]), so [from_json]'s dispatch names the right
+         codec: only a pair involving a type without one (a record) is
+         still ambiguous. *)
+      let distinct q q' =
+        Typecheck_nominal.is_identity q && Typecheck_nominal.is_identity q' in
+      (match List.find_opt (fun (q', _) ->
+           q' <> q && short q' = short q && not (distinct q q')) !seen with
        | Some (q', sp') ->
          (* A type inside a generated `<Name>_Msg` module (the message type an
             `@[endpoints] protocol` or actor declares) is named by what
@@ -11872,6 +11891,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
+  (* Colliding variant types' identities (`A.Note` / `B.Note`). *)
+  Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib m;
   (* Type-variable letters in messages are assigned on first print from a
      process-wide table.  A cold run typechecks the stdlib first and can
      print one of its variables, so the user's first variable came out `b`
@@ -11962,7 +11983,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                     signature uses ("expected X but got Mod.X").  The type side
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
-                 let ci = { ci_type = name.txt; ci_params = param_names;
+                 let ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                             ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
@@ -11990,7 +12011,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                  if v.var_vis <> Ast.Public then acc
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
-                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                   let type_ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                                    ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
@@ -12086,7 +12107,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
+               let ci = { ci_type    = Typecheck_nominal.decl_identity name
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt
@@ -12391,7 +12412,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                     signature uses ("expected X but got Mod.X").  The type side
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
-                 let ci = { ci_type = name.txt; ci_params = param_names;
+                 let ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                             ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
@@ -12419,7 +12440,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                  if v.var_vis <> Ast.Public then acc
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
-                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                   let type_ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                                    ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
@@ -12500,7 +12521,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
+               let ci = { ci_type    = Typecheck_nominal.decl_identity name
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt

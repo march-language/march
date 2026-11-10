@@ -1113,6 +1113,17 @@ let lexical_qualified_type env (name : string) : string option =
     annotation get the same variable). *)
 let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   match s with
+  | Ast.TyCon (name, args) when Typecheck_nominal.ref_identity name <> None ->
+    (* A colliding variant type's own identity (`A.Note`), resolved up front
+       by its lexical scope ([Typecheck_nominal]). *)
+    let id = Option.get (Typecheck_nominal.ref_identity name) in
+    let arity = Option.value ~default:0 (Typecheck_nominal.arity_of id) in
+    let args' = List.map (surface_ty env ~tvars) args in
+    if List.length args' <> arity then
+      Err.error ~code:Err.Code.type_arity env.errors ~span:name.Ast.span
+        (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
+           name.Ast.txt arity (List.length args'));
+    TCon (id, args')
   | Ast.TyCon (name, args) when lexical_qualified_type env name.Ast.txt <> None ->
     let q = Option.get (lexical_qualified_type env name.Ast.txt) in
     surface_ty env ~tvars (Ast.TyCon ({ name with Ast.txt = q }, args))
