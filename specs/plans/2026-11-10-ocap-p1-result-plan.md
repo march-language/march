@@ -30,6 +30,8 @@ results").
 
 - Refusal is an error value: never a crash, never a silent no-op (§15, owner 2026-11-09).
 - `CapError` names the refused scope and the limit that refused it (§15). Its variants are ours (§20).
+- Strict shape (owner, 2026-11-10): a checked operation returns exactly `Result(T, CapError)`; an
+  operation that already returned `Result(U, E)` returns `Result(Result(U, E), CapError)`.
 - Every runtime the same: compiled (C), interpreter, JIT, JS produce identical results (§15).
 - No threading capabilities through parameters; no parameterised modules (owner). Nothing in this
   phase adds a parameter to any function.
@@ -92,12 +94,14 @@ functions; the cluster's authority is checked at `ClusterNode.start`, phase 7).
 today; phase 4 gives actors their authority), `extern` calls (authority is checked when the library
 is opened, phase 2's `Foreign.open`), `actor_whereis`/`actor_register` (phase 2's `IO.Registry`).
 
-**Already returning `Result` with another error type** (gain a `CapRefused(CapError)` variant):
-`FileError` (`stdlib/file.march:13`, a `ptype`), `CsvError`, `SocketError`, `UdpError`, `TlsError`,
-`DnsError`, `TransportError` (two copies: `http_transport.march:21`, `http_client.march:18`),
-`HttpError`. `HttpError`'s `OutOfScope(String)`, `MethodRefused(String)` and `PathRefused(String)`
-(host-scope guard, shipped 2026-11-09) are refusals and fold into `CapRefused`. `String`-errored
-public functions (`Process.run/run_stream/spawn_async`, `System.cmd`) get a new `ProcessError`.
+**Already returning `Result` with another error type** (`FileError`, `CsvError`, `SocketError`,
+`UdpError`, `TlsError`, `DnsError`, `TransportError` (two copies: `http_transport.march:21`,
+`http_client.march:18`), `HttpError`, and `String` for `Process.run/run_stream/spawn_async` and
+`System.cmd`): under the owner's strict rule (Decision 2) the old type becomes the inner `T`, so
+`File.read : Result(Result(String, FileError), CapError)`. No error type changes, except that
+`HttpError` loses `OutOfScope(String)`, `MethodRefused(String)` and `PathRefused(String)` (host-scope
+guard, shipped 2026-11-09): those are refusals and move to the outer `CapError` (21 references in
+the repository).
 
 **Blast radius, measured.** A throwaway stdlib where `Prelude.println` returns `Result` (scratch
 only) makes 366 of the 790 `.march` files under `test/`, `bench/`, `examples/` that mention `println`
@@ -105,25 +109,32 @@ fail to typecheck, with 532 new `type_mismatch` errors: 393 a block's last line 
 declared `: ()`/`: Unit` of `main`), 79 after `->` (match arm or lambda), 50 inline `do`/`else`, 10
 other. A `println` used as a statement compiles unchanged (March has no unused-value warning).
 Embedded March in `test/*.ml` (≈1,200 `println`) was not measured. Clock reads (~170 sites),
-env reads (~200), task spawns (~500) add to this.
+env reads (~200), task spawns (~500) add to this. Nesting the already-`Result` operations adds
+roughly 800 more call sites (grep, includes docs and handle uses): `File.*` 233, `Dir.*` 70,
+`Csv.*` 23, `HttpClient.*` 207, `HttpTransport.*` 37, `Tls.*` 133, `Udp.*` 106, `Process.run`-family
+41, `HttpServer.listen`-family 31, direct `file_*`/`dir_list` 148. Unlike `println`, most of these are
+used as values (`match`, `let?`), so most need a fix.
 
 ## Decisions (mine, inside §20's "left to the builder"; each is a line for the owner to veto)
 
 1. **Where the check sits:** in the stdlib entry point, calling `cap_check_raw`, not inside each C
    builtin. Same choice §15 made for network connections. Keeps builtin ABIs unchanged.
-2. **Existing error types gain `CapRefused(CapError)`** rather than nesting
-   (`Result(Result(T, FileError), CapError)`) or replacing the error type. One level of `Result`,
-   I/O errors keep their detail, and `CapError` is always one match arm away.
+2. **Strict `Result(T, CapError)` (owner, 2026-11-10).** Every checked entry point returns exactly
+   `Result(T, CapError)`. Where it already returned `Result(U, E)`, `T` is that type: the outer
+   `Result` says whether the operation was permitted, the inner one whether it worked.
+   A composite stdlib function that performs a checked operation through others (`HttpClient.get`,
+   `Csv.read_all`, `Tls.https_get`) has the same shape and propagates the outer error with `let?`,
+   so `CapError` is always the outermost error a caller sees. (The owner chose this over adding a
+   `CapRefused(CapError)` variant to each existing error type.)
 3. **`CapError` shape:**
    ```march
    type CapLimit = Launch | FnNeeds(String) | ModNeeds(String) | Restrict(String) | DepGrant(String)
    type CapError = CapError(String, String, CapLimit, String)
    --                      kind    target  limit     the limit's scope text
    ```
-   `CapError`'s constructor is named after its type, not `Refused`/`CapRefused`, because
-   `TransportError` already has `Refused(String)` and every error type below gains a
-   `CapRefused(CapError)` variant (ambiguous short constructor names resolve to the current
-   module, a known trap). Only `Launch` is produced in phase 1 (by the test hook). Phases 4–6 produce the rest; the variant
+   `CapError`'s constructor is named after its type, not `Refused`, because `TransportError`
+   already has `Refused(String)` (ambiguous short constructor names resolve to the current module,
+   a known trap). Only `Launch` is produced in phase 1 (by the test hook). Phases 4–6 produce the rest; the variant
    list is final so they add no breaking change. `Authority.describe(e)` renders it as
    `IO.FileRead("/etc/passwd") refused by the launch grant (IO.Console)`.
 4. **Migration semantics** (what `forge fix` writes):
@@ -134,9 +145,13 @@ env reads (~200), task spawns (~500) add to this.
      with `Authority.describe(err)`. Today's behaviour (the op never fails) is preserved; a refusal
      becomes the panic the narrow-capabilities design specified "until phase 2".
    - a call of a raw builtin made stdlib-only here: rename to its entry point (table in Task 5).
-   - existing `match` on an error type that gained `CapRefused`: no machine fix (the arm's body is the
-     programmer's call); the non-exhaustive diagnostic names `CapRefused` and suggests
-     `CapRefused(e) -> ...` at `maybe-incorrect` tier, so `forge fix` does not apply it unasked.
+   - a nested result used the old way, `match File.read(p) do Ok(s) -> … Err(NotFound(_)) -> … end`
+     or `let? s = File.read(p)` in a function returning `Result(_, FileError)`: the mismatch shows
+     at the inner pattern or at the `let?`, not at the call, so the checker must report it at the
+     scrutinee / right-hand side and the fix is the same `Authority.must(…)` wrap of that
+     expression. The inner `Result` is untouched, so existing matches stay exhaustive.
+   - a pattern naming one of `HttpError`'s removed variants: no machine fix (the arm moves to the
+     outer `Result`, and its body is the programmer's call); the diagnostic says where it went.
 5. **Spawns return `Result(Task(a), CapError)`**, as the superseded design listed. Stdlib helpers that
    spawn as an implementation detail (`List.pmap`, `pmap_n`, `pfilter`, `preduce`, `Parallel.*`) fall
    back to the sequential computation on refusal and keep their types.
@@ -303,14 +318,13 @@ Rename table (builtin → entry point): `print`→`IO.write`, `print_line`/`prin
 - Test: `test/stdlib/test_process_refusal.march`
 
 **Interfaces:**
-- Produces: `type ProcessError = SpawnFailed(String) | CapRefused(CapError)` in `stdlib/process.march`;
-  `Process.env(name) : Result(Option(String), CapError)`; `set_env : Result((), CapError)`; `cwd : Result(String, CapError)`; `argv : Result(List(String), CapError)`; `pid : Result(Int, CapError)`; `exit(code) : Result((), CapError)` (returns only on refusal);
-  `Process.run/run_stream/spawn_async : Result(_, ProcessError)`; `System.*` mirror these; `System.cmd : Result(ProcessResult, ProcessError)`;
+- Produces: `Process.env(name) : Result(Option(String), CapError)`; `set_env : Result((), CapError)`; `cwd : Result(String, CapError)`; `argv : Result(List(String), CapError)`; `pid : Result(Int, CapError)`; `exit(code) : Result((), CapError)` (returns only on refusal);
+  `Process.run : Result(Result(ProcessResult, String), CapError)`, `run_stream` and `spawn_async` likewise (inner type unchanged); `System.*` mirror these, `System.cmd : Result(Result(ProcessResult, String), CapError)`;
   `Env.get(name, default) : Result(String, CapError)`, `Env.require : Result(String, CapError)` (still panics on unset), `Env.get_int/get_bool/is_set` likewise `Result`; `Config.*` reads propagate.
 
-- [ ] **Step 1: Failing tests:** unset variable → `Ok(None)`; refused → `Err(CapError("IO.Process", "HOME", Launch, _))`; the two are different values (narrow-capabilities §4); `Env.get("UNSET", "d") == Ok("d")`; refused `Env.get` is `Err`, not `Ok("d")`; `Process.run` refused → `Err(CapRefused(CapError(...)))` with target the program name; a non-existent program → `Err(SpawnFailed(_))`.
+- [ ] **Step 1: Failing tests:** unset variable → `Ok(None)`; refused → `Err(CapError("IO.Process", "HOME", Launch, _))`; the two are different values (narrow-capabilities §4); `Env.get("UNSET", "d") == Ok("d")`; refused `Env.get` is `Err`, not `Ok("d")`; `Process.run("git", [])` refused → `Err(CapError("IO.Process", "git", Launch, _))`; a non-existent program → `Ok(Err(_))`.
 - [ ] **Step 2:** FAIL → implement → PASS; baseline check; allowlist shrinks.
-- [ ] **Step 3:** Commit. Leave a note in the shared ocap notes folder: phase 2 reshapes `Process.spawn_async`'s handle and should keep `ProcessError`.
+- [ ] **Step 3:** Commit.
 
 ### Task 9: Signals, tasks, vault opens
 
@@ -328,34 +342,34 @@ Rename table (builtin → entry point): `print`→`IO.write`, `print_line`/`prin
 - [ ] **Step 2:** FAIL → implement → PASS; baseline; allowlist shrinks.
 - [ ] **Step 3:** Commit.
 
-### Task 10: Files, directories, CSV, network: the `CapRefused` variants
+### Task 10: Files, directories, CSV, network: the nested `Result`s
 
 **Files:**
-- Modify: `stdlib/file.march:13` (`ptype FileError` gains `CapRefused(CapError)` **last**, so the runtime-built tags `0..4` do not move), `stdlib/dir.march`, `stdlib/csv.march:26`, `stdlib/seq.march`, `stdlib/socket.march`, `stdlib/udp.march`, `stdlib/tls.march`, `stdlib/dns.march`, `stdlib/http_transport.march`, `stdlib/http_client.march` (both `TransportError`s; `HttpError` loses `OutOfScope`, `MethodRefused`, `PathRefused` and gains `CapRefused(CapError)`; the scope guard at `http_client.march:477-510` builds `CapRefused(CapError(..., ModNeeds(<module>), <spec>))`), `stdlib/http.march:984` (`ScopeRefusal` stays internal), `stdlib/http_server.march`
-- Test: `test/stdlib/test_file_refusal.march`, `test/stdlib/test_net_refusal.march`; existing host-scope tests (`test_cap_net_scope.ml`, path-scope suites) updated to the new variant
+- Modify: `stdlib/file.march`, `stdlib/dir.march`, `stdlib/csv.march`, `stdlib/seq.march`, `stdlib/socket.march`, `stdlib/udp.march`, `stdlib/tls.march`, `stdlib/dns.march`, `stdlib/http_transport.march`, `stdlib/http_client.march` (`HttpError` loses `OutOfScope`, `MethodRefused`, `PathRefused`; the scope guard at `http_client.march:477-510` returns the outer `Err(CapError(..., ModNeeds(<module>), <spec>))`), `stdlib/http.march:984` (`ScopeRefusal` stays internal), `stdlib/http_server.march`, and every stdlib caller of these (they now unwrap two levels)
+- Test: `test/stdlib/test_file_refusal.march`, `test/stdlib/test_net_refusal.march`; existing host-scope tests (`test_cap_net_scope.ml`, path-scope suites) updated to the outer `CapError`
 
 **Interfaces:**
-- Produces: each listed error type gains `CapRefused(CapError)`; `File.exists(path) : Result(Bool, CapError)`, `Dir.exists : Result(Bool, CapError)`; `HttpServer.listen(server) : Result((), CapError)`, `HttpServer.spawn_n : Result(Int, CapError)`, `HttpServer.bind_host : Result((), CapError)`; every other public function keeps its `Result(T, E)` type and now returns `Err(CapRefused(...))` on refusal. Target strings: the path (`file_rename`/`file_copy` check both, source first), `host:port` for connects and UDP destinations, `addr:port` for listens.
+- Produces: every public function in these modules that performs a checked operation, directly or through another (Decision 2), changes from `R` to `Result(R, CapError)`: `File.read : Result(Result(String, FileError), CapError)`, `File.exists : Result(Bool, CapError)`, `Dir.exists : Result(Bool, CapError)`, `Socket.connect : Result(Result(Int, SocketError), CapError)`, `HttpClient.get : Result(Result(Response, HttpError), CapError)`, `HttpServer.listen(server) : Result((), CapError)`, `HttpServer.spawn_n : Result(Int, CapError)`, `HttpServer.bind_host : Result((), CapError)`, and so on. Functions that only use an already-open value (`Socket.write`, `Socket.recv`, `Tls.read`, `Udp.recv_batch`, the `File.with_lines` callback's line reads) keep their types. No error type gains a variant. Target strings: the path (`file_rename`/`file_copy` check both, source first), `host:port` for connects and UDP destinations, `addr:port` for listens.
 
-- [ ] **Step 1: Failing tests:** `File.read("x")` under `IO.FileRead` refusal → `Err(CapRefused(CapError("IO.FileRead", "x", Launch, _)))` (outer: the `FileError` variant, inner: the `CapError` value); `File.copy("a","b")` under `IO.FileWrite` refusal names `"b"`; `Socket.connect("example.com", 80)` under `IO.NetConnect` → `Err(CapRefused(_))` without opening a socket (assert with a listener in the test that counts accepts: zero); a host-scoped `HttpClient.get` outside its scope → `Err(CapRefused(CapError("IO.NetConnect", "foo.com/", ModNeeds("M"), "example.com")))`; the existing `test_cap_net_scope` expectations move from `OutOfScope(h)` to that.
+- [ ] **Step 1: Failing tests:** `File.read("missing")` → `Ok(Err(NotFound(_)))`; `File.read("x")` under `IO.FileRead` refusal → `Err(CapError("IO.FileRead", "x", Launch, _))`; `File.copy("a","b")` under `IO.FileWrite` refusal names `"b"`; `Socket.connect("127.0.0.1", port)` under `IO.NetConnect` refusal → `Err(CapError(...))` without opening a socket (a listener in the test counts accepts: zero); a host-scoped `HttpClient.get` outside its scope → `Err(CapError("IO.NetConnect", "foo.com/", ModNeeds("M"), "example.com"))`; the existing `test_cap_net_scope` expectations move from `Err(OutOfScope(h))` to that; an `HttpClient` error step never sees a refusal (it is outside the pipeline's `HttpError`).
 - [ ] **Step 2:** FAIL → implement → PASS (`scripts/run-tests.sh stdlib stdlib_march compiler`); baseline; allowlist shrinks to the reasoned `Internal` rows only.
-- [ ] **Step 3:** Non-exhaustive matches on these types in `stdlib/` gain a `CapRefused(e)` arm that propagates; count corpus matches with Task 0's tooling and list them for Task 14.
+- [ ] **Step 3:** Stdlib internals that matched one level now unwrap two (`let? inner = File.read(p)` in functions already returning `Result(_, CapError)`; elsewhere a match on both levels). Count corpus uses of the removed `HttpError` variants (21 references today) for Task 14.
 - [ ] **Step 4:** Commit. Note for phase 2 in the shared folder: `file_open`, `csv_open`, `tcp_*`, `udp_*`, `tls_*_ctx`, `http_server_*`, `process_spawn_async` are checked in their wrappers but **not** gated; phase 2 gates them when it introduces the handle types, and its new opens must call `Authority.check`.
 
 ### Task 11: `cap_result_unhandled` diagnostic, its fixes, and `forge fix` on plain paths
 
 **Files:**
-- Modify: `lib/errors/code.ml` (new code `cap_result_unhandled`), `lib/errors/explain.ml` (page), `lib/typecheck/typecheck_unify.ml` (`report_mismatch`: when actual is `Result(t, CapError)` and `t` unifies with expected, emit this code instead of `type_mismatch`, with the fix of Decision 4), the block-tail detection where the checker knows the expression is a block's last element (`lib/typecheck/typecheck.ml`, the `EBlock` arm)
+- Modify: `lib/errors/code.ml` (new code `cap_result_unhandled`), `lib/errors/explain.ml` (page), `lib/typecheck/typecheck_unify.ml` (`report_mismatch`: when actual is `Result(t, CapError)` and `t` unifies with expected, emit this code instead of `type_mismatch`, with the fix of Decision 4), the `EMatch` arm (when a pattern fails against a scrutinee of type `Result(t, CapError)` and would check against `t`, report at the scrutinee) and the `let?` arm (when the right-hand side is `Result(Result(u, e), CapError)` and the enclosing function's error type is `e`, report at the right-hand side), the block-tail detection where the checker knows the expression is a block's last element (`lib/typecheck/typecheck.ml`, the `EBlock` arm)
 - Modify: `forge/lib/cmd_fix.ml` (`forge fix [--dry-run] PATH...`: with paths, skip `Project.load` and fix the given `.march` files or directories; repeat collect-and-apply until a pass applies zero fixes, at most 5 passes), `forge/bin/main.ml`
-- Test: `test/errors/cap_result_unhandled_{1,2,3,4}.march` via `scripts/seed-error-corpus.sh`; `forge/test/test_fix_cap_result.ml` with `forge/test/fixtures/cap_result/{before,after}/`
+- Test: `test/errors/cap_result_unhandled_{1,2,3,4,5,6}.march` via `scripts/seed-error-corpus.sh`; `forge/test/test_fix_cap_result.ml` with `forge/test/fixtures/cap_result/{before,after}/`
 
 **Interfaces:**
 - Consumes: `CapError` (Task 1), the re-typed entry points (Tasks 6–10).
 - Produces: fixes, all `machine-applicable`: `FInsert` of `<indent>()` after the line (block tail); `FReplace` to `Authority.ignore(<expr>)` (other unit positions); `FReplace` to `Authority.must(<expr>)` (value positions). The expression's source text comes from its span.
 
-- [ ] **Step 1: Failing corpus cases:** (1) `fn main() : () do println("x") end` across lines → fix inserts `()`; (2) `match o do Some(v) -> println(v) None -> () end` → `Authority.ignore(println(v))`; (3) `let t = System.unix_time_ms() + 1` → `Authority.must(System.unix_time_ms()) + 1`; (4) `match Process.env("H") do Some(v) -> v None -> "" end` → scrutinee wrapped in `must`. Each `.expected` shows the fix diff.
+- [ ] **Step 1: Failing corpus cases:** (1) `fn main() : () do println("x") end` across lines → fix inserts `()`; (2) `match o do Some(v) -> println(v) None -> () end` → `Authority.ignore(println(v))`; (3) `let t = System.unix_time_ms() + 1` → `Authority.must(System.unix_time_ms()) + 1`; (4) `match Process.env("H") do Some(v) -> v None -> "" end` → scrutinee wrapped in `must`; (5) `match File.read(p) do Ok(s) -> s Err(NotFound(_)) -> "" Err(_) -> "?" end` → scrutinee wrapped in `must`, arms untouched; (6) `let? s = File.read(p)` in `fn f(p) : Result(String, FileError)` → `let? s = Authority.must(File.read(p))`. Each `.expected` shows the fix diff, and no case reports a second error after its fix.
 - [ ] **Step 2:** `ERRORS_ONLY=cap_result_unhandled ./_build/default/test/run_errors.exe -e` → FAIL.
-- [ ] **Step 3:** Implement; `UPDATE_ERRORS=1` for the four new cases only; review the diff; `git diff test/errors/` shows no other case changed.
+- [ ] **Step 3:** Implement; `UPDATE_ERRORS=1` for the six new cases only; review the diff; `git diff test/errors/` shows no other case changed.
 - [ ] **Step 4: forge tests:** fixture `before/` (one file per shape above plus an unannotated helper whose `Result` reaches a `: ()` caller) → `forge fix before/` → equals `after/` byte for byte; a second run reports "no auto-fixable diagnostics found"; the result typechecks (`--check` empty). Run `forge/test/run_cases_parallel.sh` or the forge dune test.
 - [ ] **Step 5:** Commit.
 
@@ -395,10 +409,10 @@ Large and mostly mechanical. Split commits by tree so a reviewer can read each.
 **Files:** `test/**/*.march`, `bench/*.march`, `examples/**`, `test/*.ml` and `lsp/test/*.ml` embedded sources, golden files (`test/snapshots/`, `test/errors/`, `test/test_reports/`, `test/test_codegen.ml` preambles), `specs/lang/*.md` code samples, `.claude/skills/march-lang/SKILL.md`
 
 - [ ] **Step 1:** `forge fix test/ bench/ examples/` (Task 11's path mode). Then rerun Task 0's corpus check: no file has an error that the baseline did not. Expected order of magnitude: 366+ files.
-- [ ] **Step 2:** Hand-fix what has no machine fix: non-exhaustive matches from Task 10 Step 3, direct `task_spawn` calls, programs whose `.expected` output now differs. Commit per tree.
+- [ ] **Step 2:** Hand-fix what has no machine fix: the removed `HttpError` variants (Task 10 Step 3), direct `task_spawn` calls, programs whose `.expected` output now differs. Commit per tree.
 - [ ] **Step 3:** Embedded sources in `.ml` tests: run each suite, fix by the same rules, commit per suite (`compiler`, `eval`, `codegen`, `stdlib`, `test_jit`, `lsp`). LSP hover/signature tests that pin `println`'s type move to the new type.
 - [ ] **Step 4:** Goldens: `UPDATE_SNAPSHOTS=1`, `UPDATE_ERRORS=1`, `UPDATE_TEST_REPORTS=1` and review each `git diff`: every change must be a `println`/entry-point type or an added `()`/`Authority.*`; anything else is a bug to fix, not to accept.
-- [ ] **Step 5:** Docs: `specs/lang/capabilities.md` and `capability-enforcement.md` gain a "Refusals" section (CapError, `Authority.must/ignore`, the error-type variants, the test hook as test-only); every sample that calls a re-typed function is updated; `scripts/gen-lang-docs.py`; `scripts/check-docs.sh`. Update the `march-lang` skill (println returns a `Result`; `Authority.must`).
+- [ ] **Step 5:** Docs: `specs/lang/capabilities.md` and `capability-enforcement.md` gain a "Refusals" section (CapError, the outer/inner `Result` shape, `Authority.must/ignore`, the test hook as test-only); every sample that calls a re-typed function is updated; `scripts/gen-lang-docs.py`; `scripts/check-docs.sh`. Update the `march-lang` skill (println returns a `Result`; `Authority.must`).
 - [ ] **Step 6:** Commit.
 
 ### Task 15: Verification, benchmarks, changelog, specs bookkeeping
@@ -407,7 +421,7 @@ Large and mostly mechanical. Split commits by tree so a reviewer can read each.
 - [ ] **Step 2:** Task 4's allowlist holds only `Internal` rows with reasons; the stdlib per-file `--check` counts are at or below Task 0's.
 - [ ] **Step 3:** `scripts/oracle-base.sh ir types`: both RED by design. Review the IR diff on a sample of 20 programs: the only changes are a `march_cap_check_raw` call before each checked operation and the `Result` construction; review the types diff: only re-typed entry points. Write the summary into the PR description.
 - [ ] **Step 4:** Benchmarks from Task 0, same machine, `scripts/` load check first (other sessions' load makes numbers lie): `list_ops`, `binary_trees` within noise; `println_loop`, `clock_loop`, `spawn_loop` within 5%. If `println_loop` is worse because `Ok(())` allocates, make `Ok(())` of `Result((), _)` a static constant in codegen (one task, its own commit) before accepting.
-- [ ] **Step 5:** `CHANGELOG.md` `## [Unreleased]` `### Changed`: capability operations return `Result`; the list of re-typed entry points; `forge fix` migrates; `HttpError`'s three refusal variants became `CapRefused`. `specs/progress/2026-11-10-ocap-p1-result.md` (what landed, the decisions above, the measured blast radius); delete the baseline note; `specs/todos/2026-11-10-unused-cap-result-lint.md` (Decision 7); `specs/todos/2026-11-10-ocap-p2-gate-handle-builtins.md` (the builtins Task 5 left callable, for phase 2).
+- [ ] **Step 5:** `CHANGELOG.md` `## [Unreleased]` `### Changed`: capability operations return `Result`; the list of re-typed entry points; `forge fix` migrates; operations that already returned a `Result` now return it inside `Result(_, CapError)`; `HttpError`'s three refusal variants moved to the outer `CapError`. `specs/progress/2026-11-10-ocap-p1-result.md` (what landed, the decisions above, the measured blast radius); delete the baseline note; `specs/todos/2026-11-10-unused-cap-result-lint.md` (Decision 7); `specs/todos/2026-11-10-ocap-p2-gate-handle-builtins.md` (the builtins Task 5 left callable, for phase 2).
 - [ ] **Step 6:** Commit.
 
 ---
@@ -425,8 +439,10 @@ family (6–10) each carrying its share of Task 14, then 12, 13 and 15.
 ## Overlap with the other phase sessions
 
 - **Phase 2 (handles)** edits the same stdlib files for `file_open`, `csv_open`, sockets, listeners,
-  processes and vault opens. This plan only adds `Authority.check` calls and `CapRefused` variants
-  there and leaves gating of handle builtins to phase 2. Whichever lands second rebases; the
+  processes and vault opens. This plan adds `Authority.check` calls there and wraps their
+  return types in `Result(_, CapError)`, and leaves gating of handle builtins to phase 2. Phase 2's
+  new opens (`File.open`, `Tcp.listen`, ...) return `Result(Result(Handle, E), CapError)` by the same
+  rule. Whichever lands second rebases; the
   conflict is textual.
 - **Phase 3 (compile-time checks under `--check`, interpreter, REPL)** changes when the existing
   ceiling diagnostics run; it does not touch run-time checks. The new `cap_result_unhandled`
