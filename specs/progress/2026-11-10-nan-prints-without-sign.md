@@ -10,8 +10,10 @@ It surfaced as the `codegen` job failing on #1233, whose test built its NaN with
 ## What changed
 
 - `lib/eval/eval_runtime.ml`: a module-level `string_of_float` shadows `Stdlib.string_of_float`
-  and returns `"nan"` for any NaN. Every interpreter site that formats a Float picks it up
-  (they all `open Eval_runtime`).
+  and returns `"nan"` for any NaN. It is exported from `eval_runtime.mli`: `eval_builtins.ml`
+  (the `float_to_string` builtin, `print_float`, the logger's `LFloat`) and `eval_net.ml` open
+  `Eval_runtime`, and without the export they kept `Stdlib.string_of_float` (the first version
+  of this change forgot it; Linux CI caught `float_to_string(-n)` still printing `-nan`).
 - `runtime/march_runtime.c`: `march_format_float_ocaml` (behind `float_to_string`,
   `march_print_float`, polymorphic `show`) and the logger's `logger_float_str` return `nan`
   for any NaN.
