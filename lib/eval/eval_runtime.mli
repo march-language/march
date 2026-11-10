@@ -52,6 +52,13 @@ val display_tag : string -> string
 (** A record's fields in display order: sorted by field name, the order the
     compiled backend lays them out in. *)
 val sorted_record_fields : (string * 'a) list -> (string * 'a) list
+
+(** The interpreter's Float rendering: [Stdlib.string_of_float], except that
+    any NaN is ["nan"] (libc prints a sign-bit-set one as ["-nan"]).  Exported
+    so that every module that opens [Eval_runtime] ([Eval_builtins],
+    [Eval_net]) shadows [Stdlib.string_of_float] with it, not just this file. *)
+val string_of_float : float -> string
+
 val value_to_string : value -> string
 val value_display : value -> string
 val show_dispatch : value -> string

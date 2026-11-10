@@ -1359,6 +1359,10 @@ void *march_int_to_string(int64_t n) {
  * Shared by march_float_to_string and march_print_float so the two cannot
  * drift. Writes into [buf] (64 bytes) and returns the length. */
 static int march_format_float_ocaml(char *buf, double f) {
+    /* NaN has no meaningful sign: glibc prints a sign-bit-set NaN (x86's
+     * default NaN from inf - inf) as "-nan" and arm64's as "nan".  Print "nan"
+     * everywhere, as the interpreter and the JS runtime do. */
+    if (isnan(f)) { memcpy(buf, "nan", 4); return 3; }
     int len = snprintf(buf, 64, "%.12g", f);
     if (len < 0) len = 0;
     if (len > 63) len = 63;
@@ -16773,6 +16777,7 @@ static void logger_v2_pop_one(void) {
  * string_of_float, i.e. "%.12g" plus a trailing "." when the result would
  * otherwise read as an integer ("2." not "2", "1.5", "1e+20", "inf"). */
 static void logger_float_str(double f, char *buf, size_t cap) {
+    if (isnan(f)) { snprintf(buf, cap, "nan"); return; }  /* never "-nan": see march_format_float_ocaml */
     snprintf(buf, cap, "%.12g", f);
     for (const char *c = buf; *c; c++)
         if (!(*c == '-' || (*c >= '0' && *c <= '9'))) return;
