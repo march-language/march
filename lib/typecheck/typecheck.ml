@@ -5149,7 +5149,13 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     let mark = env.errors.Err.diagnostics in
     let inferred =
       with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
-    unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected;
+    (* A block whose value is a capability operation's Result: the
+       cap_result_unhandled fix belongs on that last expression, not the
+       block. *)
+    let provided_e = match repr inferred with
+      | TCon ("Result", [ _; err ]) when is_cap_error_ty err -> branch_leaf e
+      | _ -> e in
+    unify env ~span:sp ~reason ~provided:(provided_of_expr provided_e inferred) inferred expected;
     relocate_literal_mismatch env ~mark ~reason e sp expected;
     relocate_callback_mismatch env ~mark e sp inferred expected;
     relocate_branch_mismatch env ~mark ~reason e sp expected;
