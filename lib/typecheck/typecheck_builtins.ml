@@ -1267,9 +1267,11 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_recv_chunked_frame",  Mono (TArrow (t_int, t_result t_string t_string)));
     (* Ok(None) is the cap expiring: the absence of an event, not an error. *)
     ("tcp_recv_timeout",        Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result (t_option t_string) t_string)))));
-    (* http_serialize_request(method, host, path, query_opt, headers, body) -> String *)
+    (* http_serialize_request(method, host, path, query_opt, headers, body)
+         -> Result(String, String): Err when a field would smuggle a second
+       request (a CR/LF/space/control byte; lib/eval/http_request_check.ml). *)
     ("http_serialize_request",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string,
-        TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
+        TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_result t_string t_string))))))));
     ("http_parse_response",     Mono (TArrow (t_string,
         t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) t_string)));
     (* http_fetch / http_fetch_available: JS-only fetch path used by
