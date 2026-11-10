@@ -1,0 +1,112 @@
+-- examples/https_hello.march
+--
+-- A small HTTPS server in the shape of a real deployment with a certbot
+-- certificate and no load balancer in front:
+--
+--   https://<host>/         a page
+--   POST https://<host>/upload   answers with the number of bytes received
+--   wss://<host>/ws         echoes text frames, and a second task pushes
+--                            "tick <n>" every second while the socket is open
+--   http://<host>/...       ACME HTTP-01 challenges from certbot's webroot;
+--                            everything else redirects to https
+--
+-- It starts in bootstrap mode, so the very first certificate can be obtained
+-- through it: run it, then
+--   certbot certonly --webroot -w /var/www/acme -d example.com
+-- and the HTTPS port opens within a minute. Renewals are picked up by the
+-- certificate poller; no restart, no deploy hook.
+--
+-- Settings come from the environment (defaults in brackets):
+--   CERT      [/etc/letsencrypt/live/example.com/fullchain.pem]
+--   KEY       [/etc/letsencrypt/live/example.com/privkey.pem]
+--   WEBROOT   [/var/www/acme]
+--   HTTPS_PORT [443]   HTTP_PORT [80]
+--
+-- Build (HTTPS needs a compiled binary):
+--   march --compile --opt 2 examples/https_hello.march -o https_hello
+-- Deployment notes: specs/features/http-and-networking.md, "Deploying with certbot".
+
+mod HttpsHello do
+  needs IO.Process
+  needs IO.NetListen
+  needs IO.WebSocket
+  needs IO.Spawn
+  needs IO.FileRead
+
+  pfn env_or(name, dflt) do
+    match process_env(name) do
+    Some(s) -> s
+    None -> dflt
+    end
+  end
+
+  pfn env_int(name, dflt) do
+    match string_to_int(env_or(name, "")) do
+    Some(n) -> n
+    None -> dflt
+    end
+  end
+
+  -- Pushes one frame a second for at most ten minutes. A frame sent after
+  -- the client has gone is dropped by the runtime, so the bound only keeps
+  -- an abandoned task from running forever.
+  pfn tick_loop(socket, n) do
+    if n > 600 do ()
+    else
+      sleep_ms(1000)
+      WebSocket.send_frame(socket, TextFrame("tick " ++ int_to_string(n)))
+      tick_loop(socket, n + 1)
+    end
+  end
+
+  pfn echo_loop(socket) do
+    match WebSocket.recv(socket) do
+    TextFrame(msg) ->
+      WebSocket.send_frame(socket, TextFrame("echo: " ++ msg))
+      echo_loop(socket)
+    Ping ->
+      WebSocket.send_frame(socket, Pong)
+      echo_loop(socket)
+    Close(code, reason) -> WebSocket.close(socket, code, reason)
+    _ -> echo_loop(socket)
+    end
+  end
+
+  pfn ws_session(socket) do
+    let _ticker = Task.async(fn () -> tick_loop(socket, 1))
+    echo_loop(socket)
+  end
+
+  pfn page() do
+    "<!doctype html><title>March over HTTPS</title>"
+    ++ "<h1>Hello over HTTPS</h1>"
+    ++ "<p>POST to /upload, or open a WebSocket to /ws.</p>"
+  end
+
+  pfn router(conn) do
+    match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+    (:get, Nil) -> conn |> HttpServer.html(200, page())
+    (:post, Cons("upload", Nil)) ->
+      let n = string_byte_length(HttpServer.req_body(conn))
+      conn |> HttpServer.text(200, int_to_string(n) ++ " bytes")
+    (:get, Cons("ws", Nil)) -> WebSocket.upgrade(conn, fn socket -> ws_session(socket))
+    _ -> conn |> HttpServer.text(404, "Not Found")
+    end
+  end
+
+  fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _w : Cap(IO.WebSocket),
+          _s : Cap(IO.Spawn), _f : Cap(IO.FileRead)) do
+    let https_port = env_int("HTTPS_PORT", 443)
+    HttpServer.new(https_port)
+    |> HttpServer.tls(HttpServer.TlsFiles(
+         env_or("CERT", "/etc/letsencrypt/live/example.com/fullchain.pem"),
+         env_or("KEY", "/etc/letsencrypt/live/example.com/privkey.pem")))
+    |> HttpServer.tls_wait_for_cert()
+    |> HttpServer.plain_listener(env_int("HTTP_PORT", 80), [
+         HttpAcme.webroot(env_or("WEBROOT", "/var/www/acme")),
+         HttpServer.redirect_to_https(https_port)
+       ])
+    |> HttpServer.plug(router)
+    |> HttpServer.listen()
+  end
+end

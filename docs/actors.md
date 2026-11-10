@@ -68,6 +68,7 @@ state while it runs.
 
 - [Builtins Reference](#builtins-reference)
 - [Interpreted vs compiled](#interpreted-vs-compiled)
+- [Handler guarantees: `ensures` and `old`](#handler-guarantees-ensures-and-old)
 - [What is proved about the mailbox](#what-is-proved-about-the-mailbox)
 - [See also](#see-also)
 
@@ -1293,6 +1294,86 @@ For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload ty
 see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6;
 for the scheduler and lowering internals, see the implementation reference
 (`specs/impl/index.md`).
+
+---
+
+## Handler guarantees: `ensures` and `old`
+
+A handler can state how one message changes the state, and the compiler proves it on
+every build. Write `ensures` and a predicate between the parameters and `do`:
+
+```march
+@invariant(balance >= 0)
+actor Account do
+  state { balance : Int }
+  init { balance: 0 }
+
+  on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do
+    { balance: state.balance + n }
+  end
+
+  on Withdraw(n : Int) ensures state.balance <= old(state.balance) do
+    if n > 0 && n <= state.balance do { balance: state.balance - n } else state end
+  end
+end
+```
+
+In the predicate:
+
+- `state`, and each field's bare name (`balance`), is the state the handler **returns**;
+- `old(e)` is `e` read of the state the message **arrived with**: `old(state.balance)`,
+  `old(balance)`, or `old(state)` for the whole of it;
+- the message's parameters are in scope. A parameter named like a field means the
+  parameter; write `state.f` for the field.
+
+Each guarantee is proved for its handler alone, as the
+[`@invariant`](refinement-types.md) is: from any incoming state that satisfies the
+invariant, and any arguments that satisfy the parameters' refinements, the state the
+body returns must satisfy the guarantee. A handler that can break it is an error that
+shows both states:
+
+```
+`Account`'s handler `Steal` does not guarantee its `ensures`. [return_refinement_violated]
+
+The handler guarantees:
+
+    balance <= old(balance)
+
+A counterexample was found:
+
+    state = { balance: 0 }
+    n = 1
+
+and the handler returns:
+
+    { balance: 1 }
+```
+
+A guarantee the solver cannot decide is a recorded skip, and an error under
+`cap verified`. `march --check --guarantees` lists each one beside the invariant:
+
+```
+actor Account: proved
+  @invariant           proved: 4 sites at init and after each handler
+  ensures on Deposit   proved: 1 site across the handler's return paths
+  ensures on Withdraw  proved: 2 sites across the handler's return paths
+```
+
+What a guarantee does not cover:
+
+- **Replies and sends.** The guarantee is about the returned state. A call handler's
+  `Actor.reply(reply_to, v)` is an effect, not part of the claim; `ensures state ==
+  old(state)` on a read-only call handler is the usual use.
+- **Sequences of messages.** A guarantee is about one message; an order across messages
+  is a protocol's job.
+- **Running it.** The predicate is proof-only: it is erased, and nothing evaluates it at
+  run time.
+
+`old` has a meaning only in a handler's `ensures`. `old(…)` in an `@invariant`, a state
+field's type, a message parameter's type or a function's type is an `old_misuse` error,
+as is `old` without exactly one argument in a guarantee. Elsewhere `old` and `ensures`
+are ordinary names, and a program that defines its own function `old` can call it in
+refinements.
 
 ---
 

@@ -911,9 +911,36 @@ end
    | exception Not_found ->
      Alcotest.failf "not reported as a ceiling violation:\n%s" out)
 
+(* A user module named like a stdlib module (`Yaml`) is user code: its own
+   undeclared FileWrite is charged to IT, not seen through and credited to the
+   caller (which here declares FileWrite and so would cover it).  Transparency
+   is decided by where the declaration comes from, never by its name. *)
+let test_user_module_named_like_stdlib_is_not_transparent () =
+  rejects_naming "user module named Yaml" ~expect:"Yaml"
+    {|
+mod YamlApp do
+  needs IO.Console
+  needs IO.FileWrite
+  mod Yaml do
+    needs IO.Console
+    fn go() : () do
+      match File.write("/tmp/cap_ceiling_yaml", "d") do
+        Ok(_)  -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+    Yaml.go()
+  end
+end
+|}
+
 let tests =
   unit_tests
   @ [
+      Alcotest.test_case "user module named like a stdlib module is not transparent" `Slow
+        test_user_module_named_like_stdlib_is_not_transparent;
       Alcotest.test_case
         "MARCH_LIB_PATH dependency with no needs does not crash" `Slow
         test_lib_path_dependency_with_no_needs_does_not_crash;

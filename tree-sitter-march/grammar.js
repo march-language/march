@@ -457,6 +457,8 @@ module.exports = grammar({
     actor_handler: $ => seq(
       'on', field('name', $.type_identifier),
       '(', optional(commaSep($.fn_param)), ')',
+      // Two-state specs: `on Deposit(n) ensures state.balance == old(state.balance) + n do`.
+      optional(seq('ensures', field('ensures', $._expr))),
       'do', $.block_body, 'end',
     ),
 

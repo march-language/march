@@ -178,6 +178,24 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
          [ line "@invariant"
              (Not_checked, "no init or handler result was checked against it") ])
   in
+  (* Handler guarantees (two-state specs): `on Msg(…) ensures P do`, one
+     postcondition per handler, filed by [Refine_check]'s `DActor` arm as
+     `<Actor>.<Msg>.ensures`. *)
+  let ensures_lines =
+    List.filter_map
+      (fun (h : A.actor_handler) ->
+        match h.A.ah_ensures with
+        | None -> None
+        | Some _ ->
+          let m = h.A.ah_msg.A.txt in
+          let what = Printf.sprintf "ensures on %s" m in
+          let mine (o : O.t) = o.O.kind = O.Postcondition && o.O.callee = name ^ "." ^ m ^ ".ensures" in
+          Some
+            (match summarise ~where:"across the handler's return paths" (List.filter mine obs) with
+             | Some s -> line what s
+             | None -> line what (Not_checked, "the handler's guarantee was not checked")))
+      ad.A.actor_handlers
+  in
   let msg_line =
     match summarise ~where:"where a message is built" msgs with
     | Some s -> [ line "handler contracts" s ]
@@ -301,7 +319,7 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
           (Assumed, "a remote sender's message is not checked against the handler contracts") ]
     else []
   in
-  state_line @ invariant_line @ msg_line @ migrate_state_line @ migrate_msg_line @ rollback_line
+  state_line @ invariant_line @ ensures_lines @ msg_line @ migrate_state_line @ migrate_msg_line @ rollback_line
   @ simulation_line @ remote_line
 
 (* The protocol's lines from its translation-validation rows

@@ -187,6 +187,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         promote_to Parser.GHOST ~when_:(function
           | Parser.LET | Parser.FN | Parser.PFN | Parser.LOWER_IDENT _ -> true
           | _ -> false)
+      (* Two-state specs: `on Msg(…) ensures P do`.  `ensures` is a keyword
+         only before a token that can start its predicate but never follows a
+         name in an expression (calls take parentheses), so `ensures` stays
+         an ordinary name everywhere else. *)
+      | Parser.LOWER_IDENT "ensures" ->
+        promote_to Parser.ENSURES ~when_:(function
+          | Parser.STATE -> true (* `ensures state.balance …` *)
+          | t -> starts_condition t)
       | Parser.LOWER_IDENT "calc" ->
         promote_to Parser.CALC ~when_:(function Parser.DO -> true | _ -> false)
       | Parser.LOWER_IDENT "reveal" ->
@@ -195,6 +203,18 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         promote_to Parser.MODULE_KW ~when_:after_upper_ident
       | Parser.LOWER_IDENT ("elif" | "elsif") ->
         promote_to Parser.ELIF ~when_:starts_condition
+      (* `not` is an ordinary function name (`not(x)`, a user's own `fn not`),
+         but `not p(n)`, with an operand directly after it, means `!p(n)`.
+         Left alone it was two block statements, a discarded `not` and the
+         value `p(n)`, so `else not p(n) end` silently returned `p(n)`
+         (specs/progress/2026-10-29-not-at-block-start-parses-as-two-statements.md).
+         Same test as `elif`: a name, a literal or `!` can never follow an
+         identifier in an expression, while `not(…)`, `fn not(`, `not,`,
+         `not)` and `not` at a line end keep the name.  [Parser.BANG] builds
+         the same `EApp (EVar "not", …)` a call does, so a user-defined
+         `not` still shadows it. *)
+      | Parser.LOWER_IDENT "not" ->
+        promote_to Parser.BANG ~when_:starts_condition
       | Parser.ROLE      -> demote "role"      ~keep_when:after_upper_ident
       | Parser.INIT      -> promote_init ()
       | Parser.MAY       -> demote "may"       ~keep_when:after_crash

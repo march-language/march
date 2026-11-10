@@ -195,21 +195,79 @@ let fixpoint (infos : fn_info list) ~(is_defined : string -> bool)
    guard in HttpClient checks it). *)
 type meth = MHttp of string | MRaw | MDynamic
 
-type dest_use = { auth : H.authority; meth : meth }
+(* How much of a request's path the compiler can see: all of it (a literal
+   URL), its start (a literal prefix ending in `/`), or none. *)
+type dpath = DPath of string | DPrefix of string | DUnknown
+
+(* [guarded]: the call is a direct call, in the scoped module, to an entry
+   point the rewrite points at its scope-checking twin, so the run-time guard
+   will check what the compiler cannot see (the rest of the path). *)
+type dest_use = { auth : H.authority; meth : meth; path : dpath; guarded : bool }
 
 type result = Fixed of dest_use list | Opaque of string
+
+let unguard (r : result) : result =
+  match r with
+  | Fixed us -> Fixed (List.map (fun u -> { u with guarded = false }) us)
+  | o -> o
 
 let combine (rs : result list) : result =
   match List.find_opt (function Opaque _ -> true | Fixed _ -> false) rs with
   | Some o -> o
   | None -> Fixed (List.concat_map (function Fixed a -> a | Opaque _ -> []) rs)
 
+(* ── Source-level names in diagnostics ──────────────────────────────
+   TIR names are compiler-generated: monomorphisation appends `$<types>`
+   (`fetch$Int`), an interface method's impl is `Iface$Type.method`
+   (`Fetch$B.T.fetch`), and an actor lowers to `Actor_dispatch`, `Actor_spawn`
+   and one `Actor_<Msg>` handler per message.  None of those is a name the
+   author wrote, so a message renders the source-level one.  An impl-method
+   name is told from a mono name by its leading capital (interface names are
+   capitalised, functions are not). *)
+let strip_mono (n : string) : string =
+  match String.index_opt n '$' with
+  | None -> n
+  | Some p ->
+    let base = String.sub n 0 p in
+    let capital = base <> "" && Char.uppercase_ascii base.[0] = base.[0] in
+    (match String.rindex_opt n '.' with
+     | Some d when d > p && capital ->
+       base ^ String.sub n d (String.length n - d)
+     | _ -> base)
+
+let chop_suffix ~suffix s =
+  let ls = String.length s and lx = String.length suffix in
+  if ls > lx && String.sub s (ls - lx) lx = suffix then Some (String.sub s 0 (ls - lx))
+  else None
+
+(* A name as a phrase with its own backticks: `` `fetch` ``,
+   ``actor `Fetcher` ``, ``handler `Go` of actor `Fetcher` ``. *)
+let source_phrase (n : string) : string =
+  let n = strip_mono n in
+  match chop_suffix ~suffix:"_dispatch" n, chop_suffix ~suffix:"_spawn" n with
+  | Some a, _ | _, Some a -> Printf.sprintf "actor `%s`" a
+  | None, None ->
+    (match Handler_owner.owner_of n, String.rindex_opt n '_' with
+     | Some _, Some i ->
+       Printf.sprintf "handler `%s` of actor `%s`"
+         (String.sub n (i + 1) (String.length n - i - 1)) (String.sub n 0 i)
+     | _ -> "`" ^ n ^ "`")
+
 let url_evidence ?(meths = [ MDynamic ]) ~(callee : string) (v : value) : result =
-  let opaque why = Opaque (Printf.sprintf "the URL passed to `%s` %s" callee why) in
+  let guarded = D.guarded callee in
+  (* `with_connection`'s URL picks the host to connect to; its path is never
+     sent (each request carries its own, checked by the guard). *)
+  let path_never_sent = callee = "HttpClient.with_connection" in
+  let opaque why = Opaque (Printf.sprintf "the URL passed to %s %s" (source_phrase callee) why) in
   match v with
   | VLit s -> (
       match H.authority_of_url ~prefix:false s with
-      | Some a -> Fixed (List.map (fun meth -> { auth = a; meth }) meths)
+      | Some a ->
+        let path =
+          if path_never_sent then DUnknown
+          else match H.url_path_of_literal ~prefix:false s with Some p -> DPath p | None -> DUnknown
+        in
+        Fixed (List.map (fun meth -> { auth = a; meth; path; guarded }) meths)
       | None ->
         opaque
           (Printf.sprintf
@@ -219,7 +277,12 @@ let url_evidence ?(meths = [ MDynamic ]) ~(callee : string) (v : value) : result
              s))
   | VPrefix s -> (
       match H.authority_of_url ~prefix:true s with
-      | Some a -> Fixed (List.map (fun meth -> { auth = a; meth }) meths)
+      | Some a ->
+        let path =
+          if path_never_sent then DUnknown
+          else match H.url_path_of_literal ~prefix:true s with Some p -> DPrefix p | None -> DUnknown
+        in
+        Fixed (List.map (fun meth -> { auth = a; meth; path; guarded }) meths)
       | None ->
         opaque
           (Printf.sprintf
@@ -238,15 +301,17 @@ let host_evidence ~(callee : string) (host : value) (port : value option) : resu
          could connect somewhere the suffix match did not describe. *)
       match H.parse_pattern h with
       | Ok pat when (not pat.H.wildcard) && pat.H.port = None ->
-        Fixed [ { auth = { H.a_host = pat.H.host; a_port = p }; meth = MRaw } ]
+        Fixed
+          [ { auth = { H.a_host = pat.H.host; a_port = p }; meth = MRaw; path = DUnknown;
+              guarded = false } ]
       | _ ->
         Opaque
           (Printf.sprintf
-             "the host %S passed to `%s` is not a plain host name or IP literal"
-             h callee))
+             "the host %S passed to %s is not a plain host name or IP literal"
+             h (source_phrase callee)))
   | VLit _, _ ->
-    Opaque (Printf.sprintf "the port passed to `%s` is not a literal" callee)
-  | _ -> Opaque (Printf.sprintf "the host passed to `%s` is not a literal" callee)
+    Opaque (Printf.sprintf "the port passed to %s is not a literal" (source_phrase callee))
+  | _ -> Opaque (Printf.sprintf "the host passed to %s is not a literal" (source_phrase callee))
 
 let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool)
     ~(transparent_fns : string -> bool) ~(annotated : (string * int) list)
@@ -282,7 +347,7 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
   let rec summary (n : string) : result =
     match Hashtbl.find_opt memo n with
     | Some (Some r) -> r
-    | Some None -> Opaque (Printf.sprintf "`%s` is recursive" n)
+    | Some None -> Opaque (Printf.sprintf "%s is recursive" (source_phrase n))
     | None ->
       Hashtbl.replace memo n None;
       let i = Hashtbl.find info_of n in
@@ -301,9 +366,9 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
            Some
              (Opaque
                 (Printf.sprintf
-                   "`%s`, which reaches the network, is passed as a value, so the \
+                   "%s, which reaches the network, is passed as a value, so the \
                     compiler cannot see where it connects"
-                   n))
+                   (source_phrase n)))
          else None)
       i.fn_values
   (* [forwarding]: inside an annotated function, the parameter index whose
@@ -325,17 +390,17 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
           Some
             (Opaque
                (Printf.sprintf
-                  "`%s` reaches the network, and the compiler cannot see where it \
+                  "%s reaches the network, and the compiler cannot see where it \
                    connects (it takes no URL it can check)"
-                  c))
+                  (source_phrase c)))
       else if Hashtbl.mem reaches_redirect c then
         Some
           (Opaque
              (Printf.sprintf
-                "`%s` makes HttpClient calls that can follow redirects, and the \
+                "%s makes HttpClient calls that can follow redirects, and the \
                  redirect guard cannot follow a scope through another module yet; \
                  call HttpClient from this module instead"
-                c))
+                (source_phrase c)))
       else
         match annotation c with
         | Some k ->
@@ -343,18 +408,18 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
             if forwards k then Fixed []
             else url_evidence ~meths:(forwarded_meths c k) ~callee:c (nth_value s.args k)
           in
-          Some (combine [ own; annotated_rest c k ])
+          Some (unguard (combine [ own; annotated_rest c k ]))
         | None -> (
             match summary c with
-            | Fixed a -> Some (Fixed a)
+            | Fixed a -> Some (unguard (Fixed a))
             | Opaque _ ->
               Some
                 (Opaque
                    (Printf.sprintf
-                      "`%s` reaches the network with a destination this module cannot \
+                      "%s reaches the network with a destination this module cannot \
                        see; if it takes the URL as a parameter, mark it \
                        `@[net_dest(<param>)]`"
-                      c)))
+                      (source_phrase c))))
     else
       match D.builtin_dest c with
       | Some (D.Url k) ->
@@ -367,13 +432,13 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
         Some
           (Opaque
              (Printf.sprintf
-                "`%s` acts on an already-open connection (an integer handle), whose \
+                "%s acts on an already-open connection (an integer handle), whose \
                  host the compiler cannot see"
-                c))
+                (source_phrase c)))
       | Some D.Unknown ->
         Some
           (Opaque
-             (Printf.sprintf "`%s` takes an address in a form the compiler does not read" c))
+             (Printf.sprintf "%s takes an address in a form the compiler does not read" (source_phrase c)))
       | Some (D.Inbound | D.Neutral) | None -> None
   (* The method an entry point uses, as far as the compiler can see. *)
   and entry_meths (c : string) : meth list =
@@ -475,12 +540,73 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
       else if is_raw && List.exists (fun (d : H.decl) -> d.methods = None) anyhost then `Ok
       else `No
   in
+  (* The path half of a destination's check (host and method already pass). *)
+  let path_violation (ds : H.decl list) (u : dest_use) : (string * string) option =
+    let a = u.auth in
+    let meth = match u.meth with MHttp m -> Some m | _ -> None in
+    let covering =
+      List.concat_map
+        (fun (d : H.decl) ->
+           let mok = match (meth, d.methods) with None, _ | _, None -> true | Some m, Some ms -> List.mem m ms in
+           if not mok then []
+           else if d.patterns = [] then [ None ]
+           else
+             List.filter_map
+               (fun (p : H.pattern) ->
+                  if H.matches p ~host:a.a_host ~port:a.a_port then Some p.H.path else None)
+               d.patterns)
+        ds
+    in
+    let needs_path = covering <> [] && List.for_all (fun x -> x <> None) covering in
+    if not needs_path then None
+    else
+      let prefixes = List.filter_map (fun x -> x) covering in
+      let segs p = List.filter (fun x -> x <> "") (String.split_on_char '/' p) in
+      let rec is_prefix a b = match (a, b) with
+        | [], _ -> true | _, [] -> false | x :: xs, y :: ys -> x = y && is_prefix xs ys in
+      match u.path with
+      | DPath p ->
+        if H.permits_request ds ~host:a.a_host ~port:a.a_port ~meth ~path:(Some p) then None
+        else
+          Some
+            ( March_errors.Code.cap_host_scope,
+              Printf.sprintf "connects to `%s%s`, outside the scope's path" a.a_host p )
+      | DPrefix pp ->
+        let ps = segs pp in
+        let compatible =
+          List.exists (fun pre -> is_prefix pre ps || is_prefix ps pre) prefixes
+          && H.path_ok pp
+        in
+        if not compatible then
+          Some
+            ( March_errors.Code.cap_host_scope,
+              Printf.sprintf "connects to `%s%s...`, which is already outside the scope's path"
+                a.a_host pp )
+        else if u.guarded then None
+        else
+          Some
+            ( March_errors.Code.cap_host_unproven,
+              Printf.sprintf
+                "connects to `%s%s...` through another function, and the path guard \
+                 cannot follow a scope through it; make the call from this module"
+                a.a_host pp )
+      | DUnknown ->
+        if u.guarded then None
+        else
+          Some
+            ( March_errors.Code.cap_host_unproven,
+              Printf.sprintf
+                "connects to `%s` with a path the compiler cannot see, through another \
+                 function the path guard cannot follow"
+                a.a_host )
+  in
   let subject n =
-    let base = match String.rindex_opt n '.' with
-      | Some i -> String.sub n (i + 1) (String.length n - i - 1)
+    (* A function is named without its module (the module is in the message). *)
+    let base = match String.rindex_opt (strip_mono n) '.' with
+      | Some i -> let m = strip_mono n in String.sub m (i + 1) (String.length m - i - 1)
       | None -> n
     in
-    "`" ^ base ^ "`"
+    source_phrase base
   in
   List.iter
     (fun (i : fn_info) ->
@@ -517,6 +643,16 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
                                  `%s`, or use a method it already allows."
                                 (subject i.name) (String.uppercase_ascii m) a.a_host o
                                 (allowed_methods ds a) m o)
+                         | _ when path_violation ds u <> None ->
+                           (match path_violation ds u with
+                            | Some (code, what) ->
+                              add code o i.name
+                                (Printf.sprintf
+                                   "%s %s, but module `%s` may reach only %s.\n\
+                                    hint: use a path inside the scope, or widen the \
+                                    scope's path in module `%s`."
+                                   (subject i.name) what o (pattern_list ds) o)
+                            | None -> ())
                          | MRaw when not (H.permits_raw ds ~host:a.a_host ~port:a.a_port) ->
                            add March_errors.Code.cap_host_unproven o i.name
                              (Printf.sprintf
@@ -648,7 +784,7 @@ let rewrite ~(scopes : (string * H.decl list) list) (m : Tir.tir_module) : Tir.t
            let step (e : Tir.expr) =
              match e with
              | Tir.EApp (v, args)
-               when D.redirect_capable v.Tir.v_name
+               when D.guarded v.Tir.v_name
                     && Hashtbl.mem defined (v.Tir.v_name ^ "_scoped") ->
                let v_ty =
                  match v.Tir.v_ty with

@@ -34,7 +34,7 @@
  ; and which CI's `test` job therefore executes on both macOS and Linux.
  ; Its predecessor, test/test_http_native.sh, was wired into nothing at all,
  ; which is how a total outage of the compiled HTTP server went unnoticed.
- (modules test_stdlib_suite test_http_native test_socket_timeout test_tls_groups)
+ (modules test_stdlib_suite test_http_native test_https_native test_socket_timeout test_tls_groups)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -1226,6 +1226,38 @@
  (deps    (file test_http_simd_runner))
  (action  (run ./test_http_simd_runner)))
 
+; ── TLS session over memory BIOs (HTTPS server) ─────────────────────────
+; OpenSSL flags from pkg-config, falling back to bare -lssl -lcrypto.
+(rule
+ (targets test_tls_session_runner)
+ (deps    test_tls_session.c
+          ../runtime/march_tls_session.c
+          ../runtime/march_tls_session.h)
+ (action  (system "%{cc} -std=gnu11 -Wall -Wextra -I../runtime -O1 -o %{targets} test_tls_session.c ../runtime/march_tls_session.c $(pkg-config --cflags --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lpthread")))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_tls_session_runner))
+ (action  (run ./test_tls_session_runner)))
+
+; ── HTTPS certificate slot, poller and fd registry ─────────────────────
+(rule
+ (targets test_tls_server_runner)
+ (deps    test_tls_server.c
+          ../runtime/march_tls_server.c
+          ../runtime/march_tls_session.c
+          ../runtime/march_https.c
+          ../runtime/march_https.h
+          ../runtime/march_tls_ops.h
+          ../runtime/march_tls_server.h
+          ../runtime/march_tls_session.h)
+ (action  (system "%{cc} -std=gnu11 -Wall -Wextra -I../runtime -O1 -o %{targets} test_tls_server.c ../runtime/march_tls_server.c ../runtime/march_tls_session.c ../runtime/march_https.c $(pkg-config --cflags --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lpthread")))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_tls_server_runner))
+ (action  (run ./test_tls_server_runner)))
+
 ; ── Zero-copy response builder tests ────────────────────────────────────
 (rule
  (targets test_http_response_runner)
@@ -1404,7 +1436,7 @@
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
- (modules test_refinecheck test_refine_quantifier test_refine_ghost test_refine_alias test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars test_refine_pred_names test_refine_proof_hints test_refine_nested_measure)
+ (modules test_refinecheck test_refine_quantifier test_refine_ghost test_refine_alias test_refine_two_state test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars test_refine_pred_names test_refine_proof_hints test_refine_nested_measure)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans

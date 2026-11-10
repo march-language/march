@@ -642,7 +642,7 @@ which has no row here because it never parses at all).
 | 1 (tightest) | `expr_atom` | literals, identifiers, constructors, `(…)`, tuples, records, lists, list comprehensions, `if`/`match`/`cond`/`with` (via `expr`, see note below), lambdas, `do…end` | n/a | atomic, never itself recurses through a lower stratum except via explicit `(…)` |
 | 2 | `expr_field` | `.` (field/module access, plus the contextual field names `send`/`choose`/`offer`) | left | `expr_field DOT lower_name/upper_name/SEND/CHOOSE/OFFER` |
 | 3 | `expr_app` | function application `f(a, b, …)`, constructor application `Con(a, b, …)` | n/a (application is not itself a binary operator; chained direct calls like `f(1)(2)` do **not** parse at all, see §4.7) | `expr_field LPAREN … RPAREN`; falls through to `expr_field %prec prec_app` otherwise |
-| 4 | `expr_unary` | unary `-` (`negate`), `!` (`not`) | right (prefix; self-recursive on the right) | `MINUS expr_unary` / `BANG expr_unary` |
+| 4 | `expr_unary` | unary `-` (`negate`), `!` (`not`); the word `not` directly followed by an operand on the same line (`not p(n)`, `not x`, `not true`) is the token filter's `BANG` too, while `not(…)`, `not` before `,`/`)` and `not` at a line end stay the name `not` (p47) | right (prefix; self-recursive on the right) | `MINUS expr_unary` / `BANG expr_unary` |
 | 5 | `expr_mul` | `* / % *. /.`  | left | `expr_mul OP expr_unary` |
 | 6 | `expr_add` | `+ - ++ +. -.` | left | `expr_add OP expr_mul` |
 | 7 | `expr_cmp` | `== != < > <= >=` | **non-assoc** (chained comparisons do not parse, §4.4 below) | `expr_add OP expr_add`, both operands one stratum down |
@@ -2168,7 +2168,7 @@ actor_decl ::= "actor" upper_name "do"
                  actor_handler*
                "end"
 
-actor_handler ::= "on" upper_name "(" param,* ")" "do" block_body "end"
+actor_handler ::= "on" upper_name "(" param,* ")" ("ensures" expr)? "do" block_body "end"
 ```
 
 (`actor_decl` at `parser.mly:490–505`; `actor_handler` at

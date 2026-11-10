@@ -64,3 +64,6 @@ let method_of (name : string) : string option =
   | "HttpClient.put_request" -> Some "put"
   | "HttpClient.delete" -> Some "delete"
   | _ -> None
+
+let guarded (name : string) : bool =
+  redirect_capable name || name = "HttpTransport.simple_get"

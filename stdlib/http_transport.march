@@ -26,6 +26,7 @@ mod HttpTransport do
     | ConnParseError(String)
     | Closed
     | SchemeNotSupported(String)
+    | Refused(String)
 
   -- Guard the fd-oriented APIs: they use tcp_send_all/tcp_recv_* directly.
   pfn require_plain_http(req) do
@@ -420,13 +421,33 @@ mod HttpTransport do
       Err(ConnParseError("invalid scheme: ftp://example.com/"))
   """
   @[net_dest(url)]
-  fn simple_get(url) do
+  fn simple_get(url) do simple_get_scoped(url, "") end
+
+  doc """
+  `simple_get` checked against a host/path scope string (the format in
+  `Http`'s scope section) before connecting: a request outside it is
+  `Err(Refused(reason))` and never connects. The compiler calls this for a
+  module that declares a host scope; calling it directly can only narrow.
+
+  ## Examples
+
+      march> HttpTransport.simple_get_scoped("https://other.invalid/", "a.invalid")
+      Err(Refused("host other.invalid is outside the scope"))
+  """
+  @[net_dest(url)]
+  fn simple_get_scoped(url, scope) do
     match Http.get(url) do
     Err(InvalidScheme(s)) -> Err(ConnParseError("invalid scheme: " ++ s))
     Err(MissingHost) -> Err(ConnParseError("missing host"))
     Err(InvalidPort(s)) -> Err(ConnParseError("invalid port: " ++ s))
     Err(MalformedUrl(s)) -> Err(ConnParseError("malformed url: " ++ s))
-    Ok(req) -> request(Http.set_body(req, ""))
+    Ok(req) ->
+      match Http.scope_check_request(scope, req) do
+      Ok(_) -> request(Http.set_body(req, ""))
+      Err(HostRefused(h)) -> Err(Refused("host " ++ h ++ " is outside the scope"))
+      Err(MethodNotAllowed(m)) -> Err(Refused(m ++ " is not allowed by the scope"))
+      Err(PathNotAllowed(p)) -> Err(Refused("path " ++ p ++ " is outside the scope"))
+      end
     end
   end
 

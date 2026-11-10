@@ -965,4 +965,301 @@ mod Http do
     end
   end
 
+
+  -- -----------------------------------------------------------------------
+  -- Host and path scopes (specs/2026-11-09-host-scoped-network-capabilities-design.md,
+  -- specs/2026-11-09-dependency-grants-and-restrict-design.md §3)
+  --
+  -- A module that declares `needs IO.NetConnect("host/path/", methods(...))`
+  -- has its HttpClient and HttpTransport.simple_get calls rewritten by the
+  -- compiler to private `*_scoped` variants, which receive the module's scope
+  -- as a string: "" for any host, otherwise ","-separated entries
+  -- `[!]host[:port][/path/][@get+head]` ("!" for `no_redirects`). These
+  -- helpers check a request the client is about to send. They must agree
+  -- with lib/caps/host_scope.ml (test/test_host_scope.ml compares them).
+  -- They live here, not in HttpClient, so HttpTransport can use them too.
+  -- -----------------------------------------------------------------------
+
+  -- Why a scope refused a request.
+  type ScopeRefusal = HostRefused(String) | MethodNotAllowed(String) | PathNotAllowed(String)
+
+  pfn scope_norm_host(h) do
+    let l = string_to_lowercase(h)
+    if string_ends_with(l, ".") do string_slice(l, 0, string_byte_length(l) - 1)
+    else l
+    end
+  end
+
+  -- A host the guard will vouch for: letters, digits, `-` and `.`, or a
+  -- bracketed IPv6 literal. Anything else (a NUL byte ends the C string the
+  -- resolver sees) could connect somewhere the pattern match did not describe.
+  pfn scope_valid_host(h) do
+    if string_starts_with(h, "[") do
+      string_ends_with(h, "]") && scope_all_chars(h, 1, string_byte_length(h) - 1, true)
+    else string_byte_length(h) > 0 && scope_all_chars(h, 0, string_byte_length(h), false)
+    end
+  end
+
+  pfn scope_all_chars(h, i, stop, v6) do
+    if i >= stop do true
+    else do
+      let c = string_slice(h, i, 1)
+      let lc = string_to_lowercase(c)
+      let ok =
+        string_contains("abcdefghijklmnopqrstuvwxyz0123456789-.", lc) && c != ""
+        || (v6 && (c == ":"))
+      if ok do scope_all_chars(h, i + 1, stop, v6) else false end
+    end
+    end
+  end
+
+  pfn scope_split_port(body) do
+    if string_starts_with(body, "[") do
+      match string_index_of(body, "]") do
+      None -> (body, None)
+      Some(i) -> do
+        let rest = string_slice(body, i + 1, string_byte_length(body) - i - 1)
+        let h = string_slice(body, 0, i + 1)
+        if string_starts_with(rest, ":") do
+          (h, string_to_int(string_slice(rest, 1, string_byte_length(rest) - 1)))
+        else (h, None)
+        end
+      end
+      end
+    else
+      match string_last_index_of(body, ":") do
+      None -> (body, None)
+      Some(i) ->
+        (string_slice(body, 0, i),
+         string_to_int(string_slice(body, i + 1, string_byte_length(body) - i - 1)))
+      end
+    end
+  end
+
+  pfn scope_host_matches(body, host, port) do
+    match scope_split_port(body) do
+    (hpart, pport) -> do
+      let port_ok = match pport do
+        None -> true
+        Some(p) -> p == port
+        end
+      let h = scope_norm_host(host)
+      let pat = scope_norm_host(hpart)
+      if not(port_ok) do false
+      else if string_starts_with(pat, "*.") do
+        let suffix = string_slice(pat, 1, string_byte_length(pat) - 1)
+        string_byte_length(h) > string_byte_length(suffix) && string_ends_with(h, suffix)
+      else h == pat
+      end end
+    end
+    end
+  end
+
+  pfn scope_segments(p) do List.filter(string_split(p, "/"), fn s -> s != "") end
+
+  pfn scope_prefix_segs(pre, segs) do
+    match pre do
+    Nil -> true
+    Cons(a, pt) ->
+      match segs do
+      Nil -> false
+      Cons(b, st) -> a == b && scope_prefix_segs(pt, st)
+      end
+    end
+  end
+
+  pfn scope_no_dot_segs(segs) do
+    match segs do
+    Nil -> true
+    Cons(x, rest) -> x != "." && x != ".." && scope_no_dot_segs(rest)
+    end
+  end
+
+  doc """
+  Whether the guard will judge a request path at all: it starts with `/`,
+  uses only RFC 3986 path characters (no `;`, `?`, `#`, space or control
+  character), every `%` escape is well formed and does not decode to `.`,
+  `/`, backslash, `%` or a control character, and it has no `//` and no
+  `.` or `..` segment. Such a path is refused, not normalized.
+
+  ## Examples
+
+      march> Http.scope_path_ok("/v1/weather/today")
+      true
+      march> Http.scope_path_ok("/v1/weather/../admin")
+      false
+  """
+  fn scope_path_ok(p) do
+    string_starts_with(p, "/") && not(string_contains(p, "//"))
+      && scope_path_chars(p, 0, string_byte_length(p))
+      && scope_no_dot_segs(string_split(p, "/"))
+  end
+
+  -- Only RFC 3986 path characters; a `%` must be a well-formed escape that
+  -- does not decode to `.`, `/`, `\`, `%` or a control character. Agrees with
+  -- `path_ok` in lib/caps/host_scope.ml.
+  pfn scope_path_chars(p, i, n) do
+    if i >= n do true
+    else do
+      let c = string_slice(p, i, 1)
+      if c == "%" do
+        if i + 2 <= n - 1 && scope_hex_ok(string_to_lowercase(string_slice(p, i + 1, 2))) do
+          scope_path_chars(p, i + 3, n)
+        else false
+        end
+      else if c != "" && string_contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$&'()*+,=:@/", c) do
+        scope_path_chars(p, i + 1, n)
+      else false
+      end end
+    end
+    end
+  end
+
+  pfn scope_hex_ok(h) do
+    let digits = "0123456789abcdef"
+    string_byte_length(h) == 2
+      && string_contains(digits, string_slice(h, 0, 1))
+      && string_contains(digits, string_slice(h, 1, 1))
+      && not(string_starts_with(h, "0")) && not(string_starts_with(h, "1"))
+      && h != "2e" && h != "2f" && h != "5c" && h != "25" && h != "7f"
+  end
+
+  -- An entry `[!]host[:port][/path/][@m+m]` as (no_redirects, host, path, methods).
+  pfn scope_entry(e) do
+    let nr = string_starts_with(e, "!")
+    let e1 = if nr do string_slice(e, 1, string_byte_length(e) - 1) else e end
+    let (body, ms) = match string_index_of(e1, "@") do
+      None -> (e1, "")
+      Some(i) -> (string_slice(e1, 0, i),
+                  string_slice(e1, i + 1, string_byte_length(e1) - i - 1))
+      end
+    match string_index_of(body, "/") do
+    None -> (nr, body, "", ms)
+    Some(i) -> (nr, string_slice(body, 0, i),
+                string_slice(body, i, string_byte_length(body) - i), ms)
+    end
+  end
+
+  -- `meth` "" and `path` "" mean "not checked".
+  pfn scope_any(entries, host, port, meth, path, only_no_redirects) do
+    match entries do
+    Nil -> false
+    Cons(e, rest) -> do
+      let (nr, hb, pp, ms) = scope_entry(e)
+      let covers = hb == "" || scope_host_matches(hb, host, port)
+      let method_ok = meth == "" || ms == "" || List.member(string_split(ms, "+"), meth)
+      let path_ok =
+        pp == "" || path == ""
+        || (scope_path_ok(path) && scope_prefix_segs(scope_segments(pp), scope_segments(path)))
+      if covers && method_ok && path_ok && (not(only_no_redirects) || nr) do true
+      else scope_any(rest, host, port, meth, path, only_no_redirects)
+      end
+    end
+    end
+  end
+
+  doc """
+  Whether a scope string admits a request: `meth` lowercase (`"get"`) or
+  `""` for any, `path` a request path (no query) or `""` to skip the path.
+  `""` as the scope admits everything.
+
+  ## Examples
+
+      march> Http.scope_permits_request("a.test/v1/@get", "a.test", 443, "get", "/v1/x")
+      true
+      march> Http.scope_permits_request("a.test/v1/@get", "a.test", 443, "get", "/v2/x")
+      false
+  """
+  fn scope_permits_request(spec, host, port, meth, path) do
+    if spec == "" do true
+    else scope_any(string_split(spec, ","), host, port, meth, path, false)
+    end
+  end
+
+  doc """
+  Whether a scope string forbids following any redirect from `host`: a
+  `!`-marked (`no_redirects`) entry covers it.
+
+  ## Examples
+
+      march> Http.scope_forbids_redirects("!a.test", "a.test", 443)
+      true
+  """
+  fn scope_forbids_redirects(spec, host, port) do
+    if spec == "" do false
+    else scope_any(string_split(spec, ","), host, port, "", "", true)
+    end
+  end
+
+  -- A non-standard verb never names a standard one: "!" cannot appear in a
+  -- scope's method list, so it matches no `methods(...)` entry.
+  pfn scope_method_name(m) do
+    match m do
+    Get -> "get"
+    Post -> "post"
+    Put -> "put"
+    Patch -> "patch"
+    Delete -> "delete"
+    Head -> "head"
+    Options -> "options"
+    Trace -> "trace"
+    Connect -> "connect"
+    Other(_) -> "!other"
+    end
+  end
+
+  pfn scope_method_upper(m) do
+    match m do
+    Get -> "GET"
+    Post -> "POST"
+    Put -> "PUT"
+    Patch -> "PATCH"
+    Delete -> "DELETE"
+    Head -> "HEAD"
+    Options -> "OPTIONS"
+    Trace -> "TRACE"
+    Connect -> "CONNECT"
+    Other(x) -> x
+    end
+  end
+
+  pfn scope_effective_port(req) do
+    match port(req) do
+    Some(p) -> p
+    None -> match scheme(req) do
+      SchemeHttps -> 443
+      SchemeHttp -> 80
+      end
+    end
+  end
+
+  doc """
+  Check a request against a scope string: `Ok(())`, or why it is refused
+  (`HostRefused(host)`, `MethodNotAllowed("POST host")`,
+  `PathNotAllowed("host/path")`). `""` admits everything.
+
+  ## Examples
+
+      march> Http.scope_check_request("a.test/v1/", Result.unwrap(Http.get("https://a.test/v2/x")))
+      Err(PathNotAllowed("a.test/v2/x"))
+  """
+  fn scope_check_request(spec, req) do
+    if spec == "" do Ok(())
+    else do
+      let h = host(req)
+      let p = scope_effective_port(req)
+      let m = method(req)
+      let raw_path = path(req)
+      let pth = if raw_path == "" do "/" else raw_path end
+      if not(scope_valid_host(h)) do Err(HostRefused(h))
+      else if not(scope_permits_request(spec, h, p, "", "")) do Err(HostRefused(h))
+      else if not(scope_permits_request(spec, h, p, scope_method_name(m), "")) do
+        Err(MethodNotAllowed(scope_method_upper(m) ++ " " ++ h))
+      else if scope_permits_request(spec, h, p, scope_method_name(m), pth) do Ok(())
+      else Err(PathNotAllowed(h ++ pth))
+      end end end end
+    end
+    end
+  end
+
 end

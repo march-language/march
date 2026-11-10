@@ -4160,6 +4160,23 @@ let test_fold_int_div_by_zero () =
   let _ = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "not changed" false !changed
 
+(* #1169: `/.` by 0.0 or -0.0 must stay a run-time division, which stops with
+   "division by zero"; a nonzero divisor still folds. *)
+let test_fold_float_div_by_zero () =
+  List.iter (fun z ->
+      let changed = ref false in
+      let m = mk_module [mk_fn "f" (fapp "/." [flit 1.0; flit z])] in
+      let _ = March_tir.Fold.run ~changed m in
+      Alcotest.(check bool) (Printf.sprintf "1.0 /. %g not folded" z) false !changed)
+    [0.0; -0.0];
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (fapp "/." [flit 1.0; flit 240.0])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "1.0 /. 240.0 folded" true !changed;
+  Alcotest.(check string) "1.0 /. 240.0"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (flit (1.0 /. 240.0))))
+    (March_tir.Tir.show_expr (first_body m'))
+
 let test_fold_float_add () =
   let changed = ref false in
   let m = mk_module [mk_fn "f" (fapp "+." [flit 1.5; flit 2.5])] in
@@ -13664,6 +13681,96 @@ let test_js_int_subset_parity () =
             && ir_contains tail "EXIT:1")
   end
 
+(** `--target js` Float literals are the same double as native, bit for bit
+    (#1169).  js_emit printed a literal with [string_of_float] (12 significant
+    digits), so `3.141592653589793`, `Math.pi()`, `Math.tau()` and folded
+    values like `1.0 /. 240.0` ran as a different double, and a folded
+    infinity or NaN came out as `inf.0` / `nan.0`, a SyntaxError.  The program
+    prints each value's bits (sign, 53-bit mantissa, exponent, found by exact
+    halving/doubling; -0 told from +0 by atan2), not its printed form, which
+    float_to_string's 12 digits would hide.  The overflows use a literal of 1
+    followed by 308 zeros (the lexer has no exponent form) times 10.0, which
+    opt.fold turns into an infinity without a division by zero; a 309-zero
+    literal is infinite at lex time, and also reaches a float pattern
+    (literal_tag_js).  Interpreter, native and node must all print
+    [expected].  The JS half is skipped when node is absent. *)
+let test_js_float_literal_bits () =
+  let name = "march_js_float_bits" in
+  let e308 = "1" ^ String.make 308 '0' ^ ".0" in
+  let e309 = "1" ^ String.make 309 '0' ^ ".0" in
+  let src = Printf.sprintf
+    "mod JsFloatBits do\n\
+    \  needs IO.Console\n\
+    \  pfn norm(m : Float, e : Int) : String do\n\
+    \    if m >= 9007199254740992.0 do norm(m *. 0.5, e + 1)\n\
+    \    else if m < 4503599627370496.0 do norm(m *. 2.0, e - 1)\n\
+    \    else int_to_string(float_to_int(m)) ++ \"p\" ++ int_to_string(e) end end\n\
+    \  end\n\
+    \  pfn bits(x : Float) : String do\n\
+    \    if float_is_nan(x) do \"nan\"\n\
+    \    else if x == 0.0 do (if Math.atan2(0.0, x) > 0.0 do \"-0\" else \"+0\" end)\n\
+    \    else if x == x +. x do (if x > 0.0 do \"+inf\" else \"-inf\" end)\n\
+    \    else if x < 0.0 do \"-\" ++ norm(0.0 -. x, 0)\n\
+    \    else \"+\" ++ norm(x, 0) end end end end\n\
+    \  end\n\
+    \  pfn tag(x : Float) : String do\n\
+    \    match x do\n\
+    \      3.141592653589793 -> \"pi\"\n\
+    \      %s -> \"inf\"\n\
+    \      _ -> \"other\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let big = %s *. 10.0\n\
+    \    println(\"literal \" ++ bits(3.141592653589793))\n\
+    \    println(\"literal \" ++ bits(0.30000000000000004))\n\
+    \    println(\"pi \" ++ bits(Math.pi()))\n\
+    \    println(\"tau \" ++ bits(Math.tau()))\n\
+    \    println(\"e \" ++ bits(Math.e()))\n\
+    \    println(\"folded div \" ++ bits(1.0 /. 240.0))\n\
+    \    println(\"folded sum \" ++ bits(0.1 +. 0.2))\n\
+    \    println(\"folded inf \" ++ bits(big))\n\
+    \    println(\"folded -inf \" ++ bits(0.0 -. big))\n\
+    \    println(\"folded nan \" ++ bits(big -. big))\n\
+    \    println(\"literal inf \" ++ bits(%s))\n\
+    \    println(\"literal -0.0 \" ++ bits(-0.0))\n\
+    \    println(\"folded -0.0 \" ++ bits(0.0 *. -1.0))\n\
+    \    println(\"folded +0.0 \" ++ bits(0.0 -. 0.0))\n\
+    \    println(\"pattern \" ++ tag(Math.pi()) ++ \" \" ++ tag(big) ++ \" \" ++ tag(1.0))\n\
+    \  end\n\
+     end\n" e309 e308 e309 in
+  let expected =
+    "literal +7074237752028440p-51\n\
+     literal +5404319552844596p-54\n\
+     pi +7074237752028440p-51\n\
+     tau +7074237752028440p-50\n\
+     e +6121026514868073p-51\n\
+     folded div +4803839602528529p-60\n\
+     folded sum +5404319552844596p-54\n\
+     folded inf +inf\n\
+     folded -inf -inf\n\
+     folded nan nan\n\
+     literal inf +inf\n\
+     literal -0.0 -0\n\
+     folded -0.0 -0\n\
+     folded +0.0 +0\n\
+     pattern pi inf other" in
+  assert_compiled_interp_parity ~name ~src ~expected ();
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Float literal bits)"
+  else begin
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    Alcotest.(check string) (name ^ ": node output (bits) equals native")
+      (expected ^ "\nEXIT:0") (String.trim js_out)
+  end
+
 (** The Diagnostics module on `--target js` (the diag_* builtins, and the
     try_finally its with_context is built on, had no JS mapping: the first
     failed the compile, the second a ReferenceError at run time).  The JS
@@ -14267,6 +14374,40 @@ let test_int_overflow_uncaught_panic () =
          on instead of panicking. *)
       ("march_divz", "h / (h - h)", "division by zero");
       ("march_modz", "h % (h - h)", "modulo by zero") ]
+
+(** `1.0 /. 0.0` written with two literals stops with "division by zero" in a
+    default (opt.fold on) native build, as in the interpreter
+    (specs/lang/core-march.md, δ-Div-0F).  opt.fold used to compute it, so the
+    build printed `inf` / `-inf` and exited 0 while a --disable-pass opt.fold
+    build stopped (#1169).  The JS run-time `/.` does not check its divisor
+    (specs/todos/2026-11-09-js-float-div-by-zero.md), so there is no JS half. *)
+let test_compiled_float_div_zero_literal () =
+  List.iter (fun (name, expr) ->
+    let src = Printf.sprintf
+      "mod FloatDivZero do\n\
+      \  needs IO.Console\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \    println(\"before\")\n\
+      \    println(float_to_string(%s))\n\
+      \    println(\"after\")\n\
+      \  end\n\
+       end\n" expr in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let ok out = ir_contains out "before" && ir_contains out "division by zero"
+                 && not (ir_contains out "after") && ir_contains out "EXIT:1" in
+    let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src_path)) in
+    Alcotest.(check bool) (name ^ ": interpreter stops (got: " ^ interp_out ^ ")")
+      true (ok interp_out);
+    let bin = Filename.concat tmp (name ^ "bin") in
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+            ~main_exe ~bin ~src:src_path () with
+    | None -> ()
+    | Some bin ->
+      let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+      Alcotest.(check bool) (name ^ ": compiled (opt.fold on) stops (got: " ^ run_out ^ ")")
+        true (ok run_out && ir_contains run_out "runtime error: division by zero"))
+    [ ("march_fdivz_pos", "1.0 /. 0.0"); ("march_fdivz_neg", "1.0 /. -0.0") ]
 
 (** A shift count outside [0, 62] (and a negative int_pow exponent) panics
     on both backends with the interpreter's message.  Compiled, a non-literal
@@ -15303,6 +15444,36 @@ let test_newtype_eq_operator_generic_payload_compiled () =
    mangled to [Tup_Tup_Int_x_Int_x_Int_x_Int].  The interpreter was right in
    every case; compiled code gave wrong answers, over-read, or SIGSEGVed. *)
 
+(** `not p(n)` is `!p(n)`: it used to parse as two block statements, a
+    discarded `not` and the value `p(n)`, so the `else` branch returned
+    `p(n)` un-negated on both backends
+    (specs/progress/2026-10-29-not-at-block-start-parses-as-two-statements.md). *)
+let test_not_before_operand_is_prefix_not () =
+  assert_compiled_interp_parity
+    ~name:"march_not_before_operand"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn p(n : Int) : Bool do n > 5 end
+  fn branch(n : Int) : Bool do
+    if n >= 0 do false else not p(n) end
+  end
+  fn arms(n : Int) : Bool do
+    match n do
+      0 -> not true
+      _ -> not not p(n)
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    println(bool_to_string(branch(-1)))
+    println(bool_to_string(branch(-9)))
+    println(bool_to_string(arms(0)) ++ " " ++ bool_to_string(arms(9)))
+    println(bool_to_string(not(true)))
+  end
+end
+|}
+    ~expected:"true\ntrue\nfalse true\nfalse"
+    ()
+
 (** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
 let test_record_eq_pair_then_triple_compiled () =
   assert_compiled_interp_parity
@@ -15987,6 +16158,11 @@ declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_time
 declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
 declare void @march_http_server_wait(i64 %handle)
 declare void @march_http_server_bind_host(ptr %host)
+declare ptr  @march_http_server_tls_configure(i64 %kind, ptr %a, ptr %b, i64 %poll_secs, i64 %wait_for_cert)
+declare void @march_http_server_set_timeouts(i64 %handshake_secs, i64 %header_secs, i64 %progress_secs)
+declare ptr  @march_http_server_reload_tls(i64 %kind, ptr %a, ptr %b)
+declare void @march_http_server_plain_listener(i64 %port, ptr %pipeline)
+declare i64  @march_http_conn_is_tls(i64 %fd)
 declare void @march_ws_handshake(i64 %fd, ptr %key)
 declare ptr  @march_ws_recv(i64 %fd)
 declare void @march_ws_send(i64 %fd, ptr %frame)
@@ -18536,6 +18712,7 @@ let codegen_suites =
         Alcotest.test_case "int_mul"                 `Quick test_fold_int_mul;
         Alcotest.test_case "int_div_by_zero"         `Quick test_fold_int_div_by_zero;
         Alcotest.test_case "float_add"               `Quick test_fold_float_add;
+        Alcotest.test_case "float_div_by_zero"       `Quick test_fold_float_div_by_zero;
         Alcotest.test_case "bool_not"                `Quick test_fold_bool_not;
         Alcotest.test_case "and_shortcircuit_pure"   `Quick test_fold_and_shortcircuit_pure;
         Alcotest.test_case "and_shortcircuit_impure" `Quick test_fold_and_shortcircuit_impure;
@@ -19182,8 +19359,12 @@ let codegen_suites =
             test_int_divmod_inline_ir;
           Alcotest.test_case "uncaught Int overflow / div by zero panics with its message, exit 1 (interp, compiled, JS)" `Quick
             test_int_overflow_uncaught_panic;
+          Alcotest.test_case "Float /. by a literal zero is not folded: compiled stops like the interpreter (#1169)" `Quick
+            test_compiled_float_div_zero_literal;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
+          Alcotest.test_case "--target js Float literals are native's double, bit for bit (#1169)" `Quick
+            test_js_float_literal_bits;
           Alcotest.test_case "--target js Diagnostics: observers, context, location match the interpreter" `Quick
             test_js_diagnostics_observers;
           Alcotest.test_case "unwritable -o path: dirs created, plain error, no ICE (#1181)" `Quick
@@ -19280,6 +19461,8 @@ let codegen_suites =
             test_newtype_eq_operator_generic_payload_compiled;
           Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
             test_eq_operator_opaque_ctor_field_uses_poly_eq;
+          Alcotest.test_case "`not p(n)` at a block start is `!p(n)`" `Quick
+            test_not_before_operand_is_prefix_not;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

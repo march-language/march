@@ -116,6 +116,7 @@ let all_stdlib_decls =
     "websocket.march";
     "tls.march";
     "http_server.march";
+    "http_acme.march";
     "iterable.march";
     "set.march";
     "hash_map.march";

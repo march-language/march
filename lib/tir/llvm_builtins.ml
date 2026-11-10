@@ -711,6 +711,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_http_server_wait(i64 %handle)" };
   { march_name = "http_server_bind_host"; c_name = Some "march_http_server_bind_host"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_http_server_bind_host(ptr %host)" };
+  { march_name = "http_server_tls_configure"; c_name = Some "march_http_server_tls_configure"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_server_tls_configure(i64 %kind, ptr %a, ptr %b, i64 %poll_secs, i64 %wait_for_cert)" };
+  { march_name = "http_server_set_timeouts"; c_name = Some "march_http_server_set_timeouts"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_http_server_set_timeouts(i64 %handshake_secs, i64 %header_secs, i64 %progress_secs)" };
+  { march_name = "http_server_reload_tls"; c_name = Some "march_http_server_reload_tls"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_server_reload_tls(i64 %kind, ptr %a, ptr %b)" };
+  { march_name = "http_server_plain_listener"; c_name = Some "march_http_server_plain_listener"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_http_server_plain_listener(i64 %port, ptr %pipeline)" };
+  { march_name = "http_conn_is_tls"; c_name = Some "march_http_conn_is_tls"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_http_conn_is_tls(i64 %fd)" };
   { march_name = "ws_handshake"; c_name = Some "march_ws_handshake"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare void @march_ws_handshake(i64 %fd, ptr %key)" };
   { march_name = "ws_recv"; c_name = Some "march_ws_recv"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -1849,6 +1859,11 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_http_server_spawn_n";
   PDeclare "march_http_server_wait";
   PDeclare "march_http_server_bind_host";
+  PDeclare "march_http_server_tls_configure";
+  PDeclare "march_http_server_set_timeouts";
+  PDeclare "march_http_server_reload_tls";
+  PDeclare "march_http_server_plain_listener";
+  PDeclare "march_http_conn_is_tls";
   PDeclare "march_ws_handshake";
   PDeclare "march_ws_recv";
   PDeclare "march_ws_send";
