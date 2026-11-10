@@ -19,6 +19,15 @@
     declarations are not counted (they reach a check through the cached
     stdlib env, whose signatures are bare).
 
+    One exception: the RESERVED builtin names ([reserved_builtin_names], the
+    ocap phase-2 handle types).  A user variant with one of these names gets
+    an identity even when it is the only declaration, and at the top level
+    that identity is entry-qualified ([App.Process]), so it is never the bare
+    builtin.  A user record or alias with a reserved name keeps its bare name
+    in the typechecker (it cannot unify with the builtin TCon), but each
+    reference to it is recorded ([refers_to_user_decl]) so the lowering keeps
+    it apart from the handle box too.
+
     Resolution is done ONCE, up front, over the whole AST, by the lexical rule
     a reference follows: a bare [Note] means the innermost enclosing module
     that declares a type [Note]; a qualified [A.Note] means module [A] as seen
@@ -43,6 +52,14 @@ module A = March_ast.Ast
    span) and declarations (a [DType]'s name span). *)
 let refs : (A.span, string) Hashtbl.t = Hashtbl.create 16
 
+(** Written references to a reserved builtin name that resolve, lexically, to
+    a user declaration that is not a variant (a record or an alias), which has
+    no identity in [refs].  For the current check only. *)
+let user_reserved_refs : (A.span, unit) Hashtbl.t = Hashtbl.create 16
+
+(** The entry module of the current check (for [identity_of_path_name]). *)
+let current_entry : string ref = ref ""
+
 (** identity -> arity, for the current check only. *)
 let arity_tbl : (string, int) Hashtbl.t = Hashtbl.create 16
 
@@ -53,6 +70,8 @@ let short_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
 
 let reset () =
   Hashtbl.reset refs;
+  Hashtbl.reset user_reserved_refs;
+  current_entry := "";
   Hashtbl.reset arity_tbl
 
 let is_identity (s : string) : bool = Hashtbl.mem arity_tbl s
@@ -87,12 +106,26 @@ let reserved_builtin_names = [ "Socket"; "Listener"; "Process" ]
 
 let is_reserved (short : string) : bool = List.mem short reserved_builtin_names
 
+(** True iff the written type name [n] (a reserved builtin name, at that
+    span) means a declaration of the checked program rather than the
+    builtin: a variant's identity or a record/alias reference. *)
+let refers_to_user_decl (n : A.name) : bool =
+  Hashtbl.mem refs n.A.span || Hashtbl.mem user_reserved_refs n.A.span
+
 let short_of q =
   match String.rindex_opt q '.' with
   | Some i -> String.sub q (i + 1) (String.length q - i - 1)
   | None -> q
 
 let join p s = if p = "" then s else p ^ "." ^ s
+
+(** A type's name relative to the entry module ([Process], [A.Process]) as its
+    identity: a reserved name declared at the top level is entry-qualified
+    (see [compute]); every other name is its own identity. *)
+let identity_of_path_name (q : string) : string =
+  if !current_entry <> "" && not (String.contains q '.') && is_reserved q
+  then join !current_entry q
+  else q
 
 (** Walk [m] and fill the tables.  [is_stdlib] tells a stdlib declaration
     (not counted).  Called at the start of every whole-module check. *)
@@ -126,15 +159,20 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
   collect "" m.A.mod_decls;
   let colliding = Hashtbl.create 16 in
   Hashtbl.iter (fun short paths ->
-      if List.length paths >= 2 || is_reserved short then
-        Hashtbl.replace colliding short ()) variant_paths;
+      if List.length paths >= 2 then Hashtbl.replace colliding short ()) variant_paths;
+  (* Any declaration of a reserved name, of any kind (the stdlib declares
+     none). *)
+  Hashtbl.iter (fun (_, short) _ ->
+      if is_reserved short then Hashtbl.replace colliding short ()) decls_at;
   if Hashtbl.length colliding = 0 then ()
   else begin
     let entry = m.A.mod_name.A.txt in
-    (* The identity of [short] declared at [path].  A reserved name is
-       qualified by the entry module too, so it is never the bare builtin. *)
+    current_entry := entry;
+    (* The identity of [short] declared at [path].  A reserved name declared
+       at the top level is qualified by the entry module, so it is never the
+       bare builtin; elsewhere its path already qualifies it. *)
     let ident path short =
-      if is_reserved short then join (join entry path) short else join path short in
+      if is_reserved short && path = "" then join entry short else join path short in
     (* Declarations get their identity. *)
     Hashtbl.iter (fun (path, short) d ->
         match d with
@@ -187,6 +225,38 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
         in
         go scopes
     in
+    (* Whether [txt], a reserved name, means a NON-variant declaration
+       (record, alias) of the program, by the same lexical rule as
+       [resolve]. *)
+    let resolves_to_other scopes (txt : string) : bool =
+      let short = short_of txt in
+      if not (String.contains txt '.') then
+        let rec go = function
+          | [] -> false
+          | p :: rest ->
+            (match Hashtbl.find_opt decls_at (p, short) with
+             | Some `Other -> true
+             | Some (`Variant _) -> false
+             | None -> go rest)
+        in
+        go scopes
+      else
+        let prefix = String.sub txt 0 (String.length txt - String.length short - 1) in
+        let prefixes =
+          if prefix = entry then [ "" ]
+          else
+            let el = String.length entry in
+            if String.length prefix > el + 1
+               && String.sub prefix 0 (el + 1) = entry ^ "."
+            then [ prefix; String.sub prefix (el + 1) (String.length prefix - el - 1) ]
+            else [ prefix ]
+        in
+        List.exists (fun p ->
+            List.exists (fun pre ->
+                let cand = if pre = "" then "" else join p pre in
+                Hashtbl.find_opt decls_at (cand, short) = Some `Other) prefixes)
+          scopes
+    in
     let record scopes (n : A.name) =
       if n.A.span <> A.dummy_span then
         match resolve scopes n.A.txt with
@@ -194,7 +264,9 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
           (match Hashtbl.find_opt refs n.A.span with
            | Some id' when id' <> id -> ()   (* a span claimed twice: keep the first *)
            | _ -> Hashtbl.replace refs n.A.span id)
-        | None -> ()
+        | None ->
+          if is_reserved (short_of n.A.txt) && resolves_to_other scopes n.A.txt then
+            Hashtbl.replace user_reserved_refs n.A.span ()
     in
     (* Pass 2: every written type, with its lexical scope. *)
     let rec ty sc (t : A.ty) =

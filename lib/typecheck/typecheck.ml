@@ -11845,7 +11845,10 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
          codec: only a pair involving a type without one (a record) is
          still ambiguous. *)
       let distinct q q' =
-        Typecheck_nominal.is_identity q && Typecheck_nominal.is_identity q' in
+        (* [q] is entry-relative; a reserved name's top-level identity is
+           entry-qualified ([Typecheck_nominal.identity_of_path_name]). *)
+        let id = Typecheck_nominal.identity_of_path_name in
+        Typecheck_nominal.is_identity (id q) && Typecheck_nominal.is_identity (id q') in
       (match List.find_opt (fun (q', _) ->
            q' <> q && short q' = short q && not (distinct q q')) !seen with
        | Some (q', sp') ->
@@ -11937,7 +11940,11 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
-  (* Colliding variant types' identities (`A.Note` / `B.Note`). *)
+  (* Colliding variant types' identities (`A.Note` / `B.Note`).  Recomputed
+     per check, so per REPL fragment too: a fragment sees only its own
+     declarations, and a user type with a reserved handle name (`Process`)
+     declared in an EARLIER fragment has no identity in a later one (known
+     edge, ocap phase 2 Task 2 review item 8). *)
   Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib m;
   (* Type-variable letters in messages are assigned on first print from a
      process-wide table.  A cold run typechecks the stdlib first and can

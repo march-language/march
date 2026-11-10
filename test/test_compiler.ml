@@ -18507,13 +18507,111 @@ end|} in
 end|} in
   Alcotest.(check bool) "a user's own Process type checks" false (has_errors ok)
 
+(* Review fix round 1, MINOR 2: a reserved name declared in a module gets
+   that module's path as its identity (`Procs.Process`), with no entry
+   prefix; only a top-level declaration is entry-qualified. *)
+let test_reserved_identity_is_path_relative () =
+  let ctx = typecheck {|mod Bad do
+  mod Procs do
+    type Process = P(Int)
+    fn mk() : Process do P(1) end
+  end
+  fn use_it(_p : Process) : Int do 0 end
+  fn go() : Int do use_it(Procs.mk()) end
+end|} in
+  Alcotest.(check bool) "named Procs.Process" true (has_error_with ctx "got `Procs.Process`");
+  Alcotest.(check bool) "not Bad.Procs.Process" false (has_error_with ctx "Bad.Procs.Process")
+
+(* MINOR 3: two modules each deriving Json for their own `Process` have two
+   identities, exactly as two `Note`s do: no json_derive_name_collision. *)
+let test_reserved_json_derive_no_false_collision () =
+  let src short = Printf.sprintf {|mod App do
+  mod A do
+    type %s = P(Int)
+    derive Json for %s
+  end
+  mod B do
+    type %s = Q(String)
+    derive Json for %s
+  end
+  fn go() : Int do
+    let x : A.%s = A.P(3)
+    let r : Result(A.%s, String) = from_json(to_json(x))
+    match r do
+      Ok(A.P(n)) -> n
+      _ -> 0
+    end
+  end
+end|} short short short short short short in
+  List.iter (fun short ->
+      let ctx = typecheck (src short) in
+      Alcotest.(check bool) (short ^ ": no false json collision") false
+        (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+             d.code = March_errors.Errors.Code.json_derive_name_collision)
+            ctx.March_errors.Errors.diagnostics))
+    [ "Note"; "Process"; "Socket"; "Listener" ];
+  (* A top-level one (entry-qualified identity `App.Process`) beside a nested
+     one: [check_json_derive_collisions] sees the path-relative `Process`. *)
+  let ctx = typecheck {|mod App do
+  type Process = P(Int)
+  derive Json for Process
+  mod B do
+    type Process = Q(String)
+    derive Json for Process
+  end
+end|} in
+  Alcotest.(check bool) "top-level and nested Process: no false json collision" false
+    (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+         d.code = March_errors.Errors.Code.json_derive_name_collision)
+        ctx.March_errors.Errors.diagnostics)
+
+(* MINOR 4: one source of truth for the handle type names. *)
+let test_handle_name_tables_agree () =
+  let reserved = March_typecheck.Typecheck_nominal.reserved_builtin_names in
+  let lowered = March_tir.Lower_types.handle_type_names in
+  Alcotest.(check (list string)) "lowered handle names = File.Handle, File.Dir + reserved"
+    ([ "File.Handle"; "File.Dir" ] @ reserved) lowered;
+  List.iter (fun n ->
+      Alcotest.(check (option int)) (n ^ " is a builtin type of arity 0") (Some 0)
+        (List.assoc_opt n March_typecheck.Typecheck_builtins.builtin_types))
+    lowered;
+  List.iter (fun n ->
+      Alcotest.(check bool) (n ^ " is undotted") false (String.contains n '.'))
+    reserved
+
+(* MINOR 5: the stdlib declares no type with a reserved handle name (the
+   nominal pass would give it an identity the cached stdlib env lacks). *)
+let test_stdlib_declares_no_reserved_type () =
+  let dir = stdlib_dir_for_test () in
+  let decls = stdlib_decls_like_toolchain dir March_modules.Stdlib_manifest.all_known in
+  let found = ref [] in
+  let rec walk path ds =
+    List.iter (function
+        | March_ast.Ast.DType (_, n, _, _, _) | March_ast.Ast.DAlwaysLinearType (_, n, _, _, _)
+          when March_typecheck.Typecheck_nominal.is_reserved n.March_ast.Ast.txt ->
+          found := (path ^ "." ^ n.March_ast.Ast.txt) :: !found
+        | March_ast.Ast.DMod (m, _, inner, _) -> walk (path ^ "." ^ m.March_ast.Ast.txt) inner
+        | March_ast.Ast.DDescribe (_, inner, _) -> walk path inner
+        | _ -> ()) ds
+  in
+  walk "" decls;
+  Alcotest.(check bool) "walked the stdlib" true (List.length decls > 50);
+  Alcotest.(check (list string)) "no stdlib type named Socket, Listener or Process" [] !found
+
 let handle_types_suite =
   ("handle types",
    [ Alcotest.test_case "handle_type_names_resolve" `Quick test_handle_type_names_resolve;
      Alcotest.test_case "file_handle_is_not_linear" `Quick test_file_handle_is_not_linear;
      Alcotest.test_case "handle_eq_is_type_error" `Quick test_handle_eq_is_type_error;
      Alcotest.test_case "cap_io_process_narrow" `Quick test_cap_io_process_narrow;
-     Alcotest.test_case "user_process_is_not_the_handle" `Quick test_user_process_is_not_the_handle ])
+     Alcotest.test_case "user_process_is_not_the_handle" `Quick test_user_process_is_not_the_handle;
+     Alcotest.test_case "reserved_identity_is_path_relative" `Quick
+       test_reserved_identity_is_path_relative;
+     Alcotest.test_case "reserved_json_derive_no_false_collision" `Quick
+       test_reserved_json_derive_no_false_collision;
+     Alcotest.test_case "handle_name_tables_agree" `Quick test_handle_name_tables_agree;
+     Alcotest.test_case "stdlib_declares_no_reserved_type" `Quick
+       test_stdlib_declares_no_reserved_type ])
 
 let compiler_suites =
   [

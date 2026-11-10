@@ -2729,7 +2729,7 @@ let handle_containers_src = {|mod HandleContainers do
 end
 |}
 
-(* A user module type named like a handle type (`App.Process`), next to a
+(* A user module VARIANT type named like a handle type (`App.Process`), next to a
    builtin `Process` box: the TIR must keep the two apart (R7). *)
 let handle_vs_user_type_src = {|mod Main do
   needs IO.Console
@@ -2752,6 +2752,30 @@ let handle_vs_user_type_src = {|mod Main do
     println(inspect(ps))
     let _ = handle_close(h)
     println(inspect(h))
+  end
+end
+|}
+
+(* A user RECORD named `Socket` inside a variant, next to a builtin handle
+   box (review fix round 1): the record must lower as the record. *)
+let handle_vs_user_record_src = {|mod App do
+  needs IO.Console
+  type Socket = { fd : Int, name : String }
+  type Wrap = W(Socket)
+  fn f(s : Socket) : Int do s.fd end
+  fn g(w : Wrap) : String do
+    match w do
+      W(s) -> s.name ++ int_to_string(f(s))
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let s : Socket = { fd: 42, name: "x" }
+    let h : Listener = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    println(int_to_string(f(s)))
+    println(g(W(s)))
+    let ws = [W(s), W({ fd: 1, name: "y" })]
+    println(to_string(ws))
+    println(inspect([h]))
   end
 end
 |}

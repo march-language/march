@@ -45,7 +45,8 @@ let unknown_ty = Tir.TVar "_"
     name. *)
 let handle_tir_name = "$Handle"
 
-let handle_type_names = [ "File.Handle"; "File.Dir"; "Socket"; "Listener"; "Process" ]
+let handle_type_names =
+  [ "File.Handle"; "File.Dir" ] @ March_typecheck.Typecheck_nominal.reserved_builtin_names
 
 let is_handle_type_name (n : string) : bool = List.mem n handle_type_names
 
@@ -64,7 +65,7 @@ let rec lower_ty (t : Ast.ty) : Tir.ty =
   | Ast.TyCon ({ txt = "Unit"; _ }, [])   -> Tir.TUnit
   | Ast.TyCon (({ txt = name; _ } as n), [])
     when is_handle_type_name name
-      && March_typecheck.Typecheck_nominal.ref_identity n = None ->
+      && not (March_typecheck.Typecheck_nominal.refers_to_user_decl n) ->
     (* the builtin handle type, not a user type of that short name *)
     Tir.TCon (handle_tir_name, [])
   | Ast.TyCon ({ txt = name; _ }, args)   ->

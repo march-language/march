@@ -18632,7 +18632,7 @@ let test_handle_in_generic_containers () =
   Alcotest.(check bool) ("never prints the raw descriptor as a field:\n" ^ out) false
     (contains "Socket(7" out)
 
-(* R7: a user `App.Process` record and a builtin `Process` box in one
+(* R7: a user `App.Process` variant and a builtin `Process` box in one
    compiled program; the TIR lowers the builtin to `$Handle`, so Perceus
    never drops the box as the user's P(Int, Int). Output must equal the
    interpreter's. *)
@@ -18658,13 +18658,40 @@ let test_handle_vs_user_type_named_process () =
     [ "3,4"; "[#<Socket>, #<Socket>]"; "[P(3, 4), P(5, 6)]"; "#<Socket closed>" ]
     (program_lines compiled)
 
+(* Review fix round 1: a user RECORD named `Socket` (no nominal identity:
+   records are structural) inside a variant, beside a builtin handle box.
+   Compiled output must equal the interpreter's. *)
+let test_handle_vs_user_record_named_socket () =
+  let (rc, compiled) =
+    run_handle_fixture ~compiled:true ~name:"handle_vs_rec" handle_vs_user_record_src in
+  if rc <> 0 then Alcotest.failf "compiled handle-vs-user-record exited %d:\n%s" rc compiled;
+  let (irc, interp) =
+    run_handle_fixture ~compiled:false ~name:"handle_vs_rec_i" handle_vs_user_record_src in
+  if irc <> 0 then Alcotest.failf "interpreted handle-vs-user-record exited %d:\n%s" irc interp;
+  let program_lines out =
+    let ls = List.map String.trim (String.split_on_char '\n' out) in
+    let rec drop_to = function
+      | l :: rest when l = "42" -> l :: rest
+      | _ :: rest -> drop_to rest
+      | [] -> []
+    in
+    List.filter (( <> ) "") (drop_to ls)
+  in
+  Alcotest.(check (list string)) "compiled output = interpreted output"
+    (program_lines interp) (program_lines compiled);
+  Alcotest.(check (list string)) "the program's output"
+    [ "42"; "x42"; "[W({ fd: 42, name: \"x\" }), W({ fd: 1, name: \"y\" })]"; "[#<Socket>]" ]
+    (program_lines compiled)
+
 let codegen_suites =
   [
       ( "handle primitives", [
           Alcotest.test_case "handle_primitive_roundtrip" `Quick test_handle_primitive_roundtrip;
           Alcotest.test_case "handle_in_generic_containers" `Quick test_handle_in_generic_containers;
           Alcotest.test_case "handle_vs_user_type_named_process" `Quick
-            test_handle_vs_user_type_named_process ] );
+            test_handle_vs_user_type_named_process;
+          Alcotest.test_case "handle_vs_user_record_named_socket" `Quick
+            test_handle_vs_user_record_named_socket ] );
       ( "string_allocator", [
           Alcotest.test_case "strings use the March object allocator" `Quick
             test_string_alloc_uses_march_allocator;
