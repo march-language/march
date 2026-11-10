@@ -15474,6 +15474,46 @@ end
     ~expected:"true\ntrue\nfalse true\nfalse"
     ()
 
+(** A newtype over a GENERIC named record ([Wrap(Cell(a))]): the payload
+    reached the eq generator as [TCon ("Cell", [TString])], which names a
+    record, not a variant, so no helper was found and the newtype's helper
+    fell back to [march_poly_eq], a pointer comparison for records: equal
+    payloads compared unequal compiled.  The two-parameter record's fields
+    are declared in the opposite order to its parameters, so the parameter
+    substitution must come from the declaration
+    (specs/progress/2026-11-06-compiled-generic-record-newtype-equality.md). *)
+let test_newtype_over_generic_record_eq_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_generic_record_eq"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Cell(a) = { value : a }
+  type Wrap(a) = Wrap(Cell(a))
+  type Pair(a, b) = { y : a, x : b }
+  type WP(a, b) = WP(Pair(a, b))
+  derive Eq for Cell
+  derive Eq for Wrap
+  derive Eq for Pair
+  derive Eq for WP
+  fn main(_cap : Cap(IO.Console)) : () do
+    let a : Cell(String) = { value: "ann" }
+    let b : Cell(String) = { value: "bob" }
+    let c : Cell(Int) = { value: 1 }
+    let d : Cell(Int) = { value: 2 }
+    println(to_string(Wrap(a) == Wrap({ value: "ann" })))
+    println(to_string(Wrap(a) == Wrap(b)))
+    println(to_string(Wrap(c) == Wrap({ value: 1 })))
+    println(to_string(Wrap(c) != Wrap(d)))
+    let p : Pair(String, Int) = { y: "s", x: 3 }
+    println(to_string(WP(p) == WP({ y: "s", x: 3 })))
+    println(to_string(WP(p) == WP({ y: "s", x: 4 })))
+    println(to_string(WP(p) == WP({ y: "t", x: 3 })))
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue\ntrue\ntrue\nfalse\nfalse"
+    ()
+
 (** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
 let test_record_eq_pair_then_triple_compiled () =
   assert_compiled_interp_parity
@@ -19463,6 +19503,8 @@ let codegen_suites =
             test_eq_operator_opaque_ctor_field_uses_poly_eq;
           Alcotest.test_case "`not p(n)` at a block start is `!p(n)`" `Quick
             test_not_before_operand_is_prefix_not;
+          Alcotest.test_case "== on a newtype over a generic named record is structural" `Quick
+            test_newtype_over_generic_record_eq_compiled;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

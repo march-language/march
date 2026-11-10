@@ -880,6 +880,9 @@ git log is authoritative for exact commits.
   source as `/a/m.march` and then `/b/m.march` reused the first binary, whose panic locations
   and `--test` failure reports named `/a/m.march`. The entry path as written is now part of the
   cache key.
+- **Compiled `==` on a newtype over a generic record compares the record.** For
+  `type Wrap(a) = Wrap(Cell(a))` with `Cell` a record, compiled code compared the two `Cell`
+  pointers, so equal values compared unequal; the interpreter was right.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
