@@ -57,7 +57,14 @@ let private_home =
   end
 
 (* Fixtures the JS target cannot run yet, each with the gap that stops it. *)
-let js_unsupported : (string * string) list = []
+let js_unsupported : (string * string) list = [
+  (* With the console refused the verdict can only be the exit code, and the
+     JS target has neither `process_exit` nor stdin (`io_read_line`,
+     `io_read_byte`): pre-existing gaps. Authority.check itself is covered
+     on JS by the refuse_* fixtures. *)
+  ("console_read_byte", "verdict needs `process_exit`, and `io_read_byte`; the JS target has neither");
+  ("console_refused", "verdict needs `process_exit`, and `io_read_line`; the JS target has neither");
+]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)
 

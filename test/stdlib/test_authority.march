@@ -55,6 +55,25 @@ describe "Authority" do
 
   end
 
+  describe "operations return Ok when allowed" do
+
+    test "console" do
+      assert (println("authority test") == Ok(()))
+      assert (IO.puts("authority test") == Ok(()))
+    end
+
+    test "clock" do
+      assert (Authority.must(System.now_ms()) > 1700000000000)
+      assert (Authority.must(DateTime.now()) > 1700000000)
+    end
+
+    test "random" do
+      assert (Bytes.length(Authority.must(Crypto.random_bytes(4))) == 4)
+      assert (String.byte_size(Authority.must(Crypto.random_hex(3))) == 6)
+    end
+
+  end
+
   describe "check" do
 
     test "an unrefused kind is allowed" do

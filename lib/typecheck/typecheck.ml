@@ -2533,6 +2533,11 @@ let binary_operators =
   [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/.";
     "<"; "<="; ">"; ">="; "=="; "!="; "&&"; "||" ]
 
+(* Operators whose operands are never a capability operation's
+   [Result(T, CapError)] on purpose (`==` is: `println(x) == Ok(())`). *)
+let cap_operand_operators =
+  [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/."; "<"; "<="; ">"; ">=" ]
+
 (** The type a literal has on its face, if it is one. *)
 let literal_ty (e : Ast.expr) =
   match e with
@@ -4068,7 +4073,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
               | _ -> None)
            | _ -> None in
          let mark_args = env.errors.Err.diagnostics in
-         let res = infer_app ?payload env sp f_ty args 0 in
+         let cap_op = match f with
+           | Ast.EVar name -> List.mem name.txt cap_operand_operators && List.length args = 2
+           | _ -> false in
+         let res = infer_app ?payload ~cap_op env sp f_ty args 0 in
          (match f with
           | Ast.EVar name -> suggest_argument_order env name args mark_args
           | _ -> ());
@@ -5092,7 +5100,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     explain_concat_result env ~mark e sp
 
 (** Thread function application through argument list, tracking arg index. *)
-and infer_app ?payload env span f_ty args idx =
+and infer_app ?payload ?(cap_op = false) env span f_ty args idx =
   match args, repr f_ty with
   | [], t ->
     (* A call written with empty parens — `f()`, i.e. zero surface arguments
@@ -5163,7 +5171,25 @@ and infer_app ?payload env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    let result = infer_app ?payload env span ret_ty rest (idx + 1) in
+    (* An operator's operand that is a capability operation's
+       [Result(T, CapError)] (`System.now_ms() + 1000`) has just bound the
+       operator's shared type variable to the [Result]; report it with its
+       [Authority.must] fix and re-link the variable to [T], so the other
+       operand and the operator's constraint check against the value. *)
+    if cap_op then
+      List.iter (fun r ->
+          match !r with
+          | Link t ->
+            (match repr t with
+             | TCon ("Result", [ p; err ])
+               when is_cap_error_ty err && Typecheck_suggest.informative p ->
+               report_cap_result_unhandled env ~span:(span_of_expr arg)
+                 ~provided:(provided_of_expr arg t) ~payload:p t p;
+               r := Link p
+             | _ -> ())
+          | Unbound _ -> ())
+        param_vars;
+    let result = infer_app ?payload ~cap_op env span ret_ty rest (idx + 1) in
     if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)

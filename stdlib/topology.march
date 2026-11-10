@@ -366,7 +366,7 @@ mod Topology do
     end
   end
 
-  pfn report(msg : String) : () do println("topology: " ++ msg) end
+  pfn report(msg : String) : () do Authority.ignore(println("topology: " ++ msg)) end
 
   -- ── placement ─────────────────────────────────────────────────────────
 

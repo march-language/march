@@ -323,10 +323,145 @@ let cap_pair_of ~occurs_violation ?provided expected found =
       Some (have, need, p)
     | _ -> None
 
+(* ── ocap phase 1: a capability operation's Result where its value was wanted ──
+
+   Every capability operation returns [Result(T, CapError)]
+   (specs/2026-11-10-object-capability-design.md §15).  A program written
+   before that used the value: `fn main() : () do println("hi") end`,
+   `unix_time_ms() + 1`.  Such a mismatch, a [Result(T, CapError)] provided
+   where a [T] is required, gets its own diagnostic, [cap_result_unhandled],
+   with the machine fix `forge fix` applies (specs/plans/2026-11-10-ocap-p1-
+   result-plan.md, Decision 4):
+
+   - a unit result on a line of its own: a line [()] after it (the refusal is
+     discarded, as it already is for a statement);
+   - any other unit position: [Authority.ignore(e)];
+   - a value position: [Authority.must(e)], which panics on a refusal. *)
+
+let is_cap_error_ty t =
+  match repr t with
+  | TCon (n, []) -> n = "CapError" || String.ends_with ~suffix:".CapError" n
+  | _ -> false
+
+(** [Some payload] when [provided_ty] is [Result(payload, CapError)] and
+    [required] is a known type the payload fits. *)
+let cap_result_payload ~provided_ty ~required =
+  match repr provided_ty with
+  | TCon ("Result", [ p; err ]) when is_cap_error_ty err
+                                    && Typecheck_suggest.informative required ->
+    (match repr required with
+     | TCon ("Result", [ _; e2 ]) when is_cap_error_ty e2 -> None
+     | _ ->
+       if Typecheck_suggest.try_unify (Typecheck_suggest.new_trial ()) p required
+       then Some p else None)
+  | _ -> None
+
+let cap_fix_source : (string, string array) Hashtbl.t = Hashtbl.create 4
+
+let cap_fix_lines file =
+  match Hashtbl.find_opt cap_fix_source file with
+  | Some ls -> ls
+  | None ->
+    let ls =
+      try
+        let ic = open_in_bin file in
+        let rec go acc = match input_line ic with
+          | l -> go (l :: acc)
+          | exception End_of_file -> close_in ic; Array.of_list (List.rev acc) in
+        go []
+      with _ -> [||] in
+    Hashtbl.replace cap_fix_source file ls;
+    ls
+
+(* The expression at [sp] stands on lines of its own: only blanks before it,
+   only blanks or a comment after it. Returns its indentation. *)
+let cap_fix_own_lines (sp : Ast.span) : string option =
+  let ls = cap_fix_lines sp.Ast.file in
+  let n = Array.length ls in
+  if sp.Ast.start_line < 1 || sp.Ast.end_line > n then None
+  else
+    let first = ls.(sp.Ast.start_line - 1) and last = ls.(sp.Ast.end_line - 1) in
+    let blank s = String.trim s = "" in
+    if sp.Ast.start_col > String.length first || sp.Ast.end_col > String.length last then None
+    else
+      let before = String.sub first 0 sp.Ast.start_col in
+      let after = String.trim (String.sub last sp.Ast.end_col (String.length last - sp.Ast.end_col)) in
+      if blank before && (after = "" || String.starts_with ~prefix:"--" after)
+      then Some before else None
+
+(* The source text [sp] covers, when the file is readable. *)
+let cap_fix_text (sp : Ast.span) : string option =
+  let ls = cap_fix_lines sp.Ast.file in
+  let n = Array.length ls in
+  if sp.Ast.start_line < 1 || sp.Ast.end_line > n || sp.Ast.start_line > sp.Ast.end_line then None
+  else
+    try
+      if sp.Ast.start_line = sp.Ast.end_line then
+        Some (String.sub ls.(sp.Ast.start_line - 1) sp.Ast.start_col
+                (sp.Ast.end_col - sp.Ast.start_col))
+      else begin
+        let buf = Buffer.create 64 in
+        let first = ls.(sp.Ast.start_line - 1) in
+        Buffer.add_string buf
+          (String.sub first sp.Ast.start_col (String.length first - sp.Ast.start_col));
+        for i = sp.Ast.start_line to sp.Ast.end_line - 2 do
+          Buffer.add_char buf '\n'; Buffer.add_string buf ls.(i)
+        done;
+        Buffer.add_char buf '\n';
+        Buffer.add_string buf (String.sub ls.(sp.Ast.end_line - 1) 0 sp.Ast.end_col);
+        Some (Buffer.contents buf)
+      end
+    with Invalid_argument _ -> None
+
+let cap_result_fix ~(payload : ty) (sp : Ast.span) : Err.fix_kind =
+  let wrap pre =
+    match cap_fix_text sp with
+    | Some text -> Err.FReplace { span = sp; text = pre ^ text ^ ")" }
+    | None ->
+    Err.FMulti
+      [ Err.FReplace { span = { sp with Ast.end_line = sp.Ast.start_line;
+                                        end_col = sp.Ast.start_col }; text = pre };
+        Err.FReplace { span = { sp with Ast.start_line = sp.Ast.end_line;
+                                        start_col = sp.Ast.end_col }; text = ")" } ] in
+  match repr payload with
+  | TTuple [] ->
+    (match cap_fix_own_lines sp with
+     | Some indent -> Err.FInsert { after_line = sp.Ast.end_line; text = indent ^ "()" }
+     | None -> wrap "Authority.ignore(")
+  | _ -> wrap "Authority.must("
+
+let report_cap_result_unhandled env ~span ?provided ~payload provided_ty required =
+  let at = match provided with Some p -> p.p_span | None -> span in
+  let unit = match repr payload with TTuple [] -> true | _ -> false in
+  Err.report env.errors
+    { Err.severity = Error; span = at;
+      message =
+        Printf.sprintf
+          "This capability operation returns %s, which says whether it was \
+           permitted, but %s is expected here."
+          (format_ty_for_error provided_ty) (format_ty_for_error required);
+      labels = [];
+      notes =
+        [ (if unit then
+             "Handle the refusal (`match`, `let?`), or discard the result: \
+              a call on a line of its own needs nothing, and \
+              `Authority.ignore(...)` discards it anywhere else."
+           else
+             "Handle the refusal (`match`, `let?`), or write \
+              `Authority.must(...)` to take the value and panic if the \
+              operation is refused.") ];
+      code = Err.Code.cap_result_unhandled;
+      fix = Some (Err.fix (cap_result_fix ~payload at)) }
+
 (** Report a type mismatch with a conversational Elm-style message. *)
 let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expected found =
   match cap_pair_of ~occurs_violation ?provided expected found with
   | Some (have, need, p) -> report_cap_mismatch env ~span ~reason ~p ~have ~need
+  | None ->
+  match (if occurs_violation then None
+         else cap_result_payload ~provided_ty:expected ~required:found) with
+  | Some payload ->
+    report_cap_result_unhandled env ~span ?provided ~payload expected found
   | None -> report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected found
 
 and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff expected found =

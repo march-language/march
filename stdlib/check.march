@@ -69,17 +69,26 @@ mod Check do
 
   -- ---- Seed resolution ----
 
+  pfn clock_seed() : Int do
+    match System.now() do
+    Ok(t) -> float_to_int(t)
+    Err(_) -> 0
+    end
+  end
+
   pfn resolve_seed(config_seed : Option(Int)) : Int do
     match config_seed do
     Some(n) -> n
     None    ->
+      -- A refused clock gives seed 0: a property run must not fail on its
+      -- seed.
       match process_env("MARCH_PROP_SEED") do
       Some(s) ->
         match string_to_int(s) do
         Some(n) -> n
-        None    -> float_to_int(unix_time(()))
+        None    -> clock_seed()
         end
-      None    -> float_to_int(unix_time(()))
+      None    -> clock_seed()
       end
     end
   end

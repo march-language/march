@@ -23,7 +23,6 @@ module Ops = March_caps.Cap_ops
 let allowlist : ((string * string) * string) list = [
   (("Check.is_skipped", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
   (("Check.resolve_seed", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Check.resolve_seed", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
   (("ClusterConn.listen", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.credentials", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.config_from_env", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
@@ -51,14 +50,9 @@ let allowlist : ((string * string) * string) list = [
   (("Config.is_prod", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
   (("Config.new_store", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Config.new_store", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Crypto.hash_password", "random_bytes"), "TODO ocap-p1 Task 7 (clock/random)");
-  (("Crypto.random_bytes", "stdlib_random_bytes"), "TODO ocap-p1 Task 7 (clock/random)");
-  (("Crypto.random_hex", "random_bytes"), "TODO ocap-p1 Task 7 (clock/random)");
   (("Csv.each_row", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("Csv.read_all", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("Csv.each_row_with_header", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
-  (("DataFrame.print_table", "println"), "TODO ocap-p1 Task 6 (console)");
-  (("DateTime.now", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
   (("Dir.list", "dir_list"), "TODO ocap-p1 Task 10 (files/network)");
   (("Dir.list_full", "dir_list"), "TODO ocap-p1 Task 10 (files/network)");
   (("Dir.mkdir", "dir_mkdir"), "TODO ocap-p1 Task 10 (files/network)");
@@ -86,7 +80,6 @@ let allowlist : ((string * string) * string) list = [
   (("File.with_chunks", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("File.each_line", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("File.each_chunk", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
-  (("Forge.add", "println"), "TODO ocap-p1 Task 6 (console)");
   (("HttpServer.configure_runtime", "http_server_plain_listener"), "TODO ocap-p1 Task 10 (files/network)");
   (("HttpServer.listen", "http_server_listen"), "TODO ocap-p1 Task 10 (files/network)");
   (("HttpServer.spawn_n", "http_server_spawn_n"), "TODO ocap-p1 Task 10 (files/network)");
@@ -94,27 +87,15 @@ let allowlist : ((string * string) * string) list = [
   (("HttpTransport.connect", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
   (("HttpTransport.request_https_with_context", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
   (("HttpTransport.request_plain", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
-  (("IO.write", "print"), "TODO ocap-p1 Task 6 (console)");
-  (("IO.puts", "println"), "TODO ocap-p1 Task 6 (console)");
-  (("IO.warn", "print_stderr"), "TODO ocap-p1 Task 6 (console)");
-  (("IO.read_line", "io_read_line"), "TODO ocap-p1 Task 6 (console)");
-  (("IO.read_byte", "io_read_byte"), "TODO ocap-p1 Task 6 (console)");
-  (("IO.gets", "print"), "TODO ocap-p1 Task 6 (console)");
-  (("IO.inspect", "println"), "TODO ocap-p1 Task 6 (console)");
   (("List.pmap", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("List.pmap_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("List.pfilter", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("List.preduce", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Logger.appender_stderr", "print_stderr"), "TODO ocap-p1 Task 6 (console)");
-  (("Logger.appender_stdout", "println"), "TODO ocap-p1 Task 6 (console)");
-  (("Logger.with_span", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
   (("NetKernel.recv_exact_until", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("NetKernel.now_s", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("NetKernel.handshake_auth", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Parallel.pmap_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Parallel.preduce_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Prelude.println", "print_line"), "TODO ocap-p1 Task 6 (console)");
-  (("Prelude.debug", "print_line"), "TODO ocap-p1 Task 6 (console)");
   (("Process.run", "process_spawn_sync"), "TODO ocap-p1 Task 8 (process/env)");
   (("Process.run_stream", "process_spawn_lines"), "TODO ocap-p1 Task 8 (process/env)");
   (("Process.env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
@@ -124,8 +105,6 @@ let allowlist : ((string * string) * string) list = [
   (("Process.argv", "process_argv"), "TODO ocap-p1 Task 8 (process/env)");
   (("Process.pid", "process_pid"), "TODO ocap-p1 Task 8 (process/env)");
   (("Process.spawn_async", "process_spawn_async"), "TODO ocap-p1 Task 8 (process/env)");
-  (("Random.int", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
-  (("Recon.print_top", "println"), "TODO ocap-p1 Task 6 (console)");
   (("Seq.from_file_lines", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("Seq.from_file_chunks", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("SessionNode.start_link", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
@@ -155,7 +134,6 @@ let allowlist : ((string * string) * string) list = [
   (("Tls.server_ctx", "tls_server_ctx"), "TODO ocap-p1 Task 10 (files/network)");
   (("Tls.https_get", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
   (("Topology.actor Anchor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
-  (("Topology.report", "println"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.place", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.place", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.place", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
@@ -181,8 +159,6 @@ let allowlist : ((string * string) * string) list = [
   (("Udp.send_batch", "udp_send_batch"), "TODO ocap-p1 Task 10 (files/network)");
   (("Udp.send_batch_connected", "udp_send_batch"), "TODO ocap-p1 Task 10 (files/network)");
   (("Udp.send_many", "udp_send_many"), "TODO ocap-p1 Task 10 (files/network)");
-  (("UUID.v4", "uuid_v4"), "TODO ocap-p1 Task 7 (clock/random)");
-  (("UUID.v7", "uuid_v7"), "TODO ocap-p1 Task 7 (clock/random)");
   (("Vault.new", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Vault.open", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Vault.open", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
@@ -257,8 +233,12 @@ let offenders () : (string * string) list =
     Sys.readdir dir |> Array.to_list
     |> List.filter (fun f -> Filename.check_suffix f ".march" && f <> "authority.march")
     |> List.sort compare in
+  (* A call spelled like a builtin the stdlib shadows (`println` is the
+     Prelude's, `random_bytes` Crypto's inside Crypto) reaches the stdlib
+     function, which checks. *)
+  let shadowed = March_typecheck.Io_ops_gen.shadowed_by_stdlib in
   let checked = List.filter_map (function
-      | (n, Ops.Checked _) -> Some n | _ -> None) Ops.table in
+      | (n, Ops.Checked _) when not (List.mem n shadowed) -> Some n | _ -> None) Ops.table in
   List.concat_map (fun f ->
       let path = Filename.concat dir f in
       let lines = read_lines path in

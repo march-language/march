@@ -11,7 +11,7 @@ mod RefuseClock do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) : Unit do
+  fn main(_c : Cap(IO.Console)) do
     println(show_check("IO.Clock", ""))
     println(show_check("IO.Console", "stdout"))
   end

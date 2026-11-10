@@ -39,7 +39,9 @@ mod NetKernel do
   end
 
   doc "A fresh random nonce for a handshake challenge: 16 random bytes as 32 hex digits (`Crypto.random_hex(16)`)."
-  fn fresh_nonce() : String do Crypto.random_hex(16) end
+  -- Cluster plumbing: the cluster's authority is checked where it starts
+  -- (ClusterNode.start; ocap phase 7), so a refusal here is a broken launch.
+  fn fresh_nonce() : String do Authority.must(Crypto.random_hex(16)) end
 
   -- ── framed socket I/O ──────────────────────────────────────────────────────
 
@@ -523,7 +525,7 @@ mod NetKernel do
 
   pfn handshake_cert(fd : Int, my_id : NodeIdentity.Identity, creds : NodeCert.Credentials, nonce : String,
                      role : String, addr : String, deadline : Int) : Result(Authed, String) do
-    let eph_sk = Crypto.random_bytes(32)
+    let eph_sk = Authority.must(Crypto.random_bytes(32))
     let eph_pub = x25519(eph_sk, x25519_base())
     let hello = Handshake.encode_hello(Handshake.make_hello_cert(my_id, nonce, role, addr,
                                          NodeCert.to_bytes(creds.signed), Bytes.to_list(eph_pub)))

@@ -105,8 +105,8 @@ let table : (string * cls) list = [
   ("process_kill_proc",      Use);
   ("process_wait_proc",      Use);
   (* IO.Clock *)
-  ("unix_time",              c ["System.unix_time"]);
-  ("unix_time_ms",           c ["System.unix_time_ms"]);
+  ("unix_time",              c ["System.now"]);
+  ("unix_time_ms",           c ["System.now_ms"]);
   ("uuid_v7",                c ["UUID.v7"]);
   (* IO.Random *)
   ("random_bytes",           c ["Crypto.random_bytes"]);

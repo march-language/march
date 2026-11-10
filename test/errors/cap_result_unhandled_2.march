@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: This capability operation returns
+mod Main do
+  needs IO.Console
+
+  -- A unit result in a match arm beside `()`: the fix wraps it in
+  -- `Authority.ignore(...)`.
+  fn show(o : Option(Int)) : () do
+    match o do
+    Some(v) -> println(v)
+    None -> ()
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    show(Some(1))
+  end
+end

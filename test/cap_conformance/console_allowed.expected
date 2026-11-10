@@ -1,0 +1,8 @@
+println
+IO.puts
+IO.write
+true
+5
+5
+debug
+exit 0

@@ -3290,7 +3290,7 @@ mod ClusterNode do
         -- in (D35). A Vault name is a global handle anyone with IO.Mut can
         -- `Vault.whereis`, so the name carries 128 random bits; name + pid
         -- alone was found by a scan over the pid range.
-        let tag = cfg.name ++ "." ++ int_to_string(pid_to_int(node)) ++ "." ++ Crypto.random_hex(16)
+        let tag = cfg.name ++ "." ++ int_to_string(pid_to_int(node)) ++ "." ++ Authority.must(Crypto.random_hex(16))
         let h = { pid: pid_to_int(node), name: cfg.name, node_id: node_id_of(cfg.name), advertise: cfg.advertise,
                   members: Vault.new("cluster_node_members_" ++ tag),
                   names: Vault.new("cluster_node_names_" ++ tag),
