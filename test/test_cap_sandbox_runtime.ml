@@ -317,6 +317,7 @@ mod SbxDenyNet do
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
     println("write=" ++ int_to_string(probe_write_open()))
+    ()
   end
 end
 |}
@@ -341,6 +342,7 @@ mod SbxDenyExec do
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
     println("write=" ++ int_to_string(probe_write_open()))
+    ()
   end
 end
 |}
@@ -365,6 +367,7 @@ mod SbxDenyWrite do
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
     println("write=" ++ int_to_string(probe_write_open()))
+    ()
   end
 end
 |}
@@ -394,6 +397,7 @@ mod SbxDenyListen do
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
     println("connect=" ++ int_to_string(probe_connect()))
+    ()
   end
 end
 |}
@@ -414,6 +418,7 @@ mod SbxHoldListen do
     let _anchor_listen = tcp_listen(0)
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
+    ()
   end
 end
 |}
@@ -504,6 +509,7 @@ mod SbxDenyNetMac do
     println("socket=" ++ int_to_string(probe_socket()))
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
+    ()
   end
 end
 |}
@@ -530,6 +536,7 @@ mod SbxDenyProcessMac do
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
     println("exec=" ++ int_to_string(probe_exec_inplace()))
+    ()
   end
 end
 |}
@@ -552,6 +559,7 @@ mod SbxHoldProcessMac do
     let _anchor_proc = process_pid()
     println("fork=" ++ int_to_string(probe_fork()))
     println("exec=" ++ int_to_string(probe_exec_inplace()))
+    ()
   end
 end
 |}
@@ -576,6 +584,7 @@ mod SbxDenyWriteMac do
     println("connect=" ++ int_to_string(probe_connect()))
     println("fork=" ++ int_to_string(probe_fork()))
     println("write=" ++ int_to_string(probe_write_open()))
+    ()
   end
 end
 |}
@@ -678,6 +687,7 @@ mod SbxHoldListenMac do
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
     println("connect=" ++ int_to_string(probe_connect()))
+    ()
   end
 end
 |}
@@ -904,6 +914,7 @@ mod SbxEarlyThread do
     println("started=" ++ int_to_string(early_started()))
     println("main=" ++ int_to_string(probe_bind()))
     println("early=" ++ int_to_string(early_probe()))
+    ()
   end
 end
 |}
@@ -960,6 +971,7 @@ mod SbxReload do
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
     println("up")
     println("waited=" ++ int_to_string(wait_stdin()))
+    ()
   end
 end
 |}
@@ -994,6 +1006,7 @@ let reload_write_src =
     let _anchor = file_write("/dev/null", "")
     println("up")
     println("waited=" ++ int_to_string(wait_stdin()))
+    ()
   end
 end
 |}

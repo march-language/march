@@ -97,7 +97,7 @@ mod TlsGroupsProbe do
         println(label ++ " group=" ++ show(Tls.negotiated_group(conn))
                 ++ " pq=" ++ bool_to_string(Tls.is_post_quantum(conn)))
         Tls.close(conn)
-      Err(e) -> println(label ++ " FAIL handshake " ++ Tls.error_to_string(e))
+      Err(e) -> Authority.ignore(println(label ++ " FAIL handshake " ++ Tls.error_to_string(e)))
       end
       Socket.close(fd)
     end

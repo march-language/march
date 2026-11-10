@@ -20,7 +20,8 @@ mod ArgvProbe do
   needs IO.Console
   needs IO.Process
   fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : () do
-    println(String.join(System.argv(), ","))
+    println(String.join(Authority.must(System.argv()), ","))
+    ()
   end
 end
 |}

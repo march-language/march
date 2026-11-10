@@ -3404,6 +3404,7 @@ let test_session_offer_guarded_catch_all_not_catch_all () =
           Chan.close(cc3)
         _ when false ->
           println("other")
+          ()
       end
     end
   end|} in
@@ -4375,6 +4376,7 @@ let test_actor_handler_escapes_grant_is_caught () =
       let p = spawn(Exfil)
       send(p, Go("secrets"))
       println("done")
+      ()
     end
   end|} in
   Alcotest.(check bool)
@@ -4401,6 +4403,7 @@ let test_actor_spawned_not_sent_still_charged () =
     fn main(cap : Cap(IO.Console)) : () do
       let _p = spawn(Z)
       println("never sent")
+      ()
     end
   end|} in
   Alcotest.(check bool) "spawning the actor charges its handler to the grant"
@@ -4422,6 +4425,7 @@ let test_actor_defined_never_spawned_is_free () =
     end
     fn main(cap : Cap(IO.Console)) : () do
       println("Z is never spawned")
+      ()
     end
   end|} in
   Alcotest.(check bool)
@@ -4449,6 +4453,7 @@ let test_actor_init_io_is_charged_to_grant () =
       let p = spawn(Exfil)
       send(p, Go())
       println("done")
+      ()
     end
   end|} in
   Alcotest.(check bool) "init-reached IO.FileWrite is charged to main's grant"
@@ -5107,7 +5112,7 @@ let test_zero_arg_lambda_unit_callback_accepts () =
   let ctx = typecheck {|mod Main do
   needs IO.Console
     fn call_it(cb : Unit -> Unit) : Unit do cb() end
-    fn once() : Unit do println("ran") end
+    fn once() : Unit do Authority.ignore(println("ran")) end
     fn main(_cap_console : Cap(IO.Console)) do call_it(fn -> once()) end
   end|} in
   Alcotest.(check bool) "call_it(fn -> once()) : Unit -> Unit accepted"
@@ -9857,7 +9862,7 @@ let test_cap_pure_println_error () =
   let ctx = typecheck {|mod Pure do
   needs IO.Console
     cap pure
-    fn greet() : Unit do println("hello") end
+    fn greet() : Unit do Authority.ignore(println("hello")) end
   end|} in
   Alcotest.(check bool) "cap pure + println: error" true (has_errors ctx)
 
@@ -12707,6 +12712,7 @@ let test_unused_cap_param_is_not_warned () =
     needs IO.Console
     fn main(cap : Cap(IO.Console)) : () do
       println("hi")
+      ()
     end
   end|} in
   Alcotest.(check bool) "a capability parameter is not an unused variable"
@@ -12858,6 +12864,7 @@ let test_main_is_not_nagged_about_root_cap () =
     needs IO
     fn main(cap : Cap(IO)) : () do
       println("hi")
+      ()
     end
   end|} in
   Alcotest.(check bool) "main is not told to narrow the root capability"
@@ -12868,6 +12875,7 @@ let test_non_main_still_hinted_about_root_cap () =
     needs IO
     fn helper(cap : Cap(IO)) : () do
       println("hi")
+      ()
     end
     fn main(c : Cap(IO)) : () do
       helper(c)
@@ -12968,6 +12976,7 @@ let test_module_fn_shadowing_builtin_is_not_a_cap_use () =
     end
     fn main(_cap_console : Cap(IO.Console)) : () do
       println(int_to_string(file_read(1)))
+      ()
     end
   end|} in
   Alcotest.(check bool)
@@ -12985,6 +12994,7 @@ let test_module_let_shadowing_builtin_is_not_a_cap_use () =
     let random_bytes = fn n -> n * 2
     fn main(_cap_console : Cap(IO.Console)) : () do
       println(int_to_string(random_bytes(3)))
+      ()
     end
   end|} in
   Alcotest.(check bool)
@@ -13003,6 +13013,7 @@ let test_dns_resolve_shadow_witness () =
     end
     fn main(_cap_console : Cap(IO.Console)) : () do
       println(int_to_string(dns_resolve(1)))
+      ()
     end
   end|} in
   Alcotest.(check bool)
@@ -13163,6 +13174,7 @@ let test_prelude_println_still_requires_needs () =
       mod_decls = prelude_inner_decls @ (parse_and_desugar {|mod Main do
         fn main() : () do
           println("hi")
+          ()
         end
       end|}).March_ast.Ast.mod_decls;
     } in
@@ -13179,7 +13191,7 @@ let test_stdlib_mediated_needs_is_not_unused () =
       mod_decls = dt :: (parse_and_desugar {|mod Main do
         needs IO.Clock
         fn stamp() : Int do
-          DateTime.now()
+          Authority.must(DateTime.now())
         end
       end|}).March_ast.Ast.mod_decls;
     } in
@@ -13200,7 +13212,7 @@ let test_unrelated_needs_still_warns_with_stdlib_loaded () =
       mod_decls = dt :: (parse_and_desugar {|mod Main do
         needs IO.NetListen
         fn stamp() : Int do
-          DateTime.now()
+          Authority.must(DateTime.now())
         end
       end|}).March_ast.Ast.mod_decls;
     } in
@@ -13386,6 +13398,7 @@ let test_grant_narrow_covers_console () =
     needs IO.Console
     fn main(cap : Cap(IO.Console)) : () do
       println("hi")
+      ()
     end
   end|} in
   Alcotest.(check bool) "console under Cap(IO.Console) is within the grant"
@@ -13400,8 +13413,8 @@ let test_grant_narrow_rejects_filewrite () =
     needs IO.FileWrite
     fn main(cap : Cap(IO.Console)) : () do
       match file_write("/tmp/grant_x", "d") do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
+        Ok(_) -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end|} in
@@ -13425,6 +13438,7 @@ let test_grant_violation_through_helper () =
     fn main(cap : Cap(IO.Console)) : () do
       save()
       println("hi")
+      ()
     end
   end|} in
   Alcotest.(check bool) "helper-reached IO.FileWrite is still a grant error"
@@ -13448,6 +13462,7 @@ let test_grant_violation_names_the_user_module () =
     end
     fn main(cap : Cap(IO.Console)) : () do
       println(helper("/etc/passwd"))
+      ()
     end
   end|} in
   (* Since the X7 traces (specs/plans/2026-11-02-diagnostics-depth-plan.md),
@@ -13469,8 +13484,8 @@ let test_grant_full_io_accepts_everything () =
     needs IO
     fn main(cap : Cap(IO)) : () do
       match file_write("/tmp/grant_f", "d") do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
+        Ok(_) -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end|} in
@@ -13498,8 +13513,8 @@ let test_grant_absent_is_ambient () =
     needs IO.FileWrite
     fn main() : () do
       match file_write("/tmp/grant_l", "d") do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
+        Ok(_) -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end|} in
@@ -13516,6 +13531,7 @@ let test_grant_narrow_refuses_foreign () =
     end
     fn main(cap : Cap(IO.Console)) : () do
       println(int_to_string(ffi_id(1)))
+      ()
     end
   end|} in
   Alcotest.(check bool) "IO.Foreign under a narrow grant is refused"
@@ -13537,6 +13553,7 @@ let test_grant_dead_code_is_not_charged () =
     end
     fn main(cap : Cap(IO.Console)) : () do
       println("hi")
+      ()
     end
   end|} in
   Alcotest.(check bool) "unreachable capability is not a grant violation"
@@ -13551,6 +13568,7 @@ let test_main_signature_accepts_narrow_cap () =
       needs IO.Console
       fn main(cap : Cap(IO.Console)) : () do
         println("hi")
+        ()
       end
     end|})
 
@@ -13576,6 +13594,7 @@ let test_fn_grant_narrow_covers_console () =
     needs IO.Console
     fn log(cap : Cap(IO.Console), msg : String) : () do
       println(msg)
+      ()
     end
     fn main() : () do
       ()
@@ -13595,8 +13614,8 @@ let test_fn_grant_multi_cap_params_union () =
     needs IO.FileWrite
     fn both(c : Cap(IO.Console), w : Cap(IO.FileWrite), msg : String) : () do
       match file_write("/tmp/fn_grant_m", msg) do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
+        Ok(_) -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
     fn main() : () do
@@ -13618,8 +13637,8 @@ let test_fn_grant_polymorphic_cap_param_is_no_gate () =
     end
     fn noisy(c : Cap(IO)) : () do
       match file_write("/tmp/fn_grant_p", "d") do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
+        Ok(_) -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
     fn main() : () do
@@ -13678,6 +13697,7 @@ let test_fn_grant_dead_code_is_not_charged () =
     end
     fn log(cap : Cap(IO.Console), msg : String) : () do
       println(msg)
+      ()
     end
     fn main() : () do
       ()
@@ -13694,8 +13714,8 @@ let test_fn_grant_main_is_not_double_reported () =
     needs IO.FileWrite
     fn main(cap : Cap(IO.Console)) : () do
       match file_write("/tmp/fn_grant_once", "d") do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
+        Ok(_) -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end|} in
@@ -13748,7 +13768,8 @@ let test_module_scoped_caps_with_stdlib_prepended () =
         needs IO.Console
         needs IO.Clock
         fn stamped(cap : Cap(IO.Console)) : () do
-          println(int_to_string(DateTime.now()))
+          println(int_to_string(Authority.must(DateTime.now())))
+          ()
         end
         fn main(cap : Cap(IO.Console)) : () do
           stamped(cap)
@@ -13779,11 +13800,12 @@ let test_module_scoped_caps_with_prelude_flattened () =
       needs IO.FileWrite
       fn talk(cap : Cap(IO.Console), msg : String) : () do
         println(msg)
+        ()
       end
       fn scribble(cap : Cap(IO.Console), msg : String) : () do
         match file_write("/tmp/fn_grant_prelude", msg) do
-          Ok(_) -> println("ok")
-          Err(_) -> println("e")
+          Ok(_) -> Authority.ignore(println("ok"))
+          Err(_) -> Authority.ignore(println("e"))
         end
       end
       fn main(cap : Cap(IO.Console)) : () do
@@ -13871,6 +13893,7 @@ let test_main_multi_cap_signature_accepted () =
       needs IO.Spawn
       fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
         println("hi")
+        ()
       end
     end|})
 
@@ -13925,8 +13948,8 @@ let test_main_grant_union_still_rejects_outside () =
     needs IO.FileWrite
     fn main(cap_console : Cap(IO.Console), cap_spawn : Cap(IO.Spawn)) : () do
       match file_write("/tmp/stage_d_u", "d") do
-        Ok(_) -> println("ok")
-        Err(_) -> println("e")
+        Ok(_) -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end|} in
@@ -13948,6 +13971,7 @@ let test_main_explicit_foreign_grant_accepted () =
     end
     fn main(cap_console : Cap(IO.Console), cap_foreign : Cap(IO.Foreign)) : () do
       println(int_to_string(ffi_id3(1)))
+      ()
     end
   end|} in
   Alcotest.(check bool) "an explicit Cap(IO.Foreign) grant is honored"
@@ -13962,6 +13986,7 @@ let test_main_foreign_under_console_still_refused () =
     end
     fn main(cap_console : Cap(IO.Console)) : () do
       println(int_to_string(ffi_id4(1)))
+      ()
     end
   end|} in
   Alcotest.(check bool) "IO.Foreign uncovered by the grant is still refused"
@@ -13974,6 +13999,7 @@ let test_parameterless_main_doing_io_is_an_error () =
     needs IO.Console
     fn main() : () do
       println("hi")
+      ()
     end
   end|} in
   Alcotest.(check bool) "a parameterless main performing IO is rejected"
@@ -14001,6 +14027,7 @@ let test_module_without_main_is_not_gated () =
     needs IO.Console
     fn shout(msg : String) : () do
       println(msg)
+      ()
     end
   end|} in
   Alcotest.(check bool) "a module with no main is not gated"
@@ -14023,6 +14050,7 @@ let test_stage_d_with_stdlib_prepended () =
       needs IO.Console
       fn main() : () do
         println("hi")
+        ()
       end
     end|}).March_ast.Ast.mod_decls;
   } in
@@ -14053,6 +14081,7 @@ let test_stage_d_emits_replace_fix () =
       needs IO.Console
       fn main() : () do
         println("hi")
+        ()
       end
     end|}
   with
@@ -14072,6 +14101,7 @@ let test_stage_d_fix_spans_the_parameter_list () =
       needs IO.Console
       fn main() : () do
         println("hi")
+        ()
       end
     end|}
   with
@@ -14089,8 +14119,8 @@ let test_stage_d_fix_covers_multiple_capabilities () =
       needs IO.FileWrite
       fn main() : () do
         match file_write("/tmp/stage_d_fix", "d") do
-          Ok(_) -> println("ok")
-          Err(_) -> println("e")
+          Ok(_) -> Authority.ignore(println("ok"))
+          Err(_) -> Authority.ignore(println("e"))
         end
       end
     end|}
@@ -16417,11 +16447,11 @@ let test_stdlib_builtin_wrappers_have_real_types () =
   fn ok_ints() : Int do System.cpu_count() + System.cpu_load_milli() + System.mem_total_bytes() + System.mem_available_bytes() + System.monotonic_time() end
   fn bad_cpu() : String do System.cpu_count() end
   fn bad_version() : Int do System.version() end
-  fn ok_io() : String do IO.read_line() ++ int_to_string(IO.read_byte()) end
+  fn ok_io() : String do Authority.must(IO.read_line()) ++ int_to_string(Authority.must(IO.read_byte())) end
   fn bad_read_line() : Int do IO.read_line() end
   fn bad_read_byte() : String do IO.read_byte() end
   fn bad_warn() : Int do IO.warn("x") end
-  fn ok_hash() : String do Crypto.sha512("x") ++ UUID.to_string(UUID.v4()) end
+  fn ok_hash() : String do Crypto.sha512("x") ++ UUID.to_string(Authority.must(UUID.v4())) end
   fn bad_sha512() : Int do Crypto.sha512("x") end
   fn bad_sha512_arg() : String do Crypto.sha512(1) end
   fn bad_v4() : String do UUID.v4() end
@@ -17852,7 +17882,7 @@ let test_record_field_mismatch_note_polarity () =
   let ctx = typecheck {|mod T do
   needs IO.Console
     fn width({ w: w }) : Int do w end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(width({ w: 8, h: 9 }))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(width({ w: 8, h: 9 })))) end
   end|} in
   let notes =
     List.concat_map (fun (d : March_errors.Errors.diagnostic) -> d.notes)

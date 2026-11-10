@@ -81,6 +81,7 @@ mod PkgEntry do
     else
       println("n")
     end
+    ()
   end
 end
 |}

@@ -642,6 +642,7 @@ end
     needs IO.Console
     fn l(n : Int) : Unit do
       println("B.l ran")
+      ()
     end
   end
   fn main(_cap : Cap(IO.Console)) do

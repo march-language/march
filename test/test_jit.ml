@@ -512,6 +512,7 @@ let jit_file_fib_src = {|mod JitFileTest do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println("checksum=" ++ int_to_string(fib(20)))
+    ()
   end
 end
 |}
@@ -558,6 +559,7 @@ let jit_file_atoms_src = {|mod JitFileAtoms do
     println("bare=" ++ to_string(:zz))
     println("fn=" ++ to_string(pick(true)) ++ "," ++ to_string(pick(false)))
     println("ok=" ++ to_string(:ok))
+    ()
   end
 end
 |}

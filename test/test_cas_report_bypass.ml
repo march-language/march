@@ -26,6 +26,7 @@ let src = {|mod ReportBypassProbe do
   fn main(_c : Cap(IO.Console)) : Unit do
     let xs = [1, 2, 3]
     println(int_to_string(List.length(xs)))
+    ()
   end
 end
 |}

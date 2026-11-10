@@ -871,6 +871,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(B.f(B.Z)))
+    ()
   end
 end
 |}
@@ -891,6 +892,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(None)))
+    ()
   end
 end
 |}
@@ -917,6 +919,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(B.c(B.Z)))
+    ()
   end
 end
 |}
@@ -937,6 +940,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(DownReason.Killed)))
+    ()
   end
 end
 |}
@@ -974,6 +978,7 @@ let ctor_review3 =
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(mk(), 0)))
+    ()
   end
 end
 |}
@@ -1000,6 +1005,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(A.f(A.mk(), 0)))
+    ()
   end
 end
 |}
@@ -1022,6 +1028,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(Membership.f(Alive, 0)))
+    ()
   end
 end
 |}
@@ -1047,6 +1054,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(Inc(), 0)))
+    ()
   end
 end
 |}
@@ -1065,6 +1073,7 @@ end
   fn e() : Int do need(None) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(None)))
+    ()
   end
 end
 |}
@@ -1117,6 +1126,7 @@ let ctor_review4 =
   fn d() : Int do need(Inc(), 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(Inc())))
+    ()
   end
 end
 |}
@@ -1139,6 +1149,7 @@ end
   fn c(m : Counter.Msg) : Int do need(m, 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(Inc())))
+    ()
   end
 end
 |}
@@ -1163,6 +1174,7 @@ end
   fn f() : Int do need(5, 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(None)))
+    ()
   end
 end
 |}
@@ -1179,6 +1191,7 @@ end
   fn main(cap : Cap(IO)) : Unit do
     let t = task_cancel_token_new()
     println(int_to_string(c(t)))
+    ()
   end
 end
 |}
@@ -1209,6 +1222,7 @@ end
   fn main(cap : Cap(IO)) : Unit do
     let t = task_cancel_token_new()
     println(int_to_string(c2(Some(t))))
+    ()
   end
 end
 |}
@@ -1246,6 +1260,7 @@ end
   fn e() : Int do need(None, 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(None)))
+    ()
   end
 end
 |}
@@ -1264,6 +1279,7 @@ end
   fn main(cap : Cap(IO)) : Unit do
     let t = Tok(3)
     println(int_to_string(c(t)))
+    ()
   end
 end
 |}
@@ -1287,6 +1303,7 @@ end
   fn d() : Int do need(U.Zap(1)) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(U.Zap(2))))
+    ()
   end
 end
 |}

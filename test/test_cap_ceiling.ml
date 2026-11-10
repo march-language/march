@@ -202,8 +202,8 @@ mod CeilDirect do
   needs IO.Console
   fn main() : () do
     match file_write("/tmp/x", "d") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -223,8 +223,8 @@ mod CeilStdlib do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/x", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -253,8 +253,8 @@ mod CeilSpanned do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/x", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -300,8 +300,8 @@ mod CeilValue do
     end
     fn go() : () do
       match apply1(file_read, "/etc/hosts") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -333,6 +333,7 @@ mod CeilApp do
   end
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.greet("world"))
+    ()
   end
 end
 |}
@@ -347,8 +348,8 @@ mod CeilOkay do
   needs IO.FileWrite
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match File.write("/tmp/x", "d") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -362,8 +363,8 @@ mod CeilParent do
   needs IO.FileSystem
   fn main(_cap_console : Cap(IO.Console), _cap_filesystem : Cap(IO.FileSystem)) : () do
     match File.write("/tmp/x", "d") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -396,6 +397,7 @@ mod CeilDeepOkay do
   end
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
+    ()
   end
 end
 |}
@@ -421,6 +423,7 @@ mod CeilDeepBad do
   end
   fn main() : () do
     if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
+    ()
   end
 end
 |}
@@ -519,6 +522,7 @@ let test_console_use_without_needs_is_still_caught () =
 mod CeilConsoleUndeclared do
   fn main() : () do
     println("hi")
+    ()
   end
 end
 |}
@@ -577,8 +581,8 @@ mod CeilNoMainUses do
   needs IO.Console
   fn save(p : String, d : String) : () do
     match File.write(p, d) do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -659,8 +663,8 @@ mod CeilOptOut do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/cap_ceiling_optout", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -925,8 +929,8 @@ mod YamlApp do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/cap_ceiling_yaml", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end

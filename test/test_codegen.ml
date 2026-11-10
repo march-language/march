@@ -319,6 +319,7 @@ let unboxed_vec3_src = {|mod UB do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(vx(forward(1.0, 2.0))))
+    ()
   end
 end|}
 
@@ -461,6 +462,7 @@ let module_vec3_src = {|mod UB do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(Geo.vx(Geo.forward(1.0, 2.0))))
+    ()
   end
 end|}
 
@@ -542,6 +544,7 @@ let unboxed_branch_join_src = {|mod UBJoin do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(spin(10, 0.0)))
+    ()
   end
 end|}
 
@@ -567,6 +570,7 @@ let unboxed_mixed_join_src = {|mod UBMixed do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(spin(10, 0.0)))
+    ()
   end
 end|}
 
@@ -597,6 +601,7 @@ let unboxed_multi_join_src = {|mod UBMulti do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(int_to_string(spin(10, 0)))
+    ()
   end
 end|}
 
@@ -868,6 +873,7 @@ let test_nested_bool_lit_pattern_no_tag_switch () =
       println(classify(Ok(true)))
       println(classify(Ok(false)))
       println(classify(Err("x")))
+      ()
     end
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
@@ -892,6 +898,7 @@ let test_nested_int_lit_pattern_tagged_switch () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do
       println(classify(Ok(1)))
+      ()
     end
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
@@ -915,6 +922,7 @@ let test_nested_atom_lit_pattern_no_tag_switch () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do
       println(classify(Ok(:red)))
+      ()
     end
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
@@ -1174,6 +1182,7 @@ let test_actor_suffix_named_user_type_not_treated_as_actor () =
       let shared = original
       let bumped = bump(original)
       println(int_to_string(bumped_val(bumped) + shared_val(shared)))
+      ()
     end
     fn bumped_val(t : Tree_Actor) : Int do
       match t do
@@ -1204,7 +1213,7 @@ let test_tco_factorial_has_loop () =
       if n == 0 do acc
       else factorial(n - 1, n * acc) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(factorial(10, 1))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(factorial(10, 1)))) end
   end|} in
   (* The tco_loop label and back-edge branch are the unique markers of TCO. *)
   Alcotest.(check bool) "TCO factorial: tco_loop block emitted" true
@@ -1224,7 +1233,7 @@ let test_tco_fold_has_loop () =
       Cons(h, t) -> fold(t, acc + h)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0)))) end
   end|} in
   Alcotest.(check bool) "TCO fold: tco_loop block emitted" true
     (ir_contains ir "tco_loop");
@@ -1240,7 +1249,7 @@ let test_tco_nontail_fib_no_loop () =
       if n < 2 do n
       else fib(n - 1) + fib(n - 2) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fib(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
   Alcotest.(check bool) "non-tail fib: no TCO loop" false
     (ir_contains ir "tco_loop");
@@ -1256,7 +1265,7 @@ let test_tco_countdown_has_loop () =
       if n == 0 do 0
       else count(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(count(100))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(count(100)))) end
   end|} in
   Alcotest.(check bool) "TCO countdown: tco_loop block emitted" true
     (ir_contains ir "tco_loop");
@@ -1276,7 +1285,7 @@ let test_mutual_tco_even_odd_loop_emitted () =
     fn odd(n : Int) : Bool do
       if n == 0 do false else even(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(to_string(even(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(even(1000000)))) end
   end|} in
   Alcotest.(check bool) "mutual TCO even/odd: mutual_loop block emitted" true
     (ir_contains ir "mutual_loop");
@@ -1306,7 +1315,7 @@ let test_mutual_tco_three_way () =
     fn fc(n : Int) : Int do
       if n == 0 do 0 else fa(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fa(99))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fa(99)))) end
   end|} in
   Alcotest.(check bool) "three-way mutual TCO: mutual_loop emitted" true
     (ir_contains ir "mutual_loop");
@@ -1327,7 +1336,7 @@ let test_mutual_tco_state_machine () =
     fn state_b(n : Int) : Int do
       if n <= 0 do 2 else state_a(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(state_a(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(state_a(1000000)))) end
   end|} in
   Alcotest.(check bool) "state machine mutual TCO: mutual_loop emitted" true
     (ir_contains ir "mutual_loop");
@@ -1347,7 +1356,7 @@ let test_mutual_tco_non_tail_no_loop () =
     fn count_g(n : Int) : Int do
       if n == 0 do 1 else count_f(n - 1) + 1 end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(count_f(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(count_f(10)))) end
   end|} in
   Alcotest.(check bool) "non-tail mutual recursion: no mutual_loop" false
     (ir_contains ir "mutual_loop")
@@ -1362,7 +1371,7 @@ let test_mutual_tco_self_tco_unaffected () =
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(countdown(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(countdown(10)))) end
   end|} in
   Alcotest.(check bool) "self TCO still works: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1417,7 +1426,7 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
         build_loop(s, n - 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(build_loop("z", 1000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(build_loop("z", 1000)))) end
   end|} in
   Alcotest.(check bool)
     "mutual-tco borrowed-arg: the group is flattened (mutual_loop emitted)"
@@ -1472,7 +1481,7 @@ let test_tco_self_fresh_arg_release_deferred () =
         str_to_int(String.join(rest, ""), acc * 10 + String.byte_size(c))
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(str_to_int("9000", 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(str_to_int("9000", 0)))) end
   end|} in
   let fn_ir =
     let start = Str.search_forward (Str.regexp "define [^\n]*@str_to_int(") ir 0 in
@@ -1506,7 +1515,7 @@ let test_mutual_tco_safe_group_still_flattened () =
     fn od(n : Int) : Bool do
       if n == 0 do false else ev(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(to_string(ev(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(ev(1000000)))) end
   end|} in
   Alcotest.(check bool) "safe mutual group (ints): mutual_loop emitted" true
     (ir_contains ir_ints "mutual_loop");
@@ -1525,7 +1534,7 @@ let test_mutual_tco_safe_group_still_flattened () =
     fn step(x : String, rest : List(String), seen : Int) : Int do
       if String.starts_with(x, "no") do walk(rest, seen + 1) else walk(rest, seen) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(walk(["no-a", "b"], 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(walk(["no-a", "b"], 0)))) end
   end|} in
   Alcotest.(check bool) "safe mutual group (owned list walk): mutual_loop emitted" true
     (ir_contains ir_list "mutual_loop");
@@ -1573,7 +1582,7 @@ let test_tco_self_dup_arg_decref_on_live_path () =
       Cons(_, t) -> walk(t, acc + 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(walk(["a", "b"], 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(walk(["a", "b"], 0)))) end
   end|} in
   Alcotest.(check bool) "self-tco dup-arg: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1643,7 +1652,7 @@ let test_deep_drop_of_borrowed_container () =
         go(buf, i + 1, n, acc + consume(parts))
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(go("a,b,c", 0, 2, 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(go("a,b,c", 0, 2, 0)))) end
   end|} in
   Alcotest.(check bool)
     "deep drop: the owner's drop of the split result calls a generated deep drop, not a bare decrc"
@@ -1693,6 +1702,7 @@ let test_drop_glue_name_is_structural () =
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(int_to_string(List.length(outer(5))))
+    ()
   end
 end|} in
   let drop_syms ir =
@@ -1765,7 +1775,7 @@ let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
         build_loop(s, n - 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(build_loop("z", 5))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(build_loop("z", 5)))) end
   end|} in
   Alcotest.(check bool)
     "non-tail dec-chain-wrapped group call: no mutual_loop formed for this pair"
@@ -1790,7 +1800,7 @@ let test_mutual_tco_has_reduction_check () =
     fn is_odd(n : Int) : Bool do
       if n == 0 do false else is_even(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(to_string(is_even(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(is_even(1000000)))) end
   end|} in
   Alcotest.(check bool) "mutual TCO is_even/is_odd: mutual_loop block emitted" true
     (ir_contains ir "mutual_loop");
@@ -1824,7 +1834,7 @@ let test_phase4_nonleaf_has_reduction_check () =
       if n <= 1 do n
       else fib(n - 1) + fib(n - 2) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fib(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
   (* Must match the LOAD, not the preamble declaration: @march_tls_reductions
      and @march_preempt_request are both declared in every native preamble, so
@@ -1850,7 +1860,7 @@ let test_phase4_leaf_fn_no_reduction_check () =
   let ir = emit_tco_ir {|mod Test do
   needs IO.Console
     fn square(n : Int) : Int do n * n end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(42)) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(42))) end
   end|} in
   (* No non-leaf functions → no preemption check IR anywhere in the output.
      Assert on the LOAD: the preamble declares @march_preempt_request
@@ -1866,7 +1876,7 @@ let test_phase4_tco_fn_reduction_in_loop () =
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(countdown(100))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(countdown(100)))) end
   end|} in
   Alcotest.(check bool) "TCO countdown: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1882,7 +1892,7 @@ let test_phase4_nonrecursive_caller_has_check () =
   needs IO.Console
     fn double(n : Int) : Int do n + n end
     fn apply_double(n : Int) : Int do double(n) end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(apply_double(3))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(apply_double(3)))) end
   end|} in
   (* apply_double calls double (non-builtin) → non-leaf → check emitted. *)
   Alcotest.(check bool) "apply_double: preemption check present" true
@@ -10308,7 +10318,7 @@ let test_ffi_extern_explicit_symbol_ir () =
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int = "crc32_compute"
     end
-    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do println(int_to_string(crc32(255))) end
+    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do Authority.ignore(println(int_to_string(crc32(255)))) end
   end|} in
   Alcotest.(check bool) "calls the explicit C symbol" true
     (ir_contains ir "@crc32_compute");
@@ -10323,7 +10333,7 @@ let test_ffi_extern_default_symbol_ir () =
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int
     end
-    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do println(int_to_string(crc32(255))) end
+    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do Authority.ignore(println(int_to_string(crc32(255)))) end
   end|} in
   Alcotest.(check bool) "falls back to <lib>_<fn> when no symbol given" true
     (ir_contains ir "@crc_crc32")
@@ -10500,6 +10510,7 @@ let test_opt_without_perceus () =
     fn main(_cap_console : Cap(IO.Console)) : Unit do
       let t = Node(Node(Leaf, 1, Leaf), 2, Node(Leaf, 3, Leaf))
       println(int_to_string(sum(t)))
+      ()
     end
   end|} in
   let m = parse_and_desugar src in
@@ -11365,6 +11376,7 @@ let borrowed_field_owner_src = {|mod Main do
     let base = live_allocs()
     let t = churn(2000, 0)
     println("leaked " ++ int_to_string(live_allocs() - base) ++ ", total " ++ int_to_string(t))
+    ()
   end
 end
 |}
@@ -12920,6 +12932,7 @@ let poly_let_none_src =
     let w : Option(Float) = Some(2.5)
     println(pick(if r.n > 3 do w else z end))
     println(pick(z))
+    ()
   end
 end
 |}
@@ -14007,7 +14020,7 @@ let test_js_test_runner_gaps () =
   end
 
   pfn where_am_i() : String do
-    Process.cwd()
+    Authority.must(Process.cwd())
   end
 
   test "to_string without Show" do
@@ -14015,6 +14028,7 @@ let test_js_test_runner_gaps () =
     println(to_string(p))
     println(to_string(Box(2.0, "s")))
     println(to_string({ b: [Dot, Box(0.5, "")], a: (1, true, ()) }))
+    ()
   end
 
   test "try_call" do
@@ -14023,6 +14037,7 @@ let test_js_test_runner_gaps () =
     println(show_r(Check.try_prop(fn x -> if x > 0 do panic("boom") else true end, 1)))
     println(show_r(Check.try_prop(fn x -> if x > 0 do todo("later") else true end, 1)))
     println(show_r(Check.try_prop(fn x -> x > 0, 1)))
+    ()
   end
 
   test "process env and value-typed capability mocks" do
@@ -14036,6 +14051,7 @@ let test_js_test_runner_gaps () =
     println(with_cap(mock, fn _ -> where_am_i()))
     println(to_string(with_cap(mock, fn _ -> Process.pid())))
     println(to_string(before == where_am_i() && before != "/mocked"))
+    ()
   end
 end
 |} in
@@ -15573,6 +15589,7 @@ let test_not_before_operand_is_prefix_not () =
     println(bool_to_string(branch(-9)))
     println(bool_to_string(arms(0)) ++ " " ++ bool_to_string(arms(9)))
     println(bool_to_string(not(true)))
+    ()
   end
 end
 |}
@@ -15613,6 +15630,7 @@ let test_newtype_over_generic_record_eq_compiled () =
     println(to_string(WP(p) == WP({ y: "s", x: 3 })))
     println(to_string(WP(p) == WP({ y: "s", x: 4 })))
     println(to_string(WP(p) == WP({ y: "t", x: 3 })))
+    ()
   end
 end
 |}
@@ -15633,6 +15651,7 @@ let test_local_fn_shadows_later_bulk_use_compiled () =
   use List.*
   fn main(_cap : Cap(IO.Console)) : () do
     println(int_to_string(sum_int(append([1], [2]))))
+    ()
   end
 end
 |}
@@ -15657,6 +15676,7 @@ let test_record_eq_pair_then_triple_compiled () =
     println(to_string(p1 == p2))
     println(to_string(t1 == t2))
     println(to_string(t1 != t2))
+    ()
   end
 end
 |}
@@ -15681,6 +15701,7 @@ let test_record_eq_triple_then_pair_compiled () =
     let p2 : Pair = { a: 1, b: 2 }
     println(to_string(t1 == t2))
     println(to_string(p1 == p2))
+    ()
   end
 end
 |}
@@ -15705,6 +15726,7 @@ let test_record_eq_strings_then_ints_compiled () =
     let q2 : Point = { x: 1, y: 2 }
     println(to_string(n1 == n2))
     println(to_string(q1 == q2))
+    ()
   end
 end
 |}
@@ -15734,6 +15756,7 @@ let test_record_eq_nested_and_list_compiled () =
     let l1 : List(Inner) = [{ x: 1, y: 2, z: 3 }]
     let l2 : List(Inner) = [{ x: 1, y: 2, z: 9 }]
     println(to_string(eq(l1, l2)))
+    ()
   end
 end
 |}
@@ -15758,6 +15781,7 @@ let test_tuple_eq_nested_shape_collision_compiled () =
     println(to_string(b1 == b2))
     println(to_string(a1 == a2))
     println(to_string(a1 != a2))
+    ()
   end
 end
 |}
@@ -15788,6 +15812,7 @@ let test_eq_operator_opaque_ctor_field_uses_poly_eq () =
   fn main() : Unit do
     let t = task_spawn(fn n -> n)
     println(bool_to_string(HA(t) == HA(t)))
+    ()
   end
 end|} in
   Alcotest.(check bool)
@@ -17344,6 +17369,7 @@ let vectorize_source_inlined_reuse_fail = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let out = scale(arr, 2.0)
     println(native_float_arr_get(out, 0))
+    ()
   end
 end|}
 
@@ -17366,6 +17392,7 @@ let vectorize_check_fail_src = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17402,6 +17429,7 @@ let vectorize_source_ok = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17446,6 +17474,7 @@ let vectorize_source_warn_ok = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17459,6 +17488,7 @@ let vectorize_source_ok_int = {|mod Main do
     let arr = native_int_arr_make(4, 1)
     let doubled = double_all(arr)
     println(native_int_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17474,6 +17504,7 @@ let vectorize_source_reuse_fail = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17489,6 +17520,7 @@ let vectorize_source_reuse_warn = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17503,6 +17535,7 @@ let vectorize_source_ok_map2 = {|mod Main do
     let b = native_float_arr_make(4, 2.0)
     let summed = combine(a, b)
     println(native_float_arr_get(summed, 0))
+    ()
   end
 end|}
 
@@ -17519,6 +17552,7 @@ let vectorize_source_reuse_fail_map2 = {|mod Main do
     let b = native_float_arr_make(4, 2.0)
     let summed = combine(a, b)
     println(native_float_arr_get(summed, 0))
+    ()
   end
 end|}
 
@@ -17532,6 +17566,7 @@ let vectorize_source_misuse = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17545,6 +17580,7 @@ let vectorize_source_misuse_warn = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17594,6 +17630,7 @@ let vectorize_source_reuse_fail_int = {|mod Main do
     let arr = native_int_arr_make(4, 1)
     let doubled = double_all(arr)
     println(native_int_arr_get(doubled, 0))
+    ()
   end
 end|}
 

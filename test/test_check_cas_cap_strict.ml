@@ -25,8 +25,8 @@ mod CeilOptOut do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/cap_ceiling_optout", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end

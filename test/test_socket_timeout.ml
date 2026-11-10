@@ -338,7 +338,7 @@ mod TlsReadTimeoutProbe do
   needs IO.Console
 
   pfn port_from_env(name) do
-    match string_to_int(String.trim(Env.get(name, "0"))) do
+    match string_to_int(String.trim(Authority.must(Env.get(name, "0")))) do
     Some(p) -> p
     None    -> 0
     end

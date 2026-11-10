@@ -30,6 +30,7 @@ let src = {|mod PostTirCacheProbe do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println("post-tir " ++ int_to_string(6 * 7))
+    ()
   end
 end
 |}

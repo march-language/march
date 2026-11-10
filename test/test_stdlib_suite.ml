@@ -7551,7 +7551,7 @@ let test_crypto_base64_roundtrip () =
 let test_vault_set_get () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("users")
+      let t = Authority.must(Vault.new("users"))
       Vault.set(t, "alice", 42)
       Vault.get(t, "alice")
     end
@@ -7563,7 +7563,7 @@ let test_vault_set_get () =
 let test_vault_get_missing () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("cache")
+      let t = Authority.must(Vault.new("cache"))
       Vault.get(t, "nobody")
     end
   end|} in
@@ -7574,7 +7574,7 @@ let test_vault_get_missing () =
 let test_vault_drop () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("store")
+      let t = Authority.must(Vault.new("store"))
       Vault.set(t, 1, "one")
       Vault.drop(t, 1)
       Vault.get(t, 1)
@@ -7587,7 +7587,7 @@ let test_vault_drop () =
 let test_vault_update () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("counters")
+      let t = Authority.must(Vault.new("counters"))
       Vault.set(t, :hits, 0)
       Vault.update(t, :hits, fn n -> n + 1)
       Vault.update(t, :hits, fn n -> n + 1)
@@ -7601,7 +7601,7 @@ let test_vault_update () =
 let test_vault_update_noop_on_missing () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("empty_t")
+      let t = Authority.must(Vault.new("empty_t"))
       Vault.update(t, "absent", fn n -> n + 1)
       Vault.size(t)
     end
@@ -7612,7 +7612,7 @@ let test_vault_update_noop_on_missing () =
 let test_vault_size () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("things")
+      let t = Authority.must(Vault.new("things"))
       Vault.set(t, 1, "a")
       Vault.set(t, 2, "b")
       Vault.set(t, 3, "c")
@@ -7626,7 +7626,7 @@ let test_vault_set_ttl_live () =
   (* TTL of 60 seconds — entry is still live immediately after insertion *)
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("session")
+      let t = Authority.must(Vault.new("session"))
       Vault.set_ttl(t, "tok", "abc", 60)
       Vault.get(t, "tok")
     end
@@ -7639,7 +7639,7 @@ let test_vault_set_ttl_expired () =
   (* TTL of -1 seconds — entry is already expired at insertion time *)
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("expired_cache")
+      let t = Authority.must(Vault.new("expired_cache"))
       Vault.set_ttl(t, "stale", "old", -1)
       Vault.get(t, "stale")
     end
@@ -7651,7 +7651,7 @@ let test_vault_set_ttl_expired () =
 let test_vault_get_or () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("defaults")
+      let t = Authority.must(Vault.new("defaults"))
       Vault.get_or(t, "missing", 99)
     end
   end|} in
@@ -7661,7 +7661,7 @@ let test_vault_get_or () =
 let test_vault_has () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("presence")
+      let t = Authority.must(Vault.new("presence"))
       Vault.set(t, "key", true)
       (Vault.has(t, "key"), Vault.has(t, "other"))
     end
@@ -7720,7 +7720,7 @@ let test_vault_keys_returns_all_keys () =
       end
     end
     fn f() do
-      let t = Vault.new("keys_test_1")
+      let t = Authority.must(Vault.new("keys_test_1"))
       Vault.set(t, "x", 1)
       Vault.set(t, "y", 2)
       Vault.set(t, "z", 3)
@@ -7739,7 +7739,7 @@ let test_vault_keys_empty_table () =
       end
     end
     fn f() do
-      let t = Vault.new("keys_test_empty")
+      let t = Authority.must(Vault.new("keys_test_empty"))
       count(Vault.keys(t))
     end
   end|} in
@@ -8556,7 +8556,7 @@ let test_crypto_hmac () =
 let test_crypto_random_bytes () =
   let env = eval_with_crypto {|mod Test do
     fn f() do
-      let b = Crypto.random_bytes(16)
+      let b = Authority.must(Crypto.random_bytes(16))
       Bytes.length(b)
     end
   end|} in
@@ -8565,7 +8565,7 @@ let test_crypto_random_bytes () =
 
 let test_crypto_random_hex () =
   let env = eval_with_crypto {|mod Test do
-    fn f() do string_byte_length(Crypto.random_hex(16)) end
+    fn f() do string_byte_length(Authority.must(Crypto.random_hex(16))) end
   end|} in
   Alcotest.(check int) "random_hex(16) gives 32-char string" 32
     (vint (call_fn env "f" []))
@@ -8604,7 +8604,7 @@ let test_crypto_stdlib_base64_roundtrip () =
 let test_crypto_password_hash_verify () =
   let env = eval_with_crypto {|mod Test do
     fn f() do
-      let h = Crypto.hash_password("secret123")
+      let h = Authority.must(Crypto.hash_password("secret123"))
       if Crypto.verify_password("secret123", h) do "ok" else "fail" end
     end
   end|} in
@@ -8614,7 +8614,7 @@ let test_crypto_password_hash_verify () =
 let test_crypto_password_wrong () =
   let env = eval_with_crypto {|mod Test do
     fn f() do
-      let h = Crypto.hash_password("correct")
+      let h = Authority.must(Crypto.hash_password("correct"))
       if Crypto.verify_password("wrong", h) do "ok" else "fail" end
     end
   end|} in
@@ -9124,7 +9124,7 @@ let test_uuid_parse_ok () =
 let test_uuid_v4_format () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      let u = UUID.v4()
+      let u = Authority.must(UUID.v4())
       let s = UUID.to_string(u)
       string_byte_length(s)
     end
@@ -9135,7 +9135,7 @@ let test_uuid_v4_format () =
 let test_uuid_v4_dashes () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      let u = UUID.v4()
+      let u = Authority.must(UUID.v4())
       let s = UUID.to_string(u)
       string_slice(s, 8, 1) ++ string_slice(s, 13, 1) ++
       string_slice(s, 18, 1) ++ string_slice(s, 23, 1)
@@ -9146,7 +9146,7 @@ let test_uuid_v4_dashes () =
 
 let test_uuid_v4_version () =
   let env = eval_with_uuid {|mod Test do
-    fn f() do UUID.version(UUID.v4()) end
+    fn f() do UUID.version(Authority.must(UUID.v4())) end
   end|} in
   Alcotest.(check int) "UUID v4 version is 4" 4
     (vint (call_fn env "f" []))
@@ -9253,7 +9253,7 @@ let test_uuid_v5_rfc_url_vector () =
 
 let test_uuid_v7_version () =
   let env = eval_with_uuid {|mod Test do
-    fn f() do UUID.version(UUID.v7()) end
+    fn f() do UUID.version(Authority.must(UUID.v7())) end
   end|} in
   Alcotest.(check int) "UUID v7 version is 7" 7
     (vint (call_fn env "f" []))
@@ -9261,7 +9261,7 @@ let test_uuid_v7_version () =
 let test_uuid_v7_format () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      let s = UUID.to_string(UUID.v7())
+      let s = UUID.to_string(Authority.must(UUID.v7()))
       string_byte_length(s)
     end
   end|} in
@@ -9299,7 +9299,7 @@ let test_uuid_v7_sorts_by_time () =
 let test_uuid_v7_timestamp_ms_on_v4_is_none () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      match UUID.timestamp_ms(UUID.v4()) do
+      match UUID.timestamp_ms(Authority.must(UUID.v4())) do
       Some(_) -> "some"
       None    -> "none"
       end

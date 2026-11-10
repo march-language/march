@@ -183,8 +183,8 @@ mod ScopeViol do
   needs IO.FileRead("/etc/myapp")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/shadow") do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -198,8 +198,8 @@ mod ScopeOkay do
   needs IO.FileRead("/etc/myapp")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/myapp/db.conf") do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -215,8 +215,8 @@ mod ScopeEscape do
   needs IO.FileRead("/etc/myapp")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/myapp/../shadow") do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -239,6 +239,7 @@ mod ScopeDyn do
   end
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(load("/anything/at/all"))
+    ()
   end
 end
 |}
@@ -253,8 +254,8 @@ mod ScopeUnscoped do
   needs IO.FileRead
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/shadow") do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -268,8 +269,8 @@ mod ScopeUnion do
   needs IO.FileRead("/etc/app"), IO.FileRead("/usr/share/app")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/usr/share/app/x") do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -286,8 +287,8 @@ mod ScopeParent do
   needs IO.FileRead
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/srv/data/x") do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -303,8 +304,8 @@ mod ScopeTwoPath do
   needs IO.FileWrite("/var/tmp")
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match file_rename("/var/tmp/a", "/etc/passwd") do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -322,8 +323,8 @@ mod ScopeCsv do
   needs IO.FileRead("/srv/data")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match csv_open("%s", ",", :simple) do
-      Ok(_) -> println("o")
-      Err(_) -> println("e")
+      Ok(_) -> Authority.ignore(println("o"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end

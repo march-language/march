@@ -6667,6 +6667,7 @@ mod DSC do
     test "divides" do
       let d = zero()
       println(int_to_string(100 / d))
+      ()
     end
   end
 end|}))
@@ -6679,6 +6680,7 @@ mod DSC2 do
     test "divides" do
       let d = zero()
       println(int_to_string(100 / d))
+      ()
     end
   end
 end|}))
@@ -6691,6 +6693,7 @@ mod TST do
   test "divides" do
     let d = zero()
     println(int_to_string(100 / d))
+    ()
   end
 end|}))
   ; Alcotest.test_case "cap no_panic sees a division in setup and setup_all" `Quick (fun () ->
@@ -6702,9 +6705,11 @@ mod STP do
   fn zero() : Int do 0 end
   setup do
     println(int_to_string(100 / zero()))
+    ()
   end
   setup_all do
     println(int_to_string(200 / zero()))
+    ()
   end
 end|})))
   ; Alcotest.test_case "cap no_panic sees a division in an actor handler and init" `Quick

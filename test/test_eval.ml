@@ -3992,7 +3992,7 @@ let test_borrow_read_only_param_is_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> Authority.ignore(println(s)) end
     end
   end|} in
   Alcotest.(check bool) "log's conn param is borrowed" true
@@ -4120,7 +4120,7 @@ let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> Authority.ignore(println(s)) end
     end
     fn log_twice(conn : Conn) : Unit do
       log(conn)
@@ -4158,7 +4158,7 @@ let test_borrow_no_incrc_at_call_site () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> Authority.ignore(println(s)) end
     end
     fn handle(conn : Conn) : Conn do
       log(conn)
@@ -5231,6 +5231,7 @@ let test_main_cap_io_runs () =
     fn main(cap : Cap(IO)) : () do
       let _console : Cap(IO.Console) = cap_narrow(cap)
       println("main ran with cap")
+      ()
     end
   end|} in
   let buf = Buffer.create 64 in
@@ -5248,6 +5249,7 @@ let test_main_zero_arity_still_runs () =
   needs IO.Console
     fn main(_cap_console : Cap(IO.Console)) : () do
       println("zero-arity main ran")
+      ()
     end
   end|} in
   let buf = Buffer.create 64 in
