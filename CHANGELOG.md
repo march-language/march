@@ -850,6 +850,21 @@ git log is authoritative for exact commits.
   builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the
   capture first, so the builtin read freed memory. ASAN caught it in `HttpServer.tls`; on macOS
   the freed bytes usually survived. The release now waits until the call returns.
+- **Security: an HTTP request can no longer smuggle a second request.** The request
+  serializer copied the method, host, path, query and headers into the request verbatim, so
+  a path such as `"/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"` (from user input, say)
+  sent a pipelined second request. `HttpTransport` and `HttpClient` now refuse, with
+  `Refused(reason)` and before any connection is opened, a method or header name that is not
+  an HTTP token, a host or header value with a CR, LF or other control byte, and a path or
+  query with any byte outside RFC 3986 that was not percent-encoded (a space, `#`, a bare
+  `%`, a non-ASCII byte; percent-encode values with `Uri.encode` / `Uri.encode_query`, since
+  `Http.encode_query` does not); interpreted, compiled and browser builds refuse the same
+  requests. `Tls.https_get` refuses such a host or path the same way, with
+  `TlsWriteError(reason)`.
+  The `http_serialize_request` builtin now returns `Result(String, String)`. Compiled
+  programs also send the request's headers (including `Connection: close`), which the
+  compiled serializer used to drop, and send `Content-Length` only for a non-empty body, as
+  interpreted ones always did.
 - **A NaN prints `nan` on every backend, and the interpreter's `show` no longer adds `.0`
   to `nan`/`inf`/`-inf`.** `float_to_string` went through libc's `%.12g`, which prints a NaN with
   the sign bit set as `-nan` on Linux and `nan` on macOS, and x86's default NaN (what

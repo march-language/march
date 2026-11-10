@@ -945,7 +945,9 @@ mod Http do
 
   doc """
   Replace the query string with `encode_query(params)`; an empty list removes
-  it (`query` becomes `None`). Like `encode_query`, this does not percent-encode.
+  it (`query` becomes `None`). Like `encode_query`, this does not percent-encode;
+  a query byte outside RFC 3986 (a space, `#`, a bare `%`) makes `HttpTransport`
+  refuse the request with `Refused`. Encode raw values with `Uri.encode` first.
 
   ## Examples
 
