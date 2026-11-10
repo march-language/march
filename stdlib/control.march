@@ -1766,7 +1766,7 @@ mod Control do
   (`certs_text`). `has` is the artifact's presence in the CAS
   (a `base:` in the release is informational: the base image is not an artifact).
 
-      let mem = Vault.new("agent")
+      let mem = Authority.must(Vault.new("agent"))
       let ops = Control.real_ops("node-a", "web", status, certs, mem)
       Control.agent_apply_recording(ops, mem, order, 200)
   """

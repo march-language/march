@@ -61,7 +61,7 @@ end
 describe "task_cancel_by_id" do
 
   test "cancelling a completed task makes await return Err" do
-    let t = Task.async(fn () -> 7)
+    let t = Authority.must(Task.async(fn () -> 7))
     task_cancel_by_id(t)
     let r = Task.await(t)
     assert (r == Err("cancelled"))
@@ -87,7 +87,7 @@ describe "Task.race" do
 
   test "race cancels the losers" do
     let t1 = Task.async(fn () -> "winner")
-    let t2 = Task.async(fn () -> "loser")
+    let t2 = Authority.must(Task.async(fn () -> "loser"))
     Task.race([t1, t2])
     -- After race, t2 should be marked cancelled
     let r2 = Task.await(t2)
@@ -101,7 +101,7 @@ describe "Task.race" do
 
   test "race with cancelled first task returns Err" do
     -- Use task_cancel_by_id to simulate a pre-failed task.
-    let t1 = Task.async(fn () -> 1)
+    let t1 = Authority.must(Task.async(fn () -> 1))
     task_cancel_by_id(t1)
     let t2 = Task.async(fn () -> 99)
     let r = Task.race([t1, t2])
@@ -120,7 +120,7 @@ describe "Task.any" do
   end
 
   test "any returns first Ok, skips earlier Err" do
-    let t1 = Task.async(fn () -> 1)
+    let t1 = Authority.must(Task.async(fn () -> 1))
     let t2 = Task.async(fn () -> 2)
     -- mark t1 as failed by cancelling it
     task_cancel_by_id(t1)
@@ -129,8 +129,8 @@ describe "Task.any" do
   end
 
   test "any cancels remaining tasks after first Ok" do
-    let t1 = Task.async(fn () -> 1)
-    let t2 = Task.async(fn () -> 2)
+    let t1 = Authority.must(Task.async(fn () -> 1))
+    let t2 = Authority.must(Task.async(fn () -> 2))
     task_cancel_by_id(t1)
     Task.any([t1, t2])
     -- t2 was the winner (not cancelled by any), t1 was the failed
@@ -140,8 +140,8 @@ describe "Task.any" do
   end
 
   test "any with all Err returns Err(list)" do
-    let t1 = Task.async(fn () -> 1)
-    let t2 = Task.async(fn () -> 2)
+    let t1 = Authority.must(Task.async(fn () -> 1))
+    let t2 = Authority.must(Task.async(fn () -> 2))
     task_cancel_by_id(t1)
     task_cancel_by_id(t2)
     let r = Task.any([t1, t2])
@@ -167,7 +167,7 @@ describe "Task.all_settled" do
 
   test "all_settled includes Err results without short-circuiting" do
     let t1 = Task.async(fn () -> 1)
-    let t2 = Task.async(fn () -> 2)
+    let t2 = Authority.must(Task.async(fn () -> 2))
     let t3 = Task.async(fn () -> 3)
     task_cancel_by_id(t2)
     let rs = Task.all_settled([t1, t2, t3])
@@ -196,7 +196,7 @@ describe "Task.scope" do
 
   test "scope works with task spawning inside" do
     let r = Task.scope(fn () ->
-      let t = Task.async(fn () -> 7)
+      let t = Authority.must(Task.async(fn () -> 7))
       Task.await_unwrap(t)
     )
     assert (r == 7)
@@ -204,8 +204,8 @@ describe "Task.scope" do
 
   test "scope with multiple tasks inside" do
     let r = Task.scope(fn () ->
-      let t1 = Task.async(fn () -> 3)
-      let t2 = Task.async(fn () -> 4)
+      let t1 = Authority.must(Task.async(fn () -> 3))
+      let t2 = Authority.must(Task.async(fn () -> 4))
       Task.await_unwrap(t1) + Task.await_unwrap(t2)
     )
     assert (r == 7)

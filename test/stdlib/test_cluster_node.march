@@ -1342,7 +1342,7 @@ mod TestClusterNode do
   -- accept loop's task eagerly.)
 
   pfn race_vaults(tag : String) : (Vault(GlobalPid.Pid), Vault(Int)) do
-    (Vault.new("test_cn_race_names_" ++ tag), Vault.new("test_cn_race_claims_" ++ tag))
+    (Authority.must(Vault.new("test_cn_race_names_" ++ tag)), Authority.must(Vault.new("test_cn_race_claims_" ++ tag)))
   end
 
   pfn taken_pid(r : Result((), ClusterNode.RegisterError)) : Int do

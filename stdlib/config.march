@@ -730,24 +730,22 @@ mod Config do
   Returns a store handle holding tagged `Value`s; use it with `store_put`,
   `store_get` and `store_fetch` and the same typed keys as the global table.
   Calling it again with the same name returns the same store, contents
-  included.
+  included. `Err(CapError(...))` when opening a table by that name (IO.Mut)
+  is refused.
 
   ## Examples
 
       march> let port = Config.key(:myapp, :port, Config.int())
       march> let k = Config.key(:myapp, :port, Config.int())
-      march> let store = Config.new_store("new_store_demo")
+      march> let store = Authority.must(Config.new_store("new_store_demo"))
       march> Config.store_put(store, k, 1)
       march> let k = Config.key(:myapp, :port, Config.int())
       march> let port = Config.key(:myapp, :port, Config.int())
-      march> Option.unwrap_or(Config.store_get(Config.new_store("new_store_demo"), k), 0)
+      march> Option.unwrap_or(Config.store_get(Authority.must(Config.new_store("new_store_demo")), k), 0)
       1
   """
-  fn new_store(name : String) : Vault(Value) do
-    match vault_whereis(name) do
-      Some(tbl) -> tbl
-      None      -> vault_new(name)
-    end
+  fn new_store(name : String) : Result(Vault(Value), CapError) do
+    Vault.open(name)
   end
 
   doc """

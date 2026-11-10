@@ -37,10 +37,8 @@ let allowlist : ((string * string) * string) list = [
   (("ClusterNode.replace_checked", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.start", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.start", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
-  (("Config.global_table", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Config.global_table", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Config.new_store", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Config.new_store", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Config.global_table", "vault_new"), "Config's own table (\"__march_config__\"), not one a caller names: the stdlib's state, charged to Config's IO.Mut as today");
+  (("Config.global_table", "vault_whereis"), "Config's own table (\"__march_config__\"), not one a caller names: the stdlib's state, charged to Config's IO.Mut as today");
   (("Csv.each_row", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("Csv.read_all", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
   (("Csv.each_row_with_header", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
@@ -93,13 +91,8 @@ let allowlist : ((string * string) * string) list = [
   (("SessionNode.actor OfferActor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("SessionNode.retire_offer", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("SessionNode.hosted_trace", "print_stderr"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
-  (("Signal.watch", "signal_watch"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Signal.raise", "signal_raise_self"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Socket.connect", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
   (("Socket.connect_timeout", "tcp_connect_timeout"), "TODO ocap-p1 Task 10 (files/network)");
-  (("Task.async", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Task.async_stream", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Task.async_stream_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
   (("Tls.client_ctx", "tls_client_ctx"), "TODO ocap-p1 Task 10 (files/network)");
   (("Tls.server_ctx", "tls_server_ctx"), "TODO ocap-p1 Task 10 (files/network)");
   (("Tls.https_get", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
@@ -129,12 +122,6 @@ let allowlist : ((string * string) * string) list = [
   (("Udp.send_batch", "udp_send_batch"), "TODO ocap-p1 Task 10 (files/network)");
   (("Udp.send_batch_connected", "udp_send_batch"), "TODO ocap-p1 Task 10 (files/network)");
   (("Udp.send_many", "udp_send_many"), "TODO ocap-p1 Task 10 (files/network)");
-  (("Vault.new", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Vault.open", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Vault.open", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Vault.whereis", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Vault.ns_get", "vault_ns_get"), "TODO ocap-p1 Task 9 (signal/task/vault)");
-  (("Vault.ns_drop", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
 ]
 
 let stdlib_dir () =

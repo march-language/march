@@ -89,7 +89,7 @@ mod ClusterConn do
   -- its most recent handshake here (process-wide, like PeerRegistry's ids).
   -- Step 11b's role and raw-send checks read it.
 
-  pfn certs() : Vault(NodeCert.Cert) do Vault.open("cluster_conn_certs") end
+  pfn certs() : Vault(NodeCert.Cert) do Authority.must(Vault.open("cluster_conn_certs")) end
 
   pfn remember(a) do
     match a.cert do

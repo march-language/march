@@ -77,7 +77,7 @@ mod TestSessionNode do
 
     test "a delivery behind a parked one from the same sender waits its turn" do
       let p = SessionNode.party(2, "fifo-test", fn _ -> ())
-      let got : Vault(String) = Vault.new("test_session_node_fifo_got")
+      let got : Vault(String) = Authority.must(Vault.new("test_session_node_fifo_got"))
       Vault.set(p.forward, "f", fn (_from, msg, _ep) ->
         Vault.set(got, "seen", Vault.get_or(got, "seen", "") ++ Bytes.to_string(msg) ++ ";"))
       -- No continuation yet (the host has not parked): the first is parked.

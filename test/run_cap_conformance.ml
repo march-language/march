@@ -66,6 +66,8 @@ let js_unsupported : (string * string) list = [
   ("console_refused", "verdict needs `process_exit`, and `io_read_line`; the JS target has neither");
   ("process_allowed", "the JS target has no `process_set_env` or `process_spawn_sync`");
   ("process_refused", "the JS target has no `process_exit`");
+  ("spawn_mut_allowed", "the JS target has no tasks (`task_spawn`, `task_await`) or tables (`vault_get`)");
+  ("spawn_mut_signal_refused", "the JS target has no `signal_watch` or `pmap_threshold`");
 ]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)

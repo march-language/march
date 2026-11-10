@@ -245,9 +245,9 @@ mod NodeSend do
   -- name it). One table per node process; the seq space is the caller's.
 
   pfn pending() do
-    match Vault.whereis("node_send_pending") do
+    match Authority.must(Vault.whereis("node_send_pending")) do
       Some(t) -> t
-      None -> Vault.new("node_send_pending")
+      None -> Authority.must(Vault.new("node_send_pending"))
     end
   end
 

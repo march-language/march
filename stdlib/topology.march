@@ -156,7 +156,7 @@ mod Topology do
   """
   fn offer_actor_role(name : String, place : TopoPlacement, capacity : Int, mk : () -> Pid(a),
                       open : Pid(a) -> Int -> Result(SessionNode.Offer, SessionNode.RunError)) : TopoRole do
-    let spare = Vault.new("topology_spare_" ++ name ++ "_" ++ int_to_string(next_id()))
+    let spare = Authority.must(Vault.new("topology_spare_" ++ name ++ "_" ++ int_to_string(next_id())))
     { name: name, place: place, capacity: capacity, pinned: false,
       open: fn cap ->
         let host = match Vault.get(spare, "h") do
@@ -174,7 +174,7 @@ mod Topology do
   end
 
   pfn next_id() : Int do
-    let ids : Vault(Int) = Vault.open("topology_ids")
+    let ids : Vault(Int) = Authority.must(Vault.open("topology_ids"))
     Vault.incr(ids, "n", 1)
   end
 
@@ -339,10 +339,10 @@ mod Topology do
 
   pfn state_of(node : Cap(ClusterNode.Live)) : TopoState do
     let k = ClusterNode.node_id(node)
-    { meta: Vault.open("topology_meta_" ++ k), strs: Vault.open("topology_strs_" ++ k),
-      offers: Vault.open("topology_offers_" ++ k),
-      draining: Vault.open("topology_draining_" ++ k), roles: Vault.open("topology_roles_" ++ k),
-      anchor: Vault.open("topology_anchor_" ++ k) }
+    { meta: Authority.must(Vault.open("topology_meta_" ++ k)), strs: Authority.must(Vault.open("topology_strs_" ++ k)),
+      offers: Authority.must(Vault.open("topology_offers_" ++ k)),
+      draining: Authority.must(Vault.open("topology_draining_" ++ k)), roles: Authority.must(Vault.open("topology_roles_" ++ k)),
+      anchor: Authority.must(Vault.open("topology_anchor_" ++ k)) }
   end
 
   pfn anchor(st : TopoState) : Pid(TopoAnchorState) do
@@ -1086,10 +1086,11 @@ mod Topology do
   deadlines), then exit 0 once no session is running. At [soft_ms] a drain
   still waiting is reported; at [hard_ms] the process exits 1, naming how
   many sessions it cut. A second signal escapes the watcher and stops the
-  process at once.
+  process at once. `Err(CapError(...))` when watching a signal (IO.Signal)
+  is refused.
   """
-  fn drain_on_signal(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : () do
-    Signal.watch(Signal.Term, fn -> drain(node, soft_ms, hard_ms))
+  fn drain_on_signal(node : Cap(ClusterNode.Live), soft_ms : Int, hard_ms : Int) : Result((), CapError) do
+    let? _ = Signal.watch(Signal.Term, fn -> drain(node, soft_ms, hard_ms))
     Signal.watch(Signal.Int, fn -> drain(node, soft_ms, hard_ms))
   end
 
@@ -1195,7 +1196,7 @@ mod Topology do
   Long-lived work belongs in a task or actor the hook spawns.
   """
   fn hook(name : String, f : () -> a) : a do
-    let flag : Vault(Int) = Vault.new("topology_hook_" ++ int_to_string(next_id()))
+    let flag : Vault(Int) = Authority.must(Vault.new("topology_hook_" ++ int_to_string(next_id())))
     let limit = hook_timeout_ms()
     let _ = task_spawn(fn _ -> watchdog(flag, name, limit, unix_time_ms()))
     let v = f()
