@@ -803,6 +803,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`--target js` Float literals are the same double as native** (#1169). The JS emitter
+  printed a `Float` literal with 12 significant digits, so `3.141592653589793`, `Math.pi()`,
+  `Math.tau()`, `Math.e()` and values `opt.fold` computed (`1.0 /. 240.0`) ran as a different
+  double with no warning; a folded infinity or NaN came out as `inf.0` / `nan.0` and the module
+  failed to load with a `SyntaxError`. Literals now use the fewest digits (12 to 17) that read
+  back as the same bits, and `Infinity`, `(-Infinity)` and `NaN` for the non-finite values.
 - **`ClusterAuth.verify` compares HMAC proofs in constant time, and `DataFrame.to_html` escapes
   every special character.** `verify` used `==`, whose running time leaks how much of a forged
   shared-secret proof was right; it now uses `Crypto.secure_compare`. `to_html`'s cell and header
