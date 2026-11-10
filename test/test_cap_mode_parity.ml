@@ -256,7 +256,8 @@ let fixtures =
       (main_grant "c : Cap(IO.Console), w : Cap(IO.FileWrite)") ~skip:no_entry;
     fx "path_scope" [ "cap_scope_violation" ]
       (path_scope "/etc/hosts") ~repl:(path_scope_repl "/etc/hosts")
-      ~skip:mc_nested_path_scope;
+      ~skip:(mc_nested_path_scope
+             @ [ ("repl", "a module declared at the prompt is checked as a nested module: specs/todos/2026-11-10-nested-path-scope-unchecked.md") ]);
     fx "path_scope_ok" [] (path_scope "/nonexistent/cap_parity/a.txt")
       ~repl:(path_scope_repl "/nonexistent/cap_parity/a.txt");
     fx "host_scope" [ "cap_host_scope" ]
@@ -286,12 +287,6 @@ let modes =
    phase lands; must be empty when it is done. *)
 let known_gaps : (string * string) list =
   [
-    (* repl *)
-    ("ceiling_stdlib", "repl");
-    ("fn_bound", "repl");
-    ("host_scope", "repl");
-    ("host_unproven", "repl");
-    ("path_scope", "repl");
   ]
 
 let read_file path =
