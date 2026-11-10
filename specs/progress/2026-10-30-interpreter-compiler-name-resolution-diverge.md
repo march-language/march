@@ -40,3 +40,13 @@ blanket "a user module may not be named like a stdlib module" error would reject
 programs. A real fix gives an entry-level nested module's functions their own TIR names when a
 stdlib module of that name exists (or qualifies every user module under the entry module's
 name), and rewrites the user's call sites to match, without touching the stdlib's own calls.
+
+## 2026-11-10: the last shape fixed
+
+An entry-file module whose top-level name is also a stdlib module (or a module from another file)
+now lowers its fns under their own TIR names (`List.sum_int` -> `List.sum_int$u`), and every
+reference in the entry file that resolves to one is mapped to it, so `List.sum_int([1, 2])` is 42 on
+both backends while the rest of the stdlib `List` stays reachable. The same tests found the
+interpreter wrong inside that module: a bare sibling call (which desugar qualifies to
+`List.sum_int`) reached the stdlib's fn; the module's env now binds the qualified name to its own
+fn. Details: `specs/progress/2026-11-10-user-stdlib-name-collisions.md`.
