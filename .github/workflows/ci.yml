@@ -770,8 +770,14 @@ jobs:
       # driver fixed (bin/toolchain.ml, runtime_dir_complete) it takes under
       # a minute, and the script fails if the prelude ever falls back to
       # recompiling again.
+      #
+      # It has since grown back to the budget with no fallback: by 2026-11-10
+      # the per-module REPL sessions alone summed to ~285 s on main (one cold
+      # ~60 s prelude precompile, then 86 sessions of ~1-24 s), and a PR run
+      # timed out after printing "0 failed". The budget is 10 min; read the
+      # per-session lines before raising it again.
       - name: Check stdlib `march>` doctests
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           eval $(opam env)
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
