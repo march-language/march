@@ -624,6 +624,16 @@ void march_tls_ctx_free(int64_t ctx_handle) {
     SSL_CTX_free(ctx);
 }
 
+/* TLS handle boxes (march_handle.c): a TLS box releases its SSL* here and
+ * then closes its TCP fd (aux) itself; a TLS_CTX box frees the context. */
+static void tls_handle_release(int64_t raw, int64_t aux) { (void)aux; march_tls_close(raw); }
+static void tls_ctx_handle_release(int64_t raw, int64_t aux) { (void)aux; march_tls_ctx_free(raw); }
+__attribute__((constructor))
+static void tls_register_handle_release(void) {
+    march_handle_set_releaser(MARCH_HANDLE_TLS, tls_handle_release);
+    march_handle_set_releaser(MARCH_HANDLE_TLS_CTX, tls_ctx_handle_release);
+}
+
 /* ── Introspection ────────────────────────────────────────────────────── */
 
 void *march_tls_negotiated_alpn(int64_t ssl_handle) {

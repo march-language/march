@@ -394,6 +394,14 @@ void march_udp_close(int64_t fd_arg) {
     if (fd >= 0) close(fd);
 }
 
+/* A UDP handle box (march_handle.c) releases through march_udp_close, so the
+ * per-fd flags are cleared with the descriptor. */
+static void udp_handle_release(int64_t raw, int64_t aux) { (void)aux; march_udp_close(raw); }
+__attribute__((constructor))
+static void udp_register_handle_release(void) {
+    march_handle_set_releaser(MARCH_HANDLE_UDP, udp_handle_release);
+}
+
 /* udp_local_addr(fd) -> Result(String, String): the bound address. */
 void *march_udp_local_addr(int64_t fd_arg) {
     struct sockaddr_storage ss;

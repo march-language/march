@@ -6681,6 +6681,7 @@ let compile filename =
                  else "")  (* BLAKE3 for server-side cap_root recompute *)
               ^ (if not !compile_so then opt_file2 (Filename.concat runtime_dir "march_cap_lattice.c") else "")  (* cap subsumption/normalize for ACTIVATE4 admission *)
               ^ opt_file2 (Filename.concat runtime_dir "march_ctx_escape.c")  (* ~H contextual escapers; referenced by march_extras.c *)
+              ^ opt_file2 (Filename.concat runtime_dir "march_handle.c")  (* handle boxes; referenced by march_runtime.c *)
               ^ opt_file2 (Filename.concat runtime_dir "tweetnacl.c")  (* ed25519 (ACTIVATE verification) + X25519; core since the node-certificate builtins (march_nacl.c) *)
               ^ opt_file2 (Filename.concat runtime_dir "march_nacl.c") (* ed25519_* / x25519 builtins *)
               ^ opt_file2 (Filename.concat runtime_dir "pqc.c")        (* vendored ML-KEM-768 / ML-DSA-65 (third_party/) *)

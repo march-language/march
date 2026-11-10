@@ -355,6 +355,56 @@ void march_clo_capture_epoch(void *clo);
 void march_clo_forget_epoch(void *clo);
 void march_clo_frame_enter(void *clo);
 
+/* A handle box (runtime/march_handle.c; ocap phase 2, spec §6): a
+ * reference-counted cell holding one raw descriptor and a closed flag, the
+ * runtime form of File.Handle, File.Dir, Socket, Listener and Process.
+ *   [rc][tag=MARCH_HANDLE_TAG][pad=kind][raw@16][aux@24][state@32][pad@40]
+ * state (an _Atomic int64): bit 0 closed, bit 1 released, bits 2.. the
+ * in-flight count.  A use brackets the raw descriptor with enter/leave; the
+ * descriptor is released exactly once, by whichever of close, the last leave
+ * after a close, or the destructor finds it closed (or dying) with nothing in
+ * flight.  A message copy shares the box (rc+1), never byte-copies it. */
+#define MARCH_HANDLE_TAG ((int32_t)-10)
+#define MARCH_HANDLE_SIZE 48
+#define MARCH_HANDLE_FILE         1   /* raw: fh-table handle (march_file_open) */
+#define MARCH_HANDLE_DIR          2   /* raw: an O_DIRECTORY fd */
+#define MARCH_HANDLE_TCP          3   /* raw: a connected socket fd */
+#define MARCH_HANDLE_TCP_BORROWED 4   /* raw: an fd the HTTP event loop owns */
+#define MARCH_HANDLE_LISTENER     5   /* raw: a listening socket fd */
+#define MARCH_HANDLE_UDP          6   /* raw: a UDP socket fd */
+#define MARCH_HANDLE_TLS          7   /* raw: SSL*, aux: its TCP fd */
+#define MARCH_HANDLE_TLS_CTX      8   /* raw: SSL_CTX* */
+#define MARCH_HANDLE_PROCESS      9   /* raw: live-process slot handle */
+void   *march_handle_new(int64_t kind, int64_t raw, int64_t aux);
+/* raw with the in-flight count raised, or -1 when closed.  Fatal (the fatal
+ * hook runs, then abort) when h is not a handle or not of [kind]; a
+ * TCP_BORROWED box satisfies an expected TCP. */
+int64_t march_handle_enter(void *h, int64_t kind);
+void    march_handle_leave(void *h);
+/* 1 if this call closed the box, 0 if it was closed already.  Sockets (TCP,
+ * LISTENER, UDP) are shut down first, so a reader parked in recv wakes; the
+ * descriptor is released now, or by the last leave when a use is in flight. */
+int64_t march_handle_close(void *h);
+/* Close WITHOUT releasing: ownership of raw moves to the caller (TCP -> TLS,
+ * server conn -> WebSocket).  raw, or -1 if already closed. */
+int64_t march_handle_detach(void *h);
+int64_t march_handle_is_closed(void *h);
+int64_t march_handle_aux(void *h);
+int64_t march_handle_kind(void *h);
+/* The March type a kind renders as ("File.Handle", "Socket", ...). */
+const char *march_handle_kind_name(int64_t kind);
+/* Releases the descriptor unless already released (march_run_resource_dtor). */
+void    march_handle_dtor(void *h);
+/* Per-kind release for the kinds whose closer lives in an optional runtime
+ * file (march_udp.c, march_tls.c register theirs from a constructor, so the
+ * box itself stays a core file).  An unregistered UDP release is close(raw). */
+void    march_handle_set_releaser(int64_t kind, void (*fn)(int64_t raw, int64_t aux));
+/* Test hook (test/test_handle.c): when set, replaces every release. */
+extern void (*march_handle_test_release_hook)(int64_t kind, int64_t raw, int64_t aux);
+/* Release a live-process slot the way process_wait_proc does, without
+ * waiting for or signalling the child (march_runtime.c). */
+void    march_process_release_slot(int64_t handle);
+
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
  * the actor `actor` after delay_ms milliseconds. RC contract matches
