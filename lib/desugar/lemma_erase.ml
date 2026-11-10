@@ -275,7 +275,7 @@ let rec mentions (n : string) (decls : decl list) : bool =
       | DInterface (idef, _) -> List.iter (fun m -> Option.iter ex m.md_default) idef.iface_methods
       | DActor (_, _, a, _) ->
         ex a.actor_init;
-        List.iter (fun (h : actor_handler) -> ex h.ah_body) a.actor_handlers;
+        List.iter (fun (h : actor_handler) -> ex h.ah_body; Option.iter ex h.ah_ensures) a.actor_handlers;
         Option.iter (fun (h : actor_handler) -> ex h.ah_body) a.actor_on_stop;
         Option.iter ex a.actor_invariant
       | DTest (t, _) -> ex t.test_body

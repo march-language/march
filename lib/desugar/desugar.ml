@@ -1562,7 +1562,8 @@ let rec desugar_decl (d : decl) : decl =
        refinement alias in a message or the state expands here. *)
     let param (p : param) = { p with param_ty = Option.map desugar_ty p.param_ty } in
     let handlers' = List.map (fun h ->
-        { h with ah_body = desugar_expr h.ah_body; ah_params = List.map param h.ah_params })
+        { h with ah_body = desugar_expr h.ah_body; ah_params = List.map param h.ah_params;
+                 ah_ensures = Option.map desugar_expr h.ah_ensures })
         actor.actor_handlers in
     let actor = { actor with
                   actor_state = List.map (fun f -> { f with fld_ty = desugar_ty f.fld_ty }) actor.actor_state;
@@ -2331,7 +2332,15 @@ let qualify_level (prefix : string) (own_names : string list) (decls : decl list
                   sc.sc_fields }) actor.actor_supervise
       ; actor_handlers = List.map (fun h ->
             let bound = List.map (fun p -> p.param_name.txt) h.ah_params in
-            { h with ah_body = go bound h.ah_body }) actor.actor_handlers
+            { h with ah_body = go bound h.ah_body;
+                     (* `state`, `old` and the bare field names mean the
+                        spec's own things in a guarantee, never a module fn. *)
+                     ah_ensures =
+                       Option.map
+                         (go ("state" :: "old"
+                              :: List.map (fun f -> f.fld_name.txt) actor.actor_state @ bound))
+                         h.ah_ensures })
+            actor.actor_handlers
       ; actor_on_stop = Option.map (fun h ->
             { h with ah_body = go [] h.ah_body }) actor.actor_on_stop
       } in
@@ -2504,7 +2513,8 @@ let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
               { sc with sc_fields = List.map (fun sf ->
                     { sf with sf_init_args = List.map rw sf.sf_init_args })
                     sc.sc_fields }) actor.actor_supervise
-        ; actor_handlers  = List.map (fun h -> { h with ah_body = rw h.ah_body })
+        ; actor_handlers  = List.map (fun h ->
+              { h with ah_body = rw h.ah_body; ah_ensures = Option.map rw h.ah_ensures })
                               actor.actor_handlers
         ; actor_on_stop   = Option.map (fun h -> { h with ah_body = rw h.ah_body })
                               actor.actor_on_stop

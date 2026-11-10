@@ -32,7 +32,8 @@ One file per step. Grouped by effort, ordered within a group by practical payoff
    parameters, lets and functions, erased like lemmas: proof-only state. Follow-ups (a ghost-set
    proof, merged clauses, impl methods, the REPLs, actor state):
    `2026-11-08-ghost-code-followups`.
-7. `2026-11-06-two-state-specs` — `old(state)` in actor handler and migration contracts.
+7. ~~`2026-11-06-two-state-specs`~~ done (`specs/progress/2026-11-06-two-state-specs.md`) —
+   handler guarantees, `on Msg(…) ensures P do` with `old(e)`, proved per handler.
 8. `2026-11-06-lean-export` — emit reflected definitions and unproved lemmas as Lean 4, prove
    the hard ones there, admit them by digest. Lean's power without becoming Lean.
 9. `2026-11-06-checked-solver-proofs` — measure certificate coverage first, then

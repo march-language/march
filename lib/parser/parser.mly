@@ -468,7 +468,7 @@
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
-%token CALC REVEAL FORALL EXISTS GHOST
+%token CALC REVEAL FORALL EXISTS GHOST ENSURES
 %token DBG DOC
 %token <string> SIGIL_PREFIX
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
@@ -1060,7 +1060,7 @@ actor_item:
   | h = actor_handler { `H h }
   | ON_STOP; DO; body = block_body; END
     { `S ({ ah_msg = { txt = "on_stop"; span = mk_span ($loc($1)) };
-            ah_params = []; ah_body = body }, $startpos($1)) }
+            ah_params = []; ah_ensures = None; ah_body = body }, $startpos($1)) }
 
 (** mailbox N policy — a bound on the actor's mailbox, declared with the
     actor rather than at every spawn site. Lowers to
@@ -1228,8 +1228,9 @@ restart_strategy_tok:
 
 actor_handler:
   | ON; msg = upper_name; LPAREN; params = separated_list(COMMA, param); RPAREN;
+    ens = option(preceded(ENSURES, expr));
     DO; body = block_body; END
-    { { ah_msg = msg; ah_params = params; ah_body = body } }
+    { { ah_msg = msg; ah_params = params; ah_ensures = ens; ah_body = body } }
 
 (** Protocol (binary session type) declaration:
     protocol Transfer do
