@@ -21,12 +21,17 @@ let fold_int_op op a b =
   | "%" -> if b = 0 then None else Some (a mod b)
   | _   -> None
 
+(* A zero divisor (0.0 or -0.0) is left unfolded, like the Int `/`: `x /. 0.0`
+   stops with "division by zero" at run time (specs/lang/core-march.md,
+   δ-Div-0F; native march_checked_fdiv).  Folding it to IEEE inf/nan made a
+   default --compile build print `inf` where the interpreter and a
+   --disable-pass opt.fold build stop (#1169). *)
 let fold_float_op op a b =
   match op with
   | "+." -> Some (a +. b)
   | "-." -> Some (a -. b)
   | "*." -> Some (a *. b)
-  | "/." -> Some (a /. b)
+  | "/." -> if b = 0.0 then None else Some (a /. b)
   | _    -> None
 
 let mk_int n = Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt n))
