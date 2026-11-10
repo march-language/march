@@ -1024,10 +1024,20 @@ Directly callable without module qualification (built into the evaluator).
 
 | Builtin | Description |
 |---------|-------------|
-| `print(x)` / `println(x)` | Print |
+| `print(x)` / `println(x)` | Print; `println` returns `Result((), CapError)` |
 | `print_int(n)` / `print_float(f)` | Typed print |
 | `read_line()` | Read from stdin |
 | `tap(x)` | Print and return |
+
+**Capability operations return `Result(T, CapError)`** (ocap phase 1): console,
+clock (`System.now`, `System.now_ms`, `DateTime.now`), random, `Process.env` and
+friends, spawns (`Task.async`), table opens (`Vault.new/open/whereis`), signals,
+files (`File.read : Result(Result(String, FileError), CapError)`, nested),
+`Socket.connect`, `Dns.resolve`. A call on its own line needs nothing (the
+result is discarded). In a `: ()` function ending in `println(...)`, add a line
+`()`; where the value is needed write `Authority.must(e)` (panics on a refusal)
+or match it. The diagnostic is `cap_result_unhandled`; `forge fix` applies the
+fix. Using a handle (`Vault.set`, socket send/recv) is not an operation.
 
 ### Map (hash map)
 

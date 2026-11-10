@@ -470,6 +470,29 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Capability operations return `Result(T, CapError)`** (object-capability design,
+  phase 1; breaking). Printing (`println`, `IO.puts/write/warn/read_line/read_byte/gets`),
+  the clock (`System.now`, `System.now_ms`, new; `DateTime.now`, `local_now`), randomness
+  (`Crypto.random_bytes/random_hex/hash_password`, `UUID.v4/v7`, `Random.int`, the
+  ML-KEM/ML-DSA/NodeCert key and signing functions), the environment and the process
+  (`Process.env/set_env/cwd/argv/pid/exit`, `System.*`, `Env.*`, `Config.from_env*`/`env`),
+  spawning (`Task.async`, `async_stream`), opening a table by name (`Vault.new/open/whereis`,
+  `ns_*`, `Config.new_store`), signals (`Signal.watch/raise`), files (`File.*`, `Dir.*`,
+  `Csv.*`, `Seq.from_file_*`), `Socket.connect*` and `Dns.resolve*` all return a `Result`
+  whose `Err(CapError(...))` is a refusal naming the operation and the limit. Operations
+  that already returned `Result(U, E)` now return `Result(Result(U, E), CapError)`:
+  `Ok(Err(NotFound(p)))` is a missing file, `Err(CapError(...))` a refused one. A call used
+  as a statement is unaffected; code that used the value gets the new diagnostic
+  `cap_result_unhandled`, whose fix (`()` after a unit result, `Authority.ignore(...)`,
+  `Authority.must(...)`) `forge fix` applies. `forge fix PATH... [--only CODE,...]` fixes
+  files outside a project. The new `Authority` module (`check`, `describe`, `must`, `ignore`)
+  and the Prelude types `CapError`/`CapLimit` carry it. The parallel `List` helpers compute
+  sequentially when spawning is refused; `IO.inspect`, `debug` and the Logger never fail.
+  Nothing refuses yet except the test-only `MARCH_TEST_REFUSE` hook; UDP, TLS contexts,
+  `HttpClient` and `HttpServer` follow in phase 2. The REPL does not echo the `Ok(())` of a
+  console operation. Reading stdin is now charged to `IO.Console`.
+- **`forge fix` keeps a file's final newline**; it used to drop it from every file it fixed.
+
 - **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
   NaN, the infinities and a result outside Int's range** (#1230), with
   `float_floor: value out of Int range` or `float_floor: cannot convert NaN to Int`, the same
