@@ -537,8 +537,8 @@ let check ?(preamble = "") ?(assume : string list = []) ?rlimit (t : t) (vc : Sm
   if assume <> [] then Buffer.add_string b "(set-option :produce-unsat-cores true)\n";
   Buffer.add_string b (Printf.sprintf "(set-option :rlimit %d)\n" rlimit);
   (* Measure-axiom preamble (datatype + uninterpreted-fn declarations + axioms). *)
-  if preamble <> "" then (Buffer.add_string b preamble; Buffer.add_char b '\n');
-  Buffer.add_string b (Smt.assertion_block vc);
+  Buffer.add_string b
+    (Smt.hoist_string_decls ((if preamble = "" then "" else preamble ^ "\n") ^ Smt.assertion_block vc));
   if assume = [] then Buffer.add_string b "(check-sat)\n"
   else Buffer.add_string b (Printf.sprintf "(check-sat-assuming (%s))\n" (String.concat " " assume));
   let sent = Buffer.contents b in

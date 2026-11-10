@@ -104,8 +104,8 @@ let is_float_base : A.ty -> bool = function
    long-lived `z3 -in` process shared by the whole compilation and the driver
    reads exactly one verdict line per query, so a single such error
    DESYNCHRONISES the channel and corrupts every subsequent VC in the run. *)
-let str_sort = "$Str"
-let strlen_fn = "$strlen"
+let str_sort = Smt.str_sort
+let strlen_fn = Smt.strlen_fn
 
 (* Abstract refinements (design 2026-09-20 §2a).  Inside the definition that
    declares `p`, `p(e)` is the uninterpreted Bool function [abs_sym p] over the
@@ -121,12 +121,7 @@ let is_abs_sym (f : string) : bool =
   String.length f > String.length abs_prefix
   && String.sub f 0 (String.length abs_prefix) = abs_prefix
 
-let string_preamble =
-  Printf.sprintf
-    "(declare-sort %s 0)\n\
-     (declare-fun %s (%s) Int)\n\
-     (assert (forall ((s %s)) (! (>= (%s s) 0) :pattern ((%s s)))))\n"
-    str_sort strlen_fn str_sort str_sort strlen_fn strlen_fn
+let string_preamble = Smt.string_preamble
 
 (* Does this refined parameter's base type reflect into the `Str` sort?  The
    one place [rparam.sort] is compared against [str_sort]; every other consumer
@@ -466,6 +461,11 @@ let rec fp_rewrite (is_float : string -> bool) (t : Smt.term) : Smt.term =
   | Smt.Implies (a, b) -> Smt.Implies (f a, f b)
   | t -> t
 
+(* ctor name -> field sorts as the measure sees them (recursive self -> SData adt,
+   type params / other ADTs -> opaque "Elem", Int/Bool/String/Float concrete);
+   see §5 below.  Here because [mentions_float] reads it. *)
+let ctor_field_sorts : (string, Smt.sort list) Hashtbl.t = Hashtbl.create 32
+
 (* Does [t] mention a float anywhere? *)
 let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   let m = mentions_float is_float in
@@ -484,6 +484,12 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
     ||
     if List.length ps <> List.length args then List.exists m args
     else List.exists2 (fun p a -> if p = Smt.SFloat && float_term is_float a then false else m a) ps args)
+  (* Likewise a float at a constructor's Float field ([smt_sort_of_field],
+     since 2026-11-09): `F(2, 1.5)` is well sorted. *)
+  | Smt.App (c, args) | Smt.Ctor (c, _, args) when Hashtbl.mem ctor_field_sorts c -> (
+    let fs = Hashtbl.find ctor_field_sorts c in
+    if List.length fs <> List.length args then List.exists m args
+    else List.exists2 (fun s a -> if s = Smt.SFloat && float_term is_float a then false else m a) fs args)
   | Smt.App (_, args) | Smt.Ctor (_, _, args) -> List.exists m args
   | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Not a | Smt.Neg a | Smt.MulLit (_, a)
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> m a
@@ -1177,9 +1183,7 @@ let measure_body_nonneg (self : string) (known : string list) (body : A.expr) : 
    ================================================================= *)
 
 (* ── Measure axioms (M-a): datatype model + recursion-equation preamble ───── *)
-(* ctor name -> field sorts as the measure sees them (recursive self -> SData adt,
-   type params / other ADTs -> opaque "Elem", Int/Bool concrete). *)
-let ctor_field_sorts : (string, Smt.sort list) Hashtbl.t = Hashtbl.create 32
+(* [ctor_field_sorts] is defined near [mentions_float], which reads it. *)
 let adt_ctors : (string, string list) Hashtbl.t = Hashtbl.create 16
 
 (* ── Constructor names: SOURCE vs SMT (2026-11-02) ────────────────────────
@@ -2521,6 +2525,14 @@ let rec smt_sort_of_field ?(pnames : string list = []) (t : A.ty) : Smt.sort =
   | A.TyRefine (b, _, _) | A.TyLinear (_, b) -> smt_sort_of_field ~pnames b
   | A.TyCon ({ A.txt = "Int"; _ }, []) -> Smt.SInt
   | A.TyCon ({ A.txt = "Bool"; _ }, []) -> Smt.SBool
+  (* The sorts reflection gives a String and a Float value (D9), so a
+     reflected constructor application (`N(x, "v2")`) fits its fields.  Until
+     2026-11-09 these were the opaque `Elem`, a sort conflict that refused
+     every predicate over such a record (todo
+     2026-11-08-reflect-records-with-string-fields).  A query declaring the
+     datatype gets `$Str` from [Solver.check]'s string-preamble hoist. *)
+  | A.TyCon ({ A.txt = "String"; _ }, []) -> Smt.sdata str_sort
+  | A.TyCon ({ A.txt = "Float"; _ }, []) -> Smt.SFloat
   (* The declaring datatype's own type parameter. *)
   | A.TyVar v when List.mem v.A.txt pnames ->
     (match List.find_index (fun n -> n = v.A.txt) pnames with
