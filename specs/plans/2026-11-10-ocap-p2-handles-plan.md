@@ -59,7 +59,7 @@
 7. **Out of scope** (not in this phase's row of spec §17):
    - `Actor.pid_from_int` as an `Actor.Introspect`-kind operation is phase 7. `pid_of_int` is already stdlib-only.
    - Retiring `Cap(Actor.Introspect)` parameters is phase 7. `Actor.whereis(c, name)` keeps its parameter here and additionally becomes charged `IO.Registry`.
-   - The `Library` handle is not planned: owner question 1 below.
+   - There is no `Library` handle (owner, 2026-11-10; question 1 below). A foreign call is checked per call against `IO.Foreign` and its symbol scopes, the same way console and environment access are. The check is compile-time today and also run-time from phase 4. Narrowed access is handed out as closures (spec §5). This phase builds nothing for foreign libraries.
    - The listen-address parameter is narrow-capabilities §6.
    - Vault *write* scopes are narrow-capabilities §8. This phase checks only the by-name lookups.
 
@@ -667,7 +667,6 @@ Public *record* types with `fd : Int` fields (`CnLink`, `CnHalf`, `Peer`, `Write
 - `.claude/skills/march-lang/SKILL.md`: the raw-builtin mentions, and a short "Handles" paragraph.
 - `specs/progress/2026-11-10-ocap-p2-handles.md`: what shipped, the decisions above, and the test names.
 - `specs/todos/` follow-ups, one file each:
-  - `…-ocap-library-handle.md` (owner question 1);
   - `…-listen-address-parameter.md`;
   - `…-http-server-spawn-n-handle-int.md` (`spawn_n` still returns an Int server handle; forging one lets a program wait on another server, which grants nothing, but it is the last integer handle);
   - `…-macos-dir-symlinks-refused.md` (documented behaviour; reopen if `openat2`-equivalent APIs appear);
@@ -705,6 +704,6 @@ Public *record* types with `fd : Int` fields (`CnLink`, `CnHalf`, `Peer`, `Write
    - (b) `Foreign.open(lib)` returns a record of function values captured at the open, which needs run-time `dlopen` in compiled builds too.
 
    This plan builds neither and files a todo. Which do you want, or should `Library` wait for the `IO.Foreign` symbol scopes in narrow-capabilities §7?
-   **Open: under discussion with the owner (2026-11-10).**
+   **Decided by the owner, 2026-11-10: checked calls, no handle.** `extern` keeps its meaning. Each foreign call is checked against the current authority (`IO.Foreign("lib", symbols(...))`), at compile time now and also at run time from phase 4. Narrowed access is a closure over the admitted calls. The design doc's §6 table and §21 record the change in the same commit.
 2. **`File.open` split by mode** (decision 5). **Decided by the owner, 2026-11-10: yes.** The API is `File.open(path)` and `File.open_write(path, mode)`.
 3. **macOS refuses every symlink beneath a directory handle** (Task 7). **Decided by the owner, 2026-11-10: best effort is fine on macOS.**
