@@ -123,6 +123,12 @@ native_curated=(
   # …/2026-09-15-closure-captures-released-by-the-hof-loop.md). They are
   # 5,000-iteration probes, not the multi-million ones excluded above.
   closure_capture_release_probe
+  # a closure matching a captured value and handing the pattern's fields to a
+  # borrowing builtin in tail position: the capture was released before the
+  # builtin read them (HttpServer.tls, str_dup). macOS printed the right
+  # values; only ASAN saw it
+  # (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md).
+  closure_borrowed_tail_call_probe
   # RingBuf's reference-count contract on its one unrestricted path, a user
   # record's field: the owned, rc-neutral ring_buf_* builtins must leave
   # live_allocs() flat and free every pair shell exactly once (Part C, Phase
