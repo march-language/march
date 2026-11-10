@@ -1198,6 +1198,7 @@
 (rule
  (targets test_heap_runner)
  (deps    test_heap.c
+          test_heap_stubs.c
           ../runtime/march_heap.c
           ../runtime/march_heap.h
           ../runtime/march_message.c
@@ -1208,6 +1209,7 @@
                -std=gnu11 -Wall -Wextra -O2 -I../runtime
                -o %{targets}
                test_heap.c
+               test_heap_stubs.c
                ../runtime/march_heap.c
                ../runtime/march_message.c
                ../runtime/march_gc.c
@@ -15537,7 +15539,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets test_hcr_frame_unwind_runner)
  (deps    test_hcr_frame_unwind.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -15551,7 +15553,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_hcr_frame_unwind.c ../runtime/march_runtime.c
+               test_hcr_frame_unwind.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -15587,7 +15589,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets test_hcr_closure_epoch_runner)
  (deps    test_hcr_closure_epoch.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -15601,7 +15603,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_hcr_closure_epoch.c ../runtime/march_runtime.c
+               test_hcr_closure_epoch.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
