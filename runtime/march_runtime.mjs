@@ -724,10 +724,26 @@ export function march_int_wrapping_mul(a, b) {
   return __int_result(BigInt.asIntN(63, BigInt(a) * BigInt(b)), "int_wrapping_mul");
 }
 
+/* Float → Int (float_to_int, float_truncate, float_floor, float_ceil,
+ * float_round).  `r` is the argument already rounded.  NaN, ±Infinity and a
+ * value outside the 63-bit range [-2^62, 2^62) throw with the native
+ * runtime's messages (march_float_int_checked in march_runtime.c) instead of
+ * returning a JS number that is not an Int.  The bound is the one
+ * march_int_ovf uses; between 2^53 and 2^62 the result is an inexact Int, as
+ * for any Int on this target. */
+function __float_int(r, op) {
+  if (r >= -__INT63_LIMIT && r < __INT63_LIMIT) return r;
+  throw new Error(op + (r !== r ? ": cannot convert NaN to Int" : ": value out of Int range"));
+}
+export function march_float_to_int(f) { return __float_int(Math.trunc(f), "float_to_int"); }
+export function march_float_truncate(f) { return __float_int(Math.trunc(f), "float_truncate"); }
+export function march_float_floor(f) { return __float_int(Math.floor(f), "float_floor"); }
+export function march_float_ceil(f) { return __float_int(Math.ceil(f), "float_ceil"); }
+
 /** Float → Int rounding, half AWAY FROM ZERO (mirrors OCaml Float.round;
  * JS Math.round rounds half toward +inf, so Math.round(-2.5) would differ). */
 export function march_float_round(f) {
-  return Math.sign(f) * Math.round(Math.abs(f));
+  return __float_int(Math.sign(f) * Math.round(Math.abs(f)), "float_round");
 }
 
 /* ── System ────────────────────────────────────────────────────────── */

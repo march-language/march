@@ -390,10 +390,18 @@ mod Math do
 
   -- ---- Rounding ----
 
+  -- True for NaN, the infinities, and every |x| >= 2^53: those are already
+  -- whole (or have no Int), and float_floor and friends panic outside Int's
+  -- range (#1230). 2^53 rather than 2^52 so the bound stays above 2^52 even
+  -- if a backend shortens the literal.
+  pfn whole_by_magnitude(x : Float) : Bool do
+    not (x > -9007199254740992.0 && x < 9007199254740992.0)
+  end
+
   doc """
-  Largest integer not greater than `x`, as a Float. Computed via an Int
-  round-trip, so it is only correct when the result fits in an Int (NaN,
-  infinities and huge magnitudes are not preserved).
+  Largest integer not greater than `x`, as a Float. NaN, the infinities
+  and any `x` of magnitude 2^53 or more (already a whole number) are
+  returned unchanged.
 
   ## Examples
 
@@ -403,12 +411,12 @@ mod Math do
       true
   """
   fn floor(x : Float) : Float do
-    int_to_float(float_floor(x))
+    if whole_by_magnitude(x) do x else int_to_float(float_floor(x)) end
   end
 
   doc """
-  Smallest integer not less than `x`, as a Float. Same Int round-trip
-  caveat as `floor`.
+  Smallest integer not less than `x`, as a Float. Same handling of
+  NaN, infinities and huge values as `floor`.
 
   ## Examples
 
@@ -418,12 +426,12 @@ mod Math do
       true
   """
   fn ceil(x : Float) : Float do
-    int_to_float(float_ceil(x))
+    if whole_by_magnitude(x) do x else int_to_float(float_ceil(x)) end
   end
 
   doc """
   Rounds to the nearest integer, as a Float; halves round away from zero.
-  Same Int round-trip caveat as `floor`.
+  Same handling of NaN, infinities and huge values as `floor`.
 
   ## Examples
 
@@ -435,11 +443,12 @@ mod Math do
       true
   """
   fn round(x : Float) : Float do
-    int_to_float(float_round(x))
+    if whole_by_magnitude(x) do x else int_to_float(float_round(x)) end
   end
 
   doc """
-  Rounds toward zero, as a Float. Same Int round-trip caveat as `floor`.
+  Rounds toward zero, as a Float. Same handling of NaN, infinities and
+  huge values as `floor`.
 
   ## Examples
 
@@ -449,7 +458,7 @@ mod Math do
       true
   """
   fn truncate(x : Float) : Float do
-    int_to_float(float_truncate(x))
+    if whole_by_magnitude(x) do x else int_to_float(float_truncate(x)) end
   end
 
   -- ---- Interpolation ----

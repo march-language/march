@@ -266,8 +266,10 @@ val int_wrapping_add : int -> int -> int
 val int_wrapping_sub : int -> int -> int
 val int_wrapping_mul : int -> int -> int
 
-(** [Float.to_int], raising [int_overflow op] when the float is out of the
-    host Int range on a narrow host. *)
+(** [int_of_float_checked op f]: [Float.to_int f] for the Float -> Int
+    builtin [op], with [f] already rounded.  Panics on NaN and outside
+    [-2^62, 2^62); on a narrow host, also raises [int_overflow op] outside the
+    host's own Int range. *)
 val int_of_float_checked : string -> float -> int
 
 val arith_num :

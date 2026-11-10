@@ -1208,13 +1208,13 @@ let base_env : env =
         | [VFloat f] -> VFloat (abs_float f)
         | _ -> eval_error "float_abs: expected float"))
   ; ("float_floor", VBuiltin ("float_floor", function
-        | [VFloat f] -> VInt (int_of_float (floor f))
+        | [VFloat f] -> VInt (int_of_float_checked "float_floor" (floor f))
         | _ -> eval_error "float_floor: expected float"))
   ; ("float_ceil", VBuiltin ("float_ceil", function
-        | [VFloat f] -> VInt (int_of_float (ceil f))
+        | [VFloat f] -> VInt (int_of_float_checked "float_ceil" (ceil f))
         | _ -> eval_error "float_ceil: expected float"))
   ; ("float_round", VBuiltin ("float_round", function
-        | [VFloat f] -> VInt (Float.to_int (Float.round f))
+        | [VFloat f] -> VInt (int_of_float_checked "float_round" (Float.round f))
         | _ -> eval_error "float_round: expected float"))
   ; ("float_truncate", VBuiltin ("float_truncate", function
         | [VFloat f] -> VInt (int_of_float_checked "float_truncate" f)

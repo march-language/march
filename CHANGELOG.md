@@ -470,6 +470,17 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
+  NaN, the infinities and a result outside Int's range** (#1230), with
+  `float_floor: value out of Int range` or `float_floor: cannot convert NaN to Int`, the same
+  on the interpreter, compiled code and `--target js`. They used to return whatever the host
+  gave: `float_floor(1e20)` was `-1` natively and `100000000000000000000` on JS, and
+  `float_to_int(nan)` was `0` or `NaN`. `Math.floor`/`ceil`/`round`/`truncate` now return NaN,
+  the infinities and values of magnitude 2^53 or more unchanged instead of a wrong Float, and
+  `Json.to_string`, `DataFrame`'s JSON import and group-by hash, and `Plot` guard their
+  conversions so they keep working on such values. The wasm runtime traps on them, and gains the
+  missing `march_float_to_int`. See `specs/lang/type-system.md`, "Converting a Float to an Int".
+
 - **Two variant types with the same short name in different modules are two types.** `A.Note`
   and `B.Note` used to be one type to the typechecker, so a value of one was accepted where the
   other was expected and the program then failed at run time. Passing one where the other is

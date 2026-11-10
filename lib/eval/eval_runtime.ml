@@ -739,11 +739,19 @@ let int_wrapping_add a b = if narrow_int then int_add a b else a + b
 let int_wrapping_sub a b = if narrow_int then int_sub a b else a - b
 let int_wrapping_mul a b = if narrow_int then int_mul a b else a * b
 
-(** [Float.to_int], raising [int_overflow op] when [f] is outside the host Int
-    range on a narrow host. *)
+(** [Float.to_int] for the Float -> Int builtins ([op] is the builtin's name),
+    [f] already rounded to a whole number.  NaN, and a value outside the
+    63-bit range [-2^62, 2^62), panic (specs/lang/type-system.md, "Converting
+    a Float to an Int") instead of returning what the host's conversion
+    happens to give; the messages are the C runtime's (march_float_int_checked)
+    byte for byte.  On a narrow host an in-range value can still exceed the
+    host's own Int, which raises [int_overflow op]. *)
 let int_of_float_checked op f =
-  if narrow_int && not (Float.is_nan f)
-     && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
+  if Float.is_nan f then eval_error "%s: cannot convert NaN to Int" op
+  else if not (f >= -0x1p62 && f < 0x1p62) then
+    eval_error "%s: value out of Int range" op
+  else if narrow_int
+       && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
   then int_overflow op else Float.to_int f
 
 let arith_num iop fop name = VBuiltin (name, function

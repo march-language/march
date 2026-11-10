@@ -1,7 +1,7 @@
 # Dependency grants and `restrict` blocks
 
 **Date:** 2026-11-09
-**Status:** design, owner's questions answered 2026-11-09; awaiting approval
+**Status:** superseded 2026-11-10 by `specs/2026-11-10-object-capability-design.md` (its §16 lists what changed and what carries over)
 **Builds on:** `specs/2026-11-09-host-scoped-network-capabilities-design.md` (host and
 method scopes on `IO.NetConnect`, PR march-language/march#1213).
 
