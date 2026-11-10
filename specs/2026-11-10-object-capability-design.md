@@ -1,7 +1,7 @@
 # Object capabilities for March
 
 **Date:** 2026-11-10
-**Status:** design, awaiting the owner's approval
+**Status:** approved by the owner 2026-11-10
 **Supersedes:** `specs/2026-11-09-dependency-grants-and-restrict-design.md` and
 `specs/plans/2026-11-09-grants-restrict-roadmap.md`. Their `forge.toml` grants, `restrict`
 blocks, path-scope rules and run-time context carry over; what changes is listed in §16.
