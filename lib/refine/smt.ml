@@ -361,6 +361,48 @@ let rec render = function
   | SetSub (a, b) -> Printf.sprintf "(= ((_ map or) %s %s) %s)" (render a) (render b) (render b)
   | SetCard (e, a) -> Printf.sprintf "(%s %s)" (card_fn (render_elem_sort e)) (render a)
 
+(* The opaque String sort and its one function (reflection D9).  Defined here,
+   below every builder of a query, so the declaration lines a builder emits
+   and the ones [hoist_string_decls] looks for are the same text. *)
+let str_sort = "$Str"
+let strlen_fn = "$strlen"
+let str_sort_decl = Printf.sprintf "(declare-sort %s 0)" str_sort
+let strlen_decl = Printf.sprintf "(declare-fun %s (%s) Int)" strlen_fn str_sort
+let strlen_axiom =
+  Printf.sprintf "(assert (forall ((s %s)) (! (>= (%s s) 0) :pattern ((%s s)))))" str_sort strlen_fn strlen_fn
+let string_preamble = str_sort_decl ^ "\n" ^ strlen_decl ^ "\n" ^ strlen_axiom ^ "\n"
+
+(* A query that mentions `$Str` gets [string_preamble] once, FIRST.  The
+   query builders assemble a preamble from several sources (datatype
+   declarations, measure axioms, set definitions, the string sort), each in
+   its own order, and a datatype with a String field (since 2026-11-09)
+   names `$Str` in its `declare-datatypes`: declared after that, z3 rejects
+   the query.  Rather than teach every builder the order, every copy of the
+   three declarations is dropped and one is put at the top.  A query without `$Str`
+   is returned unchanged. *)
+let hoist_string_decls (body : string) : string =
+  let find_from hay needle i =
+    let n = String.length needle and h = String.length hay in
+    let rec go i = if i + n > h then None else if String.sub hay i n = needle then Some i else go (i + 1) in
+    go i
+  in
+  (* Every occurrence, wherever it sits: a builder may end a datatype
+     declaration with no newline before the next piece, so a copy is not
+     always a line of its own. *)
+  let remove_all needle s =
+    let b = Buffer.create (String.length s) in
+    let rec go i =
+      match find_from s needle i with
+      | Some j -> Buffer.add_string b (String.sub s i (j - i)); go (j + String.length needle)
+      | None -> Buffer.add_string b (String.sub s i (String.length s - i))
+    in
+    go 0;
+    Buffer.contents b
+  in
+  if find_from body str_sort 0 = None then body
+  else
+    string_preamble ^ (body |> remove_all strlen_axiom |> remove_all strlen_decl |> remove_all str_sort_decl)
+
 (* The canonical assertion block for a VC: declare every free symbol, assert the
    hypotheses, and assert the NEGATED goal.  Sent to z3 between push/pop and also
    used (verbatim) as the BLAKE3 cache key.  `(check-sat)` is appended by the

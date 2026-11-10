@@ -435,6 +435,11 @@ let lower_fn_def (env : Lower_state.env) (def : Ast.fn_def) : Tir.fn_def =
 
 (** Lower a type definition. *)
 let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_def) : Tir.type_def option =
+  (match td with
+   | Ast.TDRecord _ ->
+     Hashtbl.replace Lower_types.record_type_params name.txt
+       (List.map (fun (p : Ast.name) -> p.txt) _params)
+   | _ -> ());
   match td with
   | Ast.TDVariant variants ->
     let ctors = List.map (fun (v : Ast.variant) ->

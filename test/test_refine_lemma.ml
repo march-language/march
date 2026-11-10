@@ -1546,6 +1546,84 @@ let record_body =
         let out = run (record_body_src ^ "  @[lemma]\n  fn l_bad(n : Int) : {Unit | px(bump(mk(n))) == 2 * n + 1} do () end\nend\n") in
         if not (unproved out "l_bad" || refuted out "l_bad") then Alcotest.failf "l_bad is false:\n%s" out) ]
 
+(* A record or variant with a String or Float field (todo
+   2026-11-08-reflect-records-with-string-fields).  Such fields were declared
+   at the opaque `Elem` sort while reflection encodes a String at `$Str` and a
+   Float at the FloatingPoint sort, so building one (`N(x, "v2")`) was a sort
+   conflict and every lemma over the record an `unreflectable-predicate`
+   skip; an actor whose state held a String could not prove its rollback round
+   trip. *)
+let scalar_fields_src =
+  {|mod SF do
+  type N = { a : Int, s : String }
+  type F = { b : Int, f : Float }
+  type Tag = Named(String, Int) | Anon(Int)
+  fn mk(x : Int) : N do { a: x, s: "v2" } end
+  fn un(n : N) : Int do n.a end
+  fn label(n : N) : String do n.s end
+  fn mkf(x : Int) : F do { b: x, f: 2.5 } end
+  fn unf(r : F) : Int do r.b end
+  fn named(x : Int) : Tag do Named("k", x) end
+  fn num(t : Tag) : Int do
+    match t do
+      Named(_, n) -> n
+      Anon(n) -> 0 - n
+    end
+  end
+  fn rename(n : N, t : String) : N do { n with s: t } end
+|}
+
+let scalar_fields =
+  [ gated "scalar_fields: records and variants with String and Float fields reflect" (fun () ->
+        let out =
+          run
+            (scalar_fields_src
+           ^ "  @[lemma]\n  fn l_un(x : Int) : {Unit | un(mk(x)) == x} do () end\n  @[lemma]\n  fn l_label(x : Int) : {Unit | label(mk(x)) == \"v2\"} do () end\n  @[lemma]\n  fn l_unf(x : Int) : {Unit | unf(mkf(x)) == x} do () end\n  @[lemma]\n  fn l_num(x : Int) : {Unit | num(named(x)) == x} do () end\n  @[lemma]\n  fn l_rename(x : Int, t : String) : {Unit | label(rename(mk(x), t)) == t && un(rename(mk(x), t)) == x} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_un"; "l_label"; "l_unf"; "l_num"; "l_rename" ]);
+    gated "scalar_fields_red: false theorems over String and Float fields are not proved" (fun () ->
+        let out =
+          run
+            (scalar_fields_src
+           ^ "  @[lemma]\n  fn l_bad(x : Int) : {Unit | un(mk(x)) == x + 1} do () end\n  @[lemma]\n  fn l_bad2(x : Int) : {Unit | label(mk(x)) == \"v3\"} do () end\n  @[lemma]\n  fn l_bad3(x : Int) : {Unit | unf(mkf(x)) == 0} do () end\n  @[lemma]\n  fn l_bad4(x : Int, t : String) : {Unit | label(rename(mk(x), t)) == \"v2\"} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_bad"; "l_bad2"; "l_bad3"; "l_bad4" ]);
+    gated "scalar_fields_callsite: a call passing a record with a Float field is still checked" (fun () ->
+        (* A Float at the record's Float field must not trip the float sort
+           gate (it did once the field stopped being `Elem`). *)
+        let out =
+          run
+            "mod SC do\n  type F = { b : Int, f : Float }\n  fn needf(r : {F | _.b > 0}) : Int do r.b end\n  fn go() : Int do needf({ b: 2, f: 1.5 }) end\n  fn bad() : Int do needf({ b: 0, f: 1.5 }) end\nend\n"
+        in
+        let row v line =
+          List.exists
+            (fun l -> String.starts_with ~prefix:(v ^ "\tuser\tm.march:" ^ line ^ ":") l && contains l "\tprecondition\t")
+            (lines out)
+        in
+        if not (row "proved" "4" && row "violated" "5") then
+          Alcotest.failf "expected proved at line 4 and violated at line 5:\n%s" out);
+    gated "scalar_fields_order: no query declares a String-field datatype before `$Str`" (fun () ->
+        (* A datatype with a String field names `$Str`; a query that declares
+           it before `(declare-sort $Str 0)` is rejected by z3 (16 such
+           queries in this program, stdlib ones included, before
+           [Smt.hoist_string_decls]).  A cold cache, so every query is sent. *)
+        let dir = Filename.temp_dir "scalar_fields" "" in
+        Fun.protect ~finally:(fun () -> ignore (Sys.command ("rm -rf " ^ Filename.quote dir))) (fun () ->
+            Out_channel.with_open_bin (Filename.concat dir "m.march") (fun oc ->
+                output_string oc
+                  (scalar_fields_src
+                 ^ "  @[lemma]\n  fn l_un(x : Int) : {Unit | un(mk(x)) == x} do () end\n  fn need(u : {v : N | member(v.s, singleton(v.s))}) : Int do 0 end\n  fn ok() : Int do need({ a: 1, s: \"a\" }) end\nend\n"));
+            let lg = Filename.concat dir "z3.log" in
+            let out = U.run_in ~env:("MARCH_REFINE_Z3_LOG=" ^ Filename.quote lg) ~dir "--check --refine-report-sites=all" "m.march" in
+            expect_admitted out "l_un";
+            let log = In_channel.with_open_bin lg In_channel.input_all in
+            if contains log "verdict: rejected" then
+              Alcotest.failf "z3 rejected a query:\n%s"
+                (String.concat "\n"
+                   (List.filter (fun l -> contains l "declare-sort" || contains l "rejected") (String.split_on_char '\n' log)))) ) ]
+
 (* Tuples (§3.2): one datatype per arity, its constructor and selectors; a
    tuple literal in a predicate at a tuple parameter is that constructor. *)
 let tuple_body_src =

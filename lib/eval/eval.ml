@@ -169,6 +169,22 @@ let is_type_dispatched_iface = function
   | _ -> false
 
 
+(** The functions each module being evaluated declares itself, innermost
+    module first.  A bulk import (`use M.*`, `use M` except ...) never rebinds
+    one of them, wherever the `use` sits: a module's own definition shadows a
+    bulk import, the rule the typechecker applies ([env.local_fns]) and that
+    lowering follows.  The interpreter used to let a `use` placed after the
+    definition win (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md). *)
+let local_def_scopes : string list list ref = ref []
+
+let local_fn_names (decls : decl list) : string list =
+  List.filter_map (function DFn (d, _) -> Some d.fn_name.txt | _ -> None) decls
+
+let defined_locally (short : string) : bool =
+  match !local_def_scopes with
+  | names :: _ -> List.mem short names
+  | [] -> false
+
 (** Same-short-name type collision set — the interpreter's counterpart to
     [Collision_set] in lib/tir (native/TIR backend, Task 0 of
     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md). The interpreter
@@ -3687,6 +3703,7 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DMod (name, _, decls, _) ->
     (* Evaluate nested module; bindings are prefixed with "ModName." *)
     module_stack := name.txt :: !module_stack;
+    local_def_scopes := local_fn_names decls :: !local_def_scopes;
     (* Two-pass evaluation for inner decls so recursive/mutual fns work *)
     let inner_ref = ref env in
     List.iter (function
@@ -3772,8 +3789,12 @@ let rec eval_decl (env : env) (d : decl) : env =
          witness harness, the test drivers -- would otherwise evaluate
          everything after it under this module's stale prefix. *)
       try eval_mod_decls decls !inner_ref
-      with e -> module_stack := List.tl !module_stack; raise e
+      with e ->
+        module_stack := List.tl !module_stack;
+        local_def_scopes := List.tl !local_def_scopes;
+        raise e
     in
+    local_def_scopes := List.tl !local_def_scopes;
     (* An actor declared in this module was registered with the env as it
        stood at ITS declaration -- pass-1 stubs for every fn declared after
        it -- and nothing re-pointed it, so a handler calling such a fn died
@@ -4103,7 +4124,8 @@ let rec eval_decl (env : env) (d : decl) : env =
        let plen = String.length prefix in
        let additions = List.filter_map (fun (k, v) ->
            if String.length k > plen && String.sub k 0 plen = prefix then
-             Some (String.sub k plen (String.length k - plen), v)
+             let short = String.sub k plen (String.length k - plen) in
+             if defined_locally short then None else Some (short, v)
            else None) env in
        additions @ env
      | UseNames names ->
@@ -4117,7 +4139,7 @@ let rec eval_decl (env : env) (d : decl) : env =
        let additions = List.filter_map (fun (k, v) ->
            if String.length k > plen && String.sub k 0 plen = prefix then
              let short = String.sub k plen (String.length k - plen) in
-             if List.mem short excl_set then None
+             if List.mem short excl_set || defined_locally short then None
              else Some (short, v)
            else None) env in
        additions @ env)
@@ -4390,7 +4412,10 @@ let eval_module_env (m : module_) : env =
     List.fold_left (fun (acc, env) run ->
         let scope_ref = ref env in
         scope_ref := install_stubs scope_ref run env;
-        let run_env = make_recursive_env scope_ref run !scope_ref in
+        local_def_scopes := local_fn_names run :: !local_def_scopes;
+        let run_env =
+          Fun.protect ~finally:(fun () -> local_def_scopes := List.tl !local_def_scopes)
+            (fun () -> make_recursive_env scope_ref run !scope_ref) in
         scope_ref := run_env;
         (run_env :: acc, run_env))
       ([], task_builtins @ base_env) (top_level_file_runs m.mod_decls)
