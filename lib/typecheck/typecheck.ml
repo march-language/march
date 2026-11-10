@@ -2744,6 +2744,17 @@ let poison_linear_operands env (e : Ast.expr) =
         | _ -> ())
       env.lin
 
+(* [@[stdlib_internal]] members cannot be imported by `use` or `alias` from
+   user code: an import rebinds the member under another key, which the
+   reference gate's spelled name would not see. [import_blocked env sp k sch]
+   is true when the member bound at [k] is one, and the import at [sp] is not
+   itself stdlib code (stdlib modules may import each other's internals). *)
+let import_blocked env (sp : Ast.span) k sch =
+  not (span_is_stdlib sp)
+  && (match Hashtbl.find_opt env.stdlib_internal_fns k with
+      | Some (_, isch) -> isch == sch
+      | None -> false)
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -2799,12 +2810,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (if Hashtbl.length env.stdlib_internal_fns > 0
           && not (span_is_stdlib name.span) then
          match Hashtbl.find_opt env.stdlib_internal_fns name.txt with
-         | Some md ->
+         | Some (md, isch)
+           when (match lookup_var name.txt env with
+                 | Some sch -> sch == isch | None -> false) ->
            Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
              (Printf.sprintf
                 "`%s` is internal to the standard library; use the handle API in `%s`."
                 name.txt md)
-         | None -> ());
+         | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
@@ -8580,16 +8593,18 @@ let rec check_decl env (d : Ast.decl) : env =
     List.iter (function
         | Ast.DFn (fd, fsp)
           when List.mem "stdlib_internal" fd.Ast.fn_attrs && span_is_stdlib fsp ->
-          Hashtbl.replace env.stdlib_internal_fns
-            (name.txt ^ "." ^ fd.Ast.fn_name.txt) name.txt
+          let q = name.txt ^ "." ^ fd.Ast.fn_name.txt in
+          (match List.assoc_opt q new_names with
+           | Some sch -> Hashtbl.replace env.stdlib_internal_fns q (name.txt, sch)
+           | None -> ())
         | _ -> ()) decls;
     List.iter (function
         | Ast.DMod (inner, _, _, _) ->
           let prefix = inner.txt ^ "." in
           let n = String.length prefix in
-          Hashtbl.iter (fun k md ->
+          Hashtbl.iter (fun k v ->
               if String.length k > n && String.sub k 0 n = prefix then
-                Hashtbl.replace env.stdlib_internal_fns (name.txt ^ "." ^ k) md)
+                Hashtbl.replace env.stdlib_internal_fns (name.txt ^ "." ^ k) v)
             (Hashtbl.copy env.stdlib_internal_fns)
         | _ -> ()) decls;
     let env' = bind_vars new_names env in
@@ -9031,6 +9046,7 @@ let rec check_decl env (d : Ast.decl) : env =
              let rest = String.sub k plen (String.length k - plen) in
              let short_key = short_prefix ^ rest in
              if StrMap.mem short_key env.vars then acc
+             else if import_blocked env sp k sch then acc
              else (short_key, sch) :: acc
            else acc) env.vars [] in
        (* The entry is registered UNCONDITIONALLY, but pre-marked used when it
@@ -9076,6 +9092,7 @@ let rec check_decl env (d : Ast.decl) : env =
            then
              let short = String.sub k plen (String.length k - plen) in
              if StrMap.mem short env.local_fns then acc
+             else if import_blocked env sp k sch then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
        (* Import interfaces from the module prefix into scope as short names *)
@@ -9133,6 +9150,14 @@ let rec check_decl env (d : Ast.decl) : env =
      | Ast.UseNames names ->
        List.fold_left (fun env n ->
            match StrMap.find_opt (prefix ^ n.Ast.txt) env.vars with
+           | Some sch when import_blocked env sp (prefix ^ n.Ast.txt) sch ->
+             Err.error ~code:Err.Code.stdlib_internal env.errors ~span:n.Ast.span
+               (Printf.sprintf
+                  "`%s%s` is internal to the standard library; use the handle API in `%s`."
+                  prefix n.Ast.txt
+                  (match Hashtbl.find_opt env.stdlib_internal_fns (prefix ^ n.Ast.txt) with
+                   | Some (md, _) -> md | None -> mod_str));
+             env
            | Some sch ->
              (* Track for unused-import warning: warn if this specific name is unused. *)
              let entry = { ie_span = n.Ast.span
@@ -9161,6 +9186,7 @@ let rec check_decl env (d : Ast.decl) : env =
              if List.mem short excl_set then acc
              (* Local definitions shadow bulk imports — see UseAll. *)
              else if StrMap.mem short env.local_fns then acc
+             else if import_blocked env sp k sch then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
        (* Track for unused-import warning: warn if nothing from this module is
@@ -9199,7 +9225,8 @@ let rec check_decl env (d : Ast.decl) : env =
         let plen = String.length orig_prefix in
         if String.length k > plen && String.sub k 0 plen = orig_prefix then
           let rest = String.sub k plen (String.length k - plen) in
-          (short_prefix ^ rest, sch) :: acc
+          if import_blocked env sp k sch then acc
+          else (short_prefix ^ rest, sch) :: acc
         else acc) env.vars [] in
     (* Track for unused-alias warning: warn if no "Short.*" name is referenced. *)
     if new_bindings <> [] then begin

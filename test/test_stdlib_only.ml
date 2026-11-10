@@ -648,8 +648,7 @@ let typecheck_files (files : (string * string) list) =
       let lexbuf = Lexing.from_string src in
       Lexing.set_filename lexbuf file;
       let m = March_parser.Parse.module_of_lexbuf lexbuf in
-      let sp = (List.hd m.March_ast.Ast.mod_decls |> function
-        | March_ast.Ast.DFn (_, sp) -> sp | _ -> assert false) in
+      let sp = March_ast.Ast.dummy_span in
       March_ast.Ast.DMod (m.March_ast.Ast.mod_name, March_ast.Ast.Public,
                           m.March_ast.Ast.mod_decls, sp)) files in
   let entry = { March_ast.Ast.mod_name = { March_ast.Ast.txt = "Entry"; span = March_ast.Ast.dummy_span };
@@ -694,6 +693,90 @@ end|} in
   Alcotest.(check bool) "a user fn named raw is not Inner.raw" false
     (has_error_with ctx "internal to the standard library")
 
+
+(* Fix round 1: every import form rebinds a member under another key, so the
+   spelled-name gate alone would miss it. *)
+let inner_two_src = {|mod Inner do
+  @[stdlib_internal]
+  fn raw(fd : Int) : Int do fd end
+  fn other(n : Int) : Int do n end
+end|}
+
+let internal_ctx2 user_src =
+  with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_two_src); ("app.march", user_src) ])
+
+let refused ctx = has_error_with ctx "is internal to the standard library"
+
+let test_internal_use_all_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  use Inner.*
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "use Inner.* leaves raw out, so raw(3) is unbound" true
+    (has_errors ctx)
+
+let test_internal_use_names_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  use Inner.{raw}
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "explicit import is stdlib_internal" true
+    (has_error_with ctx "`Inner.raw` is internal to the standard library; use the handle API in `Inner`.")
+
+let test_internal_use_except_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  import Inner, except: [other]
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "use Inner.{except ..} leaves raw out" true (has_errors ctx)
+
+let test_internal_alias_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  alias Inner, as: I
+  fn go() : Int do I.raw(3) end
+end|} in
+  Alcotest.(check bool) "I.raw does not resolve" true (has_errors ctx)
+
+let test_internal_use_other_still_works () =
+  let ctx = internal_ctx2 {|mod App do
+  use Inner.*
+  fn go() : Int do other(3) end
+end|} in
+  Alcotest.(check bool) "non-internal members still import" false (has_errors ctx)
+
+let test_internal_use_all_stdlib_ok () =
+  let ctx = with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_src);
+                        ("other.march", {|mod Other do
+  use Inner.*
+  fn go() : Int do raw(3) end
+end|}) ]) in
+  Alcotest.(check bool) "a stdlib module may use Inner.* and call raw" false
+    (has_errors ctx)
+
+let test_internal_dotted_use_refused () =
+  let ctx = with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", {|mod Outer do
+  mod Inner do
+    @[stdlib_internal]
+    fn raw(fd : Int) : Int do fd end
+  end
+end|});
+                        ("app.march", {|mod App do
+  use Outer.Inner
+  fn go() : Int do Inner.raw(3) end
+end|}) ]) in
+  Alcotest.(check bool) "dotted use A.B does not rebind raw" true (has_errors ctx)
+
+let test_internal_same_name_user_module_ok () =
+  let ctx = internal_ctx {|mod Inner do
+  fn raw(fd : Int) : Int do fd end
+  fn go() : Int do Inner.raw(3) end
+end|} in
+  Alcotest.(check bool) "a user module named Inner owns its own Inner.raw" false
+    (refused ctx)
+
 let tests =
   [ ("stdlib-only builtins",
      [ Alcotest.test_case "user call rejected" `Quick test_user_call_rejected;
@@ -726,6 +809,14 @@ let tests =
        Alcotest.test_case "internal_fn_value_refused" `Quick test_internal_fn_value_refused;
        Alcotest.test_case "internal_fn_stdlib_ok" `Quick test_internal_fn_stdlib_ok;
        Alcotest.test_case "internal_fn_user_shadow_ok" `Quick test_internal_fn_user_shadow_ok;
+       Alcotest.test_case "internal_use_all_refused" `Quick test_internal_use_all_refused;
+       Alcotest.test_case "internal_use_names_refused" `Quick test_internal_use_names_refused;
+       Alcotest.test_case "internal_use_except_refused" `Quick test_internal_use_except_refused;
+       Alcotest.test_case "internal_alias_refused" `Quick test_internal_alias_refused;
+       Alcotest.test_case "internal_use_other_still_works" `Quick test_internal_use_other_still_works;
+       Alcotest.test_case "internal_use_all_stdlib_ok" `Quick test_internal_use_all_stdlib_ok;
+       Alcotest.test_case "internal_dotted_use_refused" `Quick test_internal_dotted_use_refused;
+       Alcotest.test_case "internal_same_name_user_module_ok" `Quick test_internal_same_name_user_module_ok;
        Alcotest.test_case "adversarial sweep: every name, every spelling, same text" `Quick
          test_adversarial_sweep;
        Alcotest.test_case "sweep negative control: rebound names are silent" `Quick

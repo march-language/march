@@ -754,9 +754,11 @@ type env = {
       ceiling: a stdlib wrapper's body caps roll up to the user module that
       calls it, exactly as [March_tir.Cap_attrib]'s [~transparent] does on the
       `--compile` side. Keyed like [cap_closures]. *)
-  stdlib_internal_fns : (string, string) Hashtbl.t;
+  stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
   (** Qualified name ([Mod.f]) of every stdlib function carrying
-      [@[stdlib_internal]], mapped to the module the error points users at.
+      [@[stdlib_internal]], mapped to the module the error points users at and the scheme the export step
+      bound to that name. The gate fires only for a name whose resolved scheme IS
+      (physically) that one, so a user module of the same name never matches.
       Filled when a stdlib [DMod]'s [DFn]s are checked; read by the stdlib-only
       gate in [infer_expr]'s [EVar] arm. Shared by every copy of the env, like
       [stdlib_fns]. *)
