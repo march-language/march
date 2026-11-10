@@ -22,3 +22,11 @@ to scope a slot predicate's free names against the function's parameter facts (o
 decline with a recorded skip when it cannot). A false refutation must not stay a violation.
 This may be the same defect as the concurrent "relational element slot `_ < n` read in
 the wrong scope" fix. Check that fix against this repro before working on it.
+
+## Closed 2026-11-09: verified fixed
+
+Verified fixed on `c3cd49c76` by the repro above: `march --check --refine-report` now reports
+`1 proved, 0 violated` for user code (exit 0). With `x : {Int | _ > 0}` the same call is still
+`violated`, so the proof is not vacuous. Most likely fixed by `a33248f93` (one namespace for
+relational element refinements, `specs/progress/2026-10-18-relational-element-refinement-scope.md`),
+the concurrent fix this entry suspected. No test pins this exact shape.
