@@ -83,3 +83,11 @@ call sites are lowered to), so mono never has to guess from types. The same coll
 every interface method name (`eq`, `compare`, `hash`, `to_json`, ...) and nested modules
 (`find_iface_impls` strips the `M.` prefix). Same family as
 `2026-10-30-interpreter-compiler-name-resolution-diverge.md`.
+
+## 2026-11-10: fixed
+
+Lowering now gives a user fn named like an interface method its own TIR symbol (`show` ->
+`show$u`), so the user's calls reach it and the prelude's `show` calls reach the method; mono no
+longer guesses from argument types. Both directions are pinned by parity tests (generic `fn show(r)`,
+and an annotated `fn show(r : Result(String, String))` that used to capture `println`'s call).
+Details: `specs/progress/2026-11-10-user-stdlib-name-collisions.md`.

@@ -834,6 +834,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A user fn named like `show`, `eq`, `compare` or `hash` no longer swaps places with the
+  interface method in compiled code.** A generic `fn show(r)` printed `Ok(pos)` where the
+  interpreter printed `pos`; a `fn show(r : T)` took over `println` of every `T`; `fn compare`
+  and `fn hash` returned the built-in answer; and `Util.eq(1, 1)` in a user `mod Util` ran
+  `Eq`. Each now runs the user's fn for the user's calls and the method everywhere else, on both
+  backends.
+- **A module named like a stdlib module no longer loses its functions to the stdlib's.** With
+  `mod List do fn sum_int(xs : List(Int)) : Int do 42 end end` in the program, compiled
+  `List.sum_int([1, 2])` returned the stdlib's `3`, and so did an interpreted call to `sum_int`
+  from inside the module; both now return `42`, and the rest of the stdlib `List` still works.
 - **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
   When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
   interpreter ran whichever impl registered last on both types' values; compiled code was right.

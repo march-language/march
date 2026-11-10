@@ -3790,6 +3790,21 @@ let rec eval_decl (env : env) (d : decl) : env =
              | None -> e')
           | _ -> e'
         in
+        (* Desugar qualifies a bare call to a sibling fn with the module's
+           path ([Desugar.qualify_module_refs]: `sum_int` inside an entry
+           `mod List` becomes `List.sum_int`), and [lookup] reads the lexical
+           env before the module registry.  When the env already binds that
+           qualified name -- a stdlib module of the same name, evaluated
+           earlier -- the sibling call reached the OTHER module's fn.  Bind
+           the qualified name to this module's own fn as well, so it wins
+           inside the module exactly as the bare name does.
+           specs/progress/2026-11-10-user-stdlib-name-collisions.md *)
+        let e'' =
+          let q = current_doc_prefix () ^ def.fn_name.txt in
+          if q <> def.fn_name.txt && List.mem_assoc q e'' then
+            (q, combined) :: List.remove_assoc q e''
+          else e''
+        in
         inner_ref := e'';
         eval_mod_decls rest e''
       | d :: rest ->
