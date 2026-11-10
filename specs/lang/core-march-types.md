@@ -80,7 +80,8 @@ and the **opaque-type imbalance** it intentionally preserves (`ExType`/
 referenceable cross-module even though its declaring module never marked it
 public), together with the **no-per-module-type-namespace design point**
 (types resolve by bare name only, so two sibling modules' same-named types
-are literally one nominal type, not just visually similar) and the
+are literally one nominal type, not just visually similar; superseded for
+variant types on 2026-11-09, see §2.5) and the
 `9001e4c0` qualified-type-path unification that is the flip side of the same
 design. §2.5 also files a real, precisely-traced enforcement gap found while
 verifying the imbalance live: `opaque type`'s constructor-hiding is NOT
@@ -2083,6 +2084,17 @@ not just un-flagged at check time but truly accepted end-to-end.
 > "sibling-module constructor shadowing" in `specs/todos/`; the witness now
 > uses distinct ctor names (`MkA`/`MkB`), which isolates the type-identity
 > fact this section documents.
+> **Superseded for variant types, 2026-11-09:** two user modules that each
+> declare a VARIANT type with the same short name now get two nominal types.
+> `lib/typecheck/typecheck_nominal.ml` gives each colliding declaration the
+> identity `Path.Short` (bare at entry level) and resolves every reference
+> lexically, so `take_a(B.make())` above is now rejected with
+> `` expected `A.Foo` but got `B.Foo` `` (`reject/t458`, which is the old
+> `accept/t35`; `reject/t457` is the unqualified form). Unchanged: records
+> still share one global name (`reject/t318` still guards their Json
+> collision), and a user type named like a built-in or stdlib type still
+> collides with it (P1 todo `typecheck-conflates-same-short-named-types`).
+
 **This is documented here as ONE intentional design point, not logged as a
 bug:** March has no per-module type namespace; a module boundary partitions
 FUNCTION/VALUE names (via `pub_set`) but never partitions TYPE identity.

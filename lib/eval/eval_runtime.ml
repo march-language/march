@@ -760,6 +760,11 @@ let type_name_of_value = function
 
 let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
 
+(** Bare constructor tags that two or more types declare (filled by
+    [register_type_ctors]); such a tag's [ctor_qualified_type_tbl] entry is
+    whichever type registered last, so [find_impl_for] ignores it. *)
+let ambiguous_ctor_tags : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
     declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
     short name, so a general-interface method call routes through
@@ -772,6 +777,22 @@ let dispatch_type_name_of_value = function
      | Some qualified -> Some qualified
      | None -> type_name_of_value v)
   | v -> type_name_of_value v
+
+(** The [iface] impl for value [v] whose bare type name is [tname]: a
+    colliding type's own (declaring-module-qualified) slot first, see
+    [dispatch_type_name_of_value]; else the bare slot.  Without the qualified
+    slot, two same-short-name types' derived Show/Eq/Ord/Hash impls shared one
+    last-writer-wins key and a value of one ran the other's impl. *)
+let find_impl_for iface (v : value) (tname : string) =
+  match v with
+  | VCon (tag, _) when not (Hashtbl.mem ambiguous_ctor_tags tag) ->
+    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
+     | Some q ->
+       (match Hashtbl.find_opt impl_tbl (iface, q) with
+        | Some f -> Some f
+        | None -> Hashtbl.find_opt impl_tbl (iface, tname))
+     | None -> Hashtbl.find_opt impl_tbl (iface, tname))
+  | _ -> Hashtbl.find_opt impl_tbl (iface, tname)
 
 (** Lexicographic order of two tuples: the first component pair that
     differs decides, each compared as [compare] would (a total order on
@@ -797,7 +818,7 @@ and ord_compare_value (a : value) (b : value) : int option =
   | _ ->
     (match type_name_of_value a with
      | Some tname ->
-       (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+       (match find_impl_for "Ord" a tname with
         | Some cmp_fn ->
           (match !iface_dispatch_hook cmp_fn [a; b] with
            | VInt n -> Some n
@@ -814,7 +835,7 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
       (* For == and !=, look up the Eq impl if available. *)
       let eq_result = match type_name_of_value a with
         | Some tname ->
-          (match Hashtbl.find_opt impl_tbl ("Eq", tname) with
+          (match find_impl_for "Eq" a tname with
            | Some eq_fn -> Some (!iface_dispatch_hook eq_fn [a; b])
            | None       -> None)
         | None -> None
@@ -833,7 +854,7 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
         | _ ->
         match type_name_of_value a with
         | Some tname ->
-          (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+          (match find_impl_for "Ord" a tname with
            | Some cmp_fn -> Some (!iface_dispatch_hook cmp_fn [a; b])
            | None        -> None)
         | None -> None
@@ -1660,7 +1681,7 @@ let rec show_dispatch (v : value) : string =
   | _ ->
     (match type_name_of_value v with
      | Some tname ->
-       (match Hashtbl.find_opt impl_tbl ("Show", tname) with
+       (match find_impl_for "Show" v tname with
         | Some show_fn ->
           (match !apply_hook show_fn [v] with
            | VString s -> s

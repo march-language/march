@@ -200,6 +200,11 @@ let defined_locally (short : string) : bool =
     tell a first same-short-name declaration from the only one. *)
 let type_collision_set : (string, unit) Hashtbl.t = Hashtbl.create 16
 
+(** [impl_tbl] bare (iface, type) slots written by an impl whose type is NOT
+    module-qualified for dispatch (see the DImpl arm): a colliding nested
+    type's impl leaves them alone. *)
+let bare_slot_exact : (string * string, unit) Hashtbl.t = Hashtbl.create 16
+
 let is_colliding_type_name (short_name : string) : bool =
   Hashtbl.mem type_collision_set short_name
 
@@ -1204,6 +1209,13 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
     between them. *)
 let register_type_ctors (name_txt : string) (variants : variant list) : unit =
   List.iter (fun (v : variant) ->
+      (* A constructor name two types declare cannot tell the interpreter
+         which type a bare-tagged value belongs to: [find_impl_for] must not
+         trust its qualified type. *)
+      (match Hashtbl.find_opt ctor_type_tbl v.var_name.txt with
+       | Some prev when prev <> name_txt ->
+         Hashtbl.replace ambiguous_ctor_tags v.var_name.txt ()
+       | _ -> ());
       Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
       Hashtbl.replace variant_ctor_names v.var_name.txt ();
       if is_colliding_type_name name_txt then begin
@@ -2753,6 +2765,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset ambiguous_ctor_tags;
+  Hashtbl.reset bare_slot_exact;
   Hashtbl.reset type_collision_set;
   Hashtbl.reset colliding_ctor_type_by_module;
   closure_prefix_override := None;
@@ -4003,8 +4017,23 @@ let rec eval_decl (env : env) (d : decl) : env =
                may claim the shared (iface, type) key; extra methods (e.g. Eq's
                default `neq`) must not clobber it, or builtin dispatch invokes
                the wrong method and recurses forever (neq → eq → neq). *)
-            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
-              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* A colliding type's Show/Eq/Ord/Hash impl also claims its
+               qualified slot, which [find_impl_for] reads first: the bare
+               slot is shared by every same-short-name type, last writer
+               wins. *)
+            if is_dispatched && dispatch_type_name <> type_name then
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, dispatch_type_name) fn_val;
+            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then begin
+              let key = (idef.impl_iface.txt, type_name) in
+              (* The bare slot IS the qualified slot of a colliding type
+                 declared at the entry level (empty module prefix): a nested
+                 same-short-name type must not take it over. *)
+              if dispatch_type_name = type_name then begin
+                Hashtbl.replace bare_slot_exact key ();
+                Hashtbl.replace impl_tbl key fn_val
+              end else if not (Hashtbl.mem bare_slot_exact key) then
+                Hashtbl.replace impl_tbl key fn_val
+            end;
             (* A Json codec of a same-short-name type also claims its
                qualified slot, which the `to_json` builtin consults first via
                [dispatch_type_name_of_value]: the bare slot above is
@@ -4228,6 +4257,8 @@ let eval_module_env (m : module_) : env =
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset ambiguous_ctor_tags;
+  Hashtbl.reset bare_slot_exact;
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
     ; "Some", "Option"; "None", "Option"

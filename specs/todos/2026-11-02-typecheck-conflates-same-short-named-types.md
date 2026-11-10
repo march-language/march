@@ -28,3 +28,25 @@ only in builtin signatures such as `task_cancel_token_new`), so
 wrong arm, and `--compile` emits invalid LLVM (`march: clang failed (exit 1)`). A user type named
 like any type the base environment produces (`Typecheck_builtins.builtin_type_names`) should be
 rejected or kept distinct by the typechecker.
+
+## 2026-11-09: nested-module collisions fixed; built-in and stdlib collisions still open
+
+Two variant types of one short name declared in two modules of the checked program
+(`A.T` / `B.T`, the `q1.march` probe) now have their own identities
+(`lib/typecheck/typecheck_nominal.ml`;
+`specs/progress/2026-10-13-same-short-name-nested-types-unify.md`). What remains open here:
+
+- a user type named like a type the base environment produces (`type CancelToken`,
+  `type DownReason`, `type Option`; `Typecheck_builtins.builtin_type_names`), and
+- a user type named like a stdlib type.
+
+Stdlib declarations are excluded from the collision count on purpose: they reach a check
+through the cached stdlib env, whose signatures are bare, which is what sank the archived
+"cut (b)" (`specs/plans/archive/2026-07-17-fqn-type-ctor-identity.md`). The mechanism extends
+by counting those names as declared at a pseudo path and giving a colliding entry-level user
+type a non-bare identity (e.g. `Main.CancelToken`). Before doing that, audit the tests and
+examples that declare a type with a built-in name on purpose (they rely on the conflation
+today), and decide whether rejecting such a declaration is the better answer.
+
+The refinement checker's skip rule (every datatype whose short name two declarants share
+resolves no constructor) can be relaxed for nested-module pairs now.

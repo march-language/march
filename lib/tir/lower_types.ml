@@ -82,7 +82,10 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
   | Typecheck.TCon ("Bool",   []) -> Tir.TBool
   | Typecheck.TCon ("String", []) -> Tir.TString
   | Typecheck.TCon ("Unit",   []) -> Tir.TUnit
-  | Typecheck.TCon (name, args)   -> Tir.TCon (name, List.map convert_ty args)
+  | Typecheck.TCon (name, args)   ->
+    (* A colliding variant's typecheck identity (`A.Note`) is the bare name
+       to every backend (see [March_typecheck.Typecheck_nominal]). *)
+    Tir.TCon (March_typecheck.Typecheck_nominal.bare name, List.map convert_ty args)
   | Typecheck.TArrow _ as t ->
     let rec collect acc = function
       | Typecheck.TArrow (a, b) -> collect (convert_ty a :: acc) (Typecheck.repr b)

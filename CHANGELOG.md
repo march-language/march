@@ -470,6 +470,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Two variant types with the same short name in different modules are two types.** `A.Note`
+  and `B.Note` used to be one type to the typechecker, so a value of one was accepted where the
+  other was expected and the program then failed at run time. Passing one where the other is
+  expected is now a type error (`expected `B.Note` but got `A.Note``); a program that mixed them
+  needs fixing. Both may now `derive Json`, and each `from_json` decodes with its own type's codec.
+  Two same-short-name record types that both derive Json are still rejected. A user type named
+  like a built-in or stdlib type is still the same type as it (not yet fixed).
 - **`HttpServer.idle_timeout` is enforced on both server modes,** and requests have
   deadlines. The event loop ignored `idle_timeout` and the thread pool used a fixed 10 s;
   both now close a keep-alive connection after the configured value (60 s by default). A
@@ -827,6 +834,9 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
+  When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
+  interpreter ran whichever impl registered last on both types' values; compiled code was right.
 - **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
   was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
   through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name

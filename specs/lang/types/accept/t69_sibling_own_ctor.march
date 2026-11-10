@@ -10,9 +10,9 @@ mod Main do
   -- re-registration was a structural-dedup no-op. add_ctor now moves a
   -- re-registered entry to the front (declaring-module recency), so this
   -- program -- the ORIGINAL shape of accept/t35 before its 2026-07-10
-  -- reconciliation -- typechecks again. The no-per-module-TYPE-identity
-  -- design point (§2.5) still holds: `take_a` annotated `A.Foo` accepts a
-  -- `B.Foo` value (the two Foos are the same nominal TCon).
+  -- reconciliation -- typechecks again. Since 2026-11-09 the two Foos
+  -- are also two nominal types (`A.Foo`, `B.Foo`), so `take_a` takes an
+  -- `A.Foo`; passing `B.make()` is rejected (reject/t458).
   --
   -- Value-witnessed: prints `7`.
   mod A do
@@ -27,6 +27,6 @@ mod Main do
   fn take_a(_x : A.Foo) : Int do 7 end
 
   fn main(_cap_console : Cap(IO.Console)) do
-    println(int_to_string(take_a(B.make())))
+    println(int_to_string(take_a(A.make())))
   end
 end

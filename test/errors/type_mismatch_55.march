@@ -1,0 +1,26 @@
+-- EXPECT-ERROR: expected `B.Note` but got `A.Note`
+mod Main do
+  needs IO.Console
+  -- Two nested modules each declare a variant type named `Note`. They are two
+  -- types: `A.Note` is not accepted where `B.Note` is expected
+  -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
+  -- The typechecker used to collapse both to the bare `Note`, so this passed
+  -- `--check` and then panicked at run time on both backends (`no branch
+  -- matched the value NA(3)`).
+  mod A do
+    type Note = NA(Int) | NB(String)
+    fn make() : Note do NA(3) end
+  end
+  mod B do
+    type Note = NC(Bool) | ND(Int, Int)
+    fn describe(n : Note) : String do
+      match n do
+        NC(b) -> if b do "NC true" else "NC false" end
+        ND(x, y) -> "ND " ++ int_to_string(x + y)
+      end
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    print_line(B.describe(A.make()))
+  end
+end
