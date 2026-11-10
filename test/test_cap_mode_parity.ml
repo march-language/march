@@ -286,12 +286,6 @@ let modes =
    phase lands; must be empty when it is done. *)
 let known_gaps : (string * string) list =
   [
-    (* march_check *)
-    ("unlowerable", "march_check");
-    ("ceiling_stdlib", "march_check");
-    ("dep_module", "march_check");
-    ("host_scope", "march_check");
-    ("host_unproven", "march_check");
     (* repl *)
     ("ceiling_stdlib", "repl");
     ("fn_bound", "repl");

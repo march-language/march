@@ -7513,6 +7513,13 @@ let run_check_cmd ?(emit_caps = false) files =
     check_no_prelude_collision_decls ~stdlib_decls all_decls;
   (* As in [compile]: a file under the stdlib root is the stdlib's by
      provenance; `--stdlib-source` says so for any other spelling. *)
+  (* The capability checks, as `march --check` runs them (ocap phase 3): the
+     typecheck-side ceiling during the check, which must know the stdlib's
+     files so prelude uses are not charged to user modules; the TIR-side
+     checks after it (below).  `march caps` reports capabilities rather than
+     verdicts, so it runs neither. *)
+  March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  March_typecheck.Typecheck.cap_strict_ceiling := !cap_strict && not emit_caps;
   if !stdlib_source then
     List.iter (fun f ->
         March_typecheck.Typecheck.stdlib_source_files :=
@@ -7608,7 +7615,28 @@ let run_check_cmd ?(emit_caps = false) files =
       (List.filter (sev_is March_errors.Errors.Warning) contract_diags);
     List.iter (print_diag "error")
       (List.filter (sev_is March_errors.Errors.Error) contract_diags);
-    if List.exists (sev_is March_errors.Errors.Error) contract_diags then exit 1
+    if List.exists (sev_is March_errors.Errors.Error) contract_diags then exit 1;
+    (* The capability ceiling and host scopes, on lowered TIR. *)
+    match !caps_env with
+    | None -> ()
+    | Some tc_env ->
+      let filename = List.hd files in
+      let input = {
+        March_driver.Cap_static.desugared = program (stdlib_decls @ all_decls);
+        stdlib_decls; tc_env; type_map = check_type_map;
+        src = (try read_file filename with Sys_error _ -> "");
+        filename; read_file; cap_strict = !cap_strict } in
+      let fs =
+        cap_findings_of input
+          (March_driver.Cap_static.check_program ~opt:!opt_enabled
+             ~is_js:(parse_target !target_str = March_tir.Llvm_emit.Js) input) in
+      List.iter (function
+          | March_driver.Cap_static.Bare text -> prerr_string text
+          | March_driver.Cap_static.Diag d ->
+            print_diag
+              (if d.severity = March_errors.Errors.Error then "error" else "warning") d)
+        fs;
+      if cap_findings_rejected fs then exit 1
   end;
   if emit_caps then begin
     match !caps_env with
