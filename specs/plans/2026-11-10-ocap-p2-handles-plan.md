@@ -67,7 +67,10 @@
 
 - **Phase 1 first.** Phase 1 changes the types of the operations that return a plain value today: console, clock, random, spawn, the `IO.Mut` table operations and signal registration (superseded design, "Every capability operation returns a `Result`"). Phase 2 changes no such type. The overlaps:
   - The `IO.Mut` lookups (`Vault.new`, `Vault.whereis`): phase 2 only adds a name-scope check, so it rebases onto whatever result type phase 1 gave them.
-  - `FileError`, `SocketError`: if phase 1 adds a refusal variant (for example `Refused(CapError)`), phase 2's `Closed` variant sits beside it. The two are independent, so a rebase is a one-line merge in each `ptype`.
+  - `FileError`, `SocketError`: the phase 1 owner decision (2026-11-10, relayed from the phase 1 session) adds no refusal variant to any error type. A checked operation returns strict `Result(T, CapError)`, so an open that returned `Result(U, E)` becomes `Result(Result(U, E), CapError)`. Phase 2's `Closed` variant therefore conflicts with nothing.
+  - **If phase 1 lands first**, phase 2's opens adopt that shape when they rebase: `File.open : Result(Result(File.Handle, FileError), CapError)`, and likewise `open_write`, `open_dir`, `Socket.connect`, `Socket.listen` and `Process.spawn_async`. Each new open calls phase 1's `Authority.check(kind, target)` before the raw open. Handle *uses* keep their single `Result(_, E)`.
+  - **If phase 2 lands first**, phase 1 converts the opens.
+  - Phase 1 gates the non-handle builtins, including `vault_new`/`vault_whereis`. It leaves the handle builtins to Task 10.
 - **Phase 2 first.** Nothing in phase 2 depends on phase 1. Phase 1 then has fewer operations to convert: handle uses carry no capability after Task 10, so they are not "capability operations", and phase 1 must not wrap them in `Result(_, CapError)`.
   - **Handover note for phase 1:** leave in `specs/todos/` the list of builtins Task 10 removes from `builtin_cap_table`.
 - **Phase 3.** Phase 3 edits the cap-checking code (`lib/typecheck/typecheck_caps.ml`, `check_stdlib_mediated_ceiling`). Phase 2 edits mostly data:
