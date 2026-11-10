@@ -40,6 +40,40 @@ mod TestClusterAuth do
       assert (not(ClusterAuth.verify("s3cret", "nonce-1", "deadbeef")))
     end
 
+    -- verify compares with Crypto.secure_compare (constant-time in shape: no
+    -- early exit on the first differing byte or on a length mismatch). Timing
+    -- cannot be unit-tested; these pin that the comparison still answers right.
+    test "rejects an equal-length proof differing only in the last byte" do
+      let good = ClusterAuth.prove("s3cret", "nonce-1")
+      let n = string_byte_length(good)
+      let last = string_slice(good, n - 1, 1)
+      let flipped = if last == "0" do "1" else "0" end
+      let bad = string_slice(good, 0, n - 1) ++ flipped
+      assert (string_byte_length(bad) == n)
+      assert (not(ClusterAuth.verify("s3cret", "nonce-1", bad)))
+    end
+
+    test "rejects an equal-length proof differing only in the first byte" do
+      let good = ClusterAuth.prove("s3cret", "nonce-1")
+      let n = string_byte_length(good)
+      let first = string_slice(good, 0, 1)
+      let flipped = if first == "0" do "1" else "0" end
+      let bad = flipped ++ string_slice(good, 1, n - 1)
+      assert (not(ClusterAuth.verify("s3cret", "nonce-1", bad)))
+    end
+
+    test "rejects a correct proof with extra bytes appended" do
+      let good = ClusterAuth.prove("s3cret", "nonce-1")
+      assert (not(ClusterAuth.verify("s3cret", "nonce-1", good ++ "00")))
+    end
+
+    test "rejects a truncated proof and an empty proof" do
+      let good = ClusterAuth.prove("s3cret", "nonce-1")
+      let n = string_byte_length(good)
+      assert (not(ClusterAuth.verify("s3cret", "nonce-1", string_slice(good, 0, n - 1))))
+      assert (not(ClusterAuth.verify("s3cret", "nonce-1", "")))
+    end
+
   end
 
   describe "ClusterAuth frame keys (step 11a)" do

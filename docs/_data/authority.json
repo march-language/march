@@ -25,15 +25,15 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "80ac0db09",
-    "date": "2026-11-07",
+    "commit": "0b02b0953",
+    "date": "2026-11-09",
     "inputs_sha256": "8869d6813a03fed65550e32f9da917310738ef7a1610f56e995aca6ba4a77b49"
   },
   "modules": {
     "classes": {
       "inside": 15,
       "none": 118,
-      "outside": 24
+      "outside": 25
     },
     "list": [
       {
@@ -944,6 +944,14 @@
       },
       {
         "cls": "outside",
+        "name": "HttpAcme",
+        "needs": [
+          "IO.FileRead"
+        ],
+        "own": false
+      },
+      {
+        "cls": "outside",
         "name": "HttpServer",
         "needs": [
           "IO.NetListen"
@@ -1152,7 +1160,7 @@
         "own": true
       }
     ],
-    "total": 157
+    "total": 158
   },
   "pinned": {
     "node_refusal": "FAILED Server.handle: ERR cap_policy IO.FileWrite \u2014 deploy rejected by node capability policy",

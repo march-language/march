@@ -45,11 +45,13 @@ mod ClusterAuth do
   doc """
   Verify a peer's [proof] for a [nonce] we issued: true exactly when [proof]
   equals `prove(secret, nonce)`. False means the peer lacks the secret or
-  replayed a proof for a different nonce. The comparison is plain string
-  equality (not constant-time).
+  replayed a proof for a different nonce. The comparison is
+  `Crypto.secure_compare`, which never exits early on the first differing
+  byte or on a length mismatch, so its running time does not reveal how much
+  of a forged proof was right.
   """
   fn verify(secret : String, nonce : String, proof : String) : Bool do
-    prove(secret, nonce) == proof
+    Crypto.secure_compare(prove(secret, nonce), proof)
   end
 
   -- ── the per-frame MAC offer (shared-secret mode) ─────────────────────────

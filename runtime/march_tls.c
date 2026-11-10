@@ -19,6 +19,7 @@
  */
 
 #include "march_tls.h"
+#include "march_tls_server.h"   /* MARCH_TLS_PQ_GROUPS */
 #include "march_runtime.h"
 #include "march_preempt.h"
 #include "march_http.h"   /* MARCH_RECV_TIMEOUT_MSG — one spelling of an expired deadline */
@@ -33,6 +34,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include <pthread.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,7 +150,8 @@ static int ctx_set_min_version(SSL_CTX *ctx, int64_t ver) {
  * behaviour as before this was set.  Explicit rather than inherited so that
  * the PQ group does not depend on which OpenSSL release happens to put it in
  * its default list, and so tls_pq_available can say whether it is in effect. */
-#define MARCH_TLS_PQ_GROUPS "X25519MLKEM768:X25519:P-256:P-384:P-521"
+/* MARCH_TLS_PQ_GROUPS is defined in march_tls_server.h (shared with the
+ * HTTPS server's contexts). */
 
 /* 1 if [groups] was accepted, 0 (error queue cleared, ctx unchanged) if not. */
 static int ctx_try_groups(SSL_CTX *ctx, const char *groups) {
@@ -162,6 +165,24 @@ static void ctx_set_default_groups(SSL_CTX *ctx) {
 }
 
 /* ── ALPN server callback ─────────────────────────────────────────────── */
+
+/* The callback's buffer hangs off the context as ex_data whose free hook
+ * releases it when the context's last reference goes. */
+static void alpn_ex_free(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
+                         int idx, long argl, void *argp) {
+    (void)parent; (void)ad; (void)idx; (void)argl; (void)argp;
+    free(ptr);
+}
+
+static int g_alpn_ex_index = -1;
+static pthread_once_t g_alpn_ex_once = PTHREAD_ONCE_INIT;
+static void alpn_ex_init(void) {
+    g_alpn_ex_index = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, alpn_ex_free);
+}
+static int alpn_ex_index(void) {
+    pthread_once(&g_alpn_ex_once, alpn_ex_init);
+    return g_alpn_ex_index;
+}
 
 /* arg points to: [unsigned int len][unsigned char wire_buf[len]] */
 static int tls_alpn_server_cb(SSL *ssl,
@@ -298,6 +319,8 @@ void *march_tls_server_ctx(void *cert_file, void *key_file, void *ca_file,
             memcpy(stored, &alpn_len, sizeof alpn_len);
             memcpy(stored + sizeof alpn_len, alpn_buf, alpn_len);
             SSL_CTX_set_alpn_select_cb(ctx, tls_alpn_server_cb, stored);
+            /* Owned by the context: freed with it (was leaked). */
+            SSL_CTX_set_ex_data(ctx, alpn_ex_index(), stored);
         }
         free(alpn_buf);
     }
