@@ -888,6 +888,10 @@ git log is authoritative for exact commits.
   compiled code the module's own `f`; both now call the module's own, as the docs say.
 - **`alias M, as: B` next to a declared `mod B` is a compile error** (`alias_shadows_module`).
   `B.f` meant the declared module interpreted and the alias target compiled.
+- **Lemmas over a record or variant with a `String` or `Float` field are checked.** Every
+  predicate over such a type (`un(mk(x)) == x` for `type N = { a : Int, s : String }`) was
+  skipped as unreflectable, so an actor whose state held a String could not prove its
+  rollback round trip. The field now holds a string or float value, as a parameter does.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
