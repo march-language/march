@@ -2,6 +2,9 @@
 
 **Spec:** `specs/2026-11-09-dependency-grants-and-restrict-design.md` (approved 2026-11-09).
 
+**Superseded 2026-11-10** by the phase table in `specs/2026-11-10-object-capability-design.md` §17,
+which maps each phase below to its new number. Phase 1 here is done; nothing else below was started.
+
 The spec's eight phases are separate subsystems (stdlib guard, every runtime, the type of
 every capability builtin, forge), so each gets its own plan, written when the phase
 starts, against the code as it is then. Each phase merges on its own.

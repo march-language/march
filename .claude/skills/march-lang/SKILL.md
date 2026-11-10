@@ -957,10 +957,10 @@ Directly callable without module qualification (built into the evaluator).
 
 | Builtin | Description |
 |---------|-------------|
-| `float_to_int(f)` | Truncate to Int |
+| `float_to_int(f)` | Truncate to Int; panics on NaN, ±inf and outside Int's range |
 | `float_to_string(f)` | To String |
 | `float_abs(f)` | Absolute value |
-| `float_floor(f)` / `float_ceil` / `float_round` / `float_truncate` | Rounding |
+| `float_floor(f)` / `float_ceil` / `float_round` / `float_truncate` | Rounding to Int; same panics as `float_to_int` |
 | `float_is_nan(f)` / `float_is_infinite(f)` | Checks |
 | `float_infinity` / `float_neg_infinity` / `float_nan` / `float_epsilon` | Constants |
 | `float_from_string(s)` / `string_to_float(s)` | Parse |

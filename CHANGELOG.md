@@ -470,6 +470,17 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
+  NaN, the infinities and a result outside Int's range** (#1230), with
+  `float_floor: value out of Int range` or `float_floor: cannot convert NaN to Int`, the same
+  on the interpreter, compiled code and `--target js`. They used to return whatever the host
+  gave: `float_floor(1e20)` was `-1` natively and `100000000000000000000` on JS, and
+  `float_to_int(nan)` was `0` or `NaN`. `Math.floor`/`ceil`/`round`/`truncate` now return NaN,
+  the infinities and values of magnitude 2^53 or more unchanged instead of a wrong Float, and
+  `Json.to_string`, `DataFrame`'s JSON import and group-by hash, and `Plot` guard their
+  conversions so they keep working on such values. The wasm runtime traps on them, and gains the
+  missing `march_float_to_int`. See `specs/lang/type-system.md`, "Converting a Float to an Int".
+
 - **Two variant types with the same short name in different modules are two types.** `A.Note`
   and `B.Note` used to be one type to the typechecker, so a value of one was accepted where the
   other was expected and the program then failed at run time. Passing one where the other is
@@ -849,6 +860,15 @@ git log is authoritative for exact commits.
   programs also send the request's headers (including `Connection: close`), which the
   compiled serializer used to drop, and send `Content-Length` only for a non-empty body, as
   interpreted ones always did.
+- **A NaN prints `nan` on every backend, and the interpreter's `show` no longer adds `.0`
+  to `nan`/`inf`/`-inf`.** `float_to_string` went through libc's `%.12g`, which prints a NaN with
+  the sign bit set as `-nan` on Linux and `nan` on macOS, and x86's default NaN (what
+  `inf -. inf` produces) has that bit set where arm64's does not, so the same program printed
+  `-nan` on x86 Linux and `nan` on a Mac. A NaN now prints `nan` in the interpreter and the
+  native runtime (and the logger's float fields), as `--target js` already did. Separately, the
+  interpreter's `show` of a Float printed `nan.0`, `inf.0` and `-inf.0`; it now prints `nan`,
+  `inf` and `-inf` like compiled code.
+
 - **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
   When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
   interpreter ran whichever impl registered last on both types' values; compiled code was right.

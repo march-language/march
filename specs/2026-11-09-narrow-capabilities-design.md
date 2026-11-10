@@ -4,7 +4,8 @@
 **Status:** approved 2026-11-09; revised the same day after a builder check (§14 lists what changed)
 **Builds on:** host/method/path scopes on `IO.NetConnect` (#1213, #1216), and the
 dependency-grants design and roadmap (`specs/2026-11-09-dependency-grants-and-restrict-design.md`,
-`specs/plans/2026-11-09-grants-restrict-roadmap.md`, on `main` once #1216 merges).
+`specs/plans/2026-11-09-grants-restrict-roadmap.md`), both superseded 2026-11-10 by
+`specs/2026-11-10-object-capability-design.md`: "phase 2" and "phase 4" below are its phases 1 and 4.
 
 Every capability other than network and files is all-or-nothing today. A dependency
 granted `IO.Process` can read every environment variable and run any program, including
