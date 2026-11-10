@@ -17,3 +17,26 @@ What is needed: one resolution rule (local, enclosing modules innermost first, `
 by the typechecker, the interpreter and lowering, or an `ambiguous_name` error where two of them can
 supply a name. Until then the refinement checker treats every such site as unresolved and never
 unfolds it (`Refine_term.graph.ambiguous`, `specs/progress/2026-10-30-reflection-phase1a.md`).
+
+## 2026-11-09: two of the three shapes fixed; a user module named like a stdlib module is open
+
+Reproduced on `9f14c7358` with single-file probes:
+
+| Probe | Interpreted | Compiled | Now |
+|---|---|---|---|
+| `fn sum_int` then `use List.*`, call `sum_int` | 3 (List's) | 102 (local) | 102 on both: the interpreter's bulk `use` (`UseAll`/`UseExcept`) skips a name the current module defines (`Eval.local_def_scopes`), the rule the typechecker already had (`env.local_fns`) |
+| `alias A, as: B` plus a declared `mod B`, call `B.g(1)` | 51 (declared `B`) | 2 (alias target) | compile error `alias_shadows_module` (`Typecheck.check_alias_shadows_module`) |
+| entry-level `mod List do fn sum_int ...`, call `List.sum_int([1, 2])` | 42 (user's) | 3 (stdlib's) | **still open** |
+
+Pinned by the codegen parity test "a local fn shadows a later `use M.*` on both backends" and
+`test/errors/alias_shadows_module_1`.
+
+**Why the last one is bigger.** A module nested in the entry module lowers to the same
+qualified TIR names as a stdlib module of the same name (`List.sum_int` both), so the two
+definitions are one symbol to the backend, and the stdlib's wins when the stdlib module is
+linked in. When it is not (a user `mod Queue` whose `empty` clashes with the stdlib's, in a
+program that never uses the stdlib `Queue`), the user's wins and both backends agree, so a
+blanket "a user module may not be named like a stdlib module" error would reject working
+programs. A real fix gives an entry-level nested module's functions their own TIR names when a
+stdlib module of that name exists (or qualifies every user module under the entry module's
+name), and rewrites the user's call sites to match, without touching the stdlib's own calls.

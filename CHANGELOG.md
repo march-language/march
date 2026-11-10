@@ -883,6 +883,11 @@ git log is authoritative for exact commits.
 - **Compiled `==` on a newtype over a generic record compares the record.** For
   `type Wrap(a) = Wrap(Cell(a))` with `Cell` a record, compiled code compared the two `Cell`
   pointers, so equal values compared unequal; the interpreter was right.
+- **A module's own function beats a later `use M.*` in the interpreter too.** With `fn f`
+  declared before `use M.*` (where `M` also has an `f`), interpreted code called `M.f` and
+  compiled code the module's own `f`; both now call the module's own, as the docs say.
+- **`alias M, as: B` next to a declared `mod B` is a compile error** (`alias_shadows_module`).
+  `B.f` meant the declared module interpreted and the alias target compiled.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its

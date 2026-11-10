@@ -22,6 +22,7 @@ let abstract_refinement_unused = "abstract_refinement_unused"
 let actor_handler_state_type = "actor_handler_state_type"
 let actor_init_arity = "actor_init_arity"
 let alias_kind_mismatch = "alias_kind_mismatch"
+let alias_shadows_module = "alias_shadows_module"
 let ambiguous_constructor = "ambiguous_constructor"
 let annotated_tyvar_fixed = "annotated_tyvar_fixed"
 let arity_mismatch = "arity_mismatch"
@@ -239,6 +240,7 @@ let all = [
   actor_handler_state_type;
   actor_init_arity;
   alias_kind_mismatch;
+  alias_shadows_module;
   ambiguous_constructor;
   annotated_tyvar_fixed;
   arity_mismatch;
@@ -478,7 +480,7 @@ let category_table : (string * string list) list = [
     template_fragment_position; template_unsafe_interpolation;
     template_unterminated; then_keyword ];
   "NAMING", [
-    ambiguous_constructor; duplicate_binder; duplicate_constructor;
+    alias_shadows_module; ambiguous_constructor; duplicate_binder; duplicate_constructor;
     duplicate_field; import_unresolved; prelude_collision; reserved_type_name; unbound_variable;
     unknown_constructor; unknown_export; unknown_qualified_name;
     unknown_record_field ];
