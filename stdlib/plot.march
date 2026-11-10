@@ -253,9 +253,11 @@ mod Plot do
       let range = hi_v -. lo_v
       let bin_w = if range == 0.0 do 1.0 else range /. int_to_float(bins) end
       fn bin_of(x : Float) : Int do
-        let b = float_to_int((x -. lo_v) /. bin_w)
-        let capped = if b >= bins do bins - 1 else b end
-        if capped < 0 do 0 else capped end
+        -- Clamp before float_to_int, which panics on NaN and outside Int's
+        -- range (#1230); NaN goes to bin 0.
+        let q = (x -. lo_v) /. bin_w
+        if q >= int_to_float(bins) do bins - 1
+        else if q > 0.0 do float_to_int(q) else 0 end end
       end
       fn update_at(idx : Int, cs : List(Int)) : List(Int) do
         match cs do
@@ -471,8 +473,16 @@ mod Plot do
   end
 
   pfn fmt_float(f : Float) : String do
-    -- Format to 2 decimal places for compact SVG coordinates
-    let scaled = float_to_int(f *. 100.0)
+    -- Format to 2 decimal places for compact SVG coordinates. NaN, the
+    -- infinities and huge values (float_to_int panics on them, #1230) use
+    -- float_to_string.
+    let scaled_f = f *. 100.0
+    if scaled_f > -4600000000000000000.0 && scaled_f < 4600000000000000000.0 do
+      fmt_scaled(float_to_int(scaled_f))
+    else float_to_string(f) end
+  end
+
+  pfn fmt_scaled(scaled : Int) : String do
     let whole = scaled / 100
     let frac = scaled % 100
     let frac_abs = if frac < 0 do 0 - frac else frac end
