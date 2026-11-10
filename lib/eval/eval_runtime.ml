@@ -9,6 +9,20 @@ open March_ast.Ast
 open Eval_types
 open Eval_prim
 
+(** The interpreter's Float rendering, shadowing [Stdlib.string_of_float] for
+    this module and every module that opens it.  Stdlib's is [%.12g] through
+    the platform libc, which prints a NaN whose sign bit is set as ["-nan"]
+    (glibc, x86's default NaN from [inf -. inf]) and an unsigned one as
+    ["nan"] (arm64's default NaN).  NaN has no meaningful sign, so every
+    backend prints ["nan"]; the C runtime does the same in
+    [march_format_float_ocaml] / [logger_float_str] and the JS runtime in
+    [march_float_to_string].  [Stdlib.string_of_float] already yields a valid
+    float lexeme for every finite value (a bare integer gets a trailing dot),
+    so [show] uses it as is: [nan], [inf] and [-inf] stay bare, as in native
+    and JS, instead of gaining a [.0]. *)
+let string_of_float f =
+  if Float.is_nan f then "nan" else Stdlib.string_of_float f
+
 (** Vault: ETS-like in-memory key-value store.
     Each table is identified by an opaque integer handle.
 
@@ -98,9 +112,7 @@ let rec value_to_string v =
   match v with
   | VInt n    -> string_of_int n
   | VFloat f  ->
-    let s = string_of_float f in
-    if String.contains s '.' || String.contains s 'e' then s
-    else s ^ ".0"
+    string_of_float f
   | VString s -> "\"" ^ String.escaped s ^ "\""
   | VBool b   -> string_of_bool b
   | VAtom a   -> ":" ^ a
@@ -152,8 +164,7 @@ let rec value_to_string v =
         (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
   | VNativeFloatArr a ->
     let n = Array.length a in
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     if n <= 8 then
       "NativeFloatArr[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
     else
@@ -161,8 +172,7 @@ let rec value_to_string v =
         (String.concat ", " (List.init 4 (fun i -> fmt a.(i))))
   | VNativeF32Arr a ->
     let n = Array.length a in
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     if n <= 8 then
       "NativeF32Arr[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
     else
@@ -183,12 +193,10 @@ let rec value_to_string v =
       Printf.sprintf "NativeU8Arr(%d)[%s, ...]" n
         (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
   | VF32x4 a ->
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     "F32x4[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
   | VF64x2 a ->
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     "F64x2[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
   | VI32x4 a ->
     "I32x4[" ^ String.concat ", " (Array.to_list (Array.map string_of_int a)) ^ "]"
@@ -731,11 +739,19 @@ let int_wrapping_add a b = if narrow_int then int_add a b else a + b
 let int_wrapping_sub a b = if narrow_int then int_sub a b else a - b
 let int_wrapping_mul a b = if narrow_int then int_mul a b else a * b
 
-(** [Float.to_int], raising [int_overflow op] when [f] is outside the host Int
-    range on a narrow host. *)
+(** [Float.to_int] for the Float -> Int builtins ([op] is the builtin's name),
+    [f] already rounded to a whole number.  NaN, and a value outside the
+    63-bit range [-2^62, 2^62), panic (specs/lang/type-system.md, "Converting
+    a Float to an Int") instead of returning what the host's conversion
+    happens to give; the messages are the C runtime's (march_float_int_checked)
+    byte for byte.  On a narrow host an in-range value can still exceed the
+    host's own Int, which raises [int_overflow op]. *)
 let int_of_float_checked op f =
-  if narrow_int && not (Float.is_nan f)
-     && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
+  if Float.is_nan f then eval_error "%s: cannot convert NaN to Int" op
+  else if not (f >= -0x1p62 && f < 0x1p62) then
+    eval_error "%s: value out of Int range" op
+  else if narrow_int
+       && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
   then int_overflow op else Float.to_int f
 
 let arith_num iop fop name = VBuiltin (name, function
@@ -1663,8 +1679,7 @@ let rec show_dispatch (v : value) : string =
   match v with
   | VInt n    -> string_of_int n
   | VFloat f  ->
-    let s = string_of_float f in
-    if String.contains s '.' || String.contains s 'e' then s else s ^ ".0"
+    string_of_float f
   | VBool b   -> string_of_bool b
   | VString s -> s
   | VAtom a   -> ":" ^ a

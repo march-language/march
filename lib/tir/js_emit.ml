@@ -924,8 +924,13 @@ and emit_val_impl ctx expr =
       | "mod_int",   [a; b] -> emit_int_mod ctx a b
       | "int_to_float", [a] ->
         emit_atom ctx a
-      | "float_to_int", [a] | "float_truncate", [a] ->
-        emit ctx "Math.trunc("; emit_atom ctx a; emit ctx ")"
+      (* Float -> Int conversions go through the runtime, which throws on NaN,
+         the infinities and a result outside [-2^62, 2^62) (#1230); an inline
+         Math.trunc returned those as an "Int". *)
+      | ("float_to_int" | "float_truncate" | "float_floor" | "float_ceil" as n), [a] ->
+        let rt = "march_" ^ n in
+        use_runtime ctx rt;
+        emit ctx (rt ^ "("); emit_atom ctx a; emit ctx ")"
       (* Show$String.show's body (lib/tir/lower.ml) — a dynamic identity that
          classifies the UNIFORM representation at runtime, because Mono defaults
          a dangling type variable to String and an erased value may really be a
@@ -1150,10 +1155,6 @@ and emit_val_impl ctx expr =
         use_runtime ctx "march_int_pow";
         emit ctx "march_int_pow("; emit_atom ctx a; emit ctx ", "; emit_atom ctx b; emit ctx ")"
       | "float_abs",   [a] -> emit ctx "Math.abs(";   emit_atom ctx a; emit ctx ")"
-      (* float_floor/ceil/round return Int in March; the results are
-         integer-valued JS numbers, which IS the JS target's Int repr *)
-      | "float_floor", [a] -> emit ctx "Math.floor("; emit_atom ctx a; emit ctx ")"
-      | "float_ceil",  [a] -> emit ctx "Math.ceil(";  emit_atom ctx a; emit ctx ")"
       | "float_round", [a] ->
         (* OCaml Float.round rounds half AWAY FROM ZERO; JS Math.round rounds
            half toward +inf — delegate to the runtime helper *)
@@ -1991,15 +1992,11 @@ let builtin_wrappers = {|
 const int_to_string   = { _0: ($_, x) => String(x) };
 const bool_to_string  = { _0: ($_, x) => String(x) };
 const int_to_float    = { _0: ($_, x) => x };
-const float_to_int    = { _0: ($_, x) => Math.trunc(x) };
-const float_truncate  = { _0: ($_, x) => Math.trunc(x) };
 const string_is_empty = { _0: ($_, x) => x === "" };
 const not_bool        = { _0: ($_, x) => !x };
 const negate_int      = { _0: ($_, x) => march_int_ovf(-x, 3) };
 const negate_float    = { _0: ($_, x) => -x };
 const float_abs       = { _0: ($_, x) => Math.abs(x) };
-const float_floor     = { _0: ($_, x) => Math.floor(x) };
-const float_ceil      = { _0: ($_, x) => Math.ceil(x) };
 const root_cap        = undefined;
 |}
 
@@ -2123,7 +2120,9 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
     (int_rt_builtins2 @ int_rt_builtins1);
   Hashtbl.replace ctx.runtime_uses "march_unix_time" ();
   Hashtbl.replace ctx.runtime_uses "march_unix_time_ms" ();
-  Hashtbl.replace ctx.runtime_uses "march_float_round" ();
+  List.iter (fun n -> Hashtbl.replace ctx.runtime_uses n ())
+    [ "march_float_round"; "march_float_to_int"; "march_float_truncate";
+      "march_float_floor"; "march_float_ceil" ];
   Hashtbl.replace ctx.runtime_uses "march_try_finally" ();   (* try_finally *)
   (* main's crash-observer wrapper, emitted below. *)
   if Hashtbl.mem ctx.runtime_uses "march_diag_observe" then
@@ -2150,7 +2149,9 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
     wrapper "int_abs" "{ _0: ($_, a) => Math.abs(a) }" ^
     wrapper "unix_time" "{ _0: ($_) => march_unix_time() }" ^
     wrapper "unix_time_ms" "{ _0: ($_) => march_unix_time_ms() }" ^
-    wrapper "float_round" "{ _0: ($_, a) => march_float_round(a) }" ^
+    String.concat "" (List.map (fun n ->
+      wrapper n (Printf.sprintf "{ _0: ($_, a) => march_%s(a) }" n))
+      [ "float_round"; "float_to_int"; "float_truncate"; "float_floor"; "float_ceil" ]) ^
     wrapper "try_finally" "{ _0: ($_, a, c) => march_try_finally(a, c) }"
   in
   let runtime_import =

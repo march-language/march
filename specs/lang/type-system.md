@@ -217,6 +217,28 @@ a native or wasm target. The decision to treat the JS target as a subset
 rather than emulate 63 bits with `BigInt` is recorded in
 `specs/progress/2026-09-30-js-backend-int-63-bit-semantics.md`.
 
+### Converting a Float to an Int
+
+`float_to_int` and `float_truncate` round toward zero, `float_floor` down,
+`float_ceil` up, and `float_round` to the nearest whole number with halves
+away from zero (`float_round(-2.5) == -3`). The result must be an `Int`, so
+each one **panics** when the rounded value lies outside
+[-2^62, 2^62 - 1], with `float_floor: value out of Int range` (the
+builtin's own name first), and on NaN with `float_floor: cannot convert NaN
+to Int`. The infinities are out of range. The message is the same on the
+interpreter, compiled code and `--target js`, and a literal argument out of
+range is not folded at compile time; it panics when it runs.
+
+To convert a value that may be out of range, test it first:
+`x >= -4611686018427387904.0 && x < 4611686018427387904.0` is false for NaN
+and the infinities. `Math.floor`, `Math.ceil`, `Math.round` and
+`Math.truncate` return a `Float` and do not panic: NaN, the infinities and
+values of magnitude 2^53 or more (already whole) come back unchanged.
+
+On `--target js` the bound is the same ±2^62, checked on the double, so a
+result between 2^53 and 2^62 is returned as an inexact `Int`, like any other
+`Int` past ±(2^53 - 1) there.
+
 ### Parsing a Float
 
 `string_to_float(s)` (also `float_from_string`, and `String.to_float`, which

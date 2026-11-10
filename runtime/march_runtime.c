@@ -1359,6 +1359,10 @@ void *march_int_to_string(int64_t n) {
  * Shared by march_float_to_string and march_print_float so the two cannot
  * drift. Writes into [buf] (64 bytes) and returns the length. */
 static int march_format_float_ocaml(char *buf, double f) {
+    /* NaN has no meaningful sign: glibc prints a sign-bit-set NaN (x86's
+     * default NaN from inf - inf) as "-nan" and arm64's as "nan".  Print "nan"
+     * everywhere, as the interpreter and the JS runtime do. */
+    if (isnan(f)) { memcpy(buf, "nan", 4); return 3; }
     int len = snprintf(buf, 64, "%.12g", f);
     if (len < 0) len = 0;
     if (len > 63) len = 63;
@@ -10720,10 +10724,27 @@ int march_hcr_migrate_check(uint32_t slot, void *(*check)(void *), int64_t timeo
 /* ── Float builtins ──────────────────────────────────────────────────── */
 
 double march_float_abs(double f) { return fabs(f); }
-int64_t march_float_ceil(double f) { return (int64_t)ceil(f); }
-int64_t march_float_floor(double f) { return (int64_t)floor(f); }
-int64_t march_float_round(double f) { return (int64_t)round(f); }
-int64_t march_float_truncate(double f) { return (int64_t)f; }
+/* Float -> Int (float_ceil/floor/round/truncate and float_to_int).  [r] is
+ * the argument already rounded to a whole number.  A bare (int64_t) cast of
+ * NaN or of a value outside int64 is undefined behaviour in C (arm64
+ * saturates, x86-64 gives INT64_MIN), and a value in [2^62, 2^63) fits int64
+ * but not March's 63-bit Int, so it would wrap when tagged.  Both panic
+ * instead, with the interpreter's messages (eval_runtime.ml's
+ * int_of_float_checked) byte for byte.  -0x1p62 and 0x1p62 are exact
+ * doubles, so the comparison is exact; NaN fails it and is tested first. */
+static int64_t march_float_int_checked(double r, const char *op) {
+    if (r >= -0x1p62 && r < 0x1p62) return (int64_t)r;
+    char m[64];
+    snprintf(m, sizeof m, "%s: %s", op,
+             r != r ? "cannot convert NaN to Int" : "value out of Int range");
+    march_panic(march_string_lit(m, (int64_t)strlen(m)));
+    abort();  /* march_panic does not return */
+}
+
+int64_t march_float_ceil(double f) { return march_float_int_checked(ceil(f), "float_ceil"); }
+int64_t march_float_floor(double f) { return march_float_int_checked(floor(f), "float_floor"); }
+int64_t march_float_round(double f) { return march_float_int_checked(round(f), "float_round"); }
+int64_t march_float_truncate(double f) { return march_float_int_checked(trunc(f), "float_truncate"); }
 double march_int_to_float(int64_t n) { return (double)n; }
 
 /* ── Math builtins ───────────────────────────────────────────────────── */
@@ -11162,7 +11183,7 @@ int64_t march_char_is_whitespace(void *c) {
 
 /* Float/Int conversion */
 int64_t march_float_to_int(double f) {
-    return (int64_t)f;
+    return march_float_int_checked(trunc(f), "float_to_int");
 }
 
 /* Returns List(String). */
@@ -16756,6 +16777,7 @@ static void logger_v2_pop_one(void) {
  * string_of_float, i.e. "%.12g" plus a trailing "." when the result would
  * otherwise read as an integer ("2." not "2", "1.5", "1e+20", "inf"). */
 static void logger_float_str(double f, char *buf, size_t cap) {
+    if (isnan(f)) { snprintf(buf, cap, "nan"); return; }  /* never "-nan": see march_format_float_ocaml */
     snprintf(buf, cap, "%.12g", f);
     for (const char *c = buf; *c; c++)
         if (!(*c == '-' || (*c >= '0' && *c <= '9'))) return;

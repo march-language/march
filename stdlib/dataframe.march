@@ -393,14 +393,21 @@ mod DataFrame do
 
   doc """
   A hash of a value used for group-by / join keys: the Int itself, the
-  Float scaled by 1e6 and truncated, djb2 over a string's characters,
-  0/1 for Bool and 0 for Null. Equal values hash equally; not a
-  cryptographic hash.
+  Float scaled by 1e6 and truncated (or, when that does not fit an Int or
+  the Float is NaN, the hash of its `float_to_string`), djb2 over a
+  string's characters, 0/1 for Bool and 0 for Null. Equal values hash
+  equally; not a cryptographic hash.
   """
   fn value_hash(v : Value) : Int do
     match v do
     IntVal(n)   -> n
-    FloatVal(f) -> float_to_int(f * 1000000.0)
+    FloatVal(f) -> do
+      -- float_to_int panics outside Int's range and on NaN (#1230).
+      let scaled = f * 1000000.0
+      if scaled > -4600000000000000000.0 && scaled < 4600000000000000000.0 do
+        float_to_int(scaled)
+      else value_hash(StrVal(float_to_string(f))) end
+      end
     StrVal(s)   -> do
       -- djb2 hash
       let chars = string_chars(s)
@@ -2238,8 +2245,12 @@ mod DataFrame do
     Null      -> NullVal
     Bool(b)   -> BoolVal(b)
     Number(f) -> do
-      let i = float_to_int(f)
-      if int_to_float(i) == f do IntVal(i) else FloatVal(f) end
+      -- float_to_int panics on NaN, infinities and values outside Int's
+      -- range (#1230); those stay Floats.
+      if f > -4600000000000000000.0 && f < 4600000000000000000.0 do
+        let i = float_to_int(f)
+        if int_to_float(i) == f do IntVal(i) else FloatVal(f) end
+      else FloatVal(f) end
       end
     JsonValue.Str(s) -> StrVal(s)
     _                -> StrVal(Json.to_string(jv))

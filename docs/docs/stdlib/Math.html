@@ -352,7 +352,7 @@ march&gt; <span class="tok-ty">Math</span>.atan2(<span class="tok-num">1.0</span
 <span class="tok-kw">true</span>
 march&gt; (<span class="tok-ty">Math</span>.cbrt(-<span class="tok-num">8.0</span>)) == -<span class="tok-num">2.0</span>
 <span class="tok-kw">true</span></code></pre></div></div>
-<div class="item" id="fn-ceil"><div class="ih"><span class="badge bfn">fn</span><span class="name">ceil</span><span class="sig">ceil(x : Float) : Float</span><a class="anchor-link" href="#fn-ceil" title="Link">#</a></div><div class="ib"><p>Smallest integer not less than <code>x</code>, as a Float. Same Int round-trip caveat as <code>floor</code>.</p><h3>Examples</h3><pre data-try="(Math.ceil(2.1)) == 3.0
+<div class="item" id="fn-ceil"><div class="ih"><span class="badge bfn">fn</span><span class="name">ceil</span><span class="sig">ceil(x : Float) : Float</span><a class="anchor-link" href="#fn-ceil" title="Link">#</a></div><div class="ib"><p>Smallest integer not less than <code>x</code>, as a Float. Same handling of NaN, infinities and huge values as <code>floor</code>.</p><h3>Examples</h3><pre data-try="(Math.ceil(2.1)) == 3.0
 (Math.ceil(-2.7)) == -2.0" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty">Math</span>.ceil(<span class="tok-num">2.1</span>)) == <span class="tok-num">3.0</span>
 <span class="tok-kw">true</span>
 march&gt; (<span class="tok-ty">Math</span>.ceil(-<span class="tok-num">2.7</span>)) == -<span class="tok-num">2.0</span>
@@ -399,7 +399,7 @@ Math.exp2(-1.0)" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty
 <span class="tok-kw">true</span>
 march&gt; <span class="tok-ty">Math</span>.exp2(-<span class="tok-num">1.0</span>)
 <span class="tok-num">0.5</span></code></pre></div></div>
-<div class="item" id="fn-floor"><div class="ih"><span class="badge bfn">fn</span><span class="name">floor</span><span class="sig">floor(x : Float) : Float</span><a class="anchor-link" href="#fn-floor" title="Link">#</a></div><div class="ib"><p>Largest integer not greater than <code>x</code>, as a Float. Computed via an Int round-trip, so it is only correct when the result fits in an Int (NaN, infinities and huge magnitudes are not preserved).</p><h3>Examples</h3><pre data-try="(Math.floor(2.7)) == 2.0
+<div class="item" id="fn-floor"><div class="ih"><span class="badge bfn">fn</span><span class="name">floor</span><span class="sig">floor(x : Float) : Float</span><a class="anchor-link" href="#fn-floor" title="Link">#</a></div><div class="ib"><p>Largest integer not greater than <code>x</code>, as a Float. NaN, the infinities and any <code>x</code> of magnitude 2^53 or more (already a whole number) are returned unchanged.</p><h3>Examples</h3><pre data-try="(Math.floor(2.7)) == 2.0
 (Math.floor(-2.3)) == -3.0" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty">Math</span>.floor(<span class="tok-num">2.7</span>)) == <span class="tok-num">2.0</span>
 <span class="tok-kw">true</span>
 march&gt; (<span class="tok-ty">Math</span>.floor(-<span class="tok-num">2.3</span>)) == -<span class="tok-num">3.0</span>
@@ -433,7 +433,7 @@ march&gt; <span class="tok-ty">Math</span>.pow(<span class="tok-num">2.0</span>,
 <span class="tok-num">0.5</span>
 march&gt; (<span class="tok-ty">Math</span>.pow(<span class="tok-num">4.0</span>, <span class="tok-num">0.5</span>)) == <span class="tok-num">2.0</span>
 <span class="tok-kw">true</span></code></pre></div></div>
-<div class="item" id="fn-round"><div class="ih"><span class="badge bfn">fn</span><span class="name">round</span><span class="sig">round(x : Float) : Float</span><a class="anchor-link" href="#fn-round" title="Link">#</a></div><div class="ib"><p>Rounds to the nearest integer, as a Float; halves round away from zero. Same Int round-trip caveat as <code>floor</code>.</p><h3>Examples</h3><pre data-try="(Math.round(2.5)) == 3.0
+<div class="item" id="fn-round"><div class="ih"><span class="badge bfn">fn</span><span class="name">round</span><span class="sig">round(x : Float) : Float</span><a class="anchor-link" href="#fn-round" title="Link">#</a></div><div class="ib"><p>Rounds to the nearest integer, as a Float; halves round away from zero. Same handling of NaN, infinities and huge values as <code>floor</code>.</p><h3>Examples</h3><pre data-try="(Math.round(2.5)) == 3.0
 (Math.round(-2.5)) == -3.0
 (Math.round(2.4)) == 2.0" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty">Math</span>.round(<span class="tok-num">2.5</span>)) == <span class="tok-num">3.0</span>
 <span class="tok-kw">true</span>
@@ -456,7 +456,7 @@ march&gt; (<span class="tok-ty">Math</span>.sqrt(<span class="tok-num">0.0</span
 <span class="tok-kw">true</span></code></pre></div></div>
 <div class="item" id="fn-tau"><div class="ih"><span class="badge bfn">fn</span><span class="name">tau</span><span class="sig">tau() : Float</span><a class="anchor-link" href="#fn-tau" title="Link">#</a></div><div class="ib"><p>Tau = 2*pi (6.28318...), one full turn in radians.</p><h3>Examples</h3><pre data-try="Math.tau() == 2.0 *. Math.pi()" data-try-kind="transcript"><code>march&gt; <span class="tok-ty">Math</span>.tau() == <span class="tok-num">2.0</span> *. <span class="tok-ty">Math</span>.pi()
 <span class="tok-kw">true</span></code></pre></div></div>
-<div class="item" id="fn-truncate"><div class="ih"><span class="badge bfn">fn</span><span class="name">truncate</span><span class="sig">truncate(x : Float) : Float</span><a class="anchor-link" href="#fn-truncate" title="Link">#</a></div><div class="ib"><p>Rounds toward zero, as a Float. Same Int round-trip caveat as <code>floor</code>.</p><h3>Examples</h3><pre data-try="(Math.truncate(-2.7)) == -2.0
+<div class="item" id="fn-truncate"><div class="ih"><span class="badge bfn">fn</span><span class="name">truncate</span><span class="sig">truncate(x : Float) : Float</span><a class="anchor-link" href="#fn-truncate" title="Link">#</a></div><div class="ib"><p>Rounds toward zero, as a Float. Same handling of NaN, infinities and huge values as <code>floor</code>.</p><h3>Examples</h3><pre data-try="(Math.truncate(-2.7)) == -2.0
 (Math.truncate(2.7)) == 2.0" data-try-kind="transcript"><code>march&gt; (<span class="tok-ty">Math</span>.truncate(-<span class="tok-num">2.7</span>)) == -<span class="tok-num">2.0</span>
 <span class="tok-kw">true</span>
 march&gt; (<span class="tok-ty">Math</span>.truncate(<span class="tok-num">2.7</span>)) == <span class="tok-num">2.0</span>

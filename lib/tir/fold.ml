@@ -127,8 +127,8 @@ let rec fold_expr ~user_not ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitFloat a)])
     when f.Tir.v_name = "float_abs" ->
     changed := true; mk_float (Float.abs a)
-  (* float→int: guard finite + safely in 63-bit int range so the OCaml-side
-     conversion can't overflow/UB where the C (int64_t) cast would differ. *)
+  (* float→int: guard finite + safely in 63-bit int range.  Outside it every
+     backend panics at run time (#1230), so the call must stay unfolded. *)
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitFloat a)])
     when Float.is_finite a && Float.abs a < 4.6e18
          && (match f.Tir.v_name with

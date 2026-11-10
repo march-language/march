@@ -512,10 +512,19 @@ int64_t march_hash_bool(int64_t b) { return b ? 1 : 0; }
 
 /* WASM has native f64 instructions for most of these */
 double march_float_abs(double f) { return f < 0 ? -f : f; }
-int64_t march_float_ceil(double f) { return (int64_t)__builtin_ceil(f); }
-int64_t march_float_floor(double f) { return (int64_t)__builtin_floor(f); }
-int64_t march_float_round(double f) { return (int64_t)__builtin_round(f); }
-int64_t march_float_truncate(double f) { return (int64_t)__builtin_trunc(f); }
+/* Float -> Int: NaN, or a rounded value outside March's 63-bit Int range,
+ * panics as in march_runtime.c's march_float_int_checked (a bare cast is
+ * undefined there).  A panic traps the instance on wasm (march_panic below),
+ * so this traps directly, like march_int_overflow. */
+static int64_t march_float_int_checked(double r) {
+    if (r >= -0x1p62 && r < 0x1p62) return (int64_t)r;
+    __builtin_trap();
+}
+int64_t march_float_ceil(double f) { return march_float_int_checked(__builtin_ceil(f)); }
+int64_t march_float_floor(double f) { return march_float_int_checked(__builtin_floor(f)); }
+int64_t march_float_round(double f) { return march_float_int_checked(__builtin_round(f)); }
+int64_t march_float_truncate(double f) { return march_float_int_checked(__builtin_trunc(f)); }
+int64_t march_float_to_int(double f) { return march_float_int_checked(__builtin_trunc(f)); }
 double march_int_to_float(int64_t n) { return (double)n; }
 
 /* ── Math builtins ──────────────────────────────────────────────────── */
