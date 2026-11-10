@@ -18915,6 +18915,97 @@ let test_string_alloc_uses_march_allocator () =
   Alcotest.(check bool) "march_string_alloc routes through march_obj_malloc" true
     (Test_helpers.contains "march_string *s = march_obj_malloc" source)
 
+(* A closure that matches a CAPTURED value and hands the pattern's fields to a
+   borrowing builtin in tail position must not release the capture before the
+   call (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md).
+   [Drop.rewrite_apply_clo_drop] asked whether the tail USES a capture by the
+   capture's own name, so a tail naming only `a`/`b` (fields of `src`) got the
+   environment's deep release in front of it: `__drop$Pair(src)` freed the
+   strings, then `string_concat(a, b)` read them (ASAN: heap-use-after-free in
+   HttpServer.tls's http_server_tls_configure call).  Asserted on post-Drop TIR:
+   along every path of each apply fn, no `__drop$` call precedes the call to
+   the builtin that reads the fields. *)
+let closure_field_tail_src = {|
+mod M do
+  type Pair = Pair(String, String) | Solo(String)
+  type Nest = Nest(Pair, String)
+
+  fn joiner(src : Pair) : ((Int, Int)) -> String do
+    fn pw ->
+      match pw do
+      (x, y) ->
+        match src do
+        Pair(a, b) -> string_concat(a, b)
+        Solo(a) -> string_concat(a, int_to_string(x + y))
+        end
+      end
+  end
+
+  fn nested(n : Nest) : (Int) -> Int do
+    fn _ ->
+      match n do
+      Nest(p, s) ->
+        match p do
+        Pair(a, _) -> string_byte_length(a) + string_byte_length(s)
+        Solo(a) -> string_byte_length(a)
+        end
+      end
+  end
+
+  fn main() do
+    let f = joiner(Pair(int_to_string(1), int_to_string(2)))
+    let h = nested(Nest(Pair(int_to_string(3), "b"), int_to_string(4)))
+    string_byte_length(f((1, 2))) + h(0)
+  end
+end
+|}
+
+let test_closure_field_tail_not_released_first () =
+  let open March_tir.Tir in
+  let m = parse_and_desugar closure_field_tail_src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let k_table = March_tir.Kind.of_module tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let is_drop (f : var) =
+    String.starts_with ~prefix:March_tir.Tir_names.drop_fn_prefix f.v_name in
+  let rec has_drop = function
+    | EApp (f, _) -> is_drop f
+    | ELet (_, a, b) | ESeq (a, b) -> has_drop a || has_drop b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> has_drop br.br_body) brs
+      || (match d with Some e -> has_drop e | None -> false)
+    | _ -> false
+  in
+  (* [bad seen e]: a call to one of [readers] reached on a path where a deep
+     release already ran ([seen]). *)
+  let readers = [ "string_concat"; "string_byte_length" ] in
+  let rec bad seen = function
+    | EApp (f, _) when List.mem f.v_name readers -> seen
+    | ELet (_, a, b) | ESeq (a, b) -> bad seen a || bad (seen || has_drop a) b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> bad seen br.br_body) brs
+      || (match d with Some e -> bad seen e | None -> false)
+    | _ -> false
+  in
+  let applies = List.filter (fun f ->
+      March_tir.Tir_names.is_apply_fn f.fn_name
+      && (String.ends_with ~suffix:"_joiner" f.fn_name
+          || String.ends_with ~suffix:"_nested" f.fn_name)) tir.tm_fns in
+  Alcotest.(check int) "both apply fns found" 2 (List.length applies);
+  List.iter (fun f ->
+      (* Control: the release is still there (on the freeing path), only after
+         the read.  Without it this test would pass on a leak. *)
+      Alcotest.(check bool) (f.fn_name ^ " still releases its capture") true
+        (has_drop f.fn_body);
+      Alcotest.(check bool)
+        (f.fn_name ^ ": no deep release before the builtin reads a field") false
+        (bad false f.fn_body))
+    applies
+
 let codegen_suites =
   [
       ( "string_allocator", [
@@ -19010,6 +19101,10 @@ let codegen_suites =
           Alcotest.test_case "filter+fold fused fn is FnFused"     `Quick test_fnfused_filter_fold_tagged;
           Alcotest.test_case "map+filter+fold fused fn is FnFused" `Quick test_fnfused_map_filter_fold_tagged;
           Alcotest.test_case "no FnFused when nothing fuses"       `Quick test_fnfused_absent_when_not_fused;
+        ] );
+      ( "closure_field_tail", [
+          Alcotest.test_case "capture not released before a tail reading its fields" `Quick
+            test_closure_field_tail_not_released_first;
         ] );
       ( "unboxed_aggregates", [
           Alcotest.test_case "identified struct type declared"        `Quick test_unboxed_aggregate_declared_as_struct;

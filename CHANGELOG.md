@@ -845,6 +845,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
+  A compiled closure that matched a captured value and passed the pattern's fields straight to a
+  builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the
+  capture first, so the builtin read freed memory. ASAN caught it in `HttpServer.tls`; on macOS
+  the freed bytes usually survived. The release now waits until the call returns.
 - **A user fn named like `show`, `eq`, `compare` or `hash` no longer swaps places with the
   interface method in compiled code.** A generic `fn show(r)` printed `Ok(pos)` where the
   interpreter printed `pos`; a `fn show(r : T)` took over `println` of every `T`; `fn compare`
