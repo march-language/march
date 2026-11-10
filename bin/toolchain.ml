@@ -702,7 +702,7 @@ let load_stdlib ?(for_js=false) () =
       with _ -> ());
       (* Register these declarations' files as the stdlib's BEFORE any
          typecheck sees them: the stdlib-only builtin gate
-         ([Typecheck_caps.check_stdlib_only_refs]) exempts a declaration by
+         (the resolution-time gate in [Typecheck.infer_expr]) exempts a declaration by
          its span's file, and every path that typechecks the stdlib (compile,
          `march test`, `march check`, the REPL and its JIT, warm-cache) loads
          it here. *)

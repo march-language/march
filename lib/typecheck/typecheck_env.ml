@@ -754,6 +754,12 @@ type env = {
       ceiling: a stdlib wrapper's body caps roll up to the user module that
       calls it, exactly as [March_tir.Cap_attrib]'s [~transparent] does on the
       `--compile` side. Keyed like [cap_closures]. *)
+  stdlib_internal_fns : (string, string) Hashtbl.t;
+  (** Qualified name ([Mod.f]) of every stdlib function carrying
+      [@[stdlib_internal]], mapped to the module the error points users at.
+      Filled when a stdlib [DMod]'s [DFn]s are checked; read by the stdlib-only
+      gate in [infer_expr]'s [EVar] arm. Shared by every copy of the env, like
+      [stdlib_fns]. *)
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   (** Function-name keys that are ALWAYS-reachable ceiling roots regardless of
       whether the program has a `main` — mirroring the unconditional roots
@@ -929,6 +935,7 @@ let make_env errors type_map = {
   own_cap_closures = Hashtbl.create 64;
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
+  stdlib_internal_fns = Hashtbl.create 8;
   ceiling_extra_roots = Hashtbl.create 16;
   fn_scopes = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;

@@ -85,7 +85,7 @@ let cap_strict_ceiling : bool ref = ref false
 
 (** Whether source file [f] is one of the standard library's. The ONE
     predicate for "this code is the stdlib's": [span_is_stdlib] below, the
-    stdlib-only builtin gate ([Typecheck_caps.check_stdlib_only_refs]) and the
+    stdlib-only builtin gate (the resolution-time check in [Typecheck.infer_expr]'s [EVar] arm) and the
     driver's diagnostic filter (bin/main.ml, [user_diag_file]) all go through
     it, so the gate can never admit code the filter shows as the user's, or
     reject code whose error the filter then hides. *)
@@ -154,7 +154,7 @@ let span_is_stdlib (sp : Ast.span) : bool =
 
     A call or value reference to one of these names from code outside the
     stdlib ([span_is_stdlib]) is a type error; the check is
-    [Typecheck_caps.check_stdlib_only_refs]. It exists for builtins that
+    the resolution-time gate in [Typecheck.infer_expr]'s [EVar] arm. It exists for builtins that
     forge authority, which user code must reach through a capability-taking
     stdlib wrapper (specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md,
     II.1 and II.4.4). Search and docs are unaffected: the gate is at the

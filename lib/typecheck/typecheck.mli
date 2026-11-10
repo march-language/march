@@ -330,6 +330,7 @@ type env = {
   own_cap_closures : (string, string list) Hashtbl.t;
   body_cap_closures : (string, string list) Hashtbl.t;
   stdlib_fns : (string, unit) Hashtbl.t;
+  stdlib_internal_fns : (string, string) Hashtbl.t;
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   fn_scopes : (string, string) Hashtbl.t;
   fn_refs : (string, string list) Hashtbl.t;

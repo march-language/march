@@ -630,6 +630,70 @@ end|} in
   Alcotest.(check bool) "user bindings of every gated name are not the builtins" false
     (has_error_with ctx "internal to the standard library")
 
+
+(* ── @[stdlib_internal]: the gate for stdlib FUNCTIONS (ocap phase 2, task 3) ──
+   A stdlib module's `@[stdlib_internal] fn` may be named only from a span the
+   stdlib owns. Each source below is one `mod`; they are parsed under their own
+   file name and nested into one entry module, the way the driver nests the
+   stdlib's modules beside the user's. *)
+let internal_message = "`Inner.raw` is internal to the standard library; use the handle API in `Inner`."
+
+let inner_src = {|mod Inner do
+  @[stdlib_internal]
+  fn raw(fd : Int) : Int do fd end
+end|}
+
+let typecheck_files (files : (string * string) list) =
+  let nested = List.map (fun (file, src) ->
+      let lexbuf = Lexing.from_string src in
+      Lexing.set_filename lexbuf file;
+      let m = March_parser.Parse.module_of_lexbuf lexbuf in
+      let sp = (List.hd m.March_ast.Ast.mod_decls |> function
+        | March_ast.Ast.DFn (_, sp) -> sp | _ -> assert false) in
+      March_ast.Ast.DMod (m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+                          m.March_ast.Ast.mod_decls, sp)) files in
+  let entry = { March_ast.Ast.mod_name = { March_ast.Ast.txt = "Entry"; span = March_ast.Ast.dummy_span };
+                mod_decls = nested } in
+  let (errors, _) =
+    March_typecheck.Typecheck.check_module (March_desugar.Desugar.desugar_module entry) in
+  errors
+
+let internal_ctx user_src =
+  with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_src); ("app.march", user_src) ])
+
+let test_internal_fn_call_refused () =
+  let ctx = internal_ctx {|mod App do
+  fn go() : Int do Inner.raw(3) end
+end|} in
+  Alcotest.(check bool) "a user call is refused" true (has_error_with ctx internal_message)
+
+let test_internal_fn_value_refused () =
+  let ctx = internal_ctx {|mod App do
+  fn go() : Int do
+    let f = Inner.raw
+    f(3)
+  end
+end|} in
+  Alcotest.(check bool) "a value reference is refused" true (has_error_with ctx internal_message)
+
+let test_internal_fn_stdlib_ok () =
+  let ctx = with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_src);
+                        ("other.march", {|mod Other do
+  fn go() : Int do Inner.raw(3) end
+end|}) ]) in
+  Alcotest.(check bool) "a stdlib module may call it" false
+    (has_error_with ctx "internal to the standard library")
+
+let test_internal_fn_user_shadow_ok () =
+  let ctx = internal_ctx {|mod App do
+  fn raw(fd : Int) : Int do fd end
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "a user fn named raw is not Inner.raw" false
+    (has_error_with ctx "internal to the standard library")
+
 let tests =
   [ ("stdlib-only builtins",
      [ Alcotest.test_case "user call rejected" `Quick test_user_call_rejected;
@@ -658,6 +722,10 @@ let tests =
        Alcotest.test_case "shipped table gates the four forging builtins" `Quick
          test_shipped_table;
        Alcotest.test_case "handle_primitives_gated" `Quick test_handle_primitives_gated;
+       Alcotest.test_case "internal_fn_call_refused" `Quick test_internal_fn_call_refused;
+       Alcotest.test_case "internal_fn_value_refused" `Quick test_internal_fn_value_refused;
+       Alcotest.test_case "internal_fn_stdlib_ok" `Quick test_internal_fn_stdlib_ok;
+       Alcotest.test_case "internal_fn_user_shadow_ok" `Quick test_internal_fn_user_shadow_ok;
        Alcotest.test_case "adversarial sweep: every name, every spelling, same text" `Quick
          test_adversarial_sweep;
        Alcotest.test_case "sweep negative control: rebound names are silent" `Quick

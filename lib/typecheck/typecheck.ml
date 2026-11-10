@@ -2791,6 +2791,20 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
            (Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint)
        | _ -> ());
+      (* [@[stdlib_internal]] stdlib functions (ocap phase 2): the same gate,
+         for a function instead of a builtin. [env.stdlib_internal_fns] is
+         keyed by the qualified name a reference spells (`Socket.raw_fd`), so a
+         user's own bare `raw_fd` never matches; a stdlib span (including the
+         defining module itself) is exempt, exactly as for builtins. *)
+      (if Hashtbl.length env.stdlib_internal_fns > 0
+          && not (span_is_stdlib name.span) then
+         match Hashtbl.find_opt env.stdlib_internal_fns name.txt with
+         | Some md ->
+           Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
+             (Printf.sprintf
+                "`%s` is internal to the standard library; use the handle API in `%s`."
+                name.txt md)
+         | None -> ());
       (match lookup_var name.txt env with
        | Some sch ->
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
@@ -8560,6 +8574,24 @@ let rec check_decl env (d : Ast.decl) : env =
       check_no_extern_module env.errors inner_env decls;
     if inner_env.deterministic_mod then
       check_deterministic_module env.errors inner_env decls;
+    (* [@[stdlib_internal]] functions of a stdlib module, filed under the
+       qualified name a reference spells and, for a nested module, under each
+       enclosing path too ([Outer.Inner.f] as well as [Inner.f]). *)
+    List.iter (function
+        | Ast.DFn (fd, fsp)
+          when List.mem "stdlib_internal" fd.Ast.fn_attrs && span_is_stdlib fsp ->
+          Hashtbl.replace env.stdlib_internal_fns
+            (name.txt ^ "." ^ fd.Ast.fn_name.txt) name.txt
+        | _ -> ()) decls;
+    List.iter (function
+        | Ast.DMod (inner, _, _, _) ->
+          let prefix = inner.txt ^ "." in
+          let n = String.length prefix in
+          Hashtbl.iter (fun k md ->
+              if String.length k > n && String.sub k 0 n = prefix then
+                Hashtbl.replace env.stdlib_internal_fns (name.txt ^ "." ^ k) md)
+            (Hashtbl.copy env.stdlib_internal_fns)
+        | _ -> ()) decls;
     let env' = bind_vars new_names env in
     let no_panic_modules' =
       if inner_env.no_panic_mod then name.txt :: env'.no_panic_modules
