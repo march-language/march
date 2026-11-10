@@ -7900,7 +7900,6 @@ let rec check_decl env (d : Ast.decl) : env =
            | _ -> false
       in
       env.current_module = "DistLink"
-      && env.enclosing_package = "DistLink"
       && name.txt = "DownReason"
       && params = []
       && match typedef with
@@ -7911,12 +7910,21 @@ let rec check_decl env (d : Ast.decl) : env =
            && nullary "NodeDown" node_down
          | _ -> false
     in
-    if env.current_module = env.enclosing_package
+    (* Only the entry module's own top-level types collide: TIR unwraps the
+       entry module, so its `DownReason` reaches the backend under the bare
+       name the monitor ABI reserves, while a nested or library module's type
+       is qualified (`Sub.DownReason`) and shadows the built-in harmlessly.
+       [cap_qual_prefix] is "" exactly at the entry module's top level.  (This
+       used to test [current_module = enclosing_package], which never held for
+       user code: the stdlib baseline env leaves [enclosing_package] set to
+       "StdlibBaseline", so the redeclaration slipped through and crashed
+       [Llvm_toplevel.emit_module].) *)
+    if env.cap_qual_prefix = ""
        && (name.txt = "Down" || name.txt = "DownReason")
        && not is_canonical_dist_link_down_reason then begin
       Err.error ~code:Err.Code.reserved_type_name env.errors ~span:name.span
         (Printf.sprintf
-           "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"
+           "Type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared here. Rename it, or declare it inside a nested module."
            name.txt);
       env
     end else
@@ -8519,11 +8527,13 @@ let rec check_decl env (d : Ast.decl) : env =
         | Ast.DNeeds (caps, _) ->
           List.map (fun (p, sc) -> (cap_path_of_names p, sc)) caps
         | _ -> []) decls in
+    (* Keyed by the QUALIFIED name only.  [module_caps] above also files a
+       short-name entry for its own lookups, but two modules sharing a short
+       name (`P1.Inner`, a top-level `Inner`) would then collide there and
+       whichever was declared later would judge both.  The host check resolves
+       owners by qualified name. *)
     let module_need_scopes' =
-      let with_qual =
-        (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes in
-      if cap_qname = name.txt then with_qual
-      else (name.txt, inner_need_scopes) :: with_qual
+      (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes
     in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
@@ -9222,7 +9232,8 @@ let rec check_decl env (d : Ast.decl) : env =
                  (Printf.sprintf
                     "The host scope `%s` on `%s` is not valid: %s.\n\
                      hint: write a host, a host and port, or `*.domain`, \
-                     e.g. `needs IO.NetConnect(\"api.example.com\")`."
+                     optionally followed by a path prefix, e.g. \
+                     `needs IO.NetConnect(\"api.example.com/v1/\")`."
                     path cap reason))
           else if snd (March_caps.Host_scope.split_options path) <> []
           then
@@ -12275,6 +12286,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     check_deterministic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
+  (* Two-state specs (lib/desugar/two_state.ml): `old(e)` only in a
+     handler's `ensures`. *)
+  March_desugar.Two_state.check errors m.Ast.mod_decls;
   (* Ghost code (lib/desugar/ghost.ml): a ghost value reaches only ghost
      positions, and no linear value is observed by ghost code. *)
   March_desugar.Ghost.check errors m.Ast.mod_decls ~top:m.Ast.mod_name.Ast.txt

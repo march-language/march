@@ -438,6 +438,13 @@ and actor_def = {
 and actor_handler = {
   ah_msg    : name;
   ah_params : param list;
+  ah_ensures : expr option;
+  (** `on Msg(…) ensures P do … end` (two-state specs): a guarantee about
+      the state the handler returns.  `state` and the bare field names read
+      the RETURNED state, `old(e)` reads [e] of the state the message
+      arrived with, and the message's parameters are in scope.  Proof-only:
+      the refinement checker proves it per handler (Refine_check, DActor);
+      nothing runs it. *)
   ah_body   : expr;
 }
 

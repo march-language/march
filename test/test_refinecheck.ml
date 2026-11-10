@@ -13065,7 +13065,7 @@ module Audit_fixture = struct
       { A.actor_state = [ { A.fld_name = nm "value"; fld_ty = refine_or_plain 34 int_ty; fld_lin = A.Unrestricted } ];
         actor_init_params = [];
         actor_init = A.ELet (init_binding, dummy);
-        actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_body = A.ELit (A.LitInt 0, dummy) } ];
+        actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_ensures = None; ah_body = A.ELit (A.LitInt 0, dummy) } ];
         actor_supervise = Some supervise_cfg;
         actor_mailbox = None; actor_remote = false; actor_on_stop = None;
         actor_compat = "full";
@@ -30599,6 +30599,7 @@ let () =
       ("reflect-overflow", Test_refine_overflow.tests);
       ("quantifiers", Test_refine_quantifier.tests);
       ("aliases", Test_refine_alias.tests);
+      ("two-state", Test_refine_two_state.tests);
       ("ghost", Test_refine_ghost.tests);
       ("reflect-lemma", Test_refine_lemma.scoped_asserts @ Test_refine_lemma.scoped_hint_bindings @ Test_refine_lemma.scoped_directives @ Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.scalar_fields @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);

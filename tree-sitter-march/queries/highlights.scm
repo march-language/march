@@ -16,7 +16,7 @@
 ; Keywords — declarations and actor / protocol bodies added with the
 ; 2026-09-28 grammar sync
 ["derive" "satisfy" "for" "resource" "transitions" "via" "app" "on_start"
- "on_stop" "opaque" "always_linear" "tag" "requires" "state" "init" "on"
+ "on_stop" "opaque" "always_linear" "tag" "requires" "ensures" "state" "init" "on"
  "mailbox" "supervise" "strategy" "max_restarts" "within" "backoff" "restart"
  "shutdown" "choose" "by" "role" "may" "or" "in" "with"] @keyword
 (attribute "@" @attribute)

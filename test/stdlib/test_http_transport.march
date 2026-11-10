@@ -153,6 +153,26 @@ describe "https transport dispatch" do
     Ok(_)  -> assert false
     end
   end
+
+end
+
+
+describe "HttpTransport scope guard" do
+  test "simple_get_scoped refuses an out-of-scope URL before connecting" do
+    -- `.invalid` never resolves, so a wrongful connect would show up as a
+    -- connection error, not as Refused.
+    match HttpTransport.simple_get_scoped("https://other.invalid/x", "a.invalid/v1/") do
+    Err(HttpTransport.Refused(_)) -> ()
+    _ -> assert false
+    end
+  end
+
+  test "simple_get_scoped refuses a path outside the prefix" do
+    match HttpTransport.simple_get_scoped("https://a.invalid/v2/x", "a.invalid/v1/") do
+    Err(HttpTransport.Refused(m)) -> assert (string_contains(m, "/v2/x"))
+    _ -> assert false
+    end
+  end
 end
 
 end

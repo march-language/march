@@ -124,6 +124,7 @@ let nonregular_type = "nonregular_type"
 let not_a_function = "not_a_function"
 let not_a_nat = "not_a_nat"
 let not_a_variant = "not_a_variant"
+let old_misuse = "old_misuse"
 let or_pattern_binding = "or_pattern_binding"
 let overlapping_impl = "overlapping_impl"
 let parse_error = "parse_error"
@@ -340,6 +341,7 @@ let all = [
   not_a_function;
   not_a_nat;
   not_a_variant;
+  old_misuse;
   or_pattern_binding;
   overlapping_impl;
   parse_error;
@@ -532,7 +534,7 @@ let category_table : (string * string list) list = [
     int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
     invariant_not_deploy_checkable;
     ghost_in_runtime; ghost_misuse;
-    lemma_argument_impure; lemma_unproved; lemma_unproved_call;
+    lemma_argument_impure; old_misuse; lemma_unproved; lemma_unproved_call;
     measure_scalar_field; predicate_eq_structural; predicate_vocabulary_shadowed;
     refinement_ignored;
     refinement_unchecked; refinement_unverified; refinement_violated;
