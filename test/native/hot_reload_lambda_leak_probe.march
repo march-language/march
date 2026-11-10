@@ -33,6 +33,7 @@ mod Main do
 
   fn report(name : String, a0 : Int, a1 : Int) : Unit do
     println(name ++ " flat: " ++ (if a1 - a0 < 100 do "true" else "false" end))
+    ()
   end
 
   fn main(_c : Cap(IO.Console)) do

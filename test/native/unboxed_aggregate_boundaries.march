@@ -72,5 +72,6 @@ mod UnboxedAggregateBoundaries do
       Ok(v)  -> println(to_string(v))
       Err(e) -> println(e)
     end
+    ()
   end
 end

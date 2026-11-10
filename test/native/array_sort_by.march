@@ -76,6 +76,7 @@ mod ArraySortBy do
     let fp = List.fold_left(res, 0, fn (acc, r) -> match r do (_, _, f) -> (acc * 17 + f) % 1000000007 end)
     println(name ++ ": stable+ordered " ++ int_to_string(good) ++ "/66, equals List.sort_by "
       ++ int_to_string(same) ++ "/66, fingerprint " ++ int_to_string(fp))
+    ()
   end
 
   fn main(_c : Cap(IO.Console)) do

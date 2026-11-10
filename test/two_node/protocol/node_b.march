@@ -37,7 +37,7 @@ mod ProtocolNodeB do
 
   fn main(c : Cap(IO)) do
     println("node-b: up")
-    let addrs = match SessionNode.parse_addr(1, Env.require("BAD_A_ADDR")) do
+    let addrs = match SessionNode.parse_addr(1, Authority.must(Env.require("BAD_A_ADDR"))) do
       Ok(a) -> Cons(a, Nil)
       Err(e) -> panic(e)
     end

@@ -16,6 +16,7 @@ end
 
 pfn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : Unit do
   println(int_to_string(go(0, 10000000, 0)))
+  ()
 end
 
 end

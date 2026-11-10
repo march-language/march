@@ -34,7 +34,7 @@ mod Main do
     let sink = spawn(Sink)
     let _r = Actor.register(sink, "sink")
     let _ = send(sink, Stall())
-    let t = Task.async(fn -> produce(sink, 120000))
+    let t = Authority.must(Task.async(fn -> produce(sink, 120000)))
     println("ready")
     let _ = Task.await(t)
     ()

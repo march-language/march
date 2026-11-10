@@ -74,5 +74,6 @@ mod ErasedRenderShow do
     println("html_erased_ok=" ++ apply_first(h2, Ok("a")))
     let h3 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
     println("html_erased_adt=" ++ apply_first(h3, B("a")))
+    ()
   end
 end

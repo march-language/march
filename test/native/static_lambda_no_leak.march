@@ -37,5 +37,6 @@ mod Main do
     -- captured environments must not share state
     println(add5(100))
     println(add10(100))
+    ()
   end
 end

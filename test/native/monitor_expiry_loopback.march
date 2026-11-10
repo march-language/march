@@ -79,7 +79,7 @@ mod MonitorExpiryLoopback do
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
     end
@@ -111,7 +111,7 @@ mod MonitorExpiryLoopback do
     tcp_close(fd)
     match counts do
       (before, dropped, after) ->
-        println("node-b: pending fires before node-a was declared dead: " ++ int_to_string(before) ++ ", dropped: " ++ int_to_string(dropped) ++ ", after: " ++ int_to_string(after))
+        Authority.ignore(println("node-b: pending fires before node-a was declared dead: " ++ int_to_string(before) ++ ", dropped: " ++ int_to_string(dropped) ++ ", after: " ++ int_to_string(after)))
     end
   end
 end

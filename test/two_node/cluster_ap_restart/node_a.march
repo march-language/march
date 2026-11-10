@@ -68,7 +68,7 @@ mod ClusterApRestartA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "apr-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "apr-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -77,7 +77,7 @@ mod ClusterApRestartA do
         -- TWO_NODE_TIME_SCALE (scripts/two-node.sh) is 1, or 5 under ASan,
         -- where node-b's restart, its join, and SWIM's verdict on the old
         -- incarnation (stretched there too) all take longer.
-        let k = Env.get_int("TWO_NODE_TIME_SCALE", 1)
+        let k = Authority.must(Env.get_int("TWO_NODE_TIME_SCALE", 1))
         if session_retry(c, h, 1, 60000 * k) do println("Client: session 1 done") else panic("node-a: first session never formed") end
         let first = offer_creation(h)
         -- Both waits fit inside the harness's TWO_NODE_TIMEOUT for node-a to

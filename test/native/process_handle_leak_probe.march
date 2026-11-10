@@ -22,7 +22,7 @@ mod Main do
   needs IO.Spawn
 
   pfn echo_once(k : Int) : Bool do
-    match Process.spawn_async("echo", ["n" ++ int_to_string(k)]) do
+    match Authority.must(Process.spawn_async("echo", ["n" ++ int_to_string(k)])) do
       Ok(p) ->
         let line = Process.read_line(p)
         let _ = Process.wait_proc(p)
@@ -40,7 +40,7 @@ mod Main do
   end
 
   pfn cat_once(k : Int) : Bool do
-    match Process.spawn_async("cat", []) do
+    match Authority.must(Process.spawn_async("cat", [])) do
       Ok(p) ->
         Process.write(p, "x" ++ int_to_string(k) ++ "\n")
         Process.kill(p)
@@ -58,7 +58,7 @@ mod Main do
   pfn leg_run(i : Int, n : Int, ok : Int) : Int do
     if i == n do ok
     else
-      let hit = match Process.run("true", ["a" ++ int_to_string(i)]) do
+      let hit = match Authority.must(Process.run("true", ["a" ++ int_to_string(i)])) do
         Ok(_) -> 1
         Err(_) -> 0
       end
@@ -89,7 +89,7 @@ mod Main do
   pfn leg_stream(i : Int, n : Int, ok : Int) : Int do
     if i == n do ok
     else
-      let hit = match Process.run_stream("echo", ["s" ++ int_to_string(i)]) do
+      let hit = match Authority.must(Process.run_stream("echo", ["s" ++ int_to_string(i)])) do
         Ok(seq) -> Seq.count(seq)
         Err(_) -> 0
       end
@@ -102,7 +102,7 @@ mod Main do
     else
       let key = "MARCH_PROC_LEAK_PROBE_" ++ int_to_string(i % 4)
       Process.set_env(key, "v" ++ int_to_string(i))
-      let hit = match Process.env(key) do
+      let hit = match Authority.must(Process.env(key)) do
         Some(_) -> 1
         None -> 0
       end
@@ -114,6 +114,7 @@ mod Main do
     let grew = live_allocs() - before
     println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
             ++ bool_to_string(grew < n / 4))
+    ()
   end
 
   fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do

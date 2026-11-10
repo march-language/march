@@ -54,5 +54,6 @@ mod JsSelfTailCallRcDrop do
       None -> println("none")
       Some(v) -> println("some " ++ int_to_string(v))
     end
+    ()
   end
 end

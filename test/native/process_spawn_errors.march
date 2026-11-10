@@ -16,51 +16,52 @@ mod ProcessSpawnErrors do
   pfn show_run(label : String, r) : () do
     match r do
       Ok(res) ->
-        println(label ++ ": Ok code=" ++ int_to_string(Process.exit_code(res))
-                ++ " out=[" ++ Process.stdout(res) ++ "]")
-      Err(e) -> println(label ++ ": Err " ++ e)
+        Authority.ignore(println(label ++ ": Ok code=" ++ int_to_string(Process.exit_code(res))
+                ++ " out=[" ++ Process.stdout(res) ++ "]"))
+        ()
+      Err(e) -> Authority.ignore(println(label ++ ": Err " ++ e))
     end
   end
 
   fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
     -- Missing program: Err from every spawn entry point.
-    show_run("run missing", Process.run("march_no_such_program_xyz", ["a"]))
-    match Process.run_stream("march_no_such_program_xyz", []) do
-      Ok(_) -> println("run_stream missing: Ok")
-      Err(e) -> println("run_stream missing: Err " ++ e)
+    show_run("run missing", Authority.must(Process.run("march_no_such_program_xyz", ["a"])))
+    match Authority.must(Process.run_stream("march_no_such_program_xyz", [])) do
+      Ok(_) -> Authority.ignore(println("run_stream missing: Ok"))
+      Err(e) -> Authority.ignore(println("run_stream missing: Err " ++ e))
     end
-    match Process.spawn_async("march_no_such_program_xyz", []) do
-      Ok(p) -> println("spawn_async missing: Ok code=" ++ int_to_string(Process.wait_proc(p)))
-      Err(e) -> println("spawn_async missing: Err " ++ e)
+    match Authority.must(Process.spawn_async("march_no_such_program_xyz", [])) do
+      Ok(p) -> Authority.ignore(println("spawn_async missing: Ok code=" ++ int_to_string(Process.wait_proc(p))))
+      Err(e) -> Authority.ignore(println("spawn_async missing: Err " ++ e))
     end
     -- A path that exists but is not executable.
-    show_run("run not executable", Process.run("/etc/hosts", []))
+    show_run("run not executable", Authority.must(Process.run("/etc/hosts", [])))
     -- Normal spawn and capture are unchanged, non-zero exit codes included.
-    show_run("echo", Process.run("echo", ["hello", "world"]))
-    show_run("exit 3", Process.run("sh", ["-c", "printf out; exit 3"]))
+    show_run("echo", Authority.must(Process.run("echo", ["hello", "world"])))
+    show_run("exit 3", Authority.must(Process.run("sh", ["-c", "printf out; exit 3"])))
     -- The shell runs, and its own exit 127 for a missing command is still
     -- an ordinary Ok exit code.
-    show_run("sh missing", Process.run("sh", ["-c", "march_no_such_program_xyz 2>/dev/null"]))
+    show_run("sh missing", Authority.must(Process.run("sh", ["-c", "march_no_such_program_xyz 2>/dev/null"])))
     -- stdin/stdout of a live child.
-    match Process.spawn_async("cat", []) do
+    match Authority.must(Process.spawn_async("cat", [])) do
       Ok(p) ->
         Process.write(p, "ping\n")
         let line = Process.read_line(p)
         Process.kill(p)
         let _ = Process.wait_proc(p)
         match line do
-          Some(s) -> println("cat: " ++ s)
-          None -> println("cat: <none>")
+          Some(s) -> Authority.ignore(println("cat: " ++ s))
+          None -> Authority.ignore(println("cat: <none>"))
         end
-      Err(e) -> println("cat: Err " ++ e)
+      Err(e) -> Authority.ignore(println("cat: Err " ++ e))
     end
     -- cwd and environment are inherited, including a set_env made here.
     Process.set_env("MARCH_SPAWN_FIXTURE_VAR", "from-parent")
-    show_run("env", Process.run("sh", ["-c", "printf %s \"$MARCH_SPAWN_FIXTURE_VAR\""]))
-    match Process.run("sh", ["-c", "pwd -P"]) do
+    show_run("env", Authority.must(Process.run("sh", ["-c", "printf %s \"$MARCH_SPAWN_FIXTURE_VAR\""])))
+    match Authority.must(Process.run("sh", ["-c", "pwd -P"])) do
       Ok(res) ->
-        println("cwd matches: " ++ to_string(String.trim(Process.stdout(res)) == Process.cwd()))
-      Err(e) -> println("pwd: Err " ++ e)
+        Authority.ignore(println("cwd matches: " ++ to_string(String.trim(Process.stdout(res)) == Authority.must(Process.cwd()))))
+      Err(e) -> Authority.ignore(println("pwd: Err " ++ e))
     end
   end
 end

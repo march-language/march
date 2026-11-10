@@ -41,7 +41,7 @@ mod DrainInitKilledC do
   pfn traffic(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int)) : Int do
     match Order_Run.initiate_Shop(h, fn (s, st) -> shop(s, st, 101)) do
       Ok(_) ->
-        if Vault.incr(done, "sessions", 1) == 20 do println("node-c: traffic flowing") else () end
+        if Vault.incr(done, "sessions", 1) == 20 do Authority.ignore(println("node-c: traffic flowing")) else () end
       Err(_) -> sleep_ms(10)
     end
     traffic(c, h, done)
@@ -53,14 +53,14 @@ mod DrainInitKilledC do
   end
 
   fn main(c : Cap(IO)) do
-    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
-    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "drain-killed-secret", 1)
+    let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
+    let cfg = ClusterNode.config("node-c", Authority.must(Env.require_int("MARCH_PORT_C")), "", Cons(seed, Nil), "drain-killed-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 2, 120000) do () else panic("node-c: never joined") end
         Topology.drain_on_signal(h, 1000, 4000)
-        let done = Vault.new("traffic")
+        let done = Authority.must(Vault.new("traffic"))
         let _ = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> traffic(c, h, done)))
         -- The drain exits the process.
         idle()

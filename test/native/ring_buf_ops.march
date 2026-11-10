@@ -56,6 +56,7 @@ mod Main do
     println("cleared=" ++ int_to_string(sz2))
     let rb = RingBuf.push(rb, 99)
     println("to_list=[" ++ String.join(List.map(RingBuf.to_list(rb), fn x -> int_to_string(x)), ",") ++ "]")
+    ()
   end
 
   fn strs() : Unit do
@@ -75,6 +76,7 @@ mod Main do
     let rb2 = RingBuf.push(RingBuf.make(1), "dropped" ++ "!")
     RingBuf.drop(rb2)
     println("dropped")
+    ()
   end
 
   fn main(_cap_console : Cap(IO.Console)) : Unit do

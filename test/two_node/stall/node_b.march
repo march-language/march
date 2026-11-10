@@ -108,16 +108,16 @@ mod TwoNodeStallB do
 
   pfn serve(fd : Int, s : SwimDriver.State, buf : List(Int), inc : Int) : () do
     match tick(fd, s, buf) do
-      (_, _, _, true) -> println("node-b: peer closed")
+      (_, _, _, true) -> Authority.ignore(println("node-b: peer closed"))
       (s2, buf2, _, false) ->
         let inc2 = s2.swim.incarnation
-        if inc2 != inc do println("node-b: refuted, incarnation " ++ int_to_string(inc2)) else () end
+        if inc2 != inc do Authority.ignore(println("node-b: refuted, incarnation " ++ int_to_string(inc2))) else () end
         serve(fd, s2, buf2, inc2)
     end
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
-    let port = Env.require_int("MARCH_NODE_PORT")
+    let port = Authority.must(Env.require_int("MARCH_NODE_PORT"))
     let listen_fd = match tcp_listen(port) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

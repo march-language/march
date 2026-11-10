@@ -19,6 +19,7 @@ end
 pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let n = go(0, 1000000)
   println(int_to_string(n))
+  ()
 end
 
 end

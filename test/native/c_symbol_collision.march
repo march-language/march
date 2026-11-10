@@ -11,7 +11,7 @@ mod CSymbolCollision do
   needs IO.NetConnect
 
   fn connect(port : Int) : Int do
-    match Socket.connect("127.0.0.1", port) do
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
       Ok(fd) -> fd
       Err(_) -> 0 - port
     end
@@ -22,7 +22,7 @@ mod CSymbolCollision do
   fn strlen(_s : String) : Int do 7 end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect)) do
-    println(log("a"))
+    Authority.ignore(println(log("a")))
     println(log("b"))
     -- port 1 is refused on loopback: the runtime's connect() must be libc's,
     -- or this never returns.

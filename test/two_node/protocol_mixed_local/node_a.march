@@ -90,10 +90,11 @@ mod ProtocolMixedLocal do
 
   pfn outcome(what : String, r : Result(Session.Outcome, SessionNode.RunError)) : () do
     match r do
-      Ok(_) -> println(what ++ ": formed and finished")
+      Ok(_) -> Authority.ignore(println(what ++ ": formed and finished"))
       Err(SessionNode.NoOffer(role, why)) ->
         println(what ++ ": no offer for role " ++ Order_Msg.role_name(role) ++ " (" ++ why ++ ")")
-      Err(e) -> println(what ++ ": " ++ SessionNode.run_error_message(e))
+        ()
+      Err(e) -> Authority.ignore(println(what ++ ": " ++ SessionNode.run_error_message(e)))
     end
   end
 
@@ -113,7 +114,7 @@ mod ProtocolMixedLocal do
     end
     println("table: Buyer accepts version 1; Shop rows: "
       ++ int_to_string(List.length(List.filter(Order_Msg.compat(), fn row -> match row do (_, r, _) -> r == "Shop" end))))
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "mixed-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "mixed-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->

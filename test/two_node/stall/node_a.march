@@ -112,13 +112,13 @@ mod TwoNodeStallA do
   pfn me() : String do "node-a" end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do
           Err(e)
         else
-          let _ = Process.run("sleep", Cons("0.1", Nil))
+          let _ = Authority.must(Process.run("sleep", Cons("0.1", Nil)))
           connect_with_retry(host, port, attempts_left - 1)
         end
     end
@@ -128,14 +128,14 @@ mod TwoNodeStallA do
   -- Alive at a higher incarnation than it started with.
   pfn observe(fd : Int, s : SwimDriver.State, buf : List(Int), last : String, acked_once : Bool) : () do
     match tick(fd, s, buf) do
-      (_, _, _, true) -> println("node-a: peer closed early")
+      (_, _, _, true) -> Authority.ignore(println("node-a: peer closed early"))
       (s2, buf2, acked, false) ->
         let acked_now = acked_once || acked
-        if acked && acked_once == false do println("node-a: first ack from node-b") else () end
+        if acked && acked_once == false do Authority.ignore(println("node-a: first ack from node-b")) else () end
         let view = peer_view(s2, "node-b")
-        if view != last do println("node-a: node-b " ++ view) else () end
+        if view != last do Authority.ignore(println("node-a: node-b " ++ view)) else () end
         if view == "Alive (incarnation 2)" do
-          println("node-a: done")
+          Authority.ignore(println("node-a: done"))
         else
           observe(fd, s2, buf2, view, acked_now)
         end
@@ -143,7 +143,7 @@ mod TwoNodeStallA do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
-    let port = Env.require_int("MARCH_PEER_PORT")
+    let port = Authority.must(Env.require_int("MARCH_PEER_PORT"))
     let fd = match connect_with_retry("127.0.0.1", port, 100) do
       Ok(fd) -> fd
       Err(e) -> panic("connect: " ++ Socket.error_message(e))

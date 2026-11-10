@@ -12,73 +12,73 @@ describe "Dir.exists" do
 
   test "returns true after mkdir" do
     let path = "/tmp/march_td_exists_01"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
     assert (Authority.must(Dir.exists(path)))
-    let _ = Dir.rm_rf(path)
+    let _ = Authority.must(Dir.rm_rf(path))
   end
 
   test "returns false for a file path" do
     let path = "/tmp/march_td_file_02"
-    let _ = File.write(path, "data")
+    let _ = Authority.must(File.write(path, "data"))
     assert (not (Authority.must(Dir.exists(path))))
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 end
 
 describe "Dir.mkdir" do
   test "creates a directory" do
     let path = "/tmp/march_td_mkdir_03"
-    let _ = Dir.rm_rf(path)
-    match Dir.mkdir(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    match Authority.must(Dir.mkdir(path)) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
     assert (Authority.must(Dir.exists(path)))
-    let _ = Dir.rm_rf(path)
+    let _ = Authority.must(Dir.rm_rf(path))
   end
 
   test "duplicate mkdir returns Err" do
     let path = "/tmp/march_td_mkdir_dup_04"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
-    match Dir.mkdir(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
+    match Authority.must(Dir.mkdir(path)) do
     Err(_) -> ()
     Ok(_)  -> assert false
     end
-    let _ = Dir.rm_rf(path)
+    let _ = Authority.must(Dir.rm_rf(path))
   end
 end
 
 describe "Dir.list" do
   test "empty directory has no entries" do
     let path = "/tmp/march_td_list_05"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
-    let names = match Dir.list(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
+    let names = match Authority.must(Dir.list(path)) do
       Ok(ns) -> ns
       Err(_) -> panic("Dir.list failed")
     end
     assert (List.length(names) == 0)
-    let _ = Dir.rm_rf(path)
+    let _ = Authority.must(Dir.rm_rf(path))
   end
 
   test "list returns created files" do
     let path = "/tmp/march_td_list_06"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
-    let _ = File.write(path ++ "/a.txt", "A")
-    let _ = File.write(path ++ "/b.txt", "B")
-    let names = match Dir.list(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
+    let _ = Authority.must(File.write(path ++ "/a.txt", "A"))
+    let _ = Authority.must(File.write(path ++ "/b.txt", "B"))
+    let names = match Authority.must(Dir.list(path)) do
       Ok(ns) -> ns
       Err(_) -> panic("Dir.list after writes failed")
     end
     assert (List.length(names) == 2)
-    let _ = Dir.rm_rf(path)
+    let _ = Authority.must(Dir.rm_rf(path))
   end
 
   test "list on nonexistent returns Err" do
-    match Dir.list("/tmp/march_td_list_noexist_07") do
+    match Authority.must(Dir.list("/tmp/march_td_list_noexist_07")) do
     Err(_) -> ()
     Ok(_)  -> assert false
     end
@@ -88,17 +88,17 @@ end
 describe "Dir.list_full" do
   test "returns full absolute paths" do
     let path = "/tmp/march_td_full_08"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
-    let _ = File.write(path ++ "/a.txt", "A")
-    let _ = File.write(path ++ "/b.txt", "B")
-    let paths = match Dir.list_full(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
+    let _ = Authority.must(File.write(path ++ "/a.txt", "A"))
+    let _ = Authority.must(File.write(path ++ "/b.txt", "B"))
+    let paths = match Authority.must(Dir.list_full(path)) do
       Ok(ps) -> ps
       Err(_) -> panic("Dir.list_full failed")
     end
     assert (List.length(paths) == 2)
     assert (List.all(paths, fn p -> String.starts_with(p, path)))
-    let _ = Dir.rm_rf(path)
+    let _ = Authority.must(Dir.rm_rf(path))
   end
 end
 
@@ -106,22 +106,22 @@ describe "Dir.mkdir_p" do
   test "creates nested directories" do
     let base   = "/tmp/march_td_mkdirp_09"
     let nested = base ++ "/deep/nested/path"
-    let _ = Dir.rm_rf(base)
-    match Dir.mkdir_p(nested) do
+    let _ = Authority.must(Dir.rm_rf(base))
+    match Authority.must(Dir.mkdir_p(nested)) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
     assert (Authority.must(Dir.exists(nested)))
-    let _ = Dir.rm_rf(base)
+    let _ = Authority.must(Dir.rm_rf(base))
   end
 end
 
 describe "Dir.rmdir" do
   test "removes an empty directory" do
     let path = "/tmp/march_td_rmdir_10"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
-    match Dir.rmdir(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
+    match Authority.must(Dir.rmdir(path)) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
@@ -130,26 +130,26 @@ describe "Dir.rmdir" do
 
   test "fails on non-empty directory" do
     let path = "/tmp/march_td_rmdir_ne_11"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
-    let _ = File.write(path ++ "/file.txt", "data")
-    match Dir.rmdir(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
+    let _ = Authority.must(File.write(path ++ "/file.txt", "data"))
+    match Authority.must(Dir.rmdir(path)) do
     Err(_) -> ()
     Ok(_)  -> assert false
     end
-    let _ = Dir.rm_rf(path)
+    let _ = Authority.must(Dir.rm_rf(path))
   end
 end
 
 describe "Dir.rm_rf" do
   test "removes directory tree recursively" do
     let path = "/tmp/march_td_rmrf_12"
-    let _ = Dir.rm_rf(path)
-    let _ = Dir.mkdir(path)
-    let _ = File.write(path ++ "/f1.txt", "x")
-    let _ = Dir.mkdir(path ++ "/sub")
-    let _ = File.write(path ++ "/sub/f2.txt", "y")
-    match Dir.rm_rf(path) do
+    let _ = Authority.must(Dir.rm_rf(path))
+    let _ = Authority.must(Dir.mkdir(path))
+    let _ = Authority.must(File.write(path ++ "/f1.txt", "x"))
+    let _ = Authority.must(Dir.mkdir(path ++ "/sub"))
+    let _ = Authority.must(File.write(path ++ "/sub/f2.txt", "y"))
+    match Authority.must(Dir.rm_rf(path)) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
@@ -157,7 +157,7 @@ describe "Dir.rm_rf" do
   end
 
   test "rm_rf on nonexistent does not panic" do
-    match Dir.rm_rf("/tmp/march_td_rmrf_noexist_13") do
+    match Authority.must(Dir.rm_rf("/tmp/march_td_rmrf_noexist_13")) do
     Err(_) -> ()
     Ok(_)  -> ()
     end

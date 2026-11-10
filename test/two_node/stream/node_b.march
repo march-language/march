@@ -38,7 +38,7 @@ mod StreamOverNodesB do
   end
 
   fn main(c : Cap(IO)) do
-    let listen_fd = match tcp_listen(Env.require_int("MARCH_NODE_PORT")) do
+    let listen_fd = match tcp_listen(Authority.must(Env.require_int("MARCH_NODE_PORT"))) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
     end

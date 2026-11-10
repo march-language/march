@@ -90,5 +90,6 @@ mod ErasedParamFieldRead do
     println("warmup " ++ int_to_string(w))
     println("fresh rows: total " ++ int_to_string(x) ++ ", growth " ++ int_to_string(a1 - a0))
     println("shared rows: total " ++ int_to_string(y) ++ ", growth " ++ int_to_string(a2 - a1))
+    ()
   end
 end

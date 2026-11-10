@@ -60,7 +60,7 @@ mod RpcAutoEnroll do
 
     let srv = task_spawn(fn _ -> run_server(listen_fd))
 
-    let conn_fd = match Socket.connect("127.0.0.1", port) do
+    let conn_fd = match Authority.must(Socket.connect("127.0.0.1", port)) do
       Ok(fd) -> fd
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
@@ -76,12 +76,13 @@ mod RpcAutoEnroll do
     match r do
       Ok(payload) ->
         match Msgpack.decode(payload) do
-          Ok(Msgpack.Int(n)) -> println("result:" ++ String.from_int(n))
-          _ -> println("fail:bad_payload")
+          Ok(Msgpack.Int(n)) -> Authority.ignore(println("result:" ++ String.from_int(n)))
+          _ -> Authority.ignore(println("fail:bad_payload"))
         end
       Err(e) ->
         let _ = e
         println("fail:call_error")
+        ()
     end
 
     tcp_close(conn_fd)

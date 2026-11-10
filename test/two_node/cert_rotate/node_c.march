@@ -17,34 +17,34 @@ mod CertRotateC do
   needs ClusterNode.Live
 
   pfn read(path : String) : String do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Ok(t) -> String.trim(t)
       Err(_) -> panic("node-c: cannot read " ++ path)
     end
   end
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
   end
 
   fn main(c : Cap(IO)) do
-    let old = Env.require("OLD_PKI")
+    let old = Authority.must(Env.require("OLD_PKI"))
     let creds = match (NodeCert.key_from_hex(read(old ++ "/node-b.key"), 64), NodeCert.from_text(read(old ++ "/node-b.cert")),
-                       NodeCert.key_from_hex(read(Env.require("PKI") ++ "/operator.pub"), 32)) do
+                       NodeCert.key_from_hex(read(Authority.must(Env.require("PKI")) ++ "/operator.pub"), 32)) do
       (Ok(sk), Ok(signed), Ok(op)) -> { signed: signed, secret_key: sk, operator_pubkey: op, revoked: fn _ -> false }
       _ -> panic("node-c: could not read node-b's old credentials")
     end
-    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
-    let cfg = { ClusterNode.config("node-b", Env.require_int("MARCH_PORT_C"), "", Cons(seed, Nil), "", 2)
+    let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
+    let cfg = { ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_C")), "", Cons(seed, Nil), "", 2)
                 with auth: ClusterAuth.Certified(creds) }
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        println("node-c: up")
-        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        Authority.ignore(println("node-c: up"))
+        wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         ClusterNode.stop(h)
         println("node-c: done")
     end

@@ -31,18 +31,19 @@ mod CertRotateB do
   pfn me() : String do "node-b" end
 
   pfn flags() : Vault(Int) do
-    match Vault.whereis("cert_rotate_flags") do
+    match Authority.must(Vault.whereis("cert_rotate_flags")) do
       Some(v) -> v
-      None -> Vault.new("cert_rotate_flags")
+      None -> Authority.must(Vault.new("cert_rotate_flags"))
     end
   end
 
   pfn once(key : String, line : String) : () do
-    if Vault.incr(flags(), key, 1) == 1 do println(me() ++ ": " ++ line) else () end
+    if Vault.incr(flags(), key, 1) == 1 do Authority.ignore(println(me() ++ ": " ++ line)) else () end
+    ()
   end
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
@@ -68,9 +69,9 @@ mod CertRotateB do
   end
 
   fn main(c : Cap(IO)) do
-    let pki = Env.require("PKI")
+    let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me())
-    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int("MARCH_PORT_B"))))
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
     Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
@@ -95,7 +96,7 @@ mod CertRotateB do
           Ok(_) -> println(me() ++ ": session finished")
           Err(e) -> println(me() ++ ": session failed: " ++ Order_Run.error_message(e))
         end
-        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         ClusterNode.stop(h)
         println(me() ++ ": done")
     end

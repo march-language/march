@@ -94,7 +94,7 @@ mod TwoNodeSkewB do
 
   pfn me() : String do "node-b" end
 
-  pfn now() : Int do unix_time_ms() + Env.get_int("MARCH_CLOCK_SKEW_MS", 0) end
+  pfn now() : Int do unix_time_ms() + Authority.must(Env.get_int("MARCH_CLOCK_SKEW_MS", 0)) end
 
   -- Fixed metrics: the scenario is about the stamp, not the numbers.
   pfn report() : SwimDriver.WireMsg do
@@ -104,7 +104,7 @@ mod TwoNodeSkewB do
 
   pfn serve(fd : Int, s : SwimDriver.State, buf : List(Int), reported : Bool) : () do
     match tick(fd, s, buf) do
-      (_, _, _, true) -> println("node-b: peer closed")
+      (_, _, _, true) -> Authority.ignore(println("node-b: peer closed"))
       (s2, buf2, acked, false) ->
         if acked && reported == false do
           write_msg(fd, report())
@@ -117,7 +117,7 @@ mod TwoNodeSkewB do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
-    let port = Env.require_int("MARCH_NODE_PORT")
+    let port = Authority.must(Env.require_int("MARCH_NODE_PORT"))
     let listen_fd = match tcp_listen(port) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

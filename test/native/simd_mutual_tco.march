@@ -58,5 +58,6 @@ mod SimdMutualTco do
   fn main(_cap_console : Cap(IO.Console)) : () do
     let a = NativeArray.make_f32(16, 2.0)
     println(Simd.sum_f32x4(even_step(a, 0, 16, Simd.splat_f32x4(0.0))))
+    ()
   end
 end

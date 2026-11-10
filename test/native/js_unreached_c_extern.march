@@ -16,7 +16,7 @@ mod JsUnreachedCExtern do
 
     fn shared(x : Int) : Int do x + 1 end
 
-    fn main(_c : Cap(IO.Console)) : Unit do println(int_to_string(c_open())) end
+    fn main(_c : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(c_open()))) end
   end
 
 
@@ -30,5 +30,6 @@ mod JsUnreachedCExtern do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println(if Desktop.shared(1) == 2 do "ok" else "bad" end)
+    ()
   end
 end

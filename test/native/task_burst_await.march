@@ -48,5 +48,6 @@ mod TaskBurstAwait do
     -- total = 40 * 19930 = 797200
     let total = run_rounds(0, 40, 20, 0)
     println(int_to_string(total))
+    ()
   end
 end

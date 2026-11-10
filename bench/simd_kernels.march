@@ -225,6 +225,7 @@ mod SimdKernels do
     -- fma_f32x4 interpreted-vs-compiled parity checksum
     let checksum = fma_parity_checksum(200000)
     println("PARITY_CHECKSUM " ++ float_to_string(checksum))
+    ()
   end
 
 end

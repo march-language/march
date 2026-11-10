@@ -42,5 +42,6 @@ mod ShadowSelfrefLet do
     println(int_to_string(chained(3)))
     println(int_to_string(arm(7)))
     println(int_to_string(arm(0)))
+    ()
   end
 end

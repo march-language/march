@@ -51,5 +51,6 @@ mod Main do
     println(float_to_string(List.fold_left(xs, 7.5, fn (s, _x) -> s)))
     -- Empty list
     println(float_to_string(List.fold_left(Nil, 2.5, fn (s, x) -> s +. x)))
+    ()
   end
 end

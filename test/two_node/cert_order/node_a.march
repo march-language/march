@@ -31,9 +31,9 @@ mod CertOrderA do
 
   -- Certificate mode, from the files scenario.sh made with `forge cluster`.
   pfn config(me : String, port_var : String, seeds : String) : ClusterNode.CnConfig do
-    let pki = Env.require("PKI")
+    let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me)
-    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int(port_var)))
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int(port_var))))
     Process.set_env("MARCH_CLUSTER_NODES", seeds)
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me ++ ".key")
@@ -115,7 +115,7 @@ mod CertOrderA do
       Ok(h) ->
         println("node-a: up")
         if ClusterNode.await_members(h, 2, 120000) do () else panic("node-a: the offers never joined") end
-        round(c, h, Vault.new("cert_order_done"), 1)
+        round(c, h, Authority.must(Vault.new("cert_order_done")), 1)
         ClusterNode.stop(h)
     end
   end

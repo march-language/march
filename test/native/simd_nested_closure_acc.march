@@ -70,5 +70,6 @@ mod SimdNestedClosureAcc do
     let ones = NativeArray.from_list_f32(List.map(List.range(0, 64), fn _ -> 1.0))
     println("nested_big=" ++ float_to_string(nested_dot(big, ones)))
     println("tco_big=" ++ float_to_string(tco_dot(big, ones)))
+    ()
   end
 end

@@ -12,21 +12,22 @@ mod Main do
   needs IO.Console
   needs IO.Spawn
   fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : () do
-    let a = Task.async(fn () -> 1)
-    let b = Task.async(fn () -> 2)
+    let a = Authority.must(Task.async(fn () -> 1))
+    let b = Authority.must(Task.async(fn () -> 2))
     match Task.race(Cons(a, Cons(b, Nil))) do
-      Ok(v)  -> println("race=" ++ int_to_string(v))
-      Err(e) -> println("race_err=" ++ e)
+      Ok(v)  -> Authority.ignore(println("race=" ++ int_to_string(v)))
+      Err(e) -> Authority.ignore(println("race_err=" ++ e))
     end
-    let c = Task.async(fn () -> 10)
-    let d = Task.async(fn () -> 20)
+    let c = Authority.must(Task.async(fn () -> 10))
+    let d = Authority.must(Task.async(fn () -> 20))
     match Task.any(Cons(c, Cons(d, Nil))) do
-      Ok(v)   -> println("any=" ++ int_to_string(v))
-      Err(es) -> println("any_failed=" ++ int_to_string(List.length(es)))
+      Ok(v)   -> Authority.ignore(println("any=" ++ int_to_string(v)))
+      Err(es) -> Authority.ignore(println("any_failed=" ++ int_to_string(List.length(es))))
     end
     let tok = task_cancel_token_new()
     let _t = task_spawn_with_cancel(fn _ -> 99, tok)
     task_cancel(tok)
     println("cancelled=" ++ bool_to_string(task_is_cancelled(tok)))
+    ()
   end
 end

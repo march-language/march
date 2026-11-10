@@ -68,5 +68,6 @@ mod ModuleLetFn do
     println(int_to_string(t() + 1))
     let fs = [Cst.inc, Cst.Inner.triple, top_double]
     println(show_list(List.map(fs, fn f -> f(5))))
+    ()
   end
 end

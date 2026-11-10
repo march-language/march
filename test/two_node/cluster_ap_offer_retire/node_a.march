@@ -38,7 +38,7 @@ mod ClusterApOfferRetire do
   -- The server of phase 3 waits for the test's go before answering, so the
   -- session is still running when its offer is closed.
   pfn wait_go(left : Int) : () do
-    if Vault.get(Vault.open("retire_go"), "go") != None do ()
+    if Vault.get(Authority.must(Vault.open("retire_go")), "go") != None do ()
     else if left <= 0 do panic("never told to go") else
       sleep_ms(10)
       wait_go(left - 10)
@@ -102,6 +102,7 @@ mod ClusterApOfferRetire do
     let now = Scheduler.live_procs()
     println("procs retired after " ++ what ++ ": " ++ bool_to_string(now <= before)
       ++ (if now <= before do "" else " (" ++ int_to_string(now - before) ++ " over)" end))
+    ()
   end
 
   pfn open_close(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
@@ -148,7 +149,7 @@ mod ClusterApOfferRetire do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -179,7 +180,7 @@ mod ClusterApOfferRetire do
             SessionNode.close_offer(o)
             sleep_ms(200)
             println("closed with a session running, actor alive: " ++ bool_to_string(is_alive(o.worker)))
-            Vault.set(Vault.open("retire_go"), "go", 1)
+            Vault.set(Authority.must(Vault.open("retire_go")), "go", 1)
             println("session done: " ++ int_to_string(task_await_unwrap(client)))
             sleep_ms(300)
             println("after the session, actor alive: " ++ bool_to_string(is_alive(o.worker)))
@@ -211,8 +212,8 @@ mod ClusterApOfferRetire do
 
         -- 5. Nothing left in the shared tables.
         sleep_ms(100)
-        let flags : Vault(Int) = Vault.open("session_ap_flags")
-        let strs : Vault(String) = Vault.open("session_ap_strs")
+        let flags : Vault(Int) = Authority.must(Vault.open("session_ap_flags"))
+        let strs : Vault(String) = Authority.must(Vault.open("session_ap_strs"))
         println("offer keys left: " ++ int_to_string(Vault.size(flags) + Vault.size(strs)))
         ClusterNode.stop(h)
     end

@@ -25,6 +25,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let cmp    = fn x -> fn y -> x <= y
   let sorted = Sort.insertion_sort_by(xs, cmp)
   println(int_to_string(head(sorted)))
+  ()
 end
 
 end

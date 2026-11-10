@@ -49,5 +49,6 @@ mod ShadowedNegateNot do
     println(int_to_string(string_length("ab")))
     println(int_to_string(int_xor(2, 3)))
     println(int_to_string(int_xor(2, 4)))
+    ()
   end
 end

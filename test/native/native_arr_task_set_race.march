@@ -16,8 +16,8 @@ mod Main do
     end
   end
   pfn round(arr : NativeIntArr, k : Int) : Int do
-    let t1 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, k), 0))
-    let t2 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, k + 1000), 0))
+    let t1 = Authority.must(Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, k), 0)))
+    let t2 = Authority.must(Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, k + 1000), 0)))
     let a = unwrap(Task.await(t1))
     let b = unwrap(Task.await(t2))
     let c = NativeArray.get_int(arr, 0)

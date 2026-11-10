@@ -12,5 +12,6 @@ mod Main do
     println(int_to_string(x + y + z + w))
     let ((s1, n1), f1) = (("hi", 5), 2.5)
     println(s1 ++ " " ++ int_to_string(n1) ++ " " ++ float_to_string(f1))
+    ()
   end
 end

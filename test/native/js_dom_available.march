@@ -27,5 +27,6 @@ mod JsDomAvailable do
 
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println("dom available")
+    ()
   end
 end
