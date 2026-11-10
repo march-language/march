@@ -131,6 +131,14 @@ let read_lines path =
   !lines
 
 let write_lines path lines =
+  (* Write through a symlink to the file it names: renaming the temp file over
+     [path] would replace the link with a copy (2026-11-10: the corpus
+     migration turned a test's shared node_b -> node_a link into a file). *)
+  let path =
+    match (Unix.lstat path).Unix.st_kind with
+    | Unix.S_LNK -> (try Unix.realpath path with _ -> path)
+    | _ -> path
+    | exception Unix.Unix_error _ -> path in
   let tmp = path ^ ".fix.tmp" in
   let oc = open_out tmp in
   (* Every line ends with a newline, the last included: [read_lines] cannot

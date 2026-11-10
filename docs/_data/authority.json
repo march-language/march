@@ -25,14 +25,14 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "0b02b0953",
-    "date": "2026-11-09",
-    "inputs_sha256": "8869d6813a03fed65550e32f9da917310738ef7a1610f56e995aca6ba4a77b49"
+    "commit": "1e908add4",
+    "date": "2026-11-10",
+    "inputs_sha256": "31bc39a5f3d2207f1fef9a099f41e685bf473d15ea4696a618abe9ba3448490f"
   },
   "modules": {
     "classes": {
       "inside": 15,
-      "none": 118,
+      "none": 119,
       "outside": 25
     },
     "list": [
@@ -51,6 +51,12 @@
       {
         "cls": "none",
         "name": "Array",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Authority",
         "needs": [],
         "own": false
       },
@@ -822,7 +828,8 @@
         "cls": "inside",
         "name": "Random",
         "needs": [
-          "IO.Random"
+          "IO.Random",
+          "IO.Clock"
         ],
         "own": false
       },
@@ -855,7 +862,8 @@
         "cls": "inside",
         "name": "UUID",
         "needs": [
-          "IO.Random"
+          "IO.Random",
+          "IO.Clock"
         ],
         "own": false
       },
@@ -1160,7 +1168,7 @@
         "own": true
       }
     ],
-    "total": 158
+    "total": 159
   },
   "pinned": {
     "node_refusal": "FAILED Server.handle: ERR cap_policy IO.FileWrite \u2014 deploy rejected by node capability policy",

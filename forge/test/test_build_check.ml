@@ -432,6 +432,19 @@ end
   Alcotest.(check bool) "the unused parameter is left alone" true
     (contains after "unused : Int")
 
+let test_fix_paths_keeps_symlinks () =
+  setup_hermetic_march ();
+  let dir = Filename.temp_dir "forge_fix_link_" "" in
+  let real = Filename.concat dir "real.march" in
+  let link = Filename.concat dir "link.march" in
+  write_file real cap_fix_before;
+  Unix.symlink "real.march" link;
+  (match Cmd_fix.run_paths ~only:[ "cap_result_unhandled" ] [ link ] with
+   | Ok _ -> () | Error e -> Alcotest.failf "forge fix failed: %s" e);
+  Alcotest.(check bool) "the link is still a link" true
+    ((Unix.lstat link).Unix.st_kind = Unix.S_LNK);
+  Alcotest.(check string) "the fix landed in the file it names" cap_fix_after (read_file_text real)
+
 let test_fix_paths_no_files () =
   let dir = Filename.temp_dir "forge_fix_empty_" "" in
   match Cmd_fix.run_paths [ dir ] with
@@ -1170,6 +1183,8 @@ let () =
         test_fix_paths_no_files;
       Alcotest.test_case "--only applies only the named codes" `Quick
         test_fix_paths_only_filters_codes;
+      Alcotest.test_case "a symlink stays a symlink" `Quick
+        test_fix_paths_keeps_symlinks;
     ];
     "forge fix --contracts", [
       Alcotest.test_case "inserts @[no_alloc] and is idempotent" `Quick
