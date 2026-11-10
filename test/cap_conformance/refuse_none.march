@@ -1,0 +1,17 @@
+-- REFUSE:
+-- No hook: every check passes.
+mod RefuseNone do
+  needs IO.Console
+
+  fn show_check(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> kind ++ " allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(show_check("IO.Clock", ""))
+    println(show_check("IO.FileRead", "/etc/passwd"))
+  end
+end

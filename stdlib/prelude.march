@@ -32,6 +32,9 @@
 
 mod Prelude do
 
+  type CapLimit = ByLaunch | ByFnNeeds(String) | ByModNeeds(String) | ByRestrict(String) | ByGrant(String)
+  type CapError = CapError(String, String, CapLimit, String)
+
   -- ---- Diverging ----
 
   doc """

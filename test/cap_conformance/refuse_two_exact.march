@@ -1,0 +1,21 @@
+-- REFUSE: IO.FileRead, IO.Spawn
+-- Two refused kinds, matched exactly: IO.FileRead and IO.Spawn are refused
+-- (the target is named), while IO.FileWrite and IO.FileSystem are not (the
+-- test hook does not walk the capability lattice).
+mod RefuseTwoExact do
+  needs IO.Console
+
+  fn show_check(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> kind ++ " allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println(show_check("IO.FileRead", "/etc/passwd"))
+    println(show_check("IO.Spawn", ""))
+    println(show_check("IO.FileWrite", "/tmp/x"))
+    println(show_check("IO.FileSystem", "/tmp/x"))
+  end
+end

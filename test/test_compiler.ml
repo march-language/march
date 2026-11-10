@@ -18428,6 +18428,8 @@ let compiler_suites =
       ("tcenv_cli_cache", Test_tcenv_cli_cache.tests);
       ("cap_strip", Test_cap_strip.tests);
       ("cap_symbols", Test_cap_symbols.tests);
+      ("cap_ops", Test_cap_ops.tests);
+      ("cap_check_coverage", Test_cap_check_coverage.tests);
       ("builtin_borrow_classification", Test_builtin_borrow_classification.tests);
       ("builtin_compiled_lowering", Test_builtin_compiled_lowering.tests);
       ("cap_markers", Test_cap_markers.tests);

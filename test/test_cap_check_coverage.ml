@@ -1,0 +1,312 @@
+(* Every stdlib function that performs a capability operation checks it first.
+
+   specs/2026-11-10-object-capability-design.md §15: "a test lists every
+   public function that reaches one and fails when a new one lacks a check."
+   For ocap phase 1 (specs/plans/2026-11-10-ocap-p1-result-plan.md, Task 4):
+   a stdlib function (or impl, actor, top-level let) whose source calls a
+   builtin that [March_caps.Cap_ops] classifies [Checked] must also call
+   [Authority.check], or be listed in [allowlist] with the reason it need not.
+
+   The unit of the check is a declaration's source text, as the parser spans
+   it: a nested helper is part of its enclosing function, so a function that
+   checks and then calls a local helper that performs the raw call passes.
+   Textual on purpose: it reads what a reviewer reads, and it cannot be
+   satisfied by a check the typechecker would discard.
+
+   [CAP_COVERAGE_PRINT=1] prints today's offenders in allowlist form. *)
+
+module Ops = March_caps.Cap_ops
+
+(* ((unit, builtin), reason): calls that need no check. The phase-1 tasks
+   delete their rows as they add the checks; what remains at the end is
+   reasoned. *)
+let allowlist : ((string * string) * string) list = [
+  (("Check.is_skipped", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Check.resolve_seed", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Check.resolve_seed", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("ClusterConn.listen", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.credentials", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.config_from_env", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.actor ClusterNodeActor", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.actor ClusterNodeActor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.perform", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.mirror", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.dial", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.read_link", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.accept_loop", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.accept_loop", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.tick_loop", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.watch_cert_files", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.replace_checked", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.start", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("ClusterNode.start", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Config.global_table", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Config.global_table", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Config.from_env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Config.from_env_int", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Config.from_env_bool", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Config.env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Config.is_dev", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Config.is_test", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Config.is_prod", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Config.new_store", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Config.new_store", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Crypto.hash_password", "random_bytes"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("Crypto.random_bytes", "stdlib_random_bytes"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("Crypto.random_hex", "random_bytes"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("Csv.each_row", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Csv.read_all", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Csv.each_row_with_header", "csv_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("DataFrame.print_table", "println"), "TODO ocap-p1 Task 6 (console)");
+  (("DateTime.now", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("Dir.list", "dir_list"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Dir.list_full", "dir_list"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Dir.mkdir", "dir_mkdir"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Dir.mkdir_p", "dir_mkdir_p"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Dir.rmdir", "dir_rmdir"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Dir.rm_rf", "dir_rm_rf"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Dir.exists", "dir_exists"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Dns.resolve", "dns_resolve"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Env.get", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Env.require", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Env.get_int", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Env.get_bool", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Env.is_set", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("File.read", "file_read"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.read_lines", "file_read"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.exists", "file_exists"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.stat", "file_stat"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.mtime", "file_stat"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.write", "file_write"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.append", "file_append"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.delete", "file_delete"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.copy", "file_copy"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.rename", "file_rename"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.with_lines", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.with_chunks", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.each_line", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("File.each_chunk", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Forge.add", "println"), "TODO ocap-p1 Task 6 (console)");
+  (("HttpServer.configure_runtime", "http_server_plain_listener"), "TODO ocap-p1 Task 10 (files/network)");
+  (("HttpServer.listen", "http_server_listen"), "TODO ocap-p1 Task 10 (files/network)");
+  (("HttpServer.spawn_n", "http_server_spawn_n"), "TODO ocap-p1 Task 10 (files/network)");
+  (("HttpServer.bind_host", "http_server_bind_host"), "TODO ocap-p1 Task 10 (files/network)");
+  (("HttpTransport.connect", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
+  (("HttpTransport.request_https_with_context", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
+  (("HttpTransport.request_plain", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
+  (("IO.write", "print"), "TODO ocap-p1 Task 6 (console)");
+  (("IO.puts", "println"), "TODO ocap-p1 Task 6 (console)");
+  (("IO.warn", "print_stderr"), "TODO ocap-p1 Task 6 (console)");
+  (("IO.read_line", "io_read_line"), "TODO ocap-p1 Task 6 (console)");
+  (("IO.read_byte", "io_read_byte"), "TODO ocap-p1 Task 6 (console)");
+  (("IO.gets", "print"), "TODO ocap-p1 Task 6 (console)");
+  (("IO.inspect", "println"), "TODO ocap-p1 Task 6 (console)");
+  (("List.pmap", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("List.pmap_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("List.pfilter", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("List.preduce", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Logger.appender_stderr", "print_stderr"), "TODO ocap-p1 Task 6 (console)");
+  (("Logger.appender_stdout", "println"), "TODO ocap-p1 Task 6 (console)");
+  (("Logger.with_span", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("NetKernel.recv_exact_until", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("NetKernel.now_s", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("NetKernel.handshake_auth", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Parallel.pmap_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Parallel.preduce_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Prelude.println", "print_line"), "TODO ocap-p1 Task 6 (console)");
+  (("Prelude.debug", "print_line"), "TODO ocap-p1 Task 6 (console)");
+  (("Process.run", "process_spawn_sync"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.run_stream", "process_spawn_lines"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.set_env", "process_set_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.cwd", "process_cwd"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.exit", "process_exit"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.argv", "process_argv"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.pid", "process_pid"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Process.spawn_async", "process_spawn_async"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Random.int", "unix_time"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("Recon.print_top", "println"), "TODO ocap-p1 Task 6 (console)");
+  (("Seq.from_file_lines", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Seq.from_file_chunks", "file_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("SessionNode.start_link", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.serve_outcome", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.addrs_from_env", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.open_listener", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.notify_redialled", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.cluster_links", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.actor OfferActor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.retire_offer", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("SessionNode.hosted_trace", "print_stderr"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Signal.watch", "signal_watch"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Signal.raise", "signal_raise_self"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Socket.connect", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Socket.connect_timeout", "tcp_connect_timeout"), "TODO ocap-p1 Task 10 (files/network)");
+  (("System.env", "process_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("System.put_env", "process_set_env"), "TODO ocap-p1 Task 8 (process/env)");
+  (("System.argv", "process_argv"), "TODO ocap-p1 Task 8 (process/env)");
+  (("System.cwd", "process_cwd"), "TODO ocap-p1 Task 8 (process/env)");
+  (("System.pid", "process_pid"), "TODO ocap-p1 Task 8 (process/env)");
+  (("System.exit", "process_exit"), "TODO ocap-p1 Task 8 (process/env)");
+  (("System.cmd", "process_spawn_sync"), "TODO ocap-p1 Task 8 (process/env)");
+  (("Task.async", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Task.async_stream", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Task.async_stream_n", "task_spawn"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Tls.client_ctx", "tls_client_ctx"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Tls.server_ctx", "tls_server_ctx"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Tls.https_get", "tcp_connect"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Topology.actor Anchor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.report", "println"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.place", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.place", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.place", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.reconcile", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.retire", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.topology_source", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.write_status", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.drain", "process_exit"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.drain", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.drain", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.drain_wait", "process_exit"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.drain_wait", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.hook", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.hook", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.watchdog", "process_exit"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.watchdog", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.config_plain_from_env", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.start_failed", "process_exit"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Topology.runs_pool", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
+  (("Udp.open_with", "udp_open"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Udp.resolve", "udp_resolve"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Udp.connect", "udp_connect"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Udp.send_batch", "udp_send_batch"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Udp.send_batch_connected", "udp_send_batch"), "TODO ocap-p1 Task 10 (files/network)");
+  (("Udp.send_many", "udp_send_many"), "TODO ocap-p1 Task 10 (files/network)");
+  (("UUID.v4", "uuid_v4"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("UUID.v7", "uuid_v7"), "TODO ocap-p1 Task 7 (clock/random)");
+  (("Vault.new", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Vault.open", "vault_new"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Vault.open", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Vault.whereis", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Vault.ns_get", "vault_ns_get"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+  (("Vault.ns_drop", "vault_whereis"), "TODO ocap-p1 Task 9 (signal/task/vault)");
+]
+
+let stdlib_dir () =
+  let candidates = [ "stdlib"; "../stdlib"; "../../stdlib"; "../../../stdlib" ] in
+  match List.find_opt (fun d -> Sys.file_exists (Filename.concat d "prelude.march"))
+          candidates with
+  | Some d -> d
+  | None -> Filename.concat (Test_helpers.march_project_root ()) "stdlib"
+
+let read_lines path =
+  let ic = open_in_bin path in
+  let rec go acc = match input_line ic with
+    | l -> go (l :: acc)
+    | exception End_of_file -> close_in ic; Array.of_list (List.rev acc) in
+  go []
+
+(* Every checkable declaration of a parsed file: its dotted name and span. *)
+let units_of (m : March_ast.Ast.module_) : (string * March_ast.Ast.span) list =
+  let open March_ast.Ast in
+  let rec go prefix decls =
+    List.concat_map (function
+        | DFn (fd, sp) -> [ (prefix ^ fd.fn_name.txt, sp) ]
+        | DActor (_, n, _, sp) -> [ (prefix ^ "actor " ^ n.txt, sp) ]
+        | DImpl (im, sp) -> [ (prefix ^ "impl " ^ im.impl_iface.txt, sp) ]
+        | DLet (_, _, sp) -> [ (prefix ^ "let", sp) ]
+        | DMod (n, _, inner, _) -> go (prefix ^ n.txt ^ ".") inner
+        | _ -> [])
+      decls in
+  go (m.mod_name.txt ^ ".") m.mod_decls
+
+(* Whether [text] calls [name] (not a longer name, not a qualified one, not
+   the definition `fn name(`). *)
+let calls_name (text : string) (name : string) : bool =
+  let re = Str.regexp ("\\(^\\|[^a-zA-Z0-9_.]\\)" ^ Str.quote name ^ "[ \t]*(") in
+  let is_def pos =
+    let before = String.sub text 0 (pos + 1) in
+    let t = String.trim before in
+    String.ends_with ~suffix:" fn" (" " ^ t) || String.ends_with ~suffix:" pfn" (" " ^ t) in
+  let rec from i =
+    match Str.search_forward re text i with
+    | pos -> if is_def pos then from (pos + 1) else true
+    | exception Not_found -> false in
+  from 0
+
+(* The declaration's code: its source lines minus `--` comment lines and
+   the contents of doc strings (triple-quoted blocks), where a builtin named
+   in prose would be a false positive. *)
+let code_text (lines : string array) (sp : March_ast.Ast.span) : string =
+  let buf = Buffer.create 1024 in
+  let in_doc = ref false in
+  for i = sp.start_line - 1 to min (Array.length lines - 1) (sp.end_line - 1) do
+    let l = lines.(i) in
+    let t = String.trim l in
+    let triple = (try ignore (Str.search_forward (Str.regexp_string "\"\"\"") l 0); true
+                  with Not_found -> false) in
+    if !in_doc then (if triple then in_doc := false)
+    else if triple then in_doc := true
+    else if String.length t >= 2 && String.sub t 0 2 = "--" then ()
+    else (Buffer.add_string buf l; Buffer.add_char buf '\n')
+  done;
+  Buffer.contents buf
+
+let offenders () : (string * string) list =
+  let dir = stdlib_dir () in
+  let files =
+    Sys.readdir dir |> Array.to_list
+    |> List.filter (fun f -> Filename.check_suffix f ".march" && f <> "authority.march")
+    |> List.sort compare in
+  let checked = List.filter_map (function
+      | (n, Ops.Checked _) -> Some n | _ -> None) Ops.table in
+  List.concat_map (fun f ->
+      let path = Filename.concat dir f in
+      let lines = read_lines path in
+      let m =
+        let ic = open_in_bin path in
+        let lexbuf = Lexing.from_channel ic in
+        lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+        let m = March_parser.Parse.module_of_lexbuf lexbuf in
+        close_in ic; m in
+      List.concat_map (fun (u, sp) ->
+          let text = code_text lines sp in
+          if calls_name text "Authority.check" then []
+          else List.filter_map (fun b -> if calls_name text b then Some (u, b) else None)
+              checked)
+        (units_of m))
+    files
+
+let test_every_operation_is_checked () =
+  let found = offenders () in
+  if Sys.getenv_opt "CAP_COVERAGE_PRINT" = Some "1" then
+    List.iter (fun (u, b) -> Printf.printf "  ((%S, %S), \"\");\n" u b) found;
+  let unlisted = List.filter (fun p -> not (List.mem_assoc p allowlist)) found in
+  Alcotest.(check (list (pair string string)))
+    "stdlib functions calling a checked builtin without Authority.check" [] unlisted
+
+let test_allowlist_not_stale () =
+  let found = offenders () in
+  let stale = List.filter (fun p -> not (List.mem p found)) (List.map fst allowlist) in
+  Alcotest.(check (list (pair string string))) "allowlist rows that no longer match" [] stale
+
+(* A fixture function that reads the clock with no check is reported. *)
+let test_detects_an_unchecked_call () =
+  let lines = [| "  fn now_ms() : Int do"; "    unix_time_ms()"; "  end" |] in
+  let sp = { March_ast.Ast.dummy_span with start_line = 1; end_line = 3 } in
+  let text = code_text lines sp in
+  Alcotest.(check bool) "unix_time_ms is seen" true (calls_name text "unix_time_ms");
+  Alcotest.(check bool) "no Authority.check" false (calls_name text "Authority.check");
+  Alcotest.(check bool) "System.unix_time_ms is not the raw builtin" false
+    (calls_name "System.unix_time_ms()" "unix_time_ms");
+  Alcotest.(check bool) "a definition is not a call" false
+    (calls_name "  fn random_bytes(n) do\n" "random_bytes");
+  Alcotest.(check bool) "a call after a definition is" true
+    (calls_name "  pfn f(n) do\n    random_bytes(n)\n" "random_bytes")
+
+let tests =
+  [
+    Alcotest.test_case "every stdlib capability operation is checked" `Quick
+      test_every_operation_is_checked;
+    Alcotest.test_case "allowlist is not stale" `Quick test_allowlist_not_stale;
+    Alcotest.test_case "detects an unchecked call" `Quick test_detects_an_unchecked_call;
+  ]

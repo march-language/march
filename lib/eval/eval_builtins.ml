@@ -158,6 +158,16 @@ let try_call_thunk (thunk : value) : value =
    http_server_bind_host sets it (mirrors march_http_bind_addr in the C runtime). *)
 let http_bind_addr = ref Unix.inet_addr_any
 
+(* ocap phase 1: the TEST-ONLY refusal hook read by [cap_check_raw] and
+   [cap_launch_text] below. MARCH_TEST_REFUSE is a comma-separated list of
+   capability kinds the launch refuses, matched exactly; read once. The
+   compiled twin is runtime/march_extras.c, the JS one march_runtime.mjs. *)
+let cap_test_refuse_text =
+  lazy (String.trim (Option.value (Sys.getenv_opt "MARCH_TEST_REFUSE") ~default:""))
+let cap_test_refuse_kinds =
+  lazy (String.split_on_char ',' (Lazy.force cap_test_refuse_text)
+        |> List.map String.trim |> List.filter (fun k -> k <> ""))
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -2750,6 +2760,15 @@ let base_env : env =
         | args when args = [] || args = [VUnit] ->
           VInt (int_of_float (Unix.gettimeofday () *. 1000.0))
         | _ -> eval_error "unix_time_ms: takes no arguments"))
+    (* ---- ocap phase 1 capability check point (runtime/march_extras.c has the
+       compiled twin; the rule must match it exactly) ---- *)
+  ; ("cap_check_raw", VBuiltin ("cap_check_raw", function
+        | [VString kind; VString _target] ->
+          VInt (if List.mem kind (Lazy.force cap_test_refuse_kinds) then 1 else 0)
+        | _ -> eval_error "cap_check_raw: expected (String, String)"))
+  ; ("cap_launch_text", VBuiltin ("cap_launch_text", function
+        | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_test_refuse_text)
+        | _ -> eval_error "cap_launch_text: takes no arguments"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:

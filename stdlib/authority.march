@@ -1,0 +1,103 @@
+-- Authority: refusals of capability operations as values.
+--
+-- Every capability operation returns `Result(T, CapError)`
+-- (specs/2026-11-10-object-capability-design.md §15). The types live in the
+-- Prelude so `CapError` and its constructors are bare names everywhere:
+--
+--   type CapLimit = ByLaunch | ByFnNeeds(String) | ByModNeeds(String)
+--                 | ByRestrict(String) | ByGrant(String)
+--   type CapError = CapError(kind, target, limit, limit_scope)
+--
+-- `kind` is the capability (`IO.FileRead`), `target` what the operation
+-- named (a path, `host:port`, a variable name; `""` when it names nothing),
+-- `limit` which limit refused it and `limit_scope` that limit's scope list
+-- as written. Phase 1 produces only `ByLaunch`; the others arrive with
+-- run-time authority, `restrict` and dependency grants.
+--
+-- This module performs no operation of its own and has no `needs` line.
+
+mod Authority do
+
+  doc """
+  A one-line description of a refusal: the refused operation written as a
+  scope, the limit that refused it, and that limit's scope list.
+
+  ## Examples
+
+      march> Authority.describe(CapError("IO.Clock", "", ByModNeeds("Report"), "IO.Console"))
+      "IO.Clock refused by module Report's needs (IO.Console)"
+  """
+  fn describe(e : CapError) : String do
+    match e do
+    CapError(kind, target, limit, scope) ->
+      let op = if target == "" do kind else kind ++ "(\"" ++ target ++ "\")" end
+      let who = limit_text(limit)
+      let allowed = if scope == "" do "nothing" else scope end
+      op ++ " refused by " ++ who ++ " (" ++ allowed ++ ")"
+    end
+  end
+
+  pfn limit_text(limit : CapLimit) : String do
+    match limit do
+    ByLaunch      -> "the launch grant"
+    ByFnNeeds(f)  -> "function " ++ f ++ "'s needs"
+    ByModNeeds(m) -> "module " ++ m ++ "'s needs"
+    ByRestrict(w) -> "the restrict at " ++ w
+    ByGrant(p)    -> "the grant to package " ++ p
+    end
+  end
+
+  impl Show(CapError) do
+    fn show(e : CapError) : String do
+      describe(e)
+    end
+  end
+
+  doc """
+  The `Ok` payload of a capability operation's result; a refusal panics
+  with `describe` of the error. What `forge fix` writes where a program used
+  an operation's value before operations could be refused.
+
+  ## Examples
+
+      march> Authority.must(Ok(3))
+      3
+  """
+  fn must(r : Result(a, CapError)) : a do
+    match r do
+    Ok(v)  -> v
+    Err(e) -> panic("capability refused: " ++ describe(e))
+    end
+  end
+
+  doc """
+  Discards a capability operation's result, refused or not. What `forge
+  fix` writes where a program used an operation such as `println` only for
+  its effect, in a position that needs `()`.
+
+  ## Examples
+
+      march> Authority.ignore(Ok(1))
+      ()
+  """
+  fn ignore(_r : Result(a, CapError)) : () do
+    ()
+  end
+
+  doc """
+  `Ok(())` when the current authority admits an operation of capability
+  `kind` on `target`, else `Err(CapError(...))` naming the limit that
+  refused it. Every stdlib entry point that performs a capability operation
+  calls this first.
+
+  ## Examples
+
+      march> Authority.check("IO.Console", "stdout")
+      Ok(())
+  """
+  fn check(kind : String, target : String) : Result((), CapError) do
+    if cap_check_raw(kind, target) == 0 do Ok(())
+    else Err(CapError(kind, target, ByLaunch, cap_launch_text())) end
+  end
+
+end

@@ -16496,6 +16496,8 @@ declare ptr    @ring_buf_drop(ptr %rb)
 ; Time builtins
 declare double @march_unix_time()
 declare i64    @march_unix_time_ms()
+declare i64    @march_cap_check_raw(ptr %kind, ptr %target)
+declare ptr    @march_cap_launch_text()
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
 declare i64  @march_vault_live_tables()
