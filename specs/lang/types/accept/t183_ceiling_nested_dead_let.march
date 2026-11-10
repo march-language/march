@@ -8,12 +8,13 @@
 mod NestedDeadLet do
   needs IO.Console
   mod Inner do
-    let _leaked = match File.read("/etc/hosts") do
+    let _leaked = match Authority.must(File.read("/etc/hosts")) do
       Ok(s) -> s
       Err(_) -> ""
     end
   end
   fn main(_cap : Cap(IO.Console)) : () do
     println("hi")
+    ()
   end
 end

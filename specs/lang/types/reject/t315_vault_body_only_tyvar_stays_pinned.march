@@ -9,7 +9,7 @@ mod M do
   needs IO.Mut
 
   fn peek() : Option(b) do
-    let t = Vault.open("shared")
+    let t = Authority.must(Vault.open("shared"))
     Vault.get(t, "k")
   end
 
