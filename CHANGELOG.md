@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
+  methods(get))` limits a module to a path prefix on a host, matched by whole segment
+  (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
+  counts). A path with `.`/`..` segments, `//`, a backslash or a percent-encoded `.`, `/`
+  or backslash is refused rather than normalized. Literal paths are checked at compile time;
+  every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
+  `HttpTransport.Refused`). The scope matcher is now public in `Http`
+  (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
 - **Handler guarantees: `on Msg(…) ensures P do … end`.** A handler can state how one message
   changes the actor's state, with `old(e)` for the state the message arrived with:
   `on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do`. Each
@@ -819,6 +827,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
+  was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
+  through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name
+  the actor or function you wrote (``handler `Go` of actor `Fetcher` ``), not compiler
+  names like `Fetcher_spawn` or `Fetch$B.T.fetch`, and two modules sharing a short name
+  (`P1.Inner`, `Inner`) keep their own host scopes whatever order they are declared in.
+- **A user module named like a stdlib module is charged for its own capabilities.** The
+  capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
+  `needs` to its callers; it now looks at where the module comes from, not its name.
 - **`--target js` Float literals are the same double as native** (#1169). The JS emitter
   printed a `Float` literal with 12 significant digits, so `3.141592653589793`, `Math.pi()`,
   `Math.tau()`, `Math.e()` and values `opt.fold` computed (`1.0 /. 240.0`) ran as a different
