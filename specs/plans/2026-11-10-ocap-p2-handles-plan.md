@@ -705,5 +705,6 @@ Public *record* types with `fd : Int` fields (`CnLink`, `CnHalf`, `Peer`, `Write
    - (b) `Foreign.open(lib)` returns a record of function values captured at the open, which needs run-time `dlopen` in compiled builds too.
 
    This plan builds neither and files a todo. Which do you want, or should `Library` wait for the `IO.Foreign` symbol scopes in narrow-capabilities §7?
-2. **`File.open` split by mode** (decision 5): `File.open(path)` and `File.open_write(path, mode)` instead of `File.open(path, mode)`. The reason is that a single function would charge every reader `IO.FileWrite` under today's stdlib-mediated ceiling. Is the split acceptable, or should the ceiling learn to charge by a literal mode argument?
-3. **macOS refuses every symlink beneath a directory handle** (Task 7), even one that stays inside, because it has no `RESOLVE_BENEATH`. Acceptable as the documented best effort?
+   **Open: under discussion with the owner (2026-11-10).**
+2. **`File.open` split by mode** (decision 5). **Decided by the owner, 2026-11-10: yes.** The API is `File.open(path)` and `File.open_write(path, mode)`.
+3. **macOS refuses every symlink beneath a directory handle** (Task 7). **Decided by the owner, 2026-11-10: best effort is fine on macOS.**
