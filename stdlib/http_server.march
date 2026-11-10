@@ -500,8 +500,9 @@ mod HttpServer do
   -- and binds the builtin's result before returning it: the first version
   -- matched a captured TlsSource and returned the call directly, and ASAN
   -- caught the closure freeing the captured path strings before the builtin
-  -- (which borrows them) read them (specs/todos/2026-11-06-closure-borrowed-
-  -- tail-call-uaf.md).
+  -- (which borrows them) read them. That compiler bug is fixed
+  -- (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md); this
+  -- shape stays because it is the one ASAN has run clean.
   pfn tls_configure_call(kind, a, b) do
     fn pw ->
       match pw do
