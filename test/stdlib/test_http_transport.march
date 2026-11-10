@@ -175,4 +175,33 @@ describe "HttpTransport scope guard" do
   end
 end
 
+describe "request smuggling is refused before connecting" do
+  -- Port 1 on loopback refuses connections, so a wrongful connect would show
+  -- up as a connection/handshake error rather than the serializer's refusal.
+  test "HttpTransport.request refuses a CRLF in the path" do
+    let req = Request(Get, SchemeHttp, "127.0.0.1", Some(1),
+                      "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin", None, Nil, "")
+    match HttpTransport.request(req) do
+    Err(HttpTransport.Refused(m)) -> assert (string_contains(m, "http request rejected: path"))
+    _ -> assert false
+    end
+  end
+
+  test "HttpTransport.request refuses a CRLF in a header value" do
+    let req = Request(Get, SchemeHttp, "127.0.0.1", Some(1), "/",
+                      None, Cons(Header("X-A", "v\r\nX-Injected: 1"), Nil), "")
+    match HttpTransport.request(req) do
+    Err(HttpTransport.Refused(m)) -> assert (string_contains(m, "header value"))
+    _ -> assert false
+    end
+  end
+
+  test "Tls.https_get refuses a CRLF in the path" do
+    match Tls.https_get("127.0.0.1", 1, "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin") do
+    Err(Tls.TlsWriteError(m)) -> assert (string_contains(m, "http request rejected: path"))
+    _ -> assert false
+    end
+  end
+end
+
 end

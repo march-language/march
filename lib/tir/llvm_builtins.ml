@@ -1074,7 +1074,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_connect(ptr %host, i64 %port)" };
   { march_name = "tcp_connect_timeout"; c_name = Some "march_tcp_connect_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_connect_timeout(ptr %host, i64 %port, i64 %timeout_ms)" };
-  { march_name = "http_serialize_request"; c_name = Some "march_http_serialize_request"; ret_ty = Some Tir.TString;
+  { march_name = "http_serialize_request"; c_name = Some "march_http_serialize_request"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)" };
   { march_name = "http_parse_response"; c_name = Some "march_http_parse_response"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_parse_response(ptr %raw)" };

@@ -9206,7 +9206,7 @@ let test_http_serialize_request () =
       http_serialize_request("GET", "example.com", "/path", None, Nil, "")
     end
   end|} in
-  let raw = vstr (call_fn env "f" []) in
+  let raw = vstr (List.hd (vcon "Ok" (call_fn env "f" []))) in
   Alcotest.(check bool) "starts with GET /path"
     true (String.length raw > 0 && String.sub raw 0 14 = "GET /path HTTP")
 
@@ -9217,7 +9217,7 @@ let test_http_serialize_request_with_body () =
         Cons(Header("Content-Type", "text/plain"), Nil), "hello")
     end
   end|} in
-  let raw = vstr (call_fn env "f" []) in
+  let raw = vstr (List.hd (vcon "Ok" (call_fn env "f" []))) in
   Alcotest.(check bool) "contains body" true (
     let lines = String.split_on_char '\n' raw in
     List.exists (fun l -> String.trim l = "hello") lines)
@@ -10827,6 +10827,148 @@ let write_march_source ~name src_text =
   output_string oc src_text;
   close_out oc;
   (project_root, main_exe, src, tmp)
+
+(* ── HTTP request-line / header injection (2026-11-09 todo, P1) ──────────
+   `http_serialize_request` used to copy the method, host, path, query and
+   headers into the request verbatim, so a CR/LF/space in any of them
+   smuggled a pipelined second request.  Both serializers (the interpreter's
+   in lib/eval/eval_builtins.ml and runtime/march_http.c) now return
+   Err(reason) instead, with the same message, and the compiled one emits the
+   headers it used to drop.  Run the same program interpreted and compiled
+   and require byte-identical output, plus the expected verdicts. *)
+let http_inject_src = {|mod HttpInject do
+  fn report(label, r) do
+    match r do
+    Ok(s) -> println(label ++ " OK[" ++ s ++ "]")
+    Err(e) -> println(label ++ " ERR " ++ e)
+    end
+  end
+
+  needs IO.Console
+
+  fn main(_console : Cap(IO.Console)) do
+    let accept = Cons(Header("Accept", "text/plain"), Nil)
+    report("plain", http_serialize_request("GET", "example.com", "/a%20b/c%2Fd", Some("x=1&y=%2F&z=a+b"), accept, ""))
+    report("body", http_serialize_request("POST", "example.com", "/api", None, accept, "hello"))
+    report("path", http_serialize_request("GET", "h", "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin", None, Nil, ""))
+    report("space", http_serialize_request("GET", "h", "/a b", None, Nil, ""))
+    report("pct", http_serialize_request("GET", "h", "/100%", None, Nil, ""))
+    report("hash", http_serialize_request("GET", "h", "/a#frag", None, Nil, ""))
+    report("query", http_serialize_request("GET", "h", "/", Some("a=1\r\nX-Evil: 1"), Nil, ""))
+    report("hval", http_serialize_request("GET", "h", "/", None, Cons(Header("X-Ok", "v\r\nX-Evil: 1"), Nil), ""))
+    report("hname", http_serialize_request("GET", "h", "/", None, Cons(Header("X-Evil\r\nFoo", "v"), Nil), ""))
+    report("hspace", http_serialize_request("GET", "h", "/", None, Cons(Header("Bad Name", "v"), Nil), ""))
+    report("method", http_serialize_request("GET /evil HTTP/1.1\r\n", "h", "/", None, Nil, ""))
+    report("host", http_serialize_request("GET", "h\r\nX-Evil: 1", "/", None, Nil, ""))
+  end
+end
+|}
+
+let test_http_serialize_injection_parity () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_inject" http_inject_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  let expect_line out label prefix =
+    let lines = String.split_on_char '\n' out in
+    let want = label ^ " " ^ prefix in
+    if not (List.exists (fun l ->
+        String.length l >= String.length want
+        && String.sub l 0 (String.length want) = want) lines)
+    then Alcotest.failf "expected a line starting %S in:\n%s" want out
+  in
+  let check_verdicts which out =
+    ignore which;
+    (* The ordinary request still goes out, %-escapes and query intact, with
+       its header. *)
+    Alcotest.(check bool) "plain request line kept verbatim" true
+      (contains "plain OK[GET /a%20b/c%2Fd?x=1&y=%2F&z=a+b HTTP/1.1\r\nHost: example.com\r\nAccept: text/plain\r\n\r\n]" out);
+    Alcotest.(check bool) "body + Content-Length" true
+      (contains "Accept: text/plain\r\nContent-Length: 5\r\n\r\nhello]" out);
+    expect_line out "path" "ERR http request rejected: path contains byte 0x20 at offset 2";
+    expect_line out "space" "ERR http request rejected: path contains byte 0x20 at offset 2";
+    expect_line out "pct" "ERR http request rejected: path has a malformed %-escape at offset 4";
+    expect_line out "hash" "ERR http request rejected: path contains byte 0x23 at offset 2";
+    expect_line out "query" "ERR http request rejected: query contains byte 0x0d at offset 3";
+    expect_line out "hval" "ERR http request rejected: header value contains byte 0x0d at offset 1";
+    expect_line out "hname" "ERR http request rejected: header name contains byte 0x0d at offset 6";
+    expect_line out "hspace" "ERR http request rejected: header name contains byte 0x20 at offset 3";
+    expect_line out "method" "ERR http request rejected: method contains byte 0x20 at offset 3";
+    expect_line out "host" "ERR http request rejected: host contains byte 0x0d at offset 1";
+    Alcotest.(check bool) "nothing smuggled" false (contains "DELETE /admin HTTP" out || contains "OK[GET /x" out)
+  in
+  check_verdicts "interpreter" interp_out;
+  let bin = Filename.concat tmp "http_inject_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let compiled_out = read_cmd_output (Filename.quote bin ^ " 2>&1") in
+    check_verdicts "compiled" compiled_out;
+    Alcotest.(check string) "interpreter and compiled serializers agree" interp_out compiled_out
+
+(* End to end through HttpTransport.request: an injected path is refused
+   before the connection is even opened, so a local listener sees no bytes
+   (interpreted and compiled). *)
+let test_http_transport_refuses_injected_path () =
+  let listen = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> try Unix.close listen with _ -> ()) @@ fun () ->
+  Unix.setsockopt listen Unix.SO_REUSEADDR true;
+  Unix.bind listen (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  Unix.listen listen 8;
+  let port = match Unix.getsockname listen with
+    | Unix.ADDR_INET (_, p) -> p | _ -> assert false in
+  let src_text = Printf.sprintf {|mod HttpInjectE2e do
+  needs IO.NetConnect
+  needs IO.Console
+
+  fn main(_net : Cap(IO.NetConnect), _console : Cap(IO.Console)) do
+    match Http.get("http://127.0.0.1:%d/ok") do
+    Err(_) -> println("URL")
+    Ok(req) ->
+      let bad = Http.set_header(Http.set_path(Http.set_body(req, ""), "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"), "X-A", "b")
+      match HttpTransport.request(bad) do
+      Ok(_) -> println("SENT")
+      Err(HttpTransport.Refused(m)) -> println("REFUSED " ++ m)
+      Err(_) -> println("OTHER")
+      end
+    end
+  end
+end
+|} port in
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_inject_e2e" src_text in
+  (* Whatever reached the listener: no connection, or one with zero bytes. *)
+  let drain_listener () =
+    let got = Buffer.create 64 in
+    let rec loop () =
+      match Unix.select [listen] [] [] 0.2 with
+      | [], _, _ -> ()
+      | _ ->
+        let (c, _) = Unix.accept listen in
+        let b = Bytes.create 4096 in
+        (match Unix.select [c] [] [] 0.5 with
+         | [], _, _ -> ()
+         | _ -> let n = (try Unix.read c b 0 4096 with _ -> 0) in
+           Buffer.add_subbytes got b 0 n);
+        Unix.close c;
+        loop ()
+    in
+    loop ();
+    Buffer.contents got
+  in
+  let check which out =
+    Alcotest.(check string) (which ^ ": transport refuses the request")
+      "REFUSED http request rejected: path contains byte 0x20 at offset 2" out;
+    Alcotest.(check string) (which ^ ": listener received nothing") "" (drain_listener ())
+  in
+  check "interpreter" (read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+  let bin = Filename.concat tmp "http_inject_e2e_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin -> check "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
 
 (* A function used only as a value must remain reachable through mono. *)
 let test_other_module_function_value_compiled () =
@@ -19131,6 +19273,8 @@ let codegen_suites =
       ("http builtins", [
         Alcotest.test_case "serialize request"       `Quick test_http_serialize_request;
         Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
+        Alcotest.test_case "serialize rejects injection (interp = compiled)" `Quick test_http_serialize_injection_parity;
+        Alcotest.test_case "transport refuses injected path, sends nothing" `Quick test_http_transport_refuses_injected_path;
         Alcotest.test_case "parse response"          `Quick test_http_parse_response;
         Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
       ]);

@@ -434,7 +434,9 @@ mod Tls do
   reads the response, tears down TLS, closes the TCP fd.
   Returns `Ok(response_string)` (the raw response: status line, headers and
   body, unparsed) or `Err(TlsError)`; a TCP connect failure is reported as
-  `TlsHandshakeFailed("tcp_connect: ...")`.
+  `TlsHandshakeFailed("tcp_connect: ...")`. A host or path that would smuggle
+  a second request (a CR, LF, space, or a path byte outside RFC 3986 that was
+  not percent-encoded) gives `TlsWriteError(reason)` before connecting.
 
   The response is a single `read` of at most 1 MiB, so a response spanning
   several TLS records may come back truncated; use `HttpTransport.request`
@@ -448,6 +450,17 @@ mod Tls do
       end
   """
   fn https_get(host, port, path) do
+    -- The request goes through the HTTP serializer's field checks, so a host
+    -- or path carrying a CR, LF, space or other byte the request line cannot
+    -- carry is refused (TlsWriteError, nothing connected or sent) instead of
+    -- smuggling a second request.
+    match http_serialize_request("GET", host, path, None, Cons(Header("Connection", "close"), Nil), "") do
+    Err(msg) -> Err(TlsWriteError(msg))
+    Ok(req) -> https_get_raw(host, port, req)
+    end
+  end
+
+  pfn https_get_raw(host, port, req) do
     let config = default_client_config()
     match client_ctx(config) do
     Err(e) -> Err(e)
@@ -461,8 +474,6 @@ mod Tls do
           Err(e)
         end
         Ok(conn) -> do
-          let req = "GET " ++ path ++ " HTTP/1.1\r\nHost: " ++ host ++
-                    "\r\nConnection: close\r\n\r\n"
           match write(conn, req) do
           Err(e) -> do
             close(conn)
