@@ -834,6 +834,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A NaN prints `nan` on every backend, and the interpreter's `show` no longer adds `.0`
+  to `nan`/`inf`/`-inf`.** `float_to_string` went through libc's `%.12g`, which prints a NaN with
+  the sign bit set as `-nan` on Linux and `nan` on macOS, and x86's default NaN (what
+  `inf -. inf` produces) has that bit set where arm64's does not, so the same program printed
+  `-nan` on x86 Linux and `nan` on a Mac. A NaN now prints `nan` in the interpreter and the
+  native runtime (and the logger's float fields), as `--target js` already did. Separately, the
+  interpreter's `show` of a Float printed `nan.0`, `inf.0` and `-inf.0`; it now prints `nan`,
+  `inf` and `-inf` like compiled code.
+
 - **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
   When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
   interpreter ran whichever impl registered last on both types' values; compiled code was right.

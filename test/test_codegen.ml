@@ -13232,6 +13232,43 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** A NaN prints "nan" whatever its sign bit.  libc's `%.12g` (which the
+    interpreter's `string_of_float` and the native runtime both defer to)
+    prints a sign-bit-set NaN as "-nan" on glibc and plain "nan" on macOS, and
+    x86's default NaN (from `inf -. inf`) has the sign bit set where arm64's
+    does not, so the same program printed "-nan" on Linux CI and "nan" on a
+    Mac.  The negative NaNs here are built independent of the CPU: `-x` flips
+    the sign bit (fneg), and `string_to_float("-nan")` applies the sign
+    itself.  The JS runtime always printed "nan".  Linux is where the sign
+    half can go red; on macOS libc the unfixed code also prints "nan".  The
+    `show` lines pin the other divergence: the interpreter's `show` appended
+    ".0" to anything without a '.' or 'e', which only `nan`/`inf`/`-inf` ever
+    lacked, so it printed "nan.0"/"inf.0" where native and JS print "nan"/"inf". *)
+let test_nan_prints_without_sign_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_nan_sign"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn parse(s : String) : Float do
+    match string_to_float(s) do
+      Some(v) -> v
+      None -> 0.0
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    let n = parse("nan")
+    println(float_to_string(n))
+    println(float_to_string(-n))
+    println(float_to_string(parse("-nan")))
+    println(show(-n))
+    println(show(parse("inf")))
+    println(show(parse("-inf")))
+  end
+end
+|}
+    ~expected:"nan\nnan\nnan\nnan\ninf\n-inf"
+    ()
+
 (** `--compile --no-opt` must still prune unreachable top-level functions.
     Reachability pruning (Dce.prune_unreachable) is a LINKABILITY requirement,
     not an optimization: the injected prelude/http stack references
@@ -19425,6 +19462,8 @@ let codegen_suites =
             test_js_int_subset_parity;
           Alcotest.test_case "--target js Float literals are native's double, bit for bit (#1169)" `Quick
             test_js_float_literal_bits;
+          Alcotest.test_case "a NaN prints \"nan\" whatever its sign bit (interp = compiled)" `Quick
+            test_nan_prints_without_sign_compiled;
           Alcotest.test_case "--target js Diagnostics: observers, context, location match the interpreter" `Quick
             test_js_diagnostics_observers;
           Alcotest.test_case "unwritable -o path: dirs created, plain error, no ICE (#1181)" `Quick
