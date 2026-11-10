@@ -267,7 +267,8 @@ let rec rename_decls tbl ~root cur (decls : decl list) : decl list =
       TDVariant (List.map (fun v -> { v with var_args = List.map ty v.var_args }) vs)
     | TDRecord fs -> TDRecord (List.map field fs) in
   let handler (h : actor_handler) =
-    { h with ah_params = List.map param h.ah_params; ah_body = ex h.ah_body } in
+    { h with ah_params = List.map param h.ah_params; ah_body = ex h.ah_body;
+             ah_ensures = Option.map ex h.ah_ensures } in
   let child_ty t = match t with
     | TyCon (n, args) ->
       (match resolve tbl ~root cur n.txt with

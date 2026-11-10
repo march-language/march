@@ -6703,6 +6703,8 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
          let v = fresh_var 1 in
          tvars := M.add n.txt v !tvars;
          v)
+    | Ast.TyCon (n, args) when Typecheck_nominal.ref_identity n <> None ->
+      TCon (Option.get (Typecheck_nominal.ref_identity n), List.map lenient_ty args)
     | Ast.TyCon (n, args)  ->
       let args' = List.map lenient_ty args in
       (* Expand a record type name to its structural form, exactly as
@@ -7900,7 +7902,6 @@ let rec check_decl env (d : Ast.decl) : env =
            | _ -> false
       in
       env.current_module = "DistLink"
-      && env.enclosing_package = "DistLink"
       && name.txt = "DownReason"
       && params = []
       && match typedef with
@@ -7911,16 +7912,29 @@ let rec check_decl env (d : Ast.decl) : env =
            && nullary "NodeDown" node_down
          | _ -> false
     in
-    if env.current_module = env.enclosing_package
+    (* Only the entry module's own top-level types collide: TIR unwraps the
+       entry module, so its `DownReason` reaches the backend under the bare
+       name the monitor ABI reserves, while a nested or library module's type
+       is qualified (`Sub.DownReason`) and shadows the built-in harmlessly.
+       [cap_qual_prefix] is "" exactly at the entry module's top level.  (This
+       used to test [current_module = enclosing_package], which never held for
+       user code: the stdlib baseline env leaves [enclosing_package] set to
+       "StdlibBaseline", so the redeclaration slipped through and crashed
+       [Llvm_toplevel.emit_module].) *)
+    if env.cap_qual_prefix = ""
        && (name.txt = "Down" || name.txt = "DownReason")
        && not is_canonical_dist_link_down_reason then begin
       Err.error ~code:Err.Code.reserved_type_name env.errors ~span:name.span
         (Printf.sprintf
-           "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"
+           "Type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared here. Rename it, or declare it inside a nested module."
            name.txt);
       env
     end else
     let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
+    let env1 =
+      let id = Typecheck_nominal.decl_identity name in
+      if id = name.txt then env1
+      else { env1 with types = StrMap.add id (List.length params) env1.types } in
     (match typedef with
      | Ast.TDVariant variants ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -7941,7 +7955,7 @@ let rec check_decl env (d : Ast.decl) : env =
            | None -> (v.var_name.txt, v.var_name.span) :: seen
          ) [] variants in
        List.fold_left (fun e (v : Ast.variant) ->
-           let ci = { ci_type    = name.txt
+           let ci = { ci_type    = Typecheck_nominal.decl_identity name
                     ; ci_params  = param_names
                     ; ci_arg_tys = v.var_args
                     ; ci_module  = env.current_module
@@ -8519,11 +8533,13 @@ let rec check_decl env (d : Ast.decl) : env =
         | Ast.DNeeds (caps, _) ->
           List.map (fun (p, sc) -> (cap_path_of_names p, sc)) caps
         | _ -> []) decls in
+    (* Keyed by the QUALIFIED name only.  [module_caps] above also files a
+       short-name entry for its own lookups, but two modules sharing a short
+       name (`P1.Inner`, a top-level `Inner`) would then collide there and
+       whichever was declared later would judge both.  The host check resolves
+       owners by qualified name. *)
     let module_need_scopes' =
-      let with_qual =
-        (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes in
-      if cap_qname = name.txt then with_qual
-      else (name.txt, inner_need_scopes) :: with_qual
+      (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes
     in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
@@ -9222,7 +9238,8 @@ let rec check_decl env (d : Ast.decl) : env =
                  (Printf.sprintf
                     "The host scope `%s` on `%s` is not valid: %s.\n\
                      hint: write a host, a host and port, or `*.domain`, \
-                     e.g. `needs IO.NetConnect(\"api.example.com\")`."
+                     optionally followed by a path prefix, e.g. \
+                     `needs IO.NetConnect(\"api.example.com/v1/\")`."
                     path cap reason))
           else if snd (March_caps.Host_scope.split_options path) <> []
           then
@@ -9518,11 +9535,17 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
          `Config`).  Returning None falls back to the [fresh_var] placeholder,
          which unifies with anything and imposes no false constraint; the
          callee's own [check_fn] still derives and enforces its real type. *)
+      (match Typecheck_nominal.ref_identity name with
+       | Some id ->
+         (match opt_all (List.map conv args) with
+          | Some args' -> Some (TCon (id, args'))
+          | None -> None)
+       | None ->
       if String.contains name.txt '.' then None
       else
         (match opt_all (List.map conv args) with
          | Some args' -> Some (TCon (name.txt, args'))
-         | None -> None)
+         | None -> None))
     | Ast.TyVar v ->
       (match List.assoc_opt v.txt !tvars with
        | Some t -> Some t
@@ -11817,7 +11840,14 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
   in
   let seen = ref seed in
   List.iter (fun ((q, sp) as site) ->
-      (match List.find_opt (fun (q', _) -> q' <> q && short q' = short q) !seen with
+      (* Two colliding VARIANT types have their own identities
+         ([Typecheck_nominal]), so [from_json]'s dispatch names the right
+         codec: only a pair involving a type without one (a record) is
+         still ambiguous. *)
+      let distinct q q' =
+        Typecheck_nominal.is_identity q && Typecheck_nominal.is_identity q' in
+      (match List.find_opt (fun (q', _) ->
+           q' <> q && short q' = short q && not (distinct q q')) !seen with
        | Some (q', sp') ->
          (* A type inside a generated `<Name>_Msg` module (the message type an
             `@[endpoints] protocol` or actor declares) is named by what
@@ -11856,6 +11886,41 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
        | None -> ());
       seen := !seen @ [site]) own
 
+(** Reject an `alias Path, as: B` whose name [B] is also a module declared in
+    the same scope (`mod B do ... end`).  The interpreter resolved `B.g` to
+    the declared module and the compiled build to the alias target, so one
+    program printed two answers
+    (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md).
+    Stdlib declarations are not checked. *)
+let check_alias_shadows_module errors (decls : Ast.decl list) : unit =
+  let rec walk decls =
+    let mods = List.filter_map (function
+        | Ast.DMod (n, _, _, sp) -> Some (n.Ast.txt, sp)
+        | _ -> None) decls in
+    List.iter (function
+        | Ast.DAlias (ad, sp) when not (Typecheck_builtins.span_is_stdlib sp) ->
+          let short = ad.Ast.alias_name.Ast.txt in
+          (match List.assoc_opt short mods with
+           | Some msp ->
+             let target = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ad.Ast.alias_path) in
+             if target <> short then
+               Err.report errors
+                 { Err.severity = Err.Error; span = ad.Ast.alias_name.Ast.span;
+                   message = Printf.sprintf
+                       "This alias names `%s` as `%s`, but this module also declares a module `%s`.\n\
+                        A reference like `%s.f` could mean either one. Pick a different alias \
+                        name, or rename the module."
+                       target short short short;
+                   labels = [{ Err.lbl_span = msp;
+                               Err.lbl_message = Printf.sprintf "module `%s` is declared here" short }];
+                   notes = [];
+                   code = Err.Code.alias_shadows_module; fix = None }
+           | None -> ())
+        | Ast.DMod (_, _, inner, sp) when not (Typecheck_builtins.span_is_stdlib sp) -> walk inner
+        | _ -> ()) decls
+  in
+  walk decls
+
 (** The [nonexhaustive_match_spans] of the last [check_module_core] run,
     guarded matches included (see [check_exhaustiveness]).  Read only by
     [--reflect-report]'s R5 (lib/refinecheck/refine_reflect.ml): the driver's
@@ -11872,6 +11937,8 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
+  (* Colliding variant types' identities (`A.Note` / `B.Note`). *)
+  Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib m;
   (* Type-variable letters in messages are assigned on first print from a
      process-wide table.  A cold run typechecks the stdlib first and can
      print one of its variables, so the user's first variable came out `b`
@@ -11891,6 +11958,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       | None -> [] in
     let own = collect_json_derive_sites m.Ast.mod_decls in
     check_json_derive_collisions errors ~seed ~own;
+    check_alias_shadows_module errors m.Ast.mod_decls;
     seed @ own
   in
   let type_map = match seed_env with
@@ -11962,7 +12030,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                     signature uses ("expected X but got Mod.X").  The type side
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
-                 let ci = { ci_type = name.txt; ci_params = param_names;
+                 let ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                             ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
@@ -11990,7 +12058,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                  if v.var_vis <> Ast.Public then acc
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
-                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                   let type_ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                                    ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
@@ -12086,7 +12154,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
+               let ci = { ci_type    = Typecheck_nominal.decl_identity name
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt
@@ -12275,6 +12343,9 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     check_deterministic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
+  (* Two-state specs (lib/desugar/two_state.ml): `old(e)` only in a
+     handler's `ensures`. *)
+  March_desugar.Two_state.check errors m.Ast.mod_decls;
   (* Ghost code (lib/desugar/ghost.ml): a ghost value reaches only ghost
      positions, and no linear value is observed by ghost code. *)
   March_desugar.Ghost.check errors m.Ast.mod_decls ~top:m.Ast.mod_name.Ast.txt
@@ -12391,7 +12462,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                     signature uses ("expected X but got Mod.X").  The type side
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
-                 let ci = { ci_type = name.txt; ci_params = param_names;
+                 let ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                             ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
@@ -12419,7 +12490,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                  if v.var_vis <> Ast.Public then acc
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
-                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                   let type_ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                                    ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
@@ -12500,7 +12571,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
+               let ci = { ci_type    = Typecheck_nominal.decl_identity name
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt

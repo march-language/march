@@ -264,11 +264,52 @@ let test_libprobe_in_cas_key () =
   Alcotest.(check bool) ("the second build is not a cache hit\n" ^ none) false
     (contains none "(cached)")
 
+(* The entry path, as written, is part of the source-level key: a build
+   embeds that spelling (a runtime panic's location, a `--test` failure
+   report).  The same source built as `/a/m.march` and then `/b/m.march`
+   was served the first binary, which named /a
+   (specs/progress/2026-11-07-cas-key-omits-entry-path.md).  The same
+   relative spelling from two projects embeds the same text and still shares
+   (B7.3 above). *)
+let panic_src = {|mod B7Panic do
+  needs IO.Console
+  fn f(n : Int) : Int do if n > 0 do panic("boom") else 1 end end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(f(3)))
+  end
+end
+|}
+
+let test_entry_path_in_key () =
+  require_compiler ();
+  with_scratch @@ fun dir ->
+  let home = Filename.concat dir "home" in
+  let mk name =
+    let p = Filename.concat dir name in
+    Unix.mkdir p 0o755;
+    write_file (Filename.concat p "m.march") panic_src;
+    p in
+  let a = mk "project_a" and b = mk "project_b" in
+  let _ = compile ~home ~dir:a ~log:(Filename.concat dir "a.log") (Filename.concat a "m.march") in
+  let out_a = run_out a in
+  let warm = compile ~home ~extra:"--timings" ~dir:b ~log:(Filename.concat dir "b.log")
+      (Filename.concat b "m.march") in
+  let out_b = run_out b in
+  Alcotest.(check bool) ("project A's panic names A's file\n" ^ out_a) true
+    (contains out_a (Filename.concat a "m.march"));
+  Alcotest.(check bool) ("B, built at another absolute path, is not a source-level hit\n" ^ warm)
+    true (outcome warm <> Source_hit);
+  Alcotest.(check bool) ("B's panic names B's file, not A's\n" ^ out_b) true
+    (contains out_b (Filename.concat b "m.march")
+     && not (contains out_b (Filename.concat a "m.march")))
+
 let tests =
   [ Alcotest.test_case "Stage 0: the host library probe is part of the CAS key" `Slow
       test_libprobe_in_cas_key;
     Alcotest.test_case "B7.3: a build writes through to ~/.march/cas; another project hits it" `Slow
       test_global_store_write_through;
+    Alcotest.test_case "the entry path as written is part of the source-level key" `Slow
+      test_entry_path_in_key;
     Alcotest.test_case "B7.1: a cache hit replays the build's warnings" `Slow
       test_replay_diagnostics_on_hit;
     Alcotest.test_case "B7.2: editing an unloaded sibling is still a source-level hit" `Slow

@@ -57,7 +57,9 @@ val value_display : value -> string
 val show_dispatch : value -> string
 val type_name_of_value : value -> string option
 val ctor_qualified_type_tbl : (string, string) Hashtbl.t
+val ambiguous_ctor_tags : (string, unit) Hashtbl.t
 val dispatch_type_name_of_value : value -> string option
+val find_impl_for : string -> value -> string -> value option
 val tuple_compare : value list -> value list -> int option
 val type_tag_of : value -> string option
 

@@ -1405,7 +1405,11 @@ Functions with several parameters, and functions that return a list or a
   and a `{ x, y }` pattern in a `match` or a `let` all translate. Records are
   matched to their declared type by their field names, so a function over a
   record is reflected only when exactly one declared record has those fields,
-  with those types, and that record takes no type parameters.
+  with those types, and that record takes no type parameters. A `String` or
+  `Float` field holds a string or float value as described above, in a record
+  or a variant (`type N = { a : Int, s : String }`,
+  `type Tag = Named(String, Int)`), so `un(mk(x)) == x` and `label(mk(x)) == "v2"`
+  are proved for `fn mk(x : Int) : N do { a: x, s: "v2" } end`.
 - **A tuple** works the same way: `(a, b)` builds one, and a `(a, b)` pattern in a
   `match` or a `let` takes one apart. A tuple or record literal may be passed to
   a reflected function in a predicate: `sw((5, 2)) == 3`, `px({ x: 1, y: 2 }) == 3`.
@@ -2842,8 +2846,10 @@ equals no value, itself included.
   is silently skipped, including for an argument that clearly violates it.
   Arithmetic over float **literals only** (`0.0 -. 1.0`) is different: it is
   folded to a constant before reflection and is fully checked.
-- **Float record fields and ADT payloads are opaque.** A `Float` *parameter* or
-  *return* is modelled; a `Float` inside a record or constructor is not.
+- **A `Float` inside a record or constructor is only a value.** Reflection and
+  lemmas carry it through (`unf(mkf(x)) == x`), but a record literal holding a
+  float is not built in a call-site query: the field stays an unknown value
+  there, so only the record's other fields are checked.
 - **No special values.** There is no `is_nan` or `is_finite` vocabulary, so a
   predicate cannot mention them. NaN is nevertheless modelled correctly inside
   the solver, which is what keeps the encoding from reporting correct code.
@@ -5863,6 +5869,12 @@ position into a real contract, obligation and assumption together, is
   state's refined fields are obliged at `init` and at every handler's result
   (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
   of the incoming `state` in every handler body.
+- (Closed 2026-11-09.) Two-state handler guarantees: `on Msg(…) ensures P do`,
+  where `state` and the bare fields in `P` are the returned state and `old(e)`
+  reads the incoming one. Proved per handler as the `@invariant` is (the
+  invariant assumed of the incoming state), a violation shows both states, and
+  each is a ledger row `<Actor>.<Msg>.ensures` listed by `--guarantees`. See
+  [Handler guarantees](actors.md#handler-guarantees-ensures-and-old).
 - (Closed 2026-11-08.) An actor's `@invariant`: an inductive invariant too,
   over its bare field names (or `state.f`), and it may call the program's own
   functions, unfolded as in any contract. The state `init` builds must
@@ -6932,10 +6944,10 @@ edges:
   `{Bool | _ == true}`, `{Bool | _ != false}` and the connectives `&& || not`
   are checked; the bare-binder spelling `{Bool | not _}` is a **parse error**,
   so write `{Bool | _ == false}` instead.
-- **`Float` record fields and ADT payloads are opaque.** A `Float` *parameter*
-  or *return* is checked; a `Float` sitting inside a record or a constructor is
-  not reflected, and a record with such a field is skipped at the call site
-  rather than half-modelled.
+- **A `Float` inside a record or constructor is only a value.** Reflected
+  functions and lemmas carry it through; at a call site a record literal's
+  float field is an unknown value, so the record's other fields are still
+  checked but nothing is concluded about the float.
 - **There is no special-value vocabulary.** No `is_nan`, no `is_finite`. You
   cannot write a predicate expressing "not NaN"; see
   [Float Refinements](#float-refinements) for why NaN nevertheless never causes

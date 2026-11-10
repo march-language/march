@@ -8065,7 +8065,7 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
          Fun.protect ~finally:(fun () -> Refine_post.lemma_prefix := saved_prefix) @@ fun () ->
          with_post_subject
            { ps_headline = headline; ps_requires = "The invariant requires"; ps_what = what;
-             ps_pred = shown; ps_note = note }
+             ps_pred = shown; ps_note = note; ps_after = None; ps_rename = [] }
            (fun () ->
              with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
                  with_post_lookup (postcond_of ctx defs) (fun () ->
@@ -8099,6 +8099,168 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
              (as_fn ~name:(a ^ "." ^ m) ~sp (state_p :: ps) h.A.ah_body))
          ad.A.actor_handlers
      | _ -> ());
+    (* (5) Handler guarantees, the two-state specs
+       (todo 2026-11-06-two-state-specs; specs/lang/actors.md, "Handler
+       guarantees").  `on Deposit(n) ensures state.balance ==
+       old(state.balance) + n do … end` is stated exactly as (4) states the
+       invariant: the handler as a function from the incoming `state` (and
+       its parameters) to the state it returns, now under
+       `{after : <Actor> | ens}`, and proved by [check_fn_post_verdict].  In
+       the guarantee, `state` and the bare field names read the RETURNED
+       state, and `old(e)` reads [e] of the incoming one, the handler's
+       `state` parameter.  The `@invariant`, when there is one, is assumed of
+       the incoming state, the same assumption (4) makes; a parameter of the
+       message shadows a field of the same name.  Each guarantee is its own
+       ledger row, `<Actor>.<Msg>.ensures`, beside (4)'s `<Actor>.<Msg>`. *)
+    (if not !calls_only_walk then
+       let a = aname.A.txt in
+       let nm sp s = { A.txt = s; A.span = sp } in
+       let fields = List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state in
+       let rec spec ?(ren = []) ~params ~cur ~before (e : A.expr) : A.expr =
+         let go = spec ~ren ~params ~cur ~before in
+         match e with
+         | A.EApp (A.EVar o, [ x ], _) when o.A.txt = "old" -> spec ~ren ~params ~cur:before ~before x
+         | A.EVar v when List.mem_assoc v.A.txt ren -> A.EVar { v with A.txt = List.assoc v.A.txt ren }
+         | A.EVar v when v.A.txt = "state" -> A.EVar { v with A.txt = cur }
+         | A.EVar v when List.mem v.A.txt fields && not (List.mem v.A.txt params) ->
+           A.EField (A.EVar { v with A.txt = cur }, v, v.A.span)
+         | A.EApp ((A.EVar _ as hd), args, asp) -> A.EApp (hd, List.map go args, asp)
+         | A.EApp (f, args, asp) -> A.EApp (go f, List.map go args, asp)
+         | A.EField (r, n, fsp) -> A.EField (go r, n, fsp)
+         | A.ETuple (es, tsp) -> A.ETuple (List.map go es, tsp)
+         | A.ECon (c, es, csp) -> A.ECon (c, List.map go es, csp)
+         | A.EAnnot (x, t, asp) -> A.EAnnot (go x, t, asp)
+         | A.EIf (c, t, f, isp) -> A.EIf (go c, go t, go f, isp)
+         | _ -> e
+       in
+       (* The witness decoder reads the state record by its fields. *)
+       if not (Hashtbl.mem Witness.record_fields a) then
+         Hashtbl.replace Witness.record_fields a
+           (List.map (fun (f : A.field) -> (f.A.fld_name.A.txt, f.A.fld_ty)) ad.A.actor_state);
+       (* The incoming state's assumption: the invariant, read of `state`. *)
+       let incoming sp =
+         match ad.A.actor_invariant with
+         | None ->
+           (* Stated as a (trivial) record precondition all the same: a
+              model over a refined record parameter is a counterexample
+              ([check_post_stage]'s [scope_has_record]); over a bare one
+              only an all-inputs refutation is. *)
+           A.TyRefine (A.TyCon (nm sp a, []), Some (nm sp "s"), A.ELit (A.LitBool true, sp))
+         | Some inv ->
+           A.TyRefine (A.TyCon (nm sp a, []), Some (nm sp "s"),
+                       spec ~params:[] ~cur:"s" ~before:"s" inv)
+       in
+       List.iter
+         (fun (h : A.actor_handler) ->
+           match h.A.ah_ensures with
+           | None -> ()
+           | Some ens ->
+             let m = h.A.ah_msg.A.txt in
+             let enforced =
+               Hashtbl.mem !handler_sigs m
+               || Hashtbl.mem !handler_sigs (Refine_scope.handler_key a m) in
+             let ps = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
+             let params = List.map (fun (p : A.param) -> p.A.param_name.A.txt) h.A.ah_params in
+             (* The returned state's binder: any name the guarantee cannot
+                mean (not a parameter, a field, or `state`). *)
+             let rec fresh i =
+               let b = if i = 0 then "after" else Printf.sprintf "after%d" i in
+               if List.mem b params || List.mem b fields || b = "state" then fresh (i + 1) else b
+             in
+             let after = fresh 0 in
+             let sp = h.A.ah_msg.A.span in
+             let ens_sp = March_typecheck.Typecheck.span_of_expr ens in
+             (* A parameter named like a field: in a refinement over the
+                state record a bare field name reads the field, so the
+                parameter is renamed apart (`count` -> `count_arg`), in the
+                guarantee and, by a `let`, at the head of the body. *)
+             let taken = after :: "state" :: params @ fields in
+             let ren =
+               List.filter_map
+                 (fun p ->
+                   if not (List.mem p fields) then None
+                   else
+                     let rec pick i =
+                       let c = if i = 0 then p ^ "_arg" else Printf.sprintf "%s_arg%d" p i in
+                       if List.mem c taken then pick (i + 1) else c
+                     in
+                     Some (p, pick 0))
+                 params
+             in
+             let ps =
+               List.map
+                 (fun (p : A.param) ->
+                   match List.assoc_opt p.A.param_name.A.txt ren with
+                   | Some n -> { p with A.param_name = { p.A.param_name with A.txt = n } }
+                   | None -> p)
+                 ps
+             in
+             let body =
+               if ren = [] then h.A.ah_body
+               else
+                 A.EBlock
+                   (List.map
+                      (fun (o, n) ->
+                        A.ELet
+                          ( { A.bind_pat = A.PatVar (nm sp o); bind_ty = None; bind_lin = A.Unrestricted;
+                              bind_expr = A.EVar (nm sp n) },
+                            sp ))
+                      ren
+                    @ [ h.A.ah_body ],
+                    sp)
+             in
+             let pred = spec ~ren ~params ~cur:after ~before:"state" ens in
+             let state_p =
+               { A.param_name = nm sp "state"; param_ty = Some (incoming sp);
+                 param_lin = A.Unrestricted } in
+             let fd : A.fn_def =
+               { A.fn_name = nm ens_sp (a ^ "." ^ m ^ ".ensures"); fn_vis = A.Private; fn_doc = None;
+                 fn_attrs = [];
+                 fn_ret_ty = Some (A.TyRefine (A.TyCon (nm ens_sp a, []), Some (nm ens_sp after), pred));
+                 fn_clauses =
+                   [ { A.fc_params = List.map (fun p -> A.FPNamed p) (state_p :: ps); fc_guard = None;
+                       fc_body = body; fc_span = ens_sp; fc_params_span = sp } ];
+                 fn_bounds = []; fn_attr_args = []; fn_needs = None }
+             in
+             let shown = pred_str ens in
+             (* The returned state, for the message: the counterexample's
+                incoming state and arguments run through the body by the
+                interpreter, uncharged (display only). *)
+             let after_of model =
+               let typed =
+                 ("state", A.TyCon (nm sp a, []))
+                 :: List.filter_map
+                      (fun (p : A.param) -> Option.map (fun t -> (p.A.param_name.A.txt, t)) p.A.param_ty)
+                      ps
+               in
+               if List.length typed <> 1 + List.length ps then None
+               else
+                 match Witness.decode_model ~params:typed ~model with
+                 | None -> None
+                 | Some binds ->
+                   (match Witness.uncharged (fun () -> Witness.eval_classified ~bindings:binds body) with
+                    | Witness.C_ret v -> Witness.render_value v
+                    | _ -> None)
+             in
+             let saved_prefix = !Refine_post.lemma_prefix in
+             Refine_post.lemma_prefix := ctx.modpath;
+             Fun.protect ~finally:(fun () -> Refine_post.lemma_prefix := saved_prefix) @@ fun () ->
+             with_post_subject
+               { ps_headline =
+                   Printf.sprintf "`%s`'s handler `%s` does not guarantee its `ensures`." a m;
+                 ps_requires = "The handler guarantees";
+                 ps_what = Printf.sprintf "`%s`'s guarantee `%s` of handler `%s`" a shown m;
+                 ps_pred = shown;
+                 ps_note =
+                   "In `ensures`, `state` is the state the handler returns and `old(e)` is `e` \
+                    of the state the message arrived with.";
+                 ps_after = Some after_of;
+                 ps_rename = List.map (fun (o, n) -> (n, o)) ren }
+               (fun () ->
+                 with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+                     with_post_lookup (postcond_of ctx defs) (fun () ->
+                         ignore (check_fn_post_verdict ~root errctx fd)))))
+         ad.A.actor_handlers);
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)
     Option.iter visit_expr ad.A.actor_invariant

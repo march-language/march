@@ -23,6 +23,13 @@
 module Ast = March_ast.Ast
 module Typecheck = March_typecheck.Typecheck
 
+(** A nominal record type's declared type parameters, in order, filled by
+    [Lower_decls.lower_type_def].  [Tir.TDRecord] carries no parameter list,
+    and a record's field order is not its parameter order, so the
+    structural-equality generator ([Llvm_eq]) reads this to instantiate a
+    generic record named by a [TCon] (`Cell(String)`). *)
+let record_type_params : (string, string list) Hashtbl.t = Hashtbl.create 16
+
 (** Default type used when no annotation is available. A placeholder
     that will be resolved during monomorphization. *)
 let unknown_ty = Tir.TVar "_"
@@ -75,7 +82,10 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
   | Typecheck.TCon ("Bool",   []) -> Tir.TBool
   | Typecheck.TCon ("String", []) -> Tir.TString
   | Typecheck.TCon ("Unit",   []) -> Tir.TUnit
-  | Typecheck.TCon (name, args)   -> Tir.TCon (name, List.map convert_ty args)
+  | Typecheck.TCon (name, args)   ->
+    (* A colliding variant's typecheck identity (`A.Note`) is the bare name
+       to every backend (see [March_typecheck.Typecheck_nominal]). *)
+    Tir.TCon (March_typecheck.Typecheck_nominal.bare name, List.map convert_ty args)
   | Typecheck.TArrow _ as t ->
     let rec collect acc = function
       | Typecheck.TArrow (a, b) -> collect (convert_ty a :: acc) (Typecheck.repr b)

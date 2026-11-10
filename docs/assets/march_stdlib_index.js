@@ -573,6 +573,7 @@ window.marchModuleIndex = {
    "file": "http.march",
    "unavailable": null,
    "uses": [
+    "List",
     "Result",
     "Uri"
    ]
@@ -592,7 +593,6 @@ window.marchModuleIndex = {
    "uses": [
     "Http",
     "HttpTransport",
-    "List",
     "Result"
    ]
   },

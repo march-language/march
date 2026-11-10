@@ -182,6 +182,30 @@ let js_string_lit s =
 
 (* ── Atom emission ───────────────────────────────────────────────── *)
 
+(** A JS expression for the double [f], exact to the bit (#1169).
+    The obvious [string_of_float] is wrong twice: it is [%.12g], so a literal
+    with more significant digits (Math.pi, or anything opt.fold computed)
+    ran as a different double, and for a non-finite value it gives [inf] /
+    [nan], which are not JS.  Finite values use the fewest digits from 12 to
+    17 that parse back to the same bits ([%.17g] always does); starting at 12
+    keeps the digits of every literal that already round-tripped.  The sign
+    of -0.0 survives in the text ("-0.0").  [-Infinity] is parenthesized so
+    it stays one operand next to a binary [-]. *)
+let js_float_lit (f : float) : string =
+  if Float.is_nan f then "NaN"
+  else if f = Float.infinity then "Infinity"
+  else if f = Float.neg_infinity then "(-Infinity)"
+  else begin
+    let bits = Int64.bits_of_float f in
+    let rec go p =
+      let s = Printf.sprintf "%.*g" p f in
+      if p >= 17 || Int64.equal (Int64.bits_of_float (float_of_string s)) bits
+      then s else go (p + 1)
+    in
+    let s = go 12 in
+    if String.contains s '.' || String.contains s 'e' then s else s ^ ".0"
+  end
+
 let emit_literal ctx lit =
   let open March_ast.Ast in
   match lit with
@@ -192,9 +216,7 @@ let emit_literal ctx lit =
     emit ctx (Printf.sprintf "march_ck_lit(%s, %s)"
       (js_string_lit (string_of_int n)) (js_string_lit ctx.cur_loc))
   | LitInt n    -> emit ctx (string_of_int n)
-  | LitFloat f  ->
-    let s = string_of_float f in
-    emit ctx (if String.contains s '.' || String.contains s 'e' then s else s ^ ".0")
+  | LitFloat f  -> emit ctx (js_float_lit f)
   | LitBool b   -> emit ctx (if b then "true" else "false")
   | LitString s -> emit ctx (js_string_lit s)
   | LitAtom a   -> emit ctx (Printf.sprintf "\":%s\"" a)
@@ -539,14 +561,14 @@ let literal_tag_js br_tag =
   | "False" | "false" -> "false"
   | _ when br_tag <> "" && br_tag.[0] = '#' ->
     (* Decode the "%h" hex-float tag back to the exact double (same decode as
-       llvm_emit.ml's emit_case float-chain), then re-encode with "%.17g" — a
-       plain decimal JS number literal.  JS numbers are IEEE-754 doubles too,
-       so "%.17g" (which always carries enough significant digits to
-       round-trip a double exactly) parses back to the identical bit pattern
-       in both OCaml and JS; unlike the hex form, it's also valid JS syntax
-       (JS numeric literals don't support C99 hex-float notation). *)
+       llvm_emit.ml's emit_case float-chain), then re-encode with
+       [js_float_lit] — a plain decimal JS number literal that parses back to
+       the identical bit pattern (JS numbers are IEEE-754 doubles too), or
+       Infinity / (-Infinity) for a literal that overflowed; unlike the hex
+       form, it's also valid JS syntax (JS numeric literals don't support
+       C99 hex-float notation). *)
     let hex = String.sub br_tag 1 (String.length br_tag - 1) in
-    Printf.sprintf "%.17g" (float_of_string hex)
+    js_float_lit (float_of_string hex)
   | _ when br_tag <> "" && (br_tag.[0] = '-'
                              || (br_tag.[0] >= '0' && br_tag.[0] <= '9')) ->
     br_tag  (* numeric literal — emit as-is *)

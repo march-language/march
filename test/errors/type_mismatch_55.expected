@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_55.march
+
+expected `B.Note` but got `A.Note`. [type_mismatch]
+
+24 |     print_line(B.describe(A.make()))
+                               ^^^^^^^^
+
+    This is argument #1 of a function call.
+
+    the expected type comes from here:
+
+24 |     print_line(B.describe(A.make()))
+                    ^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

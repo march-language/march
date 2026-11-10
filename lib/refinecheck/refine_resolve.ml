@@ -496,10 +496,10 @@ let rec term_fits_sort (sort : Smt.sort) (t : Smt.term) : bool =
   let is_ctor_app t = ctor_view t <> None in
   match sort with
   | Smt.SInt | Smt.SBool -> not (is_ctor_app t)
-  (* Float RECORD FIELDS are out of scope: [smt_sort_of_field] never produces
-     `SFloat` (a `Float` field is opaque `Elem`), so this arm is unreachable —
-     and if a later change makes it reachable, refusing the fit makes the record
-     unreflectable and the call skipped, which is the safe direction. *)
+  (* A Float RECORD FIELD (its sort since 2026-11-09; `Elem` before): no
+     term fits, so a literal is not reflected here and [opaque] decides what
+     the field becomes.  Refusing the fit is the safe direction: the record is
+     unreflectable rather than mis-sorted. *)
   | Smt.SFloat -> false
   (* No record field is a set: a set-sorted field never arises from
      [smt_sort_of_field], so nothing fits it. *)

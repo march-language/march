@@ -21,6 +21,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
+  methods(get))` limits a module to a path prefix on a host, matched by whole segment
+  (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
+  counts). A path with `.`/`..` segments, `//`, a backslash or a percent-encoded `.`, `/`
+  or backslash is refused rather than normalized. Literal paths are checked at compile time;
+  every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
+  `HttpTransport.Refused`). The scope matcher is now public in `Http`
+  (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
+- **Handler guarantees: `on Msg(…) ensures P do … end`.** A handler can state how one message
+  changes the actor's state, with `old(e)` for the state the message arrived with:
+  `on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do`. Each
+  guarantee is proved per handler on every build (the `@invariant` assumed of the incoming state);
+  a handler that can break it is an error showing the incoming state, the arguments and the state
+  the handler returns, and `march --check --guarantees` lists each one beside the invariant.
+  `old` anywhere else in a refinement is the new `old_misuse` error; `ensures` and `old` remain
+  ordinary names outside a handler header and its guarantee.
 - **HTTPS for `HttpServer`.** `HttpServer.tls(server, TlsFiles(cert, key))` (or `TlsPem`)
   serves HTTP/1.1 over TLS on both server modes, with `wss://` through the unchanged
   `WebSocket` API. Certificates rotate without a restart: `TlsFiles` are re-read every
@@ -34,6 +50,14 @@ git log is authoritative for exact commits.
   compiled build. Deployment notes: `specs/features/http-and-networking.md`, and
   `examples/https_hello.march`.
 
+- **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
+  methods(get))` limits a module to a path prefix on a host, matched by whole segment
+  (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
+  counts). A path with `.`/`..` segments, `//`, a backslash or a percent-encoded `.`, `/`
+  or backslash is refused rather than normalized. Literal paths are checked at compile time;
+  every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
+  `HttpTransport.Refused`). The scope matcher is now public in `Http`
+  (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
 - **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
   Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
   law, that the comparator is a strict total order agreeing with `==`. A module can say what
@@ -457,6 +481,13 @@ git log is authoritative for exact commits.
   conversions so they keep working on such values. The wasm runtime traps on them, and gains the
   missing `march_float_to_int`. See `specs/lang/type-system.md`, "Converting a Float to an Int".
 
+- **Two variant types with the same short name in different modules are two types.** `A.Note`
+  and `B.Note` used to be one type to the typechecker, so a value of one was accepted where the
+  other was expected and the program then failed at run time. Passing one where the other is
+  expected is now a type error (`expected `B.Note` but got `A.Note``); a program that mixed them
+  needs fixing. Both may now `derive Json`, and each `from_json` decodes with its own type's codec.
+  Two same-short-name record types that both derive Json are still rejected. A user type named
+  like a built-in or stdlib type is still the same type as it (not yet fixed).
 - **`HttpServer.idle_timeout` is enforced on both server modes,** and requests have
   deadlines. The event loop ignored `idle_timeout` and the thread pool used a fixed 10 s;
   both now close a keep-alive connection after the configured value (60 s by default). A
@@ -814,6 +845,28 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
+  When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
+  interpreter ran whichever impl registered last on both types' values; compiled code was right.
+- **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
+  was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
+  through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name
+  the actor or function you wrote (``handler `Go` of actor `Fetcher` ``), not compiler
+  names like `Fetcher_spawn` or `Fetch$B.T.fetch`, and two modules sharing a short name
+  (`P1.Inner`, `Inner`) keep their own host scopes whatever order they are declared in.
+- **A user module named like a stdlib module is charged for its own capabilities.** The
+  capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
+  `needs` to its callers; it now looks at where the module comes from, not its name.
+- **`--target js` Float literals are the same double as native** (#1169). The JS emitter
+  printed a `Float` literal with 12 significant digits, so `3.141592653589793`, `Math.pi()`,
+  `Math.tau()`, `Math.e()` and values `opt.fold` computed (`1.0 /. 240.0`) ran as a different
+  double with no warning; a folded infinity or NaN came out as `inf.0` / `nan.0` and the module
+  failed to load with a `SyntaxError`. Literals now use the fewest digits (12 to 17) that read
+  back as the same bits, and `Infinity`, `(-Infinity)` and `NaN` for the non-finite values.
+- **`1.0 /. 0.0` stops with "division by zero" in a default compiled build.** The constant
+  folder computed a `/.` whose divisor was a literal `0.0` or `-0.0`, so `--compile` printed
+  `inf` where the interpreter and an unoptimised build stop. It now leaves the division to
+  run time. (`--target js` still gives `Infinity` for any `/.` by zero.)
 - **`ClusterAuth.verify` compares HMAC proofs in constant time, and `DataFrame.to_html` escapes
   every special character.** `verify` used `==`, whose running time leaks how much of a forged
   shared-secret proof was right; it now uses `Crypto.secure_compare`. `to_html`'s cell and header
@@ -823,6 +876,43 @@ git log is authoritative for exact commits.
 - **The event-loop HTTP server no longer drops pipelined requests** that arrive while a large
   response is still being written; they are served once the write finishes.
 
+- **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
+  was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
+  through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name
+  the actor or function you wrote (``handler `Go` of actor `Fetcher` ``), not compiler
+  names like `Fetcher_spawn` or `Fetch$B.T.fetch`, and two modules sharing a short name
+  (`P1.Inner`, `Inner`) keep their own host scopes whatever order they are declared in.
+- **A user module named like a stdlib module is charged for its own capabilities.** The
+  capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
+  `needs` to its callers; it now looks at where the module comes from, not its name.
+- **Redeclaring `type DownReason` or `type Down` is an error, not a compiler crash.** These
+  names belong to the local-monitor runtime. A top-level declaration in your entry module was
+  accepted and then crashed `--compile` with an internal compiler error; it is now reported as
+  `reserved_type_name`. A nested module may still declare its own `DownReason`.
+- **Interpreter-mode FFI no longer needs `/opt/homebrew/lib/libblake3.a`.** Release binaries
+  linked the runtime library against the libblake3 found on the machine that built them, so on
+  a Mac without that file every interpreted program calling project FFI failed with "failed to
+  compile runtime .so". The runtime now uses the BLAKE3 implementation bundled with March, as
+  compiled programs already did.
+- **`not p(n)` negates.** `not` followed directly by an operand parsed as two statements, a
+  discarded `not` and the operand, so `else not p(n) end` returned `p(n)` un-negated. `not x` is now
+  the prefix `!x`; `not(x)` is unchanged.
+- **The build cache no longer serves a binary built from another path.** Compiling the same
+  source as `/a/m.march` and then `/b/m.march` reused the first binary, whose panic locations
+  and `--test` failure reports named `/a/m.march`. The entry path as written is now part of the
+  cache key.
+- **Compiled `==` on a newtype over a generic record compares the record.** For
+  `type Wrap(a) = Wrap(Cell(a))` with `Cell` a record, compiled code compared the two `Cell`
+  pointers, so equal values compared unequal; the interpreter was right.
+- **A module's own function beats a later `use M.*` in the interpreter too.** With `fn f`
+  declared before `use M.*` (where `M` also has an `f`), interpreted code called `M.f` and
+  compiled code the module's own `f`; both now call the module's own, as the docs say.
+- **`alias M, as: B` next to a declared `mod B` is a compile error** (`alias_shadows_module`).
+  `B.f` meant the declared module interpreted and the alias target compiled.
+- **Lemmas over a record or variant with a `String` or `Float` field are checked.** Every
+  predicate over such a type (`un(mk(x)) == x` for `type N = { a : Int, s : String }`) was
+  skipped as unreflectable, so an actor whose state held a String could not prove its
+  rollback round trip. The field now holds a string or float value, as a parameter does.
 - **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
   of a module whose names the checker cannot list counted against every ghost function in the
   program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its

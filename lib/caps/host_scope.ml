@@ -1,6 +1,6 @@
 (* Host scopes on IO.NetConnect.  See host_scope.mli. *)
 
-type pattern = { host : string; wildcard : bool; port : int option }
+type pattern = { host : string; wildcard : bool; port : int option; path : string list option }
 type decl = { patterns : pattern list; no_redirects : bool; methods : string list option }
 
 let http_methods = [ "get"; "head"; "post"; "put"; "patch"; "delete"; "options" ]
@@ -39,13 +39,102 @@ let valid_ipv6_body (b : string) : bool =
           is_digit c || (c >= 'a' && c <= 'f') || c = ':' || c = '.')
        b
 
+(* ── Paths ─────────────────────────────────────────────────────────── *)
+
+(* The path part of a request, without query or fragment. *)
+let strip_query (p : string) : string =
+  let cut c s = match String.index_opt s c with Some i -> String.sub s 0 i | None -> s in
+  cut '#' (cut '?' p)
+
+(* A request path the guard will judge at all.  An ALLOWLIST, not a
+   denylist: only RFC 3986 path characters (no `;`, no `?`, no `#`), and a
+   `%` must be a well-formed escape that does not decode to `.`, `/`, `\`,
+   `%` (double encoding) or a control character.  Then no `//` and no `.` or
+   `..` segment.  Refused, not normalized: a server may resolve these
+   differently from us, and CR/LF/space would let a path smuggle a second
+   request onto the wire.  Must agree with `Http.scope_path_ok`. *)
+let path_char c =
+  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || is_digit c
+  || String.contains "-._~!$&'()*+,=:@/" c
+
+let hex_ok (h : string) : bool =
+  let hexd c = is_digit c || (c >= 'a' && c <= 'f') in
+  String.length h = 2
+  && hexd h.[0] && hexd h.[1]
+  && h.[0] <> '0' && h.[0] <> '1'
+  && not (List.mem h [ "2e"; "2f"; "5c"; "25"; "7f" ])
+
+let path_ok (p : string) : bool =
+  let n = String.length p in
+  let rec chars i =
+    if i >= n then true
+    else if p.[i] = '%' then
+      i + 2 <= n - 1 && hex_ok (String.lowercase_ascii (String.sub p (i + 1) 2))
+      && chars (i + 3)
+    else path_char p.[i] && chars (i + 1)
+  in
+  n > 0 && p.[0] = '/'
+  && (not (contains p "//"))
+  && chars 0
+  && List.for_all (fun seg -> seg <> "." && seg <> "..") (String.split_on_char '/' p)
+
+let path_segments (p : string) : string list =
+  List.filter (fun s -> s <> "") (String.split_on_char '/' (strip_query p))
+
+let path_within ~(prefix : string list) (p : string) : bool =
+  let rec go pre segs =
+    match (pre, segs) with
+    | [], _ -> true
+    | _, [] -> false
+    | a :: pt, b :: st -> a = b && go pt st
+  in
+  go prefix (path_segments p)
+
+(* A path scope as written: `/v1/weather/`.  Only unreserved characters, so
+   it can never be read two ways (and never collides with the spec string's
+   `,` `@` `+` `!` separators). *)
+let parse_scope_path (p : string) : (string list, string) result =
+  let seg_char c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || is_digit c
+    || c = '-' || c = '_' || c = '.' || c = '~'
+  in
+  let parts = String.split_on_char '/' p in
+  (* p starts with '/', so the first part is ""; a trailing '/' gives a last "". *)
+  let inner = match parts with "" :: rest -> rest | l -> l in
+  let inner =
+    match List.rev inner with "" :: r -> List.rev r | _ -> inner
+  in
+  match List.find_opt (fun seg -> seg = "" || seg = "." || seg = ".." || not (String.for_all seg_char seg)) inner with
+  | Some "" -> Error "a path scope cannot contain `//`"
+  | Some seg when seg = "." || seg = ".." ->
+    Error (Printf.sprintf "a path scope cannot contain a `%s` segment" seg)
+  | Some seg ->
+    Error
+      (Printf.sprintf
+         "the path segment `%s` may contain only letters, digits, `-`, `_`, `.` and \
+          `~` (no `%%`, `?`, `#` or `\\`)"
+         seg)
+  | None -> Ok inner
+
 let parse_pattern (raw : string) : (pattern, string) result =
-  let s = String.lowercase_ascii raw in
-  if s = "" then Error "a host scope cannot be empty"
-  else if contains s "://" then
+  if raw = "" then Error "a host scope cannot be empty"
+  else if contains raw "://" then
     Error "a host scope names a host, not a URL: drop the scheme (`https://`)"
-  else if String.contains s '/' then
-    Error "a host scope names a host, not a URL: drop the path"
+  else
+  (* The path starts at the first '/'; it keeps its case (paths are
+     case-sensitive), the host part is lowercased. *)
+  let host_raw, path_r =
+    match String.index_opt raw '/' with
+    | None -> (raw, Ok None)
+    | Some i ->
+      ( String.sub raw 0 i,
+        Result.map (fun x -> Some x) (parse_scope_path (String.sub raw i (String.length raw - i))) )
+  in
+  match path_r with
+  | Error e -> Error e
+  | Ok path ->
+  let s = String.lowercase_ascii host_raw in
+  if s = "" then Error "a host scope needs a host before its path"
   else if String.contains s '@' then
     Error "a host scope cannot carry userinfo (`user@`)"
   else if String.exists (fun c -> Char.code c >= 0x80) s then
@@ -86,7 +175,7 @@ let parse_pattern (raw : string) : (pattern, string) result =
         let n = String.length host_part in
         if n >= 2 && host_part.[n - 1] = ']'
            && valid_ipv6_body (String.sub host_part 1 (n - 2))
-        then Ok { host = host_part; wildcard = false; port }
+        then Ok { host = host_part; wildcard = false; port; path }
         else Error (Printf.sprintf "`%s` is not an IPv6 literal" host_part)
       else
         let wildcard, name =
@@ -103,12 +192,16 @@ let parse_pattern (raw : string) : (pattern, string) result =
                "`%s` is not a host name: labels are letters, digits and `-`, \
                 separated by single dots"
                host_part)
-        else Ok { host = name; wildcard; port }
+        else Ok { host = name; wildcard; port; path }
 
 let pattern_to_string (p : pattern) : string =
   (if p.wildcard then "*." else "")
   ^ p.host
-  ^ match p.port with None -> "" | Some n -> ":" ^ string_of_int n
+  ^ (match p.port with None -> "" | Some n -> ":" ^ string_of_int n)
+  ^ match p.path with
+    | None -> ""
+    | Some [] -> "/"
+    | Some segs -> "/" ^ String.concat "/" segs ^ "/"
 
 let is_option_text (o : string) : bool =
   let word w = w <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') w in
@@ -195,8 +288,39 @@ let permits_method (ds : decl list) ~(host : string) ~(port : int) ~(meth : stri
           && match d.methods with None -> true | Some ms -> List.mem meth ms)
        ds
 
+let method_ok d meth =
+  match (meth, d.methods) with
+  | None, _ | _, None -> true
+  | Some m, Some ms -> List.mem m ms
+
+let path_admits (p : pattern) (path : string option) =
+  match (p.path, path) with
+  | None, _ -> true
+  | Some _, None -> false
+  | Some segs, Some pth -> path_ok pth && path_within ~prefix:segs pth
+
+let permits_request (ds : decl list) ~(host : string) ~(port : int) ~(meth : string option)
+    ~(path : string option) : bool =
+  ds = []
+  || List.exists
+       (fun d ->
+          method_ok d meth
+          && (d.patterns = []
+              || List.exists (fun p -> matches p ~host ~port && path_admits p path) d.patterns))
+       ds
+
+let permits_host_ignoring_path (ds : decl list) ~(host : string) ~(port : int)
+    ~(meth : string option) : bool =
+  ds = [] || List.exists (fun d -> method_ok d meth && decl_covers d ~host ~port) ds
+
 let permits_raw (ds : decl list) ~(host : string) ~(port : int) : bool =
-  ds = [] || List.exists (fun d -> d.methods = None && decl_covers d ~host ~port) ds
+  ds = []
+  || List.exists
+       (fun d ->
+          d.methods = None
+          && (d.patterns = []
+              || List.exists (fun p -> p.path = None && matches p ~host ~port) d.patterns))
+       ds
 
 let forbids_redirects (ds : decl list) ~(host : string) ~(port : int) : bool =
   List.exists (fun d -> d.no_redirects && decl_covers d ~host ~port) ds
@@ -240,6 +364,33 @@ let authority_of_url ~(prefix : bool) (s : string) : authority option =
           match port with
           | Some port when valid_name host -> Some { a_host = host; a_port = port }
           | _ -> None)
+
+let url_path_of_literal ~(prefix : bool) (s : string) : string option =
+  let strip pre =
+    let n = String.length pre in
+    if String.length s >= n && String.sub s 0 n = pre then
+      Some (String.sub s n (String.length s - n))
+    else None
+  in
+  let rest =
+    match strip "https://" with Some r -> Some r | None -> strip "http://"
+  in
+  match rest with
+  | None -> None
+  | Some rest -> (
+      match String.index_opt rest '/' with
+      | None -> if prefix then None else Some "/"
+      | Some i ->
+        (* As Http.parse_url: the path runs to the first `?`; a `#` stays. *)
+        let p =
+          let raw = String.sub rest i (String.length rest - i) in
+          match String.index_opt raw '?' with Some q -> String.sub raw 0 q | None -> raw
+        in
+        if prefix then
+          match String.rindex_opt p '/' with
+          | Some j -> Some (String.sub p 0 (j + 1))
+          | None -> None
+        else Some p)
 
 let encode_spec (ds : decl list) : string =
   String.concat ","

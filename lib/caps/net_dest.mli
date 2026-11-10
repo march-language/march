@@ -38,3 +38,9 @@ val method_of : string -> string option
     scopes: [HttpClient.post] is ["post"]. [None] when the method is decided
     at run time ([HttpClient.with_connection]) or the name is not an entry
     point; the run-time guard checks those. *)
+
+val guarded : string -> bool
+(** The entry points a host-scoped module's direct calls are rewritten to a
+    private-or-public [<name>_scoped] twin for, so the run-time guard checks
+    the request (path, method, redirects, request steps): the
+    [redirect_capable] ones plus [HttpTransport.simple_get]. *)

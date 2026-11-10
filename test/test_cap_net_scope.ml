@@ -417,8 +417,273 @@ let test_net_dest_on_host_param_rejected () =
     end|})
        (fn_go {|C.dial("example.com")|}))
 
+(* Diagnostics name what the author wrote, never compiler-generated names:
+   actor glue (`Fetcher_Go`, `Fetcher_dispatch`, `Fetcher_spawn`) and the
+   mono/impl spelling `Fetch$B.T.fetch`. *)
+let output_of src =
+  let rc, out = run_compiler src in
+  if rc = 0 then Alcotest.fail "should be rejected but compiled";
+  out
+
+let check_no_generated out ~absent ~present =
+  List.iter
+    (fun bad ->
+       if contains out bad then
+         Alcotest.failf "generated name %S leaked:\n%s" bad out)
+    absent;
+  List.iter
+    (fun want ->
+       if not (contains out want) then
+         Alcotest.failf "expected %S in:\n%s" want out)
+    present
+
+let test_actor_glue_names_not_leaked () =
+  let out =
+    output_of
+      {|mod Main do
+  needs IO.NetConnect, IO.Console, IO.Spawn
+
+  mod F do
+    needs IO.NetConnect("example.com")
+    actor Fetcher do
+      state { n : Int }
+      init { n: 0 }
+      on Go(u : String) do
+        match HttpTransport.simple_get(u) do
+          Ok(_) -> { state with n: 1 }
+          Err(_) -> { state with n: 2 }
+        end
+      end
+    end
+  end
+
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let _p = spawn(F.Fetcher)
+    println("x")
+  end
+end
+|}
+  in
+  check_no_generated out
+    ~absent:[ "Fetcher_Go"; "Fetcher_dispatch"; "Fetcher_spawn" ]
+    ~present:[ "handler `Go` of actor `Fetcher`"; "actor `Fetcher`" ]
+
+let test_impl_method_name_not_leaked () =
+  let out =
+    output_of
+      {|mod Main do
+  needs IO.NetConnect, IO.Console
+
+  mod B do
+    needs IO.NetConnect("example.com")
+    type T = T(String)
+    interface Fetch(a) do
+      fn fetch : a -> String
+    end
+    impl Fetch(T) do
+      fn fetch(x) do
+        match x do
+          T(u) ->
+            match HttpTransport.simple_get(u) do
+              Ok(_) -> "ok"
+              Err(_) -> "err"
+            end
+        end
+      end
+    end
+    fn go(u : String) : String do Fetch.fetch(T(u)) end
+  end
+
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(B.go("q"))
+  end
+end
+|}
+  in
+  check_no_generated out ~absent:[ "$" ] ~present:[ "`Fetch.fetch`" ]
+
+(* Two modules that share a SHORT name (`P1.Inner` and a top-level `Inner`)
+   keep separate scopes whatever order they are declared in: a lookup keyed by
+   the short name let the later declaration's scope judge both. *)
+let test_same_short_name_modules_each_own_scope () =
+  accepts "P1.Inner and Inner, each on its own host" ({|mod Main do
+  needs IO.NetConnect, IO.Console
+
+  mod Inner do
+    needs IO.NetConnect("b.example.com")
+    fn go() : String do
+      match HttpTransport.simple_get("https://b.example.com/") do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end
+    end
+  end
+  mod P1 do
+    mod Inner do
+      needs IO.NetConnect("a.example.com")
+      fn go() : String do
+        match HttpTransport.simple_get("https://a.example.com/") do
+          Ok(_) -> "ok"
+          Err(_) -> "err"
+        end
+      end
+    end
+  end
+
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(P1.Inner.go())
+    println(Inner.go())
+  end
+end
+|});
+  rejects "top-level Inner reaches P1.Inner's host" ~code:"cap_host_scope"
+    ~mentions:[ "module `Inner` may reach only `b.example.com`" ]
+    ({|mod Main do
+  needs IO.NetConnect, IO.Console
+
+  mod Inner do
+    needs IO.NetConnect("b.example.com")
+    fn go() : String do
+      match HttpTransport.simple_get("https://a.example.com/") do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end
+    end
+  end
+  mod P1 do
+    mod Inner do
+      needs IO.NetConnect("a.example.com")
+      fn go() : String do
+        match HttpTransport.simple_get("https://a.example.com/") do
+          Ok(_) -> "ok"
+          Err(_) -> "err"
+        end
+      end
+    end
+  end
+
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(P1.Inner.go())
+    println(Inner.go())
+  end
+end
+|});
+  rejects "P1.Inner reaches Inner's host" ~code:"cap_host_scope"
+    ~mentions:[ "module `P1.Inner` may reach only `a.example.com`" ]
+    ({|mod Main do
+  needs IO.NetConnect, IO.Console
+
+  mod Inner do
+    needs IO.NetConnect("b.example.com")
+    fn go() : String do
+      match HttpTransport.simple_get("https://b.example.com/") do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end
+    end
+  end
+  mod P1 do
+    mod Inner do
+      needs IO.NetConnect("a.example.com")
+      fn go() : String do
+        match HttpTransport.simple_get("https://b.example.com/") do
+          Ok(_) -> "ok"
+          Err(_) -> "err"
+        end
+      end
+    end
+  end
+
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(P1.Inner.go())
+    println(Inner.go())
+  end
+end
+|})
+
+
+(* ── Path scopes (path-scopes plan, Task 4) ────────────────────────── *)
+
+let path_needs = {|needs IO.NetConnect("example.com/v1/weather/", methods(get))|}
+
+let test_literal_path_in_scope_ok () =
+  accepts "literal path inside the prefix"
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/weather/today"|})))
+
+let test_literal_path_outside_rejected () =
+  rejects "literal path outside the prefix" ~code:"cap_host_scope" ~mentions:[ "/v1/admin" ]
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/admin"|})))
+
+let test_prefix_inside_ok () =
+  accepts "literal prefix inside the prefix"
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/weather/" ++ p|})))
+
+let test_prefix_leaving_rejected () =
+  rejects "literal prefix already outside" ~code:"cap_host_scope" ~mentions:[ "/v2/" ]
+    (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v2/" ++ p|})))
+
+let test_simple_get_rewritten () =
+  let rc, out =
+    run_compiler ~flags:"--dump-tir"
+      (program ~a_needs:path_needs (fn_go (simple_get {|"https://example.com/v1/weather/" ++ p|})))
+  in
+  if rc <> 0 then Alcotest.failf "dump-tir failed:\n%s" out;
+  if not (contains out {|"example.com/v1/weather/@get"|}) then
+    Alcotest.fail "simple_get was not given the module's scope (no spec literal in the TIR)"
+
+let test_helper_unknown_path_unproven () =
+  rejects "path guard cannot follow through a helper" ~code:"cap_host_unproven"
+    (program ~a_needs:path_needs ~extra:annotated_fetch
+       (fn_go {|C.fetch("https://example.com/v1/weather/" ++ p)|}))
+
+let test_raw_to_path_scoped_unproven () =
+  rejects "raw tcp_connect to a path-scoped host" ~code:"cap_host_unproven"
+    (program ~a_needs:path_needs
+       (fn_go
+          {|match tcp_connect("example.com", 443) do
+        Ok(_) -> p
+        Err(_) -> "err"
+      end|}))
+
+let test_host_only_unchanged () =
+  accepts "host-only scope, parameter-free literal, as before"
+    (program (fn_go (simple_get {|"https://example.com/anything/at/all"|})))
+
+(* ── Path-scope review fixes ───────────────────────────────────────── *)
+
+let test_crlf_literal_rejected () =
+  rejects "CRLF in a literal path" ~code:"cap_host_scope"
+    (program ~a_needs:path_needs
+       (fn_go (simple_get {|"https://example.com/v1/weather/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"|})))
+
+let test_fragment_via_helper_rejected () =
+  rejects "fragment then dot segments, through a helper" ~code:"cap_host_scope"
+    (program ~a_needs:path_needs
+       ~extra:(c_module ("    fn fetch() : String do\n      " ^ simple_get {|"https://example.com/v1/weather/#/../../admin"|} ^ "\n    end"))
+       (fn_go "C.fetch()"))
+
+let test_with_connection_host_base_ok () =
+  accepts "with_connection's base URL path is never sent"
+    (program ~a_needs:path_needs
+       (fn_go
+          {|match HttpClient.with_connection(HttpClient.new_client(), "https://example.com", fn d -> p) do
+        Ok(r) -> r
+        Err(_) -> "err"
+      end|}))
+
 let tests =
   [
+    Alcotest.test_case "CRLF literal rejected" `Slow test_crlf_literal_rejected;
+    Alcotest.test_case "fragment via helper rejected" `Slow test_fragment_via_helper_rejected;
+    Alcotest.test_case "with_connection host base ok" `Slow test_with_connection_host_base_ok;
+    Alcotest.test_case "literal path in scope ok" `Slow test_literal_path_in_scope_ok;
+    Alcotest.test_case "literal path outside rejected" `Slow test_literal_path_outside_rejected;
+    Alcotest.test_case "prefix inside ok" `Slow test_prefix_inside_ok;
+    Alcotest.test_case "prefix leaving rejected" `Slow test_prefix_leaving_rejected;
+    Alcotest.test_case "simple_get rewritten" `Slow test_simple_get_rewritten;
+    Alcotest.test_case "helper unknown path unproven" `Slow test_helper_unknown_path_unproven;
+    Alcotest.test_case "raw to path-scoped host unproven" `Slow test_raw_to_path_scoped_unproven;
+    Alcotest.test_case "host-only unchanged" `Slow test_host_only_unchanged;
     Alcotest.test_case "stdlib-named user module checked" `Slow test_stdlib_named_user_module_checked;
     Alcotest.test_case "prelude-named entry fn checked" `Slow test_prelude_named_entry_fn_checked;
     Alcotest.test_case "NUL host rejected" `Slow test_nul_host_rejected;
@@ -449,4 +714,7 @@ let tests =
     Alcotest.test_case "unscoped module unchecked" `Slow test_unscoped_module_unchecked;
     Alcotest.test_case "no_redirects literal rejected" `Slow test_no_redirects_literal_rejected;
     Alcotest.test_case "two modules, two hosts" `Slow test_two_modules_two_hosts;
+    Alcotest.test_case "same short name modules, own scopes" `Slow test_same_short_name_modules_each_own_scope;
+    Alcotest.test_case "actor glue names not leaked" `Slow test_actor_glue_names_not_leaked;
+    Alcotest.test_case "impl method name not leaked" `Slow test_impl_method_name_not_leaked;
   ]

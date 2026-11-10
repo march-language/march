@@ -955,7 +955,7 @@ let base_env : env =
         | [a; b] ->
           (match type_name_of_value a with
            | Some tname ->
-             (match Hashtbl.find_opt impl_tbl ("Eq", tname) with
+             (match find_impl_for "Eq" a tname with
               | Some eq_fn -> !apply_hook eq_fn [a; b]
               | None       -> VBool (a = b))
            | None -> VBool (a = b))
@@ -975,7 +975,7 @@ let base_env : env =
         | [a; b] ->
           (match type_name_of_value a with
            | Some tname ->
-             (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+             (match find_impl_for "Ord" a tname with
               | Some cmp_fn -> !apply_hook cmp_fn [a; b]
               | None        -> VInt (compare a b))
            | None -> VInt (compare a b))
@@ -997,7 +997,7 @@ let base_env : env =
         | [v] ->
           (match type_name_of_value v with
            | Some tname ->
-             (match Hashtbl.find_opt impl_tbl ("Hash", tname) with
+             (match find_impl_for "Hash" v tname with
               | Some hash_fn -> !apply_hook hash_fn [v]
               | None         -> VInt (Hashtbl.hash v))
            | None -> VInt (Hashtbl.hash v))

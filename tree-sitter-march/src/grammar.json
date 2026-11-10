@@ -3359,6 +3359,31 @@
           "value": ")"
         },
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "ensures"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "ensures",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_expr"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "STRING",
           "value": "do"
         },

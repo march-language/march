@@ -169,6 +169,22 @@ let is_type_dispatched_iface = function
   | _ -> false
 
 
+(** The functions each module being evaluated declares itself, innermost
+    module first.  A bulk import (`use M.*`, `use M` except ...) never rebinds
+    one of them, wherever the `use` sits: a module's own definition shadows a
+    bulk import, the rule the typechecker applies ([env.local_fns]) and that
+    lowering follows.  The interpreter used to let a `use` placed after the
+    definition win (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md). *)
+let local_def_scopes : string list list ref = ref []
+
+let local_fn_names (decls : decl list) : string list =
+  List.filter_map (function DFn (d, _) -> Some d.fn_name.txt | _ -> None) decls
+
+let defined_locally (short : string) : bool =
+  match !local_def_scopes with
+  | names :: _ -> List.mem short names
+  | [] -> false
+
 (** Same-short-name type collision set — the interpreter's counterpart to
     [Collision_set] in lib/tir (native/TIR backend, Task 0 of
     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md). The interpreter
@@ -183,6 +199,11 @@ let is_type_dispatched_iface = function
     (before any [DType]/[DImpl] is evaluated) since eval order alone can't
     tell a first same-short-name declaration from the only one. *)
 let type_collision_set : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+(** [impl_tbl] bare (iface, type) slots written by an impl whose type is NOT
+    module-qualified for dispatch (see the DImpl arm): a colliding nested
+    type's impl leaves them alone. *)
+let bare_slot_exact : (string * string, unit) Hashtbl.t = Hashtbl.create 16
 
 let is_colliding_type_name (short_name : string) : bool =
   Hashtbl.mem type_collision_set short_name
@@ -1188,6 +1209,13 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
     between them. *)
 let register_type_ctors (name_txt : string) (variants : variant list) : unit =
   List.iter (fun (v : variant) ->
+      (* A constructor name two types declare cannot tell the interpreter
+         which type a bare-tagged value belongs to: [find_impl_for] must not
+         trust its qualified type. *)
+      (match Hashtbl.find_opt ctor_type_tbl v.var_name.txt with
+       | Some prev when prev <> name_txt ->
+         Hashtbl.replace ambiguous_ctor_tags v.var_name.txt ()
+       | _ -> ());
       Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
       Hashtbl.replace variant_ctor_names v.var_name.txt ();
       if is_colliding_type_name name_txt then begin
@@ -2737,6 +2765,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset ambiguous_ctor_tags;
+  Hashtbl.reset bare_slot_exact;
   Hashtbl.reset type_collision_set;
   Hashtbl.reset colliding_ctor_type_by_module;
   closure_prefix_override := None;
@@ -3687,6 +3717,7 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DMod (name, _, decls, _) ->
     (* Evaluate nested module; bindings are prefixed with "ModName." *)
     module_stack := name.txt :: !module_stack;
+    local_def_scopes := local_fn_names decls :: !local_def_scopes;
     (* Two-pass evaluation for inner decls so recursive/mutual fns work *)
     let inner_ref = ref env in
     List.iter (function
@@ -3772,8 +3803,12 @@ let rec eval_decl (env : env) (d : decl) : env =
          witness harness, the test drivers -- would otherwise evaluate
          everything after it under this module's stale prefix. *)
       try eval_mod_decls decls !inner_ref
-      with e -> module_stack := List.tl !module_stack; raise e
+      with e ->
+        module_stack := List.tl !module_stack;
+        local_def_scopes := List.tl !local_def_scopes;
+        raise e
     in
+    local_def_scopes := List.tl !local_def_scopes;
     (* An actor declared in this module was registered with the env as it
        stood at ITS declaration -- pass-1 stubs for every fn declared after
        it -- and nothing re-pointed it, so a handler calling such a fn died
@@ -3982,8 +4017,23 @@ let rec eval_decl (env : env) (d : decl) : env =
                may claim the shared (iface, type) key; extra methods (e.g. Eq's
                default `neq`) must not clobber it, or builtin dispatch invokes
                the wrong method and recurses forever (neq → eq → neq). *)
-            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
-              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* A colliding type's Show/Eq/Ord/Hash impl also claims its
+               qualified slot, which [find_impl_for] reads first: the bare
+               slot is shared by every same-short-name type, last writer
+               wins. *)
+            if is_dispatched && dispatch_type_name <> type_name then
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, dispatch_type_name) fn_val;
+            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then begin
+              let key = (idef.impl_iface.txt, type_name) in
+              (* The bare slot IS the qualified slot of a colliding type
+                 declared at the entry level (empty module prefix): a nested
+                 same-short-name type must not take it over. *)
+              if dispatch_type_name = type_name then begin
+                Hashtbl.replace bare_slot_exact key ();
+                Hashtbl.replace impl_tbl key fn_val
+              end else if not (Hashtbl.mem bare_slot_exact key) then
+                Hashtbl.replace impl_tbl key fn_val
+            end;
             (* A Json codec of a same-short-name type also claims its
                qualified slot, which the `to_json` builtin consults first via
                [dispatch_type_name_of_value]: the bare slot above is
@@ -4103,7 +4153,8 @@ let rec eval_decl (env : env) (d : decl) : env =
        let plen = String.length prefix in
        let additions = List.filter_map (fun (k, v) ->
            if String.length k > plen && String.sub k 0 plen = prefix then
-             Some (String.sub k plen (String.length k - plen), v)
+             let short = String.sub k plen (String.length k - plen) in
+             if defined_locally short then None else Some (short, v)
            else None) env in
        additions @ env
      | UseNames names ->
@@ -4117,7 +4168,7 @@ let rec eval_decl (env : env) (d : decl) : env =
        let additions = List.filter_map (fun (k, v) ->
            if String.length k > plen && String.sub k 0 plen = prefix then
              let short = String.sub k plen (String.length k - plen) in
-             if List.mem short excl_set then None
+             if List.mem short excl_set || defined_locally short then None
              else Some (short, v)
            else None) env in
        additions @ env)
@@ -4206,6 +4257,8 @@ let eval_module_env (m : module_) : env =
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset ambiguous_ctor_tags;
+  Hashtbl.reset bare_slot_exact;
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
     ; "Some", "Option"; "None", "Option"
@@ -4390,7 +4443,10 @@ let eval_module_env (m : module_) : env =
     List.fold_left (fun (acc, env) run ->
         let scope_ref = ref env in
         scope_ref := install_stubs scope_ref run env;
-        let run_env = make_recursive_env scope_ref run !scope_ref in
+        local_def_scopes := local_fn_names run :: !local_def_scopes;
+        let run_env =
+          Fun.protect ~finally:(fun () -> local_def_scopes := List.tl !local_def_scopes)
+            (fun () -> make_recursive_env scope_ref run !scope_ref) in
         scope_ref := run_env;
         (run_env :: acc, run_env))
       ([], task_builtins @ base_env) (top_level_file_runs m.mod_decls)

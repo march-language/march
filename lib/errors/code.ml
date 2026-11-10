@@ -22,6 +22,7 @@ let abstract_refinement_unused = "abstract_refinement_unused"
 let actor_handler_state_type = "actor_handler_state_type"
 let actor_init_arity = "actor_init_arity"
 let alias_kind_mismatch = "alias_kind_mismatch"
+let alias_shadows_module = "alias_shadows_module"
 let ambiguous_constructor = "ambiguous_constructor"
 let annotated_tyvar_fixed = "annotated_tyvar_fixed"
 let arity_mismatch = "arity_mismatch"
@@ -124,6 +125,7 @@ let nonregular_type = "nonregular_type"
 let not_a_function = "not_a_function"
 let not_a_nat = "not_a_nat"
 let not_a_variant = "not_a_variant"
+let old_misuse = "old_misuse"
 let or_pattern_binding = "or_pattern_binding"
 let overlapping_impl = "overlapping_impl"
 let parse_error = "parse_error"
@@ -238,6 +240,7 @@ let all = [
   actor_handler_state_type;
   actor_init_arity;
   alias_kind_mismatch;
+  alias_shadows_module;
   ambiguous_constructor;
   annotated_tyvar_fixed;
   arity_mismatch;
@@ -340,6 +343,7 @@ let all = [
   not_a_function;
   not_a_nat;
   not_a_variant;
+  old_misuse;
   or_pattern_binding;
   overlapping_impl;
   parse_error;
@@ -476,7 +480,7 @@ let category_table : (string * string list) list = [
     template_fragment_position; template_unsafe_interpolation;
     template_unterminated; then_keyword ];
   "NAMING", [
-    ambiguous_constructor; duplicate_binder; duplicate_constructor;
+    alias_shadows_module; ambiguous_constructor; duplicate_binder; duplicate_constructor;
     duplicate_field; import_unresolved; prelude_collision; reserved_type_name; unbound_variable;
     unknown_constructor; unknown_export; unknown_qualified_name;
     unknown_record_field ];
@@ -532,7 +536,7 @@ let category_table : (string * string list) list = [
     int_overflow; invalid_lemma; invalid_measure; invalid_reflect;
     invariant_not_deploy_checkable;
     ghost_in_runtime; ghost_misuse;
-    lemma_argument_impure; lemma_unproved; lemma_unproved_call;
+    lemma_argument_impure; old_misuse; lemma_unproved; lemma_unproved_call;
     measure_scalar_field; predicate_eq_structural; predicate_vocabulary_shadowed;
     refinement_ignored;
     refinement_unchecked; refinement_unverified; refinement_violated;
