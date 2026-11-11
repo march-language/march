@@ -395,6 +395,19 @@ let test_check_does_not_duplicate_shared_module_diagnostics () =
            not once per other file checked alongside it"
           1 warnings)
 
+(** The clean-check marker is keyed on the compiler (ocap phase 3): a
+    compiler that adds checks must not be answered by a marker the previous
+    one wrote for the same sources. *)
+let test_check_cache_key_includes_compiler () =
+  let f = Filename.temp_file "check_key" ".march" in
+  let oc = open_out f in
+  output_string oc "mod K do\n  fn f() : Int do 1 end\nend\n";
+  close_out oc;
+  let key id = Cmd_build.check_all_cache_key ~lib_path_env:"" ~compiler_id:id [ f ] in
+  Sys.remove f;
+  Alcotest.(check bool) "same compiler, same key" true (key "a" = key "a");
+  Alcotest.(check bool) "another compiler, another key" false (key "a" = key "b")
+
 (** Regression test for a stdlib-shadowing bug in [run_check_cmd]
     (bin/main.ml): the single-file `--check`/`--compile` path already strips
     a stdlib module from the combined declaration list when a project file
@@ -999,6 +1012,8 @@ let () =
         test_check_reports_warnings_from_combined_module;
       Alcotest.test_case "check cache short-circuits unchanged rebuild" `Quick
         test_check_cache_short_circuits_unchanged_rebuild;
+      Alcotest.test_case "check cache key includes the compiler" `Quick
+        test_check_cache_key_includes_compiler;
       Alcotest.test_case "check does not duplicate shared-module diagnostics" `Quick
         test_check_does_not_duplicate_shared_module_diagnostics;
       Alcotest.test_case "check: stdlib shadow does not corrupt an unrelated module" `Quick

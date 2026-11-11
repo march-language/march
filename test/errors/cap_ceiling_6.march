@@ -1,0 +1,18 @@
+mod Main do
+  needs IO.Console, IO.FileRead
+  mod Inner do
+    needs IO.Console
+    fn apply1(f : (String) -> a, p : String) : a do
+      f(p)
+    end
+    fn go() : () do
+      match apply1(file_read, "/etc/hosts") do
+        Ok(_)  -> println("ok")
+        Err(_) -> println("e")
+      end
+    end
+  end
+  fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) : () do
+    Inner.go()
+  end
+end

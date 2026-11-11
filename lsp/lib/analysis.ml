@@ -2476,6 +2476,7 @@ let analyse ~filename ~src : t =
       demorgan_sites    = [];
       perf_insights     = [];
       consume_modes     = [];
+      cap_program       = None;
       tir_fn_insights   = [];
       code_lens_items   = [];
       decls             = [];
@@ -3374,6 +3375,10 @@ let analyse ~filename ~src : t =
       perf_insights;
       consume_modes    = [];
       no_alloc_candidates = [];
+      cap_program      =
+        Some ({ desugared with
+                Ast.mod_decls = stdlib_decls @ extra_decls @ desugared.Ast.mod_decls },
+              final_env);
       tir_fn_insights  = [];
       code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
@@ -3541,6 +3546,32 @@ let run_tir_pass (a : t) : t =
       let contract_diags =
         List.filter_map (diag_to_lsp ~filename:a.filename)
           pipe.March_tir.Contract_pipeline.contract_diags in
+      (* The capability ceiling and host scopes (ocap phase 3), over the whole
+         program [analyse] kept, exactly as `march --check` runs them.  A
+         finding the edit-time subset already published is not repeated; one
+         with no span (a [Bare] finding) has nothing to point at and is not
+         published. *)
+      let cap_diags =
+        match a.cap_program with
+        | None -> []
+        | Some (program, tc_env) ->
+          let input = {
+            March_driver.Cap_static.desugared = program;
+            stdlib_decls = Stdlib_cache.load (); tc_env; type_map = a.type_map;
+            src = a.src; filename = a.filename;
+            read_file = (fun f -> In_channel.with_open_bin f In_channel.input_all);
+            cap_strict = true } in
+          (match March_driver.Cap_static.check_program ~opt:true ~is_js:false input with
+           | March_driver.Cap_static.Unchecked _ -> []
+           | March_driver.Cap_static.Checked fs ->
+             List.filter_map (function
+                 | March_driver.Cap_static.Diag d -> diag_to_lsp ~filename:a.filename d
+                 | March_driver.Cap_static.Bare _ -> None) fs
+             |> List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+                 not (List.exists (fun (e : Lsp.Types.Diagnostic.t) ->
+                     e.range = d.range && e.message = d.message) a.diagnostics)))
+      in
+      let contract_diags = contract_diags @ cap_diags in
       let contract_decls = March_tir.Alloc_contract.collect desugared in
       let no_alloc_holds =
         let failing =

