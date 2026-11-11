@@ -212,6 +212,8 @@ classify() {
       add CHECKS scripts/test-affected.sh; reason "$f" "test-affected.sh" ;;
     scripts/determinism-oracle.sh)
       add CHECKS "scripts/determinism-oracle.sh"; reason "$f" "determinism oracle" ;;
+    scripts/ci-evidence.sh|scripts/test-ci-evidence.sh)
+      add CHECKS scripts/test-ci-evidence.sh; reason "$f" "test-ci-evidence.sh" ;;
     scripts/ir-oracle.sh) add ORACLES ir; reason "$f" "ir oracle" ;;
     scripts/oracle-base.sh) add ORACLES ir; reason "$f" "ir oracle (exercises oracle-base.sh)" ;;
     scripts/refine-oracle.sh) add ORACLES refine; reason "$f" "refine oracle" ;;

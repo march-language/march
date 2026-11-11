@@ -26,6 +26,7 @@ expect() {
 }
 
 # Narrow plans.
+expect checks "scripts/test-ci-evidence.sh" -- scripts/ci-evidence.sh
 expect checks "scripts/test-two-node.sh" -- scripts/two-node.sh
 expect checks "scripts/test-two-node.sh" -- scripts/test-two-node.sh
 expect checks "scripts/test-release-gate.sh" -- scripts/release-gate.sh
