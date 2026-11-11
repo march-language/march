@@ -4,6 +4,7 @@
 -- Run with: dune exec march -- test test/stdlib/test_file.march
 
 mod TestFile do
+  needs IO.FileSystem
 
   needs IO.FileRead
   needs IO.FileWrite

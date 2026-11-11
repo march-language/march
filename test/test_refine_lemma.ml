@@ -625,8 +625,11 @@ end
           ^ "  fn main(_cap : Cap(IO.Console)) do\n    let kids = Supervisor.which_children(:nope)\n    println(int_to_string(List.length(kids)))\n  end\nend\n"
         in
         let a = output `Interp (src ~lemma:true) and b = output `Interp (src ~lemma:false) in
-        let last s = match List.rev (lines s) with l :: _ -> String.trim l | [] -> "" in
-        if last a <> "0" || last b <> "0" || contains a "panic" then
+        (* The program's own line, not the last one: dynamic supervisors are
+           interpreter-only, so every mode now also warns [cap_unchecked]
+           (ocap phase 3) after it. *)
+        let printed_zero s = List.exists (fun l -> String.trim l = "0") (lines s) in
+        if not (printed_zero a) || not (printed_zero b) || contains a "panic" then
           Alcotest.failf "the builtin call must survive erasure:\n--with--\n%s\n--without--\n%s" a b);
     gated "lemma_shadow: a non-lemma sharing a lemma's name keeps its calls" (fun () ->
         let src =

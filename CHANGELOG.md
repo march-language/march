@@ -479,6 +479,19 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Capability checks run however a program is checked or run (object
+  capabilities, phase 3).** The capability upper limit (each module's emitted code
+  within its own `needs`) and host scopes on `IO.NetConnect` used to run in full only
+  under `march --compile`. They now also run under `march --check`, `--check-json`,
+  `--emit-core-ast`, `march check` (what `forge check` and `forge build` run), the
+  interpreter, `--jit`, `march test`, the REPL (for a `mod` declared at the prompt;
+  it now also holds that module's functions to their `needs` bounds) and the editor.
+  A program those accepted can now be rejected the way `--compile` rejected it. A
+  program the compiler cannot build (an interpreter-only builtin) runs with one
+  `cap_unchecked` warning instead of a verdict. The interpreter caches a clean
+  verdict, so only a changed program pays for the check (about 1.3 s for a small
+  program); forge's check cache now also keys the compiler, so a compiler upgrade
+  re-checks.
 - **`Socket.connect` returns a `Socket`, not an `Int`; `Udp.UdpSocket`, `Tls.TlsConn`,
   `Tls.TlsCtx` and `WebSocket.WsSocket` can no longer be built from an integer.**
   Connections and listening sockets are reference-counted handles: `Socket.connect` /

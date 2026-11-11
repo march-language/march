@@ -13,6 +13,7 @@
 -- the counters to a stats file the lab reads.
 mod LabApp do
   needs IO.Console
+  needs IO.Process
   needs IO.Mut
   needs IO.Clock
   needs IO.Spawn

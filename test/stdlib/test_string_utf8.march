@@ -3,6 +3,8 @@
 -- Run with: forge test test/stdlib/test_string_utf8.march
 
 mod TestStringUTF8 do
+  needs IO.Clock
+  needs IO.Process
 
   -- ─────────────────────────────────────────────────────────────────
   -- UNIT TESTS: Basic functionality

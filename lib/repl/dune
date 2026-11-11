@@ -11,6 +11,7 @@
    march_desugar
    march_typecheck
    march_errors
+   march_driver
    march_eval
    march_jit
    march_tir

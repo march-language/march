@@ -5,6 +5,7 @@
 -- Run with: dune exec march -- test test/stdlib/test_task.march
 
 mod TestTask do
+  needs IO.Spawn
 
 describe "cancel tokens" do
 
