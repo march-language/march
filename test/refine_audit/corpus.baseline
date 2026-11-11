@@ -1075,7 +1075,7 @@ stdlib_peer_registry: coverage audit (user code): 0 enforced, 0 inert (warned), 
 stdlib_plot: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
 stdlib_plot: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_prelude: coverage audit (user + stdlib): 338 enforced, 0 inert (warned), 0 unenforced
-stdlib_prelude: coverage audit (user code): 12 enforced, 0 inert (warned), 0 unenforced
+stdlib_prelude: coverage audit (user code): 6 enforced, 0 inert (warned), 0 unenforced
 stdlib_presence: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
 stdlib_presence: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_process: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
