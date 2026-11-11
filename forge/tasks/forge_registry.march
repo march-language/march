@@ -267,12 +267,12 @@ end
 -- Bare-name patterns match a dir at any depth in both BSD and GNU tar; excluding
 -- a directory drops its whole subtree.
 pfn make_tarball(pkg_dir, out_path) do
-  match Process.run("tar", ["czf", out_path,
+  match Authority.must(Process.run("tar", ["czf", out_path,
     "--exclude=.git", "--exclude=.claude", "--exclude=.march", "--exclude=_build",
     "--exclude=node_modules", "--exclude=.forge", "--exclude=.DS_Store", "--exclude=*.ll",
     "--exclude=trace", "--exclude=march-phases", "--exclude=playwright-report",
     "--exclude=*.bak",
-    "-C", Path.dirname(pkg_dir), Path.basename(pkg_dir)]) do
+    "-C", Path.dirname(pkg_dir), Path.basename(pkg_dir)])) do
   Err(e)  -> Err("tar failed: " ++ e)
   Ok(res) ->
     match res do
@@ -285,13 +285,13 @@ end
 pfn auth_headers(token) do [("Authorization", "Bearer " ++ token)] end
 
 pfn do_publish(registry, token, pkg_dir) do
-  match File.read(Path.join(pkg_dir, "forge.toml")) do
+  match Authority.must(File.read(Path.join(pkg_dir, "forge.toml"))) do
   Err(_)       -> Err("cannot read " ++ Path.join(pkg_dir, "forge.toml"))
   Ok(toml_str) ->
     match read_name_version(toml_str) do
     Err(e)              -> Err(e)
     Ok((name, version)) ->
-      let out = "/tmp/forge-publish-" ++ Crypto.random_hex(8) ++ ".tar.gz"
+      let out = "/tmp/forge-publish-" ++ Authority.must(Crypto.random_hex(8)) ++ ".tar.gz"
       -- This println is not just a progress message: on the compiled
       -- backend, make_tarball's `Process.ProcessResult(...)` match (over a
       -- Process.run() result) panics with "non-exhaustive pattern match"
@@ -308,11 +308,11 @@ pfn do_publish(registry, token, pkg_dir) do
       match make_tarball(pkg_dir, out) do
       Err(e) -> Err(e)
       Ok(_)  ->
-        match File.read(out) do
+        match Authority.must(File.read(out)) do
         Err(_)      -> Err("cannot read built tarball at " ++ out)
         Ok(tarball) ->
           let checksum = Crypto.sha256(tarball)
-          let boundary = "forgeMultipart" ++ Crypto.random_hex(16)
+          let boundary = "forgeMultipart" ++ Authority.must(Crypto.random_hex(16))
           let headers  = List.append(auth_headers(token), [("Content-Type", "multipart/form-data; boundary=" ++ boundary)])
           let body     = multipart(boundary, tarball, name ++ "-" ++ version ++ ".tar.gz", checksum)
           match request("POST", publish_url(registry, name), headers, body) do
@@ -337,9 +337,9 @@ end
 -- ── Entry points (called from main) ───────────────────────────────────────
 
 fn run_publish() do
-  let registry = Env.get("FORGE_REGISTRY", "https://forgepm.org")
-  let token    = Env.get("FORGE_TOKEN", "")
-  let pkg_dir  = Env.get("FORGE_PKG_DIR", ".")
+  let registry = Authority.must(Env.get("FORGE_REGISTRY", "https://forgepm.org"))
+  let token    = Authority.must(Env.get("FORGE_TOKEN", ""))
+  let pkg_dir  = Authority.must(Env.get("FORGE_PKG_DIR", "."))
   if String.byte_size(token) == 0 do
     println("error: FORGE_TOKEN is required (an API key with the 'publish' permission)")
     Process.exit(1)
@@ -356,11 +356,11 @@ fn run_publish() do
 end
 
 fn run_retire() do
-  let registry = Env.get("FORGE_REGISTRY", "https://forgepm.org")
-  let token    = Env.get("FORGE_TOKEN", "")
-  let pkg_dir  = Env.get("FORGE_PKG_DIR", ".")
-  let version  = Env.get("FORGE_VERSION", "")
-  let reason   = Env.get("FORGE_REASON", "")
+  let registry = Authority.must(Env.get("FORGE_REGISTRY", "https://forgepm.org"))
+  let token    = Authority.must(Env.get("FORGE_TOKEN", ""))
+  let pkg_dir  = Authority.must(Env.get("FORGE_PKG_DIR", "."))
+  let version  = Authority.must(Env.get("FORGE_VERSION", ""))
+  let reason   = Authority.must(Env.get("FORGE_REASON", ""))
   if String.byte_size(token) == 0 do
     println("error: FORGE_TOKEN is required (an API key with the 'retire' permission)")
     Process.exit(1)
@@ -368,7 +368,7 @@ fn run_retire() do
     println("error: a version to retire is required")
     Process.exit(1)
   else
-    match File.read(Path.join(pkg_dir, "forge.toml")) do
+    match Authority.must(File.read(Path.join(pkg_dir, "forge.toml"))) do
     Err(_)       -> do println("cannot read forge.toml to determine the package name") Process.exit(2) end
     Ok(toml_str) ->
       match read_name_version(toml_str) do
@@ -394,8 +394,8 @@ end
 -- client and we avoid curl). No token needed — reads are public. Exit codes
 -- match the publish convention: 0 ok, 2 local (write), 3 transport, 4 http 4xx.
 pfn run_fetch() do
-  let url = Env.get("FORGE_URL", "")
-  let out = Env.get("FORGE_OUT", "")
+  let url = Authority.must(Env.get("FORGE_URL", ""))
+  let out = Authority.must(Env.get("FORGE_OUT", ""))
   if String.byte_size(url) == 0 || String.byte_size(out) == 0 do
     do println("error: FORGE_URL and FORGE_OUT are required") Process.exit(1) end
   else
@@ -403,7 +403,7 @@ pfn run_fetch() do
     Err(e)       -> do println("transport: " ++ e) Process.exit(3) end
     Ok((st, bd)) ->
       if st >= 200 && st < 300 do
-        match File.write(out, bd) do
+        match Authority.must(File.write(out, bd)) do
         Err(e) -> do println("write failed: " ++ to_string(e)) Process.exit(2) end
         Ok(_)  -> do println("ok " ++ int_to_string(st) ++ " " ++ int_to_string(String.byte_size(bd))) Process.exit(0) end
         end
@@ -415,7 +415,7 @@ pfn run_fetch() do
 end
 
 fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_random : Cap(IO.Random)) do
-  match Env.get("FORGE_ACTION", "publish") do
+  match Authority.must(Env.get("FORGE_ACTION", "publish")) do
   "retire" -> run_retire()
   "fetch"  -> run_fetch()
   _        -> run_publish()

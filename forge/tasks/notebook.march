@@ -16,6 +16,10 @@
 -- once captures all per-cell outputs in one pass.
 
 mod ForgeNotebook do
+    needs IO.Process
+    needs IO.FileWrite
+    needs IO.FileRead
+    needs IO.Console
 
 -- ── Cell types ────────────────────────────────────────────────────────────────
 
@@ -280,13 +284,13 @@ pfn run_cells(cells, march_bin) do
   let src = generate_runner(cells)
   -- Write runner to temp file
   let tmp = "/tmp/__forge_notebook_runner__.march"
-  match File.write(tmp, src) do
+  match Authority.must(File.write(tmp, src)) do
     Err(msg) ->
       let err = "failed to write temp file: " ++ msg
       parse_cell_results("", cells, Some(err))
     Ok(_) ->
       -- Run march on the generated file
-      match Process.run(march_bin, [tmp]) do
+      match Authority.must(Process.run(march_bin, [tmp])) do
         Err(msg) ->
           parse_cell_results("", cells, Some("march invocation failed: " ++ msg))
         Ok(result) ->
@@ -392,7 +396,6 @@ pfn to_html(title, cells, results, date_str) do
           Code(_)     -> code_idx + 1
         end)
         go(rest_cells, rest_results, Cons(html, acc), n)
-      _ -> List.reverse(acc)
     end
   end
   -- Pair cells with results and generate HTML
@@ -428,7 +431,6 @@ pfn to_html(title, cells, results, date_str) do
           Code(_)     -> code_n + 1
         end
         go2(rc, rr, Cons(html, acc), new_code_n)
-      _ -> List.reverse(acc)
     end
   end
   let body_parts = go2(cells, results, Nil, 0)
@@ -438,8 +440,8 @@ end
 
 -- ── Main entry point ──────────────────────────────────────────────────────────
 
-fn main() do
-  let input_path = match System.env("FORGE_NB_INPUT") do
+fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_process : Cap(IO.Process)) do
+  let input_path = match Authority.must(System.env("FORGE_NB_INPUT")) do
     Some(p) -> p
     None    ->
       IO.warn("forge notebook: FORGE_NB_INPUT not set")
@@ -447,7 +449,7 @@ fn main() do
       ""
   end
 
-  let output_path = match System.env("FORGE_NB_OUTPUT") do
+  let output_path = match Authority.must(System.env("FORGE_NB_OUTPUT")) do
     Some(p) -> p
     None    ->
       -- Default: replace .mnb extension with .html
@@ -457,13 +459,13 @@ fn main() do
       end
   end
 
-  let march_bin = match System.env("FORGE_NB_MARCH") do
+  let march_bin = match Authority.must(System.env("FORGE_NB_MARCH")) do
     Some(b) -> b
     None    -> "march"
   end
 
   -- Read notebook file
-  match File.read(input_path) do
+  match Authority.must(File.read(input_path)) do
     Err(msg) ->
       IO.warn("forge notebook: cannot read " ++ input_path ++ ": " ++ msg)
       Process.exit(1)
@@ -499,7 +501,7 @@ fn main() do
       let date_str = "generated"
       let html = to_html(title, cells, results, date_str)
 
-      match File.write(output_path, html) do
+      match Authority.must(File.write(output_path, html)) do
         Err(msg) ->
           IO.warn("forge notebook: cannot write " ++ output_path ++ ": " ++ msg)
           Process.exit(1)
