@@ -10,6 +10,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual, for the release gate: see the same trigger in ci.yml.
+  workflow_dispatch:
 
 concurrency:
   group: doc-lint-${{ github.event.pull_request.number || github.run_id }}
@@ -41,6 +43,12 @@ jobs:
 
       - name: Test the two-node harness golden checks
         run: scripts/test-two-node.sh
+
+      # scripts/release-gate.sh decides whether a v* tag may ship and which
+      # commit the nightly builds. Against a fake gh (no network): it must go
+      # red on a failed, cancelled, running or missing run.
+      - name: Test the release gate
+        run: scripts/test-release-gate.sh
 
       # scripts/affected.sh picks which suites a local change runs. A rule that
       # selects too little is a silent hole, so its path -> plan mapping is pinned

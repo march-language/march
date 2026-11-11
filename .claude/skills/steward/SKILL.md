@@ -65,6 +65,30 @@ green.**
   the same commit.
 - Stage files by name: never `git add -A`, `git add .` or `git commit -a`.
 
+## Cutting a release
+
+`scripts/bump-version.sh X.Y.Z` builds, tests, finalizes the CHANGELOG, commits
+`release: X.Y.Z` and tags it locally. It does not push. Then:
+
+1. `git push origin main`, and wait for **CI** and **Doc lint** to finish on the
+   release commit itself. Hold other merges until they do: a merge that lands
+   while the release commit's CI run is still queued cancels it (pushes to
+   `main` share one concurrency group).
+2. `scripts/release-gate.sh <release commit sha>`. It exits 0 only if the commit
+   is on `main` and `ci.yml` and `doc-lint.yml` each have a successful run of
+   that exact commit. On a red commit it says so: fix `main` and cut again. On a
+   commit with no verdict it prints the commands that run CI on it
+   (`gh workflow run ci.yml --ref ...`); run them, wait, check again.
+3. `git push origin vX.Y.Z` only after the gate is green. `release.yml`'s `gate`
+   job runs the same script on the tag's commit and `build` needs it, so a tag
+   pushed early fails there and publishes nothing; get the commit green, then
+   re-run the failed `gate` job (`gh run rerun <run-id> --failed`).
+
+Never delete and re-push a tag to get past the gate, and never tag a different
+commit than the one `bump-version.sh` committed (`check-version-tag.sh` compares
+the tag with the version compiled in). `gh workflow run release.yml -f tag=vX.Y.Z`
+rebuilds the archives of a release that already shipped and skips the gate.
+
 ## Attribution footers
 
 Every commit message ends with exactly:

@@ -54,6 +54,13 @@ on:
     paths-ignore: ['**.md']
   pull_request:
     paths-ignore: ['**.md']
+  # Manual: a verdict for a commit that has none. Pushes to main share one
+  # concurrency group (below), so a commit in the middle of a burst of merges
+  # has its run cancelled, and a Markdown-only commit never starts one. The
+  # release gate (scripts/release-gate.sh) needs a green run of the exact
+  # commit being tagged and prints the `gh workflow run ci.yml --ref ...`
+  # command when there is none. Runs everything a push to main runs.
+  workflow_dispatch:
 
 # One live run per pull request: a newer push cancels the older run instead of
 # letting both hold runner slots. The org is on GitHub's free plan (20 concurrent
@@ -67,8 +74,11 @@ on:
 # instead of a dozen each holding ~35 job slots (a 12-merge burst on 2026-09-22
 # left PR jobs queued for 80+ minutes). Intermediate main commits therefore get
 # no CI verdict of their own; the nightly gate already skips cancelled runs.
+#
+# A manual run gets a group of its own per commit, so a merge to main can never
+# cancel the run a release is waiting on.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || (github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.sha)) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -1057,7 +1067,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event_name == 'push' && '[1, 2]' || '[1]') }}
+        shard: ${{ fromJSON(github.event_name != 'pull_request' && '[1, 2]' || '[1]') }}
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@v7
@@ -1093,10 +1103,10 @@ jobs:
         timeout-minutes: 5
         run: scripts/determinism-oracle.sh --self-test
 
-      - name: Determinism oracle (${{ github.event_name == 'push' && format('full corpus, shard {0}/2', matrix.shard) || 'small corpus' }})
+      - name: Determinism oracle (${{ github.event_name != 'pull_request' && format('full corpus, shard {0}/2', matrix.shard) || 'small corpus' }})
         timeout-minutes: 60
         run: |
-          if [ "${{ github.event_name }}" = push ]; then
+          if [ "${{ github.event_name }}" != pull_request ]; then
             scripts/determinism-oracle.sh --corpus all --shard ${{ matrix.shard }}/2
           else
             scripts/determinism-oracle.sh --corpus small
