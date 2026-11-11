@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/stdlib_internal_2.march","start_line":13,"start_col":35,"end_line":13,"end_col":48,"message":"`Socket.raw_fd` is internal to the standard library; use the handle API in `Socket`.","code":"stdlib_internal","fix":null,"labels":[],"notes":[],"category":"PROGRAM"}

@@ -45,6 +45,10 @@ mod UdpCloseWhileRecv do
       Vault.set(Vault.open("ucwr"), "result", what))
     sleep_ms(100)
     Udp.close(sock)
-    println(poll_result(3000))
+    let r = poll_result(3000)
+    println(r)
+    -- A reader still parked would keep the process alive past main: leave
+    -- now, so the rule fails on the diff instead of hanging.
+    if r != "woke closed" do Process.exit(0) else () end
   end
 end

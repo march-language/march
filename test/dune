@@ -15380,6 +15380,25 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/socket_close_while_recv.expected native_socket_close_while_recv.out)))
 
+; listener_close_while_accept (R3): Socket.close_listener wakes a task parked
+; in Socket.accept; on macOS shutdown() on a listening socket wakes nothing.
+(rule
+ (targets native_listener_close_while_accept native_listener_close_while_accept.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/listener_close_while_accept.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_listener_close_while_accept
+        native/listener_close_while_accept.march)
+   (with-stdout-to native_listener_close_while_accept.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_listener_close_while_accept")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/listener_close_while_accept.expected native_listener_close_while_accept.out)))
+
 ; udp_close_while_recv (R3): Udp.close wakes a task parked in Udp.recv on an
 ; unconnected socket, the case shutdown() alone cannot wake on macOS.
 (rule

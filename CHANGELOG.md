@@ -877,6 +877,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Closing a TLS connection whose peer had already reset it no longer kills the process.**
+  `Tls.close` sends close_notify; to a reset peer that write raised SIGPIPE, so a TLS server
+  that closed after its client hung up could exit with status 141. The descriptor now gets
+  `SO_NOSIGPIPE` at the handshake (macOS/BSD), and on Linux the close blocks and consumes
+  the signal.
 - **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
   A compiled closure that matched a captured value and passed the pattern's fields straight to a
   builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the

@@ -13,7 +13,7 @@
 -- box also cancels every green thread parked on the descriptor.
 --
 -- The rule runs this at MARCH_NUM_SCHEDULERS=4 (test/dune). If the reader
--- never wakes, main gives up after 3 s and prints why instead of hanging.
+-- never wakes, main gives up after 3 s, prints why and exits instead of hanging.
 mod SocketCloseWhileRecv do
   needs IO
   needs IO.Console
@@ -65,7 +65,11 @@ mod SocketCloseWhileRecv do
       Vault.set(Vault.open("scwr"), "result", what))
     sleep_ms(100)
     let _ = Socket.close(s)
-    println(poll_result(3000))
+    let r = poll_result(3000)
+    println(r)
+    -- A reader still parked would keep the process alive past main: leave
+    -- now, so the rule fails on the diff instead of hanging.
+    if r != "woke closed" do Process.exit(0) else () end
     let _ = Socket.close(client)
     let _ = Socket.close_listener(l)
   end

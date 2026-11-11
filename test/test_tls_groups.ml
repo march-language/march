@@ -62,10 +62,12 @@ mod TlsGroupsProbe do
     end
   end
 
-  -- Accept [n] connections; report the group of each completed handshake,
-  -- then wait for the client to hang up (a read that ends on its close), so
-  -- C4's reader has a live, silent peer. The harness's readiness probe is
-  -- one of the accepts and fails the handshake.
+  -- Accept [n] connections; report the group of each completed handshake.
+  -- The harness's readiness probe is one of them and fails the handshake.
+  -- The last one is C4's: stay connected and silent (a read that ends when
+  -- the client hangs up), so C4's reader has a live peer to park on. Only
+  -- that one reads: a TLS 1.3 server's first read sends its session tickets,
+  -- and C1/C2 have hung up by then.
   fn serve(l, ctx, n) do
     if n <= 0 do ()
     else
@@ -76,7 +78,10 @@ mod TlsGroupsProbe do
         Ok(conn) ->
           println("S group=" ++ show(Tls.negotiated_group(conn))
                   ++ " pq=" ++ bool_to_string(Tls.is_post_quantum(conn)))
-          let _ = Tls.read(conn, 16)
+          if n == 1 do
+            let _ = Tls.read(conn, 16)
+            ()
+          else () end
           Tls.close(conn)
         Err(_) ->
           let _ = Socket.close(s)

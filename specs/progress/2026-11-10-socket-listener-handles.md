@@ -31,6 +31,12 @@ Ocap phase 2, Task 5 (plan: `specs/plans/2026-11-10-ocap-p2-handles-plan.md`).
   read side, and only when another use is in flight (so a plain close still sends
   close_notify, and no write to a shut-down socket can raise SIGPIPE).
 - Ruling R4: a TLS or TLS_CTX box released with no registered closer aborts.
+- `runtime/march_tls.c`: SSL_shutdown's close_notify to a peer that had reset the
+  connection raised SIGPIPE (exit 141; seen as the TLS groups probe's server dying after
+  C1). The fd gets `SO_NOSIGPIPE` at `march_tls_connect` / `march_tls_accept` (setting it
+  at close time is too late: setsockopt on a reset socket fails with EINVAL); on Linux the
+  close blocks SIGPIPE around SSL_shutdown and consumes it. SSL_write/SSL_read on Linux
+  are still unprotected (pre-existing).
 - `lib/modules/module_registry.ml`: an `opaque type`'s constructors are no longer exported
   across the module boundary. They were, with only their arity, so `Udp.UdpSocket(5)`
   typechecked with a fresh variable for the argument.
@@ -40,7 +46,8 @@ Ocap phase 2, Task 5 (plan: `specs/plans/2026-11-10-ocap-p2-handles-plan.md`).
   `tcp_*` builtins until Task 9 / 10), the socket fixtures (handle API).
 - Tests: `test/stdlib/test_socket.march` (migrated; listen/accept round trip, use after
   close, accept timeout; also run by `march test` and compiled `--compile --test`),
-  `test/native/socket_close_while_recv`, `udp_close_while_recv`,
+  `test/native/socket_close_while_recv`, `listener_close_while_accept`, `udp_close_while_recv`,
   `socket_sent_to_local_actor`, the TLS groups probe's C4 case (Tls.close while parked in
   Tls.read), `test/test_handle.c` (missing TLS closer is fatal; close cancels a wait on a
-  listening socket), `test/errors/handle_forge_1` and `stdlib_internal_2`.
+  listening socket), `test/errors/handle_forge_1` and `stdlib_internal_2`, and
+  `test/stdlib/test_tls.march` (migrated; use after close).

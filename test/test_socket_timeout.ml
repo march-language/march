@@ -221,7 +221,8 @@ mod SocketTimeoutProbe do
       Err(other) -> println("A FAIL wrong-error " ++ Socket.error_message(other))
       Ok(_)      -> println("A FAIL unexpected-data")
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -240,7 +241,8 @@ mod SocketTimeoutProbe do
         Ok(_)               -> println("B FAIL unexpected-data")
         end
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -253,7 +255,8 @@ mod SocketTimeoutProbe do
       Ok(data) -> println("D OK data " ++ data)
       Err(e)   -> println("D FAIL " ++ Socket.error_message(e))
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -314,7 +317,8 @@ mod TlsTimeoutProbe do
           end
         end
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -367,7 +371,8 @@ mod TlsReadTimeoutProbe do
           end
         end
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
