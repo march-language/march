@@ -86,6 +86,24 @@ type value =
           extern call). Holds the raw marshaled march_value bits; never
           introspected by the interpreter, only round-tripped through
           ffi_marshal_iv/ffi_unmarshal_iv back into subsequent extern calls. *)
+  | VHandle of handle_cell
+      (** A handle box (ocap phase 2; lib/eval/eval_handle.ml mirrors
+          runtime/march_handle.c): File.Handle, File.Dir, Socket, Listener,
+          Process.  Every copy of the value shares the one cell. *)
+
+(** The interpreter's handle box.  [h_kind] is the box kind (1 FILE ..
+    9 PROCESS); [h_raw] the descriptor (or other raw value) the box guards;
+    [h_aux] a second word (a TLS conn's socket fd).  [h_release] releases
+    the raw resource; [h_released] makes that happen at most once (by
+    [handle_close], or by the GC finaliser for a box never closed). *)
+and handle_cell = {
+  h_kind : int;
+  h_raw : value;
+  h_aux : value;
+  mutable h_closed : bool;
+  mutable h_released : bool;
+  h_release : unit -> unit;
+}
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]

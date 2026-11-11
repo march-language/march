@@ -66,6 +66,10 @@ let extern_borrow_table : (string * bool list) list = [
   ("file_read",     [true]);
   ("file_write",    [true; true]);
   ("file_append",   [true; true]);
+  (* file_open_write reads its path (fopen); file_write_handle reads its
+     data (fwrite). The Int handle / mode / offset carry no RC. *)
+  ("file_open_write",   [true; false]);
+  ("file_write_handle", [false; true]);
   ("file_delete",   [true]);
   ("file_copy",     [true; true]);
   ("file_rename",   [true; true]);
@@ -127,6 +131,15 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
   ("march_actor_stop",  [true; false]);
+  (* Handle-box primitives (ocap phase 2): each only reads the box; the
+     box's own count is the caller's. handle_new takes three Ints. *)
+  ("handle_new",        [false; false; false]);
+  ("handle_enter",      [true; false]);
+  ("handle_leave",      [true]);
+  ("handle_close",      [true]);
+  ("handle_detach",     [true]);
+  ("handle_is_closed",  [true]);
+  ("handle_aux",        [true]);
   ("is_alive",          [true]);
   ("march_is_alive",    [true]);
   ("actor_is_draining", [true]);

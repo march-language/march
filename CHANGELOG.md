@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`File.Handle`: open, read, write, seek and close a file through a handle.**
+  `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
+  (writes, creates the file, `IO.FileWrite`) return `Result(File.Handle, FileError)`;
+  `File.read_line`, `File.read_chunk`, `File.write_to`, `File.seek` and `File.close` use it.
+  The handle is a reference-counted box: every use after `close` returns the new
+  `Err(Closed)` (a second `close` too), and a handle dropped without `close` is closed
+  when its last reference goes. `File.with_open` / `File.with_open_write` close it when the
+  callback returns or panics. `FileError` now derives `Eq`. `with_lines`, `with_chunks`,
+  `each_line` and `each_chunk` keep their signatures and use a handle internally.
 - **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
   methods(get))` limits a module to a path prefix on a host, matched by whole segment
   (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
@@ -469,6 +478,14 @@ git log is authoritative for exact commits.
   are unaffected.
 
 ### Changed
+
+- **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
+  `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
+  connection (ocap phase 2). A module's own type (variant, record or alias) named
+  `Socket`, `Listener` or `Process` is still allowed and is always a type distinct from the builtin, never
+  unified with it. Code that only goes through `Channel.new_socket` and
+  the `Channel.socket_*` accessors is unaffected; code that names the type or matches
+  on the constructor renames it.
 
 - **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
   NaN, the infinities and a result outside Int's range** (#1230), with

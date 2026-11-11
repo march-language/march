@@ -623,6 +623,10 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
+    } else if (tag == MARCH_HANDLE_TAG) {
+        /* A handle box releases its descriptor unless closed-and-released
+         * or detached already (runtime/march_handle.c). */
+        march_handle_dtor(p);
     } else if (tag == MARCH_TYPED_ARR_TAG) {
         /* Every slot owns one reference (each typed_array_ producer takes its
          * own); march_decrc ignores a tagged immediate. */
@@ -12171,6 +12175,45 @@ void *march_file_read_chunk(void *handle_ptr, int64_t size) {
     return s;                                              /* Some(chunk) */
 }
 
+/* file_open_write(path, mode) : Result(Int, FileError).  Mode 0 truncates,
+ * 1 appends; the file is created (0644, less the umask) when missing.  The
+ * stream goes into the same handle table as file_open, so file_close and the
+ * File.Handle box's FILE release (march_handle.c) close it. */
+void *march_file_open_write(void *path_ptr, int64_t mode) {
+    march_string *ps = (march_string *)path_ptr;
+    FILE *f = fopen(ps->data, mode == 1 ? "ab" : "wb");
+    if (!f) return mk_err_errno_file_rw(ps->data);
+    int64_t h = fh_open(f, 0, 0);
+    if (h == 0) { fclose(f); errno = EMFILE; return mk_err_errno_file_rw(ps->data); }
+    return mk_ok((void *)(intptr_t)h);
+}
+
+/* file_write_handle(handle, data) : Result((), FileError).  Buffered: the
+ * bytes reach the file by the time the stream is closed (fclose flushes),
+ * whether by file_close or by the handle box's release. */
+void *march_file_write_handle(int64_t handle, void *data_ptr) {
+    march_string *ds = (march_string *)data_ptr;
+    FILE *f = fh_lookup((void *)(intptr_t)handle, NULL, NULL);
+    if (!f) return mk_err_file_cstr(FILEERR_IO_ERROR, "write to a closed file");
+    size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
+    if ((int64_t)w != ds->len) return mk_err_errno_io();
+    return mk_ok_unit();
+}
+
+/* file_seek(handle, offset) : Result(Int, FileError).  Seeks to an absolute
+ * offset and returns the new offset. */
+void *march_file_seek(int64_t handle, int64_t offset) {
+    FILE *f = fh_lookup((void *)(intptr_t)handle, NULL, NULL);
+    if (!f) return mk_err_file_cstr(FILEERR_IO_ERROR, "seek on a closed file");
+    if (fseeko(f, (off_t)offset, SEEK_SET) != 0) return mk_err_errno_io();
+    off_t pos = ftello(f);
+    if (pos < 0) return mk_err_errno_io();
+    /* An Int in a Result payload is tagged (n<<1)|1, as tcp_connect's fd
+     * is (march_http.c): the compiled read untags it.  The file handles
+     * above need no tag only because they are even (see fh_encode). */
+    return mk_ok((void *)(intptr_t)(((int64_t)pos << 1) | 1));
+}
+
 /* ── Directory builtins ─────────────────────────────────────────────── */
 
 void *march_dir_list(void *path_ptr) {
@@ -12847,9 +12890,12 @@ int64_t march_process_kill_proc(void *lp_obj) {
 /* process_wait_proc(lp) → Int (exit code).  Closes the streams (a stream a
    reader or writer is still inside is closed when it leaves) and releases
    the slot; the handle is stale afterwards. */
-int64_t march_process_wait_proc(void *lp_obj) {
-    int64_t pid    = MARCH_FIELD(lp_obj, 0);
-    int64_t handle = MARCH_FIELD(lp_obj, 1);
+/* Mark the slot a handle names closing and settle it: its streams close now
+   (or when the reader/writer inside one leaves) and the slot is freed once
+   both are.  A stale or already-released handle is a no-op.  Neither waits
+   for nor signals the child: wait_proc reaps after this, and a Process
+   handle box (march_handle.c) releases its slot with it on close. */
+void march_process_release_slot(int64_t handle) {
     pthread_mutex_lock(&live_proc_mu);
     live_proc_slot *s = live_proc_lookup_locked(handle);
     if (s) {
@@ -12857,6 +12903,12 @@ int64_t march_process_wait_proc(void *lp_obj) {
         live_proc_settle_locked(s);
     }
     pthread_mutex_unlock(&live_proc_mu);
+}
+
+int64_t march_process_wait_proc(void *lp_obj) {
+    int64_t pid    = MARCH_FIELD(lp_obj, 0);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    march_process_release_slot(handle);
     int status = 0;
     waitpid((pid_t)pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
@@ -13971,6 +14023,15 @@ void *march_value_to_string_mode(void *v, int repr) {
     /* Boxed SIMD vector in an erased slot: render lane-for-lane like
        impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
     if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
+    /* A handle box (march_handle.c) in an erased slot: its type by kind, and
+     * whether it is closed -- never the descriptor number. */
+    if (tag == MARCH_HANDLE_TAG) {
+        char buf[64];
+        int n = snprintf(buf, sizeof(buf), "#<%s%s>",
+                         march_handle_kind_name(march_handle_kind(v)),
+                         march_handle_is_closed(v) ? " closed" : "");
+        return march_string_lit(buf, n);
+    }
     /* Check if this pointer is an actor (live, or dead with its record
      * still held) → display as Pid(n).  A live meta not yet spawned prints
      * Pid(0), as it always did. */

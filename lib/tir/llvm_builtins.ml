@@ -743,6 +743,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_line(ptr %handle)" };
   { march_name = "file_read_chunk"; c_name = Some "march_file_read_chunk"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)" };
+  { march_name = "file_open_write"; c_name = Some "march_file_open_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open_write(ptr %path, i64 %mode)" };
+  { march_name = "file_write_handle"; c_name = Some "march_file_write_handle"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write_handle(i64 %handle, ptr %data)" };
+  { march_name = "file_seek"; c_name = Some "march_file_seek"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_seek(i64 %handle, i64 %offset)" };
   { march_name = "file_write"; c_name = Some "march_file_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write(ptr %path, ptr %data)" };
   { march_name = "file_append"; c_name = Some "march_file_append"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
@@ -1237,6 +1243,24 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = None };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_value_to_string(ptr %v)" };
+  (* Handle-box primitives (ocap phase 2, Task 2; runtime/march_handle.c).
+     Stdlib-only; the box is the caller's handle type ([TPtr] here: the
+     result is always the box pointer). Close and is_closed return the C
+     1/0 as Bool. *)
+  { march_name = "handle_new"; c_name = Some "march_handle_new"; ret_ty = Some (Tir.TPtr Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_handle_new(i64 %kind, i64 %raw, i64 %aux)" };
+  { march_name = "handle_enter"; c_name = Some "march_handle_enter"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_enter(ptr %h, i64 %kind)" };
+  { march_name = "handle_leave"; c_name = Some "march_handle_leave"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_handle_leave(ptr %h)" };
+  { march_name = "handle_close"; c_name = Some "march_handle_close"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_close(ptr %h)" };
+  { march_name = "handle_detach"; c_name = Some "march_handle_detach"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_detach(ptr %h)" };
+  { march_name = "handle_is_closed"; c_name = Some "march_handle_is_closed"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_is_closed(ptr %h)" };
+  { march_name = "handle_aux"; c_name = Some "march_handle_aux"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_aux(ptr %h)" };
   { march_name = "chan_new"; c_name = Some "march_chan_new"; ret_ty = Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_chan_new(ptr %proto_name)" };
   { march_name = "chan_send"; c_name = Some "march_chan_send"; ret_ty = Some (Tir.TCon ("Chan", []));
@@ -1876,6 +1900,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_file_read";
   PDeclare "march_file_read_line";
   PDeclare "march_file_read_chunk";
+  PDeclare "march_file_open_write";
+  PDeclare "march_file_write_handle";
+  PDeclare "march_file_seek";
   PDeclare "march_file_write";
   PDeclare "march_file_append";
   PDeclare "march_file_delete";
@@ -2101,6 +2128,14 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_actor_inspect";
   PDeclare "march_pid_index_of";
   PDeclare "march_value_to_string";
+  PComment "; Handle-box builtins (ocap phase 2)";
+  PDeclare "march_handle_new";
+  PDeclare "march_handle_enter";
+  PDeclare "march_handle_leave";
+  PDeclare "march_handle_close";
+  PDeclare "march_handle_detach";
+  PDeclare "march_handle_is_closed";
+  PDeclare "march_handle_aux";
   PComment "; Session-typed channel builtins (binary)";
   PDeclare "march_chan_new";
   PDeclare "march_chan_send";

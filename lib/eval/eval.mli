@@ -64,6 +64,16 @@ type value =
   | VVaultHandle of int
   | VRingBuf of value ring
   | VResource of int64
+  | VHandle of handle_cell
+and handle_cell =
+  Eval_types.handle_cell = {
+  h_kind : int;
+  h_raw : value;
+  h_aux : value;
+  mutable h_closed : bool;
+  mutable h_released : bool;
+  h_release : unit -> unit;
+}
 and chan_endpoint =
   Eval_types.chan_endpoint = {
   ce_id : int;

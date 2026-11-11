@@ -206,10 +206,9 @@ authority: the open was checked.
 | Outbound connections | `Tcp.connect`, the HTTP client's connection | `Socket` | send, receive, close |
 | Listening | `Tcp.listen(addr)` | `Listener` | accept (yields a `Socket`), close |
 | Child processes | `Process.spawn(...)` | `Process` | wait, kill, its pipes |
-| Foreign libraries | `Foreign.open(lib)` | `Library` | the symbols the scope admitted |
 | Named tables | `Vault.new(name)`, `Vault.whereis(name)` | `Vault(v)` (already typed) | get, put, delete |
 | Actors | `spawn` | `Pid(a)` | send (§7) |
-| Environment, console, clock, random | none: each use is checked | — | — |
+| Environment, console, clock, random, foreign calls | none: each use is checked | — | — |
 
 - **Path-based conveniences stay** (`File.read(path)`, `File.write(path, s)`): they are an
   open, a use and a close, checked as an open.
@@ -221,7 +220,7 @@ authority: the open was checked.
   closed flag. A use after close returns `Err`. The raw integer builtins become
   stdlib-only (the existing `check_stdlib_only_refs` gate).
 - **Names must not collide** with the stdlib's typestate `Handle(r, s)`; the new types are
-  `File.Handle`, `File.Dir`, `Socket`, `Listener`, `Process`, `Library`.
+  `File.Handle`, `File.Dir`, `Socket`, `Listener`, `Process`.
 - **Scoped opens.** `File.with_open(path, mode, fn h -> ...)` closes at the end; the
   static layer (§13) makes letting `h` out of the callback a compile error, and before
   that layer exists a use after the close is a run-time `Err`.
@@ -579,6 +578,13 @@ settled here as my calls.
   (the reverse of today's rule), about 100 of the 139 stdlib modules would have needed
   `needs` lines or an exemption, and every intermediate module would have gained a line.
   §3, §4, §16, §17 and §18 now describe the own-operations rule.
+
+- **No `Library` handle** (owner, 2026-11-10, while planning phase 2). A foreign library is
+  not a value today: `extern` declares functions bound statically, and a compiled build
+  links the shim at build time. Each foreign call is therefore a checked operation, like
+  console and environment access: against `IO.Foreign` and its symbol scopes
+  (narrow-capabilities §7), at compile time and, from phase 4, at run time. Narrowed access
+  is handed out as a closure over the admitted calls (§5). `extern` keeps its meaning.
 
 **Settled (my calls)**
 
