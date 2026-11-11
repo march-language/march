@@ -25,6 +25,10 @@ the host's own. The ordinary rules then apply: `Socket.write` is stdlib, so the 
 through it to its callers. A function with no record (TIR that did not come through this
 process's Defun) or whose host is gone is charged as itself, as before.
 `Hot_reload.module_of_name` and the structural names are unchanged.
+When the host itself has no non-transparent caller in the static graph (a stdlib host run
+only from an actor handler, a stored callback or a spawned task), the lifted function falls back
+to its own owner, the entry module, exactly as before; see
+`specs/todos/2026-11-11-cap-attrib-indirect-calls.md`.
 
 **Effect.** A module that calls a stdlib function whose capability sits in a lambda now needs
 the capability itself: before, `mod Writer do fn send(s) do Socket.write(s, "x") end end`
