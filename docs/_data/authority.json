@@ -25,8 +25,8 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "0d7810cb1",
-    "date": "2026-11-10",
+    "commit": "4f13266c9",
+    "date": "2026-11-11",
     "inputs_sha256": "ee97b7be8295511e87912f3d638a9cc4bcd26dc7c1a62d1623d00ec67a71740b"
   },
   "modules": {
