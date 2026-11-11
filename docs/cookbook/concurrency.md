@@ -20,7 +20,7 @@ March has two concurrency primitives: **Tasks** for async work and **Actors** fo
 -- a stand-in for real work
 fn expensive_computation() do List.fold_left(List.range(1, 1001), 0, fn (a, b) -> a + b) end
 
-let t = Task.async(fn () -> expensive_computation())
+let t = Authority.must(Task.async(fn () -> expensive_computation()))
 let result = Task.await(t)
 ```
 
@@ -32,7 +32,7 @@ Run multiple tasks in parallel and collect all results:
 let urls = ["https://example.com/a", "https://example.com/b"]
 fn fetch(url) do "body of " ++ url end
 
-let tasks = List.map(urls, fn url -> Task.async(fn () -> fetch(url)))
+let tasks = List.map(urls, fn url -> Authority.must(Task.async(fn () -> fetch(url))))
 let results = Task.await_many(tasks)
 ```
 
@@ -42,8 +42,8 @@ Race: first to finish wins, others are cancelled:
 <!-- repl:skip -->
 ```march
 match Task.race([
-  Task.async(fn () -> primary_source()),
-  Task.async(fn () -> fallback_source())
+  Authority.must(Task.async(fn () -> primary_source())),
+  Authority.must(Task.async(fn () -> fallback_source()))
 ]) do
   Ok(v)  -> v
   Err(e) -> handle_error(e)

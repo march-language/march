@@ -135,12 +135,15 @@ mod System do
   Returns Some(value) if set, None if not set.
   """
   fn env(name : String) : Result(Option(String), CapError) do
-    Process.env(name)
+    let? _ = Authority.check("IO.Process", name)
+    Ok(process_env(name))
   end
 
   doc "Set an environment variable."
   fn put_env(name : String, value : String) : Result((), CapError) do
-    Process.set_env(name, value)
+    let? _ = Authority.check("IO.Process", name)
+    process_set_env(name, value)
+    Ok(())
   end
 
   -- ---- Process metadata ----
@@ -150,22 +153,27 @@ mod System do
   argv()[0] is the path to the executable.
   """
   fn argv() : Result(List(String), CapError) do
-    Process.argv()
+    let? _ = Authority.check("IO.Process", "")
+    Ok(process_argv())
   end
 
   doc "Return the current working directory as a String."
   fn cwd() : Result(String, CapError) do
-    Process.cwd()
+    let? _ = Authority.check("IO.Process", "")
+    Ok(process_cwd())
   end
 
   doc "Return the OS-level PID of the current process as an Int."
   fn pid() : Result(Int, CapError) do
-    Process.pid()
+    let? _ = Authority.check("IO.Process", "")
+    Ok(process_pid())
   end
 
   doc "Terminate the process with the given exit code."
   fn exit(code : Int) : Result((), CapError) do
-    Process.exit(code)
+    let? _ = Authority.check("IO.Process", "")
+    process_exit(code)
+    Ok(())
   end
 
   -- ---- Subprocess execution ----
@@ -183,7 +191,8 @@ mod System do
       end
   """
   fn cmd(command : String, args : List(String)) : Result(Result(ProcessResult, String), CapError) do
-    Process.run(command, args)
+    let? _ = Authority.check("IO.Process", command)
+    Ok(process_spawn_sync(command, args))
   end
 
   doc "Extract the exit code from a ProcessResult."

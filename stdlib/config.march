@@ -54,6 +54,14 @@ mod Config do
   needs IO.Mut
   needs IO.Process
 
+  -- The environment read every function here makes: IO.Process on the
+  -- variable. Read directly, not through Process.env, so the module needs no
+  -- other module loaded (the browser REPL loads stdlib modules on demand).
+  pfn read_env(name : String) : Result(Option(String), CapError) do
+    let? _ = Authority.check("IO.Process", name)
+    Ok(process_env(name))
+  end
+
   -- ── Types ─────────────────────────────────────────────────────────────────
 
   -- A stored configuration value. This closed, tagged sum is what the config
@@ -505,7 +513,7 @@ mod Config do
       "dev-secret"
   """
   fn from_env(k : Key(String), env_var : String, default_val : String) : Result(String, CapError) do
-    let? v = Process.env(env_var)
+    let? v = read_env(env_var)
     let value = match v do
       Some(s) -> s
       None    -> default_val
@@ -525,7 +533,7 @@ mod Config do
       Ok(4)
   """
   fn from_env_int(k : Key(Int), env_var : String, default_val : Int) : Result(Int, CapError) do
-    let? v = Process.env(env_var)
+    let? v = read_env(env_var)
     let value = match v do
       Some(s) ->
         match string_to_int(s) do
@@ -550,7 +558,7 @@ mod Config do
       Ok(true)
   """
   fn from_env_bool(k : Key(Bool), env_var : String, default_val : Bool) : Result(Bool, CapError) do
-    let? v = Process.env(env_var)
+    let? v = read_env(env_var)
     let value = match v do
       Some(s) -> s == "true" || s == "1" || s == "yes"
       None    -> default_val
@@ -575,7 +583,7 @@ mod Config do
   predicates below.
   """
   fn env() : Result(Atom, CapError) do
-    let? v = Process.env("MARCH_ENV")
+    let? v = read_env("MARCH_ENV")
     match v do
     Some("prod") -> Ok(:prod)
     Some("test") -> Ok(:test)
