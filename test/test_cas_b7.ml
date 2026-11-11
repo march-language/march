@@ -240,7 +240,14 @@ let test_libprobe_in_cas_key () =
   require_compiler ();
   with_scratch @@ fun dir ->
   write_file (Filename.concat dir "m.march")
-    "mod M do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n    println(\"hi\")\n  end\nend\n";
+    {|mod M do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("hi")
+    ()
+  end
+end
+|};
   let run ~probe_root log =
     let cmd = Printf.sprintf
         "cd %s && env HOME=%s MARCH_DEBUG_CASFLAGS=1 %s %s --compile -o out m.march > %s 2>&1"

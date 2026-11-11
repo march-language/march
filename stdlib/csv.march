@@ -60,17 +60,15 @@ mod Csv do
   """
   fn each_row(path, delimiter, mode, callback) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match csv_open(path, delimiter, mode) do
-      Err(e) -> Err(e)
-      Ok(handle) -> do
-        each_row_loop(handle, callback)
-        csv_close(handle)
-        Ok(:ok)
-      end
-      end
+    let performed = match csv_open(path, delimiter, mode) do
+    Err(e) -> Err(e)
+    Ok(handle) -> do
+      each_row_loop(handle, callback)
+      csv_close(handle)
+      Ok(:ok)
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   -- Internal accumulator loop for read_all.
@@ -95,17 +93,15 @@ mod Csv do
   """
   fn read_all(path, delimiter, mode) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match csv_open(path, delimiter, mode) do
-      Err(e) -> Err(e)
-      Ok(handle) -> do
-        let rows = collect_loop(handle, Nil)
-        csv_close(handle)
-        Ok(rows)
-      end
-      end
+    let performed = match csv_open(path, delimiter, mode) do
+    Err(e) -> Err(e)
+    Ok(handle) -> do
+      let rows = collect_loop(handle, Nil)
+      csv_close(handle)
+      Ok(rows)
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   -- Internal loop for each_row_with_header: calls callback(header, fields) per row.
@@ -134,25 +130,23 @@ mod Csv do
   """
   fn each_row_with_header(path, delimiter, mode, callback) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match csv_open(path, delimiter, mode) do
-      Err(e) -> Err(e)
-      Ok(handle) -> do
-        match csv_next_row(handle) do
-        CsvEof -> do
-          csv_close(handle)
-          Ok(:ok)
-        end
-        Row(header) -> do
-          with_header_loop(handle, header, callback)
-          csv_close(handle)
-          Ok(:ok)
-        end
-        end
+    let performed = match csv_open(path, delimiter, mode) do
+    Err(e) -> Err(e)
+    Ok(handle) -> do
+      match csv_next_row(handle) do
+      CsvEof -> do
+        csv_close(handle)
+        Ok(:ok)
+      end
+      Row(header) -> do
+        with_header_loop(handle, header, callback)
+        csv_close(handle)
+        Ok(:ok)
       end
       end
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   doc """

@@ -1090,6 +1090,7 @@ let test_run_interpreted_passes_ffi_sources () =
         \  end\n\n\
         \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do\n\
         \    println(int_to_string(triple(14)))\n\
+        \    ()\n\
         \  end\n\
          end\n" mod_name);
       (* Capture stdout: the assertion is on the VALUE the extern returned. *)

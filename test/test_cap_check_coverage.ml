@@ -45,7 +45,7 @@ let allowlist : ((string * string) * string) list = [
   (("HttpServer.bind_host", "http_server_bind_host"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("HttpTransport.connect", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("HttpTransport.request_https_with_context", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("HttpTransport.request_plain", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
+  (("HttpTransport.request_plain_raw", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("List.pmap", "task_spawn"), "checked through spawn_allowed() (Authority.check); a refusal computes the same result sequentially");
   (("List.pmap_n", "task_spawn"), "checked through spawn_allowed() (Authority.check); a refusal computes the same result sequentially");
   (("List.pfilter", "task_spawn"), "checked through spawn_allowed() (Authority.check); a refusal computes the same result sequentially");
@@ -66,7 +66,7 @@ let allowlist : ((string * string) * string) list = [
   (("SessionNode.hosted_trace", "print_stderr"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Tls.client_ctx", "tls_client_ctx"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("Tls.server_ctx", "tls_server_ctx"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Tls.https_get", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
+  (("Tls.https_get_raw", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("Topology.actor Anchor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.place", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.place", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");

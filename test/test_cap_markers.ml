@@ -171,7 +171,7 @@ mod WrapApp do
   mod Dep do
     needs IO.FileRead
     fn slurp(p : String) : String do
-      match File.read(p) do
+      match Authority.must(File.read(p)) do
         Ok(s)  -> s
         Err(_) -> ""
       end
@@ -349,6 +349,7 @@ mod ClockMarkerApp do
   needs IO.Clock
   fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
     println(%s)
+    ()
   end
 end
 |}

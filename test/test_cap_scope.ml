@@ -358,6 +358,7 @@ mod ScopeDecl do
   %s
   fn main(_cap_console : Cap(IO.Console)) : () do
     println("x")
+    ()
   end
 end
 |}

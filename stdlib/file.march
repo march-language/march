@@ -42,10 +42,7 @@ mod File do
   """
   fn read(path) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      file_read(path)
-    end
-    Ok(perform())
+    Ok(file_read(path))
   end
 
   doc """
@@ -61,24 +58,22 @@ mod File do
   """
   fn read_lines(path) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match file_read(path) do
-      Err(e) -> Err(e)
-      Ok(s) -> do
-        let lines = String.split(s, "\n")
-        -- Strip all trailing empty strings (from trailing newlines)
-        fn strip_trailing(xs) do
-          match List.reverse(xs) do
-          Nil -> Nil
-          Cons("", rest) -> strip_trailing(List.reverse(rest))
-          ig -> xs
-          end
+    let performed = match file_read(path) do
+    Err(e) -> Err(e)
+    Ok(s) -> do
+      let lines = String.split(s, "\n")
+      -- Strip all trailing empty strings (from trailing newlines)
+      fn strip_trailing(xs) do
+        match List.reverse(xs) do
+        Nil -> Nil
+        Cons("", rest) -> strip_trailing(List.reverse(rest))
+        ig -> xs
         end
-        Ok(strip_trailing(lines))
       end
-      end
+      Ok(strip_trailing(lines))
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   doc """
@@ -91,10 +86,7 @@ mod File do
   """
   fn exists(path) : Result(Bool, CapError) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      file_exists(path)
-    end
-    Ok(perform())
+    Ok(file_exists(path))
   end
 
   doc """
@@ -111,10 +103,7 @@ mod File do
   """
   fn stat(path) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      file_stat(path)
-    end
-    Ok(perform())
+    Ok(file_stat(path))
   end
 
   doc """
@@ -123,13 +112,11 @@ mod File do
   """
   fn mtime(path) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match file_stat(path) do
-      Err(e) -> Err(e)
-      Ok(FileStat(_, _, m, _)) -> Ok(m)
-      end
+    let performed = match file_stat(path) do
+    Err(e) -> Err(e)
+    Ok(FileStat(_, _, m, _)) -> Ok(m)
     end
-    Ok(perform())
+    Ok(performed)
   end
 
   -- Write
@@ -145,10 +132,7 @@ mod File do
   """
   fn write(path, data) do
     let? _ = Authority.check("IO.FileWrite", path)
-    fn perform() do
-      file_write(path, data)
-    end
-    Ok(perform())
+    Ok(file_write(path, data))
   end
   doc """
   Append `data` to the end of `path`, creating the file if it does not
@@ -160,10 +144,7 @@ mod File do
   """
   fn append(path, data) do
     let? _ = Authority.check("IO.FileWrite", path)
-    fn perform() do
-      file_append(path, data)
-    end
-    Ok(perform())
+    Ok(file_append(path, data))
   end
   doc """
   Delete the file at `path`. Returns `Ok(:ok)`, or `Err(FileError)` if it
@@ -172,10 +153,7 @@ mod File do
   """
   fn delete(path) do
     let? _ = Authority.check("IO.FileWrite", path)
-    fn perform() do
-      file_delete(path)
-    end
-    Ok(perform())
+    Ok(file_delete(path))
   end
   doc """
   Copy the contents of `src` to `dest`, creating or overwriting `dest`.
@@ -184,10 +162,7 @@ mod File do
   fn copy(src, dest) do
     let? _ = Authority.check("IO.FileRead", src)
     let? _ = Authority.check("IO.FileWrite", dest)
-    fn perform() do
-      file_copy(src, dest)
-    end
-    Ok(perform())
+    Ok(file_copy(src, dest))
   end
   doc """
   Rename (move) `src` to `dest`, replacing `dest` if it exists. Returns
@@ -196,10 +171,7 @@ mod File do
   fn rename(src, dest) do
     let? _ = Authority.check("IO.FileWrite", src)
     let? _ = Authority.check("IO.FileWrite", dest)
-    fn perform() do
-      file_rename(src, dest)
-    end
-    Ok(perform())
+    Ok(file_rename(src, dest))
   end
 
   -- Streaming: closed when callback returns OR panics (via try_finally).
@@ -224,26 +196,24 @@ mod File do
   """
   fn with_lines(path, callback) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match file_open(path) do
-      Err(e) -> Err(e)
-      Ok(fd) -> do
-        fn do_lines(a, f) do
-          match file_read_line(fd) do
-          None -> a
-          Some(line) -> do_lines(f(a, line), f)
-          end
+    let performed = match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      fn do_lines(a, f) do
+        match file_read_line(fd) do
+        None -> a
+        Some(line) -> do_lines(f(a, line), f)
         end
-        let seq = Seq(fn(acc, f) -> do_lines(acc, f))
-        let result = try_finally(
-          fn _ -> callback(seq),
-          fn _ -> file_close(fd)
-        )
-        Ok(result)
       end
-      end
+      let seq = Seq(fn(acc, f) -> do_lines(acc, f))
+      let result = try_finally(
+        fn _ -> callback(seq),
+        fn _ -> file_close(fd)
+      )
+      Ok(result)
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   doc """
@@ -258,26 +228,24 @@ mod File do
   """
   fn with_chunks(path, size, callback) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match file_open(path) do
-      Err(e) -> Err(e)
-      Ok(fd) -> do
-        fn do_chunks(a, f) do
-          match file_read_chunk(fd, size) do
-          None -> a
-          Some(chunk) -> do_chunks(f(a, chunk), f)
-          end
+    let performed = match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      fn do_chunks(a, f) do
+        match file_read_chunk(fd, size) do
+        None -> a
+        Some(chunk) -> do_chunks(f(a, chunk), f)
         end
-        let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
-        let result = try_finally(
-          fn _ -> callback(seq),
-          fn _ -> file_close(fd)
-        )
-        Ok(result)
       end
-      end
+      let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
+      let result = try_finally(
+        fn _ -> callback(seq),
+        fn _ -> file_close(fd)
+      )
+      Ok(result)
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   -- Low-level callbacks (side-effect iteration)
@@ -304,17 +272,15 @@ mod File do
   """
   fn each_line(path, f) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match file_open(path) do
-      Err(e) -> Err(e)
-      Ok(fd) -> do
-        each_line_loop(fd, f)
-        file_close(fd)
-        Ok(:ok)
-      end
-      end
+    let performed = match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      each_line_loop(fd, f)
+      file_close(fd)
+      Ok(:ok)
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   -- Internal helper: recursively reads chunks. Used by each_chunk.
@@ -335,17 +301,15 @@ mod File do
   """
   fn each_chunk(path, size, f) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match file_open(path) do
-      Err(e) -> Err(e)
-      Ok(fd) -> do
-        each_chunk_loop(fd, size, f)
-        file_close(fd)
-        Ok(:ok)
-      end
-      end
+    let performed = match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      each_chunk_loop(fd, size, f)
+      file_close(fd)
+      Ok(:ok)
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
 end

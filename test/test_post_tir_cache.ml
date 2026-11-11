@@ -128,6 +128,7 @@ let marker_src ~name ~needs = Printf.sprintf {|mod %s do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println("markers")
+    ()
   end
 end
 |} name needs

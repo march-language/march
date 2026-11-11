@@ -20,10 +20,7 @@ mod Dir do
   """
   fn list(path) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      dir_list(path)
-    end
-    Ok(perform())
+    Ok(dir_list(path))
   end
 
   doc """
@@ -37,25 +34,23 @@ mod Dir do
   """
   fn list_full(path) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      match dir_list(path) do
-      Err(e) -> Err(e)
-      Ok(names) -> do
-        let prefix =
-          if string_is_empty(path) do ""
-          else if string_ends_with(path, "/") do path
-          else path ++ "/" end end
-        fn prepend(xs) do
-          match xs do
-          Nil -> Nil
-          Cons(name, rest) -> Cons(prefix ++ name, prepend(rest))
-          end
+    let performed = match dir_list(path) do
+    Err(e) -> Err(e)
+    Ok(names) -> do
+      let prefix =
+        if string_is_empty(path) do ""
+        else if string_ends_with(path, "/") do path
+        else path ++ "/" end end
+      fn prepend(xs) do
+        match xs do
+        Nil -> Nil
+        Cons(name, rest) -> Cons(prefix ++ name, prepend(rest))
         end
-        Ok(prepend(names))
       end
-      end
+      Ok(prepend(names))
     end
-    Ok(perform())
+    end
+    Ok(performed)
   end
 
   doc """
@@ -69,10 +64,7 @@ mod Dir do
   """
   fn mkdir(path) do
     let? _ = Authority.check("IO.FileWrite", path)
-    fn perform() do
-      dir_mkdir(path)
-    end
-    Ok(perform())
+    Ok(dir_mkdir(path))
   end
 
   doc """
@@ -85,10 +77,7 @@ mod Dir do
   """
   fn mkdir_p(path) do
     let? _ = Authority.check("IO.FileWrite", path)
-    fn perform() do
-      dir_mkdir_p(path)
-    end
-    Ok(perform())
+    Ok(dir_mkdir_p(path))
   end
 
   doc """
@@ -102,10 +91,7 @@ mod Dir do
   """
   fn rmdir(path) do
     let? _ = Authority.check("IO.FileWrite", path)
-    fn perform() do
-      dir_rmdir(path)
-    end
-    Ok(perform())
+    Ok(dir_rmdir(path))
   end
 
   doc """
@@ -120,10 +106,7 @@ mod Dir do
   """
   fn rm_rf(path) do
     let? _ = Authority.check("IO.FileWrite", path)
-    fn perform() do
-      dir_rm_rf(path)
-    end
-    Ok(perform())
+    Ok(dir_rm_rf(path))
   end
 
   doc """
@@ -139,10 +122,7 @@ mod Dir do
   """
   fn exists(path) : Result(Bool, CapError) do
     let? _ = Authority.check("IO.FileRead", path)
-    fn perform() do
-      dir_exists(path)
-    end
-    Ok(perform())
+    Ok(dir_exists(path))
   end
 
 end
