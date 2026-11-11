@@ -1125,12 +1125,43 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
        && unrelated x.Tir.v_name
      | _ -> false)
   in
-  let rec push ?(incs : string list = []) (freed : Tir.var) (e : Tir.expr)
-    : Tir.expr =
+  (* [aliases] maps a name to the capture it reads INTO: a pattern variable of
+     a [case] on a capture (or on such a name), and a [let] that copies or
+     projects one.  Each is borrowed from the capture, not a reference of its
+     own, so releasing the capture frees what it names.  `match src do
+     Pair(a, b) -> string_concat(a, b) end` has a tail naming only [a] and
+     [b]; asking [used] about [src] alone released the environment in front
+     of the call, and the builtin read freed strings
+     (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md). *)
+  let root_of aliases n =
+    if is_capture n then Some n else List.assoc_opt n aliases in
+  let alias_all aliases (scrut : Tir.atom) (vs : Tir.var list) =
+    match scrut with
+    | Tir.AVar x ->
+      (match root_of aliases x.Tir.v_name with
+       (* Only a heap value can dangle: an [Int] read out of a capture
+          (`b.data_fd`) is a copy, and counting it would withhold the
+          capture's release for nothing. *)
+       | Some r ->
+         List.filter_map (fun (v : Tir.var) ->
+             if Kind.needs_rc_of env.k_table v.Tir.v_ty
+             then Some (v.Tir.v_name, r) else None) vs
+         @ aliases
+       | None -> aliases)
+    | _ -> aliases
+  in
+  let rec push ?(incs : string list = []) ?(aliases : (string * string) list = [])
+      (freed : Tir.var) (e : Tir.expr) : Tir.expr =
     match e with
-    | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, push freed e2)
+    | Tir.ELet (v, e1, e2) ->
+      let aliases = match e1 with
+        | Tir.EAtom a | Tir.EField (a, _) -> alias_all aliases a [v]
+        (* A rebinding shadows whatever the name aliased before. *)
+        | _ -> List.remove_assoc v.Tir.v_name aliases
+      in
+      Tir.ELet (v, e1, push ~aliases freed e2)
     | Tir.ESeq ((Tir.EIncRC (Tir.AVar v) as e1), e2) ->
-      Tir.ESeq (e1, push ~incs:(v.Tir.v_name :: incs) freed e2)
+      Tir.ESeq (e1, push ~incs:(v.Tir.v_name :: incs) ~aliases freed e2)
     (* A release of some OTHER variable between those incs and the tail (the
        owned-aggregate parameter drop [Perceus] places right before a tail:
        `fn (_p, s) -> body(s)` releases [_p] there) does not touch the
@@ -1138,14 +1169,17 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
        Resetting on it left SessionNode.run_cluster_with's role closure
        leaking the role function it captured, once per cluster session
        (specs/progress/2026-10-07-reused-closure-captures-leak.md). *)
-    | Tir.ESeq (e1, e2) when releases_other incs e1 -> Tir.ESeq (e1, push ~incs freed e2)
-    | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push freed e2)
-    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push freed inner)
+    | Tir.ESeq (e1, e2) when releases_other incs e1 ->
+      Tir.ESeq (e1, push ~incs ~aliases freed e2)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push ~aliases freed e2)
+    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push ~aliases freed inner)
     | Tir.ECase (a, branches, default) ->
       Tir.ECase (a,
-        List.map (fun br -> { br with Tir.br_body = push freed br.Tir.br_body })
+        List.map (fun br ->
+            let aliases = alias_all aliases a br.Tir.br_vars in
+            { br with Tir.br_body = push ~aliases freed br.Tir.br_body })
           branches,
-        Option.map (push freed) default)
+        Option.map (push ~aliases freed) default)
     | tail ->
       let guarded only =
         Tir.ECase (Tir.AVar freed,
@@ -1171,7 +1205,13 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
            or extern (not a module function), which cannot recurse back.  A
            consuming use in the tail took its own reference, so releasing
            the environment's afterwards is balanced. *)
-      let used (v : Tir.var) = Perceus_liveness.name_free_in v.Tir.v_name tail in
+      (* A capture's names: its own and every alias reading into it. *)
+      let names_of (v : Tir.var) =
+        v.Tir.v_name
+        :: List.filter_map (fun (a, r) ->
+            if String.equal r v.Tir.v_name then Some a else None) aliases in
+      let used (v : Tir.var) =
+        List.exists (fun n -> Perceus_liveness.name_free_in n tail) (names_of v) in
       let may_recurse = match tail with
         | Tir.ECallPtr _ -> true
         | Tir.EApp (f, _) ->
@@ -1201,12 +1241,12 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
         match call_atoms with
         | None -> false
         | Some atoms ->
-          let n = v.Tir.v_name in
-          let count l =
-            List.length (List.filter (String.equal n) l) in
-          let occ = count (List.filter_map (function
-              | Tir.AVar a -> Some a.Tir.v_name | _ -> None) atoms) in
-          count incs >= occ
+          let names = List.filter_map (function
+              | Tir.AVar a -> Some a.Tir.v_name | _ -> None) atoms in
+          List.for_all (fun n ->
+              let count l = List.length (List.filter (String.equal n) l) in
+              count incs >= count names)
+            (names_of v)
       in
       if not (List.exists used !captures) then
         Tir.ESeq (guarded (fun _ -> true), tail)

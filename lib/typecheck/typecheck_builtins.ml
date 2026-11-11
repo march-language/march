@@ -85,7 +85,7 @@ let cap_strict_ceiling : bool ref = ref false
 
 (** Whether source file [f] is one of the standard library's. The ONE
     predicate for "this code is the stdlib's": [span_is_stdlib] below, the
-    stdlib-only builtin gate ([Typecheck_caps.check_stdlib_only_refs]) and the
+    stdlib-only builtin gate (the resolution-time check in [Typecheck.infer_expr]'s [EVar] arm) and the
     driver's diagnostic filter (bin/main.ml, [user_diag_file]) all go through
     it, so the gate can never admit code the filter shows as the user's, or
     reject code whose error the filter then hides. *)
@@ -154,7 +154,7 @@ let span_is_stdlib (sp : Ast.span) : bool =
 
     A call or value reference to one of these names from code outside the
     stdlib ([span_is_stdlib]) is a type error; the check is
-    [Typecheck_caps.check_stdlib_only_refs]. It exists for builtins that
+    the resolution-time gate in [Typecheck.infer_expr]'s [EVar] arm. It exists for builtins that
     forge authority, which user code must reach through a capability-taking
     stdlib wrapper (specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md,
     II.1 and II.4.4). Search and docs are unaffected: the gate is at the
@@ -242,6 +242,10 @@ let builtin_cap_table : (string * string) list = [
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
+  (* file_open_write opens a stream for writing (File.open_write). The
+     handle-taking file_write_handle / file_seek are charged nothing: the
+     handle came from a checked open (ocap phase 2). *)
+  ("file_open_write",       "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");
@@ -1175,6 +1179,13 @@ let builtin_bindings : (string * scheme) list =
     ("file_rename",     Mono (TArrow (t_string, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
     ("file_stat",       Mono (TArrow (t_string, t_result (TCon ("FileStat", [])) (TCon ("FileError", [])))));
     ("file_open",       Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    (* file_open_write(path, mode): mode 0 truncates, 1 appends; creates the
+       file (0644). file_write_handle(fd, data); file_seek(fd, offset) seeks
+       to an absolute offset and returns it. Raw handles: File.open_write /
+       File.write_to / File.seek wrap them in a File.Handle box. *)
+    ("file_open_write", Mono (TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
+    ("file_write_handle", Mono (TArrow (t_int, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
+    ("file_seek",       Mono (TArrow (t_int, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     (* file_close returns :ok on both backends (it was declared Unit while
@@ -1210,6 +1221,20 @@ let builtin_bindings : (string * scheme) list =
     ("csv_open",     Mono (TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int (TCon ("CsvError", [])))))));
     ("csv_next_row", Mono (TArrow (t_int, TCon ("Csv.CsvRow", []))));
     ("csv_close",    Mono (TArrow (t_int, t_atom)));
+    (* Handle-box primitives (ocap phase 2, Task 2 of
+       specs/plans/2026-11-10-ocap-p2-handles-plan.md; runtime/march_handle.c).
+       Stdlib-only ([Typecheck_env.stdlib_only]): the stdlib wraps each raw
+       descriptor in a box of one of the handle types below and annotates the
+       result, so the box's type is the caller's [a]. Kinds are small ints
+       (1 FILE .. 9 PROCESS). [handle_enter] returns the raw value and counts
+       a use in flight, or -1 when the box is closed; [handle_leave] ends it. *)
+    ("handle_new",       poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, a)))));
+    ("handle_enter",     poly1 (fun a -> TArrow (a, TArrow (t_int, t_int))));
+    ("handle_leave",     poly1 (fun a -> TArrow (a, t_unit)));
+    ("handle_close",     poly1 (fun a -> TArrow (a, t_bool)));
+    ("handle_detach",    poly1 (fun a -> TArrow (a, t_int)));
+    ("handle_is_closed", poly1 (fun a -> TArrow (a, t_bool)));
+    ("handle_aux",       poly1 (fun a -> TArrow (a, t_int)));
     (* TCP/HTTP transport builtins *)
     (* tcp_listen(port): binds+listens on port, returns Ok(listen_fd) or Err(reason) *)
     ("tcp_listen",              Mono (TArrow (t_int, t_result t_int t_string)));
@@ -1267,9 +1292,11 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_recv_chunked_frame",  Mono (TArrow (t_int, t_result t_string t_string)));
     (* Ok(None) is the cap expiring: the absence of an event, not an error. *)
     ("tcp_recv_timeout",        Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result (t_option t_string) t_string)))));
-    (* http_serialize_request(method, host, path, query_opt, headers, body) -> String *)
+    (* http_serialize_request(method, host, path, query_opt, headers, body)
+         -> Result(String, String): Err when a field would smuggle a second
+       request (a CR/LF/space/control byte; lib/eval/http_request_check.ml). *)
     ("http_serialize_request",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string,
-        TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
+        TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_result t_string t_string))))))));
     ("http_parse_response",     Mono (TArrow (t_string,
         t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) t_string)));
     (* http_fetch / http_fetch_available: JS-only fetch path used by
@@ -2103,7 +2130,18 @@ let builtin_types : (string * int) list =
        the compiled ABI; source declarations with the same exact shape (the
        native conformance fixture and, later, the actor stdlib surface) refine
        the same nominal entries rather than inventing per-module wire tags. *)
-    ("DownReason", 0); ("Down", 1); ]
+    ("DownReason", 0); ("Down", 1);
+    (* Handle types (ocap phase 2, spec §6): opaque reference-counted boxes
+       over a descriptor, made only by their module's open functions (the
+       box primitives are stdlib-only). No implementation, so no `==`. Never
+       a bare `Handle`: that name is the typestate Handle(r, s) of
+       stdlib/handle.march, which is always_linear. *)
+    ("File.Handle", 0); ("File.Dir", 0); ("Socket", 0); ("Listener", 0);
+    ("Process", 0); ]
+
+let () =
+  List.iter (fun (n, _) -> Hashtbl.replace Typecheck_env.builtin_type_keys n ())
+    builtin_types
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].

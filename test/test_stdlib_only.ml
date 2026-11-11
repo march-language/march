@@ -347,14 +347,19 @@ let test_shipped_table () =
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
     [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
-      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request" ]
+      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request";
+      "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
+      "handle_is_closed"; "handle_aux";
+      "file_open_write"; "file_write_handle"; "file_seek" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
         (contains ~needle:"`Actor.introspect`" hint))
     (List.filter (fun (name, _) -> name <> "observe_count_send" && name <> "actor_inspect" && name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn" && name <> "epoch_holds" && name <> "reload_request"
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
-                             && name <> "delivery_failed_watch")
+                             && name <> "delivery_failed_watch"
+                             && not (String.length name > 7 && String.sub name 0 7 = "handle_")
+                             && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek" ]))
        !TB.stdlib_only);
   Alcotest.(check bool) "actor_inspect suggestion names Actor.debug" true
     (contains ~needle:"`Actor.debug`" (List.assoc "actor_inspect" !TB.stdlib_only));
@@ -368,6 +373,60 @@ let test_shipped_table () =
     actor_whereis(n)
   end
 end|}) "`actor_whereis` is internal to the standard library; use `Actor.whereis(cap, name)`")
+
+(* ocap phase 2 (Task 2): the seven handle primitives are stdlib-only, and
+   each points the user at the module open functions that make handles. *)
+let handle_primitives =
+  [ "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
+    "handle_is_closed"; "handle_aux" ]
+
+let test_handle_primitives_gated () =
+  let ctx = typecheck {|mod App do
+  fn forge() do
+    handle_new(3, 0, 0)
+  end
+end|} in
+  let gate =
+    List.find_opt (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error
+        && contains ~needle:"`handle_new` is internal to the standard library" d.message)
+      ctx.March_errors.Errors.diagnostics
+  in
+  (match gate with
+   | None -> Alcotest.fail "user code calling handle_new(3, 0, 0) is not gated"
+   | Some d ->
+     Alcotest.(check string) "the code is stdlib_internal"
+       March_errors.Errors.Code.stdlib_internal d.code;
+     Alcotest.(check bool) "the message names \"handles are made by\"" true
+       (contains ~needle:"handles are made by" d.message));
+  List.iter (fun name ->
+      Alcotest.(check bool) (name ^ " is in the shipped table") true
+        (match List.assoc_opt name !TB.stdlib_only with
+         | Some hint -> contains ~needle:"handles are made by their module's open functions" hint
+         | None -> false))
+    handle_primitives
+
+(* ocap phase 2 (Task 4): the raw file builtins behind File.Handle are
+   stdlib-only, so a guessed Int handle cannot write or seek an open file. *)
+let test_raw_file_handle_builtins_gated () =
+  List.iter (fun (call, name) ->
+      let ctx = typecheck (Printf.sprintf {|mod App do
+  fn forge() do
+    %s
+  end
+end|} call) in
+      let gated =
+        List.exists (fun (d : March_errors.Errors.diagnostic) ->
+            d.severity = March_errors.Errors.Error
+            && d.code = March_errors.Errors.Code.stdlib_internal
+            && contains ~needle:(Printf.sprintf "`%s` is internal to the standard library" name)
+                 d.message)
+          ctx.March_errors.Errors.diagnostics
+      in
+      Alcotest.(check bool) (name ^ " is refused in user code") true gated)
+    [ ({|file_open_write("/tmp/x", 0)|}, "file_open_write");
+      ({|file_write_handle(-2, "x")|}, "file_write_handle");
+      ({|file_seek(-2, 0)|}, "file_seek") ]
 
 (* ── Adversarial sweep over the shipped table ─────────────────────────────
    Every gated name, in every spelling the review's findings list (and
@@ -595,6 +654,153 @@ end|} in
   Alcotest.(check bool) "user bindings of every gated name are not the builtins" false
     (has_error_with ctx "internal to the standard library")
 
+
+(* ── @[stdlib_internal]: the gate for stdlib FUNCTIONS (ocap phase 2, task 3) ──
+   A stdlib module's `@[stdlib_internal] fn` may be named only from a span the
+   stdlib owns. Each source below is one `mod`; they are parsed under their own
+   file name and nested into one entry module, the way the driver nests the
+   stdlib's modules beside the user's. *)
+let internal_message = "`Inner.raw` is internal to the standard library; use the handle API in `Inner`."
+
+let inner_src = {|mod Inner do
+  @[stdlib_internal]
+  fn raw(fd : Int) : Int do fd end
+end|}
+
+let typecheck_files (files : (string * string) list) =
+  let nested = List.map (fun (file, src) ->
+      let lexbuf = Lexing.from_string src in
+      Lexing.set_filename lexbuf file;
+      let m = March_parser.Parse.module_of_lexbuf lexbuf in
+      let sp = March_ast.Ast.dummy_span in
+      March_ast.Ast.DMod (m.March_ast.Ast.mod_name, March_ast.Ast.Public,
+                          m.March_ast.Ast.mod_decls, sp)) files in
+  let entry = { March_ast.Ast.mod_name = { March_ast.Ast.txt = "Entry"; span = March_ast.Ast.dummy_span };
+                mod_decls = nested } in
+  let (errors, _) =
+    March_typecheck.Typecheck.check_module (March_desugar.Desugar.desugar_module entry) in
+  errors
+
+let internal_ctx user_src =
+  with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_src); ("app.march", user_src) ])
+
+let test_internal_fn_call_refused () =
+  let ctx = internal_ctx {|mod App do
+  fn go() : Int do Inner.raw(3) end
+end|} in
+  Alcotest.(check bool) "a user call is refused" true (has_error_with ctx internal_message)
+
+let test_internal_fn_value_refused () =
+  let ctx = internal_ctx {|mod App do
+  fn go() : Int do
+    let f = Inner.raw
+    f(3)
+  end
+end|} in
+  Alcotest.(check bool) "a value reference is refused" true (has_error_with ctx internal_message)
+
+let test_internal_fn_stdlib_ok () =
+  let ctx = with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_src);
+                        ("other.march", {|mod Other do
+  fn go() : Int do Inner.raw(3) end
+end|}) ]) in
+  Alcotest.(check bool) "a stdlib module may call it" false
+    (has_error_with ctx "internal to the standard library")
+
+let test_internal_fn_user_shadow_ok () =
+  let ctx = internal_ctx {|mod App do
+  fn raw(fd : Int) : Int do fd end
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "a user fn named raw is not Inner.raw" false
+    (has_error_with ctx "internal to the standard library")
+
+
+(* Fix round 1: every import form rebinds a member under another key, so the
+   spelled-name gate alone would miss it. *)
+let inner_two_src = {|mod Inner do
+  @[stdlib_internal]
+  fn raw(fd : Int) : Int do fd end
+  fn other(n : Int) : Int do n end
+end|}
+
+let internal_ctx2 user_src =
+  with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_two_src); ("app.march", user_src) ])
+
+let refused ctx = has_error_with ctx "is internal to the standard library"
+
+let test_internal_use_all_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  use Inner.*
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "use Inner.* leaves raw out, so raw(3) is unbound" true
+    (has_errors ctx)
+
+let test_internal_use_names_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  use Inner.{raw}
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "explicit import is stdlib_internal" true
+    (has_error_with ctx "`Inner.raw` is internal to the standard library; use the handle API in `Inner`.")
+
+let test_internal_use_except_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  import Inner, except: [other]
+  fn go() : Int do raw(3) end
+end|} in
+  Alcotest.(check bool) "use Inner.{except ..} leaves raw out" true (has_errors ctx)
+
+let test_internal_alias_refused () =
+  let ctx = internal_ctx2 {|mod App do
+  alias Inner, as: I
+  fn go() : Int do I.raw(3) end
+end|} in
+  Alcotest.(check bool) "I.raw does not resolve" true (has_errors ctx)
+
+let test_internal_use_other_still_works () =
+  let ctx = internal_ctx2 {|mod App do
+  use Inner.*
+  fn go() : Int do other(3) end
+end|} in
+  Alcotest.(check bool) "non-internal members still import" false (has_errors ctx)
+
+let test_internal_use_all_stdlib_ok () =
+  let ctx = with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", inner_src);
+                        ("other.march", {|mod Other do
+  use Inner.*
+  fn go() : Int do raw(3) end
+end|}) ]) in
+  Alcotest.(check bool) "a stdlib module may use Inner.* and call raw" false
+    (has_errors ctx)
+
+let test_internal_dotted_use_refused () =
+  let ctx = with_gate ~stdlib_files:[ "inner.march"; "other.march" ] (fun () ->
+      typecheck_files [ ("inner.march", {|mod Outer do
+  mod Inner do
+    @[stdlib_internal]
+    fn raw(fd : Int) : Int do fd end
+  end
+end|});
+                        ("app.march", {|mod App do
+  use Outer.Inner
+  fn go() : Int do Inner.raw(3) end
+end|}) ]) in
+  Alcotest.(check bool) "dotted use A.B does not rebind raw" true (has_errors ctx)
+
+let test_internal_same_name_user_module_ok () =
+  let ctx = internal_ctx {|mod Inner do
+  fn raw(fd : Int) : Int do fd end
+  fn go() : Int do Inner.raw(3) end
+end|} in
+  Alcotest.(check bool) "a user module named Inner owns its own Inner.raw" false
+    (refused ctx)
+
 let tests =
   [ ("stdlib-only builtins",
      [ Alcotest.test_case "user call rejected" `Quick test_user_call_rejected;
@@ -622,6 +828,20 @@ let tests =
          test_driver_rejects_user_json_march;
        Alcotest.test_case "shipped table gates the four forging builtins" `Quick
          test_shipped_table;
+       Alcotest.test_case "handle_primitives_gated" `Quick test_handle_primitives_gated;
+       Alcotest.test_case "raw_file_handle_builtins_gated" `Quick test_raw_file_handle_builtins_gated;
+       Alcotest.test_case "internal_fn_call_refused" `Quick test_internal_fn_call_refused;
+       Alcotest.test_case "internal_fn_value_refused" `Quick test_internal_fn_value_refused;
+       Alcotest.test_case "internal_fn_stdlib_ok" `Quick test_internal_fn_stdlib_ok;
+       Alcotest.test_case "internal_fn_user_shadow_ok" `Quick test_internal_fn_user_shadow_ok;
+       Alcotest.test_case "internal_use_all_refused" `Quick test_internal_use_all_refused;
+       Alcotest.test_case "internal_use_names_refused" `Quick test_internal_use_names_refused;
+       Alcotest.test_case "internal_use_except_refused" `Quick test_internal_use_except_refused;
+       Alcotest.test_case "internal_alias_refused" `Quick test_internal_alias_refused;
+       Alcotest.test_case "internal_use_other_still_works" `Quick test_internal_use_other_still_works;
+       Alcotest.test_case "internal_use_all_stdlib_ok" `Quick test_internal_use_all_stdlib_ok;
+       Alcotest.test_case "internal_dotted_use_refused" `Quick test_internal_dotted_use_refused;
+       Alcotest.test_case "internal_same_name_user_module_ok" `Quick test_internal_same_name_user_module_ok;
        Alcotest.test_case "adversarial sweep: every name, every spelling, same text" `Quick
          test_adversarial_sweep;
        Alcotest.test_case "sweep negative control: rebound names are silent" `Quick

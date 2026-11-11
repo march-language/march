@@ -50,3 +50,14 @@ today), and decide whether rejecting such a declaration is the better answer.
 
 The refinement checker's skip rule (every datatype whose short name two declarants share
 resolves no constructor) can be relaxed for nested-module pairs now.
+
+## 2026-11-10: the function-name half is fixed; this type half needs its own mechanism
+
+The two sibling todos (a user `fn show` vs the `Show` method, an entry `mod List` vs the stdlib
+`List`) were one TIR symbol for two definitions, and lowering now names the user's definition
+distinctly (`specs/progress/2026-11-10-user-stdlib-name-collisions.md`). That does not reach this
+item: a type's identity is decided by the typechecker (unification on the bare `TCon` name), before
+lowering, so a user `type CancelToken` is already the built-in one by the time TIR names anything.
+The fix is still the one sketched above (count built-in and stdlib type names as declared at a
+pseudo path in `Typecheck_nominal` and give a colliding entry-level user type a non-bare identity,
+or reject the declaration), after auditing the tests and examples that rely on the conflation.

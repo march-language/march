@@ -41,6 +41,7 @@ let table : (string * string) list = [
   (* IO.FileWrite *)
   ("march_file_write",             "IO.FileWrite");
   ("march_file_append",            "IO.FileWrite");
+  ("march_file_open_write",        "IO.FileWrite");
   ("march_file_delete",            "IO.FileWrite");
   ("march_file_rename",            "IO.FileWrite");
   ("march_dir_mkdir",              "IO.FileWrite");

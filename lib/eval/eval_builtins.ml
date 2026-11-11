@@ -158,6 +158,15 @@ let try_call_thunk (thunk : value) : value =
    http_server_bind_host sets it (mirrors march_http_bind_addr in the C runtime). *)
 let http_bind_addr = ref Unix.inet_addr_any
 
+(* Write streams opened by file_open_write.  The interpreter's file handles
+   are channels passed around as the Int [Obj.magic chan] (file_open), and a
+   channel does not say which way it points, so this table remembers the
+   ones that write: file_seek must use seek_out on them, file_close must
+   flush them (close_out), and the read builtins must not read them.  The
+   table holds the channel itself, so the handle stays reachable until it is
+   closed. *)
+let write_chans : (int, out_channel) Hashtbl.t = Hashtbl.create 8
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -1882,7 +1891,40 @@ let base_env : env =
            VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
       | _ -> eval_error "file_open(path)"))
 
+  ; ("file_open_write", VBuiltin ("file_open_write", function
+      | [VString path; VInt mode] ->
+        (try
+           let flags = Unix.[O_WRONLY; O_CREAT; if mode = 1 then O_APPEND else O_TRUNC] in
+           let fd = Unix.openfile path flags 0o644 in
+           let oc = Unix.out_channel_of_descr fd in
+           let h = (Obj.magic oc : int) in
+           Hashtbl.replace write_chans h oc;
+           VCon ("Ok", [VInt h])
+         with Unix.Unix_error (e, _, _) -> VCon ("Err", [file_error_of_unix path e]))
+      | _ -> eval_error "file_open_write(path, mode)"))
+
+  ; ("file_write_handle", VBuiltin ("file_write_handle", function
+      | [VInt h; VString data] ->
+        (match Hashtbl.find_opt write_chans h with
+         | None -> VCon ("Err", [VCon ("IoError", [VString "write to a closed or read-only file"])])
+         | Some oc ->
+           (try output_string oc data; VCon ("Ok", [VUnit])
+            with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])])))
+      | _ -> eval_error "file_write_handle(fd, data)"))
+
+  ; ("file_seek", VBuiltin ("file_seek", function
+      | [VInt h; VInt off] ->
+        (try
+           match Hashtbl.find_opt write_chans h with
+           | Some oc -> seek_out oc off; VCon ("Ok", [VInt (pos_out oc)])
+           | None ->
+             let ic : in_channel = Obj.magic h in
+             seek_in ic off; VCon ("Ok", [VInt (pos_in ic)])
+         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_seek(fd, offset)"))
+
   ; ("file_read_line", VBuiltin ("file_read_line", function
+      | [VInt ic_int] when Hashtbl.mem write_chans ic_int -> VCon ("None", [])
       | [VInt ic_int] ->
         let ic : in_channel = Obj.magic ic_int in
         (try VCon ("Some", [VString (input_line ic)])
@@ -1890,6 +1932,7 @@ let base_env : env =
       | _ -> eval_error "file_read_line(fd)"))
 
   ; ("file_read_chunk", VBuiltin ("file_read_chunk", function
+      | [VInt ic_int; VInt _] when Hashtbl.mem write_chans ic_int -> VCon ("None", [])
       | [VInt ic_int; VInt size] ->
         let ic : in_channel = Obj.magic ic_int in
         let buf = Bytes.create size in
@@ -1901,6 +1944,11 @@ let base_env : env =
       | _ -> eval_error "file_read_chunk(fd, size)"))
 
   ; ("file_close", VBuiltin ("file_close", function
+      | [VInt h] when Hashtbl.mem write_chans h ->
+        let oc = Hashtbl.find write_chans h in
+        Hashtbl.remove write_chans h;
+        (try close_out oc with _ -> ());
+        VAtom "ok"
       | [VInt ic_int] ->
         let ic : in_channel = Obj.magic ic_int in
         (try close_in ic with _ -> ());
@@ -3051,38 +3099,64 @@ let base_env : env =
     (* ---- HTTP serialization builtins ---- *)
   ; ("http_serialize_request", VBuiltin ("http_serialize_request", function
         | [VString meth; VString host; VString path; query_opt; header_list; VString body] ->
-          let buf = Buffer.create 256 in
-          let query_str = match query_opt with
-            | VCon ("Some", [VString q]) -> "?" ^ q
-            | _ -> ""
+          (* Every field is checked before anything is written: a CR, LF,
+             space or other control byte in the method, host, path, query or a
+             header would otherwise smuggle a second, pipelined request.  The
+             C twin is march_http_serialize_request (runtime/march_http.c);
+             the two must accept the same inputs and word the error the same
+             (test_http_serialize_injection_parity). *)
+          let query = match query_opt with
+            | VCon ("Some", [VString q]) -> Some q
+            | _ -> None
           in
-          Buffer.add_string buf meth;
-          Buffer.add_char buf ' ';
-          Buffer.add_string buf path;
-          Buffer.add_string buf query_str;
-          Buffer.add_string buf " HTTP/1.1\r\n";
-          Buffer.add_string buf "Host: ";
-          Buffer.add_string buf host;
-          Buffer.add_string buf "\r\n";
-          let rec add_headers = function
-            | VCon ("Nil", []) -> ()
+          let rec headers acc = function
             | VCon ("Cons", [VCon ("Header", [VString n; VString v]); rest]) ->
-              Buffer.add_string buf n;
-              Buffer.add_string buf ": ";
-              Buffer.add_string buf v;
-              Buffer.add_string buf "\r\n";
-              add_headers rest
-            | _ -> ()
+              headers ((n, v) :: acc) rest
+            | _ -> List.rev acc
           in
-          add_headers header_list;
-          if body <> "" then begin
-            Buffer.add_string buf "Content-Length: ";
-            Buffer.add_string buf (string_of_int (String.length body));
-            Buffer.add_string buf "\r\n"
-          end;
-          Buffer.add_string buf "\r\n";
-          Buffer.add_string buf body;
-          VString (Buffer.contents buf)
+          let headers = headers [] header_list in
+          let check =
+            let ( >>= ) r f = match r with Ok () -> f () | Error _ as e -> e in
+            Http_request_check.check_method meth >>= fun () ->
+            Http_request_check.check_host host >>= fun () ->
+            Http_request_check.check_target "path" path >>= fun () ->
+            (match query with
+             | Some q -> Http_request_check.check_target "query" q
+             | None -> Ok ()) >>= fun () ->
+            List.fold_left (fun acc (n, v) ->
+                acc >>= fun () ->
+                Http_request_check.check_header_name n >>= fun () ->
+                Http_request_check.check_header_value v)
+              (Ok ()) headers
+          in
+          (match check with
+           | Error msg -> VCon ("Err", [VString msg])
+           | Ok () ->
+             let buf = Buffer.create 256 in
+             Buffer.add_string buf meth;
+             Buffer.add_char buf ' ';
+             Buffer.add_string buf path;
+             (match query with
+              | Some q when q <> "" -> Buffer.add_char buf '?'; Buffer.add_string buf q
+              | _ -> ());
+             Buffer.add_string buf " HTTP/1.1\r\n";
+             Buffer.add_string buf "Host: ";
+             Buffer.add_string buf host;
+             Buffer.add_string buf "\r\n";
+             List.iter (fun (n, v) ->
+                 Buffer.add_string buf n;
+                 Buffer.add_string buf ": ";
+                 Buffer.add_string buf v;
+                 Buffer.add_string buf "\r\n")
+               headers;
+             if body <> "" then begin
+               Buffer.add_string buf "Content-Length: ";
+               Buffer.add_string buf (string_of_int (String.length body));
+               Buffer.add_string buf "\r\n"
+             end;
+             Buffer.add_string buf "\r\n";
+             Buffer.add_string buf body;
+             VCon ("Ok", [VString (Buffer.contents buf)]))
         | _ -> eval_error "http_serialize_request(method, host, path, query_opt, headers, body)"))
   ; ("http_parse_response", VBuiltin ("http_parse_response", function
         | [VString raw] ->
@@ -6061,3 +6135,44 @@ let base_env : env =
   ]
   (* UDP datagrams: lib/eval/eval_udp.ml mirrors runtime/march_udp.c. *)
   @ Eval_udp.builtins
+
+(* Handle boxes (lib/eval/eval_handle.ml): each kind's release runs the raw
+   closer the stdlib used before boxes existed, looked up in the table above,
+   so the box and the raw builtin can never disagree on how a resource is
+   freed.  Mirrors runtime/march_handle.c's release_kind:
+   - DIR closes its fd as TCP does ([tcp_close] is a bare close);
+   - TLS closes the session, then its socket (the aux word);
+   - PROCESS closes the child's streams without killing or reaping it
+     (march_process_release_slot), the first half of [process_wait_proc];
+   - TCP_BORROWED releases nothing. *)
+let () =
+  let raw_closer name =
+    match List.assoc_opt name base_env with
+    | Some (VBuiltin (_, f)) -> (fun v -> ignore (f [v]))
+    | _ -> failwith ("Eval_builtins: handle releaser needs builtin " ^ name)
+  in
+  let file_close = raw_closer "file_close"
+  and tcp_close = raw_closer "tcp_close"
+  and udp_close = raw_closer "udp_close"
+  and tls_close = raw_closer "tls_close"
+  and tls_ctx_free = raw_closer "tls_ctx_free" in
+  let open Eval_handle in
+  set_releaser kind_file (fun raw _ -> file_close raw);
+  set_releaser kind_dir (fun raw _ -> tcp_close raw);
+  set_releaser kind_tcp (fun raw _ -> tcp_close raw);
+  set_releaser kind_listener (fun raw _ -> tcp_close raw);
+  set_releaser kind_udp (fun raw _ -> udp_close raw);
+  set_releaser kind_tls (fun raw aux -> tls_close raw; tcp_close aux);
+  set_releaser kind_tls_ctx (fun raw _ -> tls_ctx_free raw);
+  set_releaser kind_process (fun raw _ ->
+      match raw with
+      | VInt id ->
+        (match Hashtbl.find_opt live_proc_tbl id with
+         | Some (ic, oc, _) ->
+           (try close_in_noerr ic with _ -> ());
+           (try close_out_noerr oc with _ -> ());
+           Hashtbl.remove live_proc_tbl id
+         | None -> ())
+      | _ -> ())
+
+let base_env : env = base_env @ Eval_handle.builtins

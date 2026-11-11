@@ -1,0 +1,79 @@
+-- File.Handle is a reference-counted box (ocap phase 2). Dropping the last
+-- reference to an open box must release its descriptor through drop glue
+-- (march_handle_dtor -> march_file_close), and closing it first must not
+-- release it a second time.
+--
+-- Two legs of 10 000 iterations each:
+--   - open_drop: File.open, one read, then the handle goes out of scope
+--     WITHOUT File.close. Only the box's destructor can close the stream.
+--   - open_close: File.open, File.close, then the handle goes out of scope;
+--     the destructor must see the box released and do nothing.
+-- Then the process's open descriptors (the entries of /dev/fd) are counted
+-- again. A leak in either leg leaves 10 000 descriptors open (or fails an
+-- open at the descriptor limit), so the counts would differ.
+mod Main do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Process
+
+  pfn fd_count() : Int do
+    match Dir.list("/dev/fd") do
+    Ok(xs) -> List.length(xs)
+    Err(_) -> -1
+    end
+  end
+
+  -- Opens, reads one line, and drops the handle without closing it.
+  pfn open_drop(path : String, n : Int, ok : Int) : Int do
+    if n <= 0 do ok
+    else
+      let got = match File.open(path) do
+        Err(_) -> 0
+        Ok(h) ->
+          match File.read_line(h) do
+          Ok(Some(_)) -> 1
+          _ -> 0
+          end
+      end
+      open_drop(path, n - 1, ok + got)
+    end
+  end
+
+  -- Opens, closes, then drops the handle.
+  pfn open_close(path : String, n : Int, ok : Int) : Int do
+    if n <= 0 do ok
+    else
+      let got = match File.open(path) do
+        Err(_) -> 0
+        Ok(h) ->
+          match File.close(h) do
+          Ok(_) -> 1
+          Err(_) -> 0
+          end
+      end
+      open_close(path, n - 1, ok + got)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite), _p : Cap(IO.Process)) : Unit do
+    -- Per-process name: a concurrent run (another worktree) deleting a
+    -- shared file would fail opens and print a false LEAK.
+    let path = "/tmp/march_native_file_handle_box_leak_probe_" ++ int_to_string(Process.pid()) ++ ".txt"
+    match File.write(path, "line\n") do
+    Err(_) -> panic("write failed")
+    Ok(_) -> :ok
+    end
+    let before = fd_count()
+    let a = open_drop(path, 10000, 0)
+    let b = open_close(path, 10000, 0)
+    let after = fd_count()
+    if a == 10000 && b == 10000 && before == after && before > 0 do
+      println("fds stable")
+    else
+      println("LEAK: open_drop ok " ++ int_to_string(a) ++ ", open_close ok " ++ int_to_string(b)
+        ++ ", fds before " ++ int_to_string(before) ++ ", after " ++ int_to_string(after))
+    end
+    match File.delete(path) do _ -> () end
+  end
+end

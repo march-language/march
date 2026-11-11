@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`File.Handle`: open, read, write, seek and close a file through a handle.**
+  `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
+  (writes, creates the file, `IO.FileWrite`) return `Result(File.Handle, FileError)`;
+  `File.read_line`, `File.read_chunk`, `File.write_to`, `File.seek` and `File.close` use it.
+  The handle is a reference-counted box: every use after `close` returns the new
+  `Err(Closed)` (a second `close` too), and a handle dropped without `close` is closed
+  when its last reference goes. `File.with_open` / `File.with_open_write` close it when the
+  callback returns or panics. `FileError` now derives `Eq`. `with_lines`, `with_chunks`,
+  `each_line` and `each_chunk` keep their signatures and use a handle internally.
 - **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
   methods(get))` limits a module to a path prefix on a host, matched by whole segment
   (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
@@ -484,6 +493,14 @@ git log is authoritative for exact commits.
   program); forge's check cache now also keys the compiler, so a compiler upgrade
   re-checks.
 
+- **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
+  `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
+  connection (ocap phase 2). A module's own type (variant, record or alias) named
+  `Socket`, `Listener` or `Process` is still allowed and is always a type distinct from the builtin, never
+  unified with it. Code that only goes through `Channel.new_socket` and
+  the `Channel.socket_*` accessors is unaffected; code that names the type or matches
+  on the constructor renames it.
+
 - **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
   NaN, the infinities and a result outside Int's range** (#1230), with
   `float_floor: value out of Int range` or `float_floor: cannot convert NaN to Int`, the same
@@ -858,6 +875,45 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
+  A compiled closure that matched a captured value and passed the pattern's fields straight to a
+  builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the
+  capture first, so the builtin read freed memory. ASAN caught it in `HttpServer.tls`; on macOS
+  the freed bytes usually survived. The release now waits until the call returns.
+- **A user fn named like `show`, `eq`, `compare` or `hash` no longer swaps places with the
+  interface method in compiled code.** A generic `fn show(r)` printed `Ok(pos)` where the
+  interpreter printed `pos`; a `fn show(r : T)` took over `println` of every `T`; `fn compare`
+  and `fn hash` returned the built-in answer; and `Util.eq(1, 1)` in a user `mod Util` ran
+  `Eq`. Each now runs the user's fn for the user's calls and the method everywhere else, on both
+  backends.
+- **A module named like a stdlib module no longer loses its functions to the stdlib's.** With
+  `mod List do fn sum_int(xs : List(Int)) : Int do 42 end end` in the program, compiled
+  `List.sum_int([1, 2])` returned the stdlib's `3`, and so did an interpreted call to `sum_int`
+  from inside the module; both now return `42`, and the rest of the stdlib `List` still works.
+- **Security: an HTTP request can no longer smuggle a second request.** The request
+  serializer copied the method, host, path, query and headers into the request verbatim, so
+  a path such as `"/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"` (from user input, say)
+  sent a pipelined second request. `HttpTransport` and `HttpClient` now refuse, with
+  `Refused(reason)` and before any connection is opened, a method or header name that is not
+  an HTTP token, a host or header value with a CR, LF or other control byte, and a path or
+  query with any byte outside RFC 3986 that was not percent-encoded (a space, `#`, a bare
+  `%`, a non-ASCII byte; percent-encode values with `Uri.encode` / `Uri.encode_query`, since
+  `Http.encode_query` does not); interpreted, compiled and browser builds refuse the same
+  requests. `Tls.https_get` refuses such a host or path the same way, with
+  `TlsWriteError(reason)`.
+  The `http_serialize_request` builtin now returns `Result(String, String)`. Compiled
+  programs also send the request's headers (including `Connection: close`), which the
+  compiled serializer used to drop, and send `Content-Length` only for a non-empty body, as
+  interpreted ones always did.
+- **A NaN prints `nan` on every backend, and the interpreter's `show` no longer adds `.0`
+  to `nan`/`inf`/`-inf`.** `float_to_string` went through libc's `%.12g`, which prints a NaN with
+  the sign bit set as `-nan` on Linux and `nan` on macOS, and x86's default NaN (what
+  `inf -. inf` produces) has that bit set where arm64's does not, so the same program printed
+  `-nan` on x86 Linux and `nan` on a Mac. A NaN now prints `nan` in the interpreter and the
+  native runtime (and the logger's float fields), as `--target js` already did. Separately, the
+  interpreter's `show` of a Float printed `nan.0`, `inf.0` and `-inf.0`; it now prints `nan`,
+  `inf` and `-inf` like compiled code.
 
 - **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
   When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the

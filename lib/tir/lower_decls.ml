@@ -29,7 +29,15 @@ let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : 
   let module SSet = Set.Make (String) in
   let rename_var bound (v : Tir.var) : Tir.var =
     if List.mem v.Tir.v_name names && not (SSet.mem v.Tir.v_name bound)
-    then { v with Tir.v_name = prefix ^ v.Tir.v_name }
+    then
+      (* The qualified name may be one an entry-module fn is defined under
+         distinctly ([Lower_state._entry_builtin_shadows]: `List.sum_int` ->
+         `List.sum_int$u`); the table is empty outside the entry file. *)
+      let q = prefix ^ v.Tir.v_name in
+      let q = match Hashtbl.find_opt !Lower_state._builtin_shadows q with
+        | Some renamed -> renamed
+        | None -> q in
+      { v with Tir.v_name = q }
     else v
   in
   let rename_atom bound = function
