@@ -481,8 +481,8 @@ git log is authoritative for exact commits.
 
 - **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
   `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
-  connection (ocap phase 2). A module's own variant named `Socket`, `Listener` or
-  `Process` is still allowed and is always a type distinct from the builtin, never
+  connection (ocap phase 2). A module's own type (variant, record or alias) named
+  `Socket`, `Listener` or `Process` is still allowed and is always a type distinct from the builtin, never
   unified with it. Code that only goes through `Channel.new_socket` and
   the `Channel.socket_*` accessors is unaffected; code that names the type or matches
   on the constructor renames it.

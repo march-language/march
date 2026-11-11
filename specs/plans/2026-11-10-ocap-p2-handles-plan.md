@@ -119,6 +119,8 @@
 
 ---
 
+> **Split (2026-11-10):** Tasks 1-4 shipped as phase 2a (march-language/march#1244), plus stdlib-only gating of the three new raw file builtins. Tasks 5-14 are open as `specs/todos/2026-11-10-ocap-p2b-*.md` and continue on branch `claude/ocap-p2b-handles`; Task 15 runs on that branch.
+
 ### Task 1: The handle box in the C runtime
 
 **Files:**

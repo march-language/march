@@ -349,7 +349,8 @@ let test_shipped_table () =
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request";
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
-      "handle_is_closed"; "handle_aux" ]
+      "handle_is_closed"; "handle_aux";
+      "file_open_write"; "file_write_handle"; "file_seek" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
@@ -357,7 +358,8 @@ let test_shipped_table () =
     (List.filter (fun (name, _) -> name <> "observe_count_send" && name <> "actor_inspect" && name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn" && name <> "epoch_holds" && name <> "reload_request"
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
                              && name <> "delivery_failed_watch"
-                             && not (String.length name > 7 && String.sub name 0 7 = "handle_"))
+                             && not (String.length name > 7 && String.sub name 0 7 = "handle_")
+                             && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek" ]))
        !TB.stdlib_only);
   Alcotest.(check bool) "actor_inspect suggestion names Actor.debug" true
     (contains ~needle:"`Actor.debug`" (List.assoc "actor_inspect" !TB.stdlib_only));
@@ -403,6 +405,28 @@ end|} in
          | Some hint -> contains ~needle:"handles are made by their module's open functions" hint
          | None -> false))
     handle_primitives
+
+(* ocap phase 2 (Task 4): the raw file builtins behind File.Handle are
+   stdlib-only, so a guessed Int handle cannot write or seek an open file. *)
+let test_raw_file_handle_builtins_gated () =
+  List.iter (fun (call, name) ->
+      let ctx = typecheck (Printf.sprintf {|mod App do
+  fn forge() do
+    %s
+  end
+end|} call) in
+      let gated =
+        List.exists (fun (d : March_errors.Errors.diagnostic) ->
+            d.severity = March_errors.Errors.Error
+            && d.code = March_errors.Errors.Code.stdlib_internal
+            && contains ~needle:(Printf.sprintf "`%s` is internal to the standard library" name)
+                 d.message)
+          ctx.March_errors.Errors.diagnostics
+      in
+      Alcotest.(check bool) (name ^ " is refused in user code") true gated)
+    [ ({|file_open_write("/tmp/x", 0)|}, "file_open_write");
+      ({|file_write_handle(-2, "x")|}, "file_write_handle");
+      ({|file_seek(-2, 0)|}, "file_seek") ]
 
 (* ── Adversarial sweep over the shipped table ─────────────────────────────
    Every gated name, in every spelling the review's findings list (and
@@ -805,6 +829,7 @@ let tests =
        Alcotest.test_case "shipped table gates the four forging builtins" `Quick
          test_shipped_table;
        Alcotest.test_case "handle_primitives_gated" `Quick test_handle_primitives_gated;
+       Alcotest.test_case "raw_file_handle_builtins_gated" `Quick test_raw_file_handle_builtins_gated;
        Alcotest.test_case "internal_fn_call_refused" `Quick test_internal_fn_call_refused;
        Alcotest.test_case "internal_fn_value_refused" `Quick test_internal_fn_value_refused;
        Alcotest.test_case "internal_fn_stdlib_ok" `Quick test_internal_fn_stdlib_ok;
