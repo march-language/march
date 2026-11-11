@@ -13947,6 +13947,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file_handle.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_file_handle.march)))
 
+; ... and compiled (`--compile --test`), the only CI coverage of the compiled
+; file_open_write / file_write_handle / file_seek (and of seek's tagged Ok(Int)
+; offset). The binary exits non-zero when a test fails.
+(rule
+ (targets test_file_handle_compiled_bin test_file_handle_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_file_handle.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_file_handle_compiled_bin
+        stdlib/test_file_handle.march)
+   (with-stdout-to test_file_handle_compiled.out
+    (system "./test_file_handle_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_file_handle_compiled.out)
+ (action (progn)))
+
 (rule
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_gen.march))

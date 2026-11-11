@@ -15,6 +15,7 @@ mod Main do
   needs IO.Console
   needs IO.FileRead
   needs IO.FileWrite
+  needs IO.Process
 
   pfn fd_count() : Int do
     match Dir.list("/dev/fd") do
@@ -55,8 +56,10 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : Unit do
-    let path = "/tmp/march_native_file_handle_box_leak_probe.txt"
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite), _p : Cap(IO.Process)) : Unit do
+    -- Per-process name: a concurrent run (another worktree) deleting a
+    -- shared file would fail opens and print a false LEAK.
+    let path = "/tmp/march_native_file_handle_box_leak_probe_" ++ int_to_string(Process.pid()) ++ ".txt"
     match File.write(path, "line\n") do
     Err(_) -> panic("write failed")
     Ok(_) -> :ok

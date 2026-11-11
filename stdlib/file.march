@@ -6,8 +6,10 @@
 -- Use with_lines / with_chunks for streaming.  The file handle is
 -- closed when the callback returns *and* if the callback panics —
 -- these wrappers delegate to the runtime `try_finally` primitive to
--- guarantee cleanup even on unhandled exceptions.  (each_line /
--- each_chunk close the handle only on normal return.)
+-- guarantee cleanup even on unhandled exceptions.  each_line /
+-- each_chunk close the handle on normal return; if `f` panics they do
+-- not close it there, and the descriptor is released only when the
+-- handle's last reference is dropped.
 
 mod File do
   needs IO.FileRead
@@ -403,7 +405,9 @@ mod File do
   doc """
   Call `f(line)` for each line of `path` (terminators stripped), for side
   effects. Returns `Ok(:ok)`, or `Err(FileError)` if the file cannot be
-  opened. Unlike `with_lines`, the file is NOT closed if `f` panics.
+  opened. Unlike `with_lines`, the file is not closed at the panic site if
+  `f` panics: its descriptor is released when the handle's last reference
+  is dropped.
 
   ## Examples
 
@@ -434,7 +438,9 @@ mod File do
   doc """
   Call `f(chunk)` for each chunk of at most `size` bytes of `path`, for side
   effects. Returns `Ok(:ok)` or `Err(FileError)` if the file cannot be
-  opened. The file is NOT closed if `f` panics (use `with_chunks` for that).
+  opened. If `f` panics the file is not closed at the panic site: its
+  descriptor is released when the handle's last reference is dropped (use
+  `with_chunks` to close it at once).
   """
   fn each_chunk(path, size, f) do
     match open(path) do

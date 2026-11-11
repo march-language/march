@@ -2,16 +2,25 @@
 -- Tests for File.Handle: open, open_write, read_line, read_chunk, write_to,
 -- seek, close, with_open, with_open_write.
 -- Each test works in its own scratch directory under /tmp (made with
--- Dir.mkdir_p, removed at the end).
+-- Dir.mkdir_p, removed at the end). The directory name carries the process
+-- id: this file runs under several runners in one `dune runtest` (the
+-- stdlib_march exe, `march test`, and compiled `--compile --test`), possibly
+-- at once and from several worktrees, and a shared name would let one
+-- runner's rm_rf delete another's files.
 -- Run with: dune exec march -- test test/stdlib/test_file_handle.march
 
 mod TestFileHandle do
 
   needs IO.FileRead
   needs IO.FileWrite
+  needs IO.Process
+
+pfn scratch_dir(name : String) : String do
+  "/tmp/march_tfh_" ++ int_to_string(Process.pid()) ++ "_" ++ name
+end
 
 pfn scratch(name : String) : String do
-  let dir = "/tmp/march_tfh_" ++ name
+  let dir = scratch_dir(name)
   let _ = Dir.rm_rf(dir)
   match Dir.mkdir_p(dir) do
   Ok(_) -> dir ++ "/f.txt"
@@ -20,7 +29,7 @@ pfn scratch(name : String) : String do
 end
 
 pfn cleanup(name : String) : Unit do
-  let _ = Dir.rm_rf("/tmp/march_tfh_" ++ name)
+  let _ = Dir.rm_rf(scratch_dir(name))
   ()
 end
 
