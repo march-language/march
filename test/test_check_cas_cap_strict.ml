@@ -146,7 +146,7 @@ let test_warm_check_cache_does_not_mask_host_scope () =
 let dep_src needs = Printf.sprintf {|mod CapDep do
   needs %s
   fn slurp(p : String) : String do
-    match File.read(p) do
+    match Authority.must(File.read(p)) do
       Ok(s) -> s
       Err(_) -> "none"
     end
