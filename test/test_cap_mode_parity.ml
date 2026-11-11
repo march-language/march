@@ -374,7 +374,7 @@ let run_mode (f : fixture) (mode : string) : (bool * string list) option =
   let exe = Filename.quote compiler_exe in
   let run args stdin =
     Sys.command
-      (Printf.sprintf "cd %s && HOME=%s MARCH_CAP_TRACE=1 %s%s %s > %s 2>&1 < %s"
+      (Printf.sprintf "cd %s && HOME=%s %s%s %s > %s 2>&1 < %s"
          (Filename.quote dir) (Filename.quote (Lazy.force home)) lib_env exe args
          (Filename.quote out) stdin)
   in
@@ -413,8 +413,6 @@ let run_mode (f : fixture) (mode : string) : (bool * string list) option =
      | Some input ->
        let inp = Filename.concat dir "repl.txt" in
        write_file inp (input ^ ":quit\n");
-       (* MARCH_CAP_TRACE: the check's decision points, quoted in a
-          mismatch (Linux x86_64 CI accepts three fixtures silently). *)
        let _ = run "repl" (Filename.quote inp) in
        (* The REPL exits 0 whatever happened: a capability error is a
           rejection of the declaration. *)
