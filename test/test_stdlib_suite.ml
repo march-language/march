@@ -11728,7 +11728,7 @@ end
           with its reload server; the role's root still exists statically. *)
        "let t = spawn(Tick)\n\
        \    send(t, Bump(1))\n\
-       \    if List.length(Process.argv()) > 99 do\n\
+       \    if List.length(Authority.must(Process.argv())) > 99 do\n\
        \      let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
        \        fn (s, con, fw, st) -> cons(s, con, st))\n\
        \      ()\n\
@@ -12521,15 +12521,17 @@ let compiled_and_interpreted_stdout ~tag ~src_text =
 (* The size histogram must be EXACT, not approximate: the SSO criterion is a
    fraction of allocations in the small buckets, so an off-by-N histogram
    changes the architectural verdict.  String.repeat allocates exactly one
-   string per call, so 100 calls producing 12 bytes and 100 producing 40 must
-   appear as exactly 100 in hist_le15 and 100 in hist_le63.  The loops keep
+   string per call, so 100 calls producing 20 bytes and 100 producing 40 must
+   appear as exactly 100 in hist_le23 and 100 in hist_le63.  The loops keep
    each string live only briefly, which also exercises the free path.
 
    Deliberately NOT 4-byte strings: println, to_string and stdlib internals
    allocate their own short-lived strings, which the counter correctly counts,
    so the <=7 bucket carries unrelated traffic (measured: 302 for 100 loop
-   allocations) and could not support an exact assertion.  12 and 40 bytes sit
-   in buckets nothing else in this program touches, which is what lets both
+   allocations) and could not support an exact assertion.  Nor 12-byte ones:
+   since capability operations are checked, println's Authority.check makes
+   "IO.Console" (10 bytes) and its kind/target pair land in the <=15 bucket.
+   20 and 40 bytes sit in buckets nothing else in this program touches, which is what lets both
    checks stay exact rather than degrading to >=. *)
 let test_string_stats_histogram_exact () =
   with_compiled_program ~tag:"march_strstats"
@@ -12540,7 +12542,7 @@ let test_string_stats_histogram_exact () =
       \  pfn small(i : Int, n : Int, acc : Int) : Int do\n\
       \    if i >= n do acc\n\
       \    else\n\
-      \      let s = String.repeat(\"abcd\", 3)\n\
+      \      let s = String.repeat(\"abcd\", 5)\n\
       \      small(i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
@@ -12557,8 +12559,8 @@ let test_string_stats_histogram_exact () =
        end\n"
     (fun err_file ->
        let get k = string_stat_of ~stderr_file:err_file k in
-       Alcotest.(check int) "hist_le15 counts the 100 twelve-byte strings"
-         100 (get "hist_le15");
+       Alcotest.(check int) "hist_le23 counts the 100 twenty-byte strings"
+         100 (get "hist_le23");
        Alcotest.(check int) "hist_le63 counts the 100 forty-byte strings"
          100 (get "hist_le63");
        Alcotest.(check bool) "allocs covers both loops" true (get "allocs" >= 200);

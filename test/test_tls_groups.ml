@@ -66,7 +66,7 @@ mod TlsGroupsProbe do
     if n <= 0 do ()
     else
       match tcp_accept(listen_fd) do
-      Err(e) -> println("S FAIL accept " ++ e)
+      Err(e) -> Authority.ignore(println("S FAIL accept " ++ e))
       Ok(fd) ->
         match Tls.accept(fd, ctx) do
         Ok(conn) ->
@@ -86,8 +86,8 @@ mod TlsGroupsProbe do
   end
 
   fn handshake(label, ctx, port) do
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println(label ++ " FAIL connect " ++ Socket.error_message(e))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println(label ++ " FAIL connect " ++ Socket.error_message(e)))
     Ok(fd) ->
       match Socket.set_recv_timeout(fd, 5000) do
       _ -> ()
@@ -106,15 +106,15 @@ mod TlsGroupsProbe do
   fn client(port) do
     println("AVAIL " ++ bool_to_string(Tls.post_quantum_available()))
     match Tls.client_ctx(client_config()) do
-    Err(_) -> println("C FAIL ctx")
+    Err(_) -> Authority.ignore(println("C FAIL ctx"))
     Ok(ctx) ->
       handshake("C1", ctx, port)
       match Tls.set_groups(ctx, ["no-such-group"]) do
-      Ok(_) -> println("C3 FAIL accepted a bogus group")
-      Err(_) -> println("C3 OK rejected")
+      Ok(_) -> Authority.ignore(println("C3 FAIL accepted a bogus group"))
+      Err(_) -> Authority.ignore(println("C3 OK rejected"))
       end
       match Tls.set_groups(ctx, ["X25519"]) do
-      Err(e) -> println("C2 FAIL set_groups " ++ Tls.error_to_string(e))
+      Err(e) -> Authority.ignore(println("C2 FAIL set_groups " ++ Tls.error_to_string(e)))
       Ok(_) -> handshake("C2", ctx, port)
       end
       Tls.ctx_free(ctx)
@@ -126,10 +126,10 @@ mod TlsGroupsProbe do
     let port = env_int("MARCH_TLS_PORT")
     if env_or("MARCH_TLS_ROLE", "client") == "server" do
       match Tls.server_ctx(Tls.server_config(env_or("MARCH_TLS_CERT", ""), env_or("MARCH_TLS_KEY", ""))) do
-      Err(e) -> println("S FAIL ctx " ++ Tls.error_to_string(e))
+      Err(e) -> Authority.ignore(println("S FAIL ctx " ++ Tls.error_to_string(e)))
       Ok(ctx) ->
         match tcp_listen(port) do
-        Err(e) -> println("S FAIL listen " ++ e)
+        Err(e) -> Authority.ignore(println("S FAIL listen " ++ e))
         Ok(lfd) ->
           serve(lfd, ctx, env_int("MARCH_TLS_ACCEPTS"))
           Socket.close(lfd)
