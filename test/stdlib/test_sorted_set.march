@@ -9,6 +9,8 @@
 -- are witnessed against a partly proved reference.
 
 mod TestSortedSet do
+  needs IO.Clock
+  needs IO.Process
 
 pfn icmp(a : Int, b : Int) : Int do a - b end
 

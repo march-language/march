@@ -2,6 +2,7 @@
 -- Run with: dune exec march -- test test/stdlib/test_datetime.march
 
 mod TestDateTime do
+  needs IO.Clock
 
 -- Helper: assert the offset parses and carries `want` seconds.
 pfn assert_offset_secs(s : String, want : Int) do

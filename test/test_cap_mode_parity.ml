@@ -338,6 +338,21 @@ let codes_of (out : string) : string list =
   scan (Str.regexp {|"code":"\(cap_[a-z_]+\)|});
   List.sort_uniq compare !found
 
+(* The output file of the last [run_mode], quoted in a mismatch: a mode that
+   prints an unrelated error (the REPL exits 0 whatever happens) shows up as
+   "accept []", and only its output says why. *)
+let last_out = ref ""
+
+let output_excerpt () =
+  let lines =
+    try String.split_on_char '\n' (read_file !last_out) with _ -> [ "(no output file)" ] in
+  let rec take n = function
+    | [] -> []
+    | _ when n = 0 -> [ "    ..." ]
+    | l :: rest -> ("    " ^ l) :: take (n - 1) rest
+  in
+  String.concat "\n" (take 25 lines)
+
 (* Runs [f] in [mode]: (rejected, codes). [None] when the mode does not
    apply to the fixture. *)
 let run_mode (f : fixture) (mode : string) : (bool * string list) option =
@@ -355,6 +370,7 @@ let run_mode (f : fixture) (mode : string) : (bool * string list) option =
   let src = Filename.concat dir "main.march" in
   write_file src f.src;
   let out = Filename.concat dir "out.txt" in
+  last_out := out;
   let exe = Filename.quote compiler_exe in
   let run args stdin =
     Sys.command
@@ -434,12 +450,13 @@ let test_modes_agree () =
                   :: !problems
               else if (not ok) && not gap then
                 problems :=
-                  Printf.sprintf "%s/%s: expected %s [%s], got %s [%s]" f.name
+                  (Printf.sprintf "%s/%s: expected %s [%s], got %s [%s]" f.name
                     mode
                     (if f.expect = [] || f.warn_only then "accept" else "reject")
                     (String.concat " " f.expect)
                     (if rejected then "reject" else "accept")
                     (String.concat " " codes)
+                  ^ "\n  output:\n" ^ output_excerpt ())
                   :: !problems)
          modes)
     (List.filter selected fixtures);

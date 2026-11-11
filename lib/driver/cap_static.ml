@@ -484,6 +484,22 @@ let module_caps (i : input) ~(pre_opt : March_tir.Tir.tir_module) =
    the ceiling charged stdlib modules for their own wrappers. *)
 let entry_is_stdlib (i : input) =
   March_typecheck.Typecheck_builtins.file_is_stdlib i.filename
+  (* The root the stdlib was loaded from is resolved next to the compiler,
+     so in a checkout it is the STAGED copy (`_build/default/stdlib`), and
+     `march --check stdlib/dist_link.march` names the source copy, a
+     different path.  The same file is the stdlib's when it is byte-for-byte
+     the file of that name under a registered root.  Not by basename alone:
+     a user's own `json.march` is not the stdlib's.  Read from disk, never
+     through [i.read_file]: the REPL's answers [src] for any path, and its
+     span file is [""], whose concatenation is the root directory itself. *)
+  || (let base = Filename.basename i.filename in
+      Filename.check_suffix base ".march"
+      && List.exists (fun root ->
+          let f = Filename.concat root base in
+          Sys.file_exists f && not (Sys.is_directory f)
+          && (try In_channel.with_open_bin f In_channel.input_all = i.src
+              with _ -> false))
+        !March_typecheck.Typecheck_builtins.stdlib_roots)
 
 let ceiling_findings (i : input) ~(pre_opt : March_tir.Tir.tir_module)
     ~(attribution : (string * string) list) : report =
