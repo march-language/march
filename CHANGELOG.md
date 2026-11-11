@@ -507,6 +507,19 @@ git log is authoritative for exact commits.
   is now `unknown_constructor`). Standard-library internals that still need the raw
   descriptor use `Socket.raw_fd` / `adopt` / `borrow`, marked `@[stdlib_internal]`: a user
   program naming one gets the `stdlib_internal` error.
+- **The HTTP client and server use `Socket` handles, not descriptor numbers.**
+  `HttpTransport.connect(req)` returns `Result(Socket, TransportError)` (same errors as
+  before); `HttpTransport.request_on`, `stream_request_on`, `stream_chunked_body`,
+  `stream_fixed_body` and `HttpClient.transport_keepalive` take the `Socket`, and a use
+  after `Socket.close` is `Err(Closed)`. `HttpClient.run_on_fd` is renamed `run_on` (it
+  had no callers outside the standard library). `HttpServer.Conn`'s first field is now
+  the connection's `Socket`, borrowed from the server: closing it never closes the
+  connection, and once the connection ends the socket is closed, so a `Conn` a handler
+  kept reaches no descriptor. `HttpServer.fd` is `@[stdlib_internal]`. Handler unit
+  tests build a request with the new `HttpServer.test_conn(method, path, headers, body)`
+  instead of the 13-field `Conn(...)` constructor: replace
+  `Conn(0, m, path, _, "", headers, body, 0, Nil, "", false, Nil, NoUpgrade)` with
+  `HttpServer.test_conn(m, path, headers, body)` (a query string goes in `path` after a `?`).
 - **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
   `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
   connection (ocap phase 2). A module's own type (variant, record or alias) named

@@ -90,6 +90,13 @@ let make (kind : int) (raw : value) (aux : value) : value =
   Gc.finalise finalise cell;
   VHandle cell
 
+(** Close a box from the runtime side (as march_handle_close): the HTTP
+    server closes a request's borrowed Socket once the request is done. *)
+let close (v : value) : unit =
+  match v with
+  | VHandle c when not c.h_closed -> c.h_closed <- true; release_once c
+  | _ -> ()
+
 let kind_ok ~(want : int) (have : int) : bool =
   have = want || (have = kind_tcp_borrowed && want = kind_tcp)
 

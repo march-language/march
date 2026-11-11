@@ -85,7 +85,15 @@ static inline void *call_closure1(void *clo, void *arg) {
  * used by the legacy march_http_parse_request() path. */
 void *march_conn_from_parsed(const march_http_request_t *req,
                               const char *buf, size_t buf_len,
-                              int fd);
+                              void *sock);
+
+/* A connection's Socket (HttpServer.Conn field 0): a TCP_BORROWED handle
+ * box over [fd], made once per connection and shared, one reference per
+ * Conn, by every Conn built from it (march_conn_from_parsed). When the
+ * connection ends, march_http_conn_sock_done closes it and drops the
+ * server's reference; call it before close(fd). */
+void *march_http_conn_sock(int fd);
+void march_http_conn_sock_done(void *sock);
 
 /* Detect keep-alive from a parsed SIMD request (HTTP version + Connection hdr).
  * Returns 1 for keep-alive, 0 for close. */
@@ -99,7 +107,7 @@ int march_send_response_with_ka(int fd, int64_t status, void *headers,
 
 /* Process one parsed request through the March pipeline and send the response.
  * Returns: 1 = keep going, 0 = close connection, -1 = error. */
-int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
+int march_process_one_request(int fd, void *sock, void *pipeline, closure_fn_t fn,
                                const march_http_request_t *req,
                                const char *buf, size_t buf_len);
 

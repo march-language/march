@@ -34,21 +34,21 @@ Pure data types with no I/O. All HTTP libraries depend on this.
 
 ### Layer 2: HttpTransport Module (`stdlib/http_transport.march`)
 
-Low-level TCP and HTTP/1.1 request-response handling. Does **not** close connections; caller manages fd lifetime.
+Low-level TCP and HTTP/1.1 request-response handling. Does **not** close connections; the caller manages the `Socket`'s lifetime.
 
 **Key Types** (lines 14-20):
 - `TransportError`: ConnectionRefused | ConnTimeout | SendError | RecvError | ConnParseError | Closed
 
 **Key Functions**:
-- `connect(req)` (line 26): Open TCP connection to request host:port, returns Ok(fd) or Err
-- `request_on(fd, req)` (line 43): Send request on existing fd, receive response (for keep-alive)
-- `stream_request_on(fd, req, on_chunk)` (line 74): Stream response body with callback
+- `connect(req)`: Open TCP connection to request host:port, returns `Ok(Socket)` or Err
+- `request_on(s, req)`: Send request on an open `Socket`, receive response (for keep-alive); `Err(Closed)` once it is closed
+- `stream_request_on(s, req, on_chunk)`: Stream response body with callback
 - `request(req)` (line 129): One-shot: connect, send, receive, close automatically
 - `simple_get(url)` (line 170): Convenience wrapper for GET requests
 
 **Connection Lifecycle**:
 - Single connection: `request()` opens, sends, receives, closes
-- Keep-alive: Caller opens with `connect()`, reuses fd with `request_on()`, closes manually with `tcp_close()`
+- Keep-alive: Caller opens with `connect()`, reuses the `Socket` with `request_on()`, closes it with `Socket.close()`
 - Streaming: Use `stream_request_on()` to process body chunks without buffering
 
 ### Layer 3: HttpClient Module (`stdlib/http_client.march`)
@@ -89,7 +89,7 @@ Request-response handler with Plug-style middleware pipeline.
 **Key Types** (lines 14-35):
 - `Upgrade`: NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
 - `Conn` (lines 21-35): 13-field request-response struct
-  - Fields 0-6: Request metadata (fd, method, path, path_info, query_string, headers, body)
+  - Fields 0-6: Request metadata (socket, method, path, path_info, query_string, headers, body); the socket is a `Socket` borrowed from the server (closed when the connection ends)
   - Fields 7-9: Response (status, headers, body)
   - Fields 10-12: Halted flag, assigns, upgrade
 
@@ -98,7 +98,8 @@ Request-response handler with Plug-style middleware pipeline.
 - `req_headers`, `req_body`: Raw request
 - `status`, `resp_headers`, `resp_body`: Response components
 - `halted`, `assigns`, `conn_upgrade`: Control flags
-- `fd`: Socket file descriptor
+- `fd`: the socket's descriptor, `@[stdlib_internal]`
+- `test_conn(method, path, headers, body)`: a request `Conn` over a closed socket, for handler unit tests
 
 **Conn Transforms** (lines 120-175):
 - `put_resp_header(conn, name, value)` (line 120): Add response header
@@ -365,7 +366,7 @@ offset 16: char     data[len+1] // null-terminated
 ```
 
 **Conn** (120 bytes):
-- Field 0 (offset 16): int64_t fd
+- Field 0 (offset 16): pointer to the connection's `Socket` (a TCP_BORROWED handle box, one per connection: `march_http_conn_sock`)
 - Field 1-9 (offsets 24-88): pointers to Method/String/List/Int objects
 - Field 10-12 (offsets 96-112): pointers to Bool/List/Upgrade objects
 
@@ -468,9 +469,9 @@ Performance benchmarks under `bench/`:
 - Each request is independent
 
 **Keep-Alive Requests** (Layer 2: `HttpTransport.request_on`, Layer 3: `HttpClient.with_connection`):
-- Caller manages fd lifecycle
+- Caller manages the `Socket`'s lifecycle
 - Multiple requests on same connection
-- Caller responsible for closing with `tcp_close(fd)`
+- Caller responsible for closing with `Socket.close(s)`
 
 ### Server Connection Management
 

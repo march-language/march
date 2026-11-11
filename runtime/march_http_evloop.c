@@ -382,6 +382,8 @@ static void close_conn(int evfd, conn_state_t *c) {
 #elif EVLOOP_USE_EPOLL
     epoll_ctl(evfd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
+    march_http_conn_sock_done(c->sock);     /* before the number can be reused */
+    c->sock = NULL;
     close(c->fd);
     march_http_release_conns(c->pending_release, &c->pending_release_n);
     conn_state_free(c);
@@ -453,7 +455,10 @@ static void detach_conn(int evfd, conn_state_t *c) {
 #elif EVLOOP_USE_EPOLL
     epoll_ctl(evfd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
-    /* Do NOT close c->fd — the WebSocket thread takes ownership. */
+    /* Do NOT close c->fd — the WebSocket thread takes ownership (through a
+     * box of its own); this connection's Conns no longer reach it. */
+    march_http_conn_sock_done(c->sock);
+    c->sock = NULL;
     march_tls_conn_free_out(c);
     march_http_release_conns(c->pending_release, &c->pending_release_n);
     conn_state_free(c);
@@ -599,11 +604,12 @@ static void handle_read(int evfd, conn_state_t *c) {
          * march_string_lit) so the resulting Conn is safe after the shift. */
         void *pre_conns[EVLOOP_PIPELINE_BATCH];
         int   pre_keep_alives[EVLOOP_PIPELINE_BATCH];
+        if (!c->sock) c->sock = march_http_conn_sock(c->fd);
         for (int i = 0; i < n; i++) {
             pre_keep_alives[i] = march_detect_keep_alive_simd(&reqs[i]);
             pre_conns[i]       = march_conn_from_parsed(&reqs[i],
                                                          c->rbuf, c->rbuf_len,
-                                                         c->fd);
+                                                         c->sock);
         }
 
         /* Shift consumed bytes NOW — before any send or early return.

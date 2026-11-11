@@ -11,7 +11,7 @@
 --   FORGE_INSECURE  "1" to allow an http:// registry (local dev)
 -- Exit codes (specs/forge-publish-client.md §7): 0 ok · 1 config · 2 local ·
 -- 3 transport · 4 server 4xx · 5 server 5xx.  self-contained: only the stdlib
--- (Tls/tcp_*, Crypto, Toml, Uri, Process, File) + one `tar` shell-out.
+-- (Tls/Socket, Crypto, Toml, Uri, Process, File) + one `tar` shell-out.
 mod ForgeRegistry do
 
   needs IO.Console
@@ -131,27 +131,30 @@ pfn send_tls(method, host, port, full_path, headers, body) do
   end
 end
 
+-- Read the plain response until the server closes (the request says
+-- `Connection: close`); a failed read before any byte arrived is an error.
+pfn read_socket(s, acc) do
+  match Socket.recv(s, 65536) do
+  Err(e) -> if is_nil(acc) do Err("read failed: " ++ Socket.error_message(e)) else Ok(acc) end
+  Ok(chunk) -> if String.byte_size(chunk) == 0 do Ok(acc) else read_socket(s, Cons(chunk, acc)) end
+  end
+end
+
 pfn send_plain(method, host, port, full_path, headers, body) do
-  match tcp_connect(host, port) do
-  Err(m) -> Err("connect " ++ host ++ ": " ++ m)
-  Ok(fd) ->
-    match tcp_send_all(fd, build_request(method, full_path, host, headers, body)) do
-    Err(e) -> do
-      tcp_close(fd)
-      Err("write failed: " ++ e)
+  match Socket.connect(host, port) do
+  Err(e) -> Err("connect " ++ host ++ ": " ++ connect_message(e))
+  Ok(s) -> do
+    let result = match Socket.write(s, build_request(method, full_path, host, headers, body)) do
+      Err(e) -> Err("write failed: " ++ Socket.error_message(e))
+      Ok(_) ->
+        match read_socket(s, Nil) do
+        Err(e) -> Err(e)
+        Ok(rev) -> Ok(finalize(String.join(List.reverse(rev), "")))
+        end
     end
-    Ok(_) ->
-      match tcp_recv_http(fd, 16777216) do
-      Err(e) -> do
-        tcp_close(fd)
-        Err("read failed: " ++ e)
-      end
-      Ok(raw) -> do
-        tcp_close(fd)
-        Ok(finalize(raw))
-      end
-      end
-    end
+    let _ = Socket.close(s)
+    result
+  end
   end
 end
 
