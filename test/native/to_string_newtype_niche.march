@@ -74,5 +74,6 @@ mod Main do
     println(inspect(MaybeName.NoName))
     let n = MaybeName.Named("<b>")
     println(IOList.to_string(~H"<p>${w} ${n} ${MaybeName.NoName}</p>"))
+    ()
   end
 end

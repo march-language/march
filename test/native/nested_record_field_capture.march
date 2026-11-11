@@ -54,5 +54,6 @@ mod Main do
     println(my_id.name)
     println(my_id.node_id)
     println(String.from_int(List.length(junk)))
+    ()
   end
 end

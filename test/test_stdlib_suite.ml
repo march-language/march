@@ -2148,7 +2148,7 @@ let test_file_read () =
   with_temp_file "hello world" (fun path ->
     let env = eval_with_file (Printf.sprintf {|mod T do
       fn f() do
-        match File.read("%s") do
+        match Authority.must(File.read("%s")) do
         Ok(s) -> s
         Err(ig) -> "fail"
         end
@@ -2162,9 +2162,9 @@ let test_file_write_read () =
   (try
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
-         match File.write("%s", "written data") do
+         match Authority.must(File.write("%s", "written data")) do
          Ok(ig) ->
-           match File.read("%s") do
+           match Authority.must(File.read("%s")) do
            Ok(s) -> s
            Err(ig) -> "read fail"
            end
@@ -2180,7 +2180,7 @@ let test_file_write_read () =
 let test_file_exists () =
   with_temp_file "x" (fun path ->
     let env = eval_with_file (Printf.sprintf {|mod T do
-      fn f() do File.exists("%s") end
+      fn f() do Authority.must(File.exists("%s")) end
     end|} path) in
     Alcotest.(check bool) "exists" true
       (vbool (call_fn env "f" [])))
@@ -2191,7 +2191,7 @@ let test_file_with_lines () =
       fn append_bang(l) do l ++ "!" end
       fn collect_lines(lines) do Seq.to_list(Seq.map(lines, fn l -> append_bang(l))) end
       fn f() do
-        match File.with_lines("%s", fn lines -> collect_lines(lines)) do
+        match Authority.must(File.with_lines("%s", fn lines -> collect_lines(lines))) do
         Ok(xs) -> xs
         Err(ig) -> Nil
         end
@@ -2203,7 +2203,7 @@ let test_file_with_lines () =
 let test_file_not_found () =
   let env = eval_with_file {|mod T do
     fn f() do
-      match File.read("/nonexistent/path/xyz_march_test.txt") do
+      match Authority.must(File.read("/nonexistent/path/xyz_march_test.txt")) do
       Ok(ig) -> "ok"
       Err(ig) -> "err"
       end
@@ -2241,9 +2241,9 @@ let test_file_append () =
   (try
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
-         File.write("%s", "line1\n")
-         File.append("%s", "line2\n")
-         match File.read("%s") do
+         Authority.must(File.write("%s", "line1\n"))
+         Authority.must(File.append("%s", "line2\n"))
+         match Authority.must(File.read("%s")) do
          Ok(s) -> s
          Err(ig) -> "fail"
          end
@@ -2265,13 +2265,13 @@ let test_dir_mkdir_list_rmdir () =
   let path = base ^ "/subdir" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.mkdir("%s") do
+      match Authority.must(Dir.mkdir("%s")) do
       Err(e) -> "mkdir failed: " ++ to_string(e)
       Ok(ig) ->
-        match Dir.list("%s") do
+        match Authority.must(Dir.list("%s")) do
         Err(ig) -> "list failed"
         Ok(ig) ->
-          match Dir.rmdir("%s") do
+          match Authority.must(Dir.rmdir("%s")) do
           Err(ig) -> "rmdir failed"
           Ok(ig) -> "ok"
           end
@@ -2292,7 +2292,7 @@ let test_dir_rm_rf () =
   output_string oc "x"; close_out oc;
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.rm_rf("%s") do
+      match Authority.must(Dir.rm_rf("%s")) do
       Ok(ig) -> "ok"
       Err(ig) -> "err"
       end
@@ -2304,7 +2304,7 @@ let test_dir_rm_rf () =
 let test_dir_rm_rf_refuses_root () =
   let env = eval_with_dir {|mod T do
     fn f() do
-      match Dir.rm_rf("/") do
+      match Authority.must(Dir.rm_rf("/")) do
       Ok(ig) -> "deleted root"
       Err(ig) -> "refused"
       end
@@ -2316,7 +2316,7 @@ let test_dir_rm_rf_refuses_root () =
 let test_dir_exists () =
   let base = Filename.temp_dir "march_exists_" "" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
-    fn f() do Dir.exists("%s") end
+    fn f() do Authority.must(Dir.exists("%s")) end
   end|} base) in
   let result = vbool (call_fn env "f" []) in
   (try Unix.rmdir base with _ -> ());
@@ -2324,7 +2324,7 @@ let test_dir_exists () =
 
 let test_dir_not_exists () =
   let env = eval_with_dir {|mod T do
-    fn f() do Dir.exists("/nonexistent_march_test_xyz_dir") end
+    fn f() do Authority.must(Dir.exists("/nonexistent_march_test_xyz_dir")) end
   end|} in
   Alcotest.(check bool) "dir not exists" false
     (vbool (call_fn env "f" []))
@@ -2334,8 +2334,8 @@ let test_dir_mkdir_p () =
   let deep = base ^ "/a/b/c" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.mkdir_p("%s") do
-      Ok(ig) -> Dir.exists("%s")
+      match Authority.must(Dir.mkdir_p("%s")) do
+      Ok(ig) -> Authority.must(Dir.exists("%s"))
       Err(ig) -> false
       end
     end
@@ -2362,7 +2362,7 @@ let test_integration_file_pipeline () =
   write (base ^ "/c.csv") "ignore me";
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.list_full("%s") do
+      match Authority.must(Dir.list_full("%s")) do
       Err(ig) -> Nil
       Ok(files) -> do
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
@@ -2370,7 +2370,7 @@ let test_integration_file_pipeline () =
           match ps do
           Nil -> List.reverse(acc)
           Cons(p, rest) ->
-            match File.read_lines(p) do
+            match Authority.must(File.read_lines(p)) do
             Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
             Err(ig) -> collect(rest, acc)
             end
@@ -7551,7 +7551,7 @@ let test_crypto_base64_roundtrip () =
 let test_vault_set_get () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("users")
+      let t = Authority.must(Vault.new("users"))
       Vault.set(t, "alice", 42)
       Vault.get(t, "alice")
     end
@@ -7563,7 +7563,7 @@ let test_vault_set_get () =
 let test_vault_get_missing () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("cache")
+      let t = Authority.must(Vault.new("cache"))
       Vault.get(t, "nobody")
     end
   end|} in
@@ -7574,7 +7574,7 @@ let test_vault_get_missing () =
 let test_vault_drop () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("store")
+      let t = Authority.must(Vault.new("store"))
       Vault.set(t, 1, "one")
       Vault.drop(t, 1)
       Vault.get(t, 1)
@@ -7587,7 +7587,7 @@ let test_vault_drop () =
 let test_vault_update () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("counters")
+      let t = Authority.must(Vault.new("counters"))
       Vault.set(t, :hits, 0)
       Vault.update(t, :hits, fn n -> n + 1)
       Vault.update(t, :hits, fn n -> n + 1)
@@ -7601,7 +7601,7 @@ let test_vault_update () =
 let test_vault_update_noop_on_missing () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("empty_t")
+      let t = Authority.must(Vault.new("empty_t"))
       Vault.update(t, "absent", fn n -> n + 1)
       Vault.size(t)
     end
@@ -7612,7 +7612,7 @@ let test_vault_update_noop_on_missing () =
 let test_vault_size () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("things")
+      let t = Authority.must(Vault.new("things"))
       Vault.set(t, 1, "a")
       Vault.set(t, 2, "b")
       Vault.set(t, 3, "c")
@@ -7626,7 +7626,7 @@ let test_vault_set_ttl_live () =
   (* TTL of 60 seconds — entry is still live immediately after insertion *)
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("session")
+      let t = Authority.must(Vault.new("session"))
       Vault.set_ttl(t, "tok", "abc", 60)
       Vault.get(t, "tok")
     end
@@ -7639,7 +7639,7 @@ let test_vault_set_ttl_expired () =
   (* TTL of -1 seconds — entry is already expired at insertion time *)
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("expired_cache")
+      let t = Authority.must(Vault.new("expired_cache"))
       Vault.set_ttl(t, "stale", "old", -1)
       Vault.get(t, "stale")
     end
@@ -7651,7 +7651,7 @@ let test_vault_set_ttl_expired () =
 let test_vault_get_or () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("defaults")
+      let t = Authority.must(Vault.new("defaults"))
       Vault.get_or(t, "missing", 99)
     end
   end|} in
@@ -7661,7 +7661,7 @@ let test_vault_get_or () =
 let test_vault_has () =
   let env = eval_with_vault {|mod Test do
     fn f() do
-      let t = Vault.new("presence")
+      let t = Authority.must(Vault.new("presence"))
       Vault.set(t, "key", true)
       (Vault.has(t, "key"), Vault.has(t, "other"))
     end
@@ -7720,7 +7720,7 @@ let test_vault_keys_returns_all_keys () =
       end
     end
     fn f() do
-      let t = Vault.new("keys_test_1")
+      let t = Authority.must(Vault.new("keys_test_1"))
       Vault.set(t, "x", 1)
       Vault.set(t, "y", 2)
       Vault.set(t, "z", 3)
@@ -7739,7 +7739,7 @@ let test_vault_keys_empty_table () =
       end
     end
     fn f() do
-      let t = Vault.new("keys_test_empty")
+      let t = Authority.must(Vault.new("keys_test_empty"))
       count(Vault.keys(t))
     end
   end|} in
@@ -8556,7 +8556,7 @@ let test_crypto_hmac () =
 let test_crypto_random_bytes () =
   let env = eval_with_crypto {|mod Test do
     fn f() do
-      let b = Crypto.random_bytes(16)
+      let b = Authority.must(Crypto.random_bytes(16))
       Bytes.length(b)
     end
   end|} in
@@ -8565,7 +8565,7 @@ let test_crypto_random_bytes () =
 
 let test_crypto_random_hex () =
   let env = eval_with_crypto {|mod Test do
-    fn f() do string_byte_length(Crypto.random_hex(16)) end
+    fn f() do string_byte_length(Authority.must(Crypto.random_hex(16))) end
   end|} in
   Alcotest.(check int) "random_hex(16) gives 32-char string" 32
     (vint (call_fn env "f" []))
@@ -8604,7 +8604,7 @@ let test_crypto_stdlib_base64_roundtrip () =
 let test_crypto_password_hash_verify () =
   let env = eval_with_crypto {|mod Test do
     fn f() do
-      let h = Crypto.hash_password("secret123")
+      let h = Authority.must(Crypto.hash_password("secret123"))
       if Crypto.verify_password("secret123", h) do "ok" else "fail" end
     end
   end|} in
@@ -8614,7 +8614,7 @@ let test_crypto_password_hash_verify () =
 let test_crypto_password_wrong () =
   let env = eval_with_crypto {|mod Test do
     fn f() do
-      let h = Crypto.hash_password("correct")
+      let h = Authority.must(Crypto.hash_password("correct"))
       if Crypto.verify_password("wrong", h) do "ok" else "fail" end
     end
   end|} in
@@ -9124,7 +9124,7 @@ let test_uuid_parse_ok () =
 let test_uuid_v4_format () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      let u = UUID.v4()
+      let u = Authority.must(UUID.v4())
       let s = UUID.to_string(u)
       string_byte_length(s)
     end
@@ -9135,7 +9135,7 @@ let test_uuid_v4_format () =
 let test_uuid_v4_dashes () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      let u = UUID.v4()
+      let u = Authority.must(UUID.v4())
       let s = UUID.to_string(u)
       string_slice(s, 8, 1) ++ string_slice(s, 13, 1) ++
       string_slice(s, 18, 1) ++ string_slice(s, 23, 1)
@@ -9146,7 +9146,7 @@ let test_uuid_v4_dashes () =
 
 let test_uuid_v4_version () =
   let env = eval_with_uuid {|mod Test do
-    fn f() do UUID.version(UUID.v4()) end
+    fn f() do UUID.version(Authority.must(UUID.v4())) end
   end|} in
   Alcotest.(check int) "UUID v4 version is 4" 4
     (vint (call_fn env "f" []))
@@ -9253,7 +9253,7 @@ let test_uuid_v5_rfc_url_vector () =
 
 let test_uuid_v7_version () =
   let env = eval_with_uuid {|mod Test do
-    fn f() do UUID.version(UUID.v7()) end
+    fn f() do UUID.version(Authority.must(UUID.v7())) end
   end|} in
   Alcotest.(check int) "UUID v7 version is 7" 7
     (vint (call_fn env "f" []))
@@ -9261,7 +9261,7 @@ let test_uuid_v7_version () =
 let test_uuid_v7_format () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      let s = UUID.to_string(UUID.v7())
+      let s = UUID.to_string(Authority.must(UUID.v7()))
       string_byte_length(s)
     end
   end|} in
@@ -9299,7 +9299,7 @@ let test_uuid_v7_sorts_by_time () =
 let test_uuid_v7_timestamp_ms_on_v4_is_none () =
   let env = eval_with_uuid {|mod Test do
     fn f() do
-      match UUID.timestamp_ms(UUID.v4()) do
+      match UUID.timestamp_ms(Authority.must(UUID.v4())) do
       Some(_) -> "some"
       None    -> "none"
       end
@@ -11554,7 +11554,7 @@ let hcr_manifest_caps_fixture_src =
   \  needs IO.Console\n\
   \  mod Core do\n\
   \    needs IO.Console\n\
-  \    fn logger(x : String) : Unit do println(x) end\n\
+  \    fn logger(x : String) : Unit do Authority.ignore(println(x)) end\n\
   \  end\n\
   \  mod Pure do\n\
   \    fn add(a : Int, b : Int) : Int do a + b end\n\
@@ -11728,7 +11728,7 @@ end
           with its reload server; the role's root still exists statically. *)
        "let t = spawn(Tick)\n\
        \    send(t, Bump(1))\n\
-       \    if List.length(Process.argv()) > 99 do\n\
+       \    if List.length(Authority.must(Process.argv())) > 99 do\n\
        \      let _ = Stream_Run.run_Cons(c, \"cons\", \"secret\", Stream_Run.addrs_from_env(),\n\
        \        fn (s, con, fw, st) -> cons(s, con, st))\n\
        \      ()\n\
@@ -12255,9 +12255,9 @@ let frame_pin_src version =
     | 2 -> "state { count : Int, label : String }\ninit { count: 0, label: \"fresh\" }"
     | _ -> "state { count : Int, label : String, extra : Int }\ninit { count: 0, label: \"fresh3\", extra: 0 }" in
   let stop = match version with
-    | 1 -> "println(\"stop-old \" ++ int_to_string(state.count))"
-    | 2 -> "println(\"stop-new \" ++ state.label)"
-    | _ -> "println(\"stop-third \" ++ state.label ++ \":\" ++ int_to_string(state.extra))" in
+    | 1 -> "Authority.ignore(println(\"stop-old \" ++ int_to_string(state.count)))"
+    | 2 -> "Authority.ignore(println(\"stop-new \" ++ state.label))"
+    | _ -> "Authority.ignore(println(\"stop-third \" ++ state.label ++ \":\" ++ int_to_string(state.extra)))" in
   let migration = match version with
     | 1 -> ""
     | 2 -> "fn probe_migrate_state(old : { count : Int }) : { count : Int, label : String } do { count: old.count, label: \"migrated\" } end\n"
@@ -12265,12 +12265,12 @@ let frame_pin_src version =
   "mod Main do\nneeds IO\n" ^ count ^ "actor Probe do\n" ^ state
   ^ "\non Tick() do\nprintln(\"fresh-\" ++ int_to_string(calc()))\nstate\nend\non_stop do\n"
   ^ stop ^ "\nend\nend\n" ^ migration
-  ^ "fn hold_frame(done : String, step : Int -> ()) : () do\nif File.exists(done) do () else\nstep(0)\nhold_frame(done, step)\nend\nend\n"
+  ^ "fn hold_frame(done : String, step : Int -> ()) : () do\nif Authority.must(File.exists(done)) do () else\nstep(0)\nhold_frame(done, step)\nend\nend\n"
   ^ "fn main(_io : Cap(IO)) do\nlet a = spawn(Probe)\nprintln(\"frame-ready\")\n"
-  ^ "let step = fn mark -> do\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nif mark == 1 do println(\"old-closure-101\") else () end\nsend(a, Tick())\nsleep_ms(50)\nend\n"
-  ^ "hold_frame(Env.require(\"MARCH_FRAME_FINISH\"), step)\nstep(1)\n"
+  ^ "let step = fn mark -> do\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nif mark == 1 do Authority.ignore(println(\"old-closure-101\")) else () end\nsend(a, Tick())\nsleep_ms(50)\nend\n"
+  ^ "hold_frame(Authority.must(Env.require(\"MARCH_FRAME_FINISH\")), step)\nstep(1)\n"
   ^ "if calc() != 101 do panic(\"old main crossed ABI\") else println(\"old-main-101\") end\n"
-  ^ "let _ = Actor.stop(a, 1000)\nprintln(\"frame-done\")\nend\nend\n"
+  ^ "let _ = Actor.stop(a, 1000)\nprintln(\"frame-done\")\n()\nend\nend\n"
 
 let test_hcr_running_frame_signature_change () =
   let module H = March_forge.Cmd_deploy_hot in
@@ -12521,15 +12521,17 @@ let compiled_and_interpreted_stdout ~tag ~src_text =
 (* The size histogram must be EXACT, not approximate: the SSO criterion is a
    fraction of allocations in the small buckets, so an off-by-N histogram
    changes the architectural verdict.  String.repeat allocates exactly one
-   string per call, so 100 calls producing 12 bytes and 100 producing 40 must
-   appear as exactly 100 in hist_le15 and 100 in hist_le63.  The loops keep
+   string per call, so 100 calls producing 20 bytes and 100 producing 40 must
+   appear as exactly 100 in hist_le23 and 100 in hist_le63.  The loops keep
    each string live only briefly, which also exercises the free path.
 
    Deliberately NOT 4-byte strings: println, to_string and stdlib internals
    allocate their own short-lived strings, which the counter correctly counts,
    so the <=7 bucket carries unrelated traffic (measured: 302 for 100 loop
-   allocations) and could not support an exact assertion.  12 and 40 bytes sit
-   in buckets nothing else in this program touches, which is what lets both
+   allocations) and could not support an exact assertion.  Nor 12-byte ones:
+   since capability operations are checked, println's Authority.check makes
+   "IO.Console" (10 bytes) and its kind/target pair land in the <=15 bucket.
+   20 and 40 bytes sit in buckets nothing else in this program touches, which is what lets both
    checks stay exact rather than degrading to >=. *)
 let test_string_stats_histogram_exact () =
   with_compiled_program ~tag:"march_strstats"
@@ -12540,7 +12542,7 @@ let test_string_stats_histogram_exact () =
       \  pfn small(i : Int, n : Int, acc : Int) : Int do\n\
       \    if i >= n do acc\n\
       \    else\n\
-      \      let s = String.repeat(\"abcd\", 3)\n\
+      \      let s = String.repeat(\"abcd\", 5)\n\
       \      small(i + 1, n, acc + String.byte_size(s))\n\
       \    end\n\
       \  end\n\
@@ -12557,8 +12559,8 @@ let test_string_stats_histogram_exact () =
        end\n"
     (fun err_file ->
        let get k = string_stat_of ~stderr_file:err_file k in
-       Alcotest.(check int) "hist_le15 counts the 100 twelve-byte strings"
-         100 (get "hist_le15");
+       Alcotest.(check int) "hist_le23 counts the 100 twenty-byte strings"
+         100 (get "hist_le23");
        Alcotest.(check int) "hist_le63 counts the 100 forty-byte strings"
          100 (get "hist_le63");
        Alcotest.(check bool) "allocs covers both loops" true (get "allocs" >= 200);
@@ -13245,15 +13247,16 @@ let test_compiled_io_read_byte () =
     let src = Filename.concat tmp "rb.march" in
     let oc = open_out src in
     output_string oc
-      "mod App do\n\
-    \  needs IO.Console\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
-      \    let a = IO.read_byte()\n\
-      \    let b = IO.read_byte()\n\
-      \    let c = IO.read_byte()\n\
-      \    println(int_to_string(a) ++ \",\" ++ int_to_string(b) ++ \",\" ++ int_to_string(c))\n\
-      \  end\n\
-       end\n";
+      {|mod App do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) do
+    let a = Authority.must(IO.read_byte())
+    let b = Authority.must(IO.read_byte())
+    let c = Authority.must(IO.read_byte())
+    println(int_to_string(a) ++ "," ++ int_to_string(b) ++ "," ++ int_to_string(c))
+  end
+end
+|};
     close_out oc;
     let bin = Filename.concat tmp "rbbin" in
     let compile_rc = Sys.command (Printf.sprintf
@@ -13418,24 +13421,25 @@ let test_compiled_vault_scalar_roundtrip () =
   let src = Filename.concat tmp "v.march" in
   let oc = open_out src in
   output_string oc
-    "mod VaultScalar do\n\
-    \  needs IO.Process\n\
-    \  needs IO.Mut\n\
-    \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-    \    -- One table per element type: a Vault handle is Vault(v), phantom in\n\
-    \    -- the value type, so a single table cannot hold both a Bool and an\n\
-    \    -- Int. That is orthogonal to what this test guards (the runtime's\n\
-    \    -- scalar tagging on the store path), and both scalars still make the\n\
-    \    -- same round trip.\n\
-    \    let tb = Vault.new(\"vs_test_b\")\n\
-    \    let tn = Vault.new(\"vs_test_n\")\n\
-    \    Vault.set(tb, \"b\", true)\n\
-    \    Vault.set(tn, \"n\", 4242)\n\
-    \    let b = Vault.get(tb, \"b\") |> unwrap_or(false)\n\
-    \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
-    \    if b && n == 4242 do () else process_exit(1) end\n\
-    \  end\n\
-     end\n";
+    {|mod VaultScalar do
+  needs IO.Process
+  needs IO.Mut
+  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+    -- One table per element type: a Vault handle is Vault(v), phantom in
+    -- the value type, so a single table cannot hold both a Bool and an
+    -- Int. That is orthogonal to what this test guards (the runtime's
+    -- scalar tagging on the store path), and both scalars still make the
+    -- same round trip.
+    let tb = Authority.must(Vault.new("vs_test_b"))
+    let tn = Authority.must(Vault.new("vs_test_n"))
+    Vault.set(tb, "b", true)
+    Vault.set(tn, "n", 4242)
+    let b = Vault.get(tb, "b") |> unwrap_or(false)
+    let n = Vault.get(tn, "n") |> unwrap_or(0)
+    if b && n == 4242 do () else process_exit(1) end
+  end
+end
+|};
   close_out oc;
   let bin = Filename.concat tmp "vbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
@@ -13467,16 +13471,17 @@ let test_compiled_vault_ns_get_missing_namespace () =
   let src = Filename.concat tmp "v.march" in
   let oc = open_out src in
   output_string oc
-    "mod VaultNsGetMissing do\n\
-    \  needs IO.Process\n\
-    \  needs IO.Mut\n\
-    \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-    \    match Vault.ns_get(\"never_written_ns_xyz\", \"k\") do\n\
-    \      None -> ()\n\
-    \      Some(_) -> process_exit(1)\n\
-    \    end\n\
-    \  end\n\
-     end\n";
+    {|mod VaultNsGetMissing do
+  needs IO.Process
+  needs IO.Mut
+  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+    match Authority.must(Vault.ns_get("never_written_ns_xyz", "k")) do
+      None -> ()
+      Some(_) -> process_exit(1)
+    end
+  end
+end
+|};
   close_out oc;
   let bin = Filename.concat tmp "vnsbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
@@ -13514,30 +13519,31 @@ let test_compiled_vault_ns_get_missing_namespace () =
    permanent regression test rather than relying on the default-opt one to
    stand in for it. *)
 let vault_update_src =
-  "mod VaultUpdate do\n\
-    \  needs IO.Process\n\
-  \  needs IO.Mut\n\
-  \  fn inc(n) do\n\
-  \    n + 1\n\
-  \  end\n\
-  \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-  \    -- One table per element type (Vault(v) is phantom in the value type),\n\
-  \    -- which changes nothing about what this guards: the Int table still\n\
-  \    -- exercises the tagged-scalar untag before the closure call and the\n\
-  \    -- String table the heap-pointer pass-through, both against the same\n\
-  \    -- march_vault_update path.\n\
-  \    let tn = Vault.new(\"vu_test_n\")\n\
-  \    let ts = Vault.new(\"vu_test_s\")\n\
-  \    Vault.set(tn, \"n\", 1)\n\
-  \    Vault.update(tn, \"n\", fn n -> n + 1)\n\
-  \    Vault.update(tn, \"n\", inc)\n\
-  \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
-  \    Vault.set(ts, \"s\", \"ab\")\n\
-  \    Vault.update(ts, \"s\", fn s -> s ++ \"!\")\n\
-  \    let s = Vault.get(ts, \"s\") |> unwrap_or(\"\")\n\
-  \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
-  \  end\n\
-   end\n"
+  {|mod VaultUpdate do
+  needs IO.Process
+  needs IO.Mut
+  fn inc(n) do
+    n + 1
+  end
+  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+    -- One table per element type (Vault(v) is phantom in the value type),
+    -- which changes nothing about what this guards: the Int table still
+    -- exercises the tagged-scalar untag before the closure call and the
+    -- String table the heap-pointer pass-through, both against the same
+    -- march_vault_update path.
+    let tn = Authority.must(Vault.new("vu_test_n"))
+    let ts = Authority.must(Vault.new("vu_test_s"))
+    Vault.set(tn, "n", 1)
+    Vault.update(tn, "n", fn n -> n + 1)
+    Vault.update(tn, "n", inc)
+    let n = Vault.get(tn, "n") |> unwrap_or(0)
+    Vault.set(ts, "s", "ab")
+    Vault.update(ts, "s", fn s -> s ++ "!")
+    let s = Vault.get(ts, "s") |> unwrap_or("")
+    if n == 3 && s == "ab!" do () else process_exit(1) end
+  end
+end
+|}
 
 let run_compiled_vault_update_test ~extra_args ~check_label =
   let main_exe = find_main_exe () in

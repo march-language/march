@@ -41,7 +41,7 @@ let test_direct_reach () =
 
 let test_transitive_reach_names_the_chain () =
   let src =
-    m {|  pfn log(s : String) : Unit do println(s) end
+    m {|  pfn log(s : String) : Unit do Authority.ignore(println(s)) end
   fn f(s : String) : Unit needs IO.Clock do log(s) end|}
   in
   rejects "cap_bound" "reach through a helper" src;
@@ -137,7 +137,7 @@ let test_nested_module () =
     {|mod M do
   mod Inner do
     needs IO.Console
-    fn shout(s : String) : Unit needs () do println(s) end
+    fn shout(s : String) : Unit needs () do Authority.ignore(println(s)) end
   end
 end|}
 
@@ -226,7 +226,7 @@ let shows ?(iface_needs = "needs ()") ?(module_needs = "IO.Console") impl_body =
     fn show : a -> String %s
   end
   type T = T(Int)
-  pfn log(s : String) : Unit do println(s) end
+  pfn log(s : String) : Unit do Authority.ignore(println(s)) end
   impl Show(T) do
     fn show(_t) do
 %s
@@ -361,7 +361,7 @@ let nested_impl ~iface_needs ~impl_needs =
       fn emit : a -> Unit %s
     end
     type T = T(Int)
-    pfn log(s : String) : Unit do println(s) end
+    pfn log(s : String) : Unit do Authority.ignore(println(s)) end
     impl Sink(T) do
       fn emit(_t) %s do log("x") end
     end

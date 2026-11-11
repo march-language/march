@@ -70,6 +70,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let zs    = ifilter(ys, fn x -> x % 3 == 0)
   let total = ifold(zs, 0, fn (a, b) -> a + b)
   println(int_to_string(total))
+  ()
 end
 
 end

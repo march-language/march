@@ -20,5 +20,6 @@ mod Main do
     let arr2 = Simd.store_f32x4(arr, 2, sv)
     let back = Simd.load_f32x4(arr2, 2)
     println([NativeArray.get_f32(shared, 2), NativeArray.get_f32(arr2, 2), Simd.extract_f32x4(back, 0)])
+    ()
   end
 end

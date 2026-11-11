@@ -26,7 +26,7 @@ mod CrashAfterSendNodeA do
   end
 
   pfn wait_for(path : String) : () do
-    if File.exists(path) do ()
+    if Authority.must(File.exists(path)) do ()
     else
       sleep_ms(50)
       wait_for(path)
@@ -39,7 +39,7 @@ mod CrashAfterSendNodeA do
     Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
       fn (read, st2) ->
         println("L: got Read(" ++ read ++ ")")
-        wait_for(Env.require("LOGGING_GO_FILE"))
+        wait_for(Authority.must(Env.require("LOGGING_GO_FILE")))
         Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
       fn (fatal, st2) ->
         println("L: got Fatal(" ++ fatal ++ ")")

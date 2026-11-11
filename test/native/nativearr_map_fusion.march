@@ -121,5 +121,6 @@ mod Main do
     println(show_ints(NativeArray.to_list_int(param_chain(ia, fn x -> x * 7))))
     -- impure callback bodies
     println(show_ints(NativeArray.to_list_int(impure_chain(ia))))
+    ()
   end
 end

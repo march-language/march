@@ -1,0 +1,9 @@
+IO.Spawn refused by the launch grant (IO.Spawn, IO.Mut, IO.Signal)
+IO.Spawn refused by the launch grant (IO.Spawn, IO.Mut, IO.Signal)
+true
+4498500
+IO.Mut("conformance_table") refused by the launch grant (IO.Spawn, IO.Mut, IO.Signal)
+IO.Mut("conformance_table") refused by the launch grant (IO.Spawn, IO.Mut, IO.Signal)
+IO.Mut("conformance_ns") refused by the launch grant (IO.Spawn, IO.Mut, IO.Signal)
+IO.Signal("SIGUSR1") refused by the launch grant (IO.Spawn, IO.Mut, IO.Signal)
+exit 0

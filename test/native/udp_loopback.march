@@ -69,63 +69,63 @@ mod UdpLoopback do
     let rx = sock("127.0.0.1")
     let tx = sock("127.0.0.1")
     let dst = addr_of(rx)
-    println("bound port > 0: " ++ bool_to_string(Udp.addr_port(dst) > 0))
-    println("addr renders: " ++ bool_to_string(string_starts_with(Udp.addr_to_string(dst), "127.0.0.1:")))
+    Authority.ignore(println("bound port > 0: " ++ bool_to_string(Udp.addr_port(dst) > 0)))
+    Authority.ignore(println("addr renders: " ++ bool_to_string(string_starts_with(Udp.addr_to_string(dst), "127.0.0.1:"))))
 
     -- round trip, and the source is tx's address
     let _ = send_ok(Udp.send_batch(tx, dst, ["hello"]))
     match Udp.recv(rx, 2048, 1000) do
       Ok(Some((from, data))) ->
-        println("recv: " ++ data)
-        println("from == tx: " ++ bool_to_string(from == addr_of(tx)))
-      Ok(None) -> println("recv: timed out")
-      Err(e) -> println(Udp.error_message(e))
+        Authority.ignore(println("recv: " ++ data))
+        Authority.ignore(println("from == tx: " ++ bool_to_string(from == addr_of(tx))))
+      Ok(None) -> Authority.ignore(println("recv: timed out"))
+      Err(e) -> Authority.ignore(println(Udp.error_message(e)))
     end
 
     -- a batch arrives whole and in order
     let batch = List.map(List.range(0, 500), fn i -> "seq-" ++ int_to_string(i))
-    println("batch sent: " ++ int_to_string(send_ok(Udp.send_batch(tx, dst, batch))))
+    Authority.ignore(println("batch sent: " ++ int_to_string(send_ok(Udp.send_batch(tx, dst, batch)))))
     let got = payloads(take(rx, 500, 2048, []))
-    println("batch received: " ++ int_to_string(List.length(got)) ++ ", in order: " ++ bool_to_string(in_order(got, 0)))
+    Authority.ignore(println("batch received: " ++ int_to_string(List.length(got)) ++ ", in order: " ++ bool_to_string(in_order(got, 0))))
 
     -- mixed sizes, including empty and near the 64 KiB limit
     let mixed = [string_repeat("a", 700), string_repeat("b", 700), string_repeat("c", 300),
                  string_repeat("d", 700), "", "e", string_repeat("f", 65000), string_repeat("g", 5)]
-    println("mixed sent: " ++ int_to_string(send_ok(Udp.send_batch(tx, dst, mixed))))
+    Authority.ignore(println("mixed sent: " ++ int_to_string(send_ok(Udp.send_batch(tx, dst, mixed)))))
     let back = payloads(take(rx, 8, 65535, []))
-    println("mixed sizes: " ++ sizes(back))
-    println("mixed intact: " ++ bool_to_string(back == mixed))
+    Authority.ignore(println("mixed sizes: " ++ sizes(back)))
+    Authority.ignore(println("mixed intact: " ++ bool_to_string(back == mixed)))
 
     -- oversize is refused, not truncated
     match Udp.send_to(tx, dst, string_repeat("z", 70000)) do
-      Ok(_) -> println("oversize: sent?!")
-      Err(SendFailed(_)) -> println("oversize: SendFailed")
-      Err(e) -> println("oversize: " ++ Udp.error_message(e))
+      Ok(_) -> Authority.ignore(println("oversize: sent?!"))
+      Err(SendFailed(_)) -> Authority.ignore(println("oversize: SendFailed"))
+      Err(e) -> Authority.ignore(println("oversize: " ++ Udp.error_message(e)))
     end
 
     -- truncation to max_size
     let _ = send_ok(Udp.send_batch(tx, dst, [string_repeat("t", 100)]))
-    println("truncated to: " ++ sizes(payloads(take(rx, 1, 10, []))))
+    Authority.ignore(println("truncated to: " ++ sizes(payloads(take(rx, 1, 10, [])))))
 
     -- send_many: two destinations in one call
     let rx2 = sock("127.0.0.1")
     let dst2 = addr_of(rx2)
     let n = send_ok(Udp.send_many(tx, [(dst, "one"), (dst2, "two"), (dst2, "three"), (dst, "four")]))
-    println("send_many sent: " ++ int_to_string(n))
-    println("rx got: " ++ string_join(payloads(take(rx, 2, 2048, [])), " "))
-    println("rx2 got: " ++ string_join(payloads(take(rx2, 2, 2048, [])), " "))
+    Authority.ignore(println("send_many sent: " ++ int_to_string(n)))
+    Authority.ignore(println("rx got: " ++ string_join(payloads(take(rx, 2, 2048, [])), " ")))
+    Authority.ignore(println("rx2 got: " ++ string_join(payloads(take(rx2, 2, 2048, [])), " ")))
 
     -- connected socket
     let c = sock("127.0.0.1")
     match Udp.connect(c, dst2) do
       Ok(_) -> ()
-      Err(e) -> println(Udp.error_message(e))
+      Err(e) -> Authority.ignore(println(Udp.error_message(e)))
     end
     match Udp.send(c, "via connect") do
       Ok(_) -> ()
-      Err(e) -> println(Udp.error_message(e))
+      Err(e) -> Authority.ignore(println(Udp.error_message(e)))
     end
-    println("connected: " ++ string_join(payloads(take(rx2, 1, 2048, [])), " "))
+    Authority.ignore(println("connected: " ++ string_join(payloads(take(rx2, 1, 2048, [])), " ")))
 
     -- a connected socket hears ICMP port-unreachable as an error
     let gone = sock("127.0.0.1")
@@ -135,56 +135,56 @@ mod UdpLoopback do
     let _ = Udp.connect(lonely, gone_addr)
     let _ = Udp.send(lonely, "anyone?")
     match Udp.recv(lonely, 2048, 1000) do
-      Err(RecvFailed(_)) -> println("unreachable peer: RecvFailed")
-      Ok(None) -> println("unreachable peer: silent")
-      Ok(Some(_)) -> println("unreachable peer: got data?!")
-      Err(e) -> println("unreachable peer: " ++ Udp.error_message(e))
+      Err(RecvFailed(_)) -> Authority.ignore(println("unreachable peer: RecvFailed"))
+      Ok(None) -> Authority.ignore(println("unreachable peer: silent"))
+      Ok(Some(_)) -> Authority.ignore(println("unreachable peer: got data?!"))
+      Err(e) -> Authority.ignore(println("unreachable peer: " ++ Udp.error_message(e)))
     end
 
     -- timeouts: 0 never waits, a quiet socket gives Ok([])
     match Udp.recv_batch(rx, 64, 2048, 0) do
-      Ok(ds) -> println("poll empty: " ++ int_to_string(List.length(ds)))
-      Err(e) -> println(Udp.error_message(e))
+      Ok(ds) -> Authority.ignore(println("poll empty: " ++ int_to_string(List.length(ds))))
+      Err(e) -> Authority.ignore(println(Udp.error_message(e)))
     end
     match Udp.recv(rx, 2048, 50) do
-      Ok(None) -> println("quiet recv: None")
-      _ -> println("quiet recv: unexpected")
+      Ok(None) -> Authority.ignore(println("quiet recv: None"))
+      _ -> Authority.ignore(println("quiet recv: unexpected"))
     end
 
     -- IPv6
     match Udp.open("::1", 0) do
-      Err(e) -> println("ipv6: " ++ Udp.error_message(e))
+      Err(e) -> Authority.ignore(println("ipv6: " ++ Udp.error_message(e)))
       Ok(r6) ->
         let t6 = sock("::1")
         let d6 = addr_of(r6)
-        println("ipv6 addr renders: " ++ bool_to_string(string_starts_with(Udp.addr_to_string(d6), "[::1]:")))
+        Authority.ignore(println("ipv6 addr renders: " ++ bool_to_string(string_starts_with(Udp.addr_to_string(d6), "[::1]:"))))
         let _ = send_ok(Udp.send_batch(t6, d6, ["six", "six again"]))
-        println("ipv6 got: " ++ string_join(payloads(take(r6, 2, 2048, [])), " | "))
+        Authority.ignore(println("ipv6 got: " ++ string_join(payloads(take(r6, 2, 2048, [])), " | ")))
         Udp.close(t6)
         Udp.close(r6)
     end
 
     -- shards share one port
     match Udp.open_sharded("127.0.0.1", 0, 3, Udp.defaults()) do
-      Err(e) -> println("sharded: " ++ Udp.error_message(e))
+      Err(e) -> Authority.ignore(println("sharded: " ++ Udp.error_message(e)))
       Ok(shards) ->
         let ports = List.map(shards, fn s -> Udp.addr_port(addr_of(s)))
         let p0 = match ports do
           Cons(p, _) -> p
           Nil -> -1
         end
-        println("shards: " ++ int_to_string(List.length(shards)) ++ ", one port: "
-          ++ bool_to_string(List.all(ports, fn p -> p == p0)))
+        Authority.ignore(println("shards: " ++ int_to_string(List.length(shards)) ++ ", one port: "
+          ++ bool_to_string(List.all(ports, fn p -> p == p0))))
         List.map(shards, fn s -> Udp.close(s))
         ()
     end
 
     let st = Udp.stats(tx)
-    println("send stalls counted: " ++ bool_to_string(st.tx_stalls >= 0))
-    println(Udp.error_message(ResolveFailed("nope")))
+    Authority.ignore(println("send stalls counted: " ++ bool_to_string(st.tx_stalls >= 0)))
+    Authority.ignore(println(Udp.error_message(ResolveFailed("nope"))))
     match Udp.resolve("", 9) do
-      Err(ResolveFailed(_)) -> println("empty host: ResolveFailed")
-      _ -> println("empty host: unexpected")
+      Err(ResolveFailed(_)) -> Authority.ignore(println("empty host: ResolveFailed"))
+      _ -> Authority.ignore(println("empty host: unexpected"))
     end
     Udp.close(c)
     Udp.close(lonely)

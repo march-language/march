@@ -99,7 +99,7 @@ let small_src =
   "mod Rt do\n\
   \  needs IO.Console\n\
   \  pfn greet(n : Int) : String do \"n=\" ++ int_to_string(n) end\n\
-  \  fn main(_cap : Cap(IO.Console)) : Unit do println(greet(3)) end\n\
+  \  fn main(_cap : Cap(IO.Console)) : Unit do Authority.ignore(println(greet(3))) end\n\
    end\n"
 
 let emit_llvm ~env src =
@@ -167,7 +167,7 @@ let test_report_names_the_leaking_site () =
     Alcotest.(check bool) ("balanced_loop is not blamed for any live object:\n" ^ out) false
       (contains live_section "LIVE 0x" && contains live_section "allocated at balanced_loop#");
     Alcotest.(check bool) ("literal cells are immortal, not leaks:\n" ^ out) true
-      (contains out "immortal: 4");
+      (contains out "immortal: 8");
     Alcotest.(check bool) ("no inconsistent history:\n" ^ out) true
       (contains out "inconsistent: 0");
     Alcotest.(check bool) ("the report's exit status flags the leak:\n" ^ out) true
@@ -189,6 +189,7 @@ let clean_src =
   \  end\n\
   \  fn main(_cap : Cap(IO.Console)) : Unit do\n\
   \    println(\"total: \" ++ int_to_string(churn(200, 0)))\n\
+  \    ()\n\
   \  end\n\
    end\n"
 

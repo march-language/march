@@ -14,6 +14,7 @@ mod Main do
   pfn flat(label : String, before : Int, r : String) : () do
     let grew = live_allocs() - before
     println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 30))
+    ()
   end
 
   pfn strs(n : Int) : List(String) do

@@ -23,6 +23,7 @@ end
 pfn banner(name : String) : Unit do
   println("")
   println("=== " ++ name ++ " ===")
+  ()
 end
 
 -- ── Data generation ────────────────────────────────────────────────────────
@@ -64,6 +65,7 @@ pfn bench_sum_list(lst : List(Float)) : Unit do
   let t1 = unix_time(())
   println("result: " ++ float_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+  ()
 end
 
 pfn bench_sum_native(arr) : Unit do
@@ -73,6 +75,7 @@ pfn bench_sum_native(arr) : Unit do
   let t1 = unix_time(())
   println("result: " ++ float_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+  ()
 end
 
 -- ── Map ────────────────────────────────────────────────────────────────────
@@ -102,6 +105,7 @@ pfn bench_map_list(lst : List(Float)) : Unit do
   let s    = list_sum_float(lst2)
   println("checksum: " ++ float_to_string(s))
   println("time:     " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+  ()
 end
 
 pfn bench_map_native(arr) : Unit do
@@ -112,6 +116,7 @@ pfn bench_map_native(arr) : Unit do
   let s    = native_float_arr_sum(arr2)
   println("checksum: " ++ float_to_string(s))
   println("time:     " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+  ()
 end
 
 -- ── Fold ───────────────────────────────────────────────────────────────────
@@ -129,6 +134,7 @@ pfn bench_fold_list(lst : List(Int)) : Unit do
   let t1 = unix_time(())
   println("result: " ++ int_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+  ()
 end
 
 pfn bench_fold_native(arr) : Unit do
@@ -138,6 +144,7 @@ pfn bench_fold_native(arr) : Unit do
   let t1 = unix_time(())
   println("result: " ++ int_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+  ()
 end
 
 -- ── Main ───────────────────────────────────────────────────────────────────
@@ -161,6 +168,7 @@ fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   bench_fold_native(int_arr)
   println("")
   println("Done.")
+  ()
 end
 
 end -- mod ArrayNumeric

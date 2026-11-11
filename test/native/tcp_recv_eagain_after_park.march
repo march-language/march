@@ -74,7 +74,7 @@ mod TcpRecvEagainAfterPark do
       unsent
     end)
 
-    let fd = match Socket.connect("127.0.0.1", port) do
+    let fd = match Authority.must(Socket.connect("127.0.0.1", port)) do
       Ok(f) -> f
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end

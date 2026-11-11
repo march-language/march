@@ -88,8 +88,8 @@ mod StreamReplay do
   end
 
   fn in_process() : Transport do
-    let handlers = Vault.new("stream_replay_handlers")
-    let pending  = Vault.new("stream_replay_pending")
+    let handlers = Authority.must(Vault.new("stream_replay_handlers"))
+    let pending  = Authority.must(Vault.new("stream_replay_pending"))
     Vault.set(pending, "q", Deque.empty())
     {
       ops: {

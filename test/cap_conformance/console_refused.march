@@ -1,0 +1,42 @@
+-- REFUSE: IO.Console
+-- With the console refused, every console operation returns the refusal and
+-- (IO.read_byte is in console_read_byte.)
+-- prints nothing; IO.inspect and debug are pass-throughs and still return.
+-- Stdout is the channel under test, so the verdict is the exit code: 0 when
+-- every expectation holds, else the number of the first that failed.
+mod ConsoleRefused do
+  needs IO.Console
+  needs IO.Process
+
+  fn refused(r : Result(a, CapError), target : String) : Bool do
+    match r do
+    Err(CapError("IO.Console", t, ByLaunch, "IO.Console")) -> t == target
+    _ -> false
+    end
+  end
+
+  -- 0 when every check holds, else the 1-based position of the first that fails.
+  fn first_failure(checks : List(Bool), i : Int) : Int do
+    match checks do
+    Nil -> 0
+    Cons(ok, rest) -> if ok do first_failure(rest, i + 1) else i end
+    end
+  end
+
+  fn verdict() : Int do
+    first_failure([
+      refused(println("x"), "stdout"),
+      refused(IO.puts("x"), "stdout"),
+      refused(IO.write("x"), "stdout"),
+      refused(IO.warn("x"), "stderr"),
+      refused(IO.read_line(), "stdin"),
+      refused(IO.gets("prompt"), "stdout"),
+      IO.inspect(3) == 3,
+      debug(4) == ()
+    ], 1)
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    Process.exit(verdict())
+  end
+end

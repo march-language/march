@@ -76,7 +76,7 @@ mod PeerReaderLoopback do
   -- The reader counts frames through a Vault: the dispatch closure is called
   -- per frame and cannot carry state between calls.
   pfn frame_count() : Int do
-    let v = Vault.open("peer_reader_frames")
+    let v = Authority.must(Vault.open("peer_reader_frames"))
     let n = match Vault.get(v, "n") do
       Some(k) -> k
       None -> 0
@@ -87,7 +87,7 @@ mod PeerReaderLoopback do
 
   -- node-b's output, in the order it happened; main prints it at the end.
   pfn note(line : String) : () do
-    let v = Vault.open("peer_reader_log")
+    let v = Authority.must(Vault.open("peer_reader_log"))
     Vault.set(v, "lines", List.append(Vault.get_or(v, "lines", Nil), Cons(line, Nil)))
   end
 
@@ -101,7 +101,7 @@ mod PeerReaderLoopback do
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
@@ -136,12 +136,12 @@ mod PeerReaderLoopback do
     println("node-a: wrote 3 frames in one burst")
 
     let _ = task_await(srv)
-    let _ = List.map(Vault.get_or(Vault.open("peer_reader_log"), "lines", Nil), fn l -> println(l))
+    let _ = List.map(Vault.get_or(Authority.must(Vault.open("peer_reader_log")), "lines", Nil), fn l -> println(l))
     tcp_close(conn_fd)
     run_until_idle()
     match get_actor_field(sink_pid, "got") do
-      Some(n) -> println("node-b: actor received " ++ int_to_string(n) ++ " item(s)")
-      None -> println("node-b: sink gone")
+      Some(n) -> Authority.ignore(println("node-b: actor received " ++ int_to_string(n) ++ " item(s)"))
+      None -> Authority.ignore(println("node-b: sink gone"))
     end
   end
 end

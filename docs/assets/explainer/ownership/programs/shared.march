@@ -26,5 +26,6 @@ mod Own do
     let t = build(4, 1)
     let t2 = inc_leaves(t)
     println(int_to_string(sum_leaves(t2) - sum_leaves(t)))
+    ()
   end
 end

@@ -126,5 +126,6 @@ mod ErasedRecordDeep do
     println("String and List fields: total " ++ int_to_string(y) ++ ", growth " ++ int_to_string(a2 - a1))
     println("nominal record: total " ++ int_to_string(z) ++ ", growth " ++ int_to_string(a3 - a2))
     println("shared rows: total " ++ int_to_string(v) ++ ", growth " ++ int_to_string(a4 - a3))
+    ()
   end
 end

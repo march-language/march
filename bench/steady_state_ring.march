@@ -149,10 +149,11 @@ mod SteadyStateRing do
     println("BUCKET 17 " ++ int_to_string(c17))
     println("END")
     System.exit(0)
+    ()
   end
 
   pfn env_int(name : String, dflt : Int) : Int do
-    match System.env(name) do
+    match Authority.must(System.env(name)) do
       Some(s) -> match String.to_int(s) do
         Ok(v) -> v
         Err(_) -> dflt

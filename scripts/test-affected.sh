@@ -61,6 +61,9 @@ expect suites "errors" -- test/errors/foo_1.expected
 expect suites "test_reports" -- test/test_reports/assert_values.expected
 expect suites "test_reports" -- test/run_test_reports.ml
 expect suites "test_reports" -- lib/errors/test_report.ml
+expect suites "cap_conformance" -- test/cap_conformance/refuse_clock.march
+expect suites "cap_conformance" -- test/run_cap_conformance.ml
+expect suites "cap_conformance" -- stdlib/authority.march
 expect dune "@forge/test/runtest" -- forge/lib/cmd_add.ml
 expect dune "@test/types-check" -- specs/lang/types/accept/t01_literals.march
 expect dune "@test/bench_gate" -- bench/list_ops.march

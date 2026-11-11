@@ -204,6 +204,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_reverse",     [true]);
   (* ── 2-arg string × string ──────────────────────────────────────────────── *)
   ("march_string_contains",      [true; true]);
+  ("march_cap_check_raw",        [true; true]);
   ("march_string_starts_with",   [true; true]);
   ("march_string_ends_with",     [true; true]);
   ("march_string_split",         [true; true]);
@@ -399,6 +400,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_trim_end",      [true]);
   ("string_reverse",       [true]);
   ("string_contains",      [true; true]);
+  ("cap_check_raw",        [true; true]);
   ("string_starts_with",   [true; true]);
   ("string_ends_with",     [true; true]);
   ("string_split",         [true; true]);

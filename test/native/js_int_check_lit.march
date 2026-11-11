@@ -5,5 +5,6 @@ mod JsIntCheckLit do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println(int_to_string(1804289383 * 1103515245))
+    ()
   end
 end

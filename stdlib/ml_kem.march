@@ -45,14 +45,16 @@ mod MlKem do
   end
 
   doc """
-  A fresh key pair from 64 random bytes.
+  A fresh key pair from 64 random bytes. `Err(CapError(...))` when drawing
+  random bytes (IO.Random) is refused.
 
-      let kp = MlKem.keypair()
+      let kp = Authority.must(MlKem.keypair())
       -- kp.public_key: 1184 bytes, kp.secret_key: 2400 bytes
   """
-  fn keypair() : KeyPair do
-    match keypair_from_seed(Crypto.random_bytes(64)) do
-      Ok(kp) -> kp
+  fn keypair() : Result(KeyPair, CapError) do
+    let? seed = Crypto.random_bytes(64)
+    match keypair_from_seed(seed) do
+      Ok(kp) -> Ok(kp)
       Err(e) -> panic(e)
     end
   end
@@ -77,14 +79,16 @@ mod MlKem do
   doc """
   Encapsulate a fresh shared secret against [public_key]:
   Ok((ciphertext, shared_secret)). Send the ciphertext; keep the secret.
+  The outer `Err(CapError(...))` is a refused IO.Random.
 
-      match MlKem.encapsulate(peer_public_key) do
+      match Authority.must(MlKem.encapsulate(peer_public_key)) do
         Ok((ct, secret)) -> ...
         Err(e) -> ...
       end
   """
-  fn encapsulate(public_key : Bytes) : Result((Bytes, Bytes), String) do
-    encapsulate_with_coins(public_key, Crypto.random_bytes(32))
+  fn encapsulate(public_key : Bytes) : Result(Result((Bytes, Bytes), String), CapError) do
+    let? coins = Crypto.random_bytes(32)
+    Ok(encapsulate_with_coins(public_key, coins))
   end
 
   doc """

@@ -228,6 +228,9 @@ let builtin_cap_table : (string * string) list = [
   ("print",                 "IO.Console");
   ("print_line",            "IO.Console");
   ("print_stderr",          "IO.Console");
+  (* stdin reads: uncharged until ocap phase 1 (2026-11-10) *)
+  ("io_read_line",          "IO.Console");
+  ("io_read_byte",          "IO.Console");
   (* IO.FileRead *)
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
@@ -849,6 +852,11 @@ let builtin_bindings : (string * scheme) list =
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
+    (* ocap phase 1: the run-time capability check point and its test hook
+       (runtime/march_extras.c). Stdlib-only; user code calls Authority.check.
+       Not capability operations themselves, so not in builtin_cap_table. *)
+    ("cap_check_raw",   Mono (TArrow (t_string, TArrow (t_string, t_int))));
+    ("cap_launch_text", Mono (TArrow (t_unit,  t_string)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,

@@ -34,7 +34,7 @@ mod ClusterQueueLimitA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "ql-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "ql-secret", 1)
     -- SWIM's suspect timeout is raised to 15 s here: this scenario is about
     -- the queue limit giving up on a peer that stops reading, and under the
     -- sanitizer the default 3 s could declare node-b dead first.

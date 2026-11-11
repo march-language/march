@@ -21,7 +21,7 @@ element is the executable path; the rest are the user's arguments.
 <!-- scroll:skip -->
 ```march
 fn main() do
-  match System.argv() do
+  match Authority.must(System.argv()) do
     [_exe]            -> IO.warn("usage: greet <name>")
     [_exe, name]      -> println("Hello, " ++ name ++ "!")
     _                 -> IO.warn("too many arguments")
@@ -44,11 +44,11 @@ returning an `Int` from `main` does *not* affect the exit status.
 <!-- repl:skip -->
 ```march
 fn main() do
-  match System.argv() do
+  match Authority.must(System.argv()) do
     [_exe, path] -> run(path)
     _ ->
       IO.warn("usage: tool <file>")
-      System.exit(2)   -- 2 = bad usage, by convention
+      Authority.ignore(System.exit(2))   -- 2 = bad usage, by convention
   end
 end
 ```
@@ -87,10 +87,10 @@ mod Repeat do
   end
 
   fn main() do
-    match parse(System.argv()) do
+    match parse(Authority.must(System.argv())) do
       Args(_count, None) ->
         IO.warn("usage: repeat [-v ...] <text>")
-        System.exit(2)
+        Authority.ignore(System.exit(2))
       Args(count, Some(text)) ->
         List.each(List.range(0, count), fn _ -> println(text))
     end
@@ -114,11 +114,11 @@ becomes a clean error instead of a crash:
 <!-- repl:skip -->
 ```march
 fn run(path : String) do
-  match File.read(path) do
+  match Authority.must(File.read(path)) do
     Ok(text) -> println(text)
     Err(_)   ->
       IO.warn("cannot read " ++ path)
-      System.exit(1)
+      Authority.ignore(System.exit(1))
   end
 end
 ```
@@ -139,22 +139,22 @@ mod Cat do
   needs IO.Process
 
   fn dump(path : String) do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Ok(text) -> print(text)
       Err(_) ->
         IO.warn("cat: " ++ path ++ ": cannot read")
-        System.exit(1)
+        Authority.ignore(System.exit(1))
     end
   end
 
   fn main() do
-    match System.argv() do
+    match Authority.must(System.argv()) do
       [_exe] ->
         IO.warn("usage: cat <file> [<file> ...]")
-        System.exit(2)
+        Authority.ignore(System.exit(2))
       _ ->
         -- every argument after the program name is a file
-        List.each(List.drop(System.argv(), 1), fn p -> dump(p))
+        List.each(List.drop(Authority.must(System.argv()), 1), fn p -> dump(p))
     end
   end
 

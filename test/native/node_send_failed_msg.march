@@ -26,7 +26,7 @@ mod NodeSendFailedMsg do
       state
     end
     on SendFailed(seq : Int, reason : String) do
-      println("sender: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason)
+      Authority.ignore(println("sender: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason))
       { state with failed: state.failed + 1 }
     end
   end
@@ -36,7 +36,7 @@ mod NodeSendFailedMsg do
     match tcp_accept(listen_fd) do
       Ok(conn_fd) ->
         let _ = NodeSend.serve_one(conn_fd, 1, fn d ->
-          println("node-b: refused " ++ int_to_string(d.seq))
+          Authority.ignore(println("node-b: refused " ++ int_to_string(d.seq)))
           Err("no live process " ++ int_to_string(d.to_local_pid)))
         tcp_close(conn_fd)
         tcp_close(listen_fd)
@@ -59,7 +59,7 @@ mod NodeSendFailedMsg do
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
@@ -85,14 +85,14 @@ mod NodeSendFailedMsg do
     let _ = send(sender, Go(conn_fd, sender))
     match PeerReader.serve(conn_fd, Nil, on_frame) do
       Ok(_) -> ()
-      Err(e) -> println("node-a: reader error: " ++ e)
+      Err(e) -> Authority.ignore(println("node-a: reader error: " ++ e))
     end
     let _ = task_await(srv)
     tcp_close(conn_fd)
     run_until_idle()
     match get_actor_field(sender, "failed") do
-      Some(n) -> println("done: " ++ int_to_string(n) ++ " failure(s) reached the sender's mailbox")
-      None -> println("done: sender gone")
+      Some(n) -> Authority.ignore(println("done: " ++ int_to_string(n) ++ " failure(s) reached the sender's mailbox"))
+      None -> Authority.ignore(println("done: sender gone"))
     end
   end
 end

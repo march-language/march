@@ -1066,6 +1066,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
   { march_name = "unix_time_ms"; c_name = Some "march_unix_time_ms"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @march_unix_time_ms()" };
+  (* ocap phase 1 capability check point (runtime/march_extras.c). *)
+  { march_name = "cap_check_raw"; c_name = Some "march_cap_check_raw"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_check_raw(ptr %kind, ptr %target)" };
+  { march_name = "cap_launch_text"; c_name = Some "march_cap_launch_text"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_launch_text()" };
   (* peak_rss_bytes: process self-inspection, not capability-gated (see
      typecheck.ml — deliberately absent from the capability table). *)
   { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
@@ -2059,6 +2064,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PComment "; Time builtins";
   PDeclare "march_unix_time";
   PDeclare "march_unix_time_ms";
+  PDeclare "march_cap_check_raw";
+  PDeclare "march_cap_launch_text";
   PDeclare "march_peak_rss_bytes";
   PDeclare "march_live_allocs";
   PDeclare "march_vault_live_tables";

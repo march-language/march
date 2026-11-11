@@ -14,5 +14,6 @@ mod Main do
     println(to_string(None))
     let x : Option(String) = None
     println(x)
+    ()
   end
 end

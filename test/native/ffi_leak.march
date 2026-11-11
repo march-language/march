@@ -27,5 +27,6 @@ mod Test do
     let base = live_allocs()
     churn(2000)
     println(int_to_string(live_allocs() - base))
+    ()
   end
 end

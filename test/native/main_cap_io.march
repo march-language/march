@@ -13,5 +13,6 @@ mod MainCapIo do
   fn main(cap : Cap(IO)) : () do
     let _console : Cap(IO.Console) = cap_narrow(cap)
     println("main ran with cap")
+    ()
   end
 end

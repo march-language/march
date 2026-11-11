@@ -39,7 +39,9 @@ mod NetKernel do
   end
 
   doc "A fresh random nonce for a handshake challenge: 16 random bytes as 32 hex digits (`Crypto.random_hex(16)`)."
-  fn fresh_nonce() : String do Crypto.random_hex(16) end
+  -- Cluster plumbing: the cluster's authority is checked where it starts
+  -- (ClusterNode.start; ocap phase 7), so a refusal here is a broken launch.
+  fn fresh_nonce() : String do Authority.must(Crypto.random_hex(16)) end
 
   -- ── framed socket I/O ──────────────────────────────────────────────────────
 
@@ -315,9 +317,9 @@ mod NetKernel do
 
   type MacKeys = { tx_key : Bytes, rx_key : Bytes }
 
-  pfn mac_table() : Vault(MacKeys) do Vault.open("net_kernel_mac") end
-  pfn mac_counts() : Vault(Int) do Vault.open("net_kernel_mac_counts") end
-  pfn mac_hooks() : Vault(Int -> Int -> Unit) do Vault.open("net_kernel_mac_hooks") end
+  pfn mac_table() : Vault(MacKeys) do Authority.must(Vault.open("net_kernel_mac")) end
+  pfn mac_counts() : Vault(Int) do Authority.must(Vault.open("net_kernel_mac_counts")) end
+  pfn mac_hooks() : Vault(Int -> Int -> Unit) do Authority.must(Vault.open("net_kernel_mac_hooks")) end
   pfn fk(fd : Int) : String do int_to_string(fd) end
 
   doc "Frames that may fail their MAC on one connection before it is closed."
@@ -338,7 +340,7 @@ mod NetKernel do
   -- RemoteCall: anything outside a session) may cross the connection: only
   -- when BOTH certificates carry `raw_send`. A connection with no entry
   -- (shared-secret mode, or never handshaked here) allows them.
-  pfn raw_table() : Vault(Int) do Vault.open("net_kernel_raw") end
+  pfn raw_table() : Vault(Int) do Authority.must(Vault.open("net_kernel_raw")) end
 
   doc """
   May raw frames (anything but session traffic) cross [fd]? False only on a
@@ -362,7 +364,7 @@ mod NetKernel do
   -- handshake that made it (a CERT_UPDATE's proof): the transcript covers
   -- both hellos, nonces and ephemeral keys, so no two connections share one,
   -- and both ends compute the same bytes (`ClusterAuth.transcript`).
-  pfn binding_table() : Vault(Bytes) do Vault.open("net_kernel_binding") end
+  pfn binding_table() : Vault(Bytes) do Authority.must(Vault.open("net_kernel_binding")) end
 
   doc "The handshake transcript of [fd]'s sealed connection (empty when it has none: unsealed, or never handshaked here)."
   fn link_binding(fd : Int) : Bytes do
@@ -523,7 +525,7 @@ mod NetKernel do
 
   pfn handshake_cert(fd : Int, my_id : NodeIdentity.Identity, creds : NodeCert.Credentials, nonce : String,
                      role : String, addr : String, deadline : Int) : Result(Authed, String) do
-    let eph_sk = Crypto.random_bytes(32)
+    let eph_sk = Authority.must(Crypto.random_bytes(32))
     let eph_pub = x25519(eph_sk, x25519_base())
     let hello = Handshake.encode_hello(Handshake.make_hello_cert(my_id, nonce, role, addr,
                                          NodeCert.to_bytes(creds.signed), Bytes.to_list(eph_pub)))

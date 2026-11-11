@@ -20,13 +20,13 @@ mod ClusterJoinB do
   pfn me() : String do "node-b" end
 
   pfn port_of(name : String) : Int do
-    if name == "node-a" do Env.require_int("MARCH_PORT_A")
-    else if name == "node-b" do Env.require_int("MARCH_PORT_B")
-    else Env.require_int("MARCH_PORT_C") end end
+    if name == "node-a" do Authority.must(Env.require_int("MARCH_PORT_A"))
+    else if name == "node-b" do Authority.must(Env.require_int("MARCH_PORT_B"))
+    else Authority.must(Env.require_int("MARCH_PORT_C")) end end
   end
 
   pfn wait_for(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_for(path)
     end
@@ -43,24 +43,24 @@ mod ClusterJoinB do
 
   fn main(c : Cap(IO)) do
     let port = port_of(me())
-    let cfg = ClusterNode.config(me(), port, "", Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil), "join-secret", 1)
+    let cfg = ClusterNode.config(me(), port, "", Cons("127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))), Nil), "join-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        println(me() ++ ": up")
+        Authority.ignore(println(me() ++ ": up"))
         if converged(h, 120000) do
           let infos = List.sort_by(ClusterNode.members(h), fn (a, b) -> a.name < b.name)
           let _ = List.map(infos, fn i ->
             println(me() ++ ": sees " ++ i.name ++ " at its own port: " ++
                     bool_to_string(i.addr == "127.0.0.1:" ++ int_to_string(port_of(i.name)))))
-          println(me() ++ ": linked to both")
+          Authority.ignore(println(me() ++ ": linked to both"))
         else
-          println(me() ++ ": did not converge (" ++ int_to_string(List.length(ClusterNode.members(h))) ++
-                  " members, " ++ int_to_string(ClusterNode.link_count(h)) ++ " links)")
+          Authority.ignore(println(me() ++ ": did not converge (" ++ int_to_string(List.length(ClusterNode.members(h))) ++
+                  " members, " ++ int_to_string(ClusterNode.link_count(h)) ++ " links)"))
         end
-        wait_for(Env.require("CLUSTER_STOP_FILE"))
+        wait_for(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         ClusterNode.stop(h)
-        println(me() ++ ": done")
+        Authority.ignore(println(me() ++ ": done"))
     end
   end
 end

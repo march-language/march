@@ -43,8 +43,8 @@ mod CertAuthz do
                meta : Vault(Int), certs : Vault(NodeCert.Cert) }
 
   pfn new_net(tag : String) : Net do
-    { names: Vault.new("authz_names_" ++ tag), routes: Vault.new("authz_routes_" ++ tag),
-      meta: Vault.new("authz_meta_" ++ tag), certs: Vault.new("authz_certs_" ++ tag) }
+    { names: Authority.must(Vault.new("authz_names_" ++ tag)), routes: Authority.must(Vault.new("authz_routes_" ++ tag)),
+      meta: Authority.must(Vault.new("authz_meta_" ++ tag)), certs: Authority.must(Vault.new("authz_certs_" ++ tag)) }
   end
 
   pfn cert(id : String, roles : List(String)) : NodeCert.Cert do

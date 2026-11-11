@@ -30,7 +30,7 @@ mod NetFrameLargeLoopback do
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
     end
@@ -51,9 +51,9 @@ mod NetFrameLargeLoopback do
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
     match NetKernel.recv_frame(fd, Nil) do
-      Err(e) -> println("recv error: " ++ e)
+      Err(e) -> Authority.ignore(println("recv error: " ++ e))
       Ok((frame, rest)) ->
-        println("frame length: " ++ int_to_string(List.length(frame)))
+        Authority.ignore(println("frame length: " ++ int_to_string(List.length(frame))))
         let first = match List.head_opt(frame) do
           Some(b) -> b
           None -> -1
@@ -64,8 +64,8 @@ mod NetFrameLargeLoopback do
         end
         println("first byte: " ++ int_to_string(first) ++ ", last byte: " ++ int_to_string(last))
         match NetKernel.recv_frame(fd, rest) do
-          Err(e) -> println("second recv error: " ++ e)
-          Ok((frame2, _)) -> println("second frame: " ++ to_string(frame2))
+          Err(e) -> Authority.ignore(println("second recv error: " ++ e))
+          Ok((frame2, _)) -> Authority.ignore(println("second frame: " ++ to_string(frame2)))
         end
     end
     let _ = task_await(srv)

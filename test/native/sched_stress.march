@@ -41,5 +41,6 @@ mod SchedStress do
             ++ int_to_string(batch_size) ++ "...")
     spawn_batches(0, n_batches, batch_size)
     println("All batches dispatched — scheduler draining " ++ int_to_string(total) ++ " tasks")
+    ()
   end
 end

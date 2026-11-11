@@ -914,7 +914,8 @@ mod Plot do
   doc """
   Render `p` to SVG and write it to `path`, replacing any existing file.
   Fails with the `File.FileError` the write reported (`NotFound`,
-  `Permission`, `IsDirectory`, `IoError`, ...).
+  `Permission`, `IsDirectory`, `IoError`, ...) inside `Ok`, or with
+  `Err(CapError(...))` when writing the file (IO.FileWrite) is refused.
 
   ## Examples
 
@@ -923,11 +924,8 @@ mod Plot do
         |> Plot.set_title("Squares")
         |> Plot.save("squares.svg")
   """
-  fn save(p : Plot, path : String) : Result(Unit, File.FileError) do
-    match File.write(path, to_svg(p)) do
-    Ok(_) -> Ok(())
-    Err(e) -> Err(e)
-    end
+  fn save(p : Plot, path : String) : Result(Result(Unit, File.FileError), CapError) do
+    File.write(path, to_svg(p))
   end
 
   -- ---- Quick helpers ----

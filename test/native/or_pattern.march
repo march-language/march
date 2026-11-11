@@ -78,5 +78,6 @@ fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(unwrap(Left(4))))
   println(int_to_string(unwrap(Right(6))))
   println(int_to_string(unwrap(Neither)))
+  ()
 end
 end

@@ -36,13 +36,13 @@ mod QualifiedTypeNameRender do
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.FileRead)) : Unit do
     match file_read("/definitely/missing/path.txt") do
-    Ok(_)  -> println("file=ok")
-    Err(e) -> println("file_err=" ++ to_string(e))
+    Ok(_)  -> Authority.ignore(println("file=ok"))
+    Err(e) -> Authority.ignore(println("file_err=" ++ to_string(e)))
     end
 
     match dir_list("/definitely/missing/dir") do
-    Ok(_)  -> println("dir=ok")
-    Err(e) -> println("dir_err=" ++ to_string(e))
+    Ok(_)  -> Authority.ignore(println("dir=ok"))
+    Err(e) -> Authority.ignore(println("dir_err=" ++ to_string(e)))
     end
 
     -- The SAME error reaching a renderer through an ERASED slot: no static
@@ -50,13 +50,13 @@ mod QualifiedTypeNameRender do
     -- Result wrapper is stamped by the C runtime's mk_ok/mk_err and the
     -- FileError payload by mk_file_error, so both name themselves.
     let cb = Bx(Cons(fn x -> to_string(x), Nil))
-    println("erased=" ++ apply_first(cb, file_read("/definitely/missing/erased")))
+    Authority.ignore(println("erased=" ++ apply_first(cb, file_read("/definitely/missing/erased"))))
 
     -- Ambiguous short name: must never print the OTHER module's constructor.
     let a = A.ADup(1)
     let b = B.BDup("s")
-    println("dup_a_not_wrong=" ++ bool_to_string(not(string_contains(to_string(a), "BDup"))))
-    println("dup_b_not_wrong=" ++ bool_to_string(not(string_contains(to_string(b), "ADup"))))
+    Authority.ignore(println("dup_a_not_wrong=" ++ bool_to_string(not(string_contains(to_string(a), "BDup")))))
+    Authority.ignore(println("dup_b_not_wrong=" ++ bool_to_string(not(string_contains(to_string(b), "ADup")))))
   end
 
   type Box = Bx(List(b))

@@ -52,5 +52,6 @@ mod ClosureBoolField do
     println("literal=" ++ int_to_string(run(Bx(Cons(fn r -> true, Nil)), rows())))
     -- negated stored field: 1 inactive row
     println("negated=" ++ int_to_string(run(Bx(Cons(fn r -> r.active == false, Nil)), rows())))
+    ()
   end
 end

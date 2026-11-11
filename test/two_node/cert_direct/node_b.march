@@ -45,7 +45,7 @@ mod CertDirectB do
   end
 
   fn main(c : Cap(IO)) do
-    let pki = Env.require("PKI")
+    let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
     Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")

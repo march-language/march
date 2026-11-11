@@ -30,12 +30,12 @@ mod MonitorReconnectA do
   end
 
   pfn sleep_100ms() do
-    let _ = Process.run("sleep", Cons("0.1", Nil))
+    let _ = Authority.must(Process.run("sleep", Cons("0.1", Nil)))
     ()
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do
@@ -76,11 +76,12 @@ mod MonitorReconnectA do
         Ok((target_pid, reason)) ->
           let copies = Vault.incr(seen, "t" ++ int_to_string(target_pid), 1)
           if copies == 1 do
-            println("node-a: Down for Pid(" ++ int_to_string(target_pid) ++ ") reason=" ++ reason_text(reason) ++ " after reconnect")
+            Authority.ignore(println("node-a: Down for Pid(" ++ int_to_string(target_pid) ++ ") reason=" ++ reason_text(reason) ++ " after reconnect"))
             let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
             ()
           else
-            println("node-a: duplicate fire deduped")
+            Authority.ignore(println("node-a: duplicate fire deduped"))
+            ()
           end
           let _ = NetKernel.send_frame(fd, DistLink.encode_ack(target_pid, pid_to_int(watcher)))
           Ok(false)
@@ -92,8 +93,8 @@ mod MonitorReconnectA do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) do
-    let port = Env.require_int("MARCH_PEER_PORT")
-    let seen = Vault.new("monitor_reconnect_seen")
+    let port = Authority.must(Env.require_int("MARCH_PEER_PORT"))
+    let seen = Authority.must(Vault.new("monitor_reconnect_seen"))
     let watcher = spawn(Watcher)
     let fd1 = dial(port)
     let target = read_hello(fd1)
@@ -106,13 +107,13 @@ mod MonitorReconnectA do
     let fd2 = dial(port)
     match PeerReader.serve(fd2, Nil, fn (tag, frame) -> on_fire(fd2, watcher, seen, tag, frame)) do
       Ok(_) -> ()
-      Err(e) -> println("node-a: reader error: " ++ e)
+      Err(e) -> Authority.ignore(println("node-a: reader error: " ++ e))
     end
     tcp_close(fd2)
     run_until_idle()
     match get_actor_field(watcher, "downs") do
-      Some(n) -> println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)")
-      None -> println("node-a: watcher gone")
+      Some(n) -> Authority.ignore(println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)"))
+      None -> Authority.ignore(println("node-a: watcher gone"))
     end
   end
 end

@@ -121,5 +121,6 @@ mod Main do
     let r = churn(300, 0)
     let grew = live_allocs() - before
     println("loop: " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 50))
+    ()
   end
 end

@@ -8,15 +8,19 @@
 -- when done, ideally via Socket.with_connection which ensures cleanup.
 --
 -- Public API:
---   Socket.connect(host, port)             : Result(Int, SocketError)
---   Socket.connect_timeout(host, port, ms) : Result(Int, SocketError)
+--   Socket.connect(host, port)             : Result(Result(Int, SocketError), CapError)
+--   Socket.connect_timeout(host, port, ms) : Result(Result(Int, SocketError), CapError)
 --   Socket.write(fd, data)                 : Result((), SocketError)
 --   Socket.recv(fd, max_bytes)             : Result(String, SocketError)
 --   Socket.recv_timeout(fd, max, ms)       : Result(String, SocketError)
 --   Socket.set_recv_timeout(fd, ms)        : Result((), SocketError)
 --   Socket.recv_deadline(fd, max, ms)      : Result(Option(String), SocketError)
 --   Socket.close(fd)                       : ()
---   Socket.with_connection(host, port, f)  : Result(a, SocketError)
+--   Socket.with_connection(host, port, f)  : Result(Result(a, SocketError), CapError)
+--
+-- Connecting is a capability operation (IO.NetConnect on host:port): the
+-- outer Err(CapError(...)) is a refused connection attempt, which opens no
+-- socket. Using an open fd needs no authority.
 --   Socket.error_message(e)                : String
 
 mod Socket do
@@ -58,10 +62,11 @@ mod Socket do
         Err(e) -> println(Socket.error_message(e))
       end
   """
-  fn connect(host : String, port : Int) : Result(Int, SocketError) do
+  fn connect(host : String, port : Int) : Result(Result(Int, SocketError), CapError) do
+    let? _ = Authority.check("IO.NetConnect", host ++ ":" ++ int_to_string(port))
     match tcp_connect(host, port) do
-    Ok(fd)   -> Ok(fd)
-    Err(msg) -> Err(ConnectionFailed(msg))
+    Ok(fd)   -> Ok(Ok(fd))
+    Err(msg) -> Ok(Err(ConnectionFailed(msg)))
     end
   end
 
@@ -76,10 +81,11 @@ mod Socket do
 
       Socket.connect_timeout("10.0.0.5", 8080, 2000)
   """
-  fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Int, SocketError) do
+  fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Result(Int, SocketError), CapError) do
+    let? _ = Authority.check("IO.NetConnect", host ++ ":" ++ int_to_string(port))
     match tcp_connect_timeout(host, port, timeout_ms) do
-    Ok(fd)   -> Ok(fd)
-    Err(msg) -> Err(ConnectionFailed(msg))
+    Ok(fd)   -> Ok(Ok(fd))
+    Err(msg) -> Ok(Err(ConnectionFailed(msg)))
     end
   end
 
@@ -236,12 +242,13 @@ mod Socket do
         Socket.recv(fd, 4096))
   """
   fn with_connection(host : String, port : Int, f) do
-    match connect(host, port) do
-    Err(e) -> Err(e)
+    let? c = connect(host, port)
+    match c do
+    Err(e) -> Ok(Err(e))
     Ok(fd) ->
       let result = f(fd)
       close(fd)
-      result
+      Ok(result)
     end
   end
 

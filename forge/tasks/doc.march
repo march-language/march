@@ -345,7 +345,7 @@ end
 
 -- Parse a .march file into a ModuleInfo (or None if unparseable).
 pfn parse_file(path, include_private) do
-  match File.read(path) do
+  match Authority.must(File.read(path)) do
   Err(_) -> None
   Ok(src) ->
     do
@@ -365,12 +365,12 @@ end
 -- ── File discovery ────────────────────────────────────────────────────────────
 
 pfn walk_march_files(dir) do
-  match Dir.list(dir) do
+  match Authority.must(Dir.list(dir)) do
   Err(_) -> Nil
   Ok(names) ->
     List.flat_map(names, fn name ->
       let path = dir ++ "/" ++ name
-      if Dir.exists(path) do walk_march_files(path)
+      if Authority.must(Dir.exists(path)) do walk_march_files(path)
       else
         if String.ends_with(name, ".march") do Cons(path, Nil)
         else Nil end
@@ -619,19 +619,19 @@ end
 -- ── Main ──────────────────────────────────────────────────────────────────────
 
 fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_process : Cap(IO.Process)) do
-  let output_dir = match System.env("FORGE_DOC_OUTPUT") do
+  let output_dir = match Authority.must(System.env("FORGE_DOC_OUTPUT")) do
     None -> "doc"
     Some(d) -> d
   end
-  let include_private = match System.env("FORGE_DOC_PRIVATE") do
+  let include_private = match Authority.must(System.env("FORGE_DOC_PRIVATE")) do
     Some("true") -> true
     _ -> false
   end
-  let stdlib_dirs = match System.env("FORGE_DOC_STDLIB") do
+  let stdlib_dirs = match Authority.must(System.env("FORGE_DOC_STDLIB")) do
     None -> Nil
     Some(p) -> Cons(p, Nil)
   end
-  let extra_dirs = match System.env("FORGE_DOC_SRC") do
+  let extra_dirs = match Authority.must(System.env("FORGE_DOC_SRC")) do
     None -> Nil
     Some(s) ->
       List.filter(String.split(s, ":"), fn p -> !(String.is_empty(p)))
@@ -639,7 +639,7 @@ fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_f
   let all_dirs = List.append(stdlib_dirs, extra_dirs)
   if List.is_empty(all_dirs) do
     IO.warn("forge doc: no source directories found (set FORGE_DOC_STDLIB)")
-    System.exit(1)
+    Authority.ignore(System.exit(1))
   else () end
   let all_files = List.sort_by(List.flat_map(all_dirs, walk_march_files), fn (a, b) -> a < b)
   IO.warn("forge doc: parsing " ++ String.from_int(List.length(all_files)) ++ " source files...")
@@ -648,10 +648,10 @@ fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_f
     fn (a, b) -> info_name(a) < info_name(b)
   )
   IO.warn("forge doc: generating " ++ String.from_int(List.length(modules)) ++ " module pages...")
-  match Dir.mkdir_p(output_dir) do
+  match Authority.must(Dir.mkdir_p(output_dir)) do
     Err(_) ->
       IO.warn("forge doc: cannot create " ++ output_dir)
-      System.exit(1)
+      Authority.ignore(System.exit(1))
     Ok(_) -> ()
   end
   let module_names = List.map(modules, info_name)
@@ -659,14 +659,14 @@ fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_f
   List.each(modules, fn info ->
     let name = info_name(info)
     let html = render_module(info, sidebar)
-    match File.write(output_dir ++ "/" ++ name ++ ".html", html) do
-      Err(_) -> IO.warn("forge doc: failed to write " ++ name ++ ".html")
+    match Authority.must(File.write(output_dir ++ "/" ++ name ++ ".html", html)) do
+      Err(_) -> Authority.ignore(IO.warn("forge doc: failed to write " ++ name ++ ".html"))
       Ok(_) -> ()
     end
   )
   let idx = render_index(modules, sidebar)
-  match File.write(output_dir ++ "/index.html", idx) do
-    Err(_) -> IO.warn("forge doc: failed to write index.html")
+  match Authority.must(File.write(output_dir ++ "/index.html", idx)) do
+    Err(_) -> Authority.ignore(IO.warn("forge doc: failed to write index.html"))
     Ok(_) -> ()
   end
   IO.puts("forge doc: generated " ++ String.from_int(List.length(modules)) ++

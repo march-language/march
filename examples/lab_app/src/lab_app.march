@@ -57,8 +57,8 @@ mod LabApp do
 
     pfn probe_loop(home : String) : Int do
       let line = "live " ++ int_to_string(live_allocs()) ++ "\nat " ++ int_to_string(unix_time_ms()) ++ "\n"
-      let _ = File.write(home ++ "/lab-probe.tmp", line)
-      let _ = File.rename(home ++ "/lab-probe.tmp", home ++ "/lab-probe")
+      let _ = Authority.must(File.write(home ++ "/lab-probe.tmp", line))
+      let _ = Authority.must(File.rename(home ++ "/lab-probe.tmp", home ++ "/lab-probe"))
       sleep_ms(5000)
       probe_loop(home)
     end
@@ -76,14 +76,14 @@ mod LabApp do
     type Env = { node : String }
 
     fn start(_node : Cap(ClusterNode.Live)) : Env do
-      Probe.start(Env.get("HOME", "/tmp"))
-      { node: Env.get("MARCH_NODE_NAME", "work") }
+      Probe.start(Authority.must(Env.get("HOME", "/tmp")))
+      { node: Authority.must(Env.get("MARCH_NODE_NAME", "work")) }
     end
 
     pfn tally() : Vault(Int) do
-      match Vault.whereis("lab_stock") do
+      match Authority.must(Vault.whereis("lab_stock")) do
         Some(t) -> t
-        None -> Vault.new("lab_stock")
+        None -> Authority.must(Vault.new("lab_stock"))
       end
     end
 
@@ -116,7 +116,7 @@ mod LabApp do
       state { total : Int, node : String, sessions : LinearMap(String, Order_Ledger.Parked_Ledger) }
       init(env : Env) { total: 0, node: env.node, sessions: LinearMap.empty_string() }
       on Start(sid : String, s : Cap(Session.Live), _con : Cap(IO.Console)) do
-        if state.total == 0 do println("ledger: first session on " ++ state.node) else () end
+        if state.total == 0 do Authority.ignore(println("ledger: first session on " ++ state.node)) else () end
         let parked = Order_Ledger.await_have_out(s, Order_Ledger.register(s, 0))
         match LinearMap.put(state.sessions, sid, parked) do
           (None, m) -> { state with sessions: m }
@@ -148,7 +148,7 @@ mod LabApp do
         match LinearMap.take(state.sessions, sid) do
           (None, m) -> { state with sessions: m }
           (Some(parked), m) ->
-            println("ledger: session " ++ sid ++ " cancelled: " ++ cause)
+            Authority.ignore(println("ledger: session " ++ sid ++ " cancelled: " ++ cause))
             Order_Ledger.take_closed(Order_Ledger.cancel(s, parked))
             { state with sessions: m }
         end
@@ -175,7 +175,7 @@ mod LabApp do
     -- deploy runs the new code (a task inherits its spawner's epoch, and the
     -- actor moves to the new epoch at its next message).
     fn start(node : Cap(ClusterNode.Live)) : Env do
-      let home = Env.get("HOME", "/tmp")
+      let home = Authority.must(Env.get("HOME", "/tmp"))
       let stats = home ++ "/lab-stats"
       Probe.start(home)
       let d = start_driver()
@@ -185,16 +185,16 @@ mod LabApp do
     end
 
     pfn tally() : Vault(Int) do
-      match Vault.whereis("lab_ingress") do
+      match Authority.must(Vault.whereis("lab_ingress")) do
         Some(t) -> t
-        None -> Vault.new("lab_ingress")
+        None -> Authority.must(Vault.new("lab_ingress"))
       end
     end
 
     pfn last() : Vault(String) do
-      match Vault.whereis("lab_ingress_last") do
+      match Authority.must(Vault.whereis("lab_ingress_last")) do
         Some(t) -> t
-        None -> Vault.new("lab_ingress_last")
+        None -> Authority.must(Vault.new("lab_ingress_last"))
       end
     end
 
@@ -290,7 +290,7 @@ mod LabApp do
     -- one a second, at most 4 at once. A session not started because 4 are
     -- still running is counted as `skipped`.
     pfn traffic(path : String) : (Int, Int) do
-      match File.read(path) do
+      match Authority.must(File.read(path)) do
         Ok(text) ->
           match String.split(String.trim(text), " ") do
             Cons(e, Cons(k, _)) -> (int_or(e, 1000), int_or(k, 4))
@@ -334,8 +334,8 @@ mod LabApp do
       let lines = List.map(List.sort_by(Vault.keys(t), fn (a, b) -> a < b), fn k -> k ++ " " ++ int_to_string(Vault.get_or(t, k, 0)))
       let reasons = List.map(List.sort_by(Vault.keys(l), fn (a, b) -> a < b), fn k -> "last_" ++ k ++ " " ++ Vault.get_or(l, k, ""))
       let body = "at " ++ int_to_string(unix_time_ms()) ++ "\n" ++ String.join(List.append(lines, reasons), "\n") ++ "\n"
-      let _ = File.write(path ++ ".tmp", body)
-      let _ = File.rename(path ++ ".tmp", path)
+      let _ = Authority.must(File.write(path ++ ".tmp", body))
+      let _ = Authority.must(File.rename(path ++ ".tmp", path))
       sleep_ms(1000)
       report(path)
     end

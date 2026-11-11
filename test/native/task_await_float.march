@@ -43,21 +43,21 @@ mod TaskAwaitFloat do
   fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     -- Task.await on Float: pre-fix this SIGSEGVed (after defect 2 was fixed)
     -- or failed to compile at all (before it).  1.5 * 100 = 150.
-    let t = Task.async(fn () -> 1.5)
+    let t = Authority.must(Task.async(fn () -> 1.5))
     match Task.await(t) do
-      Ok(v)  -> println("await=" ++ scaled(v))
-      Err(e) -> println("await_err=" ++ e)
+      Ok(v)  -> Authority.ignore(println("await=" ++ scaled(v)))
+      Err(e) -> Authority.ignore(println("await_err=" ++ e))
     end
 
     -- Task.await_unwrap goes through task_await_unwrap, whose "double" arm
     -- DOES unbox (it yields the scalar as its value, not as an ADT field) --
     -- the opposite of task_await's.  Pin that the two stay distinguished.
-    println("await_unwrap=" ++ scaled(Task.await_unwrap(Task.async(fn () -> 2.25))))
+    println("await_unwrap=" ++ scaled(Task.await_unwrap(Authority.must(Task.async(fn () -> 2.25)))))
 
     -- Task.await_many: in-order fold over [0.5, 0.25, 1.0] -> 1.75 -> 175.
-    let ts = [Task.async(fn () -> 0.5),
-              Task.async(fn () -> 0.25),
-              Task.async(fn () -> 1.0)]
+    let ts = [Authority.must(Task.async(fn () -> 0.5)),
+              Authority.must(Task.async(fn () -> 0.25)),
+              Authority.must(Task.async(fn () -> 1.0))]
     let many_sum = List.fold_left(Task.await_many(ts), 0.0, fn (acc, r) ->
       match r do
         Ok(v)  -> acc +. v
@@ -67,7 +67,7 @@ mod TaskAwaitFloat do
     println("await_many_sum=" ++ scaled(many_sum))
 
     -- Task.async_stream: halves of 1..4 -> 0.5+1.0+1.5+2.0 = 5.0 -> 500.
-    let halves = Task.async_stream([1, 2, 3, 4], fn n -> int_to_float(n) *. 0.5)
+    let halves = Authority.must(Task.async_stream([1, 2, 3, 4], fn n -> int_to_float(n) *. 0.5))
     let stream_sum = List.fold_left(halves, 0.0, fn (acc, r) ->
       match r do
         Ok(v)  -> acc +. v
@@ -75,6 +75,7 @@ mod TaskAwaitFloat do
       end
     )
     println("stream_sum=" ++ scaled(stream_sum))
+    ()
   end
 
 end

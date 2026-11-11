@@ -50,7 +50,7 @@ let parse_src src =
     excluded, matching the native compile path.  A file that fails to open is
     skipped gracefully (see [load_stdlib_file]). *)
 let stdlib_file_list = [
-  "prelude.march"; "option.march"; "result.march"; "list.march"; "hamt.march";
+  "prelude.march"; "authority.march"; "option.march"; "result.march"; "list.march"; "hamt.march";
   "map.march"; "math.march"; "string.march"; "iolist.march"; "html.march";
   "sigil.march"; "http.march"; "http_transport.march"; "http_client.march";
   "seq.march"; "path.march"; "file.march"; "dir.march"; "sort.march";

@@ -47,8 +47,8 @@ mod MarkerFileApp do
   needs IO.FileRead
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match file_read("/etc/hosts") do
-      Ok(_) -> println("ok")
-      Err(_) -> println("err")
+      Ok(_) -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("err"))
     end
   end
 end
@@ -60,6 +60,7 @@ mod MarkerPureApp do
   needs IO.Console
   fn main(_cap_console : Cap(IO.Console)) : () do
     println("hi")
+    ()
   end
 end
 |}
@@ -98,8 +99,8 @@ mod MarkerDirectPassApp do
 
   fn main(_cap_console : Cap(IO.Console)) : () do
     match apply1(file_read, "/etc/hosts") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("err")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("err"))
     end
   end
 end
@@ -143,6 +144,7 @@ mod AttribApp do
   end
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.slurp("/etc/hosts"))
+    ()
   end
 end
 |}
@@ -169,7 +171,7 @@ mod WrapApp do
   mod Dep do
     needs IO.FileRead
     fn slurp(p : String) : String do
-      match File.read(p) do
+      match Authority.must(File.read(p)) do
         Ok(s)  -> s
         Err(_) -> ""
       end
@@ -177,6 +179,7 @@ mod WrapApp do
   end
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.slurp("/etc/hosts"))
+    ()
   end
 end
 |}
@@ -211,6 +214,7 @@ mod PartialApp do
   end
   fn main(_cap_console : Cap(IO.Console)) : () do
     println(int_to_string(Dep.add(2, 3)))
+    ()
   end
 end
 |}
@@ -291,6 +295,7 @@ mod UserDnsResolveApp do
   end
   fn main(_cap_console : Cap(IO.Console)) : () do
     println(int_to_string(dns_resolve(41)))
+    ()
   end
 end
 |}
@@ -302,8 +307,8 @@ mod RealDnsResolveApp do
   needs IO.Network
   fn main(_cap_console : Cap(IO.Console), _cap_net : Cap(IO.Network)) : () do
     match dns_resolve("localhost") do
-      Ok(_) -> println("ok")
-      Err(_) -> println("err")
+      Ok(_) -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("err"))
     end
   end
 end
@@ -344,6 +349,7 @@ mod ClockMarkerApp do
   needs IO.Clock
   fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
     println(%s)
+    ()
   end
 end
 |}

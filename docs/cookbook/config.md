@@ -33,7 +33,7 @@ mod AppConfig do
   end
 
   fn load(path : String) : Result(Settings, String) do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Err(_)   -> Err("cannot read " ++ path)
       Ok(text) ->
         match Toml.parse(text) do
@@ -45,7 +45,7 @@ mod AppConfig do
                 None    -> "localhost"
               end
             -- Env var wins over the file; the file value is the fallback.
-            let port = Env.get_int("PORT", default_port(tv))
+            let port = Authority.must(Env.get_int("PORT", default_port(tv)))
             Ok(Settings(host, port))
         end
     end

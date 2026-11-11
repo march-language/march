@@ -46,6 +46,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let doubled = map_strings(pieces)
   let result  = string_join(doubled, ",")
   println(int_to_string(string_byte_length(result)))
+  ()
 end
 
 end

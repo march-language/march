@@ -10,7 +10,7 @@ mod Main do
     cap pure
     needs IO.FileRead
     fn read() : Int do
-      match File.read("pure_violation_4.march") do
+      match Authority.must(File.read("pure_violation_4.march")) do
         Ok(s) -> string_byte_length(s)
         Err(_) -> 0
       end
@@ -19,5 +19,6 @@ mod Main do
 
   fn main(_c : Cap(IO)) : () do
     println(int_to_string(Pure.read()))
+    ()
   end
 end

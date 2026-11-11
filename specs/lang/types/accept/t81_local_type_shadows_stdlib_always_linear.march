@@ -20,5 +20,6 @@ mod Main do
 
   fn main(_cap_console : Cap(IO.Console)) : () do
     println(int_to_string(drop_it(Handle(7))))
+    ()
   end
 end

@@ -40,6 +40,7 @@ mod Main do
     let a0 = live_allocs()
     let r = times(100, f, 0)
     println(name ++ " = " ++ int_to_string(r) ++ ", no growth: " ++ bool_to_string(live_allocs() - a0 < 5))
+    ()
   end
 
   fn main(_c : Cap(IO.Console)) do

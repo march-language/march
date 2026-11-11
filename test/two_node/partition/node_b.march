@@ -135,11 +135,11 @@ mod TwoNodePartitionB do
   pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool, reply_due : Bool) : () do
     let t = tick(fd, s, buf, reg)
     if t.closed do
-      println(me() ++ ": peer closed")
+      Authority.ignore(println(me() ++ ": peer closed"))
     else
       let st = peer_status(t.s)
       if phase == 0 && t.acked do
-        println(me() ++ ": first ack from " ++ peer())
+        Authority.ignore(println(me() ++ ": first ack from " ++ peer()))
         run(fd, t.s, t.buf, t.reg, clock, 1, false, false, false)
       else
         if phase == 1 && st == "Dead" do
@@ -150,7 +150,7 @@ mod TwoNodePartitionB do
         else
           if phase == 2 do
             let alive2 = if alive == false && st == "Alive" do
-              println(me() ++ ": " ++ peer() ++ " Alive again")
+              Authority.ignore(println(me() ++ ": " ++ peer() ++ " Alive again"))
               on_healed(fd, t.reg)
               -- A reply that was held back until now (see on_merged) goes out
               -- here: node-a ends the session when it gets it, so node-b's
@@ -159,7 +159,7 @@ mod TwoNodePartitionB do
               true
             else alive end
             if merged == false && t.synced do
-              println(me() ++ ": leader after merge -> " ++ leader_text(t.reg))
+              Authority.ignore(println(me() ++ ": leader after merge -> " ++ leader_text(t.reg)))
               match on_merged(fd, t.reg, alive2) do
                 (true, _) -> ()
                 (false, due) -> run(fd, t.s, t.buf, t.reg, clock, 2, alive2, true, due)
@@ -194,7 +194,7 @@ mod TwoNodePartitionB do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
-    let port = Env.require_int("MARCH_NODE_PORT")
+    let port = Authority.must(Env.require_int("MARCH_NODE_PORT"))
     let listen_fd = match tcp_listen(port) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)

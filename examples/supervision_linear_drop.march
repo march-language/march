@@ -27,7 +27,7 @@ mod LinearDropDemo do
     fn drop(conn) do
       match conn do
       DbConnection(id) ->
-        println("[Drop] Closing database connection " ++ to_string(id))
+        Authority.ignore(println("[Drop] Closing database connection " ++ to_string(id)))
       end
     end
   end
@@ -38,7 +38,7 @@ mod LinearDropDemo do
     fn drop(h) do
       match h do
       FileHandle(path) ->
-        println("[Drop] Closing file: " ++ path)
+        Authority.ignore(println("[Drop] Closing file: " ++ path))
       end
     end
   end
@@ -49,13 +49,13 @@ mod LinearDropDemo do
     init { id: 0 }
     on SetId(n : Int) do { id: n } end
     on Work() do
-      println("[Worker] doing work, id: " ++ to_string(state.id))
+      Authority.ignore(println("[Worker] doing work, id: " ++ to_string(state.id)))
       state
     end
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
-    println("=== Linear Drop Handlers Demo (Phase 6b) ===")
+    Authority.ignore(println("=== Linear Drop Handlers Demo (Phase 6b) ==="))
 
     let pid = spawn(Worker)
     send(pid, SetId(1))

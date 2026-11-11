@@ -23,5 +23,6 @@ mod Own do
     let t = Node(Leaf(1), Node(Leaf(2), Leaf(3)))
     let t2 = inc_leaves(t)
     println(int_to_string(sum_leaves(t2) - sum_leaves(t)))
+    ()
   end
 end

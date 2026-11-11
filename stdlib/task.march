@@ -7,7 +7,7 @@
 --
 -- Basic usage:
 --
---     march> let t = Task.async(fn () -> 21 * 2)
+--     march> let t = Authority.must(Task.async(fn () -> 21 * 2))
 --     march> Task.await(t)  -- Ok(value) or Err(reason)
 --     Ok(42)
 --
@@ -33,21 +33,23 @@ mod Task do
   doc """
   Spawn f as a lightweight async task.
   f must be a zero-argument function: fn () -> result.
-  Returns a Task handle that can be passed to Task.await.
+  Returns a Task handle that can be passed to Task.await, or
+  `Err(CapError(...))` when spawning (IO.Spawn) is refused.
 
-      march> let t = Task.async(fn () -> 1 + 1)
+      march> let t = Authority.must(Task.async(fn () -> 1 + 1))
       march> Task.await(t)
       Ok(2)
   """
   fn async(f) do
-    task_spawn(fn _ -> f())
+    let? _ = Authority.check("IO.Spawn", "")
+    Ok(task_spawn(fn _ -> f()))
   end
 
   doc """
   Await the result of a task with a default 5-second timeout.
   Returns Ok(result) or Err(reason).
 
-      march> let t = Task.async(fn () -> 42)
+      march> let t = Authority.must(Task.async(fn () -> 42))
       march> Task.await(t)
       Ok(42)
   """
@@ -66,7 +68,7 @@ mod Task do
 
   ## Examples
 
-      march> Task.await_ms(Task.async(fn () -> 5 * 5), 1000)
+      march> Task.await_ms(Authority.must(Task.async(fn () -> 5 * 5)), 1000)
       Ok(25)
   """
   fn await_ms(task, _timeout_ms) do
@@ -78,7 +80,7 @@ mod Task do
   Returns the result value directly (not wrapped in Ok).
   Panics if the task failed.
 
-      march> let t = Task.async(fn () -> 42)
+      march> let t = Authority.must(Task.async(fn () -> 42))
       march> Task.await_unwrap(t)
       42
   """
@@ -91,8 +93,8 @@ mod Task do
   Each element is Ok(v) or Err(reason).
   Uses a default 5-second timeout per task.
 
-      march> let t1 = Task.async(fn () -> 1)
-      march> let t2 = Task.async(fn () -> 2)
+      march> let t1 = Authority.must(Task.async(fn () -> 1))
+      march> let t2 = Authority.must(Task.async(fn () -> 2))
       march> Task.await_many([t1, t2])
       [Ok(1), Ok(2)]
   """
@@ -108,7 +110,7 @@ mod Task do
 
   ## Examples
 
-      march> Task.await_many_ms([Task.async(fn () -> 1), Task.async(fn () -> 2)], 1000)
+      march> Task.await_many_ms([Authority.must(Task.async(fn () -> 1)), Authority.must(Task.async(fn () -> 2))], 1000)
       [Ok(1), Ok(2)]
       march> Task.await_many_ms([], 1000)
       []
@@ -122,11 +124,12 @@ mod Task do
   Equivalent to a parallel Enum.map.  Each result is Ok(v) or Err(reason).
 
       march> Task.async_stream([1, 2, 3], fn n -> n * n)
-      [Ok(1), Ok(4), Ok(9)]
+      Ok([Ok(1), Ok(4), Ok(9)])
   """
   fn async_stream(list, f) do
+    let? _ = Authority.check("IO.Spawn", "")
     let tasks = List.map(list, fn x -> task_spawn(fn _ -> f(x)))
-    List.map(tasks, fn t -> task_await(t))
+    Ok(List.map(tasks, fn t -> task_await(t)))
   end
 
   doc """
@@ -135,13 +138,14 @@ mod Task do
   Returns results in original order; each element is Ok(v) or Err(reason).
 
       march> Task.async_stream_n([1, 2, 3], fn n -> n + 1, 2)
-      [Ok(2), Ok(3), Ok(4)]
+      Ok([Ok(2), Ok(3), Ok(4)])
   """
   fn async_stream_n(list, f, _max_concurrency) do
     -- Phase 1: single-threaded interpreter runs all tasks eagerly, so
     -- max_concurrency is advisory here.  Phase 2+ will enforce batching.
+    let? _ = Authority.check("IO.Spawn", "")
     let tasks = List.map(list, fn x -> task_spawn(fn _ -> f(x)))
-    List.map(tasks, fn t -> task_await(t))
+    Ok(List.map(tasks, fn t -> task_await(t)))
   end
 
   -- ── Structured concurrency ──────────────────────────────────────────────
@@ -220,7 +224,7 @@ mod Task do
   Unlike await_many, all_settled does not short-circuit on error.  Every
   element of the returned list is Ok(v) or Err(reason).
 
-      march> let tasks = List.map([1, 2, 3], fn x -> Task.async(fn () -> x * 10))
+      march> let tasks = List.map([1, 2, 3], fn x -> Authority.must(Task.async(fn () -> x * 10)))
       march> Task.all_settled(tasks)
       [Ok(10), Ok(20), Ok(30)]
   """
@@ -248,7 +252,7 @@ mod Task do
         [Task.await_unwrap(t1), Task.await_unwrap(t2)]
       )
 
-      march> Task.scope(fn () -> Task.await_unwrap(Task.async(fn () -> 6 * 7)))
+      march> Task.scope(fn () -> Task.await_unwrap(Authority.must(Task.async(fn () -> 6 * 7))))
       42
   """
   fn scope(f) do

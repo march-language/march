@@ -46,9 +46,9 @@ mod Node do
   -- One sequence space per node process; the seq is returned to the caller
   -- so a later DELIVERY_FAILED (which echoes it) can be matched.
   pfn seqs() do
-    match Vault.whereis("node_send_seq") do
+    match Authority.must(Vault.whereis("node_send_seq")) do
       Some(t) -> t
-      None -> Vault.new("node_send_seq")
+      None -> Authority.must(Vault.new("node_send_seq"))
     end
   end
 

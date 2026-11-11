@@ -9,7 +9,7 @@ mod Hammer do
   needs IO.Console
 
   fn hammer(n : Int, stop : String) : Int do
-    if File.exists(stop) do n
+    if Authority.must(File.exists(stop)) do n
     else
       let _ = Control.relay_line("NODE_STATE")
       hammer(n + 1, stop)
@@ -17,7 +17,7 @@ mod Hammer do
   end
 
   fn main(c : Cap(IO)) do
-    match Process.env("HAMMER_STOP") do
+    match Authority.must(Process.env("HAMMER_STOP")) do
       None -> println("hammer: HAMMER_STOP is not set")
       Some(stop) ->
         println("hammer: started")

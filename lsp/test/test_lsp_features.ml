@@ -1443,7 +1443,7 @@ mod Main do
   mod Dep do
     needs IO.Console
     fn slurp(p : String) : String do
-      match File.read(p) do
+      match Authority.must(File.read(p)) do
         Ok(s) -> s
         Err(_) -> "none"
       end

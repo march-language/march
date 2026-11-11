@@ -4,9 +4,9 @@
     "stock_signature": "fn stock(env : Env, s : Cap(Session.Live), m : Cap(IO.Mut), st : Order_Stock.Entry) : Order_Stock.Yield"
   },
   "generated": {
-    "commit": "d884c1df8",
-    "date": "2026-11-10",
-    "inputs_sha256": "34a5c30003cddefb576726ff54a6bdefdee2e30616429dd0c1ef90a8625b8581"
+    "commit": "4f13266c9",
+    "date": "2026-11-11",
+    "inputs_sha256": "b4a68c21ec71cda42974f60ba0e2e54511c476e5af3f46d22a8a16d56b6b6437"
   },
   "lab_run": {
     "commit": "53d66f068",

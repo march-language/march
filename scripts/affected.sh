@@ -91,7 +91,7 @@ owner_of_test_module() {
     march_test_stdlib_suite) echo stdlib ;;
     march_test_snapshots|run_snapshots) echo @test/runtest-run_snapshots ;;
     march_test_helpers) echo FULL ;;
-    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|test_stdlib_march|test_jit|test_refinecheck)
+    run_compiler|run_eval|run_codegen|run_stdlib|run_errors|run_test_reports|run_cap_conformance|test_stdlib_march|test_jit|test_refinecheck)
       echo "${stanza#run_}" ;;
     "") ;;
     *) echo "@test/runtest-$stanza" ;;
@@ -130,18 +130,18 @@ classify() {
 
     # ── back end ──────────────────────────────────────────────────────────
     lib/tir/*|lib/codegen/*)
-      add SUITES codegen stdlib compiler test_jit test_reports; add DUNE @test/runtest-run_snapshots
+      add SUITES codegen stdlib compiler test_jit test_reports cap_conformance; add DUNE @test/runtest-run_snapshots
       add ORACLES ir; add CHECKS "scripts/determinism-oracle.sh"
       reason "$f" "codegen, stdlib, compiler, jit, test_reports, snapshots; ir + determinism oracles" ;;
     runtime/*)
-      add SUITES codegen stdlib test_jit test_reports
+      add SUITES codegen stdlib test_jit test_reports cap_conformance
       add CHECKS scripts/check-runtime-sources.sh scripts/check-actor-rc-stores.sh
       note "runtime: two-node and sanitizer sweeps not run (scripts/two-node.sh, specs/lang/golden/sanitize.sh)"
       reason "$f" "codegen, stdlib, jit, test_reports; runtime manifest + actor-rc checks" ;;
     lib/jit/*|lib/repl/*)
       add SUITES test_jit compiler eval; reason "$f" "jit, compiler, eval" ;;
     lib/eval/*)
-      add SUITES eval stdlib stdlib_march compiler test_reports
+      add SUITES eval stdlib stdlib_march compiler test_reports cap_conformance
       note "lib/eval: the ir oracle cannot see the interpreter; bench/run_interp_bench.sh --modes interp for perf"
       reason "$f" "eval, stdlib, stdlib_march, compiler, test_reports" ;;
 
@@ -171,7 +171,7 @@ classify() {
 
     # ── stdlib: every program reads it ────────────────────────────────────
     stdlib/*)
-      add SUITES stdlib stdlib_march eval codegen compiler errors test_reports
+      add SUITES stdlib stdlib_march eval codegen compiler errors test_reports cap_conformance
       add ORACLES refine ir; add CHECKS scripts/check-docs.sh
       reason "$f" "stdlib, stdlib_march, eval, codegen, compiler, errors, test_reports; refine+ir oracles" ;;
 
@@ -182,6 +182,7 @@ classify() {
     test/stdlib/*) add SUITES stdlib_march; reason "$f" "stdlib_march" ;;
     test/errors/*) add SUITES errors; reason "$f" "errors" ;;
     test/test_reports/*) add SUITES test_reports; reason "$f" "test_reports" ;;
+    test/cap_conformance/*) add SUITES cap_conformance; reason "$f" "cap_conformance" ;;
     test/two_node/*)
       note "two-node: scripts/two-node.sh <scenario> (not run here)"; reason "$f" "two-node (note only)" ;;
     test/dune) FULL=1; reason "$f" "FULL (test wiring)" ;;

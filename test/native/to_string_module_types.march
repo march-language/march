@@ -39,5 +39,6 @@ mod Main do
     println(to_string(Some(Duration.seconds(2))))
     println(to_string([Inner.Id(1), Inner.Id(2)]))
     println(to_string((Inner.Got("t"), Inner.Id(9))))
+    ()
   end
 end

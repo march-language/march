@@ -65,12 +65,19 @@ let name = "entryapp"
    from. *)
 let program tag =
   Printf.sprintf
-    "mod Entryapp do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : () do\n    println(\"%s\")\n  end\nend\n"
+    "mod Entryapp do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : () do\n    println(\"%s\")\n    ()\n  end\nend\n"
     tag
 
 (* Picking this file is a type error, so a consumer that chose it fails. *)
 let broken =
-  "mod Entryapp do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : () do\n    println(1 ++ \"x\")\n  end\nend\n"
+  {|mod Entryapp do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : () do
+    println(1 ++ "x")
+    ()
+  end
+end
+|}
 
 let with_project ?entrypoint (files : (string * string) list) f =
   let root = Unix.realpath (Filename.temp_dir "forge_entry_rule_" "") in

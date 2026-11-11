@@ -212,14 +212,14 @@ mod SocketTimeoutProbe do
   -- Probe A: recv_timeout against a peer that accepts and then says nothing.
   -- Must report RecvTimeout carrying the deadline it was given.
   fn probe_recv_timeout(port) do
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println("A FAIL connect " ++ Socket.error_message(e))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println("A FAIL connect " ++ Socket.error_message(e)))
     Ok(fd) ->
       match Socket.recv_timeout(fd, 1024, 500) do
       Err(RecvTimeout(ms)) ->
-        println("A OK RecvTimeout " ++ int_to_string(ms))
-      Err(other) -> println("A FAIL wrong-error " ++ Socket.error_message(other))
-      Ok(_)      -> println("A FAIL unexpected-data")
+        Authority.ignore(println("A OK RecvTimeout " ++ int_to_string(ms)))
+      Err(other) -> Authority.ignore(println("A FAIL wrong-error " ++ Socket.error_message(other)))
+      Ok(_)      -> Authority.ignore(println("A FAIL unexpected-data"))
       end
       Socket.close(fd)
     end
@@ -228,16 +228,16 @@ mod SocketTimeoutProbe do
   -- Probe B: the fd-level mechanism TLS rides.  set_recv_timeout, then the
   -- UNTIMED recv -- which hangs forever unless SO_RCVTIMEO actually took.
   fn probe_set_recv_timeout(port) do
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println("B FAIL connect " ++ Socket.error_message(e))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println("B FAIL connect " ++ Socket.error_message(e)))
     Ok(fd) ->
       match Socket.set_recv_timeout(fd, 500) do
-      Err(e) -> println("B FAIL setopt " ++ Socket.error_message(e))
+      Err(e) -> Authority.ignore(println("B FAIL setopt " ++ Socket.error_message(e)))
       Ok(_) ->
         match Socket.recv(fd, 1024) do
-        Err(RecvTimeout(_)) -> println("B OK bounded")
-        Err(other)          -> println("B FAIL wrong-error " ++ Socket.error_message(other))
-        Ok(_)               -> println("B FAIL unexpected-data")
+        Err(RecvTimeout(_)) -> Authority.ignore(println("B OK bounded"))
+        Err(other)          -> Authority.ignore(println("B FAIL wrong-error " ++ Socket.error_message(other)))
+        Ok(_)               -> Authority.ignore(println("B FAIL unexpected-data"))
         end
       end
       Socket.close(fd)
@@ -246,12 +246,12 @@ mod SocketTimeoutProbe do
 
   -- Probe D: the non-vacuity control.  A peer that answers must still be read.
   fn probe_live_peer(port) do
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println("D FAIL connect " ++ Socket.error_message(e))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println("D FAIL connect " ++ Socket.error_message(e)))
     Ok(fd) ->
       match Socket.recv_timeout(fd, 1024, 5000) do
-      Ok(data) -> println("D OK data " ++ data)
-      Err(e)   -> println("D FAIL " ++ Socket.error_message(e))
+      Ok(data) -> Authority.ignore(println("D OK data " ++ data))
+      Err(e)   -> Authority.ignore(println("D FAIL " ++ Socket.error_message(e)))
       end
       Socket.close(fd)
     end
@@ -261,7 +261,7 @@ mod SocketTimeoutProbe do
     let silent = port_from_env("MARCH_TEST_SILENT_PORT")
     let live   = port_from_env("MARCH_TEST_LIVE_PORT")
     if silent == 0 do
-      println("FAIL no-silent-port")
+      Authority.ignore(println("FAIL no-silent-port"))
     else
       probe_recv_timeout(silent)
       probe_set_recv_timeout(silent)
@@ -299,18 +299,18 @@ mod TlsTimeoutProbe do
   fn main(_c1 : Cap(IO.NetConnect), _c2 : Cap(IO.NetConnect.TLS),
           _c3 : Cap(IO.Process), _c4 : Cap(IO.Console)) do
     let port = port_from_env("MARCH_TEST_SILENT_PORT")
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println("C FAIL connect " ++ Socket.error_message(e))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println("C FAIL connect " ++ Socket.error_message(e)))
     Ok(fd) ->
       match Socket.set_recv_timeout(fd, 500) do
-      Err(e) -> println("C FAIL setopt " ++ Socket.error_message(e))
+      Err(e) -> Authority.ignore(println("C FAIL setopt " ++ Socket.error_message(e)))
       Ok(_) ->
         match Tls.client_ctx(Tls.default_client_config()) do
-        Err(_) -> println("C FAIL ctx")
+        Err(_) -> Authority.ignore(println("C FAIL ctx"))
         Ok(ctx) ->
           match Tls.connect(fd, ctx, "127.0.0.1") do
-          Err(_) -> println("C OK bounded")
-          Ok(_)  -> println("C FAIL handshake-succeeded")
+          Err(_) -> Authority.ignore(println("C OK bounded"))
+          Ok(_)  -> Authority.ignore(println("C FAIL handshake-succeeded"))
           end
         end
       end
@@ -338,7 +338,7 @@ mod TlsReadTimeoutProbe do
   needs IO.Console
 
   pfn port_from_env(name) do
-    match string_to_int(String.trim(Env.get(name, "0"))) do
+    match string_to_int(String.trim(Authority.must(Env.get(name, "0")))) do
     Some(p) -> p
     None    -> 0
     end
@@ -347,22 +347,22 @@ mod TlsReadTimeoutProbe do
   fn main(_c1 : Cap(IO.NetConnect), _c2 : Cap(IO.NetConnect.TLS),
           _c3 : Cap(IO.Process), _c4 : Cap(IO.Console)) do
     let port = port_from_env("MARCH_TEST_TLS_PORT")
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println("E FAIL connect " ++ Socket.error_message(e))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println("E FAIL connect " ++ Socket.error_message(e)))
     Ok(fd) ->
       match Socket.set_recv_timeout(fd, 500) do
-      Err(e) -> println("E FAIL setopt " ++ Socket.error_message(e))
+      Err(e) -> Authority.ignore(println("E FAIL setopt " ++ Socket.error_message(e)))
       Ok(_) ->
         match Tls.client_ctx(TlsConfig("", "", "", ["http/1.1"], Tls12, false)) do
-        Err(_) -> println("E FAIL ctx")
+        Err(_) -> Authority.ignore(println("E FAIL ctx"))
         Ok(ctx) ->
           match Tls.connect(fd, ctx, "127.0.0.1") do
-          Err(e) -> println("E FAIL handshake " ++ Tls.error_to_string(e))
+          Err(e) -> Authority.ignore(println("E FAIL handshake " ++ Tls.error_to_string(e)))
           Ok(conn) ->
             match Tls.read(conn, 4096) do
-            Err(TlsReadTimeout) -> println("E OK TlsReadTimeout")
-            Err(e)              -> println("E FAIL " ++ Tls.error_to_string(e))
-            Ok(_)               -> println("E FAIL read-returned-data")
+            Err(TlsReadTimeout) -> Authority.ignore(println("E OK TlsReadTimeout"))
+            Err(e)              -> Authority.ignore(println("E FAIL " ++ Tls.error_to_string(e)))
+            Ok(_)               -> Authority.ignore(println("E FAIL read-returned-data"))
             end
           end
         end

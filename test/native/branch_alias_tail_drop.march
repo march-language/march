@@ -22,7 +22,7 @@ mod Main do
   -- tail CALL that borrows the projection.
   pfn check(got : String, want : String) : () do
     if String.byte_size(want) > 1000 do check(got, String.slice(want, 1, 1000))
-    else println(if got == want do "ok" else "FAIL got [" ++ got ++ "]" end)
+    else Authority.ignore(println(if got == want do "ok" else "FAIL got [" ++ got ++ "]" end))
     end
   end
 
@@ -32,7 +32,7 @@ mod Main do
       |> subject("hi")
     match m.to do
       Cons(a, _) -> check(a.address, "u@x.com")
-      Nil        -> println("FAIL no recipient")
+      Nil        -> Authority.ignore(println("FAIL no recipient"))
     end
   end
 

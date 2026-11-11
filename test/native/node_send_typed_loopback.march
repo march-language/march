@@ -51,7 +51,7 @@ mod TypedSendLoopback do
   end
 
   pfn remember(line : String) : () do
-    match Vault.whereis("typed_send_inbox") do
+    match Authority.must(Vault.whereis("typed_send_inbox")) do
       Some(t) ->
         let prior = match Vault.get(t, "lines") do
           Some(ls) -> ls
@@ -129,7 +129,7 @@ mod TypedSendLoopback do
 
   -- ── node-a: send ────────────────────────────────────────────────────
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
     end
@@ -156,7 +156,7 @@ mod TypedSendLoopback do
     match ls do
       Nil -> ()
       Cons(l, rest) ->
-        println(l)
+        Authority.ignore(println(l))
         print_all(rest)
     end
   end
@@ -170,8 +170,8 @@ mod TypedSendLoopback do
       Ok(p) -> p
       Err(e) -> panic("local_port: " ++ e)
     end
-    let seen = Vault.new("typed_send_seen")
-    let inbox_log = Vault.new("typed_send_inbox")
+    let seen = Authority.must(Vault.new("typed_send_seen"))
+    let inbox_log = Authority.must(Vault.new("typed_send_inbox"))
     let inbox = spawn(Inbox)
     let srv = task_spawn(fn _ -> run_node_b(listen_fd, seen, inbox))
     let fd = match connect_with_retry("127.0.0.1", port, 5) do
@@ -196,12 +196,12 @@ mod TypedSendLoopback do
     tcp_close(fd)
     match Vault.get(seen, "lines") do
       Some(ls) -> print_all(List.reverse(ls))
-      None -> println("node-b saw nothing")
+      None -> Authority.ignore(println("node-b saw nothing"))
     end
     run_until_idle()
     match Vault.get(inbox_log, "lines") do
       Some(ls) -> print_all(List.reverse(ls))
-      None -> println("inbox got nothing")
+      None -> Authority.ignore(println("inbox got nothing"))
     end
   end
 end

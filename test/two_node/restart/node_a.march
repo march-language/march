@@ -44,19 +44,19 @@ mod TwoNodeRestartA do
     List.fold_left(DistLink.monitors_on_node(tbl, node_id), 0, fn (n, m) ->
       match DistLink.down_msg(m, DistLink.NodeDown) do
         (_ref, target_pid, reason) ->
-          println("node-a: Down for Pid(" ++ int_to_string(target_pid) ++ ") reason=" ++ reason_text(reason) ++ " (node-b crashed)")
+          Authority.ignore(println("node-a: Down for Pid(" ++ int_to_string(target_pid) ++ ") reason=" ++ reason_text(reason) ++ " (node-b crashed)"))
           let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
           n + 1
       end)
   end
 
   pfn sleep_100ms() do
-    let _ = Process.run("sleep", Cons("0.1", Nil))
+    let _ = Authority.must(Process.run("sleep", Cons("0.1", Nil)))
     ()
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do
@@ -87,7 +87,7 @@ mod TwoNodeRestartA do
             if d.type_tag == "TwoNodeRestart.Hello" do
               match GlobalPid.decode(d.payload) do
                 Ok(p) ->
-                  println("node-a: node-b hosts Pid(" ++ int_to_string(p.local_pid) ++ ") at creation " ++ int_to_string(p.creation))
+                  Authority.ignore(println("node-a: node-b hosts Pid(" ++ int_to_string(p.local_pid) ++ ") at creation " ++ int_to_string(p.creation)))
                   p
                 Err(e) -> panic("hello pid: " ++ e)
               end
@@ -105,7 +105,7 @@ mod TwoNodeRestartA do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
-    let port = Env.require_int("MARCH_PEER_PORT")
+    let port = Authority.must(Env.require_int("MARCH_PEER_PORT"))
     let watcher = spawn(Watcher)
 
     -- Incarnation 1.
@@ -121,11 +121,12 @@ mod TwoNodeRestartA do
     -- Nothing more is expected on this connection; the next read returns
     -- only when node-b is gone.
     match NetKernel.recv_frame(fd1, Nil) do
-      Ok(_) -> println("node-a: unexpected frame before the restart")
+      Ok(_) -> Authority.ignore(println("node-a: unexpected frame before the restart"))
       Err(_) ->
-        println("node-a: connection to node-b lost")
+        Authority.ignore(println("node-a: connection to node-b lost"))
         let fired = fire_node_down(tbl, "node-b", watcher)
         println("node-a: fired NodeDown for " ++ int_to_string(fired) ++ " monitor(s)")
+        ()
     end
     tcp_close(fd1)
 
@@ -134,15 +135,15 @@ mod TwoNodeRestartA do
     let fresh = read_hello(fd2)
     item(fd2, 2, held)
     match NodeSend.recv_failure(fd2, Nil) do
-      Ok((seq, reason)) -> println("node-a: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason)
-      Err(e) -> println("node-a: recv error: " ++ e)
+      Ok((seq, reason)) -> Authority.ignore(println("node-a: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason))
+      Err(e) -> Authority.ignore(println("node-a: recv error: " ++ e))
     end
     item(fd2, 3, fresh)
     tcp_close(fd2)
     run_until_idle()
     match get_actor_field(watcher, "downs") do
-      Some(n) -> println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)")
-      None -> println("node-a: watcher gone")
+      Some(n) -> Authority.ignore(println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)"))
+      None -> Authority.ignore(println("node-a: watcher gone"))
     end
   end
 end

@@ -64,9 +64,9 @@ mod CertDowngradeAfterRestart do
 
   pfn show_cert(node : Cap(ClusterNode.Live), what : String) : () do
     match ClusterNode.own_cert(node) do
-      Some(c) -> println(what ++ ": serial=" ++ c.serial ++ " roles=" ++ String.join(c.roles, ",")
-                         ++ " flags=" ++ String.join(c.flags, ","))
-      None -> println(what ++ ": no cert")
+      Some(c) -> Authority.ignore(println(what ++ ": serial=" ++ c.serial ++ " roles=" ++ String.join(c.roles, ",")
+                         ++ " flags=" ++ String.join(c.flags, ",")))
+      None -> Authority.ignore(println(what ++ ": no cert"))
     end
   end
 
@@ -82,13 +82,13 @@ mod CertDowngradeAfterRestart do
     let cfg = { ClusterNode.config("b", 0, "", Nil, "", 1) with auth: ClusterAuth.Certified(creds) }
     println("starting node b")
     match ClusterNode.start(io, cfg) do
-      Err(e) -> println("start failed: " ++ e)
+      Err(e) -> Authority.ignore(println("start failed: " ++ e))
       Ok(node) ->
-        println("started")
+        Authority.ignore(println("started"))
         let r1 = release(1700000000001, NodeCert.to_text(broad))
         let r2 = release(1700000000002, NodeCert.to_text(narrow))
         let reload_head = 1600000000000
-        let mem = Vault.new("cert_downgrade_mem_before")
+        let mem = Authority.must(Vault.new("cert_downgrade_mem_before"))
         let a = Control.agent_apply_certs_recording(ops(node, mem, reload_head), mem, order(r1))
         println("release 1: ok=" ++ to_string(a.ok) ++ " " ++ a.detail)
         let b = Control.agent_apply_certs_recording(ops(node, mem, reload_head), mem, order(r2))
@@ -98,7 +98,7 @@ mod CertDowngradeAfterRestart do
         println("replay of release 1, same process: ok=" ++ to_string(c.ok) ++ " " ++ c.detail)
         -- The node restarts: the Agent's memory Vault is new; the reload
         -- server's persisted head is unchanged (no signed line was relayed).
-        let mem2 = Vault.new("cert_downgrade_mem_after_restart")
+        let mem2 = Authority.must(Vault.new("cert_downgrade_mem_after_restart"))
         let o2 = ops(node, mem2, reload_head)
         println("floor after restart: " ++ int_to_string(o2.floor()))
         let d = Control.agent_apply_certs_recording(o2, mem2, order(r1))
@@ -113,6 +113,7 @@ mod CertDowngradeAfterRestart do
         show_cert(node, "at the end")
         ClusterNode.stop(node)
         System.exit(0)
+        ()
     end
   end
 end

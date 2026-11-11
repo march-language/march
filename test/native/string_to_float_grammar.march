@@ -164,5 +164,6 @@ mod Main do
     Ok(v) -> println("toml: " ++ Toml.to_string(v))
     Err(_) -> println("toml: parse error")
     end
+    ()
   end
 end

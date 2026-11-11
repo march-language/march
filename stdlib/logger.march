@@ -844,7 +844,8 @@ mod Logger do
       Logger.add_appender(Logger.appender_stderr(Logger.format_json))
   """
   fn appender_stderr(format_fn : LogEntry -> String) : Appender do
-    Appender("stderr", fn entry -> print_stderr(format_fn(entry) ++ "\n"))
+    -- A refused console drops the line: logging must not fail the program.
+    Appender("stderr", fn entry -> Authority.ignore(IO.warn(format_fn(entry))))
   end
 
   doc """
@@ -854,7 +855,7 @@ mod Logger do
       Logger.add_appender(Logger.appender_stdout(Logger.format_logfmt))
   """
   fn appender_stdout(format_fn : LogEntry -> String) : Appender do
-    Appender("stdout", fn entry -> println(format_fn(entry)))
+    Appender("stdout", fn entry -> Authority.ignore(println(format_fn(entry))))
   end
 
   doc """
@@ -1109,8 +1110,22 @@ mod Logger do
   end
 
   pfn random_hex(n : {Int | _ >= 0}) : String do
-    -- 16-char span id / 32-char trace id from /dev/urandom.
-    Crypto.random_hex(n)
+    -- 16-char span id / 32-char trace id from /dev/urandom. A refused
+    -- IO.Random gives an all-zero id: logging must not fail because the
+    -- program may not draw random numbers.
+    match Crypto.random_hex(n) do
+    Ok(h) -> h
+    Err(_) -> string_repeat("0", 2 * n)
+    end
+  end
+
+  -- A span's start in ms, or null when the clock is refused: a log line must
+  -- not fail because the program may not read the clock.
+  pfn span_start_ms() : LogValue do
+    match System.now_ms() do
+    Ok(ms) -> LInt(ms)
+    Err(_) -> LNull
+    end
   end
 
   doc """
@@ -1145,7 +1160,7 @@ mod Logger do
       Cons(LogField("span_id",       LStr(span_id)),
       Cons(parent_field,
       Cons(LogField("span_name",     LStr(name)),
-      Cons(LogField("span_start_ms", LInt(float_to_int(unix_time(()) *. 1000.0))),
+      Cons(LogField("span_start_ms", span_start_ms()),
       Nil))))),
       thunk)
   end

@@ -41,5 +41,6 @@ mod HEscapeCtxBuiltin do
     let safe = Html.raw("<b>ok</b>")
     println("safe_html=" ++ html_escape_ctx(0, safe))
     println("safe_attr=" ++ html_escape_ctx(1, safe))
+    ()
   end
 end

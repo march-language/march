@@ -76,7 +76,7 @@ mod NodeCallLoopback do
   -- March scheduler/runtime race. A same-process immediate retry is the
   -- workaround reported to clear it, since no `sleep` builtin exists.
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do

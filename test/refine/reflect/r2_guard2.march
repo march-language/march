@@ -9,5 +9,6 @@ mod Guard2 do
 
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(guarded(Cons(0 - 1, Nil))))
+    ()
   end
 end

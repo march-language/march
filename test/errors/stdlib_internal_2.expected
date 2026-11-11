@@ -1,0 +1,10 @@
+exit: 1
+-- PROGRAM --------------- errors/stdlib_internal_2.march
+
+`cap_check_raw` is internal to the standard library; use `Authority.check(kind, target)`. [stdlib_internal]
+
+7 |     cap_check_raw("IO.Clock", "")
+        ^^^^^^^^^^^^^
+
+
+

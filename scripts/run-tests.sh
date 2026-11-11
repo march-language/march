@@ -114,7 +114,7 @@ fi
 # live under lsp/test/, not test/, so the exe path is per-runner from here on.
 ALL_RUNNERS=(run_compiler run_eval run_codegen run_stdlib test_stdlib_march test_jit
              test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli test_refinecheck
-             run_errors run_test_reports)
+             run_errors run_test_reports run_cap_conformance)
 # Suites whose executable is lsp/test/<name>.exe rather than test/<name>.exe.
 LSP_RUNNERS=(test_lsp test_utf16 test_jsonrpc test_incremental test_query_cli)
 # Runners excluded from the DEFAULT (no suite names given) set under -q; see

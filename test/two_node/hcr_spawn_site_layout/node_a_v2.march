@@ -5,7 +5,7 @@ mod SpawnSite do
   needs IO.Clock
   needs IO.Mut
 
-  pfn tally() : Vault(Int) do Vault.open("spawn_site_tally") end
+  pfn tally() : Vault(Int) do Authority.must(Vault.open("spawn_site_tally")) end
 
   actor C do
     state { count : Int, label : String, extra : Int }
@@ -62,6 +62,7 @@ mod SpawnSite do
     println(path ++ ": v1 " ++ seen(" v1") ++ ", v2 fresh " ++ seen(" v2 fresh")
             ++ ", v2 migrated " ++ seen(" v2 migrated")
             ++ ", v2 bad " ++ int_to_string(Vault.get_or(t, path ++ " v2 BAD", 0)))
+    ()
   end
 
   fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock), _m : Cap(IO.Mut)) : Unit do
@@ -84,5 +85,6 @@ mod SpawnSite do
     report(tl, "main")
     println("driver: v2 fresh " ++ bool_to_string(Vault.get_or(tl, "driver v2 fresh", 0) > 0)
             ++ ", v2 bad " ++ int_to_string(Vault.get_or(tl, "driver v2 BAD", 0)))
+    ()
   end
 end

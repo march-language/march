@@ -20,6 +20,7 @@
 (** The ordered list of stdlib file names. *)
 let stdlib_file_list = [
   "prelude.march";
+  "authority.march";
   "option.march";
   "result.march";
   "list.march";

@@ -33,11 +33,11 @@ mod ClusterApA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "ap-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "ap-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        let served = Vault.new("served")
+        let served = Authority.must(Vault.new("served"))
         -- Printed BEFORE the offer: it is live as soon as `offer_Server`
         -- registers it, and a session can be served before a line printed
         -- after the call would run.

@@ -15,8 +15,8 @@ mod Main do
 
   fn greet(name : String) : () do
     match file_write("/tmp/t166_out", name) do
-      Ok(_)  -> println("hello " ++ name)
-      Err(_) -> println("hello anyway")
+      Ok(_)  -> Authority.ignore(println("hello " ++ name))
+      Err(_) -> Authority.ignore(println("hello anyway"))
     end
   end
 

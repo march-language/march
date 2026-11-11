@@ -27,6 +27,8 @@ let table : (string * string) list = [
   ("march_println",                "IO.Console");
   ("march_print",                  "IO.Console");
   ("march_print_stderr",           "IO.Console");
+  ("march_io_read_line",           "IO.Console");
+  ("march_io_read_byte",           "IO.Console");
   (* IO.FileRead *)
   ("march_file_exists",            "IO.FileRead");
   ("march_file_read",              "IO.FileRead");

@@ -19,16 +19,16 @@ mod TaskAwaitInt do
 
   fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     -- Task.await on Int: expect Ok(42), not Ok(85).
-    let t = Task.async(fn () -> 6 * 7)
+    let t = Authority.must(Task.async(fn () -> 6 * 7))
     match Task.await(t) do
-      Ok(n)  -> println("await=" ++ int_to_string(n))
-      Err(e) -> println("await_err=" ++ e)
+      Ok(n)  -> Authority.ignore(println("await=" ++ int_to_string(n)))
+      Err(e) -> Authority.ignore(println("await_err=" ++ e))
     end
 
     -- Task.await_many: [10,20,30] summed via in-order fold → 60, not 123.
-    let ts = [Task.async(fn () -> 10),
-              Task.async(fn () -> 20),
-              Task.async(fn () -> 30)]
+    let ts = [Authority.must(Task.async(fn () -> 10)),
+              Authority.must(Task.async(fn () -> 20)),
+              Authority.must(Task.async(fn () -> 30))]
     let many_sum = List.fold_left(Task.await_many(ts), 0, fn (acc, r) ->
       match r do
         Ok(n)  -> acc + n
@@ -38,7 +38,7 @@ mod TaskAwaitInt do
     println("await_many_sum=" ++ int_to_string(many_sum))
 
     -- Task.async_stream: squares of 1..5 summed → 55, not 115.
-    let squares = Task.async_stream([1, 2, 3, 4, 5], fn n -> n * n)
+    let squares = Authority.must(Task.async_stream([1, 2, 3, 4, 5], fn n -> n * n))
     let stream_sum = List.fold_left(squares, 0, fn (acc, r) ->
       match r do
         Ok(n)  -> acc + n
@@ -48,7 +48,8 @@ mod TaskAwaitInt do
     println("stream_sum=" ++ int_to_string(stream_sum))
 
     -- Regression guard: task_await_unwrap already untags correctly.
-    println("await_unwrap=" ++ int_to_string(Task.await_unwrap(Task.async(fn () -> 99))))
+    println("await_unwrap=" ++ int_to_string(Task.await_unwrap(Authority.must(Task.async(fn () -> 99)))))
+    ()
   end
 
 end

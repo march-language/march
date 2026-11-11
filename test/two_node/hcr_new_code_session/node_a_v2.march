@@ -52,9 +52,9 @@ mod HcrSessionA do
     end
 
     fn offers() : Vault(SessionNode.Offer) do
-      match Vault.whereis("hcr_offers") do
+      match Authority.must(Vault.whereis("hcr_offers")) do
         Some(v) -> v
-        None -> Vault.new("hcr_offers")
+        None -> Authority.must(Vault.new("hcr_offers"))
       end
     end
 
@@ -63,16 +63,16 @@ mod HcrSessionA do
     -- sessions already using the old callback keep their original epoch.
     fn host_tick(c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
       let v = offers()
-      let bodies = Vault.open("hcr_shop_bodies")
+      let bodies = Authority.must(Vault.open("hcr_shop_bodies"))
       -- Version 2 reports, once, whether it finds the offer version 1
       -- stored: with a second vault registry in the patch it would not, and
       -- would open a second offer.
-      let flags = Vault.open("hcr_flags")
+      let flags = Authority.must(Vault.open("hcr_flags"))
       match Vault.get(v, "cur") do
         Some(_) ->
           if Vault.get(flags, "noted") == None do
             Vault.set(flags, "noted", 1)
-            println("node-a: version 2 host sees the version-1 offer")
+            Authority.ignore(println("node-a: version 2 host sees the version-1 offer"))
             -- The protocol is unchanged, so this typed callback has the
             -- same endpoint ABI. Publish it from the new actor frame;
             -- sessions already inside the old callback keep that epoch.
@@ -81,7 +81,7 @@ mod HcrSessionA do
         None ->
           if Vault.get(flags, "noted") == None do
             Vault.set(flags, "noted", 1)
-            println("node-a: version 2 host finds NO offer: it opens another")
+            Authority.ignore(println("node-a: version 2 host finds NO offer: it opens another"))
           else () end
           Vault.set(bodies, "cur", fn (s, st) -> shop(s, st))
           match Order_Run.offer_work_Shop(h, 64, fn (s, st) ->
@@ -120,14 +120,14 @@ mod HcrSessionA do
     -- The default SWIM timeouts, which scripts/two-node.sh stretches under
     -- AddressSanitizer (MARCH_SWIM_*_MS): ASan load alone (no deploy
     -- needed) made the nodes suspect each other at the default 3 s.
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hcr-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "hcr-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let a = spawn(ShopHost)
         let _ = send(a, Tick(c, h))
         sleep_ms(200)
-        println("node-a: offering")
+        Authority.ignore(println("node-a: offering"))
         -- Ticks until the scenario kills the node.
         ticking(a, c, h, 400)
         ClusterNode.stop(h)
