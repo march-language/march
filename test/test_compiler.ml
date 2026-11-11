@@ -8872,7 +8872,14 @@ let test_shared_type_name_does_not_load_unreferenced_module () =
     in
     (* (1) The issue's layout: the entry names only Alpha. *)
     let (m, resolve_errors, extra) = resolve "main.march"
-        "mod Main do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : () do\n    println(int_to_string(Alpha.one()))\n  end\nend\n" in
+        {|mod Main do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : () do
+    println(int_to_string(Alpha.one()))
+    ()
+  end
+end
+|} in
     Alcotest.(check bool) "no resolve errors" true (resolve_errors = []);
     Alcotest.(check bool) "Alpha is loaded" true (kept "Alpha" extra);
     Alcotest.(check bool) "Zeta (same type name) is not loaded" false (kept "Zeta" extra);
@@ -16462,7 +16469,7 @@ let test_stdlib_builtin_wrappers_have_real_types () =
   fn ok_hash() : String do Crypto.sha512("x") ++ UUID.to_string(Authority.must(UUID.v4())) end
   fn bad_sha512() : Int do Crypto.sha512("x") end
   fn bad_sha512_arg() : String do Crypto.sha512(1) end
-  fn bad_v4() : String do UUID.v4() end
+  fn bad_v4() : String do Authority.must(UUID.v4()) end
 end|} in
   let expected = [4; 5; 7; 8; 10; 11; 12; 14; 15; 16] in
   let got = user_error_lines_against_stdlib src in

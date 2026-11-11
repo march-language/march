@@ -13454,6 +13454,7 @@ let test_nan_prints_without_sign_compiled () =
     println(show(-n))
     println(show(parse("inf")))
     println(show(parse("-inf")))
+    ()
   end
 end
 |}

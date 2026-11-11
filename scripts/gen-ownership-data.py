@@ -431,7 +431,10 @@ def run_contracts(ws):
             _, per_site = trace(ws, name)
             facts = trace_facts(per_site)
             entry["allocs"] = {"inc_leaves": facts["allocs"]["inc_leaves"]}
-            entry["tree_cells"] = facts["allocs"]["main"]
+            # The cells of the tree `main` builds, counted in its source: `main` also
+            # allocates the console operation's `Ok(())` results (println returns
+            # Result((), CapError)), so its allocation count is not the tree's size.
+            entry["tree_cells"] = entry["excerpt"].count("Leaf(") + entry["excerpt"].count("Node(")
         out[key] = entry
     return out
 

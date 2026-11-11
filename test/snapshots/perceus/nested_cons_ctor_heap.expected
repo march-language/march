@@ -1,7 +1,75 @@
 -- types (2) --
 type Row = Row(List(Int))
 closure $Clo_go$0_List_range(Ptr(Unit), Int)
--- fns (18) --
+-- fns (22) --
+## Authority.check
+fn Authority.check(kind : String, target : String) : Result((), CapError) =
+  let $t161 : '_ = let $t160 : '_ = cap_check_raw(kind, target) in
+let $rc_4 : '_ = ==($t160, 0) in
+dec_rc $t160;
+$rc_4 in
+case $t161 of
+  True() -> dec_rc $t161;
+dec_rc target;
+dec_rc kind;
+let $t162 : () = () in
+alloc Ok($t162)
+  _ -> dec_rc $t161;
+let $t165 : '_ = let $t163 : '_ = alloc ByLaunch() in
+let $t164 : '_ = cap_launch_text() in
+alloc CapError(kind, target, $t163, $t164) in
+alloc Err($t165)
+
+## Authority.describe
+fn Authority.describe(e : CapError) : String =
+  case e of
+  CapError($f136, $f137, $f138, $f139) -> dec_rc e;
+let scope : '_ = $f139 in
+let limit : '_ = $f138 in
+let target : '_ = $f137 in
+let kind : '_ = $f136 in
+let op : '_ = let $t134 : '_ = ==(target, "") in
+case $t134 of
+  True() -> dec_rc $t134;
+dec_rc target;
+kind
+  _ -> dec_rc $t134;
+let $rc_3 : '_ = string_concat_n(kind, "(\"", target, "\")") in
+dec_rc kind;
+dec_rc target;
+$rc_3 in
+let who : '_ = let $rc_2 : '_ = Authority.limit_text(limit) in
+dec_rc limit;
+$rc_2 in
+let allowed : '_ = let $t135 : '_ = ==(scope, "") in
+case $t135 of
+  True() -> dec_rc $t135;
+dec_rc scope;
+"nothing"
+  _ -> dec_rc $t135;
+scope in
+let $rc_1 : '_ = string_concat_n(op, " refused by ", who, " (", allowed, ")") in
+dec_rc op;
+dec_rc who;
+dec_rc allowed;
+$rc_1
+  _ -> dec_rc e;
+panic("non-exhaustive pattern match")
+
+## Authority.limit_text
+fn Authority.limit_text(limit : CapLimit) : String =
+  case limit of
+  ByLaunch() -> "the launch grant"
+  ByFnNeeds($f152) -> let f : '_ = $f152 in
+string_concat3("function ", f, "'s needs")
+  ByModNeeds($f153) -> let m : '_ = $f153 in
+string_concat3("module ", m, "'s needs")
+  ByRestrict($f154) -> let w : '_ = $f154 in
+++("the restrict at ", w)
+  ByGrant($f155) -> let p : '_ = $f155 in
+++("the grant to package ", p)
+  _ -> panic("non-exhaustive pattern match")
+
 ## List.length$List_Int
 fn List.length$List_Int(xs : List(Int)) : Int =
   ();
@@ -34,24 +102,24 @@ List.length_onto$List_Row$Int(t, $t74)
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f492, $f493) -> let r : '_ = $f493 in
-let x : '_ = $f492 in
-let $t491 : '_ = >(x, m) in
-case $t491 of
-  True() -> dec_rc $t491;
+  Cons($f539, $f540) -> let r : '_ = $f540 in
+let x : '_ = $f539 in
+let $t538 : '_ = >(x, m) in
+case $t538 of
+  True() -> dec_rc $t538;
 inc_rc x;
 List.max_onto(r, x)
-  _ -> dec_rc $t491;
+  _ -> dec_rc $t538;
 List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.maximum_int
 fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1198, 18, 55);
+  Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f485, $f486) -> let t : '_ = $f486 in
-let h : '_ = $f485 in
+  Cons($f532, $f533) -> let t : '_ = $f533 in
+let h : '_ = $f532 in
 inc_rc h;
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -60,24 +128,24 @@ List.max_onto(t, h)
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f479, $f480) -> let r : '_ = $f480 in
-let x : '_ = $f479 in
-let $t478 : '_ = <(x, m) in
-case $t478 of
-  True() -> dec_rc $t478;
+  Cons($f526, $f527) -> let r : '_ = $f527 in
+let x : '_ = $f526 in
+let $t525 : '_ = <(x, m) in
+case $t525 of
+  True() -> dec_rc $t525;
 inc_rc x;
 List.min_onto(r, x)
-  _ -> dec_rc $t478;
+  _ -> dec_rc $t525;
 List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1175, 18, 55);
+  Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f472, $f473) -> let t : '_ = $f473 in
-let h : '_ = $f472 in
+  Cons($f519, $f520) -> let t : '_ = $f520 in
+let h : '_ = $f519 in
 inc_rc h;
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -90,11 +158,11 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f466, $f467) -> let t : '_ = $f467 in
-let x : '_ = $f466 in
-let $t465 : '_ = inc_rc x;
+  Cons($f513, $f514) -> let t : '_ = $f514 in
+let x : '_ = $f513 in
+let $t512 : '_ = inc_rc x;
 *(acc, x) in
-List.product_onto(t, $t465)
+List.product_onto(t, $t512)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -149,6 +217,19 @@ let $trmc1 : Cons = alloc_hole Cons(i, _) in
 $dst.1 <- $trmc1;
 List.range_step_go$dps(next, stop, step, $trmc1)
 
+## List.spawn_allowed
+fn List.spawn_allowed() : Bool =
+  let $t166 : '_ = Authority.check("IO.Spawn", "") in
+case $t166 of
+  Ok($f167) -> dec_rc $t166;
+dec_rc $f167;
+true
+  Err($f168) -> dec_rc $t166;
+dec_rc $f168;
+false
+  _ -> dec_rc $t166;
+panic("non-exhaustive pattern match")
+
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
   List.sum_onto(xs, 0)
@@ -157,11 +238,11 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f459, $f460) -> let t : '_ = $f460 in
-let x : '_ = $f459 in
-let $t458 : '_ = inc_rc x;
+  Cons($f506, $f507) -> let t : '_ = $f507 in
+let x : '_ = $f506 in
+let $t505 : '_ = inc_rc x;
 +(acc, x) in
-List.sum_onto(t, $t458)
+List.sum_onto(t, $t505)
   _ -> panic("non-exhaustive pattern match")
 
 ## go$apply$0_List_range
@@ -194,29 +275,30 @@ let $t8 : List(Row) = alloc List.Nil(Row)() in
 alloc List.Cons($t7, $t8) in
 alloc List.Cons($t4, $t9) in
 case rows of
-  Cons($f520, $f521) -> dec_rc rows;
-case $f520 of
-  Row($f522) -> let rest : List(Row) = $f521 in
-let fp : List(Int) = $f522 in
-let $t517 : String = let $t516 : Int = let $rc_4 : Int = List.length$List_Int(fp) in
+  Cons($f567, $f568) -> dec_rc rows;
+case $f567 of
+  Row($f569) -> let rest : List(Row) = $f568 in
+let fp : List(Int) = $f569 in
+let $t564 : String = let $t563 : Int = let $rc_8 : Int = List.length$List_Int(fp) in
 dec_rc fp;
-$rc_4 in
-int_to_string($t516) in
-let $rc_3 : () = println($t517) in
-dec_rc $t517;
-$rc_3;
-let $t519 : String = let $t518 : Int = let $rc_2 : Int = List.length$List_Row(rest) in
+$rc_8 in
+int_to_string($t563) in
+let $rc_7 : () = println($t564) in
+dec_rc $t564;
+$rc_7;
+let $t566 : String = let $t565 : Int = let $rc_6 : Int = List.length$List_Row(rest) in
 dec_rc rest;
-$rc_2 in
-int_to_string($t518) in
-let $rc_1 : () = println($t519) in
-dec_rc $t519;
-$rc_1
-  _ -> dec_rc $f520;
-dec_rc $f521;
+$rc_6 in
+int_to_string($t565) in
+let $rc_5 : () = println($t566) in
+dec_rc $t566;
+$rc_5
+  _ -> dec_rc $f567;
+dec_rc $f568;
 panic("non-exhaustive pattern match")
   Nil() -> dec_rc rows;
 println("empty")
   _ -> dec_rc rows;
-panic("non-exhaustive pattern match")
+panic("non-exhaustive pattern match");
+()
 
