@@ -77,7 +77,9 @@ $ march --compile --cap-sandbox -o build/myapp app.march
 
 Installation **fails closed**: if the sandbox cannot be installed, the program will not run rather than continue unconfined.
 
-**Path scopes.** A filesystem capability can be narrowed to a directory subtree: `needs IO.FileWrite("/var/lib/myapp")`. A literal path outside every declared scope is a compile error, and `--cap-sandbox` narrows its write grant to the declared subtrees. Two scopes are compile errors rather than being silently ignored: a scope on a capability that is not `IO.FileRead`, `IO.FileWrite` or `IO.FileSystem` (for example `needs IO.Network("/etc")`, or `needs IO("/srv")`; scope the filesystem capability you mean instead), and a relative scope (`"etc/myapp"`, `"./out"`), which would name a different directory depending on the working directory at run time.
+**Host scopes are not OS-enforced.** `needs IO.NetConnect("example.com")` (see [host scopes]({{ site.baseurl }}/docs/capabilities/#host-scopes)) is a compile-time check plus a guard in `HttpClient`; neither Seatbelt nor seccomp filters by host name, so the sandbox grants `IO.NetConnect` whole.
+
+**Path scopes.** A filesystem capability can be narrowed to a directory subtree: `needs IO.FileWrite("/var/lib/myapp")`. A literal path outside every declared scope is a compile error, and `--cap-sandbox` narrows its write grant to the declared subtrees. Two scopes are compile errors rather than being silently ignored: a path scope on a capability that is not `IO.FileRead`, `IO.FileWrite` or `IO.FileSystem` (for example `needs IO.Network("/etc")`, or `needs IO("/srv")`; scope the filesystem capability you mean instead), and a relative scope (`"etc/myapp"`, `"./out"`), which would name a different directory depending on the working directory at run time.
 
 Scopes are normalized **lexically** at compile time (`//`, `.` and `..` collapsed; no filesystem access), because the build machine's filesystem is not the deployment machine's. Symlinks are resolved at run time instead: the macOS kernel matches a subpath only after resolving symlinks, so the `--cap-sandbox` binary `realpath()`s each write scope at startup, just before it installs the profile. You can therefore write the path the way your program spells it: `needs IO.FileWrite("/tmp/myapp")` enforces against `/private/tmp/myapp` on macOS, where `/tmp` is a symlink. A scope that does not exist yet (the usual case when the program creates it) resolves through its longest existing prefix, with the rest appended. A scope that is itself a symlink resolves to its target, as it stands when the program starts. On Linux, `--cap-sandbox` enforces `IO.FileWrite` all-or-nothing through seccomp, which cannot see paths, so a write scope is checked statically there but not narrowed at run time.
 
@@ -183,6 +185,9 @@ It does **not** prove that the code actually *uses* only those capabilities, onl
 
 ## See also
 
+- [Capability Threat Model]({{ site.baseurl }}/docs/capability-threat-model/): what the
+  capability system as a whole guarantees, assumes and does not cover, including both
+  mechanisms on this page.
 - [Capabilities]({{ site.baseurl }}/docs/capabilities/): where capabilities are
   defined and declared. This page enforces what that page declares.
 - [Capability Audit]({{ site.baseurl }}/docs/capability-audit/): `forge audit`

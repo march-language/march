@@ -108,6 +108,17 @@ _                   -- match anything, discard
 x                   -- match anything, bind to x
 ```
 
+**A pattern binds each name once.** `(a, a)`, `Pair(x, x)`, `{ p: n, q: n }` and
+`Pair(x, _) as x` are rejected with `duplicate_binder`, and so is a parameter list that
+repeats a name: `fn (a, a) -> …`, `fn two(a, a)`, or one head of a multi-head function
+such as `fn pick(0, a, a)`. A repeated name does not test the two values for equality;
+bind two names and compare them in a guard instead (`(a, b) when a == b -> …`). `_`
+binds nothing and may repeat. The rule is about one binding position only: an inner
+scope still shadows an outer one, so curried lambdas (`fn a -> fn a -> a`, where the
+inner `a` wins), a match arm rebinding a parameter, and the alternatives of an
+or-pattern (which must all bind the same names) stay legal. (Before this rule the
+interpreter took the first binding and compiled code the last.)
+
 ### Literal Patterns
 
 ```march

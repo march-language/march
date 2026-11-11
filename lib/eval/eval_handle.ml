@@ -122,7 +122,11 @@ let builtins : env =
          | _ -> eval_error "handle_close(h)"));
     ("handle_detach", VBuiltin ("handle_detach", function
          | [VHandle c] ->
-           if c.h_closed then VInt (-1)
+           (* A borrowed box's descriptor is not its to give away (as the
+              compiled march_handle_detach).  The compiled box also refuses
+              while another use is in flight; the interpreter keeps no
+              in-flight count (see the header). *)
+           if c.h_closed || c.h_kind = kind_tcp_borrowed then VInt (-1)
            else begin
              c.h_closed <- true;
              c.h_released <- true;

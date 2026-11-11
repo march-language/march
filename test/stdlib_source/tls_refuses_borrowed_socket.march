@@ -1,0 +1,43 @@
+-- Tls.connect refuses a borrowed Socket (ocap phase 2, ruling R10).
+--
+-- Socket.borrow lends a descriptor something else owns (the HTTP event loop,
+-- the cluster stack) for one call. A successful Tls.connect takes its socket
+-- over -- the TlsConn closes the fd -- so handing it a borrowed one would let
+-- TLS close a descriptor that is not this code's. It must refuse, with the
+-- usual handshake-failure shape, and leave the owner's socket working.
+--
+-- Socket.borrow / Socket.raw_fd are @[stdlib_internal], so test/dune checks
+-- and runs this file with --stdlib-source, interpreted and compiled.
+mod TlsRefusesBorrowedSocket do
+  needs IO
+
+  fn main(_c : Cap(IO)) do
+    let l = match Socket.listen(0) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
+    end
+    let port = match Socket.local_port(l) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ Socket.error_message(e))
+    end
+    let c = match Socket.connect("127.0.0.1", port) do
+      Ok(c) -> c
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let b = Socket.borrow(Socket.raw_fd(c))
+    match Tls.client_ctx(Tls.default_client_config()) do
+    Err(e) -> println("ctx failed: " ++ Tls.error_to_string(e))
+    Ok(ctx) ->
+      match Tls.connect(b, ctx, "127.0.0.1") do
+      Err(e) -> println("refused: " ++ Tls.error_to_string(e))
+      Ok(_) -> println("a borrowed socket was taken over")
+      end
+    end
+    match Socket.write(c, "still mine") do
+    Ok(_) -> println("the owner's socket still works")
+    Err(e) -> println("the owner's socket broke: " ++ Socket.error_message(e))
+    end
+    let _ = Socket.close(c)
+    let _ = Socket.close_listener(l)
+  end
+end

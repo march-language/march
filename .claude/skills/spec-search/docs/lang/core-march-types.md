@@ -35,8 +35,8 @@ cited by line**, and a conformance corpus keeps it accurate.
 The conformance mechanism differs from the operational side. There is only **one**
 typechecker (it runs before both `eval` and `--compile`), so there is no output to
 *differentially* diff. Instead the anchor is the compiler's own `--check` mode
-(`march --check file.march`: exit 0 = well-typed, exit 1 + a `-- ERROR --`
-diagnostic = rejected). The corpus (§3) is split into **`accept/`** programs
+(`march --check file.march`: exit 0 = well-typed, exit 1 + an error
+diagnostic, headed by its category such as `-- TYPE MISMATCH --` = rejected). The corpus (§3) is split into **`accept/`** programs
 (must typecheck) and **`reject/`** programs (must be rejected *with a specific
 error message*). This catches both a spec that misdescribes the typechecker and a
 typechecker regression.
@@ -80,7 +80,8 @@ and the **opaque-type imbalance** it intentionally preserves (`ExType`/
 referenceable cross-module even though its declaring module never marked it
 public), together with the **no-per-module-type-namespace design point**
 (types resolve by bare name only, so two sibling modules' same-named types
-are literally one nominal type, not just visually similar) and the
+are literally one nominal type, not just visually similar; superseded for
+variant types on 2026-11-09, see §2.5) and the
 `9001e4c0` qualified-type-path unification that is the flip side of the same
 design. §2.5 also files a real, precisely-traced enforcement gap found while
 verifying the imbalance live: `opaque type`'s constructor-hiding is NOT
@@ -1755,7 +1756,7 @@ live-captured (`reject/t23_derive_unknown_interface`):
 
 ```
 Unknown derive target `Frobnicate` for type `Color`.
-Supported interfaces: Eq, Show, Hash, Ord, Json
+Supported interfaces: Eq, Show, Hash, Ord, Json.
 ```
 
 - **`Eq`/`Show`/`Hash`/`Ord`** each produce exactly ONE `DImpl` via the local
@@ -1834,7 +1835,7 @@ expand_satisfy(iface_n, type_n) =
     | Some iface ->
         methods = filter_map (fun md ->
             match List.assoc_opt md.md_name fns with
-            | None    -> error "satisfy Iface for Type: no function `md_name` found in scope."; None
+            | None    -> error "`satisfy Iface for Type`: no function `md_name` found in scope."; None
             | Some fn -> Some(md.md_name, fn)
           ) iface.iface_methods
         if length methods < length iface.iface_methods then []      -- desugar.ml:1703
@@ -1859,7 +1860,7 @@ live this task:
 - **Missing function for a required method** (this task's
   `reject/t24_satisfy_missing_function`):
   ```
-  satisfy Named for Person: no function `name` found in scope.
+  `satisfy Named for Person`: no function `name` found in scope.
   ```
 
 **All-or-nothing: satisfy never emits a partial impl.** If even ONE method
@@ -2083,6 +2084,17 @@ not just un-flagged at check time but truly accepted end-to-end.
 > "sibling-module constructor shadowing" in `specs/todos/`; the witness now
 > uses distinct ctor names (`MkA`/`MkB`), which isolates the type-identity
 > fact this section documents.
+> **Superseded for variant types, 2026-11-09:** two user modules that each
+> declare a VARIANT type with the same short name now get two nominal types.
+> `lib/typecheck/typecheck_nominal.ml` gives each colliding declaration the
+> identity `Path.Short` (bare at entry level) and resolves every reference
+> lexically, so `take_a(B.make())` above is now rejected with
+> `` expected `A.Foo` but got `B.Foo` `` (`reject/t458`, which is the old
+> `accept/t35`; `reject/t457` is the unqualified form). Unchanged: records
+> still share one global name (`reject/t318` still guards their Json
+> collision), and a user type named like a built-in or stdlib type still
+> collides with it (P1 todo `typecheck-conflates-same-short-named-types`).
+
 **This is documented here as ONE intentional design point, not logged as a
 bug:** March has no per-module type namespace; a module boundary partitions
 FUNCTION/VALUE names (via `pub_set`) but never partitions TYPE identity.
@@ -2290,8 +2302,8 @@ The `DActor` arm performs, in order (`typecheck.ml:6742–6821`):
    This record type is the actor's *state type*, written `state_ty` below.
 
 2. **Duplicate-handler rejection (`:6752–6760`).** Two `on Msg(…)` arms with the
-   *same* message name are a hard error (`` actor '…' defines handler '…' more
-   than once ``), the only diagnostic the arm raises unconditionally.
+   *same* message name are a hard error (`` Actor `…` has a second handler for
+   `…` ``, labelling the first), the only diagnostic the arm raises unconditionally.
 
 3. **Constructor registration (`:6768–6784`).** Two kinds of constructor are
    added to the environment:
@@ -2316,8 +2328,8 @@ The `DActor` arm performs, in order (`typecheck.ml:6742–6821`):
    bound to `state_ty` (`:6790`: the field is read as `state.field`, *not*
    `self.field`) and each declared message param is in scope (`:6792–6798`). The
    body's inferred type is then unified against `state_ty` (`:6805–6806`); a
-   mismatch produces the rich `` handler '…' in actor '…' must return the state
-   type `` diagnostic (`:6811–6819`); this is what enforces the convention that
+   mismatch produces the `actor_handler_state_type` diagnostic ("The handler
+   for `…` in actor `…` must return the actor's new state, …") (`:6811–6819`); this is what enforces the convention that
    a handler ends by returning the *new* state record.
 
 #### 2.6.2 `spawn`: resolved by literal actor name at compile time
@@ -2937,6 +2949,11 @@ success, return a FRESH `TChan (ref cont)` (a new mutable ref, not the same
 one), matching the linear discipline: the old endpoint value is gone, only
 the newly-returned one is live.
 
+> **2026-11-04 (diagnostics §F3):** the wrong-state messages quoted below were reworded to plain
+> terms, e.g. ``` `Chan.recv` can't receive here: at this point the channel must send an `Int`. ```,
+> with a note listing the steps left on the channel and a label on the protocol it follows
+> (`report_session_state` in `lib/typecheck/typecheck.ml`). The quotes below are the earlier text.
+
 - **`Chan.new(Proto)` (`typecheck.ml:4323–4362`).** Not itself a state
   transition (there is no incoming channel), but the entry point that
   MANUFACTURES the first `TChan` values: the sole argument must resolve to a
@@ -3175,7 +3192,7 @@ manifest, **Check 1** (every `Cap(X)` in a function/actor/extern
 **signature** must be covered by a declared `needs`), and (§2.8.6) the
 transitive/extern-implied checks (4, 1c, 5) plus the candid three-tier
 enforcement reality (signature/transitive/extern-cap = ERROR; direct-body-
-call/extern-implied = WARNING). §2.8.8-§2.8.9 further extend §2.8 with
+call = WARNING; extern-implied became ERROR 2026-11-06). §2.8.8-§2.8.9 further extend §2.8 with
 `cap_narrow`/`root_cap` threading, the effect-inference two projections, the
 `*_migrate_state` IO-free check (Check 8), and realtime exclusion (Check 7).
 §2.8.11 covers a SEPARATE, orthogonal mechanism sharing only the `cap`
@@ -3356,8 +3373,8 @@ core enforcement rule this subsection pins:
 >
 > Check 1b (a body-scanned direct builtin call) is **also an ERROR** as of
 > 2026-08-06; it was warning-only before, and the parenthetical here said so.
-> Check 1c (an `extern` block implying `IO.Foreign`) remains warning-only and
-> was intentionally not flipped.
+> Check 1c (an `extern` block implying `IO.Foreign`) stayed warning-only until
+> 2026-11-06, when it became an **ERROR** (see the Check 1c section below).
 
 The set of signature-occurring `Cap(X)` paths (`used_caps`,
 `typecheck.ml:5468-5515`) is collected from three declaration shapes:
@@ -3512,7 +3529,7 @@ module that `use`s `Vault` without declaring `needs IO.Mut` itself is
 rejected:
 
 ```
-module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`.
+Module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is not declared in `needs`.
 help: add `needs IO.Mut` to the module body.
 ```
 
@@ -3548,15 +3565,16 @@ must be covered by `needs` exactly as a function signature's `Cap(X)` must
 be (§2.8.3). `accept/t50` (§2.8.7) declares `needs IO.FileSystem` covering an
 `extern "libc" : Cap(IO.FileSystem)` block and accepts.
 
-**Check 1c: extern blocks imply `IO.Foreign` (WARNING only).** Distinct
+**Check 1c: extern blocks imply `IO.Foreign` (ERROR since 2026-11-06; WARNING only before).** Distinct
 from Check 5's ERROR on the extern's *own declared* `Cap(X)`, Check 1c
 (`typecheck.ml:5627-5642`, comment "Check 1c:" at `:5627`) additionally treats
 *every* extern block, regardless of what `Cap(X)` it declares, as implying
 `IO.Foreign` (an FFI call is inherently foreign-code execution); and, per
 the extern-implied-caps computation feeding this check
 (`typecheck.ml:5559-5570`), `IO.Foreign.Blocking` too if any of the block's
-functions are marked blocking. Unlike Check 5, an uncovered `IO.Foreign`
-implication is only a **WARNING**:
+functions are marked blocking. Like Check 5, an uncovered `IO.Foreign`
+implication is an **ERROR** (it was only a **WARNING** before 2026-11-06; the
+snippet below shows the severity at the time it was written):
 
 ```ocaml
 List.iter (fun (cap_path, sp) ->
@@ -3570,9 +3588,9 @@ List.iter (fun (cap_path, sp) ->
 ```
 
 So a single `extern` block imposes **two independent capability obligations
-of two different severities**: its own declared `Cap(X)` is ERROR-enforced
-(Check 5), while the blanket `IO.Foreign` implication is WARNING-only (Check
-1c). `accept/t50` declares both `needs IO.Foreign` and `needs IO.FileSystem`
+of two different severities before 2026-11-06**: its own declared `Cap(X)` is
+ERROR-enforced (Check 5), while the blanket `IO.Foreign` implication was
+WARNING-only (Check 1c). Both are errors now. `accept/t50` declares both `needs IO.Foreign` and `needs IO.FileSystem`
 so neither fires; dropping only the `IO.Foreign` line would still `--check`
 exit 0 (a warning, not a rejection); dropping the `IO.FileSystem` line
 would exit 1 (Check 5, an error). This imbalance is easy to miss because
@@ -3629,7 +3647,7 @@ So the three-tier reality is:
 | `use`d module's declared caps uncovered | Check 4 | **ERROR** | 1 |
 | extern's own declared `Cap(X)` uncovered | Check 5 | **ERROR** | 1 |
 | body call to a cap-table builtin, uncovered | Check 1b | WARNING | 0 |
-| extern block's blanket `IO.Foreign` implication, uncovered | Check 1c | WARNING | 0 |
+| extern block's blanket `IO.Foreign` implication, uncovered | Check 1c | **ERROR** (WARNING before 2026-11-06) | 1 |
 
 "Absence of `needs` is a machine-verified guarantee of purity" (the
 tutorial's framing) applies **only** for the signature/transitive/extern-cap
@@ -3662,7 +3680,7 @@ Two new `accept/` programs (`t49`-`t50`) and one new `reject/` program
 - **`t39_transitive_use_missing_cap`**: companion to `t49` with the `needs
   IO.Mut` line removed: `Main` `use`s `Vault` but declares no `needs` at all,
   so `declared_needs = []` covers no cap and Check 4 raises. Pinned: ``
-  module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is
+  Module `Main` imports `Vault` which requires `Cap(IO.Mut)`, but `IO.Mut` is
   not declared in `needs` ``.
 
 `check_types.sh`: **89/89 (50 accept, 39 reject)**, exit 0.
@@ -4142,7 +4160,7 @@ program above now rejects:
 
 ```
 $ march --check leaky_pure.march     # cap pure module calling file_write(...) — POST-FIX transcript
--- ERROR --  `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
+-- CONTRACT --  `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
 $ echo $?
 1
 ```
@@ -4190,7 +4208,7 @@ live-verified:** the exact program above now rejects:
 
 ```
 $ march --check guarded_partial.march   # cap no_panic; match h do Rood -> 1 end — POST-FIX
--- ERROR --  `describe` in `mod Guarded` (declared `cap no_panic`) contains a non-exhaustive `match`, which panics at runtime when no clause matches.
+-- CONTRACT --  `describe` in `mod Guarded` (declared `cap no_panic`) contains a non-exhaustive `match`, which panics at runtime when no clause matches.
 $ echo $?
 1
 ```
@@ -5289,12 +5307,16 @@ typechecker that this document exists to pin down, not bugs:
     `Pid`'s parameter is the actor's STRUCTURAL state record and cannot name
     the actor: a message for an actor whose state has the same shape as the
     target's still typechecks and is dropped at run time on both backends.
-    One backend split remains for a handler name two actors share: a bare
-    name resolves to one owner, so the interpreter (dispatching by name) runs
-    the target's handler while compiled code drops the other actor's message.
-    When the target's state differs that is now the `send_wrong_actor` error,
-    whose advice is to rename a handler, since no qualified spelling selects
-    an actor's message (`specs/todos/2026-10-15-actor-message-ctor-cannot-be-qualified.md`).
+    For a handler name two actors share, a bare name resolves to one owner;
+    when the target's state differs that is the `send_wrong_actor` error,
+    whose advice is the actor-qualified spelling (`Counter.Tally`), which
+    selects an actor's message since 2026-11-04
+    (`specs/progress/2026-10-15-actor-message-ctor-cannot-be-qualified.md`).
+    The backend split this used to leave is closed: since 2026-11-05 the
+    interpreter tags an actor message by its checked type and drops another
+    actor's or a variant's same-named message, as compiled code does
+    (`specs/progress/2026-11-04-interp-actor-dispatch-by-name.md`,
+    `test/native/actor_shared_name_drop.march`).
     Progress entry: `specs/progress/2026-10-12-send-message-not-checked-against-pid-actor.md`.
     Cross-ref §2.6.4 and finding 18.
 
@@ -5705,11 +5727,11 @@ module a given module `use`s must have its own declared `needs` covered,
 transitively, via the same `cap_subsumes` subsumption, ERROR on violation),
 extern `Cap(X)` coverage (**Check 5**, `typecheck.ml:5684-5701`, ERROR), and
 the extern-implies-`IO.Foreign` obligation (**Check 1c**,
-`typecheck.ml:5607-5620`, WARNING-only), plus the honestly-stated three-tier
+`typecheck.ml:5607-5620`, WARNING-only when this was written; an ERROR since 2026-11-06), plus the honestly-stated three-tier
 enforcement reality that reconciles `specs/lang/capabilities.md`'s tutorial
 overclaim (F1, logged): Checks 1/4/5 (signature/transitive/extern-cap) are
 true ERRORs, exit 1; Checks 1b (body-scanned builtin call, `typecheck.ml:5588
--5605`) and 1c (extern-implied `IO.Foreign`) are WARNING-only, exit 0;
+-5605`) and 1c (extern-implied `IO.Foreign`; an ERROR since 2026-11-06) were WARNING-only, exit 0, when this was written;
 reproduced live side by side (a `Cap(IO.FileRead)` signature with no `needs`
 rejects; a body call to `file_read` with no `needs` only warns and
 `--check`s clean). Two new `accept/` programs (`t49`: an importer declaring

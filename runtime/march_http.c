@@ -3076,7 +3076,7 @@ int64_t march_ws_sock_value(int fd, march_tls_session_t *s) {
  * (stdlib/websocket.march: `opaque type WsSocket = WsSocket(Socket)`). The
  * box is never released onto the fd: the server closes the connection. */
 void *march_ws_sock_new(int64_t v, void **box_out) {
-    void *box = march_handle_new(MARCH_HANDLE_TCP_BORROWED, v, 0);
+    void *box = march_handle_new(MARCH_HANDLE_TCP_BORROWED, v, 1);  /* aux 1: borrowed (Socket.borrow) */
     void *ws_sock = march_alloc(16 + 8);
     *(void **)((char *)ws_sock + 16) = box;   /* the WsSocket owns one reference */
     march_incrc(box);                         /* ... and the caller another */

@@ -51,6 +51,19 @@
  * still links; every real link (core role) has it. */
 extern void march_sched_fdwait_cancel(int fd) __attribute__((weak));
 extern void march_sched_fdwait_forget(int fd) __attribute__((weak));
+extern void march_sched_fdwait_own(int fd, int owned) __attribute__((weak));
+
+/* The descriptor a box of [kind] owns and can cancel waits on, or -1. */
+static inline int64_t owned_fd(int64_t kind, int64_t raw, int64_t aux) {
+    switch (kind) {
+    case MARCH_HANDLE_TCP: case MARCH_HANDLE_LISTENER: case MARCH_HANDLE_UDP: return raw;
+    case MARCH_HANDLE_TLS: return aux;
+    default: return -1;
+    }
+}
+static inline void fd_own(int64_t fd, int owned) {
+    if (march_sched_fdwait_own && fd >= 0) march_sched_fdwait_own((int)fd, owned);
+}
 
 static inline void fd_cancel_waits(int64_t fd) {
     if (march_sched_fdwait_cancel && fd >= 0) march_sched_fdwait_cancel((int)fd);
@@ -168,6 +181,7 @@ static void release_kind(int64_t kind, int64_t raw, int64_t aux) {
 
 static void handle_release(void *h) {
     int64_t kind = h_kind(h), raw = h_raw(h), aux = h_auxv(h);
+    fd_own(owned_fd(kind, raw, aux), 0);
     void (*hook)(int64_t, int64_t, int64_t) = march_handle_test_release_hook;
     if (hook) { hook(kind, raw, aux); return; }
     release_kind(kind, raw, aux);
@@ -181,6 +195,7 @@ void *march_handle_new(int64_t kind, int64_t raw, int64_t aux) {
     *(int64_t *)((char *)h + 24) = aux;
     atomic_init(h_state(h), 0);
     *(int64_t *)((char *)h + 40) = 0;
+    fd_own(owned_fd(kind, raw, aux), 1);
     return h;
 }
 
@@ -246,15 +261,26 @@ int64_t march_handle_close(void *h) {
     return 1;
 }
 
+/* Hand the descriptor over (to a TLS box, or to code that keeps raw fds):
+ * close the box without releasing.  Refused (-1, nothing changes) when the
+ * box is closed; when it is a TCP_BORROWED box, whose descriptor is not the
+ * box's to give away; and while another use is in flight -- an in-flight
+ * count above the caller's own one (the caller may be inside a use, as
+ * Tls.connect is, or not) -- because that use would go on with a descriptor
+ * its new owner may close. */
 int64_t march_handle_detach(void *h) {
     check_box(h, "detach");
+    if (h_kind(h) == MARCH_HANDLE_TCP_BORROWED) return -1;
     _Atomic int64_t *st = h_state(h);
     int64_t s = atomic_load_explicit(st, memory_order_acquire);
     for (;;) {
         if (s & ST_CLOSED) return -1;
+        if ((s & IN_MASK) > IN_ONE) return -1;
         if (atomic_compare_exchange_weak_explicit(st, &s, s | ST_CLOSED | ST_RELEASED,
-                                                  memory_order_acq_rel, memory_order_acquire))
+                                                  memory_order_acq_rel, memory_order_acquire)) {
+            fd_own(owned_fd(h_kind(h), h_raw(h), h_auxv(h)), 0);
             return h_raw(h);
+        }
     }
 }
 

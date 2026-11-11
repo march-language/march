@@ -146,12 +146,14 @@ mod Socket do
   doc """
   Wrap a descriptor something else owns (the HTTP event loop, the cluster
   stack) as a `Socket` for the duration of a call. Closing or dropping it
-  never closes the descriptor. Never pass one to `Tls.connect` /
-  `Tls.accept`, which take ownership.
+  never closes the descriptor. `Tls.connect` / `Tls.accept` refuse one
+  (they would take the descriptor over).
   """
   @[stdlib_internal]
   fn borrow(fd : Int) : Socket do
-    let s : Socket = handle_new(kind_tcp_borrowed(), fd, 0)
+    -- aux 1 marks a borrowed box for the stdlib (Tls refuses one); the
+    -- runtime's own borrowed boxes (march_ws_sock_new) carry it too.
+    let s : Socket = handle_new(kind_tcp_borrowed(), fd, 1)
     s
   end
 

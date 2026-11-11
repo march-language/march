@@ -790,7 +790,7 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
                server owns and closes (stdlib/websocket.march). *)
             let fd_int = (Obj.magic sock : int) in
             let ws_sock = VCon ("WsSocket",
-              [Eval_handle.make Eval_handle.kind_tcp_borrowed (VInt fd_int) (VInt 0)]) in
+              [Eval_handle.make Eval_handle.kind_tcp_borrowed (VInt fd_int) (VInt 1)]) in
             (try ignore (!apply_hook handler_fn [ws_sock])
              with _ -> ()))
        | _ ->
@@ -1033,7 +1033,7 @@ let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : 
   in
   let start_ws_fiber fd handler_fn =
     let ws_sock = VCon ("WsSocket",
-      [Eval_handle.make Eval_handle.kind_tcp_borrowed (VInt (Obj.magic fd : int)) (VInt 0)]) in
+      [Eval_handle.make Eval_handle.kind_tcp_borrowed (VInt (Obj.magic fd : int)) (VInt 1)]) in
     Effect.Deep.match_with
       (fun () -> ignore (!apply_hook handler_fn [ws_sock]))
       ()

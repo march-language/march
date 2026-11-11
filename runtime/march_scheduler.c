@@ -4878,20 +4878,43 @@ static void fdwait_service(void) {
  * has no green thread to wake there). */
 #define FDWAIT_CANCEL_POLL_MS 100
 
+/* Descriptors a handle box owns (march_sched_fdwait_own): the only ones a
+ * cancellation can ever name.  A blocking wait polls in FDWAIT_CANCEL_POLL_MS
+ * slices only for those; every other off-scheduler wait (the pooled HTTP
+ * server's conn_wait, a blocking WebSocket read) keeps one poll for its whole
+ * timeout, as before cancellation existed.  Indexed by fd, read without a
+ * lock; a descriptor at or above the table size is treated as owned (sliced),
+ * which is only slower, never wrong. */
+#define FDWAIT_OWNED_MAX 65536
+static _Atomic unsigned char g_fdwait_owned[FDWAIT_OWNED_MAX];
+
+void march_sched_fdwait_own(int fd, int owned) {
+    if (fd >= 0 && fd < FDWAIT_OWNED_MAX)
+        atomic_store_explicit(&g_fdwait_owned[fd], owned ? 1 : 0, memory_order_release);
+}
+
+static int fdwait_sliced(int fd) {
+    if (fd < 0) return 0;
+    if (fd >= FDWAIT_OWNED_MAX) return 1;
+    return atomic_load_explicit(&g_fdwait_owned[fd], memory_order_acquire) != 0;
+}
+
 static int fdwait_blocking(int fd, int want_write, int64_t deadline_ms) {
     struct pollfd pfd;
     pfd.fd = fd;
     pfd.events = want_write ? POLLOUT : POLLIN;
     pfd.revents = 0;
     int rc;
+    const int sliced = fdwait_sliced(fd);
     for (;;) {
         if (fdwait_is_cancelled_locked(fd)) { errno = ECANCELED; return MARCH_FDWAIT_ERROR; }
-        int ms = FDWAIT_CANCEL_POLL_MS;
-        int last = 0;
+        int ms = sliced ? FDWAIT_CANCEL_POLL_MS : -1;
+        int last = !sliced;
         if (deadline_ms > 0) {
             int64_t rem = deadline_ms - march_now_ms();
             if (rem <= 0) return MARCH_FDWAIT_TIMEOUT;
-            if (rem <= ms) { ms = (int)rem; last = 1; }
+            if (!sliced) ms = rem > INT_MAX ? INT_MAX : (int)rem;
+            else if (rem <= ms) { ms = (int)rem; last = 1; }
         }
         rc = poll(&pfd, 1, ms);
         if (rc < 0 && errno == EINTR) continue;
@@ -4973,15 +4996,18 @@ int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms) {
         struct pollfd pfds[4];
         for (int i = 0; i < n; i++) { pfds[i].fd = fds[i]; pfds[i].events = POLLIN; pfds[i].revents = 0; }
         int rc;
+        int sliced = 0;
+        for (int i = 0; i < n; i++) sliced |= fdwait_sliced(fds[i]);
         for (;;) {
             for (int i = 0; i < n; i++)
                 if (fdwait_is_cancelled_locked(fds[i])) { errno = ECANCELED; return MARCH_FDWAIT_ERROR; }
-            int ms = FDWAIT_CANCEL_POLL_MS;
-            int last = 0;
+            int ms = sliced ? FDWAIT_CANCEL_POLL_MS : -1;
+            int last = !sliced;
             if (deadline_ms > 0) {
                 int64_t rem = deadline_ms - march_now_ms();
                 if (rem <= 0) return MARCH_FDWAIT_TIMEOUT;
-                if (rem <= ms) { ms = (int)rem; last = 1; }
+                if (!sliced) ms = rem > INT_MAX ? INT_MAX : (int)rem;
+                else if (rem <= ms) { ms = (int)rem; last = 1; }
             }
             rc = poll(pfds, (nfds_t)n, ms);
             if (rc < 0 && errno == EINTR) continue;

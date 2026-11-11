@@ -132,29 +132,45 @@ mod Tls do
   -- with the SSL_CTX * inside ctx. On success the new TlsConn takes the fd
   -- over: s is detached (closed without closing the fd) and the fd becomes
   -- the TLS box's aux. On failure s is left open and the caller's.
+  --
+  -- A borrowed Socket (Socket.borrow: an fd something else owns, marked by
+  -- aux 1) is refused before anything runs: taking it over would let the
+  -- TlsConn close a descriptor that is not this code's to close.
+  --
+  -- Every exit frees the SSL object BEFORE leaving s: the leave can drop the
+  -- last in-flight use of a socket another task closed meanwhile, which
+  -- releases the fd, and SSL_shutdown must not then write close_notify to a
+  -- descriptor number the OS may already have handed to someone else.
   pfn handshake(s : Socket, ctx : TlsCtx, run) : Result(TlsConn, TlsError) do
-    with_ctx(ctx, fn h ->
-      let fd = handle_enter(s, kind_tcp())
-      if fd == -1 do Err(TlsError.Closed) else
-        match run(fd, h) do
-        Err(msg) ->
-          handle_leave(s)
-          if handle_is_closed(s) do Err(TlsError.Closed) else Err(TlsHandshakeFailed(msg)) end
-        Ok(ssl) ->
-          -- Detach while still in flight, so no concurrent close can release
-          -- the fd between the handshake and the hand-over.
-          let raw = handle_detach(s)
-          handle_leave(s)
-          if raw == -1 do
-            -- s was closed during the handshake; its release closes the fd.
-            tls_close(ssl)
-            Err(TlsError.Closed)
-          else
-            let b : Socket = handle_new(kind_tls(), ssl, raw)
-            Ok(TlsConn(b))
+    if handle_aux(s) == 1 do
+      Err(TlsHandshakeFailed("a borrowed socket cannot be handed to TLS"))
+    else
+      with_ctx(ctx, fn h ->
+        let fd = handle_enter(s, kind_tcp())
+        if fd == -1 do Err(TlsError.Closed) else
+          match run(fd, h) do
+          Err(msg) ->
+            handle_leave(s)
+            if handle_is_closed(s) do Err(TlsError.Closed) else Err(TlsHandshakeFailed(msg)) end
+          Ok(ssl) ->
+            -- Detach while still in flight, so no concurrent close can release
+            -- the fd between the handshake and the hand-over. Detach refuses
+            -- (-1) when s is closed, or while another task is using s.
+            let raw = handle_detach(s)
+            if raw == -1 do
+              tls_close(ssl)          -- the fd is still held by our use
+              let closed = handle_is_closed(s)
+              handle_leave(s)         -- may release the fd now; the SSL is gone
+              if closed do Err(TlsError.Closed)
+              else Err(TlsHandshakeFailed("the socket is in use by another task")) end
+            else
+              handle_leave(s)
+              let b : Socket = handle_new(kind_tls(), ssl, raw)
+              Ok(TlsConn(b))
+            end
           end
-        end
-      end)
+        end)
+    end
   end
 
   -- ── Config accessors ──────────────────────────────────────────────────

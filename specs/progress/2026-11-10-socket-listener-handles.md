@@ -51,3 +51,16 @@ Ocap phase 2, Task 5 (plan: `specs/plans/2026-11-10-ocap-p2-handles-plan.md`).
   Tls.read), `test/test_handle.c` (missing TLS closer is fatal; close cancels a wait on a
   listening socket), `test/errors/handle_forge_1` and `stdlib_internal_2`, and
   `test/stdlib/test_tls.march` (migrated; use after close).
+- Review fix round 1:
+  - `Tls` handshake frees the SSL object before leaving the Socket on every refused
+    hand-over, so close_notify can never go to a released (reusable) fd.
+  - Ruling R10: `Tls.connect` / `Tls.accept` refuse a borrowed Socket
+    (`TlsHandshakeFailed`; `Socket.borrow` and the runtime's WsSocket boxes carry aux 1),
+    and `march_handle_detach` refuses a TCP_BORROWED box and refuses while another use is
+    in flight (count above the caller's own).
+  - The blocking (off-scheduler) wait polls in 100 ms slices only for descriptors a handle
+    box owns (`march_sched_fdwait_own`, set at `march_handle_new`, cleared at release and
+    detach); every other blocking wait keeps one poll.
+  - Follow-ups filed: `specs/todos/2026-11-11-ws-send-in-flight-at-handler-return.md`,
+    `-linux-ssl-read-write-sigpipe.md`, `-udp-recv-batch-drops-on-close.md`,
+    `-interp-ws-socket-not-closed-after-handler.md`.

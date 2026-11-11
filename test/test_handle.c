@@ -308,6 +308,39 @@ static void test_missing_tls_releaser_is_fatal(void) {
     run_fatal_case(TLS_CTX_NO_RELEASER, "TLS_CTX box released with no closer registered");
 }
 
+/* ── detach refuses while another use is in flight, or on a borrowed box (R10) */
+static void test_detach_refuses_in_flight_and_borrowed(void) {
+    install_counter();
+    int p[2];
+    if (pipe(p) != 0) { perror("pipe"); exit(2); }
+    void *h = march_handle_new(MARCH_HANDLE_TCP, p[0], 0);
+    CHECK(march_handle_enter(h, MARCH_HANDLE_TCP) == p[0], "first use enters");
+    CHECK(march_handle_enter(h, MARCH_HANDLE_TCP) == p[0], "second use enters");
+    CHECK(march_handle_detach(h) == -1, "detach refused with another use in flight");
+    CHECK(!march_handle_is_closed(h), "a refused detach leaves the box open");
+    CHECK(march_handle_enter(h, MARCH_HANDLE_TCP) == p[0], "and usable");
+    march_handle_leave(h);
+    march_handle_leave(h);
+    CHECK(march_handle_detach(h) == p[0], "detach with only the caller's own use in flight");
+    CHECK(march_handle_is_closed(h), "the detached box is closed");
+    march_handle_leave(h);
+    march_decrc(h);
+    CHECK(atomic_load(&g_releases) == 0, "a detached descriptor is never released");
+    CHECK(fd_is_open(p[0]), "the detached descriptor stays open");
+    /* Not inside any use: count 0 is fine too. */
+    void *h2 = march_handle_new(MARCH_HANDLE_TCP, p[0], 0);
+    CHECK(march_handle_detach(h2) == p[0], "detach outside any use");
+    march_decrc(h2);
+    remove_counter();                  /* the real release: nothing, for a borrowed box */
+    void *b = march_handle_new(MARCH_HANDLE_TCP_BORROWED, p[0], 1);
+    CHECK(march_handle_detach(b) == -1, "a borrowed box refuses detach");
+    CHECK(!march_handle_is_closed(b), "and stays open");
+    march_decrc(b);
+    CHECK(fd_is_open(p[0]), "the borrowed descriptor stays open");
+    close(p[0]);
+    close(p[1]);
+}
+
 /* ── close cancels a wait on the descriptor (R3) ───────────────────────────
  * A thread waits for a LISTENING socket to become readable (what accept
  * parks on) through march_sched_wait_fd.  Off a green thread that is the
@@ -447,6 +480,7 @@ int main(void) {
     test_kind_mismatch_is_fatal();
     test_missing_tls_releaser_is_fatal();
     test_close_cancels_listener_wait();
+    test_detach_refuses_in_flight_and_borrowed();
     test_msg_copy_shares();
     test_to_string();
     if (g_failed) {

@@ -15418,6 +15418,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/udp_close_while_recv.expected native_udp_close_while_recv.out)))
 
+; tls_refuses_borrowed_socket (ruling R10): Tls.connect refuses a borrowed
+; Socket and leaves the owner's socket working. It calls the
+; @[stdlib_internal] Socket.borrow, so it runs with --stdlib-source,
+; interpreted and compiled (and lives outside test/native, whose files the
+; refine audit checks as user code).
+(rule
+ (targets tls_refuses_borrowed_socket_interp.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file stdlib_source/tls_refuses_borrowed_socket.march))
+ (action
+  (with-stdout-to tls_refuses_borrowed_socket_interp.out
+   (run %{exe:../bin/main.exe} --stdlib-source
+        stdlib_source/tls_refuses_borrowed_socket.march))))
+
+(rule
+ (alias runtest)
+ (action (diff stdlib_source/tls_refuses_borrowed_socket.expected tls_refuses_borrowed_socket_interp.out)))
+
+(rule
+ (targets tls_refuses_borrowed_socket_bin tls_refuses_borrowed_socket.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib_source/tls_refuses_borrowed_socket.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o tls_refuses_borrowed_socket_bin
+        stdlib_source/tls_refuses_borrowed_socket.march)
+   (with-stdout-to tls_refuses_borrowed_socket.out
+        (system "./tls_refuses_borrowed_socket_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff stdlib_source/tls_refuses_borrowed_socket.expected tls_refuses_borrowed_socket.out)))
+
 ; socket_sent_to_local_actor: a Socket sent to a local actor is shared (the
 ; message copy shares the handle box), so the actor writes to the very
 ; connection the main thread accepted.

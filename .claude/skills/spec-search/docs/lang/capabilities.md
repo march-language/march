@@ -32,11 +32,11 @@ is open). This page covers all of them, in the order you are likely to need them
 academic "effect system". There are no algebraic effects, no effect handlers, and no
 user-defined effects with row-polymorphic inference. What exists is a fixed, closed
 lattice of IO and behavioral capabilities, checked by tracing which of them a
-function's reachable call graph touches. A per-function effect-row system is
-intentionally not built: it would make a `Cap(X)` parameter an upper limit over
-everything a function reaches, forcing every caller to thread capabilities it does
-not otherwise need, which is the opposite of March's module-scoped design. See
-[The grant](#grant).
+function's reachable call graph touches. A `Cap(X)` parameter is not an upper limit
+over what a function reaches (that would force every caller to thread capabilities it
+does not otherwise need); a function that wants a narrower limit than its module
+declares one in its header instead ([Per-function bounds](#per-function-bounds)), which
+callers never have to satisfy. See [The grant](#grant).
 
 ## On this page
 
@@ -55,6 +55,7 @@ not otherwise need, which is the opposite of March's module-scoped design. See
 - [What the compiler tells you](#what-the-compiler-tells-you)
 - [The capability upper limit](#cap-strict)
 - [The grant: `main`'s parameter bounds the whole program](#grant)
+- [Host and method scopes on IO.NetConnect](#host-scopes)
 - [When not to use IO caps](#when-not-to-use-io-caps)
 - [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
@@ -89,11 +90,11 @@ not otherwise need, which is the opposite of March's module-scoped design. See
 | Guarantee a function is completely pure | Declare no `needs`; the compiler verifies it |
 | Let a plugin only read the clock | `cap_narrow` to `Cap(IO.Clock)` at the call site |
 | Bound what the whole program may do | The grant: `main`'s capability parameter |
-| Prove integer division can never panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisor params |
+| Prove integer division and arithmetic can never panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisors and operands |
 | Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` for a whole module, `@[no_alloc]` for one function (the same check) |
 | Keep a module free of C/FFI | `cap no_extern` |
-| Guarantee zero side effects, not just no IO caps declared | `cap pure` |
-| Guarantee reproducible output (no clock, no RNG) | `cap deterministic` |
+| Guarantee zero side effects, not just no IO caps declared (no `needs` allowed; effectful builtins, monotonic clock reads included, rejected) | `cap pure` |
+| Guarantee reproducible output (no clock, no RNG; no `needs` on `IO.Clock`/`IO.Random`/`IO`) | `cap deterministic` |
 | Guarantee migrations run before any query | A proof cap: `proof cap Migrated` in `mod Db` |
 | Prove a specific string has been sanitized | An opaque refined type (`ptype`), not a proof cap |
 | Track that a file handle is open vs closed | Typestate: `always_linear type` + `transitions` |
@@ -185,7 +186,7 @@ IO
 │   │   └── IO.WebSocket — WebSocket connections (ws_send, ws_recv, ws_select; child of NetConnect)
 │   └── IO.NetListen    — bind + listen on a port
 ├── IO.Process          — env vars, child processes, process exit
-├── IO.Clock            — wall clock, monotonic time
+├── IO.Clock            — wall clock (unix_time_ms, DateTime.now); monotonic time is ambient, see below
 ├── IO.Random           — CSPRNG (random_bytes, uuid_v4)
 ├── IO.Signal           — OS-signal watchers (Signal.watch/unwatch/raise)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
@@ -194,6 +195,14 @@ IO
 └── IO.Foreign          — calling unverified C (extern blocks)
     └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
 ```
+
+**Monotonic time is ambient.** `sys_uptime_ms` and its stdlib wrapper
+`System.monotonic_time` (milliseconds since the process started) are not gated
+by `IO.Clock`: they read elapsed time inside the process, not the wall clock,
+and gating them would break every timing caller granted only `IO.Console`. They
+are still a clock read, so `cap pure` and `cap deterministic` both reject them,
+called directly or through a stdlib wrapper (see
+[Behavioral caps](#behavioral-caps)).
 
 **declaration-only** (`IO.Database`, `IO.Telemetry`): the compiler accepts the
 `needs` as a surface-contract annotation but does not scan for specific builtins
@@ -311,8 +320,8 @@ from it that needs a capability you have not declared:
 
 ```
 $ march --check caller.march   # `use`s a module needing Cap(IO.Network), no `needs IO.Network` of its own
--- ERROR --
-module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`.
+-- CAPABILITY --
+Module `Caller` imports `Server` which requires `Cap(IO.Network)`, but `IO.Network` is not declared in `needs`.
 help: add `needs IO.Network` to the module body.
 $ echo $?
 1
@@ -326,21 +335,24 @@ signature, is the same severity:
 
 ```
 $ march --check reader.march   # fn slurp(path) do file_read(path) end — no needs
--- ERROR -- function bodies in `Reader` call builtins that require `Cap(IO.FileRead)`, but `Reader` declares no matching `needs`.
-hint: add these to the module body —
+-- CAPABILITY -- `slurp` reads a file, but module `Reader` declares no `needs IO.FileRead`.
+hint: add this to the module body —
         needs IO.FileRead
 $ echo $?
 1
 ```
 
-The error includes a machine-applicable fix, so `forge fix` will insert the
-`needs` line for you. Every offending capability in the module is collapsed
-into **one** diagnostic, not one per call site: a `main` that touches four
-undeclared capabilities gets a single error naming all four once, with one
-fix that inserts all four `needs` lines at once:
+The error points at the first call that needs the capability and names the code it is
+in and what it does: a function (`` `slurp` reads a file``), an actor handler
+(`` the `Inc` handler of actor `Counter` prints``) or a module-level `let`. It
+includes a machine-applicable fix, so `forge fix` will insert the `needs` line for
+you. Every offending capability in the module is collapsed into **one** diagnostic,
+not one per call site: a `main` that touches four undeclared capabilities gets a
+single error naming all four once (each other capability's first use is a label),
+with one fix that inserts all four `needs` lines at once:
 
 ```
--- ERROR -- function bodies in `Main` call builtins that require `Cap(IO.Console)`, `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`, but `Main` declares no matching `needs`.
+-- CAPABILITY -- `main` prints, but module `Main` declares no `needs IO.Console`; its code also reaches `Cap(IO.FileWrite)`, `Cap(IO.Random)`, `Cap(Time.Clock)`.
 hint: add these to the module body —
         needs IO.Console
         needs IO.FileWrite
@@ -411,8 +423,7 @@ This compiles as-is. Delete `needs IO.FileWrite` and it fails, not with a
 missing-parameter error but with the compiler naming the whole path:
 
 ```
-function bodies in `Logger` call builtins that require `Cap(IO.FileWrite)`, but
-`Logger` declares no matching `needs`.
+`log` writes a file, but module `Logger` declares no `needs IO.FileWrite`.
 ...
 reached from `main`: main → log_error → log
 ```
@@ -447,8 +458,10 @@ accepted if you would rather say it explicitly.
 
 ```
 $ march --compile -o app app.march
--- CAPABILITY CEILING --
-module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`
+-- CAPABILITY ------------------------------------ dep.march
+
+Module `HostileDep` uses `IO.FileRead` but does not declare `needs IO.FileRead`. [cap_ceiling]
+help: add `needs IO.FileRead` to the module body.
 
 1 capability ceiling violation(s). Every module's emitted code must stay
 within its own `needs`.
@@ -486,7 +499,13 @@ capability, so each fix is one line. `--no-cap-strict` unblocks a build you do n
 want to migrate yet.
 
 `IO.Foreign` is excluded: `extern` blocks are already an error when undeclared,
-and what linked C code does is outside the capability model entirely.
+and what linked C code does is outside the capability model entirely. The
+exclusion also covers first-party stdlib modules built on `extern`, such as
+`Js.Dom`, `Js.Canvas` and `Js.Audio` on `--target js`: those modules declare
+`needs IO.Foreign` themselves, so a module can call them without declaring any
+`needs`. Function-level `needs ()` bounds and `main`'s grant still see the
+reach: a bounded function that calls `Js.Dom.set_text` gets `[cap_bound]`, and
+a `main` granted only `Cap(IO.Console)` gets `[cap_grant_exceeded]`.
 
 The same upper limit can be re-checked on a compiled binary with
 [`forge cap inspect --strict`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary),
@@ -567,11 +586,11 @@ Two intentional edges:
 
 The grant is `needs`' missing complement: `needs` states what a *module*
 touches; the grant bounds what the *program* may. Sandbox ladder stages A/B/D
-are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`). Per-function
-grants (effect rows) are stage C and intentionally **not** built: making a
-`Cap(X)` parameter an upper limit over everything a function reaches would force
-every caller to thread capabilities it does not otherwise need, which is the
-opposite of March's module-scoped design. A `Cap(X)` parameter is an authority
+are shipped (`specs/2026-08-08-r1-no-ambient-io-design.md`). Stage C, which made
+a `Cap(X)` parameter an upper limit over everything a function reaches, was removed
+because it forced every caller to thread capabilities it does not otherwise need; a
+declared bound ([Per-function bounds](#per-function-bounds)) gives a function the
+same limit without involving its callers. A `Cap(X)` parameter is an authority
 marker at a module boundary; the *checks* are `needs`, the module upper limit, and
 `main`'s grant.
 
@@ -584,9 +603,170 @@ each call of the role's runner. A role's grant must fit within `main`'s. See
 `--dump-role-authority`, the report of what a role can reach through references it is
 handed rather than through its own code.
 
+### Per-function bounds
+{: #per-function-bounds}
+
+A module's `needs` bounds every function in it. A function can declare a narrower bound
+in its header, after the return type:
+
+```march
+mod Report do
+  needs IO.Console, IO.Clock
+
+  fn log(msg : String) : Unit needs IO.Console do
+    println(msg)
+  end
+
+  fn parse(body : String) : Int needs () do
+    string_byte_length(body)
+  end
+end
+```
+
+`needs ()` is the empty bound: the function performs no capability. Two checks apply:
+
+- **The bound lies within the module.** Every capability it names must be covered by the
+  module's `needs` (a parent covers its children: a module declaring `IO.FileSystem`
+  admits a function bound of `IO.FileRead`). Otherwise `cap_bound_needs`.
+- **The function lies within the bound.** Everything the function reaches, through every
+  function it calls, transitively, must be covered by the bound, the same reachability
+  `main`'s grant is checked with. Otherwise `cap_bound`, naming the path to the capability:
+  ``"`parse` is bounded by `needs ()`, but reaches `IO.Console` (via log → println)"``.
+
+A bound has **no effect on callers**: calling a bounded function is the same as calling
+any other, and a caller stays bounded by its own module and `main`'s grant. Two cases
+are worth knowing:
+
+- **Callbacks are charged to whoever supplies them.** `fn apply(f : Int -> Int, x : Int)
+  : Int needs () do f(x) end` is accepted: calling `f` is charged to the caller that
+  passed it, as everywhere else in the capability checks. A bound means "my own
+  authority, plus whatever you hand me".
+- **Untraceable calls are refused.** A body that calls a function value taken out of a
+  record field, a list or a ref (a codec's stored encoder, say) cannot be charged to
+  anyone, so a bound narrower than all of `IO` is rejected (`cap_bound`) rather than
+  certified. Pass the function in as a parameter or call it by name instead.
+
+The bound may sit on any one clause of a multi-clause function, and covers all of them;
+two clauses declaring different bounds is a syntax error. Impl methods take bounds the
+same way. Local functions inside a body do not: their reach already counts toward the
+function that contains them. Path scopes (`IO.FileRead("/etc")`) are not accepted in a
+function bound.
+
+**Interface methods** take a bound too, after the method's type, and it holds every impl
+of that method (and the interface's default body) to it, including impls written in other
+modules:
+
+```march
+interface Store(a) do
+  fn get : (a, String) -> Option(String) needs IO.FileRead
+  fn describe : a -> String needs ()
+end
+```
+
+An impl method with no bound of its own is checked against the interface's (`cap_bound`,
+naming the interface). One with its own bound may narrow the interface's but not widen it
+(`cap_bound_iface`), and is then held to its own. An interface's bound need not lie within
+its own module's `needs`: it limits other modules' impls, and each impl's module still
+needs the capability itself. A violation reached only through another impl's (a generic
+`impl Store(List(a)) when Store(a)` calling an impure `impl Store(Disk)`, or a bounded
+function calling `get`) is reported once, at the impl that has it; once that impl is
+fixed, anything the caller reaches beyond its own bound is reported in turn. The four built-in interfaces are bounded by `needs ()`; see
+[Standard Interfaces]({{ site.baseurl }}/docs/interfaces/#standard-interfaces).
+
+**No capability threading.** A bound, on a function or an interface method, is a check
+made once where the bounded code is written. It is never part of a type and never carried
+by a `when Iface(a)` constraint, so no caller, generic function or signature has to
+declare anything because of it. A call through an interface is charged what the impls in
+the program actually reach, exactly as before.
+
+### Host and method scopes on IO.NetConnect
+{: #host-scopes}
+
+A module can narrow outbound network access to the hosts it may reach, and to the HTTP
+methods it may use on them:
+
+```march
+mod Billing do                          -- your own code
+  needs IO.NetConnect("api.stripe.com", methods(get, post))
+end
+
+mod Weather do                          -- wraps a dependency: read only
+  needs IO.NetConnect("api.weather.test", methods(get), no_redirects)
+end
+```
+
+`Billing` may reach only `api.stripe.com`, with GET or POST; `Weather` only
+`api.weather.test`, with GET, and never follows a redirect. Scopes are per module and per
+host: each module's own `needs` lines decide.
+
+**Scope syntax.** A host (`example.com`), a host and port (`example.com:8443`), any
+subdomain (`*.example.com`, which does not include `example.com` itself), or an IP
+literal, optionally followed by a path prefix (`api.example.com/v1/weather/`). No scheme or
+userinfo; host names are compared case-insensitively, paths case-sensitively.
+
+**Path prefixes** match by whole segment: `/v1/weather/` admits `/v1/weather` and
+`/v1/weather/today`, not `/v1/weatherman`; the query string never counts. A request path is
+judged only if every character is a plain path character (letters, digits and
+`-._~!$&'()*+,=:@/`; no `;`, `?`, `#`, space or control character), every `%` escape is
+well formed and does not decode to `.`, `/`, `\`, `%` or a control character, and it has no
+`//` and no `.` or `..` segment. Anything else is refused outright rather than cleaned up,
+because a server may resolve it differently (or, with a CR/LF, read a second request). A
+literal prefix proves the host but not the path (`"https://api.example.com/v1/weather/" ++
+"../admin"`), so under a path scope every request's path is checked when it is sent, and
+the compiler reports the violations it can see. A path-scoped host admits no raw
+`tcp_connect`. A URL
+with no port uses its scheme's default (80 or 443). Two options may follow, in either
+order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete`,
+`options`, and `no_redirects`. Options alone mean any host:
+`needs IO.NetConnect(methods(get))`. Without `methods(...)` every method is allowed, and
+unscoped `needs IO.NetConnect` still means any host. Scopes are accepted on
+`IO.NetConnect` only; it also bounds the TLS connections built on it.
+
+**What is checked, at compile time.** In a scoped module, every network call must have a
+destination the compiler can see, inside the scope, with an allowed method; anything else
+fails the build. The check is fail-closed:
+
+- A literal URL, or a literal prefix that ends its host with `/`
+  (`"https://api.stripe.com/" ++ path`), is checked against the scope. Without the `/`
+  the rest could extend the host (`".evil.test/"`), so it is refused.
+- A URL from a parameter, a computed string, a socket handle (`tcp_send_all(fd, ...)`,
+  `tls_connect`), or a call the compiler cannot follow is refused (`cap_host_unproven`).
+- The method comes from the call: `HttpClient.get`, `HttpTransport.simple_get` are GET,
+  `HttpClient.post` POST, `put_request` PUT, `delete` DELETE. A raw `tcp_connect` shows
+  no method, so it is allowed only to a host declared without `methods(...)`.
+- The scope covers everything the module reaches, including calls into your other modules
+  and dependencies. A helper that takes the URL as a parameter must say so with
+  `@[net_dest(url)]`, and is then checked to pass that parameter straight to the
+  connection; its caller's argument is checked against the caller's scope. A helper with
+  a fixed URL is checked as if its call were written in the scoped module. A helper in
+  another module that makes `HttpClient` calls is refused for now (see below).
+- A function you hand in as a parameter is charged to whoever wrote it, as elsewhere on
+  this page: a closure built in an unscoped `main` may be called by a scoped module.
+
+**What is checked, at run time.** A redirect's target and a request rewritten by client
+request steps are only known when the program runs. In a scoped module the compiler
+routes `HttpClient` calls through a variant that receives the module's scope, and the
+client refuses, before connecting, a request outside it: `HttpClient.OutOfScope(host)`,
+`MethodRefused("POST host")`, or under `no_redirects` `RedirectRefused(host)`.
+
+**Limits.** Host scopes are checked on the `--compile` path only, like the
+[upper limit](#cap-strict). `march --check` reports nothing about them, and a program run
+by the interpreter, the REPL or the JIT gets neither the check nor the run-time guard, so
+it follows redirects freely. Only a compiled binary has the protection described here.
+A message a scoped module sends to an actor it was handed (a pid from `main`) runs that
+actor's handler under the handler's module, not the sender's: the same rule as a function
+handed in as a parameter. A scoped module that spawns a network-reaching actor itself is
+refused. They bound the
+name a module connects to, not the address it resolves to, and no OS sandbox enforces
+them: what C code reached through `extern` does is outside them, as it is outside every
+check here. A scoped module cannot call a stdlib server API (its socket handles are plain
+integers) or another module's `HttpClient`-calling helper; move those to an unscoped
+module. A scope on `main`'s grant, which would bound dependencies' own code as well, is
+planned (`specs/todos/2026-11-09-host-scope-phase-2.md`).
+
 ### When *not* to use IO caps
 
-**Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. A module with no `needs` that calls IO builtins directly in function bodies is rejected (`--check` exits 1); a stdlib-mediated call is outside that check but is caught by the upper-limit subset that runs under `--check`, and by the full upper limit under `--compile`. The guarantee is strongest when the functions in question actually take `Cap(X)` parameters or `use` something that does, because the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import.
+**Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. A module with no `needs` that calls IO builtins directly in function bodies is rejected (`--check` exits 1); a stdlib-mediated call is outside that check but is caught by the upper-limit subset that runs under `--check`, and by the full upper limit under `--compile`. The one exception is `IO.Foreign`, which the upper limit excludes: a module with no `needs` can call a first-party stdlib module built on `extern` (`Js.Dom`, `Js.Canvas` on `--target js`), and only a function-level `needs ()` bound or `main`'s grant reports that reach. The guarantee is strongest when the functions in question actually take `Cap(X)` parameters or `use` something that does, because the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import.
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels less precise. Accurate beats narrow-but-wrong.
 
@@ -677,7 +857,7 @@ mod Bindings do
 end
 ```
 
-`needs IO.Foreign` on its own subsumes `IO.Foreign.Blocking` (parent covers child), so one declaration suppresses both warnings if you prefer coarser annotations.
+`needs IO.Foreign` on its own subsumes `IO.Foreign.Blocking` (parent covers child), so one declaration satisfies both requirements if you prefer coarser annotations.
 
 ---
 
@@ -698,7 +878,7 @@ mod SafeMath do
 end
 ```
 
-A module with `cap no_panic` must not contain any expression that can panic at runtime. Three checks enforce that, covering three different ways code panics: an unsafe call, an unsafe division, and an unhandled `match` case.
+A module with `cap no_panic` must not contain any expression that can panic at runtime. Four checks enforce that, covering four different ways code panics: an unsafe call, an unsafe division, an unhandled `match` case, and Int arithmetic that overflows.
 
 **1. Unsafe calls.** Some functions can panic: `panic` itself, `List.tail` on an empty list, `Option.unwrap` on `None`. The compiler splits these into two groups:
 
@@ -729,6 +909,8 @@ A module with `cap no_panic` must not contain any expression that can panic at r
 Use `Math.checked_div` / `Math.checked_mod` when you cannot prove the divisor is non-zero statically: they return `Option(Int)` instead of panicking.
 
 **3. Non-exhaustive `match`.** In an ordinary module, a `match` that does not cover every constructor is a warning: the build still succeeds. Under `cap no_panic` it is an error: an uncovered case is a runtime panic waiting to happen ("no matching clause"), and excluding that is exactly what the capability promises.
+
+**4. Int overflow.** `+`, `-`, `*` and unary `-` on `Int` panic when the result leaves [-2^62, 2^62) (see [Int width and overflow]({{ site.baseurl }}/docs/types/#int-width-and-overflow)). Under `cap no_panic` each one must be proven to stay in range, by the same machinery as division: refinements on parameters, enclosing guards, and `let` values in scope. The checker knows that every `Int` a program holds is already in range (a value outside it would have panicked where it was computed), so `x - 1` under `x >= 0`, `x + 1` under `x < n`, and `x * x` with `x` refined to `{v : Int | v >= 0 && v < 1000}` are all accepted, while a bare `x + 1` on an unrefined `x` is an error that names a value it cannot rule out (`x = 4611686018427387903`). Float arithmetic never traps and is not checked. When wrapping is genuinely what you want, or a counter is bounded by something the checker cannot see (a byte offset into the input, say), spell it `int_wrapping_add` / `int_wrapping_sub` / `int_wrapping_mul`: those wrap modulo 2^63 and never panic. `int_abs`, `int_pow` and `int_shl` also still wrap and are not checked.
 
 One tooling caveat: `march check` (the fast, package-level command) does not run the same proof infrastructure as `march --compile`/`--check`, so for the "allowed if you prove it" functions above it falls back to banning them by name rather than checking your guard. That means `march check` can reject a call that `march --compile` accepts. It is being more conservative, not wrong. The LSP has the same limitation inside a top-level module (nested modules get full proof-based squiggles).
 
@@ -809,14 +991,25 @@ mod PureMath do
 end
 ```
 
-A module with `cap pure` bans every call to a builtin that performs any side effect (file IO, network IO, spawning, sending, vault access, console output, randomness, the clock), as well as `spawn`/`send`/`exit`. The banned set is derived from the same authoritative builtin-to-capability table (`builtin_cap_table`) the ordinary IO-cap body-scan check consults, so it stays in sync with the real builtin surface: a module declaring `cap pure` and calling `file_write` is rejected:
+A module with `cap pure` bans every call to a builtin that performs any side effect (file IO, network IO, spawning, sending, vault access, console output, randomness, the clock), as well as `spawn`/`send`/`exit` and the monotonic clock read `sys_uptime_ms`. The banned set is derived from the same authoritative builtin-to-capability table (`builtin_cap_table`) the ordinary IO-cap body-scan check consults, so it stays in sync with the real builtin surface: a module declaring `cap pure` and calling `file_write` is rejected:
 
 ```
 $ march --check leaky_pure.march   # cap pure; fn write(...) : Result(Unit, String) do file_write(path, contents) end
--- ERROR -- `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
+-- CONTRACT -- `write` in `mod LeakyPure` (declared `cap pure`) calls `file_write`, which has side effects.
 $ echo $?
 1
 ```
+
+The check covers stdlib wrappers too, by two rules. A `cap pure` module may not declare any `needs`: a pure module holding a capability is a contradiction, and every stdlib wrapper over a capability-gated builtin (`File.read`, `DateTime.now`, …) is reachable only from a module that declares its `needs`, so rejecting the `needs` line closes that route. A banned builtin that needs no capability (the monotonic clock behind `System.monotonic_time`, `spawn`, `send`, `exit`) is followed through the stdlib: a call to a stdlib function that reaches one is rejected like a direct call.
+
+```
+$ march --check pure_clock.march   # cap pure; fn t() : Int do System.monotonic_time() end
+-- CONTRACT -- `t` in `mod Pure` (declared `cap pure`) calls `System.monotonic_time`, which has side effects: it reaches `sys_uptime_ms`.
+$ march --check pure_needs.march   # cap pure; needs IO.FileRead
+-- CONTRACT -- `mod Pure` (declared `cap pure`) declares `needs IO.FileRead`, but a pure module cannot hold a capability: …
+```
+
+Calls through user-defined modules are outside both caps: each module is checked against its own declarations.
 
 ### `cap deterministic`: no clock, no randomness
 
@@ -830,11 +1023,11 @@ mod DeterministicSim do
 end
 ```
 
-`cap deterministic` is **strictly weaker than `cap pure`**: it bans only the two nondeterminism sources (wall-clock/monotonic-clock reads and random-number generation), so a `cap deterministic` module may still perform ordinary IO such as `file_read`, as long as it never touches the clock or an RNG:
+`cap deterministic` is **strictly weaker than `cap pure`**: it bans only the two nondeterminism sources (wall-clock/monotonic-clock reads and random-number generation), so a `cap deterministic` module may still perform ordinary IO such as `file_read`, as long as it never touches the clock or an RNG. The same two rules carry it through stdlib wrappers: the module may not declare `needs IO.Clock`, `needs IO.Random` or `needs IO` (which includes both), so `DateTime.now` and the RNG wrappers are out of reach, and a stdlib call that reaches the ambient monotonic clock (`System.monotonic_time`) is rejected like a direct `sys_uptime_ms()`:
 
 ```
 $ march --check clock_leak.march   # cap deterministic; calls unix_time_ms(())
--- ERROR -- `now` in `mod DetLeak` (declared `cap deterministic`) calls `unix_time_ms`, which is non-deterministic.
+-- CONTRACT -- `now` in `mod DetLeak` (declared `cap deterministic`) calls `unix_time_ms`, which is non-deterministic.
 $ echo $?
 1
 ```
@@ -845,7 +1038,7 @@ History: both `cap pure`'s and `cap deterministic`'s banned-builtin sets used to
 
 | I want to… | Use |
 |------------|-----|
-| Prove no integer division can panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisor params |
+| Prove no integer division or arithmetic can panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisors and operands |
 | Guarantee safe use in a realtime audio callback | `cap no_alloc`, checked on the compiled code by `forge build`, `march --check` and the editor (+ `Tagged(DSP, Realtime)` for the calling site) |
 | Keep a module free of C/FFI trust-boundary crossings | `cap no_extern` |
 | Guarantee a module has zero side effects, not just no IO caps declared | `cap pure` |
@@ -1329,6 +1522,16 @@ fn test_process() do
   Test.assert_true(List.any(lines, fn l -> String.contains(l, "expected message")), "should have captured the message")
 end
 ```
+
+---
+
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints when a capability is missing or wrong, each with a program you can edit and re-check in the browser:
+
+- [A `main` that does I/O without being granted a capability]({{ site.baseurl }}/docs/error-messages/#main-no-grant)
+- [A module that writes a file without declaring `needs`]({{ site.baseurl }}/docs/error-messages/#missing-needs)
+- [Passing one capability where another is required]({{ site.baseurl }}/docs/error-messages/#wrong-capability)
 
 ---
 
