@@ -206,6 +206,8 @@ classify() {
       add CHECKS scripts/test-run-tests.sh; reason "$f" "test-run-tests.sh" ;;
     scripts/two-node.sh|scripts/test-two-node.sh)
       add CHECKS scripts/test-two-node.sh; reason "$f" "test-two-node.sh" ;;
+    scripts/release-gate.sh|scripts/test-release-gate.sh)
+      add CHECKS scripts/test-release-gate.sh; reason "$f" "test-release-gate.sh" ;;
     scripts/affected.sh|scripts/test-affected.sh)
       add CHECKS scripts/test-affected.sh; reason "$f" "test-affected.sh" ;;
     scripts/determinism-oracle.sh)

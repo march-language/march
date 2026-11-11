@@ -22,7 +22,7 @@ suite unsharded. Be most careful with macOS: 5 slots for the whole org.
 | [`doc-lint.yml`](doc-lint.yml) | every PR and push to `main` | Seconds-long doc and source-level checks, including on Markdown-only changes. |
 | [`nightly.yml`](nightly.yml) | 00:00 UTC; manual | Publishes a `nightly-YYYYMMDD` prerelease when `main` is green and has moved. |
 | [`perf-ab.yml`](perf-ab.yml) | 03:00 UTC; manual | Same-box performance A/B of the last release tag against `main` (`scripts/perf-ab.sh`); uploads the table. A report: red only on an invalid comparison, a failed self-test, or a regression when dispatched with `fail_on_regression`. |
-| [`release.yml`](release.yml) | push of a `v*` tag; manual | Builds and publishes a versioned release. Run manually with a `tag` to rebuild an existing release's archives and replace them. |
+| [`release.yml`](release.yml) | push of a `v*` tag; manual | Builds and publishes a versioned release, only if the tag's commit is green on `main` (`gate`). Run manually with a `tag` to rebuild an existing release's archives and replace them. |
 | [`build.yml`](build.yml) | called by nightly/release | Builds the three distributable archives. Not triggered on its own. |
 | [`gen-stdlib-docs.yml`](gen-stdlib-docs.yml) | push to `main` touching `stdlib/**` | Regenerates the committed stdlib API pages and search index. |
 | [`gen-browser-repl.yml`](gen-browser-repl.yml) | push to `main` touching `lib/**`, `stdlib/**`, `js/**`, the JS runtimes or the Tetris demo | Rebuilds the committed in-browser REPL, live compiler and Tetris playground files (`scripts/build-browser-repl.sh`), smoke-tests them, and commits them if they changed. |
@@ -57,6 +57,12 @@ but only the newest merge stays queued behind it (GitHub cancels the older
 pending run in a group). So a burst of merges costs one run, not one per
 merge, and intermediate `main` commits get no verdict of their own; the
 nightly gate skips cancelled runs and reads the next completed one.
+
+`ci.yml` and `doc-lint.yml` can also be run by hand
+(`gh workflow run ci.yml --ref REF`), which is how a commit that got no verdict
+gets one before a release. A manual run does everything a push to `main` does
+(the full determinism corpus included), ignores `paths-ignore`, and has a
+concurrency group of its own, so a merge cannot cancel it.
 
 Every check is its own job so the critical path is the slowest job, not the
 sum. There is no required-check list in branch protection; "green" means every
@@ -112,9 +118,10 @@ the tests quarantined out of `runtest` (run informationally by the nightly), and
 ## `nightly.yml`
 
 1. `gate` decides whether to run and which commit to build. It walks `CI`'s
-   push runs on `main` newest first, skipping runs still in progress. The first
-   finished run decides: a failure means `main` is red and nothing runs; a
-   success makes that commit the candidate. The candidate must also be newer
+   push runs on `main` newest first (`scripts/release-gate.sh --newest-green`,
+   the code `release.yml`'s gate shares), skipping runs still in progress and
+   cancelled ones. The first finished run decides: a failure means `main` is
+   red and nothing runs; a success makes that commit the candidate. The candidate must also be newer
    than the rolling `nightly` tag (the last commit a nightly shipped). A manual
    run with `force: true` builds `main`'s HEAD and skips both checks.
 2. `quarantined` (informational, never fails the run) runs every
@@ -150,7 +157,25 @@ the job fails if a "static" binary has dynamic dependencies or won't run in a
 bare container, and on every leg if the packaged compiler cannot compile and
 run a program with only the archive's own runtime and stdlib (v0.5.0 shipped
 archives missing `runtime/third_party/` because only `--version` was checked).
-`release.yml` calls it on a `v*` tag and publishes a release. Run manually
+`release.yml` calls it on a `v*` tag and publishes a release. Its `gate` job
+runs first and `build` needs it: `scripts/release-gate.sh SHA` exits 0 only if
+the tag's commit is on `main` and both `ci.yml` and `doc-lint.yml` have a
+successful run of that exact commit. What counts:
+
+- `push` runs on `main` and manual (`workflow_dispatch`) runs. A pull request's
+  run tested a merge ref, not the commit.
+- A cancelled run is no verdict. The newest run with a verdict decides, and a
+  run still in progress is not a success.
+
+So a tag on a red commit fails at `gate` and publishes nothing. A commit with
+no verdict (its run was cancelled by the next merge, or it changed only
+Markdown and `ci.yml` never started) also fails, and the job's log prints the
+`gh workflow run` commands that give it one; when that run is green, re-run the
+failed `gate` job. Run the script locally before pushing a tag to find out
+first. `scripts/test-release-gate.sh` (run by `doc-lint.yml`) drives it against
+a fake `gh`.
+
+Run manually
 (`gh workflow run release.yml -f tag=vX.Y.Z`), it rebuilds that existing tag's
 sources with the current `build.yml` and replaces the release's archives and
 checksums, leaving the notes, the tag and `latest` alone.
