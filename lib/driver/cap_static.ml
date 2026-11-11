@@ -576,6 +576,13 @@ let check_program ?(test_mode = false) ~opt ~is_js (i : input) : outcome =
       (March_typecheck.Typecheck.declared_net_scopes i.tc_env
          ~entry_module:i.desugared.March_ast.Ast.mod_name.March_ast.Ast.txt)
   in
+  if Sys.getenv_opt "MARCH_CAP_TRACE" <> None then
+    Printf.eprintf "cap-trace: check_program file=%S strict=%b entry_is_stdlib=%b \
+                    file_is_stdlib=%b scoped=%b stdlib_files=%d roots=%s\n%!"
+      i.filename i.cap_strict (entry_is_stdlib i)
+      (March_typecheck.Typecheck_builtins.file_is_stdlib i.filename) scoped
+      (List.length !March_typecheck.Typecheck_builtins.stdlib_source_files)
+      (String.concat ":" !March_typecheck.Typecheck_builtins.stdlib_roots);
   if not ((i.cap_strict && not (entry_is_stdlib i)) || scoped) then Checked [] else
   match
     (try
@@ -596,6 +603,9 @@ let check_program ?(test_mode = false) ~opt ~is_js (i : input) : outcome =
              let attribution = cap_attribution i ~pre_opt in
              ceiling_findings i ~pre_opt ~attribution
        in
+       if Sys.getenv_opt "MARCH_CAP_TRACE" <> None then
+         Printf.eprintf "cap-trace: host_scope=%d ceiling=%d\n%!"
+           hs.count ceiling.count;
        Ok (hs.findings @ ceiling.findings)
      with
      | (Out_of_memory | Stack_overflow) as e -> raise e

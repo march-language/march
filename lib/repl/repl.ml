@@ -355,6 +355,10 @@ let wrap_decl_as_module
    belongs to no module and may use the session's bindings. *)
 let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
     (ctx : March_errors.Errors.ctx) (decl : March_ast.Ast.decl) : unit =
+  if Sys.getenv_opt "MARCH_CAP_TRACE" <> None then
+    Printf.eprintf "cap-trace: repl decl is_mod=%b ctx_errors=%b\n%!"
+      (match decl with March_ast.Ast.DMod _ -> true | _ -> false)
+      (March_errors.Errors.has_errors ctx);
   match decl with
   | March_ast.Ast.DMod (_, _, _, dsp) when not (March_errors.Errors.has_errors ctx) ->
     let within (sp : March_ast.Ast.span) =
@@ -394,6 +398,9 @@ let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
              String.length d.code >= 4 && String.sub d.code 0 4 = "cap_" in
            (* Only the capability errors are new here: anything else this
               declaration has, [check_decl] already reported. *)
+           if Sys.getenv_opt "MARCH_CAP_TRACE" <> None then
+             Printf.eprintf "cap-trace: repl errors_here=%d (all=%d)\n%!"
+               (List.length errors_here) (List.length (March_errors.Errors.sorted errs));
            List.iter (fun d -> if cap_code d then March_errors.Errors.report ctx d)
              errors_here;
            (* A non-capability error here that [check_decl] did not report
