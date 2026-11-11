@@ -38,6 +38,8 @@ returns `Result(Result(U, E), CapError)`.
 
 ## Not done here (each has a todo)
 
+- march_doc (the stdlib-docs generator, another repo) needs the same migration: specs/todos/2026-11-10-ocap-p1-march-doc-migration.md.
+
 - Gate on raw capability builtins: specs/todos/2026-11-10-ocap-p1-gate-raw-capability-builtins.md.
 - UDP, TLS contexts, HttpTransport/HttpClient, HttpServer; HttpError's refusal
   variants: specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md.
