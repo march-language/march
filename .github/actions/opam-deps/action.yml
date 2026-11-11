@@ -17,6 +17,11 @@ inputs:
 runs:
   using: composite
   steps:
+    # setup-ocaml runs its own `apt-get install`, so the mirror check has to
+    # come first (an ubuntu.com DNS outage otherwise burns the job's timeout).
+    - name: Check the apt mirror
+      uses: ./.github/actions/apt-mirror-fallback
+
     - name: Set up OCaml
       uses: ocaml/setup-ocaml@v3.7.0
       with:

@@ -1,0 +1,19 @@
+name: apt-mirror-fallback
+description: >
+  On a Linux runner whose default apt mirror does not resolve (an ubuntu.com
+  DNS outage), switch apt to Ubuntu mirrors outside ubuntu.com for the rest of
+  the job. Does nothing on macOS, and nothing while the default mirror
+  resolves. Run it before the first `apt-get install` of a job, including the
+  one inside ocaml/setup-ocaml. See apt-mirror-fallback.sh for the detail.
+
+runs:
+  using: composite
+  steps:
+    - name: Fall back to another apt mirror if ubuntu.com does not resolve
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        # TEMPORARY, removed before merge: take the fallback path on a real
+        # runner once, to prove it there.
+        APT_MIRROR_FALLBACK_FORCE: "1"
+      run: bash "${{ github.action_path }}/apt-mirror-fallback.sh"
