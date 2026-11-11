@@ -16,7 +16,6 @@ Phase 1 shipped (`specs/progress/2026-11-09-host-scoped-network-capabilities.md`
 - **Opaque connection handles.** Integer fds are forgeable, so handle-taking calls and the
   stdlib server APIs are refused in scoped modules.
 - **Per-role grants** for protocol roles.
-- **Under `--check` and the interpreter.** The check runs on the compile path only.
 - **Call-site spans.** Violations point at the module (post-lowering TIR has no spans).
 - **Actor messages to a handed-in pid.** A scoped module sending a message to an actor
   in an unscoped module (pid supplied by `main`) is not checked against the sender's

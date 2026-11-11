@@ -348,6 +348,75 @@ let wrap_decl_as_module
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [d] }
 
+(* ── Capability checks for a declaration at the prompt (ocap phase 3) ────
+   `check_decl` covers what one declaration can be judged on alone (the
+   body-scan `needs` check, path scopes); function bounds, the module ceiling
+   and host scopes need the whole program, so a `mod` declaration is checked
+   again as part of one: the stdlib, every module accepted earlier this
+   session, and the new one.  That program's full typecheck holds each
+   function under its `needs` bound; [Cap_static.check_program] then runs the
+   ceiling and host scopes on it lowered.  Their findings go into [ctx], so a
+   declaration that exceeds its authority is rejected like a type error.  The
+   REPL runs with full authority (ocap design §21), so `main`'s grant is
+   never checked here.  A top-level `fn` at the prompt is not re-checked: it
+   belongs to no module and may use the session's bindings. *)
+let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
+    (ctx : March_errors.Errors.ctx) (decl : March_ast.Ast.decl) : unit =
+  match decl with
+  | March_ast.Ast.DMod (_, _, _, dsp) when not (March_errors.Errors.has_errors ctx) ->
+    let within (sp : March_ast.Ast.span) =
+      sp.March_ast.Ast.file = dsp.March_ast.Ast.file
+      && (sp.March_ast.Ast.start_line, sp.March_ast.Ast.start_col)
+         >= (dsp.March_ast.Ast.start_line, dsp.March_ast.Ast.start_col)
+      && (sp.March_ast.Ast.end_line, sp.March_ast.Ast.end_col)
+         <= (dsp.March_ast.Ast.end_line, dsp.March_ast.Ast.end_col)
+    in
+    let program = {
+      March_ast.Ast.mod_name = { March_ast.Ast.txt = "Repl"; span = March_ast.Ast.dummy_span };
+      mod_decls = stdlib_decls @ prior_mods @ [ decl ] } in
+    let saved_files = !March_typecheck.Typecheck.stdlib_source_files in
+    March_typecheck.Typecheck.stdlib_source_files :=
+      March_typecheck.Typecheck_builtins.stdlib_span_files stdlib_decls;
+    Fun.protect ~finally:(fun () ->
+        March_typecheck.Typecheck.stdlib_source_files := saved_files)
+      (fun () ->
+         match March_typecheck.Typecheck.check_module_full program with
+         | exception _ -> ()
+         | (errs, type_map, tc_env) ->
+           let mine (d : March_errors.Errors.diagnostic) =
+             within d.March_errors.Errors.span in
+           let errors_here =
+             List.filter (fun (d : March_errors.Errors.diagnostic) ->
+                 d.severity = March_errors.Errors.Error && mine d)
+               (March_errors.Errors.sorted errs) in
+           let cap_code (d : March_errors.Errors.diagnostic) =
+             String.length d.code >= 4 && String.sub d.code 0 4 = "cap_" in
+           (* Only the capability errors are new here: anything else this
+              declaration has, [check_decl] already reported. *)
+           List.iter (fun d -> if cap_code d then March_errors.Errors.report ctx d)
+             errors_here;
+           if errors_here = [] then begin
+             let input = {
+               March_driver.Cap_static.desugared = program; stdlib_decls; tc_env;
+               type_map; src; filename = dsp.March_ast.Ast.file;
+               read_file = (fun _ -> src); cap_strict = true } in
+             match March_driver.Cap_static.check_program ~opt:true ~is_js:false input with
+             | March_driver.Cap_static.Unchecked why ->
+               March_errors.Errors.warning ctx ~code:March_errors.Code.cap_unchecked
+                 ~span:dsp
+                 (Printf.sprintf
+                    "The capability ceiling and host scopes were not checked: \
+                     the compiler cannot build this module (%s)." why)
+             | March_driver.Cap_static.Checked fs ->
+               List.iter (function
+                   | March_driver.Cap_static.Diag d -> March_errors.Errors.report ctx d
+                   | March_driver.Cap_static.Bare text ->
+                     March_errors.Errors.error ctx ~code:March_errors.Code.cap_ceiling
+                       ~span:dsp (String.trim text))
+                 fs
+           end)
+  | _ -> ()
+
 (** Non-TUI fallback REPL. *)
 let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) ?(preload_file=None) () =
   let use_jit = jit_ctx <> None &&
@@ -408,6 +477,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   let first_line  = ref true in
   let show_type   = ref false in
   let loaded_file : string option ref = ref None in
+  (* Modules accepted this session, for [repl_check_caps]. *)
+  let accepted_mods : March_ast.Ast.decl list ref = ref [] in
   (* Actor declarations live only in the interpreter's scheduler. Once a
      DActor is seen we disable the JIT paths so spawn/send/run_until_idle
      always go through the interpreter — otherwise JIT-compiled calls hit
@@ -913,7 +984,12 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  let input_ctx = March_errors.Errors.create () in
                  let input_tc  = { !tc_env with errors = input_ctx } in
                  let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
+                 repl_check_caps ~stdlib_decls ~prior_mods:!accepted_mods
+                   ~src:(Buffer.contents buf) input_ctx d';
                  let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+                 (if tc_ok then match d' with
+                    | March_ast.Ast.DMod _ -> accepted_mods := !accepted_mods @ [ d' ]
+                    | _ -> ());
                  report_no_alloc_unchecked input_ctx d';
                  (* In debug mode, skip typecheck gate — the eval env has
                     bindings the typechecker doesn't know about. *)
@@ -1229,6 +1305,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in
   let loaded_file  = ref (None : string option) in
+  let accepted_mods : March_ast.Ast.decl list ref = ref [] in
   let tui          = Tui.create () in
   let inp          = ref Input.empty in
   let comp         = ref CompOff in
@@ -1500,7 +1577,12 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       let input_ctx = March_errors.Errors.create () in
       let input_tc  = { !tc_env with errors = input_ctx } in
       let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
+      repl_check_caps ~stdlib_decls ~prior_mods:!accepted_mods
+        ~src input_ctx d';
       let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+      (if tc_ok then match d' with
+         | March_ast.Ast.DMod _ -> accepted_mods := !accepted_mods @ [ d' ]
+         | _ -> ());
       report_no_alloc_unchecked input_ctx d';
       if not is_debug then
         List.iter (fun (diag : March_errors.Errors.diagnostic) ->

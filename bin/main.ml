@@ -271,61 +271,7 @@ let render_user_diag ~src ~filename ~read_file (d : March_errors.Errors.diagnost
    ref itself at its own check sites. *)
 let stdlib_span_files = March_typecheck.Typecheck_builtins.stdlib_span_files
 
-(** Qualified names of the modules that are USER code: a [DMod] whose span is a
-    real file outside the stdlib root (stdlib modules carry a placeholder span).
-    Transparency for the capability ceiling is decided by this, never by a
-    module's NAME: a user module called `Yaml` is not the stdlib's. *)
-let user_module_names (decls : March_ast.Ast.decl list) : (string, unit) Hashtbl.t =
-  let seen = Hashtbl.create 16 in
-  let rec go prefix ds =
-    List.iter
-      (function
-        | March_ast.Ast.DMod (name, _, inner, sp) ->
-          let q =
-            if prefix = "" then name.March_ast.Ast.txt
-            else prefix ^ "." ^ name.March_ast.Ast.txt
-          in
-          let f = sp.March_ast.Ast.file in
-          if f <> March_ast.Ast.dummy_span.March_ast.Ast.file
-             && not (March_typecheck.Typecheck_builtins.file_is_stdlib f) then
-            Hashtbl.replace seen q ();
-          go q inner
-        | _ -> ())
-      ds
-  in
-  go "" decls;
-  seen
-
-(** The module names a batch of stdlib declarations defines.
-
-    Feeds [Cap_attrib.attribute]'s [~transparent] set, so a capability reached
-    through a stdlib wrapper is attributed to the dependency that called the
-    wrapper rather than to the wrapper. Derived from the declarations actually
-    loaded — like [stdlib_span_files] — rather than from a hand-maintained
-    name list, which is exactly the thing that drifts (see the correction
-    history on [Resolver.stdlib_module_names]).
-
-    [DMod] is the only declaration form that introduces a module name, so the
-    catch-all below cannot hide one; nested modules are reached through
-    [DMod]'s own inner list. Note prelude.march is deliberately unwrapped into
-    global scope by [load_stdlib_file], so its members are bare-named and
-    invisible here — a capability used only by a prelude function is
-    attributed to the entry module. *)
-let stdlib_module_names (decls : March_ast.Ast.decl list) : string list =
-  let seen = Hashtbl.create 64 in
-  let rec go prefix ds =
-    List.iter
-      (function
-        | March_ast.Ast.DMod (name, _, inner, _) ->
-          let name = name.March_ast.Ast.txt in
-          let q = if prefix = "" then name else prefix ^ "." ^ name in
-          Hashtbl.replace seen q ();
-          go q inner
-        | _ -> ())
-      ds
-  in
-  go "" decls;
-  Hashtbl.fold (fun n () acc -> n :: acc) seen []
+let stdlib_module_names = March_driver.Cap_static.stdlib_module_names
 
 (** Typecheck [stdlib_decls] once and cache the resulting environment, so a
     combined check/compile can seed pass 1 from it (via
@@ -685,62 +631,8 @@ let setup_interpreter_ffi () =
     "cannot be attributed to any module").  Same gate the typechecker's Check
     1b uses, for the same reason. *)
 
-(* The names of the functions THIS file declares, span-filtered against the
-   stdlib.  Shared by [own_caps_of_this_module] and by the --cap-strict
-   ceiling's DCE roots (see [Dce.prune_unreachable]'s [extra_root]), which
-   need the same "is this the user's code?" answer and must not drift apart
-   in how they get it. *)
-let user_fn_names_of ~stdlib_files (m : March_ast.Ast.module_) :
-    (string, unit) Hashtbl.t =
-  let is_stdlib (sp : March_ast.Ast.span) =
-    List.mem sp.March_ast.Ast.file stdlib_files
-  in
-  let user_fn_names = Hashtbl.create 64 in
-  let rec walk decls =
-    List.iter (fun (d : March_ast.Ast.decl) ->
-        match d with
-        | March_ast.Ast.DFn (fd, sp) ->
-          if not (is_stdlib sp) then
-            Hashtbl.replace user_fn_names fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
-        | March_ast.Ast.DMod (_, _, inner, _) -> walk inner
-        | _ -> ()) decls
-  in
-  walk m.March_ast.Ast.mod_decls;
-  user_fn_names
-
-(* A TIR function name's bare stem: module prefix and monomorphization suffix
-   stripped (`M.helper$Int` -> `helper`), the spelling [user_fn_names_of]
-   records. *)
-let tir_fn_stem n =
-  let n =
-    match String.rindex_opt n '.' with
-    | Some i -> String.sub n (i + 1) (String.length n - i - 1)
-    | None -> n
-  in
-  match String.index_opt n '$' with
-  | Some i -> String.sub n 0 i
-  | None -> n
-
-(* Whether TIR function [n] is one THIS file declares.  The stem comparison
-   strips the module prefix, so on its own it also matched every STDLIB
-   function sharing a user function's bare name: a main-less module declaring
-   `add` rooted `BigInt.add`, `Decimal.add`, `DateTime.add`, `Forge.add`,
-   `PeerRegistry.add` and `CRDT.GCounter.add`, whose 172 reachable functions
-   include console IO — and the ceiling then charged `IO.Console` to a module
-   that never mentions it
-   (specs/progress/2026-09-18-cap-ceiling-rooted-stdlib-namesakes.md).  A
-   prefixed name is the user's own only if the prefix is not a stdlib module;
-   the entry module's own functions are bare.  Shared by the --cap-strict
-   ceiling's DCE roots and a main-less executable's codegen roots. *)
-let is_user_tir_fn ~user_fns ~stdlib_mods n =
-  Hashtbl.mem user_fns (tir_fn_stem n)
-  && (let pre_mono =
-        match String.index_opt n '$' with
-        | Some i -> String.sub n 0 i
-        | None -> n in
-      match String.rindex_opt pre_mono '.' with
-      | None -> true
-      | Some i -> not (List.mem (String.sub pre_mono 0 i) stdlib_mods))
+let user_fn_names_of = March_driver.Cap_static.user_fn_names_of
+let is_user_tir_fn = March_driver.Cap_static.is_user_tir_fn
 
 (* MIRRORS the local [impl_ty_key] inside Typecheck's [check_module_needs] —
    the producer of the "Iface$Ty.method" closure keys this file must match.
@@ -2910,6 +2802,107 @@ let write_file path contents =
     (Re-exported from the shared resolver for callers below.) *)
 let collect_lib_files = March_resolver.Resolver.collect_lib_files
 
+(* ── TIR-side capability checks outside --compile (ocap phase 3) ──────────
+   [cap_findings_of] turns [Cap_static.check_program]'s outcome into the
+   findings every mode prints; a program the compiler cannot lower gets one
+   [cap_unchecked] warning instead of a verdict. *)
+let cap_findings_of (input : March_driver.Cap_static.input)
+    (outcome : March_driver.Cap_static.outcome) : March_driver.Cap_static.finding list =
+  match outcome with
+  | March_driver.Cap_static.Checked fs -> fs
+  | March_driver.Cap_static.Unchecked why ->
+    let why =
+      let n = String.length why in
+      if n > 0 && why.[n - 1] = '.' then String.sub why 0 (n - 1) else why in
+    let ctx = March_errors.Errors.create () in
+    March_errors.Errors.warning ctx ~code:March_errors.Code.cap_unchecked
+      ~span:input.March_driver.Cap_static.desugared.March_ast.Ast.mod_name.March_ast.Ast.span
+      (Printf.sprintf
+         "The capability ceiling and host scopes were not checked: the \
+          compiler cannot build this program (%s).\n\
+          help: `march --compile` rejects it for that reason; every other \
+          capability check ran."
+         why);
+    List.map (fun d -> March_driver.Cap_static.Diag d) (March_errors.Errors.sorted ctx)
+
+let cap_findings_rejected (fs : March_driver.Cap_static.finding list) =
+  List.exists (function
+      | March_driver.Cap_static.Bare _ -> true
+      | March_driver.Cap_static.Diag d -> d.severity = March_errors.Errors.Error) fs
+
+let print_cap_findings ~src ~filename ~read_file fs =
+  List.iter (function
+      | March_driver.Cap_static.Bare text -> Printf.eprintf "%s" text
+      | March_driver.Cap_static.Diag d ->
+        Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
+    fs
+
+(* The interpreter's cached verdict: a program whose TIR-side capability
+   checks came back clean is not lowered again until something it is built
+   from changes.  Keyed like the --check source key's full walk: the entry's
+   bytes and path, the stdlib, every .march file in the entry's directory and
+   on MARCH_LIB_PATH (so a dependency's edit is a miss), the flags that change
+   the verdict, and (through [compilation_hash]) the compiler and runtime. *)
+let interp_cap_cache_key ~src ~filename ~is_js ~test_mode : string option =
+  try
+    let stdlib_hash = match stdlib_source_hash ~for_js:is_js () with
+      | Some (_, h, _) -> h
+      | None -> "" in
+    let buf = Buffer.create (64 * 1024) in
+    Buffer.add_string buf src;
+    Buffer.add_string buf stdlib_hash;
+    Buffer.add_string buf ("\x00entry:" ^ filename ^ "\x00");
+    let lib_path = try Sys.getenv "MARCH_LIB_PATH" with Not_found -> "" in
+    let lib_dirs = List.filter (fun d -> d <> "") (String.split_on_char ':' lib_path) in
+    let entry_real = (try Unix.realpath filename with Unix.Unix_error _ -> filename) in
+    List.iter (fun dir ->
+        List.iter (fun fp ->
+            let fp_real = (try Unix.realpath fp with Unix.Unix_error _ -> fp) in
+            if fp_real <> entry_real then begin
+              Buffer.add_string buf ("\x00" ^ fp ^ "\x00");
+              (try Buffer.add_string buf (read_file fp) with Sys_error _ -> ())
+            end)
+          (List.sort String.compare (collect_lib_files dir)))
+      (Filename.dirname filename :: lib_dirs);
+    let flags =
+      (if !stdlib_source then ["stdlib-source"] else [])
+      @ (if !cap_strict then ["capstrict"] else [])
+      @ (if test_mode then ["test"] else [])
+      @ (if is_js then ["js"] else []) in
+    Some (March_cas.Cas.compilation_hash
+            ("src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)))
+            ~target:"capcheck" ~flags)
+  with Sys_error _ | Unix.Unix_error _ | Failure _ -> None
+
+(* The interpreter, --jit and `march test`: run the TIR-side checks before
+   the program runs; print what they find; exit 1 on a violation.  A clean
+   verdict is cached (above).  A [cap_unchecked] warning is printed every run
+   and never cached. *)
+let run_interp_cap_checks ~(input : March_driver.Cap_static.input) ~test_mode ~is_js =
+  let src = input.March_driver.Cap_static.src
+  and filename = input.March_driver.Cap_static.filename
+  and read_file = input.March_driver.Cap_static.read_file in
+  let key = interp_cap_cache_key ~src ~filename ~is_js ~test_mode in
+  let store = lazy (March_cas.Cas.create ~project_root:(Sys.getcwd ()) ()) in
+  let hit =
+    match key with
+    | Some ch ->
+      (try March_cas.Cas.lookup_artifact (Lazy.force store) ch <> None
+       with Sys_error _ | Unix.Unix_error _ -> false)
+    | None -> false in
+  if not hit then begin
+    let fs =
+      cap_findings_of input
+        (March_driver.Cap_static.check_program ~test_mode ~opt:!opt_enabled ~is_js input) in
+    print_cap_findings ~src ~filename ~read_file fs;
+    if cap_findings_rejected fs then exit 1;
+    match key with
+    | Some ch when fs = [] ->
+      (try March_cas.Cas.store_artifact (Lazy.force store) ch filename
+       with Sys_error _ | Unix.Unix_error _ -> ())
+    | _ -> ()
+  end
+
 (** Cross-file import resolution — single shared implementation in
     lib/resolver (also used by the REPL and the LSP), so editor
     diagnostics, REPL loads, and forge builds resolve modules identically. *)
@@ -3081,7 +3074,13 @@ let run_test_cmd args =
        syntactic ban must leave the contracted names to it.  Set BEFORE
        [check_module] — the flag is read during that call. *)
     March_typecheck.Typecheck.proof_based_panic_surface := true;
-    let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
+    (* The capability checks run here as in every other mode (ocap phase 3):
+       the typecheck-side ceiling now, the TIR-side ones once the front end
+       is clean (below). *)
+    March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+    March_typecheck.Typecheck.cap_strict_ceiling := !cap_strict;
+    let (errors, type_map, test_tc_env) =
+      March_typecheck.Typecheck.check_module_full desugared in
     (* Phase A1b: discharge refinement-precondition VCs at call sites. *)
     (* NOTE: --refine-audit cannot actually reach this pipeline from the CLI
        today. `march test` is dispatched to [run_test_cmd], whose own
@@ -3179,6 +3178,10 @@ let run_test_cmd args =
       ) diags;
       exit 1
     end;
+    run_interp_cap_checks ~test_mode:true ~is_js:false
+      ~input:{ March_driver.Cap_static.desugared; stdlib_decls;
+               tc_env = test_tc_env; type_map; src; filename; read_file;
+               cap_strict = !cap_strict };
     (* `cap no_alloc` / @[no_alloc] are judged on lowered TIR, which
        `march test` never builds: say so (once) rather than stay silent.  This
        path prints only errors above, so the hint is printed on its own. *)
@@ -3372,141 +3375,6 @@ let run_fmt args =
    category to signal separately; anything that reaches here is a bug. *)
 let internal_compiler_error_exit_code = 3
 
-(** [cap_ceiling_module_spans ~entry_owner ~entry_span decls] maps each
-    module's --cap-strict ceiling owner name (the same keying
-    [March_typecheck.Typecheck.module_caps] uses: the entry module's own TIR
-    name, and both the bare and fully-qualified spelling of every nested
-    [DMod]) to (a) the span [March_caps.Cap_ceiling.check] should attribute
-    an [Undeclared] violation to — that module's first [DNeeds] span if it
-    declares one, otherwise its own header span ([entry_span] for the entry
-    module, the [DMod]'s own declaration span for a nested one) — and (b)
-    whether that span is a HEADER (no existing [DNeeds]) as opposed to an
-    existing [DNeeds] line, which [cap_ceiling_fix_indent] below needs to
-    pick the right indent for an inserted `needs` line.
-
-    Mirrors [Typecheck.check_module_needs]'s [cap_qname_prefix] accumulation
-    (empty at the entry level) so a violation on a doubly-nested module
-    resolves to the SAME qualified key the ceiling matches attribution
-    against. *)
-let cap_ceiling_module_spans ~entry_owner ~entry_span
-    (decls : March_ast.Ast.decl list)
-    : (string * March_ast.Ast.span) list * (string * bool) list =
-  let first_needs_span decls =
-    List.find_map (function
-        | March_ast.Ast.DNeeds (_, sp) -> Some sp
-        | _ -> None)
-      decls
-  in
-  (* A module loaded from a separate file via MARCH_LIB_PATH is synthesized
-     as [DMod (..., dummy_span)] (bin/main.ml's lib-path loader never had a
-     real `mod ... end` span to give it) — its OWN header span is useless.
-     Fall back to the first inner declaration that carries a real span, so
-     the ceiling still has somewhere concrete to point at instead of
-     [dummy_span]'s (file="<none>", line=0), which downstream indexes
-     straight into a negative line number. *)
-  let rec first_real_decl_span decls =
-    match decls with
-    | [] -> None
-    | d :: rest ->
-      let sp =
-        match (d : March_ast.Ast.decl) with
-        | March_ast.Ast.DFn (_, sp) | March_ast.Ast.DLet (_, _, sp)
-        | March_ast.Ast.DType (_, _, _, _, sp)
-        | March_ast.Ast.DAlwaysLinearType (_, _, _, _, sp)
-        | March_ast.Ast.DActor (_, _, _, sp) | March_ast.Ast.DProtocol (_, _, sp)
-        | March_ast.Ast.DMod (_, _, _, sp)
-        | March_ast.Ast.DSig (_, _, sp) | March_ast.Ast.DInterface (_, sp)
-        | March_ast.Ast.DImpl (_, sp)
-        | March_ast.Ast.DExtern (_, sp) | March_ast.Ast.DUse (_, sp)
-        | March_ast.Ast.DAlias (_, sp)
-        | March_ast.Ast.DNeeds (_, sp) | March_ast.Ast.DProofCap (_, _, sp)
-        | March_ast.Ast.DTransitions (_, _, sp)
-        | March_ast.Ast.DApp (_, sp) | March_ast.Ast.DDeriving (_, _, sp)
-        | March_ast.Ast.DSatisfy (_, _, sp)
-        | March_ast.Ast.DTest (_, sp) | March_ast.Ast.DDescribe (_, _, sp)
-        | March_ast.Ast.DSetup (_, sp)
-        | March_ast.Ast.DSetupAll (_, sp) | March_ast.Ast.DOpts (_, sp) -> sp
-      in
-      if sp <> March_ast.Ast.dummy_span then Some sp
-      else first_real_decl_span rest
-  in
-  let span_and_is_header ~header decls =
-    match first_needs_span decls with
-    | Some sp -> (sp, false)
-    | None ->
-      let header =
-        if header = March_ast.Ast.dummy_span then
-          match first_real_decl_span decls with
-          | Some sp -> sp
-          | None -> header
-        else header
-      in
-      (header, true)
-  in
-  let spans = ref [] and is_header = ref [] in
-  let add name sp hdr =
-    spans := (name, sp) :: !spans;
-    is_header := (name, hdr) :: !is_header
-  in
-  let (entry_sp, entry_hdr) = span_and_is_header ~header:entry_span decls in
-  add entry_owner entry_sp entry_hdr;
-  let rec walk ~prefix decls =
-    List.iter (function
-        | March_ast.Ast.DMod (n, _, inner, decl_span) ->
-          let qname = if prefix = "" then n.March_ast.Ast.txt
-                      else prefix ^ "." ^ n.March_ast.Ast.txt in
-          (* [decl_span], not [n.span] — [n] is only the module NAME token
-             ("Dep" in "mod Dep do"), whose column is well past the line's
-             actual leading indentation.  [decl_span] (parser.mly:
-             [mk_span ($loc)] over the whole [mod ... end] production)
-             starts at the `mod` keyword itself, which IS the line's
-             indentation. *)
-          let (sp, hdr) = span_and_is_header ~header:decl_span inner in
-          add qname sp hdr;
-          if qname <> n.March_ast.Ast.txt then add n.March_ast.Ast.txt sp hdr;
-          walk ~prefix:qname inner
-        | _ -> ())
-      decls
-  in
-  walk ~prefix:"" decls;
-  (!spans, !is_header)
-
-(** [cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header span] is the
-    column an inserted `needs` line for [span]'s module should start at:
-    the ACTUAL leading whitespace of [span]'s own source line (read from
-    [src], or from [read_file span.file] when the span points into a
-    different file than the one being compiled — a sibling module pulled in
-    via [MARCH_LIB_PATH]) when [span] is an existing [DNeeds] line (a new
-    line is a peer of it, same column); that plus 2 when [span] is a module
-    HEADER instead — the module's body, where the fix lands, is indented one
-    step deeper than its own header line. (This codebase's own convention;
-    March is not indentation-sensitive, so a wrong answer here is cosmetic,
-    never a build break — confirmed by [test_ceiling_violation_carries_a_span_and_a_fix],
-    which does not assert on indent width.) Reading the source line directly,
-    rather than trusting a token's [start_col], is deliberate: the natural
-    candidate span for a header ([DMod]'s NAME token) sits well past the
-    line's real indentation, which is exactly the bug this function fixes. *)
-let cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header
-    (span : March_ast.Ast.span) : int =
-  let file_src =
-    if span.March_ast.Ast.file = filename || span.March_ast.Ast.file = "" then src
-    else (try read_file span.March_ast.Ast.file with Sys_error _ -> src)
-  in
-  let lines = String.split_on_char '\n' file_src in
-  let idx = span.March_ast.Ast.start_line - 1 in
-  let base =
-    (* [List.nth_opt] RAISES [Invalid_argument] on a negative index rather
-       than returning [None] — a [dummy_span] (start_line = 0) gives
-       idx = -1, which would otherwise crash the compiler here instead of
-       degrading gracefully. *)
-    match if idx < 0 then None else List.nth_opt lines idx with
-    | None -> 0
-    | Some line ->
-      let n = String.length line in
-      let rec count i = if i < n && line.[i] = ' ' then count (i + 1) else i in
-      count 0
-  in
-  if is_header then base + 2 else base
 
 (** [contract_attr_fix ~src ~filename ~read_file decl_span attr] is the
     [--report-contracts] fix that attaches [attr] (e.g. [@[no_alloc]]) to the
@@ -4459,15 +4327,16 @@ let compile filename =
   if !stdlib_source then
     March_typecheck.Typecheck.stdlib_source_files :=
       filename :: !March_typecheck.Typecheck.stdlib_source_files;
-  (* Run the typecheck-side capability ceiling ONLY in typecheck-only modes
-     (`--check`/`--check-json`/`--emit-core-ast`), where the `--compile`
-     path's TIR-side [Cap_ceiling] never runs. On a full `--compile` this
-     stays off so the two ceilings do not double-report; the TIR one is the
-     authoritative complete check there. --emit-core-ast must match --check
-     here or its "verdict" says accept on a program --check rejects. Respects
-     `--no-cap-strict` for parity. *)
+  (* The typecheck-side capability ceiling runs in every mode except a full
+     compile: --check, --check-json, --emit-core-ast, the interpreter and
+     --jit.  It is a cheap subset of the TIR-side ceiling, so its errors stop
+     a program before anything is lowered; the TIR-side check
+     ([Cap_static.check_program]) then runs only on a front-end-clean
+     program, so nothing is reported twice.  On a full `--compile` it stays
+     off: the compile path's own TIR ceiling is the check there, and the two
+     would double-report.  Respects `--no-cap-strict`. *)
   March_typecheck.Typecheck.cap_strict_ceiling :=
-    !cap_strict && (!do_check || !check_json || !emit_core_ast_file <> None);
+    !cap_strict && not (!dump_tir || !emit_llvm || !do_compile || !dump_phases);
   March_typecheck.Typecheck.dump_role_authority := !dump_role_authority;
   (* This pipeline runs [Panic_surface_by_proof] below, so the typechecker's
      syntactic ban must leave the contracted names to it.  Set BEFORE
@@ -4681,11 +4550,42 @@ let compile filename =
   let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
       d.severity = March_errors.Errors.Error && is_user_file d
     ) diags in
+  (* Input to the TIR-side capability checks (lib/driver/cap_static.ml),
+     shared by every mode. *)
+  let cap_static_input = {
+    March_driver.Cap_static.desugared; stdlib_decls; tc_env = typecheck_env;
+    type_map; src; filename; read_file; cap_strict = !cap_strict } in
+  let print_cap_findings = print_cap_findings ~src ~filename ~read_file in
+  (* The TIR-side capability checks for the modes that do not lower the
+     program themselves (--check, --check-json, --emit-core-ast, the
+     interpreter, --jit): lowered on demand by [Cap_static.check_program].
+     Forced only on a front-end-clean program.  A program the compiler cannot
+     lower is not rejected for it: one [cap_unchecked] warning says why. *)
+  let cap_findings = lazy (
+    cap_findings_of cap_static_input
+      (March_driver.Cap_static.check_program ~test_mode:!do_test ~opt:!opt_enabled
+         ~is_js:is_js_target cap_static_input)) in
+  let cap_diags () =
+    List.filter_map (function
+        | March_driver.Cap_static.Diag d -> Some d
+        | March_driver.Cap_static.Bare _ -> None) (Lazy.force cap_findings) in
+  let cap_rejected () = cap_findings_rejected (Lazy.force cap_findings) in
   if !check_json then begin
+    (* The TIR-side capability checks too, on a front-end-clean program, so
+       `forge fix` and the editor see what --check rejects.  A finding with
+       no span has no JSON form: it goes to stderr as --check prints it. *)
+    let cap =
+      if has_user_errors || has_resolve_errors || has_desugar_errors then []
+      else begin
+        List.iter (function
+            | March_driver.Cap_static.Bare text -> prerr_string text
+            | March_driver.Cap_static.Diag _ -> ()) (Lazy.force cap_findings);
+        cap_diags ()
+      end in
     List.iter (fun (d : March_errors.Errors.diagnostic) ->
       if is_user_file d then
         print_string (March_errors.Errors.render_diagnostic_json d ^ "\n")
-    ) (Fix_verify.verify ~src ~verifiable:is_user_file diags);
+    ) (Fix_verify.verify ~src ~verifiable:is_user_file (diags @ cap));
     exit 0
   end;
   let frontend_rejected =
@@ -4728,9 +4628,11 @@ let compile filename =
   in
   if !emit_core_ast_file <> None then begin
     let contract = if frontend_rejected then [] else Lazy.force contract_diags in
+    let cap = if frontend_rejected then [] else cap_diags () in
     Emit_core_ast.run ~topology:topology_json ~filename ~user_files ~user_ast ~type_map
-      ~diags:(diags @ contract) ~is_user_file ~typecheck_env
-      ~rejected:(frontend_rejected || contract_rejected ())
+      ~diags:(diags @ contract @ cap) ~is_user_file ~typecheck_env
+      ~rejected:(frontend_rejected || contract_rejected ()
+                 || ((not frontend_rejected) && cap_rejected ()))
   end;
   (* Under --shell, only errors: they stop the session.  The program's
      warnings and refinement hints are the build's business, and a real
@@ -4825,6 +4727,11 @@ let compile filename =
   in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
+  (* The interpreter and --jit: the TIR-side capability checks run before
+     the program does (ocap phase 3). *)
+  if interpreting && not frontend_rejected && not !check_migration then
+    run_interp_cap_checks ~input:cap_static_input ~test_mode:!do_test
+      ~is_js:is_js_target;
   if not frontend_rejected then emit_protocols ();
   if frontend_rejected then exit 1
   (* --check: stop after typecheck.  Diagnostics above already printed; we just
@@ -4838,6 +4745,9 @@ let compile filename =
         Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
       ) contract_diags;
     if contract_rejected () then exit 1;
+    (* The capability ceiling and host scopes, on lowered TIR. *)
+    print_cap_findings (Lazy.force cap_findings);
+    if cap_rejected () then exit 1;
     (* Cache successful check result so the next identical-source invocation
        exits immediately without re-running the typecheck pipeline (the early
        CAS hit at the top of this function does `exit 0` printing nothing).
@@ -4855,6 +4765,7 @@ let compile filename =
        diagnostics are emitted — only whether the cache may suppress them. *)
     let printed_user_diag =
       List.exists is_user_file diags || contract_diags <> []
+      || Lazy.force cap_findings <> []
     in
     (match source_cas_state with
      | Some (src_store, src_ch) when not printed_user_diag ->
@@ -4919,122 +4830,10 @@ let compile filename =
       in
       if List.for_all (fun (_, ds) -> ds = []) scopes then tir
       else begin
-        let stdlib_mods = stdlib_module_names stdlib_decls in
-        let prelude_fns = Hashtbl.create 64 in
-        (* "Transparent" (stdlib) is decided by where a declaration COMES FROM,
-           never by its name: a user module named `Yaml`, or an entry-module
-           function named like a prelude one, is user code and is checked
-           (a by-name test let both escape the check entirely). *)
-        let user_mods = Hashtbl.create 16 in
-        let user_entry_fns = Hashtbl.create 64 in
-        let annotated = ref [] in
-        let rec walk prefix (decls : March_ast.Ast.decl list) =
-          List.iter (fun (d : March_ast.Ast.decl) ->
-              match d with
-              | March_ast.Ast.DFn (fd, sp) ->
-                let name = fd.March_ast.Ast.fn_name.March_ast.Ast.txt in
-                let from_stdlib = March_typecheck.Typecheck_builtins.file_is_stdlib sp.March_ast.Ast.file in
-                if prefix = "" && from_stdlib then Hashtbl.replace prelude_fns name ();
-                if prefix = "" && not from_stdlib then
-                  Hashtbl.replace user_entry_fns name ();
-                (match March_caps.Net_dest.net_dest_attr fd.March_ast.Ast.fn_attrs with
-                 | None -> ()
-                 | Some p ->
-                   let params =
-                     match fd.March_ast.Ast.fn_clauses with
-                     | c :: _ ->
-                       List.map (function
-                           | March_ast.Ast.FPNamed prm | March_ast.Ast.FPDefault (prm, _) ->
-                             prm.March_ast.Ast.param_name.March_ast.Ast.txt
-                           | March_ast.Ast.FPPat (March_ast.Ast.PatVar n) -> n.March_ast.Ast.txt
-                           | March_ast.Ast.FPPat _ -> "")
-                         c.March_ast.Ast.fc_params
-                     | [] -> []
-                   in
-                   let rec index i = function
-                     | [] -> None
-                     | x :: rest -> if x = p then Some i else index (i + 1) rest
-                   in
-                   Option.iter (fun i ->
-                       annotated := ((if prefix = "" then name else prefix ^ "." ^ name), i)
-                                    :: !annotated)
-                     (index 0 params))
-              | March_ast.Ast.DMod (n, _, inner, msp) ->
-                let full =
-                  if prefix = "" then n.March_ast.Ast.txt
-                  else prefix ^ "." ^ n.March_ast.Ast.txt
-                in
-                (* Stdlib modules carry a placeholder span; a user module (the
-                   program's or a dependency's) has a real file outside the
-                   stdlib root. *)
-                let f = msp.March_ast.Ast.file in
-                if f <> March_ast.Ast.dummy_span.March_ast.Ast.file
-                   && not (March_typecheck.Typecheck_builtins.file_is_stdlib f) then
-                  Hashtbl.replace user_mods full ();
-                walk full inner
-              | _ -> ()) decls
-        in
-        walk "" desugared.March_ast.Ast.mod_decls;
-        walk "" stdlib_decls;
-        if Sys.getenv_opt "MARCH_DUMP_NET_SCOPE" = Some "1" then begin
-          List.iter (fun (m, ds) ->
-              if ds <> [] then
-                Printf.eprintf "net-scope: module %s scoped to %s\n" m
-                  (March_caps.Host_scope.encode_spec ds)) scopes;
-          List.iter (fun (n, i) ->
-              Printf.eprintf "net-scope: @[net_dest] %s param %d\n" n i) !annotated
-        end;
-        let violations =
-          March_tir.Net_scope.check ~scopes
-            ~transparent:(fun m -> List.mem m stdlib_mods && not (Hashtbl.mem user_mods m))
-            ~transparent_fns:(fun n ->
-                not (String.contains n '.') && Hashtbl.mem prelude_fns n
-                && not (Hashtbl.mem user_entry_fns n))
-            ~annotated:(List.sort_uniq compare !annotated) tir
-        in
-        if violations <> [] then begin
-          let (module_spans, _) = cap_ceiling_module_spans
-              ~entry_owner:tir.March_tir.Tir.tm_name
-              ~entry_span:desugared.March_ast.Ast.mod_name.March_ast.Ast.span
-              desugared.March_ast.Ast.mod_decls
-          in
-          (* One diagnostic per module (TIR carries no call spans, so it points
-             at the module), its first violation as the message and the rest
-             listed after it. *)
-          let owners =
-            List.sort_uniq compare
-              (List.map (fun (v : March_tir.Net_scope.violation) -> v.owner) violations)
-          in
-          let ctx = March_errors.Errors.create () in
-          List.iter (fun owner ->
-              let vs =
-                List.filter (fun (v : March_tir.Net_scope.violation) -> v.owner = owner)
-                  violations
-              in
-              match vs with
-              | [] -> ()
-              | first :: rest ->
-                let msg =
-                  if rest = [] then first.message
-                  else
-                    first.message ^ "\n\nAlso in module `" ^ owner ^ "`:\n"
-                    ^ String.concat "\n"
-                        (List.map (fun (v : March_tir.Net_scope.violation) ->
-                             "- [" ^ v.code ^ "] " ^ v.message) rest)
-                in
-                let span =
-                  match List.assoc_opt owner module_spans with
-                  | Some sp -> sp
-                  | None -> desugared.March_ast.Ast.mod_name.March_ast.Ast.span
-                in
-                if span = March_ast.Ast.dummy_span then
-                  Printf.eprintf "-- CAPABILITY --\n%s [%s]\n\n" msg first.code
-                else March_errors.Errors.error ctx ~span ~code:first.code msg)
-            owners;
-          List.iter (fun (d : March_errors.Errors.diagnostic) ->
-              Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d))
-            (March_errors.Errors.sorted ctx);
-          Printf.eprintf "%d host-scope violation(s).\n%!" (List.length violations);
+        let r = March_driver.Cap_static.host_scope_findings cap_static_input tir in
+        if r.March_driver.Cap_static.count > 0 then begin
+          print_cap_findings r.March_driver.Cap_static.findings;
+          Printf.eprintf "%d host-scope violation(s).\n%!" r.March_driver.Cap_static.count;
           exit 1
         end;
         March_tir.Net_scope.rewrite ~scopes tir
@@ -5273,57 +5072,7 @@ let compile filename =
        capabilities.  Both passes are pure, so this observes the pipeline
        without perturbing it. *)
     let cap_attrib =
-      let stdlib_mods = stdlib_module_names stdlib_decls in
-      let user_mods = user_module_names desugared.March_ast.Ast.mod_decls in
-      (* A module with no `main` has no DCE roots, so pruning would keep the
-         whole prepended stdlib and attribution would charge every stdlib
-         module for capabilities the program never reaches — 17 violations for
-         a file whose only declaration was `fn helper(x) = x + 1`.  Root the
-         functions this FILE declares instead; see [Dce.prune_unreachable].
-
-         Matched against the TIR name, which may be prefixed by the module
-         (`M.helper`) and/or suffixed by monomorphization (`helper$Int`), so
-         compare the bare stem.  Prelude functions are excluded by the
-         span filter inside [user_fn_names_of] — not by shape, since `println`
-         is unprefixed exactly like the entry module's own functions. *)
-      let user_fns =
-        user_fn_names_of ~stdlib_files:(stdlib_span_files stdlib_decls)
-          desugared
-      in
-      let stem = tir_fn_stem in
-      (* The PRELUDE's functions are the complement of [user_fns] at the top
-         level: stdlib-span [DFn]s, unwrapped into the entry module, so their
-         TIR names are BARE exactly like the user's own.  They must be
-         see-through per FUNCTION — the module predicate above cannot express
-         them (they name no module, and their owner resolves to the entry
-         module, which is never transparent).  Without this, the console use
-         inside `println$String` was charged to the ENTRY module no matter
-         which nested module called it, and that module's own `needs` could
-         not satisfy the ceiling. *)
-      let prelude_fns = Hashtbl.create 64 in
-      let walk_prelude decls =
-        List.iter (fun (d : March_ast.Ast.decl) ->
-            match d with
-            | March_ast.Ast.DFn (fd, sp) ->
-              if List.mem sp.March_ast.Ast.file
-                   (stdlib_span_files stdlib_decls) then
-                Hashtbl.replace prelude_fns
-                  fd.March_ast.Ast.fn_name.March_ast.Ast.txt ()
-            | March_ast.Ast.DMod _ -> ()  (* prefixed; module transparency covers them *)
-            | _ -> ()) decls
-      in
-      walk_prelude desugared.March_ast.Ast.mod_decls;
-      March_tir.Cap_attrib.attribute
-        ~transparent:(fun m -> List.mem m stdlib_mods && not (Hashtbl.mem user_mods m))
-        ~transparent_fns:(fun n ->
-          (* Bare names only: a dotted name belongs to a module and is judged
-             by the module predicate.  Matching the stem of a dotted name here
-             would make a user function that merely SHARES a prelude name
-             (`MyMod.println`) see-through. *)
-          not (String.contains n '.') && Hashtbl.mem prelude_fns (stem n))
-        (March_tir.Dce.prune_unreachable
-           ~extra_root:(is_user_tir_fn ~user_fns ~stdlib_mods)
-           ~fail_open:false pre_opt_tir)
+      March_driver.Cap_static.cap_attribution cap_static_input ~pre_opt:pre_opt_tir
     in
     (* --cap-strict: `needs` as a hard ceiling.  Deliberately checked here,
        against attributed use, rather than by a fifth source-level AST walk.
@@ -5354,127 +5103,20 @@ let compile filename =
         cap_module_caps
       |> List.sort_uniq compare
     in
-    if !cap_strict then begin
-      (* The ceiling's used-set is the ATTRIBUTED set — capabilities of the
-         emitted code — and deliberately NOT unioned with
-         [own_caps_of_this_module] any more (changed 2026-08-08, with the
-         default flip).
-
-         The typecheck-side set counts a capability that appears only in a
-         SIGNATURE (`fn main(cap : Cap(IO))`, `fn demo(c : Cap(IO.Console))`)
-         as "used".  Capabilities are erased, so a signature-only capability
-         corresponds to no emitted operation at all; feeding it to the
-         ceiling produced an Unattributed violation nobody could fix — and
-         `main(cap : Cap(IO))` is the DOCUMENTED entry-point shape (R2), so
-         with the ceiling on by default that false positive rejected the
-         sanctioned way to write `main`.
-
-         What the union genuinely bought was a DRIFT DETECTOR between the two
-         capability tables: when attribution's builtin lookup missed ten
-         trampoline-lowered builtins (2026-08-07), it was exactly this diff
-         that surfaced as "cannot be attributed".  That role is now carried
-         by test_cap_attrib_agreement, which pins the two tables to each
-         other directly instead of surfacing their drift as a user-facing
-         false positive.
-
-         [own_caps_of_this_module] itself is unchanged and still feeds
-         --cap-sandbox, where the SIGNATURE reading is the right one: a
-         module that receives a capability by parameter may exercise it, so
-         the sandbox profile must allow it. *)
-      let flat_caps =
-        List.sort_uniq compare (List.map fst cap_attrib)
-      in
-      (* The entry module is unwrapped by desugar (~is_entry:true), so it has
-         no DMod and never lands in [module_caps]; its `needs` accumulate in
-         [mod_needs] instead. Attribution names it by [tm_name], so bind the
-         two together or every entry-module capability reads as undeclared —
-         which is what the first run of this check did to a module that had
-         correctly declared its need. *)
-      let module_caps =
-        (pre_opt_tir.March_tir.Tir.tm_name,
-         typecheck_env.March_typecheck.Typecheck.mod_needs)
-        :: typecheck_env.March_typecheck.Typecheck.module_caps
-      in
-      let (module_spans, module_is_header) = cap_ceiling_module_spans
-          ~entry_owner:pre_opt_tir.March_tir.Tir.tm_name
-          ~entry_span:desugared.March_ast.Ast.mod_name.March_ast.Ast.span
-          desugared.March_ast.Ast.mod_decls
-      in
-      let violations =
-        March_caps.Cap_ceiling.check ~module_caps ~module_spans
-          ~attribution:cap_attrib ~caps:flat_caps
-      in
-      if violations <> [] then begin
-        (* Undeclared violations carry a span and a name to their own owning
-           module (from [module_spans] above), so they render through the
-           SAME diagnostic pipeline as every other capability error — with
-           a real span, a source excerpt, and a machine-applicable [FInsert]
-           fix — rather than the bespoke, file-less
-           "-- CAPABILITY CEILING --" block this replaces (see the same
-           [vectorize_diags] pattern just below for the render precedent: a
-           fresh [Err.ctx], not the shared typecheck [errors], since this
-           runs after that context has already been drained and printed).
-
-           This does NOT yet make the violation visible to the LSP or
-           applicable by `forge fix` — this only runs on the [--compile]
-           path, which `--check`/`--check-json` (forge fix's only input,
-           see [run_check_cmd]) never reaches. The fix payload is real and
-           ready; it has no consumer until the ceiling also runs under
-           [--check] (tracked in
-           specs/todos/2026-08-14-cap-ceiling-under-check-needs-body-only-closure.md).
-
-           [Unattributed] violations name no module and therefore have no
-           span to point at — the ceiling's own [.mli] documents why this
-           is a fail-closed case rather than a false-positive risk to guard
-           against here — so those stay on the original bespoke line. *)
-        let ctx = March_errors.Errors.create () in
-        List.iter
-          (fun v ->
-             match v with
-             | March_caps.Cap_ceiling.Undeclared { cap = _; owner = _; span }
-               when span = March_ast.Ast.dummy_span ->
-               (* No real span was found ANYWHERE for this violation's
-                  owning module — every inner declaration was itself
-                  span-less. Rendering through the normal diagnostic
-                  pipeline with [dummy_span]'s file ("<none>") would raise
-                  [Sys_error] on read, silently fall back to the ENTRY
-                  file's source, and print line 0 of the WRONG file. Fail
-                  back to the bespoke, file-less rendering instead — never
-                  a crash, never a diagnostic pointing at unrelated code. *)
-               Printf.eprintf "-- CAPABILITY --\n%s\n\n"
-                 (March_caps.Cap_ceiling.describe v)
-             | March_caps.Cap_ceiling.Undeclared { cap; owner; span } ->
-               let is_header =
-                 match List.assoc_opt owner module_is_header with
-                 | Some h -> h | None -> true
-               in
-               let indent =
-                 cap_ceiling_fix_indent ~src ~filename ~read_file ~is_header span
-               in
-               March_errors.Errors.error_with_fix ctx ~span
-                 ~code:(March_errors.Code.with_arg March_errors.Code.cap_ceiling cap)
-                 ~fix:(March_errors.Errors.FInsert {
-                   after_line = span.March_ast.Ast.start_line;
-                   text = String.make indent ' ' ^ "needs " ^ cap })
-                 (Printf.sprintf
-                    "Module `%s` uses `%s` but does not declare `needs %s`.\n\
-                     help: add `needs %s` to the module body."
-                    owner cap cap cap)
-             | March_caps.Cap_ceiling.Unattributed _ ->
-               Printf.eprintf "-- CAPABILITY --\n%s\n\n"
-                 (March_caps.Cap_ceiling.describe v))
-          violations;
-        List.iter (fun (d : March_errors.Errors.diagnostic) ->
-            Printf.eprintf "%s\n\n\n" (render_user_diag ~src ~filename ~read_file d)
-          ) (March_errors.Errors.sorted ctx);
-        Printf.eprintf
-          "%d capability ceiling violation(s). Every module's emitted code \
-           must stay within its own `needs`.\n\
-           Add the missing `needs` line to the module named above, or pass \
-           `--no-cap-strict` to build without this check.\n%!"
-          (List.length violations);
-        exit 1
-      end
+    (* --cap-strict: `needs` as a hard ceiling, over the ATTRIBUTED set (what
+       emitted code does), never signature-only capabilities; see
+       [March_driver.Cap_static.ceiling_findings]. *)
+    let r = March_driver.Cap_static.ceiling_findings cap_static_input
+        ~pre_opt:pre_opt_tir ~attribution:cap_attrib in
+    if r.March_driver.Cap_static.count > 0 then begin
+      print_cap_findings r.March_driver.Cap_static.findings;
+      Printf.eprintf
+        "%d capability ceiling violation(s). Every module's emitted code \
+         must stay within its own `needs`.\n\
+         Add the missing `needs` line to the module named above, or pass \
+         `--no-cap-strict` to build without this check.\n%!"
+        r.March_driver.Cap_static.count;
+      exit 1
     end;
     (* Declared path scopes, embedded as a manifest so `forge cap run` can
        narrow its external sandbox to them (None when nothing is scoped). *)
@@ -7871,6 +7513,13 @@ let run_check_cmd ?(emit_caps = false) files =
     check_no_prelude_collision_decls ~stdlib_decls all_decls;
   (* As in [compile]: a file under the stdlib root is the stdlib's by
      provenance; `--stdlib-source` says so for any other spelling. *)
+  (* The capability checks, as `march --check` runs them (ocap phase 3): the
+     typecheck-side ceiling during the check, which must know the stdlib's
+     files so prelude uses are not charged to user modules; the TIR-side
+     checks after it (below).  `march caps` reports capabilities rather than
+     verdicts, so it runs neither. *)
+  March_typecheck.Typecheck.stdlib_source_files := stdlib_span_files stdlib_decls;
+  March_typecheck.Typecheck.cap_strict_ceiling := !cap_strict && not emit_caps;
   if !stdlib_source then
     List.iter (fun f ->
         March_typecheck.Typecheck.stdlib_source_files :=
@@ -7966,7 +7615,28 @@ let run_check_cmd ?(emit_caps = false) files =
       (List.filter (sev_is March_errors.Errors.Warning) contract_diags);
     List.iter (print_diag "error")
       (List.filter (sev_is March_errors.Errors.Error) contract_diags);
-    if List.exists (sev_is March_errors.Errors.Error) contract_diags then exit 1
+    if List.exists (sev_is March_errors.Errors.Error) contract_diags then exit 1;
+    (* The capability ceiling and host scopes, on lowered TIR. *)
+    match !caps_env with
+    | None -> ()
+    | Some tc_env ->
+      let filename = List.hd files in
+      let input = {
+        March_driver.Cap_static.desugared = program (stdlib_decls @ all_decls);
+        stdlib_decls; tc_env; type_map = check_type_map;
+        src = (try read_file filename with Sys_error _ -> "");
+        filename; read_file; cap_strict = !cap_strict } in
+      let fs =
+        cap_findings_of input
+          (March_driver.Cap_static.check_program ~opt:!opt_enabled
+             ~is_js:(parse_target !target_str = March_tir.Llvm_emit.Js) input) in
+      List.iter (function
+          | March_driver.Cap_static.Bare text -> prerr_string text
+          | March_driver.Cap_static.Diag d ->
+            print_diag
+              (if d.severity = March_errors.Errors.Error then "error" else "warning") d)
+        fs;
+      if cap_findings_rejected fs then exit 1
   end;
   if emit_caps then begin
     match !caps_env with

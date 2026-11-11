@@ -14,6 +14,7 @@
   march_resolver
   march_refactor
   march_tir
+  march_driver
   march_cas
   march_forge
   yojson

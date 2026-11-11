@@ -368,18 +368,21 @@ The error above is easy to over-read. What it covers:
 - It catches a **direct** call to a capability builtin: `file_read(p)`.
 - It does **not** catch, on its own, the same operation routed through a stdlib
   wrapper: `File.read(p)`. That call is invisible to *this* check. It is caught
-  by the **capability upper limit** instead. Since 2026-08-17 a sound subset of
-  the upper limit runs under `--check` and `--check-json` too, enough to catch the
-  common stdlib-mediated route without lowering, so `--check` exits 1 on it rather
-  than 0.
+  by the **capability upper limit** instead.
 - The complete check is the [upper limit](#cap-strict), which works on
   **emitted code** and therefore cannot be evaded by re-routing through a helper.
-  It runs on the compile path: `--compile` remains the complete check.
+  It runs however the program is checked or run: `--compile`, `--check`,
+  `--check-json`, `march check` (what `forge check` and `forge build` run), the
+  interpreter, `--jit`, `march test`, the REPL (for a `mod` declared at the
+  prompt) and the editor. Outside `--compile` the program is lowered on demand
+  for it; the interpreter remembers a clean verdict until a source changes.
 
 So `needs` is a **mandatory, mechanically-verified manifest** of the builtins a
 module calls directly, not, on its own, proof that a module cannot reach a
-capability. That proof comes from the upper-limit check, which means it comes from
-`march --compile`, not from `--check`.
+capability. That proof comes from the upper-limit check. A program the compiler
+cannot build (one using an interpreter-only builtin such as `App.stop`) cannot be
+held to it outside `--compile` either: it runs with one `cap_unchecked` warning
+saying so, and `--compile` rejects it.
 
 There is also a distinction hiding in the word "capability": this check makes you
 *declare* what you touch. It does not make anyone *grant* it: `needs` is a
@@ -750,10 +753,11 @@ routes `HttpClient` calls through a variant that receives the module's scope, an
 client refuses, before connecting, a request outside it: `HttpClient.OutOfScope(host)`,
 `MethodRefused("POST host")`, or under `no_redirects` `RedirectRefused(host)`.
 
-**Limits.** Host scopes are checked on the `--compile` path only, like the
-[upper limit](#cap-strict). `march --check` reports nothing about them, and a program run
-by the interpreter, the REPL or the JIT gets neither the check nor the run-time guard, so
-it follows redirects freely. Only a compiled binary has the protection described here.
+**Limits.** The compile-time check runs in every mode, like the
+[upper limit](#cap-strict): `--compile`, `--check`, `march check`, the interpreter, the
+REPL, the JIT and the editor. The run-time guard does not: a program run by the
+interpreter, the REPL or the JIT follows redirects freely, and only a compiled binary
+refuses a redirect or a step-rewritten host outside the scope.
 A message a scoped module sends to an actor it was handed (a pid from `main`) runs that
 actor's handler under the handler's module, not the sender's: the same rule as a function
 handed in as a parameter. A scoped module that spawns a network-reaching actor itself is
@@ -826,7 +830,7 @@ ocap phase 2.
 
 ### When *not* to use IO caps
 
-**Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. A module with no `needs` that calls IO builtins directly in function bodies is rejected (`--check` exits 1); a stdlib-mediated call is outside that check but is caught by the upper-limit subset that runs under `--check`, and by the full upper limit under `--compile`. The one exception is `IO.Foreign`, which the upper limit excludes: a module with no `needs` can call a first-party stdlib module built on `extern` (`Js.Dom`, `Js.Canvas` on `--target js`), and only a function-level `needs ()` bound or `main`'s grant reports that reach. The guarantee is strongest when the functions in question actually take `Cap(X)` parameters or `use` something that does, because the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import.
+**Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. A module with no `needs` that calls IO builtins directly in function bodies is rejected (`--check` exits 1); a stdlib-mediated call is outside that check but is caught by the upper limit, which runs in every mode. The one exception is `IO.Foreign`, which the upper limit excludes: a module with no `needs` can call a first-party stdlib module built on `extern` (`Js.Dom`, `Js.Canvas` on `--target js`), and only a function-level `needs ()` bound or `main`'s grant reports that reach. The guarantee is strongest when the functions in question actually take `Cap(X)` parameters or `use` something that does, because the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import.
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels less precise. Accurate beats narrow-but-wrong.
 

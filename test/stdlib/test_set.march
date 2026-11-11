@@ -2,6 +2,8 @@
 -- Run with: dune exec march -- test test/stdlib/test_set.march
 
 mod TestSet do
+  needs IO.Clock
+  needs IO.Process
 
 pfn int_cmp(a : Int) : Int -> Bool do
   fn b -> a < b

@@ -4,6 +4,8 @@
 -- Run with: dune exec march -- test test/stdlib/test_dir.march
 
 mod TestDir do
+  needs IO.FileRead
+  needs IO.FileWrite
 
 describe "Dir.exists" do
   test "returns false for nonexistent path" do

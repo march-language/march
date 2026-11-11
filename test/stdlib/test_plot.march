@@ -2,6 +2,8 @@
 -- Run with: dune exec march -- test/stdlib/test_plot.march
 
 mod TestPlot do
+  needs IO.FileRead
+  needs IO.FileWrite
 
 pfn contains(haystack : String, needle : String) : Bool do
   String.contains(haystack, needle)
