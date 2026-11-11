@@ -347,12 +347,12 @@ let test_shipped_table () =
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
     [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
-      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request";
+      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
+      (* ocap phase 1: the capability check point (stdlib/authority.march) *)
+      "cap_check_raw"; "cap_launch_text"; "reload_request";
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
       "handle_is_closed"; "handle_aux";
-      "file_open_write"; "file_write_handle"; "file_seek";
-      (* ocap phase 1: the capability check point (stdlib/authority.march) *)
-      "cap_check_raw"; "cap_launch_text" ]
+      "file_open_write"; "file_write_handle"; "file_seek" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true

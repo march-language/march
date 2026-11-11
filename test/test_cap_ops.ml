@@ -39,7 +39,7 @@ let test_known_rows () =
   Alcotest.(check bool) "dist_monitor_ack is internal" true
     (Ops.classify "dist_monitor_ack" = Some Ops.Internal);
   Alcotest.(check bool) "file_open is checked but left to phase 2's gate" true
-    (Ops.classify "file_open" = Some (Ops.Checked { entry = [ "File.with_lines"; "File.each_line" ];
+    (Ops.classify "file_open" = Some (Ops.Checked { entry = [ "File.open"; "File.with_open"; "File.with_lines"; "File.each_line" ];
                                                     gated = false }));
   Alcotest.(check bool) "unix_time is gated" true (List.mem_assoc "unix_time" Ops.gated)
 
