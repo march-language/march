@@ -1180,6 +1180,13 @@ and emit_val_impl ctx expr =
       | "unix_time_ms", _ ->
         use_runtime ctx "march_unix_time_ms";
         emit ctx "march_unix_time_ms()"
+      (* ocap phase 1 capability check point (runtime/march_runtime.mjs) *)
+      | "cap_check_raw", [k; t] ->
+        use_runtime ctx "march_cap_check_raw";
+        emit ctx "march_cap_check_raw("; emit_atom ctx k; emit ctx ", "; emit_atom ctx t; emit ctx ")"
+      | "cap_launch_text", _ ->
+        use_runtime ctx "march_cap_launch_text";
+        emit ctx "march_cap_launch_text()"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with

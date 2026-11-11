@@ -55,5 +55,6 @@ mod StringConcatScopeDrop do
     println("fresh: total " ++ int_to_string(x) ++ ", growth " ++ int_to_string(a1 - a0))
     println("kept: total " ++ int_to_string(y) ++ ", growth " ++ int_to_string(a2 - a1))
     println("record: total " ++ int_to_string(z) ++ ", growth " ++ int_to_string(a3 - a2))
+    ()
   end
 end

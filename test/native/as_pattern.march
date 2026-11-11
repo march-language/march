@@ -39,5 +39,6 @@ fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(tier(7)))
   println(int_to_string(twice(1)))
   println(int_to_string(twice(5)))
+  ()
 end
 end

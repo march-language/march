@@ -305,9 +305,9 @@ mod NodeQueue do
   pfn queued_key(w) : String do "q" ++ int_to_string(pid_to_int(w)) end
   pfn budget_key(w) : String do "b" ++ int_to_string(pid_to_int(w)) end
   pfn table() do
-    match Vault.whereis("node_queue") do
+    match Authority.must(Vault.whereis("node_queue")) do
       Some(t) -> t
-      None -> Vault.new("node_queue")
+      None -> Authority.must(Vault.new("node_queue"))
     end
   end
 
@@ -354,7 +354,7 @@ mod NodeQueue do
   -- A LOCAL queue (`start_local`) has an fd of -2 or below, naming its sink:
   -- the frame is handed to it in this writer's turn instead of written.
   -- (-1 is a closed connection, `close_fd_state`.)
-  pfn sinks() : Vault(Bytes -> Unit) do Vault.open("node_queue_sinks") end
+  pfn sinks() : Vault(Bytes -> Unit) do Authority.must(Vault.open("node_queue_sinks")) end
 
   -- A closed local queue's sink and budget entries go with it: a local id is
   -- never reused, so nothing else would ever drop them (a process that starts

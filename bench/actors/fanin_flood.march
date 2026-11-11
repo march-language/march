@@ -51,7 +51,7 @@ mod FaninFlood do
       Task.async(fn ->
         producer(pid, msgs_per_producer)
         1))
-    let _ = List.map(producers, fn t -> Task.await(t))
+    let _ = List.map(producers, fn t -> Task.await(Authority.must(t)))
     run_until_idle()
     match Actor.call(pid, GetSeenReq, 30000) do
       Ok(n)  -> println("delivered " ++ int_to_string(n))

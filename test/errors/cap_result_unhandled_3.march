@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: This capability operation returns
+mod Main do
+  needs IO.Console
+  needs IO.Clock
+
+  -- A clock read used as a value: the fix wraps it in `Authority.must(...)`.
+  fn later() : Int do
+    System.now_ms() + 1000
+  end
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    println(later() > 0)
+  end
+end

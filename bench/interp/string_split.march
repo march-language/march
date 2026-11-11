@@ -19,5 +19,6 @@ mod StringSplit do
     let s = build(20000, "")
     let parts = String.split(s, ",")
     println("checksum=" ++ int_to_string(count7(parts, 0)))
+    ()
   end
 end

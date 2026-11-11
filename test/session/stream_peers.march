@@ -234,7 +234,7 @@ mod StreamPeers do
     t3.drain(())
 
     print_line("-- chaos: Stream, 50 seeds each way and both ways")
-    let tally = Vault.new("stream_peers_tally")
+    let tally = Authority.must(Vault.new("stream_peers_tally"))
     stream_seeds(c, tally, 0, 0)
     stream_seeds(c, tally, 0, 1)
     stream_seeds(c, tally, 0, 2)
@@ -242,13 +242,13 @@ mod StreamPeers do
       ++ int_to_string(count(tally, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally, "stalled")))
 
     print_line("-- chaos: Fan, all three roles, 50 seeds")
-    let tally2 = Vault.new("stream_peers_tally_fan")
+    let tally2 = Authority.must(Vault.new("stream_peers_tally_fan"))
     fan_seeds(c, tally2, 0)
     print_line("closes: " ++ int_to_string(count(tally2, "close")) ++ " of 150, cancels: "
       ++ int_to_string(count(tally2, "cancel")) ++ ", stalls: " ++ int_to_string(count(tally2, "stalled")))
 
     print_line("-- chaos: Logging, C may crash, 50 seeds")
-    let tally3 = Vault.new("stream_peers_tally_logging")
+    let tally3 = Authority.must(Vault.new("stream_peers_tally_logging"))
     logging_seeds(c, tally3, 0)
     print_line("normal: " ++ int_to_string(count(tally3, "normal")) ++ ", crashed: " ++ int_to_string(count(tally3, "crashed"))
       ++ ", crash branches: " ++ int_to_string(count(tally3, "crash_branch")) ++ ", stalls: " ++ int_to_string(count(tally3, "stalled")))

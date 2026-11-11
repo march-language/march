@@ -74,8 +74,19 @@ let assert_by =
     gated "assert by is erased: the program runs without evaluating the hint" (fun () ->
         let out =
           run ~args:""
-            ("mod H do\n  needs IO.Console\n  @[lemma]\n  fn boom(x : Int) : {Unit | x == x} do\n    ()\n  end\n\
-             \  fn main(_c : Cap(IO.Console)) : Unit do\n    assert 1 == 1 by boom(3)\n    println(\"ran\")\n  end\nend\n")
+            ({|mod H do
+  needs IO.Console
+  @[lemma]
+  fn boom(x : Int) : {Unit | x == x} do
+    ()
+  end
+  fn main(_c : Cap(IO.Console)) : Unit do
+    assert 1 == 1 by boom(3)
+    println("ran")
+    ()
+  end
+end
+|})
         in
         if not (List.mem "ran" (List.map String.trim (U.lines out))) then Alcotest.failf "did not run:\n%s" out) ]
 
@@ -122,7 +133,16 @@ let reveal_fuel =
     gated "with fuel keeps its body: the program still runs it" (fun () ->
         let out =
           run ~args:""
-            "mod H do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n    with fuel(main, 3) do\n      println(\"body ran\")\n    end\n  end\nend\n"
+            {|mod H do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    with fuel(main, 3) do
+      println("body ran")
+    end
+    ()
+  end
+end
+|}
         in
         if not (List.mem "body ran" (List.map String.trim (U.lines out))) then Alcotest.failf "body did not run:\n%s" out) ]
 
@@ -302,16 +322,18 @@ let soft =
   [ test_case_run "calc and reveal stay usable as names" (fun () ->
         let out =
           run ~args:""
-            "mod S do\n\
-             \  needs IO.Console\n\
-             \  fn calc() : Int do 1 end\n\
-             \  fn reveal(x : Int) : Int do x + 1 end\n\
-             \  fn main(_c : Cap(IO.Console)) : Unit do\n\
-             \    let calc_v = calc()\n\
-             \    let reveal = reveal(calc_v)\n\
-             \    println(int_to_string(reveal))\n\
-             \  end\n\
-             end\n"
+            {|mod S do
+  needs IO.Console
+  fn calc() : Int do 1 end
+  fn reveal(x : Int) : Int do x + 1 end
+  fn main(_c : Cap(IO.Console)) : Unit do
+    let calc_v = calc()
+    let reveal = reveal(calc_v)
+    println(int_to_string(reveal))
+    ()
+  end
+end
+|}
         in
         if not (List.mem "2" (List.map String.trim (U.lines out))) then Alcotest.failf "did not run:\n%s" out) ]
 

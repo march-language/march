@@ -19,5 +19,6 @@ mod Main do
     println("fault line: " ++ bool_to_string(flags - (flags / 2) * 2 == 1))
     println("static pc line: " ++ bool_to_string((flags / 2) - (flags / 4) * 2 == 1))
     println("frame walk: " ++ bool_to_string(flags / 4 == 1))
+    ()
   end
 end

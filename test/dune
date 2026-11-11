@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_host_scope test_cap_net_scope test_cap_fn_bounds test_cap_ceiling test_cap_mode_parity test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple)
+ (modules test_compiler test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_ops test_cap_check_coverage test_cap_markers test_cap_package test_cap_scope test_host_scope test_cap_net_scope test_cap_fn_bounds test_cap_ceiling test_cap_mode_parity test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_format march_ctxesc march_modules march_resolver march_forge march_lint march_jit yojson alcotest str unix threads.posix))
 
 (library
@@ -15144,6 +15144,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (modules run_errors)
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
+ (action (run %{test} -e)))
+
+; Capability refusal conformance (ocap phase 1, extended by phase 4): every
+; test/cap_conformance/*.march runs interpreted, through the JIT, compiled and
+; as JS under its `-- REFUSE:` MARCH_TEST_REFUSE value, and each backend's
+; stdout + exit code must equal <name>.expected. Regenerate with
+; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
+(test
+ (name run_cap_conformance)
+ ; Runs in CI's `compiler` shard (ci.yml), not `rest`: four backends per
+ ; fixture cost ~14 CPU-minutes there, which pushed `rest` past its timeout.
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
+ (modules run_cap_conformance)
+ (libraries march_test_helpers alcotest unix)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (glob_files ../runtime/*.mjs)
+       (source_tree cap_conformance))
  (action (run %{test} -e)))
 
 ; Golden test-failure reports (lib/errors/test_report.ml): every

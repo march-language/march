@@ -1069,7 +1069,7 @@ let rotate_server_src = {|mod HttpsRotate do
   end
 
   fn read_or_empty(path) do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
     Ok(s) -> s
     Err(_) -> ""
     end

@@ -896,11 +896,14 @@ mod JsonStream do
   -- ndjson_run itself returns Result(unit, JsonStreamError) — two
   -- different error types, so the outer FileError is folded into
   -- JsonStreamError rather than propagated via `let?`.
+  -- A refused read (IO.FileRead) is the outer `Err(CapError(...))`.
   fn each_value(path, cb) do
-    match File.with_chunks(path, 65536, fn chunks -> ndjson_run(chunks, cb)) do
-    Err(e) -> Err(EMalformed("file error: " ++ to_string(e), 0))
-    Ok(inner) -> inner
-    end
+    let? r = File.with_chunks(path, 65536, fn chunks -> ndjson_run(chunks, cb))
+    let out = match r do
+      Err(e) -> Err(EMalformed("file error: " ++ to_string(e), 0))
+      Ok(inner) -> inner
+      end
+    Ok(out)
   end
 
   pfn ndjson_run(chunks, cb) do
@@ -991,10 +994,12 @@ mod JsonStream do
       JsonStream.each_typed("users.ndjson", fn u -> println(u.name))
   """
   fn each_typed(path, cb) do
-    match File.with_lines(path, fn seq -> typed_run(seq, cb)) do
-    Err(e) -> Err(Json.DecodeError("file error: " ++ to_string(e), Nil, 0 - 1))
-    Ok(inner) -> inner
-    end
+    let? r = File.with_lines(path, fn seq -> typed_run(seq, cb))
+    let out = match r do
+      Err(e) -> Err(Json.DecodeError("file error: " ++ to_string(e), Nil, 0 - 1))
+      Ok(inner) -> inner
+      end
+    Ok(out)
   end
 
   pfn typed_run(seq, cb) do

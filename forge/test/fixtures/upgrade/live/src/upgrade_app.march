@@ -46,7 +46,7 @@ mod UpgradeApp do
     let _ = task_spawn(fn _ -> feed(t, 0))
     -- Named state the OLD version creates: a later version's code must find
     -- it (a hot patch used to carry its own vault registry and could not).
-    let st = Vault.new("upgrade_state")
+    let st = Authority.must(Vault.new("upgrade_state"))
     Vault.set(st, "base", 100)
     { io: io, node: node }
   end
@@ -85,11 +85,11 @@ mod UpgradeApp do
     -- version's hook created, then starts an Echo session of its own (Ask 7:
     -- answered 8, then 9). Returns base + that answer: 109.
     pfn nested(env : Env, n : Int) : Int do
-      let base = match Vault.whereis("upgrade_state") do
+      let base = match Authority.must(Vault.whereis("upgrade_state")) do
         Some(v) -> Vault.get_or(v, "base", -1)
         None -> -1000
       end
-      let got = Vault.new("upgrade_nested_" ++ int_to_string(n))
+      let got = Authority.must(Vault.new("upgrade_nested_" ++ int_to_string(n)))
       let own = match Echo_Run.initiate_Client(env.node, fn (s, st) ->
           Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, 7), fn (a, st2) ->
             Echo_Client.recv_Answer2(s, Echo_Client.send_Ask2(s, st2, a), fn (b, st3) ->

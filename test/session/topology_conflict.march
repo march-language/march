@@ -75,12 +75,13 @@ mod TopologyConflict do
   end
 
   pfn show_offers(c : Cap(ClusterNode.Live), what : String) : () do
-    println(what ++ ": offers [" ++ String.join(Topology.offered(c), ", ") ++ "]")
+    Authority.ignore(println(what ++ ": offers [" ++ String.join(Topology.offered(c), ", ") ++ "]"))
+    ()
   end
 
   pfn status(c : Cap(ClusterNode.Live)) : () do
     List.each(String.split(Topology.status_text(c), "\n"), fn l ->
-      if String.starts_with(l, "offers ") || String.starts_with(l, "conflict ") do println("  status: " ++ l) else () end)
+      if String.starts_with(l, "offers ") || String.starts_with(l, "conflict ") do Authority.ignore(println("  status: " ++ l)) else () end)
   end
 
   -- A peer that ranks above n0 for [role].
@@ -96,14 +97,14 @@ mod TopologyConflict do
   end
 
   fn main(io : Cap(IO)) do
-    let fk = { members: Vault.new("tc_members"), names: Vault.new("tc_names"),
-               pending: Vault.new("tc_pending"), meta: Vault.new("tc_meta") }
+    let fk = { members: Authority.must(Vault.new("tc_members")), names: Authority.must(Vault.new("tc_names")),
+               pending: Authority.must(Vault.new("tc_pending")), meta: Authority.must(Vault.new("tc_meta")) }
     let peer = peer_above("Echo.Primary", ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"])
     Vault.set(fk.members, "n0", member("n0", Membership.Alive))
     Vault.set(fk.members, peer, member(peer, Membership.Dead))
     Vault.set(fk.names, Topology.marker("Echo.Primary", peer), GlobalPid.make(peer, 1, 1))
     let c = ClusterNode.attach(io, fake_ops(fk))
-    let tries : Vault(Int) = Vault.new("tc_tries")
+    let tries : Vault(Int) = Authority.must(Vault.new("tc_tries"))
     Topology.place(c, [
       Topology.role("Echo.Primary", Topology.count(1),
                     fn () -> Echo_Run.offer_Server(c, 4, fn (s, st) -> serve_one(s, st))),
@@ -118,7 +119,7 @@ mod TopologyConflict do
     -- every evaluation (it was, silently, before the fix: 6 tries).
     List.each([1, 2, 3, 4, 5], fn _ -> Topology.reconcile_now(c))
     show_offers(c, "after 5 more evaluations")
-    println("Echo.Replica tried every evaluation: " ++ (if Vault.get_or(tries, "n", 0) >= 6 do "yes" else "no" end))
+    Authority.ignore(println("Echo.Replica tried every evaluation: " ++ (if Vault.get_or(tries, "n", 0) >= 6 do "yes" else "no" end)))
     status(c)
     -- The holder moves away: the peer ranked above n0 comes alive.
     Vault.set(fk.members, peer, member(peer, Membership.Alive))

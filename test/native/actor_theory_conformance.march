@@ -57,6 +57,7 @@ mod Main do
   fn check(q : Actor.Theory.ActorQueue, s : Int, k : Int) : Unit do
     let got = Actor.Theory.payloads(Actor.Theory.from_sender(s, q))
     println("sender " ++ int_to_string(s) ++ " in order: " ++ bool_to_string(got == upto(k, Nil)))
+    ()
   end
 
   fn main(_cap_console : Cap(IO.Console)) do
@@ -76,7 +77,7 @@ mod Main do
         check(q, 1, k)
         check(q, 2, k)
         check(q, 3, k)
-      Err(e) -> println("err: " ++ e)
+      Err(e) -> Authority.ignore(println("err: " ++ e))
     end
   end
 end

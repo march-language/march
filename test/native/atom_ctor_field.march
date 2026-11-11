@@ -15,6 +15,7 @@ mod AtomCtorField do
 
   fn check(label : String, got : Atom, want : Atom) : Unit do
     if got == want do println("ok " ++ label) else println("BAD " ++ label) end
+    ()
   end
 
   fn main(_cap_console : Cap(IO.Console)) : Unit do

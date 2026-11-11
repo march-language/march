@@ -178,13 +178,13 @@ mod Crypto do
   different iteration count continue to verify correctly because the count is
   embedded in the hash string.
   """
-  fn hash_password(plain) do
-    let salt_bytes = random_bytes(16)
+  fn hash_password(plain) : Result(String, CapError) do
+    let? salt_bytes = random_bytes(16)
     let salt_hex = bytes_to_hex(salt_bytes)
     match pbkdf2_sha256(plain, salt_bytes, pw_iterations, pw_dklen) do
     Ok(hash_bytes) ->
       let hash_hex = bytes_to_hex(hash_bytes)
-      "pbkdf2:sha256:" ++ int_to_string(pw_iterations) ++ ":" ++ salt_hex ++ ":" ++ hash_hex
+      Ok("pbkdf2:sha256:" ++ int_to_string(pw_iterations) ++ ":" ++ salt_hex ++ ":" ++ hash_hex)
     end
   end
 
@@ -243,12 +243,15 @@ mod Crypto do
   output is suitable for cryptographic keys, IVs, nonces, salts, and
   session tokens.
 
-  Panics if `n` is negative or if `/dev/urandom` cannot be opened.
+  Panics if `n` is negative or if `/dev/urandom` cannot be opened. A
+  capability operation (IO.Random): `Err(CapError(...))` when the current
+  authority refuses it.
 
-      Crypto.random_bytes(16)  -- Bytes value with 16 random bytes
+      Crypto.random_bytes(16)  -- Ok(Bytes value with 16 random bytes)
   """
-  fn random_bytes(n : {Int | _ >= 0}) do
-    stdlib_random_bytes(n)
+  fn random_bytes(n : {Int | _ >= 0}) : Result(Bytes, CapError) do
+    let? _ = Authority.check("IO.Random", "")
+    Ok(stdlib_random_bytes(n))
   end
 
   doc """
@@ -257,10 +260,11 @@ mod Crypto do
 
   Panics if `n` is negative or if `/dev/urandom` cannot be opened.
 
-      Crypto.random_hex(16)  -- 32-character lowercase hex string
+      Crypto.random_hex(16)  -- Ok(32-character lowercase hex string)
   """
-  fn random_hex(n : {Int | _ >= 0}) do
-    bytes_to_hex(random_bytes(n))
+  fn random_hex(n : {Int | _ >= 0}) : Result(String, CapError) do
+    let? b = random_bytes(n)
+    Ok(bytes_to_hex(b))
   end
 
   -- ── Constant-time comparison ──────────────────────────────────────────────

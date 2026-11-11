@@ -355,11 +355,11 @@ describe "DateTime" do
     test "now returns valid timestamp" do
       let ts = DateTime.now()
       -- Should be after 2020-01-01 (1577836800)
-      assert (ts > 1577836800)
+      assert (Authority.must(ts) > 1577836800)
     end
 
     test "now as DateTime has valid fields" do
-      let dt = DateTime.from_timestamp(DateTime.now())
+      let dt = DateTime.from_timestamp(Authority.must(DateTime.now()))
       match dt do
       DateTime(Date(y, m, d), Time(h, mn, s)) -> do
         assert (y >= 2024)

@@ -39,7 +39,7 @@ mod FrameTamperedC do
           Ok(body) ->
             let hit = a_to_b && conn == tamper_conn() && k == tamper_frame()
             let out = if hit do flip(body) else body end
-            if hit do println("node-c: flipped a byte in one data frame") else () end
+            if hit do Authority.ignore(println("node-c: flipped a byte in one data frame")) else () end
             match Result.map_err(tcp_send_all(dst, Bytes.to_string(Bytes.concat(hdr, out))), fn m -> Socket.WriteFailed(m)) do
               Ok(_) -> pump(src, dst, conn, a_to_b, k + 1)
               Err(_) -> 0
@@ -49,11 +49,11 @@ mod FrameTamperedC do
   end
 
   pfn serve(listen_fd : Int, conn : Int, stop : String) : () do
-    if File.exists(stop) do () else
+    if Authority.must(File.exists(stop)) do () else
       match tcp_accept_timeout(listen_fd, 200) do
         Err(_) -> serve(listen_fd, conn, stop)
         Ok(fd) ->
-          match Result.map_err(tcp_connect("127.0.0.1", Env.require_int("MARCH_PORT_B")), fn m -> Socket.ConnectionFailed(m)) do
+          match Result.map_err(tcp_connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_B"))), fn m -> Socket.ConnectionFailed(m)) do
             -- At teardown node-b can stop before node-a, whose cluster node
             -- then redials through this proxy into a closed port. That refusal
             -- is the peer going away, not a fixture failure: close the
@@ -76,11 +76,11 @@ mod FrameTamperedC do
   end
 
   fn main(_c : Cap(IO)) do
-    match tcp_listen(Env.require_int("MARCH_PORT_C")) do
+    match tcp_listen(Authority.must(Env.require_int("MARCH_PORT_C"))) do
       Err(e) -> panic("node-c: listen: " ++ e)
       Ok(lfd) ->
-        println("node-c: up")
-        serve(lfd, 0, Env.require("CLUSTER_STOP_FILE"))
+        Authority.ignore(println("node-c: up"))
+        serve(lfd, 0, Authority.must(Env.require("CLUSTER_STOP_FILE")))
         println("node-c: done")
     end
   end

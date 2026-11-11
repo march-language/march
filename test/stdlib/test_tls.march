@@ -20,13 +20,13 @@ mod TestTls do
   -- Tls.connect / Tls.accept take a Socket, not a descriptor number; the
   -- interpreter's stub handshake succeeds on any socket. Port 0: the OS picks.
   pfn stub_socket() : Socket do
-    match Socket.listen(0) do
+    match Authority.must(Socket.listen(0)) do
     Err(e) -> panic("listen: " ++ Socket.error_message(e))
     Ok(l) ->
       match Socket.local_port(l) do
       Err(e) -> panic("local_port: " ++ Socket.error_message(e))
       Ok(port) ->
-        match Socket.connect("127.0.0.1", port) do
+        match Authority.must(Socket.connect("127.0.0.1", port)) do
         Err(e) -> panic("connect: " ++ Socket.error_message(e))
         Ok(s) -> s
         end
@@ -36,7 +36,7 @@ mod TestTls do
 
   pfn make_stub_conn() do
     let config = Tls.default_client_config()
-    match Tls.client_ctx(config) do
+    match Authority.must(Tls.client_ctx(config)) do
     Ok(ctx) ->
       match Tls.connect(stub_socket(), ctx, "stub") do
       Ok(conn) -> conn
@@ -146,7 +146,7 @@ mod TestTls do
   describe "client_ctx" do
     test "returns Ok(TlsCtx) with default config" do
       let config = Tls.default_client_config()
-      match Tls.client_ctx(config) do
+      match Authority.must(Tls.client_ctx(config)) do
       Ok(_) -> assert true
       Err(e) -> assert false
       end
@@ -154,7 +154,7 @@ mod TestTls do
 
     test "h2 config also returns Ok" do
       let config = Tls.h2_client_config()
-      match Tls.client_ctx(config) do
+      match Authority.must(Tls.client_ctx(config)) do
       Ok(_) -> assert true
       Err(_) -> assert false
       end
@@ -166,7 +166,7 @@ mod TestTls do
   describe "server_ctx" do
     test "empty cert_file returns Err" do
       let config = Tls.default_client_config()
-      match Tls.server_ctx(config) do
+      match Authority.must(Tls.server_ctx(config)) do
       Err(TlsContextError(msg)) ->
         assert (string_length(msg) > 0)
       Ok(_) -> assert false
@@ -175,7 +175,7 @@ mod TestTls do
 
     test "non-empty cert_file returns Ok in interpreter" do
       let config = Tls.server_config("/fake/cert.pem", "/fake/key.pem")
-      match Tls.server_ctx(config) do
+      match Authority.must(Tls.server_ctx(config)) do
       Ok(_) -> assert true
       Err(_) -> assert false
       end
@@ -187,7 +187,7 @@ mod TestTls do
   describe "connect and close" do
     test "connect with a stub socket returns Ok(TlsConn)" do
       let config = Tls.default_client_config()
-      match Tls.client_ctx(config) do
+      match Authority.must(Tls.client_ctx(config)) do
       Ok(ctx) ->
         match Tls.connect(stub_socket(), ctx, "example.com") do
         Ok(conn) -> do
@@ -202,7 +202,7 @@ mod TestTls do
 
     test "accept with a stub socket returns Ok(TlsConn)" do
       let config = Tls.server_config("/fake/cert.pem", "/fake/key.pem")
-      match Tls.server_ctx(config) do
+      match Authority.must(Tls.server_ctx(config)) do
       Ok(ctx) ->
         match Tls.accept(stub_socket(), ctx) do
         Ok(conn) -> do
@@ -232,7 +232,7 @@ mod TestTls do
 
     test "the Socket a handshake took over is closed" do
       let s = stub_socket()
-      match Tls.client_ctx(Tls.default_client_config()) do
+      match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
       Err(_) -> assert false
       Ok(ctx) ->
         match Tls.connect(s, ctx, "stub") do
@@ -245,7 +245,7 @@ mod TestTls do
     end
 
     test "a freed TlsCtx reports Err(Closed)" do
-      match Tls.client_ctx(Tls.default_client_config()) do
+      match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
       Err(_) -> assert false
       Ok(ctx) ->
         Tls.ctx_free(ctx)
@@ -295,7 +295,7 @@ mod TestTls do
   describe "ctx_free" do
     test "ctx_free does not crash" do
       let config = Tls.default_client_config()
-      match Tls.client_ctx(config) do
+      match Authority.must(Tls.client_ctx(config)) do
       Ok(ctx) -> do
         Tls.ctx_free(ctx)
         assert true
@@ -310,7 +310,7 @@ mod TestTls do
   describe "introspection" do
     test "negotiated_alpn returns None on stub conn" do
       let config = Tls.default_client_config()
-      match Tls.client_ctx(config) do
+      match Authority.must(Tls.client_ctx(config)) do
       Ok(ctx) ->
         match Tls.connect(stub_socket(), ctx, "stub") do
         Ok(conn) ->
@@ -326,7 +326,7 @@ mod TestTls do
 
     test "peer_cn returns None on stub conn" do
       let config = Tls.default_client_config()
-      match Tls.client_ctx(config) do
+      match Authority.must(Tls.client_ctx(config)) do
       Ok(ctx) ->
         match Tls.connect(stub_socket(), ctx, "stub") do
         Ok(conn) ->

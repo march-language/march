@@ -26,5 +26,6 @@ mod Main do
   fn main(_cap_console : Cap(IO.Console)) : () do
     let ints = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
     println(go(ints, 0, 0))   -- (1+1) + (2+1) + (3+1) = 9
+    ()
   end
 end

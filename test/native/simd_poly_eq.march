@@ -20,5 +20,6 @@ mod SimdPolyEq do
     println(List.member(xs, Simd.splat_f32x4(9.0)))
     -- Content-equal to the 1st element via a fresh box.
     println(List.member(xs, Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)))
+    ()
   end
 end

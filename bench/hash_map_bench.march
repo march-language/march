@@ -49,6 +49,7 @@ end
 
 pfn print_timing(label : String, ms : Int, check : Int) : Unit do
   println(label ++ " " ++ int_to_string(ms) ++ "ms  (check=" ++ int_to_string(check) ++ ")")
+  ()
 end
 
 -- ── Workload 1: raw HashMap put / get ──────────────────────────────────────

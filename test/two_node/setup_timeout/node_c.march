@@ -27,13 +27,13 @@ mod SetupTimeoutC do
 
   fn main(c : Cap(IO)) do
     match Tri_Run.run_C(c, "node-c", "tri-secret", Tri_Run.addrs_from_env(), fn (s, st) -> role_c(s, st)) do
-      Ok(_) -> println("C: closed")
+      Ok(_) -> Authority.ignore(println("C: closed"))
       Err(SessionNode.Connect(role, _)) ->
-        println("C: could not connect to role " ++ int_to_string(role))
+        Authority.ignore(println("C: could not connect to role " ++ int_to_string(role)))
         -- Carry on, as a program that handles the error would: whatever A
         -- learns about C now comes from C's setup teardown, not its exit.
         sleep_ms(30000)
-      Err(e) -> println("C: " ++ SessionNode.run_error_message(e))
+      Err(e) -> Authority.ignore(println("C: " ++ SessionNode.run_error_message(e)))
     end
   end
 end

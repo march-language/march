@@ -54,7 +54,15 @@ let setup_hermetic_march () =
     Unix.putenv "PATH" (bindir ^ ":" ^ old_path);
     (* Empty MARCH_HOME → no global toolchain resolves → path_prefix stays empty
        → the bare `march` in the subprocess commands hits our PATH symlink. *)
-    Unix.putenv "MARCH_HOME" (Filename.temp_dir "march_hermetic_home_" "")
+    Unix.putenv "MARCH_HOME" (Filename.temp_dir "march_hermetic_home_" "");
+    (* The staged stdlib, when the dune rule passes it: march invoked through
+       the PATH symlink resolves its stdlib exe-relative from the LINK's
+       directory on macOS, and finds none for the on-demand modules. *)
+    (match Sys.getenv_opt "MARCH_TEST_STDLIB_DIR" with
+     | Some d when d <> "" ->
+       let d = if Filename.is_relative d then Filename.concat (Sys.getcwd ()) d else d in
+       Unix.putenv "MARCH_STDLIB" d
+     | _ -> ())
 
 let write_file path content =
   let oc = open_out path in
@@ -312,6 +320,144 @@ let test_fix_contracts_honors_forge_toml_globs () =
        | Ok _ -> () | Error e -> Alcotest.failf "forge fix --contracts failed: %s" e);
       Alcotest.(check bool) "add is in scope via the glob" true
         (contains (read_file_text f) "@[no_alloc]\n  fn add"))
+
+(* ------------------------------------------- forge fix PATH: cap results *)
+
+(* ocap phase 1 (specs/plans/2026-11-10-ocap-p1-result-plan.md, Task 11):
+   capability operations return [Result(T, CapError)], and `forge fix PATH`
+   rewrites code that used the value, outside any project. *)
+
+let cap_fix_before = {|mod Shapes do
+  needs IO.Console
+  needs IO.Clock
+
+  fn greet(name : String) : () do
+    println("hello, " ++ name)
+  end
+
+  fn show(o : Option(Int)) : () do
+    match o do
+    Some(v) -> println(v)
+    None -> ()
+    end
+  end
+
+  fn later() : Int do
+    System.now_ms() + 1000
+  end
+
+  fn helper() do
+    println("from helper")
+  end
+
+  fn twice() : () do
+    helper()
+  end
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    greet("world")
+    show(Some(1))
+    println(later() > 0)
+    twice()
+  end
+end
+|}
+
+let cap_fix_after = {|mod Shapes do
+  needs IO.Console
+  needs IO.Clock
+
+  fn greet(name : String) : () do
+    println("hello, " ++ name)
+    ()
+  end
+
+  fn show(o : Option(Int)) : () do
+    match o do
+    Some(v) -> Authority.ignore(println(v))
+    None -> ()
+    end
+  end
+
+  fn later() : Int do
+    Authority.must(System.now_ms()) + 1000
+  end
+
+  fn helper() do
+    println("from helper")
+  end
+
+  fn twice() : () do
+    helper()
+    ()
+  end
+
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+    greet("world")
+    show(Some(1))
+    println(later() > 0)
+    twice()
+  end
+end
+|}
+
+let test_fix_paths_cap_results () =
+  setup_hermetic_march ();
+  let dir = Filename.temp_dir "forge_fix_paths_" "" in
+  let f = Filename.concat dir "shapes.march" in
+  write_file f cap_fix_before;
+  (match Cmd_fix.run_paths [ dir ] with
+   | Ok _ -> () | Error e -> Alcotest.failf "forge fix PATH failed: %s" e);
+  Alcotest.(check string) "every shape rewritten" cap_fix_after (read_file_text f);
+  (match Cmd_fix.run_paths [ dir ] with
+   | Ok msg -> Alcotest.(check string) "a second run finds nothing"
+                 "no auto-fixable diagnostics found" msg
+   | Error e -> Alcotest.failf "second forge fix PATH failed: %s" e);
+  let rc = Sys.command (Printf.sprintf "march --check %s > /dev/null 2>&1" (Filename.quote f)) in
+  Alcotest.(check int) "the result typechecks" 0 rc
+
+let test_fix_paths_only_filters_codes () =
+  setup_hermetic_march ();
+  let dir = Filename.temp_dir "forge_fix_only_" "" in
+  let f = Filename.concat dir "only.march" in
+  write_file f {|mod Only do
+  needs IO.Console
+
+  fn greet(name : String, unused : Int) : () do
+    println("hello, " ++ name)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    greet("world", 1)
+  end
+end
+|};
+  (match Cmd_fix.run_paths ~only:[ "cap_result_unhandled" ] [ dir ] with
+   | Ok _ -> () | Error e -> Alcotest.failf "forge fix --only failed: %s" e);
+  let after = read_file_text f in
+  Alcotest.(check bool) "the capability result is fixed" true
+    (contains after "println(\"hello, \" ++ name)\n    ()\n");
+  Alcotest.(check bool) "the unused parameter is left alone" true
+    (contains after "unused : Int")
+
+let test_fix_paths_keeps_symlinks () =
+  setup_hermetic_march ();
+  let dir = Filename.temp_dir "forge_fix_link_" "" in
+  let real = Filename.concat dir "real.march" in
+  let link = Filename.concat dir "link.march" in
+  write_file real cap_fix_before;
+  Unix.symlink "real.march" link;
+  (match Cmd_fix.run_paths ~only:[ "cap_result_unhandled" ] [ link ] with
+   | Ok _ -> () | Error e -> Alcotest.failf "forge fix failed: %s" e);
+  Alcotest.(check bool) "the link is still a link" true
+    ((Unix.lstat link).Unix.st_kind = Unix.S_LNK);
+  Alcotest.(check string) "the fix landed in the file it names" cap_fix_after (read_file_text real)
+
+let test_fix_paths_no_files () =
+  let dir = Filename.temp_dir "forge_fix_empty_" "" in
+  match Cmd_fix.run_paths [ dir ] with
+  | Error _ -> ()
+  | Ok m -> Alcotest.failf "expected an error for a directory with no .march files, got %S" m
 
 (* -------------------------------------------------------------- forge check *)
 
@@ -965,6 +1111,7 @@ let test_run_interpreted_passes_ffi_sources () =
         \  end\n\n\
         \  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do\n\
         \    println(int_to_string(triple(14)))\n\
+        \    ()\n\
         \  end\n\
          end\n" mod_name);
       (* Capture stdout: the assertion is on the VALUE the extern returned. *)
@@ -1052,6 +1199,16 @@ let () =
     "forge run", [
       Alcotest.test_case "interpreted run passes [ffi] sources to the compiler" `Quick
         test_run_interpreted_passes_ffi_sources;
+    ];
+    "forge fix PATH", [
+      Alcotest.test_case "rewrites capability results and is idempotent" `Quick
+        test_fix_paths_cap_results;
+      Alcotest.test_case "a path with no .march files is an error" `Quick
+        test_fix_paths_no_files;
+      Alcotest.test_case "--only applies only the named codes" `Quick
+        test_fix_paths_only_filters_codes;
+      Alcotest.test_case "a symlink stays a symlink" `Quick
+        test_fix_paths_keeps_symlinks;
     ];
     "forge fix --contracts", [
       Alcotest.test_case "inserts @[no_alloc] and is idempotent" `Quick

@@ -49,6 +49,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let cmp    = fn x -> fn y -> x <= y
   let sorted = sort_batched(xs, cmp)
   println(int_to_string(head(sorted)))
+  ()
 end
 
 end

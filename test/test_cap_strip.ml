@@ -89,6 +89,7 @@ mod PureStripApp do
   needs IO.Console
   fn main(_cap_console : Cap(IO.Console)) : () do
     println(int_to_string(1 + 1))
+    ()
   end
 end
 |}
@@ -105,8 +106,8 @@ mod ClosureStripApp do
 
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     match apply1(fn p -> file_read(p), "/etc/hosts") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("err")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("err"))
     end
   end
 end
@@ -245,8 +246,8 @@ mod SbNetApp do
   needs IO.NetListen
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) : () do
     match tcp_listen(19097) do
-      Ok(_)  -> println("BOUND")
-      Err(_) -> println("BIND-FAILED")
+      Ok(_)  -> Authority.ignore(println("BOUND"))
+      Err(_) -> Authority.ignore(println("BIND-FAILED"))
     end
   end
 end

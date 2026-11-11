@@ -15,9 +15,9 @@
 --
 -- Typical client usage:
 --   let config = Tls.default_client_config()
---   match Tls.client_ctx(config) do
+--   match Authority.must(Tls.client_ctx(config)) do
 --   Ok(ctx) ->
---     match Socket.connect("example.com", 443) do
+--     match Authority.must(Socket.connect("example.com", 443)) do
 --     Ok(s) ->
 --       -- Bound reads against a peer that accepts and then goes silent.
 --       -- Must be set BEFORE the handshake to bound the handshake too.
@@ -35,6 +35,11 @@
 --     end
 --   Err(e) -> Err(e)
 --   end
+--
+-- Creating a context is the capability operation (IO.NetConnect.TLS):
+-- `client_ctx` and `server_ctx` return `Result(Result(TlsCtx, TlsError),
+-- CapError)`, the outer `Err` a refusal. Handshakes and I/O on a context or
+-- connection you hold need no further authority.
 
 mod Tls do
   needs IO.NetConnect.TLS
@@ -272,47 +277,52 @@ mod Tls do
   doc """
   Create a client-side TLS context from a TlsConfig (uses `ca_file`, `alpn`,
   `min_version`, `verify_peer`; the cert/key fields are ignored).
-  Returns `Ok(TlsCtx)` or `Err(TlsContextError(msg))`, e.g. when the CA file
-  cannot be loaded. The ctx can be shared across many connections
-  (thread-safe); release it with `ctx_free`.
+  Returns `Ok(Ok(TlsCtx))` or `Ok(Err(TlsContextError(msg)))`, e.g. when the
+  CA file cannot be loaded; a refused capability check (IO.NetConnect.TLS) is
+  the outer `Err(CapError(...))`. The ctx can be shared across many
+  connections (thread-safe); release it with `ctx_free`.
 
   ## Examples
 
       match Tls.client_ctx(Tls.default_client_config()) do
-        Ok(ctx) -> use_ctx(ctx)
-        Err(e) -> println(Tls.error_to_string(e))
+        Ok(Ok(ctx))  -> use_ctx(ctx)
+        Ok(Err(e))   -> println(Tls.error_to_string(e))
+        Err(refused) -> println(Authority.describe(refused))
       end
   """
-  fn client_ctx(config) do
+  fn client_ctx(config) : Result(Result(TlsCtx, TlsError), CapError) do
+    let? _ = Authority.check("IO.NetConnect.TLS", "")
     let ca    = ca_file(config)
     let a     = alpn(config)
     let ver   = version_to_int(min_version(config))
     let vp    = if verify_peer(config) do 1 else 0 end
     match tls_client_ctx(ca, a, ver, vp) do
-    Err(msg) -> Err(TlsContextError(msg))
-    Ok(h)    -> Ok(new_ctx(h))
+    Err(msg) -> Ok(Err(TlsContextError(msg)))
+    Ok(h)    -> Ok(Ok(new_ctx(h)))
     end
   end
 
   doc """
   Create a server-side TLS context from a TlsConfig.
   cert_file and key_file must be non-empty PEM paths. `verify_peer` is not
-  used. Returns `Ok(TlsCtx)` or `Err(TlsContextError(msg))` (missing or
-  mismatched cert/key, bad CA file).
+  used. Returns `Ok(Ok(TlsCtx))` or `Ok(Err(TlsContextError(msg)))` (missing
+  or mismatched cert/key, bad CA file); a refused capability check
+  (IO.NetConnect.TLS) is the outer `Err(CapError(...))`.
 
   ## Examples
 
-      let ctx = Result.unwrap(Tls.server_ctx(Tls.server_config("cert.pem", "key.pem")))
+      let ctx = Result.unwrap(Authority.must(Tls.server_ctx(Tls.server_config("cert.pem", "key.pem"))))
   """
-  fn server_ctx(config) do
+  fn server_ctx(config) : Result(Result(TlsCtx, TlsError), CapError) do
+    let? _ = Authority.check("IO.NetConnect.TLS", "")
     let cert  = cert_file(config)
     let key   = key_file(config)
     let ca    = ca_file(config)
     let a     = alpn(config)
     let ver   = version_to_int(min_version(config))
     match tls_server_ctx(cert, key, ca, a, ver) do
-    Err(msg) -> Err(TlsContextError(msg))
-    Ok(h)    -> Ok(new_ctx(h))
+    Err(msg) -> Ok(Err(TlsContextError(msg)))
+    Ok(h)    -> Ok(Ok(new_ctx(h)))
     end
   end
 
@@ -568,9 +578,13 @@ mod Tls do
 
   pfn https_get_raw(host, port, req) do
     let config = default_client_config()
+    -- https_get keeps its single Result until the deferred HTTPS opens are
+    -- re-typed (specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md):
+    -- a refused context is reported as a context error, and nothing connects.
     match client_ctx(config) do
-    Err(e) -> Err(e)
-    Ok(ctx) ->
+    Err(refused) -> Err(TlsContextError(Authority.describe(refused)))
+    Ok(Err(e)) -> Err(e)
+    Ok(Ok(ctx)) ->
       let result = match tcp_connect(host, port) do
         Err(msg) -> Err(TlsHandshakeFailed("tcp_connect: " ++ msg))
         Ok(fd) ->

@@ -15,7 +15,7 @@ mod TestSocket do
 
 
   pfn listen_ok() : Listener do
-    match Socket.listen(0) do
+    match Authority.must(Socket.listen(0)) do
     Ok(l) -> l
     Err(e) -> panic("listen failed: " ++ Socket.error_message(e))
     end
@@ -29,7 +29,7 @@ mod TestSocket do
   end
 
   pfn connect_ok(port : Int) : Socket do
-    match Socket.connect("127.0.0.1", port) do
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
     Ok(s) -> s
     Err(e) -> panic("connect failed: " ++ Socket.error_message(e))
     end
@@ -106,14 +106,14 @@ mod TestSocket do
 
     test "connection refused returns Err" do
       -- Port 1 is almost universally not listening; ECONNREFUSED or similar.
-      match Socket.connect("127.0.0.1", 1) do
+      match Authority.must(Socket.connect("127.0.0.1", 1)) do
       Err(_) -> ()
       Ok(_)  -> panic("expected connection to fail on port 1")
       end
     end
 
     test "invalid port returns Err" do
-      match Socket.connect("127.0.0.1", 99999) do
+      match Authority.must(Socket.connect("127.0.0.1", 99999)) do
       Err(_) -> ()
       Ok(_)  -> panic("expected connection to fail on port 99999")
       end
@@ -126,7 +126,7 @@ mod TestSocket do
   describe "with_connection" do
 
     test "propagates connect error" do
-      let result = Socket.with_connection("127.0.0.1", 1, fn s -> Socket.peer_addr(s))
+      let result = Authority.must(Socket.with_connection("127.0.0.1", 1, fn s -> Socket.peer_addr(s)))
       match result do
       Err(_) -> ()
       Ok(_)  -> panic("expected error")
@@ -136,11 +136,11 @@ mod TestSocket do
     test "passes a Socket and closes it" do
       let l = listen_ok()
       let port = port_ok(l)
-      let r = Socket.with_connection("127.0.0.1", port, fn s ->
+      let r = Authority.must(Socket.with_connection("127.0.0.1", port, fn s ->
         match Socket.write(s, "hi") do
         Ok(_) -> Ok(s)
         Err(e) -> Err(e)
-        end)
+        end))
       match r do
       Ok(s) -> assert (Socket.write(s, "x") == Err(Socket.Closed))
       Err(e) -> panic("with_connection failed: " ++ Socket.error_message(e))

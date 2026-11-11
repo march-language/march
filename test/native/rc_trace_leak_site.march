@@ -34,5 +34,6 @@ mod Main do
     let b = leak_loop(3, 0)
     println("sum: " ++ int_to_string(a + b))
     println("delta: " ++ int_to_string(live_allocs() - base))
+    ()
   end
 end

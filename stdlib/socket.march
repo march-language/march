@@ -15,8 +15,8 @@
 -- local actor shares it; handles cannot be sent to another node.
 --
 -- Public API:
---   Socket.connect(host, port)             : Result(Socket, SocketError)
---   Socket.connect_timeout(host, port, ms) : Result(Socket, SocketError)
+--   Socket.connect(host, port)             : Result(Result(Socket, SocketError), CapError)
+--   Socket.connect_timeout(host, port, ms) : Result(Result(Socket, SocketError), CapError)
 --   Socket.write(s, data)                  : Result((), SocketError)
 --   Socket.recv(s, max_bytes)              : Result(String, SocketError)
 --   Socket.recv_timeout(s, max, ms)        : Result(String, SocketError)
@@ -24,12 +24,16 @@
 --   Socket.recv_deadline(s, max, ms)       : Result(Option(String), SocketError)
 --   Socket.peer_addr(s)                    : Result(String, SocketError)
 --   Socket.close(s)                        : Result((), SocketError)
---   Socket.with_connection(host, port, f)  : Result(a, SocketError)
---   Socket.listen(port)                    : Result(Listener, SocketError)
+--   Socket.with_connection(host, port, f)  : Result(Result(a, SocketError), CapError)
+--   Socket.listen(port)                    : Result(Result(Listener, SocketError), CapError)
 --   Socket.accept(l)                       : Result(Socket, SocketError)
 --   Socket.accept_timeout(l, ms)           : Result(Socket, SocketError)
 --   Socket.local_port(l)                   : Result(Int, SocketError)
 --   Socket.close_listener(l)               : Result((), SocketError)
+--
+-- Connecting and listening are capability operations (IO.NetConnect on
+-- host:port, IO.NetListen on the port): the outer Err(CapError(...)) is a
+-- refused attempt, which opens no socket. Using a handle needs no authority.
 --   Socket.error_message(e)                : String
 
 mod Socket do
@@ -160,21 +164,25 @@ mod Socket do
   -- ── Connections ───────────────────────────────────────────────────────────
 
   doc """
-  Open a TCP connection to host:port. Returns `Ok(socket)` or
-  `Err(ConnectionFailed(msg))`. Close the socket with `close` (or let
-  `with_connection` do it).
+  Open a TCP connection to host:port. Returns `Ok(Ok(socket))` or
+  `Ok(Err(ConnectionFailed(msg)))`; a refused capability check
+  (IO.NetConnect on `host:port`) is the outer `Err(CapError(...))` and
+  opens nothing. Close the socket with `close` (or let `with_connection`
+  do it).
 
   ## Examples
 
       match Socket.connect("127.0.0.1", 6379) do
-        Ok(s) -> use_redis(s)
-        Err(e) -> println(Socket.error_message(e))
+        Ok(Ok(s))    -> use_redis(s)
+        Ok(Err(e))   -> println(Socket.error_message(e))
+        Err(refused) -> println(Authority.describe(refused))
       end
   """
-  fn connect(host : String, port : Int) : Result(Socket, SocketError) do
+  fn connect(host : String, port : Int) : Result(Result(Socket, SocketError), CapError) do
+    let? _ = Authority.check("IO.NetConnect", host ++ ":" ++ int_to_string(port))
     match tcp_connect(host, port) do
-    Ok(fd)   -> Ok(adopt(fd))
-    Err(msg) -> Err(ConnectionFailed(msg))
+    Ok(fd)   -> Ok(Ok(adopt(fd)))
+    Err(msg) -> Ok(Err(ConnectionFailed(msg)))
     end
   end
 
@@ -183,16 +191,19 @@ mod Socket do
   peer never answers (a SYN dropped by a partition gets no RST, so a plain
   `connect` waits out the kernel's SYN retries, a minute or two).
   timeout_ms <= 0 means no bound. A refused connection still fails at once.
-  Every failure, including the timeout, is `Err(ConnectionFailed(msg))`.
+  Every failure, including the timeout, is `Ok(Err(ConnectionFailed(msg)))`;
+  a refused capability check is the outer `Err(CapError(...))`, as for
+  `connect`.
 
   ## Examples
 
       Socket.connect_timeout("10.0.0.5", 8080, 2000)
   """
-  fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Socket, SocketError) do
+  fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Result(Socket, SocketError), CapError) do
+    let? _ = Authority.check("IO.NetConnect", host ++ ":" ++ int_to_string(port))
     match tcp_connect_timeout(host, port, timeout_ms) do
-    Ok(fd)   -> Ok(adopt(fd))
-    Err(msg) -> Err(ConnectionFailed(msg))
+    Ok(fd)   -> Ok(Ok(adopt(fd)))
+    Err(msg) -> Ok(Err(ConnectionFailed(msg)))
     end
   end
 
@@ -359,9 +370,10 @@ mod Socket do
 
   doc """
   Open a connection, run `f(s)`, then close the socket and return `f`'s
-  result. `f` must itself return a `Result(a, SocketError)`; a connection
-  failure is `Err(ConnectionFailed(msg))` and `f` is not called. The socket
-  is closed when `f` returns or panics.
+  result in `Ok`. `f` must itself return a `Result(a, SocketError)`; a
+  connection failure is `Ok(Err(ConnectionFailed(msg)))`, a refused
+  capability check the outer `Err(CapError(...))`, and in either case `f` is
+  not called. The socket is closed when `f` returns or panics.
 
   ## Examples
 
@@ -369,14 +381,15 @@ mod Socket do
         let? _ = Socket.write(s, "HEAD / HTTP/1.0\r\n\r\n")
         Socket.recv(s, 4096))
   """
-  fn with_connection(host : String, port : Int, f : Socket -> Result(a, SocketError)) : Result(a, SocketError) do
-    match connect(host, port) do
-    Err(e) -> Err(e)
+  fn with_connection(host : String, port : Int, f : Socket -> Result(a, SocketError)) : Result(Result(a, SocketError), CapError) do
+    let? c = connect(host, port)
+    match c do
+    Err(e) -> Ok(Err(e))
     Ok(s) ->
-      try_finally(
+      Ok(try_finally(
         fn _ -> f(s),
         fn _ -> close(s)
-      )
+      ))
     end
   end
 
@@ -384,19 +397,22 @@ mod Socket do
 
   doc """
   Listen for TCP connections on port (0 lets the OS pick a free port; see
-  `local_port`). Returns `Ok(listener)` or `Err(ListenFailed(msg))`.
+  `local_port`). Returns `Ok(Ok(listener))` or `Ok(Err(ListenFailed(msg)))`;
+  a refused capability check (IO.NetListen on the port) is the outer
+  `Err(CapError(...))` and opens nothing.
 
   ## Examples
 
-      let? l = Socket.listen(0)
+      let? l = Authority.must(Socket.listen(0))
       let? port = Socket.local_port(l)
   """
-  fn listen(port : Int) : Result(Listener, SocketError) do
+  fn listen(port : Int) : Result(Result(Listener, SocketError), CapError) do
+    let? _ = Authority.check("IO.NetListen", int_to_string(port))
     match tcp_listen(port) do
     Ok(fd) ->
       let l : Listener = handle_new(kind_listener(), fd, 0)
-      Ok(l)
-    Err(msg) -> Err(ListenFailed(msg))
+      Ok(Ok(l))
+    Err(msg) -> Ok(Err(ListenFailed(msg)))
     end
   end
 

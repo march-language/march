@@ -7,15 +7,15 @@ mod VaultNewSameName do
   needs IO
 
   fn main(_cap : Cap(IO)) do
-    let a = Vault.new("vn_probe")
+    let a = Authority.must(Vault.new("vn_probe"))
     Vault.set(a, "k", 42)
-    let b = Vault.new("vn_probe")
+    let b = Authority.must(Vault.new("vn_probe"))
     match Vault.get(b, "k") do
       Some(v) -> println("same table: " ++ int_to_string(v))
       None    -> println("FRESH table")
     end
     -- and a different name is still a different table
-    let c = Vault.new("vn_other")
+    let c = Authority.must(Vault.new("vn_other"))
     match Vault.get(c, "k") do
       Some(_) -> println("other name SHARED")
       None    -> println("other name is its own table")

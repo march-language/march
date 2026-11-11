@@ -25,5 +25,6 @@ mod JsTailLoop do
     println(int_to_string(count(10000000, 0)))
     println(int_to_string(walk(10000000, { v: 0 }, 0)))
     println(int_to_string(List.fold_left(List.map(adders(3, Nil), fn (f) -> f(10)), 0, fn (a, b) -> a + b)))
+    ()
   end
 end

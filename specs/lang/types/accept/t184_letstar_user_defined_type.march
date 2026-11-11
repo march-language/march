@@ -36,7 +36,7 @@ mod Main do
 
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     match chain() do
-      Box.Box(v) -> println(int_to_string(v))
+      Box.Box(v) -> Authority.ignore(println(int_to_string(v)))
     end
   end
 end

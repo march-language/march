@@ -51,12 +51,12 @@ mod NodeSendLoopback do
     on PingMsg(fd : Int, payload : List(Int)) do
       match decode_ping(payload) do
         Ok((n, reply_to)) ->
-          println("node-b: ping " ++ int_to_string(n) ++ " from " ++ reply_to.node_id)
+          Authority.ignore(println("node-b: ping " ++ int_to_string(n) ++ " from " ++ reply_to.node_id))
           let pong = Msgpack.encode(Msgpack.int(n * 10))
           let _ = NodeSend.cast(fd, 100 + n, reply_to, "NodeSendLoopback.Pong", pong)
           { state with seen: state.seen + 1 }
         Err(e) ->
-          println("node-b: undecodable ping: " ++ e)
+          Authority.ignore(println("node-b: undecodable ping: " ++ e))
           state
       end
     end
@@ -112,8 +112,8 @@ mod NodeSendLoopback do
         -- next blocks, which would make its position in the trace depend on
         -- the scheduler. The actor only counts; the count is read at the end.
         match Msgpack.decode(d.payload) do
-          Ok(Msgpack.Int(n)) -> println("node-a: pong " ++ int_to_string(n))
-          _ -> println("node-a: bad pong")
+          Ok(Msgpack.Int(n)) -> Authority.ignore(println("node-a: pong " ++ int_to_string(n)))
+          _ -> Authority.ignore(println("node-a: bad pong"))
         end
         let _ = send(pong_pid, PongMsg(d.payload))
         Ok(())
@@ -123,8 +123,8 @@ mod NodeSendLoopback do
 
   pfn report_failure(fd : Int) do
     match NodeSend.recv_failure(fd, Nil) do
-      Ok((seq, reason)) -> println("node-a: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason)
-      Err(e) -> println("node-a: recv error: " ++ e)
+      Ok((seq, reason)) -> Authority.ignore(println("node-a: delivery " ++ int_to_string(seq) ++ " failed: " ++ reason))
+      Err(e) -> Authority.ignore(println("node-a: recv error: " ++ e))
     end
   end
 
@@ -180,15 +180,15 @@ mod NodeSendLoopback do
     -- `run_until_idle` while the server task was blocked never returned).
     run_until_idle()
     match get_actor_field(pong_pid, "got") do
-      Some(n) -> println("node-a: pongs delivered to the actor: " ++ int_to_string(n))
-      None -> println("node-a: pong actor gone")
+      Some(n) -> Authority.ignore(println("node-a: pongs delivered to the actor: " ++ int_to_string(n)))
+      None -> Authority.ignore(println("node-a: pong actor gone"))
     end
     -- The reply went out with NodeSend.cast, a remote send that never reaches
     -- the local mailbox path: it is counted on the sender's msgs_out anyway
     -- (observe plan R3, `observe_count_send`).
     match Recon.info(Actor.introspect(io), pid_to_int(ping_pid)) do
-      Some(a) -> println("node-b: ping actor's sends counted: " ++ int_to_string(a.msgs_out))
-      None -> println("node-b: ping actor gone")
+      Some(a) -> Authority.ignore(println("node-b: ping actor's sends counted: " ++ int_to_string(a.msgs_out)))
+      None -> Authority.ignore(println("node-b: ping actor gone"))
     end
   end
 end

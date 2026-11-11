@@ -56,6 +56,7 @@ callers never have to satisfy. See [The grant](#grant).
 - [The capability upper limit](#cap-strict)
 - [The grant: `main`'s parameter bounds the whole program](#grant)
 - [Host and method scopes on IO.NetConnect](#host-scopes)
+- [Refusals: capability operations return `Result`](#refusals)
 - [When not to use IO caps](#when-not-to-use-io-caps)
 - [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
@@ -767,6 +768,65 @@ check here. A scoped module cannot call a stdlib server API (its socket handles 
 integers) or another module's `HttpClient`-calling helper; move those to an unscoped
 module. A scope on `main`'s grant, which would bound dependencies' own code as well, is
 planned (`specs/todos/2026-11-09-host-scope-phase-2.md`).
+
+<a id="refusals"></a>
+### Refusals: capability operations return `Result`
+
+Every capability operation can be refused by the authority the code runs
+under, and a refusal is a value, never a crash or a silent no-op
+(specs/2026-11-10-object-capability-design.md §15). So each one returns
+`Result(T, CapError)`:
+
+```march
+println("hi")                       -- Result((), CapError)
+System.now_ms()                     -- Result(Int, CapError)
+Process.env("HOME")                 -- Result(Option(String), CapError)
+Task.async(fn () -> work())         -- Result(Task(a), CapError)
+Vault.new("sessions")               -- Result(Vault(v), CapError)
+```
+
+An operation that already had its own failure keeps it, inside: the outer
+`Result` says whether the operation was permitted, the inner one whether it
+worked.
+
+```march
+match File.read("/etc/motd") do
+Ok(Ok(text))           -> text
+Ok(Err(File.NotFound(_))) -> ""          -- the file is missing
+Ok(Err(e))             -> panic(to_string(e))
+Err(refused)           -> panic(Authority.describe(refused))
+end
+```
+
+`CapError(kind, target, limit, limit_scope)` names the refused operation as a
+scope (`IO.FileRead("/etc/motd")`) and the limit that refused it
+(`ByLaunch`, `ByFnNeeds(f)`, `ByModNeeds(m)`, `ByRestrict(at)`, `ByGrant(pkg)`)
+with that limit's scope list. `Authority.describe(e)` renders it.
+
+Using an operation only for its effect needs nothing: a statement's result is
+discarded (`println("hi")` on its own line). Where the value is wanted, handle
+the refusal (`match`, `let?`), or write `Authority.must(e)`, which takes the
+value and panics with the description on a refusal. `Authority.ignore(e)`
+discards a result where `()` is expected.
+
+Code written before operations returned `Result` gets the diagnostic
+`cap_result_unhandled` with the fix: a line `()` after a unit result on its own
+line, `Authority.ignore(...)` around other unit results, `Authority.must(...)`
+around values. `forge fix` applies it to a project; `forge fix --only
+cap_result_unhandled PATH...` to files outside one.
+
+What is not an operation: using what an operation opened. `Vault.set` on a
+table handle, reading or writing an open socket, the lines of an open file and
+a running process's pipes need no authority and keep their types. Some stdlib
+helpers degrade instead of failing: `List.pmap` and friends compute
+sequentially when spawning is refused, `IO.inspect` and `debug` still return
+their argument, and the Logger drops a line or a timestamp.
+
+Until run-time authority lands (ocap phase 4), nothing refuses except the
+test-only `MARCH_TEST_REFUSE` hook, a comma-separated list of capability kinds
+the launch refuses. Network opens that yield a handle (UDP, TLS contexts,
+`HttpClient`, `HttpServer`) still return their old types; they move with
+ocap phase 2.
 
 ### When *not* to use IO caps
 

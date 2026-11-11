@@ -95,5 +95,6 @@ mod Main do
     println(float_to_string(generic_inner(Some(Some(1.125)), 0.0)))
     println(float_to_string(generic_inner(Some(None), 6.5)))
     println(int_to_string(generic_inner(Some(Some(11)), 0)))
+    ()
   end
 end

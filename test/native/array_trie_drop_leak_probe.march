@@ -91,6 +91,7 @@ mod Main do
     let grew = live_allocs() - before
     println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
             ++ bool_to_string(grew < builds))
+    ()
   end
 
   pfn from_list_leg(label : String, n : Int, builds : Int) : () do
@@ -100,6 +101,7 @@ mod Main do
     let r = from_list_legs(0, builds, xs, 0)
     flat(label, before, r, builds)
     println("  (list kept alive: " ++ int_to_string(List.length(xs)) ++ ")")
+    ()
   end
 
   pfn push_leg(label : String, n : Int, builds : Int) : () do

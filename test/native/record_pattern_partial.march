@@ -26,5 +26,6 @@ fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(classify({ code: 404, msg: "unused" }))
   println(classify({ code: 200, msg: "ok" }))
   println(int_to_string(width({ w: 8, h: 9 }, 1)))
+  ()
 end
 end

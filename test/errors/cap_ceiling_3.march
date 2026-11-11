@@ -7,11 +7,12 @@
 -- still catches. (Accept counterpart to the DEAD-function case is accept/t181.)
 mod CeilApp do
   needs IO.Console
-  let _leaked = match File.read("/etc/hosts") do
+  let _leaked = match Authority.must(File.read("/etc/hosts")) do
     Ok(s) -> s
     Err(_) -> ""
   end
   fn main(_cap : Cap(IO.Console)) : () do
     println("hi")
+    ()
   end
 end

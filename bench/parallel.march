@@ -62,6 +62,7 @@ pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   let t     = make(24)
   let total = par_sum(t, 0, 10)
   println(int_to_string(total))
+  ()
 end
 
 end

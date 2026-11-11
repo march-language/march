@@ -84,7 +84,7 @@ mod Throughput do
     let tasks = List.map(List.range(0, n_tasks), fn i ->
       let lo = 2 + i * chunk
       let hi = if i == n_tasks - 1 do limit else lo + chunk - 1 end
-      Task.async(fn () -> count_range(lo, hi))
+      Authority.must(Task.async(fn () -> count_range(lo, hi)))
     )
     let results = Task.await_many(tasks)
     List.fold_left(results, 0, fn (acc, r) ->
@@ -108,6 +108,7 @@ mod Throughput do
     let ratio = if par_ms == 0 do 9999 else seq_ms * 100 / par_ms end
     println("  " ++ label ++ " speedup: "
             ++ int_to_string(ratio / 100) ++ "." ++ frac2(ratio % 100) ++ "x")
+    ()
   end
 
   -- ── Correctness check ────────────────────────────────────────────────
@@ -116,14 +117,15 @@ mod Throughput do
     let seq_ans = seq_run(limit)
     let par_ans = par_run(limit, n_tasks)
     if seq_ans == par_ans do
-      println("  par" ++ int_to_string(n_tasks) ++ " OK: "
+      Authority.ignore(println("  par" ++ int_to_string(n_tasks) ++ " OK: "
               ++ int_to_string(seq_ans) ++ " primes up to "
-              ++ int_to_string(limit))
+              ++ int_to_string(limit)))
     else
-      println("  MISMATCH par" ++ int_to_string(n_tasks)
+      Authority.ignore(println("  MISMATCH par" ++ int_to_string(n_tasks)
               ++ ": seq=" ++ int_to_string(seq_ans)
-              ++ " par=" ++ int_to_string(par_ans))
+              ++ " par=" ++ int_to_string(par_ans)))
     end
+    ()
   end
 
   -- ── Main ─────────────────────────────────────────────────────────────
@@ -137,7 +139,7 @@ mod Throughput do
     -- The interpreter runs tasks single-threaded, so "parallel" timings will
     -- match sequential — that is expected and correct.
     let limit =
-      match System.env("MARCH_LIMIT") do
+      match Authority.must(System.env("MARCH_LIMIT")) do
         Some(s) -> match string_to_int(s) do Some(n) -> n | None -> 2000000 end
         None    -> 2000000
       end

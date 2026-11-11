@@ -33,5 +33,6 @@ mod ModuleLetValue do
     println(int_to_string(Cst.twice()))
     println(Bytes.encode_base64(Bytes.from_string("hi!")))
     println(Bytes.encode_base64(Bytes.from_string("March")))
+    ()
   end
 end

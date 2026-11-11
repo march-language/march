@@ -1,0 +1,45 @@
+# ocap phase 2b merged with phase 1: the opens take phase 1's `CapError` shape
+
+Logged 2026-11-11. Merge of origin/main (object-capability phase 1, PR #1243) into
+the phase 2b branch (Socket/Listener handles, PR #1245). Ruling R2: phase 1 landed
+first, so phase 2b wraps its handle-returning opens in phase 1's
+`Result(Result(Handle, E), CapError)`, each gated by `Authority.check` before the
+raw open (specs/plans/2026-11-10-ocap-p2-handles-plan.md, "If phase 1 lands first").
+
+## Wrapped (before -> after)
+
+- `Socket.connect`, `connect_timeout`: phase 1's wrapping kept around the handle:
+  `Result(Socket, SocketError)` -> `Result(Result(Socket, SocketError), CapError)`
+  (`IO.NetConnect` on `host:port`).
+- `Socket.with_connection(host, port, f)`: `Result(a, SocketError)` ->
+  `Result(Result(a, SocketError), CapError)`; the socket is still closed by
+  `try_finally`.
+- `Socket.listen(port)`: `Result(Listener, SocketError)` ->
+  `Result(Result(Listener, SocketError), CapError)` (`IO.NetListen` on the port).
+- `Udp.open`, `open_with`, `open_sharded`: `Result(UdpSocket | List(UdpSocket), UdpError)`
+  -> `Result(Result(_, UdpError), CapError)` (`IO.NetConnect` on `host:port`; one check
+  covers every shard). The bind is the private `Udp.open_raw` (allowlisted in
+  test/test_cap_check_coverage.ml like `File.open_raw`). `open_sharded`'s
+  `len(_) == n` refinement moved to the private `open_sharded_raw`: the checker cannot
+  reflect an element refinement under the outer `CapError` result.
+- `Tls.client_ctx`, `server_ctx`: `Result(TlsCtx, TlsError)` ->
+  `Result(Result(TlsCtx, TlsError), CapError)` (`IO.NetConnect.TLS`, target `""`).
+
+## Not wrapped (still on specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md)
+
+- `HttpTransport.*` / `HttpClient.*`: they now dial through the checked
+  `Socket.connect`; a refusal is folded into `HttpTransport.Refused(reason)`, a refused
+  TLS context likewise. Signatures unchanged.
+- `Tls.https_get`: a refused context is `TlsContextError(reason)`; it still dials
+  with raw `tcp_connect` (allowlisted).
+- `HttpServer.listen` / `spawn_n` / `bind_host`, `Udp.resolve`, `Udp.connect`,
+  `Udp.send_*`: unchanged.
+- Cluster plumbing (`ClusterConn`, `ClusterNode`) uses `Authority.must` around
+  `Socket.connect*`, as phase 1 did; the cluster listens stay raw `tcp_listen`.
+
+Fixtures, demos and tests that need a raw descriptor for cluster framing call
+`tcp_connect` directly (ungated in phase 1); the rest wrap the opens in
+`Authority.must(...)`. The branch's `test/errors/stdlib_internal_2` case is now
+`stdlib_internal_3` (phase 1 added its own `stdlib_internal_2`).
+docs/_data/authority.json and explainer.json were regenerated (Socket's needs gain
+`IO.NetListen`).

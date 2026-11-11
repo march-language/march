@@ -1766,7 +1766,7 @@ mod Control do
   (`certs_text`). `has` is the artifact's presence in the CAS
   (a `base:` in the release is informational: the base image is not an artifact).
 
-      let mem = Vault.new("agent")
+      let mem = Authority.must(Vault.new("agent"))
       let ops = Control.real_ops("node-a", "web", status, certs, mem)
       Control.agent_apply_recording(ops, mem, order, 200)
   """
@@ -1789,14 +1789,14 @@ mod Control do
       march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
-      march> let mem = Vault.new("doc_control_memory")
+      march> let mem = Authority.must(Vault.new("doc_control_memory"))
       march> let res = Control.agent_apply_recording({ ops with has: fn h -> false }, mem, { ord with want: "m2" }, 200)
       march> res.ok
       false
       march> let rep = { node: "a", seq: 1, versions: "web=m1", topology: "t1", drained: 0, healthy: true, failed_seq: 0, failed_step: 0, failed_why: "", detail: "", pools: "web", certs: "cert:42 rev:r7" }
       march> let ord = { seq: 1, release: "abc", step: 1, node: "a", action: "activate(web)", want: "m1", artifacts: "m1", lines: "" }
       march> let ops = { report: fn -> rep, has: fn h -> h == "m1", request: fn l -> "OK" }
-      march> let mem = Vault.new("doc_control_memory")
+      march> let mem = Authority.must(Vault.new("doc_control_memory"))
       march> let res = Control.agent_apply_recording(ops, mem, ord, 200)
       march> res.ok
       true
@@ -1938,7 +1938,7 @@ mod Control do
 
   ## Examples
 
-      march> Control.cert_floor(Vault.new("doc_control_cert_floor"))
+      march> Control.cert_floor(Authority.must(Vault.new("doc_control_cert_floor")))
       0
   """
   fn cert_floor(memory : Vault(String)) : Int do

@@ -75,7 +75,7 @@ mod TestDns do
   describe "resolve" do
 
     test "localhost resolves to 127.0.0.1" do
-      match Dns.resolve("localhost") do
+      match Authority.must(Dns.resolve("localhost")) do
       Err(_) -> ()  -- allowed in sandboxed environments
       Ok(ips) ->
         Test.assert_true(List.length(ips) >= 1, "at least one address")
@@ -89,21 +89,21 @@ mod TestDns do
     end
 
     test "nonexistent domain returns Err" do
-      match Dns.resolve("this-domain-does-not-exist.example.invalid") do
+      match Authority.must(Dns.resolve("this-domain-does-not-exist.example.invalid")) do
       Err(_) -> ()
       Ok(_)  -> panic("expected DNS failure for invalid TLD")
       end
     end
 
     test "resolve_one returns single IP for localhost" do
-      match Dns.resolve_one("localhost") do
+      match Authority.must(Dns.resolve_one("localhost")) do
       Err(_) -> ()  -- allowed in sandboxed environments
       Ok(ip) -> Test.assert_true(Dns.is_ip(ip), "result is IP string")
       end
     end
 
     test "resolve_one returns Err for nonexistent domain" do
-      match Dns.resolve_one("this-domain-does-not-exist.example.invalid") do
+      match Authority.must(Dns.resolve_one("this-domain-does-not-exist.example.invalid")) do
       Err(_) -> ()
       Ok(_)  -> panic("expected failure")
       end

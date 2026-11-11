@@ -9,7 +9,7 @@
 mod Main do
   needs IO.Spawn
   fn main(_s : Cap(IO.Spawn)) : Int do
-    let t = Task.async(fn () -> RingBuf.make(4))
+    let t = Authority.must(Task.async(fn () -> RingBuf.make(4)))
     let a = match Task.await(t) do
       Ok(rb) -> rb
       Err(_) -> RingBuf.make(1)

@@ -61,7 +61,7 @@ mod SendAfterChurn do
   fn main(_cap : Cap(IO)) do
     let sink = spawn(Sink)
     timed_sends(sink, "churn=0")
-    let n = match System.env("CHURN") do
+    let n = match Authority.must(System.env("CHURN")) do
       Some(s) -> match string_to_int(s) do
         Some(v) -> v
         None -> 100000

@@ -1,4 +1,4 @@
-# Typing corpus index (t01–t455 accept, t01–t458 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (205 accept, 288 reject; see the Result line below) -->
+# Typing corpus index (t01–t455 accept, t01–t459 reject) <!-- doc-lint:ignore-count: accept/reject share one numbering pool, so the highest id on each side is NOT that side's file count (205 accept, 289 reject; see the Result line below) -->
 
 **Two-repo rule.** This corpus is also checked by
 [march-language/march-lean](https://github.com/march-language/march-lean), an
@@ -249,7 +249,7 @@ dune build bin/main.exe
 MARCH_BIN=$PWD/_build/default/bin/main.exe specs/lang/types/check_types.sh
 ```
 
-Exit 0 iff every program behaves as declared (currently 493/493: 205 accept, 288
+Exit 0 iff every program behaves as declared (currently 494/494: 205 accept, 289
 reject). See `specs/lang/core-march-types.md` §3 for the harness's full
 description and the invariant it protects (a spec that misdescribes the
 typechecker, AND a real typechecker regression, both show up as a harness
@@ -639,7 +639,7 @@ from the repo root) or as part of the CI workflow's dedicated step.
 | `t178_letstar_no_flat_map` | **`let*` (generalized monadic bind, 2026-08-14, `specs/lang/let-star-generalized-bind.md`): no matching `flat_map`.** `let*` resolves `<Type>.flat_map` from the RHS's inferred type; a type with no `flat_map` in a same-named module (here a bare `Widget`) is a clear, actionable error naming exactly what to define, not a crash or a generic "unbound variable" | ``let*` needs `Widget.flat_map`, but it doesn't exist.` |
 | `t179_letstar_last_expr` | **`let*`: trailing binder rejected, mirrors `let?`'s `t67`/`r05`.** A `let*` with an empty continuation can never unify against `M(b)`, so it is caught with the same "cannot be the last expression in a block" shape `let?` already has, generalized to name the RHS's own type instead of hardcoding `Result` | ``let*` cannot be the last expression in a block.` |
 
-**Result: 493 / 493 (205 accept, 288 reject).** `accept/t296`–`t299` and
+**Result: 494 / 494 (205 accept, 289 reject).** `accept/t296`–`t299` and
 `reject/t300`–`t307` (2026-10-06, Part C, Phase C2 of
 `specs/plans/2026-09-25-send-data-race-freedom-plan.md`): `RingBuf` is
 `always_linear`. The eight rejects are the plan's holes H1–H8, each of which
@@ -808,6 +808,7 @@ their own table entries.
 | `t456_two_argument_abstract_too_weak` | **Two-argument abstract refinements, a too-weak lambda (2026-10-21, phase 2, row m4):** `need_pos(filt(a, fn (_k, v) -> v >= 0))`. The instantiated relation does not imply the demanded `v > 0`: a too-weak skip (scratch ledger, never a violation), an error under `cap verified`. Before phase 2 the call was a `parametric-source-unproved` skip. Accept twin: `t455` | ``abstract-refinement-too-weak: `fn (_k, v) -> v >= 0` does not imply `_ > 0` `` |
 | `t457_same_short_name_variants_do_not_unify` | **Two variant types with the same short name are two types (2026-11-09, `specs/progress/2026-10-13-same-short-name-nested-types-unify.md`).** `mod A`'s `Note` passed where `mod B`'s `Note` is expected. The typechecker used to collapse both to the bare `Note`, so this passed `--check` and panicked at run time on both backends; each colliding variant now has its own identity (`lib/typecheck/typecheck_nominal.ml`). Accept-side witness: `specs/lang/golden/g48_same_short_name_types.march` | ``expected `B.Note` but got `A.Note`` |
 | `t458_sibling_same_short_name_types_distinct` | **Formerly `accept/t35`, the no-per-module-type-namespace design point, now superseded for variant types (2026-11-09, §2.5).** Sibling modules `A`/`B` each declare `type Foo`; `take_a(x : A.Foo)` used to accept `B.make()` because both were one nominal `TCon("Foo")`. Each colliding variant declaration now has its own identity (`lib/typecheck/typecheck_nominal.ml`); `t457` is the unqualified twin | ``expected `A.Foo` but got `B.Foo`` |
+| `t459_cap_check_raw_is_stdlib_only` | **The ocap phase 1 check point is stdlib-only (2026-11-10).** `cap_check_raw` answers an Int code that phase 4 changes the meaning of; user code reaches it through `Authority.check`, which builds the `CapError` | ``is internal to the standard library; use `Authority.check(kind, target)`` |
 | `t285_linear_param_rebound_then_dropped` | **A plain `let` rename can't launder a binding-linear value (2026-09-22).** `h` is linear only because of its binding (`linear h : Res`, a plain ADT), so `ELet`'s type-driven auto-promotion bound `let h2 = h` Unrestricted: the read of `h` was its one use and `h2` was then dropped silently — the named twin of `t283`. `h2` now inherits the tracked binding's linearity. Accepted before the fix | `` The linear value `h2` was never used. `` |
 | `t291_config_typed_key_read_as_pid` | **Config typed keys (2026-09-22): the `specs/progress/2026-09-22-config-typed-keys.md` witness, spelled with the typed API.** The untyped `Config.put(:ns, :name, 42)` / `Config.get(:ns, :name)` pair typechecked and handed the stored `Int` to `is_alive` as a `Pid`; `Config.get(key : Key(v)) : Option(v)` on a `Key(Int)` now yields `Option(Int)`. Accept twin `t292` | ``expected `Pid(`` |
 

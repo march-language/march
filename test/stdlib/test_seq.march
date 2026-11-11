@@ -692,14 +692,14 @@ describe "from_file_lines" do
   test "reads all lines of a temp file" do
     let path = "/tmp/march_seq_test_lines.txt"
     File.write(path, "first\nsecond\nthird\n")
-    match Seq.from_file_lines(path) do
+    match Authority.must(Seq.from_file_lines(path)) do
     Err(_) -> assert false
     Ok(s) -> assert (Seq.to_list(s) == ["first", "second", "third"])
     end
   end
 
   test "missing file returns NotFound" do
-    match Seq.from_file_lines("/tmp/march_seq_does_not_exist.txt") do
+    match Authority.must(Seq.from_file_lines("/tmp/march_seq_does_not_exist.txt")) do
     Ok(_)  -> assert false
     Err(_) -> assert true
     end
@@ -708,7 +708,7 @@ describe "from_file_lines" do
   test "take respects laziness (small file)" do
     let path = "/tmp/march_seq_test_take.txt"
     File.write(path, "1\n2\n3\n4\n5\n")
-    match Seq.from_file_lines(path) do
+    match Authority.must(Seq.from_file_lines(path)) do
     Err(_) -> assert false
     Ok(s) -> assert (Seq.to_list(Seq.take(s, 2)) == ["1", "2"])
     end
@@ -719,7 +719,7 @@ describe "from_file_chunks" do
   test "yields fixed-size byte chunks" do
     let path = "/tmp/march_seq_test_chunks.txt"
     File.write(path, "abcdefgh")
-    match Seq.from_file_chunks(path, 3) do
+    match Authority.must(Seq.from_file_chunks(path, 3)) do
     Err(_) -> assert false
     Ok(s)  -> do
       let chunks = Seq.to_list(s)

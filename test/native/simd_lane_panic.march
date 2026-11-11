@@ -23,5 +23,6 @@ mod SimdLanePanic do
   fn main(_cap_console : Cap(IO.Console)) : () do
     let v = Simd.make_i32x4(1, 2, 3, 4)
     println(Simd.extract_i32x4(v, lane(1)))
+    ()
   end
 end

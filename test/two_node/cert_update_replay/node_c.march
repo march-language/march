@@ -18,9 +18,9 @@ mod CertUpdateReplayC do
   needs IO.Clock
 
   pfn recorded() : Vault(List(Int)) do
-    match Vault.whereis("replay_recorded") do
+    match Authority.must(Vault.whereis("replay_recorded")) do
       Some(v) -> v
-      None -> Vault.new("replay_recorded")
+      None -> Authority.must(Vault.new("replay_recorded"))
     end
   end
 
@@ -39,8 +39,9 @@ mod CertUpdateReplayC do
       let payload = Bytes.to_list(Bytes.slice(body, 8, n - 40))
       if is_cert_update(payload) && Vault.get(recorded(), "f") == None do
         Vault.set(recorded(), "f", payload)
-        println("node-c: recorded node-b's certificate update")
+        Authority.ignore(println("node-c: recorded node-b's certificate update"))
       else () end
+      ()
     end
   end
 
@@ -65,11 +66,11 @@ mod CertUpdateReplayC do
   end
 
   pfn serve(listen_fd : Int, go : String) : () do
-    if File.exists(go) do () else
+    if Authority.must(File.exists(go)) do () else
       match tcp_accept_timeout(listen_fd, 200) do
         Err(_) -> serve(listen_fd, go)
         Ok(fd) ->
-          match Result.map_err(tcp_connect("127.0.0.1", Env.require_int("MARCH_PORT_B")), fn m -> Socket.ConnectionFailed(m)) do
+          match Result.map_err(tcp_connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_B"))), fn m -> Socket.ConnectionFailed(m)) do
             Err(_) ->
               -- node-b has stopped: node-a's redials go nowhere.
               tcp_close(fd)
@@ -84,14 +85,14 @@ mod CertUpdateReplayC do
   end
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
   end
 
   pfn read(path : String) : String do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Ok(t) -> String.trim(t)
       Err(e) -> panic("node-c: " ++ path ++ ": " ++ to_string(e))
     end
@@ -112,7 +113,7 @@ mod CertUpdateReplayC do
   -- One connection to node-a, handshaked as node-b with the old credentials.
   pfn connect_as_b(auth : ClusterAuth.Auth, role : String) : Int do
     let me = NodeIdentity.make("node-b", "pk-node-b", 2)
-    match Result.map_err(tcp_connect("127.0.0.1", Env.require_int("MARCH_PORT_A")), fn m -> Socket.ConnectionFailed(m)) do
+    match Result.map_err(tcp_connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_A"))), fn m -> Socket.ConnectionFailed(m)) do
       Err(e) -> panic("node-c: connect: " ++ Socket.error_message(e))
       Ok(fd) ->
         match NetKernel.handshake_auth(fd, me, auth, NetKernel.fresh_nonce(), role, "", 5000) do
@@ -125,10 +126,10 @@ mod CertUpdateReplayC do
   end
 
   pfn replay_loop(cfd : Int, frame : List(Int), stop : String) : Int do
-    if File.exists(stop) do 0 else
+    if Authority.must(File.exists(stop)) do 0 else
       match NetKernel.send_frame(cfd, frame) do
         Ok(_) ->
-          if Vault.incr(recorded_n(), "sent", 1) == 1 do println("node-c: replayed it on its own link as node-b") else () end
+          if Vault.incr(recorded_n(), "sent", 1) == 1 do Authority.ignore(println("node-c: replayed it on its own link as node-b")) else () end
         Err(_) -> ()
       end
       sleep_ms(200)
@@ -137,14 +138,14 @@ mod CertUpdateReplayC do
   end
 
   pfn recorded_n() : Vault(Int) do
-    match Vault.whereis("replay_sent") do
+    match Authority.must(Vault.whereis("replay_sent")) do
       Some(v) -> v
-      None -> Vault.new("replay_sent")
+      None -> Authority.must(Vault.new("replay_sent"))
     end
   end
 
   fn main(_c : Cap(IO)) do
-    let old = Env.require("OLD_PKI")
+    let old = Authority.must(Env.require("OLD_PKI"))
     let signed = match NodeCert.from_text(read(old ++ "/node-b.cert")) do
       Ok(s) -> s
       Err(e) -> panic("node-c: " ++ e)
@@ -153,16 +154,16 @@ mod CertUpdateReplayC do
       Ok(k) -> k
       Err(e) -> panic("node-c: " ++ e)
     end
-    let op = match NodeCert.key_from_hex(read(Env.require("PKI") ++ "/operator.pub"), 32) do
+    let op = match NodeCert.key_from_hex(read(Authority.must(Env.require("PKI")) ++ "/operator.pub"), 32) do
       Ok(k) -> k
       Err(e) -> panic("node-c: " ++ e)
     end
     let auth = ClusterAuth.Certified({ signed: signed, secret_key: sk, operator_pubkey: op, revoked: fn _ -> false })
-    match tcp_listen(Env.require_int("MARCH_PORT_C")) do
+    match tcp_listen(Authority.must(Env.require_int("MARCH_PORT_C"))) do
       Err(e) -> panic("node-c: listen: " ++ e)
       Ok(lfd) ->
-        println("node-c: up")
-        let go = Env.require("GO_FILE")
+        Authority.ignore(println("node-c: up"))
+        let go = Authority.must(Env.require("GO_FILE"))
         serve(lfd, go)
         let frame = match Vault.get(recorded(), "f") do
           Some(f) -> f
@@ -173,9 +174,9 @@ mod CertUpdateReplayC do
         -- Replay the frame every 200 ms until the end: node-a may not have
         -- paired the two connections into a link yet when the first one
         -- lands (under ASan it is slow), and each replay is the same attack.
-        let _ = task_spawn(fn _ -> replay_loop(cfd, frame, Env.require("CLUSTER_STOP_FILE")))
-        wait_file(Env.require("CLUSTER_STOP_FILE"))
-        println("node-c: done")
+        let _ = task_spawn(fn _ -> replay_loop(cfd, frame, Authority.must(Env.require("CLUSTER_STOP_FILE"))))
+        wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
+        Authority.ignore(println("node-c: done"))
     end
   end
 end

@@ -1,0 +1,26 @@
+-- REFUSE: IO.FileRead, IO.FileWrite
+-- File and directory operations refused: the outer Err names the path (both
+-- paths are checked for copy and rename, source first); a missing file is
+-- the inner Err, never the refusal.
+mod FileRefused do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.FileSystem
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _fs : Cap(IO.FileSystem)) do
+    println(verdict(File.read("/etc/hosts")))
+    println(verdict(File.exists("/etc/hosts")))
+    println(verdict(File.write("/tmp/march_conf_x", "x")))
+    println(verdict(File.copy("/etc/hosts", "/tmp/march_conf_y")))
+    println(verdict(Dir.list("/tmp")))
+    println(verdict(Dir.mkdir_p("/tmp/march_conf_dir")))
+  end
+end

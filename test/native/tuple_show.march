@@ -14,5 +14,6 @@ mod Main do
     println([(1, 2), (3, 4)])
     println(((1, 2), 3))
     println(to_string((1, 2, 3, 4)))
+    ()
   end
 end

@@ -177,9 +177,9 @@ mod StreamActor do
   end
 
   fn main(c : Cap(IO)) do
-    let handlers = Vault.new("stream_actor_handlers")
-    let owners   = Vault.new("stream_actor_owners")
-    let pending  = Vault.new("stream_actor_pending")
+    let handlers = Authority.must(Vault.new("stream_actor_handlers"))
+    let owners   = Authority.must(Vault.new("stream_actor_owners"))
+    let pending  = Authority.must(Vault.new("stream_actor_pending"))
     let t = mailbox(handlers, pending)
     let s = Session.attach(c, t.ops)
 

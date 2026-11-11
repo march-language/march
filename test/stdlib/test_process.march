@@ -9,12 +9,12 @@ describe "Process" do
 
     test "cwd is non-empty" do
       let dir = Process.cwd()
-      assert not(string_is_empty(dir))
+      assert not(string_is_empty(Authority.must(dir)))
     end
 
     test "cwd has at least one character" do
       let dir = Process.cwd()
-      assert (string_byte_length(dir) >= 1)
+      assert (string_byte_length(Authority.must(dir)) >= 1)
     end
 
   end
@@ -23,12 +23,12 @@ describe "Process" do
 
     test "PATH is set" do
       let path = Process.env("PATH")
-      assert Option.is_some(path)
+      assert Option.is_some(Authority.must(path))
     end
 
     test "PATH is non-empty" do
       let path_opt = Process.env("PATH")
-      match path_opt do
+      match Authority.must(path_opt) do
       None -> ()
       Some(p) -> assert not(string_is_empty(p))
       end
@@ -36,7 +36,7 @@ describe "Process" do
 
     test "HOME if set is non-empty" do
       let home = Process.env("HOME")
-      match home do
+      match Authority.must(home) do
       None    -> ()
       Some(h) -> assert not(string_is_empty(h))
       end
@@ -44,12 +44,12 @@ describe "Process" do
 
     test "unset variable is None" do
       let val_ = Process.env("__MARCH_TEST_UNSET_VAR_ZXQVWP__")
-      assert Option.is_none(val_)
+      assert Option.is_none(Authority.must(val_))
     end
 
     test "env returns Option" do
       let result = Process.env("PATH")
-      match result do
+      match Authority.must(result) do
       Some(_) -> ()
       None    -> ()
       end
@@ -61,12 +61,12 @@ describe "Process" do
 
     test "argv is non-nil" do
       let args = Process.argv()
-      assert not(is_nil(args))
+      assert not(is_nil(Authority.must(args)))
     end
 
     test "argv first element is non-empty string" do
       let args = Process.argv()
-      match args do
+      match Authority.must(args) do
       Nil        -> panic("argv is empty — expected at least argv[0]")
       Cons(a, _) -> assert not(string_is_empty(a))
       end

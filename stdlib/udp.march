@@ -18,9 +18,9 @@
 -- datagram.
 --
 -- Public API:
---   Udp.open(host, port)                         : Result(UdpSocket, UdpError)
---   Udp.open_with(host, port, opts)              : Result(UdpSocket, UdpError)
---   Udp.open_sharded(host, port, n, opts)        : Result(List(UdpSocket), UdpError)
+--   Udp.open(host, port)                         : Result(Result(UdpSocket, UdpError), CapError)
+--   Udp.open_with(host, port, opts)              : Result(Result(UdpSocket, UdpError), CapError)
+--   Udp.open_sharded(host, port, n, opts)        : Result(Result(List(UdpSocket), UdpError), CapError)
 --   Udp.defaults()                               : UdpOptions
 --   Udp.resolve(host, port)                      : Result(UdpAddr, UdpError)
 --   Udp.connect(sock, addr)                      : Result((), UdpError)
@@ -36,6 +36,9 @@
 --   Udp.stats(sock)                              : UdpStats
 --   Udp.close(sock)                              : ()
 --   Udp.error_message(e)                         : String
+--
+-- Opening a socket is a capability operation (IO.NetConnect on host:port):
+-- the outer Err(CapError(...)) is a refused open, which binds nothing.
 --
 -- An `UdpSocket` is an opaque handle (ocap phase 2): it cannot be built from
 -- a descriptor number, using it needs no capability beyond the one `open`
@@ -145,24 +148,33 @@ mod Udp do
   doc """
   Bind a UDP socket with `defaults()`. host `""` or `"0.0.0.0"` is every
   IPv4 interface, `"::"` every interface over IPv4 and IPv6; port 0 picks
-  a free port (see `local_port`).
+  a free port (see `local_port`). Returns `Ok(Ok(sock))` or
+  `Ok(Err(OpenFailed(msg)))`; a refused capability check (IO.NetConnect on
+  `host:port`) is the outer `Err(CapError(...))` and binds nothing.
 
   ## Examples
 
-      let? sock = Udp.open("127.0.0.1", 0)
+      let? sock = Authority.must(Udp.open("127.0.0.1", 0))
   """
-  fn open(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}) : Result(UdpSocket, UdpError) do
+  fn open(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}) : Result(Result(UdpSocket, UdpError), CapError) do
     open_with(host, port, defaults())
   end
 
   doc """
-  Bind a UDP socket with explicit options.
+  Bind a UDP socket with explicit options. The result is shaped as `open`'s.
 
   ## Examples
 
       Udp.open_with("::", 5353, { Udp.defaults() with reuse_addr: true })
   """
-  fn open_with(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}, opts : UdpOptions) : Result(UdpSocket, UdpError) do
+  fn open_with(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}, opts : UdpOptions) : Result(Result(UdpSocket, UdpError), CapError) do
+    let? _ = Authority.check("IO.NetConnect", host ++ ":" ++ int_to_string(port))
+    Ok(open_raw(host, port, opts))
+  end
+
+  -- The bind behind open/open_with/open_sharded, each of which calls
+  -- Authority.check first.
+  pfn open_raw(host : String, port : {Int | _ >= 0 && _ <= 65535}, opts : UdpOptions) : Result(UdpSocket, UdpError) do
     match udp_open(host, port, opt_bits(opts), opts.recv_buffer, opts.send_buffer) do
     Ok(fd)   ->
       let b : Socket = handle_new(kind_udp(), fd, 0)
@@ -176,7 +188,7 @@ mod Udp do
                 acc : List(UdpSocket)) : Result(List(UdpSocket), UdpError) do
     if n <= 0 do Ok(List.reverse(acc))
     else
-      match open_with(host, port, opts) do
+      match open_raw(host, port, opts) do
       Ok(s)  -> open_more(host, port, n - 1, opts, Cons(s, acc))
       Err(e) ->
         List.map(acc, fn s -> close(s))
@@ -190,15 +202,30 @@ mod Udp do
   Linux hashes each flow to one socket, so n tasks each draining their own
   socket scale across cores. Port 0 picks a free port for the first and
   binds the rest to it. On failure every socket opened so far is closed.
+  One capability check (IO.NetConnect on `host:port`) covers every shard; a
+  refusal is the outer `Err(CapError(...))` and binds nothing.
 
   ## Examples
 
-      let? socks = Udp.open_sharded("0.0.0.0", 9000, 4, Udp.defaults())
+      let? socks = Authority.must(Udp.open_sharded("0.0.0.0", 9000, 4, Udp.defaults()))
   """
   fn open_sharded(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}, n : {Int | _ > 0 else "open at least one shard"},
-                    opts : UdpOptions) : Result({List(UdpSocket) | len(_) == n}, UdpError) do
+                    opts : UdpOptions) : Result(Result(List(UdpSocket), UdpError), CapError) do
+    let? _ = Authority.check("IO.NetConnect", host ++ ":" ++ int_to_string(port))
+    match open_sharded_raw(host, port, n, opts) do
+    Ok(socks) -> Ok(Ok(socks))
+    Err(e) -> Ok(Err(e))
+    end
+  end
+
+  -- The shards behind open_sharded. The `len(_) == n` refinement is stated
+  -- here: under open_sharded's outer CapError result the checker cannot
+  -- reflect an element refinement (refinement_unverified in this `cap
+  -- verified` module), so the public signature says List(UdpSocket).
+  pfn open_sharded_raw(host : String, port : {Int | _ >= 0 && _ <= 65535}, n : {Int | _ > 0},
+                       opts : UdpOptions) : Result({List(UdpSocket) | len(_) == n}, UdpError) do
     let o = { opts with reuse_port: true }
-    match open_with(host, port, o) do
+    match open_raw(host, port, o) do
     Err(e) -> Err(e)
     Ok(first) ->
       match local_port(first) do

@@ -18,7 +18,7 @@ mod Main do
   needs IO.Process
 
   pfn fd_count() : Int do
-    match Dir.list("/dev/fd") do
+    match Authority.must(Dir.list("/dev/fd")) do
     Ok(xs) -> List.length(xs)
     Err(_) -> -1
     end
@@ -28,7 +28,7 @@ mod Main do
   pfn open_drop(path : String, n : Int, ok : Int) : Int do
     if n <= 0 do ok
     else
-      let got = match File.open(path) do
+      let got = match Authority.must(File.open(path)) do
         Err(_) -> 0
         Ok(h) ->
           match File.read_line(h) do
@@ -44,7 +44,7 @@ mod Main do
   pfn open_close(path : String, n : Int, ok : Int) : Int do
     if n <= 0 do ok
     else
-      let got = match File.open(path) do
+      let got = match Authority.must(File.open(path)) do
         Err(_) -> 0
         Ok(h) ->
           match File.close(h) do
@@ -59,7 +59,7 @@ mod Main do
   fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite), _p : Cap(IO.Process)) : Unit do
     -- Per-process name: a concurrent run (another worktree) deleting a
     -- shared file would fail opens and print a false LEAK.
-    let path = "/tmp/march_native_file_handle_box_leak_probe_" ++ int_to_string(Process.pid()) ++ ".txt"
+    let path = "/tmp/march_native_file_handle_box_leak_probe_" ++ int_to_string(Authority.must(Process.pid())) ++ ".txt"
     match File.write(path, "line\n") do
     Err(_) -> panic("write failed")
     Ok(_) -> :ok

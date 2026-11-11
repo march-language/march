@@ -47,7 +47,7 @@ mod ActorStress do
     end
 
     on Print() do
-      println("counter=" ++ int_to_string(state.value))
+      Authority.ignore(println("counter=" ++ int_to_string(state.value)))
       state
     end
   end
@@ -72,14 +72,14 @@ mod ActorStress do
 
     on Top() do
       match state.items do
-        Nil         -> println("stack=empty")
-        Cons(x, _)  -> println("stack.top=" ++ int_to_string(x))
+        Nil         -> Authority.ignore(println("stack=empty"))
+        Cons(x, _)  -> Authority.ignore(println("stack.top=" ++ int_to_string(x)))
       end
       state
     end
 
     on Len() do
-      println("stack.size=" ++ int_to_string(List.length(state.items)))
+      Authority.ignore(println("stack.size=" ++ int_to_string(List.length(state.items))))
       state
     end
   end
@@ -95,8 +95,8 @@ mod ActorStress do
     end
 
     on Summary() do
-      println("collected count=" ++ int_to_string(state.count)
-              ++ " total=" ++ int_to_string(state.total))
+      Authority.ignore(println("collected count=" ++ int_to_string(state.count)
+              ++ " total=" ++ int_to_string(state.total)))
       state
     end
   end
@@ -114,9 +114,9 @@ mod ActorStress do
       let m = receive()
       match m do
         Answer(v) ->
-          println("query+answer=" ++ int_to_string(n + v))
+          Authority.ignore(println("query+answer=" ++ int_to_string(n + v)))
         _ ->
-          println("waiter: unexpected message")
+          Authority.ignore(println("waiter: unexpected message"))
       end
       state
     end
@@ -124,7 +124,7 @@ mod ActorStress do
     -- Answer is consumed by receive() in the Query handler, so this
     -- handler only fires if Answer arrives without a preceding Query.
     on Answer(_v : Int) do
-      println("waiter: stray answer")
+      Authority.ignore(println("waiter: stray answer"))
       state
     end
   end
@@ -136,12 +136,12 @@ mod ActorStress do
     init { hops: 0 }
 
     on Say(msg : String) do
-      println("relay: " ++ msg)
+      Authority.ignore(println("relay: " ++ msg))
       { state with hops: state.hops + 1 }
     end
 
     on Stats() do
-      println("relay hops=" ++ int_to_string(state.hops))
+      Authority.ignore(println("relay hops=" ++ int_to_string(state.hops)))
       state
     end
   end
@@ -149,8 +149,9 @@ mod ActorStress do
   -- ── Helpers ────────────────────────────────────────────────────────────
 
   pfn section(name : String) : Unit do
-    println("")
+    Authority.ignore(println(""))
     println("=== " ++ name ++ " ===")
+    ()
   end
 
   -- ── Test: Counter operations ───────────────────────────────────────────
@@ -241,7 +242,7 @@ mod ActorStress do
   pfn test_collector() : Unit do
     section("collector")
     let col = spawn(Collector)
-    let squares = Task.async_stream([1, 2, 3, 4, 5], fn n -> n * n)
+    let squares = Authority.must(Task.async_stream([1, 2, 3, 4, 5], fn n -> n * n))
     List.each(squares, fn r ->
       match r do
         Ok(n)  -> let _ = send(col, Accum(n))
@@ -256,20 +257,21 @@ mod ActorStress do
 
   pfn test_tasks_basic() : Unit do
     section("tasks: basic")
-    let t = Task.async(fn () -> 6 * 7)
+    let t = Authority.must(Task.async(fn () -> 6 * 7))
     match Task.await(t) do
-      Ok(n)  -> println("6*7=" ++ int_to_string(n))    -- expect 42
-      Err(e) -> println("error: " ++ e)
+      Ok(n)  -> Authority.ignore(println("6*7=" ++ int_to_string(n)))    -- expect 42
+      Err(e) -> Authority.ignore(println("error: " ++ e))
     end
+    ()
   end
 
   -- ── Test: Task.await_many ─────────────────────────────────────────────
 
   pfn test_tasks_many() : Unit do
     section("tasks: await_many")
-    let t1 = Task.async(fn () -> 10)
-    let t2 = Task.async(fn () -> 20)
-    let t3 = Task.async(fn () -> 30)
+    let t1 = Authority.must(Task.async(fn () -> 10))
+    let t2 = Authority.must(Task.async(fn () -> 20))
+    let t3 = Authority.must(Task.async(fn () -> 30))
     let results = Task.await_many([t1, t2, t3])
     let total = List.fold_left(results, 0, fn (acc, r) ->
       match r do
@@ -278,6 +280,7 @@ mod ActorStress do
       end
     )
     println("sum=" ++ int_to_string(total))             -- expect 60
+    ()
   end
 
   -- NOTE: Task.race / Task.any coverage is intentionally omitted here.  Both
@@ -291,8 +294,8 @@ mod ActorStress do
 
   pfn test_tasks_stream() : Unit do
     section("tasks: async_stream")
-    let squares = Task.async_stream([1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-                                    fn n -> n * n)
+    let squares = Authority.must(Task.async_stream([1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                                    fn n -> n * n))
     let total = List.fold_left(squares, 0, fn (acc, r) ->
       match r do
         Ok(n)  -> acc + n
@@ -301,6 +304,7 @@ mod ActorStress do
     )
     -- 1+4+9+16+25+36+49+64+81+100 = 385
     println("sum_squares=" ++ int_to_string(total))
+    ()
   end
 
   -- ── Test: Message FIFO ordering ────────────────────────────────────────
@@ -373,6 +377,7 @@ mod ActorStress do
     test_bulk()
     println("")
     println("done")
+    ()
   end
 
 end

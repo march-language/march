@@ -25,5 +25,6 @@ mod Test do
     println(int_to_string(shim_add(65536, 1)))
     println(int_to_string(shim_mul(4096, 2)))
     println(int_to_string(shim_add(65536, 65536)))
+    ()
   end
 end

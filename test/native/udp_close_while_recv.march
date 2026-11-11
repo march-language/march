@@ -15,7 +15,7 @@ mod UdpCloseWhileRecv do
   needs IO.Spawn
 
   pfn poll_result(left : Int) : String do
-    let v = Vault.get_or(Vault.open("ucwr"), "result", "")
+    let v = Vault.get_or(Authority.must(Vault.open("ucwr")), "result", "")
     if v != "" do v
     else if left <= 0 do "still parked after 3 s"
     else
@@ -25,8 +25,8 @@ mod UdpCloseWhileRecv do
   end
 
   fn main(_c : Cap(IO)) do
-    let _ = Vault.new("ucwr")
-    let sock = match Udp.open("127.0.0.1", 0) do
+    let _ = Authority.must(Vault.new("ucwr"))
+    let sock = match Authority.must(Udp.open("127.0.0.1", 0)) do
       Ok(s) -> s
       Err(e) -> panic("open: " ++ Udp.error_message(e))
     end
@@ -42,13 +42,13 @@ mod UdpCloseWhileRecv do
         Ok(None) -> "woke with a timeout"
         Ok(Some(_)) -> "woke with a datagram"
       end
-      Vault.set(Vault.open("ucwr"), "result", what))
+      Vault.set(Authority.must(Vault.open("ucwr")), "result", what))
     sleep_ms(100)
     Udp.close(sock)
     let r = poll_result(3000)
     println(r)
     -- A reader still parked would keep the process alive past main: leave
     -- now, so the rule fails on the diff instead of hanging.
-    if r != "woke closed" do Process.exit(0) else () end
+    if r != "woke closed" do Authority.ignore(Process.exit(0)) else () end
   end
 end

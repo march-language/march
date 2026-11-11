@@ -10,6 +10,7 @@ type fix_item = {
   fi_file     : string;
   fi_severity : string;
   fi_message  : string;
+  fi_code     : string;   (** the diagnostic's code, "" when it has none *)
   fi_fix      : fix_kind;
 }
 
@@ -54,15 +55,24 @@ let parse_fix_line line : fix_item list =
       let file = j |> member "file" |> to_string in
       let sev  = j |> member "severity" |> to_string in
       let msg  = j |> member "message" |> to_string in
+      let code = match j |> member "code" with `String c -> c | _ -> "" in
       let fixes =
         match fix_j |> member "kind" |> to_string with
         | "multi" -> List.map parse_fix_kind (fix_j |> member "edits" |> to_list)
         | _ -> [ parse_fix_kind fix_j ]
       in
       List.map (fun fix ->
-          { fi_file = file; fi_severity = sev; fi_message = msg; fi_fix = fix }) fixes
+          { fi_file = file; fi_severity = sev; fi_message = msg; fi_code = code;
+            fi_fix = fix }) fixes
     end
   with _ -> []
+
+(* The compiler to ask: [MARCH_BIN] when set (a worktree's freshly built
+   compiler, say), else [march] on PATH. *)
+let march_bin () =
+  match Sys.getenv_opt "MARCH_BIN" with
+  | Some b when b <> "" -> Filename.quote b
+  | _ -> "march"
 
 (* [contracts] switches the input from the ordinary diagnostic stream
    (`march --check-json`) to the contract-generation one
@@ -90,14 +100,14 @@ let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ~lib_path_env fil
            dependent" readings were artifacts of hand-repros that happened to
            drop or rename the colliding `add`.  If this ever regresses, check
            the NAMES of the module's functions before anything else. *)
-        Printf.sprintf "%smarch --compile --report-contracts%s %s 2>/dev/null"
-          lib_path_env
+        Printf.sprintf "%s%s --compile --report-contracts%s %s 2>/dev/null"
+          lib_path_env (march_bin ())
           (if scope_globs = [] then ""
            else " --contract-scope " ^ Filename.quote (String.concat "," scope_globs))
           (Filename.quote file)
       else
-        Printf.sprintf "%smarch --check-json %s 2>/dev/null"
-          lib_path_env (Filename.quote file) in
+        Printf.sprintf "%s%s --check-json %s 2>/dev/null"
+          lib_path_env (march_bin ()) (Filename.quote file) in
     let ic = Unix.open_process_in cmd in
     (try
       while true do
@@ -121,12 +131,24 @@ let read_lines path =
   !lines
 
 let write_lines path lines =
+  (* Write through a symlink to the file it names: renaming the temp file over
+     [path] would replace the link with a copy (2026-11-10: the corpus
+     migration turned a test's shared node_b -> node_a link into a file). *)
+  let path =
+    match (Unix.lstat path).Unix.st_kind with
+    | Unix.S_LNK -> (try Unix.realpath path with _ -> path)
+    | _ -> path
+    | exception Unix.Unix_error _ -> path in
   let tmp = path ^ ".fix.tmp" in
   let oc = open_out tmp in
+  (* Every line ends with a newline, the last included: [read_lines] cannot
+     tell whether the file had a final one, and a source file should. Before
+     2026-11-10 the last was dropped, so every fixed file lost its final
+     newline. *)
   Array.iteri (fun i line ->
     if i > 0 then begin
       output_string oc line;
-      if i < Array.length lines - 1 then output_char oc '\n'
+      output_char oc '\n'
     end
   ) lines;
   close_out oc;
@@ -216,6 +238,69 @@ let apply_fixes_to_file path items dry_run =
     !count
   end
 
+(* Apply [items], grouped by file; returns (files changed, fixes applied). *)
+let apply_items items dry_run =
+  let by_file : (string, fix_item list) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (fun fi ->
+    let cur = try Hashtbl.find by_file fi.fi_file with Not_found -> [] in
+    Hashtbl.replace by_file fi.fi_file (fi :: cur)
+  ) items;
+  let total_fixes = ref 0 in
+  let total_files = ref 0 in
+  Hashtbl.iter (fun path file_items ->
+    let n = apply_fixes_to_file path file_items dry_run in
+    if n > 0 then begin
+      incr total_files;
+      total_fixes := !total_fixes + n;
+      if not dry_run then
+        Printf.printf "fixed %s (%d change%s)\n" path n
+          (if n = 1 then "" else "s")
+    end
+  ) by_file;
+  (!total_files, !total_fixes)
+
+(* Every .march file under [p] (a file or a directory), skipping dot
+   directories and _build. *)
+let rec march_files_under p =
+  if Sys.file_exists p && Sys.is_directory p then
+    Sys.readdir p |> Array.to_list |> List.sort compare
+    |> List.concat_map (fun f ->
+        if f = "" || f.[0] = '.' || f = "_build" then []
+        else march_files_under (Filename.concat p f))
+  else if Filename.check_suffix p ".march" && Sys.file_exists p then [ p ]
+  else []
+
+(* [forge fix PATH...]: fix the .march files under the given paths, outside
+   any project (a repository's test corpus, say). A fix can uncover the next
+   one (a function's result now typechecks, so its caller's mismatch shows), so
+   collect and apply until a pass applies nothing, at most [max_passes]. *)
+let max_passes = 5
+
+let run_paths ?(dry_run = false) ?(only = []) (paths : string list) =
+  let files = List.concat_map march_files_under paths in
+  if files = [] then Error "no .march files under the given paths"
+  else begin
+    let rec go pass files_acc fixes_acc =
+      let items = collect_all_fixes ~lib_path_env:"" files in
+      (* A code carries a suffix after a colon (`cap_ceiling:IO.FileRead`). *)
+      let base c = match String.index_opt c ':' with Some i -> String.sub c 0 i | None -> c in
+      let items =
+        if only = [] then items
+        else List.filter (fun fi -> List.mem (base fi.fi_code) only) items in
+      let (nf, nx) = apply_items items dry_run in
+      let files_acc = files_acc + nf and fixes_acc = fixes_acc + nx in
+      if nx = 0 || dry_run || pass >= max_passes then (files_acc, fixes_acc)
+      else go (pass + 1) files_acc fixes_acc
+    in
+    let (nf, nx) = go 1 0 0 in
+    if nx = 0 then Ok "no auto-fixable diagnostics found"
+    else
+      Ok (Printf.sprintf "%d file change%s, %d fix%s applied%s"
+            nf (if nf = 1 then "" else "s")
+            nx (if nx = 1 then "" else "es")
+            (if dry_run then " (dry run — no files written)" else ""))
+  end
+
 let run ?(dry_run = false) ?(contracts = false) () =
   match Project.load () with
   | Error msg -> Error msg
@@ -248,23 +333,8 @@ let run ?(dry_run = false) ?(contracts = false) () =
           let n = String.length abs_root in
           String.length abs >= n && String.sub abs 0 n = abs_root
         ) items in
-        let by_file : (string, fix_item list) Hashtbl.t = Hashtbl.create 8 in
-        List.iter (fun fi ->
-          let cur = try Hashtbl.find by_file fi.fi_file with Not_found -> [] in
-          Hashtbl.replace by_file fi.fi_file (fi :: cur)
-        ) owned;
-        let total_fixes = ref 0 in
-        let total_files = ref 0 in
-        Hashtbl.iter (fun path file_items ->
-          let n = apply_fixes_to_file path file_items dry_run in
-          if n > 0 then begin
-            incr total_files;
-            total_fixes := !total_fixes + n;
-            if not dry_run then
-              Printf.printf "fixed %s (%d change%s)\n" path n
-                (if n = 1 then "" else "s")
-          end
-        ) by_file;
+        let (total_files, total_fixes) = apply_items owned dry_run in
+        let total_files = ref total_files and total_fixes = ref total_fixes in
         if !total_fixes = 0 then
           Ok (if contracts then "no allocation contracts to add"
               else "no auto-fixable diagnostics found")

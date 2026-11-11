@@ -201,6 +201,22 @@ let test_orc_lazy_int_normalisation () =
       "val big = <fn>";
       "= true" ]
 
+(* ocap phase 1: `println` returns `Result((), CapError)`; the REPL does not
+   echo its `Ok(())` (it would follow every printed line), but still echoes a
+   refusal and any other Result. *)
+let test_repl_quiet_cap_ok () =
+  check_session "repl quiet Ok(()) of a capability operation"
+    [ "println(\"hi from println\")";
+      "Ok(1)";
+      ":quit" ]
+    [ "hi from println"; "= Ok(1)" ];
+  match march_bin () with
+  | None -> ()
+  | Some bin ->
+    let (_, out) = run_jit_repl ~backend:"orc" bin [ "println(\"x\")"; ":quit" ] in
+    Alcotest.(check bool) (Printf.sprintf "no Ok(()) echo (got: %s)" out) false
+      (contains out "= Ok(())")
+
 (* The narrower control from the todo — two consecutive `fn` definitions.
    The todo believed this was healthy; it in fact crashed too, and it is the
    tightest form of the duplicate-symbol collision, so pin it directly. *)
@@ -496,6 +512,7 @@ let jit_file_fib_src = {|mod JitFileTest do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println("checksum=" ++ int_to_string(fib(20)))
+    ()
   end
 end
 |}
@@ -542,6 +559,7 @@ let jit_file_atoms_src = {|mod JitFileAtoms do
     println("bare=" ++ to_string(:zz))
     println("fn=" ++ to_string(pick(true)) ++ "," ++ to_string(pick(false)))
     println("ok=" ++ to_string(:ok))
+    ()
   end
 end
 |}
@@ -1364,6 +1382,8 @@ let () =
         test_runtime_so_carries_vendored_blake3;
       Alcotest.test_case "orc_two_consecutive_fns" `Slow
         test_orc_two_consecutive_fns;
+      Alcotest.test_case "repl does not echo a capability operation's Ok(())" `Quick
+        test_repl_quiet_cap_ok;
       Alcotest.test_case "orc_lazy_int_normalisation" `Slow
         test_orc_lazy_int_normalisation;
       Alcotest.test_case "orc_fn_after_let_lambda" `Slow

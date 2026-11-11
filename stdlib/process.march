@@ -14,6 +14,14 @@
 -- env/1 and set_env/2 read and write OS environment variables.
 -- cwd/0, argv/0, pid/0 expose the current process context.
 -- exit/1 terminates the VM with the given exit code.
+--
+-- Every one of those, and every spawn, is a capability operation (IO.Process;
+-- the target is the variable or the program) and returns
+-- `Result(T, CapError)`: `Err` when the current authority refuses it
+-- (specs/2026-11-10-object-capability-design.md §15). A spawn that already
+-- returned a `Result` returns it inside: `Ok(Err(msg))` is a program that
+-- could not start, `Err(CapError(...))` one that was not permitted. Reading,
+-- writing, killing and waiting on a LiveProcess need no authority.
 
 mod Process do
 
@@ -35,54 +43,65 @@ mod Process do
   Ok, with its non-zero exit code.
 
       match Process.run("git", ["status"]) do
-        Ok(r)    -> println(Process.stdout(r))
-        Err(msg) -> println(msg)   -- e.g. "cannot execute git: No such file or directory"
+        Ok(Ok(r))    -> println(Process.stdout(r))
+        Ok(Err(msg)) -> println(msg)   -- e.g. "cannot execute git: No such file or directory"
+        Err(e)       -> println(Authority.describe(e))
       end
   """
-  fn run(command, args) do
-    process_spawn_sync(command, args)
+  fn run(command : String, args : List(String)) : Result(Result(ProcessResult, String), CapError) do
+    let? _ = Authority.check("IO.Process", command)
+    Ok(process_spawn_sync(command, args))
   end
 
   doc "Run command and return its stdout as a Seq(String) of lines. Returns Ok(Seq), or Err(msg) when the command cannot be executed (as for run). The command runs to completion and its stdout is read in full before the Seq is returned; the Seq is not a live stream of the running process."
-  fn run_stream(command, args) do
+  fn run_stream(command : String, args : List(String)) do
+    let? _ = Authority.check("IO.Process", command)
     match process_spawn_lines(command, args) do
-      Ok(out) -> Ok(Seq.from_string_lines(out))
-      Err(e) -> Err(e)
+      Ok(out) -> Ok(Ok(Seq.from_string_lines(out)))
+      Err(e) -> Ok(Err(e))
     end
   end
 
   -- ---- Environment ----
 
-  doc "Get the value of an environment variable. Returns Some(value) or None."
-  fn env(name) do
-    process_env(name)
+  doc "Get the value of an environment variable: Ok(Some(value)), Ok(None) when it is not set, or Err(CapError(...)) when reading it is refused, which is never mistaken for unset."
+  fn env(name : String) : Result(Option(String), CapError) do
+    let? _ = Authority.check("IO.Process", name)
+    Ok(process_env(name))
   end
 
   doc "Set an environment variable."
-  fn set_env(name, value) do
+  fn set_env(name : String, value : String) : Result((), CapError) do
+    let? _ = Authority.check("IO.Process", name)
     process_set_env(name, value)
+    Ok(())
   end
 
   -- ---- Current process ----
 
   doc "Returns the current working directory."
-  fn cwd() do
-    process_cwd()
+  fn cwd() : Result(String, CapError) do
+    let? _ = Authority.check("IO.Process", "")
+    Ok(process_cwd())
   end
 
-  doc "Terminate the process with the given exit code."
-  fn exit(code) do
+  doc "Terminate the process with the given exit code. Returns only when that is refused: Err(CapError(...))."
+  fn exit(code : Int) : Result((), CapError) do
+    let? _ = Authority.check("IO.Process", "")
     process_exit(code)
+    Ok(())
   end
 
   doc "Returns the command-line arguments as List(String) (argv[0] is the executable)."
-  fn argv() do
-    process_argv()
+  fn argv() : Result(List(String), CapError) do
+    let? _ = Authority.check("IO.Process", "")
+    Ok(process_argv())
   end
 
   doc "Returns the OS-level PID of the current process."
-  fn pid() do
-    process_pid()
+  fn pid() : Result(Int, CapError) do
+    let? _ = Authority.check("IO.Process", "")
+    Ok(process_pid())
   end
 
   -- ---- Async subprocess management ----
@@ -94,8 +113,9 @@ mod Process do
   it, and wait_proc to reap its exit code. Returns Err(msg) when the command
   cannot be executed: "cannot execute <cmd>: <reason>".
   """
-  fn spawn_async(command, args) do
-    process_spawn_async(command, args)
+  fn spawn_async(command : String, args : List(String)) : Result(Result(LiveProcess, String), CapError) do
+    let? _ = Authority.check("IO.Process", command)
+    Ok(process_spawn_async(command, args))
   end
 
   doc """

@@ -32,7 +32,7 @@ mod Main do
   fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
     let a = spawn(Counter)
     println("register a: " ++ bool_to_string(Actor.register(a, "worker")))
-    match Vault.whereis("$actor_registry") do
+    match Authority.must(Vault.whereis("$actor_registry")) do
       Some(t) ->
         println("raw table has key before kill: "
           ++ bool_to_string(List.member(Vault.keys(t), "worker")))

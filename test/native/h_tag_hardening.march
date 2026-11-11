@@ -54,5 +54,6 @@ mod HTagHardening do
     println("multi   : " ++ IOList.to_string(
       Html.tag("a", [("href", "/x"), ("class", "b")], body)))
     println("noattrs : " ++ IOList.to_string(Html.tag("br", [], IOList.empty())))
+    ()
   end
 end

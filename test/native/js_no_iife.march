@@ -28,5 +28,6 @@ mod JsNoIife do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println(int_to_string(shape(5, Some(7), [9, 1])) ++ " " ++ int_to_string(shape(1, None, [])) ++ " " ++ int_to_string(shape(0, Some(3), [2])))
+    ()
   end
 end

@@ -1,0 +1,17 @@
+-- REFUSE: IO.Clock
+-- Spawning and opening tables allowed: the results are Ok and usable, and a
+-- table handle's uses need nothing further.
+mod SpawnMutAllowed do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Mut
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _m : Cap(IO.Mut)) do
+    let t = Authority.must(Task.async(fn () -> 21 * 2))
+    println(Task.await(t))
+    let v = Authority.must(Vault.new("conformance_allowed"))
+    Vault.set(v, "k", 7)
+    println(Vault.get_or(v, "k", 0))
+    println(Vault.ns_get("conformance_allowed", "k") == Ok(Some(7)))
+  end
+end

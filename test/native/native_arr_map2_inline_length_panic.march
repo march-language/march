@@ -13,5 +13,6 @@ mod Main do
     let a = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
     let short = NativeArray.from_list_int(Cons(1, Cons(2, Nil)))
     println(NativeArray.to_list_int(NativeArray.map2_int(a, short, fn (x, y) -> x + y)))
+    ()
   end
 end

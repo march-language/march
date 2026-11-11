@@ -49,7 +49,7 @@ Ocap phase 2, Task 5 (plan: `specs/plans/2026-11-10-ocap-p2-handles-plan.md`).
   `test/native/socket_close_while_recv`, `listener_close_while_accept`, `udp_close_while_recv`,
   `socket_sent_to_local_actor`, the TLS groups probe's C4 case (Tls.close while parked in
   Tls.read), `test/test_handle.c` (missing TLS closer is fatal; close cancels a wait on a
-  listening socket), `test/errors/handle_forge_1` and `stdlib_internal_2`, and
+  listening socket), `test/errors/handle_forge_1` and `stdlib_internal_3`, and
   `test/stdlib/test_tls.march` (migrated; use after close).
 - Review fix round 1:
   - `Tls` handshake frees the SSL object before leaving the Socket on every refused

@@ -23,7 +23,7 @@ mod TwoNodeClient do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
-    let args = Process.argv()
+    let args = Authority.must(Process.argv())
     let host = match List.nth_opt(args, 1) do
       Some(h) -> h
       None -> "127.0.0.1"
@@ -36,9 +36,9 @@ mod TwoNodeClient do
         end
       None -> 29852
     end
-    let fd = match Socket.connect(host, port) do
+    let fd = match tcp_connect(host, port) do
       Ok(fd) -> fd
-      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+      Err(e) -> panic("connect: " ++ e)
     end
     let (sig_h, impl_h) = remote_ref_hashes("TwoNodeClient", "square")
     let r1 = call_square(fd, sig_h, impl_h, 7, 1)

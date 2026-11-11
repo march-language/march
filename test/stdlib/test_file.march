@@ -14,14 +14,14 @@ ptype FileKind = RegularFile | Directory | Symlink | OtherKind
 ptype FileStat = FileStat(Int, FileKind, Int, Int)
 
 pfn write_ok(path, content) do
-  match File.write(path, content) do
+  match Authority.must(File.write(path, content)) do
   Ok(_)  -> ()
   Err(e) -> panic("File.write failed: " ++ to_string(e))
   end
 end
 
 pfn read_ok(path) do
-  match File.read(path) do
+  match Authority.must(File.read(path)) do
   Ok(s)  -> s
   Err(e) -> panic("File.read failed: " ++ to_string(e))
   end
@@ -29,21 +29,21 @@ end
 
 describe "File.exists" do
   test "returns false for nonexistent path" do
-    assert (not (File.exists("/tmp/march_tf_noexist_00")))
+    assert (not (Authority.must(File.exists("/tmp/march_tf_noexist_00"))))
   end
 
   test "returns true after write" do
     let path = "/tmp/march_tf_exists_01"
     write_ok(path, "hello")
-    assert (File.exists(path))
-    let _ = File.delete(path)
+    assert (Authority.must(File.exists(path)))
+    let _ = Authority.must(File.delete(path))
   end
 
   test "returns false for file path when checking dir" do
     let path = "/tmp/march_tf_exists_02"
     write_ok(path, "data")
-    assert (not (Dir.exists(path)))
-    let _ = File.delete(path)
+    assert (not (Authority.must(Dir.exists(path))))
+    let _ = Authority.must(File.delete(path))
   end
 end
 
@@ -52,11 +52,11 @@ describe "File.write and File.read" do
     let path = "/tmp/march_tf_rw_03"
     write_ok(path, "hello world")
     assert (read_ok(path) == "hello world")
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 
   test "read on nonexistent returns Err" do
-    match File.read("/tmp/march_tf_rw_noexist_04") do
+    match Authority.must(File.read("/tmp/march_tf_rw_noexist_04")) do
     Err(_) -> ()
     Ok(_)  -> assert false
     end
@@ -66,7 +66,7 @@ describe "File.write and File.read" do
     let path = "/tmp/march_tf_rw_empty_05"
     write_ok(path, "")
     assert (read_ok(path) == "")
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 end
 
@@ -74,7 +74,7 @@ describe "File.read_lines" do
   test "splits content into lines" do
     let path = "/tmp/march_tf_lines_06"
     write_ok(path, "line1\nline2\nline3")
-    let lines = match File.read_lines(path) do
+    let lines = match Authority.must(File.read_lines(path)) do
       Ok(ls) -> ls
       Err(_) -> panic("File.read_lines failed")
     end
@@ -82,29 +82,29 @@ describe "File.read_lines" do
     assert (List.nth(lines, 0) == "line1")
     assert (List.nth(lines, 1) == "line2")
     assert (List.nth(lines, 2) == "line3")
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 
   test "trailing newline is stripped" do
     let path = "/tmp/march_tf_lines_trail_07"
     write_ok(path, "a\nb\n")
-    let lines = match File.read_lines(path) do
+    let lines = match Authority.must(File.read_lines(path)) do
       Ok(ls) -> ls
       Err(_) -> panic("File.read_lines trailing failed")
     end
     assert (List.length(lines) == 2)
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 
   test "empty file returns empty list" do
     let path = "/tmp/march_tf_lines_empty_08"
     write_ok(path, "")
-    let lines = match File.read_lines(path) do
+    let lines = match Authority.must(File.read_lines(path)) do
       Ok(ls) -> ls
       Err(_) -> panic("File.read_lines empty failed")
     end
     assert (List.length(lines) == 0)
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 end
 
@@ -112,12 +112,12 @@ describe "File.append" do
   test "appends to existing content" do
     let path = "/tmp/march_tf_append_09"
     write_ok(path, "first")
-    match File.append(path, " second") do
+    match Authority.must(File.append(path, " second")) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
     assert (read_ok(path) == "first second")
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 end
 
@@ -126,14 +126,14 @@ describe "File.copy" do
     let src  = "/tmp/march_tf_copy_src_10"
     let dest = "/tmp/march_tf_copy_dst_10"
     write_ok(src, "hello world")
-    match File.copy(src, dest) do
+    match Authority.must(File.copy(src, dest)) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (File.exists(dest))
+    assert (Authority.must(File.exists(dest)))
     assert (read_ok(dest) == "hello world")
-    let _ = File.delete(src)
-    let _ = File.delete(dest)
+    let _ = Authority.must(File.delete(src))
+    let _ = Authority.must(File.delete(dest))
   end
 end
 
@@ -142,13 +142,13 @@ describe "File.rename" do
     let src  = "/tmp/march_tf_rename_src_11"
     let dest = "/tmp/march_tf_rename_dst_11"
     write_ok(src, "data")
-    match File.rename(src, dest) do
+    match Authority.must(File.rename(src, dest)) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (File.exists(dest))
-    assert (not (File.exists(src)))
-    let _ = File.delete(dest)
+    assert (Authority.must(File.exists(dest)))
+    assert (not (Authority.must(File.exists(src))))
+    let _ = Authority.must(File.delete(dest))
   end
 end
 
@@ -156,18 +156,18 @@ describe "File.stat" do
   test "returns size and kind for regular file" do
     let path = "/tmp/march_tf_stat_12"
     write_ok(path, "hello world")
-    match File.stat(path) do
+    match Authority.must(File.stat(path)) do
     Err(_) -> assert false
     Ok(FileStat(size, kind, _, _)) -> do
       assert (size == 11)
       assert (kind == RegularFile)
     end
     end
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 
   test "returns Err for nonexistent" do
-    match File.stat("/tmp/march_tf_stat_noexist_13") do
+    match Authority.must(File.stat("/tmp/march_tf_stat_noexist_13")) do
     Err(_) -> ()
     Ok(_)  -> assert false
     end
@@ -178,15 +178,15 @@ describe "File.delete" do
   test "removes the file" do
     let path = "/tmp/march_tf_delete_14"
     write_ok(path, "bye")
-    match File.delete(path) do
+    match Authority.must(File.delete(path)) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    assert (not (File.exists(path)))
+    assert (not (Authority.must(File.exists(path))))
   end
 
   test "returns Err for nonexistent" do
-    match File.delete("/tmp/march_tf_delete_noexist_15") do
+    match Authority.must(File.delete("/tmp/march_tf_delete_noexist_15")) do
     Err(_) -> ()
     Ok(_)  -> assert false
     end
@@ -197,17 +197,17 @@ describe "File.with_lines" do
   test "streams all lines via callback" do
     let path = "/tmp/march_tf_wlines_16"
     write_ok(path, "line1\nline2\nline3")
-    let lines = match File.with_lines(path, fn seq -> Seq.to_list(seq)) do
+    let lines = match Authority.must(File.with_lines(path, fn seq -> Seq.to_list(seq))) do
       Ok(ls) -> ls
       Err(_) -> panic("File.with_lines failed")
     end
     assert (List.length(lines) == 3)
     assert (List.nth(lines, 0) == "line1")
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 
   test "returns Err for nonexistent" do
-    match File.with_lines("/tmp/march_tf_wlines_noexist_17", fn _seq -> ()) do
+    match Authority.must(File.with_lines("/tmp/march_tf_wlines_noexist_17", fn _seq -> ())) do
     Err(_) -> ()
     Ok(_)  -> assert false
     end
@@ -218,11 +218,11 @@ describe "File.each_line" do
   test "iterates all lines without error" do
     let path = "/tmp/march_tf_eline_18"
     write_ok(path, "a\nb\nc")
-    match File.each_line(path, fn _line -> ()) do
+    match Authority.must(File.each_line(path, fn _line -> ())) do
     Err(_) -> assert false
     Ok(_)  -> ()
     end
-    let _ = File.delete(path)
+    let _ = Authority.must(File.delete(path))
   end
 end
 

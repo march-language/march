@@ -15,5 +15,6 @@ mod Main do
   fn main(_cap_console : Cap(IO.Console)) : () do
     println(dup_pair("hi"))
     println(mixed_pair("n=", 42))
+    ()
   end
 end

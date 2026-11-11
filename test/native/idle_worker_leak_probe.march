@@ -120,9 +120,9 @@ mod Main do
   end
 
   pfn vtbl() do
-    match Vault.whereis("idle_worker_leak_probe") do
+    match Authority.must(Vault.whereis("idle_worker_leak_probe")) do
       Some(t) -> t
-      None    -> Vault.new("idle_worker_leak_probe")
+      None    -> Authority.must(Vault.new("idle_worker_leak_probe"))
     end
   end
 
@@ -183,6 +183,7 @@ mod Main do
     let _ = count(b)
     let d = live_allocs() - before
     println(leg ++ " flat: " ++ (if d < 100 do "true" else "false" end))
+    ()
   end
 
   fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _m : Cap(IO.Mut)) : () do
@@ -195,5 +196,6 @@ mod Main do
               fn leg -> measure(leg, b))
     -- The state survived 2,100 take/give round trips intact.
     println("count: " ++ int_to_string(count(b)))
+    ()
   end
 end

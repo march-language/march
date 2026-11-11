@@ -38,6 +38,7 @@ fn main(_cap_console : Cap(IO.Console)) : () do
   let b = sum_gcd(1, 3000000, 0)
   let c = bucket(0, 100000000, 37, 0)
   println(int_to_string(a) ++ " " ++ int_to_string(b) ++ " " ++ int_to_string(c))
+  ()
 end
 
 end

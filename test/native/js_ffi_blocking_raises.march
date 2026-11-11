@@ -19,5 +19,6 @@ mod JsFfiBlockingRaises do
   fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(shown(asyncParsePos("7")))
     println(shown(asyncParsePos("-1")))
+    ()
   end
 end

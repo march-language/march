@@ -21,5 +21,6 @@ mod Main do
     println(bool_to_string(eq2(N(3), N(3))))
     println(int_to_string(add3(N(1), N(2), N(3))))
     println(int_to_string(mix(N(10), 5)))
+    ()
   end
 end

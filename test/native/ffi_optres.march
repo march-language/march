@@ -38,5 +38,6 @@ mod Test do
     println(res_int(b.res))               -- 100
     -- classify() decodes a March-built Box (None / Some(String) / Err(String)):
     println(classify({ tag: 1, maybe: None, name: Some("x"), res: Err("bad") }))   -- none/x/err:bad
+    ()
   end
 end

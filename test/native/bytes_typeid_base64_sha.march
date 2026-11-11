@@ -22,5 +22,6 @@ mod BytesTypeidBase64Sha do
     Ok(b) -> println(Base64.encode(b))
     Err(_) -> println("decode failed")
     end
+    ()
   end
 end

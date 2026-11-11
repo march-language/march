@@ -33,11 +33,11 @@ mod DrainSecondSignalA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "drain-second-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "drain-second-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        let served = Vault.new("served")
+        let served = Authority.must(Vault.new("served"))
         println("node-a: offering")
         match Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st, served)) do
           Err(e) -> panic(Echo_Run.error_message(e))

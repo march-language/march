@@ -43,6 +43,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let t  = make(depth)
   let t2 = repeat(t, passes)
   println(int_to_string(sum_leaves(t2)))
+  ()
 end
 
 end

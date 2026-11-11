@@ -13,7 +13,7 @@ mod FrameTamperedA do
   needs ClusterNode.Live
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
@@ -31,8 +31,8 @@ mod FrameTamperedA do
   end
 
   fn main(c : Cap(IO)) do
-    let proxy = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_C"))
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", [proxy], "tamper-secret", 1)
+    let proxy = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_C")))
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", [proxy], "tamper-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -49,7 +49,7 @@ mod FrameTamperedA do
             let _ = ClusterNode.send_msg(h, to, "Tamper.Done", Nil, NodeQueue.BlockSender(10000))
             println("node-a: sent 10 pings and Done")
         end
-        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         ClusterNode.stop(h)
         println("node-a: done")
     end

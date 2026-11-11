@@ -15,5 +15,6 @@ mod Main do
   fn main(_cap_console : Cap(IO.Console)) : () do
     println(go(1000, 0))
     println(go(2000, 0))
+    ()
   end
 end

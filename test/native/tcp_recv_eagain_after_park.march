@@ -54,7 +54,7 @@ mod TcpRecvEagainAfterPark do
   end
 
   fn main(_c : Cap(IO)) do
-    let listener = match Socket.listen(0) do
+    let listener = match Authority.must(Socket.listen(0)) do
       Ok(l) -> l
       Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
@@ -74,7 +74,7 @@ mod TcpRecvEagainAfterPark do
       unsent
     end)
 
-    let fd = match Socket.connect("127.0.0.1", port) do
+    let fd = match Authority.must(Socket.connect("127.0.0.1", port)) do
       Ok(f) -> f
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
