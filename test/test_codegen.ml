@@ -1854,13 +1854,17 @@ let test_phase4_nonleaf_has_reduction_check () =
 
 (** All-leaf module (only builtin calls): NO reduction check anywhere.
     - square(n) = n * n        → only builtin `*`  → leaf
-    - main()    = println(42)  → only builtins      → leaf
-    Neither function should emit the icmp/br reduction check. *)
+    - main()    = int_to_string(42), then () → only builtins → leaf
+    Neither function should emit the icmp/br reduction check.  (Not
+    `println`: since capability operations return Result(T, CapError) it is
+    a Prelude function, and a call to it makes the caller non-leaf.) *)
 let test_phase4_leaf_fn_no_reduction_check () =
   let ir = emit_tco_ir {|mod Test do
-  needs IO.Console
     fn square(n : Int) : Int do n * n end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(42))) end
+    fn main() : Unit do
+      let _s = int_to_string(42)
+      ()
+    end
   end|} in
   (* No non-leaf functions → no preemption check IR anywhere in the output.
      Assert on the LOAD: the preamble declares @march_preempt_request
@@ -12187,6 +12191,7 @@ let test_try_call_single_capture_no_double_free_compiled () =
     \    Ok(_) -> println(\"ok\")\n\
     \    Err(e) -> println(\"err: \" ++ e)\n\
     \    end\n\
+    \    ()\n\
     \  end\n\
      end\n"
   in
@@ -12214,6 +12219,7 @@ let test_try_call_val_single_capture_no_double_free_compiled () =
     \    Ok(v) -> println(\"ok: \" ++ v)\n\
     \    Err(e) -> println(\"err: \" ++ e)\n\
     \    end\n\
+    \    ()\n\
     \  end\n\
      end\n"
   in
@@ -12243,6 +12249,7 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
     \    Ok(_) -> println(\"ok\")\n\
     \    Err(e) -> println(\"err: \" ++ e)\n\
     \    end\n\
+    \    ()\n\
     \  end\n\
      end\n"
   in
@@ -12387,6 +12394,7 @@ let test_file_with_lines_streaming_compiled () =
     Err(e) -> println("Error: " ++ to_string(e))
     Ok(all) -> println(int_to_string(List.length(all)))
     end
+    ()
   end
 end
 |} input_path)

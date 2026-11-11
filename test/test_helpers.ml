@@ -167,8 +167,14 @@ let load_stdlib_file_for_test name =
                         March_ast.Ast.dummy_span)
 
 (** Evaluate a module source with the given stdlib DMod declarations prepended. *)
+(* Authority (Authority.must/ignore/check) wraps every capability call since
+   capability operations return Result(T, CapError); load it for every
+   partial-stdlib eval so a migrated program resolves it. *)
+let authority_decl_for_eval = lazy (load_stdlib_file_for_test "authority.march")
+
 let eval_with_stdlib decls src =
   let m = parse_and_desugar src in
+  let decls = Lazy.force authority_decl_for_eval :: decls in
   let m = { m with March_ast.Ast.mod_decls = decls @ m.March_ast.Ast.mod_decls } in
   March_eval.Eval.eval_module_env m
 

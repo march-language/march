@@ -29,6 +29,13 @@ returns `Result(Result(U, E), CapError)`.
   console operation's `Ok(())`.
 - Three benches (`println_loop`, `clock_loop`, `spawn_loop`).
 
+- Fixed on the way: the token filter peeked the token after `match`/`choose`
+  without restoring the lexbuf positions, so menhir gave the keyword the
+  peeked token's start and an `EMatch` span began at its scrutinee. The
+  `cap_result_unhandled` fix for a trailing `match` was then spliced in after
+  the keyword. `peek_keeping_pos` (lib/parser/token_filter.ml) restores them;
+  eight error-corpus carets moved to the keyword.
+
 ## Not done here (each has a todo)
 
 - Gate on raw capability builtins: specs/todos/2026-11-10-ocap-p1-gate-raw-capability-builtins.md.

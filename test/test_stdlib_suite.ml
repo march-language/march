@@ -2180,7 +2180,7 @@ let test_file_write_read () =
 let test_file_exists () =
   with_temp_file "x" (fun path ->
     let env = eval_with_file (Printf.sprintf {|mod T do
-      fn f() do File.exists("%s") end
+      fn f() do Authority.must(File.exists("%s")) end
     end|} path) in
     Alcotest.(check bool) "exists" true
       (vbool (call_fn env "f" [])))
@@ -2203,7 +2203,7 @@ let test_file_with_lines () =
 let test_file_not_found () =
   let env = eval_with_file {|mod T do
     fn f() do
-      match File.read("/nonexistent/path/xyz_march_test.txt") do
+      match Authority.must(File.read("/nonexistent/path/xyz_march_test.txt")) do
       Ok(ig) -> "ok"
       Err(ig) -> "err"
       end
@@ -2265,13 +2265,13 @@ let test_dir_mkdir_list_rmdir () =
   let path = base ^ "/subdir" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.mkdir("%s") do
+      match Authority.must(Dir.mkdir("%s")) do
       Err(e) -> "mkdir failed: " ++ to_string(e)
       Ok(ig) ->
-        match Dir.list("%s") do
+        match Authority.must(Dir.list("%s")) do
         Err(ig) -> "list failed"
         Ok(ig) ->
-          match Dir.rmdir("%s") do
+          match Authority.must(Dir.rmdir("%s")) do
           Err(ig) -> "rmdir failed"
           Ok(ig) -> "ok"
           end
@@ -2292,7 +2292,7 @@ let test_dir_rm_rf () =
   output_string oc "x"; close_out oc;
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.rm_rf("%s") do
+      match Authority.must(Dir.rm_rf("%s")) do
       Ok(ig) -> "ok"
       Err(ig) -> "err"
       end
@@ -2304,7 +2304,7 @@ let test_dir_rm_rf () =
 let test_dir_rm_rf_refuses_root () =
   let env = eval_with_dir {|mod T do
     fn f() do
-      match Dir.rm_rf("/") do
+      match Authority.must(Dir.rm_rf("/")) do
       Ok(ig) -> "deleted root"
       Err(ig) -> "refused"
       end
@@ -2316,7 +2316,7 @@ let test_dir_rm_rf_refuses_root () =
 let test_dir_exists () =
   let base = Filename.temp_dir "march_exists_" "" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
-    fn f() do Dir.exists("%s") end
+    fn f() do Authority.must(Dir.exists("%s")) end
   end|} base) in
   let result = vbool (call_fn env "f" []) in
   (try Unix.rmdir base with _ -> ());
@@ -2324,7 +2324,7 @@ let test_dir_exists () =
 
 let test_dir_not_exists () =
   let env = eval_with_dir {|mod T do
-    fn f() do Dir.exists("/nonexistent_march_test_xyz_dir") end
+    fn f() do Authority.must(Dir.exists("/nonexistent_march_test_xyz_dir")) end
   end|} in
   Alcotest.(check bool) "dir not exists" false
     (vbool (call_fn env "f" []))
@@ -12255,9 +12255,9 @@ let frame_pin_src version =
     | 2 -> "state { count : Int, label : String }\ninit { count: 0, label: \"fresh\" }"
     | _ -> "state { count : Int, label : String, extra : Int }\ninit { count: 0, label: \"fresh3\", extra: 0 }" in
   let stop = match version with
-    | 1 -> "println(\"stop-old \" ++ int_to_string(state.count))"
-    | 2 -> "println(\"stop-new \" ++ state.label)"
-    | _ -> "println(\"stop-third \" ++ state.label ++ \":\" ++ int_to_string(state.extra))" in
+    | 1 -> "Authority.ignore(println(\"stop-old \" ++ int_to_string(state.count)))"
+    | 2 -> "Authority.ignore(println(\"stop-new \" ++ state.label))"
+    | _ -> "Authority.ignore(println(\"stop-third \" ++ state.label ++ \":\" ++ int_to_string(state.extra)))" in
   let migration = match version with
     | 1 -> ""
     | 2 -> "fn probe_migrate_state(old : { count : Int }) : { count : Int, label : String } do { count: old.count, label: \"migrated\" } end\n"
@@ -12265,12 +12265,12 @@ let frame_pin_src version =
   "mod Main do\nneeds IO\n" ^ count ^ "actor Probe do\n" ^ state
   ^ "\non Tick() do\nprintln(\"fresh-\" ++ int_to_string(calc()))\nstate\nend\non_stop do\n"
   ^ stop ^ "\nend\nend\n" ^ migration
-  ^ "fn hold_frame(done : String, step : Int -> ()) : () do\nif File.exists(done) do () else\nstep(0)\nhold_frame(done, step)\nend\nend\n"
+  ^ "fn hold_frame(done : String, step : Int -> ()) : () do\nif Authority.must(File.exists(done)) do () else\nstep(0)\nhold_frame(done, step)\nend\nend\n"
   ^ "fn main(_io : Cap(IO)) do\nlet a = spawn(Probe)\nprintln(\"frame-ready\")\n"
-  ^ "let step = fn mark -> do\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nif mark == 1 do println(\"old-closure-101\") else () end\nsend(a, Tick())\nsleep_ms(50)\nend\n"
-  ^ "hold_frame(Env.require(\"MARCH_FRAME_FINISH\"), step)\nstep(1)\n"
+  ^ "let step = fn mark -> do\nif calc() != 101 do panic(\"old frame crossed ABI\") else () end\nif mark == 1 do Authority.ignore(println(\"old-closure-101\")) else () end\nsend(a, Tick())\nsleep_ms(50)\nend\n"
+  ^ "hold_frame(Authority.must(Env.require(\"MARCH_FRAME_FINISH\")), step)\nstep(1)\n"
   ^ "if calc() != 101 do panic(\"old main crossed ABI\") else println(\"old-main-101\") end\n"
-  ^ "let _ = Actor.stop(a, 1000)\nprintln(\"frame-done\")\nend\nend\n"
+  ^ "let _ = Actor.stop(a, 1000)\nprintln(\"frame-done\")\n()\nend\nend\n"
 
 let test_hcr_running_frame_signature_change () =
   let module H = March_forge.Cmd_deploy_hot in

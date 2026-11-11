@@ -71,16 +71,18 @@ mod Check do
 
   -- A variable's value, a refused read counting as unset: a property run
   -- must not fail on its configuration.
+  -- Self-contained (the builtins behind an Authority check, as Process.env
+  -- and System.now do it) so Check needs neither module loaded.
   pfn env_or_none(name : String) : Option(String) do
-    match Process.env(name) do
-    Ok(v) -> v
+    match Authority.check("IO.Process", name) do
+    Ok(_) -> process_env(name)
     Err(_) -> None
     end
   end
 
   pfn clock_seed() : Int do
-    match System.now() do
-    Ok(t) -> float_to_int(t)
+    match Authority.check("IO.Clock", "") do
+    Ok(_) -> float_to_int(unix_time(()))
     Err(_) -> 0
     end
   end

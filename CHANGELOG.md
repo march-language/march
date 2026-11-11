@@ -868,6 +868,7 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
 - **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
   When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
   interpreter ran whichever impl registered last on both types' values; compiled code was right.
