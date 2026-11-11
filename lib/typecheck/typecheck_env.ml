@@ -2355,7 +2355,13 @@ let stdlib_only : (string * string) list ref =
       ("handle_close", "handles are made by their module's open functions");
       ("handle_detach", "handles are made by their module's open functions");
       ("handle_is_closed", "handles are made by their module's open functions");
-      ("handle_aux", "handles are made by their module's open functions") ]
+      ("handle_aux", "handles are made by their module's open functions");
+      (* ocap phase 2 (Task 4): the raw Int-descriptor file builtins added for
+         File.Handle. New, so stdlib-only from the start: a guessed raw handle
+         must not write or seek a file the program has open. *)
+      ("file_open_write", "use `File.open_write(path, mode)`");
+      ("file_write_handle", "use `File.write_to(h, data)` on a `File.Handle`");
+      ("file_seek", "use `File.seek(h, offset)` on a `File.Handle`") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding
