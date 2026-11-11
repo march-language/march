@@ -99,7 +99,7 @@ let small_src =
   "mod Rt do\n\
   \  needs IO.Console\n\
   \  pfn greet(n : Int) : String do \"n=\" ++ int_to_string(n) end\n\
-  \  fn main(_cap : Cap(IO.Console)) : Unit do println(greet(3)) end\n\
+  \  fn main(_cap : Cap(IO.Console)) : Unit do Authority.ignore(println(greet(3))) end\n\
    end\n"
 
 let emit_llvm ~env src =

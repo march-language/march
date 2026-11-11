@@ -737,7 +737,7 @@ let test_transient_bad_payload_is_parse_error () =
 needs IO
 @[no_alloc(transiant)]
 fn f(i : Int) : Int do i end
-fn main(cap : Cap(IO)) : Unit do println(int_to_string(f(1))) end
+fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(int_to_string(f(1)))) end
 end|}
     "`@[no_alloc(transient)]`"
 
@@ -944,7 +944,7 @@ mod Render do
   cap no_alloc
   fn render(xs : List(String)) : String do format_row(xs) end
 end
-fn main(cap : Cap(IO)) : Unit do println(Render.render(["a", "b"])) end|}
+fn main(cap : Cap(IO)) : Unit do Authority.ignore(println(Render.render(["a", "b"]))) end|}
 
 let test_cap_rejects_allocating_callee () =
   let needle = "`Render.render` is in `cap no_alloc` module `Render` but allocates" in
@@ -978,6 +978,7 @@ fn sum(t : Tree.Shape) : Int do
 end
 fn main(cap : Cap(IO)) : Unit do
   println(int_to_string(sum(Tree.inc_leaves(Tree.Fork(Tree.Tip(1), Tree.Tip(2))))))
+  ()
 end|}
 
 let test_cap_accepts_reused_ctor () =
@@ -992,6 +993,7 @@ end
 fn main(cap : Cap(IO)) : Unit do
   let (a, b) = Pair.make_pair(1, 2)
   println(int_to_string(a + b))
+  ()
 end|}
 
 let test_cap_rejects_tuple () =
@@ -1018,6 +1020,7 @@ let cap_arith_src = cap_src {|mod Math do
 end
 fn main(cap : Cap(IO)) : Unit do
   println(int_to_string(Math.max3(1, 7, 3) + Math.abs_diff(2, 5)))
+  ()
 end|}
 
 let test_cap_accepts_arithmetic () =
@@ -1049,6 +1052,7 @@ end
 fn main(cap : Cap(IO)) : Unit do
   let (a, _) = Dsp.Inner.spread(1)
   println(int_to_string(mix(Dsp.Sample(a))))
+  ()
 end|}
 
 let test_cap_covers_nested_module_and_impl () =
@@ -1099,6 +1103,7 @@ let unlowerable_src = {|mod WorkerDsl do
   fn main(_c : Cap(IO.Console)) do
     let _spec = worker(Counter)
     println(int_to_string(add(1, 2)))
+    ()
   end
 end|}
 

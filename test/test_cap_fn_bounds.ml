@@ -226,7 +226,7 @@ let shows ?(iface_needs = "needs ()") ?(module_needs = "IO.Console") impl_body =
     fn show : a -> String %s
   end
   type T = T(Int)
-  pfn log(s : String) : Unit do println(s) end
+  pfn log(s : String) : Unit do Authority.ignore(println(s)) end
   impl Show(T) do
     fn show(_t) do
 %s
@@ -361,7 +361,7 @@ let nested_impl ~iface_needs ~impl_needs =
       fn emit : a -> Unit %s
     end
     type T = T(Int)
-    pfn log(s : String) : Unit do println(s) end
+    pfn log(s : String) : Unit do Authority.ignore(println(s)) end
     impl Sink(T) do
       fn emit(_t) %s do log("x") end
     end

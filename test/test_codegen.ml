@@ -10594,7 +10594,7 @@ let hcr_chain_src (leaf_body : string) : string =
   Printf.sprintf {|mod App do
     fn leaf(n : Int) : Int do %s end
     fn mid(n : Int) : Int do leaf(n) + 1 end
-    fn main() : Unit do println(int_to_string(mid(3))) end
+    fn main() : Unit do Authority.ignore(println(int_to_string(mid(3)))) end
   end|} leaf_body
 
 let hget tbl k = Hashtbl.find_opt tbl k
@@ -11664,35 +11664,37 @@ let test_float_lit_no_wildcard_panics_compiled () =
    count (one immortal cell per site is the intended, and permanent, cost). *)
 let test_string_literal_operand_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_strlitleak"
-    "mod StrLitLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn concat_loop(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      let s = buf ++ \"xyz\"\n\
-    \      concat_loop(buf, i + 1, n, acc + String.byte_size(s))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-     -- Warm the literal site first, so its one permanent cell is already\n\
-     -- allocated when the baseline is sampled and only per-iteration growth\n\
-     -- can move the gauge.\n\
-    \    let warm = concat_loop(\"abc\", 0, 100, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = concat_loop(\"abc\", 0, 20000, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod StrLitLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn concat_loop(buf : String, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let s = buf ++ "xyz"
+      concat_loop(buf, i + 1, n, acc + String.byte_size(s))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+-- Warm the literal site first, so its one permanent cell is already
+-- allocated when the baseline is sampled and only per-iteration growth
+-- can move the gauge.
+    let warm = concat_loop("abc", 0, 100, 0)
+    let base = live_allocs()
+    let bulk = concat_loop("abc", 0, 20000, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "strlitleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11720,45 +11722,47 @@ let test_string_literal_operand_no_leak_compiled () =
    prints "GREW 20000". *)
 let test_unboxed_aggregate_zero_live_allocs_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_ubgauge"
-    "mod UbGauge do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  type Vec3 = Vec3(Float, Float, Float)\n\
-    \  fn forward(yaw : Float, pitch : Float) : Vec3 do\n\
-    \    let cp = Math.cos(pitch)\n\
-    \    Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)\n\
-    \  end\n\
-    \  fn dot(a : Vec3, b : Vec3) : Float do\n\
-    \    match a do\n\
-    \      Vec3(ax, ay, az) ->\n\
-    \        match b do\n\
-    \          Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz\n\
-    \        end\n\
-    \    end\n\
-    \  end\n\
-    \  pfn spin(i : Int, n : Int, acc : Float) : Float do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      let v = forward(int_to_float(i) *. 0.001, 0.25)\n\
-    \      spin(i + 1, n, acc +. dot(v, v))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = spin(0, 100, 0.0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = spin(0, 20000, 0.0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm +. bulk > 0.0 && grew == 0 do\n\
-    \      println(\"ZERO\")\n\
-    \    else\n\
-    \      println(\"GREW \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod UbGauge do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  type Vec3 = Vec3(Float, Float, Float)
+  fn forward(yaw : Float, pitch : Float) : Vec3 do
+    let cp = Math.cos(pitch)
+    Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+  end
+  fn dot(a : Vec3, b : Vec3) : Float do
+    match a do
+      Vec3(ax, ay, az) ->
+        match b do
+          Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz
+        end
+    end
+  end
+  pfn spin(i : Int, n : Int, acc : Float) : Float do
+    if i >= n do acc
+    else
+      let v = forward(int_to_float(i) *. 0.001, 0.25)
+      spin(i + 1, n, acc +. dot(v, v))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = spin(0, 100, 0.0)
+    let base = live_allocs()
+    let bulk = spin(0, 20000, 0.0)
+    let grew = live_allocs() - base
+    if warm +. bulk > 0.0 && grew == 0 do
+      println("ZERO")
+    else
+      println("GREW " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "ubgaugebin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11787,38 +11791,40 @@ let test_unboxed_aggregate_zero_live_allocs_compiled () =
    the loop count (measured 5 000 -> 5 001, 20 000 -> 20 001 live objects). *)
 let test_unboxed_aggregate_branch_join_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_ubjoingauge"
-    "mod UbJoinGauge do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  type P2 = P2(Float, Float)\n\
-    \  pfn psum(p : P2) : Float do\n\
-    \    match p do\n\
-    \      P2(a, c) -> a +. c\n\
-    \    end\n\
-    \  end\n\
-    \  pfn spin(i : Int, acc : Float) : Float do\n\
-    \    if i == 0 do acc\n\
-    \    else\n\
-    \      let p = if i % 2 == 0 do P2(1.0, 2.0) else P2(3.0, 4.0) end\n\
-    \      spin(i - 1, acc +. psum(p))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = spin(100, 0.0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = spin(20000, 0.0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm +. bulk > 0.0 && grew == 0 do\n\
-    \      println(\"ZERO\")\n\
-    \    else\n\
-    \      println(\"GREW \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod UbJoinGauge do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  type P2 = P2(Float, Float)
+  pfn psum(p : P2) : Float do
+    match p do
+      P2(a, c) -> a +. c
+    end
+  end
+  pfn spin(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = if i % 2 == 0 do P2(1.0, 2.0) else P2(3.0, 4.0) end
+      spin(i - 1, acc +. psum(p))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = spin(100, 0.0)
+    let base = live_allocs()
+    let bulk = spin(20000, 0.0)
+    let grew = live_allocs() - base
+    if warm +. bulk > 0.0 && grew == 0 do
+      println("ZERO")
+    else
+      println("GREW " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "ubjoingaugebin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11851,36 +11857,38 @@ let test_unboxed_aggregate_branch_join_no_leak_compiled () =
    GROWTH, not an absolute count. *)
 let test_static_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_staticcloleak"
-    "mod StaticCloLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  fn double(x : Int) : Int do x * 2 end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      materialize_loop(i + 1, n, acc + apply_it(double, i))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-     -- Warm the materialization site first, so its one permanent static\n\
-     -- closure is already allocated when the baseline is sampled and only\n\
-     -- per-iteration growth can move the gauge.\n\
-    \    let warm = materialize_loop(0, 100, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 20000, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod StaticCloLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  fn double(x : Int) : Int do x * 2 end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      materialize_loop(i + 1, n, acc + apply_it(double, i))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+-- Warm the materialization site first, so its one permanent static
+-- closure is already allocated when the baseline is sampled and only
+-- per-iteration growth can move the gauge.
+    let warm = materialize_loop(0, 100, 0)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 20000, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "staticcloleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11909,35 +11917,37 @@ let test_static_closure_materialization_no_leak_compiled () =
    than scaling with the iteration count. *)
 let test_lambda_static_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_lambdacloleak"
-    "mod LambdaCloLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-     -- Warm the materialization site first, so its one permanent static\n\
-     -- closure is already allocated when the baseline is sampled and only\n\
-     -- per-iteration growth can move the gauge.\n\
-    \    let warm = materialize_loop(0, 100, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 20000, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod LambdaCloLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+-- Warm the materialization site first, so its one permanent static
+-- closure is already allocated when the baseline is sampled and only
+-- per-iteration growth can move the gauge.
+    let warm = materialize_loop(0, 100, 0)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 20000, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "lambdacloleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11968,34 +11978,36 @@ let test_lambda_static_closure_materialization_no_leak_compiled () =
    leak) and equally on a build with neither. *)
 let test_capturing_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_capcloleak"
-    "mod CapCloLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  pfn materialize_loop(i : Int, n : Int, k : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-     -- `fn x -> x * k` captures k, so this allocates a real closure struct\n\
-     -- every iteration; it can never be routed to a static global.\n\
-    \      materialize_loop(i + 1, n, k, acc + apply_it(fn x -> x * k, i))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = materialize_loop(0, 100, 2, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 20000, 2, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod CapCloLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  pfn materialize_loop(i : Int, n : Int, k : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+-- `fn x -> x * k` captures k, so this allocates a real closure struct
+-- every iteration; it can never be routed to a static global.
+      materialize_loop(i + 1, n, k, acc + apply_it(fn x -> x * k, i))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = materialize_loop(0, 100, 2, 0)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 20000, 2, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "capcloleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12040,36 +12052,38 @@ let test_capturing_closure_materialization_no_leak_compiled () =
    not a leak. *)
 let test_self_recursive_capturing_closure_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccap"
-    "mod SelfRecCap do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  fn outer(k : Int, n : Int) : Int do\n\
-    \    fn helper(x : Int) : Int do\n\
-    \      if x <= 0 do 0 else helper(x - 1) + k end\n\
-    \    end\n\
-    \    apply_it(helper, n)\n\
-    \  end\n\
-    \  pfn materialize_loop(i : Int, acc : Int, k : Int) : Int do\n\
-    \    if i >= 20000 do acc\n\
-    \    else materialize_loop(i + 1, acc + outer(k, 5), k) end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = materialize_loop(0, 0, 2)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 0, 2)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod SelfRecCap do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  fn outer(k : Int, n : Int) : Int do
+    fn helper(x : Int) : Int do
+      if x <= 0 do 0 else helper(x - 1) + k end
+    end
+    apply_it(helper, n)
+  end
+  pfn materialize_loop(i : Int, acc : Int, k : Int) : Int do
+    if i >= 20000 do acc
+    else materialize_loop(i + 1, acc + outer(k, 5), k) end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = materialize_loop(0, 0, 2)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 0, 2)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "selfreccapbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12091,25 +12105,27 @@ let test_self_recursive_capturing_closure_no_leak_compiled () =
    crash rather than as unbounded growth. *)
 let test_self_recursive_capturing_closure_correct_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccapcorrect"
-    "mod SelfRecCapCorrect do\n\
-    \  needs IO.Console\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  fn outer(k : Int, n : Int) : Int do\n\
-    \    fn helper(x : Int) : Int do\n\
-    \      if x <= 0 do k\n\
-    \      else if x == 1 do helper(x - 1) * 2\n\
-    \      else helper(x - 1) + helper(x - 2) end\n\
-    \      end\n\
-    \    end\n\
-    \    apply_it(helper, n)\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    println(int_to_string(outer(1, 0)))\n\
-    \    println(int_to_string(outer(1, 1)))\n\
-    \    println(int_to_string(outer(1, 6)))\n\
-    \    println(int_to_string(outer(-3, 10)))\n\
-    \  end\n\
-     end\n"
+    {|mod SelfRecCapCorrect do
+  needs IO.Console
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  fn outer(k : Int, n : Int) : Int do
+    fn helper(x : Int) : Int do
+      if x <= 0 do k
+      else if x == 1 do helper(x - 1) * 2
+      else helper(x - 1) + helper(x - 2) end
+      end
+    end
+    apply_it(helper, n)
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(int_to_string(outer(1, 0)))
+    println(int_to_string(outer(1, 1)))
+    println(int_to_string(outer(1, 6)))
+    println(int_to_string(outer(-3, 10)))
+    ()
+  end
+end
+|}
   in
   (* stderr dropped: `helper` is deliberately double-recursive (fib-shaped), so
      the checker's non-tail-recursion warning for local functions now fires. It
@@ -12263,20 +12279,22 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
    untag, 42 would come back as 85 ((42<<1)|1) compiled-only. *)
 let test_try_finally_value_and_order_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfin"
-    "mod TryFin do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let k = 40\n\
-    \    let n = try_finally(\n\
-    \      fn _ ->\n\
-    \        let _ = println(\"action\")\n\
-    \        k + 2,\n\
-    \      fn _ -> println(\"cleanup\"))\n\
-    \    println(int_to_string(n))\n\
-    \    let s = try_finally(fn _ -> \"he\" ++ \"ap\", fn _ -> ())\n\
-    \    println(s)\n\
-    \  end\n\
-     end\n"
+    {|mod TryFin do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let k = 40
+    let n = try_finally(
+      fn _ ->
+        let _ = println("action")
+        k + 2,
+      fn _ -> println("cleanup"))
+    println(int_to_string(n))
+    let s = try_finally(fn _ -> "he" ++ "ap", fn _ -> ())
+    println(s)
+    ()
+  end
+end
+|}
   in
   let expected = "action\ncleanup\n42\nheap" in
   let interp_out = read_cmd_output (Printf.sprintf
@@ -12301,18 +12319,20 @@ let test_try_finally_value_and_order_compiled () =
    enforced by construction inside march_try_finally. *)
 let test_try_finally_cleanup_runs_on_panic_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfinpanic"
-    "mod TryFinPanic do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let label = \"kaboom\"\n\
-    \    let _ = try_finally(\n\
-    \      fn _ ->\n\
-    \        let _ = panic(label)\n\
-    \        0,\n\
-    \      fn _ -> println(\"cleanup-ran\"))\n\
-    \    println(\"unreachable\")\n\
-    \  end\n\
-     end\n"
+    {|mod TryFinPanic do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let label = "kaboom"
+    let _ = try_finally(
+      fn _ ->
+        let _ = panic(label)
+        0,
+      fn _ -> println("cleanup-ran"))
+    println("unreachable")
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "tryfinpanicbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12351,24 +12371,25 @@ let test_file_with_lines_streaming_compiled () =
   close_out oc;
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_withlines"
     (Printf.sprintf
-    "mod WithLines do\n\
-    \  needs IO.Console\n\
-    \  needs IO.FileRead\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : Unit do\n\
-    \    let path = \"%s\"\n\
-    \    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do\n\
-    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
-    \    Ok(first3) -> do\n\
-    \      println(int_to_string(List.length(first3)))\n\
-    \      println(List.fold_left(first3, \"\", fn(acc, line) -> acc ++ line ++ \"|\"))\n\
-    \    end\n\
-    \    end\n\
-    \    match File.with_lines(path, fn(lines) -> Seq.to_list(lines)) do\n\
-    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
-    \    Ok(all) -> println(int_to_string(List.length(all)))\n\
-    \    end\n\
-    \  end\n\
-     end\n" input_path)
+    {|mod WithLines do
+  needs IO.Console
+  needs IO.FileRead
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : Unit do
+    let path = "%s"
+    match Authority.must(File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3)))) do
+    Err(e) -> println("Error: " ++ to_string(e))
+    Ok(first3) -> do
+      println(int_to_string(List.length(first3)))
+      println(List.fold_left(first3, "", fn(acc, line) -> acc ++ line ++ "|"))
+    end
+    end
+    match Authority.must(File.with_lines(path, fn(lines) -> Seq.to_list(lines))) do
+    Err(e) -> println("Error: " ++ to_string(e))
+    Ok(all) -> println(int_to_string(List.length(all)))
+    end
+  end
+end
+|} input_path)
   in
   let expected = "3\nalpha|beta|gamma|\n5" in
   let interp_out = read_cmd_output (Printf.sprintf
@@ -12419,17 +12440,19 @@ let test_file_with_lines_streaming_compiled () =
    call site, not a last-use consume. *)
 let test_native_array_map_reused_capturing_closure_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrmapcap"
-    "mod ArrMapCap do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let k = 7\n\
-    \    let closure = fn x -> x + k\n\
-    \    let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))\n\
-    \    let a2 = NativeArray.map_int(a1, closure)\n\
-    \    println(NativeArray.to_list_int(a2))\n\
-    \    println(int_to_string(closure(100)))\n\
-    \  end\n\
-     end\n"
+    {|mod ArrMapCap do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let k = 7
+    let closure = fn x -> x + k
+    let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    let a2 = NativeArray.map_int(a1, closure)
+    println(NativeArray.to_list_int(a2))
+    println(int_to_string(closure(100)))
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "arrmapcapbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12465,16 +12488,18 @@ let test_native_array_map_reused_capturing_closure_compiled () =
    MUST be preserved — the alias must observe the ORIGINAL, not the mutation. *)
 let test_native_array_set_int_alias_cow_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setalias"
-    "mod SetAlias do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let a = NativeArray.make_int(4, 0)\n\
-    \    let b = NativeArray.set_int(a, 0, 99)\n\
-    \    -- a is read AFTER set_int -> aliased (rc>1) -> must be unchanged.\n\
-    \    println(int_to_string(NativeArray.get_int(a, 0)))\n\
-    \    println(int_to_string(NativeArray.get_int(b, 0)))\n\
-    \  end\n\
-     end\n"
+    {|mod SetAlias do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let a = NativeArray.make_int(4, 0)
+    let b = NativeArray.set_int(a, 0, 99)
+    -- a is read AFTER set_int -> aliased (rc>1) -> must be unchanged.
+    println(int_to_string(NativeArray.get_int(a, 0)))
+    println(int_to_string(NativeArray.get_int(b, 0)))
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "setaliasbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12494,21 +12519,23 @@ let test_native_array_set_int_alias_cow_compiled () =
    the value is the sum of the 8 last writes per position. *)
 let test_native_array_set_int_inplace_churn_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setchurn"
-    "mod SetChurn do\n\
-    \  needs IO.Console\n\
-    \  fn go(arr, i : Int, n : Int) : Int do\n\
-    \    if i >= n do\n\
-    \      NativeArray.sum_int(arr)\n\
-    \    else\n\
-    \      let arr2 = NativeArray.set_int(arr, i % 8, i)\n\
-    \      go(arr2, i + 1, n)\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let arr = NativeArray.make_int(8, 0)\n\
-    \    println(int_to_string(go(arr, 0, 2000000)))\n\
-    \  end\n\
-     end\n"
+    {|mod SetChurn do
+  needs IO.Console
+  fn go(arr, i : Int, n : Int) : Int do
+    if i >= n do
+      NativeArray.sum_int(arr)
+    else
+      let arr2 = NativeArray.set_int(arr, i % 8, i)
+      go(arr2, i + 1, n)
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let arr = NativeArray.make_int(8, 0)
+    println(int_to_string(go(arr, 0, 2000000)))
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "setchurnbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12595,18 +12622,19 @@ let test_blocking_ffi_pool_reuses_threads_compiled () =
    fix, every run below is clean after it. *)
 let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_sigwatchcap"
-    "mod SigWatchCap do\n\
-    \  needs IO.Console\n\
-    \  needs IO.Signal\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal)) do\n\
-    \    let k = 99\n\
-    \    Signal.watch(Signal.Usr2, fn -> println(\"caught \" ++ int_to_string(k)))\n\
-    \    Signal.raise(Signal.Usr2)\n\
-    \    Signal.raise(Signal.Usr2)\n\
-    \    Signal.raise(Signal.Usr2)\n\
-    \    println(\"done\")\n\
-    \  end\n\
-     end\n"
+    {|mod SigWatchCap do
+  needs IO.Console
+  needs IO.Signal
+  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal)) do
+    let k = 99
+    Signal.watch(Signal.Usr2, fn -> Authority.ignore(println("caught " ++ int_to_string(k))))
+    Signal.raise(Signal.Usr2)
+    Signal.raise(Signal.Usr2)
+    Signal.raise(Signal.Usr2)
+    println("done")
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "sigwatchcapbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -13305,38 +13333,43 @@ let test_main_adapter_zero_caps () =
 let test_main_adapter_one_cap () =
   assert_compiled_interp_parity
     ~name:"march_staged_adapter1"
-    ~src:"mod Main do\n\
-         \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) : () do println(\"a1\") end\n\
-          end\n"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : () do Authority.ignore(println("a1")) end
+end
+|}
     ~expected:"a1" ()
 
 let test_main_adapter_two_caps () =
   assert_compiled_interp_parity
     ~name:"march_staged_adapter2"
-    ~src:"mod Main do\n\
-         \  needs IO.Console\n\
-         \  needs IO.Clock\n\
-         \  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do\n\
-         \    let _t = unix_time()\n\
-         \    println(\"a2\")\n\
-         \  end\n\
-          end\n"
+    ~src:{|mod Main do
+  needs IO.Console
+  needs IO.Clock
+  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
+    let _t = unix_time()
+    println("a2")
+    ()
+  end
+end
+|}
     ~expected:"a2" ()
 
 let test_main_adapter_three_caps () =
   assert_compiled_interp_parity
     ~name:"march_staged_adapter3"
-    ~src:"mod Main do\n\
-         \  needs IO.Console\n\
-         \  needs IO.Clock\n\
-         \  needs IO.Random\n\
-         \  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do\n\
-         \    let _t = unix_time()\n\
-         \    let _b = random_bytes(4)\n\
-         \    println(\"a3\")\n\
-         \  end\n\
-          end\n"
+    ~src:{|mod Main do
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Random
+  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do
+    let _t = unix_time()
+    let _b = random_bytes(4)
+    println("a3")
+    ()
+  end
+end
+|}
     ~expected:"a3" ()
 
 let test_compiled_no_opt_prunes_unreachable () =
@@ -13797,37 +13830,38 @@ let test_js_float_literal_bits () =
 let test_js_diagnostics_observers () =
   let name = "march_js_diag" in
   let src =
-    "mod JsDiag do\n\
-    \  needs IO.Console\n\
-    \  pfn keys(ctx : List((String, Diagnostics.DiagnosticValue))) : String do\n\
-    \    String.join(List.map(ctx, fn p -> match p do (k, _) -> k end), \",\")\n\
-    \  end\n\
-    \  pfn loc(l : Option(Diagnostics.SourceLocation)) : String do\n\
-    \    match l do\n\
-    \      Some(s) -> \"line \" ++ int_to_string(s.line)\n\
-    \      None -> \"none\"\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) do\n\
-    \    println(\"outside: \" ++ keys(Diagnostics.current_context()))\n\
-    \    let v = Diagnostics.with_context([(\"a\", Diagnostics.DStr(\"x\"))], fn ->\n\
-    \      Diagnostics.with_context([(\"b\", Diagnostics.DBool(true))], fn ->\n\
-    \        keys(Diagnostics.current_context())))\n\
-    \    println(\"inside: \" ++ v)\n\
-    \    println(\"after: \" ++ keys(Diagnostics.current_context()))\n\
-    \    let gone = Diagnostics.observe_crashes(fn _ -> println(\"removed observer ran\"))\n\
-    \    Diagnostics.unobserve(gone)\n\
-    \    Diagnostics.unobserve(gone)\n\
-    \    let _h = Diagnostics.observe_crashes(fn r ->\n\
-    \      println(Diagnostics.kind_to_string(r.kind) ++ \": \" ++ r.message ++ \" ctx=\" ++ keys(r.context)\n\
-    \              ++ \" pid=\" ++ int_to_string(r.process.pid) ++ \" \" ++ loc(r.location)))\n\
-    \    let _h2 = Diagnostics.observe_crashes(fn _ -> panic(\"observer panics\"))\n\
-    \    let _h3 = Diagnostics.observe_crashes(fn _ -> println(\"third observer ran\"))\n\
-    \    Diagnostics.with_context([(\"request_id\", Diagnostics.DStr(\"r1\"))], fn ->\n\
-    \      Diagnostics.with_context([(\"job\", Diagnostics.DInt(7))], fn ->\n\
-    \        panic(\"boom\")))\n\
-    \  end\n\
-     end\n" in
+    {|mod JsDiag do
+  needs IO.Console
+  pfn keys(ctx : List((String, Diagnostics.DiagnosticValue))) : String do
+    String.join(List.map(ctx, fn p -> match p do (k, _) -> k end), ",")
+  end
+  pfn loc(l : Option(Diagnostics.SourceLocation)) : String do
+    match l do
+      Some(s) -> "line " ++ int_to_string(s.line)
+      None -> "none"
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) do
+    println("outside: " ++ keys(Diagnostics.current_context()))
+    let v = Diagnostics.with_context([("a", Diagnostics.DStr("x"))], fn ->
+      Diagnostics.with_context([("b", Diagnostics.DBool(true))], fn ->
+        keys(Diagnostics.current_context())))
+    println("inside: " ++ v)
+    println("after: " ++ keys(Diagnostics.current_context()))
+    let gone = Diagnostics.observe_crashes(fn _ -> Authority.ignore(println("removed observer ran")))
+    Diagnostics.unobserve(gone)
+    Diagnostics.unobserve(gone)
+    let _h = Diagnostics.observe_crashes(fn r ->
+      Authority.ignore(println(Diagnostics.kind_to_string(r.kind) ++ ": " ++ r.message ++ " ctx=" ++ keys(r.context)
+              ++ " pid=" ++ int_to_string(r.process.pid) ++ " " ++ loc(r.location))))
+    let _h2 = Diagnostics.observe_crashes(fn _ -> panic("observer panics"))
+    let _h3 = Diagnostics.observe_crashes(fn _ -> Authority.ignore(println("third observer ran")))
+    Diagnostics.with_context([("request_id", Diagnostics.DStr("r1"))], fn ->
+      Diagnostics.with_context([("job", Diagnostics.DInt(7))], fn ->
+        panic("boom")))
+  end
+end
+|} in
   let expected =
     "outside: \n\
      inside: b,a\n\
@@ -13875,12 +13909,14 @@ let test_js_diagnostics_observers () =
 let test_output_path_errors () =
   let name = "out_path_1181" in
   let src =
-    "mod OutPath do\n\
-    \  needs IO.Console\n\
-    \  fn main(_c : Cap(IO.Console)) : () do\n\
-    \    println(\"hello\")\n\
-    \  end\n\
-     end\n" in
+    {|mod OutPath do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : () do
+    println("hello")
+    ()
+  end
+end
+|} in
   let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
   let compile args =
     run_capture (Printf.sprintf "cd %s && %s %s %s 2>&1"
@@ -13946,20 +13982,22 @@ let test_js_test_runner () =
   else begin
     let name = "js_test_runner_1176" in
     let src =
-      "mod JsTestRunner do\n\
-      \  needs IO.Console\n\
-      \  fn double(n : Int) : Int do n * 2 end\n\
-      \  fn main(_c : Cap(IO.Console)) : () do\n\
-      \    println(\"main ran\")\n\
-      \  end\n\
-      \  test \"doubles\" do\n\
-      \    println(\"printed from a test\")\n\
-      \    assert (double(2) == 4)\n\
-      \  end\n\
-      \  test \"must fail\" do\n\
-      \    assert (double(1) == 3)\n\
-      \  end\n\
-       end\n" in
+      {|mod JsTestRunner do
+  needs IO.Console
+  fn double(n : Int) : Int do n * 2 end
+  fn main(_c : Cap(IO.Console)) : () do
+    println("main ran")
+    ()
+  end
+  test "doubles" do
+    println("printed from a test")
+    assert (double(2) == 4)
+  end
+  test "must fail" do
+    assert (double(1) == 3)
+  end
+end
+|} in
     let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
     let mjs = Filename.concat tmp (name ^ ".mjs") in
     let bin = Filename.concat tmp name in

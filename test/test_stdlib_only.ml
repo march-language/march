@@ -347,15 +347,22 @@ let test_shipped_table () =
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
     [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
-      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request" ]
+      "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
+      (* ocap phase 1: the capability check point (stdlib/authority.march) *)
+      "cap_check_raw"; "cap_launch_text"; "reload_request" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
         (contains ~needle:"`Actor.introspect`" hint))
     (List.filter (fun (name, _) -> name <> "observe_count_send" && name <> "actor_inspect" && name <> "epoch_hold" && name <> "epoch_release" && name <> "epoch_draining" && name <> "epoch_drain" && name <> "epoch_hold_next_spawn" && name <> "epoch_holds" && name <> "reload_request"
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
-                             && name <> "delivery_failed_watch")
+                             && name <> "delivery_failed_watch"
+                             && name <> "cap_check_raw" && name <> "cap_launch_text")
        !TB.stdlib_only);
+  List.iter (fun name ->
+      Alcotest.(check bool) (name ^ " suggestion names Authority.check") true
+        (contains ~needle:"`Authority.check(kind, target)`" (List.assoc name !TB.stdlib_only)))
+    [ "cap_check_raw"; "cap_launch_text" ];
   Alcotest.(check bool) "actor_inspect suggestion names Actor.debug" true
     (contains ~needle:"`Actor.debug`" (List.assoc "actor_inspect" !TB.stdlib_only));
   (* No throwaway entry installed: the shipped table itself gates user code. *)

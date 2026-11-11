@@ -2148,7 +2148,7 @@ let test_file_read () =
   with_temp_file "hello world" (fun path ->
     let env = eval_with_file (Printf.sprintf {|mod T do
       fn f() do
-        match File.read("%s") do
+        match Authority.must(File.read("%s")) do
         Ok(s) -> s
         Err(ig) -> "fail"
         end
@@ -2162,9 +2162,9 @@ let test_file_write_read () =
   (try
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
-         match File.write("%s", "written data") do
+         match Authority.must(File.write("%s", "written data")) do
          Ok(ig) ->
-           match File.read("%s") do
+           match Authority.must(File.read("%s")) do
            Ok(s) -> s
            Err(ig) -> "read fail"
            end
@@ -2191,7 +2191,7 @@ let test_file_with_lines () =
       fn append_bang(l) do l ++ "!" end
       fn collect_lines(lines) do Seq.to_list(Seq.map(lines, fn l -> append_bang(l))) end
       fn f() do
-        match File.with_lines("%s", fn lines -> collect_lines(lines)) do
+        match Authority.must(File.with_lines("%s", fn lines -> collect_lines(lines))) do
         Ok(xs) -> xs
         Err(ig) -> Nil
         end
@@ -2241,9 +2241,9 @@ let test_file_append () =
   (try
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
-         File.write("%s", "line1\n")
-         File.append("%s", "line2\n")
-         match File.read("%s") do
+         Authority.must(File.write("%s", "line1\n"))
+         Authority.must(File.append("%s", "line2\n"))
+         match Authority.must(File.read("%s")) do
          Ok(s) -> s
          Err(ig) -> "fail"
          end
@@ -2334,8 +2334,8 @@ let test_dir_mkdir_p () =
   let deep = base ^ "/a/b/c" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.mkdir_p("%s") do
-      Ok(ig) -> Dir.exists("%s")
+      match Authority.must(Dir.mkdir_p("%s")) do
+      Ok(ig) -> Authority.must(Dir.exists("%s"))
       Err(ig) -> false
       end
     end
@@ -2362,7 +2362,7 @@ let test_integration_file_pipeline () =
   write (base ^ "/c.csv") "ignore me";
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.list_full("%s") do
+      match Authority.must(Dir.list_full("%s")) do
       Err(ig) -> Nil
       Ok(files) -> do
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
@@ -2370,7 +2370,7 @@ let test_integration_file_pipeline () =
           match ps do
           Nil -> List.reverse(acc)
           Cons(p, rest) ->
-            match File.read_lines(p) do
+            match Authority.must(File.read_lines(p)) do
             Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
             Err(ig) -> collect(rest, acc)
             end
@@ -11554,7 +11554,7 @@ let hcr_manifest_caps_fixture_src =
   \  needs IO.Console\n\
   \  mod Core do\n\
   \    needs IO.Console\n\
-  \    fn logger(x : String) : Unit do println(x) end\n\
+  \    fn logger(x : String) : Unit do Authority.ignore(println(x)) end\n\
   \  end\n\
   \  mod Pure do\n\
   \    fn add(a : Int, b : Int) : Int do a + b end\n\
@@ -13245,15 +13245,16 @@ let test_compiled_io_read_byte () =
     let src = Filename.concat tmp "rb.march" in
     let oc = open_out src in
     output_string oc
-      "mod App do\n\
-    \  needs IO.Console\n\
-      \  fn main(_cap_console : Cap(IO.Console)) do\n\
-      \    let a = IO.read_byte()\n\
-      \    let b = IO.read_byte()\n\
-      \    let c = IO.read_byte()\n\
-      \    println(int_to_string(a) ++ \",\" ++ int_to_string(b) ++ \",\" ++ int_to_string(c))\n\
-      \  end\n\
-       end\n";
+      {|mod App do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) do
+    let a = Authority.must(IO.read_byte())
+    let b = Authority.must(IO.read_byte())
+    let c = Authority.must(IO.read_byte())
+    println(int_to_string(a) ++ "," ++ int_to_string(b) ++ "," ++ int_to_string(c))
+  end
+end
+|};
     close_out oc;
     let bin = Filename.concat tmp "rbbin" in
     let compile_rc = Sys.command (Printf.sprintf
@@ -13418,24 +13419,25 @@ let test_compiled_vault_scalar_roundtrip () =
   let src = Filename.concat tmp "v.march" in
   let oc = open_out src in
   output_string oc
-    "mod VaultScalar do\n\
-    \  needs IO.Process\n\
-    \  needs IO.Mut\n\
-    \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-    \    -- One table per element type: a Vault handle is Vault(v), phantom in\n\
-    \    -- the value type, so a single table cannot hold both a Bool and an\n\
-    \    -- Int. That is orthogonal to what this test guards (the runtime's\n\
-    \    -- scalar tagging on the store path), and both scalars still make the\n\
-    \    -- same round trip.\n\
-    \    let tb = Vault.new(\"vs_test_b\")\n\
-    \    let tn = Vault.new(\"vs_test_n\")\n\
-    \    Vault.set(tb, \"b\", true)\n\
-    \    Vault.set(tn, \"n\", 4242)\n\
-    \    let b = Vault.get(tb, \"b\") |> unwrap_or(false)\n\
-    \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
-    \    if b && n == 4242 do () else process_exit(1) end\n\
-    \  end\n\
-     end\n";
+    {|mod VaultScalar do
+  needs IO.Process
+  needs IO.Mut
+  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+    -- One table per element type: a Vault handle is Vault(v), phantom in
+    -- the value type, so a single table cannot hold both a Bool and an
+    -- Int. That is orthogonal to what this test guards (the runtime's
+    -- scalar tagging on the store path), and both scalars still make the
+    -- same round trip.
+    let tb = Authority.must(Vault.new("vs_test_b"))
+    let tn = Authority.must(Vault.new("vs_test_n"))
+    Vault.set(tb, "b", true)
+    Vault.set(tn, "n", 4242)
+    let b = Vault.get(tb, "b") |> unwrap_or(false)
+    let n = Vault.get(tn, "n") |> unwrap_or(0)
+    if b && n == 4242 do () else process_exit(1) end
+  end
+end
+|};
   close_out oc;
   let bin = Filename.concat tmp "vbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
@@ -13467,16 +13469,17 @@ let test_compiled_vault_ns_get_missing_namespace () =
   let src = Filename.concat tmp "v.march" in
   let oc = open_out src in
   output_string oc
-    "mod VaultNsGetMissing do\n\
-    \  needs IO.Process\n\
-    \  needs IO.Mut\n\
-    \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-    \    match Vault.ns_get(\"never_written_ns_xyz\", \"k\") do\n\
-    \      None -> ()\n\
-    \      Some(_) -> process_exit(1)\n\
-    \    end\n\
-    \  end\n\
-     end\n";
+    {|mod VaultNsGetMissing do
+  needs IO.Process
+  needs IO.Mut
+  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+    match Authority.must(Vault.ns_get("never_written_ns_xyz", "k")) do
+      None -> ()
+      Some(_) -> process_exit(1)
+    end
+  end
+end
+|};
   close_out oc;
   let bin = Filename.concat tmp "vnsbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote tmp))
@@ -13514,30 +13517,31 @@ let test_compiled_vault_ns_get_missing_namespace () =
    permanent regression test rather than relying on the default-opt one to
    stand in for it. *)
 let vault_update_src =
-  "mod VaultUpdate do\n\
-    \  needs IO.Process\n\
-  \  needs IO.Mut\n\
-  \  fn inc(n) do\n\
-  \    n + 1\n\
-  \  end\n\
-  \  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do\n\
-  \    -- One table per element type (Vault(v) is phantom in the value type),\n\
-  \    -- which changes nothing about what this guards: the Int table still\n\
-  \    -- exercises the tagged-scalar untag before the closure call and the\n\
-  \    -- String table the heap-pointer pass-through, both against the same\n\
-  \    -- march_vault_update path.\n\
-  \    let tn = Vault.new(\"vu_test_n\")\n\
-  \    let ts = Vault.new(\"vu_test_s\")\n\
-  \    Vault.set(tn, \"n\", 1)\n\
-  \    Vault.update(tn, \"n\", fn n -> n + 1)\n\
-  \    Vault.update(tn, \"n\", inc)\n\
-  \    let n = Vault.get(tn, \"n\") |> unwrap_or(0)\n\
-  \    Vault.set(ts, \"s\", \"ab\")\n\
-  \    Vault.update(ts, \"s\", fn s -> s ++ \"!\")\n\
-  \    let s = Vault.get(ts, \"s\") |> unwrap_or(\"\")\n\
-  \    if n == 3 && s == \"ab!\" do () else process_exit(1) end\n\
-  \  end\n\
-   end\n"
+  {|mod VaultUpdate do
+  needs IO.Process
+  needs IO.Mut
+  fn inc(n) do
+    n + 1
+  end
+  fn main(_cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) : Unit do
+    -- One table per element type (Vault(v) is phantom in the value type),
+    -- which changes nothing about what this guards: the Int table still
+    -- exercises the tagged-scalar untag before the closure call and the
+    -- String table the heap-pointer pass-through, both against the same
+    -- march_vault_update path.
+    let tn = Authority.must(Vault.new("vu_test_n"))
+    let ts = Authority.must(Vault.new("vu_test_s"))
+    Vault.set(tn, "n", 1)
+    Vault.update(tn, "n", fn n -> n + 1)
+    Vault.update(tn, "n", inc)
+    let n = Vault.get(tn, "n") |> unwrap_or(0)
+    Vault.set(ts, "s", "ab")
+    Vault.update(ts, "s", fn s -> s ++ "!")
+    let s = Vault.get(ts, "s") |> unwrap_or("")
+    if n == 3 && s == "ab!" do () else process_exit(1) end
+  end
+end
+|}
 
 let run_compiled_vault_update_test ~extra_args ~check_label =
   let main_exe = find_main_exe () in

@@ -13227,14 +13227,22 @@ let test_unrelated_needs_still_warns_with_stdlib_loaded () =
    stdlib callee to the ambient banned builtin it reaches.  [mod_cap] is the
    cap line ("" for the non-pure control). *)
 let check_with_system_loaded mod_cap =
-  (* system.march imports Process (for `ProcessResult`), so load both. *)
+  (* system.march imports Process (for `ProcessResult`), so load both; both
+     return Result(_, CapError) through Authority.check (ocap phase 1), so the
+     Prelude's CapError and stdlib/authority.march come too. *)
+  with_stdlib_registered "prelude.march" @@ fun () ->
+  with_stdlib_registered "authority.march" @@ fun () ->
   with_stdlib_registered "process.march" @@ fun () ->
   with_stdlib_registered "system.march" (fun () ->
+    let prelude = match load_stdlib_file_for_test "prelude.march" with
+      | March_ast.Ast.DMod (_, _, inner, _) -> inner
+      | d -> [ d ] in
+    let auth = load_stdlib_file_for_test "authority.march" in
     let proc = load_stdlib_file_for_test "process.march" in
     let sys = load_stdlib_file_for_test "system.march" in
     let m = March_ast.Ast.{
       mod_name = { txt = "Main"; span = dummy_span };
-      mod_decls = proc :: sys :: (parse_and_desugar (Printf.sprintf {|mod Main do
+      mod_decls = prelude @ auth :: proc :: sys :: (parse_and_desugar (Printf.sprintf {|mod Main do
         mod Inner do
           %s
           fn wrapped() : Int do

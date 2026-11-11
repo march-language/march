@@ -94,9 +94,9 @@ A common pattern: fan out N tasks, collect when all complete. `Task.async_stream
 let client = HttpClient.new_client()
 let urls = ["https://api.example.com/a", "https://api.example.com/b"]
 
-let results = Task.async_stream(urls, fn url ->
+let results = Authority.must(Task.async_stream(urls, fn url ->
   HttpClient.get(client, url)
-)
+))
 ```
 
 For structured coordination, use an actor as a mailbox: tasks send to it, it accumulates results:
@@ -138,7 +138,7 @@ mod Parallel do
   fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) do
     let inputs = [10, 20, 30, 40, 50]
     let tasks = List.map(inputs, fn n ->
-      Task.async(fn () -> sum_to(n))
+      Authority.must(Task.async(fn () -> sum_to(n)))
     )
     let results = Task.await_many_ms(tasks, 5000)
     List.each(results, fn r ->

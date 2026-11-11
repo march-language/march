@@ -28,11 +28,11 @@ mod Print do
   needs IO.Console
 
   fn dump(path : String) do
-    Csv.each_row_with_header(path, ",", :rfc4180, fn (header, row) ->
+    Authority.must(Csv.each_row_with_header(path, ",", :rfc4180, fn (header, row) ->
       -- pair each value with its column name
       List.each(List.zip(header, row), fn pair ->
         let (col, value) = pair
-        println(col ++ ": " ++ value)))
+        println(col ++ ": " ++ value))))
   end
 
 end
@@ -69,7 +69,7 @@ mod Sales do
 
   -- Sum an integer column, located by its header name.
   fn sum_column(path : String, column : String) : Result(Int, String) do
-    match Csv.read_all(path, ",", :rfc4180) do
+    match Authority.must(Csv.read_all(path, ",", :rfc4180)) do
       Err(_)  -> Err("cannot read " ++ path)
       Ok(Nil) -> Ok(0)
       Ok(Cons(header, rows)) ->
@@ -107,7 +107,7 @@ the leading dot:
 mod Batch do
 
   fn csv_files(dir : String) : Result(List(String), String) do
-    match Dir.list(dir) do
+    match Authority.must(Dir.list(dir)) do
       Err(_)    -> Err("cannot list " ++ dir)
       Ok(names) -> Ok(List.filter(names, fn n -> Path.extension(n) == "csv"))
     end
