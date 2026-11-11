@@ -13940,6 +13940,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_file.march)))
 
+; File.Handle (ocap phase 2, Task 4): the same file runs untyped under
+; stdlib_march; this rule runs it through `march test`, which typechecks it.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file_handle.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_file_handle.march)))
+
 (rule
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_gen.march))
@@ -15283,6 +15290,27 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_handle_leak_probe.expected native_file_handle_leak_probe.out)))
+
+; ── Leak guard: File.Handle boxes (ocap phase 2). 10 000 File.open + drop
+; (no close: only the box destructor can release the stream) and 10 000
+; File.open + File.close + drop (the destructor must not release twice),
+; then the count of /dev/fd entries must be unchanged.
+(rule
+ (targets native_file_handle_box_leak_probe native_file_handle_box_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_handle_box_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_box_leak_probe
+        native/file_handle_box_leak_probe.march)
+   (with-stdout-to native_file_handle_box_leak_probe.out
+        (system "./native_file_handle_box_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_handle_box_leak_probe.expected native_file_handle_box_leak_probe.out)))
 
 ; js_tail_loop — self tail calls (incl. the Perceus ESeq shape) run in constant stack; closures built in the loop keep each iteration's values.
 (rule

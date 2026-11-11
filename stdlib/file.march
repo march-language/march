@@ -1,5 +1,8 @@
 -- File module: filesystem I/O.
 -- All I/O functions except `exists` return Result(value, FileError).
+-- Open a `File.Handle` with `open` / `open_write` (or `with_open` /
+-- `with_open_write`, which close it for you) to read, write and seek a
+-- stream; a use after `close` returns `Err(Closed)`.
 -- Use with_lines / with_chunks for streaming.  The file handle is
 -- closed when the callback returns *and* if the callback panics —
 -- these wrappers delegate to the runtime `try_finally` primitive to
@@ -10,7 +13,14 @@ mod File do
   needs IO.FileRead
   needs IO.FileWrite
 
-  ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
+  -- The runtime builds these by tag (runtime/march_runtime.c FILEERR_*):
+  -- keep the order, and add new constructors at the end.
+  ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String) | Closed
+  derive Eq for FileError
+
+  -- How `open_write` treats an existing file: `Truncate` empties it,
+  -- `Append` writes after its end. Either way a missing file is created.
+  type WriteMode = Truncate | Append
 
   ptype FileKind = RegularFile | Directory | Symlink | OtherKind
   derive Eq for FileKind
@@ -144,6 +154,169 @@ mod File do
   """
   fn rename(src, dest) do file_rename(src, dest) end
 
+  -- Handles
+
+  doc """
+  Open `path` for reading. Returns `Ok(handle)`, or `Err(FileError)` such as
+  `NotFound(path)` or `Permission(path)`. Read it with `read_line` /
+  `read_chunk`, and `close` it when done; a handle that is dropped without
+  being closed is closed when its last reference goes. `with_open` closes it
+  for you.
+
+  ## Examples
+
+      match File.open("notes.txt") do
+        Ok(h) ->
+          let first = File.read_line(h)
+          let _ = File.close(h)
+          first
+        Err(e) -> Err(e)
+      end
+  """
+  fn open(path : String) : Result(File.Handle, FileError) do
+    match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) ->
+      let h : File.Handle = handle_new(1, fd, 0)
+      Ok(h)
+    end
+  end
+
+  doc """
+  Open `path` for writing, creating it if missing. `Truncate` empties an
+  existing file first; `Append` writes after its end. Returns `Ok(handle)`
+  or `Err(FileError)`. Write with `write_to` and `close` the handle when
+  done (the bytes are on disk once it is closed).
+
+  ## Examples
+
+      match File.open_write("out.log", File.Append) do
+        Ok(h) ->
+          let _ = File.write_to(h, "started\n")
+          File.close(h)
+        Err(e) -> Err(e)
+      end
+  """
+  fn open_write(path : String, mode : WriteMode) : Result(File.Handle, FileError) do
+    let m = match mode do
+      Truncate -> 0
+      Append -> 1
+    end
+    match file_open_write(path, m) do
+    Err(e) -> Err(e)
+    Ok(fd) ->
+      let h : File.Handle = handle_new(1, fd, 0)
+      Ok(h)
+    end
+  end
+
+  -- Every use of a handle goes through here: enter the box (refused once it
+  -- is closed), run the raw operation, then leave. A close that races the
+  -- use defers the release to this leave, so the descriptor is never
+  -- reused while `f` runs.
+  pfn with_raw(h : File.Handle, f : Int -> Result(b, FileError)) : Result(b, FileError) do
+    let fd = handle_enter(h, 1)
+    if fd == -1 do Err(Closed) else
+      let r = f(fd)
+      handle_leave(h)
+      r
+    end
+  end
+
+  doc """
+  Read the next line from `h`, without its line terminator. Returns
+  `Ok(Some(line))`, `Ok(None)` at end of file, or `Err(Closed)` once `h`
+  is closed.
+
+  ## Examples
+
+      File.read_line(h)   -- Ok(Some("first line"))
+  """
+  fn read_line(h : File.Handle) : Result(Option(String), FileError) do
+    with_raw(h, fn fd -> Ok(file_read_line(fd)))
+  end
+
+  doc """
+  Read up to `size` bytes from `h`. Returns `Ok(Some(chunk))` (the last
+  chunk may be shorter), `Ok(None)` at end of file, or `Err(Closed)`.
+  """
+  fn read_chunk(h : File.Handle, size : Int) : Result(Option(String), FileError) do
+    with_raw(h, fn fd -> Ok(file_read_chunk(fd, size)))
+  end
+
+  doc """
+  Write `data` to `h`, a handle from `open_write`. Returns `Ok(())`,
+  `Err(Closed)` once `h` is closed, or `Err(IoError(msg))`. Named
+  `write_to` because `File.write(path, data)` writes a whole file by path.
+  """
+  fn write_to(h : File.Handle, data : String) : Result((), FileError) do
+    with_raw(h, fn fd -> file_write_handle(fd, data))
+  end
+
+  doc """
+  Move `h` to the absolute byte `offset`. Returns `Ok(offset)` or
+  `Err(Closed)` / `Err(IoError(msg))`.
+
+  ## Examples
+
+      File.seek(h, 0)     -- back to the start: Ok(0)
+  """
+  fn seek(h : File.Handle, offset : Int) : Result(Int, FileError) do
+    with_raw(h, fn fd -> file_seek(fd, offset))
+  end
+
+  doc """
+  Close `h`. Returns `Ok(())`, or `Err(Closed)` if it was already closed.
+  Every later use of `h` returns `Err(Closed)`. A read or write still in
+  progress on another task finishes first; the descriptor is released
+  when it does.
+  """
+  fn close(h : File.Handle) : Result((), FileError) do
+    if handle_close(h) do Ok(()) else Err(Closed) end
+  end
+
+  doc """
+  Open `path` for reading, pass the handle to `f`, and close it when `f`
+  returns or panics. Returns `Ok(f_result)` or the open's `Err(FileError)`.
+  The handle must not be used after `f` returns: it is closed.
+
+  ## Examples
+
+      File.with_open("notes.txt", fn h -> File.read_line(h))
+  """
+  fn with_open(path : String, f : File.Handle -> a) : Result(a, FileError) do
+    match open(path) do
+    Err(e) -> Err(e)
+    Ok(h) ->
+      let result = try_finally(
+        fn _ -> f(h),
+        fn _ -> close(h)
+      )
+      Ok(result)
+    end
+  end
+
+  doc """
+  Like `with_open`, for writing: opens `path` with `open_write(path, mode)`,
+  passes the handle to `f`, and closes it when `f` returns or panics.
+
+  ## Examples
+
+      File.with_open_write("out.txt", File.Truncate, fn h ->
+        File.write_to(h, "hello\n"))
+  """
+  fn with_open_write(path : String, mode : WriteMode, f : File.Handle -> a) : Result(a, FileError) do
+    match open_write(path, mode) do
+    Err(e) -> Err(e)
+    Ok(h) ->
+      let result = try_finally(
+        fn _ -> f(h),
+        fn _ -> close(h)
+      )
+      Ok(result)
+    end
+  end
+
   -- Streaming: closed when callback returns OR panics (via try_finally).
 
   -- Seq wraps a church-encoded fold closure. Single-pass.
@@ -165,19 +338,19 @@ mod File do
           if String.contains(line, "ERROR") do n + 1 else n end))
   """
   fn with_lines(path, callback) do
-    match file_open(path) do
+    match open(path) do
     Err(e) -> Err(e)
-    Ok(fd) -> do
+    Ok(h) -> do
       fn do_lines(a, f) do
-        match file_read_line(fd) do
-        None -> a
-        Some(line) -> do_lines(f(a, line), f)
+        match read_line(h) do
+        Ok(Some(line)) -> do_lines(f(a, line), f)
+        _ -> a
         end
       end
       let seq = Seq(fn(acc, f) -> do_lines(acc, f))
       let result = try_finally(
         fn _ -> callback(seq),
-        fn _ -> file_close(fd)
+        fn _ -> close(h)
       )
       Ok(result)
     end
@@ -195,19 +368,19 @@ mod File do
         Seq.fold(chunks, 0, fn (n, c) -> n + string_byte_length(c)))
   """
   fn with_chunks(path, size, callback) do
-    match file_open(path) do
+    match open(path) do
     Err(e) -> Err(e)
-    Ok(fd) -> do
+    Ok(h) -> do
       fn do_chunks(a, f) do
-        match file_read_chunk(fd, size) do
-        None -> a
-        Some(chunk) -> do_chunks(f(a, chunk), f)
+        match read_chunk(h, size) do
+        Ok(Some(chunk)) -> do_chunks(f(a, chunk), f)
+        _ -> a
         end
       end
       let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
       let result = try_finally(
         fn _ -> callback(seq),
-        fn _ -> file_close(fd)
+        fn _ -> close(h)
       )
       Ok(result)
     end
@@ -217,13 +390,13 @@ mod File do
   -- Low-level callbacks (side-effect iteration)
 
   -- Internal helper: recursively reads lines. Used by each_line.
-  @[diverges] pfn each_line_loop(fd, f) do
-    match file_read_line(fd) do
-    None -> :ok
-    Some(line) -> do
+  @[diverges] pfn each_line_loop(h, f) do
+    match read_line(h) do
+    Ok(Some(line)) -> do
       f(line)
-      each_line_loop(fd, f)
+      each_line_loop(h, f)
     end
+    _ -> :ok
     end
   end
 
@@ -237,24 +410,24 @@ mod File do
       File.each_line("names.txt", fn name -> println("hello " ++ name))
   """
   fn each_line(path, f) do
-    match file_open(path) do
+    match open(path) do
     Err(e) -> Err(e)
-    Ok(fd) -> do
-      each_line_loop(fd, f)
-      file_close(fd)
+    Ok(h) -> do
+      each_line_loop(h, f)
+      let _ = close(h)
       Ok(:ok)
     end
     end
   end
 
   -- Internal helper: recursively reads chunks. Used by each_chunk.
-  @[diverges] pfn each_chunk_loop(fd, size, f) do
-    match file_read_chunk(fd, size) do
-    None -> :ok
-    Some(chunk) -> do
+  @[diverges] pfn each_chunk_loop(h, size, f) do
+    match read_chunk(h, size) do
+    Ok(Some(chunk)) -> do
       f(chunk)
-      each_chunk_loop(fd, size, f)
+      each_chunk_loop(h, size, f)
     end
+    _ -> :ok
     end
   end
 
@@ -264,11 +437,11 @@ mod File do
   opened. The file is NOT closed if `f` panics (use `with_chunks` for that).
   """
   fn each_chunk(path, size, f) do
-    match file_open(path) do
+    match open(path) do
     Err(e) -> Err(e)
-    Ok(fd) -> do
-      each_chunk_loop(fd, size, f)
-      file_close(fd)
+    Ok(h) -> do
+      each_chunk_loop(h, size, f)
+      let _ = close(h)
       Ok(:ok)
     end
     end

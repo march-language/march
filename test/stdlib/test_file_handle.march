@@ -1,0 +1,174 @@
+-- test/stdlib/test_file_handle.march
+-- Tests for File.Handle: open, open_write, read_line, read_chunk, write_to,
+-- seek, close, with_open, with_open_write.
+-- Each test works in its own scratch directory under /tmp (made with
+-- Dir.mkdir_p, removed at the end).
+-- Run with: dune exec march -- test test/stdlib/test_file_handle.march
+
+mod TestFileHandle do
+
+  needs IO.FileRead
+  needs IO.FileWrite
+
+pfn scratch(name : String) : String do
+  let dir = "/tmp/march_tfh_" ++ name
+  let _ = Dir.rm_rf(dir)
+  match Dir.mkdir_p(dir) do
+  Ok(_) -> dir ++ "/f.txt"
+  Err(e) -> panic("Dir.mkdir_p failed: " ++ to_string(e))
+  end
+end
+
+pfn cleanup(name : String) : Unit do
+  let _ = Dir.rm_rf("/tmp/march_tfh_" ++ name)
+  ()
+end
+
+pfn open_ok(p : String) : File.Handle do
+  match File.open(p) do
+  Ok(h) -> h
+  Err(e) -> panic("File.open failed: " ++ to_string(e))
+  end
+end
+
+pfn open_write_ok(p : String, mode : File.WriteMode) : File.Handle do
+  match File.open_write(p, mode) do
+  Ok(h) -> h
+  Err(e) -> panic("File.open_write failed: " ++ to_string(e))
+  end
+end
+
+-- Write "a\nb\n" to p through a handle.
+pfn write_ab(p : String) : Unit do
+  let h = open_write_ok(p, File.Truncate)
+  assert (File.write_to(h, "a\nb\n") == Ok(()))
+  assert (File.close(h) == Ok(()))
+end
+
+describe "File.Handle" do
+  test "write then read back" do
+    let p = scratch("rw")
+    write_ab(p)
+    let h = open_ok(p)
+    assert (File.read_line(h) == Ok(Some("a")))
+    assert (File.read_line(h) == Ok(Some("b")))
+    assert (File.read_line(h) == Ok(None))
+    let _ = File.close(h)
+    cleanup("rw")
+  end
+
+  test "append" do
+    let p = scratch("append")
+    write_ab(p)
+    let h = open_write_ok(p, File.Append)
+    assert (File.write_to(h, "c\n") == Ok(()))
+    let _ = File.close(h)
+    assert (File.read(p) == Ok("a\nb\nc\n"))
+    cleanup("append")
+  end
+
+  test "seek" do
+    let p = scratch("seek")
+    write_ab(p)
+    let h = open_ok(p)
+    assert (File.seek(h, 2) == Ok(2))
+    assert (File.read_line(h) == Ok(Some("b")))
+    let _ = File.close(h)
+    cleanup("seek")
+  end
+
+  test "read_chunk" do
+    let p = scratch("chunk")
+    write_ab(p)
+    let h = open_ok(p)
+    assert (File.read_chunk(h, 3) == Ok(Some("a\nb")))
+    assert (File.read_chunk(h, 3) == Ok(Some("\n")))
+    assert (File.read_chunk(h, 3) == Ok(None))
+    let _ = File.close(h)
+    cleanup("chunk")
+  end
+
+  test "use after close" do
+    let p = scratch("closed")
+    write_ab(p)
+    let h = open_ok(p)
+    assert (File.close(h) == Ok(()))
+    assert (File.read_line(h) == Err(File.Closed))
+    assert (File.read_chunk(h, 4) == Err(File.Closed))
+    assert (File.write_to(h, "x") == Err(File.Closed))
+    assert (File.seek(h, 0) == Err(File.Closed))
+    assert (File.close(h) == Err(File.Closed))
+    cleanup("closed")
+  end
+
+  test "with_open closes" do
+    let p = scratch("with_open")
+    write_ab(p)
+    match File.with_open(p, fn h -> h) do
+    Err(e) -> panic("File.with_open failed: " ++ to_string(e))
+    Ok(kept) -> assert (File.read_line(kept) == Err(File.Closed))
+    end
+    cleanup("with_open")
+  end
+
+  test "with_open passes the callback's result" do
+    let p = scratch("with_open_r")
+    write_ab(p)
+    assert (File.with_open(p, fn h -> File.read_line(h)) == Ok(Ok(Some("a"))))
+    cleanup("with_open_r")
+  end
+
+  test "with_open_write closes" do
+    let p = scratch("with_open_w")
+    match File.with_open_write(p, File.Truncate, fn h ->
+      let _ = File.write_to(h, "z\n")
+      h) do
+    Err(e) -> panic("File.with_open_write failed: " ++ to_string(e))
+    Ok(kept) -> assert (File.write_to(kept, "y") == Err(File.Closed))
+    end
+    assert (File.read(p) == Ok("z\n"))
+    cleanup("with_open_w")
+  end
+
+  test "open on a missing path" do
+    let p = "/tmp/march_tfh_missing_dir/nope.txt"
+    let r = match File.open(p) do
+      Ok(_) -> false
+      Err(e) -> e == File.NotFound(p)
+    end
+    assert r
+  end
+
+  test "with_lines still streams" do
+    let p = scratch("with_lines")
+    write_ab(p)
+    let r = File.with_lines(p, fn lines -> Seq.fold(lines, "", fn (acc, l) -> acc ++ l))
+    assert (r == Ok("ab"))
+    cleanup("with_lines")
+  end
+end
+
+-- passes after Task 10 (ocap phase 2): a handle works in a module with
+-- `needs ()` (spec §18). Skipped until then, for two reasons: the ceiling
+-- still charges IO.FileRead to File.read_line, and a module-level
+-- `needs ()` line does not parse yet (only the fn-level `needs ()` bound
+-- does). Task 10 uncomments it; the `march test` rule in test/dune then
+-- typechecks it.
+--
+-- mod Reader do
+--   needs ()
+--   fn first(h : File.Handle) do File.read_line(h) end
+-- end
+--
+-- describe "File.Handle capabilities" do
+--   test "handle needs no capability" do
+--     let p = scratch("needs_none")
+--     write_ab(p)
+--     let h = open_ok(p)
+--     assert (Reader.first(h) == Ok(Some("a")))
+--     let _ = File.close(h)
+--     cleanup("needs_none")
+--   end
+-- end
+
+end

@@ -66,6 +66,10 @@ let extern_borrow_table : (string * bool list) list = [
   ("file_read",     [true]);
   ("file_write",    [true; true]);
   ("file_append",   [true; true]);
+  (* file_open_write reads its path (fopen); file_write_handle reads its
+     data (fwrite). The Int handle / mode / offset carry no RC. *)
+  ("file_open_write",   [true; false]);
+  ("file_write_handle", [false; true]);
   ("file_delete",   [true]);
   ("file_copy",     [true; true]);
   ("file_rename",   [true; true]);

@@ -50,6 +50,7 @@ let cap_table : (string * string) list = [
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
+  ("file_open_write",       "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");

@@ -242,6 +242,10 @@ let builtin_cap_table : (string * string) list = [
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
+  (* file_open_write opens a stream for writing (File.open_write). The
+     handle-taking file_write_handle / file_seek are charged nothing: the
+     handle came from a checked open (ocap phase 2). *)
+  ("file_open_write",       "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");
@@ -1175,6 +1179,13 @@ let builtin_bindings : (string * scheme) list =
     ("file_rename",     Mono (TArrow (t_string, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
     ("file_stat",       Mono (TArrow (t_string, t_result (TCon ("FileStat", [])) (TCon ("FileError", [])))));
     ("file_open",       Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    (* file_open_write(path, mode): mode 0 truncates, 1 appends; creates the
+       file (0644). file_write_handle(fd, data); file_seek(fd, offset) seeks
+       to an absolute offset and returns it. Raw handles: File.open_write /
+       File.write_to / File.seek wrap them in a File.Handle box. *)
+    ("file_open_write", Mono (TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
+    ("file_write_handle", Mono (TArrow (t_int, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
+    ("file_seek",       Mono (TArrow (t_int, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     (* file_close returns :ok on both backends (it was declared Unit while

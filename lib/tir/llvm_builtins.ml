@@ -743,6 +743,12 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_line(ptr %handle)" };
   { march_name = "file_read_chunk"; c_name = Some "march_file_read_chunk"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)" };
+  { march_name = "file_open_write"; c_name = Some "march_file_open_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open_write(ptr %path, i64 %mode)" };
+  { march_name = "file_write_handle"; c_name = Some "march_file_write_handle"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write_handle(i64 %handle, ptr %data)" };
+  { march_name = "file_seek"; c_name = Some "march_file_seek"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_seek(i64 %handle, i64 %offset)" };
   { march_name = "file_write"; c_name = Some "march_file_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write(ptr %path, ptr %data)" };
   { march_name = "file_append"; c_name = Some "march_file_append"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
@@ -1894,6 +1900,9 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_file_read";
   PDeclare "march_file_read_line";
   PDeclare "march_file_read_chunk";
+  PDeclare "march_file_open_write";
+  PDeclare "march_file_write_handle";
+  PDeclare "march_file_seek";
   PDeclare "march_file_write";
   PDeclare "march_file_append";
   PDeclare "march_file_delete";

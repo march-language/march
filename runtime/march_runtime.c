@@ -12175,6 +12175,45 @@ void *march_file_read_chunk(void *handle_ptr, int64_t size) {
     return s;                                              /* Some(chunk) */
 }
 
+/* file_open_write(path, mode) : Result(Int, FileError).  Mode 0 truncates,
+ * 1 appends; the file is created (0644, less the umask) when missing.  The
+ * stream goes into the same handle table as file_open, so file_close and the
+ * File.Handle box's FILE release (march_handle.c) close it. */
+void *march_file_open_write(void *path_ptr, int64_t mode) {
+    march_string *ps = (march_string *)path_ptr;
+    FILE *f = fopen(ps->data, mode == 1 ? "ab" : "wb");
+    if (!f) return mk_err_errno_file_rw(ps->data);
+    int64_t h = fh_open(f, 0, 0);
+    if (h == 0) { fclose(f); errno = EMFILE; return mk_err_errno_file_rw(ps->data); }
+    return mk_ok((void *)(intptr_t)h);
+}
+
+/* file_write_handle(handle, data) : Result((), FileError).  Buffered: the
+ * bytes reach the file by the time the stream is closed (fclose flushes),
+ * whether by file_close or by the handle box's release. */
+void *march_file_write_handle(int64_t handle, void *data_ptr) {
+    march_string *ds = (march_string *)data_ptr;
+    FILE *f = fh_lookup((void *)(intptr_t)handle, NULL, NULL);
+    if (!f) return mk_err_file_cstr(FILEERR_IO_ERROR, "write to a closed file");
+    size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
+    if ((int64_t)w != ds->len) return mk_err_errno_io();
+    return mk_ok_unit();
+}
+
+/* file_seek(handle, offset) : Result(Int, FileError).  Seeks to an absolute
+ * offset and returns the new offset. */
+void *march_file_seek(int64_t handle, int64_t offset) {
+    FILE *f = fh_lookup((void *)(intptr_t)handle, NULL, NULL);
+    if (!f) return mk_err_file_cstr(FILEERR_IO_ERROR, "seek on a closed file");
+    if (fseeko(f, (off_t)offset, SEEK_SET) != 0) return mk_err_errno_io();
+    off_t pos = ftello(f);
+    if (pos < 0) return mk_err_errno_io();
+    /* An Int in a Result payload is tagged (n<<1)|1, as tcp_connect's fd
+     * is (march_http.c): the compiled read untags it.  The file handles
+     * above need no tag only because they are even (see fh_encode). */
+    return mk_ok((void *)(intptr_t)(((int64_t)pos << 1) | 1));
+}
+
 /* ── Directory builtins ─────────────────────────────────────────────── */
 
 void *march_dir_list(void *path_ptr) {
