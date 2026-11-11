@@ -81,6 +81,9 @@ mod HttpTransport do
 
   Returns `Ok(Response(...))`, or `SendError` / `RecvError` /
   `ConnParseError` for a failed send, receive or unparseable response.
+  A method, host, path, query or header that would smuggle a second request
+  (a CR, LF, space or other byte the request line or a header cannot carry)
+  gives `Refused(reason)` and nothing is sent.
 
   Refuses https:// requests with `SchemeNotSupported` even when an fd is
   provided, because this module uses plain `tcp_send_all` that would
@@ -107,8 +110,13 @@ mod HttpTransport do
     let req_headers = Http.headers(req)
     let req_body = Http.body(req)
 
-    let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
+    match http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body) do
+    Err(msg) -> Err(Refused(msg))
+    Ok(raw_request) -> send_and_recv_on(fd, raw_request)
+    end
+  end
 
+  pfn send_and_recv_on(fd, raw_request) do
     match tcp_send_all(fd, raw_request) do
     Err(msg) -> Err(SendError(msg))
     Ok(_) -> do
@@ -131,7 +139,8 @@ mod HttpTransport do
   transfer-encoding frames, or reads of a Content-Length body).
   Returns `Ok((status_code, headers, ()))`: the values returned by
   `on_chunk` are discarded. Errors are `SendError` / `RecvError` /
-  `ConnParseError`. Does NOT close the connection.
+  `ConnParseError`, and `Refused(reason)` (nothing sent) for a request field
+  that would smuggle a second request. Does NOT close the connection.
 
   ## Examples
 
@@ -155,8 +164,13 @@ mod HttpTransport do
     let req_headers = Http.headers(req)
     let req_body = Http.body(req)
 
-    let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
+    match http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body) do
+    Err(msg) -> Err(Refused(msg))
+    Ok(raw_request) -> stream_send_on(fd, raw_request, on_chunk)
+    end
+  end
 
+  pfn stream_send_on(fd, raw_request, on_chunk) do
     match tcp_send_all(fd, raw_request) do
     Err(msg) -> Err(SendError(msg))
     Ok(_) -> do
@@ -248,6 +262,17 @@ mod HttpTransport do
 
   pfn request_via_fetch(req) do
     let meth = Http.method_to_string(Http.method(req))
+    -- The fetch path builds its own URL and header block, so it runs the
+    -- serializer only for its field checks: the same request is refused here
+    -- as on the socket path.
+    match http_serialize_request(meth, Http.host(req), Http.path(req), Http.query(req),
+                                 Http.headers(req), Http.body(req)) do
+    Err(msg) -> Err(Refused(msg))
+    Ok(_) -> request_via_fetch_checked(meth, req)
+    end
+  end
+
+  pfn request_via_fetch_checked(meth, req) do
     let url = build_url(req)
     let header_block = serialize_header_block(Http.headers(req))
     match http_fetch(meth, url, header_block, Http.body(req)) do
@@ -276,8 +301,11 @@ mod HttpTransport do
 
   Default ports are 80 / 443. The response is read with a 1 MiB limit (plain
   HTTP also uses a 30 s receive timeout). Errors: `ConnectionRefused` for a
-  failed TCP connect or TLS setup/handshake, `SendError`, `RecvError`, and
-  `ConnParseError` for an unparseable response.
+  failed TCP connect or TLS setup/handshake, `SendError`, `RecvError`,
+  `ConnParseError` for an unparseable response, and `Refused(reason)`,
+  before any connection is opened, for a method, host, path, query or header
+  that would smuggle a second request (CR, LF, space, a control byte, or a
+  path/query byte outside RFC 3986 that was not percent-encoded).
 
   ## Examples
 
@@ -305,9 +333,15 @@ mod HttpTransport do
       Some(value) -> value
       None -> 443
       end
-    let raw = http_serialize_request(
+    match http_serialize_request(
       Http.method_to_string(Http.method(req)), host, Http.path(req), Http.query(req),
-      Http.headers(req), Http.body(req))
+      Http.headers(req), Http.body(req)) do
+    Err(msg) -> Err(Refused(msg))
+    Ok(raw) -> request_https_raw(host, port, raw)
+    end
+  end
+
+  pfn request_https_raw(host, port, raw) do
     match Tls.client_ctx(Tls.default_client_config()) do
     Err(error) -> Err(ConnectionRefused(Tls.error_to_string(error)))
     Ok(context) -> do
@@ -375,11 +409,16 @@ mod HttpTransport do
       None -> 80
       end
 
-    let raw_request = http_serialize_request(
+    match http_serialize_request(
       Http.method_to_string(Http.method(req)),
       req_host, Http.path(req), Http.query(req),
-      Http.headers(req), Http.body(req))
+      Http.headers(req), Http.body(req)) do
+    Err(msg) -> Err(Refused(msg))
+    Ok(raw_request) -> request_plain_raw(req_host, req_port, raw_request)
+    end
+  end
 
+  pfn request_plain_raw(req_host, req_port, raw_request) do
     match tcp_connect(req_host, req_port) do
     Err(msg) -> Err(ConnectionRefused(msg))
     Ok(fd) -> do

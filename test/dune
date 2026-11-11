@@ -2754,6 +2754,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/closure_capture_release_probe.expected native_closure_capture_release_probe.out)))
 
+; ── Use-after-free guard: a closure matching a captured value hands the
+; pattern's fields to a borrowing builtin in tail position. The capture's
+; release must follow the call, not precede it
+; (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md). macOS
+; prints the right values either way; the sanitizer sweep is what sees it.
+(rule
+ (targets native_closure_borrowed_tail_call_probe native_closure_borrowed_tail_call_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/closure_borrowed_tail_call_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_borrowed_tail_call_probe
+        native/closure_borrowed_tail_call_probe.march)
+   (with-stdout-to native_closure_borrowed_tail_call_probe.out
+        (system "./native_closure_borrowed_tail_call_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_borrowed_tail_call_probe.expected native_closure_borrowed_tail_call_probe.out)))
+
 ; ── Leak/double-free guard: a closure capturing an unboxed aggregate releases
 ; the box its 8-byte slot holds (a guarded or-pattern's join point, a factory
 ; called / dropped uncalled / shared, heap+unboxed captures, a local lambda).

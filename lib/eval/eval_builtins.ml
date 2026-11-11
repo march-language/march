@@ -3070,38 +3070,64 @@ let base_env : env =
     (* ---- HTTP serialization builtins ---- *)
   ; ("http_serialize_request", VBuiltin ("http_serialize_request", function
         | [VString meth; VString host; VString path; query_opt; header_list; VString body] ->
-          let buf = Buffer.create 256 in
-          let query_str = match query_opt with
-            | VCon ("Some", [VString q]) -> "?" ^ q
-            | _ -> ""
+          (* Every field is checked before anything is written: a CR, LF,
+             space or other control byte in the method, host, path, query or a
+             header would otherwise smuggle a second, pipelined request.  The
+             C twin is march_http_serialize_request (runtime/march_http.c);
+             the two must accept the same inputs and word the error the same
+             (test_http_serialize_injection_parity). *)
+          let query = match query_opt with
+            | VCon ("Some", [VString q]) -> Some q
+            | _ -> None
           in
-          Buffer.add_string buf meth;
-          Buffer.add_char buf ' ';
-          Buffer.add_string buf path;
-          Buffer.add_string buf query_str;
-          Buffer.add_string buf " HTTP/1.1\r\n";
-          Buffer.add_string buf "Host: ";
-          Buffer.add_string buf host;
-          Buffer.add_string buf "\r\n";
-          let rec add_headers = function
-            | VCon ("Nil", []) -> ()
+          let rec headers acc = function
             | VCon ("Cons", [VCon ("Header", [VString n; VString v]); rest]) ->
-              Buffer.add_string buf n;
-              Buffer.add_string buf ": ";
-              Buffer.add_string buf v;
-              Buffer.add_string buf "\r\n";
-              add_headers rest
-            | _ -> ()
+              headers ((n, v) :: acc) rest
+            | _ -> List.rev acc
           in
-          add_headers header_list;
-          if body <> "" then begin
-            Buffer.add_string buf "Content-Length: ";
-            Buffer.add_string buf (string_of_int (String.length body));
-            Buffer.add_string buf "\r\n"
-          end;
-          Buffer.add_string buf "\r\n";
-          Buffer.add_string buf body;
-          VString (Buffer.contents buf)
+          let headers = headers [] header_list in
+          let check =
+            let ( >>= ) r f = match r with Ok () -> f () | Error _ as e -> e in
+            Http_request_check.check_method meth >>= fun () ->
+            Http_request_check.check_host host >>= fun () ->
+            Http_request_check.check_target "path" path >>= fun () ->
+            (match query with
+             | Some q -> Http_request_check.check_target "query" q
+             | None -> Ok ()) >>= fun () ->
+            List.fold_left (fun acc (n, v) ->
+                acc >>= fun () ->
+                Http_request_check.check_header_name n >>= fun () ->
+                Http_request_check.check_header_value v)
+              (Ok ()) headers
+          in
+          (match check with
+           | Error msg -> VCon ("Err", [VString msg])
+           | Ok () ->
+             let buf = Buffer.create 256 in
+             Buffer.add_string buf meth;
+             Buffer.add_char buf ' ';
+             Buffer.add_string buf path;
+             (match query with
+              | Some q when q <> "" -> Buffer.add_char buf '?'; Buffer.add_string buf q
+              | _ -> ());
+             Buffer.add_string buf " HTTP/1.1\r\n";
+             Buffer.add_string buf "Host: ";
+             Buffer.add_string buf host;
+             Buffer.add_string buf "\r\n";
+             List.iter (fun (n, v) ->
+                 Buffer.add_string buf n;
+                 Buffer.add_string buf ": ";
+                 Buffer.add_string buf v;
+                 Buffer.add_string buf "\r\n")
+               headers;
+             if body <> "" then begin
+               Buffer.add_string buf "Content-Length: ";
+               Buffer.add_string buf (string_of_int (String.length body));
+               Buffer.add_string buf "\r\n"
+             end;
+             Buffer.add_string buf "\r\n";
+             Buffer.add_string buf body;
+             VCon ("Ok", [VString (Buffer.contents buf)]))
         | _ -> eval_error "http_serialize_request(method, host, path, query_opt, headers, body)"))
   ; ("http_parse_response", VBuiltin ("http_parse_response", function
         | [VString raw] ->

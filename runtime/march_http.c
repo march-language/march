@@ -3486,44 +3486,164 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
 
 /* ── HTTP client builtins ─────────────────────────────────────────────── */
 
-/* Serialize an HTTP request to a raw string.
- * http_serialize_request(method, host, path, query, headers, body) -> String */
+/* ── Outgoing-request field checks ─────────────────────────────────────
+ * A CR, LF, space or other control byte in the method, host, path, query or
+ * a header of an outgoing request ends the request line or a header early
+ * and smuggles a second, pipelined request.  These mirror
+ * lib/eval/http_request_check.ml byte for byte, error text included
+ * (test_http_serialize_injection_parity runs one program through both):
+ *   method, header name   a non-empty RFC 9110 token (tchar)
+ *   host                  no control byte, space or DEL
+ *   path, query           RFC 3986 characters (unreserved, sub-delims,
+ *                         ":@/?") and well-formed %HH escapes only
+ *   header value          VCHAR, obs-text, SP, HTAB (no CR/LF/NUL/CTL)
+ * Each returns NULL when the field is acceptable, else a fresh Err(msg). */
+#define MARCH_HTTP_REJECT "http request rejected: "
+
+static void *http_reject_byte(const char *field, const march_string *s, int64_t i) {
+    char msg[128];
+    snprintf(msg, sizeof msg, MARCH_HTTP_REJECT "%s contains byte 0x%02x at offset %lld",
+             field, (unsigned)(unsigned char)s->data[i], (long long)i);
+    return make_err(msg);
+}
+
+static int http_is_tchar(unsigned char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        return 1;
+    return c != 0 && strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
+
+static void *http_check_token(const char *field, const march_string *s) {
+    if (!s || s->len == 0) {
+        char msg[96];
+        snprintf(msg, sizeof msg, MARCH_HTTP_REJECT "empty %s", field);
+        return make_err(msg);
+    }
+    for (int64_t i = 0; i < s->len; i++)
+        if (!http_is_tchar((unsigned char)s->data[i])) return http_reject_byte(field, s, i);
+    return NULL;
+}
+
+static void *http_check_host(const march_string *s) {
+    if (!s) return NULL;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c <= ' ' || c == 0x7f) return http_reject_byte("host", s, i);
+    }
+    return NULL;
+}
+
+static void *http_check_header_value(const march_string *s) {
+    if (!s) return NULL;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (!(c == '\t' || (c >= ' ' && c != 0x7f))) return http_reject_byte("header value", s, i);
+    }
+    return NULL;
+}
+
+static int http_is_hex(unsigned char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int http_is_target_char(unsigned char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        return 1;
+    return c != 0 && strchr("-._~!$&'()*+,;=:@/?", c) != NULL;
+}
+
+/* field is "path" or "query"; the same character set serves both. */
+static void *http_check_target(const char *field, const march_string *s) {
+    if (!s) return NULL;
+    int64_t n = s->len;
+    for (int64_t i = 0; i < n; ) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c == '%') {
+            if (i + 2 < n && http_is_hex((unsigned char)s->data[i + 1])
+                          && http_is_hex((unsigned char)s->data[i + 2])) { i += 3; continue; }
+            char msg[128];
+            snprintf(msg, sizeof msg, MARCH_HTTP_REJECT "%s has a malformed %%-escape at offset %lld",
+                     field, (long long)i);
+            return make_err(msg);
+        }
+        if (!http_is_target_char(c)) return http_reject_byte(field, s, i);
+        i++;
+    }
+    return NULL;
+}
+
+/* Serialize an HTTP request.
+ * http_serialize_request(method, host, path, query, headers, body)
+ *   -> Result(String, String)
+ * query is an Option(String), a nullable march_string* at the C ABI (NULL is
+ * None).  headers is a March List(Header), the layout
+ * march_http_serialize_response reads.  Err(reason) when a field fails the
+ * checks above; nothing is built in that case.  The output matches the
+ * interpreter's (lib/eval/eval_builtins.ml): the user's headers in order,
+ * and Content-Length only for a non-empty body. */
 void *march_http_serialize_request(void *method_ptr, void *host_ptr, void *path_ptr,
                                     void *query_ptr, void *headers_ptr, void *body_ptr) {
     march_string *method  = (march_string *)method_ptr;
     march_string *host    = (march_string *)host_ptr;
     march_string *path    = (march_string *)path_ptr;
     march_string *query   = (march_string *)query_ptr;
-    march_string *body    = body_ptr ? (march_string *)body_ptr : NULL;
-    (void)headers_ptr;
+    march_string *body    = (march_string *)body_ptr;
 
-    /* Build: "METHOD /path?query HTTP/1.1\r\nHost: host\r\n\r\nbody" */
-    const char *m   = method ? method->data : "GET";
-    const char *h   = host   ? host->data   : "";
-    const char *p   = path   ? path->data   : "/";
-    const char *q   = (query && query->len > 0) ? query->data : NULL;
-    const char *b   = (body && body->len > 0)   ? body->data  : "";
-    int64_t blen    = (body && body->len > 0)   ? body->len   : 0;
-
-    char content_len_buf[64];
-    snprintf(content_len_buf, sizeof(content_len_buf), "%lld", (long long)blen);
-
-    /* Approximate buffer size */
-    size_t sz = strlen(m) + strlen(h) + strlen(p) + (q ? strlen(q) : 0) + blen + 256;
-    char *buf = (char *)malloc(sz);
-    if (!buf) return march_string_lit("", 0);
-
-    int n;
-    if (q && *q) {
-        n = snprintf(buf, sz, "%s %s?%s HTTP/1.1\r\nHost: %s\r\nContent-Length: %s\r\n\r\n%s",
-                     m, p, q, h, content_len_buf, b);
-    } else {
-        n = snprintf(buf, sz, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %s\r\n\r\n%s",
-                     m, p, h, content_len_buf, b);
+    void *err;
+    if ((err = http_check_token("method", method))) return err;
+    if ((err = http_check_host(host))) return err;
+    if ((err = http_check_target("path", path))) return err;
+    if ((err = http_check_target("query", query))) return err;
+    for (void *cur = headers_ptr; cur && *(int32_t *)((char *)cur + 8) != 0;
+         cur = *(void **)((char *)cur + 24)) {
+        void *hdr = *(void **)((char *)cur + 16);
+        if ((err = http_check_token("header name", *(march_string **)((char *)hdr + 16)))) return err;
+        if ((err = http_check_header_value(*(march_string **)((char *)hdr + 24)))) return err;
     }
-    void *result = march_string_lit(buf, n < 0 ? 0 : (int64_t)n);
+
+    size_t cap = 256;
+    char *buf = malloc(cap);
+    if (!buf) return make_err("http_serialize_request: out of memory");
+    size_t len = 0;
+
+#define REQ_APPEND(s, n) do { \
+    size_t _n = (size_t)(n); \
+    while (len + _n + 1 > cap) { cap *= 2; char *nb = realloc(buf, cap); \
+        if (!nb) { free(buf); return make_err("http_serialize_request: out of memory"); } buf = nb; } \
+    memcpy(buf + len, (s), _n); len += _n; \
+} while (0)
+#define REQ_APPEND_MS(ms) do { if (ms) REQ_APPEND((ms)->data, (ms)->len); } while (0)
+#define REQ_APPEND_C(cs) REQ_APPEND((cs), strlen(cs))
+
+    REQ_APPEND_MS(method);
+    REQ_APPEND_C(" ");
+    REQ_APPEND_MS(path);
+    if (query && query->len > 0) { REQ_APPEND_C("?"); REQ_APPEND_MS(query); }
+    REQ_APPEND_C(" HTTP/1.1\r\nHost: ");
+    REQ_APPEND_MS(host);
+    REQ_APPEND_C("\r\n");
+    for (void *cur = headers_ptr; cur && *(int32_t *)((char *)cur + 8) != 0;
+         cur = *(void **)((char *)cur + 24)) {
+        void *hdr = *(void **)((char *)cur + 16);
+        REQ_APPEND_MS(*(march_string **)((char *)hdr + 16));
+        REQ_APPEND_C(": ");
+        REQ_APPEND_MS(*(march_string **)((char *)hdr + 24));
+        REQ_APPEND_C("\r\n");
+    }
+    if (body && body->len > 0) {
+        char cl[48];
+        int cl_len = snprintf(cl, sizeof cl, "Content-Length: %lld\r\n", (long long)body->len);
+        REQ_APPEND(cl, cl_len);
+    }
+    REQ_APPEND_C("\r\n");
+    REQ_APPEND_MS(body);
+#undef REQ_APPEND
+#undef REQ_APPEND_MS
+#undef REQ_APPEND_C
+
+    void *result = march_string_lit(buf, (int64_t)len);
     free(buf);
-    return result;
+    return make_ok(result);
 }
 
 /* Parse a raw HTTP response string.

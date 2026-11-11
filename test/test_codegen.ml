@@ -9220,7 +9220,7 @@ let test_http_serialize_request () =
       http_serialize_request("GET", "example.com", "/path", None, Nil, "")
     end
   end|} in
-  let raw = vstr (call_fn env "f" []) in
+  let raw = vstr (List.hd (vcon "Ok" (call_fn env "f" []))) in
   Alcotest.(check bool) "starts with GET /path"
     true (String.length raw > 0 && String.sub raw 0 14 = "GET /path HTTP")
 
@@ -9231,7 +9231,7 @@ let test_http_serialize_request_with_body () =
         Cons(Header("Content-Type", "text/plain"), Nil), "hello")
     end
   end|} in
-  let raw = vstr (call_fn env "f" []) in
+  let raw = vstr (List.hd (vcon "Ok" (call_fn env "f" []))) in
   Alcotest.(check bool) "contains body" true (
     let lines = String.split_on_char '\n' raw in
     List.exists (fun l -> String.trim l = "hello") lines)
@@ -10842,6 +10842,148 @@ let write_march_source ~name src_text =
   output_string oc src_text;
   close_out oc;
   (project_root, main_exe, src, tmp)
+
+(* ── HTTP request-line / header injection (2026-11-09 todo, P1) ──────────
+   `http_serialize_request` used to copy the method, host, path, query and
+   headers into the request verbatim, so a CR/LF/space in any of them
+   smuggled a pipelined second request.  Both serializers (the interpreter's
+   in lib/eval/eval_builtins.ml and runtime/march_http.c) now return
+   Err(reason) instead, with the same message, and the compiled one emits the
+   headers it used to drop.  Run the same program interpreted and compiled
+   and require byte-identical output, plus the expected verdicts. *)
+let http_inject_src = {|mod HttpInject do
+  fn report(label, r) do
+    match r do
+    Ok(s) -> println(label ++ " OK[" ++ s ++ "]")
+    Err(e) -> println(label ++ " ERR " ++ e)
+    end
+  end
+
+  needs IO.Console
+
+  fn main(_console : Cap(IO.Console)) do
+    let accept = Cons(Header("Accept", "text/plain"), Nil)
+    report("plain", http_serialize_request("GET", "example.com", "/a%20b/c%2Fd", Some("x=1&y=%2F&z=a+b"), accept, ""))
+    report("body", http_serialize_request("POST", "example.com", "/api", None, accept, "hello"))
+    report("path", http_serialize_request("GET", "h", "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin", None, Nil, ""))
+    report("space", http_serialize_request("GET", "h", "/a b", None, Nil, ""))
+    report("pct", http_serialize_request("GET", "h", "/100%", None, Nil, ""))
+    report("hash", http_serialize_request("GET", "h", "/a#frag", None, Nil, ""))
+    report("query", http_serialize_request("GET", "h", "/", Some("a=1\r\nX-Evil: 1"), Nil, ""))
+    report("hval", http_serialize_request("GET", "h", "/", None, Cons(Header("X-Ok", "v\r\nX-Evil: 1"), Nil), ""))
+    report("hname", http_serialize_request("GET", "h", "/", None, Cons(Header("X-Evil\r\nFoo", "v"), Nil), ""))
+    report("hspace", http_serialize_request("GET", "h", "/", None, Cons(Header("Bad Name", "v"), Nil), ""))
+    report("method", http_serialize_request("GET /evil HTTP/1.1\r\n", "h", "/", None, Nil, ""))
+    report("host", http_serialize_request("GET", "h\r\nX-Evil: 1", "/", None, Nil, ""))
+  end
+end
+|}
+
+let test_http_serialize_injection_parity () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_inject" http_inject_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  let expect_line out label prefix =
+    let lines = String.split_on_char '\n' out in
+    let want = label ^ " " ^ prefix in
+    if not (List.exists (fun l ->
+        String.length l >= String.length want
+        && String.sub l 0 (String.length want) = want) lines)
+    then Alcotest.failf "expected a line starting %S in:\n%s" want out
+  in
+  let check_verdicts which out =
+    ignore which;
+    (* The ordinary request still goes out, %-escapes and query intact, with
+       its header. *)
+    Alcotest.(check bool) "plain request line kept verbatim" true
+      (contains "plain OK[GET /a%20b/c%2Fd?x=1&y=%2F&z=a+b HTTP/1.1\r\nHost: example.com\r\nAccept: text/plain\r\n\r\n]" out);
+    Alcotest.(check bool) "body + Content-Length" true
+      (contains "Accept: text/plain\r\nContent-Length: 5\r\n\r\nhello]" out);
+    expect_line out "path" "ERR http request rejected: path contains byte 0x20 at offset 2";
+    expect_line out "space" "ERR http request rejected: path contains byte 0x20 at offset 2";
+    expect_line out "pct" "ERR http request rejected: path has a malformed %-escape at offset 4";
+    expect_line out "hash" "ERR http request rejected: path contains byte 0x23 at offset 2";
+    expect_line out "query" "ERR http request rejected: query contains byte 0x0d at offset 3";
+    expect_line out "hval" "ERR http request rejected: header value contains byte 0x0d at offset 1";
+    expect_line out "hname" "ERR http request rejected: header name contains byte 0x0d at offset 6";
+    expect_line out "hspace" "ERR http request rejected: header name contains byte 0x20 at offset 3";
+    expect_line out "method" "ERR http request rejected: method contains byte 0x20 at offset 3";
+    expect_line out "host" "ERR http request rejected: host contains byte 0x0d at offset 1";
+    Alcotest.(check bool) "nothing smuggled" false (contains "DELETE /admin HTTP" out || contains "OK[GET /x" out)
+  in
+  check_verdicts "interpreter" interp_out;
+  let bin = Filename.concat tmp "http_inject_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let compiled_out = read_cmd_output (Filename.quote bin ^ " 2>&1") in
+    check_verdicts "compiled" compiled_out;
+    Alcotest.(check string) "interpreter and compiled serializers agree" interp_out compiled_out
+
+(* End to end through HttpTransport.request: an injected path is refused
+   before the connection is even opened, so a local listener sees no bytes
+   (interpreted and compiled). *)
+let test_http_transport_refuses_injected_path () =
+  let listen = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> try Unix.close listen with _ -> ()) @@ fun () ->
+  Unix.setsockopt listen Unix.SO_REUSEADDR true;
+  Unix.bind listen (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  Unix.listen listen 8;
+  let port = match Unix.getsockname listen with
+    | Unix.ADDR_INET (_, p) -> p | _ -> assert false in
+  let src_text = Printf.sprintf {|mod HttpInjectE2e do
+  needs IO.NetConnect
+  needs IO.Console
+
+  fn main(_net : Cap(IO.NetConnect), _console : Cap(IO.Console)) do
+    match Http.get("http://127.0.0.1:%d/ok") do
+    Err(_) -> println("URL")
+    Ok(req) ->
+      let bad = Http.set_header(Http.set_path(Http.set_body(req, ""), "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"), "X-A", "b")
+      match HttpTransport.request(bad) do
+      Ok(_) -> println("SENT")
+      Err(HttpTransport.Refused(m)) -> println("REFUSED " ++ m)
+      Err(_) -> println("OTHER")
+      end
+    end
+  end
+end
+|} port in
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_inject_e2e" src_text in
+  (* Whatever reached the listener: no connection, or one with zero bytes. *)
+  let drain_listener () =
+    let got = Buffer.create 64 in
+    let rec loop () =
+      match Unix.select [listen] [] [] 0.2 with
+      | [], _, _ -> ()
+      | _ ->
+        let (c, _) = Unix.accept listen in
+        let b = Bytes.create 4096 in
+        (match Unix.select [c] [] [] 0.5 with
+         | [], _, _ -> ()
+         | _ -> let n = (try Unix.read c b 0 4096 with _ -> 0) in
+           Buffer.add_subbytes got b 0 n);
+        Unix.close c;
+        loop ()
+    in
+    loop ();
+    Buffer.contents got
+  in
+  let check which out =
+    Alcotest.(check string) (which ^ ": transport refuses the request")
+      "REFUSED http request rejected: path contains byte 0x20 at offset 2" out;
+    Alcotest.(check string) (which ^ ": listener received nothing") "" (drain_listener ())
+  in
+  check "interpreter" (read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+  let bin = Filename.concat tmp "http_inject_e2e_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin -> check "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
 
 (* A function used only as a value must remain reachable through mono. *)
 let test_other_module_function_value_compiled () =
@@ -13281,6 +13423,43 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** A NaN prints "nan" whatever its sign bit.  libc's `%.12g` (which the
+    interpreter's `string_of_float` and the native runtime both defer to)
+    prints a sign-bit-set NaN as "-nan" on glibc and plain "nan" on macOS, and
+    x86's default NaN (from `inf -. inf`) has the sign bit set where arm64's
+    does not, so the same program printed "-nan" on Linux CI and "nan" on a
+    Mac.  The negative NaNs here are built independent of the CPU: `-x` flips
+    the sign bit (fneg), and `string_to_float("-nan")` applies the sign
+    itself.  The JS runtime always printed "nan".  Linux is where the sign
+    half can go red; on macOS libc the unfixed code also prints "nan".  The
+    `show` lines pin the other divergence: the interpreter's `show` appended
+    ".0" to anything without a '.' or 'e', which only `nan`/`inf`/`-inf` ever
+    lacked, so it printed "nan.0"/"inf.0" where native and JS print "nan"/"inf". *)
+let test_nan_prints_without_sign_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_nan_sign"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn parse(s : String) : Float do
+    match string_to_float(s) do
+      Some(v) -> v
+      None -> 0.0
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    let n = parse("nan")
+    println(float_to_string(n))
+    println(float_to_string(-n))
+    println(float_to_string(parse("-nan")))
+    println(show(-n))
+    println(show(parse("inf")))
+    println(show(parse("-inf")))
+  end
+end
+|}
+    ~expected:"nan\nnan\nnan\nnan\ninf\n-inf"
+    ()
+
 (** `--compile --no-opt` must still prune unreachable top-level functions.
     Reachability pruning (Dce.prune_unreachable) is a LINKABILITY requirement,
     not an optimization: the injected prelude/http stack references
@@ -15702,6 +15881,143 @@ let test_local_fn_shadows_later_bulk_use_compiled () =
 end
 |}
     ~expected:"102"
+    ()
+
+(* ── User names that are also stdlib / interface names ─────────────────────
+   A user fn named like an interface method (`show`, `eq`, `compare`, `hash`)
+   or a fn in a user module named like a stdlib module (`mod List`) used to
+   share one TIR symbol with the stdlib's meaning, so mono / the linker picked
+   one for every caller.  Lowering now gives the user's definition its own
+   name ([Tir_names.builtin_shadow_name]).
+   specs/progress/2026-11-10-user-stdlib-name-collisions.md *)
+
+(** A generic user `fn show(r)` lost to `Show$Result.show` in mono. *)
+let test_user_generic_show_vs_show_iface_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_generic_show"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn show(r) do
+    match r do
+      Ok(s) -> s
+      Err(e) -> e
+    end
+  end
+  fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(mk(1)))
+    println(mk(2))
+  end
+end
+|}
+    ~expected:"pos\nOk(pos)"
+    ()
+
+(** The converse: an annotated user `show` of the very type `println`'s
+    internal `show(x)` sees captured the prelude's call. *)
+let test_user_typed_show_does_not_capture_println_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_typed_show"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn show(r : Result(String, String)) : String do
+    match r do
+      Ok(s) -> s
+      Err(e) -> e
+    end
+  end
+  fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(mk(1)))
+    println(mk(2))
+    println(to_string(mk(3)))
+  end
+end
+|}
+    ~expected:"pos\nOk(pos)\nOk(pos)"
+    ()
+
+(** A user `show` of a type with its own `Show` impl: `println` uses the impl. *)
+let test_user_show_vs_own_show_impl_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_show_vs_impl"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Box = Box(Int)
+  fn show(_b : Box) : String do "user-show" end
+  impl Show(Box) do
+    fn show(b) do match b do Box(n) -> "Box " ++ int_to_string(n) end end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(Box(1)))
+    println(Box(2))
+  end
+end
+|}
+    ~expected:"user-show\nBox 2"
+    ()
+
+(** User `compare` / `hash`: the user's call runs the user's fn, the
+    prelude's `<` / `==` keep the interface. *)
+let test_user_compare_hash_vs_iface_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_compare_hash"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn compare(_a, _b) do 99 end
+  fn hash(_x) do 7 end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(compare(1, 2)))
+    println(int_to_string(hash("x")))
+    println(to_string((1, 2) < (1, 3)))
+    println(to_string(Some(1) == Some(1)))
+  end
+end
+|}
+    ~expected:"99\n7\ntrue\ntrue"
+    ()
+
+(** A nested user module's fn named like an interface method. *)
+let test_nested_module_fn_named_like_iface_method_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_nested_util_eq"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Util do
+    fn eq(a, b) do a != b end
+    fn both(a, b) do eq(a, b) && eq(b, a) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(to_string(Util.eq(1, 1)))
+    println(to_string(Util.eq("a", "b")))
+    println(to_string(Util.both(1, 2)))
+  end
+end
+|}
+    ~expected:"false\ntrue\ntrue"
+    ()
+
+(** An entry-level `mod List` whose fn has the stdlib's exact signature:
+    one symbol `List.sum_int`, the stdlib's won.  The rest of the stdlib
+    `List` stays reachable. *)
+let test_user_module_named_like_stdlib_module_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_mod_list"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod List do
+    fn sum_int(_xs : List(Int)) : Int do 42 end
+    fn twice(xs : List(Int)) : Int do sum_int(xs) + sum_int(xs) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(List.sum_int([1, 2])))
+    println(int_to_string(List.twice([1, 2])))
+    println(int_to_string(List.length([1, 2, 3])))
+    println(int_to_string(Enum.sum([1, 2, 3])))
+  end
+end
+|}
+    ~expected:"42\n84\n3\n6"
     ()
 
 (** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
@@ -18684,6 +19000,97 @@ let test_string_alloc_uses_march_allocator () =
   Alcotest.(check bool) "march_string_alloc routes through march_obj_malloc" true
     (Test_helpers.contains "march_string *s = march_obj_malloc" source)
 
+(* A closure that matches a CAPTURED value and hands the pattern's fields to a
+   borrowing builtin in tail position must not release the capture before the
+   call (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md).
+   [Drop.rewrite_apply_clo_drop] asked whether the tail USES a capture by the
+   capture's own name, so a tail naming only `a`/`b` (fields of `src`) got the
+   environment's deep release in front of it: `__drop$Pair(src)` freed the
+   strings, then `string_concat(a, b)` read them (ASAN: heap-use-after-free in
+   HttpServer.tls's http_server_tls_configure call).  Asserted on post-Drop TIR:
+   along every path of each apply fn, no `__drop$` call precedes the call to
+   the builtin that reads the fields. *)
+let closure_field_tail_src = {|
+mod M do
+  type Pair = Pair(String, String) | Solo(String)
+  type Nest = Nest(Pair, String)
+
+  fn joiner(src : Pair) : ((Int, Int)) -> String do
+    fn pw ->
+      match pw do
+      (x, y) ->
+        match src do
+        Pair(a, b) -> string_concat(a, b)
+        Solo(a) -> string_concat(a, int_to_string(x + y))
+        end
+      end
+  end
+
+  fn nested(n : Nest) : (Int) -> Int do
+    fn _ ->
+      match n do
+      Nest(p, s) ->
+        match p do
+        Pair(a, _) -> string_byte_length(a) + string_byte_length(s)
+        Solo(a) -> string_byte_length(a)
+        end
+      end
+  end
+
+  fn main() do
+    let f = joiner(Pair(int_to_string(1), int_to_string(2)))
+    let h = nested(Nest(Pair(int_to_string(3), "b"), int_to_string(4)))
+    string_byte_length(f((1, 2))) + h(0)
+  end
+end
+|}
+
+let test_closure_field_tail_not_released_first () =
+  let open March_tir.Tir in
+  let m = parse_and_desugar closure_field_tail_src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let k_table = March_tir.Kind.of_module tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let is_drop (f : var) =
+    String.starts_with ~prefix:March_tir.Tir_names.drop_fn_prefix f.v_name in
+  let rec has_drop = function
+    | EApp (f, _) -> is_drop f
+    | ELet (_, a, b) | ESeq (a, b) -> has_drop a || has_drop b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> has_drop br.br_body) brs
+      || (match d with Some e -> has_drop e | None -> false)
+    | _ -> false
+  in
+  (* [bad seen e]: a call to one of [readers] reached on a path where a deep
+     release already ran ([seen]). *)
+  let readers = [ "string_concat"; "string_byte_length" ] in
+  let rec bad seen = function
+    | EApp (f, _) when List.mem f.v_name readers -> seen
+    | ELet (_, a, b) | ESeq (a, b) -> bad seen a || bad (seen || has_drop a) b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> bad seen br.br_body) brs
+      || (match d with Some e -> bad seen e | None -> false)
+    | _ -> false
+  in
+  let applies = List.filter (fun f ->
+      March_tir.Tir_names.is_apply_fn f.fn_name
+      && (String.ends_with ~suffix:"_joiner" f.fn_name
+          || String.ends_with ~suffix:"_nested" f.fn_name)) tir.tm_fns in
+  Alcotest.(check int) "both apply fns found" 2 (List.length applies);
+  List.iter (fun f ->
+      (* Control: the release is still there (on the freeing path), only after
+         the read.  Without it this test would pass on a leak. *)
+      Alcotest.(check bool) (f.fn_name ^ " still releases its capture") true
+        (has_drop f.fn_body);
+      Alcotest.(check bool)
+        (f.fn_name ^ ": no deep release before the builtin reads a field") false
+        (bad false f.fn_body))
+    applies
+
 let codegen_suites =
   [
       ( "string_allocator", [
@@ -18779,6 +19186,10 @@ let codegen_suites =
           Alcotest.test_case "filter+fold fused fn is FnFused"     `Quick test_fnfused_filter_fold_tagged;
           Alcotest.test_case "map+filter+fold fused fn is FnFused" `Quick test_fnfused_map_filter_fold_tagged;
           Alcotest.test_case "no FnFused when nothing fuses"       `Quick test_fnfused_absent_when_not_fused;
+        ] );
+      ( "closure_field_tail", [
+          Alcotest.test_case "capture not released before a tail reading its fields" `Quick
+            test_closure_field_tail_not_released_first;
         ] );
       ( "unboxed_aggregates", [
           Alcotest.test_case "identified struct type declared"        `Quick test_unboxed_aggregate_declared_as_struct;
@@ -19321,6 +19732,8 @@ let codegen_suites =
       ("http builtins", [
         Alcotest.test_case "serialize request"       `Quick test_http_serialize_request;
         Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
+        Alcotest.test_case "serialize rejects injection (interp = compiled)" `Quick test_http_serialize_injection_parity;
+        Alcotest.test_case "transport refuses injected path, sends nothing" `Quick test_http_transport_refuses_injected_path;
         Alcotest.test_case "parse response"          `Quick test_http_parse_response;
         Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
       ]);
@@ -19617,6 +20030,8 @@ let codegen_suites =
             test_js_int_subset_parity;
           Alcotest.test_case "--target js Float literals are native's double, bit for bit (#1169)" `Quick
             test_js_float_literal_bits;
+          Alcotest.test_case "a NaN prints \"nan\" whatever its sign bit (interp = compiled)" `Quick
+            test_nan_prints_without_sign_compiled;
           Alcotest.test_case "--target js Diagnostics: observers, context, location match the interpreter" `Quick
             test_js_diagnostics_observers;
           Alcotest.test_case "unwritable -o path: dirs created, plain error, no ICE (#1181)" `Quick
@@ -19719,6 +20134,18 @@ let codegen_suites =
             test_newtype_over_generic_record_eq_compiled;
           Alcotest.test_case "a local fn shadows a later `use M.*` on both backends" `Quick
             test_local_fn_shadows_later_bulk_use_compiled;
+          Alcotest.test_case "user generic `fn show` vs the Show method" `Quick
+            test_user_generic_show_vs_show_iface_compiled;
+          Alcotest.test_case "user typed `fn show` does not capture println's show" `Quick
+            test_user_typed_show_does_not_capture_println_compiled;
+          Alcotest.test_case "user `fn show` vs the type's own Show impl" `Quick
+            test_user_show_vs_own_show_impl_compiled;
+          Alcotest.test_case "user `fn compare`/`fn hash` vs the interfaces" `Quick
+            test_user_compare_hash_vs_iface_compiled;
+          Alcotest.test_case "nested module fn named like an interface method" `Quick
+            test_nested_module_fn_named_like_iface_method_compiled;
+          Alcotest.test_case "entry `mod List` vs the stdlib List" `Quick
+            test_user_module_named_like_stdlib_module_compiled;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

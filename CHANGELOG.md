@@ -869,6 +869,45 @@ git log is authoritative for exact commits.
 ### Fixed
 
 - A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
+- **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
+  A compiled closure that matched a captured value and passed the pattern's fields straight to a
+  builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the
+  capture first, so the builtin read freed memory. ASAN caught it in `HttpServer.tls`; on macOS
+  the freed bytes usually survived. The release now waits until the call returns.
+- **A user fn named like `show`, `eq`, `compare` or `hash` no longer swaps places with the
+  interface method in compiled code.** A generic `fn show(r)` printed `Ok(pos)` where the
+  interpreter printed `pos`; a `fn show(r : T)` took over `println` of every `T`; `fn compare`
+  and `fn hash` returned the built-in answer; and `Util.eq(1, 1)` in a user `mod Util` ran
+  `Eq`. Each now runs the user's fn for the user's calls and the method everywhere else, on both
+  backends.
+- **A module named like a stdlib module no longer loses its functions to the stdlib's.** With
+  `mod List do fn sum_int(xs : List(Int)) : Int do 42 end end` in the program, compiled
+  `List.sum_int([1, 2])` returned the stdlib's `3`, and so did an interpreted call to `sum_int`
+  from inside the module; both now return `42`, and the rest of the stdlib `List` still works.
+- **Security: an HTTP request can no longer smuggle a second request.** The request
+  serializer copied the method, host, path, query and headers into the request verbatim, so
+  a path such as `"/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"` (from user input, say)
+  sent a pipelined second request. `HttpTransport` and `HttpClient` now refuse, with
+  `Refused(reason)` and before any connection is opened, a method or header name that is not
+  an HTTP token, a host or header value with a CR, LF or other control byte, and a path or
+  query with any byte outside RFC 3986 that was not percent-encoded (a space, `#`, a bare
+  `%`, a non-ASCII byte; percent-encode values with `Uri.encode` / `Uri.encode_query`, since
+  `Http.encode_query` does not); interpreted, compiled and browser builds refuse the same
+  requests. `Tls.https_get` refuses such a host or path the same way, with
+  `TlsWriteError(reason)`.
+  The `http_serialize_request` builtin now returns `Result(String, String)`. Compiled
+  programs also send the request's headers (including `Connection: close`), which the
+  compiled serializer used to drop, and send `Content-Length` only for a non-empty body, as
+  interpreted ones always did.
+- **A NaN prints `nan` on every backend, and the interpreter's `show` no longer adds `.0`
+  to `nan`/`inf`/`-inf`.** `float_to_string` went through libc's `%.12g`, which prints a NaN with
+  the sign bit set as `-nan` on Linux and `nan` on macOS, and x86's default NaN (what
+  `inf -. inf` produces) has that bit set where arm64's does not, so the same program printed
+  `-nan` on x86 Linux and `nan` on a Mac. A NaN now prints `nan` in the interpreter and the
+  native runtime (and the logger's float fields), as `--target js` already did. Separately, the
+  interpreter's `show` of a Float printed `nan.0`, `inf.0` and `-inf.0`; it now prints `nan`,
+  `inf` and `-inf` like compiled code.
+
 - **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
   When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
   interpreter ran whichever impl registered last on both types' values; compiled code was right.

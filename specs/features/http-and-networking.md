@@ -413,7 +413,7 @@ The interpreter provides pure OCaml implementations for development/testing:
 - `tcp_recv_http_headers`: Headers only with Content-Length and Transfer-Encoding detection
 - `tcp_recv_chunk`: Fixed-size receive
 - `tcp_recv_chunked_frame`: Chunked transfer encoding frame parser
-- `http_serialize_request`: Build raw HTTP request string
+- `http_serialize_request`: Build raw HTTP request string; `Err(reason)` instead when the method, host, path, query or a header would smuggle a second request (field rules in `lib/eval/http_request_check.ml`, C twin in `runtime/march_http.c`)
 - `http_parse_response`: Parse status + headers + body from response string
 
 ## Test Coverage
