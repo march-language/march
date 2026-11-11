@@ -45,12 +45,14 @@ let cap_table : (string * string) list = [
   ("file_stat",             "IO.FileRead");
   ("dir_exists",            "IO.FileRead");
   ("dir_list",              "IO.FileRead");
+  ("dir_open",              "IO.FileRead");
   ("csv_open",              "IO.FileRead");
   ("csv_next_row",          "IO.FileRead");
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
   ("file_open_write",       "IO.FileWrite");
+  ("dir_open_write",        "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");

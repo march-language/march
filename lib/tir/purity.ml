@@ -17,6 +17,7 @@ let impure_builtins = [
   (* File IO *)
   "file_read_line"; "file_open"; "file_close";
   "file_open_write"; "file_write_handle"; "file_seek";
+  "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
   "file_read"; "file_write"; "file_write_line";
   (* Network / TLS *)
   "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_close"; "tcp_shutdown"; "tcp_local_port";

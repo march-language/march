@@ -1104,6 +1104,28 @@ void   *march_file_read_chunk(void *handle, int64_t size);
 void   *march_file_open_write(void *path, int64_t mode);
 void   *march_file_write_handle(int64_t handle, void *data);
 void   *march_file_seek(int64_t handle, int64_t offset);
+/* File.Dir (runtime/march_file_beneath.c): opens beneath a directory fd. */
+void   *march_dir_open(void *path);
+void   *march_dir_open_write(void *path);
+void   *march_file_open_at(int64_t dirfd, void *rel, int64_t flags);
+void   *march_dir_list_at(int64_t dirfd, void *rel);
+int     march_beneath_open(int dirfd, const char *rel, int flags, int mode);
+/* FileError constructor tags: the declaration order of stdlib/file.march's
+ * `ptype FileError`.  Add new constructors at the end, in both places. */
+#define FILEERR_NOT_FOUND    0
+#define FILEERR_PERMISSION   1
+#define FILEERR_IS_DIRECTORY 2
+#define FILEERR_NOT_EMPTY    3
+#define FILEERR_IO_ERROR     4
+#define FILEERR_CLOSED       5
+#define FILEERR_ESCAPES      6
+/* Helpers march_runtime.c exports to march_file_beneath.c: register a FILE*
+ * in the file handle table (0 when it is full), Ok(v), Err(FileError(tag,
+ * payload)), and a List(String) from n C strings. */
+int64_t march_fh_register(void *f);
+void   *march_file_ok(void *value);
+void   *march_file_err(int64_t tag, const char *payload, int64_t len);
+void   *march_file_string_list(char **names, int64_t n);
 void   *march_file_write(void *path, void *data);
 void   *march_file_append(void *path, void *data);
 void   *march_file_delete(void *path);

@@ -2361,7 +2361,14 @@ let stdlib_only : (string * string) list ref =
          must not write or seek a file the program has open. *)
       ("file_open_write", "use `File.open_write(path, mode)`");
       ("file_write_handle", "use `File.write_to(h, data)` on a `File.Handle`");
-      ("file_seek", "use `File.seek(h, offset)` on a `File.Handle`") ]
+      ("file_seek", "use `File.seek(h, offset)` on a `File.Handle`");
+      (* ocap phase 2 (Task 7): the raw directory-fd builtins behind
+         File.Dir. A guessed Int fd must not open or list beneath a
+         directory the program holds. *)
+      ("dir_open", "use `File.open_dir(path)`");
+      ("dir_open_write", "use `File.open_dir_write(path)`");
+      ("file_open_at", "use `File.open_in(d, rel)` / `File.open_write_in(d, rel, mode)` on a `File.Dir`");
+      ("dir_list_at", "use `File.list_in(d, rel)` on a `File.Dir`") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

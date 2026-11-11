@@ -167,6 +167,27 @@ let http_bind_addr = ref Unix.inet_addr_any
    closed. *)
 let write_chans : (int, out_channel) Hashtbl.t = Hashtbl.create 8
 
+(* File.Dir (ocap phase 2): lib/eval/eval_beneath_stubs.c, which compiles
+   runtime/march_file_beneath.c's core, so a path beneath a directory is
+   refused and resolved by the same C as in a compiled binary.  Each returns
+   an fd (or 0 / names) or a negative errno. *)
+external beneath_dir_open : string -> int = "march_eval_dir_open"
+external beneath_open : int -> string -> int -> int = "march_eval_beneath_open"
+external beneath_list : int -> string -> int * string array = "march_eval_beneath_list"
+external beneath_errinfo : int -> int * string = "march_eval_beneath_errinfo"
+
+(* The FileError for errno [e] on [rel]: march_file_beneath.c's beneath_err
+   ([listing]: ENOTDIR is IsDirectory, as dir_list reports it). *)
+let beneath_error ~(listing : bool) (rel : string) (e : int) : value =
+  let (kind, msg) = beneath_errinfo e in
+  match kind with
+  | 0 -> VCon ("Escapes", [VString rel])
+  | 1 -> VCon ("NotFound", [VString rel])
+  | 2 -> VCon ("Permission", [VString rel])
+  | 3 -> VCon ("IsDirectory", [VString rel])
+  | 4 when listing -> VCon ("IsDirectory", [VString rel])
+  | _ -> VCon ("IoError", [VString (Printf.sprintf "%s: %s" rel msg)])
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -1922,6 +1943,54 @@ let base_env : env =
              seek_in ic off; VCon ("Ok", [VInt (pos_in ic)])
          with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
       | _ -> eval_error "file_seek(fd, offset)"))
+
+  (* dir_open / dir_open_write: the same open (O_DIRECTORY); the two exist so
+     each is charged its own capability.  The Int is the raw fd, which the
+     File.Dir box (kind DIR) closes with tcp_close's bare close. *)
+  ; ("dir_open", VBuiltin ("dir_open", function
+      | [VString path] ->
+        let fd = beneath_dir_open path in
+        if fd < 0 then VCon ("Err", [beneath_error ~listing:true path (-fd)])
+        else VCon ("Ok", [VInt fd])
+      | _ -> eval_error "dir_open(path)"))
+
+  ; ("dir_open_write", VBuiltin ("dir_open_write", function
+      | [VString path] ->
+        let fd = beneath_dir_open path in
+        if fd < 0 then VCon ("Err", [beneath_error ~listing:true path (-fd)])
+        else VCon ("Ok", [VInt fd])
+      | _ -> eval_error "dir_open_write(path)"))
+
+  (* file_open_at(dirfd, rel, flags): flags 0 read, 1 truncate, 2 append.
+     The stream is a channel, as file_open's / file_open_write's are. *)
+  ; ("file_open_at", VBuiltin ("file_open_at", function
+      | [VInt dirfd; VString rel; VInt flags] when flags >= 0 && flags <= 2 ->
+        let fd = beneath_open dirfd rel flags in
+        if fd < 0 then VCon ("Err", [beneath_error ~listing:false rel (-fd)])
+        else begin
+          let ufd : Unix.file_descr = Obj.magic fd in
+          if flags = 0 then
+            VCon ("Ok", [VInt (Obj.magic (Unix.in_channel_of_descr ufd) : int)])
+          else begin
+            let oc = Unix.out_channel_of_descr ufd in
+            let h = (Obj.magic oc : int) in
+            Hashtbl.replace write_chans h oc;
+            VCon ("Ok", [VInt h])
+          end
+        end
+      | [VInt _; VString _; VInt _] ->
+        VCon ("Err", [VCon ("IoError", [VString "file_open_at: bad flags"])])
+      | _ -> eval_error "file_open_at(dirfd, rel, flags)"))
+
+  ; ("dir_list_at", VBuiltin ("dir_list_at", function
+      | [VInt dirfd; VString rel] ->
+        let (err, names) = beneath_list dirfd rel in
+        if err <> 0 then VCon ("Err", [beneath_error ~listing:true rel err])
+        else
+          VCon ("Ok", [Array.fold_right
+                         (fun e acc -> VCon ("Cons", [VString e; acc]))
+                         names (VCon ("Nil", []))])
+      | _ -> eval_error "dir_list_at(dirfd, rel)"))
 
   ; ("file_read_line", VBuiltin ("file_read_line", function
       | [VInt ic_int] when Hashtbl.mem write_chans ic_int -> VCon ("None", [])

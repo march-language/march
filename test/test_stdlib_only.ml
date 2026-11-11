@@ -350,7 +350,8 @@ let test_shipped_table () =
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch"; "reload_request";
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
       "handle_is_closed"; "handle_aux";
-      "file_open_write"; "file_write_handle"; "file_seek" ]
+      "file_open_write"; "file_write_handle"; "file_seek";
+      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at" ]
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
@@ -359,7 +360,8 @@ let test_shipped_table () =
                              && name <> "delivery_origin_set" && name <> "delivery_origin_clear"
                              && name <> "delivery_failed_watch"
                              && not (String.length name > 7 && String.sub name 0 7 = "handle_")
-                             && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek" ]))
+                             && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek";
+                                                     "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at" ]))
        !TB.stdlib_only);
   Alcotest.(check bool) "actor_inspect suggestion names Actor.debug" true
     (contains ~needle:"`Actor.debug`" (List.assoc "actor_inspect" !TB.stdlib_only));
@@ -426,7 +428,12 @@ end|} call) in
       Alcotest.(check bool) (name ^ " is refused in user code") true gated)
     [ ({|file_open_write("/tmp/x", 0)|}, "file_open_write");
       ({|file_write_handle(-2, "x")|}, "file_write_handle");
-      ({|file_seek(-2, 0)|}, "file_seek") ]
+      ({|file_seek(-2, 0)|}, "file_seek");
+      (* Task 7: the File.Dir builtins. *)
+      ({|dir_open("/etc")|}, "dir_open");
+      ({|dir_open_write("/tmp")|}, "dir_open_write");
+      ({|file_open_at(3, "passwd", 0)|}, "file_open_at");
+      ({|dir_list_at(3, "")|}, "dir_list_at") ]
 
 (* ── Adversarial sweep over the shipped table ─────────────────────────────
    Every gated name, in every spelling the review's findings list (and

@@ -644,7 +644,7 @@ Functions always in scope without `use`:
 
 ### IO / Files
 
-**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`; handles (`File.Handle`, use after `close` is `Err(Closed)`): `open`, `open_write(path, Truncate | Append)`, `read_line`, `read_chunk`, `write_to`, `seek`, `close`, `with_open`, `with_open_write`
+**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`; handles (`File.Handle`, use after `close` is `Err(Closed)`): `open`, `open_write(path, Truncate | Append)`, `read_line`, `read_chunk`, `write_to`, `seek`, `close`, `with_open`, `with_open_write`; directories (`File.Dir`, refuses a path that leaves it with `Escapes(rel)`; macOS refuses every symlink beneath it): `open_dir`, `open_dir_write`, `open_in`, `open_write_in`, `list_in(d, "")`, `close_dir`
 
 **Dir** — `list`, `list_full`, `mkdir`, `mkdir_p`, `rmdir`, `rm_rf`, `exists`
 

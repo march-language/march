@@ -905,7 +905,7 @@ let setup_jit_runtime () =
     let extra_src_list = List.filter_map opt_path [
       "march_scheduler.c"; "march_reclaim.c"; "march_message.c"; "march_heap.c";
       "march_gc.c"; "sha1.c"; "march_extras.c"; "march_ctx_escape.c";
-      "march_handle.c"; "base64.c"; "march_ffi.c";
+      "march_handle.c"; "march_file_beneath.c"; "base64.c"; "march_ffi.c";
       "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
       "march_monitor_registry.c"; "march_observe.c"; "march_observe_snapshot.c"; "march_observe_debug.c"; "march_trace.c"; "march_sig.c"; "tweetnacl.c"; "march_nacl.c";
       "pqc.c"; "march_pqc.c";

@@ -30,6 +30,15 @@ git log is authoritative for exact commits.
   when its last reference goes. `File.with_open` / `File.with_open_write` close it when the
   callback returns or panics. `FileError` now derives `Eq`. `with_lines`, `with_chunks`,
   `each_line` and `each_chunk` keep their signatures and use a handle internally.
+- **`File.Dir`: authority over one directory's subtree.** `File.open_dir(path)`
+  (`IO.FileRead`) and `File.open_dir_write(path)` (`IO.FileWrite`) return a `File.Dir`;
+  `File.open_in(d, rel)`, `File.open_write_in(d, rel, mode)` and `File.list_in(d, rel)` open
+  and list beneath it and refuse a path that leaves it with the new `FileError`
+  `Escapes(rel)` (empty, `.`, absolute, or climbing out with `..`). `File.close_dir` closes
+  it; later uses return `Err(Closed)`, while handles already opened through it keep working.
+  Linux resolves through `openat2(RESOLVE_BENEATH)` and follows a symlink that stays
+  inside the directory. **On macOS every symlink beneath a directory handle is refused**
+  (`Escapes`), even one that stays inside: the check is best effort there.
 - **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
   methods(get))` limits a module to a path prefix on a host, matched by whole segment
   (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never

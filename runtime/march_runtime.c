@@ -11762,15 +11762,12 @@ static void *mk_err_errno(void) {
 }
 
 /* FileError tags (must match stdlib/file.march ptype declaration order):
-   NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4.
+   NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4, Closed=5,
+   Escapes=6.
    Build a real FileError ctor cell (not a bare string) so compiled code
    matching e.g. Err(NotFound(path)) reads a well-formed tagged cell instead
    of misinterpreting a march_string header as one. */
-#define FILEERR_NOT_FOUND    0
-#define FILEERR_PERMISSION   1
-#define FILEERR_IS_DIRECTORY 2
-#define FILEERR_NOT_EMPTY    3
-#define FILEERR_IO_ERROR     4
+/* FILEERR_* tags: march_runtime.h (march_file_beneath.c builds them too). */
 
 /* File.FileError's header type id (see the march_hdr comment in
  * march_runtime.h).  Cells the C runtime builds carry no type id by default,
@@ -12237,6 +12234,17 @@ void *march_dir_list(void *path_ptr) {
     for (int i = 0; i < n; i++) free(names[i]);
     free(names);
     return mk_ok(lst);
+}
+
+/* Exported for runtime/march_file_beneath.c (File.Dir), which builds its
+ * Results through the same cells as the file family above. */
+int64_t march_fh_register(void *f) { return fh_open((FILE *)f, 0, 0); }
+void *march_file_ok(void *value) { return mk_ok(value); }
+void *march_file_err(int64_t tag, const char *payload, int64_t len) {
+    return mk_err_file((int)tag, march_string_lit(payload, len));
+}
+void *march_file_string_list(char **names, int64_t n) {
+    return build_string_list(names, (int)n);
 }
 
 static int mkdir_p(const char *path) {

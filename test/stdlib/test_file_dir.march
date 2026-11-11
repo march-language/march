@@ -1,0 +1,215 @@
+-- test/stdlib/test_file_dir.march
+-- Tests for File.Dir (ocap phase 2, Task 7): open_dir, open_dir_write,
+-- open_in, open_write_in, list_in, close_dir.
+-- Each test builds its own scratch tree under /tmp:
+--   root/a.txt          "A\n"
+--   root/sub/b.txt      "B\n"
+--   root/out -> /etc    (a symlink that leaves root)
+-- The directory name carries the process id: this file runs under several
+-- runners in one `dune runtest` (the stdlib_march exe, `march test`, and
+-- compiled `--compile --test`), possibly at once and from several worktrees.
+-- The Linux-only case (a symlink that stays inside root opens through
+-- openat2) is test_codegen.ml's dir_beneath_symlink_linux.
+-- Run with: dune exec march -- test test/stdlib/test_file_dir.march
+
+mod TestFileDir do
+
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Process
+
+pfn root_of(name : String) : String do
+  "/tmp/march_tfd_" ++ int_to_string(Process.pid()) ++ "_" ++ name
+end
+
+pfn must(r : Result(a, e), what : String) : a do
+  match r do
+  Ok(v) -> v
+  Err(err) -> panic(what ++ " failed: " ++ to_string(err))
+  end
+end
+
+-- Build the scratch tree; returns its root.
+pfn tree(name : String) : String do
+  let root = root_of(name)
+  let _ = Dir.rm_rf(root)
+  let _ = Dir.rm_rf(root ++ "_moved")
+  must(Dir.mkdir_p(root ++ "/sub"), "Dir.mkdir_p")
+  must(File.write(root ++ "/a.txt", "A\n"), "File.write a.txt")
+  must(File.write(root ++ "/sub/b.txt", "B\n"), "File.write sub/b.txt")
+  match Process.run("ln", ["-s", "/etc", root ++ "/out"]) do
+  Ok(_) -> root
+  Err(e) -> panic("ln -s failed: " ++ e)
+  end
+end
+
+pfn cleanup(name : String) : Unit do
+  let _ = Dir.rm_rf(root_of(name))
+  let _ = Dir.rm_rf(root_of(name) ++ "_moved")
+  ()
+end
+
+pfn first_line(r : Result(File.Handle, File.FileError)) : Result(Option(String), File.FileError) do
+  match r do
+  Err(e) -> Err(e)
+  Ok(h) ->
+    let line = File.read_line(h)
+    let _ = File.close(h)
+    line
+  end
+end
+
+-- The error of a handle-returning call (handles are not Eq).
+pfn err_of(r : Result(File.Handle, File.FileError)) : Option(File.FileError) do
+  match r do
+  Err(e) -> Some(e)
+  Ok(_) -> None
+  end
+end
+
+pfn escapes(r : Result(File.Handle, File.FileError)) : Bool do
+  match r do
+  Err(File.Escapes(_)) -> true
+  _ -> false
+  end
+end
+
+describe "File.Dir" do
+  test "open_in reads beneath the directory" do
+    let root = tree("read")
+    let d = must(File.open_dir(root), "File.open_dir")
+    assert (first_line(File.open_in(d, "a.txt")) == Ok(Some("A")))
+    assert (first_line(File.open_in(d, "sub/b.txt")) == Ok(Some("B")))
+    -- `..` that stays inside is normalised away, not refused.
+    assert (first_line(File.open_in(d, "sub/../a.txt")) == Ok(Some("A")))
+    let _ = File.close_dir(d)
+    cleanup("read")
+  end
+
+  test "a path that leaves the directory is Escapes" do
+    let root = tree("escape")
+    let d = must(File.open_dir(root), "File.open_dir")
+    assert escapes(File.open_in(d, "../x"))
+    assert escapes(File.open_in(d, "/etc/passwd"))
+    assert escapes(File.open_in(d, "sub/../../x"))
+    assert escapes(File.open_in(d, ""))
+    assert escapes(File.open_in(d, "."))
+    assert (err_of(File.open_in(d, "../x")) == Some(File.Escapes("../x")))
+    let _ = File.close_dir(d)
+    cleanup("escape")
+  end
+
+  test "a symlink that leaves the directory is Escapes" do
+    let root = tree("symlink")
+    let d = must(File.open_dir(root), "File.open_dir")
+    assert escapes(File.open_in(d, "out/passwd"))
+    let _ = File.close_dir(d)
+    cleanup("symlink")
+  end
+
+  test "a missing file beneath is NotFound" do
+    let root = tree("missing")
+    let d = must(File.open_dir(root), "File.open_dir")
+    assert (err_of(File.open_in(d, "nope.txt")) == Some(File.NotFound("nope.txt")))
+    let _ = File.close_dir(d)
+    cleanup("missing")
+  end
+
+  test "a read-only directory refuses open_write_in" do
+    let root = tree("ro")
+    let d = must(File.open_dir(root), "File.open_dir")
+    assert (err_of(File.open_write_in(d, "new.txt", File.Truncate)) == Some(File.Permission("new.txt")))
+    assert (File.exists(root ++ "/new.txt") == false)
+    let _ = File.close_dir(d)
+    cleanup("ro")
+  end
+
+  test "open_dir_write creates beneath the directory" do
+    let root = tree("rw")
+    let d = must(File.open_dir_write(root), "File.open_dir_write")
+    let h = must(File.open_write_in(d, "new.txt", File.Truncate), "File.open_write_in")
+    assert (File.close(h) == Ok(()))
+    assert (File.read(root ++ "/new.txt") == Ok(""))
+    let h2 = must(File.open_write_in(d, "sub/log.txt", File.Append), "File.open_write_in append")
+    assert (File.write_to(h2, "x\n") == Ok(()))
+    assert (File.close(h2) == Ok(()))
+    assert (File.read(root ++ "/sub/log.txt") == Ok("x\n"))
+    assert escapes(File.open_write_in(d, "../escaped.txt", File.Truncate))
+    let _ = File.close_dir(d)
+    cleanup("rw")
+  end
+
+  test "list_in" do
+    let root = tree("list")
+    let d = must(File.open_dir(root), "File.open_dir")
+    assert (File.list_in(d, "") == Ok(["a.txt", "out", "sub"]))
+    assert (File.list_in(d, "sub") == Ok(["b.txt"]))
+    let up = match File.list_in(d, "..") do
+      Err(File.Escapes(_)) -> true
+      _ -> false
+    end
+    assert up
+    let _ = File.close_dir(d)
+    cleanup("list")
+  end
+
+  test "use after close_dir" do
+    let root = tree("closed")
+    let d = must(File.open_dir(root), "File.open_dir")
+    assert (File.close_dir(d) == Ok(()))
+    assert (err_of(File.open_in(d, "a.txt")) == Some(File.Closed))
+    assert (File.list_in(d, "") == Err(File.Closed))
+    assert (err_of(File.open_write_in(d, "x.txt", File.Truncate)) == Some(File.Closed))
+    assert (File.close_dir(d) == Err(File.Closed))
+    cleanup("closed")
+  end
+
+  test "a handle opened through the directory outlives close_dir" do
+    let root = tree("outlive")
+    let d = must(File.open_dir(root), "File.open_dir")
+    let h = must(File.open_in(d, "a.txt"), "File.open_in")
+    assert (File.close_dir(d) == Ok(()))
+    assert (File.read_line(h) == Ok(Some("A")))
+    let _ = File.close(h)
+    cleanup("outlive")
+  end
+
+  -- The directory fd follows the inode: renaming the directory after
+  -- open_dir does not change what a relative path resolves against.
+  test "the directory follows a rename" do
+    let root = tree("renamed")
+    let d = must(File.open_dir(root), "File.open_dir")
+    must(File.rename(root, root ++ "_moved"), "File.rename")
+    assert (File.exists(root) == false)
+    assert (first_line(File.open_in(d, "a.txt")) == Ok(Some("A")))
+    let _ = File.close_dir(d)
+    cleanup("renamed")
+  end
+end
+
+-- passes after Task 10 (ocap phase 2): a File.Dir works in a function
+-- bounded by `needs ()` (spec §18, ruling R9: the per-function bound).
+-- Skipped until then: the ceiling still charges IO.FileRead to
+-- File.read_line (Task 10 stops charging handle uses). Task 10 uncomments
+-- it; the `march test` rule in test/dune then typechecks it.
+--
+-- mod DirReader do
+--   fn first(d : File.Dir) : Result(Option(String), File.FileError) needs () do
+--     match File.open_in(d, "a.txt") do
+--     Ok(h) -> File.read_line(h)
+--     Err(e) -> Err(e)
+--     end
+--   end
+-- end
+--
+-- describe "File.Dir capabilities" do
+--   test "dir works in a needs () module" do
+--     let root = tree("needs_none")
+--     let d = must(File.open_dir(root), "File.open_dir")
+--     assert (DirReader.first(d) == Ok(Some("A")))
+--     let _ = File.close_dir(d)
+--     cleanup("needs_none")
+--   end
+-- end
+
+end

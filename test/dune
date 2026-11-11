@@ -13968,6 +13968,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps test_file_handle_compiled.out)
  (action (progn)))
 
+; File.Dir (ocap phase 2, Task 7): test_file_dir.march runs untyped under
+; stdlib_march; these rules typecheck it (`march test`) and run it compiled,
+; the only CI coverage of the compiled dir_open / file_open_at / dir_list_at
+; (runtime/march_file_beneath.c).
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file_dir.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_file_dir.march)))
+
+(rule
+ (targets test_file_dir_compiled_bin test_file_dir_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_file_dir.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_file_dir_compiled_bin
+        stdlib/test_file_dir.march)
+   (with-stdout-to test_file_dir_compiled.out
+    (system "./test_file_dir_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_file_dir_compiled.out)
+ (action (progn)))
+
 ; Socket / Listener handles (ocap phase 2, Task 5): test_socket.march runs
 ; untyped under stdlib_march; these rules typecheck it (`march test`) and run
 ; it compiled. Its listeners bind port 0, so concurrent runners never collide.

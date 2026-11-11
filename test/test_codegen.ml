@@ -10970,6 +10970,68 @@ end
   | None -> ()
   | Some bin -> check "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
 
+(* File.Dir on Linux (ocap phase 2, Task 7): open_in resolves through
+   openat2(RESOLVE_BENEATH), which follows a symlink that stays inside the
+   directory (root/in -> sub) and refuses one that leaves it (root/out ->
+   /etc).  macOS refuses every symlink beneath a directory handle (the
+   documented difference; test/stdlib/test_file_dir.march covers the refusal
+   on both), so this case is Linux only.  Interpreted and compiled. *)
+let test_dir_beneath_symlink_linux () =
+  let os = String.trim (read_cmd_output "uname -s 2>/dev/null") in
+  if os <> "Linux" then
+    Printf.printf "[skip] dir_beneath_symlink_linux: %s is not Linux; macOS refuses \
+                   every symlink beneath a File.Dir, so an in-tree symlink cannot open there\n%!"
+      (if os = "" then "this OS" else os)
+  else begin
+    let root = Filename.temp_file "march_dir_beneath" "" in
+    Sys.remove root;
+    Unix.mkdir root 0o755;
+    Unix.mkdir (Filename.concat root "sub") 0o755;
+    let oc = open_out (Filename.concat root "sub/b.txt") in
+    output_string oc "B\n";
+    close_out oc;
+    Unix.symlink "sub" (Filename.concat root "in");
+    Unix.symlink "/etc" (Filename.concat root "out");
+    let src_text = Printf.sprintf {|mod DirBeneathLinux do
+  needs IO.FileRead
+  needs IO.Console
+
+  fn main(_r : Cap(IO.FileRead), _c : Cap(IO.Console)) do
+    match File.open_dir("%s") do
+    Err(e) -> println("OPEN_DIR " ++ to_string(e))
+    Ok(d) ->
+      match File.open_in(d, "in/b.txt") do
+      Ok(h) ->
+        match File.read_line(h) do
+        Ok(Some(l)) -> println("IN " ++ l)
+        _ -> println("IN EMPTY")
+        end
+      Err(e) -> println("IN ERR " ++ to_string(e))
+      end
+      match File.open_in(d, "out/passwd") do
+      Ok(_) -> println("OUT OPENED")
+      Err(File.Escapes(_)) -> println("OUT ESCAPES")
+      Err(e) -> println("OUT ERR " ++ to_string(e))
+      end
+    end
+  end
+end
+|} root in
+    let (project_root, main_exe, src, tmp) =
+      write_march_source ~name:"dir_beneath_linux" src_text in
+    let expect which out =
+      Alcotest.(check string) (which ^ ": in-tree symlink opens, escaping one is refused")
+        "IN B\nOUT ESCAPES" out
+    in
+    expect "interpreter" (read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+    let bin = Filename.concat tmp "dir_beneath_linux_bin" in
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+            ~main_exe ~bin ~src () with
+    | None -> ()
+    | Some bin -> expect "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
+  end
+
 (* A function used only as a value must remain reachable through mono. *)
 let test_other_module_function_value_compiled () =
   let (project_root, main_exe, src, tmp) =
@@ -16659,6 +16721,10 @@ declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
 declare ptr  @march_file_open_write(ptr %path, i64 %mode)
 declare ptr  @march_file_write_handle(i64 %handle, ptr %data)
 declare ptr  @march_file_seek(i64 %handle, i64 %offset)
+declare ptr  @march_dir_open(ptr %path)
+declare ptr  @march_dir_open_write(ptr %path)
+declare ptr  @march_file_open_at(i64 %dirfd, ptr %rel, i64 %flags)
+declare ptr  @march_dir_list_at(i64 %dirfd, ptr %rel)
 declare ptr  @march_file_write(ptr %path, ptr %data)
 declare ptr  @march_file_append(ptr %path, ptr %data)
 declare ptr  @march_file_delete(ptr %path)
@@ -19743,6 +19809,7 @@ let codegen_suites =
         Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
         Alcotest.test_case "serialize rejects injection (interp = compiled)" `Quick test_http_serialize_injection_parity;
         Alcotest.test_case "transport refuses injected path, sends nothing" `Quick test_http_transport_refuses_injected_path;
+        Alcotest.test_case "dir_beneath_symlink_linux" `Quick test_dir_beneath_symlink_linux;
         Alcotest.test_case "parse response"          `Quick test_http_parse_response;
         Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
       ]);

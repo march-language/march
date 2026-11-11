@@ -237,6 +237,10 @@ let builtin_cap_table : (string * string) list = [
   ("file_stat",             "IO.FileRead");
   ("dir_exists",            "IO.FileRead");
   ("dir_list",              "IO.FileRead");
+  (* dir_open opens a File.Dir (File.open_dir). The handle-taking
+     file_open_at / dir_list_at are charged nothing: the directory came from
+     a checked open (ocap phase 2). *)
+  ("dir_open",              "IO.FileRead");
   ("csv_open",              "IO.FileRead");
   ("csv_next_row",          "IO.FileRead");
   (* IO.FileWrite *)
@@ -246,6 +250,9 @@ let builtin_cap_table : (string * string) list = [
      handle-taking file_write_handle / file_seek are charged nothing: the
      handle came from a checked open (ocap phase 2). *)
   ("file_open_write",       "IO.FileWrite");
+  (* dir_open_write is dir_open for a write-capable File.Dir
+     (File.open_dir_write): the same open, charged IO.FileWrite. *)
+  ("dir_open_write",        "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");
@@ -1186,6 +1193,16 @@ let builtin_bindings : (string * scheme) list =
     ("file_open_write", Mono (TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
     ("file_write_handle", Mono (TArrow (t_int, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
     ("file_seek",       Mono (TArrow (t_int, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
+    (* File.Dir (ocap phase 2): dir_open(path) / dir_open_write(path) open a
+       directory (O_DIRECTORY) and return its raw fd; file_open_at(dirfd, rel,
+       flags) opens rel beneath it (flags 0 read, 1 truncate, 2 append) as a
+       file handle; dir_list_at(dirfd, rel) lists rel beneath it ("" is the
+       directory itself), sorted. A path that leaves the directory is
+       Err(Escapes(rel)). runtime/march_file_beneath.c. *)
+    ("dir_open",        Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    ("dir_open_write",  Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    ("file_open_at",    Mono (TArrow (t_int, TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", [])))))));
+    ("dir_list_at",     Mono (TArrow (t_int, TArrow (t_string, t_result (t_list t_string) (TCon ("FileError", []))))));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     (* file_close returns :ok on both backends (it was declared Unit while

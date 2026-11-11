@@ -531,6 +531,10 @@ let () =
       Alcotest.test_case "File.Handle: open, open_write, read_line, write_to, seek, close, with_open"
         `Quick (run_stdlib_test "test_file_handle.march" "TestFileHandle");
     ]);
+    ("file_dir", [
+      Alcotest.test_case "File.Dir: open_dir, open_in, open_write_in, list_in, close_dir"
+        `Quick (run_stdlib_test "test_file_dir.march" "TestFileDir");
+    ]);
     ("json", [
       Alcotest.test_case "Json module"
         `Quick (run_stdlib_test "test_json.march" "TestJson");

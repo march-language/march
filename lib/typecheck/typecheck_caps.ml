@@ -225,7 +225,7 @@ let path_arg_builtins : (string * int list) list = [
   ("file_read", [0]); ("file_open", [0]); ("file_exists", [0]);
   ("file_stat", [0]); ("dir_list", [0]); ("dir_exists", [0]);
   ("file_write", [0]); ("file_append", [0]); ("file_delete", [0]);
-  ("file_open_write", [0]);
+  ("file_open_write", [0]); ("dir_open", [0]); ("dir_open_write", [0]);
   ("dir_mkdir", [0]); ("dir_mkdir_p", [0]); ("dir_rmdir", [0]);
   ("dir_rm_rf", [0]);
   (* csv_open(path, delimiter, mode): the path is argument 0 (the mode is
