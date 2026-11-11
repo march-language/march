@@ -15115,7 +15115,11 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
 (test
  (name run_cap_conformance)
- (enabled_if (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1))   ; see "CI sharding" above
+ ; Runs in CI's `compiler` shard (ci.yml), not `rest`: four backends per
+ ; fixture cost ~14 CPU-minutes there, which pushed `rest` past its timeout.
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
  (modules run_cap_conformance)
  (libraries march_test_helpers alcotest unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib)

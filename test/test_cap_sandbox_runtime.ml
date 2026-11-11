@@ -655,15 +655,16 @@ mod SbxDenyListenMac do
     Ok(fd) ->
       println("roundtrip_connect=0")
       match tcp_send_all(fd, "ping") do
-      Ok(_) -> println("roundtrip_send=0")
-      Err(_) -> println("roundtrip_send=1")
+      Ok(_) -> Authority.ignore(println("roundtrip_send=0"))
+      Err(_) -> Authority.ignore(println("roundtrip_send=1"))
       end
       tcp_close(fd)
-    Err(m) -> println("roundtrip_connect=1 " ++ m)
+    Err(m) -> Authority.ignore(println("roundtrip_connect=1 " ++ m))
     end
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
     println("connect=" ++ int_to_string(probe_connect()))
+    ()
   end
 end
 |}
@@ -771,6 +772,7 @@ mod %s do
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _w : Cap(IO.FileWrite)) : Unit do
 %s
     println("outscope=" ++ int_to_string(probe_write_open()))
+    ()
   end
 end
 |}

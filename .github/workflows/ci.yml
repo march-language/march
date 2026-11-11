@@ -182,7 +182,7 @@ jobs:
             # children print whole, then one summary line with the slowest
             # groups. Not a new shard: no extra runner from the 20-slot pool.
             refinecheck) MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-test_refinecheck ;;
-            compiler)    dune build @test/runtest-run_compiler ;;
+            compiler)    dune build @test/runtest-run_compiler @test/runtest-run_cap_conformance ;;
             rest)
               # `dune runtest` minus forge/ (the `forge` shard). A dune file
               # declaring tests outside test/, lsp/ and forge/ would run in

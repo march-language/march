@@ -54,7 +54,15 @@ let setup_hermetic_march () =
     Unix.putenv "PATH" (bindir ^ ":" ^ old_path);
     (* Empty MARCH_HOME → no global toolchain resolves → path_prefix stays empty
        → the bare `march` in the subprocess commands hits our PATH symlink. *)
-    Unix.putenv "MARCH_HOME" (Filename.temp_dir "march_hermetic_home_" "")
+    Unix.putenv "MARCH_HOME" (Filename.temp_dir "march_hermetic_home_" "");
+    (* The staged stdlib, when the dune rule passes it: march invoked through
+       the PATH symlink resolves its stdlib exe-relative from the LINK's
+       directory on macOS, and finds none for the on-demand modules. *)
+    (match Sys.getenv_opt "MARCH_TEST_STDLIB_DIR" with
+     | Some d when d <> "" ->
+       let d = if Filename.is_relative d then Filename.concat (Sys.getcwd ()) d else d in
+       Unix.putenv "MARCH_STDLIB" d
+     | _ -> ())
 
 let write_file path content =
   let oc = open_out path in

@@ -8,5 +8,5 @@ proved	user	r1_dom1.march:25:12	precondition	cnt	_ >= 0
 reflect	r1_dom1.march:2:5	p	reflected	unfold (guard: n >= 0)
 reflect	r1_dom1.march:7:5	q	reflected	unfold (guard: n >= 0)
 reflect	r1_dom1.march:11:5	cnt	reflected	unfold (guard: n >= 0)
-reflect	r1_dom1.march:15:5	guarded	no	R5:guarded match may not match (r1_dom1.march:16:10)
+reflect	r1_dom1.march:15:5	guarded	no	R5:guarded match may not match (r1_dom1.march:16:4)
 reflect	r1_dom1.march:22:5	main	no	R1:is `main` (r1_dom1.march:22:5)

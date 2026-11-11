@@ -900,6 +900,8 @@ stdlib_array: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 
 stdlib_array: coverage audit (user code): 10 enforced, 0 inert (warned), 0 unenforced
 stdlib_audio: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
 stdlib_audio: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
+stdlib_authority: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
+stdlib_authority: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_base64: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
 stdlib_base64: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_bigint: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
@@ -1073,7 +1075,7 @@ stdlib_peer_registry: coverage audit (user code): 0 enforced, 0 inert (warned), 
 stdlib_plot: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
 stdlib_plot: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_prelude: coverage audit (user + stdlib): 338 enforced, 0 inert (warned), 0 unenforced
-stdlib_prelude: coverage audit (user code): 6 enforced, 0 inert (warned), 0 unenforced
+stdlib_prelude: coverage audit (user code): 12 enforced, 0 inert (warned), 0 unenforced
 stdlib_presence: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
 stdlib_presence: coverage audit (user code): 0 enforced, 0 inert (warned), 0 unenforced
 stdlib_process: coverage audit (user + stdlib): 332 enforced, 0 inert (warned), 0 unenforced
