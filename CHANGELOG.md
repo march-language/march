@@ -516,6 +516,7 @@ git log is authoritative for exact commits.
   verdict, so only a changed program pays for the check (about 1.3 s for a small
   program); forge's check cache now also keys the compiler, so a compiler upgrade
   re-checks.
+
 - **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
   `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
   connection (ocap phase 2). A module's own type (variant, record or alias) named

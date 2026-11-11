@@ -362,10 +362,6 @@ let wrap_decl_as_module
    belongs to no module and may use the session's bindings. *)
 let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
     (ctx : March_errors.Errors.ctx) (decl : March_ast.Ast.decl) : unit =
-  if Sys.getenv_opt "MARCH_CAP_TRACE" <> None then
-    Printf.eprintf "cap-trace: repl decl is_mod=%b ctx_errors=%b\n%!"
-      (match decl with March_ast.Ast.DMod _ -> true | _ -> false)
-      (March_errors.Errors.has_errors ctx);
   match decl with
   | March_ast.Ast.DMod (_, _, _, dsp) when not (March_errors.Errors.has_errors ctx) ->
     let within (sp : March_ast.Ast.span) =
@@ -375,8 +371,20 @@ let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
       && (sp.March_ast.Ast.end_line, sp.March_ast.Ast.end_col)
          <= (dsp.March_ast.Ast.end_line, dsp.March_ast.Ast.end_col)
     in
+    (* The entry span's FILE must be one no declaration has: lowering treats
+       every top-level decl spanned in the entry's file as entry code, and
+       renames those named like a builtin with a C symbol (`read`, `write`,
+       `check`, … -> `read$u`, [Lower_state._builtin_shadows]).  With
+       [dummy_span] that file is "<none>", which stdlib declarations carry
+       too, so `File.read` was lowered as `File.read$u` while the prompt's
+       module (file "") still called `File.read`: an unknown callee, defun
+       made it an indirect call, and attribution saw no capability at all.
+       Which names are renamed depends on the builtin table, so the check
+       went silent on Linux x86_64 and, after phase 1, on macOS. *)
     let program = {
-      March_ast.Ast.mod_name = { March_ast.Ast.txt = "Repl"; span = March_ast.Ast.dummy_span };
+      March_ast.Ast.mod_name = { March_ast.Ast.txt = "Repl";
+                                 span = { March_ast.Ast.dummy_span with
+                                          March_ast.Ast.file = "<repl-cap-check>" } };
       mod_decls = stdlib_decls @ prior_mods @ [ decl ] } in
     let saved_files = !March_typecheck.Typecheck.stdlib_source_files in
     March_typecheck.Typecheck.stdlib_source_files :=
@@ -405,9 +413,6 @@ let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
              String.length d.code >= 4 && String.sub d.code 0 4 = "cap_" in
            (* Only the capability errors are new here: anything else this
               declaration has, [check_decl] already reported. *)
-           if Sys.getenv_opt "MARCH_CAP_TRACE" <> None then
-             Printf.eprintf "cap-trace: repl errors_here=%d (all=%d)\n%!"
-               (List.length errors_here) (List.length (March_errors.Errors.sorted errs));
            List.iter (fun d -> if cap_code d then March_errors.Errors.report ctx d)
              errors_here;
            (* A non-capability error here that [check_decl] did not report
