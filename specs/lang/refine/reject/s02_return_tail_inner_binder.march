@@ -1,0 +1,14 @@
+-- EXPECT-VIOLATED: postcondition g2
+-- EXPECT-ERROR: A counterexample was found
+-- Fixed 2026-10-18 (specs/progress/2026-10-18-element-flow-phase2-scalar-demands.md,
+-- "a tail's inner binders"). The arm's `n` shadows the refined parameter `n`.
+-- The parameter's `_ < 0` and the arm's `n > 5` were read as one variable, a
+-- contradiction that proved the tail `0 - 7`. `g2(0 - 1, Some(10))` is -7.
+mod S02 do
+  fn g2(n : {Int | _ < 0}, p : Option(Int)) : {Int | _ > 0} do
+    match p do
+      Some(n) -> if n > 5 do 0 - 7 else 1 end
+      None -> 1
+    end
+  end
+end

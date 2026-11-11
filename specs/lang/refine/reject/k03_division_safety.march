@@ -1,0 +1,7 @@
+-- EXPECT-VIOLATED: division n
+-- EXPECT-ERROR: may be by zero
+-- Kind: division safety. `cap no_panic` and an unconstrained divisor.
+mod K03 do
+  cap no_panic
+  fn per(total : Int, n : Int) : Int do total / n end
+end

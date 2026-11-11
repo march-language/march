@@ -119,7 +119,7 @@ check_one() {
   # export vs this worktree) even after the prefix is stripped.  Symlinking the
   # corpus roots into the cwd gives the relative path without the shared cache.
   rm -rf "$DIR/cwd/$tag"; mkdir -p "$DIR/cwd/$tag"
-  for t in test stdlib; do ln -s "$ROOT/$t" "$DIR/cwd/$tag/$t"; done
+  for t in test stdlib specs; do ln -s "$ROOT/$t" "$DIR/cwd/$tag/$t"; done
   # Normalise absolute paths so the manifest is machine- and worktree-
   # independent, then tag every line so a fixture that stops emitting shows up
   # as its lines disappearing rather than as a silent shift.
@@ -135,7 +135,12 @@ check_one() {
 }
 export -f check_one
 
-ls "$ROOT"/test/native/*.march "$ROOT"/stdlib/*.march 2>/dev/null > "$DIR/fixtures.txt"
+# specs/lang/refine/reject is the must-reject corpus: the only fixtures here
+# with a VIOLATED obligation, so the manifest pins the text of a violation
+# too.  (Whether each one IS violated is specs/lang/refine/check_refine.sh's
+# question, not this script's.)
+ls "$ROOT"/test/native/*.march "$ROOT"/stdlib/*.march "$ROOT"/specs/lang/refine/reject/*.march \
+  2>/dev/null > "$DIR/fixtures.txt"
 n=$(wc -l < "$DIR/fixtures.txt" | tr -d ' ')
 # One serial run first so the private HOME's stdlib cache is written once
 # rather than raced by every worker.
