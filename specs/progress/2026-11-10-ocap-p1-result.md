@@ -41,7 +41,9 @@ returns `Result(Result(U, E), CapError)`.
 - Gate on raw capability builtins: specs/todos/2026-11-10-ocap-p1-gate-raw-capability-builtins.md.
 - UDP, TLS contexts, HttpTransport/HttpClient, HttpServer; HttpError's refusal
   variants: specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md.
-- Found on the way, pre-existing: specs/todos/2026-11-10-user-fn-named-show-hijacks-prelude-println-compiled.md.
+- Found on the way, pre-existing: a user `fn show(r : Result(a, String))` changed what compiled
+  `println` printed. Fixed on main by the user-fn-named-like-an-interface-method change
+  (CHANGELOG "A user fn named like `show` ..."); the todo filed here was dropped at the merge.
 
 ## Things to know
 
