@@ -1112,7 +1112,8 @@ mod NodeB do
     let my_id = NodeIdentity.make("b@127.0.0.1", "node-b-pubkey", 1)
     let secret = -- same secret as Node A
 
-    match Socket.connect("127.0.0.1", 9000) do
+    -- NetKernel works on raw descriptors (the cluster stack is trusted).
+    match tcp_connect("127.0.0.1", 9000) do
       Err(e) -> Env.exit(1)
       Ok(fd) ->
         let nonce = NetKernel.fresh_nonce()

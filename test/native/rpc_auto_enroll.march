@@ -60,7 +60,7 @@ mod RpcAutoEnroll do
 
     let srv = task_spawn(fn _ -> run_server(listen_fd))
 
-    let conn_fd = match Socket.connect("127.0.0.1", port) do
+    let conn_fd = match Result.map_err(tcp_connect("127.0.0.1", port), fn m -> Socket.ConnectionFailed(m)) do
       Ok(fd) -> fd
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end

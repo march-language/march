@@ -31,7 +31,7 @@ mod TwoNodePartitionB do
   end
 
   pfn write_frame(fd : Int, bytes : List(Int)) : () do
-    let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(bytes)))
+    let _ = Result.map_err(tcp_send_all(fd, NetKernel.bytes_to_str(NetFrame.encode(bytes))), fn m -> Socket.WriteFailed(m))
     ()
   end
 
@@ -93,7 +93,7 @@ mod TwoNodePartitionB do
   type Tick = { s : SwimDriver.State, buf : List(Int), acked : Bool, closed : Bool, reg : GlobalRegistry.Names, synced : Bool }
 
   pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names) : Tick do
-    let got = match Socket.recv_timeout(fd, 4096, 50) do
+    let got = match Result.map_err(tcp_recv_chunk_timeout(fd, 4096, 50), fn m -> if m == "recv: timed out" do Socket.RecvTimeout(50) else Socket.RecvFailed(m) end) do
       Ok(chunk) -> if String.is_empty(chunk) do (buf, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false) end
       Err(Socket.RecvTimeout(_)) -> (buf, false)
       Err(_) -> (buf, true)

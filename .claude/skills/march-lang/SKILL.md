@@ -668,6 +668,8 @@ Functions always in scope without `use`:
 
 **WebSocket** — `new`, `send`, `receive`, `close`, `is_open`
 
+**Socket** — handles `Socket` (connection) and `Listener`; a use after `close` is `Err(Closed)`, closing wakes a task parked in `recv`/`accept`: `connect`, `connect_timeout`, `write`, `recv`, `recv_timeout`, `recv_deadline`, `set_recv_timeout`, `peer_addr`, `close`, `with_connection`, `listen(port)` (0 = any free port), `accept`, `accept_timeout`, `local_port`, `close_listener`. `Tls.connect(s, ctx, host)` / `Tls.accept(s, ctx)` take the `Socket` over on success (`Tls.close` closes both)
+
 **Udp** — `open`, `open_with`, `open_sharded`, `defaults`, `resolve`, `connect`, `send_to`, `send`, `send_batch`, `send_batch_connected`, `send_many`, `recv`, `recv_batch`, `local_addr`, `local_port`, `addr_to_string`, `addr_port`, `stats`, `close`. Packets are `String`; types are `UdpSocket`/`UdpAddr`/`UdpOptions`/`UdpStats` (global type namespace)
 
 **Session.Theory** — `project`, `project_bs`, `dual`, `erase`, `same`, `merge`, `informed`, `binary`; lemmas `dual_dual`, `project_dual`, `same_eq`. Types `SessionGlobal`/`SessionGBranches`/`SessionLocal`/`SessionLBranches` over `Int` ids. The spec the compiler's protocol projectors are validated against (`--validate-projections`)

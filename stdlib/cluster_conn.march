@@ -74,9 +74,12 @@ mod ClusterConn do
   end
 
   pfn dial(host, port, my_id, auth, role, timeout_ms) do
+    -- The cluster stack keeps raw descriptors (cluster peers are trusted;
+    -- ocap phase 2 decision 4): take the fd out of the Socket handle.
     match Socket.connect(host, port) do
       Err(e) -> Err(Socket.error_message(e))
-      Ok(fd) ->
+      Ok(s) ->
+        let fd = handle_detach(s)
         match handshake_within(fd, my_id, auth, role, timeout_ms) do
           Err(e) -> Err(e)
           Ok(a) -> Ok((fd, a))
@@ -231,7 +234,8 @@ mod ClusterConn do
   fn connect_to_peer(reg, host, port, my_id, secret) do
     match Socket.connect(host, port) do
       Err(e) -> Err(Socket.error_message(e))
-      Ok(fd) ->
+      Ok(s) ->
+        let fd = handle_detach(s)
         finish(reg, fd, NetKernel.handshake(fd, my_id, secret, NetKernel.fresh_nonce()))
     end
   end

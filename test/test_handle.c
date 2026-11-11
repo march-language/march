@@ -252,7 +252,8 @@ static void fatal_hook(const char *why) {
     (void)!write(g_hook_pipe[1], &c, 1);
 }
 
-enum fatal_case { WRONG_KIND, NOT_A_HANDLE, BORROWED_FOR_LISTENER };
+enum fatal_case { WRONG_KIND, NOT_A_HANDLE, BORROWED_FOR_LISTENER,
+                  TLS_NO_RELEASER, TLS_CTX_NO_RELEASER };
 
 static void run_fatal_case(enum fatal_case fc, const char *what) {
     if (pipe(g_hook_pipe) != 0) { perror("pipe"); exit(2); }
@@ -270,9 +271,16 @@ static void run_fatal_case(enum fatal_case fc, const char *what) {
             void *cell = march_alloc(24);
             ((march_hdr *)cell)->tag = 0;
             (void)march_handle_enter(cell, MARCH_HANDLE_FILE);
-        } else {
+        } else if (fc == BORROWED_FOR_LISTENER) {
             void *h = march_handle_new(MARCH_HANDLE_TCP_BORROWED, 99, 0);
             (void)march_handle_enter(h, MARCH_HANDLE_LISTENER);
+        } else {
+            /* This runner links no march_tls.c, so no TLS closer is
+             * registered: releasing the box must abort, not leak (R4). */
+            march_handle_test_release_hook = NULL;
+            void *h = march_handle_new(fc == TLS_NO_RELEASER ? MARCH_HANDLE_TLS
+                                                             : MARCH_HANDLE_TLS_CTX, 1234, -1);
+            (void)march_handle_close(h);
         }
         _exit(0);                            /* reached only if enter did not die */
     }
@@ -293,6 +301,76 @@ static void test_kind_mismatch_is_fatal(void) {
     run_fatal_case(WRONG_KIND, "DIR box entered as FILE");
     run_fatal_case(NOT_A_HANDLE, "ordinary cell entered as a handle");
     run_fatal_case(BORROWED_FOR_LISTENER, "TCP_BORROWED box entered as LISTENER");
+}
+
+static void test_missing_tls_releaser_is_fatal(void) {
+    run_fatal_case(TLS_NO_RELEASER, "TLS box released with no closer registered");
+    run_fatal_case(TLS_CTX_NO_RELEASER, "TLS_CTX box released with no closer registered");
+}
+
+/* ── close cancels a wait on the descriptor (R3) ───────────────────────────
+ * A thread waits for a LISTENING socket to become readable (what accept
+ * parks on) through march_sched_wait_fd.  Off a green thread that is the
+ * blocking path.  On macOS shutdown() on a listening socket fails with
+ * ENOTCONN and wakes nothing, so only the scheduler's cancellation can end
+ * the wait; on Linux both do. */
+#include "../runtime/march_scheduler.h"
+#include <netinet/in.h>
+
+static int listening_socket(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof a) != 0 || listen(fd, 4) != 0) {
+        perror("listening_socket"); exit(2);
+    }
+    return fd;
+}
+
+typedef struct { void *h; int rc; int err; int64_t took_ms; } waiter_arg;
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void *wait_listener(void *p) {
+    waiter_arg *a = p;
+    int64_t fd = march_handle_enter(a->h, MARCH_HANDLE_LISTENER);
+    int64_t t0 = mono_ms();
+    a->rc = march_sched_wait_fd((int)fd, 0, mono_ms() + 5000);
+    a->err = errno;
+    a->took_ms = mono_ms() - t0;
+    march_handle_leave(a->h);
+    return NULL;
+}
+
+static void test_close_cancels_listener_wait(void) {
+    remove_counter();
+    int lfd = listening_socket();
+    void *h = march_handle_new(MARCH_HANDLE_LISTENER, lfd, 0);
+    waiter_arg a = { h, 99, 0, 0 };
+    pthread_t t;
+    pthread_create(&t, NULL, wait_listener, &a);
+    struct timespec ts = { 0, 100 * 1000000L };
+    nanosleep(&ts, NULL);
+    CHECK(march_handle_close(h) == 1, "close the listener");
+    pthread_join(t, NULL);
+    CHECK(a.rc == MARCH_FDWAIT_ERROR, "the parked wait ends in an error, not a timeout");
+    CHECK(a.err == ECANCELED, "errno is ECANCELED");
+    CHECK(a.took_ms < 1000, "the wait ends well before its 5 s deadline");
+    CHECK(!fd_is_open(lfd), "the listener is released after the waiter leaves");
+    /* The cancellation went with the descriptor: a new socket that reuses the
+     * number waits normally (times out). */
+    int again = listening_socket();
+    int rc = march_sched_wait_fd(again, 0, mono_ms() + 150);
+    CHECK(rc == MARCH_FDWAIT_TIMEOUT, "a reused descriptor number is not cancelled");
+    close(again);
+    march_decrc(h);
 }
 
 /* ── message copy shares the box ───────────────────────────────────────── */
@@ -367,6 +445,8 @@ int main(void) {
     test_detach_does_not_release();
     test_borrowed_tcp();
     test_kind_mismatch_is_fatal();
+    test_missing_tls_releaser_is_fatal();
+    test_close_cancels_listener_wait();
     test_msg_copy_shares();
     test_to_string();
     if (g_failed) {

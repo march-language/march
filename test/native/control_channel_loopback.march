@@ -30,7 +30,7 @@ mod ControlChannelLoopback do
   pfn write_chunks(fd : Int, n : Int) : () do
     if n <= 0 do ()
     else
-      let _ = Socket.write(fd, chunk())
+      let _ = Result.map_err(tcp_send_all(fd, chunk()), fn m -> Socket.WriteFailed(m))
       write_chunks(fd, n - 1)
     end
   end
@@ -42,10 +42,10 @@ mod ControlChannelLoopback do
       Ok((_reg, peer)) ->
         -- (node-b prints nothing: its lines would race node-a's.)
         -- frame header for data_len() bytes, then the body in 64 KiB chunks
-        let _ = Socket.write(peer.data_fd, NetKernel.bytes_to_str(NetFrame.encode(Nil)))
-        let _ = Socket.write(peer.data_fd, NetKernel.bytes_to_str(
+        let _ = Result.map_err(tcp_send_all(peer.data_fd, NetKernel.bytes_to_str(NetFrame.encode(Nil))), fn m -> Socket.WriteFailed(m))
+        let _ = Result.map_err(tcp_send_all(peer.data_fd, NetKernel.bytes_to_str(
           Cons(int_shr(data_len(), 24), Cons(int_and(int_shr(data_len(), 16), 255),
-          Cons(int_and(int_shr(data_len(), 8), 255), Cons(int_and(data_len(), 255), Nil))))))
+          Cons(int_and(int_shr(data_len(), 8), 255), Cons(int_and(data_len(), 255), Nil)))))), fn m -> Socket.WriteFailed(m))
         write_chunks(peer.data_fd, 64)
         let _ = NetKernel.send_frame(peer.fd, SwimDriver.encode_msg(SwimDriver.SwimPing("node-b")))
         write_chunks(peer.data_fd, 192)
@@ -59,7 +59,7 @@ mod ControlChannelLoopback do
   -- Reads until EOF; on an error, remembers it so a short count is
   -- diagnosable from the golden diff rather than a bare "false".
   @[diverges] pfn read_data(fd : Int, got : Int) : Int do
-    match Socket.recv(fd, 1048576) do
+    match Result.map_err(tcp_recv_chunk(fd, 1048576), fn m -> Socket.RecvFailed(m)) do
       Ok(s) ->
         if String.is_empty(s) do got else read_data(fd, got + string_length(s)) end
       Err(e) ->

@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: Socket.raw_fd
+-- `@[stdlib_internal]` (ocap phase 2, Task 3): `Socket.raw_fd` hands the
+-- descriptor inside a `Socket` to C. It exists for standard-library code
+-- that talks to the runtime with raw descriptors; user code that got the
+-- integer out could use it after the socket is closed, when the number may
+-- already name someone else's connection. A user program cannot call it.
+mod LeaksADescriptor do
+  needs IO.Console
+  needs IO.NetConnect
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+    match Socket.connect("127.0.0.1", 1) do
+    Ok(s) -> println(int_to_string(Socket.raw_fd(s)))
+    Err(e) -> println(Socket.error_message(e))
+    end
+  end
+end

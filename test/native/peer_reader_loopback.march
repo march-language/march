@@ -101,7 +101,7 @@ mod PeerReaderLoopback do
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Result.map_err(tcp_connect(host, port), fn m -> Socket.ConnectionFailed(m)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
@@ -132,7 +132,7 @@ mod PeerReaderLoopback do
       List.append(NetFrame.encode(SwimDriver.encode_msg(SwimDriver.SwimPing("node-a"))),
       List.append(NetFrame.encode(NodeSend.encode_msg(1, target, "PeerReaderLoopback.Item", Cons(42, Nil))),
                   NetFrame.encode(SwimDriver.encode_msg(SwimDriver.SwimPing("node-a")))))
-    let _ = Socket.write(conn_fd, NetKernel.bytes_to_str(burst))
+    let _ = Result.map_err(tcp_send_all(conn_fd, NetKernel.bytes_to_str(burst)), fn m -> Socket.WriteFailed(m))
     println("node-a: wrote 3 frames in one burst")
 
     let _ = task_await(srv)

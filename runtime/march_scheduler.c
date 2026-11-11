@@ -4690,12 +4690,74 @@ typedef struct fdwait_ent {
     int                 want_write;
     march_proc         *proc;
     int                 done;       /* set by fdwait_service under g_fdwait_mu */
+    int                 cancelled;  /* set by march_sched_fdwait_cancel, ditto */
     struct fdwait_ent  *next;
 } fdwait_ent;
 
 static pthread_mutex_t  g_fdwait_mu   = PTHREAD_MUTEX_INITIALIZER;
 static fdwait_ent      *g_fdwait_head = NULL;
 static int              g_fdwait_fd   = -1;    /* kqueue()/epoll_create1(), lazily */
+
+/* Descriptors whose waits are cancelled (march_sched_fdwait_cancel), under
+ * g_fdwait_mu.  Small: an entry lives from a handle's close until its last
+ * in-flight use leaves.  g_fdwait_ncancelled is also read without the mutex,
+ * as a cheap "is anything cancelled at all" test on the blocking path. */
+static int             *g_fdwait_cancelled     = NULL;
+static int              g_fdwait_cancelled_cap = 0;
+static _Atomic int      g_fdwait_ncancelled    = 0;
+
+/* Under g_fdwait_mu. */
+static int fdwait_is_cancelled(int fd) {
+    int n = atomic_load_explicit(&g_fdwait_ncancelled, memory_order_relaxed);
+    for (int i = 0; i < n; i++) if (g_fdwait_cancelled[i] == fd) return 1;
+    return 0;
+}
+
+static int fdwait_is_cancelled_locked(int fd) {
+    if (atomic_load_explicit(&g_fdwait_ncancelled, memory_order_acquire) == 0) return 0;
+    pthread_mutex_lock(&g_fdwait_mu);
+    int c = fdwait_is_cancelled(fd);
+    pthread_mutex_unlock(&g_fdwait_mu);
+    return c;
+}
+
+void march_sched_fdwait_cancel(int fd) {
+    if (fd < 0) return;
+    pthread_mutex_lock(&g_fdwait_mu);
+    if (!fdwait_is_cancelled(fd)) {
+        int n = atomic_load_explicit(&g_fdwait_ncancelled, memory_order_relaxed);
+        if (n == g_fdwait_cancelled_cap) {
+            int cap = g_fdwait_cancelled_cap ? g_fdwait_cancelled_cap * 2 : 16;
+            int *grown = realloc(g_fdwait_cancelled, (size_t)cap * sizeof(int));
+            if (grown) { g_fdwait_cancelled = grown; g_fdwait_cancelled_cap = cap; }
+        }
+        if (n < g_fdwait_cancelled_cap) {
+            g_fdwait_cancelled[n] = fd;
+            atomic_store_explicit(&g_fdwait_ncancelled, n + 1, memory_order_release);
+        }
+    }
+    /* Rule 1 above: wake under the mutex, so no entry can leave meanwhile. */
+    for (fdwait_ent *e = g_fdwait_head; e; e = e->next) {
+        if (e->fd != fd || e->done) continue;
+        e->done = 1;
+        e->cancelled = 1;
+        march_sched_wake(e->proc);
+    }
+    pthread_mutex_unlock(&g_fdwait_mu);
+}
+
+void march_sched_fdwait_forget(int fd) {
+    if (fd < 0 || atomic_load_explicit(&g_fdwait_ncancelled, memory_order_acquire) == 0) return;
+    pthread_mutex_lock(&g_fdwait_mu);
+    int n = atomic_load_explicit(&g_fdwait_ncancelled, memory_order_relaxed);
+    for (int i = 0; i < n; i++) {
+        if (g_fdwait_cancelled[i] != fd) continue;
+        g_fdwait_cancelled[i] = g_fdwait_cancelled[n - 1];
+        atomic_store_explicit(&g_fdwait_ncancelled, n - 1, memory_order_release);
+        break;
+    }
+    pthread_mutex_unlock(&g_fdwait_mu);
+}
 
 /* Under g_fdwait_mu. */
 /* Under g_fdwait_mu.  The store is atomic because fdwait_service reads
@@ -4812,6 +4874,10 @@ static void fdwait_service(void) {
     }
 }
 
+/* How often a blocking wait looks for a cancellation (march_sched_fdwait_cancel
+ * has no green thread to wake there). */
+#define FDWAIT_CANCEL_POLL_MS 100
+
 static int fdwait_blocking(int fd, int want_write, int64_t deadline_ms) {
     struct pollfd pfd;
     pfd.fd = fd;
@@ -4819,14 +4885,17 @@ static int fdwait_blocking(int fd, int want_write, int64_t deadline_ms) {
     pfd.revents = 0;
     int rc;
     for (;;) {
-        int ms = -1;
+        if (fdwait_is_cancelled_locked(fd)) { errno = ECANCELED; return MARCH_FDWAIT_ERROR; }
+        int ms = FDWAIT_CANCEL_POLL_MS;
+        int last = 0;
         if (deadline_ms > 0) {
             int64_t rem = deadline_ms - march_now_ms();
             if (rem <= 0) return MARCH_FDWAIT_TIMEOUT;
-            ms = rem > INT_MAX ? INT_MAX : (int)rem;
+            if (rem <= ms) { ms = (int)rem; last = 1; }
         }
         rc = poll(&pfd, 1, ms);
         if (rc < 0 && errno == EINTR) continue;
+        if (rc == 0 && !last) continue;      /* a slice, not the deadline */
         break;
     }
     if (rc < 0) return MARCH_FDWAIT_ERROR;
@@ -4842,9 +4911,14 @@ int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms) {
         return fdwait_blocking(fd, want_write, deadline_ms);
 
     fdwait_ent ent;
-    ent.fd = fd; ent.want_write = want_write; ent.proc = p; ent.done = 0;
+    ent.fd = fd; ent.want_write = want_write; ent.proc = p; ent.done = 0; ent.cancelled = 0;
 
     pthread_mutex_lock(&g_fdwait_mu);
+    if (fdwait_is_cancelled(fd)) {
+        pthread_mutex_unlock(&g_fdwait_mu);
+        march_errno_set(ECANCELED);
+        return MARCH_FDWAIT_ERROR;
+    }
     if (fdwait_open() < 0) {
         pthread_mutex_unlock(&g_fdwait_mu);
         return fdwait_blocking(fd, want_write, deadline_ms);
@@ -4866,12 +4940,13 @@ int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms) {
         int64_t until = (deadline_ms > 0 && deadline_ms < chunk) ? deadline_ms : chunk;
         (void)march_sched_park_self_until(until);
         pthread_mutex_lock(&g_fdwait_mu);
-        if (ent.done) { result = MARCH_FDWAIT_READY; break; }
+        if (ent.done) { result = ent.cancelled ? MARCH_FDWAIT_ERROR : MARCH_FDWAIT_READY; break; }
         if (deadline_ms > 0 && march_now_ms() >= deadline_ms) { result = MARCH_FDWAIT_TIMEOUT; break; }
         pthread_mutex_unlock(&g_fdwait_mu);
     }
     fdwait_remove(&ent);           /* still under g_fdwait_mu */
     pthread_mutex_unlock(&g_fdwait_mu);
+    if (ent.cancelled) march_errno_set(ECANCELED);
     return result;
 }
 
@@ -4899,14 +4974,18 @@ int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms) {
         for (int i = 0; i < n; i++) { pfds[i].fd = fds[i]; pfds[i].events = POLLIN; pfds[i].revents = 0; }
         int rc;
         for (;;) {
-            int ms = -1;
+            for (int i = 0; i < n; i++)
+                if (fdwait_is_cancelled_locked(fds[i])) { errno = ECANCELED; return MARCH_FDWAIT_ERROR; }
+            int ms = FDWAIT_CANCEL_POLL_MS;
+            int last = 0;
             if (deadline_ms > 0) {
                 int64_t rem = deadline_ms - march_now_ms();
                 if (rem <= 0) return MARCH_FDWAIT_TIMEOUT;
-                ms = rem > INT_MAX ? INT_MAX : (int)rem;
+                if (rem <= ms) { ms = (int)rem; last = 1; }
             }
             rc = poll(pfds, (nfds_t)n, ms);
             if (rc < 0 && errno == EINTR) continue;
+            if (rc == 0 && !last) continue;
             break;
         }
         if (rc < 0) return MARCH_FDWAIT_ERROR;
@@ -4917,6 +4996,13 @@ int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms) {
 
     fdwait_ent ents[4];
     pthread_mutex_lock(&g_fdwait_mu);
+    for (int i = 0; i < n; i++) {
+        if (fdwait_is_cancelled(fds[i])) {
+            pthread_mutex_unlock(&g_fdwait_mu);
+            march_errno_set(ECANCELED);
+            return MARCH_FDWAIT_ERROR;
+        }
+    }
     if (fdwait_open() < 0) {
         pthread_mutex_unlock(&g_fdwait_mu);
         errno = ENOSYS;
@@ -4924,6 +5010,7 @@ int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms) {
     }
     for (int i = 0; i < n; i++) {
         ents[i].fd = fds[i]; ents[i].want_write = 0; ents[i].proc = p; ents[i].done = 0;
+        ents[i].cancelled = 0;
         ents[i].next = g_fdwait_head;
         g_fdwait_head = &ents[i];
         if (fdwait_arm(fds[i], 0) < 0) {
@@ -4948,8 +5035,11 @@ int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms) {
         if (deadline_ms > 0 && march_now_ms() >= deadline_ms) break;
         pthread_mutex_unlock(&g_fdwait_mu);
     }
+    int cancelled = 0;
+    for (int i = 0; i < n; i++) cancelled |= ents[i].cancelled;
     for (int i = 0; i < n; i++) fdwait_remove(&ents[i]);   /* still under g_fdwait_mu */
     pthread_mutex_unlock(&g_fdwait_mu);
+    if (cancelled) { march_errno_set(ECANCELED); return MARCH_FDWAIT_ERROR; }
     return result;
 }
 

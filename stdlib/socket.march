@@ -1,26 +1,45 @@
--- TCP socket module: a clean interface over the tcp_* builtins.
+-- TCP socket module: connections and listeners as handles.
 --
--- Wraps the low-level tcp_connect / tcp_send_all / tcp_recv_all /
--- tcp_close builtins with an ergonomic Result-based API.
+-- Wraps the low-level tcp_* builtins with an ergonomic Result-based API.
 -- All operations are synchronous.  For async use, wrap in task_spawn.
 --
--- File descriptors are plain Int values.  Always call Socket.close
--- when done, ideally via Socket.with_connection which ensures cleanup.
+-- A connection is a `Socket` and a listening socket a `Listener`: opaque,
+-- reference-counted handles, not descriptor numbers (ocap phase 2, spec §6).
+-- Opening one (`connect`, `listen`) is what the capability check covers;
+-- using a handle you hold needs nothing more. A use after `close` is
+-- `Err(SocketError.Closed)`. Closing a socket another task is blocked on (in `recv` or
+-- `accept`) wakes that task with `Err(SocketError.Closed)`; the descriptor itself is
+-- released only once every use in flight has returned, so a late use can
+-- never land on a reused descriptor number. A handle that is dropped without
+-- `close` is closed when its last reference goes. Sending a handle to a
+-- local actor shares it; handles cannot be sent to another node.
 --
 -- Public API:
---   Socket.connect(host, port)             : Result(Int, SocketError)
---   Socket.connect_timeout(host, port, ms) : Result(Int, SocketError)
---   Socket.write(fd, data)                 : Result((), SocketError)
---   Socket.recv(fd, max_bytes)             : Result(String, SocketError)
---   Socket.recv_timeout(fd, max, ms)       : Result(String, SocketError)
---   Socket.set_recv_timeout(fd, ms)        : Result((), SocketError)
---   Socket.recv_deadline(fd, max, ms)      : Result(Option(String), SocketError)
---   Socket.close(fd)                       : ()
+--   Socket.connect(host, port)             : Result(Socket, SocketError)
+--   Socket.connect_timeout(host, port, ms) : Result(Socket, SocketError)
+--   Socket.write(s, data)                  : Result((), SocketError)
+--   Socket.recv(s, max_bytes)              : Result(String, SocketError)
+--   Socket.recv_timeout(s, max, ms)        : Result(String, SocketError)
+--   Socket.set_recv_timeout(s, ms)         : Result((), SocketError)
+--   Socket.recv_deadline(s, max, ms)       : Result(Option(String), SocketError)
+--   Socket.peer_addr(s)                    : Result(String, SocketError)
+--   Socket.close(s)                        : Result((), SocketError)
 --   Socket.with_connection(host, port, f)  : Result(a, SocketError)
+--   Socket.listen(port)                    : Result(Listener, SocketError)
+--   Socket.accept(l)                       : Result(Socket, SocketError)
+--   Socket.accept_timeout(l, ms)           : Result(Socket, SocketError)
+--   Socket.local_port(l)                   : Result(Int, SocketError)
+--   Socket.close_listener(l)               : Result((), SocketError)
 --   Socket.error_message(e)                : String
 
 mod Socket do
   needs IO.NetConnect
+  needs IO.NetListen
+
+  -- Handle-box kinds (runtime/march_runtime.h MARCH_HANDLE_*).
+  pfn kind_tcp() : Int do 3 end
+  pfn kind_tcp_borrowed() : Int do 4 end
+  pfn kind_listener() : Int do 5 end
 
   type SocketError
     = ConnectionFailed(String)
@@ -28,6 +47,11 @@ mod Socket do
     | RecvFailed(String)
     | RecvTimeout(Int)
     | SocketOptionFailed(String)
+    | ListenFailed(String)
+    | AcceptFailed(String)
+    | Closed
+
+  derive Eq for SocketError
 
   doc """
   Return a human-readable description of a SocketError.
@@ -44,23 +68,110 @@ mod Socket do
     RecvFailed(msg)       -> "receive failed: " ++ msg
     RecvTimeout(ms)       -> "receive timed out after " ++ int_to_string(ms) ++ "ms"
     SocketOptionFailed(m) -> "socket option failed: " ++ m
+    ListenFailed(m)       -> "listen failed: " ++ m
+    AcceptFailed(m)       -> "accept failed: " ++ m
+    SocketError.Closed                -> "the socket is closed"
+    end
+  end
+
+  -- ── Handle plumbing ───────────────────────────────────────────────────────
+
+  -- Run f on the descriptor inside s, or Err(SocketError.Closed) if s is closed. The
+  -- enter/leave pair keeps the descriptor from being released (and its number
+  -- reused) while f runs, even if another task closes s meanwhile.
+  pfn with_raw(s : Socket, f : Int -> Result(b, SocketError)) : Result(b, SocketError) do
+    let fd = handle_enter(s, kind_tcp())
+    if fd == -1 do Err(SocketError.Closed) else
+      let r = f(fd)
+      handle_leave(s)
+      r
+    end
+  end
+
+  pfn with_listener(l : Listener, f : Int -> Result(b, SocketError)) : Result(b, SocketError) do
+    let fd = handle_enter(l, kind_listener())
+    if fd == -1 do Err(SocketError.Closed) else
+      let r = f(fd)
+      handle_leave(l)
+      r
+    end
+  end
+
+  -- A read that ended because s was closed under it (another task called
+  -- close while this one was parked) is Err(SocketError.Closed), whatever the raw call
+  -- saw: EOF from shutdown(), or the cancelled wait.
+  pfn closed_read(closed : Bool, r : Result(String, SocketError)) : Result(String, SocketError) do
+    if closed do
+      match r do
+      Ok(data) -> if data == "" do Err(SocketError.Closed) else r end
+      Err(_) -> Err(SocketError.Closed)
+      end
+    else r end
+  end
+
+  pfn closed_read_opt(closed : Bool, r : Result(Option(String), SocketError)) : Result(Option(String), SocketError) do
+    if closed do
+      match r do
+      Ok(Some(data)) -> if data == "" do Err(SocketError.Closed) else r end
+      Ok(None) -> r
+      Err(_) -> Err(SocketError.Closed)
+      end
+    else r end
+  end
+
+  doc """
+  The descriptor inside `s`, for standard-library code that hands it to the
+  runtime; -1 if `s` is closed. The number stays valid only while `s` is
+  open and referenced: do not keep it.
+  """
+  @[stdlib_internal]
+  fn raw_fd(s : Socket) : Int do
+    let fd = handle_enter(s, kind_tcp())
+    if fd == -1 do -1 else
+      handle_leave(s)
+      fd
     end
   end
 
   doc """
-  Open a TCP connection to host:port. Returns `Ok(fd)` or
-  `Err(ConnectionFailed(msg))`. The caller must `close` the fd.
+  Wrap a descriptor this code owns as a `Socket`. The Socket now owns it:
+  closing or dropping the Socket closes the descriptor.
+  """
+  @[stdlib_internal]
+  fn adopt(fd : Int) : Socket do
+    let s : Socket = handle_new(kind_tcp(), fd, 0)
+    s
+  end
+
+  doc """
+  Wrap a descriptor something else owns (the HTTP event loop, the cluster
+  stack) as a `Socket` for the duration of a call. Closing or dropping it
+  never closes the descriptor. Never pass one to `Tls.connect` /
+  `Tls.accept`, which take ownership.
+  """
+  @[stdlib_internal]
+  fn borrow(fd : Int) : Socket do
+    let s : Socket = handle_new(kind_tcp_borrowed(), fd, 0)
+    s
+  end
+
+  -- ── Connections ───────────────────────────────────────────────────────────
+
+  doc """
+  Open a TCP connection to host:port. Returns `Ok(socket)` or
+  `Err(ConnectionFailed(msg))`. Close the socket with `close` (or let
+  `with_connection` do it).
 
   ## Examples
 
       match Socket.connect("127.0.0.1", 6379) do
-        Ok(fd) -> use_redis(fd)
+        Ok(s) -> use_redis(s)
         Err(e) -> println(Socket.error_message(e))
       end
   """
-  fn connect(host : String, port : Int) : Result(Int, SocketError) do
+  fn connect(host : String, port : Int) : Result(Socket, SocketError) do
     match tcp_connect(host, port) do
-    Ok(fd)   -> Ok(fd)
+    Ok(fd)   -> Ok(adopt(fd))
     Err(msg) -> Err(ConnectionFailed(msg))
     end
   end
@@ -76,66 +187,70 @@ mod Socket do
 
       Socket.connect_timeout("10.0.0.5", 8080, 2000)
   """
-  fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Int, SocketError) do
+  fn connect_timeout(host : String, port : Int, timeout_ms : Int) : Result(Socket, SocketError) do
     match tcp_connect_timeout(host, port, timeout_ms) do
-    Ok(fd)   -> Ok(fd)
+    Ok(fd)   -> Ok(adopt(fd))
     Err(msg) -> Err(ConnectionFailed(msg))
     end
   end
 
   doc """
-  Write all bytes of data over fd, looping over short writes. Returns
-  `Ok(())` or `Err(WriteFailed(msg))`.
+  Write all bytes of data to s, looping over short writes. Returns
+  `Ok(())`, `Err(WriteFailed(msg))`, or `Err(SocketError.Closed)` once s is closed.
 
   ## Examples
 
-      Socket.write(fd, "PING\r\n")
+      Socket.write(s, "PING\r\n")
   """
-  fn write(fd : Int, data : String) : Result((), SocketError) do
-    match tcp_send_all(fd, data) do
-    Ok(_)    -> Ok(())
-    Err(msg) -> Err(WriteFailed(msg))
-    end
+  fn write(s : Socket, data : String) : Result((), SocketError) do
+    with_raw(s, fn fd ->
+      match tcp_send_all(fd, data) do
+      Ok(_)    -> Ok(())
+      Err(msg) -> if handle_is_closed(s) do Err(SocketError.Closed) else Err(WriteFailed(msg)) end
+      end)
   end
 
   doc """
-  Receive up to max_bytes from fd, with no per-call deadline.
+  Receive up to max_bytes from s, with no per-call deadline.
 
-  This still reports Err(RecvTimeout(0)) if the fd carries a deadline from
+  This still reports Err(RecvTimeout(0)) if s carries a deadline from
   set_recv_timeout and that deadline expires -- the 0 records that the bound
   came from the descriptor rather than from this call, which had none of its
   own.  Otherwise it blocks until the peer sends or the connection closes.
   `Ok("")` means the peer closed the connection (EOF); other failures are
-  `Err(RecvFailed(msg))`.
+  `Err(SocketError.RecvFailed(msg))`. If another task closes s while this one waits,
+  this returns `Err(SocketError.Closed)`.
 
   ## Examples
 
-      match Socket.recv(fd, 4096) do
+      match Socket.recv(s, 4096) do
         Ok("") -> :closed
         Ok(data) -> handle(data)
         Err(e) -> println(Socket.error_message(e))
       end
   """
-  fn recv(fd : Int, max_bytes : Int) : Result(String, SocketError) do
-    match tcp_recv_chunk(fd, max_bytes) do
-    Ok(data) -> Ok(data)
-    Err(msg) ->
-      if msg == "recv: timed out" do
-        Err(RecvTimeout(0))
-      else
-        Err(RecvFailed(msg))
+  fn recv(s : Socket, max_bytes : Int) : Result(String, SocketError) do
+    with_raw(s, fn fd ->
+      let r = match tcp_recv_chunk(fd, max_bytes) do
+        Ok(data) -> Ok(data)
+        Err(msg) ->
+          if msg == "recv: timed out" do
+            Err(RecvTimeout(0))
+          else
+            Err(SocketError.RecvFailed(msg))
+          end
       end
-    end
+      closed_read(handle_is_closed(s), r))
   end
 
   doc """
-  Receive up to max_bytes from fd, waiting at most timeout_ms for the peer to
+  Receive up to max_bytes from s, waiting at most timeout_ms for the peer to
   send anything.  timeout_ms <= 0 means no timeout.
 
   Returns Err(RecvTimeout(timeout_ms)) when the deadline expires with the peer
   still silent -- a distinct fact from Err(RecvFailed(...)), because only one
   of the two is worth retrying.  The deadline applies to this call alone and
-  leaves no lasting property on fd; to bound reads made through TLS, use
+  leaves no lasting property on s; to bound reads made through TLS, use
   set_recv_timeout instead.
 
   On a peer that accepts the connection and then sends nothing, this returns
@@ -143,33 +258,35 @@ mod Socket do
 
   ## Examples
 
-      match Socket.recv_timeout(fd, 4096, 1000) do
+      match Socket.recv_timeout(s, 4096, 1000) do
         Err(RecvTimeout(_)) -> retry()
         other -> other
       end
   """
-  fn recv_timeout(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(String, SocketError) do
-    match tcp_recv_chunk_timeout(fd, max_bytes, timeout_ms) do
-    Ok(data) -> Ok(data)
-    Err(msg) ->
-      -- "recv: timed out" is emitted only by the deadline path, in both the
-      -- C runtime (MARCH_RECV_TIMEOUT_MSG) and the interpreter.
-      if msg == "recv: timed out" do
-        Err(RecvTimeout(timeout_ms))
-      else
-        Err(RecvFailed(msg))
+  fn recv_timeout(s : Socket, max_bytes : Int, timeout_ms : Int) : Result(String, SocketError) do
+    with_raw(s, fn fd ->
+      let r = match tcp_recv_chunk_timeout(fd, max_bytes, timeout_ms) do
+        Ok(data) -> Ok(data)
+        Err(msg) ->
+          -- "recv: timed out" is emitted only by the deadline path, in both the
+          -- C runtime (MARCH_RECV_TIMEOUT_MSG) and the interpreter.
+          if msg == "recv: timed out" do
+            Err(RecvTimeout(timeout_ms))
+          else
+            Err(SocketError.RecvFailed(msg))
+          end
       end
-    end
+      closed_read(handle_is_closed(s), r))
   end
 
   doc """
-  Bound every subsequent blocking read on fd to timeout_ms (SO_RCVTIMEO).
+  Bound every subsequent blocking read on s to timeout_ms (SO_RCVTIMEO).
   timeout_ms <= 0 clears the deadline.
 
-  Unlike recv_timeout this is a persistent property of the descriptor, and
+  Unlike recv_timeout this is a persistent property of the socket, and
   that is the point: it is the only mechanism that reaches reads made through
-  OpenSSL, so a TLS client calls it on the fd BEFORE Tls.connect to bound both
-  the handshake and every later Tls.read against a peer that goes silent.
+  OpenSSL, so a TLS client calls it on the socket BEFORE Tls.connect to bound
+  both the handshake and every later Tls.read against a peer that goes silent.
 
   The cost of that reach: a deadline firing part-way through a TLS record
   leaves the session unusable.  On timeout, close the connection -- do not
@@ -180,14 +297,15 @@ mod Socket do
 
   ## Examples
 
-      let? _ = Socket.set_recv_timeout(fd, 30000)
-      Tls.connect(fd, ctx, "example.com")
+      let? _ = Socket.set_recv_timeout(s, 30000)
+      Tls.connect(s, ctx, "example.com")
   """
-  fn set_recv_timeout(fd : Int, timeout_ms : Int) : Result((), SocketError) do
-    match tcp_set_recv_timeout(fd, timeout_ms) do
-    Ok(_)    -> Ok(())
-    Err(msg) -> Err(SocketOptionFailed(msg))
-    end
+  fn set_recv_timeout(s : Socket, timeout_ms : Int) : Result((), SocketError) do
+    with_raw(s, fn fd ->
+      match tcp_set_recv_timeout(fd, timeout_ms) do
+      Ok(_)    -> Ok(())
+      Err(msg) -> Err(SocketOptionFailed(msg))
+      end)
   end
 
   doc """
@@ -201,48 +319,129 @@ mod Socket do
   and one that treats it as an error should not have to share a spelling.
 
   `Ok(Some(""))` is a clean EOF, as in `recv`. Other failures are
-  `Err(RecvFailed(msg))`.
+  `Err(SocketError.RecvFailed(msg))`.
 
   ## Examples
 
-      match Socket.recv_deadline(fd, 4096, 250) do
+      match Socket.recv_deadline(s, 4096, 250) do
         Ok(None) -> poll_again()
         Ok(Some(data)) -> handle(data)
-        Err(e) -> Socket.close(fd)
+        Err(e) -> Socket.close(s)
       end
   """
-  fn recv_deadline(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(Option(String), SocketError) do
-    match tcp_recv_timeout(fd, max_bytes, timeout_ms) do
-    Ok(data) -> Ok(data)
-    Err(msg) -> Err(RecvFailed(msg))
-    end
-  end
-
-  doc "Close fd. Silently ignores errors (already-closed fds, etc.)."
-  fn close(fd : Int) : () do
-    tcp_close(fd)
+  fn recv_deadline(s : Socket, max_bytes : Int, timeout_ms : Int) : Result(Option(String), SocketError) do
+    with_raw(s, fn fd ->
+      let r = match tcp_recv_timeout(fd, max_bytes, timeout_ms) do
+        Ok(data) -> Ok(data)
+        Err(msg) -> Err(SocketError.RecvFailed(msg))
+      end
+      closed_read_opt(handle_is_closed(s), r))
   end
 
   doc """
-  Open a connection, run `f(fd)`, then close the fd and return `f`'s
+  The address of the peer s is connected to, as a string (`"127.0.0.1"`);
+  `Err(SocketError.Closed)` once s is closed.
+  """
+  fn peer_addr(s : Socket) : Result(String, SocketError) do
+    with_raw(s, fn fd -> Ok(tcp_peer_addr(fd)))
+  end
+
+  doc """
+  Close s. A task blocked in a read on s wakes with `Err(SocketError.Closed)`; the
+  descriptor is released once every use in flight has returned.
+  `Err(SocketError.Closed)` if s was already closed.
+  """
+  fn close(s : Socket) : Result((), SocketError) do
+    if handle_close(s) do Ok(()) else Err(SocketError.Closed) end
+  end
+
+  doc """
+  Open a connection, run `f(s)`, then close the socket and return `f`'s
   result. `f` must itself return a `Result(a, SocketError)`; a connection
-  failure is `Err(ConnectionFailed(msg))` and `f` is not called. The fd is
-  closed when `f` returns normally, but NOT if `f` panics.
+  failure is `Err(ConnectionFailed(msg))` and `f` is not called. The socket
+  is closed when `f` returns or panics.
 
   ## Examples
 
-      Socket.with_connection("example.com", 80, fn fd ->
-        let? _ = Socket.write(fd, "HEAD / HTTP/1.0\r\n\r\n")
-        Socket.recv(fd, 4096))
+      Socket.with_connection("example.com", 80, fn s ->
+        let? _ = Socket.write(s, "HEAD / HTTP/1.0\r\n\r\n")
+        Socket.recv(s, 4096))
   """
-  fn with_connection(host : String, port : Int, f) do
+  fn with_connection(host : String, port : Int, f : Socket -> Result(a, SocketError)) : Result(a, SocketError) do
     match connect(host, port) do
     Err(e) -> Err(e)
-    Ok(fd) ->
-      let result = f(fd)
-      close(fd)
-      result
+    Ok(s) ->
+      try_finally(
+        fn _ -> f(s),
+        fn _ -> close(s)
+      )
     end
+  end
+
+  -- ── Listeners ─────────────────────────────────────────────────────────────
+
+  doc """
+  Listen for TCP connections on port (0 lets the OS pick a free port; see
+  `local_port`). Returns `Ok(listener)` or `Err(ListenFailed(msg))`.
+
+  ## Examples
+
+      let? l = Socket.listen(0)
+      let? port = Socket.local_port(l)
+  """
+  fn listen(port : Int) : Result(Listener, SocketError) do
+    match tcp_listen(port) do
+    Ok(fd) ->
+      let l : Listener = handle_new(kind_listener(), fd, 0)
+      Ok(l)
+    Err(msg) -> Err(ListenFailed(msg))
+    end
+  end
+
+  doc """
+  Wait for the next connection on l and return it as a `Socket`. Holding
+  the `Listener` is the authority to accept. If another task closes l while
+  this one waits, this returns `Err(SocketError.Closed)`; other failures are
+  `Err(AcceptFailed(msg))`.
+  """
+  fn accept(l : Listener) : Result(Socket, SocketError) do
+    with_listener(l, fn fd ->
+      match tcp_accept(fd) do
+      Ok(c)    -> Ok(adopt(c))
+      Err(msg) -> if handle_is_closed(l) do Err(SocketError.Closed) else Err(AcceptFailed(msg)) end
+      end)
+  end
+
+  doc """
+  As `accept`, giving up after timeout_ms with nothing pending:
+  `Err(RecvTimeout(timeout_ms))`. timeout_ms <= 0 waits for ever.
+  """
+  fn accept_timeout(l : Listener, timeout_ms : Int) : Result(Socket, SocketError) do
+    with_listener(l, fn fd ->
+      match tcp_accept_timeout(fd, timeout_ms) do
+      Ok(c) -> Ok(adopt(c))
+      Err(msg) ->
+        if handle_is_closed(l) do Err(SocketError.Closed)
+        else if msg == "tcp_accept: timed out" do Err(RecvTimeout(timeout_ms))
+        else Err(AcceptFailed(msg)) end end
+      end)
+  end
+
+  doc "The port l is bound to (the one the OS picked for port 0)."
+  fn local_port(l : Listener) : Result(Int, SocketError) do
+    with_listener(l, fn fd ->
+      match tcp_local_port(fd) do
+      Ok(p)    -> Ok(p)
+      Err(msg) -> Err(ListenFailed(msg))
+      end)
+  end
+
+  doc """
+  Stop listening. A task blocked in `accept` on l wakes with `Err(SocketError.Closed)`.
+  `Err(SocketError.Closed)` if l was already closed.
+  """
+  fn close_listener(l : Listener) : Result((), SocketError) do
+    if handle_close(l) do Ok(()) else Err(SocketError.Closed) end
   end
 
 end

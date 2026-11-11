@@ -479,6 +479,21 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`Socket.connect` returns a `Socket`, not an `Int`; `Udp.UdpSocket`, `Tls.TlsConn`,
+  `Tls.TlsCtx` and `WebSocket.WsSocket` can no longer be built from an integer.**
+  Connections and listening sockets are reference-counted handles: `Socket.connect` /
+  `connect_timeout` return `Result(Socket, SocketError)`, every `Socket` function takes the
+  handle, `Socket.close` returns `Result((), SocketError)`, and the new
+  `Socket.listen(port)` / `accept` / `accept_timeout` / `local_port` / `close_listener`
+  work on a `Listener`. A use after `close` is `Err(Closed)` (new in `SocketError`,
+  `UdpError` and `TlsError`), and closing a socket another task is blocked on in `recv`,
+  `accept`, `Udp.recv` or `Tls.read` wakes it with `Err(Closed)`, on macOS as well as
+  Linux. `Tls.connect(s, ctx, host)` / `Tls.accept(s, ctx)` take the `Socket`; on success
+  the `TlsConn` owns the connection (`Tls.close` closes both), on failure `s` stays the
+  caller's. `opaque type` constructors no longer cross a module boundary (`Udp.UdpSocket(5)`
+  is now `unknown_constructor`). Standard-library internals that still need the raw
+  descriptor use `Socket.raw_fd` / `adopt` / `borrow`, marked `@[stdlib_internal]`: a user
+  program naming one gets the `stdlib_internal` error.
 - **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
   `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
   connection (ocap phase 2). A module's own variant named `Socket`, `Listener` or

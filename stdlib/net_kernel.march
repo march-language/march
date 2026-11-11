@@ -72,8 +72,12 @@ mod NetKernel do
     end
   end
 
+  -- The cluster stack keeps raw descriptors (cluster peers are trusted; ocap
+  -- phase 2 decision 4); Socket.borrow lends one to the Socket API for a
+  -- single call without taking it over (closing or dropping the borrowed
+  -- Socket never closes the fd).
   pfn write_bytes(fd : Int, b : Bytes) : Result((), String) do
-    match Socket.write(fd, Bytes.to_string(b)) do
+    match Socket.write(Socket.borrow(fd), Bytes.to_string(b)) do
       Ok(_) -> Ok(())
       Err(e) -> Err(Socket.error_message(e))
     end
@@ -89,7 +93,7 @@ mod NetKernel do
 
   -- One frame, never sealed: the handshake's own frames.
   pfn send_raw(fd : Int, payload : List(Int)) : Result((), String) do
-    match Socket.write(fd, to_wire(payload)) do
+    match Socket.write(Socket.borrow(fd), to_wire(payload)) do
       Ok(_) -> Ok(())
       Err(e) -> Err(Socket.error_message(e))
     end
@@ -139,7 +143,7 @@ mod NetKernel do
       None ->
         let have = List.length(buf)
         if have < 4 do
-          match Socket.recv(fd, 4096) do
+          match Socket.recv(Socket.borrow(fd), 4096) do
             Err(e) -> Err(Socket.error_message(e))
             Ok(chunk) ->
               if String.is_empty(chunk) do
@@ -253,7 +257,7 @@ mod NetKernel do
       if left <= 0 do
         Err("net-kernel: handshake timed out")
       else
-        match Socket.recv_timeout(fd, need, left) do
+        match Socket.recv_timeout(Socket.borrow(fd), need, left) do
           Err(Socket.RecvTimeout(_)) -> Err("net-kernel: handshake timed out")
           Err(e) -> Err("net-kernel: " ++ Socket.error_message(e))
           Ok(chunk) ->

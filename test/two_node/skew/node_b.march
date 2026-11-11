@@ -20,7 +20,7 @@ mod TwoNodeSkewB do
   pfn cfg() : Swim.Config do Swim.config(300, 1000, 0) end
 
   pfn write_msg(fd : Int, msg : SwimDriver.WireMsg) : () do
-    let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(SwimDriver.encode_msg(msg))))
+    let _ = Result.map_err(tcp_send_all(fd, NetKernel.bytes_to_str(NetFrame.encode(SwimDriver.encode_msg(msg)))), fn m -> Socket.WriteFailed(m))
     ()
   end
 
@@ -67,7 +67,7 @@ mod TwoNodeSkewB do
   -- One tick: read, drain, step, perform. Returns the new driver state, the
   -- leftover bytes, whether an ack arrived, and whether the peer closed.
   pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int)) : (SwimDriver.State, List(Int), Bool, Bool) do
-    let got = match Socket.recv_timeout(fd, 4096, 50) do
+    let got = match Result.map_err(tcp_recv_chunk_timeout(fd, 4096, 50), fn m -> if m == "recv: timed out" do Socket.RecvTimeout(50) else Socket.RecvFailed(m) end) do
       Ok(chunk) -> if String.is_empty(chunk) do (buf, false, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false, false) end
       Err(Socket.RecvTimeout(_)) -> (buf, false, false)
       Err(_) -> (buf, false, true)

@@ -2166,7 +2166,9 @@ mod ClusterNode do
       Err(e) ->
         let msg = Socket.error_message(e)
         Err((msg, refused_msg(msg)))
-      Ok(fd) ->
+      Ok(s) ->
+        -- Raw fds from here on (cluster peers are trusted; ocap phase 2).
+        let fd = handle_detach(s)
         match NetKernel.handshake_auth(fd, me, h_auth(h, cfg.auth), NetKernel.fresh_nonce(), role,
                                        cfg.advertise, cfg.handshake_timeout_ms) do
           Err(e) ->
@@ -2915,7 +2917,7 @@ mod ClusterNode do
     match split_addr(h.advertise) do
       Some((_host, port)) ->
         match Socket.connect_timeout("127.0.0.1", port, 500) do
-          Ok(fd) -> tcp_close(fd)
+          Ok(s) -> discard(Socket.close(s))
           Err(_) -> ()
         end
       None -> ()

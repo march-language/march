@@ -356,15 +356,19 @@ mod HttpTransport do
     match tcp_connect(host, port) do
     Err(error) -> Err(ConnectionRefused(error))
     Ok(fd) -> do
-      let result = request_https_on_fd(context, fd, host, raw)
-      tcp_close(fd)
+      -- A successful Tls.connect takes the socket over (closing the TLS
+      -- connection closes it); after a failed one it is still ours, and this
+      -- close is what releases it. On the success path it is a no-op.
+      let s = Socket.adopt(fd)
+      let result = request_https_on_socket(context, s, host, raw)
+      let _ = Socket.close(s)
       result
     end
     end
   end
 
-  pfn request_https_on_fd(context, fd, host, raw) do
-    match Tls.connect(fd, context, host) do
+  pfn request_https_on_socket(context, s, host, raw) do
+    match Tls.connect(s, context, host) do
     Err(error) -> Err(ConnectionRefused(Tls.error_to_string(error)))
     Ok(connection) -> do
       let result = request_on_tls(connection, raw)

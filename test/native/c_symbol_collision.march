@@ -12,7 +12,9 @@ mod CSymbolCollision do
 
   fn connect(port : Int) : Int do
     match Socket.connect("127.0.0.1", port) do
-      Ok(fd) -> fd
+      Ok(s) ->
+        let _ = Socket.close(s)
+        port
       Err(_) -> 0 - port
     end
   end

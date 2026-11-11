@@ -120,7 +120,7 @@ mod DistMonitorLoopback do
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Socket.connect(host, port) do
+    match Result.map_err(tcp_connect(host, port), fn m -> Socket.ConnectionFailed(m)) do
       Ok(fd) -> Ok(fd)
       Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
     end

@@ -1981,12 +1981,13 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
         void *ws_key     = find_ws_key_header(*(void **)(rc + 56));
         if (ws_key) {
             march_ws_handshake((int64_t)fd, ws_key);
-            void *ws_sock = march_alloc(16 + 8);
-            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+            void *ws_box;
+            void *ws_sock = march_ws_sock_new((int64_t)fd, &ws_box);
             /* The handler call consumes one closure reference; the result
              * Conn's `upgrade` field still owns another, released below. */
             march_incrc(ws_closure);
             call_closure1(ws_closure, ws_sock);
+            march_ws_sock_done(ws_box);
         }
         march_http_release_conn(result_conn);
         return -1;  /* WebSocket took over — close HTTP loop */
@@ -2355,12 +2356,13 @@ static void *connection_thread(void *arg) {
                             if (pc.tls) { mts_ws_begin(pc.tls); ws_handed = 1; }
                             int64_t ws_v = march_ws_sock_value(fd, pc.tls);
                             march_ws_handshake(ws_v, ws_key);
-                            void *ws_sock = march_alloc(16 + 8);
-                            *(int64_t *)((char *)ws_sock + 16) = ws_v;
+                            void *ws_box;
+                            void *ws_sock = march_ws_sock_new(ws_v, &ws_box);
                             /* The call consumes one closure reference; the
                              * result's `upgrade` still owns another. */
                             march_incrc(ws_closure);
                             call_closure1(ws_closure, ws_sock);
+                            march_ws_sock_done(ws_box);
                         }
                         /* Earlier results of this batch were drained by the
                          * writev_all above; this one is done with too. */
@@ -3068,6 +3070,23 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
 
 int64_t march_ws_sock_value(int fd, march_tls_session_t *s) {
     return s ? ((int64_t)fd | ((int64_t)mts_gen(s) << 32)) : (int64_t)fd;
+}
+
+/* WsSocket(box): header(16) + one field, a TCP_BORROWED handle box over [v]
+ * (stdlib/websocket.march: `opaque type WsSocket = WsSocket(Socket)`). The
+ * box is never released onto the fd: the server closes the connection. */
+void *march_ws_sock_new(int64_t v, void **box_out) {
+    void *box = march_handle_new(MARCH_HANDLE_TCP_BORROWED, v, 0);
+    void *ws_sock = march_alloc(16 + 8);
+    *(void **)((char *)ws_sock + 16) = box;   /* the WsSocket owns one reference */
+    march_incrc(box);                         /* ... and the caller another */
+    *box_out = box;
+    return ws_sock;
+}
+
+void march_ws_sock_done(void *box) {
+    (void)march_handle_close(box);
+    march_decrc(box);
 }
 
 /* The live wss:// session [v] names, referenced and counted as touching the

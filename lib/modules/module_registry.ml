@@ -215,12 +215,21 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
         | _ ->
           { ex_name = tname.txt; ex_kind = ExType arity; ex_public = vis = Public }
       in
+      (* An `opaque type`'s constructors (the parser marks each variant
+         Private while the type stays Public) never cross the module
+         boundary: exporting them would let `Mod.Ctor(...)` build or open a
+         value from outside, with argument types this bridge cannot even
+         check (it carries only the arity, so every argument would be a fresh
+         variable).  That is how `Udp.UdpSocket(5)` forged a socket from an
+         integer (ocap phase 2).  A `ptype`'s variants keep their old export
+         (their own visibility is Public). *)
       let ctor_entries = match tdef with
         | TDVariant ctors ->
-          List.map (fun (v : variant) ->
-            { ex_name = v.var_name.txt;
-              ex_kind = ExCtor (tname.txt, List.length v.var_args);
-              ex_public = vis = Public }
+          List.filter_map (fun (v : variant) ->
+            if v.var_vis <> Public then None
+            else Some { ex_name = v.var_name.txt;
+                        ex_kind = ExCtor (tname.txt, List.length v.var_args);
+                        ex_public = vis = Public }
           ) ctors
         | _ -> []
       in

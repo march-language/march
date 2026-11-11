@@ -26,8 +26,8 @@ mod TcpConnectRefusedAfterPark do
     if n <= 0 do acc
     else
       let ok = match Socket.connect_timeout("127.0.0.1", port, 2000) do
-        Ok(fd) ->
-          tcp_close(fd)
+        Ok(s) ->
+          let _ = Socket.close(s)
           0
         Err(e) -> if String.contains(Socket.error_message(e), "refused") do 1 else 0 end
       end

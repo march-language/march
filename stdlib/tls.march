@@ -5,25 +5,33 @@
 --
 -- Architecture:
 --   TlsCtx  — an SSL_CTX (configuration + CA store), long-lived, shareable
---   TlsConn — a single SSL * connection wrapping one TCP fd
+--   TlsConn — a single SSL * connection over one TCP socket, which it owns
+--
+-- Both are opaque handles (ocap phase 2): they cannot be built from an
+-- integer, and a use after `close` / `ctx_free` is `Err(TlsError.Closed)`. A
+-- successful `connect` / `accept` takes the `Socket` over: closing the
+-- `TlsConn` closes the TCP connection too, and the `Socket` itself reports
+-- `Err(TlsError.Closed)` from then on.
 --
 -- Typical client usage:
 --   let config = Tls.default_client_config()
 --   match Tls.client_ctx(config) do
 --   Ok(ctx) ->
---     match tcp_connect("example.com", 443) do
---     Ok(fd) ->
+--     match Socket.connect("example.com", 443) do
+--     Ok(s) ->
 --       -- Bound reads against a peer that accepts and then goes silent.
 --       -- Must be set BEFORE the handshake to bound the handshake too.
---       Socket.set_recv_timeout(fd, 30000)
---       match Tls.connect(fd, ctx, "example.com") do
+--       Socket.set_recv_timeout(s, 30000)
+--       match Tls.connect(s, ctx, "example.com") do
 --       Ok(conn) ->
 --         Tls.write(conn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
 --         Tls.read(conn, 4096)
 --         Tls.close(conn)
---       Err(e) -> Err(e)
+--       Err(e) ->
+--         Socket.close(s)
+--         Err(e)
 --       end
---     Err(e) -> Err(TlsHandshakeFailed(e))
+--     Err(e) -> Err(TlsHandshakeFailed(Socket.error_message(e)))
 --     end
 --   Err(e) -> Err(e)
 --   end
@@ -47,6 +55,9 @@ mod Tls do
     -- SSL_ERROR_SYSCALL, and a caller that cannot tell them apart cannot say
     -- why a stream ended.
     | TlsReadTimeout
+    -- The connection or context was closed (`close`, `ctx_free`) before or
+    -- during this use.
+    | Closed
 
   -- TlsConfig: configuration for creating a TLS context
   --
@@ -69,11 +80,82 @@ mod Tls do
       Bool
     )
 
-  -- TlsCtx: opaque TLS context handle (wraps SSL_CTX *)
-  type TlsCtx = TlsCtx(Int)
+  -- TlsCtx: opaque TLS context handle, a handle box of kind TLS_CTX over
+  -- an SSL_CTX *.
+  opaque type TlsCtx = TlsCtx(Socket)
 
-  -- TlsConn: opaque TLS connection handle (wraps SSL *)
-  type TlsConn = TlsConn(Int)
+  -- TlsConn: opaque TLS connection handle, a handle box of kind TLS over an
+  -- SSL *, with the TCP fd it owns as the box's aux (runtime/march_handle.c
+  -- releases both).
+  opaque type TlsConn = TlsConn(Socket)
+
+  -- MARCH_HANDLE_* (runtime/march_runtime.h).
+  pfn kind_tcp() : Int do 3 end
+  pfn kind_tls() : Int do 7 end
+  pfn kind_tls_ctx() : Int do 8 end
+
+  pfn new_ctx(h : Int) : TlsCtx do
+    let b : Socket = handle_new(kind_tls_ctx(), h, 0)
+    TlsCtx(b)
+  end
+
+  -- Run f on the SSL * inside conn, or Err(TlsError.Closed). A failure that came
+  -- from another task closing conn meanwhile is Err(TlsError.Closed) too.
+  pfn with_conn(conn : TlsConn, f : Int -> Result(a, TlsError)) : Result(a, TlsError) do
+    match conn do
+    TlsConn(b) ->
+      let h = handle_enter(b, kind_tls())
+      if h == -1 do Err(TlsError.Closed) else
+        let r = f(h)
+        handle_leave(b)
+        match r do
+        Err(_) -> if handle_is_closed(b) do Err(TlsError.Closed) else r end
+        Ok(_) -> r
+        end
+      end
+    end
+  end
+
+  pfn with_ctx(ctx : TlsCtx, f : Int -> Result(a, TlsError)) : Result(a, TlsError) do
+    match ctx do
+    TlsCtx(b) ->
+      let h = handle_enter(b, kind_tls_ctx())
+      if h == -1 do Err(TlsError.Closed) else
+        let r = f(h)
+        handle_leave(b)
+        r
+      end
+    end
+  end
+
+  -- The handshake shared by connect and accept: run it on the fd inside s
+  -- with the SSL_CTX * inside ctx. On success the new TlsConn takes the fd
+  -- over: s is detached (closed without closing the fd) and the fd becomes
+  -- the TLS box's aux. On failure s is left open and the caller's.
+  pfn handshake(s : Socket, ctx : TlsCtx, run) : Result(TlsConn, TlsError) do
+    with_ctx(ctx, fn h ->
+      let fd = handle_enter(s, kind_tcp())
+      if fd == -1 do Err(TlsError.Closed) else
+        match run(fd, h) do
+        Err(msg) ->
+          handle_leave(s)
+          if handle_is_closed(s) do Err(TlsError.Closed) else Err(TlsHandshakeFailed(msg)) end
+        Ok(ssl) ->
+          -- Detach while still in flight, so no concurrent close can release
+          -- the fd between the handshake and the hand-over.
+          let raw = handle_detach(s)
+          handle_leave(s)
+          if raw == -1 do
+            -- s was closed during the handshake; its release closes the fd.
+            tls_close(ssl)
+            Err(TlsError.Closed)
+          else
+            let b : Socket = handle_new(kind_tls(), ssl, raw)
+            Ok(TlsConn(b))
+          end
+        end
+      end)
+  end
 
   -- ── Config accessors ──────────────────────────────────────────────────
 
@@ -192,7 +274,7 @@ mod Tls do
     let vp    = if verify_peer(config) do 1 else 0 end
     match tls_client_ctx(ca, a, ver, vp) do
     Err(msg) -> Err(TlsContextError(msg))
-    Ok(h)    -> Ok(TlsCtx(h))
+    Ok(h)    -> Ok(new_ctx(h))
     end
   end
 
@@ -214,47 +296,43 @@ mod Tls do
     let ver   = version_to_int(min_version(config))
     match tls_server_ctx(cert, key, ca, a, ver) do
     Err(msg) -> Err(TlsContextError(msg))
-    Ok(h)    -> Ok(TlsCtx(h))
+    Ok(h)    -> Ok(new_ctx(h))
     end
   end
 
   -- ── Handshake ─────────────────────────────────────────────────────────
 
   doc """
-  Perform a TLS client handshake on an already-connected TCP fd.
+  Perform a TLS client handshake on a connected `Socket`.
   `hostname` is used for SNI and certificate hostname verification.
   Returns `Ok(TlsConn)` or `Err(TlsHandshakeFailed(msg))` (including
-  certificate verification failures). The fd stays owned by the caller.
+  certificate verification failures).
+
+  On success the `TlsConn` owns the TCP connection: `Tls.close(conn)`
+  closes both, and `s` is closed (its uses return `Err(TlsError.Closed)`). On
+  failure `s` stays open and is still the caller's to close.
 
   ## Examples
 
-      match Tls.connect(fd, ctx, "example.com") do
+      match Tls.connect(s, ctx, "example.com") do
         Ok(conn) -> Tls.write(conn, request)
-        Err(e) -> Err(e)
+        Err(e) ->
+          Socket.close(s)
+          Err(e)
       end
   """
-  fn connect(fd, ctx, hostname) do
-    match ctx do
-    TlsCtx(h) ->
-      match tls_connect(fd, h, hostname) do
-      Err(msg) -> Err(TlsHandshakeFailed(msg))
-      Ok(ssl)  -> Ok(TlsConn(ssl))
-      end
-    end
+  fn connect(s : Socket, ctx : TlsCtx, hostname : String) : Result(TlsConn, TlsError) do
+    handshake(s, ctx, fn (fd, h) -> tls_connect(fd, h, hostname))
   end
 
   doc """
-  Perform a TLS server handshake on an accepted TCP fd with a context from
+  Perform a TLS server handshake on an accepted `Socket` with a context from
   `server_ctx`. Returns `Ok(TlsConn)` or `Err(TlsHandshakeFailed(msg))`.
+  As with `connect`, a successful handshake hands `s` over to the
+  `TlsConn`; on failure `s` stays open and the caller's.
   """
-  fn accept(fd, ctx) do
-    match ctx do
-    TlsCtx(h) ->
-      match tls_accept(fd, h) do
-      Err(msg) -> Err(TlsHandshakeFailed(msg))
-      Ok(ssl)  -> Ok(TlsConn(ssl))
-      end
-    end
+  fn accept(s : Socket, ctx : TlsCtx) : Result(TlsConn, TlsError) do
+    handshake(s, ctx, fn (fd, h) -> tls_accept(fd, h))
   end
 
   -- ── I/O ───────────────────────────────────────────────────────────────
@@ -264,8 +342,8 @@ mod Tls do
   Returns Ok(String) or Err(TlsError). Ok("") signals a clean shutdown.
 
   This read has no deadline of its own and will wait indefinitely for a peer
-  that has gone silent.  To bound it, call Socket.set_recv_timeout(fd, ms) on
-  the underlying fd BEFORE Tls.connect -- SO_RCVTIMEO is the only mechanism
+  that has gone silent.  To bound it, call Socket.set_recv_timeout(s, ms) on
+  the underlying socket BEFORE Tls.connect -- SO_RCVTIMEO is the only mechanism
   that reaches a read made through OpenSSL, and setting it before the
   handshake bounds the handshake too.  A deadline that fires part-way through
   a TLS record leaves the session unusable, so treat an expired read as
@@ -275,17 +353,15 @@ mod Tls do
   different fact from Err(TlsReadError(...)) -- the peer was silent, rather
   than the connection failing.  Both still mean close it.
   """
-  fn read(conn, max_bytes) do
-    match conn do
-    TlsConn(h) ->
+  fn read(conn : TlsConn, max_bytes : Int) : Result(String, TlsError) do
+    with_conn(conn, fn h ->
       match tls_read(h, max_bytes) do
       -- "recv: timed out" is the runtime's one spelling of an expired
       -- deadline (MARCH_RECV_TIMEOUT_MSG), matched exactly here the way
       -- Socket.recv_timeout matches it.
       Err(msg) -> if msg == "recv: timed out" do Err(TlsReadTimeout) else Err(TlsReadError(msg)) end
       Ok(data) -> Ok(data)
-      end
-    end
+      end)
   end
 
   doc """
@@ -303,14 +379,12 @@ mod Tls do
         Err(e) -> Tls.close(conn)
       end
   """
-  fn read_timeout(conn, max_bytes, timeout_ms) do
-    match conn do
-    TlsConn(h) ->
+  fn read_timeout(conn : TlsConn, max_bytes : Int, timeout_ms : Int) : Result(Option(String), TlsError) do
+    with_conn(conn, fn h ->
       match tls_read_timeout(h, max_bytes, timeout_ms) do
       Err(msg) -> Err(TlsReadError(msg))
       Ok(data) -> Ok(data)
-      end
-    end
+      end)
   end
 
   doc """
@@ -321,33 +395,41 @@ mod Tls do
 
       Tls.write(conn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
   """
-  fn write(conn, data) do
-    match conn do
-    TlsConn(h) ->
+  fn write(conn : TlsConn, data : String) : Result(Int, TlsError) do
+    with_conn(conn, fn h ->
       match tls_write(h, data) do
       Err(msg) -> Err(TlsWriteError(msg))
       Ok(n)    -> Ok(n)
-      end
-    end
+      end)
   end
 
   -- ── Teardown ──────────────────────────────────────────────────────────
 
   doc """
-  Perform TLS shutdown and free the connection object. Returns `()`.
-  Does NOT close the underlying TCP fd — caller must call tcp_close(fd).
-  Do not use the conn afterwards.
+  Perform TLS shutdown, free the connection object and close its TCP
+  connection. Returns `()`. A task blocked in `read` on the conn wakes
+  with `Err(TlsError.Closed)`; every later use is `Err(TlsError.Closed)`. Closing it again
+  does nothing.
   """
-  fn close(conn) do
-    match conn do | TlsConn(h) -> tls_close(h) end
+  fn close(conn : TlsConn) : () do
+    match conn do
+    TlsConn(b) ->
+      let _ = handle_close(b)
+      ()
+    end
   end
 
   doc """
-  Free a TLS context.
-  Call after all connections using this ctx have been closed.
+  Free a TLS context. Connections already made from it keep working
+  (OpenSSL counts its references); a later `connect` / `accept` /
+  `set_groups` with it is `Err(TlsError.Closed)`. Freeing it again does nothing.
   """
-  fn ctx_free(ctx) do
-    match ctx do | TlsCtx(h) -> tls_ctx_free(h) end
+  fn ctx_free(ctx : TlsCtx) : () do
+    match ctx do
+    TlsCtx(b) ->
+      let _ = handle_close(b)
+      ()
+    end
   end
 
   -- ── Introspection ─────────────────────────────────────────────────────
@@ -356,15 +438,22 @@ mod Tls do
   Return the negotiated ALPN protocol as `Some(name)` (e.g. `Some("h2")`),
   or `None` if none was selected.
   """
-  fn negotiated_alpn(conn) do
-    match conn do | TlsConn(h) -> tls_negotiated_alpn(h) end
+  fn negotiated_alpn(conn : TlsConn) : Option(String) do
+    match with_conn(conn, fn h -> Ok(tls_negotiated_alpn(h))) do
+    Ok(a) -> a
+    Err(_) -> None
+    end
   end
 
   doc """
-  Return the peer's certificate Common Name, or None if unavailable.
+  Return the peer's certificate Common Name, or None if unavailable
+  (including on a closed conn).
   """
-  fn peer_cn(conn) do
-    match conn do | TlsConn(h) -> tls_peer_cn(h) end
+  fn peer_cn(conn : TlsConn) : Option(String) do
+    match with_conn(conn, fn h -> Ok(tls_peer_cn(h))) do
+    Ok(cn) -> cn
+    Err(_) -> None
+    end
   end
 
   -- ── Key exchange (post-quantum) ───────────────────────────────────────
@@ -396,14 +485,12 @@ mod Tls do
         Err(e) -> println(Tls.error_to_string(e))
       end
   """
-  fn set_groups(ctx, groups : List(String)) do
-    match ctx do
-    | TlsCtx(h) ->
+  fn set_groups(ctx : TlsCtx, groups : List(String)) : Result((), TlsError) do
+    with_ctx(ctx, fn h ->
       match tls_ctx_set_groups(h, String.join(groups, ":")) do
       Err(msg) -> Err(TlsContextError(msg))
       Ok(_)    -> Ok(())
-      end
-    end
+      end)
   end
 
   doc """
@@ -411,8 +498,11 @@ mod Tls do
   `Some("X25519MLKEM768")` for the hybrid post-quantum group,
   `Some("x25519")`, `Some("secp256r1")`, ...; `None` if unavailable.
   """
-  fn negotiated_group(conn) do
-    match conn do | TlsConn(h) -> tls_negotiated_group(h) end
+  fn negotiated_group(conn : TlsConn) : Option(String) do
+    match with_conn(conn, fn h -> Ok(tls_negotiated_group(h))) do
+    Ok(g) -> g
+    Err(_) -> None
+    end
   end
 
   doc """
@@ -431,7 +521,7 @@ mod Tls do
   Full HTTPS GET convenience function.
   Connects to host:port, performs TLS handshake (verifying the cert for
   `host`), sends a minimal HTTP/1.1 GET request with `Connection: close`,
-  reads the response, tears down TLS, closes the TCP fd.
+  reads the response, tears down TLS and the TCP connection.
   Returns `Ok(response_string)` (the raw response: status line, headers and
   body, unparsed) or `Err(TlsError)`; a TCP connect failure is reported as
   `TlsHandshakeFailed("tcp_connect: ...")`. A host or path that would smuggle
@@ -465,38 +555,25 @@ mod Tls do
     match client_ctx(config) do
     Err(e) -> Err(e)
     Ok(ctx) ->
-      match tcp_connect(host, port) do
-      Err(msg) -> Err(TlsHandshakeFailed("tcp_connect: " ++ msg))
-      Ok(fd) ->
-        match connect(fd, ctx, host) do
-        Err(e) -> do
-          tcp_close(fd)
-          Err(e)
-        end
-        Ok(conn) -> do
-          match write(conn, req) do
-          Err(e) -> do
-            close(conn)
-            tcp_close(fd)
+      let result = match tcp_connect(host, port) do
+        Err(msg) -> Err(TlsHandshakeFailed("tcp_connect: " ++ msg))
+        Ok(fd) ->
+          let s = Socket.adopt(fd)
+          match connect(s, ctx, host) do
+          Err(e) ->
+            let _ = Socket.close(s)
             Err(e)
+          Ok(conn) ->
+            let r = match write(conn, req) do
+              Err(e) -> Err(e)
+              Ok(_) -> read(conn, 1048576)
+            end
+            close(conn)
+            r
           end
-          Ok(_) ->
-            match read(conn, 1048576) do
-            Err(e) -> do
-              close(conn)
-              tcp_close(fd)
-              Err(e)
-            end
-            Ok(body) -> do
-              close(conn)
-              tcp_close(fd)
-              Ok(body)
-            end
-            end
-          end
-        end
-        end
       end
+      ctx_free(ctx)
+      result
     end
   end
 
@@ -522,6 +599,7 @@ mod Tls do
     TlsReadTimeout          -> "TLS read timed out"
     TlsWriteError(msg)      -> "TLS write error: " ++ msg
     TlsContextError(msg)    -> "TLS context error: " ++ msg
+    TlsError.Closed                  -> "TLS connection is closed"
     end
   end
 

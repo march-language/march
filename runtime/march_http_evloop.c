@@ -77,10 +77,10 @@ static void *ws_handler_thread(void *arg) {
     free(a->key);
     free(a);
 
-    /* WsSocket(value): header(16) + one Int field. */
-    void *ws_sock = march_alloc(24);
-    *(int64_t *)((char *)ws_sock + 16) = ws_value;
+    void *ws_box;
+    void *ws_sock = march_ws_sock_new(ws_value, &ws_box);
     call_closure1(ws_closure, ws_sock);
+    march_ws_sock_done(ws_box);
 
     march_ws_tls_teardown(fd, tls);
     return NULL;

@@ -36,6 +36,11 @@
 --   Udp.stats(sock)                              : UdpStats
 --   Udp.close(sock)                              : ()
 --   Udp.error_message(e)                         : String
+--
+-- An `UdpSocket` is an opaque handle (ocap phase 2): it cannot be built from
+-- a descriptor number, using it needs no capability beyond the one `open`
+-- checked, and a use after `close` is `Err(UdpError.Closed)`. Closing a socket another
+-- task is blocked on in `recv` wakes that task with `Err(UdpError.Closed)`.
 
 mod Udp do
   needs IO.NetConnect
@@ -49,9 +54,14 @@ mod Udp do
     | ConnectFailed(String)
     | SendFailed(String)
     | RecvFailed(String)
+    | Closed
 
-  -- An open UDP socket. Close it with `Udp.close`.
-  type UdpSocket = UdpSocket(Int)
+  -- An open UDP socket. Close it with `Udp.close`. Opaque: a handle box of
+  -- kind UDP (runtime/march_handle.c), not a descriptor number.
+  opaque type UdpSocket = UdpSocket(Socket)
+
+  -- MARCH_HANDLE_UDP (runtime/march_runtime.h).
+  pfn kind_udp() : Int do 6 end
 
   -- An opaque IPv4 or IPv6 address and port; compare with `==`.
   type UdpAddr = UdpAddr(String)
@@ -118,6 +128,7 @@ mod Udp do
     ConnectFailed(m) -> "connect failed: " ++ m
     SendFailed(m)    -> "send failed: " ++ m
     RecvFailed(m)    -> "receive failed: " ++ m
+    UdpError.Closed           -> "the socket is closed"
     end
   end
 
@@ -153,7 +164,9 @@ mod Udp do
   """
   fn open_with(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}, opts : UdpOptions) : Result(UdpSocket, UdpError) do
     match udp_open(host, port, opt_bits(opts), opts.recv_buffer, opts.send_buffer) do
-    Ok(fd)   -> Ok(UdpSocket(fd))
+    Ok(fd)   ->
+      let b : Socket = handle_new(kind_udp(), fd, 0)
+      Ok(UdpSocket(b))
     Err(msg) -> Err(OpenFailed(msg))
     end
   end
@@ -249,10 +262,15 @@ mod Udp do
   doc "The address this socket is bound to."
   fn local_addr(sock : UdpSocket) : Result(UdpAddr, UdpError) do
     match sock do
-    UdpSocket(fd) ->
-      match udp_local_addr(fd) do
-      Ok(a)    -> Ok(UdpAddr(a))
-      Err(msg) -> Err(OpenFailed(msg))
+    UdpSocket(b) ->
+      let fd = handle_enter(b, kind_udp())
+      if fd == -1 do Err(UdpError.Closed) else
+        let r = udp_local_addr(fd)
+        handle_leave(b)
+        match r do
+        Ok(a)    -> Ok(UdpAddr(a))
+        Err(msg) -> Err(OpenFailed(msg))
+        end
       end
     end
   end
@@ -273,10 +291,15 @@ mod Udp do
   """
   fn connect(sock : UdpSocket, a : UdpAddr) : Result((), UdpError) do
     match (sock, a) do
-    (UdpSocket(fd), UdpAddr(raw)) ->
-      match udp_connect(fd, raw) do
-      Ok(_)    -> Ok(())
-      Err(msg) -> Err(ConnectFailed(msg))
+    (UdpSocket(b), UdpAddr(raw)) ->
+      let fd = handle_enter(b, kind_udp())
+      if fd == -1 do Err(UdpError.Closed) else
+        let r = udp_connect(fd, raw)
+        handle_leave(b)
+        match r do
+        Ok(_)    -> Ok(())
+        Err(msg) -> Err(ConnectFailed(msg))
+        end
       end
     end
   end
@@ -297,10 +320,15 @@ mod Udp do
   """
   fn send_batch(sock : UdpSocket, a : UdpAddr, payloads : List(String)) : Result({Int | _ == len(payloads)}, UdpError) do
     match (sock, a) do
-    (UdpSocket(fd), UdpAddr(raw)) ->
-      match udp_send_batch(fd, raw, payloads) do
-      Ok(_)    -> Ok(List.length(payloads))
-      Err(msg) -> Err(SendFailed(msg))
+    (UdpSocket(b), UdpAddr(raw)) ->
+      let fd = handle_enter(b, kind_udp())
+      if fd == -1 do Err(UdpError.Closed) else
+        let r = udp_send_batch(fd, raw, payloads)
+        handle_leave(b)
+        match r do
+        Ok(_)    -> Ok(List.length(payloads))
+        Err(msg) -> if handle_is_closed(b) do Err(UdpError.Closed) else Err(SendFailed(msg)) end
+        end
       end
     end
   end
@@ -308,10 +336,15 @@ mod Udp do
   doc "`send_batch` to the connected peer (see `connect`)."
   fn send_batch_connected(sock : UdpSocket, payloads : List(String)) : Result({Int | _ == len(payloads)}, UdpError) do
     match sock do
-    UdpSocket(fd) ->
-      match udp_send_batch(fd, "", payloads) do
-      Ok(_)    -> Ok(List.length(payloads))
-      Err(msg) -> Err(SendFailed(msg))
+    UdpSocket(b) ->
+      let fd = handle_enter(b, kind_udp())
+      if fd == -1 do Err(UdpError.Closed) else
+        let r = udp_send_batch(fd, "", payloads)
+        handle_leave(b)
+        match r do
+        Ok(_)    -> Ok(List.length(payloads))
+        Err(msg) -> if handle_is_closed(b) do Err(UdpError.Closed) else Err(SendFailed(msg)) end
+        end
       end
     end
   end
@@ -322,11 +355,16 @@ mod Udp do
   """
   fn send_many(sock : UdpSocket, pairs : List((UdpAddr, String))) : Result({Int | _ == len(pairs)}, UdpError) do
     match sock do
-    UdpSocket(fd) ->
+    UdpSocket(b) ->
       let raw = List.map(pairs, fn pr -> match pr do (UdpAddr(a), data) -> (a, data) end)
-      match udp_send_many(fd, raw) do
-      Ok(_)    -> Ok(List.length(pairs))
-      Err(msg) -> Err(SendFailed(msg))
+      let fd = handle_enter(b, kind_udp())
+      if fd == -1 do Err(UdpError.Closed) else
+        let r = udp_send_many(fd, raw)
+        handle_leave(b)
+        match r do
+        Ok(_)    -> Ok(List.length(pairs))
+        Err(msg) -> if handle_is_closed(b) do Err(UdpError.Closed) else Err(SendFailed(msg)) end
+        end
       end
     end
   end
@@ -368,10 +406,19 @@ mod Udp do
   fn recv_batch(sock : UdpSocket, max_msgs : {Int | _ > 0 else "receive at least one datagram" && _ <= 1024 else "at most 1024 datagrams per batch"},
                   max_size : {Int | _ > 0 else "max_size must be positive" && _ <= 65535 else "a datagram is at most 65535 bytes"}, timeout_ms : Int) : Result(List((UdpAddr, String)), UdpError) do
     match sock do
-    UdpSocket(fd) ->
-      match udp_recv_batch(fd, max_msgs, max_size, timeout_ms) do
-      Ok(raw)  -> Ok(List.map(raw, wrap_from))
-      Err(msg) -> Err(UdpError.RecvFailed(msg))
+    UdpSocket(b) ->
+      let fd = handle_enter(b, kind_udp())
+      if fd == -1 do Err(UdpError.Closed) else
+        let r = udp_recv_batch(fd, max_msgs, max_size, timeout_ms)
+        handle_leave(b)
+        -- A receive cut short because another task closed the socket (the
+        -- wait is cancelled, or shutdown() ended it) is Err(UdpError.Closed).
+        if handle_is_closed(b) do Err(UdpError.Closed) else
+          match r do
+          Ok(raw)  -> Ok(List.map(raw, wrap_from))
+          Err(msg) -> Err(UdpError.RecvFailed(msg))
+          end
+        end
       end
     end
   end
@@ -388,18 +435,33 @@ mod Udp do
     end
   end
 
-  doc "The socket's drop and backpressure counters (see `UdpStats`)."
+  doc """
+  The socket's drop and backpressure counters (see `UdpStats`). A closed
+  socket reports `{ rx_dropped: -1, tx_stalls: 0 }`.
+  """
   fn stats(sock : UdpSocket) : UdpStats do
     match sock do
-    UdpSocket(fd) ->
-      match udp_stats(fd) do
-      (d, s) -> { rx_dropped: d, tx_stalls: s }
+    UdpSocket(b) ->
+      let fd = handle_enter(b, kind_udp())
+      if fd == -1 do { rx_dropped: -1, tx_stalls: 0 } else
+        let r = udp_stats(fd)
+        handle_leave(b)
+        match r do
+        (d, s) -> { rx_dropped: d, tx_stalls: s }
+        end
       end
     end
   end
 
-  doc "Close the socket."
+  doc """
+  Close the socket. A task blocked in `recv` / `recv_batch` on it wakes
+  with `Err(UdpError.Closed)`; closing it again does nothing.
+  """
   fn close(sock : UdpSocket) : () do
-    match sock do UdpSocket(fd) -> udp_close(fd) end
+    match sock do
+    UdpSocket(b) ->
+      let _ = handle_close(b)
+      ()
+    end
   end
 end

@@ -13968,6 +13968,32 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps test_file_handle_compiled.out)
  (action (progn)))
 
+; Socket / Listener handles (ocap phase 2, Task 5): test_socket.march runs
+; untyped under stdlib_march; these rules typecheck it (`march test`) and run
+; it compiled. Its listeners bind port 0, so concurrent runners never collide.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_socket.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_socket.march)))
+
+(rule
+ (targets test_socket_compiled_bin test_socket_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_socket.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_socket_compiled_bin
+        stdlib/test_socket.march)
+   (with-stdout-to test_socket_compiled.out
+    (system "./test_socket_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_socket_compiled.out)
+ (action (progn)))
+
 (rule
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_gen.march))
@@ -15332,6 +15358,66 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_handle_box_leak_probe.expected native_file_handle_box_leak_probe.out)))
+
+; socket_close_while_recv (ocap phase 2, Task 5, R3): Socket.close wakes a
+; task parked in Socket.recv with Err(Closed) within 1 s, on 4 scheduler
+; threads. On macOS only the scheduler's fd-wait cancellation can wake it
+; for every socket state (shutdown() alone does not).
+(rule
+ (targets native_socket_close_while_recv native_socket_close_while_recv.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/socket_close_while_recv.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_socket_close_while_recv
+        native/socket_close_while_recv.march)
+   (with-stdout-to native_socket_close_while_recv.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_socket_close_while_recv")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/socket_close_while_recv.expected native_socket_close_while_recv.out)))
+
+; udp_close_while_recv (R3): Udp.close wakes a task parked in Udp.recv on an
+; unconnected socket, the case shutdown() alone cannot wake on macOS.
+(rule
+ (targets native_udp_close_while_recv native_udp_close_while_recv.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/udp_close_while_recv.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_udp_close_while_recv
+        native/udp_close_while_recv.march)
+   (with-stdout-to native_udp_close_while_recv.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_udp_close_while_recv")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/udp_close_while_recv.expected native_udp_close_while_recv.out)))
+
+; socket_sent_to_local_actor: a Socket sent to a local actor is shared (the
+; message copy shares the handle box), so the actor writes to the very
+; connection the main thread accepted.
+(rule
+ (targets native_socket_sent_to_local_actor native_socket_sent_to_local_actor.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/socket_sent_to_local_actor.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_socket_sent_to_local_actor
+        native/socket_sent_to_local_actor.march)
+   (with-stdout-to native_socket_sent_to_local_actor.out
+        (system "./native_socket_sent_to_local_actor")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/socket_sent_to_local_actor.expected native_socket_sent_to_local_actor.out)))
 
 ; js_tail_loop — self tail calls (incl. the Perceus ESeq shape) run in constant stack; closures built in the loop keep each iteration's values.
 (rule

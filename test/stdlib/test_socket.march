@@ -1,39 +1,71 @@
 -- Tests for stdlib/socket.march.
--- Tests the pure parts (error constructors, message formatting) and
--- exercises Socket.connect with an unreachable port to verify Err wrapping.
--- Actual I/O round-trips require a running server and are out of scope.
+-- The pure parts (error constructors, message formatting), connect failures,
+-- and loopback round trips through Socket.listen / accept / connect.
+-- Every listener binds port 0 (the OS picks a free one): this file runs under
+-- several runners in one `dune runtest` (the stdlib_march exe, `march test`
+-- and a compiled `--compile --test` binary), possibly at once and from
+-- several worktrees, so a fixed port would collide.
+-- Run with: dune exec march -- test test/stdlib/test_socket.march
 
 mod TestSocket do
 
   needs IO.NetListen
   needs IO.NetConnect
+  needs IO.Spawn
 
-  use Socket.*
+
+  pfn listen_ok() : Listener do
+    match Socket.listen(0) do
+    Ok(l) -> l
+    Err(e) -> panic("listen failed: " ++ Socket.error_message(e))
+    end
+  end
+
+  pfn port_ok(l : Listener) : Int do
+    match Socket.local_port(l) do
+    Ok(p) -> p
+    Err(e) -> panic("local_port failed: " ++ Socket.error_message(e))
+    end
+  end
+
+  pfn connect_ok(port : Int) : Socket do
+    match Socket.connect("127.0.0.1", port) do
+    Ok(s) -> s
+    Err(e) -> panic("connect failed: " ++ Socket.error_message(e))
+    end
+  end
+
+  pfn accept_ok(l : Listener) : Socket do
+    match Socket.accept(l) do
+    Ok(s) -> s
+    Err(e) -> panic("accept failed: " ++ Socket.error_message(e))
+    end
+  end
 
   -- ── Error type ────────────────────────────────────────────────────────────
 
   describe "SocketError constructors" do
 
     test "ConnectionFailed stores message" do
-      let e = ConnectionFailed("localhost:99999")
+      let e = Socket.ConnectionFailed("localhost:99999")
       match e do
-      ConnectionFailed(msg) -> Test.assert_eq(msg, "localhost:99999", "msg")
+      Socket.ConnectionFailed(msg) -> Test.assert_eq(msg, "localhost:99999", "msg")
       _ -> panic("wrong variant")
       end
     end
 
     test "WriteFailed stores message" do
-      let e = WriteFailed("broken pipe")
+      let e = Socket.WriteFailed("broken pipe")
       match e do
-      WriteFailed(msg) -> Test.assert_eq(msg, "broken pipe", "msg")
+      Socket.WriteFailed(msg) -> Test.assert_eq(msg, "broken pipe", "msg")
       _ -> panic("wrong variant")
       end
     end
 
     test "RecvFailed stores message" do
-      let e = RecvFailed("connection reset")
+      let e = Socket.RecvFailed("connection reset")
       match e do
-      RecvFailed(msg) -> Test.assert_eq(msg, "connection reset", "msg")
+      Socket.RecvFailed(msg) -> Test.assert_eq(msg, "connection reset", "msg")
       _ -> panic("wrong variant")
       end
     end
@@ -45,21 +77,25 @@ mod TestSocket do
   describe "error_message" do
 
     test "ConnectionFailed message" do
-      let msg = Socket.error_message(ConnectionFailed("refused"))
+      let msg = Socket.error_message(Socket.ConnectionFailed("refused"))
       Test.assert_true(string_contains(msg, "connection failed"), "prefix")
       Test.assert_true(string_contains(msg, "refused"), "detail")
     end
 
     test "WriteFailed message" do
-      let msg = Socket.error_message(WriteFailed("pipe"))
+      let msg = Socket.error_message(Socket.WriteFailed("pipe"))
       Test.assert_true(string_contains(msg, "write failed"), "prefix")
       Test.assert_true(string_contains(msg, "pipe"), "detail")
     end
 
     test "RecvFailed message" do
-      let msg = Socket.error_message(RecvFailed("reset"))
+      let msg = Socket.error_message(Socket.RecvFailed("reset"))
       Test.assert_true(string_contains(msg, "receive failed"), "prefix")
       Test.assert_true(string_contains(msg, "reset"), "detail")
+    end
+
+    test "Closed message" do
+      Test.assert_true(string_contains(Socket.error_message(Socket.Closed), "closed"), "closed")
     end
 
   end
@@ -90,16 +126,82 @@ mod TestSocket do
   describe "with_connection" do
 
     test "propagates connect error" do
-      let result = Socket.with_connection("127.0.0.1", 1, fn fd -> Ok(fd))
+      let result = Socket.with_connection("127.0.0.1", 1, fn s -> Socket.peer_addr(s))
       match result do
       Err(_) -> ()
       Ok(_)  -> panic("expected error")
       end
     end
 
+    test "passes a Socket and closes it" do
+      let l = listen_ok()
+      let port = port_ok(l)
+      let r = Socket.with_connection("127.0.0.1", port, fn s ->
+        match Socket.write(s, "hi") do
+        Ok(_) -> Ok(s)
+        Err(e) -> Err(e)
+        end)
+      match r do
+      Ok(s) -> assert (Socket.write(s, "x") == Err(Socket.Closed))
+      Err(e) -> panic("with_connection failed: " ++ Socket.error_message(e))
+      end
+      let _ = Socket.close_listener(l)
+    end
+
   end
 
-  -- ── recv_timeout ──────────────────────────────────────────────────────────
+  -- ── listen / accept ───────────────────────────────────────────────────────
+
+  describe "listen accept" do
+
+    test "listen accept roundtrip" do
+      let l = listen_ok()
+      let port = port_ok(l)
+      let client = task_spawn(fn _ ->
+        let c = connect_ok(port)
+        let _ = Socket.write(c, "ping")
+        c)
+      let s = accept_ok(l)
+      let got = Socket.recv(s, 16)
+      let c = task_await_unwrap(client)
+      assert (got == Ok("ping"))
+      assert (Socket.close(s) == Ok(()))
+      assert (Socket.close(c) == Ok(()))
+      assert (Socket.close_listener(l) == Ok(()))
+    end
+
+    test "use after close" do
+      let l = listen_ok()
+      let port = port_ok(l)
+      let s = connect_ok(port)
+      assert (Socket.close(s) == Ok(()))
+      assert (Socket.write(s, "x") == Err(Socket.Closed))
+      assert (Socket.recv(s, 16) == Err(Socket.Closed))
+      assert (Socket.peer_addr(s) == Err(Socket.Closed))
+      assert (Socket.close(s) == Err(Socket.Closed))
+      assert (Socket.close_listener(l) == Ok(()))
+      match Socket.accept(l) do
+      Err(Socket.Closed) -> ()
+      Err(e) -> panic("expected Err(Socket.Closed), got " ++ Socket.error_message(e))
+      Ok(_) -> panic("accept on a closed listener succeeded")
+      end
+      assert (Socket.local_port(l) == Err(Socket.Closed))
+      assert (Socket.close_listener(l) == Err(Socket.Closed))
+    end
+
+    test "accept_timeout times out" do
+      let l = listen_ok()
+      match Socket.accept_timeout(l, 50) do
+      Err(Socket.RecvTimeout(50)) -> ()
+      Err(e) -> panic("expected Socket.RecvTimeout(50), got " ++ Socket.error_message(e))
+      Ok(_) -> panic("accept_timeout accepted a connection nobody made")
+      end
+      let _ = Socket.close_listener(l)
+    end
+
+  end
+
+  -- ── recv_deadline ─────────────────────────────────────────────────────────
 
   describe "recv_deadline" do
 
@@ -107,25 +209,15 @@ mod TestSocket do
     -- so one process is enough: connect, then read from a peer that will
     -- never speak.
     test "returns Ok(None) when the peer sends nothing" do
-      match tcp_listen(29944) do
-      Err(msg) -> panic("listen failed: " ++ msg)
-      Ok(listen_fd) ->
-        match tcp_connect("127.0.0.1", 29944) do
-        Err(msg) -> do
-          tcp_close(listen_fd)
-          panic("connect failed: " ++ msg)
-        end
-        Ok(fd) -> do
-          let result = Socket.recv_deadline(fd, 1024, 200)
-          tcp_close(fd)
-          tcp_close(listen_fd)
-          match result do
-          Ok(None)    -> Test.assert_true(true, "timed out")
-          Ok(Some(_)) -> panic("expected a timeout, got data")
-          Err(_)      -> panic("expected a timeout, got an error")
-          end
-        end
-        end
+      let l = listen_ok()
+      let s = connect_ok(port_ok(l))
+      let result = Socket.recv_deadline(s, 1024, 200)
+      let _ = Socket.close(s)
+      let _ = Socket.close_listener(l)
+      match result do
+      Ok(None)    -> Test.assert_true(true, "timed out")
+      Ok(Some(_)) -> panic("expected a timeout, got data")
+      Err(_)      -> panic("expected a timeout, got an error")
       end
     end
 
