@@ -967,6 +967,9 @@ jobs:
       # to resolve libblake3.so at process start) and zig (needed because
       # test_oracle.exe's own MARCH_ORACLE_CROSS logic shells out to `zig cc`
       # for the cross-compile) are actually required at runtime.
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
+
       - name: Install system dependencies (blake3 for the native reference build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
@@ -1058,6 +1061,9 @@ jobs:
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
 
       - name: Install system dependencies (blake3, the compiler's only runtime .so)
         run: |
@@ -1166,6 +1172,9 @@ jobs:
 
       # Only the C libraries the prebuilt exe dynamically links — no OCaml or
       # opam here, since this job only RUNS a binary built upstream.
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
+
       - name: Install system dependencies (blake3 for the native build)
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
@@ -1283,6 +1292,9 @@ jobs:
       # above for why; only the system deps below (dynamic-linker + the
       # generated-program-link needs of the `march --compile` subprocesses
       # this binary spawns) are actually required at runtime.
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
+
       - name: Install system dependencies (blake3 for the native build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev

@@ -36,6 +36,12 @@ Shared setup lives in two composite actions:
 opam deps, the C libraries the runtime links, z3, optionally zig and the
 linux/amd64 cross sysroot) and [`../actions/opam-deps`](../actions/opam-deps/action.yml)
 (caches `~/.opam`, saving ~2.3 min per job).
+[`../actions/apt-mirror-fallback`](../actions/apt-mirror-fallback/action.yml) runs
+before any `apt-get install` on Linux (`opam-deps` calls it first, and so do the
+jobs that install system packages without the shared setup): when the runner's
+default apt mirror does not resolve, it points apt at mirrors outside ubuntu.com
+for the rest of the job. A new job that calls `apt-get` without `march-setup` or
+`opam-deps` needs that step too.
 
 ## `ci.yml`: the merge gate
 
