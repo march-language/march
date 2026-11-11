@@ -16,6 +16,7 @@ let impure_builtins = [
   "read_line"; "io_read_line"; "read_byte"; "io_read_byte"; "process_read_line";
   (* File IO *)
   "file_read_line"; "file_open"; "file_close";
+  "file_open_write"; "file_write_handle"; "file_seek";
   "file_read"; "file_write"; "file_write_line";
   (* Network / TLS *)
   "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_close"; "tcp_shutdown"; "tcp_local_port";
@@ -76,6 +77,9 @@ let impure_prefixes = [
   "vault_"; "dist_"; "signal_"; "ws_"; "logger_"; "ring_buf_"; "remote_";
   "diag_";
   "csv_"; "dns_"; "socket_"; "udp_";
+  (* handle boxes (ocap phase 2): handle_new mints a resource (two calls with
+     the same arguments are two boxes), the rest read or change its state *)
+  "handle_";
 ]
 
 let impure_suffixes = [ "_set"; "_store" ]

@@ -168,6 +168,15 @@ let cap_test_refuse_kinds =
   lazy (String.split_on_char ',' (Lazy.force cap_test_refuse_text)
         |> List.map String.trim |> List.filter (fun k -> k <> ""))
 
+(* Write streams opened by file_open_write.  The interpreter's file handles
+   are channels passed around as the Int [Obj.magic chan] (file_open), and a
+   channel does not say which way it points, so this table remembers the
+   ones that write: file_seek must use seek_out on them, file_close must
+   flush them (close_out), and the read builtins must not read them.  The
+   table holds the channel itself, so the handle stays reachable until it is
+   closed. *)
+let write_chans : (int, out_channel) Hashtbl.t = Hashtbl.create 8
+
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
      surface `a + b` etc. is ordinary application (EApp) of the VBuiltin bound
@@ -1892,7 +1901,40 @@ let base_env : env =
            VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
       | _ -> eval_error "file_open(path)"))
 
+  ; ("file_open_write", VBuiltin ("file_open_write", function
+      | [VString path; VInt mode] ->
+        (try
+           let flags = Unix.[O_WRONLY; O_CREAT; if mode = 1 then O_APPEND else O_TRUNC] in
+           let fd = Unix.openfile path flags 0o644 in
+           let oc = Unix.out_channel_of_descr fd in
+           let h = (Obj.magic oc : int) in
+           Hashtbl.replace write_chans h oc;
+           VCon ("Ok", [VInt h])
+         with Unix.Unix_error (e, _, _) -> VCon ("Err", [file_error_of_unix path e]))
+      | _ -> eval_error "file_open_write(path, mode)"))
+
+  ; ("file_write_handle", VBuiltin ("file_write_handle", function
+      | [VInt h; VString data] ->
+        (match Hashtbl.find_opt write_chans h with
+         | None -> VCon ("Err", [VCon ("IoError", [VString "write to a closed or read-only file"])])
+         | Some oc ->
+           (try output_string oc data; VCon ("Ok", [VUnit])
+            with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])])))
+      | _ -> eval_error "file_write_handle(fd, data)"))
+
+  ; ("file_seek", VBuiltin ("file_seek", function
+      | [VInt h; VInt off] ->
+        (try
+           match Hashtbl.find_opt write_chans h with
+           | Some oc -> seek_out oc off; VCon ("Ok", [VInt (pos_out oc)])
+           | None ->
+             let ic : in_channel = Obj.magic h in
+             seek_in ic off; VCon ("Ok", [VInt (pos_in ic)])
+         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_seek(fd, offset)"))
+
   ; ("file_read_line", VBuiltin ("file_read_line", function
+      | [VInt ic_int] when Hashtbl.mem write_chans ic_int -> VCon ("None", [])
       | [VInt ic_int] ->
         let ic : in_channel = Obj.magic ic_int in
         (try VCon ("Some", [VString (input_line ic)])
@@ -1900,6 +1942,7 @@ let base_env : env =
       | _ -> eval_error "file_read_line(fd)"))
 
   ; ("file_read_chunk", VBuiltin ("file_read_chunk", function
+      | [VInt ic_int; VInt _] when Hashtbl.mem write_chans ic_int -> VCon ("None", [])
       | [VInt ic_int; VInt size] ->
         let ic : in_channel = Obj.magic ic_int in
         let buf = Bytes.create size in
@@ -1911,6 +1954,11 @@ let base_env : env =
       | _ -> eval_error "file_read_chunk(fd, size)"))
 
   ; ("file_close", VBuiltin ("file_close", function
+      | [VInt h] when Hashtbl.mem write_chans h ->
+        let oc = Hashtbl.find write_chans h in
+        Hashtbl.remove write_chans h;
+        (try close_out oc with _ -> ());
+        VAtom "ok"
       | [VInt ic_int] ->
         let ic : in_channel = Obj.magic ic_int in
         (try close_in ic with _ -> ());
@@ -6106,3 +6154,44 @@ let base_env : env =
   ]
   (* UDP datagrams: lib/eval/eval_udp.ml mirrors runtime/march_udp.c. *)
   @ Eval_udp.builtins
+
+(* Handle boxes (lib/eval/eval_handle.ml): each kind's release runs the raw
+   closer the stdlib used before boxes existed, looked up in the table above,
+   so the box and the raw builtin can never disagree on how a resource is
+   freed.  Mirrors runtime/march_handle.c's release_kind:
+   - DIR closes its fd as TCP does ([tcp_close] is a bare close);
+   - TLS closes the session, then its socket (the aux word);
+   - PROCESS closes the child's streams without killing or reaping it
+     (march_process_release_slot), the first half of [process_wait_proc];
+   - TCP_BORROWED releases nothing. *)
+let () =
+  let raw_closer name =
+    match List.assoc_opt name base_env with
+    | Some (VBuiltin (_, f)) -> (fun v -> ignore (f [v]))
+    | _ -> failwith ("Eval_builtins: handle releaser needs builtin " ^ name)
+  in
+  let file_close = raw_closer "file_close"
+  and tcp_close = raw_closer "tcp_close"
+  and udp_close = raw_closer "udp_close"
+  and tls_close = raw_closer "tls_close"
+  and tls_ctx_free = raw_closer "tls_ctx_free" in
+  let open Eval_handle in
+  set_releaser kind_file (fun raw _ -> file_close raw);
+  set_releaser kind_dir (fun raw _ -> tcp_close raw);
+  set_releaser kind_tcp (fun raw _ -> tcp_close raw);
+  set_releaser kind_listener (fun raw _ -> tcp_close raw);
+  set_releaser kind_udp (fun raw _ -> udp_close raw);
+  set_releaser kind_tls (fun raw aux -> tls_close raw; tcp_close aux);
+  set_releaser kind_tls_ctx (fun raw _ -> tls_ctx_free raw);
+  set_releaser kind_process (fun raw _ ->
+      match raw with
+      | VInt id ->
+        (match Hashtbl.find_opt live_proc_tbl id with
+         | Some (ic, oc, _) ->
+           (try close_in_noerr ic with _ -> ());
+           (try close_out_noerr oc with _ -> ());
+           Hashtbl.remove live_proc_tbl id
+         | None -> ())
+      | _ -> ())
+
+let base_env : env = base_env @ Eval_handle.builtins

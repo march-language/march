@@ -277,6 +277,7 @@ type env = {
   own_cap_closures : (string, string list) Hashtbl.t;
   body_cap_closures : (string, string list) Hashtbl.t;
   stdlib_fns : (string, unit) Hashtbl.t;
+  stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   fn_scopes : (string, string) Hashtbl.t;
   fn_refs : (string, string list) Hashtbl.t;
@@ -328,6 +329,9 @@ val test_build : bool ref
 val lookup_var :
   StrMap.key -> env -> Typecheck_types.scheme option
 val lookup_type : StrMap.key -> env -> int option
+(* Keys of [Typecheck_builtins.builtin_types], installed when that module
+   loads; [canon_type_name] never rewrites one. *)
+val builtin_type_keys : (string, unit) Hashtbl.t
 val canon_type_name : env -> string -> int -> string
 val canon_qualified_tcons : env -> Typecheck_types.ty -> Typecheck_types.ty
 val cap_bare_name : string -> string

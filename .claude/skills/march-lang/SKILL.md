@@ -644,7 +644,7 @@ Functions always in scope without `use`:
 
 ### IO / Files
 
-**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`
+**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`; handles (`File.Handle`, use after `close` is `Err(Closed)`): `open`, `open_write(path, Truncate | Append)`, `read_line`, `read_chunk`, `write_to`, `seek`, `close`, `with_open`, `with_open_write`
 
 **Dir** — `list`, `list_full`, `mkdir`, `mkdir_p`, `rmdir`, `rm_rf`, `exists`
 

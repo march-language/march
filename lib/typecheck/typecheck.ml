@@ -2800,6 +2800,17 @@ let cap_scrutinee env (scrut : Ast.expr) (scrut_ty : ty) (branches : Ast.branch 
     end else scrut_ty
   | _ -> scrut_ty
 
+(* [@[stdlib_internal]] members cannot be imported by `use` or `alias` from
+   user code: an import rebinds the member under another key, which the
+   reference gate's spelled name would not see. [import_blocked env sp k sch]
+   is true when the member bound at [k] is one, and the import at [sp] is not
+   itself stdlib code (stdlib modules may import each other's internals). *)
+let import_blocked env (sp : Ast.span) k sch =
+  not (span_is_stdlib sp)
+  && (match Hashtbl.find_opt env.stdlib_internal_fns k with
+      | Some (_, isch) -> isch == sch
+      | None -> false)
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -2847,6 +2858,22 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
            (Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint)
        | _ -> ());
+      (* [@[stdlib_internal]] stdlib functions (ocap phase 2): the same gate,
+         for a function instead of a builtin. [env.stdlib_internal_fns] is
+         keyed by the qualified name a reference spells (`Socket.raw_fd`), so a
+         user's own bare `raw_fd` never matches; a stdlib span (including the
+         defining module itself) is exempt, exactly as for builtins. *)
+      (if Hashtbl.length env.stdlib_internal_fns > 0
+          && not (span_is_stdlib name.span) then
+         match Hashtbl.find_opt env.stdlib_internal_fns name.txt with
+         | Some (md, isch)
+           when (match lookup_var name.txt env with
+                 | Some sch -> sch == isch | None -> false) ->
+           Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
+             (Printf.sprintf
+                "`%s` is internal to the standard library; use the handle API in `%s`."
+                name.txt md)
+         | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
@@ -8654,6 +8681,26 @@ let rec check_decl env (d : Ast.decl) : env =
       check_no_extern_module env.errors inner_env decls;
     if inner_env.deterministic_mod then
       check_deterministic_module env.errors inner_env decls;
+    (* [@[stdlib_internal]] functions of a stdlib module, filed under the
+       qualified name a reference spells and, for a nested module, under each
+       enclosing path too ([Outer.Inner.f] as well as [Inner.f]). *)
+    List.iter (function
+        | Ast.DFn (fd, fsp)
+          when List.mem "stdlib_internal" fd.Ast.fn_attrs && span_is_stdlib fsp ->
+          let q = name.txt ^ "." ^ fd.Ast.fn_name.txt in
+          (match List.assoc_opt q new_names with
+           | Some sch -> Hashtbl.replace env.stdlib_internal_fns q (name.txt, sch)
+           | None -> ())
+        | _ -> ()) decls;
+    List.iter (function
+        | Ast.DMod (inner, _, _, _) ->
+          let prefix = inner.txt ^ "." in
+          let n = String.length prefix in
+          Hashtbl.iter (fun k v ->
+              if String.length k > n && String.sub k 0 n = prefix then
+                Hashtbl.replace env.stdlib_internal_fns (name.txt ^ "." ^ k) v)
+            (Hashtbl.copy env.stdlib_internal_fns)
+        | _ -> ()) decls;
     let env' = bind_vars new_names env in
     let no_panic_modules' =
       if inner_env.no_panic_mod then name.txt :: env'.no_panic_modules
@@ -9093,6 +9140,7 @@ let rec check_decl env (d : Ast.decl) : env =
              let rest = String.sub k plen (String.length k - plen) in
              let short_key = short_prefix ^ rest in
              if StrMap.mem short_key env.vars then acc
+             else if import_blocked env sp k sch then acc
              else (short_key, sch) :: acc
            else acc) env.vars [] in
        (* The entry is registered UNCONDITIONALLY, but pre-marked used when it
@@ -9138,6 +9186,7 @@ let rec check_decl env (d : Ast.decl) : env =
            then
              let short = String.sub k plen (String.length k - plen) in
              if StrMap.mem short env.local_fns then acc
+             else if import_blocked env sp k sch then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
        (* Import interfaces from the module prefix into scope as short names *)
@@ -9195,6 +9244,14 @@ let rec check_decl env (d : Ast.decl) : env =
      | Ast.UseNames names ->
        List.fold_left (fun env n ->
            match StrMap.find_opt (prefix ^ n.Ast.txt) env.vars with
+           | Some sch when import_blocked env sp (prefix ^ n.Ast.txt) sch ->
+             Err.error ~code:Err.Code.stdlib_internal env.errors ~span:n.Ast.span
+               (Printf.sprintf
+                  "`%s%s` is internal to the standard library; use the handle API in `%s`."
+                  prefix n.Ast.txt
+                  (match Hashtbl.find_opt env.stdlib_internal_fns (prefix ^ n.Ast.txt) with
+                   | Some (md, _) -> md | None -> mod_str));
+             env
            | Some sch ->
              (* Track for unused-import warning: warn if this specific name is unused. *)
              let entry = { ie_span = n.Ast.span
@@ -9223,6 +9280,7 @@ let rec check_decl env (d : Ast.decl) : env =
              if List.mem short excl_set then acc
              (* Local definitions shadow bulk imports — see UseAll. *)
              else if StrMap.mem short env.local_fns then acc
+             else if import_blocked env sp k sch then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
        (* Track for unused-import warning: warn if nothing from this module is
@@ -9261,7 +9319,8 @@ let rec check_decl env (d : Ast.decl) : env =
         let plen = String.length orig_prefix in
         if String.length k > plen && String.sub k 0 plen = orig_prefix then
           let rest = String.sub k plen (String.length k - plen) in
-          (short_prefix ^ rest, sch) :: acc
+          if import_blocked env sp k sch then acc
+          else (short_prefix ^ rest, sch) :: acc
         else acc) env.vars [] in
     (* Track for unused-alias warning: warn if no "Short.*" name is referenced. *)
     if new_bindings <> [] then begin
@@ -11939,7 +11998,10 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
          codec: only a pair involving a type without one (a record) is
          still ambiguous. *)
       let distinct q q' =
-        Typecheck_nominal.is_identity q && Typecheck_nominal.is_identity q' in
+        (* [q] is entry-relative; a reserved name's top-level identity is
+           entry-qualified ([Typecheck_nominal.identity_of_path_name]). *)
+        let id = Typecheck_nominal.identity_of_path_name in
+        Typecheck_nominal.is_identity (id q) && Typecheck_nominal.is_identity (id q') in
       (match List.find_opt (fun (q', _) ->
            q' <> q && short q' = short q && not (distinct q q')) !seen with
        | Some (q', sp') ->
@@ -12031,7 +12093,11 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
-  (* Colliding variant types' identities (`A.Note` / `B.Note`). *)
+  (* Colliding variant types' identities (`A.Note` / `B.Note`).  Recomputed
+     per check, so per REPL fragment too: a fragment sees only its own
+     declarations, and a user type with a reserved handle name (`Process`)
+     declared in an EARLIER fragment has no identity in a later one (known
+     edge, ocap phase 2 Task 2 review item 8). *)
   Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib m;
   (* Type-variable letters in messages are assigned on first print from a
      process-wide table.  A cold run typechecks the stdlib first and can

@@ -702,7 +702,7 @@ let load_stdlib ?(for_js=false) () =
       with _ -> ());
       (* Register these declarations' files as the stdlib's BEFORE any
          typecheck sees them: the stdlib-only builtin gate
-         ([Typecheck_caps.check_stdlib_only_refs]) exempts a declaration by
+         (the resolution-time gate in [Typecheck.infer_expr]) exempts a declaration by
          its span's file, and every path that typechecks the stdlib (compile,
          `march test`, `march check`, the REPL and its JIT, warm-cache) loads
          it here. *)
@@ -936,6 +936,7 @@ let ensure_runtime_so () =
       ^ (opt_file (Filename.concat runtime_dir "pqc.c"))              (* vendored ML-KEM-768 / ML-DSA-65 (third_party/) *)
       ^ (opt_file (Filename.concat runtime_dir "march_pqc.c"))        (* mlkem768_* / mldsa65_* builtins over pqc.c *)
       ^ (opt_file (Filename.concat runtime_dir "march_ctx_escape.c"))  (* ~H contextual escapers; referenced by march_extras.c *)
+      ^ (opt_file (Filename.concat runtime_dir "march_handle.c"))  (* handle boxes; referenced by march_runtime.c *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_observe.c")) (* observe socket *)

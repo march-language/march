@@ -754,6 +754,14 @@ type env = {
       ceiling: a stdlib wrapper's body caps roll up to the user module that
       calls it, exactly as [March_tir.Cap_attrib]'s [~transparent] does on the
       `--compile` side. Keyed like [cap_closures]. *)
+  stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
+  (** Qualified name ([Mod.f]) of every stdlib function carrying
+      [@[stdlib_internal]], mapped to the module the error points users at and the scheme the export step
+      bound to that name. The gate fires only for a name whose resolved scheme IS
+      (physically) that one, so a user module of the same name never matches.
+      Filled when a stdlib [DMod]'s [DFn]s are checked; read by the stdlib-only
+      gate in [infer_expr]'s [EVar] arm. Shared by every copy of the env, like
+      [stdlib_fns]. *)
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   (** Function-name keys that are ALWAYS-reachable ceiling roots regardless of
       whether the program has a `main` — mirroring the unconditional roots
@@ -929,6 +937,7 @@ let make_env errors type_map = {
   own_cap_closures = Hashtbl.create 64;
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
+  stdlib_internal_fns = Hashtbl.create 8;
   ceiling_extra_roots = Hashtbl.create 16;
   fn_scopes = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
@@ -1240,18 +1249,34 @@ let test_build = ref false
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
 
+(** The keys of [Typecheck_builtins.builtin_types], installed by that module
+    when it loads (it depends on this one).  Read by [canon_type_name]. *)
+let builtin_type_keys : (string, unit) Hashtbl.t = Hashtbl.create 64
+
 (** The canonical spelling of a type-constructor name that denotes a type of
     [arity] parameters.  March has a single global type namespace: a type
     declared inside a module has its BARE name as its identity, so a qualified
     `Mod.T` collapses to `T` whenever `T` is a type of the same arity in scope
     (otherwise the name is returned unchanged).  Shared by [surface_ty] (a
     written annotation) and [canon_qualified_tcons] (a builtin signature typed
-    in OCaml), so the two routes can never disagree about a type's identity. *)
+    in OCaml), so the two routes can never disagree about a type's identity.
+
+    Two exceptions (ocap phase 2), both so that a builtin type keeps its own
+   identity:
+   - a qualified name that is itself a builtin type is never rewritten:
+     `IO.Process` is the capability, not the handle type `Process`, and
+     `File.Handle` is not a user's bare `Handle`;
+   - a qualified name is never rewritten INTO a reserved builtin name
+     ([Typecheck_nominal.reserved_builtin_names], the handle types, which no
+     declaration may own): a user's `App.Socket` that is not a nominal
+     identity names no type at all, rather than the handle box. *)
 let canon_type_name env name arity =
   if Typecheck_nominal.is_identity name then name else
+  if Hashtbl.mem builtin_type_keys name then name else
   match String.rindex_opt name '.' with
   | Some i ->
     let bare = String.sub name (i + 1) (String.length name - i - 1) in
+    if Typecheck_nominal.is_reserved bare then name else
     (match lookup_type bare env with Some a when a = arity -> bare | _ -> name)
   | None -> name
 
@@ -2323,7 +2348,23 @@ let stdlib_only : (string * string) list ref =
       ("cap_launch_text", "use `Authority.check(kind, target)`");
       (* DD step 12a: runs a request line through the node's own reload-socket
          dispatch; only the control plane's Agent relays operator-signed lines. *)
-      ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)") ]
+      ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)");
+      (* ocap phase 2 (Task 2): the handle-box primitives. A handle is an
+         unforgeable reference to an opened resource; user code gets one only
+         from a checked open in the stdlib. *)
+      ("handle_new", "handles are made by their module's open functions");
+      ("handle_enter", "handles are made by their module's open functions");
+      ("handle_leave", "handles are made by their module's open functions");
+      ("handle_close", "handles are made by their module's open functions");
+      ("handle_detach", "handles are made by their module's open functions");
+      ("handle_is_closed", "handles are made by their module's open functions");
+      ("handle_aux", "handles are made by their module's open functions");
+      (* ocap phase 2 (Task 4): the raw Int-descriptor file builtins added for
+         File.Handle. New, so stdlib-only from the start: a guessed raw handle
+         must not write or seek a file the program has open. *)
+      ("file_open_write", "use `File.open_write(path, mode)`");
+      ("file_write_handle", "use `File.write_to(h, data)` on a `File.Handle`");
+      ("file_seek", "use `File.seek(h, offset)` on a `File.Handle`") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

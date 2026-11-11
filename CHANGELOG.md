@@ -21,6 +21,15 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`File.Handle`: open, read, write, seek and close a file through a handle.**
+  `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
+  (writes, creates the file, `IO.FileWrite`) return `Result(File.Handle, FileError)`;
+  `File.read_line`, `File.read_chunk`, `File.write_to`, `File.seek` and `File.close` use it.
+  The handle is a reference-counted box: every use after `close` returns the new
+  `Err(Closed)` (a second `close` too), and a handle dropped without `close` is closed
+  when its last reference goes. `File.with_open` / `File.with_open_write` close it when the
+  callback returns or panics. `FileError` now derives `Eq`. `with_lines`, `with_chunks`,
+  `each_line` and `each_chunk` keep their signatures and use a handle internally.
 - **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
   methods(get))` limits a module to a path prefix on a host, matched by whole segment
   (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
@@ -478,7 +487,9 @@ git log is authoritative for exact commits.
   (`Process.env/set_env/cwd/argv/pid/exit`, `System.*`, `Env.*`, `Config.from_env*`/`env`),
   spawning (`Task.async`, `async_stream`), opening a table by name (`Vault.new/open/whereis`,
   `ns_*`, `Config.new_store`), signals (`Signal.watch/raise`), files (`File.*`, `Dir.*`,
-  `Csv.*`, `Seq.from_file_*`), `Socket.connect*` and `Dns.resolve*` all return a `Result`
+  `Csv.*`, `Seq.from_file_*`; the handle opens `File.open`, `File.open_write`, `File.with_open`
+  and `File.with_open_write`, while the handle's own `read_line`/`write_to`/`seek`/`close` charge
+  nothing), `Socket.connect*` and `Dns.resolve*` all return a `Result`
   whose `Err(CapError(...))` is a refusal naming the operation and the limit. Operations
   that already returned `Result(U, E)` now return `Result(Result(U, E), CapError)`:
   `Ok(Err(NotFound(p)))` is a missing file, `Err(CapError(...))` a refused one. A call used
@@ -505,6 +516,13 @@ git log is authoritative for exact commits.
   verdict, so only a changed program pays for the check (about 1.3 s for a small
   program); forge's check cache now also keys the compiler, so a compiler upgrade
   re-checks.
+- **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
+  `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
+  connection (ocap phase 2). A module's own type (variant, record or alias) named
+  `Socket`, `Listener` or `Process` is still allowed and is always a type distinct from the builtin, never
+  unified with it. Code that only goes through `Channel.new_socket` and
+  the `Channel.socket_*` accessors is unaffected; code that names the type or matches
+  on the constructor renames it.
 
 - **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
   NaN, the infinities and a result outside Int's range** (#1230), with
