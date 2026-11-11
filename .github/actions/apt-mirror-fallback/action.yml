@@ -12,8 +12,4 @@ runs:
     - name: Fall back to another apt mirror if ubuntu.com does not resolve
       if: runner.os == 'Linux'
       shell: bash
-      env:
-        # TEMPORARY, removed before merge: take the fallback path on a real
-        # runner once, to prove it there.
-        APT_MIRROR_FALLBACK_FORCE: "1"
       run: bash "${{ github.action_path }}/apt-mirror-fallback.sh"

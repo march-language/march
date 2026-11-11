@@ -21,5 +21,7 @@ ubuntu.com, so apt's built-in mirror fallback could not help. macOS jobs were un
   independent of the runner's certificate store.
 - Tested against the live outage in `ubuntu:24.04` containers shaped like the runner image
   (amd64 with `mirror+file:`; arm64 with direct `ports.ubuntu.com` URIs): install failed
-  before, succeeded after; the no-op path leaves both files untouched. On a real runner the
-  fallback path was taken once with `APT_MIRROR_FALLBACK_FORCE=1` on this PR's first commit.
+  before, succeeded after; the no-op path leaves both files untouched. On a real amd64 runner
+  the fallback path was taken once with `APT_MIRROR_FALLBACK_FORCE=1` on the PR's first commit
+  (run 43063939759: all six Linux setup jobs passed on kernel.org). The arm64 runner only runs
+  on main pushes, so its path is proven in a container only.
