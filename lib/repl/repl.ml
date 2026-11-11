@@ -373,8 +373,16 @@ let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
     Fun.protect ~finally:(fun () ->
         March_typecheck.Typecheck.stdlib_source_files := saved_files)
       (fun () ->
+         let unchecked why =
+           March_errors.Errors.warning ctx ~code:March_errors.Code.cap_unchecked
+             ~span:dsp
+             (Printf.sprintf
+                "The capability ceiling and host scopes were not checked: \
+                 the compiler cannot build this module (%s)." why)
+         in
          match March_typecheck.Typecheck.check_module_full program with
-         | exception _ -> ()
+         | exception ((Out_of_memory | Stack_overflow) as e) -> raise e
+         | exception e -> unchecked (Printexc.to_string e)
          | (errs, type_map, tc_env) ->
            let mine (d : March_errors.Errors.diagnostic) =
              within d.March_errors.Errors.span in
@@ -388,18 +396,22 @@ let repl_check_caps ~stdlib_decls ~(prior_mods : March_ast.Ast.decl list) ~src
               declaration has, [check_decl] already reported. *)
            List.iter (fun d -> if cap_code d then March_errors.Errors.report ctx d)
              errors_here;
+           (* A non-capability error here that [check_decl] did not report
+              (the module checked alone with the stdlib and the session's
+              modules disagrees with the prompt's env) stops the check:
+              say so, never accept silently. *)
+           (match List.filter (fun d -> not (cap_code d)) errors_here with
+            | d :: _ when not (List.exists cap_code errors_here) ->
+              unchecked (String.trim (List.hd (String.split_on_char '\n'
+                                                  d.March_errors.Errors.message)))
+            | _ -> ());
            if errors_here = [] then begin
              let input = {
                March_driver.Cap_static.desugared = program; stdlib_decls; tc_env;
                type_map; src; filename = dsp.March_ast.Ast.file;
                read_file = (fun _ -> src); cap_strict = true } in
              match March_driver.Cap_static.check_program ~opt:true ~is_js:false input with
-             | March_driver.Cap_static.Unchecked why ->
-               March_errors.Errors.warning ctx ~code:March_errors.Code.cap_unchecked
-                 ~span:dsp
-                 (Printf.sprintf
-                    "The capability ceiling and host scopes were not checked: \
-                     the compiler cannot build this module (%s)." why)
+             | March_driver.Cap_static.Unchecked why -> unchecked why
              | March_driver.Cap_static.Checked fs ->
                List.iter (function
                    | March_driver.Cap_static.Diag d -> March_errors.Errors.report ctx d
