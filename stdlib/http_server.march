@@ -193,8 +193,9 @@ mod HttpServer do
 
   doc """
   The descriptor under the conn's socket, for standard-library code that
-  hands it to the runtime; -1 when no live connection backs the conn (a
-  `test_conn`, or a conn kept past its request).
+  hands it to the runtime; -1 when no live connection backs the conn: a
+  `test_conn`, or a conn kept after the server closed its socket (compiled:
+  when the connection ends; interpreted: when its request is done).
   """
   @[stdlib_internal]
   fn fd(conn) do

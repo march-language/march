@@ -33,10 +33,7 @@ mod HttpTransport do
   -- One raw socket call each, on the descriptor inside s; Err(Closed) once s
   -- is closed. The enter/leave pair keeps the descriptor from being
   -- released, and its number reused, while the call runs, even if another
-  -- task closes s meanwhile. Written out per call rather than through a
-  -- closure-taking helper: the capability ceiling charges a lambda lifted
-  -- out of a stdlib function to the program's entry module (see
-  -- specs/todos/2026-11-11-cap-attrib-stdlib-lambdas.md).
+  -- task closes s meanwhile.
   pfn send_all_on(s : Socket, raw_request : String) : Result((), TransportError) do
     let fd = handle_enter(s, 3)
     if fd == -1 do Err(Closed) else
@@ -73,7 +70,7 @@ mod HttpTransport do
     end
   end
 
-  pfn recv_headers_on(s : Socket) do
+  pfn recv_headers_on(s : Socket) : Result((String, Int, Bool), TransportError) do
     let fd = handle_enter(s, 3)
     if fd == -1 do Err(Closed) else
       let r = match tcp_recv_http_headers(fd) do

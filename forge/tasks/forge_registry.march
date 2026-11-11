@@ -132,11 +132,18 @@ pfn send_tls(method, host, port, full_path, headers, body) do
 end
 
 -- Read the plain response until the server closes (the request says
--- `Connection: close`); a failed read before any byte arrived is an error.
-pfn read_socket(s, acc) do
-  match Socket.recv(s, 65536) do
-  Err(e) -> if is_nil(acc) do Err("read failed: " ++ Socket.error_message(e)) else Ok(acc) end
-  Ok(chunk) -> if String.byte_size(chunk) == 0 do Ok(acc) else read_socket(s, Cons(chunk, acc)) end
+-- `Connection: close`). `left` is one more than the bytes still allowed
+-- (send_plain allows 16 MiB, the cap tcp_recv_http applied), so a response of
+-- exactly the cap still reads its EOF. A failed read is an error even
+-- after some bytes arrived: a truncated response must not pass as whole.
+pfn read_socket(s, acc, left) do
+  if left <= 0 do Err("read failed: response exceeds 16777216 bytes") else
+    match Socket.recv(s, if left < 65536 do left else 65536 end) do
+    Err(e) -> Err("read failed: " ++ Socket.error_message(e))
+    Ok(chunk) ->
+      let n = String.byte_size(chunk)
+      if n == 0 do Ok(acc) else read_socket(s, Cons(chunk, acc), left - n) end
+    end
   end
 end
 
@@ -147,7 +154,7 @@ pfn send_plain(method, host, port, full_path, headers, body) do
     let result = match Socket.write(s, build_request(method, full_path, host, headers, body)) do
       Err(e) -> Err("write failed: " ++ Socket.error_message(e))
       Ok(_) ->
-        match read_socket(s, Nil) do
+        match read_socket(s, Nil, 16777216 + 1) do
         Err(e) -> Err(e)
         Ok(rev) -> Ok(finalize(String.join(List.reverse(rev), "")))
         end

@@ -13976,6 +13976,18 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_socket.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_socket.march)))
 
+; HTTP on handles (ocap phase 2b, Task 6): stdlib_march runs these untyped, so a
+; stale `request_on(-1, ...)` once passed there while `march test` rejected it.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_http_transport.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_http_transport.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_http_server.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_http_server.march)))
+
 (rule
  (targets test_socket_compiled_bin test_socket_compiled.out)
  (deps (file %{exe:../bin/main.exe})

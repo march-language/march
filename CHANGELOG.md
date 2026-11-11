@@ -903,6 +903,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A capability reached inside a standard-library closure is charged to the code that
+  called the standard library, not to the program's entry module.** `march check` and the
+  REPL rejected correct programs that called `Socket.write`, `Tls.read` or
+  `HttpTransport.simple_get` (``Module `LibCheck` uses `IO.NetConnect` ``), and the other
+  modes charged the capability to the entry module, so a nested module that called such a
+  function without the `needs` line was accepted whenever the entry module declared it. It
+  is now rejected there, as for a direct call.
 - **Closing a TLS connection whose peer had already reset it no longer kills the process.**
   `Tls.close` sends close_notify; to a reset peer that write raised SIGPIPE, so a TLS server
   that closed after its client hung up could exit with status 141. The descriptor now gets

@@ -118,11 +118,10 @@ let builtins : env =
          | [_] -> eval_error "march: handle leave: not a handle box"
          | _ -> eval_error "handle_leave(h)"));
     ("handle_close", VBuiltin ("handle_close", function
-         | [VHandle c] ->
+         | [VHandle c as h] ->
            if c.h_closed then VBool false
            else begin
-             c.h_closed <- true;
-             release_once c;
+             close h;
              VBool true
            end
          | [_] -> eval_error "march: handle close: not a handle box"

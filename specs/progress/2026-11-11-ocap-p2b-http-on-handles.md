@@ -8,12 +8,10 @@ Ocap phase 2b, Task 6 (plan: `specs/plans/2026-11-10-ocap-p2-handles-plan.md`). 
   `stream_chunked_body` and `stream_fixed_body` take a `Socket`; each raw call is bracketed
   by `handle_enter` / `handle_leave` in its own private helper (`send_all_on`,
   `recv_http_on`, ...), so a use after close is `Err(Closed)` and the descriptor is never
-  released under a call in flight. The helpers take no closure: the capability ceiling
-  charges a lambda lifted out of a stdlib function to the entry module, which made
-  `march check` and the REPL reject `HttpTransport.simple_get` for `IO.NetConnect`
-  (`test/test_cap_mode_parity.ml`). Filed as
-  `specs/todos/2026-11-11-cap-attrib-stdlib-lambdas.md`; the same bug, through `Tls`'s
-  closures (Task 5), still rejects it for `IO.NetConnect.TLS`. The
+  released under a call in flight. (A first version used a closure helper; the capability
+  ceiling then charged its lambda to the entry module, which `march check` and the REPL
+  rejected. That attribution bug is fixed in this change too:
+  `specs/progress/2026-11-11-cap-attrib-stdlib-lambdas.md`.) The
   connect-per-request paths (`request` over plain HTTP and HTTPS) also open a `Socket`
   instead of calling `tcp_connect` / `tcp_close` directly.
 - `stdlib/http_client.march`: `transport_keepalive` takes a `Socket` (it closes it with
@@ -31,6 +29,10 @@ Ocap phase 2b, Task 6 (plan: `specs/plans/2026-11-10-ocap-p2-handles-plan.md`). 
   connection ends, before `close(fd)` (thread pool: end of `connection_thread`; event
   loop: `close_conn`, and `detach_conn` on a WebSocket hand-off), so a `Conn` kept past its
   connection reaches no descriptor. `march_process_one_request` takes the box too.
+  Limit: `Conn` is not opaque, so a handler can still match `Conn(s, ...)` and close or
+  park on the borrowed socket during its connection; closing a borrowed box does not
+  cancel waits (they are keyed by fd and would cancel the server's own). Filed as
+  `specs/todos/2026-11-11-conn-socket-field-exposed.md` (fix: an opaque `Conn`).
 - Interpreter (`lib/eval/eval_net.ml`): both servers build the `Conn` over a per-request
   borrowed box (`conn_socket`) and close it when the pipeline returns
   (`Eval_handle.close`, new).
