@@ -52,4 +52,29 @@ printf '#!/usr/bin/env bash\necho ready\nexec sleep 30\n' > "$dir/node_a.march"
 printf 'start_node a\nwait_line a ready\nkill_node a\n' > "$dir/scenario.sh"
 run_case 1
 grep -q 'node_a.expected' "$scratch/output"
+# A pid variable that names a process the harness did not start (what a
+# recycled pid is) must survive both SIGKILL paths: the EXIT cleanup and
+# kill_node. The stand-in is a child of THIS script, not of the harness.
+rm -f "$dir/node_a.expected"
+for how in cleanup kill_node; do
+  sleep 60 &
+  foreign=$!
+  case $how in
+    cleanup)   printf 'pid_b=%s\n' "$foreign" > "$dir/scenario.sh" ;;
+    kill_node) printf 'pid_b=%s\nkill_node b\n' "$foreign" > "$dir/scenario.sh" ;;
+  esac
+  run_case 0
+  if ! kill -0 "$foreign" 2>/dev/null; then
+    echo "$how SIGKILLed pid $foreign, which the harness never started" >&2
+    exit 1
+  fi
+  kill "$foreign"; wait "$foreign" 2>/dev/null || true
+done
+# ...and a node the harness did start is still killed (kill_node waits for
+# it, so a refused kill would hang here for the node's 30 s).
+printf 'ready\n' > "$dir/node_a.expected"
+printf 'start_node a\nwait_line a ready\nkill_node a\n' > "$dir/scenario.sh"
+start=$SECONDS
+run_case 0
+[ $((SECONDS - start)) -lt 20 ] || { echo "kill_node did not kill its own node" >&2; exit 1; }
 echo 'test-two-node: all cases passed'

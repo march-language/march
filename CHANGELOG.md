@@ -493,6 +493,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Compiled `NativeArray.get_*` / `set_*` no longer call into the runtime on the
+  common path.** The bounds check and the load or store are emitted inline for every
+  element width (int, float, f32, i32, u8); a `set` on an array with one owner writes in
+  place inline. The runtime is called only for an out-of-bounds index (same message, same
+  exit) or a shared array (same copy-on-write). Strata's fluid step got faster; see
+  `specs/progress/2026-11-11-native-array-get-set-inline.md`.
 - **Capability operations return `Result(T, CapError)`** (object-capability design,
   phase 1; breaking). Printing (`println`, `IO.puts/write/warn/read_line/read_byte/gets`),
   the clock (`System.now`, `System.now_ms`, new; `DateTime.now`, `local_now`), randomness
@@ -922,6 +928,12 @@ git log is authoritative for exact commits.
   (``expected `CancelToken` but got `Main.CancelToken` ``). A program that declares such a type
   and uses only its own declaration is unaffected, and messages still print the short name
   unless the two types meet. Not covered yet: types declared at the REPL.
+- **A compiled `match` arm with a qualified constructor pattern no longer returns the wrong
+  constructor when it returns the matched value.** `match s do Shapes.Square(n) -> if n > 3 do s
+  else d end ... end` returned the type's first constructor (`Circle(11)` for `Square(5)`) in a
+  compiled program, with no error; the interpreter was right. It affected every qualified
+  pattern form (`Mod.Ctor`, `Type.Ctor`, an actor's `Counter.Bump`) whose arm returns the value
+  being matched. A bare pattern was not affected.
 - **A derived `Show`, `Ord` or `Hash` no longer calls a user fn named like the method.** With
   `derive Show for P` and your own `fn show(_x : Int)` in the same module, `println(P(1, "a"))`
   printed `P(U, U)`: the generated code called `show(field)` and got your fn, on both backends.
