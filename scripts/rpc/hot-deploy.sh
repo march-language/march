@@ -204,7 +204,7 @@ docker run --rm --platform linux/amd64 \
     cd /march
     export MARCH_STDLIB=/march/stdlib
     MC=$BD/default/bin/main.exe  # reuse compiler built in Step 1
-    \"\$MC\" --compile --compile-so --hot-reload Server \
+    \"\$MC\" --compile --compile-so --stdlib-source --hot-reload Server \
       -o /out/hcr_server_patch_${SLUG}.so /out/hcr_server_patch_${SLUG}.march
     head -c4 /out/hcr_server_patch_${SLUG}.so | od -An -tx1  # expect 7f 45 4c 46 (ELF)
     echo '--- exported symbols (Server.*):'

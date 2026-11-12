@@ -9144,7 +9144,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_call_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_call_loopback
         native/node_call_loopback.march)
    (with-stdout-to native_node_call_loopback.out
         (system "./native_node_call_loopback")))))
@@ -9221,7 +9221,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_loopback
         native/node_send_loopback.march)
    (with-stdout-to native_node_send_loopback.out
         (system "./native_node_send_loopback")))))
@@ -9249,7 +9249,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_peer_reader_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_peer_reader_loopback
         native/peer_reader_loopback.march)
    (with-stdout-to native_peer_reader_loopback.out
         (system "./native_peer_reader_loopback")))))
@@ -9270,7 +9270,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_failed_msg
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_failed_msg
         native/node_send_failed_msg.march)
    (with-stdout-to native_node_send_failed_msg.out
         (system "./native_node_send_failed_msg")))))
@@ -9291,7 +9291,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_control_channel_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_control_channel_loopback
         native/control_channel_loopback.march)
    (with-stdout-to native_control_channel_loopback.out
         (system "./native_control_channel_loopback")))))
@@ -9312,7 +9312,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_net_frame_large_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_net_frame_large_loopback
         native/net_frame_large_loopback.march)
    (with-stdout-to native_net_frame_large_loopback.out
         (system "./native_net_frame_large_loopback")))))
@@ -9713,7 +9713,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_credit_backpressure_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_credit_backpressure_loopback
         native/credit_backpressure_loopback.march)
    (with-stdout-to native_credit_backpressure_loopback.out
         (system "./native_credit_backpressure_loopback")))))
@@ -9837,7 +9837,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_cluster_accept_silent_peer
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_cluster_accept_silent_peer
         native/cluster_accept_silent_peer.march)
    (with-stdout-to native_cluster_accept_silent_peer.out
         (system "./native_cluster_accept_silent_peer")))))
@@ -9856,7 +9856,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_dist_monitor_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_dist_monitor_loopback
         native/dist_monitor_loopback.march)
    (with-stdout-to native_dist_monitor_loopback.out
         (system "./native_dist_monitor_loopback")))))
@@ -9875,7 +9875,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_typed_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_typed_loopback
         native/node_send_typed_loopback.march)
    (with-stdout-to native_node_send_typed_loopback.out
         (system "./native_node_send_typed_loopback")))))
@@ -9907,7 +9907,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_session_node_fan_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_session_node_fan_loopback
         native/session_node_fan_loopback.march)
    (setenv MARCH_NUM_SCHEDULERS 1
     (with-stdout-to native_session_node_fan_loopback.out
@@ -10015,7 +10015,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_block_sender_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_block_sender_loopback
         native/block_sender_loopback.march)
    (with-stdout-to native_block_sender_loopback.out
         (system "./native_block_sender_loopback")))))
@@ -10033,7 +10033,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_after_death_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_after_death_loopback
         native/monitor_after_death_loopback.march)
    (with-stdout-to native_monitor_after_death_loopback.out
         (system "./native_monitor_after_death_loopback")))))
@@ -10052,7 +10052,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_ack_retry_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_ack_retry_loopback
         native/monitor_ack_retry_loopback.march)
    (with-stdout-to native_monitor_ack_retry_loopback.out
         (system "./native_monitor_ack_retry_loopback")))))
@@ -10070,7 +10070,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_expiry_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_expiry_loopback
         native/monitor_expiry_loopback.march)
    (with-stdout-to native_monitor_expiry_loopback.out
         (system "./native_monitor_expiry_loopback")))))
@@ -10178,7 +10178,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/swim_driver.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_discovery
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_discovery
         native/node_discovery.march)
    (with-stdout-to native_node_discovery.out
         (system "./native_node_discovery")))))
@@ -10231,7 +10231,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_rpc_auto_enroll
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_rpc_auto_enroll
         native/rpc_auto_enroll.march)
    (with-stdout-to native_rpc_auto_enroll.out
         (system "./native_rpc_auto_enroll")))))

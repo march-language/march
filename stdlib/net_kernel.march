@@ -55,6 +55,7 @@ mod NetKernel do
         Err(e) -> println("write failed: " ++ e)
       end
   """
+  @[stdlib_internal]
   fn send_frame(fd : Int, payload : List(Int)) : Result((), String) do
     match Vault.get(mac_table(), fk(fd)) do
       None -> send_raw(fd, payload)
@@ -67,6 +68,7 @@ mod NetKernel do
   first when [fd] is sealed: NodeQueue frames its messages when they are
   queued, before it knows when they will be written.
   """
+  @[stdlib_internal]
   fn write_framed(fd : Int, framed : Bytes) : Result((), String) do
     match Vault.get(mac_table(), fk(fd)) do
       None -> write_bytes(fd, framed)
@@ -123,6 +125,7 @@ mod NetKernel do
         Err(e) -> println("connection lost: " ++ e)
       end
   """
+  @[stdlib_internal]
   @[diverges] fn recv_frame(fd : Int, buf : List(Int)) : Result((List(Int), List(Int)), String) do
     match recv_frame_plain(fd, buf) do
       Err(e) -> Err(e)
@@ -177,6 +180,7 @@ mod NetKernel do
   connection it is MAC-checked as in `recv_frame`. Blocks; `Err` on a read
   failure.
   """
+  @[stdlib_internal]
   @[diverges] fn recv_frame_exact(fd : Int) : Result(List(Int), String) do
     match recv_frame_exact_raw(fd) do
       Err(e) -> Err(e)
@@ -219,6 +223,7 @@ mod NetKernel do
         Err(e) -> println("refused: " ++ e)
       end
   """
+  @[stdlib_internal]
   fn handshake(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                my_nonce : String) : Result(NodeIdentity.Identity, String) do
     match handshake_role(fd, my_id, secret, my_nonce, Handshake.role_control()) do
@@ -235,6 +240,7 @@ mod NetKernel do
   exact: nothing past the handshake's own two frames is consumed, so the
   connection is handed over with the peer's first real frame still unread.
   """
+  @[stdlib_internal]
   fn handshake_role(fd : Int, my_id : NodeIdentity.Identity, secret : String,
                     my_nonce : String, role : String) : Result((NodeIdentity.Identity, String), String) do
     match handshake_auth(fd, my_id, ClusterAuth.Secret(secret), my_nonce, role, "", 0) do
@@ -280,6 +286,7 @@ mod NetKernel do
   handshake timed out")` when the deadline passes first, or an error when
   the read fails or the connection closes.
   """
+  @[stdlib_internal]
   fn recv_frame_until(fd : Int, deadline : Int) : Result(List(Int), String) do
     match recv_exact_until(fd, 4, deadline, Nil) do
       Err(e) -> Err(e)
@@ -294,6 +301,7 @@ mod NetKernel do
   role it announced and the address it advertised ("" from a peer that
   sends none).
   """
+  @[stdlib_internal]
   fn handshake_addr(fd : Int, my_id : NodeIdentity.Identity, secret : String, my_nonce : String,
                     role : String, addr : String, timeout_ms : Int)
       : Result((NodeIdentity.Identity, String, String), String) do
@@ -352,9 +360,11 @@ mod NetKernel do
   lacks `raw_send`. Checked by `NodeSend` (Node.send) and `NodeCall`
   (RemoteCall); ClusterNode checks its own connections by certificate.
   """
+  @[stdlib_internal]
   fn raw_allowed(fd : Int) : Bool do Vault.get_or(raw_table(), fk(fd), 1) == 1 end
 
   doc "Record a raw frame refused on a connection (`raw_allowed` false): counted in `raw_refused()`."
+  @[stdlib_internal]
   fn note_raw_refused(_fd : Int) : () do
     let _ = Vault.incr(mac_counts(), "raw_refused_total", 1)
     ()
@@ -371,6 +381,7 @@ mod NetKernel do
   pfn binding_table() : Vault(Bytes) do Authority.must(Vault.open("net_kernel_binding")) end
 
   doc "The handshake transcript of [fd]'s sealed connection (empty when it has none: unsealed, or never handshaked here)."
+  @[stdlib_internal]
   fn link_binding(fd : Int) : Bytes do
     match Vault.get(binding_table(), fk(fd)) do
       Some(b) -> b
@@ -379,6 +390,7 @@ mod NetKernel do
   end
 
   doc "Drop [fd]'s MAC state: its frames are plain again (see the rule above)."
+  @[stdlib_internal]
   fn forget(fd : Int) : () do
     Vault.drop(binding_table(), fk(fd))
     Vault.drop(raw_table(), fk(fd))
@@ -391,6 +403,7 @@ mod NetKernel do
   end
 
   doc "Are [fd]'s frames sealed?"
+  @[stdlib_internal]
   fn sealed(fd : Int) : Bool do Option.is_some(Vault.get(mac_table(), fk(fd))) end
 
   doc "Frames dropped for a failed MAC, in this process, since it started."
@@ -471,6 +484,7 @@ mod NetKernel do
   [addr] is our advertised address ("" for none), [timeout_ms] bounds the
   whole exchange (<= 0: no bound).
   """
+  @[stdlib_internal]
   fn handshake_auth(fd : Int, my_id : NodeIdentity.Identity, auth : ClusterAuth.Auth, my_nonce : String,
                     role : String, addr : String, timeout_ms : Int) : Result(Authed, String) do
     -- A connection on a reused fd number must not inherit the last one's key.

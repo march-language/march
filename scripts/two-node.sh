@@ -110,6 +110,18 @@ toolchain_stamp() {
   } | sha256 | cut -d' ' -f1
 }
 
+# plumbing_flag <source>: `--stdlib-source` when the node drives the stdlib's
+# raw-fd cluster plumbing (NetKernel, NodeSend, ... are @[stdlib_internal]
+# since ocap phase 2, task 9). A two-node node that speaks the wire protocol
+# by hand is a cluster test that legitimately needs it, so its span is
+# registered as stdlib, the way test_stdlib_only.ml does. Nodes that only use
+# the public API compile as user code, gate and all.
+plumbing_flag() {
+  if grep -qE '\bNetKernel\.(send_frame|write_framed|recv_frame|recv_frame_exact|handshake|handshake_role|recv_frame_until|handshake_addr|raw_allowed|note_raw_refused|link_binding|forget|sealed|handshake_auth)\b|\bNodeSend\.(cast|cast_schema|recv_failure|cast_from|serve_one|serve_one_reply|handle_frame)\b|\bNodeCall\.(call|serve_one|serve_loop)\b|\bNodeQueue\.(start|close_fd|consumed)\b|\bPeerReader\.serve\b|\bPeerRegistry\.(no_fd|add_data)\b|\bClusterConn\.(listen|accept_split|accept_split_within|accept_split_auth|accept_one|connect_split|connect_split_within|connect_split_auth|connect_to_peer)\b|\bClusterNode\.handshake\b|\bSessionNode\.(accept_from|connect_to|open)\b' "$1"; then
+    echo "--stdlib-source"
+  fi
+}
+
 # --precompile-one <dir> <scenario> <x>: one node, run by --precompile's
 # xargs. In its own directory, which is the compiler's cwd and therefore its
 # own CAS (.march/cas/ under the cwd; its object writes are not atomic, so
@@ -119,7 +131,7 @@ if [ "${1:-}" = "--precompile-one" ]; then
   out=$2/$3; n=$4
   mkdir -p "$out"
   cp "$root/test/two_node/$3/node_$n.march" "$out/node_$n.march"
-  if (cd "$out" && "$MARCH" --compile -o "$out/node_$n.tmp" "$out/node_$n.march") > "$out/compile_$n.log" 2>&1; then
+  if (cd "$out" && "$MARCH" --compile $(plumbing_flag "$out/node_$n.march") -o "$out/node_$n.tmp" "$out/node_$n.march") > "$out/compile_$n.log" 2>&1; then
     mv "$out/node_$n.tmp" "$out/node_$n"
   else
     rm -f "$out/node_$n" "$out/node_$n.tmp"
@@ -377,7 +389,7 @@ compile() {
     return
   fi
   # shellcheck disable=SC2086 # the flags are words, split on purpose
-  "$MARCH" --compile ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
+  "$MARCH" --compile $(plumbing_flag "$work/node_$n.march") ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
     || { cat "$work/compile_$n.log" >&2; fail "node_$n.march did not compile"; }
 }
 

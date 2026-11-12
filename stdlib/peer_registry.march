@@ -14,6 +14,7 @@ mod PeerRegistry do
   doc """
   The sentinel fd (-1) meaning "no connection", used for `data_fd` until a peer's data connection is up.
   """
+  @[stdlib_internal]
   fn no_fd() : Int do -1 end
 
   type Registry = Registry(Map(String, Peer))
@@ -38,6 +39,7 @@ mod PeerRegistry do
   [node_id], replacing any previous data fd. Returns `Err` if [node_id] is
   not registered.
   """
+  @[stdlib_internal]
   fn add_data(reg : Registry, node_id : String, data_fd : Int) : Result(Registry, String) do
     match lookup(reg, node_id) do
       None -> Err("PeerRegistry: data connection for unknown peer " ++ node_id)

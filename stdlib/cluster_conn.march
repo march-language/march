@@ -24,6 +24,7 @@ mod ClusterConn do
         Err(e) -> println("listen failed: " ++ e)
       end
   """
+  @[stdlib_internal]
   fn listen(port : Int) : Result(Int, String) do
     match tcp_listen(port) do
       Ok(fd) -> Ok(fd)
@@ -112,6 +113,7 @@ mod ClusterConn do
   nodes); on failure every socket it opened is closed. The handshakes are
   unbounded: blocks until the peer answers. See `connect_split_within`.
   """
+  @[stdlib_internal]
   fn connect_split(reg, host, port, my_id, secret) do
     connect_split_within(reg, host, port, my_id, secret, 0)
   end
@@ -122,6 +124,7 @@ mod ClusterConn do
   the handshake's error instead of blocking the caller for ever. The TCP
   connect itself is not bounded by [timeout_ms].
   """
+  @[stdlib_internal]
   fn connect_split_within(reg, host, port, my_id, secret, timeout_ms) do
     match connect_split_auth(reg, host, port, my_id, ClusterAuth.Secret(secret), timeout_ms) do
       Err(e) -> Err(e)
@@ -135,6 +138,7 @@ mod ClusterConn do
   (certificate mode; None with a shared secret) and remembers it for
   `peer_cert`. Both connections must reach the same node.
   """
+  @[stdlib_internal]
   fn connect_split_auth(reg, host, port, my_id, auth, timeout_ms) do
     match dial(host, port, my_id, auth, Handshake.role_control(), timeout_ms) do
       Err(e) -> Err(e)
@@ -176,6 +180,7 @@ mod ClusterConn do
   the connections arrive out of role order or from different nodes. Blocks
   until both connections arrive; see `accept_split_within` for a bound.
   """
+  @[stdlib_internal]
   fn accept_split(reg, listen_fd, my_id, secret) do
     accept_split_within(reg, listen_fd, my_id, secret, 0)
   end
@@ -187,6 +192,7 @@ mod ClusterConn do
   the second. The bound applies to each accept and each handshake
   separately, so the whole call can take up to about four times [timeout_ms].
   """
+  @[stdlib_internal]
   fn accept_split_within(reg, listen_fd, my_id, secret, timeout_ms) do
     match accept_split_auth(reg, listen_fd, my_id, ClusterAuth.Secret(secret), timeout_ms) do
       Err(e) -> Err(e)
@@ -195,6 +201,7 @@ mod ClusterConn do
   end
 
   doc "`accept_split_within` in either authentication mode; see `connect_split_auth`."
+  @[stdlib_internal]
   fn accept_split_auth(reg, listen_fd, my_id, auth, timeout_ms) do
     match take(listen_fd, my_id, auth, timeout_ms) do
       Err(e) -> Err(e)
@@ -231,6 +238,7 @@ mod ClusterConn do
   failure. Unbounded: blocks until the peer completes the handshake. Kept for
   pre-split peers and fixtures; new code uses `connect_split_auth`.
   """
+  @[stdlib_internal]
   fn connect_to_peer(reg, host, port, my_id, secret) do
     match Authority.must(Socket.connect(host, port)) do
       Err(e) -> Err(Socket.error_message(e))
@@ -248,6 +256,7 @@ mod ClusterConn do
   peer connects and completes the handshake. The counterpart of
   `connect_to_peer`.
   """
+  @[stdlib_internal]
   fn accept_one(reg, listen_fd, my_id, secret) do
     match tcp_accept(listen_fd) do
       Err(e) -> Err(e)

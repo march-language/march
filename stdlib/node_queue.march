@@ -418,6 +418,7 @@ mod NodeQueue do
 
       let q = NodeQueue.start(peer.data_fd, 1048576)
   """
+  @[stdlib_internal]
   fn start(fd : Int, budget : Int) do
     let w = spawn(Writer)
     let _ = send(w, Configure(fd, budget))
@@ -526,6 +527,7 @@ mod NodeQueue do
   dropped. For a local queue (`start_local`) the sink is dropped instead:
   nothing is handed to it afterwards. Asynchronous: returns at once.
   """
+  @[stdlib_internal]
   fn close_fd(q) : () do
     match q do
       (w, _) ->
@@ -595,6 +597,7 @@ mod NodeQueue do
   CREDIT frame on [control_fd] (a failed write is ignored). Returns the
   total consumed so far on that connection.
   """
+  @[stdlib_internal]
   fn consumed(control_fd : Int, budget : Int, len : Int) : Int do
     let t = table()
     let total = Vault.incr(t, "c" ++ int_to_string(control_fd), len)

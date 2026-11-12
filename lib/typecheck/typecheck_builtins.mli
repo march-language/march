@@ -77,6 +77,14 @@ val is_base_type_short_name : string -> bool
 val builtin_types : (string * int) list
 val span_is_stdlib : Ast.span -> bool
 
+(** The control plane's generated-wiring file tag; equals
+    [Hot_reload.control_wiring_file] (pinned by test_stdlib_only). *)
+val control_wiring_file : string
+
+(** [span_is_stdlib], or the generated control wiring: who may name a
+    [@[stdlib_internal]] function. *)
+val span_may_name_internal : Ast.span -> bool
+
 (** Builtins only the standard library may reference, with the suggestion
     shown to user code instead: the reference-forging actor builtins, reached
     through the `Actor` wrappers that take a `Cap(Actor.Introspect)`. Enforced

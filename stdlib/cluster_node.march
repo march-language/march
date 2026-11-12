@@ -3799,6 +3799,7 @@ mod ClusterNode do
   control API's candidate-to-candidate verbs (`AUDIT_COPY`, `RELEASE_COPY`);
   call `NetKernel.forget(fd)` when done, before the fd is closed.
   """
+  @[stdlib_internal]
   fn handshake(c : Cap(ClusterNode.Live), fd : Int, role : String, timeout_ms : Int) : Result(NetKernel.Authed, String) do
     let d = ops(c)
     d.handshake(fd, role, timeout_ms)

@@ -254,7 +254,7 @@ let app_src = {|mod HrApp do
   fn main(cap : Cap(IO)) do
     let c = spawn(Counter)
     send(c, Bump(1))
-    let _q = NodeQueue.start(-1, 1024)
+    let _q = NodeQueue.start_local(fn _ -> ())
     println("ok")
   end
 end

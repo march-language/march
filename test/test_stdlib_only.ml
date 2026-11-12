@@ -815,6 +815,78 @@ end|} in
   Alcotest.(check bool) "a user module named Inner owns its own Inner.raw" false
     (refused ctx)
 
+(* ocap phase 2 (Task 9): the stdlib's cluster plumbing over a raw `fd : Int`
+   (or a record holding one) is `@[stdlib_internal]`. The public `fd` record
+   types stay, so the point is that no function that does I/O on one is
+   reachable from user code. Driven through the real driver, which loads the
+   shipped stdlib, so it covers the attribute as shipped. *)
+let cluster_plumbing =
+  [ ("NetKernel", [ "send_frame"; "write_framed"; "recv_frame"; "recv_frame_exact";
+                    "handshake"; "handshake_role"; "recv_frame_until"; "handshake_addr";
+                    "raw_allowed"; "note_raw_refused"; "link_binding"; "forget";
+                    "sealed"; "handshake_auth" ]);
+    ("NodeSend", [ "cast"; "cast_schema"; "recv_failure"; "cast_from"; "serve_one";
+                   "serve_one_reply"; "handle_frame" ]);
+    ("NodeCall", [ "call"; "serve_one"; "serve_loop" ]);
+    ("NodeQueue", [ "start"; "close_fd"; "consumed" ]);
+    ("PeerReader", [ "serve" ]);
+    ("PeerRegistry", [ "no_fd"; "add_data" ]);
+    ("ClusterConn", [ "listen"; "accept_split"; "accept_split_within"; "accept_split_auth";
+                      "accept_one"; "connect_split"; "connect_split_within";
+                      "connect_split_auth"; "connect_to_peer" ]);
+    ("ClusterNode", [ "handshake" ]);
+    ("SessionNode", [ "accept_from"; "connect_to"; "open" ]) ]
+
+let test_cluster_plumbing_internal () =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  with_temp_dir (fun dir ->
+      let file = Filename.concat dir "plumbing_user.march" in
+      let fns = List.concat_map (fun (m, names) ->
+          List.map (fun n -> (m, n)) names) cluster_plumbing in
+      let body = String.concat "\n" (List.mapi (fun i (m, n) ->
+          Printf.sprintf "  fn use_%d() do %s.%s end" i m n) fns) in
+      write_file file (Printf.sprintf "mod Plumbing do\n%s\n  fn main() do () end\nend\n" body);
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "--check on user code naming the plumbing exits 1" 1 rc;
+      List.iter (fun (m, n) ->
+          Alcotest.(check bool) (m ^ "." ^ n ^ " is stdlib_internal in user code") true
+            (contains ~needle:(Printf.sprintf "`%s.%s` is internal to the standard library" m n) out))
+        fns;
+      (* The two calls the brief names, written out as calls. *)
+      let file2 = Filename.concat dir "plumbing_calls.march" in
+      write_file file2 {|mod Plumbing2 do
+  fn a() do NetKernel.send_frame(5, Nil) end
+  fn b() do ClusterConn.listen(0) end
+  fn main() do () end
+end
+|};
+      let (rc, out) = run_compiler [ "--check"; file2 ] in
+      Alcotest.(check int) "calls exit 1" 1 rc;
+      Alcotest.(check bool) "send_frame refused" true
+        (contains ~needle:"`NetKernel.send_frame` is internal to the standard library" out);
+      Alcotest.(check bool) "listen refused" true
+        (contains ~needle:"`ClusterConn.listen` is internal to the standard library" out);
+      (* The same file as stdlib source is accepted (the cluster tests' spelling). *)
+      let (rc, out) = run_compiler [ "--check"; "--stdlib-source"; file2 ] in
+      Alcotest.(check bool) "--stdlib-source exempts it" false
+        (contains ~needle:"internal to the standard library" out);
+      ignore rc)
+
+(* The typechecker cannot name Hot_reload (lib/tir), so it keeps its own copy
+   of the control wiring's file tag. Pin them equal, and pin who may name an
+   internal function. *)
+let test_control_wiring_may_name_internal () =
+  Alcotest.(check string) "the typechecker's tag is the lowering's"
+    March_tir.Hot_reload.control_wiring_file TB.control_wiring_file;
+  let sp file = { March_ast.Ast.dummy_span with March_ast.Ast.file = file } in
+  Alcotest.(check bool) "the generated control wiring may" true
+    (TB.span_may_name_internal (sp March_tir.Hot_reload.control_wiring_file));
+  Alcotest.(check bool) "a user file may not" false
+    (TB.span_may_name_internal (sp "user.march"));
+  Alcotest.(check bool) "nor the generated topology code" false
+    (TB.span_may_name_internal (sp "<topology>"))
+
 let tests =
   [ ("stdlib-only builtins",
      [ Alcotest.test_case "user call rejected" `Quick test_user_call_rejected;
@@ -856,6 +928,8 @@ let tests =
        Alcotest.test_case "internal_use_all_stdlib_ok" `Quick test_internal_use_all_stdlib_ok;
        Alcotest.test_case "internal_dotted_use_refused" `Quick test_internal_dotted_use_refused;
        Alcotest.test_case "internal_same_name_user_module_ok" `Quick test_internal_same_name_user_module_ok;
+       Alcotest.test_case "cluster_plumbing_internal" `Quick test_cluster_plumbing_internal;
+       Alcotest.test_case "control wiring may name internals" `Quick test_control_wiring_may_name_internal;
        Alcotest.test_case "adversarial sweep: every name, every spelling, same text" `Quick
          test_adversarial_sweep;
        Alcotest.test_case "sweep negative control: rebound names are silent" `Quick

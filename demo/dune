@@ -27,7 +27,7 @@
        (source_tree ../runtime) (source_tree ../stdlib)
        (file two_node_rpc.march))
  (action
-  (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_rpc.march)))
+  (run %{exe:../bin/main.exe} --compile --stdlib-source -o %{targets} two_node_rpc.march)))
 
 ; Two-node RPC over TCP — separate server and client binaries for cross-host demo.
 ;
@@ -40,7 +40,7 @@
        (source_tree ../runtime) (source_tree ../stdlib)
        (file two_node_server.march))
  (action
-  (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_server.march)))
+  (run %{exe:../bin/main.exe} --compile --stdlib-source -o %{targets} two_node_server.march)))
 
 (rule
  (targets two_node_client.exe)
@@ -48,7 +48,7 @@
        (source_tree ../runtime) (source_tree ../stdlib)
        (file two_node_client.march))
  (action
-  (run %{exe:../bin/main.exe} --compile -o %{targets} two_node_client.march)))
+  (run %{exe:../bin/main.exe} --compile --stdlib-source -o %{targets} two_node_client.march)))
 
 ; Resource introspection demo — prints this node's live CPU/memory headroom.
 ; Cross-compile for linux/amd64 and run on a remote host to confirm the
@@ -76,7 +76,7 @@
        (source_tree ../runtime) (source_tree ../stdlib)
        (file hcr_server.march))
  (action
-  (run %{exe:../bin/main.exe} --compile --hot-reload Server -o %{targets} hcr_server.march)))
+  (run %{exe:../bin/main.exe} --compile --stdlib-source --hot-reload Server -o %{targets} hcr_server.march)))
 
 (rule
  (targets hcr_client.exe)
@@ -84,7 +84,7 @@
        (source_tree ../runtime) (source_tree ../stdlib)
        (file hcr_client.march))
  (action
-  (run %{exe:../bin/main.exe} --compile -o %{targets} hcr_client.march)))
+  (run %{exe:../bin/main.exe} --compile --stdlib-source -o %{targets} hcr_client.march)))
 
 ; Capacity-aware routing demo — server reports CPU/memory headroom, client routes.
 ; (Works cross-binary thanks to the stable RPC CAS impl_hash fix.)
@@ -98,7 +98,7 @@
        (source_tree ../runtime) (source_tree ../stdlib)
        (file load_server.march))
  (action
-  (run %{exe:../bin/main.exe} --compile -o %{targets} load_server.march)))
+  (run %{exe:../bin/main.exe} --compile --stdlib-source -o %{targets} load_server.march)))
 
 (rule
  (targets load_client.exe)
@@ -106,4 +106,4 @@
        (source_tree ../runtime) (source_tree ../stdlib)
        (file load_client.march))
  (action
-  (run %{exe:../bin/main.exe} --compile -o %{targets} load_client.march)))
+  (run %{exe:../bin/main.exe} --compile --stdlib-source -o %{targets} load_client.march)))

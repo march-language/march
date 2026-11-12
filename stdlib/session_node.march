@@ -1089,6 +1089,7 @@ mod SessionNode do
   announces first, then learns the peer's role from its hello -- a listener
   does not know which role connects next.
   """
+  @[stdlib_internal]
   fn accept_from(p : Party, conn : Peer) : Party do
     announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), "")
     match await_hello(conn.fd) do
@@ -1101,6 +1102,7 @@ mod SessionNode do
   peer announces first; a role in its hello that is not [their_role] is a
   wiring mistake and fails loudly.
   """
+  @[stdlib_internal]
   fn connect_to(p : Party, their_role : Int, conn : Peer) : Party do
     match await_hello(conn.fd) do
       (announced, peer_pid, _fp) ->
@@ -1117,6 +1119,7 @@ mod SessionNode do
   numbers left at 0 (a single-peer party routes every message to its one
   connection). [accepted] says which side of the connection this is.
   """
+  @[stdlib_internal]
   fn open(conn : Peer, node_id : String, accepted : Bool, on_close : Int -> Unit) : Party do
     let p = party(0, node_id, on_close)
     if accepted do accept_from(p, conn) else connect_to(p, 0, conn) end

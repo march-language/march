@@ -229,7 +229,11 @@ sweep() {
   for f in "$@"; do
     b="$(basename "$f" .march)"
     tag="$label/$b"
-    if ! MARCH_SANITIZE=1 "$bin" --compile "$f" -o "$work/$label-$b.bin" \
+    # A fixture that drives the stdlib's @[stdlib_internal] cluster plumbing
+    # (ocap phase 2, task 9) is compiled as a stdlib source, like test/dune's.
+    sflag=""
+    if grep -qE '\bNetKernel\.(send_frame|write_framed|recv_frame|recv_frame_exact|handshake|handshake_role|recv_frame_until|handshake_addr|raw_allowed|note_raw_refused|link_binding|forget|sealed|handshake_auth)\b|\bNodeSend\.(cast|cast_schema|recv_failure|cast_from|serve_one|serve_one_reply|handle_frame)\b|\bNodeCall\.(call|serve_one|serve_loop)\b|\bNodeQueue\.(start|close_fd|consumed)\b|\bPeerReader\.serve\b|\bPeerRegistry\.(no_fd|add_data)\b|\bClusterConn\.(listen|accept_split|accept_split_within|accept_split_auth|accept_one|connect_split|connect_split_within|connect_split_auth|connect_to_peer)\b|\bClusterNode\.handshake\b|\bSessionNode\.(accept_from|connect_to|open)\b' "$f"; then sflag="--stdlib-source"; fi
+    if ! MARCH_SANITIZE=1 "$bin" --compile $sflag "$f" -o "$work/$label-$b.bin" \
          >"$work/$label-$b.clog" 2>&1; then
       echo "  [$tag] COMPILE FAIL"; sed 's/^/    /' "$work/$label-$b.clog"
       keep "$work/$label-$b.clog"

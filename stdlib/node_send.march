@@ -190,6 +190,7 @@ mod NodeSend do
 
       NodeSend.cast(fd, 1, to, "Chat.Msg", Bytes.to_list(Bytes.from_string("{}")))
   """
+  @[stdlib_internal]
   fn cast(fd : Int, seq : Int, to : Pid, type_tag : String, payload : List(Int)) : Result((), SendError) do
     cast_schema(fd, seq, to, type_tag, "", payload)
   end
@@ -199,6 +200,7 @@ mod NodeSend do
   (`encode_msg_schema`; `""` for none). The raw-send check (step 11b) is
   here, so both spellings get it.
   """
+  @[stdlib_internal]
   fn cast_schema(fd : Int, seq : Int, to : Pid, type_tag : String, schema : String, payload : List(Int)) : Result((), SendError) do
     if is_session_tag(type_tag) == false && NetKernel.raw_allowed(fd) == false do
       NetKernel.note_raw_refused(fd)
@@ -221,6 +223,7 @@ mod NodeSend do
   skipped and lost (they belong to another consumer of this connection).
   Blocks; `Err` on a read failure.
   """
+  @[stdlib_internal]
   @[diverges] fn recv_failure(fd : Int, buf : List(Int)) : Result((Int, String), String) do
     match NetKernel.recv_frame(fd, buf) do
       Err(e) -> Err(e)
@@ -257,6 +260,7 @@ mod NodeSend do
   through `on_failure`. The record is kept even when the cast fails, and a
   message that is delivered keeps its entry (only a failure removes it).
   """
+  @[stdlib_internal]
   fn cast_from(fd : Int, seq : Int, from, to : Pid, type_tag : String, payload : List(Int)) : Result((), SendError) do
     Vault.set(pending(), int_to_string(seq), from)
     cast(fd, seq, to, type_tag, payload)
@@ -300,6 +304,7 @@ mod NodeSend do
       NodeSend.serve_one(fd, my_creation, fn d ->
         if Node.tag_is(d, "Chat.Msg") do Ok(()) else Err("no host for " ++ d.type_tag) end)
   """
+  @[stdlib_internal]
   fn serve_one(fd : Int, my_creation : Int, dispatch : Delivery -> Result((), String)) : Result((), String) do
     serve_one_reply(fd, fd, my_creation, dispatch)
   end
@@ -310,6 +315,7 @@ mod NodeSend do
   the failure travels back on the control one. The raw-send check is made
   against [reply_fd].
   """
+  @[stdlib_internal]
   fn serve_one_reply(fd : Int, reply_fd : Int, my_creation : Int, dispatch : Delivery -> Result((), String)) : Result((), String) do
     match NetKernel.recv_frame(fd, Nil) do
       Err(e) -> Err(e)
@@ -329,6 +335,7 @@ mod NodeSend do
   creation or dispatch `Err` is answered on [reply_fd] with DELIVERY_FAILED.
   `Err` only when writing that reply fails.
   """
+  @[stdlib_internal]
   fn handle_frame(frame : List(Int), reply_fd : Int, my_creation : Int, dispatch : Delivery -> Result((), String)) : Result((), String) do
     match decode_msg(frame) do
       Err(_) -> Ok(())

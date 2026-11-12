@@ -505,6 +505,13 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **The standard library's cluster plumbing over raw file descriptors is no longer callable
+  from user code.** `NetKernel.send_frame` / `recv_frame` / `handshake*`, `NodeSend.cast*`,
+  `NodeCall.call`, `NodeQueue.start`, `PeerReader.serve`, `ClusterConn.listen` /
+  `accept_split*` / `connect_split*`, `ClusterNode.handshake`, `SessionNode.open` and the
+  like are marked `@[stdlib_internal]`: naming one from your own code is a `stdlib_internal`
+  error. Use `ClusterNode` and the typed node and session APIs instead.
+
 - **Compiled `NativeArray.get_*` / `set_*` no longer call into the runtime on the
   common path.** The bounds check and the load or store are emitted inline for every
   element width (int, float, f32, i32, u8); a `set` on an array with one owner writes in

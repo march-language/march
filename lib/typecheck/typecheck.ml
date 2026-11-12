@@ -2807,7 +2807,7 @@ let cap_scrutinee env (scrut : Ast.expr) (scrut_ty : ty) (branches : Ast.branch 
    is true when the member bound at [k] is one, and the import at [sp] is not
    itself stdlib code (stdlib modules may import each other's internals). *)
 let import_blocked env (sp : Ast.span) k sch =
-  not (span_is_stdlib sp)
+  not (span_may_name_internal sp)
   && (match Hashtbl.find_opt env.stdlib_internal_fns k with
       | Some (_, isch) -> isch == sch
       | None -> false)
@@ -2897,7 +2897,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          user's own bare `raw_fd` never matches; a stdlib span (including the
          defining module itself) is exempt, exactly as for builtins. *)
       (if Hashtbl.length env.stdlib_internal_fns > 0
-          && not (span_is_stdlib name.span) then
+          && not (span_may_name_internal name.span) then
          match Hashtbl.find_opt env.stdlib_internal_fns name.txt with
          | Some (md, isch)
            when (match lookup_var name.txt env with

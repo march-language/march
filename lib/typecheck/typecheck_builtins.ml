@@ -148,6 +148,18 @@ let file_is_stdlib (f : string) : bool =
 let span_is_stdlib (sp : Ast.span) : bool =
   file_is_stdlib sp.Ast.file
 
+(** The file tag of the control plane's generated wiring, the one generated
+    file that drives the stdlib's raw-fd cluster plumbing ([ClusterNode.handshake],
+    [NetKernel.send_frame], ...). It must equal [Hot_reload.control_wiring_file]
+    (lib/tir cannot be named from here; test_stdlib_only pins the two equal). *)
+let control_wiring_file = "<control>"
+
+(** Whether a reference at [sp] may name a [@[stdlib_internal]] function: the
+    stdlib's own code, or the compiler's generated control wiring. User code
+    never qualifies. The stdlib-only BUILTIN gate keeps using [span_is_stdlib]. *)
+let span_may_name_internal (sp : Ast.span) : bool =
+  span_is_stdlib sp || String.equal sp.Ast.file control_wiring_file
+
 (** Builtins only the standard library may reference, each with the
     suggestion the error gives user code instead (e.g.
     [("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)")]).
