@@ -277,6 +277,9 @@ type env = {
   own_cap_closures : (string, string list) Hashtbl.t;
   body_cap_closures : (string, string list) Hashtbl.t;
   stdlib_fns : (string, unit) Hashtbl.t;
+  deprecated_fns : (Typecheck_types.scheme * Typecheck_types.Ast.span * string) list ref;
+  (** [@[deprecated("message")]] functions: exported scheme, declaring
+      module's span, message.  See the implementation's comment. *)
   stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   fn_scopes : (string, string) Hashtbl.t;

@@ -1,0 +1,8 @@
+-- EXPECT-VIOLATED: postcondition bad
+-- EXPECT-ERROR: but bad(-1) returns -1
+-- Kind: return refinement. The `n < 0` branch returns `n` itself.
+mod K02 do
+  fn bad(n : Int) : {Int | _ >= 0} do
+    if n < 0 do n else 0 end
+  end
+end

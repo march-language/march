@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`@[deprecated("use X instead")]` marks a function as deprecated.** Every use of it from
+  outside the module that declares it gets a warning with the code `deprecated` and the
+  message; the program still compiles and the exit status does not change. Uses inside the
+  declaring module do not warn. The language server tags the diagnostic `Deprecated`, so
+  editors strike the name through. `march --explain deprecated` has the details. The
+  attribute marks functions only for now: on a `type` or a `mod` it is a parse error that
+  says so.
 - **`File.Handle`: open, read, write, seek and close a file through a handle.**
   `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
   (writes, creates the file, `IO.FileWrite`) return `Result(File.Handle, FileError)`;
@@ -476,6 +483,13 @@ git log is authoritative for exact commits.
   variable and the combinator (`portable_capture`). Create the handle inside
   the lambda, or use the sequential version. `task_spawn` and `Task.async`
   are unaffected.
+- **A must-reject corpus for the refinement checker.** `specs/lang/refine/reject/` holds 20
+  programs, each with one obligation that must be reported violated (one per obligation
+  kind, one per fixed false proof), and `specs/lang/refine/check_refine.sh` runs them in CI.
+  Before it, a checker that proved everything passed every refinement gate. Three fixtures
+  the checker wrongly accepts today are listed in `known-accepted.txt`, which may only
+  shrink; one is new: a refined session payload type (`Client -> Server : {Int | _ > 0}`)
+  is not checked at `Chan.send`.
 
 ### Changed
 
@@ -908,6 +922,19 @@ git log is authoritative for exact commits.
   (``expected `CancelToken` but got `Main.CancelToken` ``). A program that declares such a type
   and uses only its own declaration is unaffected, and messages still print the short name
   unless the two types meet. Not covered yet: types declared at the REPL.
+- **A derived `Show`, `Ord` or `Hash` no longer calls a user fn named like the method.** With
+  `derive Show for P` and your own `fn show(_x : Int)` in the same module, `println(P(1, "a"))`
+  printed `P(U, U)`: the generated code called `show(field)` and got your fn, on both backends.
+  It now calls `Show.show`, `Ord.compare` and `Hash.hash`. Those qualified names also work
+  where they did not before: `Ord.compare(1, 2)` on a primitive failed to compile ("no `Ord`
+  implementation for type `Int`"), and under the interpreter `Hash.hash(x)` ran the wrong impl
+  when two types implemented `Hash`.
+- **`&&` and `||` now short-circuit.** The right operand runs only when the left one does not
+  already decide the result, interpreted and compiled (LLVM, JS, JIT). Both operands used to be
+  evaluated every time, so `i >= 0 && i < n && NativeArray.get_u8(a, i) == 1` read out of range
+  for a negative `i`, and `d != 0 && 10 / d > 1` passed `--check` (the division checker already
+  treated the left side as a guard) and then divided by zero at run time. A program whose right
+  operand prints or has another effect now skips that effect when the left side decides.
 - A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
 - **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
   A compiled closure that matched a captured value and passed the pattern's fields straight to a

@@ -1,0 +1,9 @@
+-- EXPECT-VIOLATED: precondition dec
+-- EXPECT-ERROR: for example, when `dec` is given
+-- Kind: callable domain at a pass site. `ap` may hand `dec` any `Int`, and
+-- `dec` accepts only `_ > 100`.
+mod K09 do
+  fn ap(x : a, f : a -> a) : a do f(x) end
+  fn dec(k : {Int | _ > 100}) : {Int | _ > 0} do k - 50 end
+  fn go(n : Int) : Int do ap(n, dec) end
+end

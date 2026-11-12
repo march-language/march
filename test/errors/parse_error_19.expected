@@ -1,0 +1,10 @@
+exit: 1
+-- SYNTAX ------------------- errors/parse_error_19.march
+
+`@[deprecated]` needs a message saying what to use instead: [parse_error]
+
+3 |   @[deprecated]
+      ^
+
+    @[deprecated("use `new_name` instead")]
+    run `march --explain parse_error`

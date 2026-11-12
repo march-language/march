@@ -368,7 +368,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
               let pats = List.map (fun s -> PatVar (mk_name s)) arg_names in
               (* "Ctor(" ++ show(a0) ++ ", " ++ show(a1) ++ ... ++ ")" *)
               let parts = List.mapi (fun i s ->
-                  let show_e = EApp (EVar (mk_name "show"), [EVar (mk_name s)], dummy_span) in
+                  let show_e = EApp (EVar (mk_name "Show.show"), [EVar (mk_name s)], dummy_span) in
                   if i = 0 then show_e
                   else EApp (EVar (mk_name "++"),
                              [ELit (LitString ", ", dummy_span); show_e],
@@ -394,7 +394,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         (* "TypeName { f1 = " ++ show(x.f1) ++ ", f2 = " ++ show(x.f2) ++ " }" *)
         let field_strs = List.mapi (fun i f ->
             let prefix = if i = 0 then f.fld_name.txt ^ " = " else ", " ^ f.fld_name.txt ^ " = " in
-            let show_e = EApp (EVar (mk_name "show"),
+            let show_e = EApp (EVar (mk_name "Show.show"),
                                [EField (EVar (mk_name "x"), f.fld_name, dummy_span)],
                                dummy_span)
             in
@@ -410,7 +410,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         in
         EApp (EVar (mk_name "++"), [mid; ELit (LitString " }", dummy_span)], dummy_span)
       | TDAlias _ ->
-        EApp (EVar (mk_name "show"), [EVar (mk_name "x")], dummy_span)
+        EApp (EVar (mk_name "Show.show"), [EVar (mk_name "x")], dummy_span)
     in
     [impl_one "show" ["x"] body]
 
@@ -440,7 +440,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
              (* Use the polymorphic hash for each field's value.
                 Note: field values may be any type — hash is safe here since
                 it's called on field values, not on x: Color. *)
-             EApp (EVar (mk_name "hash"),
+             EApp (EVar (mk_name "Hash.hash"),
                    [EField (EVar (mk_name "x"), fld.fld_name, dummy_span)],
                    dummy_span)
            in
@@ -455,7 +455,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                         dummy_span)
                 ) (hash_field f) rest))
       | TDAlias _ ->
-        EApp (EVar (mk_name "hash"), [EVar (mk_name "x")], dummy_span)
+        EApp (EVar (mk_name "Hash.hash"), [EVar (mk_name "x")], dummy_span)
     in
     [impl_one "hash" ["x"] body]
 
@@ -494,14 +494,14 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         (match fields with
          | [] -> ELit (LitInt 0, dummy_span)
          | [f] ->
-           EApp (EVar (mk_name "compare"),
+           EApp (EVar (mk_name "Ord.compare"),
                  [EField (EVar (mk_name "a"), f.fld_name, dummy_span);
                   EField (EVar (mk_name "b"), f.fld_name, dummy_span)],
                  dummy_span)
          | fields ->
            let stmts = List.mapi (fun i f ->
                let cmp_e =
-                 EApp (EVar (mk_name "compare"),
+                 EApp (EVar (mk_name "Ord.compare"),
                        [EField (EVar (mk_name "a"), f.fld_name, dummy_span);
                         EField (EVar (mk_name "b"), f.fld_name, dummy_span)],
                        dummy_span)
@@ -527,7 +527,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                ) (List.mapi (fun i f -> (i, f)) fields) (ELit (LitInt 0, dummy_span))
            ], dummy_span))
       | TDAlias _ ->
-        EApp (EVar (mk_name "compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
+        EApp (EVar (mk_name "Ord.compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
     in
     [impl_one "compare" ["a"; "b"] body]
 

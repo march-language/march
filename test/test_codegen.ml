@@ -10922,6 +10922,121 @@ let test_http_serialize_injection_parity () =
     check_verdicts "compiled" compiled_out;
     Alcotest.(check string) "interpreter and compiled serializers agree" interp_out compiled_out
 
+(* ── `&&` / `||` short-circuit (GAPS S17, 2026-11-11) ─────────────────────
+   `a && b` and `a || b` used to be strict builtins: both operands were
+   always evaluated, interpreted and compiled.  The refinement and
+   division-safety checkers reason as if they short-circuit (a `d != 0`
+   left of `&&` guards `n / d` on its right), so `d != 0 && 10 / d > 1`
+   passed `--check` and then divided by zero at run time, and an index
+   guard chain ending in `NativeArray.get_u8(a, i)` read out of bounds.
+   Both backends must now skip the right operand when the left decides the
+   result, and agree byte for byte. *)
+let short_circuit_src = {|mod ShortCircuit do
+  needs IO.Console
+
+  type Win = Win(Int, NativeU8Arr)
+
+  fn side(_c : Cap(IO.Console), tag : String, v : Bool) : Bool do
+    println("ran " ++ tag)
+    v
+  end
+
+  fn ratio_ok(d : Int) : Bool do d != 0 && 10 / d > 1 end
+
+  fn ratio_or(d : Int) : Bool do d == 0 || 10 / d > 1 end
+
+  fn solid(w : Win, i : Int) : Bool do
+    match w do
+      Win(n, a) -> i >= 0 && i < n && NativeArray.get_u8(a, i) == 1
+    end
+  end
+
+  fn named(s : String, xs : List(Int)) : Bool do
+    s == "x" && List.length(xs) > 0
+  end
+
+  fn verdict(label : String, b : Bool) : String do
+    label ++ "=" ++ bool_to_string(b)
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(verdict("f&&", false && side(c, "A", true)))
+    println(verdict("t||", true || side(c, "B", false)))
+    println(verdict("t&&", true && side(c, "C", false)))
+    println(verdict("f||", false || side(c, "D", true)))
+    println(verdict("chain", 1 > 2 && side(c, "E", true) && side(c, "F", true)))
+    println(verdict("mixed", (1 > 2 && side(c, "G", true)) || side(c, "H", true)))
+    println(verdict("div0", ratio_ok(0)))
+    println(verdict("div2", ratio_ok(2)))
+    println(verdict("or0", ratio_or(0)))
+    let w = Win(4, NativeArray.make_u8(4, 1))
+    println(verdict("in", solid(w, 3)))
+    println(verdict("neg", solid(w, -11)))
+    println(verdict("past", solid(w, 9)))
+    println(verdict("named", named("y", Cons(1, Nil))))
+    println(verdict("named2", named("x", Cons(1, Nil))))
+    let r = if 0 > 1 && side(c, "I", true) do "yes" else "no" end
+    println("if=" ++ r)
+  end
+end
+|}
+
+let short_circuit_expected = String.concat "\n" [
+  "f&&=false";
+  "t||=true";
+  "ran C";
+  "t&&=false";
+  "ran D";
+  "f||=true";
+  "chain=false";
+  "ran H";
+  "mixed=true";
+  "div0=false";
+  "div2=true";
+  "or0=true";
+  "in=true";
+  "neg=false";
+  "past=false";
+  "named=false";
+  "named2=true";
+  "if=no";
+]
+
+let test_and_or_short_circuit_parity () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"short_circuit" short_circuit_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter short-circuits" short_circuit_expected interp_out;
+  let bin = Filename.concat tmp "short_circuit_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let compiled_out = read_cmd_output (Filename.quote bin ^ " 2>&1") in
+    Alcotest.(check string) "compiled short-circuits" short_circuit_expected compiled_out
+
+(* Lowering keeps the strict `&&` builtin (one `and`) when the right operand
+   is eager-safe -- a scalar comparison that cannot fail or have an effect --
+   and branches on the left operand otherwise (a call, or `/` by a variable). *)
+let test_and_or_lowering_shape () =
+  let m = lower_module_typed {|mod ScShape do
+  fn pos(i : Int) : Bool do i > 0 end
+  fn guard(i : Int, n : Int) : Bool do i >= 0 && i < n end
+  fn rem_lit(i : Int) : Bool do i >= 0 || i % 7 == 3 end
+  fn call_rhs(i : Int) : Bool do i >= 0 && pos(i) end
+  fn div_rhs(d : Int) : Bool do d != 0 && 10 / d > 1 end
+end|} in
+  let body name =
+    let f = List.find (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name = name || String.ends_with ~suffix:("." ^ name) f.fn_name)
+        m.March_tir.Tir.tm_fns in
+    f.March_tir.Tir.fn_body in
+  Alcotest.(check bool) "scalar guard stays a strict &&" true (expr_calls "&&" (body "guard"));
+  Alcotest.(check bool) "literal-divisor % stays a strict ||" true (expr_calls "||" (body "rem_lit"));
+  Alcotest.(check bool) "a call on the right branches" false (expr_calls "&&" (body "call_rhs"));
+  Alcotest.(check bool) "a variable divisor on the right branches" false (expr_calls "&&" (body "div_rhs"))
+
 (* End to end through HttpTransport.request: an injected path is refused
    before the connection is even opened, so a local listener sees no bytes
    (interpreted and compiled). *)
@@ -15998,6 +16113,97 @@ end
     ~expected:"false\ntrue\ntrue"
     ()
 
+(* ── A derived impl's body vs a user fn named like the method ──────────────
+   `derive Show/Eq/Ord/Hash` bodies call their fields' methods as
+   `Show.show(field)` etc., so a user `fn show` next to the derive cannot
+   capture them.  The qualified spelling is the type-directed method on both
+   backends, primitives included.
+   specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+
+(** Entry-level: variant and record, all four interfaces. *)
+let test_derived_impl_not_captured_by_user_method_fn_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_vs_user_method_fn"
+    ~src:{|mod Main do
+  needs IO.Console
+  type P = P(Int, String)
+  type R = { a : Int, b : String }
+  derive Show, Eq, Ord, Hash for P
+  derive Show, Eq, Ord, Hash for R
+  fn show(_x : Int) : String do "U" end
+  fn eq(_a : Int, _b : Int) : Bool do false end
+  fn compare(_a : Int, _b : Int) : Int do 0 end
+  fn hash(_x : Int) : Int do 7 end
+  fn main(_c : Cap(IO.Console)) do
+    println(P(1, "a"))
+    println(to_string(P(1, "a") == P(1, "a")))
+    println({ a: 1, b: "x" })
+    println(to_string({ a: 1, b: "x" } < { a: 2, b: "x" }))
+    println(to_string({ a: 1, b: "x" } == { a: 1, b: "x" }))
+    println(to_string(Hash.hash({ a: 1, b: "x" }) == Hash.hash({ a: 2, b: "x" })))
+    println(show(3))
+  end
+end
+|}
+    ~expected:"P(1, a)\ntrue\nR { a = 1, b = x }\ntrue\ntrue\nfalse\nU"
+    ()
+
+(** Inside a nested module that defines the same-named fns, with a generic
+    type (the field's method is only known after monomorphisation). *)
+let test_derived_impl_not_captured_in_nested_module_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_vs_user_method_fn_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Shapes do
+    type Box(a) = Box(a)
+    type Pt = { x : Int, tag : String }
+    derive Show, Eq, Hash for Box
+    derive Show, Eq, Ord, Hash for Pt
+    fn show(_x : Int) : String do "U" end
+    fn compare(_a : Int, _b : Int) : Int do 0 end
+    fn hash(_x : Int) : Int do 7 end
+    fn mk(n : Int) : Pt do { x: n, tag: "t" } end
+  end
+  fn show(_x : Int) : String do "V" end
+  fn main(_c : Cap(IO.Console)) do
+    println(Shapes.Box(3))
+    println(Shapes.Box(Shapes.mk(4)))
+    println(to_string(Shapes.mk(1) < Shapes.mk(2)))
+    println(to_string(Hash.hash(Shapes.mk(1)) == Hash.hash(Shapes.mk(2))))
+    println(show(5) ++ Shapes.show(5))
+  end
+end
+|}
+    ~expected:"Box(3)\nBox(Pt { x = 4, tag = t })\ntrue\nfalse\nVU"
+    ()
+
+(** The qualified method written by hand: on a primitive (compiled: "no `Ord`
+    implementation for type `Int`"), and on one of two types implementing
+    the interface (interpreted: the last impl evaluated ran for both). *)
+let test_qualified_builtin_iface_method_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_builtin_iface_method"
+    ~src:{|mod Main do
+  needs IO.Console
+  type P = P(Int, String)
+  type R = { a : Int, b : String }
+  derive Show, Hash for P
+  derive Show, Hash for R
+  fn show(_x : Int) : String do "U" end
+  fn main(_c : Cap(IO.Console)) do
+    println(Show.show(5) ++ show(5))
+    println(to_string(Ord.compare(1, 2)))
+    println(to_string(Eq.eq("a", "a")))
+    println(to_string(Hash.hash(1) == Hash.hash(1)))
+    println(Show.show(P(1, "a")) ++ Show.show({ a: 1, b: "x" }))
+    println(to_string(Hash.hash(P(1, "a")) == Hash.hash(P(2, "b"))))
+  end
+end
+|}
+    ~expected:"5U\n-1\ntrue\ntrue\nP(1, a)R { a = 1, b = x }\ntrue"
+    ()
+
 (** An entry-level `mod List` whose fn has the stdlib's exact signature:
     one symbol `List.sum_int`, the stdlib's won.  The rest of the stdlib
     `List` stays reachable. *)
@@ -19824,6 +20030,10 @@ let codegen_suites =
         Alcotest.test_case "encode_query"        `Quick test_http_encode_query;
         Alcotest.test_case "response helpers"    `Quick test_http_response_helpers;
       ]);
+      ("short-circuit bool ops", [
+        Alcotest.test_case "&& / || skip the decided operand (interp = compiled)" `Quick test_and_or_short_circuit_parity;
+        Alcotest.test_case "eager-safe rhs stays strict, others branch" `Quick test_and_or_lowering_shape;
+      ]);
       ("http builtins", [
         Alcotest.test_case "serialize request"       `Quick test_http_serialize_request;
         Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
@@ -20241,6 +20451,12 @@ let codegen_suites =
             test_nested_module_fn_named_like_iface_method_compiled;
           Alcotest.test_case "entry `mod List` vs the stdlib List" `Quick
             test_user_module_named_like_stdlib_module_compiled;
+          Alcotest.test_case "derived impl body vs a user fn named like the method" `Quick
+            test_derived_impl_not_captured_by_user_method_fn_compiled;
+          Alcotest.test_case "derived impl body vs same-named fns in a nested module" `Quick
+            test_derived_impl_not_captured_in_nested_module_compiled;
+          Alcotest.test_case "qualified Show.show / Eq.eq / Ord.compare / Hash.hash" `Quick
+            test_qualified_builtin_iface_method_compiled;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

@@ -40,6 +40,12 @@ green.**
   failures (native goldens, snapshots) show up as `File "…expected", line 1`
   followed by a `git diff` of expected vs actual: **`grep -n 'File "' job.log`**
   finds them. Alcotest failures: `grep -n '\[FAIL\]' job.log`.
+- A failed `test`, `two-node` or `sanitize-gate` job uploads an
+  `evidence-<job>-<shard>` artifact, kept 7 days: the step's full log, Linux
+  cores with backtraces and the crashing binaries, macOS crash reports, the work
+  directories of failed two-node scenarios (`scripts/ci-evidence.sh`). For a
+  flake, download it before the re-run (`gh run download <run-id> -n <name>`) and
+  attach what matters to the todo: a sighting without its evidence is lost.
 - A CONFLICTING PR gets no CI run at all; resolve the conflict first.
 - Wait for CI by run id, not the PR's status rollup (it can show one entry while
   others are still queued).

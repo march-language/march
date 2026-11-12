@@ -1,0 +1,8 @@
+-- EXPECT-VIOLATED: precondition need_pos
+-- EXPECT-ERROR: for example, when `k` is
+-- Kind: precondition. `k <= 0` is all the caller knows, and `need_pos` demands
+-- `_ > 0`: no value of `k` satisfies it.
+mod K01 do
+  fn need_pos(n : {Int | _ > 0}) : Int do n end
+  fn go(k : {Int | _ <= 0}) : Int do need_pos(k) end
+end
