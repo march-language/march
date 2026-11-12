@@ -463,8 +463,21 @@ let report_cap_result_unhandled env ~span ?provided ~payload provided_ty require
       code = Err.Code.cap_result_unhandled;
       fix = Some (Err.fix (cap_result_fix ~payload at)) }
 
+(** Run [f], which words a mismatch between [a] and [b], with nominal
+    identities printed in full when the two would otherwise print alike: a
+    top-level user type named like a built-in or stdlib type prints as its
+    short name ([Typecheck_nominal.display]), and "expected `CancelToken` but
+    got `CancelToken`" says nothing. *)
+let qualify_if_alike a b (f : unit -> 'r) : 'r =
+  if Typecheck_nominal.has_short_display ()
+     && not !Typecheck_nominal.qualified_display
+     && pp_ty a = pp_ty b
+  then Typecheck_nominal.with_qualified_display f
+  else f ()
+
 (** Report a type mismatch with a conversational Elm-style message. *)
 let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided expected found =
+  qualify_if_alike expected found @@ fun () ->
   match cap_pair_of ~occurs_violation ?provided expected found with
   | Some (have, need, p) -> report_cap_mismatch env ~span ~reason ~p ~have ~need
   | None ->
@@ -475,6 +488,7 @@ let rec report_mismatch env ~span ?(occurs_violation = false) ~reason ?provided 
   | None -> report_type_mismatch env ~span ~occurs_violation ~reason ?provided expected found
 
 and report_type_mismatch env ~span ~occurs_violation ~reason ?provided ?diff expected found =
+  qualify_if_alike expected found @@ fun () ->
   match protocol_step_pair expected found with
   | Some (here, wanted) when not occurs_violation ->
     report_protocol_step_order env ~span ~provided ~here ~wanted
@@ -881,7 +895,7 @@ let pp_ty_diff env ~elide ~targets t =
       | TLin (Ast.Affine, i) -> add "affine "; go ~parens:true rpath i
       | TLin ((Ast.Unrestricted | Ast.Ghost), i) -> go ~parens rpath i
       | TCon (name, (_ :: _ as args)) ->
-        add name; add "(";
+        add (Typecheck_nominal.display name); add "(";
         List.iteri (fun i a -> if i > 0 then add ", "; go (DArg (name, i + 1) :: rpath) a) args;
         add ")"
       | TTuple (_ :: _ as ts) ->
@@ -915,6 +929,7 @@ let pp_ty_diff env ~elide ~targets t =
     [required] that differ below the root, or [None] when no part plainly
     differs.  The headline elides equal parts when either type is long. *)
 let diff_mismatch_message env ~provided ~required =
+  qualify_if_alike provided required @@ fun () ->
   match type_diffs env provided required with
   | [] | [ { td_path = []; _ } ] -> None  (* nothing, or the roots themselves *)
   | diffs ->

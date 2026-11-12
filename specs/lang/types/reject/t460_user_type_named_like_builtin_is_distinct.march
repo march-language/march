@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: expected `CancelToken` but got `Main.CancelToken`
+mod Main do
+  needs IO.Console
+  -- A user type named like a type the base environment produces is its own
+  -- type (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
+  -- `CancelToken` is named only in builtin signatures
+  -- (`task_cancel_token_new`); the typechecker used to merge this declaration
+  -- with it, so the `Tok(_)` pattern over a builtin token type-checked.
+  -- Interpreted, the match then took no arm; compiled, the program was
+  -- invalid LLVM (`clang failed`).
+  type CancelToken = Tok(Int)
+  fn main(c : Cap(IO.Console)) do
+    match Some(task_cancel_token_new()) do
+      Some(Tok(_)) -> print_line("tok")
+      None -> print_line("none")
+    end
+  end
+end

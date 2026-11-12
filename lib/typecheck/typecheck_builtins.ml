@@ -2213,6 +2213,25 @@ let builtin_type_names : string list =
   List.iter (fun (_, sc) -> scheme sc) builtin_interface_bindings;
   List.sort compare (Hashtbl.fold (fun n () l -> n :: l) acc [])
 
+(* The short names a user type must not share an identity with
+   ([Typecheck_nominal.compute]'s [base]): every built-in type name, and the
+   last segment of a qualified one that [canon_type_name] collapses to its
+   bare spelling at a use (`Csv.CsvRow`).  A qualified name that is itself a
+   key of [builtin_types] is never collapsed (`File.Handle`, the `IO.*`
+   capabilities), so its last segment is free. *)
+let base_type_short_names : (string, unit) Hashtbl.t =
+  let t = Hashtbl.create 128 in
+  List.iter (fun n ->
+      match String.rindex_opt n '.' with
+      | None -> Hashtbl.replace t n ()
+      | Some i ->
+        if not (List.mem_assoc n builtin_types) then
+          Hashtbl.replace t (String.sub n (i + 1) (String.length n - i - 1)) ())
+    builtin_type_names;
+  t
+
+let is_base_type_short_name (s : string) : bool = Hashtbl.mem base_type_short_names s
+
 let base_env errors type_map =
   let env = make_env errors type_map in
   let env = bind_vars builtin_bindings env in

@@ -65,6 +65,11 @@ val file_is_stdlib : string -> bool
     conflated with it). *)
 val builtin_type_names : string list
 
+(** True iff [s] is the bare name some built-in type is spelled with at a use:
+    a user variant type of that name gets its own identity
+    ([Typecheck_nominal.compute]). *)
+val is_base_type_short_name : string -> bool
+
 (** Every built-in type of the base environment with its arity (the number of
     type arguments it takes). The refinement checker counts a built-in as a
     declarant of its short name only at that arity: the typechecker does not

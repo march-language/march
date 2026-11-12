@@ -55,7 +55,7 @@ let con_at (sp : A.span) : string option =
   | None -> None
   | Some tm ->
     (match Hashtbl.find_opt tm sp with
-     | Some t -> (match strip t with T.TCon (n, []) -> Some n | _ -> None)
+     | Some t -> (match strip t with T.TCon (n, []) -> Some (March_typecheck.Typecheck_nominal.refine_name n) | _ -> None)
      | None -> None)
 
 let is_int_expr (e : A.expr) : bool =

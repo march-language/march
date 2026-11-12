@@ -317,9 +317,9 @@ let rec pp_ty ?(parens = false) t =
   let t = repr t in
   let s = match t with
     | TError -> "<error>"
-    | TCon (name, []) -> name
+    | TCon (name, []) -> Typecheck_nominal.display name
     | TCon (name, args) ->
-      Printf.sprintf "%s(%s)" name
+      Printf.sprintf "%s(%s)" (Typecheck_nominal.display name)
         (String.concat ", " (List.map (pp_ty ~parens:false) args))
     | TVar r ->
       (match !r with
@@ -364,7 +364,7 @@ and pp_ty_pretty ?(indent = 0) ?(width = 60) t =
       let pad = String.make (indent + 2) ' ' in
       let close_pad = String.make indent ' ' in
       let formatted = List.map (pp_ty_pretty ~indent:(indent + 2) ~width) args in
-      name ^ "(\n" ^ pad ^ String.concat (",\n" ^ pad) formatted ^ "\n" ^ close_pad ^ ")"
+      Typecheck_nominal.display name ^ "(\n" ^ pad ^ String.concat (",\n" ^ pad) formatted ^ "\n" ^ close_pad ^ ")"
     | TRecord ((_::_) as flds) ->
       let pad = String.make (indent + 2) ' ' in
       let close_pad = String.make indent ' ' in

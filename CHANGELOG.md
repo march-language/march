@@ -920,6 +920,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A user type named like a built-in or stdlib type is its own type.** `type CancelToken =
+  Tok(Int)` used to be the built-in `CancelToken`, a user `Level` was `Logger`'s `Level`, and a
+  program's own `Option` was the prelude's: a value of one type-checked where the other was
+  expected, then took the wrong `match` arm interpreted or failed to compile (`clang failed`).
+  The two are now distinct, and mixing them is a type error
+  (``expected `CancelToken` but got `Main.CancelToken` ``). A program that declares such a type
+  and uses only its own declaration is unaffected, and messages still print the short name
+  unless the two types meet. Not covered yet: types declared at the REPL.
 - **A compiled `match` arm with a qualified constructor pattern no longer returns the wrong
   constructor when it returns the matched value.** `match s do Shapes.Square(n) -> if n > 3 do s
   else d end ... end` returned the type's first constructor (`Circle(11)` for `Square(5)`) in a

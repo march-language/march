@@ -819,10 +819,11 @@ let ambiguous_ctor_hint env ctor all_types =
   in
   let describe t = match actor_of t with
     | Some a -> Printf.sprintf "a message of actor `%s`" a
-    | None -> "`" ^ t ^ "`"
+    | None -> "`" ^ Typecheck_nominal.display t ^ "`"
   in
   let qualified t =
-    Printf.sprintf "`%s.%s`" (Option.value ~default:t (actor_of t)) ctor in
+    Printf.sprintf "`%s.%s`"
+      (Option.value ~default:(Typecheck_nominal.display t) (actor_of t)) ctor in
   let spellings = String.concat " or " (List.map qualified all_types) in
   if List.for_all (fun t -> actor_of t <> None) all_types then
     Printf.sprintf
@@ -8611,14 +8612,38 @@ let rec check_decl env (d : Ast.decl) : env =
           | Some outer -> outer == cis
           | None -> false)
     in
+    (* A type this module declares under a nominal identity of its own
+       ([Typecheck_nominal]: `UserValues.Down`, not the bare `Down`) owns the
+       constructors whose [ci_type] is that identity.  A constructor of the
+       bare-named type it is merely named like (the built-in `Down`, inherited
+       from the base env) is not this module's to export: exporting it put
+       the built-in's `Down` under `UserValues.Down`. *)
+    let own_identity : (string, string) Hashtbl.t = Hashtbl.create 8 in
+    List.iter (function
+        | Ast.DType (_, n, _, _, _) | Ast.DAlwaysLinearType (_, n, _, _, _) ->
+          let id = Typecheck_nominal.decl_identity n in
+          if id <> n.Ast.txt then Hashtbl.replace own_identity n.Ast.txt id
+        | _ -> ()) decls;
+    let ctor_type_short ty =
+      if Hashtbl.length own_identity = 0 then Some ty
+      else match Hashtbl.find_opt own_identity ty with
+        | Some _ -> None                      (* the bare namesake *)
+        | None ->
+          let short = Typecheck_nominal.bare ty in
+          if short <> ty && Hashtbl.find_opt own_identity short = Some ty
+          then Some short else Some ty
+    in
     let new_ctors = StrMap.filter_map (fun k cis ->
         if inherited_qualified k cis then None else
         let filtered = List.filter (fun ci ->
+          match ctor_type_short ci.ci_type with
+          | None -> false
+          | Some ty ->
           (* Hide constructors for opaque types declared in the sig *)
-          not (List.mem ci.ci_type opaque_types) &&
+          not (List.mem ty opaque_types) &&
           (* Export constructor only if its parent type is public AND
              the constructor itself is explicitly marked Public. *)
-          is_pub ci.ci_type && ci.ci_vis = Ast.Public
+          is_pub ty && ci.ci_vis = Ast.Public
         ) cis in
         match filtered with [] -> None | _ -> Some filtered
       ) inner_env.ctors in
@@ -9553,6 +9578,13 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DTransitions (handle_ty, arms, sp) ->
     let handle_name = handle_ty.txt in
+    (* The handle type's identity: a variant named like a base type
+       (`Handle`, the short name of `File.Handle`) is entry-qualified
+       ([Typecheck_nominal]), so the via function's types carry that name. *)
+    let handle_id = match Typecheck_nominal.ref_identity handle_ty with
+      | Some id -> id
+      | None -> Typecheck_nominal.identity_of_path_name handle_name in
+    let is_handle hn = hn = handle_name || hn = handle_id in
     (* Extract the last (state) type argument from Handle(args).
        Handles both single-param Handle(s) and two-param Handle(r,s). *)
     let last_arg = function
@@ -9582,7 +9614,7 @@ let rec check_decl env (d : Ast.decl) : env =
         | Some sch ->
           let ty = repr (instantiate env.level env sch) in
           (match ty with
-           | TArrow (TCon (hn, param_args), ret_t) when hn = handle_name ->
+           | TArrow (TCon (hn, param_args), ret_t) when is_handle hn ->
              (match last_arg param_args with
               | Some (TCon (s, []) as from_t) when s <> a.tr_from.txt ->
                 Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
@@ -9591,7 +9623,7 @@ let rec check_decl env (d : Ast.decl) : env =
                      via_name (pp_ty from_t) a.tr_from.txt)
               | _ -> ());
              (match repr ret_t with
-              | TCon (hn2, ret_args) when hn2 = handle_name ->
+              | TCon (hn2, ret_args) when is_handle hn2 ->
                 (match last_arg ret_args with
                  | Some (TCon (s, []) as to_t) when s <> a.tr_to.txt ->
                    Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
@@ -9625,7 +9657,7 @@ let rec check_decl env (d : Ast.decl) : env =
           let ty = repr (instantiate env.level env sch) in
           match ty with
           | TArrow (TCon (hn, param_args), TCon (hn2, ret_args))
-            when hn = handle_name && hn2 = handle_name ->
+            when is_handle hn && is_handle hn2 ->
             (match last_arg param_args, last_arg ret_args with
              | Some from_t, Some to_t ->
                let from_s = pp_ty from_t in
@@ -12143,7 +12175,21 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      declarations, and a user type with a reserved handle name (`Process`)
      declared in an EARLIER fragment has no identity in a later one (known
      edge, ocap phase 2 Task 2 review item 8). *)
-  Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib m;
+  (let base =
+     (* Variant types the seed (the cached stdlib env) already declares, by
+        the bare name its signatures spell them with. *)
+     let seeded : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+     (match seed_env with
+      | Some (se : env) ->
+        StrMap.iter (fun _ cis ->
+            List.iter (fun (ci : ctor_info) ->
+                if not (String.contains ci.ci_type '.') then
+                  Hashtbl.replace seeded ci.ci_type ()) cis) se.ctors
+      | None -> ());
+     fun short ->
+       Typecheck_builtins.is_base_type_short_name short || Hashtbl.mem seeded short in
+   Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib ~base
+     ~user_only:(seed_env <> None) m);
   (* Type-variable letters in messages are assigned on first print from a
      process-wide table.  A cold run typechecks the stdlib first and can
      print one of its variables, so the user's first variable came out `b`
