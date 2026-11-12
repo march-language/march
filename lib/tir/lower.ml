@@ -433,9 +433,22 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       fn_kind       = Tir.FnNormal }
   in
   let reg_method meth_name ty_name mangled_name =
-    let existing = match Hashtbl.find_opt !_iface_methods meth_name with
-      | Some l -> l | None -> [] in
-    Hashtbl.replace !_iface_methods meth_name ((ty_name, mangled_name) :: existing)
+    let reg key =
+      let existing = match Hashtbl.find_opt !_iface_methods key with
+        | Some l -> l | None -> [] in
+      Hashtbl.replace !_iface_methods key ((ty_name, mangled_name) :: existing)
+    in
+    reg meth_name;
+    (* Also under the qualified key (`Show.show`, from `Show$Int.show`), as
+       [collect_iface_impls] does for every written impl.  The qualified
+       spelling cannot be captured by a user fn named like the method, so
+       derived impl bodies call their fields' methods that way
+       (Desugar_derive); without these rows `Ord.compare` on an Int field
+       found only the program's own impls and no primitive one.
+       specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+    match String.index_opt mangled_name '$' with
+    | Some i -> reg (String.sub mangled_name 0 i ^ "." ^ meth_name)
+    | None -> ()
   in
   let emit_builtin_fn name params ret_ty body_fn_name body_params =
     let fn : Tir.fn_def = {
