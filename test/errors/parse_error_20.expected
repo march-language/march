@@ -1,0 +1,10 @@
+exit: 1
+-- SYNTAX ------------------- errors/parse_error_20.march
+
+An attribute goes before a `fn` or `pfn`; this declaration does not take one. [parse_error]
+
+4 |   type Old = A | B
+      ^^^^
+
+    `@[deprecated("...")]` marks functions only for now. To deprecate a type, deprecate the functions that return or take it, and say so in its module's CHANGELOG entry.
+    run `march --explain parse_error`

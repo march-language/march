@@ -25,6 +25,20 @@
       "`doc \"...\"` attaches a doc string to a `fn` or `pfn`. %s don't carry one \xe2\x80\x94 write `-- ...` on the line above instead."
       what)
 
+  (* `@[deprecated("...")]` takes exactly one string literal: the message
+     every use site prints (specs/lang/compatibility.md). *)
+  let deprecated_form_msg =
+    "`@[deprecated]` needs a message saying what to use instead:"
+  let deprecated_form_hint = Some "@[deprecated(\"use `new_name` instead\")]"
+
+  (* Shared by the attribute-on-a-type / attribute-on-a-module rules in [decl]. *)
+  let attr_not_on_decl_msg =
+    "An attribute goes before a `fn` or `pfn`; this declaration does not take one."
+  let attr_not_on_decl_hint what =
+    Some (Printf.sprintf
+      "`@[deprecated(\"...\")]` marks functions only for now. To deprecate %s, deprecate the functions that return or take it, and say so in its module's CHANGELOG entry."
+      what)
+
   (** Raise [ParseError] from an `error` production.  [pos] is the position
       the message is about; [Parse] renders the diagnostic there. *)
   (* The expression payloads of a declaration's attributes: only
@@ -578,13 +592,23 @@ decl_list_r:
    bracketed payload is parsed as an expression list (termination design
    §2.1): a single bare identifier keeps today's `name:value` string, so
    `@[no_alloc(warn)]` and friends are unchanged; `decreases` always keeps
-   its expressions (and the plain name `decreases`); any other attribute
-   with a non-identifier payload is a parse error naming it. *)
+   its expressions (and the plain name `decreases`); `deprecated` keeps its
+   one string literal, the message, the same way; any other attribute with a
+   non-identifier payload is a parse error naming it. *)
 fn_attr:
-  | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { (name, []) }
+  | AT; LBRACKET; name = LOWER_IDENT; RBRACKET
+      { if name = "deprecated" then
+          error_raise deprecated_form_msg deprecated_form_hint $startpos($1)
+        else (name, []) }
   | AT; name = LOWER_IDENT; LPAREN; value = LOWER_IDENT; RPAREN { (name ^ ":" ^ value, []) }
   | AT; LBRACKET; name = LOWER_IDENT; LPAREN; args = separated_nonempty_list(COMMA, expr); RPAREN; RBRACKET
       { if name = "decreases" then (name, args)
+        else if name = "deprecated" then
+          (* The message is the one string literal; it stays an expression
+             payload, like `decreases`, so the formatter prints it back. *)
+          (match args with
+           | [ ELit (LitString _, _) ] -> (name, args)
+           | _ -> error_raise deprecated_form_msg deprecated_form_hint $startpos($1))
         else
           match args with
           | [ EVar v ] when not (String.contains v.txt '.') -> (name ^ ":" ^ v.txt, [])
@@ -698,6 +722,19 @@ decl:
       match d with
       | DFn (def, span) -> DFn ({ def with fn_attrs = attrs @ def.fn_attrs; fn_attr_args = attr_args_of attrs_args }, span)
       | d -> d }
+  (* Attributes go on functions (and the few actor and protocol ones below).
+     `@[deprecated("...")]` is the one a reader will try on a type or a module
+     too, and without these rules that is a bare "this `mod` has no matching
+     `end`" pointing at line 1.  Like the `doc` rules above, they match the
+     KEYWORD only and raise, so they add no conflict. *)
+  | attrs = nonempty_list(fn_attr); TYPE
+    { ignore attrs; error_raise attr_not_on_decl_msg (attr_not_on_decl_hint "a type") $startpos($2) }
+  | attrs = nonempty_list(fn_attr); PTYPE
+    { ignore attrs; error_raise attr_not_on_decl_msg (attr_not_on_decl_hint "a type") $startpos($2) }
+  | attrs = nonempty_list(fn_attr); OPAQUE
+    { ignore attrs; error_raise attr_not_on_decl_msg (attr_not_on_decl_hint "a type") $startpos($2) }
+  | attrs = nonempty_list(fn_attr); MOD
+    { ignore attrs; error_raise attr_not_on_decl_msg (attr_not_on_decl_hint "a module") $startpos($2) }
   | attrs = nonempty_list(fn_attr); d = protocol_decl
     { let attrs = List.map fst attrs in (* The one protocol attribute is `@[endpoints]`: generate typed session
          endpoints over the `Session` capability for every role

@@ -11037,6 +11037,120 @@ end|} in
   Alcotest.(check bool) "a call on the right branches" false (expr_calls "&&" (body "call_rhs"));
   Alcotest.(check bool) "a variable divisor on the right branches" false (expr_calls "&&" (body "div_rhs"))
 
+(* ── Inline NativeArray get/set (lib/tir/llvm_emit_narr.ml, 2026-11-11) ──
+   `NativeArray.get_<w>` / `set_<w>` used to be out-of-line calls into the C
+   runtime on every element.  They are now a bounds check plus a load/store
+   inline, with the runtime helper called only on the failing branch (out of
+   bounds, or a shared array that needs copy-on-write).  The program covers
+   every width (int, float, f32, i32, u8), narrowing on store and widening on
+   load, copy-on-write of a shared array, and the `||` guard from Strata's
+   fluid hash table (an out-of-bounds read if the right operand ran).  The
+   compiled output must match the interpreter's, a negative index must still
+   die with the runtime's message, and in the emitted IR the runtime helper
+   may appear only inside the failing block. *)
+let narr_inline_src = {|mod NarrInline do
+  needs IO.Console
+  needs IO.Process
+
+  pfn probe(slots : NativeIntArr, d : NativeIntArr, key : Int, s : Int) : Int do
+    let id1 = NativeArray.get_int(slots, s)
+    if id1 == 0 || NativeArray.get_int(d, 12 * (id1 - 1)) == key do s else probe(slots, d, key, s + 1) end
+  end
+
+  pfn fill(a : NativeIntArr, i : Int, n : Int) : NativeIntArr do
+    if i >= n do a else fill(NativeArray.set_int(a, i, i * i), i + 1, n) end
+  end
+
+  pfn sum(a : NativeIntArr, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else sum(a, i + 1, n, acc + NativeArray.get_int(a, i)) end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    match Authority.must(System.argv()) do
+      Cons(_, Cons("neg_get", _)) ->
+        println(int_to_string(NativeArray.get_int(NativeArray.make_int(4, 0), 0 - 12)))
+      Cons(_, Cons("neg_set", _)) ->
+        println(int_to_string(NativeArray.get_u8(NativeArray.set_u8(NativeArray.make_u8(4, 0), 0 - 1, 9), 0)))
+      _ ->
+        println(int_to_string(probe(NativeArray.make_int(8, 0), NativeArray.make_int(96, 0), 5, 0)))
+        let a = fill(NativeArray.make_int(10, 0), 0, 10)
+        println(int_to_string(sum(a, 0, 10, 0)))
+        -- shared: b and a alias; set must copy, leaving a unchanged
+        let b = a
+        let b2 = NativeArray.set_int(b, 3, 1000)
+        println(int_to_string(NativeArray.get_int(a, 3)) ++ " " ++ int_to_string(NativeArray.get_int(b2, 3)))
+        let f = NativeArray.set_float(NativeArray.make_float(3, 1.5), 2, 2.25)
+        println(float_to_string(NativeArray.get_float(f, 0)) ++ " " ++ float_to_string(NativeArray.get_float(f, 2)))
+        let g = NativeArray.set_f32(NativeArray.make_f32(3, 0.0), 1, 0.1)
+        println(float_to_string(NativeArray.get_f32(g, 1)))
+        let h = NativeArray.set_i32(NativeArray.make_i32(3, 0), 0, 4294967295 + 2147483648)
+        println(int_to_string(NativeArray.get_i32(h, 0)))
+        let h2 = NativeArray.set_i32(h, 1, 0 - 7)
+        println(int_to_string(NativeArray.get_i32(h2, 1)))
+        let u = NativeArray.set_u8(NativeArray.make_u8(3, 0), 2, 0 - 1)
+        let u2 = NativeArray.set_u8(u, 1, 300)
+        println(int_to_string(NativeArray.get_u8(u2, 2)) ++ " " ++ int_to_string(NativeArray.get_u8(u2, 1)))
+        let shared = NativeArray.make_u8(2, 5)
+        let s2 = NativeArray.set_u8(shared, 0, 6)
+        println(int_to_string(NativeArray.get_u8(shared, 0)) ++ " " ++ int_to_string(NativeArray.get_u8(s2, 0)))
+    end
+  end
+end
+|}
+
+let narr_inline_expected = String.concat "\n" [
+  "0"; "285"; "9 1000"; "1.5 2.25"; "0.10000000149"; "2147483647"; "-7";
+  "255 44"; "5 6";
+]
+
+let test_native_arr_inline_get_set () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"narr_inline" narr_inline_src in
+  let in_root = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+  let interp_out = read_cmd_output (Printf.sprintf "%s%s %s 2>&1"
+    in_root (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter" narr_inline_expected interp_out;
+  let bin = Filename.concat tmp "narr_inline_bin" in
+  (match compile_march_or_skip ~cmd_prefix:in_root ~main_exe ~bin ~src () with
+   | None -> ()
+   | Some bin ->
+     Alcotest.(check string) "compiled = interpreter" narr_inline_expected
+       (read_cmd_output (Filename.quote bin ^ " 2>&1"));
+     Alcotest.(check string) "negative get index panics as before"
+       "march: runtime error: native_int_arr_get: index -12 out of bounds (len=4)"
+       (read_cmd_output (Filename.quote bin ^ " neg_get 2>&1"));
+     Alcotest.(check string) "negative set index panics as before"
+       "march: runtime error: native_u8_arr_set: index -1 out of bounds (len=4)"
+       (read_cmd_output (Filename.quote bin ^ " neg_set 2>&1")));
+  (* IR shape: the runtime accessor is called only from the block the inline
+     check branches to on failure. *)
+  ignore (read_cmd_output (Printf.sprintf "cd %s && %s --emit-llvm %s 2>&1"
+    (Filename.quote tmp) (Filename.quote main_exe) (Filename.quote src)));
+  let ll = Filename.remove_extension src ^ ".ll" in
+  let lines = In_channel.with_open_text ll In_channel.input_all
+              |> String.split_on_char '\n' in
+  let label = ref "" and helper_calls = ref 0 and misplaced = ref [] in
+  List.iter (fun l ->
+      let t = String.trim l in
+      if String.length t > 1 && t.[String.length t - 1] = ':'
+         && not (String.contains t ' ') then label := t
+      else
+        List.iter (fun (w, block) ->
+            if ir_contains t (Printf.sprintf "@native_%s_arr_%s(" w
+                                (if block = "naget_oob" then "get" else "set"))
+               && ir_contains t "call " then begin
+              incr helper_calls;
+              if not (String.starts_with ~prefix:block !label) then
+                misplaced := t :: !misplaced
+            end)
+          [ ("int", "naget_oob"); ("int", "naset_slow"); ("u8", "naget_oob");
+            ("u8", "naset_slow"); ("float", "naset_slow"); ("i32", "naset_slow") ])
+    lines;
+  Alcotest.(check bool) "the runtime helpers are still the slow path" true
+    (!helper_calls > 0);
+  Alcotest.(check (list string)) "no runtime get/set call outside its slow block" []
+    (List.rev !misplaced)
+
 (* End to end through HttpTransport.request: an injected path is refused
    before the connection is even opened, so a local listener sees no bytes
    (interpreted and compiled). *)
@@ -12890,12 +13004,28 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
     {|mod SigWatchCap do
   needs IO.Console
   needs IO.Signal
-  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal)) do
+  needs IO.Mut
+  needs IO.Clock
+  pfn delivered(seen : Vault(Int), n : Int, left : Int) : () do
+    if Vault.get_or(seen, "n", 0) >= n do ()
+    else if left <= 0 do panic("delivery " ++ int_to_string(n) ++ " never ran") else
+      sleep_ms(1)
+      delivered(seen, n, left - 1)
+    end end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
     let k = 99
-    Signal.watch(Signal.Usr2, fn -> Authority.ignore(println("caught " ++ int_to_string(k))))
+    let seen : Vault(Int) = Authority.must(Vault.new("sigwatchcap_seen"))
+    Signal.watch(Signal.Usr2, fn ->
+      let _ = println("caught " ++ int_to_string(k))
+      let _ = Vault.incr(seen, "n", 1)
+      ())
     Signal.raise(Signal.Usr2)
+    delivered(seen, 1, 30000)
     Signal.raise(Signal.Usr2)
+    delivered(seen, 2, 30000)
     Signal.raise(Signal.Usr2)
+    delivered(seen, 3, 30000)
     println("done")
   end
 end
@@ -12907,9 +13037,31 @@ end
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let cmd = Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin) in
+    (* Each raise is ACKNOWLEDGED before the next one: the watcher counts its
+       own runs in a Vault and main waits for that count after every raise.
+       A watched signal is one pending flag that the scheduler drain claims
+       (march_signal_drain's atomic_exchange), so raises sent back to back
+       coalesce. Measured 2026-11-11 on the old program (three raises in a
+       row, then "done"), 2000 runs: the handler ran once in 1800, twice in
+       184 and three times in 16. The regression this test guards crashes on
+       delivery TWO, so nine runs in ten could not have caught it, and a
+       delivery still in flight when main returned raced the process's exit.
+       With the acknowledgement every run makes exactly three deliveries, each
+       finished before the next raise and before "done"; the count is asserted
+       so the test can never go back to passing on one. *)
+    let count_of out sub =
+      let n = String.length sub in
+      let rec go i acc =
+        if i + n > String.length out then acc
+        else if String.sub out i n = sub then go (i + n) (acc + 1)
+        else go (i + 1) acc
+      in
+      go 0 0
+    in
     let ok out =
       ir_contains out "done" && ir_contains out "EXIT:0"
       && not (ir_contains out "RC underflow")
+      && count_of out "caught 99" = 3
     in
     (* Retry a failing iteration ONCE before failing the suite, and report what
        was actually captured when it fails twice.
@@ -12940,9 +13092,10 @@ end
         let retry_out = read_cmd_output cmd in
         if not (ok retry_out) then
           Alcotest.failf
-            "a capturing Signal.watch handler delivered 3 times must not be \
-             freed after the first delivery (long-lived, unbounded-repeat \
-             call site) - iteration %d failed twice. first attempt: %S retry: %S"
+            "a capturing Signal.watch handler must run once per acknowledged \
+             raise (3) and not be freed after the first delivery (long-lived, \
+             unbounded-repeat call site) - iteration %d failed twice. first \
+             attempt: %S retry: %S"
             i run_out retry_out
       end
     done
@@ -16527,6 +16680,187 @@ let test_module_qualified_pattern_qualifier_is_stdlib_type_compiled () =
     ~expected:"6\n1000\n12\n99\n5"
     ()
 
+(* ── A qualified constructor pattern whose arm returns the scrutinee ───────
+   Perceus' scrutinee-escape rewrite ([Perceus_scrut]) rebuilds the matched
+   constructor where an arm returns the scrutinee in tail position.  It named
+   that constructor "<scrutinee type>.<branch tag>", and a pattern written
+   qualified already has a qualifier in its tag ("Shape.Shape.Square",
+   "Counter_Msg.Counter.Bump"): no such constructor, so codegen fell back to
+   tag 0 and the arm returned the type's FIRST constructor.
+   specs/progress/2026-11-05-nested-match-qualified-actor-msg-pattern-miscompile.md *)
+
+(** Module-qualified, type-qualified and stdlib-module-qualified patterns. *)
+let test_qualified_pattern_arm_returns_scrutinee_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_pattern_returns_scrutinee"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Shapes do
+    type Shape = Circle(Int) | Square(Int) | Dot
+  end
+  type Tree = Leaf(Int) | Node(Int, Int)
+
+  fn keep(s : Shapes.Shape, d : Shapes.Shape) : Shapes.Shape do
+    match s do
+      Shapes.Square(n) -> if n > 3 do s else d end
+      _ -> s
+    end
+  end
+  fn keep2(s : Shapes.Shape, d : Shapes.Shape) : Shapes.Shape do
+    match s do
+      Shape.Square(n) -> if n > 3 do s else d end
+      _ -> s
+    end
+  end
+  fn keep3(t : Tree, d : Tree) : Tree do
+    match t do
+      Tree.Node(a, b) -> if a > b do t else d end
+      _ -> t
+    end
+  end
+  fn keep4(v : Json.JsonValue, d : Json.JsonValue) : Json.JsonValue do
+    match v do
+      Json.Str(s) -> if string_length(s) > 1 do v else d end
+      _ -> v
+    end
+  end
+  fn name(s : Shapes.Shape) : String do
+    match s do
+      Shapes.Circle(n) -> "Circle " ++ int_to_string(n)
+      Shapes.Square(n) -> "Square " ++ int_to_string(n)
+      Shapes.Dot -> "Dot"
+    end
+  end
+  fn tname(t : Tree) : String do
+    match t do
+      Leaf(n) -> "Leaf " ++ int_to_string(n)
+      Node(a, b) -> "Node " ++ int_to_string(a) ++ " " ++ int_to_string(b)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(name(keep(Shapes.Square(5), Shapes.Dot)))
+    println(name(keep(Shapes.Square(1), Shapes.Dot)))
+    println(name(keep2(Shapes.Square(5), Shapes.Dot)))
+    println(tname(keep3(Node(2, 1), Leaf(0))))
+    println(tname(keep3(Node(1, 2), Leaf(0))))
+    println(Json.to_string(keep4(Json.Str("abc"), Json.Null)))
+  end
+end
+|}
+    ~expected:"Square 5\nDot\nSquare 5\nNode 2 1\nLeaf 0\n\"abc\""
+    ()
+
+(** The shape the bug was found in: an actor's message constructor qualified
+    by the actor's name, matched inside a `Some` arm. *)
+let test_qualified_actor_msg_pattern_in_some_arm_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_actor_msg_pattern_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod V1 do
+    type Msg = OldBump(Int)
+  end
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Reset() do { total: 0 } end
+    on Bump(n : Int) do { total: state.total + n } end
+  end
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.OldBump(n) -> if n < 0 do None else Some(Bump(n)) end
+    end
+  end
+  fn not_137(n : Int) : Bool do n != 137 end
+  fn w(m : V1.Msg, none : Counter.Msg) : Counter.Msg do
+    match counter_migrate_msg(m) do
+      Some(x) ->
+        match x do
+          Counter.Bump(p0) -> if not_137(p0) do x else none end
+          _ -> x
+        end
+      None -> none
+    end
+  end
+  fn tag(m : Counter.Msg) : String do
+    match m do
+      Bump(n) -> "Bump " ++ int_to_string(n)
+      Reset -> "Reset"
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(tag(w(V1.OldBump(5), Reset)))
+    println(tag(w(V1.OldBump(137), Reset)))
+    println(tag(w(V1.OldBump(-1), Reset)))
+  end
+end
+|}
+    ~expected:"Bump 5\nReset\nReset"
+    ()
+
+(** Two modules declaring a same-named type that share a constructor name:
+    the tag may carry the declaring module, and the rebuild must still name
+    the right type's constructor. *)
+let test_qualified_pattern_returns_scrutinee_colliding_types_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_pattern_returns_scrutinee_collision"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod DcA do
+    type Thing = Other(Int) | Shared(Int)
+    fn keep(t : Thing, d : Thing) : Thing do
+      match t do
+        Shared(n) -> if n > 3 do t else d end
+        _ -> t
+      end
+    end
+    fn name(t : Thing) : String do
+      match t do
+        Other(n) -> "A.Other " ++ int_to_string(n)
+        Shared(n) -> "A.Shared " ++ int_to_string(n)
+      end
+    end
+  end
+  mod DcB do
+    type Thing = Shared(Int) | Extra(Int)
+    fn keep(t : Thing, d : Thing) : Thing do
+      match t do
+        Shared(n) -> if n > 3 do t else d end
+        _ -> t
+      end
+    end
+    fn name(t : Thing) : String do
+      match t do
+        Shared(n) -> "B.Shared " ++ int_to_string(n)
+        Extra(n) -> "B.Extra " ++ int_to_string(n)
+      end
+    end
+  end
+  fn keep_a(t : DcA.Thing, d : DcA.Thing) : DcA.Thing do
+    match t do
+      DcA.Shared(n) -> if n > 3 do t else d end
+      _ -> t
+    end
+  end
+  fn keep_b(t : DcB.Thing, d : DcB.Thing) : DcB.Thing do
+    match t do
+      DcB.Shared(n) -> if n > 3 do t else d end
+      _ -> t
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(DcA.name(DcA.keep(DcA.Shared(5), DcA.Other(0))))
+    println(DcB.name(DcB.keep(DcB.Shared(5), DcB.Extra(0))))
+    println(DcA.name(keep_a(DcA.Shared(5), DcA.Other(0))))
+    println(DcA.name(keep_a(DcA.Shared(1), DcA.Other(0))))
+    println(DcB.name(keep_b(DcB.Shared(5), DcB.Extra(0))))
+    println(DcB.name(keep_b(DcB.Shared(1), DcB.Extra(0))))
+  end
+end
+|}
+    ~expected:"A.Shared 5\nB.Shared 5\nA.Shared 5\nA.Other 0\nB.Shared 5\nB.Extra 0"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings began as verbatim copies of llvm_emit.ml's deleted
@@ -20034,6 +20368,9 @@ let codegen_suites =
         Alcotest.test_case "&& / || skip the decided operand (interp = compiled)" `Quick test_and_or_short_circuit_parity;
         Alcotest.test_case "eager-safe rhs stays strict, others branch" `Quick test_and_or_lowering_shape;
       ]);
+      ("native array inline access", [
+        Alcotest.test_case "get/set inline, runtime only on the failing branch" `Quick test_native_arr_inline_get_set;
+      ]);
       ("http builtins", [
         Alcotest.test_case "serialize request"       `Quick test_http_serialize_request;
         Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
@@ -20475,6 +20812,12 @@ let codegen_suites =
             test_module_qualified_colliding_ctor_pattern_compiled;
           Alcotest.test_case "module-qualified pattern whose qualifier is a stdlib type name" `Quick
             test_module_qualified_pattern_qualifier_is_stdlib_type_compiled;
+          Alcotest.test_case "qualified pattern whose arm returns the scrutinee" `Quick
+            test_qualified_pattern_arm_returns_scrutinee_compiled;
+          Alcotest.test_case "qualified actor-message pattern nested in a Some arm" `Quick
+            test_qualified_actor_msg_pattern_in_some_arm_compiled;
+          Alcotest.test_case "qualified pattern returning the scrutinee, colliding type names" `Quick
+            test_qualified_pattern_returns_scrutinee_colliding_types_compiled;
         ] );
       ( "string_codepoint", [
           Alcotest.test_case "String.from_codepoint/to_codepoints usable compiled (pure-March codec)" `Quick
