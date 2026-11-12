@@ -900,6 +900,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A compiled `match` arm with a qualified constructor pattern no longer returns the wrong
+  constructor when it returns the matched value.** `match s do Shapes.Square(n) -> if n > 3 do s
+  else d end ... end` returned the type's first constructor (`Circle(11)` for `Square(5)`) in a
+  compiled program, with no error; the interpreter was right. It affected every qualified
+  pattern form (`Mod.Ctor`, `Type.Ctor`, an actor's `Counter.Bump`) whose arm returns the value
+  being matched. A bare pattern was not affected.
 - **`&&` and `||` now short-circuit.** The right operand runs only when the left one does not
   already decide the result, interpreted and compiled (LLVM, JS, JIT). Both operands used to be
   evaluated every time, so `i >= 0 && i < n && NativeArray.get_u8(a, i) == 1` read out of range
