@@ -849,14 +849,14 @@ via ordinary T-App per-argument checking, §2); verified live for `1 || 2`:
 two separate diagnostics, one per argument.
 
 **Cross-reference to the operational side:** `core-march.md` §4.4.1
-documents `&&`/`||` as **strict, not short-circuiting** at the value level
-(both operands are always evaluated); that is a RUNTIME/evaluation fact
-about `δ-And`/`δ-Or`, orthogonal to this section: on the TYPE side `&&`/`||`
-are simply fixed `Bool → Bool → Bool` functions like any other binary
-builtin, and no part of their strict evaluation order affects how they
+documents `&&`/`||` as **short-circuiting** (the right operand is
+evaluated only when the left one does not decide the result); that is a
+RUNTIME/evaluation fact, orthogonal to this section: on the TYPE side
+`&&`/`||` are simply fixed `Bool → Bool → Bool` functions like any other
+binary builtin, and their evaluation order does not affect how they
 are typed (both operands are ⇐-checked against `Bool` via ordinary left-to-
-right T-App argument checking, §2, exactly as strictness evaluates them
-left-to-right at runtime; the two properties happen to agree in direction
+right T-App argument checking, §2, and the evaluator also runs the left
+operand first; the two properties happen to agree in direction
 but are independently-stated facts, one operational and one static).
 
 ### 2.1c Conditionals without a scrutinee: `ECond` (`match do c -> b … end`)

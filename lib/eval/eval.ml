@@ -2115,6 +2115,21 @@ and eval_expr_inner (env : env) (e : expr) : value =
           apply send ([dst; to_; VString tag; VString (March_ast.Json_dispatch.find_schema sp); json] @ rest))
      | _ -> assert false)
 
+  (* `a && b` / `a || b` short-circuit: [b] is evaluated only when [a] does
+     not already decide the result (E-And / E-Or, core-march.md §4.4.1).  The
+     parser builds both as an ordinary [EApp] of the builtin, and no program
+     can rebind the operator symbols, so the name alone identifies them.
+     TIR lowering does the same (lower_expr.ml). *)
+  | EApp (EVar { txt = ("&&" | "||") as op; _ }, [a; b], _) ->
+    (match op, eval_expr env a with
+     | "&&", VBool false -> VBool false
+     | "||", VBool true -> VBool true
+     | _, VBool _ ->
+       (match eval_expr env b with
+        | VBool _ as v -> v
+        | _ -> eval_error "%s: right operand must be a boolean" op)
+     | _ -> eval_error "%s: left operand must be a boolean" op)
+
   | EApp (f, args, sp) ->
     (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
        happens inside apply/apply_inner: VClosure -> E-App-Clo, VBuiltin -> E-App-Prim) *)
@@ -4071,7 +4086,17 @@ let rec eval_decl (env : env) (d : decl) : env =
               Hashtbl.replace iface_method_tbl
                 (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
-            Hashtbl.replace module_registry iface_qualified fn_val
+            (* `Show.show` and its three siblings are the type-directed
+               builtin (Eval_builtins.qualified_iface_methods), not this one
+               impl: the slot is shared by every impl of the interface. *)
+            let reg_val =
+              if is_dispatched then
+                (match List.assoc_opt iface_qualified Eval_builtins.base_env with
+                 | Some dispatcher -> dispatcher
+                 | None -> fn_val)
+              else fn_val
+            in
+            Hashtbl.replace module_registry iface_qualified reg_val
           | None -> ()
         end;
         (* For Json derive: to_json only registers in impl_tbl (so the
