@@ -2367,7 +2367,9 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
     | T.TTuple (_ :: _ :: _ as ts) -> Smt.SData (tuple_adt (List.length ts), List.map inst ts)
-    | T.TCon (n, args) when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) n) ->
+    | T.TCon (n, args)
+      when Hashtbl.mem adt_ctors (adt_sort_name ~arity:(List.length args) (March_typecheck.Typecheck_nominal.refine_name n)) ->
+      let n = March_typecheck.Typecheck_nominal.refine_name n in
       let adt = adt_sort_name ~arity:(List.length args) n in
       let k = try Hashtbl.find adt_arity adt with Not_found -> 0 in
       if k = 0 then Smt.sdata adt
@@ -2388,6 +2390,7 @@ let sort_of_tc_ty (t : March_typecheck.Typecheck.ty) : Smt.sort option =
      result of a set measure over it (`elts(s)`, `keys(m)`), never the sort
      of the value itself. *)
   | T.TCon (n, args) as ty ->
+    let n = March_typecheck.Typecheck_nominal.refine_name n in
     let adt = adt_sort_name ~arity:(List.length args) n in
     (match Hashtbl.find_opt adt_ctors adt with
      | Some [ ctor ] when Hashtbl.mem ctor_field_names ctor -> None
@@ -2455,7 +2458,7 @@ let adt_of_tc_ty (t : March_typecheck.Typecheck.ty) : string option =
   let module T = March_typecheck.Typecheck in
   let rec strip t = match T.repr t with T.TLin (_, b) -> strip b | t -> t in
   match strip t with
-  | T.TCon (n, args) -> adt_of_type_name ~arity:(List.length args) n
+  | T.TCon (n, args) -> adt_of_type_name ~arity:(List.length args) (March_typecheck.Typecheck_nominal.refine_name n)
   (* A type variable is the one genuinely unknown type. *)
   | T.TVar _ -> None
   | _ -> Some ambiguous_adt_sentinel

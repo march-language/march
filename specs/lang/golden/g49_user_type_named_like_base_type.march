@@ -1,0 +1,80 @@
+mod Main do
+  needs IO.Console
+  -- User variants named like a built-in type (`CancelToken`), a prelude type
+  -- (`Option`, `Result`) and a stdlib type (`Level`, of `Logger`) are the
+  -- program's own types
+  -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
+  -- Each is used beside the type it is named like: the program's `Some` and
+  -- the prelude's are told apart by the type a constructor is checked
+  -- against, derived Show/Eq run the program's impls, and a builtin token is
+  -- still a builtin token.  The typechecker used to merge each pair.
+
+  type CancelToken = Tok(Int) | Other(String)
+  type Option(a) = Some(a) | None
+  type Result = Won(Int) | Lost
+  type Level = Low | High
+  derive Eq, Show for CancelToken
+  derive Eq, Show for Level
+
+  fn show_tok(t : CancelToken) : String do
+    match t do
+      Tok(n) -> "Tok " ++ int_to_string(n)
+      Other(s) -> "Other " ++ s
+    end
+  end
+
+  fn mine(o : Option(Int)) : Int do
+    match o do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+
+  fn wrap(n : Int) : Option(Int) do
+    if n > 0 do Some(n) else None end
+  end
+
+  fn score(r : Result) : Int do
+    match r do
+      Won(n) -> n
+      Lost -> 0
+    end
+  end
+
+  fn rank(l : Level) : Int do
+    match l do
+      Low -> 0
+      High -> 1
+    end
+  end
+
+  -- The prelude's `Result`, by its constructors: `Result` written in this
+  -- file names the program's own.
+  fn checked(n : Int) do
+    if n > 0 do Ok(n) else Err("not positive") end
+  end
+
+  fn parse(n : Int) : String do
+    match checked(n) do
+      Ok(k) -> "ok " ++ int_to_string(k)
+      Err(e) -> "err " ++ e
+    end
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    let b = task_cancel_token_new()
+    print_line(show_tok(Tok(7)))
+    print_line(show_tok(Other("x")))
+    print_line(to_string(Tok(1)) ++ " " ++ to_string(Tok(1) == Tok(1)) ++ " " ++ to_string(Tok(1) == Other("a")))
+    print_line(to_string(task_is_cancelled(b)))
+    print_line(int_to_string(mine(wrap(4)) + mine(wrap(0))))
+    match List.find([1, 2, 3], fn x -> x > 1) do
+      Some(h) -> print_line("found " ++ int_to_string(h))
+      None -> print_line("none")
+    end
+    print_line(int_to_string(score(Won(3)) + score(Lost)))
+    print_line(parse(12) ++ ", " ++ parse(0))
+    Logger.set_module_level("m", Logger.Warn)
+    print_line(to_string(High) ++ " " ++ int_to_string(rank(High)) ++ " " ++ to_string(Low == High))
+  end
+end

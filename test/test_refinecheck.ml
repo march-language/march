@@ -23986,7 +23986,7 @@ let module_qualified_measure_and_sort_suite =
      constructors resolve through a conflated type).  Both proofs this suite
      used to pin were therefore not safe; see
      specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md and
-     specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
+     specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md.
      What still holds, and is pinned: the collision makes neither call a
      proof nor a violation. *)
   (* Since 2026-11-06 (specs/progress/2026-11-06-predicate-names.md) the

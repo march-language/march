@@ -5118,6 +5118,7 @@ let rec surface_of_tc (t : T.ty) : A.ty option =
   let nm txt = { A.txt; span = A.dummy_span } in
   match T.repr t with
   | T.TCon (n, args) ->
+    let n = March_typecheck.Typecheck_nominal.refine_name n in
     let args' = List.filter_map surface_of_tc args in
     if List.length args' = List.length args then Some (A.TyCon (nm n, args')) else None
   | T.TVar _ -> Some (A.TyVar (nm "a"))

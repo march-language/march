@@ -6,7 +6,7 @@
     [TCon "Note"] and unified with each other (a value of one was accepted
     where the other was expected; a [match] over one listed the other's
     constructors; [from_json] could not tell their codecs apart).  See
-    specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md and
+    specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md and
     the design section of
     specs/progress/2026-10-03-derive-json-same-short-name-two-modules.md.
 
@@ -27,6 +27,17 @@
     in the typechecker (it cannot unify with the builtin TCon), but each
     reference to it is recorded ([refers_to_user_decl]) so the lowering keeps
     it apart from the handle box too.
+
+    The same goes for every BASE name: a type the base environment produces
+    ([Typecheck_builtins.builtin_type_names]: `CancelToken`, `Option`, …) or
+    a variant type the stdlib declares (`Color` of `Plot`, `Tree` of
+    `OrderedMap`).  The base type keeps the bare name (builtin signatures and
+    the cached stdlib env spell it so), and a user variant of that short name
+    gets an identity of its own, entry-qualified at the top level
+    ([Main.CancelToken]), so the two never unify.  Such an identity still
+    PRINTS as the short name ([display]) unless a message has to tell it from
+    the base type ([with_qualified_display]).  A reference written in a
+    stdlib file never resolves to a user declaration.
 
     Resolution is done ONCE, up front, over the whole AST, by the lexical rule
     a reference follows: a bare [Note] means the innermost enclosing module
@@ -68,11 +79,48 @@ let arity_tbl : (string, int) Hashtbl.t = Hashtbl.create 16
     process), and an identity always maps to the same short name. *)
 let short_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(** identity -> the short name it prints as: the entry-qualified identity of
+    a top-level user variant named like a base type ([Main.Color] prints
+    `Color`).  For the current check only.  A reserved handle name is not
+    here: it always prints qualified. *)
+let display_short : (string, string) Hashtbl.t = Hashtbl.create 16
+
+(** While set, [display] prints every identity in full. *)
+let qualified_display : bool ref = ref false
+
 let reset () =
   Hashtbl.reset refs;
   Hashtbl.reset user_reserved_refs;
   current_entry := "";
-  Hashtbl.reset arity_tbl
+  Hashtbl.reset arity_tbl;
+  Hashtbl.reset display_short
+
+(** How the type-constructor name [s] is printed in a message. *)
+let display (s : string) : string =
+  if !qualified_display || Hashtbl.length display_short = 0 then s
+  else match Hashtbl.find_opt display_short s with Some b -> b | None -> s
+
+(** The name the refinement checker knows the type-constructor name [s] by.
+    That checker files a datatype under its declared short name and module
+    path, as it did before a top-level user type named like a base type had
+    an identity, so such an identity ([Main.Tree]) reads as its short name
+    there, whatever [qualified_display] says.  Every other name is itself. *)
+let refine_name (s : string) : string =
+  if Hashtbl.length display_short = 0 then s
+  else match Hashtbl.find_opt display_short s with Some b -> b | None -> s
+
+(** True iff some identity prints shorter than it is spelled, so two distinct
+    types can print alike. *)
+let has_short_display () : bool = Hashtbl.length display_short > 0
+
+(** Run [f] with every identity printed in full ([Main.Color], never
+    `Color`): for a message whose two types would otherwise print alike. *)
+let with_qualified_display (f : unit -> 'a) : 'a =
+  if !qualified_display then f ()
+  else begin
+    qualified_display := true;
+    Fun.protect ~finally:(fun () -> qualified_display := false) f
+  end
 
 let is_identity (s : string) : bool = Hashtbl.mem arity_tbl s
 
@@ -123,14 +171,51 @@ let join p s = if p = "" then s else p ^ "." ^ s
     identity: a reserved name declared at the top level is entry-qualified
     (see [compute]); every other name is its own identity. *)
 let identity_of_path_name (q : string) : string =
-  if !current_entry <> "" && not (String.contains q '.') && is_reserved q
+  if !current_entry <> "" && not (String.contains q '.')
+     && Hashtbl.mem arity_tbl (join !current_entry q)
+     && not (Hashtbl.mem arity_tbl q)
   then join !current_entry q
   else q
 
 (** Walk [m] and fill the tables.  [is_stdlib] tells a stdlib declaration
-    (not counted).  Called at the start of every whole-module check. *)
-let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
+    (not counted).  [base] tells the short name of a type the base environment
+    or the (cached) stdlib env already has; a stdlib variant declared in [m]
+    itself (a check that carries the stdlib's declarations) counts as one too.
+    [user_only] says every declaration of [m] is the user's (the stdlib came
+    from a cached env).  Called at the start of every whole-module check.
+
+    A NESTED user variant named like a base type gets its identity only when
+    the stdlib's own declarations can be told from the user's: [user_only],
+    or [m] carries declarations [is_stdlib] accepts.  The stdlib itself
+    declares types the base environment names (`Bytes` in `mod Bytes`,
+    `CsvRow` in `mod Csv`), always inside a module, and those declarations
+    ARE the base types; a check that carries them unmarked (a test harness,
+    the browser build) must leave them bare.  A top-level declaration is
+    never the stdlib's. *)
+let compute ~(is_stdlib : A.span -> bool) ?(base = fun (_ : string) -> false)
+    ?(user_only = false) (m : A.module_) : unit =
   reset ();
+  let stdlib_variants : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let saw_stdlib = ref false in
+  let rec collect_stdlib (ds : A.decl list) =
+    List.iter (function
+        | A.DType (_, n, _, td, _) | A.DAlwaysLinearType (_, n, _, td, _)
+          when n.A.span <> A.dummy_span && is_stdlib n.A.span ->
+          saw_stdlib := true;
+          (match td with
+           | A.TDVariant _ -> Hashtbl.replace stdlib_variants n.A.txt ()
+           | _ -> ())
+        | A.DMod (_, _, inner, _) | A.DDescribe (_, inner, _) -> collect_stdlib inner
+        | _ -> ()) ds
+  in
+  collect_stdlib m.A.mod_decls;
+  (* A name whose bare spelling is some other type's: a user variant of that
+     name is never the bare name. *)
+  let forced short =
+    is_reserved short || base short || Hashtbl.mem stdlib_variants short in
+  let nested_ok = user_only || !saw_stdlib in
+  let forced_at path short =
+    is_reserved short || (forced short && (path = "" || nested_ok)) in
   (* Pass 1: every type declaration, per path. *)
   let decls_at : (string * string, [ `Variant of A.name * int | `Other ]) Hashtbl.t =
     Hashtbl.create 64 in
@@ -164,6 +249,10 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
      none). *)
   Hashtbl.iter (fun (_, short) _ ->
       if is_reserved short then Hashtbl.replace colliding short ()) decls_at;
+  (* A user variant named like a base type. *)
+  Hashtbl.iter (fun short paths ->
+      if List.exists (fun p -> forced_at p short) paths then
+        Hashtbl.replace colliding short ()) variant_paths;
   if Hashtbl.length colliding = 0 then ()
   else begin
     let entry = m.A.mod_name.A.txt in
@@ -172,7 +261,7 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
        at the top level is qualified by the entry module, so it is never the
        bare builtin; elsewhere its path already qualifies it. *)
     let ident path short =
-      if is_reserved short && path = "" then join entry short else join path short in
+      if forced short && path = "" then join entry short else join path short in
     (* Declarations get their identity. *)
     Hashtbl.iter (fun (path, short) d ->
         match d with
@@ -180,7 +269,9 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
           let id = ident path short in
           Hashtbl.replace refs n.A.span id;
           Hashtbl.replace arity_tbl id arity;
-          Hashtbl.replace short_tbl id short
+          Hashtbl.replace short_tbl id short;
+          if path = "" && id <> short && not (is_reserved short) then
+            Hashtbl.replace display_short id short
         | _ -> ()) decls_at;
     let identity_at path short =
       match Hashtbl.find_opt decls_at (path, short) with
@@ -258,7 +349,13 @@ let compute ~(is_stdlib : A.span -> bool) (m : A.module_) : unit =
           scopes
     in
     let record scopes (n : A.name) =
-      if n.A.span <> A.dummy_span then
+      (* A stdlib file's own references mean the stdlib's types, never a user
+         declaration (a check that carries the stdlib's declarations nests
+         them under the user's top level).  The reserved names keep the old
+         rule: the stdlib declares none, so a stdlib-owned file naming one is
+         an entry checked with `--stdlib-source`. *)
+      if n.A.span <> A.dummy_span
+         && (not (is_stdlib n.A.span) || is_reserved (short_of n.A.txt)) then
         match resolve scopes n.A.txt with
         | Some id ->
           (match Hashtbl.find_opt refs n.A.span with

@@ -1996,9 +1996,13 @@ let all_ctors_named (name : string) (env : env) : string list =
   | None -> []
   | Some cis ->
     let seen = Hashtbl.create 4 in
+    (* A top-level user type named like a base type shadows that type's
+       constructors in its own file, as it did while the two were one
+       [ci_type]: count the pair once ([Typecheck_nominal.display]). *)
     List.filter_map (fun ci ->
-      if Hashtbl.mem seen ci.ci_type then None
-      else begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
+      let k = Typecheck_nominal.display ci.ci_type in
+      if Hashtbl.mem seen k then None
+      else begin Hashtbl.add seen k (); Some ci.ci_type end
     ) cis
 
 (** Like [all_ctors_named], but returns (type_name, declaring_module) pairs

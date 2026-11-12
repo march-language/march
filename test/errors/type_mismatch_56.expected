@@ -1,0 +1,17 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_56.march
+
+expected `Main.CancelToken` but got `CancelToken`. [type_mismatch]
+
+14 |     print_line(int_to_string(id_of(task_cancel_token_new())))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^
+
+    This is argument #1 of a function call.
+
+    the expected type comes from here:
+
+14 |     print_line(int_to_string(id_of(task_cancel_token_new())))
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

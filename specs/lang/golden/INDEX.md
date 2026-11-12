@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g48)
+# Golden corpus index (g01–g49)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled**; run the whole corpus
-with `specs/lang/golden/verify.sh` (48/48 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (49/49 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -50,7 +50,8 @@ established for linear/affine annotations); `g47` the `let*` generalized
 monadic-bind addition (`specs/lang/let-star-generalized-bind.md`: the same
 type-directed `flat_map` dispatch works across three different types in one
 program, proving it isn't secretly hardwired to any one of them); `g48` the same-short-name
-types addition (each colliding variant type is its own nominal type).
+types addition (each colliding variant type is its own nominal type); `g49` the same for a
+user type named like a built-in, prelude or stdlib type.
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -102,6 +103,7 @@ types addition (each colliding variant type is its own nominal type).
 | `g46_refinement_erasure` | refinement types (`core-march-types.md` §2.14) have ZERO runtime footprint: `typecheck.ml` erases every `TyRefine` to its base type (repr strips it); a separate post-typecheck pass (`lib/refinecheck`) discharges the proof obligations entirely at `--check`/`--compile` front-end time, inserting no runtime check on either backend. A `clamp_nonneg`/`take_n` pair with a postcondition and precondition that both hold by proof (`--check` exit 0) therefore runs byte-identically; same erasure property golden `g41` established for linear/affine annotations | T-Refine-Erase (`core-march-types.md` §2.14): a refined type has the identical typing derivation as its base type; no runtime check is inserted at any point |
 | `g47_letstar_generalized_bind` | `let*` generalized monadic-bind across three different types in one program: `Option` (propagates through two steps, short-circuits on the first `None`), `Result` (same two-step shape as `g42`'s `let?`, proving `let*` subsumes it), `List` (`flat_map` as cartesian product, proving `let*` isn't secretly special-cased to short-circuiting types); matching to the byte on both backends | `let*` generalized bind (`specs/lang/let-star-generalized-bind.md`): native `ELetStar` typechecked by resolving `<Type>.flat_map` from the RHS's inferred type, lowered to an ordinary `flat_map`/lambda/match call; interpreted path dispatches on the runtime value's type instead |
 | `g48_same_short_name_types` | three variant types named `Note` (entry level, `mod A`, `mod B`): a constructor wrapping one used cross-module, `A.Note` / `Main.A.Note` written from outside, derived `Show`/`Eq` on each, and both nested types deriving `Json` and round-tripping; matching to the byte on both backends | each colliding variant type is its own nominal type (`lib/typecheck/typecheck_nominal.ml`); the interpreter's type-dispatched builtins read a colliding type's qualified impl slot (`Eval_runtime.find_impl_for`) |
+| `g49_user_type_named_like_base_type` | user variants named `CancelToken` (a built-in), `Option` and `Result` (the prelude's) and `Level` (`Logger`'s), each used beside the type it is named like: the program's `Some`/`None` and the prelude's told apart by the checked-against type, derived `Show`/`Eq` on the user types, a builtin cancel token created and queried, the prelude `Result` matched by constructor; matching to the byte on both backends | a user variant named like a base type has its own identity, entry-qualified at the top level (`Main.CancelToken`, `lib/typecheck/typecheck_nominal.ml`); the backends keep the short name |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 

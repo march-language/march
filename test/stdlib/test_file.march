@@ -9,9 +9,9 @@ mod TestFile do
   needs IO.FileRead
   needs IO.FileWrite
 
--- Local mirrors of File private types.
-ptype FileKind = RegularFile | Directory | Symlink | OtherKind
-ptype FileStat = FileStat(Int, FileKind, Int, Int)
+-- `File.FileStat(...)` and `File.RegularFile` below are File's own constructors. This
+-- file used to redeclare both types locally and relied on the checker
+-- treating a same-named user type as the stdlib's; it no longer does.
 
 pfn write_ok(path, content) do
   match Authority.must(File.write(path, content)) do
@@ -158,9 +158,9 @@ describe "File.stat" do
     write_ok(path, "hello world")
     match Authority.must(File.stat(path)) do
     Err(_) -> assert false
-    Ok(FileStat(size, kind, _, _)) -> do
+    Ok(File.FileStat(size, kind, _, _)) -> do
       assert (size == 11)
-      assert (kind == RegularFile)
+      assert (kind == File.RegularFile)
     end
     end
     let _ = Authority.must(File.delete(path))

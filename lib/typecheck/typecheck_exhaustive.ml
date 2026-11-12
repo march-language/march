@@ -197,6 +197,12 @@ let ctors_for_type ?(seen = []) (env : env) type_name =
   in
   List.map (fun (k, (ci : ctor_info)) -> (k, List.length ci.ci_arg_tys)) matches
 
+(** The type a name written in a constructor's declaration means: its nominal
+    identity when it has one ([Typecheck_nominal]), so a recursive argument
+    of a user `Tree` named like a stdlib type is the user's `Tree`. *)
+let tcon_name (name : Ast.name) : string =
+  match Typecheck_nominal.ref_identity name with Some id -> id | None -> name.txt
+
 (** Instantiate a surface type with a substitution from param names to internal
     types.  Used to reconstruct constructor argument types. *)
 let rec inst_ty (subst : (string * ty) list) (surf : Ast.ty) : ty =
@@ -208,17 +214,29 @@ let rec inst_ty (subst : (string * ty) list) (surf : Ast.ty) : ty =
   | Ast.TyCon (name, []) ->
     (match List.assoc_opt name.txt subst with
      | Some t -> t
-     | None   -> TCon (name.txt, []))
+     | None   -> TCon (tcon_name name, []))
   | Ast.TyCon (name, args) ->
-    TCon (name.txt, List.map (inst_ty subst) args)
+    TCon (tcon_name name, List.map (inst_ty subst) args)
   | Ast.TyArrow (a, b) -> TArrow (inst_ty subst a, inst_ty subst b)
   | Ast.TyTuple ts     -> TTuple (List.map (inst_ty subst) ts)
   | _                  -> TError
 
 (** Instantiated argument types for [ctor_name] given the parent type's
     concrete type arguments (e.g. [Int] for Option(Int)). *)
-let ctor_arg_tys (env : env) ctor_name parent_args =
-  match lookup_ctor ctor_name env with
+let ctor_arg_tys ?of_type (env : env) ctor_name parent_args =
+  (* The constructor OF the scrutinee's type when that is known: a bare
+     [lookup_ctor] answers the current module's or the latest declaration,
+     which is another type's when two types share the constructor's name
+     (a nested user `Down` beside the built-in one). *)
+  let ci =
+    match of_type with
+    | Some (TCon (tn, _)) ->
+      (match lookup_ctor_in_type ctor_name tn env with
+       | Some _ as r -> r
+       | None -> lookup_ctor ctor_name env)
+    | _ -> lookup_ctor ctor_name env
+  in
+  match ci with
   | None -> []
   | Some ci ->
     let n = List.length ci.ci_params in
@@ -438,7 +456,7 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
         if is_complete then
           (* Every constructor appears: check each one's sub-matrix. *)
           List.find_map (fun (ctor_name, arity) ->
-            let arg_tys = ctor_arg_tys env ctor_name parent_args in
+            let arg_tys = ctor_arg_tys ~of_type:ty env ctor_name parent_args in
             let sub      = spec_ctor_mc ctor_name arity matrix in
             let full_tys = arg_tys @ rest_tys in
             match find_missing_mc env full_tys sub with
@@ -467,7 +485,7 @@ let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
             let first_ex = match missing_ctor with
               | Some (c, 0) -> c
               | Some (c, _) ->
-                let args = ctor_arg_tys env c parent_args in
+                let args = ctor_arg_tys ~of_type:ty env c parent_args in
                 Printf.sprintf "%s(%s)" c
                   (String.concat ", " (List.map example_of args))
               | None -> "_"
@@ -598,7 +616,7 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
             List.for_all (fun (c, _) -> List.mem c sigma) ctors in
           if is_complete then
             List.exists (fun (ctor_name, arity) ->
-              let arg_tys = ctor_arg_tys env ctor_name parent_args in
+              let arg_tys = ctor_arg_tys ~of_type:ty env ctor_name parent_args in
               let sub_m = spec_ctor_mc ctor_name arity matrix in
               let wild_args = List.init arity (fun _ -> SPWild) in
               is_useful env (arg_tys @ rest_tys) sub_m (wild_args @ row_rest)
@@ -625,7 +643,7 @@ let rec is_useful (env : env) (tys : ty list) (matrix : spat list list)
      | SPCon (name, sub_pats) ->
        let arity = List.length sub_pats in
        let parent_args = match ty with TCon (_, args) -> args | _ -> [] in
-       let arg_tys = ctor_arg_tys env name parent_args in
+       let arg_tys = ctor_arg_tys ~of_type:ty env name parent_args in
        let sub_m = spec_ctor_mc name arity matrix in
        is_useful env (arg_tys @ rest_tys) sub_m (sub_pats @ row_rest)
      | SPTup sub_pats ->

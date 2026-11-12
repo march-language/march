@@ -1501,7 +1501,7 @@ let param_kind ?type_map (u : unit_) (i : int) : pkind =
       match Hashtbl.find_opt tm sp with
       | Some t -> (
         match March_typecheck.Typecheck.repr t with
-        | March_typecheck.Typecheck.TCon (n, _) -> of_name n
+        | March_typecheck.Typecheck.TCon (n, _) -> of_name (March_typecheck.Typecheck_nominal.refine_name n)
         | _ -> PUnknown)
       | None -> PUnknown)
     | _ -> PUnknown)

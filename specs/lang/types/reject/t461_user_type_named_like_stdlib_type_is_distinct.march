@@ -1,0 +1,13 @@
+-- EXPECT-ERROR: expected `Level` but got `Main.Level`
+mod Main do
+  needs IO.Console
+  -- A user variant named like a stdlib variant (`Logger`'s `Level`) is its
+  -- own type: it is not accepted where the stdlib's is expected.  Both used
+  -- to be the one bare `Level`, so this passed `--check`
+  -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
+  type Level = Low | High
+  fn main(c : Cap(IO.Console)) do
+    Logger.set_module_level("m", Low)
+    print_line("set")
+  end
+end
