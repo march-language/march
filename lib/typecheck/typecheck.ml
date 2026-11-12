@@ -9578,6 +9578,13 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DTransitions (handle_ty, arms, sp) ->
     let handle_name = handle_ty.txt in
+    (* The handle type's identity: a variant named like a base type
+       (`Handle`, the short name of `File.Handle`) is entry-qualified
+       ([Typecheck_nominal]), so the via function's types carry that name. *)
+    let handle_id = match Typecheck_nominal.ref_identity handle_ty with
+      | Some id -> id
+      | None -> Typecheck_nominal.identity_of_path_name handle_name in
+    let is_handle hn = hn = handle_name || hn = handle_id in
     (* Extract the last (state) type argument from Handle(args).
        Handles both single-param Handle(s) and two-param Handle(r,s). *)
     let last_arg = function
@@ -9607,7 +9614,7 @@ let rec check_decl env (d : Ast.decl) : env =
         | Some sch ->
           let ty = repr (instantiate env.level env sch) in
           (match ty with
-           | TArrow (TCon (hn, param_args), ret_t) when hn = handle_name ->
+           | TArrow (TCon (hn, param_args), ret_t) when is_handle hn ->
              (match last_arg param_args with
               | Some (TCon (s, []) as from_t) when s <> a.tr_from.txt ->
                 Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
@@ -9616,7 +9623,7 @@ let rec check_decl env (d : Ast.decl) : env =
                      via_name (pp_ty from_t) a.tr_from.txt)
               | _ -> ());
              (match repr ret_t with
-              | TCon (hn2, ret_args) when hn2 = handle_name ->
+              | TCon (hn2, ret_args) when is_handle hn2 ->
                 (match last_arg ret_args with
                  | Some (TCon (s, []) as to_t) when s <> a.tr_to.txt ->
                    Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
@@ -9650,7 +9657,7 @@ let rec check_decl env (d : Ast.decl) : env =
           let ty = repr (instantiate env.level env sch) in
           match ty with
           | TArrow (TCon (hn, param_args), TCon (hn2, ret_args))
-            when hn = handle_name && hn2 = handle_name ->
+            when is_handle hn && is_handle hn2 ->
             (match last_arg param_args, last_arg ret_args with
              | Some from_t, Some to_t ->
                let from_s = pp_ty from_t in
