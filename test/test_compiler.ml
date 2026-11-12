@@ -6994,26 +6994,48 @@ let test_qualified_opaque_type_evals () =
    `Row` failed in both directions ("expected `CsvRow` but got `Csv.CsvRow`"
    and its mirror).  stdlib/csv.march carried 12 such hidden errors.  The
    module here declares its own bare `CsvRow`; canonicalization keys on the
-   bare suffix, the same rule [surface_ty] applies. *)
+   bare suffix, the same rule [surface_ty] applies.
+
+   The declaration sits in a nested `mod Csv`, as the stdlib's does.  At the
+   entry module's top level a `type CsvRow` is the program's own type, not
+   the built-in's (2026-11-11,
+   specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md);
+   the second test below pins that. *)
 let test_qualified_builtin_type_unifies_bare () =
   let ctx = typecheck {|mod CsvDemo do
     needs IO.FileRead
-    type CsvRow = CsvEof | Row(List(String))
+    mod Csv do
+      needs IO.FileRead
+      type CsvRow = CsvEof | Row(List(String))
 
-    fn count(handle : Int, n : Int) : Int do
-      match csv_next_row(handle) do
-      CsvEof -> n
-      Row(_) -> count(handle, n + 1)
+      fn count(handle : Int, n : Int) : Int do
+        match csv_next_row(handle) do
+        CsvEof -> n
+        Row(_) -> count(handle, n + 1)
+        end
+      end
+
+      fn first(handle : Int) : CsvRow do
+        csv_next_row(handle)
       end
     end
+  end|} in
+  Alcotest.(check bool)
+    "builtin returning `Csv.CsvRow` unifies with bare `CsvRow`: no errors"
+    false (has_errors ctx)
+
+let test_user_type_named_like_builtin_is_distinct () =
+  let ctx = typecheck {|mod CsvDemo do
+    needs IO.FileRead
+    type CsvRow = CsvEof | Row(List(String))
 
     fn first(handle : Int) : CsvRow do
       csv_next_row(handle)
     end
   end|} in
   Alcotest.(check bool)
-    "builtin returning `Csv.CsvRow` unifies with bare `CsvRow`: no errors"
-    false (has_errors ctx)
+    "a top-level user `CsvRow` is not the built-in `Csv.CsvRow`"
+    true (has_errors ctx)
 
 (* F5: linear let binding — used exactly once is ok *)
 let test_linear_let_ok () =
@@ -19075,6 +19097,7 @@ let compiler_suites =
           (* Regression: qualified type path `Mod.Type` ≡ bare `Type` *)
           Alcotest.test_case "qualified opaque type unifies with bare" `Quick test_qualified_opaque_type_unifies_bare;
           Alcotest.test_case "qualified builtin type unifies bare" `Quick test_qualified_builtin_type_unifies_bare;
+          Alcotest.test_case "a top-level user type named like a builtin is distinct" `Quick test_user_type_named_like_builtin_is_distinct;
           Alcotest.test_case "qualified opaque type evaluates"         `Quick test_qualified_opaque_type_evals;
           (* F5: linear let bindings *)
           Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;

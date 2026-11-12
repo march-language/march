@@ -2092,8 +2092,18 @@ not just un-flagged at check time but truly accepted end-to-end.
 > `` expected `A.Foo` but got `B.Foo` `` (`reject/t458`, which is the old
 > `accept/t35`; `reject/t457` is the unqualified form). Unchanged: records
 > still share one global name (`reject/t318` still guards their Json
-> collision), and a user type named like a built-in or stdlib type still
-> collides with it (P1 todo `typecheck-conflates-same-short-named-types`).
+> collision).
+> **And for a user type named like a built-in or stdlib type, 2026-11-11:** a
+> user VARIANT whose short name is a type of the base environment
+> (`CancelToken`, `Option`, …) or a variant the stdlib declares (`Level` of
+> `Logger`) gets its own identity too, entry-qualified at the top level
+> (`Main.CancelToken`); the base type keeps the bare name. A bare name
+> written in the user's file means the user's declaration; a reference in a
+> stdlib file never does. Such an identity prints as its short name, and in
+> full only where the two would print alike (`` expected `CancelToken` but
+> got `Main.CancelToken` ``). `reject/t460`–`t462`, `accept/t463`. Still one
+> name: two stdlib types of one short name, and a type declared in the REPL
+> (a fragment is checked one declaration at a time).
 
 **This is documented here as ONE intentional design point, not logged as a
 bug:** March has no per-module type namespace; a module boundary partitions

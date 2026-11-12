@@ -8577,14 +8577,38 @@ let rec check_decl env (d : Ast.decl) : env =
           | Some outer -> outer == cis
           | None -> false)
     in
+    (* A type this module declares under a nominal identity of its own
+       ([Typecheck_nominal]: `UserValues.Down`, not the bare `Down`) owns the
+       constructors whose [ci_type] is that identity.  A constructor of the
+       bare-named type it is merely named like (the built-in `Down`, inherited
+       from the base env) is not this module's to export: exporting it put
+       the built-in's `Down` under `UserValues.Down`. *)
+    let own_identity : (string, string) Hashtbl.t = Hashtbl.create 8 in
+    List.iter (function
+        | Ast.DType (_, n, _, _, _) | Ast.DAlwaysLinearType (_, n, _, _, _) ->
+          let id = Typecheck_nominal.decl_identity n in
+          if id <> n.Ast.txt then Hashtbl.replace own_identity n.Ast.txt id
+        | _ -> ()) decls;
+    let ctor_type_short ty =
+      if Hashtbl.length own_identity = 0 then Some ty
+      else match Hashtbl.find_opt own_identity ty with
+        | Some _ -> None                      (* the bare namesake *)
+        | None ->
+          let short = Typecheck_nominal.bare ty in
+          if short <> ty && Hashtbl.find_opt own_identity short = Some ty
+          then Some short else Some ty
+    in
     let new_ctors = StrMap.filter_map (fun k cis ->
         if inherited_qualified k cis then None else
         let filtered = List.filter (fun ci ->
+          match ctor_type_short ci.ci_type with
+          | None -> false
+          | Some ty ->
           (* Hide constructors for opaque types declared in the sig *)
-          not (List.mem ci.ci_type opaque_types) &&
+          not (List.mem ty opaque_types) &&
           (* Export constructor only if its parent type is public AND
              the constructor itself is explicitly marked Public. *)
-          is_pub ci.ci_type && ci.ci_vis = Ast.Public
+          is_pub ty && ci.ci_vis = Ast.Public
         ) cis in
         match filtered with [] -> None | _ -> Some filtered
       ) inner_env.ctors in
@@ -12098,7 +12122,21 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      declarations, and a user type with a reserved handle name (`Process`)
      declared in an EARLIER fragment has no identity in a later one (known
      edge, ocap phase 2 Task 2 review item 8). *)
-  Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib m;
+  (let base =
+     (* Variant types the seed (the cached stdlib env) already declares, by
+        the bare name its signatures spell them with. *)
+     let seeded : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+     (match seed_env with
+      | Some (se : env) ->
+        StrMap.iter (fun _ cis ->
+            List.iter (fun (ci : ctor_info) ->
+                if not (String.contains ci.ci_type '.') then
+                  Hashtbl.replace seeded ci.ci_type ()) cis) se.ctors
+      | None -> ());
+     fun short ->
+       Typecheck_builtins.is_base_type_short_name short || Hashtbl.mem seeded short in
+   Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib ~base
+     ~user_only:(seed_env <> None) m);
   (* Type-variable letters in messages are assigned on first print from a
      process-wide table.  A cold run typechecks the stdlib first and can
      print one of its variables, so the user's first variable came out `b`

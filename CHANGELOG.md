@@ -900,6 +900,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A user type named like a built-in or stdlib type is its own type.** `type CancelToken =
+  Tok(Int)` used to be the built-in `CancelToken`, a user `Level` was `Logger`'s `Level`, and a
+  program's own `Option` was the prelude's: a value of one type-checked where the other was
+  expected, then took the wrong `match` arm interpreted or failed to compile (`clang failed`).
+  The two are now distinct, and mixing them is a type error
+  (``expected `CancelToken` but got `Main.CancelToken` ``). A program that declares such a type
+  and uses only its own declaration is unaffected, and messages still print the short name
+  unless the two types meet. Not covered yet: types declared at the REPL.
 - A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
 - **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
   A compiled closure that matched a captured value and passed the pattern's fields straight to a
