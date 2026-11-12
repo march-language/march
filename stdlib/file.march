@@ -379,10 +379,11 @@ mod File do
   -- Directories
 
   doc """
-  Open the directory `path` as a read-only `File.Dir`. Returns `Ok(dir)`, or
-  `Err(FileError)`: `NotFound(path)`, `Permission(path)`, or, when `path`
-  exists but is not a directory, `IsDirectory(path)` (the kind `Dir.list`
-  reports for that case). Hand the `File.Dir` to code
+  Open the directory `path` as a read-only `File.Dir` (a capability
+  operation, IO.FileRead on `path`). Returns `Ok(Ok(dir))`, `Ok(Err(FileError))`:
+  `NotFound(path)`, `Permission(path)`, or, when `path` exists but is not a
+  directory, `IsDirectory(path)` (the kind `Dir.list` reports for that case);
+  or `Err(CapError(...))` when the open is refused. Hand the `File.Dir` to code
   that should read files beneath it and nothing else: `open_in` and `list_in`
   need no capability, and refuse any path that leaves the directory.
   `close_dir` it when done; one that is dropped unclosed is closed when its
@@ -390,12 +391,18 @@ mod File do
 
   ## Examples
 
-      match File.open_dir("/srv/site") do
+      match Authority.must(File.open_dir("/srv/site")) do
         Ok(d) -> File.open_in(d, "index.html")
         Err(e) -> Err(e)
       end
   """
-  fn open_dir(path : String) : Result(File.Dir, FileError) do
+  fn open_dir(path : String) : Result(Result(File.Dir, FileError), CapError) do
+    let? _ = Authority.check("IO.FileRead", path)
+    Ok(open_dir_raw(path))
+  end
+
+  -- The open itself, after the capability check (as open_raw is for open).
+  pfn open_dir_raw(path : String) : Result(File.Dir, FileError) do
     match dir_open(path) do
     Err(e) -> Err(e)
     Ok(fd) ->
@@ -406,9 +413,16 @@ mod File do
 
   doc """
   Like `open_dir`, but the `File.Dir` can also create and write files
-  beneath the directory with `open_write_in`. Needs `IO.FileWrite`.
+  beneath the directory with `open_write_in`. A capability operation
+  (IO.FileWrite on `path`): the result is wrapped in `Result(_, CapError)`
+  like `open_dir`'s.
   """
-  fn open_dir_write(path : String) : Result(File.Dir, FileError) do
+  fn open_dir_write(path : String) : Result(Result(File.Dir, FileError), CapError) do
+    let? _ = Authority.check("IO.FileWrite", path)
+    Ok(open_dir_write_raw(path))
+  end
+
+  pfn open_dir_write_raw(path : String) : Result(File.Dir, FileError) do
     match dir_open_write(path) do
     Err(e) -> Err(e)
     Ok(fd) ->

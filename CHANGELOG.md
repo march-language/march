@@ -23,7 +23,7 @@ git log is authoritative for exact commits.
 
 - **`File.Handle`: open, read, write, seek and close a file through a handle.**
   `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
-  (writes, creates the file, `IO.FileWrite`) return `Result(File.Handle, FileError)`;
+  (writes, creates the file, `IO.FileWrite`) return `Result(Result(File.Handle, FileError), CapError)`;
   `File.read_line`, `File.read_chunk`, `File.write_to`, `File.seek` and `File.close` use it.
   The handle is a reference-counted box: every use after `close` returns the new
   `Err(Closed)` (a second `close` too), and a handle dropped without `close` is closed
@@ -31,7 +31,10 @@ git log is authoritative for exact commits.
   callback returns or panics. `FileError` now derives `Eq`. `with_lines`, `with_chunks`,
   `each_line` and `each_chunk` keep their signatures and use a handle internally.
 - **`File.Dir`: authority over one directory's subtree.** `File.open_dir(path)`
-  (`IO.FileRead`) and `File.open_dir_write(path)` (`IO.FileWrite`) return a `File.Dir`;
+  (`IO.FileRead`) and `File.open_dir_write(path)` (`IO.FileWrite`) are checked capability
+  operations on `path` and return `Result(Result(File.Dir, FileError), CapError)` (wrap a
+  call in `Authority.must` to panic on a refusal); the uses of a `File.Dir` below take the
+  handle and need no capability.
   `File.open_in(d, rel)`, `File.open_write_in(d, rel, mode)` and `File.list_in(d, rel)` open
   and list beneath it and refuse a path that leaves it with the new `FileError`
   `Escapes(rel)` (empty, `.`, absolute, or climbing out with `..`). `File.close_dir` closes

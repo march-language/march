@@ -33,6 +33,8 @@ let table : (string * cls) list = [
   (* opens that phase 2 turns into handles, and gates *)
   ("file_open",              c ~gated:false ["File.open"; "File.with_open"; "File.with_lines"; "File.each_line"]);
   ("file_open_write",        c ~gated:false ["File.open_write"; "File.with_open_write"]);
+  ("dir_open",               c ~gated:false ["File.open_dir"]);
+  ("dir_open_write",         c ~gated:false ["File.open_dir_write"]);
   ("csv_open",               c ~gated:false ["Csv.each_row"; "Csv.read_all"]);
   ("file_read_line",         Use);
   ("file_read_chunk",        Use);

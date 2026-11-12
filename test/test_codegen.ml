@@ -11127,7 +11127,7 @@ let test_dir_beneath_symlink_linux () =
   needs IO.Console
 
   fn main(_r : Cap(IO.FileRead), _c : Cap(IO.Console)) do
-    match File.open_dir("%s") do
+    match Authority.must(File.open_dir("%s")) do
     Err(e) -> println("OPEN_DIR " ++ to_string(e))
     Ok(d) ->
       match File.open_in(d, "in/b.txt") do

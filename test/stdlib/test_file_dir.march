@@ -85,7 +85,7 @@ end
 describe "File.Dir" do
   test "open_in reads beneath the directory" do
     let root = tree("read")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert (first_line(File.open_in(d, "a.txt")) == Ok(Some("A")))
     assert (first_line(File.open_in(d, "sub/b.txt")) == Ok(Some("B")))
     -- `..` that stays inside is normalised away, not refused.
@@ -96,7 +96,7 @@ describe "File.Dir" do
 
   test "a path that leaves the directory is Escapes" do
     let root = tree("escape")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert escapes(File.open_in(d, "../x"))
     assert escapes(File.open_in(d, "/etc/passwd"))
     assert escapes(File.open_in(d, "sub/../../x"))
@@ -109,7 +109,7 @@ describe "File.Dir" do
 
   test "a symlink that leaves the directory is Escapes" do
     let root = tree("symlink")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert escapes(File.open_in(d, "out/passwd"))
     let _ = File.close_dir(d)
     cleanup("symlink")
@@ -123,10 +123,10 @@ describe "File.Dir" do
     let outside = root ++ "_outside.txt"
     must(Authority.must(File.write(outside, "keep\n")), "File.write outside")
     must_ln(outside, root ++ "/leaf")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert escapes(File.open_in(d, "leaf"))
     let _ = File.close_dir(d)
-    let dw = must(File.open_dir_write(root), "File.open_dir_write")
+    let dw = must(Authority.must(File.open_dir_write(root)), "File.open_dir_write")
     assert escapes(File.open_write_in(dw, "leaf", File.Truncate))
     assert escapes(File.open_write_in(dw, "leaf", File.Append))
     assert (Authority.must(File.read(outside)) == Ok("keep\n"))
@@ -140,7 +140,7 @@ describe "File.Dir" do
     let target = root ++ "_nothere.txt"
     let _ = File.delete(target)
     must_ln(target, root ++ "/dangle")
-    let dw = must(File.open_dir_write(root), "File.open_dir_write")
+    let dw = must(Authority.must(File.open_dir_write(root)), "File.open_dir_write")
     assert escapes(File.open_write_in(dw, "dangle", File.Truncate))
     assert escapes(File.open_write_in(dw, "dangle", File.Append))
     assert (Authority.must(File.exists(target)) == false)
@@ -150,7 +150,7 @@ describe "File.Dir" do
 
   test "a missing file beneath is NotFound" do
     let root = tree("missing")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert (err_of(File.open_in(d, "nope.txt")) == Some(File.NotFound("nope.txt")))
     let _ = File.close_dir(d)
     cleanup("missing")
@@ -158,7 +158,7 @@ describe "File.Dir" do
 
   test "a read-only directory refuses open_write_in" do
     let root = tree("ro")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert (err_of(File.open_write_in(d, "new.txt", File.Truncate)) == Some(File.Permission("new.txt")))
     assert (Authority.must(File.exists(root ++ "/new.txt")) == false)
     let _ = File.close_dir(d)
@@ -167,7 +167,7 @@ describe "File.Dir" do
 
   test "open_dir_write creates beneath the directory" do
     let root = tree("rw")
-    let d = must(File.open_dir_write(root), "File.open_dir_write")
+    let d = must(Authority.must(File.open_dir_write(root)), "File.open_dir_write")
     let h = must(File.open_write_in(d, "new.txt", File.Truncate), "File.open_write_in")
     assert (File.close(h) == Ok(()))
     assert (Authority.must(File.read(root ++ "/new.txt")) == Ok(""))
@@ -182,7 +182,7 @@ describe "File.Dir" do
 
   test "list_in" do
     let root = tree("list")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert (File.list_in(d, "") == Ok(["a.txt", "out", "sub"]))
     assert (File.list_in(d, "sub") == Ok(["b.txt"]))
     let up = match File.list_in(d, "..") do
@@ -196,7 +196,7 @@ describe "File.Dir" do
 
   test "use after close_dir" do
     let root = tree("closed")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     assert (File.close_dir(d) == Ok(()))
     assert (err_of(File.open_in(d, "a.txt")) == Some(File.Closed))
     assert (File.list_in(d, "") == Err(File.Closed))
@@ -207,7 +207,7 @@ describe "File.Dir" do
 
   test "a handle opened through the directory outlives close_dir" do
     let root = tree("outlive")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     let h = must(File.open_in(d, "a.txt"), "File.open_in")
     assert (File.close_dir(d) == Ok(()))
     assert (File.read_line(h) == Ok(Some("A")))
@@ -219,7 +219,7 @@ describe "File.Dir" do
   -- open_dir does not change what a relative path resolves against.
   test "the directory follows a rename" do
     let root = tree("renamed")
-    let d = must(File.open_dir(root), "File.open_dir")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
     must(Authority.must(File.rename(root, root ++ "_moved")), "File.rename")
     assert (Authority.must(File.exists(root)) == false)
     assert (first_line(File.open_in(d, "a.txt")) == Ok(Some("A")))
@@ -246,7 +246,7 @@ end
 -- describe "File.Dir capabilities" do
 --   test "dir works in a needs () module" do
 --     let root = tree("needs_none")
---     let d = must(File.open_dir(root), "File.open_dir")
+--     let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
 --     assert (DirReader.first(d) == Ok(Some("A")))
 --     let _ = File.close_dir(d)
 --     cleanup("needs_none")

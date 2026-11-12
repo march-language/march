@@ -41,6 +41,8 @@ let allowlist : ((string * string) * string) list = [
   (("Config.global_table", "vault_whereis"), "Config's own table (\"__march_config__\"), not one a caller names: the stdlib's state, charged to Config's IO.Mut as today");
   (("File.open_raw", "file_open"), "private: the open behind File.open/with_open/with_lines/with_chunks/each_line/each_chunk, each of which calls Authority.check(\"IO.FileRead\", path) first");
   (("File.open_write_raw", "file_open_write"), "private: the open behind File.open_write/with_open_write, each of which calls Authority.check(\"IO.FileWrite\", path) first");
+  (("File.open_dir_raw", "dir_open"), "private: the open behind File.open_dir, which calls Authority.check(\"IO.FileRead\", path) first");
+  (("File.open_dir_write_raw", "dir_open_write"), "private: the open behind File.open_dir_write, which calls Authority.check(\"IO.FileWrite\", path) first");
   (("HttpServer.configure_runtime", "http_server_plain_listener"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("HttpServer.listen", "http_server_listen"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("HttpServer.spawn_n", "http_server_spawn_n"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
