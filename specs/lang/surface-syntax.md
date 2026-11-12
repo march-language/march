@@ -787,6 +787,9 @@ fn length(xs) do ... end
 
 @[decreases(len(xs) - i)]   -- a termination metric (refinement-types.md)
 fn scan(xs, i) do ... end
+
+@[deprecated("use `scan` instead")]   -- every use outside this module warns (compatibility.md)
+fn old_scan(xs) do ... end
 ```
 
 An attribute name the compiler does not know is warned about

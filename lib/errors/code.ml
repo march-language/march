@@ -55,6 +55,7 @@ let codec_missing = "codec_missing"
 let compiled_unsupported = "compiled_unsupported"
 let constructor_arity = "constructor_arity"
 let curried_lambda_over_tuple = "curried_lambda_over_tuple"
+let deprecated = "deprecated"
 let deterministic_violation = "deterministic_violation"
 let diverges_conflict = "diverges_conflict"
 let division_by_zero = "division_by_zero"
@@ -275,6 +276,7 @@ let all = [
   compiled_unsupported;
   constructor_arity;
   curried_lambda_over_tuple;
+  deprecated;
   deterministic_violation;
   diverges_conflict;
   division_by_zero;
@@ -562,7 +564,7 @@ let category_table : (string * string list) list = [
      the same renderer, so a failed test reads like a diagnostic. *)
   "TEST FAILURE", [ assert_failed; property_failed; test_panicked ];
   "PROGRAM", [
-    attribute_no_effect; compiled_unsupported; internal_error; main_and_app;
+    attribute_no_effect; compiled_unsupported; deprecated; internal_error; main_and_app;
     redundant_csrf_token; stdlib_internal; unknown_attribute ];
 ]
 

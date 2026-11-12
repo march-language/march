@@ -1,0 +1,1 @@
+{"severity":"warning","file":"errors/deprecated_1.march","start_line":14,"start_col":4,"end_line":14,"end_col":22,"message":"`Temperature.c_to_f` is deprecated: use `Temperature.to_fahrenheit` instead.","code":"deprecated","fix":null,"labels":[],"notes":[],"category":"PROGRAM"}

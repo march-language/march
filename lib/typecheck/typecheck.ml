@@ -2811,6 +2811,38 @@ let import_blocked env (sp : Ast.span) k sch =
       | Some (_, isch) -> isch == sch
       | None -> false)
 
+(* `@[deprecated("message")]` (specs/lang/compatibility.md): a reference to
+   a deprecated function from outside the module that declares it is a
+   warning carrying the message.  Inside the declaring module (and modules
+   nested in it) the old name is still the implementation's to use. *)
+let span_within (inner : Ast.span) (outer : Ast.span) =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line, inner.Ast.start_col) >= (outer.Ast.start_line, outer.Ast.start_col)
+  && (inner.Ast.end_line, inner.Ast.end_col) <= (outer.Ast.end_line, outer.Ast.end_col)
+
+let warn_if_deprecated env (name : Ast.name) sch =
+  match !(env.deprecated_fns) with
+  | [] -> ()
+  | fns ->
+    (match List.find_opt (fun (dsch, _, _) -> dsch == sch) fns with
+     | Some (_, home, msg) when not (span_within name.span home) ->
+       let already =
+         List.exists (fun (d : Err.diagnostic) ->
+             d.Err.code = Err.Code.deprecated && d.Err.span = name.span)
+           env.errors.Err.diagnostics in
+       if not already then begin
+         (* The author's message, closed with a full stop if they left it
+            open, so the line reads as a sentence either way. *)
+         let msg = String.trim msg in
+         let stop =
+           if msg = "" then ""
+           else match msg.[String.length msg - 1] with '.' | '!' | '?' -> "" | _ -> "." in
+         Err.warning ~code:Err.Code.deprecated env.errors ~span:name.span
+           (if msg = "" then Printf.sprintf "`%s` is deprecated." name.txt
+            else Printf.sprintf "`%s` is deprecated: %s%s" name.txt msg stop)
+       end
+     | _ -> ())
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -2876,6 +2908,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
+         warn_if_deprecated env name sch;
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
             env.refs := { callee = qualify_ref_name env.current_module name.txt;
                           caller = !(env.current_decl);
@@ -2914,6 +2947,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
          | env', Some sch ->
+           warn_if_deprecated env name sch;
            (* [env'] is the env AFTER [load_module_into_env] merged the
               resolved module's exports — [qual_fn_names] is only populated
               there for the ExFn case, so this correctly excludes a qualified
@@ -8348,7 +8382,7 @@ let rec check_decl env (d : Ast.decl) : env =
       actor.actor_on_stop;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
-  | Ast.DMod (name, _vis, decls, _sp) ->
+  | Ast.DMod (name, _vis, decls, sp) ->
     (* A module nested inside another may name an enclosing module's fn by
        its QUALIFIED path (`Outer.helper`) as well as bare, and that includes
        a `pfn`: the caller is lexically inside `Outer`, so the fn is in scope.
@@ -8684,6 +8718,17 @@ let rec check_decl env (d : Ast.decl) : env =
     (* [@[stdlib_internal]] functions of a stdlib module, filed under the
        qualified name a reference spells and, for a nested module, under each
        enclosing path too ([Outer.Inner.f] as well as [Inner.f]). *)
+    (* [@[deprecated("message")]] functions this module exports: see
+       [warn_if_deprecated]. *)
+    List.iter (function
+        | Ast.DFn (fd, _) ->
+          (match Ast.deprecation_of_fn fd with
+           | Some msg ->
+             (match List.assoc_opt (name.txt ^ "." ^ fd.Ast.fn_name.txt) new_names with
+              | Some sch -> env.deprecated_fns := (sch, sp, msg) :: !(env.deprecated_fns)
+              | None -> ())
+           | None -> ())
+        | _ -> ()) decls;
     List.iter (function
         | Ast.DFn (fd, fsp)
           when List.mem "stdlib_internal" fd.Ast.fn_attrs && span_is_stdlib fsp ->

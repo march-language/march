@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`@[deprecated("use X instead")]` marks a function as deprecated.** Every use of it from
+  outside the module that declares it gets a warning with the code `deprecated` and the
+  message; the program still compiles and the exit status does not change. Uses inside the
+  declaring module do not warn. The language server tags the diagnostic `Deprecated`, so
+  editors strike the name through. `march --explain deprecated` has the details. The
+  attribute marks functions only for now: on a `type` or a `mod` it is a parse error that
+  says so.
 - **`File.Handle`: open, read, write, seek and close a file through a handle.**
   `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
   (writes, creates the file, `IO.FileWrite`) return `Result(File.Handle, FileError)`;
