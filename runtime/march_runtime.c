@@ -12901,16 +12901,36 @@ int64_t march_process_kill_proc(void *lp_obj) {
 
 /* Mark the slot a handle names closing and settle it: its streams close now
    (or when the reader/writer inside one leaves) and the slot is freed once
-   both are.  A stale or already-released handle is a no-op.  Neither waits
-   for nor signals the child: process_wait_proc reaps after this. */
-void march_process_release_slot(int64_t handle) {
+   both are.  Returns the slot's pid, or -1 for a stale or already-released
+   handle (a no-op).  Neither waits for nor signals the child: the callers
+   (process_wait_proc, march_process_release_handle) decide that. */
+static pid_t live_proc_close_slot(int64_t handle) {
+    pid_t pid = -1;
     pthread_mutex_lock(&live_proc_mu);
     live_proc_slot *s = live_proc_lookup_locked(handle);
     if (s) {
+        pid = s->pid;
         s->closing = 1;
         live_proc_settle_locked(s);
     }
     pthread_mutex_unlock(&live_proc_mu);
+    return pid;
+}
+
+void march_process_release_slot(int64_t handle) {
+    (void)live_proc_close_slot(handle);
+}
+
+/* True once [pid] is reaped (or is not our child any more); false while it
+   is still running.  waitpid WNOHANG, retried on EINTR (as the sweep keeps
+   an interrupted pid), so an interrupted call never counts as "exited". */
+static int live_proc_reaped_nohang(pid_t pid) {
+    for (;;) {
+        pid_t r = waitpid(pid, NULL, WNOHANG);
+        if (r == 0) return 0;
+        if (r < 0 && errno == EINTR) continue;
+        return 1;
+    }
 }
 
 /* Children whose Process box was dropped (or closed) without wait_proc and
@@ -12950,37 +12970,41 @@ static void live_proc_reap_later(pid_t pid) {
 }
 
 /* The release of a Process handle box (march_handle.c, kind PROCESS) whose
-   child was never waited on: close its streams as wait_proc does, then reap
-   the child without blocking.  A child still running is sent SIGTERM (as
-   process_kill_proc) and, if it has not exited yet, reaped by a later sweep.
-   A handle wait_proc already released names no live slot: nothing to do (its
-   pid may since belong to another process, so it is never signalled). */
+   child was never waited on: close its streams as wait_proc does, then make
+   sure the child neither keeps running nor stays a zombie, without blocking.
+   A child still running is sent SIGTERM (as process_kill_proc) and, if it is
+   still running right after, SIGKILL; one that has not exited even then is
+   reaped by a later sweep (the next spawn or release).  A handle wait_proc
+   already released names no live slot: nothing to do (its pid may since
+   belong to another process, so it is never signalled). */
 void march_process_release_handle(int64_t handle) {
-    pid_t pid = -1;
-    pthread_mutex_lock(&live_proc_mu);
-    live_proc_slot *s = live_proc_lookup_locked(handle);
-    if (s) {
-        pid = s->pid;
-        s->closing = 1;
-        live_proc_settle_locked(s);
-    }
-    pthread_mutex_unlock(&live_proc_mu);
-    if (pid > 0 && waitpid(pid, NULL, WNOHANG) == 0) {
+    pid_t pid = live_proc_close_slot(handle);
+    if (pid > 0 && !live_proc_reaped_nohang(pid)) {
         kill(pid, SIGTERM);
-        if (waitpid(pid, NULL, WNOHANG) == 0) live_proc_reap_later(pid);
+        if (!live_proc_reaped_nohang(pid)) {
+            kill(pid, SIGKILL);
+            if (!live_proc_reaped_nohang(pid)) live_proc_reap_later(pid);
+        }
     }
     live_proc_reap_sweep();
 }
 
-/* process_wait_proc(lp) → Int (exit code).  Closes the streams (a stream a
-   reader or writer is still inside is closed when it leaves) and releases
-   the slot; the handle is stale afterwards. */
+/* process_wait_proc(lp) → Int.  Closes the streams (a stream a reader or
+   writer is still inside is closed when it leaves) and releases the slot;
+   the handle is stale afterwards.  Returns the exit status (0..255), -1 for
+   a child that did not exit normally (killed by a signal), or
+   MARCH_PROCESS_NO_CHILD (-1000, outside both ranges) when waitpid fails:
+   the child was already reaped, by a wait_proc that raced this one.
+   Process.wait_proc maps that to Err(Closed). */
+#define MARCH_PROCESS_NO_CHILD (-1000)
 int64_t march_process_wait_proc(void *lp_obj) {
     int64_t pid    = MARCH_FIELD(lp_obj, 0);
     int64_t handle = MARCH_FIELD(lp_obj, 1);
-    march_process_release_slot(handle);
+    (void)live_proc_close_slot(handle);
     int status = 0;
-    waitpid((pid_t)pid, &status, 0);
+    pid_t r;
+    do { r = waitpid((pid_t)pid, &status, 0); } while (r < 0 && errno == EINTR);
+    if (r < 0) return MARCH_PROCESS_NO_CHILD;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 

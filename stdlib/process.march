@@ -26,9 +26,12 @@
 -- a pid (ocap phase 2, spec §6). Reading, writing, killing and waiting on a
 -- `Process` you hold need no authority: the spawn was checked. wait_proc
 -- reaps the child and closes the handle; every later use is `Err(Closed)`.
--- A `Process` dropped without wait_proc is reaped when its last reference
--- goes: its pipes are closed and a child still running is sent SIGTERM, so
--- it does not linger as a zombie.
+-- A `Process` dropped without wait_proc is released when its last reference
+-- goes (compiled), or when the garbage collector finalises it (interpreted,
+-- so at no fixed point): its pipes are closed, and a child still running is
+-- sent SIGTERM and then SIGKILL, so it is not left running. A child that has
+-- not exited by the release is reaped at the next spawn or release, so it
+-- does not linger as a zombie either.
 
 mod Process do
 
@@ -199,9 +202,16 @@ mod Process do
   after the process exits (read_line returned Ok(None)) or after kill.
   """
   fn wait_proc(p : Process) : Result(Int, ProcessError) do
-    let r = with_live(p, fn lp -> Ok(process_wait_proc(lp)))
+    let r = with_live(p, fn lp -> exit_or_closed(process_wait_proc(lp)))
     let _ = handle_close(p)
     r
+  end
+
+  -- process_wait_proc returns -1000 (MARCH_PROCESS_NO_CHILD; outside the exit
+  -- statuses 0..255 and the negative signal results) when the child was
+  -- already reaped, by a wait_proc that raced this one past its enter.
+  pfn exit_or_closed(code : Int) : Result(Int, ProcessError) do
+    if code == -1000 do Err(Closed) else Ok(code) end
   end
 
   -- ---- ProcessResult helpers ----

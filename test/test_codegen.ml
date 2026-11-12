@@ -19700,13 +19700,24 @@ let test_handle_vs_user_record_named_socket () =
    (test_eval); only the compiled box releases a dropped handle at a known
    point. *)
 let test_process_release_reaps_child () =
-  List.iter (fun (drop, name) ->
+  List.iter (fun (trap, drop, name) ->
       let (rc, out) =
-        run_handle_fixture ~compiled:true ~name (process_reap_src ~drop) in
+        run_handle_fixture ~compiled:true ~name (process_reap_src ~trap ~drop ()) in
       if rc <> 0 then Alcotest.failf "%s exited %d:\n%s" name rc out;
       Alcotest.(check bool) (name ^ ": child reaped:\n" ^ out) true
         (contains process_reap_expected out))
-    [ (false, "process_reap_close"); (true, "process_reap_drop") ]
+    (* trap: the child ignores SIGTERM, so only the release's SIGKILL ends it *)
+    [ (false, false, "process_reap_close"); (false, true, "process_reap_drop");
+      (true, true, "process_reap_trap_drop") ]
+
+(* Fix round 1: racing wait_procs, compiled (Test_helpers.process_wait_race_src):
+   the loser of the waitpid race is Err(Closed), not Ok(0). *)
+let test_process_wait_race () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:true ~name:"process_wait_race" process_wait_race_src in
+  if rc <> 0 then Alcotest.failf "wait race exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("one Ok, one Closed:\n" ^ out) true
+    (contains process_wait_race_expected out)
 
 (* A closure that matches a CAPTURED value and hands the pattern's fields to a
    borrowing builtin in tail position must not release the capture before the
@@ -19809,7 +19820,8 @@ let codegen_suites =
           Alcotest.test_case "handle_vs_user_record_named_socket" `Quick
             test_handle_vs_user_record_named_socket;
           Alcotest.test_case "process_release_reaps_child" `Quick
-            test_process_release_reaps_child ] );
+            test_process_release_reaps_child;
+          Alcotest.test_case "process_wait_race" `Quick test_process_wait_race ] );
       ( "string_allocator", [
           Alcotest.test_case "strings use the March object allocator" `Quick
             test_string_alloc_uses_march_allocator;

@@ -600,8 +600,11 @@ git log is authoritative for exact commits.
   `write` and `kill` return `Result((), ProcessError)` and `wait_proc` returns
   `Result(Int, ProcessError)`; none of them needs a capability. `wait_proc` closes the handle,
   so every later use (a second `wait_proc`, or a `kill` that could reach a reused pid) is
-  `Err(Closed)`. A `Process` dropped without `wait_proc` no longer leaves a zombie: its pipes
-  are closed, a child still running is sent SIGTERM, and the child is reaped without blocking.
+  `Err(Closed)` (as is a `wait_proc` that races another one on the same handle). A `Process`
+  dropped without `wait_proc` is released when its last reference goes (compiled) or when the
+  garbage collector finalises it (interpreted): its pipes are closed, a child still running is
+  sent SIGTERM and then SIGKILL, and a child that has not exited by then is reaped at the next
+  spawn or release, so it is neither left running nor left a zombie.
   `Process.LiveProcess` is now opaque and internal to the standard library. Migrate by
   matching `Ok(Some(line))` where `read_line` returned `Some(line)`, `Ok(code)` for
   `wait_proc`'s code, and `ProcessFailed(msg)` for a spawn failure.

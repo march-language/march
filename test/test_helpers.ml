@@ -2796,13 +2796,15 @@ end
    `--stdlib-source`), at a known point on both backends; `drop` lets the
    last reference go, which only the compiled box releases at a known point
    (the interpreter's box waits for the OCaml GC), so it runs compiled only. *)
-let process_reap_src ~drop = Printf.sprintf {|mod ProcessReap do
+let process_reap_src ?(trap = false) ~drop () = Printf.sprintf {|mod ProcessReap do
   needs IO.Console
   needs IO.Process
 
-  -- A shell that prints its pid, then becomes `sleep 30` (same pid).
+  -- A shell that prints its pid, then becomes `sleep 30` (same pid); with
+  -- the trap, one that ignores SIGTERM (exec keeps SIG_IGN), so only the
+  -- release's SIGKILL ends it.
   pfn spawn_sleeper() : Process do
-    match Authority.must(Process.spawn_async("sh", ["-c", "echo $$; exec sleep 30"])) do
+    match Authority.must(Process.spawn_async("sh", ["-c", "%s"])) do
       Ok(p) -> p
       Err(e) -> panic("spawn failed: " ++ to_string(e))
     end
@@ -2852,9 +2854,45 @@ let process_reap_src ~drop = Printf.sprintf {|mod ProcessReap do
     println("child after release: " ++ settle(pid, 250))
   end
 end
-|} (if drop then "dropped()" else "closed()")
+|} (if trap then "echo $$; trap '' TERM; exec sleep 30" else "echo $$; exec sleep 30")
+  (if drop then "dropped()" else "closed()")
 
 let process_reap_expected = "child after release: gone"
+
+(* Fix round 1 (finding 3): two wait_proc calls racing on one Process. Both
+   can pass handle_enter before either closes the handle; the loser's waitpid
+   then fails (ECHILD) and must be Err(Closed), never an exit code (it used to
+   be Ok(0) compiled, Ok(-1) interpreted). Each round, exactly one Ok. *)
+let process_wait_race_src = {|mod WaitRace do
+  needs IO.Console
+  needs IO.Process
+  needs IO.Spawn
+
+  pfn one_round() : Int do
+    match Authority.must(Process.spawn_async("sh", ["-c", "sleep 0.2"])) do
+      Err(e) -> panic("spawn failed: " ++ to_string(e))
+      Ok(p) ->
+        let a = task_spawn(fn _ -> Process.wait_proc(p))
+        let b = task_spawn(fn _ -> Process.wait_proc(p))
+        let ra = task_await_unwrap(a)
+        let rb = task_await_unwrap(b)
+        let oks = (if Result.is_ok(ra) do 1 else 0 end) + (if Result.is_ok(rb) do 1 else 0 end)
+        let closed = (if ra == Err(Process.Closed) do 1 else 0 end) + (if rb == Err(Process.Closed) do 1 else 0 end)
+        if oks == 1 && closed == 1 do 1 else 0 end
+    end
+  end
+
+  pfn rounds(i : Int, n : Int, good : Int) : Int do
+    if i == n do good else rounds(i + 1, n, good + one_round()) end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do
+    println("rounds with one Ok and one Closed: " ++ int_to_string(rounds(0, 6, 0)) ++ "/6")
+  end
+end
+|}
+
+let process_wait_race_expected = "rounds with one Ok and one Closed: 6/6"
 
 (** Run [src] (written to a fresh temp dir as [name].march) with the
     compiler under a private HOME, as a stdlib source; [compiled] builds it

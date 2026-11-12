@@ -35,3 +35,19 @@ Ocap phase 2b. Deferred from phase 2a (PR march-language/march#1244, which shipp
   `Test_helpers.process_reap_src`, which polls `ps -o stat= -p PID` until the pid is gone.
   The native fixtures `live_process_registry` (the stale p0 is now `Err(Closed)`),
   `process_handle_leak_probe`, `process_spawn_errors` and `process_spawn_sigmask` are migrated.
+
+## Fix round 1 (2026-11-12)
+
+- The releaser now also sends SIGKILL when the child is still running right after SIGTERM, then
+  queues it for the pending sweep (both backends); `waitpid(WNOHANG)` on the release path retries
+  EINTR instead of counting it as exited.
+- `process_wait_proc` returns -1000 (`MARCH_PROCESS_NO_CHILD`) when `waitpid` fails (a racing
+  `wait_proc` already reaped the child); `Process.wait_proc` maps it to `Err(Closed)`. -1000 is
+  outside the exit statuses (0..255) and the signal results (-1 compiled, -signum interpreted).
+- One stream-close helper per backend (`live_proc_close_slot` / `Eval_runtime.live_proc_close`)
+  shared by the release and by `wait_proc`.
+- Tests: `process_reap_src ~trap` (a child with `trap '' TERM`; interpreted close, compiled
+  drop) and `process_wait_race_src` (two tasks `wait_proc` one Process; each of 6 rounds must be
+  one Ok and one Err(Closed)). RED without the SIGKILL ("running") and, compiled, without the
+  ECHILD mapping (0/6). The interpreter cannot race (tasks are cooperative), so its run is a
+  parity check only.

@@ -400,28 +400,47 @@ let live_proc_reap_sweep () : unit =
   (* A finaliser may have appended while we swept. *)
   live_proc_reap := running @ !live_proc_reap
 
+(** Close the streams of live process [id] and forget it; its pid, or
+    [None] when wait_proc (or a release) already did (live_proc_close_slot). *)
+let live_proc_close (id : int) : int option =
+  match Hashtbl.find_opt live_proc_tbl id with
+  | Some (ic, oc, pid) ->
+    (try close_in_noerr ic with _ -> ());
+    (try close_out_noerr oc with _ -> ());
+    Hashtbl.remove live_proc_tbl id;
+    Some pid
+  | None -> None
+
+(** True once [pid] is reaped (or not our child any more), false while it
+    runs; retried on EINTR, which never counts as exited. *)
+let rec live_proc_reaped_nohang (pid : int) : bool =
+  match Unix.waitpid [Unix.WNOHANG] pid with
+  | (0, _) -> false
+  | _ -> true
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> live_proc_reaped_nohang pid
+  | exception Unix.Unix_error _ -> true
+
 (** Release a Process box's child (march_process_release_handle): close its
-    streams as wait_proc does, SIGTERM it if still running, and reap it
-    without blocking.  An id wait_proc already removed is a no-op: that
-    child is reaped and its pid may belong to another process. *)
+    streams as wait_proc does; a child still running gets SIGTERM, then
+    SIGKILL if it is still running right after; one not exited even then is
+    reaped by the next spawn or release.  An id wait_proc already removed is
+    a no-op: that child is reaped and its pid may belong to another process. *)
 let live_proc_release (id : int) : unit =
-  (match Hashtbl.find_opt live_proc_tbl id with
-   | Some (ic, oc, pid) ->
-     (try close_in_noerr ic with _ -> ());
-     (try close_out_noerr oc with _ -> ());
-     Hashtbl.remove live_proc_tbl id;
-     let exited () =
-       match Unix.waitpid [Unix.WNOHANG] pid with
-       | (0, _) -> false
-       | _ -> true
-       | exception Unix.Unix_error _ -> true
-     in
-     if not (exited ()) then begin
-       (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
-       if not (exited ()) then live_proc_reap := pid :: !live_proc_reap
+  (match live_proc_close id with
+   | Some pid when not (live_proc_reaped_nohang pid) ->
+     (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+     if not (live_proc_reaped_nohang pid) then begin
+       (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+       if not (live_proc_reaped_nohang pid) then
+         live_proc_reap := pid :: !live_proc_reap
      end
-   | None -> ());
+   | _ -> ());
   live_proc_reap_sweep ()
+
+(** What process_wait_proc returns when the child was already reaped (a
+    racing wait_proc): MARCH_PROCESS_NO_CHILD, outside 0..255 and the
+    negative signal values; Process.wait_proc maps it to Err(Closed). *)
+let process_no_child = -1000
 
 (** The Err message of a Process.* spawn builtin for a [Unix_error] raised
     by function [fn].  A command that cannot be executed (not found, not

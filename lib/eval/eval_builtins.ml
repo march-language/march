@@ -4167,19 +4167,18 @@ let base_env : env =
   (* Wait for the process to finish; close the channel. Returns exit code. *)
   ; ("process_wait_proc", VBuiltin ("process_wait_proc", function
         | [VCon ("LiveProcess", [VInt pid; VInt id])] ->
-          (match Hashtbl.find_opt live_proc_tbl id with
-           | Some (ic, oc, _) ->
-             (try close_in_noerr ic with _ -> ());
-             (try close_out_noerr oc with _ -> ());
-             Hashtbl.remove live_proc_tbl id
-           | None -> ());
-          (try
-            let (_, status) = Unix.waitpid [] pid in
-            match status with
-            | Unix.WEXITED  n -> VInt n
-            | Unix.WSIGNALED n -> VInt (- n)
-            | Unix.WSTOPPED  n -> VInt (- n)
-          with Unix.Unix_error _ -> VInt (-1))
+          ignore (live_proc_close id);
+          let rec wait () =
+            match Unix.waitpid [] pid with
+            | (_, Unix.WEXITED n) -> VInt n
+            | (_, Unix.WSIGNALED n) -> VInt (- n)
+            | (_, Unix.WSTOPPED n) -> VInt (- n)
+            | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait ()
+            (* Already reaped (a racing wait_proc): march_process_wait_proc's
+               MARCH_PROCESS_NO_CHILD. *)
+            | exception Unix.Unix_error _ -> VInt process_no_child
+          in
+          wait ()
         | _ -> eval_error "process_wait_proc: expected LiveProcess"))
 
   (* ---- Logger builtins ----
