@@ -819,10 +819,11 @@ let ambiguous_ctor_hint env ctor all_types =
   in
   let describe t = match actor_of t with
     | Some a -> Printf.sprintf "a message of actor `%s`" a
-    | None -> "`" ^ t ^ "`"
+    | None -> "`" ^ Typecheck_nominal.display t ^ "`"
   in
   let qualified t =
-    Printf.sprintf "`%s.%s`" (Option.value ~default:t (actor_of t)) ctor in
+    Printf.sprintf "`%s.%s`"
+      (Option.value ~default:(Typecheck_nominal.display t) (actor_of t)) ctor in
   let spellings = String.concat " or " (List.map qualified all_types) in
   if List.for_all (fun t -> actor_of t <> None) all_types then
     Printf.sprintf
