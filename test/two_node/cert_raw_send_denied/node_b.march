@@ -30,6 +30,24 @@ mod CertRawSendDeniedB do
     end end
   end
 
+  -- The session queue to [id], once the link is published. A peer's
+  -- certificate becomes visible before its link: ClusterNode's Install
+  -- effect stores the certificate for the data reader it is about to start,
+  -- and the link reaches `session_queue_for` at the step's `mirror`, after
+  -- the effects. So `wait_cert` succeeding does not mean the queue is there
+  -- yet (seen once under ASAN on Linux CI); wait for the queue itself, as
+  -- peer_closed_queue_gone does.
+  pfn wait_queue(h : Cap(ClusterNode.Live), id : String, left : Int) : Option((Pid(NodeQueue.WriterState), Int)) do
+    match ClusterNode.session_queue_for(h, id) do
+      Some(q) -> Some(q)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_queue(h, id, left - 50)
+        end
+    end
+  end
+
   pfn read(path : String) : String do
     match Authority.must(File.read(path)) do
       Ok(s) -> String.trim(s)
@@ -189,7 +207,7 @@ mod CertRawSendDeniedB do
         Authority.ignore(println(me() ++ ": raw send_msg to itself: " ++ said(ClusterNode.send_msg(h, ClusterNode.global_pid(h, 1), "Raw.Self", [1], NodeQueue.Unbounded))))
         -- A compromised node skips its own check and writes through the
         -- session queue: each non-exempt kind, then one exempt one.
-        match ClusterNode.session_queue_for(h, a) do
+        match wait_queue(h, a, 60000) do
           None -> panic("node-b: no session queue to node-a")
           Some(q) ->
             let probes = [(101, "raw tag to a pid route", to_raw, "Raw.Ping"),
