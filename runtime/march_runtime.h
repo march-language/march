@@ -407,6 +407,10 @@ extern void (*march_handle_test_release_hook)(int64_t kind, int64_t raw, int64_t
 /* Release a live-process slot the way process_wait_proc does, without
  * waiting for or signalling the child (march_runtime.c). */
 void    march_process_release_slot(int64_t handle);
+/* Release a Process handle box's child (march_runtime.c): close its
+ * streams, SIGTERM it if still running, reap it without blocking (a child
+ * not yet exited is reaped by a later spawn or release). */
+void    march_process_release_handle(int64_t handle);
 
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to

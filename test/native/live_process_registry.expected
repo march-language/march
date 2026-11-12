@@ -1,7 +1,8 @@
 sequential mismatches: 0
 p0 reads: still mine
 p0 exit: 0
-stale p0 reads: <none>
+stale p0 write: Err(Closed)
+stale p0 reads: Err(Closed)
 p1 reads: p1 line
 p1 exit: 0
 concurrent mismatches: 0

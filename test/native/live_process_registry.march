@@ -6,7 +6,9 @@
 -- once could take the same slot. Now slots are allocated first-free under a
 -- lock, the table grows, and a handle carries its slot's generation, so a
 -- handle used after wait_proc addresses nothing instead of the slot's next
--- owner.
+-- owner. Since ocap phase 2b (Task 8) a Process is a handle box that
+-- wait_proc closes, so the stale p0 is refused (Err(Closed)) before it
+-- reaches the registry; the generation check still guards the raw slot.
 mod LiveProcReg do
   needs IO.Console
   needs IO.Process
@@ -18,8 +20,8 @@ mod LiveProcReg do
         let line = Process.read_line(p)
         let _ = Process.wait_proc(p)
         match line do
-          Some(s) -> s == "n" ++ int_to_string(k)
-          None -> false
+          Ok(Some(s)) -> s == "n" ++ int_to_string(k)
+          _ -> false
         end
       Err(_) -> false
     end
@@ -35,8 +37,16 @@ mod LiveProcReg do
 
   fn show(o) do
     match o do
-      Some(s) -> s
-      None -> "<none>"
+      Ok(Some(s)) -> s
+      Ok(None) -> "<none>"
+      Err(e) -> "Err(" ++ to_string(e) ++ ")"
+    end
+  end
+
+  fn exit_of(r) do
+    match r do
+      Ok(code) -> int_to_string(code)
+      Err(e) -> "Err(" ++ to_string(e) ++ ")"
     end
   end
 
@@ -46,26 +56,26 @@ mod LiveProcReg do
         -- 70 spawn/read/wait cycles while p0 stays open.
         let bad = churn(0, 70, 0)
         Authority.ignore(println("sequential mismatches: " ++ int_to_string(bad)))
-        Process.write(p0, "still mine\n")
+        let _ = Process.write(p0, "still mine\n")
         Authority.ignore(println("p0 reads: " ++ show(Process.read_line(p0))))
-        Authority.ignore(println("p0 exit: " ++ int_to_string(Process.wait_proc(p0))))
+        Authority.ignore(println("p0 exit: " ++ exit_of(Process.wait_proc(p0))))
         -- p0 is reaped; its slot is free. A new process may take the slot,
         -- and the stale p0 handle must not reach it.
         match Authority.must(Process.spawn_async("cat", [])) do
           Ok(p1) ->
-            Process.write(p0, "not yours\n")
-            Process.write(p1, "p1 line\n")
+            Authority.ignore(println("stale p0 write: " ++ to_string(Process.write(p0, "not yours\n"))))
+            let _ = Process.write(p1, "p1 line\n")
             Authority.ignore(println("stale p0 reads: " ++ show(Process.read_line(p0))))
             Authority.ignore(println("p1 reads: " ++ show(Process.read_line(p1))))
-            Authority.ignore(println("p1 exit: " ++ int_to_string(Process.wait_proc(p1))))
-          Err(e) -> Authority.ignore(println("spawn p1 failed: " ++ e))
+            Authority.ignore(println("p1 exit: " ++ exit_of(Process.wait_proc(p1))))
+          Err(e) -> Authority.ignore(println("spawn p1 failed: " ++ to_string(e)))
         end
         -- Eight tasks spawning at once, across scheduler threads.
         let tasks = List.map(Range.to_list(Range.new(0, 8)), fn t ->
           task_spawn(fn _ -> churn(t * 100, t * 100 + 25, 0)))
         let total = List.fold_left(tasks, 0, fn (acc, tk) -> acc + task_await_unwrap(tk))
         Authority.ignore(println("concurrent mismatches: " ++ int_to_string(total)))
-      Err(e) -> Authority.ignore(println("spawn p0 failed: " ++ e))
+      Err(e) -> Authority.ignore(println("spawn p0 failed: " ++ to_string(e)))
     end
   end
 end

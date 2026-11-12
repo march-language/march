@@ -19694,6 +19694,20 @@ let test_handle_vs_user_record_named_socket () =
     [ "42"; "x42"; "[W({ fd: 42, name: \"x\" }), W({ fd: 1, name: \"y\" })]"; "[#<Socket>]" ]
     (program_lines compiled)
 
+(* ocap phase 2b, Task 8 (R4): a Process released without wait_proc, by
+   close or by dropping its last reference, leaves no zombie
+   (Test_helpers.process_reap_src). The interpreter runs the close variant
+   (test_eval); only the compiled box releases a dropped handle at a known
+   point. *)
+let test_process_release_reaps_child () =
+  List.iter (fun (drop, name) ->
+      let (rc, out) =
+        run_handle_fixture ~compiled:true ~name (process_reap_src ~drop) in
+      if rc <> 0 then Alcotest.failf "%s exited %d:\n%s" name rc out;
+      Alcotest.(check bool) (name ^ ": child reaped:\n" ^ out) true
+        (contains process_reap_expected out))
+    [ (false, "process_reap_close"); (true, "process_reap_drop") ]
+
 (* A closure that matches a CAPTURED value and hands the pattern's fields to a
    borrowing builtin in tail position must not release the capture before the
    call (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md).
@@ -19793,7 +19807,9 @@ let codegen_suites =
           Alcotest.test_case "handle_vs_user_type_named_process" `Quick
             test_handle_vs_user_type_named_process;
           Alcotest.test_case "handle_vs_user_record_named_socket" `Quick
-            test_handle_vs_user_record_named_socket ] );
+            test_handle_vs_user_record_named_socket;
+          Alcotest.test_case "process_release_reaps_child" `Quick
+            test_process_release_reaps_child ] );
       ( "string_allocator", [
           Alcotest.test_case "strings use the March object allocator" `Quick
             test_string_alloc_uses_march_allocator;

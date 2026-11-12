@@ -20,8 +20,15 @@
 -- `Result(T, CapError)`: `Err` when the current authority refuses it
 -- (specs/2026-11-10-object-capability-design.md §15). A spawn that already
 -- returned a `Result` returns it inside: `Ok(Err(msg))` is a program that
--- could not start, `Err(CapError(...))` one that was not permitted. Reading,
--- writing, killing and waiting on a LiveProcess need no authority.
+-- could not start, `Err(CapError(...))` one that was not permitted.
+--
+-- spawn_async returns a `Process`: an opaque, reference-counted handle, not
+-- a pid (ocap phase 2, spec §6). Reading, writing, killing and waiting on a
+-- `Process` you hold need no authority: the spawn was checked. wait_proc
+-- reaps the child and closes the handle; every later use is `Err(Closed)`.
+-- A `Process` dropped without wait_proc is reaped when its last reference
+-- goes: its pipes are closed and a child still running is sent SIGTERM, so
+-- it does not linger as a zombie.
 
 mod Process do
 
@@ -29,9 +36,16 @@ mod Process do
   -- ProcessResult(exit_code, stdout, stderr)
   type ProcessResult = ProcessResult(Int, String, String)
 
-  -- Handle for an asynchronously-spawned subprocess (non-blocking).
-  -- LiveProcess(pid, stream_id) — both fields are opaque implementation details.
-  type LiveProcess = LiveProcess(Int, Int)
+  -- What a Process handle's operations can fail with. `Closed`: the handle
+  -- was already waited on (wait_proc closes it). `ProcessFailed(msg)`: the
+  -- command could not be started ("cannot execute <cmd>: <reason>").
+  ptype ProcessError = Closed | ProcessFailed(String)
+  derive Eq for ProcessError
+
+  -- The raw builtins' view of a live child: LiveProcess(pid, stream_slot).
+  -- Stdlib-internal: user code holds a `Process` handle (kind PROCESS, raw =
+  -- stream slot, aux = pid) and never sees one of these.
+  opaque type LiveProcess = LiveProcess(Int, Int)
 
   -- ---- Subprocess execution ----
 
@@ -108,47 +122,86 @@ mod Process do
 
   doc """
   Spawn a command asynchronously (non-blocking).
-  Returns Ok(LiveProcess) immediately — the child process starts running
-  in the background. Use read_line to consume its stdout, kill to terminate
-  it, and wait_proc to reap its exit code. Returns Err(msg) when the command
-  cannot be executed: "cannot execute <cmd>: <reason>".
+  Returns Ok(Ok(p)) immediately, `p` a `Process` handle: the child process
+  starts running in the background. Use read_line to consume its stdout,
+  write to feed its stdin, kill to terminate it, and wait_proc to reap its
+  exit code. Ok(Err(ProcessFailed(msg))) when the command cannot be
+  executed ("cannot execute <cmd>: <reason>"); Err(CapError(...)) when the
+  current authority refuses the spawn (IO.Process on the command).
+
+      match Authority.must(Process.spawn_async("cat", [])) do
+        Ok(p) ->
+          let _ = Process.write(p, "hi\n")
+          let line = Process.read_line(p)   -- Ok(Some("hi"))
+          let _ = Process.kill(p)
+          Process.wait_proc(p)              -- Ok(exit code)
+        Err(e) -> Err(e)
+      end
   """
-  fn spawn_async(command : String, args : List(String)) : Result(Result(LiveProcess, String), CapError) do
+  fn spawn_async(command : String, args : List(String)) : Result(Result(Process, ProcessError), CapError) do
     let? _ = Authority.check("IO.Process", command)
-    Ok(process_spawn_async(command, args))
+    match process_spawn_async(command, args) do
+      Err(msg) -> Ok(Err(ProcessFailed(msg)))
+      Ok(lp) ->
+        match lp do
+          LiveProcess(pid, slot) ->
+            let p : Process = handle_new(9, slot, pid)
+            Ok(Ok(p))
+        end
+    end
+  end
+
+  -- Every use of a Process goes through here, as File.with_raw does for a
+  -- File.Handle: enter the box (refused once it is closed), rebuild the raw
+  -- LiveProcess(pid, slot) the builtins take, run the operation, then leave.
+  pfn with_live(p : Process, f : LiveProcess -> Result(b, ProcessError)) : Result(b, ProcessError) do
+    let slot = handle_enter(p, 9)
+    if slot == -1 do Err(Closed) else
+      let r = f(LiveProcess(handle_aux(p), slot))
+      handle_leave(p)
+      r
+    end
   end
 
   doc """
-  Read one line from the live process's stdout.
-  Returns Some(line) for each output line, or None when the process has
-  closed its stdout (typically on exit).
-  Blocks until a full line is available.
+  Read one line from the process's stdout, without its newline.
+  Returns Ok(Some(line)) for each output line, Ok(None) once the process
+  has closed its stdout (typically on exit), or Err(Closed) after
+  wait_proc. Blocks until a full line is available.
   """
-  fn read_line(p) do
-    process_read_line(p)
+  fn read_line(p : Process) : Result(Option(String), ProcessError) do
+    with_live(p, fn lp -> Ok(process_read_line(lp)))
   end
 
   doc """
-  Write raw bytes to the live process's stdin.
-  The data is flushed immediately so the child process sees it without delay.
-  Include a trailing newline if the child reads line-by-line.
+  Write raw bytes to the process's stdin. Returns Ok(()), or Err(Closed)
+  after wait_proc. The data is flushed immediately so the child process
+  sees it without delay. Include a trailing newline if the child reads
+  line-by-line.
   """
-  fn write(p, data) do
-    process_write(p, data)
+  fn write(p : Process, data : String) : Result((), ProcessError) do
+    with_live(p, fn lp ->
+      process_write(lp, data)
+      Ok(()))
   end
 
-  doc "Send SIGTERM to the live process."
-  fn kill(p) do
-    process_kill_proc(p)
+  doc "Send SIGTERM to the process. Returns Ok(()), or Err(Closed) after wait_proc (a reaped child's pid may already belong to another process)."
+  fn kill(p : Process) : Result((), ProcessError) do
+    with_live(p, fn lp ->
+      process_kill_proc(lp)
+      Ok(()))
   end
 
   doc """
-  Wait for the live process to exit and return its exit code.
-  Also closes the stdout channel. Should be called after the process
-  exits (read_line returned None) or after kill.
+  Wait for the process to exit and return its exit code: Ok(code), or
+  Err(Closed) when it was already waited on. Closes the process's streams
+  and then the handle, so every later use of `p` is Err(Closed). Call it
+  after the process exits (read_line returned Ok(None)) or after kill.
   """
-  fn wait_proc(p) do
-    process_wait_proc(p)
+  fn wait_proc(p : Process) : Result(Int, ProcessError) do
+    let r = with_live(p, fn lp -> Ok(process_wait_proc(lp)))
+    let _ = handle_close(p)
+    r
   end
 
   -- ---- ProcessResult helpers ----

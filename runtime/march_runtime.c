@@ -12639,7 +12639,10 @@ static void *spawn_err(const char *cmd, int err) {
 /* process_spawn_sync(command, args) → Result(ProcessResult, String)
    ProcessResult = ProcessResult(Int, String, String) (exit_code, stdout, stderr)
    Err when the pipes cannot be made or the command cannot be executed. */
+static void live_proc_reap_sweep(void);
+
 void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
+    live_proc_reap_sweep();
     char **argv = spawn_argv_build((march_string *)cmd_obj, args_list);
     int stdout_pipe[2], stderr_pipe[2];
     if (spawn_pipe_cloexec(stdout_pipe) != 0) {
@@ -12805,6 +12808,7 @@ static int64_t live_proc_register(pid_t pid, FILE *fp, FILE *write_fp) {
 /* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String)
    Err when the pipes cannot be made or the command cannot be executed. */
 void *march_process_spawn_async(void *cmd_obj, void *args_list) {
+    live_proc_reap_sweep();
     char **argv = spawn_argv_build((march_string *)cmd_obj, args_list);
     /* Pipes for stdin (write) and stdout (read).  Both ends are
        close-on-exec from creation: the parent's ends must not leak into
@@ -12895,14 +12899,10 @@ int64_t march_process_kill_proc(void *lp_obj) {
     return 0;
 }
 
-/* process_wait_proc(lp) → Int (exit code).  Closes the streams (a stream a
-   reader or writer is still inside is closed when it leaves) and releases
-   the slot; the handle is stale afterwards. */
 /* Mark the slot a handle names closing and settle it: its streams close now
    (or when the reader/writer inside one leaves) and the slot is freed once
    both are.  A stale or already-released handle is a no-op.  Neither waits
-   for nor signals the child: wait_proc reaps after this, and a Process
-   handle box (march_handle.c) releases its slot with it on close. */
+   for nor signals the child: process_wait_proc reaps after this. */
 void march_process_release_slot(int64_t handle) {
     pthread_mutex_lock(&live_proc_mu);
     live_proc_slot *s = live_proc_lookup_locked(handle);
@@ -12913,6 +12913,68 @@ void march_process_release_slot(int64_t handle) {
     pthread_mutex_unlock(&live_proc_mu);
 }
 
+/* Children whose Process box was dropped (or closed) without wait_proc and
+   that had not exited by then.  A child is ours to reap until we reap it, so
+   its pid cannot be reused meanwhile; the next spawn or release reaps the
+   ones that have exited since (waitpid WNOHANG, never blocking), so a dropped
+   child does not stay a zombie for the life of the program.  Its own lock:
+   the sweep never runs under live_proc_mu. */
+static pthread_mutex_t live_proc_reap_mu = PTHREAD_MUTEX_INITIALIZER;
+static pid_t          *live_proc_reap = NULL;
+static int             live_proc_reap_len = 0;
+static int             live_proc_reap_cap = 0;
+
+static void live_proc_reap_sweep(void) {
+    pthread_mutex_lock(&live_proc_reap_mu);
+    int keep = 0;
+    for (int k = 0; k < live_proc_reap_len; k++) {
+        pid_t r = waitpid(live_proc_reap[k], NULL, WNOHANG);
+        if (r == 0 || (r < 0 && errno == EINTR))
+            live_proc_reap[keep++] = live_proc_reap[k];   /* still running */
+    }
+    live_proc_reap_len = keep;
+    pthread_mutex_unlock(&live_proc_reap_mu);
+}
+
+static void live_proc_reap_later(pid_t pid) {
+    pthread_mutex_lock(&live_proc_reap_mu);
+    if (live_proc_reap_len == live_proc_reap_cap) {
+        int ncap = live_proc_reap_cap ? live_proc_reap_cap * 2 : 16;
+        pid_t *n = (pid_t *)realloc(live_proc_reap, (size_t)ncap * sizeof(*n));
+        if (!n) { pthread_mutex_unlock(&live_proc_reap_mu); return; }  /* stays a zombie */
+        live_proc_reap = n;
+        live_proc_reap_cap = ncap;
+    }
+    live_proc_reap[live_proc_reap_len++] = pid;
+    pthread_mutex_unlock(&live_proc_reap_mu);
+}
+
+/* The release of a Process handle box (march_handle.c, kind PROCESS) whose
+   child was never waited on: close its streams as wait_proc does, then reap
+   the child without blocking.  A child still running is sent SIGTERM (as
+   process_kill_proc) and, if it has not exited yet, reaped by a later sweep.
+   A handle wait_proc already released names no live slot: nothing to do (its
+   pid may since belong to another process, so it is never signalled). */
+void march_process_release_handle(int64_t handle) {
+    pid_t pid = -1;
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    if (s) {
+        pid = s->pid;
+        s->closing = 1;
+        live_proc_settle_locked(s);
+    }
+    pthread_mutex_unlock(&live_proc_mu);
+    if (pid > 0 && waitpid(pid, NULL, WNOHANG) == 0) {
+        kill(pid, SIGTERM);
+        if (waitpid(pid, NULL, WNOHANG) == 0) live_proc_reap_later(pid);
+    }
+    live_proc_reap_sweep();
+}
+
+/* process_wait_proc(lp) → Int (exit code).  Closes the streams (a stream a
+   reader or writer is still inside is closed when it leaves) and releases
+   the slot; the handle is stale afterwards. */
 int64_t march_process_wait_proc(void *lp_obj) {
     int64_t pid    = MARCH_FIELD(lp_obj, 0);
     int64_t handle = MARCH_FIELD(lp_obj, 1);

@@ -171,7 +171,7 @@ static void release_kind(int64_t kind, int64_t raw, int64_t aux) {
         fn(raw, aux);                                  /* march_tls_ctx_free */
         break;
     case MARCH_HANDLE_PROCESS:
-        march_process_release_slot(raw);
+        march_process_release_handle(raw);           /* closes, SIGTERMs, reaps */
         break;
     case MARCH_HANDLE_TCP_BORROWED:
     default:

@@ -593,6 +593,18 @@ git log is authoritative for exact commits.
   unified with it. Code that only goes through `Channel.new_socket` and
   the `Channel.socket_*` accessors is unaffected; code that names the type or matches
   on the constructor renames it.
+- **`Process.spawn_async` returns a `Process` handle, not a `LiveProcess`.** Its type is
+  `Result(Result(Process, ProcessError), CapError)`; the new
+  `ProcessError = Closed | ProcessFailed(String)` carries the old `Err(msg)` as
+  `ProcessFailed(msg)`. `Process.read_line(p)` returns `Result(Option(String), ProcessError)`,
+  `write` and `kill` return `Result((), ProcessError)` and `wait_proc` returns
+  `Result(Int, ProcessError)`; none of them needs a capability. `wait_proc` closes the handle,
+  so every later use (a second `wait_proc`, or a `kill` that could reach a reused pid) is
+  `Err(Closed)`. A `Process` dropped without `wait_proc` no longer leaves a zombie: its pipes
+  are closed, a child still running is sent SIGTERM, and the child is reaped without blocking.
+  `Process.LiveProcess` is now opaque and internal to the standard library. Migrate by
+  matching `Ok(Some(line))` where `read_line` returned `Some(line)`, `Ok(code)` for
+  `wait_proc`'s code, and `ProcessFailed(msg)` for a spawn failure.
 
 - **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
   NaN, the infinities and a result outside Int's range** (#1230), with

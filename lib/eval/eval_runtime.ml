@@ -379,6 +379,50 @@ let live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t = Hashtbl.cr
 
 let live_proc_next_id : int ref = ref 0
 
+(** Children whose Process box was released (dropped or closed) without
+    wait_proc and that had not exited yet: reaped without blocking by the
+    next spawn or release, so they do not stay zombies.  The interpreter's
+    twin of runtime/march_runtime.c's live_proc_reap list. *)
+let live_proc_reap : int list ref = ref []
+
+let live_proc_reap_sweep () : unit =
+  let pending = !live_proc_reap in
+  live_proc_reap := [];
+  let running =
+    List.filter (fun pid ->
+        match Unix.waitpid [Unix.WNOHANG] pid with
+        | (0, _) -> true
+        | _ -> false
+        | exception Unix.Unix_error (Unix.EINTR, _, _) -> true
+        | exception Unix.Unix_error _ -> false)
+      pending
+  in
+  (* A finaliser may have appended while we swept. *)
+  live_proc_reap := running @ !live_proc_reap
+
+(** Release a Process box's child (march_process_release_handle): close its
+    streams as wait_proc does, SIGTERM it if still running, and reap it
+    without blocking.  An id wait_proc already removed is a no-op: that
+    child is reaped and its pid may belong to another process. *)
+let live_proc_release (id : int) : unit =
+  (match Hashtbl.find_opt live_proc_tbl id with
+   | Some (ic, oc, pid) ->
+     (try close_in_noerr ic with _ -> ());
+     (try close_out_noerr oc with _ -> ());
+     Hashtbl.remove live_proc_tbl id;
+     let exited () =
+       match Unix.waitpid [Unix.WNOHANG] pid with
+       | (0, _) -> false
+       | _ -> true
+       | exception Unix.Unix_error _ -> true
+     in
+     if not (exited ()) then begin
+       (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+       if not (exited ()) then live_proc_reap := pid :: !live_proc_reap
+     end
+   | None -> ());
+  live_proc_reap_sweep ()
+
 (** The Err message of a Process.* spawn builtin for a [Unix_error] raised
     by function [fn].  A command that cannot be executed (not found, not
     executable) is "cannot execute <cmd>: <strerror>", the same text the

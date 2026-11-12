@@ -179,6 +179,16 @@ val uname_info : (string * string) option Lazy.t
 val live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t
 val live_proc_next_id : int ref
 
+(** Children a released Process box SIGTERMed that had not exited yet. *)
+val live_proc_reap : int list ref
+
+(** Reap (waitpid WNOHANG) every pending child that has exited since. *)
+val live_proc_reap_sweep : unit -> unit
+
+(** Release a Process box's child: close its streams, SIGTERM it if still
+    running, reap it without blocking (march_process_release_handle). *)
+val live_proc_release : int -> unit
+
 (** Err message of a Process.* spawn builtin for a [Unix_error (err, fn, _)]:
     ["cannot execute <cmd>: <strerror>"] when the command could not be
     executed, the bare message otherwise.  Matches the compiled runtime. *)

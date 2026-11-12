@@ -2786,6 +2786,76 @@ let handle_vs_user_record_src = {|mod App do
 end
 |}
 
+(* ocap phase 2b, Task 8 (ruling R4): a Process box released without
+   wait_proc reaps its child: closes its pipes, SIGTERMs it if it is still
+   running and reaps it without blocking (a child that has not exited yet is
+   reaped by the next spawn or release, which the `ps` polls below are).
+   The child is `sh` exec'ing `sleep 30`, so before the fix it outlived the
+   box ("running"); a release that only signalled it would leave a zombie.
+   `close` releases through `handle_close` (stdlib-only: run with
+   `--stdlib-source`), at a known point on both backends; `drop` lets the
+   last reference go, which only the compiled box releases at a known point
+   (the interpreter's box waits for the OCaml GC), so it runs compiled only. *)
+let process_reap_src ~drop = Printf.sprintf {|mod ProcessReap do
+  needs IO.Console
+  needs IO.Process
+
+  -- A shell that prints its pid, then becomes `sleep 30` (same pid).
+  pfn spawn_sleeper() : Process do
+    match Authority.must(Process.spawn_async("sh", ["-c", "echo $$; exec sleep 30"])) do
+      Ok(p) -> p
+      Err(e) -> panic("spawn failed: " ++ to_string(e))
+    end
+  end
+
+  pfn pid_of(p : Process) : String do
+    match Process.read_line(p) do
+      Ok(Some(s)) -> s
+      _ -> panic("no pid line")
+    end
+  end
+
+  -- `ps` prints nothing for a pid that names no process (reaped).
+  pfn ps_state(pid : String) : String do
+    match Authority.must(Process.run("ps", ["-o", "stat=", "-p", pid])) do
+      Ok(r) ->
+        let st = String.trim(Process.stdout(r))
+        if st == "" do "gone"
+        else if String.starts_with(st, "Z") do "zombie" else "running" end end
+      Err(e) -> "ps failed: " ++ e
+    end
+  end
+
+  pfn settle(pid : String, n : Int) : String do
+    let st = ps_state(pid)
+    if st == "gone" || n == 0 do st
+    else
+      sleep_ms(20)
+      settle(pid, n - 1)
+    end
+  end
+
+  -- The Process's last reference goes when this returns.
+  pfn dropped() : String do
+    pid_of(spawn_sleeper())
+  end
+
+  pfn closed() : String do
+    let p = spawn_sleeper()
+    let pid = pid_of(p)
+    let _ = handle_close(p)
+    pid
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    let pid = %s
+    println("child after release: " ++ settle(pid, 250))
+  end
+end
+|} (if drop then "dropped()" else "closed()")
+
+let process_reap_expected = "child after release: gone"
+
 (** Run [src] (written to a fresh temp dir as [name].march) with the
     compiler under a private HOME, as a stdlib source; [compiled] builds it
     with `--compile` first. Returns (exit code, combined output). *)

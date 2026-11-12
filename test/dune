@@ -13995,6 +13995,33 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (deps test_file_dir_compiled.out)
  (action (progn)))
 
+; Process handles (ocap phase 2b, Task 8): test_process.march runs untyped
+; under stdlib_march; these rules typecheck it (`march test`) and run it
+; compiled, the CI coverage of the compiled Process box (spawn_async,
+; read_line, write, kill, wait_proc closing the handle).
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_process.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_process.march)))
+
+(rule
+ (targets test_process_compiled_bin test_process_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_process.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_process_compiled_bin
+        stdlib/test_process.march)
+   (with-stdout-to test_process_compiled.out
+    (system "./test_process_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_process_compiled.out)
+ (action (progn)))
+
 ; Socket / Listener handles (ocap phase 2, Task 5): test_socket.march runs
 ; untyped under stdlib_march; these rules typecheck it (`march test`) and run
 ; it compiled. Its listeners bind port 0, so concurrent runners never collide.

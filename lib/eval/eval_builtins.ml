@@ -4043,6 +4043,7 @@ let base_env : env =
      or Err(msg) on OS error.  Stderr is captured separately. *)
   ; ("process_spawn_sync", VBuiltin ("process_spawn_sync", function
         | [VString cmd; lst] ->
+          live_proc_reap_sweep ();
           let rec args_of_list = function
             | VCon ("Nil", []) -> []
             | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
@@ -4078,6 +4079,7 @@ let base_env : env =
      type lives in the stdlib and not in a builtin's payload. *)
   ; ("process_spawn_lines", VBuiltin ("process_spawn_lines", function
         | [VString cmd; lst] ->
+          live_proc_reap_sweep ();
           let rec args_of_list = function
             | VCon ("Nil", []) -> []
             | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
@@ -4100,6 +4102,7 @@ let base_env : env =
      Returns Ok(LiveProcess(pid, stream_id)) or Err(String). *)
   ; ("process_spawn_async", VBuiltin ("process_spawn_async", function
         | [VString cmd; lst] ->
+          live_proc_reap_sweep ();
           let rec args_of_list = function
             | VCon ("Nil", []) -> []
             | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
@@ -6231,8 +6234,9 @@ let base_env : env =
    freed.  Mirrors runtime/march_handle.c's release_kind:
    - DIR closes its fd as TCP does ([tcp_close] is a bare close);
    - TLS closes the session, then its socket (the aux word);
-   - PROCESS closes the child's streams without killing or reaping it
-     (march_process_release_slot), the first half of [process_wait_proc];
+   - PROCESS closes the child's streams, SIGTERMs a child still running
+     and reaps it without blocking ([live_proc_release], as
+     march_process_release_handle), so a dropped Process leaves no zombie;
    - TCP_BORROWED releases nothing. *)
 let () =
   let raw_closer name =
@@ -6255,13 +6259,7 @@ let () =
   set_releaser kind_tls_ctx (fun raw _ -> tls_ctx_free raw);
   set_releaser kind_process (fun raw _ ->
       match raw with
-      | VInt id ->
-        (match Hashtbl.find_opt live_proc_tbl id with
-         | Some (ic, oc, _) ->
-           (try close_in_noerr ic with _ -> ());
-           (try close_out_noerr oc with _ -> ());
-           Hashtbl.remove live_proc_tbl id
-         | None -> ())
+      | VInt id -> live_proc_release id
       | _ -> ())
 
 let base_env : env = base_env @ Eval_handle.builtins
