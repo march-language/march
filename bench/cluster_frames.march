@@ -48,7 +48,7 @@ mod ClusterFramesBench do
       Ok(p) -> p
       Err(e) -> panic("accept task: " ++ e)
     end
-    let got = Vault.new("cluster_frames_" ++ int_to_string(size))
+    let got = Authority.must(Vault.new("cluster_frames_" ++ int_to_string(size)))
     let payload = List.map(List.range(0, size), fn i -> int_and(i, 255))
     let t0 = unix_time_ms()
     let reader = task_spawn(fn _ ->

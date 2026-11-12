@@ -56,7 +56,7 @@ mod StreamOverNodesA do
   end
 
   fn main(c : Cap(IO)) do
-    let conn = match connect_split_retry(Env.require_int("MARCH_PEER_PORT"), 100) do
+    let conn = match connect_split_retry(Authority.must(Env.require_int("MARCH_PEER_PORT")), 100) do
       Ok(p) -> p
       Err(e) -> panic("connect: " ++ e)
     end

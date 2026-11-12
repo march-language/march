@@ -330,6 +330,21 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     } buffer
   in
 
+  (* Peek one token and re-queue it, leaving the lexbuf positions on the
+     token being returned. Menhir reads $startpos/$endpos of a token from the
+     lexbuf after the lexer returns it, so a bare [raw]+[push_buf] would give
+     that token the PEEKED token's position: every `match x do ... end` span
+     then started at `x`, and a fix that wraps the whole expression
+     (`Authority.ignore(...)`) was spliced in after the `match` keyword. *)
+  let peek_keeping_pos lexbuf =
+    let start_p = lexbuf.Lexing.lex_start_p and curr_p = lexbuf.Lexing.lex_curr_p in
+    let peeked = raw lexbuf in
+    push_buf peeked lexbuf;
+    lexbuf.Lexing.lex_start_p <- start_p;
+    lexbuf.Lexing.lex_curr_p <- curr_p;
+    peeked
+  in
+
   (* Check if a token could start a match arm pattern.
 
      Kept in sync with the grammar's `pattern` / `simple_pattern` rules
@@ -491,9 +506,8 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
          leaves the downstream NL handling byte-for-byte as before. The
          idiomatic cond form always writes `match do` on one line, so no NL
          ever sits between the keyword and DO here. *)
-      let peeked = raw lexbuf in
+      let peeked = peek_keeping_pos lexbuf in
       Stack.push (peeked = Parser.DO) pending_match_conds;
-      push_buf peeked lexbuf;
       tok
 
     (* `<-` (GETS) appears only in monadic with-bindings. Record the with's
@@ -510,17 +524,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     (* CHOOSE BY chooser: ... END has END without DO — peek ahead
        for BY to distinguish from Chan.choose(...) expressions. *)
     | Parser.CHOOSE ->
-      let next_tok = raw lexbuf in
+      let next_tok = peek_keeping_pos lexbuf in
       (match next_tok with
        | Parser.BY ->
          (* Protocol choose block — push Match so NL works as branch separator *)
          Stack.push Match stack;
          Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_choose = true; ms_is_cond = false } match_states;
-         push_buf Parser.BY lexbuf;
          tok
-       | other ->
-         push_buf other lexbuf;
-         tok)
+       | _ -> tok)
 
     | Parser.DO ->
       if not (Stack.is_empty pending_match_depths)

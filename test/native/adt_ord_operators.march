@@ -119,5 +119,6 @@ mod Main do
     println(List.fold_left(rs, "", fn (acc, r) -> acc ++ int_to_string(r.a) ++ int_to_string(r.b) ++ int_to_string(r.c) ++ " "))
     let sorted = List.sort_by([Large, Small, Large, Small], fn (a, b) -> a < b)
     println(List.fold_left(sorted, "", fn (acc, s) -> acc ++ int_to_string(rank(s))))
+    ()
   end
 end

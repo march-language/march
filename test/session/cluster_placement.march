@@ -98,14 +98,14 @@ mod ClusterPlacement do
             place(p, r)
             let _ = Vault.incr(p.moves, "n", 1)
             let dest = match Vault.get(p.at, r) do Some(d) -> d | None -> "nowhere" end
-            println("  " ++ r ++ ": " ++ i.node_id ++ " -> " ++ dest ++ " (" ++ cause ++ ")")
+            Authority.ignore(println("  " ++ r ++ ": " ++ i.node_id ++ " -> " ++ dest ++ " (" ++ cause ++ ")"))
           else () end)
       _ -> ()
     end
   end
 
   pfn start_placement(c : Cap(ClusterNode.Live), roles : List(String)) : (Placement, Int) do
-    let p = { c: c, roles: roles, at: Vault.new("placement_at"), moves: Vault.new("placement_moves") }
+    let p = { c: c, roles: roles, at: Authority.must(Vault.new("placement_at")), moves: Authority.must(Vault.new("placement_moves")) }
     List.each(roles, fn r -> place(p, r))
     let sub = ClusterNode.subscribe(c, fn ev -> on_event(p, ev))
     (p, sub)
@@ -114,8 +114,8 @@ mod ClusterPlacement do
   pfn show(p : Placement) : () do
     List.each(p.roles, fn r ->
       match Vault.get(p.at, r) do
-        Some(id) -> println("  " ++ r ++ " @ " ++ id)
-        None -> println("  " ++ r ++ " unplaced")
+        Some(id) -> Authority.ignore(println("  " ++ r ++ " @ " ++ id))
+        None -> Authority.ignore(println("  " ++ r ++ " unplaced"))
       end)
   end
 
@@ -124,35 +124,35 @@ mod ClusterPlacement do
   -- ── the test ───────────────────────────────────────────────────────────
 
   fn main(io : Cap(IO)) do
-    let fk = { members: Vault.new("fake_members"), subs: Vault.new("fake_subs"), meta: Vault.new("fake_meta") }
+    let fk = { members: Authority.must(Vault.new("fake_members")), subs: Authority.must(Vault.new("fake_subs")), meta: Authority.must(Vault.new("fake_meta")) }
     Vault.set(fk.members, "n1", info("n1"))
     Vault.set(fk.members, "n2", info("n2"))
     Vault.set(fk.members, "n3", info("n3"))
     let c = ClusterNode.attach(io, fake_ops(fk))
-    println("node " ++ ClusterNode.node_id(c) ++ ", creation " ++ int_to_string(ClusterNode.creation(c)))
+    Authority.ignore(println("node " ++ ClusterNode.node_id(c) ++ ", creation " ++ int_to_string(ClusterNode.creation(c))))
     let g = ClusterNode.global_pid(c, 7)
-    println("global pid " ++ g.node_id ++ "/" ++ int_to_string(g.local_pid) ++ "@" ++ int_to_string(g.creation))
+    Authority.ignore(println("global pid " ++ g.node_id ++ "/" ++ int_to_string(g.local_pid) ++ "@" ++ int_to_string(g.creation)))
     match start_placement(c, Cons("api", Cons("db", Cons("cache", Nil)))) do
       (p, sub) ->
-        println("placed:")
+        Authority.ignore(println("placed:"))
         show(p)
-        println("n2 dead:")
+        Authority.ignore(println("n2 dead:"))
         inject_dead(fk, "n2", "suspect timeout")
-        println("n4 up (nothing moves):")
+        Authority.ignore(println("n4 up (nothing moves):"))
         inject_up(fk, "n4")
-        println("n3 dead:")
+        Authority.ignore(println("n3 dead:"))
         inject_dead(fk, "n3", "refused")
-        println("placed:")
+        Authority.ignore(println("placed:"))
         show(p)
-        println("n1 dead:")
+        Authority.ignore(println("n1 dead:"))
         inject_dead(fk, "n1", "suspect timeout")
-        println("placed:")
+        Authority.ignore(println("placed:"))
         show(p)
-        println("moves: " ++ int_to_string(moves(p)))
+        Authority.ignore(println("moves: " ++ int_to_string(moves(p))))
         ClusterNode.unsubscribe(c, sub)
-        println("unsubscribed; n4 dead:")
+        Authority.ignore(println("unsubscribed; n4 dead:"))
         inject_dead(fk, "n4", "suspect timeout")
-        println("moves: " ++ int_to_string(moves(p)))
+        Authority.ignore(println("moves: " ++ int_to_string(moves(p))))
     end
   end
 end

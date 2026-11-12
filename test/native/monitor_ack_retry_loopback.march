@@ -114,11 +114,12 @@ mod MonitorAckRetryLoopback do
           let key = "t" ++ int_to_string(target_pid)
           let copies = Vault.incr(seen, key, 1)
           if copies == 1 do
-            println("node-a: MONITOR_FIRE for " ++ target_label(target_pid, monitored_pid) ++ " reason=" ++ reason_text(reason) ++ " (delivered)")
+            Authority.ignore(println("node-a: MONITOR_FIRE for " ++ target_label(target_pid, monitored_pid) ++ " reason=" ++ reason_text(reason) ++ " (delivered)"))
             let _ = send(watcher, RemoteDown(target_pid, reason_text(reason)))
             ()
           else
-            println("node-a: MONITOR_FIRE copy " ++ int_to_string(copies) ++ " (deduped)")
+            Authority.ignore(println("node-a: MONITOR_FIRE copy " ++ int_to_string(copies) ++ " (deduped)"))
+            ()
           end
           let _ = NetKernel.send_frame(fd, DistLink.encode_ack(target_pid, pid_to_int(watcher)))
           Ok(copies < 2)
@@ -152,7 +153,7 @@ mod MonitorAckRetryLoopback do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_netlisten : Cap(IO.NetListen), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut)) do
-    let seen = Vault.new("monitor_ack_seen")
+    let seen = Authority.must(Vault.new("monitor_ack_seen"))
     let listen_fd = match tcp_listen(0) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
@@ -178,7 +179,7 @@ mod MonitorAckRetryLoopback do
     end
     match PeerReader.serve(fd2, Nil, fn (tag, frame) -> on_fire(fd2, watcher, seen, target.local_pid, tag, frame)) do
       Ok(_) -> ()
-      Err(e) -> println("node-a: reader error: " ++ e)
+      Err(e) -> Authority.ignore(println("node-a: reader error: " ++ e))
     end
     tcp_close(fd2)
     tcp_close(fd1)
@@ -189,11 +190,11 @@ mod MonitorAckRetryLoopback do
     run_until_idle()
     match counts do
       (n1, n2, left) ->
-        println("node-b: resent " ++ int_to_string(n1) ++ " then " ++ int_to_string(n2) ++ "; pending after acks: " ++ int_to_string(left))
+        Authority.ignore(println("node-b: resent " ++ int_to_string(n1) ++ " then " ++ int_to_string(n2) ++ "; pending after acks: " ++ int_to_string(left)))
     end
     match get_actor_field(watcher, "downs") do
-      Some(n) -> println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)")
-      None -> println("node-a: watcher gone")
+      Some(n) -> Authority.ignore(println("node-a: watcher saw " ++ int_to_string(n) ++ " Down(s)"))
+      None -> Authority.ignore(println("node-a: watcher gone"))
     end
   end
 end

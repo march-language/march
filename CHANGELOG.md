@@ -485,9 +485,40 @@ git log is authoritative for exact commits.
   variable and the combinator (`portable_capture`). Create the handle inside
   the lambda, or use the sequential version. `task_spawn` and `Task.async`
   are unaffected.
+- **A must-reject corpus for the refinement checker.** `specs/lang/refine/reject/` holds 20
+  programs, each with one obligation that must be reported violated (one per obligation
+  kind, one per fixed false proof), and `specs/lang/refine/check_refine.sh` runs them in CI.
+  Before it, a checker that proved everything passed every refinement gate. Three fixtures
+  the checker wrongly accepts today are listed in `known-accepted.txt`, which may only
+  shrink; one is new: a refined session payload type (`Client -> Server : {Int | _ > 0}`)
+  is not checked at `Chan.send`.
 
 ### Changed
 
+- **Capability operations return `Result(T, CapError)`** (object-capability design,
+  phase 1; breaking). Printing (`println`, `IO.puts/write/warn/read_line/read_byte/gets`),
+  the clock (`System.now`, `System.now_ms`, new; `DateTime.now`, `local_now`), randomness
+  (`Crypto.random_bytes/random_hex/hash_password`, `UUID.v4/v7`, `Random.int`, the
+  ML-KEM/ML-DSA/NodeCert key and signing functions), the environment and the process
+  (`Process.env/set_env/cwd/argv/pid/exit`, `System.*`, `Env.*`, `Config.from_env*`/`env`),
+  spawning (`Task.async`, `async_stream`), opening a table by name (`Vault.new/open/whereis`,
+  `ns_*`, `Config.new_store`), signals (`Signal.watch/raise`), files (`File.*`, `Dir.*`,
+  `Csv.*`, `Seq.from_file_*`; the handle opens `File.open`, `File.open_write`, `File.with_open`
+  and `File.with_open_write`, while the handle's own `read_line`/`write_to`/`seek`/`close` charge
+  nothing), `Socket.connect*` and `Dns.resolve*` all return a `Result`
+  whose `Err(CapError(...))` is a refusal naming the operation and the limit. Operations
+  that already returned `Result(U, E)` now return `Result(Result(U, E), CapError)`:
+  `Ok(Err(NotFound(p)))` is a missing file, `Err(CapError(...))` a refused one. A call used
+  as a statement is unaffected; code that used the value gets the new diagnostic
+  `cap_result_unhandled`, whose fix (`()` after a unit result, `Authority.ignore(...)`,
+  `Authority.must(...)`) `forge fix` applies. `forge fix PATH... [--only CODE,...]` fixes
+  files outside a project. The new `Authority` module (`check`, `describe`, `must`, `ignore`)
+  and the Prelude types `CapError`/`CapLimit` carry it. The parallel `List` helpers compute
+  sequentially when spawning is refused; `IO.inspect`, `debug` and the Logger never fail.
+  Nothing refuses yet except the test-only `MARCH_TEST_REFUSE` hook; UDP, TLS contexts,
+  `HttpClient` and `HttpServer` follow in phase 2. The REPL does not echo the `Ok(())` of a
+  console operation. Reading stdin is now charged to `IO.Console`.
+- **`forge fix` keeps a file's final newline**; it used to drop it from every file it fixed.
 - **Capability checks run however a program is checked or run (object
   capabilities, phase 3).** The capability upper limit (each module's emitted code
   within its own `needs`) and host scopes on `IO.NetConnect` used to run in full only
@@ -504,7 +535,8 @@ git log is authoritative for exact commits.
 - **`Socket.connect` returns a `Socket`, not an `Int`; `Udp.UdpSocket`, `Tls.TlsConn`,
   `Tls.TlsCtx` and `WebSocket.WsSocket` can no longer be built from an integer.**
   Connections and listening sockets are reference-counted handles: `Socket.connect` /
-  `connect_timeout` return `Result(Socket, SocketError)`, every `Socket` function takes the
+  `connect_timeout` return `Result(Result(Socket, SocketError), CapError)` (phase 1's
+  capability shape around the handle), every `Socket` function takes the
   handle, `Socket.close` returns `Result((), SocketError)`, and the new
   `Socket.listen(port)` / `accept` / `accept_timeout` / `local_port` / `close_listener`
   work on a `Listener`. A use after `close` is `Err(Closed)` (new in `SocketError`,
@@ -516,6 +548,15 @@ git log is authoritative for exact commits.
   is now `unknown_constructor`). Standard-library internals that still need the raw
   descriptor use `Socket.raw_fd` / `adopt` / `borrow`, marked `@[stdlib_internal]`: a user
   program naming one gets the `stdlib_internal` error.
+- **Opening a listener, a UDP socket or a TLS context is a checked capability operation.**
+  `Socket.listen(port)` returns `Result(Result(Listener, SocketError), CapError)` (checked
+  as `IO.NetListen` on the port), `Udp.open` / `open_with` / `open_sharded` return
+  `Result(Result(UdpSocket, UdpError), CapError)` (`IO.NetConnect` on `host:port`; one check
+  covers every shard), and `Tls.client_ctx` / `server_ctx` return
+  `Result(Result(TlsCtx, TlsError), CapError)` (`IO.NetConnect.TLS`). Wrap a call in
+  `Authority.must(...)` to keep the old single `Result`. `HttpTransport`, `HttpClient` and
+  `Tls.https_get` keep their single `Result` for now: a refused connect is
+  `HttpTransport.Refused(reason)`, a refused TLS context `TlsContextError(reason)`.
 - **The HTTP client and server use `Socket` handles, not descriptor numbers.**
   `HttpTransport.connect(req)` returns `Result(Socket, TransportError)` (same errors as
   before); `HttpTransport.request_on`, `stream_request_on`, `stream_chunked_body`,
@@ -924,6 +965,20 @@ git log is authoritative for exact commits.
   that closed after its client hung up could exit with status 141. The descriptor now gets
   `SO_NOSIGPIPE` at the handshake (macOS/BSD), and on Linux the close blocks and consumes
   the signal.
+- **A derived `Show`, `Ord` or `Hash` no longer calls a user fn named like the method.** With
+  `derive Show for P` and your own `fn show(_x : Int)` in the same module, `println(P(1, "a"))`
+  printed `P(U, U)`: the generated code called `show(field)` and got your fn, on both backends.
+  It now calls `Show.show`, `Ord.compare` and `Hash.hash`. Those qualified names also work
+  where they did not before: `Ord.compare(1, 2)` on a primitive failed to compile ("no `Ord`
+  implementation for type `Int`"), and under the interpreter `Hash.hash(x)` ran the wrong impl
+  when two types implemented `Hash`.
+- **`&&` and `||` now short-circuit.** The right operand runs only when the left one does not
+  already decide the result, interpreted and compiled (LLVM, JS, JIT). Both operands used to be
+  evaluated every time, so `i >= 0 && i < n && NativeArray.get_u8(a, i) == 1` read out of range
+  for a negative `i`, and `d != 0 && 10 / d > 1` passed `--check` (the division checker already
+  treated the left side as a guard) and then divided by zero at run time. A program whose right
+  operand prints or has another effect now skips that effect when the left side decides.
+- A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
 - **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
   A compiled closure that matched a captured value and passed the pattern's fields straight to a
   builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the

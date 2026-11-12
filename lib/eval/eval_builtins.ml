@@ -158,6 +158,16 @@ let try_call_thunk (thunk : value) : value =
    http_server_bind_host sets it (mirrors march_http_bind_addr in the C runtime). *)
 let http_bind_addr = ref Unix.inet_addr_any
 
+(* ocap phase 1: the TEST-ONLY refusal hook read by [cap_check_raw] and
+   [cap_launch_text] below. MARCH_TEST_REFUSE is a comma-separated list of
+   capability kinds the launch refuses, matched exactly; read once. The
+   compiled twin is runtime/march_extras.c, the JS one march_runtime.mjs. *)
+let cap_test_refuse_text =
+  lazy (String.trim (Option.value (Sys.getenv_opt "MARCH_TEST_REFUSE") ~default:""))
+let cap_test_refuse_kinds =
+  lazy (String.split_on_char ',' (Lazy.force cap_test_refuse_text)
+        |> List.map String.trim |> List.filter (fun k -> k <> ""))
+
 (* Write streams opened by file_open_write.  The interpreter's file handles
    are channels passed around as the Int [Obj.magic chan] (file_open), and a
    channel does not say which way it points, so this table remembers the
@@ -2868,6 +2878,15 @@ let base_env : env =
         | args when args = [] || args = [VUnit] ->
           VInt (int_of_float (Unix.gettimeofday () *. 1000.0))
         | _ -> eval_error "unix_time_ms: takes no arguments"))
+    (* ---- ocap phase 1 capability check point (runtime/march_extras.c has the
+       compiled twin; the rule must match it exactly) ---- *)
+  ; ("cap_check_raw", VBuiltin ("cap_check_raw", function
+        | [VString kind; VString _target] ->
+          VInt (if List.mem kind (Lazy.force cap_test_refuse_kinds) then 1 else 0)
+        | _ -> eval_error "cap_check_raw: expected (String, String)"))
+  ; ("cap_launch_text", VBuiltin ("cap_launch_text", function
+        | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_test_refuse_text)
+        | _ -> eval_error "cap_launch_text: takes no arguments"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:
@@ -6246,3 +6265,19 @@ let () =
       | _ -> ())
 
 let base_env : env = base_env @ Eval_handle.builtins
+
+(* The qualified spelling of the four built-in interface methods names the
+   same type-directed dispatcher as the bare one.  Bound HERE, in the builtin
+   tail, so that it is the dispatcher itself and not whatever the program
+   bound `show` to: a derived impl's body calls `Show.show(field)`, which a
+   user's top-level `fn show` must not capture, and `module_registry`'s
+   "Show.show" slot holds only the LAST impl evaluated.
+   specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+let qualified_iface_methods : (string * string) list =
+  [ ("Show.show", "show"); ("Eq.eq", "eq"); ("Ord.compare", "compare"); ("Hash.hash", "hash") ]
+
+let base_env : env =
+  base_env
+  @ List.filter_map (fun (q, bare) ->
+        Option.map (fun v -> (q, v)) (List.assoc_opt bare base_env))
+      qualified_iface_methods

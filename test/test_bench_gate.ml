@@ -96,6 +96,9 @@ let gated : (string * string * compare_mode) list = [
   (* ── core compute / codegen ── *)
   "fib",              "102334155",    Exact;
   "list_ops",         "333333666666", Exact;
+  (* ocap phase 1 per-operation cost benches: deterministic counts. *)
+  "clock_loop",       "10000000",     Exact;
+  "spawn_loop",       "299995",       Exact;
   (* checked Int `+ - *` in counted loops: the cost the 2026-10-30
      overflow trap adds per iteration. *)
   "index_loop",       "548550000003", Exact;
@@ -207,6 +210,9 @@ let gated : (string * string * compare_mode) list = [
    already produced one misdiagnosis in this repo ("bind failed" /
    "malformed hello" from a 34-hour-old zombie holding port 29850). *)
 let excluded : (string * string) list = [
+  ("println_loop",
+   "prints 1_000_000 lines by design (a console-throughput bench for ocap phase 1); \
+    its last line is the count, but pinning a megabyte of stdout adds nothing");
   (* Not "cannot run in CI" like the rest of this list, but "gating it here
      would add nothing": every value array_sort prints is either a wall-clock
      microsecond count (free to vary) or a `first=` element that

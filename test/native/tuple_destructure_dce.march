@@ -9,5 +9,6 @@ mod Main do
   fn main(_cap_console : Cap(IO.Console)) : () do
     println(sum_pair(3, 4))
     println(sum_pair(100, -37))
+    ()
   end
 end

@@ -94,5 +94,6 @@ mod FfiExternLambda do
     let base = live_allocs()
     churn(500)
     println(int_to_string(live_allocs() - base))
+    ()
   end
 end

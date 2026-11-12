@@ -25,9 +25,10 @@ mod HttpAcme do
   """
   fn webroot(dir) do
     HttpServer.acme_responder(fn token ->
+      -- A missing token and a refused read both answer "no such token".
       match File.read(dir ++ "/.well-known/acme-challenge/" ++ token) do
-      Ok(body) -> Some(body)
-      Err(_) -> None
+      Ok(Ok(body)) -> Some(body)
+      _ -> None
       end)
   end
 end

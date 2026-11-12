@@ -43,7 +43,7 @@ mod App do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process)) do
-    let args = Process.argv()
+    let args = Authority.must(Process.argv())
     let port = match List.nth_opt(args, 1) do
       Some(s) ->
         match String.to_int(s) do

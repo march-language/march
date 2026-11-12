@@ -113,6 +113,7 @@ mod Main do
     let r = leak_loop(200, a, b, k, 0)
     let grew = live_allocs() - before
     println("leak loop: " ++ int_to_string(r) ++ ", flat: " ++ bool_to_string(grew < 50))
+    ()
   end
 
   pfn leak_loop(n : Int, a : NativeIntArr, b : NativeFloatArr, k : Int, acc : Int) : Int do

@@ -451,9 +451,19 @@ mod List do
       march> List.pmap([1, 2, 3], fn x -> x * 2)
       [2, 4, 6]
   """
+  -- Whether this code may spawn tasks: the parallel helpers below fall back
+  -- to the sequential computation, with the same result, when it may not.
+  pfn spawn_allowed() : Bool do
+    match Authority.check("IO.Spawn", "") do
+    Ok(_) -> true
+    Err(_) -> false
+    end
+  end
+
   fn pmap(xs : List(a), f : a -> b) : List(b) do
     let t = pmap_threshold()
-    if length(xs) <= t do
+    -- A refused IO.Spawn computes the same result sequentially.
+    if length(xs) <= t || not(spawn_allowed()) do
       map(xs, f)
     else do
       let cs = chunks(xs, t)
@@ -480,7 +490,8 @@ mod List do
   """
   fn pmap_n(xs : List(a), f : a -> b, max_concurrency : Int) : List(b) do
     let n = length(xs)
-    if n == 0 do []
+    -- A refused IO.Spawn computes the same result sequentially.
+    if n == 0 || not(spawn_allowed()) do map(xs, f)
     else do
       let cap = if max_concurrency < 1 do 1 else max_concurrency end
       -- ceil(n / cap), at least 1, so we get at most `cap` chunks
@@ -507,7 +518,7 @@ mod List do
   """
   fn pfilter(xs : List(a), pred : a -> Bool) : List(a) do
     let t = pmap_threshold()
-    if length(xs) <= t do
+    if length(xs) <= t || not(spawn_allowed()) do
       filter(xs, pred)
     else do
       let cs = chunks(xs, t)
@@ -539,7 +550,7 @@ mod List do
   """
   fn preduce(xs : List(a), identity : a, combine : a -> a -> a) : a do
     let t = pmap_threshold()
-    if length(xs) <= t do
+    if length(xs) <= t || not(spawn_allowed()) do
       fold_left(xs, identity, combine)
     else do
       let cs = chunks(xs, t)

@@ -9,12 +9,13 @@
 mod Main do
   needs IO.Console
   fn helper() : String do
-    match File.read("/etc/hosts") do
+    match Authority.must(File.read("/etc/hosts")) do
       Ok(s) -> s
       Err(_) -> ""
     end
   end
   fn main(_cap : Cap(IO.Console)) : () do
     println("helper is never called")
+    ()
   end
 end

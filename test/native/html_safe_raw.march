@@ -23,5 +23,6 @@ mod HtmlSafeRaw do
     let body = body_partial()
     let nested = layout(body)
     println(IOList.to_string(nested))
+    ()
   end
 end

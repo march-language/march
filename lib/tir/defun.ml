@@ -180,6 +180,8 @@ let builtin_names : StringSet.t =
       "string_to_codepoints"; "string_from_codepoint";
       (* Unix/time builtins *)
       "unix_time"; "unix_time_ms";
+      (* ocap phase 1 capability check point *)
+      "cap_check_raw"; "cap_launch_text";
       (* Process self-inspection builtins *)
       "peak_rss_bytes"; "live_allocs";
       (* Comparison / hash builtins *)

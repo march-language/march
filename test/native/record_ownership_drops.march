@@ -36,6 +36,7 @@ mod Main do
     let _ = times(200, f)
     let d = live_allocs() - a0
     println(name ++ ", no growth: " ++ bool_to_string(d <= 0))
+    ()
   end
 
   pfn mk(i : Int) : St do { items: Cons(i, Cons(i + 1, Nil)), name: "s" ++ int_to_string(i), n: i } end

@@ -32,6 +32,11 @@
 
 mod Prelude do
 
+  type CapLimit = ByLaunch | ByFnNeeds(String) | ByModNeeds(String) | ByRestrict(String) | ByGrant(String)
+  type CapError = CapError(String, String, CapLimit, String)
+  derive Eq for CapLimit
+  derive Eq for CapError
+
   -- ---- Diverging ----
 
   doc """
@@ -452,15 +457,23 @@ mod Prelude do
   -- ---- Polymorphic println and string conversion ----
 
   doc """
-  Prints any Show value followed by a newline, and returns ().
+  Prints any Show value followed by a newline. A capability operation
+  (IO.Console on stdout): returns `Ok(())`, or `Err(CapError(...))` when the
+  current authority refuses it. Used as a statement, the result is simply
+  discarded.
   Works for Int, Float, String, Bool, List, Option, Result, tuples,
   and any type with an explicit impl Show. A String prints without quotes.
 
       println([1, 2])     -- prints [1, 2]
       println("hi")       -- prints hi
   """
-  fn println(x) do
-    print_line(show(x))
+  fn println(x) : Result((), CapError) do
+    match Authority.check("IO.Console", "stdout") do
+    Ok(_) ->
+      print_line(show(x))
+      Ok(())
+    Err(e) -> Err(e)
+    end
   end
 
   doc """
@@ -502,12 +515,16 @@ mod Prelude do
 
   doc """
   Prints a value using its Show representation, with a trailing newline,
-  and returns (). The same output as `println`.
+  and returns (). The same output as `println`. A debugging aid: when the
+  console is refused it prints nothing, and it still returns ().
 
       debug(Some(3))      -- prints Some(3)
   """
-  fn debug(x) do
-    print_line(to_string(x))
+  fn debug(x) : () do
+    match Authority.check("IO.Console", "stdout") do
+    Ok(_) -> print_line(to_string(x))
+    Err(_) -> ()
+    end
   end
 
   doc """

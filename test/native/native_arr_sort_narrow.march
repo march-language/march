@@ -263,5 +263,6 @@ mod NativeArrSortNarrow do
             ++ bool_to_string(NativeArray.to_list_u8(ushared) == [9, 200, 3]))
     println("u8 alias result sorted: "
             ++ bool_to_string(NativeArray.to_list_u8(usorted) == [3, 9, 200]))
+    ()
   end
 end

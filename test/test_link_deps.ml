@@ -50,35 +50,57 @@ let with_dir f =
 
 let programs = [
   "hello",
-  "mod Hello do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n    println(\"hi\")\n  end\nend\n",
+  {|mod Hello do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("hi")
+    ()
+  end
+end
+|},
   "hi";
   "tlsp",
-  "mod Tlsp do\n  needs IO.Console\n  needs IO.NetConnect.TLS\n\
-  \  fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do\n\
-  \    match Tls.client_ctx(Tls.default_client_config()) do\n\
-  \      Ok(_) -> println(\"tls ctx ok\")\n\
-  \      Err(e) -> println(\"tls err \" ++ Tls.error_to_string(e))\n\
-  \    end\n  end\nend\n",
+  {|mod Tlsp do
+  needs IO.Console
+  needs IO.NetConnect.TLS
+  fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do
+    match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
+      Ok(_) -> Authority.ignore(println("tls ctx ok"))
+      Err(e) -> Authority.ignore(println("tls err " ++ Tls.error_to_string(e)))
+    end
+  end
+end
+|},
   "tls ctx ok";
   "gz",
-  "mod Gz do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n\
-  \    match Compress.Gzip.encode(Bytes.from_string(\"hello hello\")) do\n\
-  \      Ok(z) -> match Compress.Gzip.decode(z) do\n\
-  \        Ok(x) -> println(\"gz \" ++ Bytes.to_string(x))\n\
-  \        Err(_) -> println(\"gz decode err\")\n\
-  \      end\n\
-  \      Err(_) -> println(\"gz encode err\")\n\
-  \    end\n  end\nend\n",
+  {|mod Gz do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    match Compress.Gzip.encode(Bytes.from_string("hello hello")) do
+      Ok(z) -> match Compress.Gzip.decode(z) do
+        Ok(x) -> Authority.ignore(println("gz " ++ Bytes.to_string(x)))
+        Err(_) -> Authority.ignore(println("gz decode err"))
+      end
+      Err(_) -> Authority.ignore(println("gz encode err"))
+    end
+  end
+end
+|},
   "gz hello hello";
   "zs",
-  "mod Zs do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n\
-  \    match Compress.Zstd.encode(Bytes.from_string(\"zstd zstd\")) do\n\
-  \      Ok(z) -> match Compress.Zstd.decode(z) do\n\
-  \        Ok(x) -> println(\"zs \" ++ Bytes.to_string(x))\n\
-  \        Err(_) -> println(\"zs decode err\")\n\
-  \      end\n\
-  \      Err(_) -> println(\"zs encode err\")\n\
-  \    end\n  end\nend\n",
+  {|mod Zs do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    match Compress.Zstd.encode(Bytes.from_string("zstd zstd")) do
+      Ok(z) -> match Compress.Zstd.decode(z) do
+        Ok(x) -> Authority.ignore(println("zs " ++ Bytes.to_string(x)))
+        Err(_) -> Authority.ignore(println("zs decode err"))
+      end
+      Err(_) -> Authority.ignore(println("zs encode err"))
+    end
+  end
+end
+|},
   "zs zstd zstd";
 ]
 

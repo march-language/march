@@ -30,6 +30,9 @@ let impure_builtins = [
   "uuid_v4";
   (* Time *)
   "unix_time"; "unix_time_ms"; "sys_uptime_ms";
+  (* ocap phase 1: two checks must never be merged; the authority they read
+     changes between them from phase 4 on. *)
+  "cap_check_raw"; "cap_launch_text";
   (* Actors / tasks / processes *)
   "send"; "kill"; "actor_stop"; "actor_pid_indices"; "spawn"; "receive";
   "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node";

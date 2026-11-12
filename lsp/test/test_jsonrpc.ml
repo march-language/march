@@ -233,7 +233,12 @@ let test_exit_terminates () =
 let pull_diagnostics ~(text : string) ~(uri : string) : Yojson.Safe.t option =
   Sys.set_signal Sys.sigalrm
     (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
-  ignore (Unix.alarm 25);
+  (* A hang detector, not a speed budget. A fresh march-lsp loads the stdlib
+     cold before its first publish: the clean-buffer case takes ~11 s on an
+     idle Mac and went over 25 s on the loaded Linux CI runner, failing main's
+     `rest` job three runs in a row. 90 s still catches a server that never
+     answers. *)
+  ignore (Unix.alarm 90);
   let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
   send oc (`Assoc [
     "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";

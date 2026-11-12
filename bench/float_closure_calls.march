@@ -75,6 +75,7 @@ fn main(_c : Cap(IO.Clock), _o : Cap(IO.Console)) : Unit do
   let xi = ints(n)
   let xf = flts(n)
   println("CHECKSUM " ++ float_to_string(rounds(7, xi, xf, 0.0)))
+  ()
 end
 
 end

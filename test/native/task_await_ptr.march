@@ -10,20 +10,21 @@ mod TaskAwaitPtr do
   needs IO.Console
   needs IO.Spawn
   fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
-    let s = Task.async(fn () -> "hello" ++ " world")
+    let s = Authority.must(Task.async(fn () -> "hello" ++ " world"))
     match Task.await(s) do
       Ok(v)  -> println("str=" ++ v)
       Err(e) -> println("err=" ++ e)
     end
-    let l = Task.async(fn () -> [1, 2, 3, 4])
+    let l = Authority.must(Task.async(fn () -> [1, 2, 3, 4]))
     match Task.await(l) do
       Ok(xs) -> println("len=" ++ int_to_string(List.length(xs)))
       Err(_) -> println("err")
     end
-    let n = Task.async(fn () -> 6 * 7)
+    let n = Authority.must(Task.async(fn () -> 6 * 7))
     match Task.await(n) do
       Ok(k)  -> println("int=" ++ int_to_string(k))
       Err(_) -> println("err")
     end
+    ()
   end
 end

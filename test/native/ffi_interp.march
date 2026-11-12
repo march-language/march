@@ -11,5 +11,6 @@ mod Test do
   fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(dbl(21)))
     println(int_to_string(dbl(100)))
+    ()
   end
 end

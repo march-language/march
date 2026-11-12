@@ -19,7 +19,7 @@ mod TestFileDir do
   needs IO.Process
 
 pfn root_of(name : String) : String do
-  "/tmp/march_tfd_" ++ int_to_string(Process.pid()) ++ "_" ++ name
+  "/tmp/march_tfd_" ++ int_to_string(Authority.must(Process.pid())) ++ "_" ++ name
 end
 
 pfn must(r : Result(a, e), what : String) : a do
@@ -34,10 +34,10 @@ pfn tree(name : String) : String do
   let root = root_of(name)
   let _ = Dir.rm_rf(root)
   let _ = Dir.rm_rf(root ++ "_moved")
-  must(Dir.mkdir_p(root ++ "/sub"), "Dir.mkdir_p")
-  must(File.write(root ++ "/a.txt", "A\n"), "File.write a.txt")
-  must(File.write(root ++ "/sub/b.txt", "B\n"), "File.write sub/b.txt")
-  match Process.run("ln", ["-s", "/etc", root ++ "/out"]) do
+  must(Authority.must(Dir.mkdir_p(root ++ "/sub")), "Dir.mkdir_p")
+  must(Authority.must(File.write(root ++ "/a.txt", "A\n")), "File.write a.txt")
+  must(Authority.must(File.write(root ++ "/sub/b.txt", "B\n")), "File.write sub/b.txt")
+  match Authority.must(Process.run("ln", ["-s", "/etc", root ++ "/out"])) do
   Ok(_) -> root
   Err(e) -> panic("ln -s failed: " ++ e)
   end
@@ -45,7 +45,7 @@ end
 
 -- ln -s target link
 pfn must_ln(target : String, link : String) : Unit do
-  match Process.run("ln", ["-s", target, link]) do
+  match Authority.must(Process.run("ln", ["-s", target, link])) do
   Ok(_) -> ()
   Err(e) -> panic("ln -s failed: " ++ e)
   end
@@ -121,7 +121,7 @@ describe "File.Dir" do
   test "a leaf symlink to a file outside the directory is Escapes" do
     let root = tree("leaf")
     let outside = root ++ "_outside.txt"
-    must(File.write(outside, "keep\n"), "File.write outside")
+    must(Authority.must(File.write(outside, "keep\n")), "File.write outside")
     must_ln(outside, root ++ "/leaf")
     let d = must(File.open_dir(root), "File.open_dir")
     assert escapes(File.open_in(d, "leaf"))
@@ -129,7 +129,7 @@ describe "File.Dir" do
     let dw = must(File.open_dir_write(root), "File.open_dir_write")
     assert escapes(File.open_write_in(dw, "leaf", File.Truncate))
     assert escapes(File.open_write_in(dw, "leaf", File.Append))
-    assert (File.read(outside) == Ok("keep\n"))
+    assert (Authority.must(File.read(outside)) == Ok("keep\n"))
     let _ = File.close_dir(dw)
     let _ = File.delete(outside)
     cleanup("leaf")
@@ -143,7 +143,7 @@ describe "File.Dir" do
     let dw = must(File.open_dir_write(root), "File.open_dir_write")
     assert escapes(File.open_write_in(dw, "dangle", File.Truncate))
     assert escapes(File.open_write_in(dw, "dangle", File.Append))
-    assert (File.exists(target) == false)
+    assert (Authority.must(File.exists(target)) == false)
     let _ = File.close_dir(dw)
     cleanup("dangle")
   end
@@ -160,7 +160,7 @@ describe "File.Dir" do
     let root = tree("ro")
     let d = must(File.open_dir(root), "File.open_dir")
     assert (err_of(File.open_write_in(d, "new.txt", File.Truncate)) == Some(File.Permission("new.txt")))
-    assert (File.exists(root ++ "/new.txt") == false)
+    assert (Authority.must(File.exists(root ++ "/new.txt")) == false)
     let _ = File.close_dir(d)
     cleanup("ro")
   end
@@ -170,11 +170,11 @@ describe "File.Dir" do
     let d = must(File.open_dir_write(root), "File.open_dir_write")
     let h = must(File.open_write_in(d, "new.txt", File.Truncate), "File.open_write_in")
     assert (File.close(h) == Ok(()))
-    assert (File.read(root ++ "/new.txt") == Ok(""))
+    assert (Authority.must(File.read(root ++ "/new.txt")) == Ok(""))
     let h2 = must(File.open_write_in(d, "sub/log.txt", File.Append), "File.open_write_in append")
     assert (File.write_to(h2, "x\n") == Ok(()))
     assert (File.close(h2) == Ok(()))
-    assert (File.read(root ++ "/sub/log.txt") == Ok("x\n"))
+    assert (Authority.must(File.read(root ++ "/sub/log.txt")) == Ok("x\n"))
     assert escapes(File.open_write_in(d, "../escaped.txt", File.Truncate))
     let _ = File.close_dir(d)
     cleanup("rw")
@@ -220,8 +220,8 @@ describe "File.Dir" do
   test "the directory follows a rename" do
     let root = tree("renamed")
     let d = must(File.open_dir(root), "File.open_dir")
-    must(File.rename(root, root ++ "_moved"), "File.rename")
-    assert (File.exists(root) == false)
+    must(Authority.must(File.rename(root, root ++ "_moved")), "File.rename")
+    assert (Authority.must(File.exists(root)) == false)
     assert (first_line(File.open_in(d, "a.txt")) == Ok(Some("A")))
     let _ = File.close_dir(d)
     cleanup("renamed")

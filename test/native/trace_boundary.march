@@ -35,8 +35,8 @@ mod Main do
 
   fn refuse(d, label : String, names : List(String), limit : Trace.Limit) : Unit do
     match Trace.start(d, names, limit) do
-      Ok(_) -> println(label ++ ": STARTED (should be refused)")
-      Err(e) -> println(label ++ ": " ++ err_name(e))
+      Ok(_) -> Authority.ignore(println(label ++ ": STARTED (should be refused)"))
+      Err(e) -> Authority.ignore(println(label ++ ": " ++ err_name(e)))
     end
   end
 
@@ -46,7 +46,8 @@ mod Main do
   end
 
   fn calls(n : Int) : Unit do
-    if sum_steps(n, 0) < 0 do println("impossible") else () end
+    if sum_steps(n, 0) < 0 do Authority.ignore(println("impossible")) else () end
+    ()
   end
 
   fn why_str(w : Option(String)) : String do
@@ -61,12 +62,13 @@ mod Main do
   fn report(label : String, r : Result(Trace.Batch, Trace.TraceError)) : Unit do
     match r do
       Ok(x) ->
-        println(label ++ ": events=" ++ int_to_string(List.length(x.events))
+        Authority.ignore(println(label ++ ": events=" ++ int_to_string(List.length(x.events))
           ++ " recorded=" ++ int_to_string(x.recorded)
           ++ " dropped=" ++ int_to_string(x.dropped)
           ++ " rate_dropped=" ++ int_to_string(x.rate_dropped)
-          ++ " done=" ++ bool_str(x.done) ++ " why=" ++ why_str(x.why))
-      Err(e) -> println(label ++ ": " ++ err_name(e))
+          ++ " done=" ++ bool_str(x.done) ++ " why=" ++ why_str(x.why)))
+        ()
+      Err(e) -> Authority.ignore(println(label ++ ": " ++ err_name(e)))
     end
   end
 
@@ -87,17 +89,17 @@ mod Main do
 
     -- MaxEvents(10): exactly ten events out of 25 calls, then it stops itself.
     match Trace.start(d, ["step"], Trace.MaxEvents(10)) do
-      Err(e) -> println("count start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("count start: " ++ err_name(e)))
       Ok(s) ->
         calls(25)
         match Trace.drain(d, s) do
           Ok(x) ->
             report("count(10) drained", Ok(x))
             let only_step = List.all(x.events, fn e -> e.fn_name == "step")
-            println("all events are step: " ++ bool_str(only_step))
+            Authority.ignore(println("all events are step: " ++ bool_str(only_step)))
             -- a second drain finds nothing new, the session still reporting done
             report("count(10) again", Trace.drain(d, s))
-          Err(e) -> println("count drain: " ++ err_name(e))
+          Err(e) -> Authority.ignore(println("count drain: " ++ err_name(e)))
         end
         -- Once done, further calls are not recorded.
         calls(5)
@@ -109,7 +111,7 @@ mod Main do
     -- Rate(3, 60): the first three calls in the window are kept, the other
     -- seven counted as rate_dropped.
     match Trace.start(d, ["step"], Trace.Rate(3, 60)) do
-      Err(e) -> println("rate start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("rate start: " ++ err_name(e)))
       Ok(s) ->
         calls(10)
         report("rate(3,60) drained", Trace.drain(d, s))
@@ -118,18 +120,18 @@ mod Main do
 
     -- Only the named function is watched.
     match Trace.start(d, ["other"], Trace.MaxEvents(4)) do
-      Err(e) -> println("other start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("other start: " ++ err_name(e)))
       Ok(s) ->
         calls(6)
         report("other (never called)", Trace.drain(d, s))
-        println("other(1) = " ++ int_to_string(other(1)))
+        Authority.ignore(println("other(1) = " ++ int_to_string(other(1))))
         report("other (called once)", Trace.drain(d, s))
         report("other stop", Trace.stop(d, s))
     end
 
     -- A call made by an actor carries the actor's pid.
     match Trace.start(d, ["step"], Trace.MaxEvents(2)) do
-      Err(e) -> println("actor start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("actor start: " ++ err_name(e)))
       Ok(s) ->
         let a = spawn(Caller)
         let _ = send(a, Go(7))
@@ -137,10 +139,10 @@ mod Main do
         match Trace.drain(d, s) do
           Ok(x) ->
             let pids = List.map(x.events, fn e -> e.caller)
-            println("actor pid seen: " ++ bool_str(List.member(pids, pid_to_int(a))))
-            println("events=" ++ int_to_string(List.length(x.events)))
-            println("pids " ++ String.join(List.map(pids, fn p -> int_to_string(p)), ",") ++ " actor " ++ int_to_string(pid_to_int(a)))
-          Err(e) -> println("actor drain: " ++ err_name(e))
+            Authority.ignore(println("actor pid seen: " ++ bool_str(List.member(pids, pid_to_int(a)))))
+            Authority.ignore(println("events=" ++ int_to_string(List.length(x.events))))
+            Authority.ignore(println("pids " ++ String.join(List.map(pids, fn p -> int_to_string(p)), ",") ++ " actor " ++ int_to_string(pid_to_int(a))))
+          Err(e) -> Authority.ignore(println("actor drain: " ++ err_name(e)))
         end
         let _ = Trace.stop(d, s)
     end
@@ -156,12 +158,12 @@ mod Main do
         let _ = Trace.stop(d, s4)
         match Trace.start(d, ["step"], Trace.MaxEvents(1)) do
           Ok(s5) ->
-            println("room again after stop")
+            Authority.ignore(println("room again after stop"))
             let _ = Trace.stop(d, s5)
-          Err(e) -> println("after stop: " ++ err_name(e))
+          Err(e) -> Authority.ignore(println("after stop: " ++ err_name(e)))
         end
-      _ -> println("four sessions did not all start")
+      _ -> Authority.ignore(println("four sessions did not all start"))
     end
-    println("done")
+    Authority.ignore(println("done"))
   end
 end

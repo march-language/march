@@ -111,7 +111,7 @@ mod MonitorExpiryLoopback do
     tcp_close(fd)
     match counts do
       (before, dropped, after) ->
-        println("node-b: pending fires before node-a was declared dead: " ++ int_to_string(before) ++ ", dropped: " ++ int_to_string(dropped) ++ ", after: " ++ int_to_string(after))
+        Authority.ignore(println("node-b: pending fires before node-a was declared dead: " ++ int_to_string(before) ++ ", dropped: " ++ int_to_string(dropped) ++ ", after: " ++ int_to_string(after)))
     end
   end
 end

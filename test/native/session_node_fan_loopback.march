@@ -45,9 +45,9 @@ mod SessionNodeFan do
 
   pfn secret() do "fan-secret" end
   pfn log() do
-    match Vault.whereis("fan_log") do
+    match Authority.must(Vault.whereis("fan_log")) do
       Some(t) -> t
-      None -> Vault.new("fan_log")
+      None -> Authority.must(Vault.new("fan_log"))
     end
   end
 
@@ -55,6 +55,7 @@ mod SessionNodeFan do
   -- CI log should say WHICH phase each role reached rather than nothing.
   pfn phase(role : String, what : String) : () do
     IO.warn("[" ++ role ++ "] " ++ what)
+    ()
   end
 
   pfn note(role : String, line : String) : () do

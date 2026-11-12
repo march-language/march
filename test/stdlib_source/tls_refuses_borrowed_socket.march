@@ -12,7 +12,7 @@ mod TlsRefusesBorrowedSocket do
   needs IO
 
   fn main(_c : Cap(IO)) do
-    let l = match Socket.listen(0) do
+    let l = match Authority.must(Socket.listen(0)) do
       Ok(l) -> l
       Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
@@ -20,12 +20,12 @@ mod TlsRefusesBorrowedSocket do
       Ok(p) -> p
       Err(e) -> panic("local_port: " ++ Socket.error_message(e))
     end
-    let c = match Socket.connect("127.0.0.1", port) do
+    let c = match Authority.must(Socket.connect("127.0.0.1", port)) do
       Ok(c) -> c
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
     let b = Socket.borrow(Socket.raw_fd(c))
-    match Tls.client_ctx(Tls.default_client_config()) do
+    match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
     Err(e) -> println("ctx failed: " ++ Tls.error_to_string(e))
     Ok(ctx) ->
       match Tls.connect(b, ctx, "127.0.0.1") do

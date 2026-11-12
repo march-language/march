@@ -71,8 +71,8 @@ mod MonitorReconnectB do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_spawn : Cap(IO.Spawn), _cap_mut : Cap(IO.Mut), _cap_process : Cap(IO.Process)) do
-    let port = Env.require_int("MARCH_NODE_PORT")
-    let creation = Env.require_int("MARCH_NODE_CREATION")
+    let port = Authority.must(Env.require_int("MARCH_NODE_PORT"))
+    let creation = Authority.must(Env.require_int("MARCH_NODE_CREATION"))
     let target = spawn(Target)
     let listen_fd = match tcp_listen(port) do
       Ok(fd) -> fd

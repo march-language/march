@@ -33,6 +33,7 @@ mod Main do
 
   fn log(_cap : Cap(IO.Console), msg : String) : () do
     println(msg)
+    ()
   end
 
   fn run(_cap : Cap(IO.Console), job : (() -> ())) : () do

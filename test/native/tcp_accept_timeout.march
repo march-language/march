@@ -36,7 +36,7 @@ mod TcpAcceptTimeout do
       Ok(fd) ->
         println("client accepted")
         tcp_close(fd)
-      Err(e) -> println("dialed, yet: " ++ e)
+      Err(e) -> Authority.ignore(println("dialed, yet: " ++ e))
     end
     println("dialer connected: " ++ int_to_string(task_await_unwrap(dialer)))
     tcp_close(listen_fd)

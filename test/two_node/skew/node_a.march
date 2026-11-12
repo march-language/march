@@ -103,7 +103,7 @@ mod TwoNodeSkewA do
         if attempts_left <= 1 do
           Err(e)
         else
-          let _ = Process.run("sleep", Cons("0.1", Nil))
+          let _ = Authority.must(Process.run("sleep", Cons("0.1", Nil)))
           connect_with_retry(host, port, attempts_left - 1)
         end
     end
@@ -113,7 +113,7 @@ mod TwoNodeSkewA do
   -- `arrived` is node-a's own clock at arrival, 0 until then.
   pfn observe(fd : Int, s : SwimDriver.State, buf : List(Int), arrived : Int) : () do
     match tick(fd, s, buf) do
-      (_, _, _, true) -> println("node-a: peer closed early")
+      (_, _, _, true) -> Authority.ignore(println("node-a: peer closed early"))
       (s2, buf2, _, false) ->
         let t = unix_time_ms()
         if arrived == 0 do
@@ -124,7 +124,7 @@ mod TwoNodeSkewA do
                 Some(_) -> true
                 None -> false
               end
-              println("node-a: node-b load fresh on arrival: " ++ bool_to_string(fresh))
+              Authority.ignore(println("node-a: node-b load fresh on arrival: " ++ bool_to_string(fresh)))
               observe(fd, s2, buf2, t)
           end
         else
@@ -133,8 +133,8 @@ mod TwoNodeSkewA do
               Some(_) -> false
               None -> true
             end
-            println("node-a: node-b load stale 11 s after its only report: " ++ bool_to_string(stale))
-            println("node-a: done")
+            Authority.ignore(println("node-a: node-b load stale 11 s after its only report: " ++ bool_to_string(stale)))
+            Authority.ignore(println("node-a: done"))
           else
             observe(fd, s2, buf2, arrived)
           end
@@ -143,7 +143,7 @@ mod TwoNodeSkewA do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
-    let port = Env.require_int("MARCH_PEER_PORT")
+    let port = Authority.must(Env.require_int("MARCH_PEER_PORT"))
     let fd = match connect_with_retry("127.0.0.1", port, 100) do
       Ok(fd) -> fd
       Err(e) -> panic("connect: " ++ Socket.error_message(e))

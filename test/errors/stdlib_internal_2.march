@@ -1,17 +1,9 @@
--- EXPECT-ERROR: Socket.raw_fd
--- `@[stdlib_internal]` (ocap phase 2, Task 3): `Socket.raw_fd` hands the
--- descriptor inside a `Socket` to C. It exists for standard-library code
--- that talks to the runtime with raw descriptors; user code that got the
--- integer out could use it after the socket is closed, when the number may
--- already name someone else's connection. A user program cannot call it.
-mod LeaksADescriptor do
-  needs IO.Console
-  needs IO.NetConnect
-
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
-    match Socket.connect("127.0.0.1", 1) do
-    Ok(s) -> println(int_to_string(Socket.raw_fd(s)))
-    Err(e) -> println(Socket.error_message(e))
-    end
+-- EXPECT-ERROR: is internal to the standard library; use `Authority.check(kind, target)`
+mod Main do
+  -- The ocap phase 1 check point is reached through Authority.check, never
+  -- called directly: the raw answer is an Int code, and phase 4 changes what
+  -- it consults.
+  fn main() do
+    cap_check_raw("IO.Clock", "")
   end
 end

@@ -14,7 +14,7 @@ scrollmd: true
 ## Basic CRUD
 
 ```march
-let v = Vault.new("my-store")
+let v = Authority.must(Vault.new("my-store"))
 
 Vault.set(v, "name", "Alice")
 Vault.get(v, "name")    -- Some("Alice")
@@ -30,7 +30,7 @@ Vault.get(v, "name")    -- None
 `Vault.update` applies a function to the current value atomically: no race between get and set. The callback receives the unwrapped value and is only called when the key exists:
 
 ```march
-let counter = Vault.new("counters")
+let counter = Authority.must(Vault.new("counters"))
 Vault.set(counter, "hits", 0)
 
 Vault.update(counter, "hits", fn n -> n + 1)
@@ -45,7 +45,7 @@ Multiple actors can call `update` concurrently without conflict. If the key does
 `Vault.set_ttl` sets a key with an expiry. It takes `(store, key, value, ttl_secs)`; TTL is in **seconds**:
 
 ```march
-let v = Vault.new("sessions")
+let v = Authority.must(Vault.new("sessions"))
 Vault.set_ttl(v, "token", "abc123", 60)   -- expires after 60 seconds
 ```
 
@@ -56,9 +56,9 @@ Vault.set_ttl(v, "token", "abc123", 60)   -- expires after 60 seconds
 Different store names isolate keys completely:
 
 ```march
-let user_cache    = Vault.new("users")
-let session_store = Vault.new("sessions")
-let rate_limits   = Vault.new("rate-limits")
+let user_cache    = Authority.must(Vault.new("users"))
+let session_store = Authority.must(Vault.new("sessions"))
+let rate_limits   = Authority.must(Vault.new("rate-limits"))
 ```
 
 ---
@@ -66,7 +66,7 @@ let rate_limits   = Vault.new("rate-limits")
 ## Listing keys
 
 ```march
-let store = Vault.new("config")
+let store = Authority.must(Vault.new("config"))
 Vault.set(store, "host", "localhost")
 Vault.set(store, "port", "8080")
 
@@ -81,7 +81,7 @@ let keys = Vault.keys(store)    -- ["host", "port"]
 mod RateLimit do
   needs IO.Mut
   needs IO.Console
-  let store = Vault.new("rate-limit")
+  let store = Authority.must(Vault.new("rate-limit"))
 
   fn check(client_ip : String, limit : Int) : Bool do
     let key = "hits:" ++ client_ip

@@ -2680,6 +2680,7 @@ let test_compiled_run_end_to_end () =
          "";
          "  fn main(_cap : Cap(IO.Console)) : () do";
          "    println(\"forge-run-e2e-ok\")";
+         "    ()";
          "  end";
          "end";
          "" ]);
@@ -2824,7 +2825,8 @@ let test_interpreted_file_run_argv_excludes_compiler () =
          "  needs IO";
          "";
          "  fn main(_cap : Cap(IO)) : () do";
-         "    println(to_string(List.length(System.argv())))";
+         "    println(to_string(List.length(Authority.must(System.argv()))))";
+         "    ()";
          "  end";
          "end";
          "" ]);
@@ -2956,6 +2958,7 @@ let test_js_entrypoint_selects_js_main () =
         "  needs IO.Console";
         "  fn main(_c : Cap(IO.Console)) : Unit do";
         "    println(\"" ^ text ^ "\")";
+        "    ()";
         "  end";
         "end";
         "" ] in
@@ -3017,6 +3020,7 @@ let test_bench_links_ffi_sources () =
          "";
          "  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do";
          "    println(\"answer=\" ++ int_to_string(answer()))";
+         "    ()";
          "  end";
          "end";
          "" ]);

@@ -24,6 +24,7 @@ mod Main do
     let _ = times(100, f)
     let d = live_allocs() - a0
     println(name ++ ", no growth: " ++ bool_to_string(d <= 0))
+    ()
   end
 
   pfn mp_tag(v : Msgpack.Value) : Int do

@@ -23,7 +23,7 @@ mod SocketCloseWhileRecv do
   needs IO.Spawn
 
   pfn poll_result(left : Int) : String do
-    let v = Vault.get_or(Vault.open("scwr"), "result", "")
+    let v = Vault.get_or(Authority.must(Vault.open("scwr")), "result", "")
     if v != "" do v
     else if left <= 0 do "still parked after 3 s"
     else
@@ -33,8 +33,8 @@ mod SocketCloseWhileRecv do
   end
 
   fn main(_c : Cap(IO)) do
-    let _ = Vault.new("scwr")
-    let l = match Socket.listen(0) do
+    let _ = Authority.must(Vault.new("scwr"))
+    let l = match Authority.must(Socket.listen(0)) do
       Ok(l) -> l
       Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
@@ -43,7 +43,7 @@ mod SocketCloseWhileRecv do
       Err(e) -> panic("local_port: " ++ Socket.error_message(e))
     end
     -- The client connects and then says nothing.
-    let client = match Socket.connect("127.0.0.1", port) do
+    let client = match Authority.must(Socket.connect("127.0.0.1", port)) do
       Ok(c) -> c
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
@@ -62,14 +62,14 @@ mod SocketCloseWhileRecv do
         Err(e) -> "woke with the wrong error: " ++ Socket.error_message(e)
         Ok(d) -> "woke with data: [" ++ d ++ "]"
       end
-      Vault.set(Vault.open("scwr"), "result", what))
+      Vault.set(Authority.must(Vault.open("scwr")), "result", what))
     sleep_ms(100)
     let _ = Socket.close(s)
     let r = poll_result(3000)
     println(r)
     -- A reader still parked would keep the process alive past main: leave
     -- now, so the rule fails on the diff instead of hanging.
-    if r != "woke closed" do Process.exit(0) else () end
+    if r != "woke closed" do Authority.ignore(Process.exit(0)) else () end
     let _ = Socket.close(client)
     let _ = Socket.close_listener(l)
   end

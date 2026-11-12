@@ -61,15 +61,15 @@ mod RoleApp do
     type Env = { factor : Int }
 
     fn start(_con : Cap(IO.Console), _node : Cap(ClusterNode.Live)) : Env do
-      println("back: hook ran")
+      Authority.ignore(println("back: hook ran"))
       { factor: 10 }
     end
 
     -- The table version 1 writes the mark into (in the base build).
     fn marks() : Vault(Int) do
-      match Vault.whereis("role_app_marks") do
+      match Authority.must(Vault.whereis("role_app_marks")) do
         Some(t) -> t
-        None -> Vault.new("role_app_marks")
+        None -> Authority.must(Vault.new("role_app_marks"))
       end
     end
 
@@ -152,22 +152,22 @@ mod RoleApp do
     -- Ask, print an answer that differs from the last one printed, and go
     -- again, until $ROLE_APP_STOP exists.
     fn run(io : Cap(IO), node : Cap(ClusterNode.Live), last : Int, hosted_last : Int) : Int do
-      let stop = Env.get("ROLE_APP_STOP", "")
-      if stop != "" && File.exists(stop) do
-        println("front: done")
+      let stop = Authority.must(Env.get("ROLE_APP_STOP", ""))
+      if stop != "" && Authority.must(File.exists(stop)) do
+        Authority.ignore(println("front: done"))
         Back.audit(stop) * 0
       else
         let next = match echo(io, node, 4) do
           Some(v) ->
             if v != last do
-              println("front: answer " ++ int_to_string(v))
+              Authority.ignore(println("front: answer " ++ int_to_string(v)))
               v
             else last end
           None -> last
         end
         let hosted_next = match hosted_echo(io, node) do
           Some(v) ->
-            if v != hosted_last do println("front: hosted answer " ++ int_to_string(v)) else () end
+            if v != hosted_last do Authority.ignore(println("front: hosted answer " ++ int_to_string(v))) else () end
             v
           None -> hosted_last
         end
@@ -186,7 +186,7 @@ mod RoleApp do
     end
 
     fn hosted_echo(io : Cap(IO), node : Cap(ClusterNode.Live)) : Option(Int) do
-      let got = Vault.new("front_hosted_echo")
+      let got = Authority.must(Vault.new("front_hosted_echo"))
       match HostedEcho_Run.initiate_Client(node, fn (s, st) -> hosted_client(s, st, got, 3)) do
         Ok(_) -> Vault.get(got, "v")
         Err(_) -> None
@@ -194,7 +194,7 @@ mod RoleApp do
     end
 
     fn echo(io : Cap(IO), node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
-      let got = Vault.new("front_echo")
+      let got = Authority.must(Vault.new("front_echo"))
       match Echo_Run.initiate_Client(node, fn (s, st) ->
           Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->
             Vault.set(got, "v", m)

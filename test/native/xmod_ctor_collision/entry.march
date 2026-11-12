@@ -16,5 +16,6 @@ mod XModCtorCollision do
       _ -> "MISS"
       end
     println(out)
+    ()
   end
 end

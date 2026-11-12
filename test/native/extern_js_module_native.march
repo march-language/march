@@ -13,5 +13,6 @@ mod JsModuleExternNative do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println("ok")
+    ()
   end
 end

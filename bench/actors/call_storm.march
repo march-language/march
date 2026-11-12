@@ -44,7 +44,7 @@ mod CallStorm do
     let pid = spawn(Slow)
     let tasks = List.map(Range.to_list(Range.new(0, 64)), fn _ ->
       Task.async(fn -> caller(pid, 50, 0, 0)))
-    let results = List.map(tasks, fn t -> Task.await_unwrap(t))
+    let results = List.map(tasks, fn t -> Task.await_unwrap(Authority.must(t)))
     let total = List.fold_left(results, 0, fn (acc, r) ->
       match r do (ok, err) -> acc + ok + err end)
     println("completed " ++ int_to_string(total) ++ " of 3200")

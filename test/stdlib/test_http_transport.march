@@ -13,14 +13,14 @@ mod TestHttpTransport do
 -- A closed Socket: request_on / stream_request_on must refuse https before
 -- they touch the socket, so any Socket will do; a closed one proves it.
 pfn closed_socket() do
-  match Socket.listen(0) do
+  match Authority.must(Socket.listen(0)) do
   Err(e) -> panic("listen: " ++ Socket.error_message(e))
   Ok(l) ->
     let port = match Socket.local_port(l) do
       Ok(p) -> p
       Err(e) -> panic("local_port: " ++ Socket.error_message(e))
     end
-    match Socket.connect("127.0.0.1", port) do
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
     Err(e) -> panic("connect: " ++ Socket.error_message(e))
     Ok(s) ->
       let _ = Socket.close(s)

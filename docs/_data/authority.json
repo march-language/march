@@ -25,14 +25,14 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "d884c1df8",
-    "date": "2026-11-10",
-    "inputs_sha256": "5b6962dfc81197a371d4482fab926131c0ca4e919ae7812bec9d119c573b3b5a"
+    "commit": "956979c56",
+    "date": "2026-11-11",
+    "inputs_sha256": "ee97b7be8295511e87912f3d638a9cc4bcd26dc7c1a62d1623d00ec67a71740b"
   },
   "modules": {
     "classes": {
       "inside": 15,
-      "none": 118,
+      "none": 119,
       "outside": 25
     },
     "list": [
@@ -51,6 +51,12 @@
       {
         "cls": "none",
         "name": "Array",
+        "needs": [],
+        "own": false
+      },
+      {
+        "cls": "none",
+        "name": "Authority",
         "needs": [],
         "own": false
       },
@@ -822,7 +828,8 @@
         "cls": "inside",
         "name": "Random",
         "needs": [
-          "IO.Random"
+          "IO.Random",
+          "IO.Clock"
         ],
         "own": false
       },
@@ -855,7 +862,8 @@
         "cls": "inside",
         "name": "UUID",
         "needs": [
-          "IO.Random"
+          "IO.Random",
+          "IO.Clock"
         ],
         "own": false
       },
@@ -1051,7 +1059,8 @@
         "cls": "outside",
         "name": "Socket",
         "needs": [
-          "IO.NetConnect"
+          "IO.NetConnect",
+          "IO.NetListen"
         ],
         "own": false
       },
@@ -1160,7 +1169,7 @@
         "own": true
       }
     ],
-    "total": 158
+    "total": 159
   },
   "pinned": {
     "node_refusal": "FAILED Server.handle: ERR cap_policy IO.FileWrite \u2014 deploy rejected by node capability policy",

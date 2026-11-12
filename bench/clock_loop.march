@@ -1,0 +1,22 @@
+-- Clock-read throughput: 10_000_000 unix_time_ms reads.
+-- Measures the per-call cost of a clock read, including the capability check
+-- that ocap phase 1 adds (specs/plans/2026-11-10-ocap-p1-result-plan.md).
+-- Prints the read count, not a time, so the output is deterministic.
+--
+-- Usage: march --compile --opt 2 bench/clock_loop.march -o /tmp/clock_loop
+
+mod ClockLoop do
+  needs IO.Console
+  needs IO.Clock
+
+pfn go(i : Int, n : Int, acc : Int) : Int do
+  if i >= n do (if acc > 0 do i else 0 end)
+  else go(i + 1, n, acc + unix_time_ms() % 2 + 1) end
+end
+
+pfn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : Unit do
+  println(int_to_string(go(0, 10000000, 0)))
+  ()
+end
+
+end

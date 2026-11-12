@@ -4015,6 +4015,7 @@ mod DataFrame do
         let cells = List.map(pairs, fn pair ->
           match pair do (_, v) -> value_to_string(v) end)
         println(string_join(cells, " | "))
+        ()
       end
       end)
   end

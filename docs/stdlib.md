@@ -9,7 +9,7 @@ permalink: /docs/stdlib-guide/
 
 The standard library is the set of modules every March program can use with no
 dependency to add and no import to write: collections, strings, files, HTTP, JSON,
-cryptography, clustering and more, 139 modules in all. You call a function by its
+cryptography, clustering and more, 140 modules in all. You call a function by its
 qualified name, `List.map` or `String.trim`, or bring names into scope with `import` or
 `use`. A few names, such as `panic`, `unwrap` and `head`, come from `Prelude` and are
 always in scope.

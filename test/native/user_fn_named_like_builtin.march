@@ -108,5 +108,6 @@ mod UserFnNamedLikeBuiltin do
     println(String.reverse("stressed"))
     println(String.reverse("drawer"))
     println("${file_read(2)}")
+    ()
   end
 end

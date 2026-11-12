@@ -1,0 +1,5 @@
+IO.FileRead("/etc/passwd") refused by the launch grant (IO.FileRead, IO.Spawn)
+IO.Spawn refused by the launch grant (IO.FileRead, IO.Spawn)
+IO.FileWrite allowed
+IO.FileSystem allowed
+exit 0

@@ -43,13 +43,13 @@ mod ClusterSessionsA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "echo-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "echo-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
-        let out = Vault.new("echo_out")
+        let out = Authority.must(Vault.new("echo_out"))
         let t1 = task_spawn(fn _ -> session(c, h, "s1", 10, out))
         let t2 = task_spawn(fn _ -> session(c, h, "s2", 20, out))
         let ok = task_await_unwrap(t1) + task_await_unwrap(t2)

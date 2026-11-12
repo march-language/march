@@ -61,7 +61,7 @@ mod Check do
   -- ---- Skip check ----
 
   pfn is_skipped() : Bool do
-    match process_env("MARCH_SKIP_PROPERTIES") do
+    match env_or_none("MARCH_SKIP_PROPERTIES") do
     Some("1") -> true
     _         -> false
     end
@@ -69,17 +69,39 @@ mod Check do
 
   -- ---- Seed resolution ----
 
+  -- A variable's value, a refused read counting as unset: a property run
+  -- must not fail on its configuration.
+  -- Self-contained (the builtins behind an Authority check, as Process.env
+  -- and System.now do it) so Check needs neither module loaded.
+  pfn env_or_none(name : String) : Option(String) do
+    match Authority.check("IO.Process", name) do
+    Ok(_) -> process_env(name)
+    Err(_) -> None
+    end
+  end
+
+  pfn clock_seed() : Int do
+    match Authority.check("IO.Clock", "") do
+    Ok(_) -> float_to_int(unix_time(()))
+    Err(_) -> 0
+    end
+  end
+
   pfn resolve_seed(config_seed : Option(Int)) : Int do
     match config_seed do
     Some(n) -> n
     None    ->
-      match process_env("MARCH_PROP_SEED") do
+      -- A refused clock gives seed 0: a property run must not fail on its
+      -- seed.
+      -- A refused environment read counts as unset (the seed then comes from
+      -- the clock, or is 0).
+      match env_or_none("MARCH_PROP_SEED") do
       Some(s) ->
         match string_to_int(s) do
         Some(n) -> n
-        None    -> float_to_int(unix_time(()))
+        None    -> clock_seed()
         end
-      None    -> float_to_int(unix_time(()))
+      None    -> clock_seed()
       end
     end
   end

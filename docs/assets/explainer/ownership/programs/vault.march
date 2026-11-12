@@ -25,9 +25,10 @@ mod Own do
 
   fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) : Unit do
     let t = build(4, 1)
-    let kept = Vault.new("trees")
+    let kept = Authority.must(Vault.new("trees"))
     Vault.set(kept, "before", t)
     let t2 = inc_leaves(t)
     println(int_to_string(sum_leaves(t2)))
+    ()
   end
 end

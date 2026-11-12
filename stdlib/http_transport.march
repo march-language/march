@@ -113,6 +113,19 @@ mod HttpTransport do
     end
   end
 
+  -- Socket.connect with its capability refusal folded into this module's
+  -- single Result: a refused connect is `Refused(reason)` (nothing is sent,
+  -- as for a request that would smuggle). HttpTransport keeps that shape
+  -- until its own opens are re-typed
+  -- (specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md).
+  pfn dial(host : String, port : Int) : Result(Socket, TransportError) do
+    match Socket.connect(host, port) do
+    Err(refused) -> Err(Refused(Authority.describe(refused)))
+    Ok(Err(e)) -> Err(connect_error(e))
+    Ok(Ok(s)) -> Ok(s)
+    end
+  end
+
   -- Guard the Socket-oriented APIs: they write plaintext to the socket.
   pfn require_plain_http(req) do
     match Http.scheme(req) do
@@ -151,10 +164,7 @@ mod HttpTransport do
         Some(p) -> p
         None -> 80
         end
-      match Socket.connect(req_host, req_port) do
-      Err(e) -> Err(connect_error(e))
-      Ok(s) -> Ok(s)
-      end
+      dial(req_host, req_port)
     end
     end
   end
@@ -432,8 +442,9 @@ mod HttpTransport do
 
   pfn request_https_raw(host, port, raw) do
     match Tls.client_ctx(Tls.default_client_config()) do
-    Err(error) -> Err(ConnectionRefused(Tls.error_to_string(error)))
-    Ok(context) -> do
+    Err(refused) -> Err(Refused(Authority.describe(refused)))
+    Ok(Err(error)) -> Err(ConnectionRefused(Tls.error_to_string(error)))
+    Ok(Ok(context)) -> do
       let result = request_https_with_context(context, host, port, raw)
       Tls.ctx_free(context)
       result
@@ -442,8 +453,8 @@ mod HttpTransport do
   end
 
   pfn request_https_with_context(context, host, port, raw) do
-    match Socket.connect(host, port) do
-    Err(error) -> Err(connect_error(error))
+    match dial(host, port) do
+    Err(error) -> Err(error)
     Ok(s) -> do
       -- A successful Tls.connect takes the socket over (closing the TLS
       -- connection closes it); after a failed one it is still ours, and this
@@ -511,8 +522,8 @@ mod HttpTransport do
   end
 
   pfn request_plain_raw(req_host, req_port, raw_request) do
-    match Socket.connect(req_host, req_port) do
-    Err(e) -> Err(connect_error(e))
+    match dial(req_host, req_port) do
+    Err(e) -> Err(e)
     Ok(s) -> do
       let received = match send_all_on(s, raw_request) do
         Err(e) -> Err(e)

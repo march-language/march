@@ -12,5 +12,6 @@ mod Main do
 
   fn main(cap : Cap(IO), n : Int) : () do
     println(int_to_string(n))
+    ()
   end
 end

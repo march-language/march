@@ -297,7 +297,7 @@ mod SessionNode do
     end
   end
 
-  pfn queue_limit() : Int do Env.get_int("MARCH_SESSION_QUEUE_MAX_BYTES", 67108864) end
+  pfn queue_limit() : Int do Authority.must(Env.get_int("MARCH_SESSION_QUEUE_MAX_BYTES", 67108864)) end
 
   -- More than [limit] bytes are queued for [l]'s peer and unread: it has
   -- stopped reading, and it is given up on, once. Standalone, the
@@ -1011,19 +1011,19 @@ mod SessionNode do
     let ep = spawn(Endpoint)
     let tag = node_id ++ "." ++ int_to_string(my_role) ++ "." ++ int_to_string(pid_to_int(ep))
     let p = { my_role: my_role, node_id: node_id,
-      handlers: Vault.new("session_node_handlers_" ++ tag),
-      waiting: Vault.new("session_node_waiting_" ++ tag),
-      pending: Vault.new("session_node_pending_" ++ tag),
-      meta: Vault.new("session_node_meta_" ++ tag),
-      forward: Vault.new("session_node_forward_" ++ tag),
-      why: Vault.new("session_node_why_" ++ tag),
-      gone: Vault.new("session_node_gone_" ++ tag),
-      cancel_hs: Vault.new("session_node_cancel_" ++ tag),
-      crash_hs: Vault.new("session_node_crash_" ++ tag),
-      forward_cancel: Vault.new("session_node_fwdcancel_" ++ tag),
-      forward_crash: Vault.new("session_node_fwdcrash_" ++ tag),
-      heard: Vault.new("session_node_heard_" ++ tag),
-      drain_hs: Vault.new("session_node_drain_" ++ tag),
+      handlers: Authority.must(Vault.new("session_node_handlers_" ++ tag)),
+      waiting: Authority.must(Vault.new("session_node_waiting_" ++ tag)),
+      pending: Authority.must(Vault.new("session_node_pending_" ++ tag)),
+      meta: Authority.must(Vault.new("session_node_meta_" ++ tag)),
+      forward: Authority.must(Vault.new("session_node_forward_" ++ tag)),
+      why: Authority.must(Vault.new("session_node_why_" ++ tag)),
+      gone: Authority.must(Vault.new("session_node_gone_" ++ tag)),
+      cancel_hs: Authority.must(Vault.new("session_node_cancel_" ++ tag)),
+      crash_hs: Authority.must(Vault.new("session_node_crash_" ++ tag)),
+      forward_cancel: Authority.must(Vault.new("session_node_fwdcancel_" ++ tag)),
+      forward_crash: Authority.must(Vault.new("session_node_fwdcrash_" ++ tag)),
+      heard: Authority.must(Vault.new("session_node_heard_" ++ tag)),
+      drain_hs: Authority.must(Vault.new("session_node_drain_" ++ tag)),
       ep: ep, links: Nil, on_close: on_close }
     -- Present until the party's tables are closed (`close_party`): a task
     -- that outlives the session (a heartbeat) stops on its absence.
@@ -1438,8 +1438,8 @@ mod SessionNode do
   -- <= 0 turns the heartbeat off) and MARCH_SESSION_TIMEOUT_MS (default
   -- 10000).
   pfn heartbeat_config() : (Int, Int) do
-    let interval = Env.get_int("MARCH_SESSION_HEARTBEAT_MS", 1000)
-    let timeout = Env.get_int("MARCH_SESSION_TIMEOUT_MS", 10000)
+    let interval = Authority.must(Env.get_int("MARCH_SESSION_HEARTBEAT_MS", 1000))
+    let timeout = Authority.must(Env.get_int("MARCH_SESSION_TIMEOUT_MS", 10000))
     (interval, if interval > 0 do timeout / interval else 0 end)
   end
 
@@ -1783,7 +1783,7 @@ mod SessionNode do
   -- for a role to connect, and for each handshake and hello once it has.
   -- MARCH_SESSION_CONNECT_MS (default 20000); <= 0 waits for ever.
   pfn connect_ms() : Int do
-    Env.get_int("MARCH_SESSION_CONNECT_MS", 20000)
+    Authority.must(Env.get_int("MARCH_SESSION_CONNECT_MS", 20000))
   end
 
   -- Dial [a] every 100 ms until it answers or [attempts] run out (connect_ms
@@ -2561,7 +2561,7 @@ mod SessionNode do
   -- The process-wide counter a cluster party's seq key comes from
   -- (`ClusterNode.session_seq`): never reused, so a late DELIVERY_FAILED for
   -- an ended session's frame finds no handler rather than another session's.
-  pfn session_keys() : Vault(Int) do Vault.open("session_node_seq_keys") end
+  pfn session_keys() : Vault(Int) do Authority.must(Vault.open("session_node_seq_keys")) end
 
   -- A cluster party's end: its tables and its route's slot. Runs once the
   -- route is gone, so no frame reaches the slot after.
@@ -2678,7 +2678,7 @@ mod SessionNode do
   end
 
   pfn initiated_table(node : Cap(ClusterNode.Live)) : Vault(Int) do
-    Vault.open("session_node_initiated_" ++ ClusterNode.node_id(node))
+    Authority.must(Vault.open("session_node_initiated_" ++ ClusterNode.node_id(node)))
   end
 
   -- Run [f] (one session this node started) counted in `initiated`.
@@ -2739,7 +2739,7 @@ mod SessionNode do
       : Result(Session.Outcome, RunError) do
     let p0 = party(my_role, ClusterNode.node_id(node), on_close)
     Vault.set(p0.why, "sid", session)
-    let slot = Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep)))
+    let slot = Authority.must(Vault.new("session_node_slot_" ++ session ++ "." ++ int_to_string(pid_to_int(p0.ep))))
     let route_key = ClusterNode.route_session(node, pid_to_int(p0.ep), fn d -> cluster_frame(slot, p0, session, d))
     let me = role_name(session, my_role)
     let fp_ok = if fingerprint == "" do Ok(())
@@ -3267,7 +3267,7 @@ mod SessionNode do
   -- role, fingerprint, host actor pid) and the session id, so a delivery
   -- that reaches the wrong session or host shows up in a passing run's log.
   -- Read once per offer; off, it prints nothing.
-  pfn hosted_trace_on() : Bool do Env.get("MARCH_SESSION_TRACE_HOSTED", "") == "1" end
+  pfn hosted_trace_on() : Bool do Env.get("MARCH_SESSION_TRACE_HOSTED", "") == Ok("1") end
 
   pfn hosted_trace(enabled : Bool, what : String, event : String, sid : String, detail : String) : () do
     if enabled do print_stderr("session_node: hosted " ++ event ++ " " ++ what ++ " sid=" ++ sid
@@ -3301,7 +3301,7 @@ mod SessionNode do
     let o = { node: node, proto: proto, fingerprint: fingerprint, roles: roles, compat: compat, my_role: my_role, capacity: capacity,
               name: ap_name(proto, my_role, fingerprint, ClusterNode.node_id(node)),
               id: int_to_string(pid_to_int(a)),
-              flags: Vault.new("session_ap_flags"), strs: Vault.new("session_ap_strs"),
+              flags: Authority.must(Vault.new("session_ap_flags")), strs: Authority.must(Vault.new("session_ap_strs")),
               start: start, worker: a }
     let key = ClusterNode.route_session(node, pid_to_int(a), fn d -> offer_frame(o, d))
     Vault.set(o.strs, "r" ++ o.id, key)
@@ -3355,7 +3355,7 @@ mod SessionNode do
   -- the reader before the unroute): a use-after-free in `Vault.set` that the
   -- ASan gate caught in cert_order. The keys go when the initiation ends
   -- (`forget_answers`); one a late Answer writes after that is never read.
-  pfn answers_table() : Vault(String) do Vault.open("session_ap_answers") end
+  pfn answers_table() : Vault(String) do Authority.must(Vault.open("session_ap_answers")) end
 
   pfn answer_key(sid : String, nid : String) : String do sid ++ "/" ++ nid end
 
@@ -3688,7 +3688,7 @@ mod SessionNode do
     let sid = ClusterNode.node_id(node) ++ "." ++ int_to_string(ClusterNode.creation(node)) ++ "." ++ int_to_string(n)
     let inbox = spawn(ApInbox)
     let answers = answers_table()
-    let budget = Vault.new("session_ap_budget_" ++ sid)
+    let budget = Authority.must(Vault.new("session_ap_budget_" ++ sid))
     let t = connect_ms()
     Vault.set(budget, "left", if t > 0 do t else 3600000 end)
     let key = ClusterNode.route_session(node, pid_to_int(inbox), fn d -> inbox_frame(answers, sid, d))

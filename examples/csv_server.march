@@ -17,7 +17,7 @@ mod CsvServer do
 
 pfn save_csv(body) do
   let path = "/tmp/march_csv_input.csv"
-  File.write(path, body)
+  Authority.must(File.write(path, body))
   path
 end
 
@@ -87,7 +87,7 @@ pfn router(conn) do
   (:post, Cons("csv", Nil)) -> do
     let body = HttpServer.req_body(conn)
     let csv_path = save_csv(body)
-    match Csv.read_all(csv_path, ",", :rfc4180) do
+    match Authority.must(Csv.read_all(csv_path, ",", :rfc4180)) do
     Err(e) ->
       conn |> HttpServer.text(400, "CSV error: " ++ to_string(e))
     Ok(all_rows) -> do
@@ -122,7 +122,7 @@ pfn router(conn) do
         "High scorers (>80): " ++ to_string(high_count) ++ "\n" ++
         "Names (uppercase, byte sizes):\n" ++
         names_section
-      File.write("/tmp/march_csv_results.txt", result)
+      Authority.must(File.write("/tmp/march_csv_results.txt", result))
       conn |> HttpServer.text(200, result)
     end
     end
@@ -135,7 +135,7 @@ pfn router(conn) do
 end
 
 pfn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_netlisten : Cap(IO.NetListen)) do
-  println("CSV server starting on port 9876 ...")
+  Authority.ignore(println("CSV server starting on port 9876 ..."))
   HttpServer.new(9876)
   |> HttpServer.plug(router)
   |> HttpServer.listen()

@@ -1,0 +1,11 @@
+-- EXPECT-VIOLATED: postcondition inc_small
+-- EXPECT-ERROR: for example, when `n` is
+-- Kind: lemma. The theorem `inc(n) <= n` is false for every `n`.
+mod K06 do
+  fn inc(n : Int) : Int do n + 1 end
+
+  @[lemma]
+  fn inc_small(n : {Int | _ >= 0}) : {Unit | inc(n) <= n} do
+    ()
+  end
+end

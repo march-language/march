@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: This capability operation returns
+mod Main do
+  needs IO.Console
+
+  -- A unit result on a line of its own, where `()` is declared: the fix adds
+  -- a line `()` after it.
+  fn greet(name : String) : () do
+    println("hello, " ++ name)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    greet("world")
+  end
+end

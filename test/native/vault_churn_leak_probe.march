@@ -47,6 +47,7 @@ mod Main do
 
   pfn flat(label : String, d : Int, iters : Int) : () do
     println(label ++ ": flat " ++ (if d < iters / 10 do "true" else "false (" ++ int_to_string(d) ++ " over)" end))
+    ()
   end
 
   pfn sets(t : Vault(Rec), i : Int, stop : Int) : () do
@@ -136,7 +137,7 @@ mod Main do
   pfn ns(i : Int, stop : Int) : () do
     if i >= stop do () else
       Vault.ns_set("vault_churn_ns", "n", mk(i))
-      let _ : Option(Rec) = Vault.ns_get("vault_churn_ns", "n")
+      let _ : Option(Rec) = Authority.must(Vault.ns_get("vault_churn_ns", "n"))
       ns(i + 1, stop)
     end
   end
@@ -154,7 +155,7 @@ mod Main do
   pfn tables(i : Int, stop : Int, found : Int) : Int do
     if i >= stop do found else
       let name = "vault_churn_table_" ++ int_to_string(i)
-      let t : Vault(Rec) = Vault.new(name)
+      let t : Vault(Rec) = Authority.must(Vault.new(name))
       Vault.set(t, "a", mk(i))
       Vault.set(t, "b", mk(i + 1))
       Vault.close(t)
@@ -162,7 +163,7 @@ mod Main do
       -- empty table that keeps nothing.
       Vault.set(t, "late", mk(i))
       let kept = if Option.is_some(Vault.get(t, "late")) || Vault.size(t) != 0 do 1 else 0 end
-      let left : Option(Vault(Rec)) = Vault.whereis(name)
+      let left : Option(Vault(Rec)) = Authority.must(Vault.whereis(name))
       tables(i + 1, stop, found + kept + (if Option.is_some(left) do 1 else 0 end))
     end
   end
@@ -170,7 +171,7 @@ mod Main do
   fn main(_c : Cap(IO)) do
     let n = 2000
 
-    let t : Vault(Rec) = Vault.new("vault_churn_rec")
+    let t : Vault(Rec) = Authority.must(Vault.new("vault_churn_rec"))
     sets(t, 0, 10)
     let a = live_allocs()
     sets(t, 0, n)
@@ -180,32 +181,32 @@ mod Main do
       None -> println("intact: missing")
     end
 
-    let k : Vault(Int) = Vault.new("vault_churn_keys")
+    let k : Vault(Int) = Authority.must(Vault.new("vault_churn_keys"))
     keyed(k, 0, 10)
     let b = live_allocs()
     keyed(k, 0, n)
     flat("built keys", live_allocs() - b, n)
 
-    let f : Vault(Float) = Vault.new("vault_churn_float")
+    let f : Vault(Float) = Authority.must(Vault.new("vault_churn_float"))
     floats(f, 0, 10)
     let c = live_allocs()
     floats(f, 0, n)
     flat("Vault.set Float", live_allocs() - c, n)
     println("intact: " ++ float_to_string(Vault.get_or(f, "f", 0.0)))
 
-    let s : Vault(Shape) = Vault.new("vault_churn_shape")
+    let s : Vault(Shape) = Authority.must(Vault.new("vault_churn_shape"))
     shapes(s, 0, 10)
     let d = live_allocs()
     shapes(s, 0, n)
     flat("Vault.set ADT", live_allocs() - d, n)
 
-    let tp : Vault((String, List(String))) = Vault.new("vault_churn_tuple")
+    let tp : Vault((String, List(String))) = Authority.must(Vault.new("vault_churn_tuple"))
     tuples(tp, 0, 10)
     let d2 = live_allocs()
     tuples(tp, 0, n)
     flat("Vault.set tuple", live_allocs() - d2, n)
 
-    let ik : Vault(Rec) = Vault.new("vault_churn_intkey")
+    let ik : Vault(Rec) = Authority.must(Vault.new("vault_churn_intkey"))
     int_keyed(ik, 0, 10)
     let d3 = live_allocs()
     int_keyed(ik, 0, n)
@@ -231,7 +232,7 @@ mod Main do
       None -> println("intact: missing")
     end
 
-    let q : Vault(List(String)) = Vault.new("vault_churn_queue")
+    let q : Vault(List(String)) = Authority.must(Vault.new("vault_churn_queue"))
     pushes(q, 0, 10)
     let j = live_allocs()
     pushes(q, 0, n)

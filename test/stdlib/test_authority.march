@@ -1,0 +1,87 @@
+-- Tests for the Authority stdlib module (ocap phase 1: refusals as values).
+-- Run with: scripts/run-tests.sh stdlib_march
+
+mod TestAuthority do
+
+describe "Authority" do
+
+  describe "describe" do
+
+    test "a launch refusal with a target" do
+      let e = CapError("IO.FileRead", "/etc/passwd", ByLaunch, "IO.Console")
+      assert (Authority.describe(e) == "IO.FileRead(\"/etc/passwd\") refused by the launch grant (IO.Console)")
+    end
+
+    test "a module limit with no target" do
+      let e = CapError("IO.Clock", "", ByModNeeds("Report"), "IO.Console")
+      assert (Authority.describe(e) == "IO.Clock refused by module Report's needs (IO.Console)")
+    end
+
+    test "a function limit" do
+      let e = CapError("IO.Clock", "", ByFnNeeds("Report.run"), "()")
+      assert (Authority.describe(e) == "IO.Clock refused by function Report.run's needs (())")
+    end
+
+    test "a restrict block" do
+      let e = CapError("IO.NetConnect", "evil.com:443", ByRestrict("main.march:12"), "IO.NetConnect(\"api.com/\")")
+      assert (Authority.describe(e) == "IO.NetConnect(\"evil.com:443\") refused by the restrict at main.march:12 (IO.NetConnect(\"api.com/\"))")
+    end
+
+    test "a dependency grant" do
+      let e = CapError("IO.FileWrite", "/tmp/x", ByGrant("weather"), "IO.NetConnect")
+      assert (Authority.describe(e) == "IO.FileWrite(\"/tmp/x\") refused by the grant to package weather (IO.NetConnect)")
+    end
+
+    test "an empty limit scope reads as nothing" do
+      let e = CapError("IO.Console", "stdout", ByLaunch, "")
+      assert (Authority.describe(e) == "IO.Console(\"stdout\") refused by the launch grant (nothing)")
+    end
+
+  end
+
+  describe "must and ignore" do
+
+    test "must returns the Ok payload" do
+      assert (Authority.must(Ok(3)) == 3)
+    end
+
+    test "ignore discards an Ok" do
+      assert (Authority.ignore(Ok(1)) == ())
+    end
+
+    test "ignore discards an Err" do
+      assert (Authority.ignore(Err(CapError("IO.Clock", "", ByLaunch, ""))) == ())
+    end
+
+  end
+
+  describe "operations return Ok when allowed" do
+
+    test "console" do
+      assert (println("authority test") == Ok(()))
+      assert (IO.puts("authority test") == Ok(()))
+    end
+
+    test "clock" do
+      assert (Authority.must(System.now_ms()) > 1700000000000)
+      assert (Authority.must(DateTime.now()) > 1700000000)
+    end
+
+    test "random" do
+      assert (Bytes.length(Authority.must(Crypto.random_bytes(4))) == 4)
+      assert (String.byte_size(Authority.must(Crypto.random_hex(3))) == 6)
+    end
+
+  end
+
+  describe "check" do
+
+    test "an unrefused kind is allowed" do
+      assert (Authority.check("IO.Console", "stdout") == Ok(()))
+    end
+
+  end
+
+end
+
+end

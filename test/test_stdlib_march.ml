@@ -87,6 +87,7 @@ let load_stdlib_decls name =
 let all_stdlib_decls =
   let files = [
     "prelude.march";
+    "authority.march";
     "option.march";
     "result.march";
     "list.march";
@@ -438,6 +439,10 @@ let () =
       Alcotest.test_case
         "every test/stdlib/test_*.march file is registered or documented as deferred"
         `Quick check_registry_drift;
+    ]);
+    ("authority", [
+      Alcotest.test_case "Authority module"
+        `Quick (run_stdlib_test "test_authority.march" "TestAuthority");
     ]);
     ("http", [
       Alcotest.test_case "Http module"

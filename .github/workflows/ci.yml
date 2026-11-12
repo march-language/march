@@ -146,19 +146,17 @@ jobs:
           # caught, just one step later.
           dune build bin/main.exe
 
-      # A test binary killed by a signal its own handler never saw (a bare
-      # "Segmentation fault (core dumped)" from `sh -c ./native_X`) leaves no
-      # trace on a stock runner: the default core_pattern pipes to apport,
-      # which discards cores of unpackaged binaries. Write them to a known
-      # directory instead; the Test step raises the core limit, and the two
-      # steps after it backtrace and upload them, on failure only.
+      # Failure evidence (scripts/ci-evidence.sh; "Failure evidence" in
+      # README.md). A test binary killed by a signal its own handler never saw
+      # (a bare "Segmentation fault (core dumped)" from `sh -c ./native_X`)
+      # leaves no trace on a stock runner, and several flake sightings were
+      # lost with their logs. This sends Linux cores to a known directory; the
+      # Test step raises the core limit and tees its output there; on failure
+      # the two steps after it add backtraces, the crashing binaries, macOS
+      # crash reports and dune's log, and upload the lot.
       # specs/todos/2026-10-07-flake-bare-sigsegv-native-fixtures-linux.md
-      - name: Capture test cores (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo mkdir -p /tmp/march-cores && sudo chmod 1777 /tmp/march-cores
-          # %E: the executable's absolute path with '/' written as '!'.
-          sudo sysctl -w kernel.core_pattern='/tmp/march-cores/core.%p.%E'
+      - name: Set up failure evidence
+        run: scripts/ci-evidence.sh setup
 
       - name: Test (${{ matrix.shard }})
         # Sized for the unsharded macOS run: 37-49 min on main in late
@@ -171,7 +169,10 @@ jobs:
         # get under a timeout either: that doubled its runner-minutes (see
         # README.md, "Runner budget").
         timeout-minutes: 75
+        # The braces are not indented so the tee costs no diff in the body.
         run: |
+          set -o pipefail
+          {
           eval $(opam env)
           if [ "$RUNNER_OS" = Linux ]; then ulimit -c unlimited; fi
           case "${{ matrix.shard }}" in
@@ -182,7 +183,7 @@ jobs:
             # children print whole, then one summary line with the slowest
             # groups. Not a new shard: no extra runner from the 20-slot pool.
             refinecheck) MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-test_refinecheck ;;
-            compiler)    dune build @test/runtest-run_compiler ;;
+            compiler)    dune build @test/runtest-run_compiler @test/runtest-run_cap_conformance ;;
             rest)
               # `dune runtest` minus forge/ (the `forge` shard). A dune file
               # declaring tests outside test/, lsp/ and forge/ would run in
@@ -204,36 +205,20 @@ jobs:
             all)         MARCH_CI_SKIP_OS_INDEPENDENT=1 dune runtest ;;
             *) echo "::error::unknown test shard '${{ matrix.shard }}'"; exit 1 ;;
           esac
+          } 2>&1 | tee "$MARCH_EVIDENCE_DIR/test.log"
 
-      - name: Backtrace test cores (Linux)
-        if: failure() && runner.os == 'Linux'
-        run: |
-          shopt -s nullglob
-          cores=(/tmp/march-cores/core.*)
-          echo "${#cores[@]} core file(s) in /tmp/march-cores"
-          [ ${#cores[@]} -gt 0 ] || exit 0
-          sudo apt-get install -y gdb > /dev/null
-          for c in "${cores[@]:0:8}"; do
-            exe=$(basename "$c" | sed 's/^core\.[0-9]*\.//; s/!/\//g')
-            echo "::group::$c ($exe)"
-            if [ -f "$exe" ]; then
-              cp "$exe" /tmp/march-cores/ || true
-              gdb -batch -ex 'p $_siginfo' -ex 'x/6i $pc' \
-                  -ex 'thread apply all bt 40' "$exe" "$c" 2>&1 | grep -v '^\[New LWP'
-            else
-              echo "the executable is gone (rebuilt or removed since the crash)"
-            fi
-            echo "::endgroup::"
-          done
+      - name: Collect failure evidence
+        if: failure() && env.MARCH_EVIDENCE_DIR != ''
+        run: scripts/ci-evidence.sh collect
 
-      - name: Upload test cores (Linux)
-        if: failure() && runner.os == 'Linux'
+      - name: Upload failure evidence
+        if: failure() && env.MARCH_EVIDENCE_DIR != ''
         uses: actions/upload-artifact@v7
         with:
-          name: cores-${{ matrix.os }}-${{ matrix.shard }}
-          path: /tmp/march-cores
+          name: evidence-test-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ env.MARCH_EVIDENCE_DIR }}
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
 
   # Distributed-plane guards that used to run after `dune runtest` in the ubuntu
   # `test` leg, adding ~15 min to it serially. They need no test exe, only the
@@ -311,6 +296,12 @@ jobs:
           done
           echo "node_discovery: 200/200 runs matched the golden"
 
+      # Failure evidence, as in the `test` job. A failed scenario's work
+      # directory (each node's binary, stdout, stderr and golden diff) is
+      # still in /tmp afterwards; `collect` copies it.
+      - name: Set up failure evidence
+        run: scripts/ci-evidence.sh setup
+
       # Compiling is most of a scenario's time, and the loop below is serial.
       # This compiles every node of the shard 4 at a time first (one per
       # runner vCPU); each scenario then copies its binaries instead
@@ -340,13 +331,30 @@ jobs:
         # in both the matrix and the --list below) rather than raising this.
         timeout-minutes: 50
         run: |
+          set -o pipefail
+          {
           eval $(opam env)
+          ulimit -c unlimited
           # The list is captured, not looped over inline: `for s in $(...)`
           # ignores a failing --list and would run zero scenarios, green.
           list=$(scripts/two-node.sh --list ${{ matrix.shard }}/3) || exit 1
           [ -n "$list" ] || { echo "::error::shard ${{ matrix.shard }}/3 lists no scenarios"; exit 1; }
           echo "shard ${{ matrix.shard }}/3: $(echo "$list" | wc -l) scenarios"
           for s in $list; do scripts/two-node.sh "$s" || exit 1; done
+          } 2>&1 | tee "$MARCH_EVIDENCE_DIR/two-node.log"
+
+      - name: Collect failure evidence
+        if: failure() && env.MARCH_EVIDENCE_DIR != ''
+        run: scripts/ci-evidence.sh collect
+
+      - name: Upload failure evidence
+        if: failure() && env.MARCH_EVIDENCE_DIR != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-two-node-${{ matrix.shard }}
+          path: ${{ env.MARCH_EVIDENCE_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Static-semantics + grammar corpora, doc notebooks and formatting: all
   # independent of `dune runtest` and of each other, and all short — grouped
@@ -713,6 +721,18 @@ jobs:
             exit 1
           fi
 
+      # The ratchet above counts obligations; nothing else in CI holds a
+      # VIOLATED one, so a checker that proved everything passed every refine
+      # gate. Each specs/lang/refine/reject fixture must be reported violated
+      # (a skip fails), from its own fresh cwd so no VC cache answers for the
+      # solver. known-accepted.txt lists the gaps and may only shrink.
+      - name: Refinement must-reject corpus
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          specs/lang/refine/check_refine.sh
+
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 5
         run: |
@@ -872,6 +892,12 @@ jobs:
         timeout-minutes: 30
         uses: ./.github/actions/march-setup
 
+      # Failure evidence, as in the `test` job. sanitize.sh copies each
+      # failure's ASan binary and output into the directory (its `keep`). ASan
+      # builds do not dump core; the report in the log is the backtrace.
+      - name: Set up failure evidence
+        run: scripts/ci-evidence.sh setup
+
       - name: AddressSanitizer gate (RC/UAF guard) — shard ${{ matrix.shard }}/3
         # History of the unsharded step's limit: 15 min covered golden + native
         # and the first 14 two-node scenarios; 45 -> 65 on 2026-09-26 and
@@ -885,12 +911,29 @@ jobs:
           SANITIZE_TWO_NODE_SHARD: ${{ matrix.shard }}/3
           SANITIZE_TWO_NODE_ONLY: ${{ matrix.shard != 1 && '1' || '0' }}
         run: |
+          set -o pipefail
+          {
           eval $(opam env)
+          ulimit -c unlimited
           dune shutdown 2>/dev/null || true
           # test/hcr_deploy.exe: the two-node sweep's hot-deploy scenarios.
           dune build bin/main.exe forge/bin/main.exe test/hcr_deploy.exe
           MARCH_BIN="$PWD/_build/default/bin/main.exe" \
             ./specs/lang/golden/sanitize.sh
+          } 2>&1 | tee "$MARCH_EVIDENCE_DIR/sanitize.log"
+
+      - name: Collect failure evidence
+        if: failure() && env.MARCH_EVIDENCE_DIR != ''
+        run: scripts/ci-evidence.sh collect
+
+      - name: Upload failure evidence
+        if: failure() && env.MARCH_EVIDENCE_DIR != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-sanitize-gate-${{ matrix.shard }}
+          path: ${{ env.MARCH_EVIDENCE_DIR }}
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Build once, fan out via same-run artifacts (not a persistent actions/cache):
   # cross-linux-oracle and the property-oracle shards below each used to
@@ -967,6 +1010,9 @@ jobs:
       # to resolve libblake3.so at process start) and zig (needed because
       # test_oracle.exe's own MARCH_ORACLE_CROSS logic shells out to `zig cc`
       # for the cross-compile) are actually required at runtime.
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
+
       - name: Install system dependencies (blake3 for the native reference build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
@@ -1058,6 +1104,9 @@ jobs:
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@v7
+
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
 
       - name: Install system dependencies (blake3, the compiler's only runtime .so)
         run: |
@@ -1166,6 +1215,9 @@ jobs:
 
       # Only the C libraries the prebuilt exe dynamically links — no OCaml or
       # opam here, since this job only RUNS a binary built upstream.
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
+
       - name: Install system dependencies (blake3 for the native build)
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
@@ -1283,6 +1335,9 @@ jobs:
       # above for why; only the system deps below (dynamic-linker + the
       # generated-program-link needs of the `march --compile` subprocesses
       # this binary spawns) are actually required at runtime.
+      - name: Check the apt mirror
+        uses: ./.github/actions/apt-mirror-fallback
+
       - name: Install system dependencies (blake3 for the native build)
         run: |
           sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev

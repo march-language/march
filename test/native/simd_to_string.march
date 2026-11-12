@@ -10,5 +10,6 @@ mod SimdToString do
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     let v = Simd.make_f32x4(1.0, 2.0, 3.0, 4.0)
     println(IOList.to_string(~H"<p>${v}</p>"))
+    ()
   end
 end

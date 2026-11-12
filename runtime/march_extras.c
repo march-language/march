@@ -4285,3 +4285,78 @@ void *march_html_auto_escape_dyn(void *v) {
     march_decrc(s);
     return r;
 }
+
+/* ── Capability checks (ocap phase 1) ──────────────────────────────────────
+ *
+ * march_cap_check_raw(kind, target) is the one run-time check point every
+ * stdlib capability entry point calls (through Authority.check in
+ * stdlib/authority.march); specs/plans/2026-11-10-ocap-p1-result-plan.md.
+ * It answers 0 (allowed) or a non-zero limit code; 1 means "refused by the
+ * launch". Phase 4 makes it consult the current authority.
+ *
+ * In phase 1 nothing refuses except the TEST-ONLY hook MARCH_TEST_REFUSE: a
+ * comma-separated list of capability kinds, matched exactly (no lattice
+ * walk), read once per process. It can only narrow. The interpreter
+ * (lib/eval/eval_builtins.ml) and the JS runtime (runtime/march_runtime.mjs)
+ * implement the same rule; test/run_cap_conformance.ml pins that they agree.
+ * march_cap_launch_text() returns the hook's trimmed value ("" when unset),
+ * the limit's scope text in the CapError a refusal builds. */
+
+#define MARCH_CAP_HOOK_MAX 64
+static pthread_once_t march_cap_hook_once = PTHREAD_ONCE_INIT;
+static int march_cap_hook_n = 0;
+static char *march_cap_hook_kinds[MARCH_CAP_HOOK_MAX];
+static size_t march_cap_hook_lens[MARCH_CAP_HOOK_MAX];
+static char *march_cap_hook_text = NULL;
+static size_t march_cap_hook_text_len = 0;
+static void *march_cap_hook_text_cell = NULL;
+
+static void march_cap_hook_init(void) {
+    const char *v = getenv("MARCH_TEST_REFUSE");
+    if (v == NULL) v = "";
+    while (*v == ' ' || *v == '\t') v++;
+    size_t n = strlen(v);
+    while (n > 0 && (v[n - 1] == ' ' || v[n - 1] == '\t')) n--;
+    march_cap_hook_text = (char *)malloc(n + 1);
+    if (march_cap_hook_text == NULL) return;
+    memcpy(march_cap_hook_text, v, n);
+    march_cap_hook_text[n] = '\0';
+    march_cap_hook_text_len = n;
+    size_t i = 0;
+    while (i < n && march_cap_hook_n < MARCH_CAP_HOOK_MAX) {
+        while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+        size_t start = i;
+        while (i < n && v[i] != ',') i++;
+        size_t end = i;
+        while (end > start && (v[end - 1] == ' ' || v[end - 1] == '\t')) end--;
+        if (end > start) {
+            char *k = (char *)malloc(end - start + 1);
+            if (k == NULL) return;
+            memcpy(k, v + start, end - start);
+            k[end - start] = '\0';
+            march_cap_hook_kinds[march_cap_hook_n] = k;
+            march_cap_hook_lens[march_cap_hook_n] = end - start;
+            march_cap_hook_n++;
+        }
+    }
+}
+
+int64_t march_cap_check_raw(void *kind, void *target) {
+    (void)target;
+    pthread_once(&march_cap_hook_once, march_cap_hook_init);
+    if (march_cap_hook_n == 0) return 0;
+    march_string *k = (march_string *)kind;
+    for (int i = 0; i < march_cap_hook_n; i++) {
+        if ((int64_t)march_cap_hook_lens[i] == k->len
+            && memcmp(march_cap_hook_kinds[i], k->data, (size_t)k->len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+void *march_cap_launch_text(void) {
+    pthread_once(&march_cap_hook_once, march_cap_hook_init);
+    return march_string_lit_static(march_cap_hook_text ? march_cap_hook_text : "",
+                                   (int64_t)march_cap_hook_text_len,
+                                   &march_cap_hook_text_cell);
+}

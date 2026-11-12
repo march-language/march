@@ -62,6 +62,7 @@ end
 
 fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(bench_loop(100, 0)))
+  ()
 end
 
 end

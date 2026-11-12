@@ -11,11 +11,12 @@ mod Main do
     cap deterministic
     needs IO.Clock
     fn now() : Int do
-      DateTime.now()
+      Authority.must(DateTime.now())
     end
   end
 
   fn main(_c : Cap(IO)) : () do
     println(int_to_string(Sim.now()))
+    ()
   end
 end

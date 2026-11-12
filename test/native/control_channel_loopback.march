@@ -63,7 +63,7 @@ mod ControlChannelLoopback do
       Ok(s) ->
         if String.is_empty(s) do got else read_data(fd, got + string_length(s)) end
       Err(e) ->
-        Vault.set(Vault.open("cc_times"), "err", Socket.error_message(e))
+        Vault.set(Authority.must(Vault.open("cc_times")), "err", Socket.error_message(e))
         got
     end
   end
@@ -72,7 +72,7 @@ mod ControlChannelLoopback do
     if tag == 0 do
       match SwimDriver.decode_msg(frame) do
         Ok(SwimDriver.SwimPing(from)) ->
-          Vault.set(Vault.open("cc_times"), "ping", unix_time_ms())
+          Vault.set(Authority.must(Vault.open("cc_times")), "ping", unix_time_ms())
           println("node-a: control ping from " ++ from)
           Ok(false)
         _ -> Err("bad swim frame")
@@ -104,7 +104,7 @@ mod ControlChannelLoopback do
     end)
     let dat = task_spawn(fn _ ->
       let n = read_data(peer.data_fd, 0)
-      Vault.set(Vault.open("cc_times"), "data", unix_time_ms())
+      Vault.set(Authority.must(Vault.open("cc_times")), "data", unix_time_ms())
       n)
     let _ = task_await(ctl)
     let n = match task_await(dat) do
@@ -115,10 +115,10 @@ mod ControlChannelLoopback do
     if n == data_len() + 8 do
       println("node-a: data stream complete: true")
     else
-      println("node-a: data stream complete: false (got " ++ int_to_string(n) ++ " of " ++ int_to_string(data_len() + 8) ++ ", last error: " ++ Vault.get_or(Vault.open("cc_times"), "err", "none") ++ ")")
+      println("node-a: data stream complete: false (got " ++ int_to_string(n) ++ " of " ++ int_to_string(data_len() + 8) ++ ", last error: " ++ Vault.get_or(Authority.must(Vault.open("cc_times")), "err", "none") ++ ")")
     end
-    let t_ping = Vault.get_or(Vault.open("cc_times"), "ping", 0)
-    let t_data = Vault.get_or(Vault.open("cc_times"), "data", 0)
+    let t_ping = Vault.get_or(Authority.must(Vault.open("cc_times")), "ping", 0)
+    let t_data = Vault.get_or(Authority.must(Vault.open("cc_times")), "data", 0)
     println("node-a: control ping arrived before the data stream finished: " ++ bool_to_string(t_ping > 0 && t_ping <= t_data))
     tcp_close(peer.fd)
     tcp_close(peer.data_fd)

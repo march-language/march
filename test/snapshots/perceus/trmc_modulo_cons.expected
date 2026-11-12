@@ -1,28 +1,96 @@
 -- types (1) --
 closure $Clo_go$0_List_range(Ptr(Unit), Int)
--- fns (16) --
+-- fns (20) --
+## Authority.check
+fn Authority.check(kind : String, target : String) : Result((), CapError) =
+  let $t160 : '_ = let $t159 : '_ = cap_check_raw(kind, target) in
+let $rc_4 : '_ = ==($t159, 0) in
+dec_rc $t159;
+$rc_4 in
+case $t160 of
+  True() -> dec_rc $t160;
+dec_rc target;
+dec_rc kind;
+let $t161 : () = () in
+alloc Ok($t161)
+  _ -> dec_rc $t160;
+let $t164 : '_ = let $t162 : '_ = alloc ByLaunch() in
+let $t163 : '_ = cap_launch_text() in
+alloc CapError(kind, target, $t162, $t163) in
+alloc Err($t164)
+
+## Authority.describe
+fn Authority.describe(e : CapError) : String =
+  case e of
+  CapError($f135, $f136, $f137, $f138) -> dec_rc e;
+let scope : '_ = $f138 in
+let limit : '_ = $f137 in
+let target : '_ = $f136 in
+let kind : '_ = $f135 in
+let op : '_ = let $t133 : '_ = ==(target, "") in
+case $t133 of
+  True() -> dec_rc $t133;
+dec_rc target;
+kind
+  _ -> dec_rc $t133;
+let $rc_3 : '_ = string_concat_n(kind, "(\"", target, "\")") in
+dec_rc kind;
+dec_rc target;
+$rc_3 in
+let who : '_ = let $rc_2 : '_ = Authority.limit_text(limit) in
+dec_rc limit;
+$rc_2 in
+let allowed : '_ = let $t134 : '_ = ==(scope, "") in
+case $t134 of
+  True() -> dec_rc $t134;
+dec_rc scope;
+"nothing"
+  _ -> dec_rc $t134;
+scope in
+let $rc_1 : '_ = string_concat_n(op, " refused by ", who, " (", allowed, ")") in
+dec_rc op;
+dec_rc who;
+dec_rc allowed;
+$rc_1
+  _ -> dec_rc e;
+panic("non-exhaustive pattern match")
+
+## Authority.limit_text
+fn Authority.limit_text(limit : CapLimit) : String =
+  case limit of
+  ByLaunch() -> "the launch grant"
+  ByFnNeeds($f151) -> let f : '_ = $f151 in
+string_concat3("function ", f, "'s needs")
+  ByModNeeds($f152) -> let m : '_ = $f152 in
+string_concat3("module ", m, "'s needs")
+  ByRestrict($f153) -> let w : '_ = $f153 in
+++("the restrict at ", w)
+  ByGrant($f154) -> let p : '_ = $f154 in
+++("the grant to package ", p)
+  _ -> panic("non-exhaustive pattern match")
+
 ## List.max_onto
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f491, $f492) -> let r : '_ = $f492 in
-let x : '_ = $f491 in
-let $t490 : '_ = >(x, m) in
-case $t490 of
-  True() -> dec_rc $t490;
+  Cons($f534, $f535) -> let r : '_ = $f535 in
+let x : '_ = $f534 in
+let $t533 : '_ = >(x, m) in
+case $t533 of
+  True() -> dec_rc $t533;
 inc_rc x;
 List.max_onto(r, x)
-  _ -> dec_rc $t490;
+  _ -> dec_rc $t533;
 List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.maximum_int
 fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1198, 18, 55);
+  Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f484, $f485) -> let t : '_ = $f485 in
-let h : '_ = $f484 in
+  Cons($f527, $f528) -> let t : '_ = $f528 in
+let h : '_ = $f527 in
 inc_rc h;
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -31,24 +99,24 @@ List.max_onto(t, h)
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f478, $f479) -> let r : '_ = $f479 in
-let x : '_ = $f478 in
-let $t477 : '_ = <(x, m) in
-case $t477 of
-  True() -> dec_rc $t477;
+  Cons($f521, $f522) -> let r : '_ = $f522 in
+let x : '_ = $f521 in
+let $t520 : '_ = <(x, m) in
+case $t520 of
+  True() -> dec_rc $t520;
 inc_rc x;
 List.min_onto(r, x)
-  _ -> dec_rc $t477;
+  _ -> dec_rc $t520;
 List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.minimum_int
 fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
-  Nil() -> __panic_site("stdlib/list.march", 1175, 18, 55);
+  Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f471, $f472) -> let t : '_ = $f472 in
-let h : '_ = $f471 in
+  Cons($f514, $f515) -> let t : '_ = $f515 in
+let h : '_ = $f514 in
 inc_rc h;
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -61,11 +129,11 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f465, $f466) -> let t : '_ = $f466 in
-let x : '_ = $f465 in
-let $t464 : '_ = inc_rc x;
+  Cons($f508, $f509) -> let t : '_ = $f509 in
+let x : '_ = $f508 in
+let $t507 : '_ = inc_rc x;
 *(acc, x) in
-List.product_onto(t, $t464)
+List.product_onto(t, $t507)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -120,6 +188,19 @@ let $trmc5 : Cons = alloc_hole Cons(i, _) in
 $dst.1 <- $trmc5;
 List.range_step_go$dps(next, stop, step, $trmc5)
 
+## List.spawn_allowed
+fn List.spawn_allowed() : Bool =
+  let $t165 : '_ = Authority.check("IO.Spawn", "") in
+case $t165 of
+  Ok($f166) -> dec_rc $t165;
+dec_rc $f166;
+true
+  Err($f167) -> dec_rc $t165;
+dec_rc $f167;
+false
+  _ -> dec_rc $t165;
+panic("non-exhaustive pattern match")
+
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
   List.sum_onto(xs, 0)
@@ -128,11 +209,11 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f458, $f459) -> let t : '_ = $f459 in
-let x : '_ = $f458 in
-let $t457 : '_ = inc_rc x;
+  Cons($f501, $f502) -> let t : '_ = $f502 in
+let x : '_ = $f501 in
+let $t500 : '_ = inc_rc x;
 +(acc, x) in
-List.sum_onto(t, $t457)
+List.sum_onto(t, $t500)
   _ -> panic("non-exhaustive pattern match")
 
 ## bump
@@ -184,12 +265,12 @@ call_ptr go($t15, $t16)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t517 : String = let $t516 : List(Int) = let $t515 : List(Int) = List.range(1, 5) in
-bump($t515) in
-let $rc_2 : String = List.sum_int($t516) in
-dec_rc $t516;
-$rc_2 in
-let $rc_1 : () = println($t517) in
-dec_rc $t517;
-$rc_1
+  let $t560 : String = let $t559 : List(Int) = let $t558 : List(Int) = List.range(1, 5) in
+bump($t558) in
+let $rc_6 : String = List.sum_int($t559) in
+dec_rc $t559;
+$rc_6 in
+let $rc_5 : () = println($t560) in
+dec_rc $t560;
+$rc_5
 

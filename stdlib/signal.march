@@ -53,9 +53,21 @@ mod Signal do
     end
   end
 
+  -- The signal's name, the target of its capability check.
+  pfn name_of(s : Sig) : String do
+    match s do
+    Term -> "SIGTERM"
+    Int  -> "SIGINT"
+    Hup  -> "SIGHUP"
+    Usr1 -> "SIGUSR1"
+    Usr2 -> "SIGUSR2"
+    end
+  end
+
   doc """
   Register `handler` (a zero-argument function) to run when `sig` is
-  delivered. Returns `()` immediately.
+  delivered. Returns `Ok(())` immediately, or `Err(CapError(...))` when
+  watching the signal (IO.Signal) is refused.
 
       Signal.watch(Signal.Usr1, fn -> reload_config())
 
@@ -64,12 +76,14 @@ mod Signal do
   For `Term`/`Int`, registering a watcher suppresses the default shutdown on
   the first delivery (a second delivery forces it).
   """
-  fn watch(s : Sig, handler : () -> ()) : () do
+  fn watch(s : Sig, handler : () -> ()) : Result((), CapError) do
+    let? _ = Authority.check("IO.Signal", name_of(s))
     -- Wrap in a 1-arg discard thunk so both backends see a uniform closure
     -- arity: the compiled runtime invokes the watcher via the same 1-arg
     -- closure ABI as task_spawn (call_closure_1 with a dummy argument), and
     -- the interpreter's scheduler drain applies it the same way.
     signal_watch(code_of(s), fn _ -> handler())
+    Ok(())
   end
 
   doc """
@@ -88,11 +102,14 @@ mod Signal do
 
       Signal.raise(Signal.Usr2)
 
-  Useful for self-scheduled work and for exercising watchers in tests.  The
+  Useful for self-scheduled work and for exercising watchers in tests.
+  `Err(CapError(...))` when raising it (IO.Signal) is refused.  The
   delivery is asynchronous: a registered watcher runs from the next scheduler
   drain, not synchronously at the call site.
   """
-  fn raise(s : Sig) : () do
+  fn raise(s : Sig) : Result((), CapError) do
+    let? _ = Authority.check("IO.Signal", name_of(s))
     signal_raise_self(code_of(s))
+    Ok(())
   end
 end

@@ -72,7 +72,7 @@ mod TlsGroupsProbe do
     if n <= 0 do ()
     else
       match Socket.accept(l) do
-      Err(e) -> println("S FAIL accept " ++ Socket.error_message(e))
+      Err(e) -> Authority.ignore(println("S FAIL accept " ++ Socket.error_message(e)))
       Ok(s) ->
         match Tls.accept(s, ctx) do
         Ok(conn) ->
@@ -97,8 +97,8 @@ mod TlsGroupsProbe do
   end
 
   fn handshake(label, ctx, port) do
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println(label ++ " FAIL connect " ++ Socket.error_message(e))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println(label ++ " FAIL connect " ++ Socket.error_message(e)))
     Ok(s) ->
       match Socket.set_recv_timeout(s, 5000) do
       _ -> ()
@@ -109,7 +109,7 @@ mod TlsGroupsProbe do
                 ++ " pq=" ++ bool_to_string(Tls.is_post_quantum(conn)))
         Tls.close(conn)
       Err(e) ->
-        println(label ++ " FAIL handshake " ++ Tls.error_to_string(e))
+        Authority.ignore(println(label ++ " FAIL handshake " ++ Tls.error_to_string(e)))
         let _ = Socket.close(s)
         ()
       end
@@ -117,7 +117,7 @@ mod TlsGroupsProbe do
   end
 
   fn poll_c4(left) do
-    let v = Vault.get_or(Vault.open("tls_c4"), "result", "")
+    let v = Vault.get_or(Authority.must(Vault.open("tls_c4")), "result", "")
     if v != "" do v
     else if left <= 0 do "still parked after 3 s"
     else
@@ -131,15 +131,15 @@ mod TlsGroupsProbe do
   -- reader parks in SSL_read on the TCP fd; closing the TlsConn must end that
   -- read with Err(Closed) well inside the socket's 5 s read deadline.
   fn close_while_reading(ctx, port) do
-    let _ = Vault.new("tls_c4")
-    match Socket.connect("127.0.0.1", port) do
-    Err(e) -> println("C4 FAIL connect " ++ Socket.error_message(e))
+    let _ = Authority.must(Vault.new("tls_c4"))
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> Authority.ignore(println("C4 FAIL connect " ++ Socket.error_message(e)))
     Ok(s) ->
       match Socket.set_recv_timeout(s, 5000) do
       _ -> ()
       end
       match Tls.connect(s, ctx, "127.0.0.1") do
-      Err(e) -> println("C4 FAIL handshake " ++ Tls.error_to_string(e))
+      Err(e) -> Authority.ignore(println("C4 FAIL handshake " ++ Tls.error_to_string(e)))
       Ok(conn) ->
         let t0 = sys_uptime_ms()
         let _reader = task_spawn(fn _ ->
@@ -151,26 +151,26 @@ mod TlsGroupsProbe do
             Err(e) -> "woke with " ++ Tls.error_to_string(e)
             Ok(d) -> "woke with data [" ++ d ++ "]"
           end
-          Vault.set(Vault.open("tls_c4"), "result", what))
+          Vault.set(Authority.must(Vault.open("tls_c4")), "result", what))
         sleep_ms(100)
         Tls.close(conn)
-        println("C4 " ++ poll_c4(3000))
+        Authority.ignore(println("C4 " ++ poll_c4(3000)))
       end
     end
   end
 
   fn client(port) do
     println("AVAIL " ++ bool_to_string(Tls.post_quantum_available()))
-    match Tls.client_ctx(client_config()) do
-    Err(_) -> println("C FAIL ctx")
+    match Authority.must(Tls.client_ctx(client_config())) do
+    Err(_) -> Authority.ignore(println("C FAIL ctx"))
     Ok(ctx) ->
       handshake("C1", ctx, port)
       match Tls.set_groups(ctx, ["no-such-group"]) do
-      Ok(_) -> println("C3 FAIL accepted a bogus group")
-      Err(_) -> println("C3 OK rejected")
+      Ok(_) -> Authority.ignore(println("C3 FAIL accepted a bogus group"))
+      Err(_) -> Authority.ignore(println("C3 OK rejected"))
       end
       match Tls.set_groups(ctx, ["X25519"]) do
-      Err(e) -> println("C2 FAIL set_groups " ++ Tls.error_to_string(e))
+      Err(e) -> Authority.ignore(println("C2 FAIL set_groups " ++ Tls.error_to_string(e)))
       Ok(_) -> handshake("C2", ctx, port)
       end
       close_while_reading(ctx, port)
@@ -182,11 +182,11 @@ mod TlsGroupsProbe do
           _c4 : Cap(IO.Process), _c5 : Cap(IO.Console), _c6 : Cap(IO.Spawn), _c7 : Cap(IO.Mut)) do
     let port = env_int("MARCH_TLS_PORT")
     if env_or("MARCH_TLS_ROLE", "client") == "server" do
-      match Tls.server_ctx(Tls.server_config(env_or("MARCH_TLS_CERT", ""), env_or("MARCH_TLS_KEY", ""))) do
-      Err(e) -> println("S FAIL ctx " ++ Tls.error_to_string(e))
+      match Authority.must(Tls.server_ctx(Tls.server_config(env_or("MARCH_TLS_CERT", ""), env_or("MARCH_TLS_KEY", "")))) do
+      Err(e) -> Authority.ignore(println("S FAIL ctx " ++ Tls.error_to_string(e)))
       Ok(ctx) ->
-        match Socket.listen(port) do
-        Err(e) -> println("S FAIL listen " ++ Socket.error_message(e))
+        match Authority.must(Socket.listen(port)) do
+        Err(e) -> Authority.ignore(println("S FAIL listen " ++ Socket.error_message(e)))
         Ok(l) ->
           serve(l, ctx, env_int("MARCH_TLS_ACCEPTS"))
           let _ = Socket.close_listener(l)

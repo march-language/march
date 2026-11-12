@@ -52,7 +52,7 @@ let ceiling_stdlib needs =
   mod Dep do
     needs %s
     fn slurp(p : String) : String do
-      match File.read(p) do
+      match Authority.must(File.read(p)) do
         Ok(s) -> s
         Err(_) -> "none"
       end
@@ -70,7 +70,7 @@ let ceiling_stdlib_repl needs =
     {|mod Dep do
   needs %s
   fn slurp(p : String) : String do
-    match File.read(p) do
+    match Authority.must(File.read(p)) do
       Ok(s) -> s
       Err(_) -> "none"
     end
@@ -92,8 +92,8 @@ let ceiling_value needs =
     end
     fn go() : () do
       match apply1(file_read, "/nonexistent/cap_parity") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -108,7 +108,7 @@ let fn_bound bound =
   Printf.sprintf
     {|mod Main do
   needs IO.Console
-  fn f(s : String) : Unit needs %s do println(s) end
+  fn f(s : String) : Unit needs %s do Authority.ignore(println(s)) end
   fn main(c : Cap(IO.Console)) do f("hi") end
 end
 |}
@@ -118,7 +118,7 @@ let fn_bound_repl bound =
   Printf.sprintf
     {|mod Q do
   needs IO.Console
-  fn f(s : String) : Unit needs %s do println(s) end
+  fn f(s : String) : Unit needs %s do Authority.ignore(println(s)) end
 end
 |}
     bound
@@ -130,8 +130,8 @@ let main_grant grant =
   needs IO.FileWrite
   fn greet(name : String) : () do
     match file_write("/nonexistent/cap_parity", name) do
-      Ok(_)  -> println("hello " ++ name)
-      Err(_) -> println("hello anyway")
+      Ok(_)  -> Authority.ignore(println("hello " ++ name))
+      Err(_) -> Authority.ignore(println("hello anyway"))
     end
   end
   fn main(%s) : () do
@@ -208,7 +208,7 @@ let dep_lib needs =
         {|mod CapDep do
   needs %s
   fn slurp(p : String) : String do
-    match File.read(p) do
+    match Authority.must(File.read(p)) do
       Ok(s) -> s
       Err(_) -> "none"
     end
@@ -240,7 +240,7 @@ let stdlib_lambda writer_needs =
   needs IO.Console, IO.NetConnect
   mod Opener do
     needs IO.NetConnect
-    fn open() do Socket.connect("127.0.0.1", 9) end
+    fn open() do Authority.must(Socket.connect("127.0.0.1", 9)) end
   end
   mod Writer do
     %s
@@ -269,7 +269,7 @@ let socket_write_main =
   {|mod Main do
   needs IO.Console, IO.NetConnect
   fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
-    match Socket.connect("127.0.0.1", 9) do
+    match Authority.must(Socket.connect("127.0.0.1", 9)) do
     Ok(s) ->
       let _ = Socket.write(s, "x")
       println("sent")
@@ -539,6 +539,7 @@ let not_static =
     ("cap_mismatch", "Cap(X) argument type check inside the typechecker");
     ("cap_narrow_invalid", "cap_narrow call check inside the typechecker");
     ("cap_needs", "the body-scan check inside the typechecker every mode runs; test/errors/cap_needs_*");
+    ("cap_result_unhandled", "a type mismatch reported by the typechecker every mode runs; test/errors/cap_result_unhandled_*");
     ("cap_root_broad", "lint on a broad root capability; typechecker");
     ("cap_widen", "Cap widening check inside the typechecker");
   ]

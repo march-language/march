@@ -1,10 +1,10 @@
 exit: 1
 -- PROGRAM --------------- errors/stdlib_internal_2.march
 
-`Socket.raw_fd` is internal to the standard library; use the handle API in `Socket`. [stdlib_internal]
+`cap_check_raw` is internal to the standard library; use `Authority.check(kind, target)`. [stdlib_internal]
 
-13 |     Ok(s) -> println(int_to_string(Socket.raw_fd(s)))
-                                        ^^^^^^^^^^^^^
+7 |     cap_check_raw("IO.Clock", "")
+        ^^^^^^^^^^^^^
 
 
 

@@ -45,6 +45,7 @@ let cap_impl_invalid = "cap_impl_invalid"
 let cap_mismatch = "cap_mismatch"
 let cap_narrow_invalid = "cap_narrow_invalid"
 let cap_needs = "cap_needs"
+let cap_result_unhandled = "cap_result_unhandled"
 let cap_root_broad = "cap_root_broad"
 let cap_scope_violation = "cap_scope_violation"
 let cap_unchecked = "cap_unchecked"
@@ -264,6 +265,7 @@ let all = [
   cap_mismatch;
   cap_narrow_invalid;
   cap_needs;
+  cap_result_unhandled;
   cap_root_broad;
   cap_scope_violation;
   cap_unchecked;
@@ -506,7 +508,7 @@ let category_table : (string * string list) list = [
     cap_dict_misuse; cap_dict_type; cap_grant; cap_grant_exceeded;
     cap_host_annotation; cap_host_scope; cap_host_unproven;
     cap_impl_invalid; cap_mismatch; cap_narrow_invalid; cap_needs;
-    cap_root_broad; cap_scope_violation; cap_unchecked; cap_widen; extern_cap_missing;
+    cap_result_unhandled; cap_root_broad; cap_scope_violation; cap_unchecked; cap_widen; extern_cap_missing;
     extern_needs_foreign; import_cap_missing; invalid_cap_scope;
     io_not_allowed; mint_cap_invalid; proof_cap_foreign;
     proof_cap_mint_private; proof_cap_return; role_grant_exceeded;

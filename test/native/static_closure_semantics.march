@@ -30,5 +30,6 @@ mod Main do
     let pair = (double, triple)
     let (pf, pg) = pair
     println(pf(6) + pg(6))
+    ()
   end
 end

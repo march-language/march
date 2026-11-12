@@ -2533,6 +2533,20 @@ let binary_operators =
   [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/.";
     "<"; "<="; ">"; ">="; "=="; "!="; "&&"; "||" ]
 
+(* A literal value, possibly negated, or a bare atom: what `x == <it>`
+   compares a value against, never a [Result]. *)
+let rec plain_literal (e : Ast.expr) =
+  match e with
+  | Ast.ELit _ -> true
+  | Ast.EAtom (_, [], _) -> true
+  | Ast.EApp (Ast.EVar n, [ x ], _) when n.Ast.txt = "negate" -> plain_literal x
+  | _ -> false
+
+(* Operators whose operands are never a capability operation's
+   [Result(T, CapError)] on purpose (`==` is: `println(x) == Ok(())`). *)
+let cap_operand_operators =
+  [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/."; "<"; "<="; ">"; ">=" ]
+
 (** The type a literal has on its face, if it is one. *)
 let literal_ty (e : Ast.expr) =
   match e with
@@ -2743,6 +2757,48 @@ let poison_linear_operands env (e : Ast.expr) =
         | Some u when List.exists (within u) spans -> le.le_poisoned := true
         | _ -> ())
       env.lin
+
+(** A `match` over a capability operation's [Result(T, CapError)] written
+    for the [T] (`match Process.env("HOME") do Some(v) -> ... end`, from
+    before operations could be refused): report [cap_result_unhandled] on the
+    scrutinee, with the [Authority.must] fix, and return [T] for the arms to
+    check against.  Only when some arm's pattern is shaped like a value and
+    none is an [Ok]/[Err] pattern: a match that handles the [Result] (or binds
+    it whole) is left alone. *)
+let cap_scrutinee env (scrut : Ast.expr) (scrut_ty : ty) (branches : Ast.branch list) : ty =
+  match repr scrut_ty with
+  | TCon ("Result", [ p; err ]) when is_cap_error_ty err ->
+    let rec heads (pat : Ast.pattern) = match pat with
+      | Ast.PatAs (q, _, _) -> heads q
+      | Ast.PatOr (qs, _) -> List.concat_map heads qs
+      | Ast.PatWild _ | Ast.PatVar _ -> []
+      | Ast.PatCon (n, _) ->
+        let short = match String.rindex_opt n.Ast.txt '.' with
+          | Some i -> String.sub n.Ast.txt (i + 1) (String.length n.Ast.txt - i - 1)
+          | None -> n.Ast.txt in
+        [ (if short = "Ok" || short = "Err" then `Result else `Value) ]
+      | _ -> [ `Value ] in
+    let hs = List.concat_map (fun (b : Ast.branch) -> heads b.Ast.branch_pat) branches in
+    (* Written for an operation's own Result, now nested inside the capability
+       one (`match File.read(p) do ... Err(NotFound(_)) -> ... end`): some
+       `Err(...)` arm names a constructor other than [CapError]. *)
+    let nested_inner =
+      (match repr p with TCon ("Result", [ _; _ ]) -> true | _ -> false)
+      && List.exists (fun (b : Ast.branch) ->
+          let rec err_ctor (pat : Ast.pattern) = match pat with
+            | Ast.PatAs (q, _, _) -> err_ctor q
+            | Ast.PatOr (qs, _) -> List.exists err_ctor qs
+            | Ast.PatCon (n, [ Ast.PatCon (inner, _) ])
+              when (n.Ast.txt = "Err" || n.Ast.txt = "Result.Err")
+                   && inner.Ast.txt <> "CapError" -> true
+            | _ -> false in
+          err_ctor b.Ast.branch_pat) branches in
+    if (hs <> [] && not (List.mem `Result hs)) || nested_inner then begin
+      report_cap_result_unhandled env ~span:(span_of_expr scrut)
+        ~provided:(provided_of_expr scrut scrut_ty) ~payload:p scrut_ty p;
+      p
+    end else scrut_ty
+  | _ -> scrut_ty
 
 (* [@[stdlib_internal]] members cannot be imported by `use` or `alias` from
    user code: an import rebinds the member under another key, which the
@@ -4095,7 +4151,15 @@ let rec infer_expr env (e : Ast.expr) : ty =
               | _ -> None)
            | _ -> None in
          let mark_args = env.errors.Err.diagnostics in
-         let res = infer_app ?payload env sp f_ty args 0 in
+         let cap_op = match f, args with
+           | Ast.EVar name, [ _; right ] ->
+             List.mem name.txt cap_operand_operators
+             (* `==`/`!=` compare Results on purpose (`println(x) == Ok(())`);
+                against a plain literal (`Env.get(k, "") == "1"`) it is the
+                value that was meant. *)
+             || ((name.txt = "==" || name.txt = "!=") && plain_literal right)
+           | _ -> false in
+         let res = infer_app ?payload ~cap_op env sp f_ty args 0 in
          (match f with
           | Ast.EVar name -> suggest_argument_order env name args mark_args
           | _ -> ());
@@ -4261,7 +4325,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── match ────────────────────────────────────────────────────── *)
     | Ast.EMatch (scrut, branches, sp) ->
-      let scrut_ty = infer_expr env scrut in
+      let scrut_ty = cap_scrutinee env scrut (infer_expr env scrut) branches in
       infer_match env sp scrut scrut_ty branches
 
     (* ── Tuples ───────────────────────────────────────────────────── *)
@@ -5047,7 +5111,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* Match in check mode: check each arm against expected *)
   | Ast.EMatch (scrut, branches, msp), _ ->
-    let scrut_ty = infer_expr env scrut in
+    let scrut_ty = cap_scrutinee env scrut (infer_expr env scrut) branches in
     iter_arms_linear env ~span:msp branches (fun (br : Ast.branch) ->
         let (bindings, pat_ty), wilds =
           with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
@@ -5112,14 +5176,20 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     let mark = env.errors.Err.diagnostics in
     let inferred =
       with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
-    unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected;
+    (* A block whose value is a capability operation's Result: the
+       cap_result_unhandled fix belongs on that last expression, not the
+       block. *)
+    let provided_e = match repr inferred with
+      | TCon ("Result", [ _; err ]) when is_cap_error_ty err -> branch_leaf e
+      | _ -> e in
+    unify env ~span:sp ~reason ~provided:(provided_of_expr provided_e inferred) inferred expected;
     relocate_literal_mismatch env ~mark ~reason e sp expected;
     relocate_callback_mismatch env ~mark e sp inferred expected;
     relocate_branch_mismatch env ~mark ~reason e sp expected;
     explain_concat_result env ~mark e sp
 
 (** Thread function application through argument list, tracking arg index. *)
-and infer_app ?payload env span f_ty args idx =
+and infer_app ?payload ?(cap_op = false) env span f_ty args idx =
   match args, repr f_ty with
   | [], t ->
     (* A call written with empty parens — `f()`, i.e. zero surface arguments
@@ -5190,7 +5260,25 @@ and infer_app ?payload env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    let result = infer_app ?payload env span ret_ty rest (idx + 1) in
+    (* An operator's operand that is a capability operation's
+       [Result(T, CapError)] (`System.now_ms() + 1000`) has just bound the
+       operator's shared type variable to the [Result]; report it with its
+       [Authority.must] fix and re-link the variable to [T], so the other
+       operand and the operator's constraint check against the value. *)
+    if cap_op then
+      List.iter (fun r ->
+          match !r with
+          | Link t ->
+            (match repr t with
+             | TCon ("Result", [ p; err ])
+               when is_cap_error_ty err && Typecheck_suggest.informative p ->
+               report_cap_result_unhandled env ~span:(span_of_expr arg)
+                 ~provided:(provided_of_expr arg t) ~payload:p t p;
+               r := Link p
+             | _ -> ())
+          | Unbound _ -> ())
+        param_vars;
+    let result = infer_app ?payload ~cap_op env span ret_ty rest (idx + 1) in
     if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
@@ -5480,6 +5568,12 @@ and infer_block env exprs =
     (match b.bind_pat with
      | Ast.PatVar name ->
        Hashtbl.replace env.type_map name.span (repr rhs_ty);
+       (* `let t = Vault.new("x")`: a later use of [t] that wanted the value
+          gets its cap_result_unhandled fix here, on the operation. *)
+       (match repr rhs_ty with
+        | TCon ("Result", [ _; err ]) when is_cap_error_ty err ->
+          Hashtbl.replace cap_result_rhs name.span (span_of_expr b.bind_expr)
+        | _ -> ());
        (match b.bind_expr with
         | Ast.ESpawn (_, ssp) -> Hashtbl.replace env.decl_sites (spawn_site_key name.span) ssp
         | _ -> ())

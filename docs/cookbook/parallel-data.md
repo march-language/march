@@ -315,7 +315,7 @@ mod ChunkSum do
 
   fn parallel_sum(v : RRB.Vec(Float), workers : Int) : Float do
     let slices = Array.to_list(RRB.chunk(v, workers))
-    let tasks = List.map(slices, fn s -> Task.async(fn () -> sum_slice(s)))
+    let tasks = List.map(slices, fn s -> Authority.must(Task.async(fn () -> sum_slice(s))))
     let partials = Task.await_many(tasks)
     List.fold_left(partials, 0.0, fn (acc, r) ->
       match r do

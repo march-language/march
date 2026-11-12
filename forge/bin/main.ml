@@ -231,14 +231,29 @@ let fix_cmd =
   let contracts =
     Arg.(value & flag & info ["contracts"]
            ~doc:"Insert @[no_alloc] on functions the compiler verified allocation-free.                  Default scope: functions whose compiled form reuses memory in place or                  stack-allocates; widen it with `[contracts] no_alloc = [...]` globs in forge.toml") in
-  let run d c =
-    match Cmd_fix.run ~dry_run:d ~contracts:c () with
+  let paths =
+    Arg.(value & pos_all string [] & info [] ~docv:"PATH"
+           ~doc:"Fix the .march files under these files or directories instead of the \
+                 current project (no forge.toml needed). Repeats until no fix applies. \
+                 MARCH_BIN names the compiler to ask; default `march` on PATH.") in
+  let only =
+    Arg.(value & opt (list string) [] & info ["only"] ~docv:"CODE[,CODE]"
+           ~doc:"With PATHs: apply only the fixes of diagnostics with these codes \
+                 (e.g. `cap_result_unhandled,stdlib_internal`).") in
+  let run d c only paths =
+    let result =
+      if paths = [] then
+        (if only <> [] then Error "--only works with PATHs"
+         else Cmd_fix.run ~dry_run:d ~contracts:c ())
+      else if c then Error "--contracts works on a project, not on paths"
+      else Cmd_fix.run_paths ~dry_run:d ~only paths in
+    match result with
     | Ok msg  -> Printf.printf "%s\n%!" msg
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "fix"
            ~doc:"Apply safe auto-fixes for compiler diagnostics (missing needs, unused params, redundant arms)")
-    Term.(const run $ dry $ contracts)
+    Term.(const run $ dry $ contracts $ only $ paths)
 
 (* ------------------------------------------------------------------- forge run *)
 

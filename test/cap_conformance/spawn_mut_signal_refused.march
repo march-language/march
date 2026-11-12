@@ -1,0 +1,28 @@
+-- REFUSE: IO.Spawn, IO.Mut, IO.Signal
+-- Spawning, opening a table by name and watching a signal refused, each
+-- naming its target; the parallel List helpers compute the same result
+-- sequentially instead of failing.
+mod SpawnMutSignalRefused do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Mut
+  needs IO.Signal
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _m : Cap(IO.Mut), _g : Cap(IO.Signal)) do
+    println(verdict(Task.async(fn () -> 1)))
+    println(verdict(Task.async_stream([1, 2], fn n -> n)))
+    println(List.pmap(List.range(0, 3000), fn x -> x * 2) == List.map(List.range(0, 3000), fn x -> x * 2))
+    println(List.preduce(List.range(0, 3000), 0, fn (a, b) -> a + b))
+    println(verdict(Vault.new("conformance_table")))
+    println(verdict(Vault.whereis("conformance_table")))
+    println(verdict(Vault.ns_set("conformance_ns", "k", 1)))
+    println(verdict(Signal.watch(Signal.Usr1, fn -> ())))
+  end
+end

@@ -45,9 +45,9 @@ mod LoadClient do
   end
 
   pfn dial(host : String, port : Int) : Int do
-    match Socket.connect(host, port) do
+    match tcp_connect(host, port) do
       Ok(fd) -> fd
-      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " — " ++ Socket.error_message(e))
+      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " — " ++ e)
     end
   end
 
@@ -95,7 +95,7 @@ mod LoadClient do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
-    let args = Process.argv()
+    let args = Authority.must(Process.argv())
     let hostA = nth_str(args, 1, "127.0.0.1")
     let portA = nth_int(args, 2, 29853)
     let hostB = nth_str(args, 3, "127.0.0.1")

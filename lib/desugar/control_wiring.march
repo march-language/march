@@ -207,23 +207,23 @@ pfn ctl_int(s : String) : Int do
 end
 
 pfn ctl_leaders() : Vault(Control.CtlLeader) do
-  match Vault.whereis("ctl_leader") do
+  match Authority.must(Vault.whereis("ctl_leader")) do
     Option.Some(v) -> v
-    Option.None -> Vault.new("ctl_leader")
+    Option.None -> Authority.must(Vault.new("ctl_leader"))
   end
 end
 
 pfn ctl_locks() : Vault(Int) do
-  match Vault.whereis("ctl_locks") do
+  match Authority.must(Vault.whereis("ctl_locks")) do
     Option.Some(v) -> v
-    Option.None -> Vault.new("ctl_locks")
+    Option.None -> Authority.must(Vault.new("ctl_locks"))
   end
 end
 
 pfn ctl_memory() : Vault(String) do
-  match Vault.whereis("ctl_agent_memory") do
+  match Authority.must(Vault.whereis("ctl_agent_memory")) do
     Option.Some(v) -> v
-    Option.None -> Vault.new("ctl_agent_memory")
+    Option.None -> Authority.must(Vault.new("ctl_agent_memory"))
   end
 end
 
@@ -273,7 +273,7 @@ end
 pfn ctl_topology_applied(status : String) : Bool do
   let path = ctl_cfg("verified_file", "")
   if path == "" do false
-  else match File.read(path) do
+  else match Authority.must(File.read(path)) do
     Result.Err(_) -> false
     Result.Ok(text) ->
       match List.find(String.split(status, "\n"), fn l -> String.starts_with(l, "topology ")) do
@@ -297,7 +297,7 @@ pfn ctl_relay(line : String, tries : Int) : String do
   let text = if String.contains(line, " TOPOLOGY ") do
     match ctl_first(ctl_words(line), fn w -> if String.byte_size(w) == 64 do Option.Some(w) else Option.None end) do
       Option.Some(digest) ->
-        match File.read(ctl_artifact_path(digest)) do
+        match Authority.must(File.read(ctl_artifact_path(digest))) do
           Result.Ok(body) -> line ++ "\n" ++ body
           Result.Err(_) -> line
         end
@@ -370,15 +370,15 @@ pfn ctl_cert_floor_file() : String do ctl_cfg("cert_floor_file", "") end
 
 pfn ctl_load_cert_floor(_io : Cap(IO)) : () do
   let path = ctl_cert_floor_file()
-  match File.read(path) do
+  match Authority.must(File.read(path)) do
     Err(_) -> ()
     Ok(text) ->
       match string_to_int(String.trim(text)) do
-        None -> println("control: ignoring an unreadable certificate floor in " ++ path)
+        None -> Authority.ignore(println("control: ignoring an unreadable certificate floor in " ++ path))
         Some(n) ->
           Vault.set(ctl_memory(), "cert_floor", int_to_string(n))
           Vault.set(ctl_memory(), "cert_floor_saved", int_to_string(n))
-          println("control: certificate releases older than " ++ int_to_string(n) ++ " are refused")
+          Authority.ignore(println("control: certificate releases older than " ++ int_to_string(n) ++ " are refused"))
       end
   end
 end
@@ -389,14 +389,14 @@ pfn ctl_persist_cert_floor(io : Cap(IO)) : () do
   let path = ctl_cert_floor_file()
   if floor <= saved || path == "" do ()
   else
-    let _ = Dir.mkdir_p(ctl_dir())
+    let _ = Authority.must(Dir.mkdir_p(ctl_dir()))
     let tmp = path ++ ".tmp"
-    match File.write(tmp, int_to_string(floor) ++ "\n") do
-      Err(e) -> println("control: could not save the certificate floor to " ++ path ++ ": " ++ to_string(e))
+    match Authority.must(File.write(tmp, int_to_string(floor) ++ "\n")) do
+      Err(e) -> Authority.ignore(println("control: could not save the certificate floor to " ++ path ++ ": " ++ to_string(e)))
       Ok(_) ->
-        match File.rename(tmp, path) do
+        match Authority.must(File.rename(tmp, path)) do
           Ok(_) -> Vault.set(ctl_memory(), "cert_floor_saved", int_to_string(floor))
-          Err(e) -> println("control: could not save the certificate floor to " ++ path ++ ": " ++ to_string(e))
+          Err(e) -> Authority.ignore(println("control: could not save the certificate floor to " ++ path ++ ": " ++ to_string(e)))
         end
     end
   end
@@ -414,12 +414,12 @@ pfn ctl_persist_cert(io : Cap(IO)) : () do
       if path == "" do ()
       else
         let tmp = path ++ ".delivered.tmp"
-        match File.write(tmp, text ++ "\n") do
-          Result.Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
+        match Authority.must(File.write(tmp, text ++ "\n")) do
+          Result.Err(e) -> Authority.ignore(println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e)))
           Result.Ok(_) ->
-            match File.rename(tmp, path) do
+            match Authority.must(File.rename(tmp, path)) do
               Result.Ok(_) -> ()
-              Result.Err(e) -> println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e))
+              Result.Err(e) -> Authority.ignore(println("control: could not save the delivered certificate to " ++ path ++ ": " ++ to_string(e)))
             end
         end
       end
@@ -432,9 +432,9 @@ end
 -- candidate's control API (`CAS_GET`) and stores it through the node's own reload
 -- server (`CAS_PUT`).
 pfn ctl_wants() : Vault(Int) do
-  match Vault.whereis("ctl_wants") do
+  match Authority.must(Vault.whereis("ctl_wants")) do
     Option.Some(v) -> v
-    Option.None -> Vault.new("ctl_wants")
+    Option.None -> Authority.must(Vault.new("ctl_wants"))
   end
 end
 
@@ -507,7 +507,7 @@ pfn ctl_prefetch_one(io : Cap(IO), node : Cap(ClusterNode.Live), h : String) : (
         let back = Vault.get_or(ctl_locks(), "fetch_backoff:" ++ h, 1000)
         Vault.set(ctl_locks(), "fetch_backoff:" ++ h, if back * 2 > 30000 do 30000 else back * 2 end)
         Vault.set(w, h, now + back)
-        println("control: fetching " ++ String.slice(h, 0, 12) ++ " failed (" ++ why ++ "); next try in " ++ int_to_string(back) ++ " ms")
+        Authority.ignore(println("control: fetching " ++ String.slice(h, 0, 12) ++ " failed (" ++ why ++ "); next try in " ++ int_to_string(back) ++ " ms"))
     end
   end end
 end
@@ -584,7 +584,7 @@ pfn ctl_agent_loop(io : Cap(IO), node : Cap(ClusterNode.Live), backoff : Int) : 
       let why = SessionNode.run_error_message(e)
       if Vault.get(ctl_memory(), "last_error") != Option.Some(why) do
         Vault.set(ctl_memory(), "last_error", why)
-        println("control: no session with a leader: " ++ why)
+        Authority.ignore(println("control: no session with a leader: " ++ why))
       else () end
       sleep_ms(backoff)
       ctl_agent_loop(io, node, if backoff * 2 > 5000 do 5000 else backoff * 2 end)
@@ -603,9 +603,9 @@ actor CtlRespawner do
 end
 
 pfn ctl_respawners() : Vault(Pid(CtlRespawnerState)) do
-  match Vault.whereis("ctl_respawner") do
+  match Authority.must(Vault.whereis("ctl_respawner")) do
     Option.Some(v) -> v
-    Option.None -> Vault.new("ctl_respawner")
+    Option.None -> Authority.must(Vault.new("ctl_respawner"))
   end
 end
 
@@ -618,13 +618,13 @@ end
 -- Write a release durably: a temporary file renamed into place. [text] is
 -- its serialised form (taken before the release is handed to the leader).
 pfn ctl_store_release(seq : Int, text : String) : Bool do
-  let _ = Dir.mkdir_p(ctl_dir() ++ "/releases")
+  let _ = Authority.must(Dir.mkdir_p(ctl_dir() ++ "/releases"))
   let path = ctl_release_file(seq)
   let tmp = path ++ ".tmp"
-  match File.write(tmp, text) do
+  match Authority.must(File.write(tmp, text)) do
     Result.Err(_) -> false
     Result.Ok(_) ->
-      match File.rename(tmp, path) do
+      match Authority.must(File.rename(tmp, path)) do
         Result.Ok(_) -> true
         Result.Err(_) -> false
       end
@@ -632,20 +632,20 @@ pfn ctl_store_release(seq : Int, text : String) : Bool do
 end
 
 pfn ctl_forget_release(seq : Int) : () do
-  let _ = File.delete(ctl_release_file(seq))
+  let _ = Authority.must(File.delete(ctl_release_file(seq)))
   ()
 end
 
 -- The newest release this candidate holds on disk.
 pfn ctl_load_newest() : Option(Control.CtlRelease) do
-  match Dir.list(ctl_dir() ++ "/releases") do
+  match Authority.must(Dir.list(ctl_dir() ++ "/releases")) do
     Result.Err(_) -> Option.None
     Result.Ok(names) ->
       let files = List.sort_by(List.filter(names, fn n -> String.ends_with(n, ".release")), fn (a, b) -> a > b)
       match List.head_opt(files) do
         Option.None -> Option.None
         Option.Some(f) ->
-          match File.read(ctl_dir() ++ "/releases/" ++ f) do
+          match Authority.must(File.read(ctl_dir() ++ "/releases/" ++ f)) do
             Result.Err(_) -> Option.None
             Result.Ok(text) ->
               match Control.parse(text) do
@@ -709,7 +709,7 @@ pfn ctl_audit_size() : Int do
   match Vault.get(ctl_locks(), "audit_bytes") do
     Option.Some(n) -> n
     Option.None ->
-      let n = match File.read(ctl_audit_file()) do
+      let n = match Authority.must(File.read(ctl_audit_file())) do
         Result.Ok(t) -> String.byte_size(t)
         Result.Err(_) -> 0
       end
@@ -719,15 +719,15 @@ pfn ctl_audit_size() : Int do
 end
 
 pfn ctl_audit_append(text : String) : () do
-  let _ = Dir.mkdir_p(ctl_dir())
+  let _ = Authority.must(Dir.mkdir_p(ctl_dir()))
   let locked = ctl_lock("audit_file", 1000)
   let len = String.byte_size(text)
   let have = ctl_audit_size()
   let base = if have > 0 && have + len > ctl_cfg_int("audit_max", 16777216) do
-    let _ = File.rename(ctl_audit_file(), ctl_audit_file() ++ ".1")
+    let _ = Authority.must(File.rename(ctl_audit_file(), ctl_audit_file() ++ ".1"))
     0
   else have end
-  let _ = File.append(ctl_audit_file(), text)
+  let _ = Authority.must(File.append(ctl_audit_file(), text))
   Vault.set(ctl_locks(), "audit_bytes", base + len)
   if locked do ctl_unlock("audit_file") else () end
 end
@@ -763,7 +763,7 @@ end
 -- The last [n] lines of this candidate's audit log (all when [n] is 0), as
 -- the control API answers `AUDIT`: the rotated file's, then the current one's.
 pfn ctl_audit_answer(n : Int) : String do
-  let read = fn path -> match File.read(path) do
+  let read = fn path -> match Authority.must(File.read(path)) do
     Result.Ok(t) -> List.filter(String.split(t, "\n"), fn x -> x != "")
     Result.Err(_) -> List.Nil
   end
@@ -1041,7 +1041,7 @@ pfn ctl_push_one(fd : Int, h : String) : () do
   match ctl_ask(fd, "CAS_CHECK " ++ h ++ "\n") do
     Option.Some(resp) ->
       if String.starts_with(resp, "MISSING") do
-        match File.read(ctl_artifact_path(h)) do
+        match Authority.must(File.read(ctl_artifact_path(h))) do
           Result.Ok(data) ->
             match ctl_ask(fd, "CAS_PUT " ++ h ++ " " ++ int_to_string(String.byte_size(data)) ++ "\n") do
               Option.Some(r) ->
@@ -1320,7 +1320,7 @@ pfn ctl_api_authed(node : Cap(ClusterNode.Live), fd : Int, size : Int, f : Strin
     ctl_reply(fd, "AUTH\n")
     let out = match ctl_api_auth(node, fd) do
       Result.Err(e) ->
-        println("control: refused an unauthenticated write: " ++ e)
+        Authority.ignore(println("control: refused an unauthenticated write: " ++ e))
         ctl_reply(fd, "ERR unauthenticated\n")
         Option.None
       Result.Ok(_) ->
@@ -1396,11 +1396,11 @@ end
 -- follow-up "CAS after compaction".)
 
 pfn ctl_pending() : Vault(String) do
-  match Vault.whereis("ctl_cas_pending") do
+  match Authority.must(Vault.whereis("ctl_cas_pending")) do
     Option.Some(v) -> v
     Option.None ->
-      let v = Vault.new("ctl_cas_pending")
-      match File.read(ctl_dir() ++ "/cas_pending") do
+      let v = Authority.must(Vault.new("ctl_cas_pending"))
+      match Authority.must(File.read(ctl_dir() ++ "/cas_pending")) do
         Result.Ok(t) ->
           List.each(String.split(t, "\n"), fn l ->
             match ctl_words(l) do
@@ -1414,12 +1414,12 @@ pfn ctl_pending() : Vault(String) do
 end
 
 pfn ctl_pending_save() : () do
-  let _ = Dir.mkdir_p(ctl_dir())
+  let _ = Authority.must(Dir.mkdir_p(ctl_dir()))
   let text = String.join(List.map(Vault.all(ctl_pending()), fn kv -> match kv do (h, v) -> h ++ " " ++ v ++ "\n" end), "")
   let path = ctl_dir() ++ "/cas_pending"
-  match File.write(path ++ ".tmp", text) do
+  match Authority.must(File.write(path ++ ".tmp", text)) do
     Result.Ok(_) ->
-      let _ = File.rename(path ++ ".tmp", path)
+      let _ = Authority.must(File.rename(path ++ ".tmp", path))
       ()
     Result.Err(_) -> ()
   end
@@ -1472,11 +1472,11 @@ end
 -- Every hash a stored release names.
 pfn ctl_stored_hashes() : List(String) do
   let dir = ctl_dir() ++ "/releases"
-  match Dir.list(dir) do
+  match Authority.must(Dir.list(dir)) do
     Result.Err(_) -> List.Nil
     Result.Ok(names) ->
       List.flat_map(List.filter(names, fn n -> String.ends_with(n, ".release")), fn f ->
-        match File.read(dir ++ "/" ++ f) do
+        match Authority.must(File.read(dir ++ "/" ++ f)) do
           Result.Err(_) -> List.Nil
           Result.Ok(text) ->
             match Control.parse(text) do
@@ -1490,11 +1490,11 @@ end
 -- The persisted patch stacks of every service sharing this CAS.
 pfn ctl_stack_text() : String do
   let dir = ctl_cas_root() ++ "/hcr_state"
-  match Dir.list(dir) do
+  match Authority.must(Dir.list(dir)) do
     Result.Err(_) -> ""
     Result.Ok(names) ->
       String.join(List.map(names, fn n ->
-        match File.read(dir ++ "/" ++ n ++ "/state") do
+        match Authority.must(File.read(dir ++ "/" ++ n ++ "/state")) do
           Result.Ok(t) -> t
           Result.Err(_) -> ""
         end), "\n")
@@ -1524,9 +1524,9 @@ pfn ctl_cas_gc() : Int do
       List.each(old, fn kv ->
         match kv do
           (h, _) ->
-            let _ = File.delete(ctl_artifact_path(h))
+            let _ = Authority.must(File.delete(ctl_artifact_path(h)))
             Vault.drop(p, h)
-            println("control: removed artifact " ++ String.slice(h, 0, 12) ++ ": no release named it")
+            Authority.ignore(println("control: removed artifact " ++ String.slice(h, 0, 12) ++ ": no release named it"))
         end)
       ctl_pending_save()
       if locked do ctl_unlock("pending") else () end
@@ -1621,7 +1621,7 @@ pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged :
           -- An artifact's bytes from this node's CAS: `DATA <size>` then the bytes.
           let h = word(1)
           if not(ctl_is_hex64(h)) do ctl_reply(fd, "ERR bad_hash\n")
-          else match File.read(ctl_artifact_path(h)) do
+          else match Authority.must(File.read(ctl_artifact_path(h))) do
             Result.Ok(data) -> ctl_reply(fd, "DATA " ++ int_to_string(String.byte_size(data)) ++ "\n" ++ data)
             Result.Err(_) -> ctl_reply(fd, "ERR missing\n")
           end end
@@ -1693,30 +1693,30 @@ end
 fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : Int) : () do
   ctl_init()
   let m = ctl_memory()
-  Vault.set(m, "cfg:dir", Env.get("MARCH_CONTROL_DIR", "/tmp/march-control"))
-  Vault.set(m, "cfg:poll_ms", Env.get("MARCH_CONTROL_POLL_MS", "500"))
-  Vault.set(m, "cfg:session_polls", Env.get("MARCH_CONTROL_SESSION_POLLS", "1200"))
-  Vault.set(m, "cfg:verified_file", Env.get("MARCH_TOPOLOGY_VERIFIED_FILE", ""))
+  Vault.set(m, "cfg:dir", Authority.must(Env.get("MARCH_CONTROL_DIR", "/tmp/march-control")))
+  Vault.set(m, "cfg:poll_ms", Authority.must(Env.get("MARCH_CONTROL_POLL_MS", "500")))
+  Vault.set(m, "cfg:session_polls", Authority.must(Env.get("MARCH_CONTROL_SESSION_POLLS", "1200")))
+  Vault.set(m, "cfg:verified_file", Authority.must(Env.get("MARCH_TOPOLOGY_VERIFIED_FILE", "")))
   -- How often the placement loop re-reads a pushed topology: a topology step
   -- waits a few of these ticks for it (`Control.agent_apply_ticked`).
-  Vault.set(m, "cfg:placement_tick_ms", Env.get("MARCH_PLACEMENT_TICK_MS", "200"))
+  Vault.set(m, "cfg:placement_tick_ms", Authority.must(Env.get("MARCH_PLACEMENT_TICK_MS", "200")))
   Vault.set(m, "cfg:port", int_to_string(port))
-  Vault.set(m, "cfg:port_offset", Env.get("MARCH_CONTROL_PORT_OFFSET", "0"))
-  Vault.set(m, "cfg:pools", String.join(ctl_words(Env.get("MARCH_POOLS", "")), " "))
+  Vault.set(m, "cfg:port_offset", Authority.must(Env.get("MARCH_CONTROL_PORT_OFFSET", "0")))
+  Vault.set(m, "cfg:pools", String.join(ctl_words(Authority.must(Env.get("MARCH_POOLS", ""))), " "))
   -- Where a certificate taken from a release is saved: MARCH_NODE_CERT, when
   -- it names a file (it may instead hold the certificate itself).
-  let cert_env = Env.get("MARCH_NODE_CERT", "")
-  Vault.set(m, "cfg:cert_file", if cert_env != "" && File.exists(cert_env) do cert_env else "" end)
-  Vault.set(m, "cfg:agent_grace_ms", Env.get("MARCH_CONTROL_AGENT_GRACE_MS", "20000"))
+  let cert_env = Authority.must(Env.get("MARCH_NODE_CERT", ""))
+  Vault.set(m, "cfg:cert_file", if cert_env != "" && Authority.must(File.exists(cert_env)) do cert_env else "" end)
+  Vault.set(m, "cfg:agent_grace_ms", Authority.must(Env.get("MARCH_CONTROL_AGENT_GRACE_MS", "20000")))
   Vault.set(m, "cfg:cert_floor_file", ctl_dir() ++ "/cert-floor-" ++ Topology.node_name(node))
   ctl_load_cert_floor(io)
   -- The control API's bounds (see "the control API" above).
-  Vault.set(m, "cfg:max_conns", Env.get("MARCH_CONTROL_MAX_CONNS", "64"))
-  Vault.set(m, "cfg:idle_ms", Env.get("MARCH_CONTROL_IDLE_MS", "30000"))
-  Vault.set(m, "cfg:cas_pending_max", Env.get("MARCH_CONTROL_CAS_PENDING_MAX_BYTES", "1073741824"))
-  Vault.set(m, "cfg:cas_grace_ms", Env.get("MARCH_CONTROL_CAS_GRACE_MS", "600000"))
-  Vault.set(m, "cfg:gc_ms", Env.get("MARCH_CONTROL_GC_MS", "60000"))
-  Vault.set(m, "cfg:audit_max", Env.get("MARCH_CONTROL_AUDIT_MAX_BYTES", "16777216"))
+  Vault.set(m, "cfg:max_conns", Authority.must(Env.get("MARCH_CONTROL_MAX_CONNS", "64")))
+  Vault.set(m, "cfg:idle_ms", Authority.must(Env.get("MARCH_CONTROL_IDLE_MS", "30000")))
+  Vault.set(m, "cfg:cas_pending_max", Authority.must(Env.get("MARCH_CONTROL_CAS_PENDING_MAX_BYTES", "1073741824")))
+  Vault.set(m, "cfg:cas_grace_ms", Authority.must(Env.get("MARCH_CONTROL_CAS_GRACE_MS", "600000")))
+  Vault.set(m, "cfg:gc_ms", Authority.must(Env.get("MARCH_CONTROL_GC_MS", "60000")))
+  Vault.set(m, "cfg:audit_max", Authority.must(Env.get("MARCH_CONTROL_AUDIT_MAX_BYTES", "16777216")))
   -- The pending-upload table, read from MARCH_CONTROL_DIR now that it is set.
   let _ = ctl_pending()
   let respawner = spawn(CtlRespawner)
@@ -1725,15 +1725,15 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   let _ = task_spawn(fn _ -> ctl_agent_loop(io, node, 250))
   let _ = task_spawn(fn _ -> ctl_prefetch_loop(io, node))
   let offset = ctl_cfg_int("port_offset", 0)
-  let listen_port = if offset == 0 do port else ctl_int(Env.get("MARCH_NODE_PORT", "0")) + offset end
+  let listen_port = if offset == 0 do port else ctl_int(Authority.must(Env.get("MARCH_NODE_PORT", "0"))) + offset end
   if List.member(Topology.node_labels(), label) do
     match tcp_listen(listen_port) do
       Result.Ok(lfd) ->
         let _ = task_spawn(fn _ -> ctl_api_accept(node, port, lfd))
         let _ = task_spawn(fn _ -> ctl_audit_copier(node, port))
         let _ = task_spawn(fn _ -> ctl_cas_gc())
-        println("control: API listening on port " ++ int_to_string(listen_port))
-      Result.Err(e) -> println("control: cannot listen on port " ++ int_to_string(listen_port) ++ ": " ++ e)
+        Authority.ignore(println("control: API listening on port " ++ int_to_string(listen_port)))
+      Result.Err(e) -> Authority.ignore(println("control: cannot listen on port " ++ int_to_string(listen_port) ++ ": " ++ e))
     end
   else () end
 end

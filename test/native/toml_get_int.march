@@ -24,5 +24,6 @@ mod TomlGetInt do
     println(get_int_or("port = 7", "port"))
     println(get_int_or("count = 123456", "count"))
     println(get_int_or("negative = -42", "negative"))
+    ()
   end
 end

@@ -1,0 +1,10 @@
+IO.Process("HOME") refused by the launch grant (IO.Process)
+IO.Process("MARCH_CONF_X") refused by the launch grant (IO.Process)
+IO.Process refused by the launch grant (IO.Process)
+IO.Process refused by the launch grant (IO.Process)
+IO.Process refused by the launch grant (IO.Process)
+IO.Process("git") refused by the launch grant (IO.Process)
+IO.Process("MARCH_CONF_NEVER_SET") refused by the launch grant (IO.Process)
+IO.Process("HOME") refused by the launch grant (IO.Process)
+IO.Process refused by the launch grant (IO.Process)
+exit 0

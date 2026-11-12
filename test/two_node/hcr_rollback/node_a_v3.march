@@ -7,7 +7,7 @@ mod Rollback do
     state { count : Int, announced : Bool }
     init { count: 0, announced: false }
     on Tick() do
-      let _ = if state.announced do () else println("behavior: good") end
+      let _ = if state.announced do () else Authority.ignore(println("behavior: good")) end
       { count: state.count + 1, announced: true }
     end
     on Finish() do

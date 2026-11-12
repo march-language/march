@@ -656,7 +656,7 @@ mod TestControl do
     test "a line that takes effect answers ok" do
       let r = rel()
       let o = Control.order(r, head(r.steps), "r1")
-      let v = Vault.new("test_control_agent_state")
+      let v = Authority.must(Vault.new("test_control_agent_state"))
       Vault.set(v, "state", report(find_node(cluster(), "r1")))
       let req = fn _ ->
         let _ = Vault.set(v, "state", report(apply_on(find_node(cluster(), "r1"), o)))
@@ -674,7 +674,7 @@ mod TestControl do
       let r = rel()
       let o = Control.order(r, step_n(3), "r1")
       let rep = report(find_node(cluster(), "r1"))
-      let v = Vault.new("test_control_topo_lag")
+      let v = Authority.must(Vault.new("test_control_topo_lag"))
       Vault.set(v, "reports", 0)
       -- The node reports the topology from its third report on: the check
       -- before relaying, the first after it, and then the runner's tick.
@@ -699,7 +699,7 @@ mod TestControl do
       let r = rel()
       let o = Control.order(r, head(r.steps), "r1")
       let rep = report(find_node(cluster(), "r1"))
-      let v = Vault.new("test_control_no_wait")
+      let v = Authority.must(Vault.new("test_control_no_wait"))
       Vault.set(v, "reports", 0)
       let ops = { report: fn ->
           let _ = Vault.set(v, "reports", Vault.get_or(v, "reports", 0) + 1)
@@ -819,7 +819,7 @@ mod TestControl do
 
   describe "certificate items: the Agent" do
     test "a node takes its own certificate and every revocation, once" do
-      let v = Vault.new("test_control_certs_take")
+      let v = Authority.must(Vault.new("test_control_certs_take"))
       let res = Control.agent_apply_certs_recording(sim_cert_ops(v, "r1"), v, certs_order(rotation(), "r1"))
       assert (res.ok && res.detail == "certificate r1-new in use; 1 revocation(s) known")
       assert (Vault.get(v, "serial") == Some("r1-new"))
@@ -831,14 +831,14 @@ mod TestControl do
     end
 
     test "another node's certificate item is not applied" do
-      let v = Vault.new("test_control_certs_other")
+      let v = Authority.must(Vault.new("test_control_certs_other"))
       let res = Control.agent_apply_certs(sim_cert_ops(v, "r2"), certs_order(rotation(), "r2"))
       assert (res.ok && res.detail == "1 revocation(s) known")
       assert (Vault.get(v, "replaced") == None)
     end
 
     test "a certificate naming another node, or signed by another operator, is refused" do
-      let v = Vault.new("test_control_certs_refuse")
+      let v = Authority.must(Vault.new("test_control_certs_refuse"))
       let named = cert_release(45, [{ node: "r1", cert: cert_for("r2", "r2-new", op_sk()) }], Nil)
       let res = Control.agent_apply_certs_recording(sim_cert_ops(v, "r1"), v, certs_order(named, "r1"))
       assert (not(res.ok) && res.detail == "the certificate for r1 names " ++ uri("r2") ++ ", not this node")
@@ -851,7 +851,7 @@ mod TestControl do
     end
 
     test "the release must be the deploy key's, the one the order names, and not older than one taken" do
-      let v = Vault.new("test_control_certs_release")
+      let v = Authority.must(Vault.new("test_control_certs_release"))
       let o = certs_order(rotation(), "r1")
       let unsigned = { o with lines: Control.serialize({ rotation() with signature: "" }) }
       let a = Control.agent_apply_certs(sim_cert_ops(v, "r1"), unsigned)
