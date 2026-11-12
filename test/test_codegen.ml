@@ -12775,12 +12775,28 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
     {|mod SigWatchCap do
   needs IO.Console
   needs IO.Signal
-  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal)) do
+  needs IO.Mut
+  needs IO.Clock
+  pfn delivered(seen : Vault(Int), n : Int, left : Int) : () do
+    if Vault.get_or(seen, "n", 0) >= n do ()
+    else if left <= 0 do panic("delivery " ++ int_to_string(n) ++ " never ran") else
+      sleep_ms(1)
+      delivered(seen, n, left - 1)
+    end end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
     let k = 99
-    Signal.watch(Signal.Usr2, fn -> Authority.ignore(println("caught " ++ int_to_string(k))))
+    let seen : Vault(Int) = Authority.must(Vault.new("sigwatchcap_seen"))
+    Signal.watch(Signal.Usr2, fn ->
+      let _ = println("caught " ++ int_to_string(k))
+      let _ = Vault.incr(seen, "n", 1)
+      ())
     Signal.raise(Signal.Usr2)
+    delivered(seen, 1, 30000)
     Signal.raise(Signal.Usr2)
+    delivered(seen, 2, 30000)
     Signal.raise(Signal.Usr2)
+    delivered(seen, 3, 30000)
     println("done")
   end
 end
@@ -12792,9 +12808,31 @@ end
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let cmd = Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin) in
+    (* Each raise is ACKNOWLEDGED before the next one: the watcher counts its
+       own runs in a Vault and main waits for that count after every raise.
+       A watched signal is one pending flag that the scheduler drain claims
+       (march_signal_drain's atomic_exchange), so raises sent back to back
+       coalesce. Measured 2026-11-11 on the old program (three raises in a
+       row, then "done"), 2000 runs: the handler ran once in 1800, twice in
+       184 and three times in 16. The regression this test guards crashes on
+       delivery TWO, so nine runs in ten could not have caught it, and a
+       delivery still in flight when main returned raced the process's exit.
+       With the acknowledgement every run makes exactly three deliveries, each
+       finished before the next raise and before "done"; the count is asserted
+       so the test can never go back to passing on one. *)
+    let count_of out sub =
+      let n = String.length sub in
+      let rec go i acc =
+        if i + n > String.length out then acc
+        else if String.sub out i n = sub then go (i + n) (acc + 1)
+        else go (i + 1) acc
+      in
+      go 0 0
+    in
     let ok out =
       ir_contains out "done" && ir_contains out "EXIT:0"
       && not (ir_contains out "RC underflow")
+      && count_of out "caught 99" = 3
     in
     (* Retry a failing iteration ONCE before failing the suite, and report what
        was actually captured when it fails twice.
@@ -12825,9 +12863,10 @@ end
         let retry_out = read_cmd_output cmd in
         if not (ok retry_out) then
           Alcotest.failf
-            "a capturing Signal.watch handler delivered 3 times must not be \
-             freed after the first delivery (long-lived, unbounded-repeat \
-             call site) - iteration %d failed twice. first attempt: %S retry: %S"
+            "a capturing Signal.watch handler must run once per acknowledged \
+             raise (3) and not be freed after the first delivery (long-lived, \
+             unbounded-repeat call site) - iteration %d failed twice. first \
+             attempt: %S retry: %S"
             i run_out retry_out
       end
     done
