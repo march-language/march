@@ -900,6 +900,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A derived `Show`, `Ord` or `Hash` no longer calls a user fn named like the method.** With
+  `derive Show for P` and your own `fn show(_x : Int)` in the same module, `println(P(1, "a"))`
+  printed `P(U, U)`: the generated code called `show(field)` and got your fn, on both backends.
+  It now calls `Show.show`, `Ord.compare` and `Hash.hash`. Those qualified names also work
+  where they did not before: `Ord.compare(1, 2)` on a primitive failed to compile ("no `Ord`
+  implementation for type `Int`"), and under the interpreter `Hash.hash(x)` ran the wrong impl
+  when two types implemented `Hash`.
 - A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
 - **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
   A compiled closure that matched a captured value and passed the pattern's fields straight to a

@@ -6195,3 +6195,19 @@ let () =
       | _ -> ())
 
 let base_env : env = base_env @ Eval_handle.builtins
+
+(* The qualified spelling of the four built-in interface methods names the
+   same type-directed dispatcher as the bare one.  Bound HERE, in the builtin
+   tail, so that it is the dispatcher itself and not whatever the program
+   bound `show` to: a derived impl's body calls `Show.show(field)`, which a
+   user's top-level `fn show` must not capture, and `module_registry`'s
+   "Show.show" slot holds only the LAST impl evaluated.
+   specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+let qualified_iface_methods : (string * string) list =
+  [ ("Show.show", "show"); ("Eq.eq", "eq"); ("Ord.compare", "compare"); ("Hash.hash", "hash") ]
+
+let base_env : env =
+  base_env
+  @ List.filter_map (fun (q, bare) ->
+        Option.map (fun v -> (q, v)) (List.assoc_opt bare base_env))
+      qualified_iface_methods

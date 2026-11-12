@@ -4071,7 +4071,17 @@ let rec eval_decl (env : env) (d : decl) : env =
               Hashtbl.replace iface_method_tbl
                 (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
-            Hashtbl.replace module_registry iface_qualified fn_val
+            (* `Show.show` and its three siblings are the type-directed
+               builtin (Eval_builtins.qualified_iface_methods), not this one
+               impl: the slot is shared by every impl of the interface. *)
+            let reg_val =
+              if is_dispatched then
+                (match List.assoc_opt iface_qualified Eval_builtins.base_env with
+                 | Some dispatcher -> dispatcher
+                 | None -> fn_val)
+              else fn_val
+            in
+            Hashtbl.replace module_registry iface_qualified reg_val
           | None -> ()
         end;
         (* For Json derive: to_json only registers in impl_tbl (so the
