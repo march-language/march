@@ -883,6 +883,12 @@ end
       let (rc, out) = run_compiler [ "--check"; spoof ] in
       Alcotest.(check int) "an input named <control> is refused" 2 rc;
       Alcotest.(check bool) "with the reason" true
+        (contains ~needle:"reserved for compiler-generated code" out);
+      (* --emit-core-ast takes its file as a flag argument, not a positional
+         one; it is refused the same way rather than reporting "accept". *)
+      let (rc, out) = run_compiler [ "--emit-core-ast"; spoof ] in
+      Alcotest.(check int) "--emit-core-ast <control> is refused" 2 rc;
+      Alcotest.(check bool) "with the same reason" true
         (contains ~needle:"reserved for compiler-generated code" out))
 
 (* The typechecker cannot name Hot_reload (lib/tir), so it keeps its own copy

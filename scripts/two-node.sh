@@ -119,43 +119,6 @@ plumbing_flag() {
   sed -n '1,5s/^-- compile-flags: \(--stdlib-source\)\( .*\)\{0,1\}$/\1/p' "$1" | head -1
 }
 
-# --precompile-one cds
-TIMEOUT=${TWO_NODE_TIMEOUT:-60}
-
-sha256() { if command -v sha256sum > /dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
-
-# What a node binary is a function of, besides its source and flags: the
-# compiler, the runtime and stdlib it compiles against (exe-relative, unless
-# overridden, as bin/toolchain.ml resolves them), the C compiler, and the
-# environment the compiler reads that changes its output (MARCH_SANITIZE: the
-# ASan gate). A miss is only a recompile, so this can afford to be broad.
-toolchain_stamp() {
-  local d exe_dir; exe_dir=$(dirname "$MARCH")
-  {
-    sha256 < "$MARCH"
-    for d in "${MARCH_RUNTIME_DIR:-$exe_dir/../runtime}" "${MARCH_STDLIB:-$exe_dir/../stdlib}"; do
-      [ -d "$d" ] || { echo "missing $d"; continue; }
-      (cd "$d" && find . -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.march' \) \
-                   | LC_ALL=C sort | while read -r f; do printf '%s ' "$f"; sha256 < "$f"; done)
-    done
-    "${CC:-cc}" --version 2>&1 | head -1
-    echo "MARCH_SANITIZE=${MARCH_SANITIZE:-}"
-    uname -sm
-  } | sha256 | cut -d' ' -f1
-}
-
-# plumbing_flag <source>: `--stdlib-source` when the node drives the stdlib's
-# raw-fd cluster plumbing (NetKernel, NodeSend, ... are @[stdlib_internal]
-# since ocap phase 2, task 9). A two-node node that speaks the wire protocol
-# by hand is a cluster test that legitimately needs it, so its span is
-# registered as stdlib, the way test_stdlib_only.ml does. Nodes that only use
-# the public API compile as user code, gate and all.
-plumbing_flag() {
-  if grep -qE '\bNetKernel\.(send_frame|write_framed|recv_frame|recv_frame_exact|handshake|handshake_role|recv_frame_until|handshake_addr|raw_allowed|note_raw_refused|link_binding|forget|sealed|handshake_auth)\b|\bNodeSend\.(cast|cast_schema|recv_failure|cast_from|serve_one|serve_one_reply|handle_frame)\b|\bNodeCall\.(call|serve_one|serve_loop)\b|\bNodeQueue\.(start|close_fd|consumed)\b|\bPeerReader\.serve\b|\bPeerRegistry\.(no_fd|add_data)\b|\bClusterConn\.(listen|accept_split|accept_split_within|accept_split_auth|accept_one|connect_split|connect_split_within|connect_split_auth|connect_to_peer)\b|\bClusterNode\.handshake\b|\bSessionNode\.(accept_from|connect_to|open)\b' "$1"; then
-    echo "--stdlib-source"
-  fi
-}
-
 # --precompile-one <dir> <scenario> <x>: one node, run by --precompile's
 # xargs. In its own directory, which is the compiler's cwd and therefore its
 # own CAS (.march/cas/ under the cwd; its object writes are not atomic, so
