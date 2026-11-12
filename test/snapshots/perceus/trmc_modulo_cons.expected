@@ -73,14 +73,14 @@ string_concat3("module ", m, "'s needs")
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f538, $f539) -> let r : '_ = $f539 in
-let x : '_ = $f538 in
-let $t537 : '_ = >(x, m) in
-case $t537 of
-  True() -> dec_rc $t537;
+  Cons($f534, $f535) -> let r : '_ = $f535 in
+let x : '_ = $f534 in
+let $t533 : '_ = >(x, m) in
+case $t533 of
+  True() -> dec_rc $t533;
 inc_rc x;
 List.max_onto(r, x)
-  _ -> dec_rc $t537;
+  _ -> dec_rc $t533;
 List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -89,8 +89,8 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f531, $f532) -> let t : '_ = $f532 in
-let h : '_ = $f531 in
+  Cons($f527, $f528) -> let t : '_ = $f528 in
+let h : '_ = $f527 in
 inc_rc h;
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -99,14 +99,14 @@ List.max_onto(t, h)
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f525, $f526) -> let r : '_ = $f526 in
-let x : '_ = $f525 in
-let $t524 : '_ = <(x, m) in
-case $t524 of
-  True() -> dec_rc $t524;
+  Cons($f521, $f522) -> let r : '_ = $f522 in
+let x : '_ = $f521 in
+let $t520 : '_ = <(x, m) in
+case $t520 of
+  True() -> dec_rc $t520;
 inc_rc x;
 List.min_onto(r, x)
-  _ -> dec_rc $t524;
+  _ -> dec_rc $t520;
 List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -115,8 +115,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f518, $f519) -> let t : '_ = $f519 in
-let h : '_ = $f518 in
+  Cons($f514, $f515) -> let t : '_ = $f515 in
+let h : '_ = $f514 in
 inc_rc h;
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -129,11 +129,11 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f512, $f513) -> let t : '_ = $f513 in
-let x : '_ = $f512 in
-let $t511 : '_ = inc_rc x;
+  Cons($f508, $f509) -> let t : '_ = $f509 in
+let x : '_ = $f508 in
+let $t507 : '_ = inc_rc x;
 *(acc, x) in
-List.product_onto(t, $t511)
+List.product_onto(t, $t507)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -209,11 +209,11 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f505, $f506) -> let t : '_ = $f506 in
-let x : '_ = $f505 in
-let $t504 : '_ = inc_rc x;
+  Cons($f501, $f502) -> let t : '_ = $f502 in
+let x : '_ = $f501 in
+let $t500 : '_ = inc_rc x;
 +(acc, x) in
-List.sum_onto(t, $t504)
+List.sum_onto(t, $t500)
   _ -> panic("non-exhaustive pattern match")
 
 ## bump
@@ -265,12 +265,12 @@ call_ptr go($t15, $t16)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t564 : String = let $t563 : List(Int) = let $t562 : List(Int) = List.range(1, 5) in
-bump($t562) in
-let $rc_6 : String = List.sum_int($t563) in
-dec_rc $t563;
+  let $t560 : String = let $t559 : List(Int) = let $t558 : List(Int) = List.range(1, 5) in
+bump($t558) in
+let $rc_6 : String = List.sum_int($t559) in
+dec_rc $t559;
 $rc_6 in
-let $rc_5 : () = println($t564) in
-dec_rc $t564;
+let $rc_5 : () = println($t560) in
+dec_rc $t560;
 $rc_5
 

@@ -753,6 +753,30 @@ export function march_unix_time() {
   return Date.now() / 1000;
 }
 
+/* ocap phase 1 capability check point; runtime/march_extras.c has the native
+ * twin and test/run_cap_conformance.ml pins that they agree. Nothing refuses
+ * except the TEST-ONLY hook MARCH_TEST_REFUSE (comma-separated kinds, matched
+ * exactly), read once; a page with no `process` allows everything. */
+let marchCapHook = null;
+function marchCapHookInit() {
+  if (marchCapHook !== null) return marchCapHook;
+  const raw = (typeof process !== "undefined" && process.env && process.env.MARCH_TEST_REFUSE) || "";
+  const text = raw.trim();
+  const kinds = text.split(",").map((k) => k.trim()).filter((k) => k !== "");
+  marchCapHook = { text, kinds };
+  return marchCapHook;
+}
+
+/** 0 when the launch admits an operation of `kind` on `target`, else 1. */
+export function march_cap_check_raw(kind, _target) {
+  return marchCapHookInit().kinds.includes(kind) ? 1 : 0;
+}
+
+/** The test hook's trimmed value, the refusing limit's scope text. */
+export function march_cap_launch_text() {
+  return marchCapHookInit().text;
+}
+
 /** Milliseconds since the Unix epoch as an Int (mirrors `unix_time_ms`). */
 export function march_unix_time_ms() {
   return Date.now();

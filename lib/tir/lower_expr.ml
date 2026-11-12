@@ -34,6 +34,30 @@ type env = Lower_state.env = {
 
 let ty_of_span = Lower_state.ty_of_span
 let ty_of_expr = Lower_state.ty_of_expr
+
+(** [e] can be evaluated ahead of time without any observable difference:
+    it cannot fail, loop or have an effect.  Used to keep `a && e` /
+    `a || e` as the strict builtin (one `and`/`or`) instead of a branch.
+    Comparisons and `+ - *` count only on Int/Float/Bool operands, whose
+    builtins are total (Int arithmetic wraps); on any other type `==` may
+    run a user `Eq` impl.  `/` and `%` can trap, so they count only with a
+    non-zero integer-literal divisor; no call ever counts. *)
+let rec eager_safe env (e : Ast.expr) : bool =
+  let scalar x = match ty_of_expr env x with
+    | Tir.TInt | Tir.TFloat | Tir.TBool -> true
+    | _ -> false in
+  match e with
+  | Ast.EVar _ | Ast.ELit _ -> true
+  | Ast.EApp (Ast.EVar { txt = ("<" | "<=" | ">" | ">=" | "==" | "!="
+                               | "+" | "-" | "*" | "&&" | "||"); _ }, [x; y], _) ->
+    scalar x && scalar y && eager_safe env x && eager_safe env y
+  | Ast.EApp (Ast.EVar { txt = ("/" | "%"); _ }, [x; Ast.ELit (Ast.LitInt k, _)], _)
+    when k <> 0 ->
+    scalar x && eager_safe env x
+  | Ast.EApp (Ast.EVar { txt = ("not" | "!" | "negate"); _ }, [x], _) ->
+    scalar x && eager_safe env x
+  | _ -> false
+
 let unknown_ty = Lower_types.unknown_ty
 let lower_ty = Lower_types.lower_ty
 let lower_linearity = Lower_types.lower_linearity
@@ -615,6 +639,25 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       Tir.ECase (cond_atom,
         [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = then' }],
         Some else'))
+
+  (* --- `a && b` / `a || b` → ECase on [a], so [b] runs only when [a] does
+     not decide the result (core-march.md §4.4.1; the interpreter does the
+     same in eval.ml).  A right operand that cannot fail and has no effect
+     ([eager_safe]: a variable, a literal, or a scalar comparison / `+ - *`
+     / `!` / `&&` / `||` over those) keeps the strict builtin, which emits
+     one `and`/`or` instead of a branch; evaluating it early is
+     unobservable, and a tight guard chain (`i >= 0 && i < n && …`) stays
+     branch-free. --- *)
+  | Ast.EApp (Ast.EVar { txt = ("&&" | "||") as op; _ }, [a; b], _)
+    when not (eager_safe env b) ->
+    let bool_lit v = Tir.EAtom (Tir.ALit (Ast.LitBool v)) in
+    lower_to_atom_k env a (fun a_atom ->
+      let b' = lower_expr env b in
+      let on_true, on_false =
+        if op = "&&" then (b', bool_lit false) else (bool_lit true, b') in
+      Tir.ECase (a_atom,
+        [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = on_true }],
+        Some on_false))
 
   (* --- match do cond_arm* end → nested ECase on bools --- *)
   | Ast.ECond (arms, _) ->

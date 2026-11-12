@@ -949,6 +949,12 @@ git log is authoritative for exact commits.
   that closed after its client hung up could exit with status 141. The descriptor now gets
   `SO_NOSIGPIPE` at the handshake (macOS/BSD), and on Linux the close blocks and consumes
   the signal.
+- **`&&` and `||` now short-circuit.** The right operand runs only when the left one does not
+  already decide the result, interpreted and compiled (LLVM, JS, JIT). Both operands used to be
+  evaluated every time, so `i >= 0 && i < n && NativeArray.get_u8(a, i) == 1` read out of range
+  for a negative `i`, and `d != 0 && 10 / d > 1` passed `--check` (the division checker already
+  treated the left side as a guard) and then divided by zero at run time. A program whose right
+  operand prints or has another effect now skips that effect when the left side decides.
 - A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
 - **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
   A compiled closure that matched a captured value and passed the pattern's fields straight to a

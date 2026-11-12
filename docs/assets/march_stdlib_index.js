@@ -1,6 +1,7 @@
 window.marchModuleIndex = {
  "core": [
   "prelude.march",
+  "authority.march",
   "option.march",
   "result.march",
   "list.march",
@@ -62,6 +63,13 @@ window.marchModuleIndex = {
     "List",
     "String",
     "Tuple"
+   ]
+  },
+  "Authority": {
+   "file": "authority.march",
+   "unavailable": null,
+   "uses": [
+    "IO"
    ]
   },
   "Base64": {
@@ -176,7 +184,9 @@ window.marchModuleIndex = {
    "file": "check.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Gen",
+    "IO",
     "List",
     "Random",
     "Result"
@@ -197,6 +207,7 @@ window.marchModuleIndex = {
    "file": "cluster.march",
    "unavailable": "it needs the cluster runtime",
    "uses": [
+    "Authority",
     "List",
     "String",
     "System"
@@ -217,6 +228,7 @@ window.marchModuleIndex = {
    "file": "cluster_conn.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "Authority",
     "ClusterAuth",
     "Handshake",
     "IO",
@@ -239,6 +251,7 @@ window.marchModuleIndex = {
    "file": "cluster_node.march",
    "unavailable": "it needs the cluster runtime",
    "uses": [
+    "Authority",
     "Bytes",
     "ClusterAuth",
     "Crypto",
@@ -316,6 +329,7 @@ window.marchModuleIndex = {
    "file": "config.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "IO",
     "List",
     "Option",
@@ -336,6 +350,7 @@ window.marchModuleIndex = {
    "file": "control.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Bytes",
     "ClusterNode",
     "Json",
@@ -353,6 +368,7 @@ window.marchModuleIndex = {
    "file": "crypto.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Bytes",
     "IO",
     "Result"
@@ -362,6 +378,7 @@ window.marchModuleIndex = {
    "file": "csv.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "IO",
     "List",
     "String"
@@ -384,7 +401,9 @@ window.marchModuleIndex = {
    "file": "datetime.march",
    "unavailable": null,
    "uses": [
-    "Duration"
+    "Authority",
+    "Duration",
+    "IO"
    ]
   },
   "Decimal": {
@@ -420,6 +439,7 @@ window.marchModuleIndex = {
    "file": "dir.march",
    "unavailable": "it needs a file system",
    "uses": [
+    "Authority",
     "File",
     "IO"
    ]
@@ -450,6 +470,8 @@ window.marchModuleIndex = {
    "file": "dns.march",
    "unavailable": null,
    "uses": [
+    "Authority",
+    "IO",
     "List",
     "String"
    ]
@@ -475,12 +497,16 @@ window.marchModuleIndex = {
   "Env": {
    "file": "env.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Authority",
+    "IO"
+   ]
   },
   "File": {
    "file": "file.march",
    "unavailable": "it needs a file system",
    "uses": [
+    "Authority",
     "Dir",
     "IO",
     "List",
@@ -621,6 +647,7 @@ window.marchModuleIndex = {
    "file": "io.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Enum",
     "IOList"
    ]
@@ -697,6 +724,8 @@ window.marchModuleIndex = {
    "file": "list.march",
    "unavailable": null,
    "uses": [
+    "Authority",
+    "IO",
     "Range",
     "Result",
     "String",
@@ -707,10 +736,13 @@ window.marchModuleIndex = {
    "file": "logger.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Crypto",
     "File",
+    "IO",
     "Option",
-    "String"
+    "String",
+    "System"
    ]
   },
   "Map": {
@@ -747,6 +779,7 @@ window.marchModuleIndex = {
    "file": "ml_dsa.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Bytes",
     "Crypto",
     "IO",
@@ -757,6 +790,7 @@ window.marchModuleIndex = {
    "file": "ml_kem.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Bytes",
     "Crypto",
     "IO"
@@ -784,6 +818,7 @@ window.marchModuleIndex = {
    "file": "net_kernel.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "Authority",
     "Bytes",
     "ClusterAuth",
     "Crypto",
@@ -807,6 +842,7 @@ window.marchModuleIndex = {
    "file": "node.march",
    "unavailable": "it needs the cluster runtime",
    "uses": [
+    "Authority",
     "Bytes",
     "IO",
     "Json",
@@ -852,6 +888,7 @@ window.marchModuleIndex = {
    "unavailable": "it needs 63-bit integers (the browser REPL's Int is 32-bit)",
    "uses": [
     "Actor",
+    "Authority",
     "Bytes",
     "ClusterNode",
     "Deque",
@@ -877,6 +914,7 @@ window.marchModuleIndex = {
    "file": "node_send.march",
    "unavailable": "it needs the cluster runtime",
    "uses": [
+    "Authority",
     "Bytes",
     "IO",
     "List",
@@ -908,6 +946,8 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "Array",
+    "Authority",
+    "IO",
     "List",
     "RRB",
     "System"
@@ -951,6 +991,7 @@ window.marchModuleIndex = {
    "unavailable": null,
    "uses": [
     "File",
+    "IO",
     "List",
     "Math",
     "Option",
@@ -962,6 +1003,8 @@ window.marchModuleIndex = {
    "file": "prelude.march",
    "unavailable": null,
    "uses": [
+    "Authority",
+    "IO",
     "List",
     "Option",
     "Result",
@@ -980,6 +1023,8 @@ window.marchModuleIndex = {
    "file": "process.march",
    "unavailable": "it needs operating-system processes",
    "uses": [
+    "Authority",
+    "IO",
     "Seq"
    ]
   },
@@ -1010,6 +1055,7 @@ window.marchModuleIndex = {
    "file": "random.march",
    "unavailable": "it needs 63-bit integers (the browser REPL's Int is 32-bit)",
    "uses": [
+    "Authority",
     "IO",
     "List"
    ]
@@ -1068,12 +1114,16 @@ window.marchModuleIndex = {
   "Seq": {
    "file": "seq.march",
    "unavailable": null,
-   "uses": []
+   "uses": [
+    "Authority",
+    "IO"
+   ]
   },
   "Session": {
    "file": "session.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Bytes",
     "List",
     "String",
@@ -1100,6 +1150,7 @@ window.marchModuleIndex = {
    "unavailable": "it needs the cluster runtime",
    "uses": [
     "Actor",
+    "Authority",
     "Bytes",
     "ClusterAuth",
     "ClusterConn",
@@ -1163,6 +1214,7 @@ window.marchModuleIndex = {
    "file": "signal.march",
    "unavailable": "it needs operating-system processes",
    "uses": [
+    "Authority",
     "IO"
    ]
   },
@@ -1179,6 +1231,7 @@ window.marchModuleIndex = {
    "file": "socket.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "Authority",
     "IO",
     "Tls"
    ]
@@ -1242,6 +1295,7 @@ window.marchModuleIndex = {
    "file": "system.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "IO"
    ]
   },
@@ -1249,7 +1303,9 @@ window.marchModuleIndex = {
    "file": "task.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Enum",
+    "IO",
     "List"
    ]
   },
@@ -1284,6 +1340,7 @@ window.marchModuleIndex = {
    "file": "topology.march",
    "unavailable": "it needs the cluster runtime",
    "uses": [
+    "Authority",
     "ClusterNode",
     "Crypto",
     "Env",
@@ -1323,6 +1380,7 @@ window.marchModuleIndex = {
    "file": "uuid.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Bytes",
     "IO",
     "Result"
@@ -1345,6 +1403,7 @@ window.marchModuleIndex = {
    "file": "vault.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "IO",
     "List",
     "Option"
