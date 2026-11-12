@@ -326,6 +326,57 @@ let check ~(scopes : (string * H.decl list) list) ~(transparent : string -> bool
     || (let o = owner_of n in o <> entry && transparent o)
   in
   let infos = List.map (collect ~is_defined) m.Tir.tm_fns in
+  (* A call to an interface method that lowering left as the bare dispatch
+     name (`Fetch.fetch`, no definition of its own) reaches whichever impl
+     the value's type selects.  Without this, such a call looked like an
+     unknown leaf and every impl behind it went unchecked: a nested impl for
+     a type whose short name collides (`B.T` beside the stdlib's `T`s,
+     mangled `Fetch$B.T.fetch`) is called that way, so its network use was
+     never charged to the calling module.  Read the call as one to EACH impl
+     of that method, the union the capability walk uses for the same name. *)
+  let impls_of =
+    let tbl = Hashtbl.create 16 in
+    List.iter (fun (fn : Tir.fn_def) ->
+        let n = fn.Tir.fn_name in
+        if Tir_names.is_iface_mangled n then
+          match String.index_opt n '$', String.rindex_opt n '.' with
+          | Some j, Some i when j < i ->
+            let key = String.sub n 0 j ^ "." ^ String.sub n (i + 1) (String.length n - i - 1) in
+            Hashtbl.replace tbl key
+              (n :: Option.value ~default:[] (Hashtbl.find_opt tbl key))
+          | _ -> ())
+      m.Tir.tm_fns;
+    fun callee ->
+      if is_defined callee then None
+      else match Hashtbl.find_opt tbl callee with
+        | Some (_ :: _ as l) -> Some (List.rev l)
+        | _ -> None
+  in
+  let infos =
+    List.map (fun i ->
+        let sites =
+          List.concat_map (fun s ->
+              match impls_of s.callee with
+              | Some l -> List.map (fun c -> { s with callee = c }) l
+              | None -> [ s ])
+            i.sites
+        in
+        let fn_values =
+          List.concat_map (fun n -> Option.value ~default:[ n ] (impls_of n)) i.fn_values
+        in
+        let param_uses =
+          List.concat_map (fun (k, u) ->
+              match u with
+              | At (c, a) ->
+                (match impls_of c with
+                 | Some l -> List.map (fun c' -> (k, At (c', a))) l
+                 | None -> [ (k, u) ])
+              | Elsewhere -> [ (k, u) ])
+            i.param_uses
+        in
+        { i with sites; fn_values; param_uses })
+      infos
+  in
   let info_of = Hashtbl.create 256 in
   List.iter (fun i -> Hashtbl.replace info_of i.name i) infos;
   let reaches =

@@ -147,3 +147,21 @@ beside the base types, both backends).
   needs name-keyed machinery there is not covered: `type Result = Won(Int) | Lost` with
   `derive Show for Result` fails to compile (`ambiguous interface-method call to show`). Filed:
   `specs/todos/2026-11-11-compiled-derive-on-user-type-named-like-prelude-type.md`.
+
+### Fallout found in CI (fixed in the same PR)
+
+- **`transitions` blocks.** A user `Handle` (the short name of `File.Handle`) is now
+  `<Entry>.Handle`, and the via-function check compared the written short name with the
+  function's types by string, rejecting `specs/lang/grammar/parse/p21`. It now also accepts the
+  resolved identity.
+- **Host-scope check through an impl method (`lib/tir/net_scope.ml`).** A nested impl for a type
+  whose short name collides (`B.T`, mangled `Fetch$B.T.fetch`) is called through the bare
+  dispatch name `Fetch.fetch`, which has no TIR definition; net_scope read that as an unknown
+  leaf and the impl's network use went unchecked (`cap_net_scope` "impl method name not leaked"
+  compiled instead of being rejected). It now reads such a call as a call to each impl of the
+  method. Any colliding nested type hit this before the change too; the change made `T` collide.
+- **`test/stdlib/test_file.march`** redeclared `File`'s private `FileStat`/`FileKind` and relied
+  on the conflation; it now matches `File.FileStat` / `File.RegularFile`.
+- Not CI-run, and failing `march test` on main already: `test_http_server` and `test_seq` mirror
+  `HttpServer.Conn` and `Seq`'s private `Step` the same way and now report a type mismatch
+  instead of their earlier `cap_ceiling` error; `test_config` fails identically on main.
