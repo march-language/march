@@ -102,14 +102,14 @@ List.length_onto$List_Row$Int(t, $t74)
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f539, $f540) -> let r : '_ = $f540 in
-let x : '_ = $f539 in
-let $t538 : '_ = >(x, m) in
-case $t538 of
-  True() -> dec_rc $t538;
+  Cons($f535, $f536) -> let r : '_ = $f536 in
+let x : '_ = $f535 in
+let $t534 : '_ = >(x, m) in
+case $t534 of
+  True() -> dec_rc $t534;
 inc_rc x;
 List.max_onto(r, x)
-  _ -> dec_rc $t538;
+  _ -> dec_rc $t534;
 List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -118,8 +118,8 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f532, $f533) -> let t : '_ = $f533 in
-let h : '_ = $f532 in
+  Cons($f528, $f529) -> let t : '_ = $f529 in
+let h : '_ = $f528 in
 inc_rc h;
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -128,14 +128,14 @@ List.max_onto(t, h)
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f526, $f527) -> let r : '_ = $f527 in
-let x : '_ = $f526 in
-let $t525 : '_ = <(x, m) in
-case $t525 of
-  True() -> dec_rc $t525;
+  Cons($f522, $f523) -> let r : '_ = $f523 in
+let x : '_ = $f522 in
+let $t521 : '_ = <(x, m) in
+case $t521 of
+  True() -> dec_rc $t521;
 inc_rc x;
 List.min_onto(r, x)
-  _ -> dec_rc $t525;
+  _ -> dec_rc $t521;
 List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -144,8 +144,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f519, $f520) -> let t : '_ = $f520 in
-let h : '_ = $f519 in
+  Cons($f515, $f516) -> let t : '_ = $f516 in
+let h : '_ = $f515 in
 inc_rc h;
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -158,11 +158,11 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f513, $f514) -> let t : '_ = $f514 in
-let x : '_ = $f513 in
-let $t512 : '_ = inc_rc x;
+  Cons($f509, $f510) -> let t : '_ = $f510 in
+let x : '_ = $f509 in
+let $t508 : '_ = inc_rc x;
 *(acc, x) in
-List.product_onto(t, $t512)
+List.product_onto(t, $t508)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -238,11 +238,11 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f506, $f507) -> let t : '_ = $f507 in
-let x : '_ = $f506 in
-let $t505 : '_ = inc_rc x;
+  Cons($f502, $f503) -> let t : '_ = $f503 in
+let x : '_ = $f502 in
+let $t501 : '_ = inc_rc x;
 +(acc, x) in
-List.sum_onto(t, $t505)
+List.sum_onto(t, $t501)
   _ -> panic("non-exhaustive pattern match")
 
 ## go$apply$0_List_range
@@ -275,26 +275,26 @@ let $t8 : List(Row) = alloc List.Nil(Row)() in
 alloc List.Cons($t7, $t8) in
 alloc List.Cons($t4, $t9) in
 case rows of
-  Cons($f567, $f568) -> dec_rc rows;
-case $f567 of
-  Row($f569) -> let rest : List(Row) = $f568 in
-let fp : List(Int) = $f569 in
-let $t564 : String = let $t563 : Int = let $rc_8 : Int = List.length$List_Int(fp) in
+  Cons($f563, $f564) -> dec_rc rows;
+case $f563 of
+  Row($f565) -> let rest : List(Row) = $f564 in
+let fp : List(Int) = $f565 in
+let $t560 : String = let $t559 : Int = let $rc_8 : Int = List.length$List_Int(fp) in
 dec_rc fp;
 $rc_8 in
-int_to_string($t563) in
-let $rc_7 : () = println($t564) in
-dec_rc $t564;
+int_to_string($t559) in
+let $rc_7 : () = println($t560) in
+dec_rc $t560;
 $rc_7;
-let $t566 : String = let $t565 : Int = let $rc_6 : Int = List.length$List_Row(rest) in
+let $t562 : String = let $t561 : Int = let $rc_6 : Int = List.length$List_Row(rest) in
 dec_rc rest;
 $rc_6 in
-int_to_string($t565) in
-let $rc_5 : () = println($t566) in
-dec_rc $t566;
+int_to_string($t561) in
+let $rc_5 : () = println($t562) in
+dec_rc $t562;
 $rc_5
-  _ -> dec_rc $f567;
-dec_rc $f568;
+  _ -> dec_rc $f563;
+dec_rc $f564;
 panic("non-exhaustive pattern match")
   Nil() -> dec_rc rows;
 println("empty")
