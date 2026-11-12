@@ -16113,6 +16113,97 @@ end
     ~expected:"false\ntrue\ntrue"
     ()
 
+(* ── A derived impl's body vs a user fn named like the method ──────────────
+   `derive Show/Eq/Ord/Hash` bodies call their fields' methods as
+   `Show.show(field)` etc., so a user `fn show` next to the derive cannot
+   capture them.  The qualified spelling is the type-directed method on both
+   backends, primitives included.
+   specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+
+(** Entry-level: variant and record, all four interfaces. *)
+let test_derived_impl_not_captured_by_user_method_fn_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_vs_user_method_fn"
+    ~src:{|mod Main do
+  needs IO.Console
+  type P = P(Int, String)
+  type R = { a : Int, b : String }
+  derive Show, Eq, Ord, Hash for P
+  derive Show, Eq, Ord, Hash for R
+  fn show(_x : Int) : String do "U" end
+  fn eq(_a : Int, _b : Int) : Bool do false end
+  fn compare(_a : Int, _b : Int) : Int do 0 end
+  fn hash(_x : Int) : Int do 7 end
+  fn main(_c : Cap(IO.Console)) do
+    println(P(1, "a"))
+    println(to_string(P(1, "a") == P(1, "a")))
+    println({ a: 1, b: "x" })
+    println(to_string({ a: 1, b: "x" } < { a: 2, b: "x" }))
+    println(to_string({ a: 1, b: "x" } == { a: 1, b: "x" }))
+    println(to_string(Hash.hash({ a: 1, b: "x" }) == Hash.hash({ a: 2, b: "x" })))
+    println(show(3))
+  end
+end
+|}
+    ~expected:"P(1, a)\ntrue\nR { a = 1, b = x }\ntrue\ntrue\nfalse\nU"
+    ()
+
+(** Inside a nested module that defines the same-named fns, with a generic
+    type (the field's method is only known after monomorphisation). *)
+let test_derived_impl_not_captured_in_nested_module_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_vs_user_method_fn_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Shapes do
+    type Box(a) = Box(a)
+    type Pt = { x : Int, tag : String }
+    derive Show, Eq, Hash for Box
+    derive Show, Eq, Ord, Hash for Pt
+    fn show(_x : Int) : String do "U" end
+    fn compare(_a : Int, _b : Int) : Int do 0 end
+    fn hash(_x : Int) : Int do 7 end
+    fn mk(n : Int) : Pt do { x: n, tag: "t" } end
+  end
+  fn show(_x : Int) : String do "V" end
+  fn main(_c : Cap(IO.Console)) do
+    println(Shapes.Box(3))
+    println(Shapes.Box(Shapes.mk(4)))
+    println(to_string(Shapes.mk(1) < Shapes.mk(2)))
+    println(to_string(Hash.hash(Shapes.mk(1)) == Hash.hash(Shapes.mk(2))))
+    println(show(5) ++ Shapes.show(5))
+  end
+end
+|}
+    ~expected:"Box(3)\nBox(Pt { x = 4, tag = t })\ntrue\nfalse\nVU"
+    ()
+
+(** The qualified method written by hand: on a primitive (compiled: "no `Ord`
+    implementation for type `Int`"), and on one of two types implementing
+    the interface (interpreted: the last impl evaluated ran for both). *)
+let test_qualified_builtin_iface_method_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_builtin_iface_method"
+    ~src:{|mod Main do
+  needs IO.Console
+  type P = P(Int, String)
+  type R = { a : Int, b : String }
+  derive Show, Hash for P
+  derive Show, Hash for R
+  fn show(_x : Int) : String do "U" end
+  fn main(_c : Cap(IO.Console)) do
+    println(Show.show(5) ++ show(5))
+    println(to_string(Ord.compare(1, 2)))
+    println(to_string(Eq.eq("a", "a")))
+    println(to_string(Hash.hash(1) == Hash.hash(1)))
+    println(Show.show(P(1, "a")) ++ Show.show({ a: 1, b: "x" }))
+    println(to_string(Hash.hash(P(1, "a")) == Hash.hash(P(2, "b"))))
+  end
+end
+|}
+    ~expected:"5U\n-1\ntrue\ntrue\nP(1, a)R { a = 1, b = x }\ntrue"
+    ()
+
 (** An entry-level `mod List` whose fn has the stdlib's exact signature:
     one symbol `List.sum_int`, the stdlib's won.  The rest of the stdlib
     `List` stays reachable. *)
@@ -20360,6 +20451,12 @@ let codegen_suites =
             test_nested_module_fn_named_like_iface_method_compiled;
           Alcotest.test_case "entry `mod List` vs the stdlib List" `Quick
             test_user_module_named_like_stdlib_module_compiled;
+          Alcotest.test_case "derived impl body vs a user fn named like the method" `Quick
+            test_derived_impl_not_captured_by_user_method_fn_compiled;
+          Alcotest.test_case "derived impl body vs same-named fns in a nested module" `Quick
+            test_derived_impl_not_captured_in_nested_module_compiled;
+          Alcotest.test_case "qualified Show.show / Eq.eq / Ord.compare / Hash.hash" `Quick
+            test_qualified_builtin_iface_method_compiled;
           Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
             test_record_eq_pair_then_triple_compiled;
           Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick

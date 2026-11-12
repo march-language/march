@@ -476,6 +476,13 @@ git log is authoritative for exact commits.
   variable and the combinator (`portable_capture`). Create the handle inside
   the lambda, or use the sequential version. `task_spawn` and `Task.async`
   are unaffected.
+- **A must-reject corpus for the refinement checker.** `specs/lang/refine/reject/` holds 20
+  programs, each with one obligation that must be reported violated (one per obligation
+  kind, one per fixed false proof), and `specs/lang/refine/check_refine.sh` runs them in CI.
+  Before it, a checker that proved everything passed every refinement gate. Three fixtures
+  the checker wrongly accepts today are listed in `known-accepted.txt`, which may only
+  shrink; one is new: a refined session payload type (`Client -> Server : {Int | _ > 0}`)
+  is not checked at `Chan.send`.
 
 ### Changed
 
@@ -949,6 +956,13 @@ git log is authoritative for exact commits.
   that closed after its client hung up could exit with status 141. The descriptor now gets
   `SO_NOSIGPIPE` at the handshake (macOS/BSD), and on Linux the close blocks and consumes
   the signal.
+- **A derived `Show`, `Ord` or `Hash` no longer calls a user fn named like the method.** With
+  `derive Show for P` and your own `fn show(_x : Int)` in the same module, `println(P(1, "a"))`
+  printed `P(U, U)`: the generated code called `show(field)` and got your fn, on both backends.
+  It now calls `Show.show`, `Ord.compare` and `Hash.hash`. Those qualified names also work
+  where they did not before: `Ord.compare(1, 2)` on a primitive failed to compile ("no `Ord`
+  implementation for type `Int`"), and under the interpreter `Hash.hash(x)` ran the wrong impl
+  when two types implemented `Hash`.
 - **`&&` and `||` now short-circuit.** The right operand runs only when the left one does not
   already decide the result, interpreted and compiled (LLVM, JS, JIT). Both operands used to be
   evaluated every time, so `i >= 0 && i < n && NativeArray.get_u8(a, i) == 1` read out of range
