@@ -16680,6 +16680,187 @@ let test_module_qualified_pattern_qualifier_is_stdlib_type_compiled () =
     ~expected:"6\n1000\n12\n99\n5"
     ()
 
+(* ── A qualified constructor pattern whose arm returns the scrutinee ───────
+   Perceus' scrutinee-escape rewrite ([Perceus_scrut]) rebuilds the matched
+   constructor where an arm returns the scrutinee in tail position.  It named
+   that constructor "<scrutinee type>.<branch tag>", and a pattern written
+   qualified already has a qualifier in its tag ("Shape.Shape.Square",
+   "Counter_Msg.Counter.Bump"): no such constructor, so codegen fell back to
+   tag 0 and the arm returned the type's FIRST constructor.
+   specs/progress/2026-11-05-nested-match-qualified-actor-msg-pattern-miscompile.md *)
+
+(** Module-qualified, type-qualified and stdlib-module-qualified patterns. *)
+let test_qualified_pattern_arm_returns_scrutinee_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_pattern_returns_scrutinee"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Shapes do
+    type Shape = Circle(Int) | Square(Int) | Dot
+  end
+  type Tree = Leaf(Int) | Node(Int, Int)
+
+  fn keep(s : Shapes.Shape, d : Shapes.Shape) : Shapes.Shape do
+    match s do
+      Shapes.Square(n) -> if n > 3 do s else d end
+      _ -> s
+    end
+  end
+  fn keep2(s : Shapes.Shape, d : Shapes.Shape) : Shapes.Shape do
+    match s do
+      Shape.Square(n) -> if n > 3 do s else d end
+      _ -> s
+    end
+  end
+  fn keep3(t : Tree, d : Tree) : Tree do
+    match t do
+      Tree.Node(a, b) -> if a > b do t else d end
+      _ -> t
+    end
+  end
+  fn keep4(v : Json.JsonValue, d : Json.JsonValue) : Json.JsonValue do
+    match v do
+      Json.Str(s) -> if string_length(s) > 1 do v else d end
+      _ -> v
+    end
+  end
+  fn name(s : Shapes.Shape) : String do
+    match s do
+      Shapes.Circle(n) -> "Circle " ++ int_to_string(n)
+      Shapes.Square(n) -> "Square " ++ int_to_string(n)
+      Shapes.Dot -> "Dot"
+    end
+  end
+  fn tname(t : Tree) : String do
+    match t do
+      Leaf(n) -> "Leaf " ++ int_to_string(n)
+      Node(a, b) -> "Node " ++ int_to_string(a) ++ " " ++ int_to_string(b)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(name(keep(Shapes.Square(5), Shapes.Dot)))
+    println(name(keep(Shapes.Square(1), Shapes.Dot)))
+    println(name(keep2(Shapes.Square(5), Shapes.Dot)))
+    println(tname(keep3(Node(2, 1), Leaf(0))))
+    println(tname(keep3(Node(1, 2), Leaf(0))))
+    println(Json.to_string(keep4(Json.Str("abc"), Json.Null)))
+  end
+end
+|}
+    ~expected:"Square 5\nDot\nSquare 5\nNode 2 1\nLeaf 0\n\"abc\""
+    ()
+
+(** The shape the bug was found in: an actor's message constructor qualified
+    by the actor's name, matched inside a `Some` arm. *)
+let test_qualified_actor_msg_pattern_in_some_arm_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_actor_msg_pattern_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod V1 do
+    type Msg = OldBump(Int)
+  end
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Reset() do { total: 0 } end
+    on Bump(n : Int) do { total: state.total + n } end
+  end
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.OldBump(n) -> if n < 0 do None else Some(Bump(n)) end
+    end
+  end
+  fn not_137(n : Int) : Bool do n != 137 end
+  fn w(m : V1.Msg, none : Counter.Msg) : Counter.Msg do
+    match counter_migrate_msg(m) do
+      Some(x) ->
+        match x do
+          Counter.Bump(p0) -> if not_137(p0) do x else none end
+          _ -> x
+        end
+      None -> none
+    end
+  end
+  fn tag(m : Counter.Msg) : String do
+    match m do
+      Bump(n) -> "Bump " ++ int_to_string(n)
+      Reset -> "Reset"
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(tag(w(V1.OldBump(5), Reset)))
+    println(tag(w(V1.OldBump(137), Reset)))
+    println(tag(w(V1.OldBump(-1), Reset)))
+  end
+end
+|}
+    ~expected:"Bump 5\nReset\nReset"
+    ()
+
+(** Two modules declaring a same-named type that share a constructor name:
+    the tag may carry the declaring module, and the rebuild must still name
+    the right type's constructor. *)
+let test_qualified_pattern_returns_scrutinee_colliding_types_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_pattern_returns_scrutinee_collision"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod DcA do
+    type Thing = Other(Int) | Shared(Int)
+    fn keep(t : Thing, d : Thing) : Thing do
+      match t do
+        Shared(n) -> if n > 3 do t else d end
+        _ -> t
+      end
+    end
+    fn name(t : Thing) : String do
+      match t do
+        Other(n) -> "A.Other " ++ int_to_string(n)
+        Shared(n) -> "A.Shared " ++ int_to_string(n)
+      end
+    end
+  end
+  mod DcB do
+    type Thing = Shared(Int) | Extra(Int)
+    fn keep(t : Thing, d : Thing) : Thing do
+      match t do
+        Shared(n) -> if n > 3 do t else d end
+        _ -> t
+      end
+    end
+    fn name(t : Thing) : String do
+      match t do
+        Shared(n) -> "B.Shared " ++ int_to_string(n)
+        Extra(n) -> "B.Extra " ++ int_to_string(n)
+      end
+    end
+  end
+  fn keep_a(t : DcA.Thing, d : DcA.Thing) : DcA.Thing do
+    match t do
+      DcA.Shared(n) -> if n > 3 do t else d end
+      _ -> t
+    end
+  end
+  fn keep_b(t : DcB.Thing, d : DcB.Thing) : DcB.Thing do
+    match t do
+      DcB.Shared(n) -> if n > 3 do t else d end
+      _ -> t
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(DcA.name(DcA.keep(DcA.Shared(5), DcA.Other(0))))
+    println(DcB.name(DcB.keep(DcB.Shared(5), DcB.Extra(0))))
+    println(DcA.name(keep_a(DcA.Shared(5), DcA.Other(0))))
+    println(DcA.name(keep_a(DcA.Shared(1), DcA.Other(0))))
+    println(DcB.name(keep_b(DcB.Shared(5), DcB.Extra(0))))
+    println(DcB.name(keep_b(DcB.Shared(1), DcB.Extra(0))))
+  end
+end
+|}
+    ~expected:"A.Shared 5\nB.Shared 5\nA.Shared 5\nA.Other 0\nB.Shared 5\nB.Extra 0"
+    ()
+
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
 
     These four strings began as verbatim copies of llvm_emit.ml's deleted
@@ -20631,6 +20812,12 @@ let codegen_suites =
             test_module_qualified_colliding_ctor_pattern_compiled;
           Alcotest.test_case "module-qualified pattern whose qualifier is a stdlib type name" `Quick
             test_module_qualified_pattern_qualifier_is_stdlib_type_compiled;
+          Alcotest.test_case "qualified pattern whose arm returns the scrutinee" `Quick
+            test_qualified_pattern_arm_returns_scrutinee_compiled;
+          Alcotest.test_case "qualified actor-message pattern nested in a Some arm" `Quick
+            test_qualified_actor_msg_pattern_in_some_arm_compiled;
+          Alcotest.test_case "qualified pattern returning the scrutinee, colliding type names" `Quick
+            test_qualified_pattern_returns_scrutinee_colliding_types_compiled;
         ] );
       ( "string_codepoint", [
           Alcotest.test_case "String.from_codepoint/to_codepoints usable compiled (pure-March codec)" `Quick
