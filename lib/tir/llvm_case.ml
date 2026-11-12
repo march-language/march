@@ -127,6 +127,18 @@ let finish_ptr_merge ctx ~arm_tys ~loaded =
     sign-truncating shift pair in between.  A wrong i64 prediction is
     still well-typed: the store coerces through the conditional untag.
 
+    And `double` when every reaching arm's tail is syntactically a Float: a
+    Float literal, a Float variable, `+. -. *. /.` (or an overloaded
+    operator on a Float operand), or a call of a builtin or top-level
+    function returning Float.  Without it a Float-valued `if` paid a
+    [march_alloc_float] in each arm and an unbox plus [march_decrc_local]
+    at the merge, a malloc and a free per evaluation
+    (specs/progress/2026-11-12-float-valued-case-join-slot.md).  A wrong
+    `double` prediction is also well-typed, and no worse for ownership than
+    the `ptr` slot was: an arm that turns out to hold a boxed Float is
+    unboxed by the store and its box stays with whoever owned it, which is
+    what the mixed-arm `ptr` merge did with it too.
+
     Safety if the prediction were ever wrong: every store goes through
     [Llvm_ctx.coerce] to the struct type, whose ptr->struct arm unboxes a
     boxed cell of that same type, so a mismatch is still well-typed IR. *)
@@ -154,7 +166,8 @@ and predicted_unboxed_tail ctx (e : Tir.expr) : string option =
        @ Option.to_list d)
   | Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt _ | March_ast.Ast.LitBool _)) ->
     Some "i64"
-  | Tir.EAtom (Tir.AVar v) when scalar_i64_ty v.Tir.v_ty -> Some "i64"
+  | Tir.EAtom (Tir.ALit (March_ast.Ast.LitFloat _)) -> Some "double"
+  | Tir.EAtom (Tir.AVar v) -> scalar_reg_ty v.Tir.v_ty
   (* The overloaded arithmetic operators carry no useful return type in
      [v_ty] (they are Int-or-Float); the operand says which.  A comparison
      or boolean connective is a Bool whatever its operands. *)
@@ -163,24 +176,31 @@ and predicted_unboxed_tail ctx (e : Tir.expr) : string option =
     (match a with
      | Tir.ALit (March_ast.Ast.LitInt _) -> Some "i64"
      | Tir.AVar v when v.Tir.v_ty = Tir.TInt -> Some "i64"
+     | Tir.ALit (March_ast.Ast.LitFloat _) -> Some "double"
+     | Tir.AVar v when v.Tir.v_ty = Tir.TFloat -> Some "double"
      | _ -> None)
+  | Tir.EApp (f, _) when List.mem f.Tir.v_name ["+."; "-."; "*."; "/."] ->
+    Some "double"
   | Tir.EApp (f, _)
     when List.mem f.Tir.v_name ["=="; "!="; "<"; "<="; ">"; ">="; "&&"; "||"] ->
     Some "i64"
   | Tir.EApp (f, _)
-    when (match f.Tir.v_ty with
-          | Tir.TFn (_, r) -> scalar_i64_ty r
-          | _ -> false)
-      && (Llvm_builtins.is_builtin_fn f.Tir.v_name
+    when (Llvm_builtins.is_builtin_fn f.Tir.v_name
           || Hashtbl.mem ctx.Llvm_ctx.top_fns f.Tir.v_name)
       && not (Hashtbl.mem ctx.Llvm_ctx.var_slot
                 (Llvm_ctx.llvm_name f.Tir.v_name)) ->
-    Some "i64"
+    (match f.Tir.v_ty with
+     | Tir.TFn (_, r) -> scalar_reg_ty r
+     | _ -> None)
   | _ -> None
 
-(** A TIR type whose register representation is a bare i64 scalar. *)
-and scalar_i64_ty (t : Tir.ty) : bool =
-  match t with Tir.TInt | Tir.TBool -> true | _ -> false
+(** The register type of a TIR type that is a bare scalar: `i64` for
+    Int/Bool, `double` for Float. *)
+and scalar_reg_ty (t : Tir.ty) : string option =
+  match t with
+  | Tir.TInt | Tir.TBool -> Some "i64"
+  | Tir.TFloat -> Some "double"
+  | _ -> None
 
 let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
@@ -785,7 +805,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      constant must have integer type"). *)
   let coerce_arm (body : Tir.expr) (ty : string) (v : string) =
     if arm_diverges body && ty <> slot_ty
-       && Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table slot_ty <> None
+       && (slot_ty = "double"
+           || Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table slot_ty <> None)
     then "poison"
     else Llvm_ctx.coerce ctx ty v slot_ty
   in
