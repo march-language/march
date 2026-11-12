@@ -109,6 +109,9 @@ classify() {
       add CHECKS scripts/check-docs.sh; reason "$f" "doc-lint" ;;
     specs/lang/types/*)
       add DUNE @test/types-check; add ORACLES types; reason "$f" "@types-check, types oracle" ;;
+    specs/lang/refine/*)
+      add CHECKS specs/lang/refine/check_refine.sh; add ORACLES refine
+      reason "$f" "refine must-reject corpus, refine oracle" ;;
     specs/lang/*)
       FULL=1; reason "$f" "FULL (language corpus)" ;;
 
@@ -151,10 +154,12 @@ classify() {
       # (test/test_refine.ml, test/test_z3_lookup.ml) besides refinecheck's.
       add SUITES refinecheck compiler errors; add ORACLES refine
       add DUNE @test/runtest-test_refine @test/runtest-test_z3_lookup
-      reason "$f" "refinecheck, compiler, errors, test_refine, test_z3_lookup; refine oracle" ;;
+      add CHECKS specs/lang/refine/check_refine.sh
+      reason "$f" "refinecheck, compiler, errors, test_refine, test_z3_lookup; must-reject corpus; refine oracle" ;;
     lib/refinecheck/*)
       add SUITES refinecheck compiler errors; add ORACLES refine
-      reason "$f" "refinecheck, compiler, errors; refine oracle" ;;
+      add CHECKS specs/lang/refine/check_refine.sh
+      reason "$f" "refinecheck, compiler, errors; must-reject corpus; refine oracle" ;;
     lib/caps/*|lib/ctxesc/*|lib/effects/*|lib/cas/*|lib/driver/*)
       add SUITES compiler codegen; reason "$f" "compiler, codegen" ;;
     lib/search/*|lib/query/*)
@@ -269,6 +274,10 @@ cd "$ROOT" || exit 2
 for c in $CHECKS; do
   case "$c" in
     scripts/determinism-oracle.sh) step "$c --corpus small" bash "$c" --corpus small ;;
+    specs/lang/refine/check_refine.sh)
+      # Checks run before the suites build anything, and this one runs the compiler.
+      step "dune build bin/main.exe" dune build --root . bin/main.exe
+      step "$c" bash "$c" ;;
     *) step "$c" bash "$c" ;;
   esac
 done

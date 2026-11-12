@@ -1,0 +1,19 @@
+-- EXPECT-VIOLATED: division n
+-- EXPECT-ERROR: may be by zero
+-- Fixed 2026-07-29 (the decl-walk coverage fix; see test/errors/division_by_zero_1.march).
+-- The `cap no_panic` walk read only `fn` and `mod` declarations, so a division
+-- in an `impl` method was never looked at.
+mod S06 do
+  cap no_panic
+  type Box = Box(Int)
+  interface Runner(a) do
+    fn run : a -> Int
+  end
+  impl Runner(Box) do
+    fn run(b) do
+      match b do
+        Box(n) -> 100 / n
+      end
+    end
+  end
+end

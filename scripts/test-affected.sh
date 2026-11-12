@@ -68,6 +68,10 @@ expect suites "cap_conformance" -- test/run_cap_conformance.ml
 expect suites "cap_conformance" -- stdlib/authority.march
 expect dune "@forge/test/runtest" -- forge/lib/cmd_add.ml
 expect dune "@test/types-check" -- specs/lang/types/accept/t01_literals.march
+expect checks "specs/lang/refine/check_refine.sh" -- specs/lang/refine/reject/k01_precondition.march
+expect oracles "refine" -- specs/lang/refine/known-accepted.txt
+expect suites "!ALL" -- specs/lang/refine/reject/k01_precondition.march
+expect checks "specs/lang/refine/check_refine.sh" -- lib/refinecheck/refine_check.ml
 expect dune "@test/bench_gate" -- bench/list_ops.march
 expect dune "@test/bench_gate" -- test/test_bench_gate.ml
 

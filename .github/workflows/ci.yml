@@ -731,6 +731,18 @@ jobs:
             exit 1
           fi
 
+      # The ratchet above counts obligations; nothing else in CI holds a
+      # VIOLATED one, so a checker that proved everything passed every refine
+      # gate. Each specs/lang/refine/reject fixture must be reported violated
+      # (a skip fails), from its own fresh cwd so no VC cache answers for the
+      # solver. known-accepted.txt lists the gaps and may only shrink.
+      - name: Refinement must-reject corpus
+        timeout-minutes: 5
+        run: |
+          eval $(opam env)
+          dune build bin/main.exe
+          specs/lang/refine/check_refine.sh
+
       - name: Resolved-grammar conformance corpus (slow lane, not part of runtest)
         timeout-minutes: 5
         run: |
