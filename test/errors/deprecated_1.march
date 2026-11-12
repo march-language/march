@@ -1,0 +1,16 @@
+mod Main do
+  mod Temperature do
+    @[deprecated("use `Temperature.to_fahrenheit` instead")]
+    fn c_to_f(c : Int) : Int do
+      to_fahrenheit(c)
+    end
+
+    fn to_fahrenheit(c : Int) : Int do
+      c * 9 / 5 + 32
+    end
+  end
+
+  fn main() : Int do
+    Temperature.c_to_f(100)
+  end
+end

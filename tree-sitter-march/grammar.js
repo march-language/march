@@ -115,7 +115,7 @@ module.exports = grammar({
     ),
 
     // @[name], @[name(arg)], @name(arg), @invariant(expr), @[opaque],
-    // @[reflect(fuel: N)] (`opaque` is a keyword, so it is spelled out beside
+    // @[deprecated("message")], @[reflect(fuel: N)] (`opaque` is a keyword, so it is spelled out beside
     // the identifier; `fuel: N` is the one labelled payload).
     attribute: $ => seq('@', choice(
       seq('[', $.identifier, '(', $.identifier, ':', $.integer, ')', ']'),
