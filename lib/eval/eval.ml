@@ -2115,6 +2115,21 @@ and eval_expr_inner (env : env) (e : expr) : value =
           apply send ([dst; to_; VString tag; VString (March_ast.Json_dispatch.find_schema sp); json] @ rest))
      | _ -> assert false)
 
+  (* `a && b` / `a || b` short-circuit: [b] is evaluated only when [a] does
+     not already decide the result (E-And / E-Or, core-march.md §4.4.1).  The
+     parser builds both as an ordinary [EApp] of the builtin, and no program
+     can rebind the operator symbols, so the name alone identifies them.
+     TIR lowering does the same (lower_expr.ml). *)
+  | EApp (EVar { txt = ("&&" | "||") as op; _ }, [a; b], _) ->
+    (match op, eval_expr env a with
+     | "&&", VBool false -> VBool false
+     | "||", VBool true -> VBool true
+     | _, VBool _ ->
+       (match eval_expr env b with
+        | VBool _ as v -> v
+        | _ -> eval_error "%s: right operand must be a boolean" op)
+     | _ -> eval_error "%s: left operand must be a boolean" op)
+
   | EApp (f, args, sp) ->
     (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
        happens inside apply/apply_inner: VClosure -> E-App-Clo, VBuiltin -> E-App-Prim) *)

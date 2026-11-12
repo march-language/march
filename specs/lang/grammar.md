@@ -726,8 +726,8 @@ expr_and ::= expr_and "&&" expr_cmp
 
 (`parser.mly:1127–1133`.) Both left-recursive/left-associative, both
 desugared immediately into ordinary calls (`EApp (EVar "||"/"&&", …)`,
-**not** special AST nodes), so short-circuit evaluation, if any, is a
-property of how `eval`/codegen treat the `||`/`&&` builtins, not of the
+**not** special AST nodes), so their short-circuit evaluation
+(core-march.md §4.4.1) is applied by `eval` and TIR lowering, not by the
 parse tree shape. `&&` binds tighter than `||` (it sits one level below in
 the stratification, mirroring the conventional arithmetic-like precedence
 of the two connectives), and both bind looser than comparisons: confirmed

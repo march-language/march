@@ -1,0 +1,12 @@
+-- EXPECT-VIOLATED: precondition dec2
+-- EXPECT-ERROR: refinement violation
+-- KNOWN ACCEPTED (specs/todos/2026-10-18-multi-param-callable-domain-unobliged.md).
+-- `dec2`'s first parameter demands `_ > 100` and `ap2` may hand it any `Int`.
+-- The pass-site check covers one-parameter callables only, so no obligation is
+-- filed. The one-parameter twin is k09.
+mod A02 do
+  cap verified
+  fn dec2(a : {Int | _ > 100}, _x : Int) : {Int | _ > 0} do a - 50 end
+  fn ap2(x : a, y : a, f : a -> a -> Int) : Int do f(x, y) end
+  fn go2(n : Int) : Int do ap2(n, n, dec2) end
+end

@@ -3,30 +3,30 @@ type Bytes.Bytes = Bytes(String)
 -- fns (143) --
 ## Authority.check
 fn Authority.check(kind : String, target : String) : Result((), CapError) =
-  let $t441 : '_ = let $t440 : '_ = cap_check_raw(kind, target) in
-==($t440, 0) in
-case $t441 of
-  True() -> let $t442 : () = () in
-alloc Ok($t442)
-  _ -> let $t445 : '_ = let $t443 : '_ = alloc ByLaunch() in
-let $t444 : '_ = cap_launch_text() in
-alloc CapError(kind, target, $t443, $t444) in
-alloc Err($t445)
+  let $t431 : '_ = let $t430 : '_ = cap_check_raw(kind, target) in
+==($t430, 0) in
+case $t431 of
+  True() -> let $t432 : () = () in
+alloc Ok($t432)
+  _ -> let $t435 : '_ = let $t433 : '_ = alloc ByLaunch() in
+let $t434 : '_ = cap_launch_text() in
+alloc CapError(kind, target, $t433, $t434) in
+alloc Err($t435)
 
 ## Authority.describe
 fn Authority.describe(e : CapError) : String =
   case e of
-  CapError($f416, $f417, $f418, $f419) -> let scope : '_ = $f419 in
-let limit : '_ = $f418 in
-let target : '_ = $f417 in
-let kind : '_ = $f416 in
-let op : '_ = let $t414 : '_ = ==(target, "") in
-case $t414 of
+  CapError($f406, $f407, $f408, $f409) -> let scope : '_ = $f409 in
+let limit : '_ = $f408 in
+let target : '_ = $f407 in
+let kind : '_ = $f406 in
+let op : '_ = let $t404 : '_ = ==(target, "") in
+case $t404 of
   True() -> kind
   _ -> string_concat_n(kind, "(\"", target, "\")") in
 let who : '_ = Authority.limit_text(limit) in
-let allowed : '_ = let $t415 : '_ = ==(scope, "") in
-case $t415 of
+let allowed : '_ = let $t405 : '_ = ==(scope, "") in
+case $t405 of
   True() -> "nothing"
   _ -> scope in
 string_concat_n(op, " refused by ", who, " (", allowed, ")")
@@ -40,26 +40,26 @@ fn Authority.ignore(_r : Result('a, CapError)) : () =
 fn Authority.limit_text(limit : CapLimit) : String =
   case limit of
   ByLaunch() -> "the launch grant"
-  ByFnNeeds($f432) -> let f : '_ = $f432 in
+  ByFnNeeds($f422) -> let f : '_ = $f422 in
 string_concat3("function ", f, "'s needs")
-  ByModNeeds($f433) -> let m : '_ = $f433 in
+  ByModNeeds($f423) -> let m : '_ = $f423 in
 string_concat3("module ", m, "'s needs")
-  ByRestrict($f434) -> let w : '_ = $f434 in
+  ByRestrict($f424) -> let w : '_ = $f424 in
 ++("the restrict at ", w)
-  ByGrant($f435) -> let p : '_ = $f435 in
+  ByGrant($f425) -> let p : '_ = $f425 in
 ++("the grant to package ", p)
   _ -> panic("non-exhaustive pattern match")
 
 ## Authority.must
 fn Authority.must(r : Result('a, CapError)) : 'a =
   case r of
-  Ok($f438) -> let v : '_ = $f438 in
+  Ok($f428) -> let v : '_ = $f428 in
 v
-  Err($f439) -> let e : '_ = $f439 in
+  Err($f429) -> let e : '_ = $f429 in
 __panic_site("stdlib/authority.march", 69, 14, 58);
-let $t437 : '_ = let $t436 : '_ = Authority.describe(e) in
-++("capability refused: ", $t436) in
-panic($t437)
+let $t427 : '_ = let $t426 : '_ = Authority.describe(e) in
+++("capability refused: ", $t426) in
+panic($t427)
   _ -> panic("non-exhaustive pattern match")
 
 ## Bytes.b64_alphabet
@@ -72,26 +72,29 @@ fn Bytes.b64_char(n : '_) : '_ =
 
 ## Bytes.b64_val
 fn Bytes.b64_val(code : '_) : '_ =
-  let $t210 : '_ = let $t208 : '_ = >=(code, 65) in
-let $t209 : '_ = <=(code, 90) in
-&&($t208, $t209) in
-case $t210 of
+  let $t205 : '_ = let $t204 : '_ = >=(code, 65) in
+case $t204 of
+  True() -> <=(code, 90)
+  _ -> false in
+case $t205 of
   True() -> -(code, 65)
-  _ -> let $t213 : '_ = let $t211 : '_ = >=(code, 97) in
-let $t212 : '_ = <=(code, 122) in
-&&($t211, $t212) in
-case $t213 of
+  _ -> let $t207 : '_ = let $t206 : '_ = >=(code, 97) in
+case $t206 of
+  True() -> <=(code, 122)
+  _ -> false in
+case $t207 of
   True() -> -(code, 71)
-  _ -> let $t216 : '_ = let $t214 : '_ = >=(code, 48) in
-let $t215 : '_ = <=(code, 57) in
-&&($t214, $t215) in
-case $t216 of
+  _ -> let $t209 : '_ = let $t208 : '_ = >=(code, 48) in
+case $t208 of
+  True() -> <=(code, 57)
+  _ -> false in
+case $t209 of
   True() -> +(code, 4)
-  _ -> let $t217 : '_ = ==(code, 43) in
-case $t217 of
+  _ -> let $t210 : '_ = ==(code, 43) in
+case $t210 of
   True() -> 62
-  _ -> let $t218 : '_ = ==(code, 47) in
-case $t218 of
+  _ -> let $t211 : '_ = ==(code, 47) in
+case $t211 of
   True() -> 63
   _ -> negate(1)
 
@@ -120,103 +123,106 @@ alloc Bytes($t101)
 ## Bytes.decode_base64
 fn Bytes.decode_base64(s : '_) : '_ =
   let n : '_ = string_byte_length(s) in
-let $t281 : '_ = let $t280 : '_ = %(n, 4) in
-!=($t280, 0) in
-case $t281 of
+let $t271 : '_ = let $t270 : '_ = %(n, 4) in
+!=($t270, 0) in
+case $t271 of
   True() -> alloc Err("invalid base64: length must be a multiple of 4")
-  _ -> let $t282 : '_ = alloc Nil() in
-Bytes.decode_base64_go(s, 0, n, $t282)
+  _ -> let $t272 : '_ = alloc Nil() in
+Bytes.decode_base64_go(s, 0, n, $t272)
 
 ## Bytes.decode_base64_go
 fn Bytes.decode_base64_go(s : '_, i : '_, n : '_, acc : '_) : '_ =
-  let $t219 : '_ = >=(i, n) in
-case $t219 of
-  True() -> let $t223 : '_ = let $t222 : '_ = let $t221 : '_ = let $t220 : '_ = alloc Nil() in
-Bytes.rev(acc, $t220) in
-string_from_chars($t221) in
-alloc Bytes($t222) in
-alloc Ok($t223)
+  let $t212 : '_ = >=(i, n) in
+case $t212 of
+  True() -> let $t216 : '_ = let $t215 : '_ = let $t214 : '_ = let $t213 : '_ = alloc Nil() in
+Bytes.rev(acc, $t213) in
+string_from_chars($t214) in
+alloc Bytes($t215) in
+alloc Ok($t216)
   _ -> let c0 : '_ = string_byte_at(s, i) in
-let c1 : '_ = let $t224 : '_ = +(i, 1) in
-string_byte_at(s, $t224) in
-let c2 : '_ = let $t225 : '_ = +(i, 2) in
-string_byte_at(s, $t225) in
-let c3 : '_ = let $t226 : '_ = +(i, 3) in
-string_byte_at(s, $t226) in
+let c1 : '_ = let $t217 : '_ = +(i, 1) in
+string_byte_at(s, $t217) in
+let c2 : '_ = let $t218 : '_ = +(i, 2) in
+string_byte_at(s, $t218) in
+let c3 : '_ = let $t219 : '_ = +(i, 3) in
+string_byte_at(s, $t219) in
 let v0 : '_ = Bytes.b64_val(c0) in
 let v1 : '_ = Bytes.b64_val(c1) in
-let $t229 : '_ = let $t227 : '_ = <(v0, 0) in
-let $t228 : '_ = <(v1, 0) in
-||($t227, $t228) in
-case $t229 of
+let $t221 : '_ = let $t220 : '_ = <(v0, 0) in
+case $t220 of
+  True() -> true
+  _ -> <(v1, 0) in
+case $t221 of
   True() -> alloc Err("invalid base64 character")
-  _ -> let $t232 : '_ = let $t230 : '_ = ==(c2, 61) in
-let $t231 : '_ = ==(c3, 61) in
-&&($t230, $t231) in
-case $t232 of
-  True() -> let $t242 : '_ = let $t241 : '_ = let $t240 : '_ = let $t238 : '_ = let $t237 : '_ = let $t236 : '_ = let $t235 : '_ = let $t233 : '_ = *(v0, 4) in
-let $t234 : '_ = /(v1, 16) in
-+($t233, $t234) in
-%($t235, 256) in
-byte_to_char($t236) in
-alloc Cons($t237, acc) in
-let $t239 : '_ = alloc Nil() in
-Bytes.rev($t238, $t239) in
-string_from_chars($t240) in
-alloc Bytes($t241) in
-alloc Ok($t242)
-  _ -> let $t243 : '_ = ==(c3, 61) in
-case $t243 of
+  _ -> let $t223 : '_ = let $t222 : '_ = ==(c2, 61) in
+case $t222 of
+  True() -> ==(c3, 61)
+  _ -> false in
+case $t223 of
+  True() -> let $t233 : '_ = let $t232 : '_ = let $t231 : '_ = let $t229 : '_ = let $t228 : '_ = let $t227 : '_ = let $t226 : '_ = let $t224 : '_ = *(v0, 4) in
+let $t225 : '_ = /(v1, 16) in
++($t224, $t225) in
+%($t226, 256) in
+byte_to_char($t227) in
+alloc Cons($t228, acc) in
+let $t230 : '_ = alloc Nil() in
+Bytes.rev($t229, $t230) in
+string_from_chars($t231) in
+alloc Bytes($t232) in
+alloc Ok($t233)
+  _ -> let $t234 : '_ = ==(c3, 61) in
+case $t234 of
   True() -> let v2 : '_ = Bytes.b64_val(c2) in
-let $t244 : '_ = <(v2, 0) in
-case $t244 of
+let $t235 : '_ = <(v2, 0) in
+case $t235 of
   True() -> alloc Err("invalid base64 character")
-  _ -> let byte0 : '_ = let $t247 : '_ = let $t245 : '_ = *(v0, 4) in
-let $t246 : '_ = /(v1, 16) in
-+($t245, $t246) in
-%($t247, 256) in
-let byte1 : '_ = let $t251 : '_ = let $t249 : '_ = let $t248 : '_ = %(v1, 16) in
-*($t248, 16) in
-let $t250 : '_ = /(v2, 4) in
-+($t249, $t250) in
-%($t251, 256) in
-let $t259 : '_ = let $t258 : '_ = let $t257 : '_ = let $t255 : '_ = let $t252 : '_ = byte_to_char(byte1) in
-let $t254 : '_ = let $t253 : '_ = byte_to_char(byte0) in
-alloc Cons($t253, acc) in
-alloc Cons($t252, $t254) in
-let $t256 : '_ = alloc Nil() in
-Bytes.rev($t255, $t256) in
-string_from_chars($t257) in
-alloc Bytes($t258) in
-alloc Ok($t259)
+  _ -> let byte0 : '_ = let $t238 : '_ = let $t236 : '_ = *(v0, 4) in
+let $t237 : '_ = /(v1, 16) in
++($t236, $t237) in
+%($t238, 256) in
+let byte1 : '_ = let $t242 : '_ = let $t240 : '_ = let $t239 : '_ = %(v1, 16) in
+*($t239, 16) in
+let $t241 : '_ = /(v2, 4) in
++($t240, $t241) in
+%($t242, 256) in
+let $t250 : '_ = let $t249 : '_ = let $t248 : '_ = let $t246 : '_ = let $t243 : '_ = byte_to_char(byte1) in
+let $t245 : '_ = let $t244 : '_ = byte_to_char(byte0) in
+alloc Cons($t244, acc) in
+alloc Cons($t243, $t245) in
+let $t247 : '_ = alloc Nil() in
+Bytes.rev($t246, $t247) in
+string_from_chars($t248) in
+alloc Bytes($t249) in
+alloc Ok($t250)
   _ -> let v2 : '_ = Bytes.b64_val(c2) in
 let v3 : '_ = Bytes.b64_val(c3) in
-let $t262 : '_ = let $t260 : '_ = <(v2, 0) in
-let $t261 : '_ = <(v3, 0) in
-||($t260, $t261) in
-case $t262 of
+let $t252 : '_ = let $t251 : '_ = <(v2, 0) in
+case $t251 of
+  True() -> true
+  _ -> <(v3, 0) in
+case $t252 of
   True() -> alloc Err("invalid base64 character")
-  _ -> let byte0 : '_ = let $t265 : '_ = let $t263 : '_ = *(v0, 4) in
-let $t264 : '_ = /(v1, 16) in
-+($t263, $t264) in
-%($t265, 256) in
-let byte1 : '_ = let $t269 : '_ = let $t267 : '_ = let $t266 : '_ = %(v1, 16) in
-*($t266, 16) in
-let $t268 : '_ = /(v2, 4) in
-+($t267, $t268) in
-%($t269, 256) in
-let byte2 : '_ = let $t272 : '_ = let $t271 : '_ = let $t270 : '_ = %(v2, 4) in
-*($t270, 64) in
-+($t271, v3) in
-%($t272, 256) in
-let $t273 : '_ = +(i, 4) in
-let $t279 : '_ = let $t274 : '_ = byte_to_char(byte2) in
-let $t278 : '_ = let $t275 : '_ = byte_to_char(byte1) in
-let $t277 : '_ = let $t276 : '_ = byte_to_char(byte0) in
-alloc Cons($t276, acc) in
-alloc Cons($t275, $t277) in
-alloc Cons($t274, $t278) in
-Bytes.decode_base64_go(s, $t273, n, $t279)
+  _ -> let byte0 : '_ = let $t255 : '_ = let $t253 : '_ = *(v0, 4) in
+let $t254 : '_ = /(v1, 16) in
++($t253, $t254) in
+%($t255, 256) in
+let byte1 : '_ = let $t259 : '_ = let $t257 : '_ = let $t256 : '_ = %(v1, 16) in
+*($t256, 16) in
+let $t258 : '_ = /(v2, 4) in
++($t257, $t258) in
+%($t259, 256) in
+let byte2 : '_ = let $t262 : '_ = let $t261 : '_ = let $t260 : '_ = %(v2, 4) in
+*($t260, 64) in
++($t261, v3) in
+%($t262, 256) in
+let $t263 : '_ = +(i, 4) in
+let $t269 : '_ = let $t264 : '_ = byte_to_char(byte2) in
+let $t268 : '_ = let $t265 : '_ = byte_to_char(byte1) in
+let $t267 : '_ = let $t266 : '_ = byte_to_char(byte0) in
+alloc Cons($t266, acc) in
+alloc Cons($t265, $t267) in
+alloc Cons($t264, $t268) in
+Bytes.decode_base64_go(s, $t263, n, $t269)
 
 ## Bytes.decode_utf8
 fn Bytes.decode_utf8(b : '_) : '_ =
@@ -230,84 +236,84 @@ fn Bytes.empty() : '_ =
 ## Bytes.encode_base64
 fn Bytes.encode_base64(b : '_) : '_ =
   case b of
-  Bytes($f207) -> let s : '_ = $f207 in
-let $t205 : '_ = string_byte_length(s) in
-let $t206 : '_ = alloc Nil() in
-Bytes.encode_base64_go(s, 0, $t205, $t206)
+  Bytes($f203) -> let s : '_ = $f203 in
+let $t201 : '_ = string_byte_length(s) in
+let $t202 : '_ = alloc Nil() in
+Bytes.encode_base64_go(s, 0, $t201, $t202)
   _ -> panic("non-exhaustive pattern match")
 
 ## Bytes.encode_base64_go
 fn Bytes.encode_base64_go(s : '_, i : '_, n : '_, acc : '_) : '_ =
-  let $t158 : '_ = let $t157 : '_ = +(i, 3) in
-<=($t157, n) in
-case $t158 of
+  let $t154 : '_ = let $t153 : '_ = +(i, 3) in
+<=($t153, n) in
+case $t154 of
   True() -> let b0 : '_ = string_byte_at(s, i) in
-let b1 : '_ = let $t159 : '_ = +(i, 1) in
-string_byte_at(s, $t159) in
-let b2 : '_ = let $t160 : '_ = +(i, 2) in
-string_byte_at(s, $t160) in
-let c0 : '_ = let $t161 : '_ = /(b0, 4) in
+let b1 : '_ = let $t155 : '_ = +(i, 1) in
+string_byte_at(s, $t155) in
+let b2 : '_ = let $t156 : '_ = +(i, 2) in
+string_byte_at(s, $t156) in
+let c0 : '_ = let $t157 : '_ = /(b0, 4) in
+Bytes.b64_char($t157) in
+let c1 : '_ = let $t161 : '_ = let $t159 : '_ = let $t158 : '_ = %(b0, 4) in
+*($t158, 16) in
+let $t160 : '_ = /(b1, 16) in
++($t159, $t160) in
 Bytes.b64_char($t161) in
-let c1 : '_ = let $t165 : '_ = let $t163 : '_ = let $t162 : '_ = %(b0, 4) in
-*($t162, 16) in
-let $t164 : '_ = /(b1, 16) in
+let c2 : '_ = let $t165 : '_ = let $t163 : '_ = let $t162 : '_ = %(b1, 16) in
+*($t162, 4) in
+let $t164 : '_ = /(b2, 64) in
 +($t163, $t164) in
 Bytes.b64_char($t165) in
-let c2 : '_ = let $t169 : '_ = let $t167 : '_ = let $t166 : '_ = %(b1, 16) in
-*($t166, 4) in
-let $t168 : '_ = /(b2, 64) in
-+($t167, $t168) in
-Bytes.b64_char($t169) in
-let c3 : '_ = let $t170 : '_ = %(b2, 64) in
-Bytes.b64_char($t170) in
-let $t171 : '_ = +(i, 3) in
-let $t175 : '_ = let $t174 : '_ = let $t173 : '_ = let $t172 : '_ = alloc Cons(c0, acc) in
-alloc Cons(c1, $t172) in
-alloc Cons(c2, $t173) in
-alloc Cons(c3, $t174) in
-Bytes.encode_base64_go(s, $t171, n, $t175)
-  _ -> let $t177 : '_ = let $t176 : '_ = +(i, 2) in
-==($t176, n) in
-case $t177 of
+let c3 : '_ = let $t166 : '_ = %(b2, 64) in
+Bytes.b64_char($t166) in
+let $t167 : '_ = +(i, 3) in
+let $t171 : '_ = let $t170 : '_ = let $t169 : '_ = let $t168 : '_ = alloc Cons(c0, acc) in
+alloc Cons(c1, $t168) in
+alloc Cons(c2, $t169) in
+alloc Cons(c3, $t170) in
+Bytes.encode_base64_go(s, $t167, n, $t171)
+  _ -> let $t173 : '_ = let $t172 : '_ = +(i, 2) in
+==($t172, n) in
+case $t173 of
   True() -> let b0 : '_ = string_byte_at(s, i) in
-let b1 : '_ = let $t178 : '_ = +(i, 1) in
-string_byte_at(s, $t178) in
-let c0 : '_ = let $t179 : '_ = /(b0, 4) in
+let b1 : '_ = let $t174 : '_ = +(i, 1) in
+string_byte_at(s, $t174) in
+let c0 : '_ = let $t175 : '_ = /(b0, 4) in
+Bytes.b64_char($t175) in
+let c1 : '_ = let $t179 : '_ = let $t177 : '_ = let $t176 : '_ = %(b0, 4) in
+*($t176, 16) in
+let $t178 : '_ = /(b1, 16) in
++($t177, $t178) in
 Bytes.b64_char($t179) in
-let c1 : '_ = let $t183 : '_ = let $t181 : '_ = let $t180 : '_ = %(b0, 4) in
-*($t180, 16) in
-let $t182 : '_ = /(b1, 16) in
-+($t181, $t182) in
-Bytes.b64_char($t183) in
-let c2 : '_ = let $t185 : '_ = let $t184 : '_ = %(b1, 16) in
-*($t184, 4) in
-Bytes.b64_char($t185) in
-let $t191 : '_ = let $t189 : '_ = let $t188 : '_ = let $t187 : '_ = let $t186 : '_ = alloc Cons(c0, acc) in
-alloc Cons(c1, $t186) in
-alloc Cons(c2, $t187) in
-alloc Cons("=", $t188) in
-let $t190 : '_ = alloc Nil() in
-Bytes.rev($t189, $t190) in
-Bytes.join_strings($t191)
-  _ -> let $t193 : '_ = let $t192 : '_ = +(i, 1) in
-==($t192, n) in
-case $t193 of
+let c2 : '_ = let $t181 : '_ = let $t180 : '_ = %(b1, 16) in
+*($t180, 4) in
+Bytes.b64_char($t181) in
+let $t187 : '_ = let $t185 : '_ = let $t184 : '_ = let $t183 : '_ = let $t182 : '_ = alloc Cons(c0, acc) in
+alloc Cons(c1, $t182) in
+alloc Cons(c2, $t183) in
+alloc Cons("=", $t184) in
+let $t186 : '_ = alloc Nil() in
+Bytes.rev($t185, $t186) in
+Bytes.join_strings($t187)
+  _ -> let $t189 : '_ = let $t188 : '_ = +(i, 1) in
+==($t188, n) in
+case $t189 of
   True() -> let b0 : '_ = string_byte_at(s, i) in
-let c0 : '_ = let $t194 : '_ = /(b0, 4) in
-Bytes.b64_char($t194) in
-let c1 : '_ = let $t196 : '_ = let $t195 : '_ = %(b0, 4) in
-*($t195, 16) in
-Bytes.b64_char($t196) in
-let $t202 : '_ = let $t200 : '_ = let $t199 : '_ = let $t198 : '_ = let $t197 : '_ = alloc Cons(c0, acc) in
-alloc Cons(c1, $t197) in
-alloc Cons("=", $t198) in
-alloc Cons("=", $t199) in
-let $t201 : '_ = alloc Nil() in
-Bytes.rev($t200, $t201) in
-Bytes.join_strings($t202)
-  _ -> let $t204 : '_ = let $t203 : '_ = alloc Nil() in
-Bytes.rev(acc, $t203) in
-Bytes.join_strings($t204)
+let c0 : '_ = let $t190 : '_ = /(b0, 4) in
+Bytes.b64_char($t190) in
+let c1 : '_ = let $t192 : '_ = let $t191 : '_ = %(b0, 4) in
+*($t191, 16) in
+Bytes.b64_char($t192) in
+let $t198 : '_ = let $t196 : '_ = let $t195 : '_ = let $t194 : '_ = let $t193 : '_ = alloc Cons(c0, acc) in
+alloc Cons(c1, $t193) in
+alloc Cons("=", $t194) in
+alloc Cons("=", $t195) in
+let $t197 : '_ = alloc Nil() in
+Bytes.rev($t196, $t197) in
+Bytes.join_strings($t198)
+  _ -> let $t200 : '_ = let $t199 : '_ = alloc Nil() in
+Bytes.rev(acc, $t199) in
+Bytes.join_strings($t200)
 
 ## Bytes.encode_utf8
 fn Bytes.encode_utf8(s : '_) : '_ =
@@ -316,38 +322,39 @@ fn Bytes.encode_utf8(s : '_) : '_ =
 ## Bytes.from_hex
 fn Bytes.from_hex(s : '_) : '_ =
   let n : '_ = string_byte_length(s) in
-let $t155 : '_ = let $t154 : '_ = %(n, 2) in
-!=($t154, 0) in
-case $t155 of
+let $t151 : '_ = let $t150 : '_ = %(n, 2) in
+!=($t150, 0) in
+case $t151 of
   True() -> alloc Err("hex string must have even length")
-  _ -> let $t156 : '_ = alloc Nil() in
-Bytes.from_hex_go(s, 0, n, $t156)
+  _ -> let $t152 : '_ = alloc Nil() in
+Bytes.from_hex_go(s, 0, n, $t152)
 
 ## Bytes.from_hex_go
 fn Bytes.from_hex_go(s : '_, i : '_, n : '_, acc : '_) : '_ =
-  let $t138 : '_ = >=(i, n) in
-case $t138 of
-  True() -> let $t142 : '_ = let $t141 : '_ = let $t140 : '_ = let $t139 : '_ = alloc Nil() in
-Bytes.rev(acc, $t139) in
-string_from_chars($t140) in
-alloc Bytes($t141) in
-alloc Ok($t142)
-  _ -> let hi : '_ = let $t143 : '_ = string_byte_at(s, i) in
-Bytes.hex_val($t143) in
-let lo : '_ = let $t145 : '_ = let $t144 : '_ = +(i, 1) in
-string_byte_at(s, $t144) in
-Bytes.hex_val($t145) in
-let $t148 : '_ = let $t146 : '_ = <(hi, 0) in
-let $t147 : '_ = <(lo, 0) in
-||($t146, $t147) in
-case $t148 of
+  let $t135 : '_ = >=(i, n) in
+case $t135 of
+  True() -> let $t139 : '_ = let $t138 : '_ = let $t137 : '_ = let $t136 : '_ = alloc Nil() in
+Bytes.rev(acc, $t136) in
+string_from_chars($t137) in
+alloc Bytes($t138) in
+alloc Ok($t139)
+  _ -> let hi : '_ = let $t140 : '_ = string_byte_at(s, i) in
+Bytes.hex_val($t140) in
+let lo : '_ = let $t142 : '_ = let $t141 : '_ = +(i, 1) in
+string_byte_at(s, $t141) in
+Bytes.hex_val($t142) in
+let $t144 : '_ = let $t143 : '_ = <(hi, 0) in
+case $t143 of
+  True() -> true
+  _ -> <(lo, 0) in
+case $t144 of
   True() -> alloc Err("invalid hex character")
-  _ -> let $t149 : '_ = +(i, 2) in
-let $t153 : '_ = let $t152 : '_ = let $t151 : '_ = let $t150 : '_ = *(hi, 16) in
-+($t150, lo) in
-byte_to_char($t151) in
-alloc Cons($t152, acc) in
-Bytes.from_hex_go(s, $t149, n, $t153)
+  _ -> let $t145 : '_ = +(i, 2) in
+let $t149 : '_ = let $t148 : '_ = let $t147 : '_ = let $t146 : '_ = *(hi, 16) in
++($t146, lo) in
+byte_to_char($t147) in
+alloc Cons($t148, acc) in
+Bytes.from_hex_go(s, $t145, n, $t149)
 
 ## Bytes.from_list
 fn Bytes.from_list(xs : '_) : '_ =
@@ -398,20 +405,23 @@ char_from_int($t114)
 
 ## Bytes.hex_val
 fn Bytes.hex_val(code : '_) : '_ =
-  let $t131 : '_ = let $t129 : '_ = >=(code, 48) in
-let $t130 : '_ = <=(code, 57) in
-&&($t129, $t130) in
-case $t131 of
+  let $t130 : '_ = let $t129 : '_ = >=(code, 48) in
+case $t129 of
+  True() -> <=(code, 57)
+  _ -> false in
+case $t130 of
   True() -> -(code, 48)
-  _ -> let $t134 : '_ = let $t132 : '_ = >=(code, 65) in
-let $t133 : '_ = <=(code, 70) in
-&&($t132, $t133) in
-case $t134 of
+  _ -> let $t132 : '_ = let $t131 : '_ = >=(code, 65) in
+case $t131 of
+  True() -> <=(code, 70)
+  _ -> false in
+case $t132 of
   True() -> -(code, 55)
-  _ -> let $t137 : '_ = let $t135 : '_ = >=(code, 97) in
-let $t136 : '_ = <=(code, 102) in
-&&($t135, $t136) in
-case $t137 of
+  _ -> let $t134 : '_ = let $t133 : '_ = >=(code, 97) in
+case $t133 of
+  True() -> <=(code, 102)
+  _ -> false in
+case $t134 of
   True() -> -(code, 87)
   _ -> negate(1)
 
@@ -508,10 +518,10 @@ fn Bytes.to_u8_arr(b : '_) : '_ =
 fn List.all(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
   Nil() -> true
-  Cons($f581, $f582) -> let t : '_ = $f582 in
-let h : '_ = $f581 in
-let $t580 : '_ = pred(h) in
-case $t580 of
+  Cons($f567, $f568) -> let t : '_ = $f568 in
+let h : '_ = $f567 in
+let $t566 : '_ = pred(h) in
+case $t566 of
   True() -> List.all(t, pred)
   _ -> false
   _ -> panic("non-exhaustive pattern match")
@@ -520,10 +530,10 @@ case $t580 of
 fn List.any(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
   Nil() -> false
-  Cons($f574, $f575) -> let t : '_ = $f575 in
-let h : '_ = $f574 in
-let $t573 : '_ = pred(h) in
-case $t573 of
+  Cons($f560, $f561) -> let t : '_ = $f561 in
+let h : '_ = $f560 in
+let $t559 : '_ = pred(h) in
+case $t559 of
   True() -> true
   _ -> List.any(t, pred)
   _ -> panic("non-exhaustive pattern match")
@@ -532,22 +542,22 @@ case $t573 of
 fn List.append(xs : List('a), ys : List('a)) : List('a) =
   case xs of
   Nil() -> ys
-  Cons($f370, $f371) -> let t : '_ = $f371 in
-let h : '_ = $f370 in
-let $t369 : '_ = List.append(t, ys) in
-alloc Cons(h, $t369)
+  Cons($f360, $f361) -> let t : '_ = $f361 in
+let h : '_ = $f360 in
+let $t359 : '_ = List.append(t, ys) in
+alloc Cons(h, $t359)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.chunks
 fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
   let go : (List('a), List(List('a))) -> List(List('a)) = letrec [go] in
 go in
-let $t725 : '_ = <=(size, 0) in
-case $t725 of
+let $t711 : '_ = <=(size, 0) in
+case $t711 of
   True() -> __panic_site("stdlib/list.march", 1035, 20, 63);
 panic("List.chunks: size must be positive")
-  _ -> let $t726 : '_ = alloc Nil() in
-go(xs, $t726)
+  _ -> let $t712 : '_ = alloc Nil() in
+go(xs, $t712)
 
 ## List.concat
 fn List.concat(xss : List(List('a))) : List('a) =
@@ -555,8 +565,8 @@ fn List.concat(xss : List(List('a))) : List('a) =
 prepend_reversed in
 let go : (List(List('a)), List('a)) -> List('a) = letrec [go] in
 go in
-let $t543 : '_ = alloc Nil() in
-go(xss, $t543)
+let $t529 : '_ = alloc Nil() in
+go(xss, $t529)
 
 ## List.dedup
 fn List.dedup(xs : List('a)) : List('a) =
@@ -564,32 +574,32 @@ fn List.dedup(xs : List('a)) : List('a) =
 go in
 case xs of
   Nil() -> alloc Nil()
-  Cons($f837, $f838) -> let t : '_ = $f838 in
-let h : '_ = $f837 in
-let $t836 : '_ = let $t835 : '_ = alloc Nil() in
-alloc Cons(h, $t835) in
-go(t, h, $t836)
+  Cons($f823, $f824) -> let t : '_ = $f824 in
+let h : '_ = $f823 in
+let $t822 : '_ = let $t821 : '_ = alloc Nil() in
+alloc Cons(h, $t821) in
+go(t, h, $t822)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop
 fn List.drop(xs : List('a), n : Int) : List('a) =
-  let $t666 : '_ = <=(n, 0) in
-case $t666 of
+  let $t652 : '_ = <=(n, 0) in
+case $t652 of
   True() -> xs
   _ -> case xs of
   Nil() -> alloc Nil()
-  Cons($f668, $f669) -> let t : '_ = $f669 in
-let $t667 : '_ = -(n, 1) in
-List.drop(t, $t667)
+  Cons($f654, $f655) -> let t : '_ = $f655 in
+let $t653 : '_ = -(n, 1) in
+List.drop(t, $t653)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop_last
 fn List.drop_last(xs : List('a)) : List('a) =
-  let $t715 : '_ = List.reverse(xs) in
-case $t715 of
+  let $t701 : '_ = List.reverse(xs) in
+case $t701 of
   Nil() -> alloc Nil()
-  Cons($f716, $f717) -> let rest : '_ = $f717 in
-let ig : '_ = $f716 in
+  Cons($f702, $f703) -> let rest : '_ = $f703 in
+let ig : '_ = $f702 in
 List.reverse(rest)
   _ -> panic("non-exhaustive pattern match")
 
@@ -597,10 +607,10 @@ List.reverse(rest)
 fn List.drop_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f683, $f684) -> let t : '_ = $f684 in
-let h : '_ = $f683 in
-let $t682 : '_ = pred(h) in
-case $t682 of
+  Cons($f669, $f670) -> let t : '_ = $f670 in
+let h : '_ = $f669 in
+let $t668 : '_ = pred(h) in
+case $t668 of
   True() -> List.drop_while(t, pred)
   _ -> xs
   _ -> panic("non-exhaustive pattern match")
@@ -619,19 +629,19 @@ fn List.empty() : List('a) =
 fn List.enumerate(xs : List('a)) : List((Int, 'a)) =
   let go : (List('a), Int, List((Int, 'a))) -> List((Int, 'a)) = letrec [go] in
 go in
-let $t784 : '_ = alloc Nil() in
-go(xs, 0, $t784)
+let $t770 : '_ = alloc Nil() in
+go(xs, 0, $t770)
 
 ## List.filter
 fn List.filter(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f408, $f409) -> let t : '_ = $f409 in
-let h : '_ = $f408 in
-let $t406 : '_ = pred(h) in
-case $t406 of
-  True() -> let $t407 : '_ = List.filter(t, pred) in
-alloc Cons(h, $t407)
+  Cons($f398, $f399) -> let t : '_ = $f399 in
+let h : '_ = $f398 in
+let $t396 : '_ = pred(h) in
+case $t396 of
+  True() -> let $t397 : '_ = List.filter(t, pred) in
+alloc Cons(h, $t397)
   _ -> List.filter(t, pred)
   _ -> panic("non-exhaustive pattern match")
 
@@ -639,13 +649,13 @@ alloc Cons(h, $t407)
 fn List.filter_map(xs : List('a), f : ('a) -> Option('b)) : List('b) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f504, $f505) -> let t : '_ = $f505 in
-let h : '_ = $f504 in
-let $t501 : '_ = f(h) in
-case $t501 of
-  Some($f503) -> let v : '_ = $f503 in
-let $t502 : '_ = List.filter_map(t, f) in
-alloc Cons(v, $t502)
+  Cons($f490, $f491) -> let t : '_ = $f491 in
+let h : '_ = $f490 in
+let $t487 : '_ = f(h) in
+case $t487 of
+  Some($f489) -> let v : '_ = $f489 in
+let $t488 : '_ = List.filter_map(t, f) in
+alloc Cons(v, $t488)
   None() -> List.filter_map(t, f)
   _ -> panic("non-exhaustive pattern match")
   _ -> panic("non-exhaustive pattern match")
@@ -654,10 +664,10 @@ alloc Cons(v, $t502)
 fn List.find(xs : List('a), pred : ('a) -> Bool) : Option('a) =
   case xs of
   Nil() -> alloc None()
-  Cons($f559, $f560) -> let t : '_ = $f560 in
-let h : '_ = $f559 in
-let $t558 : '_ = pred(h) in
-case $t558 of
+  Cons($f545, $f546) -> let t : '_ = $f546 in
+let h : '_ = $f545 in
+let $t544 : '_ = pred(h) in
+case $t544 of
   True() -> alloc Some(h)
   _ -> List.find(t, pred)
   _ -> panic("non-exhaustive pattern match")
@@ -670,22 +680,22 @@ go(xs, 0)
 
 ## List.flat_map
 fn List.flat_map(xs : List('a), f : ('a) -> List('b)) : List('b) =
-  let $t391 : '_ = alloc Nil() in
-List.flat_map_go($t391, xs, f)
+  let $t381 : '_ = alloc Nil() in
+List.flat_map_go($t381, xs, f)
 
 ## List.flat_map_go
 fn List.flat_map_go(sub : List('b), lst : List('a), f : ('a) -> List('b)) : List('b) =
   case sub of
-  Cons($f400, $f401) -> let rest : '_ = $f401 in
-let x : '_ = $f400 in
-let $t392 : '_ = List.flat_map_go(rest, lst, f) in
-alloc Cons(x, $t392)
+  Cons($f390, $f391) -> let rest : '_ = $f391 in
+let x : '_ = $f390 in
+let $t382 : '_ = List.flat_map_go(rest, lst, f) in
+alloc Cons(x, $t382)
   Nil() -> case lst of
   Nil() -> alloc Nil()
-  Cons($f394, $f395) -> let t : '_ = $f395 in
-let h : '_ = $f394 in
-let $t393 : '_ = f(h) in
-List.flat_map_go($t393, t, f)
+  Cons($f384, $f385) -> let t : '_ = $f385 in
+let h : '_ = $f384 in
+let $t383 : '_ = f(h) in
+List.flat_map_go($t383, t, f)
   _ -> panic("non-exhaustive pattern match")
   _ -> panic("non-exhaustive pattern match")
 
@@ -693,23 +703,23 @@ List.flat_map_go($t393, t, f)
 fn List.fold_left(xs : List('a), acc : 'b, f : ('b) -> ('a) -> 'b) : 'b =
   case xs of
   Nil() -> acc
-  Cons($f511, $f512) -> let t : '_ = $f512 in
-let h : '_ = $f511 in
-let $t510 : '_ = f(acc, h) in
-List.fold_left(t, $t510, f)
+  Cons($f497, $f498) -> let t : '_ = $f498 in
+let h : '_ = $f497 in
+let $t496 : '_ = f(acc, h) in
+List.fold_left(t, $t496, f)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.fold_right
 fn List.fold_right(xs : List('a), acc : 'b, f : ('a) -> ('b) -> 'b) : 'b =
-  let $t517 : '_ = List.reverse(xs) in
-let $t519 : ('_, '_) -> '_ = letrec [$lam0_fold_right] in
+  let $t503 : '_ = List.reverse(xs) in
+let $t505 : ('_, '_) -> '_ = letrec [$lam0_fold_right] in
 $lam0_fold_right in
-List.fold_left($t517, acc, $t519)
+List.fold_left($t503, acc, $t505)
 
 ## List.head
 fn List.head(xs : List('a)) : 'a =
   case xs of
-  Cons($f304, $f305) -> let h : '_ = $f304 in
+  Cons($f294, $f295) -> let h : '_ = $f294 in
 h
   Nil() -> __panic_site("stdlib/list.march", 134, 18, 48);
 panic("List.head: empty list")
@@ -718,7 +728,7 @@ panic("List.head: empty list")
 ## List.head_opt
 fn List.head_opt(xs : List('a)) : Option('a) =
   case xs of
-  Cons($f316, $f317) -> let h : '_ = $f316 in
+  Cons($f306, $f307) -> let h : '_ = $f306 in
 alloc Some(h)
   Nil() -> alloc None()
   _ -> panic("non-exhaustive pattern match")
@@ -727,8 +737,8 @@ alloc Some(h)
 fn List.intersperse(xs : List('a), sep : 'a) : List('a) =
   let go : (List('a), List('a)) -> List('a) = letrec [go] in
 go in
-let $t557 : '_ = alloc Nil() in
-go(xs, $t557)
+let $t543 : '_ = alloc Nil() in
+go(xs, $t543)
 
 ## List.is_empty
 fn List.is_empty(xs : List('a)) : Bool =
@@ -741,10 +751,10 @@ fn List.last(xs : List('a)) : 'a =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 203, 18, 48);
 panic("List.last: empty list")
-  Cons($f328, $f329) -> case $f329 of
-  Nil() -> let x : '_ = $f328 in
+  Cons($f318, $f319) -> case $f319 of
+  Nil() -> let x : '_ = $f318 in
 x
-  _ -> let t : '_ = $f329 in
+  _ -> let t : '_ = $f319 in
 List.last(t)
   _ -> panic("non-exhaustive pattern match")
 
@@ -757,30 +767,30 @@ List.length_onto(xs, 0)
 fn List.length_onto(lst : List('a), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f355, $f356) -> let t : '_ = $f356 in
-let $t354 : '_ = +(acc, 1) in
-List.length_onto(t, $t354)
+  Cons($f345, $f346) -> let t : '_ = $f346 in
+let $t344 : '_ = +(acc, 1) in
+List.length_onto(t, $t344)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.map
 fn List.map(xs : List('a), f : ('a) -> 'b) : List('b) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f378, $f379) -> let t : '_ = $f379 in
-let h : '_ = $f378 in
-let $t376 : '_ = f(h) in
-let $t377 : '_ = List.map(t, f) in
-alloc Cons($t376, $t377)
+  Cons($f368, $f369) -> let t : '_ = $f369 in
+let h : '_ = $f368 in
+let $t366 : '_ = f(h) in
+let $t367 : '_ = List.map(t, f) in
+alloc Cons($t366, $t367)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.max_onto
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f819, $f820) -> let r : '_ = $f820 in
-let x : '_ = $f819 in
-let $t818 : '_ = >(x, m) in
-case $t818 of
+  Cons($f805, $f806) -> let r : '_ = $f806 in
+let x : '_ = $f805 in
+let $t804 : '_ = >(x, m) in
+case $t804 of
   True() -> List.max_onto(r, x)
   _ -> List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
@@ -790,25 +800,25 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f812, $f813) -> let t : '_ = $f813 in
-let h : '_ = $f812 in
+  Cons($f798, $f799) -> let t : '_ = $f799 in
+let h : '_ = $f798 in
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t826 : ('_) -> '_ = letrec [$lam0_member] in
+  let $t812 : ('_) -> '_ = letrec [$lam0_member] in
 $lam0_member in
-List.any(xs, $t826)
+List.any(xs, $t812)
 
 ## List.min_onto
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f806, $f807) -> let r : '_ = $f807 in
-let x : '_ = $f806 in
-let $t805 : '_ = <(x, m) in
-case $t805 of
+  Cons($f792, $f793) -> let r : '_ = $f793 in
+let x : '_ = $f792 in
+let $t791 : '_ = <(x, m) in
+case $t791 of
   True() -> List.min_onto(r, x)
   _ -> List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
@@ -818,8 +828,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f799, $f800) -> let t : '_ = $f800 in
-let h : '_ = $f799 in
+  Cons($f785, $f786) -> let t : '_ = $f786 in
+let h : '_ = $f785 in
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
@@ -828,138 +838,142 @@ fn List.nth(xs : List('a), n : Int) : 'a =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 227, 18, 56);
 panic("List.nth: index out of bounds")
-  Cons($f340, $f341) -> let t : '_ = $f341 in
-let h : '_ = $f340 in
-let $t338 : '_ = ==(n, 0) in
-case $t338 of
+  Cons($f330, $f331) -> let t : '_ = $f331 in
+let h : '_ = $f330 in
+let $t328 : '_ = ==(n, 0) in
+case $t328 of
   True() -> h
-  _ -> let $t339 : '_ = -(n, 1) in
-List.nth(t, $t339)
+  _ -> let $t329 : '_ = -(n, 1) in
+List.nth(t, $t329)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.nth_opt
 fn List.nth_opt(xs : List('a), n : Int) : Option('a) =
   case xs of
   Nil() -> alloc None()
-  Cons($f348, $f349) -> let t : '_ = $f349 in
-let h : '_ = $f348 in
-let $t346 : '_ = ==(n, 0) in
-case $t346 of
+  Cons($f338, $f339) -> let t : '_ = $f339 in
+let h : '_ = $f338 in
+let $t336 : '_ = ==(n, 0) in
+case $t336 of
   True() -> alloc Some(h)
-  _ -> let $t347 : '_ = -(n, 1) in
-List.nth_opt(t, $t347)
+  _ -> let $t337 : '_ = -(n, 1) in
+List.nth_opt(t, $t337)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.partition
 fn List.partition(xs : List('a), pred : ('a) -> Bool) : (List('a), List('a)) =
-  let $t702 : '_ = alloc Nil() in
-let $t703 : '_ = alloc Nil() in
-List.partition_go(xs, pred, $t702, $t703)
+  let $t688 : '_ = alloc Nil() in
+let $t689 : '_ = alloc Nil() in
+List.partition_go(xs, pred, $t688, $t689)
 
 ## List.partition_go
 fn List.partition_go(lst : List('a), pred : ('a) -> Bool, yes : List('a), no : List('a)) : (List('a), List('a)) =
   case lst of
-  Nil() -> let $t704 : '_ = List.reverse(yes) in
-let $t705 : '_ = List.reverse(no) in
-($t704, $t705)
-  Cons($f709, $f710) -> let t : '_ = $f710 in
-let h : '_ = $f709 in
-let $t706 : '_ = pred(h) in
-case $t706 of
-  True() -> let $t707 : '_ = alloc Cons(h, yes) in
-List.partition_go(t, pred, $t707, no)
-  _ -> let $t708 : '_ = alloc Cons(h, no) in
-List.partition_go(t, pred, yes, $t708)
+  Nil() -> let $t690 : '_ = List.reverse(yes) in
+let $t691 : '_ = List.reverse(no) in
+($t690, $t691)
+  Cons($f695, $f696) -> let t : '_ = $f696 in
+let h : '_ = $f695 in
+let $t692 : '_ = pred(h) in
+case $t692 of
+  True() -> let $t693 : '_ = alloc Cons(h, yes) in
+List.partition_go(t, pred, $t693, no)
+  _ -> let $t694 : '_ = alloc Cons(h, no) in
+List.partition_go(t, pred, yes, $t694)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.pfilter
 fn List.pfilter(xs : List('a), pred : ('a) -> Bool) : List('a) =
   let t : '_ = pmap_threshold() in
-let $t482 : '_ = let $t479 : '_ = let $t478 : '_ = List.length(xs) in
-<=($t478, t) in
-let $t481 : '_ = let $t480 : '_ = List.spawn_allowed() in
-not($t480) in
-||($t479, $t481) in
-case $t482 of
+let $t469 : '_ = let $t467 : '_ = let $t466 : '_ = List.length(xs) in
+<=($t466, t) in
+case $t467 of
+  True() -> true
+  _ -> let $t468 : '_ = List.spawn_allowed() in
+not($t468) in
+case $t469 of
   True() -> List.filter(xs, pred)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t486 : ('_) -> '_ = letrec [$lam0_pfilter] in
+let tasks : '_ = let $t473 : ('_) -> '_ = letrec [$lam0_pfilter] in
 $lam0_pfilter in
-List.map(cs, $t486) in
-let $t489 : '_ = let $t488 : ('_) -> '_ = letrec [$lam1_pfilter] in
+List.map(cs, $t473) in
+let $t476 : '_ = let $t475 : ('_) -> '_ = letrec [$lam1_pfilter] in
 $lam1_pfilter in
-List.map(tasks, $t488) in
-List.concat($t489)
+List.map(tasks, $t475) in
+List.concat($t476)
 
 ## List.pmap
 fn List.pmap(xs : List('a), f : ('a) -> 'b) : List('b) =
   let t : '_ = pmap_threshold() in
-let $t453 : '_ = let $t450 : '_ = let $t449 : '_ = List.length(xs) in
-<=($t449, t) in
-let $t452 : '_ = let $t451 : '_ = List.spawn_allowed() in
-not($t451) in
-||($t450, $t452) in
-case $t453 of
+let $t442 : '_ = let $t440 : '_ = let $t439 : '_ = List.length(xs) in
+<=($t439, t) in
+case $t440 of
+  True() -> true
+  _ -> let $t441 : '_ = List.spawn_allowed() in
+not($t441) in
+case $t442 of
   True() -> List.map(xs, f)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t457 : ('_) -> '_ = letrec [$lam0_pmap] in
+let tasks : '_ = let $t446 : ('_) -> '_ = letrec [$lam0_pmap] in
 $lam0_pmap in
-List.map(cs, $t457) in
-let $t460 : '_ = let $t459 : ('_) -> '_ = letrec [$lam1_pmap] in
+List.map(cs, $t446) in
+let $t449 : '_ = let $t448 : ('_) -> '_ = letrec [$lam1_pmap] in
 $lam1_pmap in
-List.map(tasks, $t459) in
-List.concat($t460)
+List.map(tasks, $t448) in
+List.concat($t449)
 
 ## List.pmap_n
 fn List.pmap_n(xs : List('a), f : ('a) -> 'b, max_concurrency : Int) : List('b) =
   let n : '_ = List.length(xs) in
-let $t464 : '_ = let $t461 : '_ = ==(n, 0) in
-let $t463 : '_ = let $t462 : '_ = List.spawn_allowed() in
-not($t462) in
-||($t461, $t463) in
-case $t464 of
+let $t452 : '_ = let $t450 : '_ = ==(n, 0) in
+case $t450 of
+  True() -> true
+  _ -> let $t451 : '_ = List.spawn_allowed() in
+not($t451) in
+case $t452 of
   True() -> List.map(xs, f)
-  _ -> let cap : '_ = let $t465 : '_ = <(max_concurrency, 1) in
-case $t465 of
+  _ -> let cap : '_ = let $t453 : '_ = <(max_concurrency, 1) in
+case $t453 of
   True() -> 1
   _ -> max_concurrency in
-let csize : '_ = let $t468 : '_ = let $t467 : '_ = let $t466 : '_ = /(n, cap) in
-*($t466, cap) in
-==($t467, n) in
-case $t468 of
+let csize : '_ = let $t456 : '_ = let $t455 : '_ = let $t454 : '_ = /(n, cap) in
+*($t454, cap) in
+==($t455, n) in
+case $t456 of
   True() -> /(n, cap)
-  _ -> let $t469 : '_ = /(n, cap) in
-+($t469, 1) in
-let csize2 : '_ = let $t470 : '_ = <(csize, 1) in
-case $t470 of
+  _ -> let $t457 : '_ = /(n, cap) in
++($t457, 1) in
+let csize2 : '_ = let $t458 : '_ = <(csize, 1) in
+case $t458 of
   True() -> 1
   _ -> csize in
 let cs : '_ = List.chunks(xs, csize2) in
-let tasks : '_ = let $t474 : ('_) -> '_ = letrec [$lam0_pmap_n] in
+let tasks : '_ = let $t462 : ('_) -> '_ = letrec [$lam0_pmap_n] in
 $lam0_pmap_n in
-List.map(cs, $t474) in
-let $t477 : '_ = let $t476 : ('_) -> '_ = letrec [$lam1_pmap_n] in
+List.map(cs, $t462) in
+let $t465 : '_ = let $t464 : ('_) -> '_ = letrec [$lam1_pmap_n] in
 $lam1_pmap_n in
-List.map(tasks, $t476) in
-List.concat($t477)
+List.map(tasks, $t464) in
+List.concat($t465)
 
 ## List.preduce
 fn List.preduce(xs : List('a), identity : 'a, combine : ('a) -> ('a) -> 'a) : 'a =
   let t : '_ = pmap_threshold() in
-let $t494 : '_ = let $t491 : '_ = let $t490 : '_ = List.length(xs) in
-<=($t490, t) in
-let $t493 : '_ = let $t492 : '_ = List.spawn_allowed() in
-not($t492) in
-||($t491, $t493) in
-case $t494 of
+let $t480 : '_ = let $t478 : '_ = let $t477 : '_ = List.length(xs) in
+<=($t477, t) in
+case $t478 of
+  True() -> true
+  _ -> let $t479 : '_ = List.spawn_allowed() in
+not($t479) in
+case $t480 of
   True() -> List.fold_left(xs, identity, combine)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t498 : ('_) -> '_ = letrec [$lam0_preduce] in
+let tasks : '_ = let $t484 : ('_) -> '_ = letrec [$lam0_preduce] in
 $lam0_preduce in
-List.map(cs, $t498) in
-let partials : '_ = let $t500 : ('_) -> '_ = letrec [$lam1_preduce] in
+List.map(cs, $t484) in
+let partials : '_ = let $t486 : ('_) -> '_ = letrec [$lam1_preduce] in
 $lam1_preduce in
-List.map(tasks, $t500) in
+List.map(tasks, $t486) in
 List.fold_left(partials, identity, combine)
 
 ## List.product_int
@@ -970,73 +984,73 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f793, $f794) -> let t : '_ = $f794 in
-let x : '_ = $f793 in
-let $t792 : '_ = *(acc, x) in
-List.product_onto(t, $t792)
+  Cons($f779, $f780) -> let t : '_ = $f780 in
+let x : '_ = $f779 in
+let $t778 : '_ = *(acc, x) in
+List.product_onto(t, $t778)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
 fn List.range(start : Int, stop : Int) : List(Int) =
   let go : (Int, List(Int)) -> List(Int) = letrec [go] in
 go in
-let $t298 : '_ = -(stop, 1) in
-let $t299 : '_ = alloc Nil() in
-go($t298, $t299)
+let $t288 : '_ = -(stop, 1) in
+let $t289 : '_ = alloc Nil() in
+go($t288, $t289)
 
 ## List.range_step
 fn List.range_step(start : Int, stop : Int, step : Int) : List(Int) =
-  let $t300 : '_ = ==(step, 0) in
-case $t300 of
+  let $t290 : '_ = ==(step, 0) in
+case $t290 of
   True() -> __panic_site("stdlib/list.march", 99, 20, 67);
 panic("List.range_step: step must be non-zero")
   _ -> List.range_step_go(start, stop, step)
 
 ## List.range_step_go
 fn List.range_step_go(i : Int, stop : Int, step : Int) : List(Int) =
-  let $t302 : '_ = let $t301 : '_ = >(step, 0) in
-case $t301 of
+  let $t292 : '_ = let $t291 : '_ = >(step, 0) in
+case $t291 of
   True() -> >=(i, stop)
   _ -> <=(i, stop) in
-case $t302 of
+case $t292 of
   True() -> alloc Nil()
   _ -> let next : '_ = +(i, step) in
-let $t303 : '_ = List.range_step_go(next, stop, step) in
-alloc Cons(i, $t303)
+let $t293 : '_ = List.range_step_go(next, stop, step) in
+alloc Cons(i, $t293)
 
 ## List.repeat
 fn List.repeat(x : 'a, n : Int) : List('a) =
   let go : (Int, List('a)) -> List('a) = letrec [go] in
 go in
-let $t294 : '_ = alloc Nil() in
-go(n, $t294)
+let $t284 : '_ = alloc Nil() in
+go(n, $t284)
 
 ## List.reverse
 fn List.reverse(xs : List('a)) : List('a) =
-  let $t361 : '_ = alloc Nil() in
-List.reverse_onto(xs, $t361)
+  let $t351 : '_ = alloc Nil() in
+List.reverse_onto(xs, $t351)
 
 ## List.reverse_onto
 fn List.reverse_onto(lst : List('a), acc : List('a)) : List('a) =
   case lst of
   Nil() -> acc
-  Cons($f363, $f364) -> let t : '_ = $f364 in
-let h : '_ = $f363 in
-let $t362 : '_ = alloc Cons(h, acc) in
-List.reverse_onto(t, $t362)
+  Cons($f353, $f354) -> let t : '_ = $f354 in
+let h : '_ = $f353 in
+let $t352 : '_ = alloc Cons(h, acc) in
+List.reverse_onto(t, $t352)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.scan_left
 fn List.scan_left(xs : List('a), acc : 'b, f : ('b) -> ('a) -> 'b) : List('b) =
   let go : ('b, List('a), List('b)) -> List('b) = letrec [go] in
 go in
-let $t528 : '_ = alloc Nil() in
-go(acc, xs, $t528)
+let $t514 : '_ = alloc Nil() in
+go(acc, xs, $t514)
 
 ## List.singleton
 fn List.singleton(x : 'a) : List('a) =
-  let $t290 : '_ = alloc Nil() in
-alloc Cons(x, $t290)
+  let $t280 : '_ = alloc Nil() in
+alloc Cons(x, $t280)
 
 ## List.sort_by
 fn List.sort_by(xs : List('a), cmp : ('a) -> ('a) -> Bool) : List('a) =
@@ -1050,24 +1064,24 @@ let sort_loop : (List(List('a))) -> List('a) = letrec [sort_loop] in
 sort_loop in
 let to_singletons : (List('a), List(List('a))) -> List(List('a)) = letrec [to_singletons] in
 to_singletons in
-let $t655 : '_ = let $t654 : '_ = alloc Nil() in
-to_singletons(xs, $t654) in
-sort_loop($t655)
+let $t641 : '_ = let $t640 : '_ = alloc Nil() in
+to_singletons(xs, $t640) in
+sort_loop($t641)
 
 ## List.spawn_allowed
 fn List.spawn_allowed() : Bool =
-  let $t446 : '_ = Authority.check("IO.Spawn", "") in
-case $t446 of
-  Ok($f447) -> true
-  Err($f448) -> false
+  let $t436 : '_ = Authority.check("IO.Spawn", "") in
+case $t436 of
+  Ok($f437) -> true
+  Err($f438) -> false
   _ -> panic("non-exhaustive pattern match")
 
 ## List.split_at
 fn List.split_at(xs : List('a), n : Int) : (List('a), List('a)) =
   let go : (List('a), Int, List('a)) -> (List('a), List('a)) = letrec [go] in
 go in
-let $t701 : '_ = alloc Nil() in
-go(xs, n, $t701)
+let $t687 : '_ = alloc Nil() in
+go(xs, n, $t687)
 
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
@@ -1077,16 +1091,16 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f786, $f787) -> let t : '_ = $f787 in
-let x : '_ = $f786 in
-let $t785 : '_ = +(acc, x) in
-List.sum_onto(t, $t785)
+  Cons($f772, $f773) -> let t : '_ = $f773 in
+let x : '_ = $f772 in
+let $t771 : '_ = +(acc, x) in
+List.sum_onto(t, $t771)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.tail
 fn List.tail(xs : List('a)) : List('a) =
   case xs of
-  Cons($f310, $f311) -> let t : '_ = $f311 in
+  Cons($f300, $f301) -> let t : '_ = $f301 in
 t
   Nil() -> __panic_site("stdlib/list.march", 152, 18, 48);
 panic("List.tail: empty list")
@@ -1095,40 +1109,40 @@ panic("List.tail: empty list")
 ## List.tail_opt
 fn List.tail_opt(xs : List('a)) : Option(List('a)) =
   case xs of
-  Cons($f322, $f323) -> let t : '_ = $f323 in
+  Cons($f312, $f313) -> let t : '_ = $f313 in
 alloc Some(t)
   Nil() -> alloc None()
   _ -> panic("non-exhaustive pattern match")
 
 ## List.take
 fn List.take(xs : List('a), n : Int) : List('a) =
-  let $t656 : '_ = alloc Nil() in
-List.take_onto(xs, n, $t656)
+  let $t642 : '_ = alloc Nil() in
+List.take_onto(xs, n, $t642)
 
 ## List.take_onto
 fn List.take_onto(lst : List('a), k : Int, acc : List('a)) : List('a) =
-  let $t657 : '_ = <=(k, 0) in
-case $t657 of
+  let $t643 : '_ = <=(k, 0) in
+case $t643 of
   True() -> List.reverse(acc)
   _ -> case lst of
   Nil() -> List.reverse(acc)
-  Cons($f660, $f661) -> let t : '_ = $f661 in
-let h : '_ = $f660 in
-let $t658 : '_ = -(k, 1) in
-let $t659 : '_ = alloc Cons(h, acc) in
-List.take_onto(t, $t658, $t659)
+  Cons($f646, $f647) -> let t : '_ = $f647 in
+let h : '_ = $f646 in
+let $t644 : '_ = -(k, 1) in
+let $t645 : '_ = alloc Cons(h, acc) in
+List.take_onto(t, $t644, $t645)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.take_while
 fn List.take_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f676, $f677) -> let t : '_ = $f677 in
-let h : '_ = $f676 in
-let $t674 : '_ = pred(h) in
-case $t674 of
-  True() -> let $t675 : '_ = List.take_while(t, pred) in
-alloc Cons(h, $t675)
+  Cons($f662, $f663) -> let t : '_ = $f663 in
+let h : '_ = $f662 in
+let $t660 : '_ = pred(h) in
+case $t660 of
+  True() -> let $t661 : '_ = List.take_while(t, pred) in
+alloc Cons(h, $t661)
   _ -> alloc Nil()
   _ -> panic("non-exhaustive pattern match")
 
@@ -1136,23 +1150,23 @@ alloc Cons(h, $t675)
 fn List.unzip(pairs : List(('a, 'b))) : (List('a), List('b)) =
   let go : (List(('a, 'b)), List('a), List('b)) -> (List('a), List('b)) = letrec [go] in
 go in
-let $t773 : '_ = alloc Nil() in
-let $t774 : '_ = alloc Nil() in
-go(pairs, $t773, $t774)
+let $t759 : '_ = alloc Nil() in
+let $t760 : '_ = alloc Nil() in
+go(pairs, $t759, $t760)
 
 ## List.zip
 fn List.zip(xs : List('a), ys : List('b)) : List(('a, 'b)) =
   let go : (List('a), List('b), List(('a, 'b))) -> List(('a, 'b)) = letrec [go] in
 go in
-let $t741 : '_ = alloc Nil() in
-go(xs, ys, $t741)
+let $t727 : '_ = alloc Nil() in
+go(xs, ys, $t727)
 
 ## List.zip_with
 fn List.zip_with(xs : List('a), ys : List('b), f : ('a) -> ('b) -> 'c) : List('c) =
   let go : (List('a), List('b), List('c)) -> List('c) = letrec [go] in
 go in
-let $t756 : '_ = alloc Nil() in
-go(xs, ys, $t756)
+let $t742 : '_ = alloc Nil() in
+go(xs, ys, $t742)
 
 ## String.byte_size
 fn String.byte_size(s : '_) : '_ =
@@ -1172,79 +1186,79 @@ fn String.contains(s : '_, substring : '_) : '_ =
 
 ## String.decode_go
 fn String.decode_go(b : Bytes, n : Int, i : Int, acc : List(Int)) : List(Int) =
-  let $t289 : '_ = >=(i, n) in
-case $t289 of
+  let $t279 : '_ = >=(i, n) in
+case $t279 of
   True() -> List.reverse(acc)
   _ -> let byte : '_ = Bytes.get(b, i) in
-let $t843 : '_ = <(byte, 128) in
-case $t843 of
-  True() -> let $t844 : '_ = +(i, 1) in
-let $t845 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t844, $t845)
-  _ -> let $t846 : '_ = <(byte, 224) in
+let $t829 : '_ = <(byte, 128) in
+case $t829 of
+  True() -> let $t830 : '_ = +(i, 1) in
+let $t831 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t830, $t831)
+  _ -> let $t832 : '_ = <(byte, 224) in
+case $t832 of
+  True() -> let $t834 : '_ = let $t833 : '_ = +(i, 1) in
+<($t833, n) in
+case $t834 of
+  True() -> let b2 : '_ = let $t835 : '_ = +(i, 1) in
+Bytes.get(b, $t835) in
+let $t836 : '_ = +(i, 2) in
+let $t841 : '_ = let $t840 : '_ = let $t838 : '_ = let $t837 : '_ = -(byte, 192) in
+int_shl($t837, 6) in
+let $t839 : '_ = -(b2, 128) in
+int_or($t838, $t839) in
+alloc Cons($t840, acc) in
+String.decode_go(b, n, $t836, $t841)
+  _ -> let $t842 : '_ = +(i, 1) in
+let $t843 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t842, $t843)
+  _ -> let $t844 : '_ = <(byte, 240) in
+case $t844 of
+  True() -> let $t846 : '_ = let $t845 : '_ = +(i, 2) in
+<($t845, n) in
 case $t846 of
-  True() -> let $t848 : '_ = let $t847 : '_ = +(i, 1) in
-<($t847, n) in
-case $t848 of
-  True() -> let b2 : '_ = let $t849 : '_ = +(i, 1) in
-Bytes.get(b, $t849) in
-let $t850 : '_ = +(i, 2) in
-let $t855 : '_ = let $t854 : '_ = let $t852 : '_ = let $t851 : '_ = -(byte, 192) in
-int_shl($t851, 6) in
-let $t853 : '_ = -(b2, 128) in
-int_or($t852, $t853) in
-alloc Cons($t854, acc) in
-String.decode_go(b, n, $t850, $t855)
-  _ -> let $t856 : '_ = +(i, 1) in
-let $t857 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t856, $t857)
-  _ -> let $t858 : '_ = <(byte, 240) in
-case $t858 of
-  True() -> let $t860 : '_ = let $t859 : '_ = +(i, 2) in
-<($t859, n) in
-case $t860 of
-  True() -> let b2 : '_ = let $t861 : '_ = +(i, 1) in
-Bytes.get(b, $t861) in
-let b3 : '_ = let $t862 : '_ = +(i, 2) in
+  True() -> let b2 : '_ = let $t847 : '_ = +(i, 1) in
+Bytes.get(b, $t847) in
+let b3 : '_ = let $t848 : '_ = +(i, 2) in
+Bytes.get(b, $t848) in
+let $t849 : '_ = +(i, 3) in
+let $t857 : '_ = let $t856 : '_ = let $t854 : '_ = let $t851 : '_ = let $t850 : '_ = -(byte, 224) in
+int_shl($t850, 12) in
+let $t853 : '_ = let $t852 : '_ = -(b2, 128) in
+int_shl($t852, 6) in
+int_or($t851, $t853) in
+let $t855 : '_ = -(b3, 128) in
+int_or($t854, $t855) in
+alloc Cons($t856, acc) in
+String.decode_go(b, n, $t849, $t857)
+  _ -> let $t858 : '_ = +(i, 1) in
+let $t859 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t858, $t859)
+  _ -> let $t861 : '_ = let $t860 : '_ = +(i, 3) in
+<($t860, n) in
+case $t861 of
+  True() -> let b2 : '_ = let $t862 : '_ = +(i, 1) in
 Bytes.get(b, $t862) in
-let $t863 : '_ = +(i, 3) in
-let $t871 : '_ = let $t870 : '_ = let $t868 : '_ = let $t865 : '_ = let $t864 : '_ = -(byte, 224) in
-int_shl($t864, 12) in
-let $t867 : '_ = let $t866 : '_ = -(b2, 128) in
-int_shl($t866, 6) in
-int_or($t865, $t867) in
-let $t869 : '_ = -(b3, 128) in
-int_or($t868, $t869) in
-alloc Cons($t870, acc) in
-String.decode_go(b, n, $t863, $t871)
-  _ -> let $t872 : '_ = +(i, 1) in
-let $t873 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t872, $t873)
-  _ -> let $t875 : '_ = let $t874 : '_ = +(i, 3) in
-<($t874, n) in
-case $t875 of
-  True() -> let b2 : '_ = let $t876 : '_ = +(i, 1) in
-Bytes.get(b, $t876) in
-let b3 : '_ = let $t877 : '_ = +(i, 2) in
-Bytes.get(b, $t877) in
-let b4 : '_ = let $t878 : '_ = +(i, 3) in
-Bytes.get(b, $t878) in
-let $t879 : '_ = +(i, 4) in
-let $t890 : '_ = let $t889 : '_ = let $t887 : '_ = let $t884 : '_ = let $t881 : '_ = let $t880 : '_ = -(byte, 240) in
-int_shl($t880, 18) in
-let $t883 : '_ = let $t882 : '_ = -(b2, 128) in
-int_shl($t882, 12) in
-int_or($t881, $t883) in
-let $t886 : '_ = let $t885 : '_ = -(b3, 128) in
-int_shl($t885, 6) in
-int_or($t884, $t886) in
-let $t888 : '_ = -(b4, 128) in
-int_or($t887, $t888) in
-alloc Cons($t889, acc) in
-String.decode_go(b, n, $t879, $t890)
-  _ -> let $t891 : '_ = +(i, 1) in
-let $t892 : '_ = alloc Cons(byte, acc) in
-String.decode_go(b, n, $t891, $t892)
+let b3 : '_ = let $t863 : '_ = +(i, 2) in
+Bytes.get(b, $t863) in
+let b4 : '_ = let $t864 : '_ = +(i, 3) in
+Bytes.get(b, $t864) in
+let $t865 : '_ = +(i, 4) in
+let $t876 : '_ = let $t875 : '_ = let $t873 : '_ = let $t870 : '_ = let $t867 : '_ = let $t866 : '_ = -(byte, 240) in
+int_shl($t866, 18) in
+let $t869 : '_ = let $t868 : '_ = -(b2, 128) in
+int_shl($t868, 12) in
+int_or($t867, $t869) in
+let $t872 : '_ = let $t871 : '_ = -(b3, 128) in
+int_shl($t871, 6) in
+int_or($t870, $t872) in
+let $t874 : '_ = -(b4, 128) in
+int_or($t873, $t874) in
+alloc Cons($t875, acc) in
+String.decode_go(b, n, $t865, $t876)
+  _ -> let $t877 : '_ = +(i, 1) in
+let $t878 : '_ = alloc Cons(byte, acc) in
+String.decode_go(b, n, $t877, $t878)
 
 ## String.encode_cp
 fn String.encode_cp(cp : Int) : List(Int) =
@@ -1345,14 +1359,14 @@ case $t64 of
   True() -> let $t65 : '_ = <=(cp, 57343) in
 case $t65 of
   True() -> alloc None()
-  _ -> let $t285 : '_ = let $t284 : '_ = let $t283 : '_ = String.encode_cp(cp) in
-Bytes.from_list($t283) in
-Bytes.to_string($t284) in
-alloc Some($t285)
-  _ -> let $t288 : '_ = let $t287 : '_ = let $t286 : '_ = String.encode_cp(cp) in
-Bytes.from_list($t286) in
-Bytes.to_string($t287) in
-alloc Some($t288)
+  _ -> let $t275 : '_ = let $t274 : '_ = let $t273 : '_ = String.encode_cp(cp) in
+Bytes.from_list($t273) in
+Bytes.to_string($t274) in
+alloc Some($t275)
+  _ -> let $t278 : '_ = let $t277 : '_ = let $t276 : '_ = String.encode_cp(cp) in
+Bytes.from_list($t276) in
+Bytes.to_string($t277) in
+alloc Some($t278)
 
 ## String.from_float
 fn String.from_float(f : '_) : '_ =
@@ -1433,9 +1447,9 @@ fn String.starts_with(s : '_, prefix : '_) : '_ =
 ## String.to_codepoints
 fn String.to_codepoints(s : String) : List(Int) =
   let b : '_ = Bytes.from_string(s) in
-let $t893 : '_ = Bytes.length(b) in
-let $t894 : '_ = alloc Nil() in
-String.decode_go(b, $t893, 0, $t894)
+let $t879 : '_ = Bytes.length(b) in
+let $t880 : '_ = alloc Nil() in
+String.decode_go(b, $t879, 0, $t880)
 
 ## String.to_float
 fn String.to_float(s : '_) : '_ =
@@ -1480,18 +1494,18 @@ fn String.trim_start(s : '_) : '_ =
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
   let pair : (String, String) = ("hello", "world") in
-let $t900 : String = let $t899 : Int = process_pairs(pair, 3, 0) in
-int_to_string($t899) in
-println($t900)
+let $t886 : String = let $t885 : Int = process_pairs(pair, 3, 0) in
+int_to_string($t885) in
+println($t886)
 
 ## process_pairs
 fn process_pairs(pair : (String, String), n : Int, acc : Int) : Int =
   case n of
   0() -> acc
   _ -> let k : Int = use_first(pair) in
-let $t895 : Int = -(n, 1) in
-let $t896 : Int = +(acc, k) in
-process_pairs(pair, $t895, $t896)
+let $t881 : Int = -(n, 1) in
+let $t882 : Int = +(acc, k) in
+process_pairs(pair, $t881, $t882)
 
 ## use_first
 fn use_first(pair : (String, String)) : Int =

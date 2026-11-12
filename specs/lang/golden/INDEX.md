@@ -66,7 +66,7 @@ types addition (each colliding variant type is its own nominal type).
 | `g10_arithmetic` | `-`,`*`,`/`,`%`, truncating `/`/`%`, unary `negate`, Float `-`/`*` | δ-Sub/Mul/Div/Mod-I, δ-Neg-I, δ-Sub-F/δ-Mul-F (§4.4) |
 | `g11_comparison` | `!=`,`<`,`<=`,`>`,`>=` on Int/Float/String | δ-Neq/Lt/Le/Gt/Ge-* (§4.4) |
 | `g12_bool_ops` | `&&`,`\|\|`,`!`/`not`, `++` | δ-And, δ-Or, δ-Not, δ-Concat (§4.4) |
-| `g13_strict_bool` | `&&`/`\|\|` **strictness** (rhs side effect fires) | §4.4.1 (strict, not short-circuiting); E-App-Prim (§4.2) |
+| `g13_short_circuit_bool` | `&&`/`\|\|` **short-circuit** (a decided rhs's side effect never fires) | §4.4.1 (E-And-F/T, E-Or-T/F) |
 | `g14_tuple_let` | `ETuple` construction, `PatTuple` in a block `let` | E-Tuple (§4.2), match(PatTuple, VTuple) (§4.3) |
 | `g15_tuple_match` | `PatTuple` as a `match` branch, alongside a literal-tuple pattern | E-Match (§4.2), match(PatTuple …) + branch-selection (§4.3) |
 | `g16_tuple_nested` | nested `ETuple` destructured by nested `PatTuple` in a `match` | E-Tuple (§4.2), match(PatTuple …) via match_list recursion (§4.3) |
@@ -114,11 +114,11 @@ note explaining why:
   source program can construct them. Collected in §4.3.1; `g27` is the reachable
   substitute for `PatAs`'s "bindings visible to the arm" semantics.
 - **E-Cond-Fail (truly all-false)** and the **`Match_failure`
-  exhaustiveness** case and the **`&&`/`||` crashing strictness** witness; all
+  exhaustiveness** case; both
   RAISE at runtime, and `verify.sh` treats any nonzero interpreter exit as an
   automatic `INTERP FAIL`, so a crashing program can never register as a golden
-  `MATCH`. `g32` (routed through a `_ ->` catch-all) and `g13` (a non-crashing
-  `println` side-effect witness) are the non-crashing substitutes.
+  `MATCH`. `g32` (routed through a `_ ->` catch-all) is the non-crashing
+  substitute.
 - **`ERecordUpdate` on a missing field**: the adjudicated-and-converged
   divergence (§4.2.1). Its resolved form is "both backends reject with a nonzero
   exit", which (per the harness limitation above) cannot be a golden `MATCH`; it
