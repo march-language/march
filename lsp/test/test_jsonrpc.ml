@@ -8,6 +8,14 @@
    .../lsp/test/test_jsonrpc.exe, the server at .../lsp/bin/main.exe. *)
 let exe = Filename.concat (Filename.dirname Sys.executable_name) "../bin/main.exe"
 
+(* Each session's hang guard. These alarms detect a server that never answers;
+   they are not latency assertions. On CI the `rest` shard runs this suite next
+   to the other test executables, and a normal session there has taken well
+   over 25s (the suite's 37 cases take 150-220s on a green run), so a tight
+   alarm failed sessions that were slow, not hung. A real hang still trips this
+   one. *)
+let hang_guard_s = 120
+
 (* ── Content-Length framing over the process pipes ────────────────────────── *)
 
 let send oc (json : Yojson.Safe.t) =
@@ -60,10 +68,10 @@ let is_id i j = member "id" j = `Int i
 (* ── The test ─────────────────────────────────────────────────────────────── *)
 
 let run_session () =
-  (* Guard against a hung server: abort the whole test after 25s. *)
+  (* Guard against a hung server (see [hang_guard_s]). *)
   Sys.set_signal Sys.sigalrm
     (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
-  ignore (Unix.alarm 25);
+  ignore (Unix.alarm hang_guard_s);
   let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
 
   (* 1. initialize *)
@@ -141,7 +149,7 @@ let test_full_session () =
 let run_execute_command () =
   Sys.set_signal Sys.sigalrm
     (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
-  ignore (Unix.alarm 25);
+  ignore (Unix.alarm hang_guard_s);
   let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
   send oc (`Assoc [
     "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
@@ -206,7 +214,7 @@ let run_exit_terminates () =
   Sys.set_signal Sys.sigalrm
     (Sys.Signal_handle
        (fun _ -> failwith "march-lsp did not exit after the `exit` notification"));
-  ignore (Unix.alarm 10);
+  ignore (Unix.alarm hang_guard_s);
   let exited =
     match input_line ic with
     | exception End_of_file -> true   (* server closed its stdout: it exited *)
@@ -233,12 +241,7 @@ let test_exit_terminates () =
 let pull_diagnostics ~(text : string) ~(uri : string) : Yojson.Safe.t option =
   Sys.set_signal Sys.sigalrm
     (Sys.Signal_handle (fun _ -> failwith "march-lsp did not respond (timeout)"));
-  (* A hang detector, not a speed budget. A fresh march-lsp loads the stdlib
-     cold before its first publish: the clean-buffer case takes ~11 s on an
-     idle Mac and went over 25 s on the loaded Linux CI runner, failing main's
-     `rest` job three runs in a row. 90 s still catches a server that never
-     answers. *)
-  ignore (Unix.alarm 90);
+  ignore (Unix.alarm hang_guard_s);
   let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
   send oc (`Assoc [
     "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";
@@ -436,7 +439,7 @@ let run_no_project_root () =
   Sys.set_signal Sys.sigalrm
     (Sys.Signal_handle
        (fun _ -> failwith "a document with no project root hung the server"));
-  ignore (Unix.alarm 30);
+  ignore (Unix.alarm hang_guard_s);
   let (ic, oc, ec) = Unix.open_process_args_full exe [| exe |] (Unix.environment ()) in
   send oc (`Assoc [
     "jsonrpc", `String "2.0"; "id", `Int 1; "method", `String "initialize";

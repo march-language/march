@@ -1,0 +1,20 @@
+exit: 0
+-- WARNING: PROGRAM ----------- errors/deprecated_2.march
+
+`Legacy.old_add` is deprecated: use `Legacy.add` instead; `old_add` goes away in 2.0. [deprecated]
+
+21 |       let f = Legacy.old_add
+                   ^^^^^^^^^^^^^^
+
+    run `march --explain deprecated`
+
+
+-- WARNING: PROGRAM ----------- errors/deprecated_2.march
+
+`Legacy.old_add` is deprecated: use `Legacy.add` instead; `old_add` goes away in 2.0. [deprecated]
+
+22 |       f(1, 2) + Legacy.old_add(3, 4) + Legacy.inside()
+                     ^^^^^^^^^^^^^^
+
+
+

@@ -249,9 +249,18 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
       | Some _ -> fix
       | None -> annotation_fix ~filename ~src ~msg pos in
     let code = Option.value code ~default:code_parse_error in
-    Error [ refine ~generic:false
-              { (Errors.parse_error_diagnostic_at ~filename ?hint ~src ~msg pos)
-                with code; fix = Errors.fix_opt fix } ]
+    let d = { (Errors.parse_error_diagnostic_at ~filename ?hint ~src ~msg pos)
+              with code; fix = Errors.fix_opt fix } in
+    (* A production that rejects something it has already parsed (a malformed
+       attribute payload, say) raises with the position of that construct,
+       on a line ABOVE the token the parser is looking at.  The block-balance
+       evidence is about that later token, so applying it here moved the caret
+       to an enclosing `mod` and offered to insert an `end`. *)
+    let behind_lookahead =
+      match (state ()).Token_filter.last_tok with
+      | Some _ -> pos.Lexing.pos_lnum < (state ()).Token_filter.last_pos.Lexing.pos_lnum
+      | None -> false in
+    Error [ if behind_lookahead then d else refine ~generic:false d ]
   | exception Parser.Error ->
     Error [ refine ~generic:true
               { (Errors.parse_error_diagnostic ~filename ~msg:stuck lexbuf)

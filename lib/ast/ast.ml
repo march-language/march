@@ -290,9 +290,10 @@ and fn_def = {
   fn_clauses : fn_clause list;  (** One or more pattern-matching heads *)
   fn_bounds : (name * ty) list; (** Explicit type-variable bounds: [s : ConnState, ...] *)
   fn_attr_args : (string * expr list) list;
-      (** Expression payloads of attributes, by attribute name.  Only
-          [@[decreases(e, ...)]] has one (termination design §2.1); its name is
-          also in [fn_attrs] as plain ["decreases"]. *)
+      (** Expression payloads of attributes, by attribute name.
+          [@[decreases(e, ...)]] has one (termination design §2.1), and
+          [@[deprecated("message")]] has its one string literal (read it with
+          [deprecation_of_fn]); each name is also in [fn_attrs], plain. *)
   fn_needs : (name list list * span) option;
       (** A per-function capability bound, [fn f(x) needs IO.Console do]:
           the capability paths and the clause's span.  [Some ([], _)] is
@@ -708,3 +709,10 @@ let rec inspect_unprintable_ty (t : ty) : bool =
 (** The text such a field renders as; [None] means it prints normally. *)
 let inspect_field_placeholder (t : ty) : string option =
   if inspect_unprintable_ty t then Some "<opaque>" else None
+
+(** The message of a function's [@[deprecated("message")]] attribute, if it
+    carries one (specs/lang/compatibility.md, "How something is deprecated"). *)
+let deprecation_of_fn (fd : fn_def) : string option =
+  match List.assoc_opt "deprecated" fd.fn_attr_args with
+  | Some [ ELit (LitString msg, _) ] -> Some msg
+  | _ -> None

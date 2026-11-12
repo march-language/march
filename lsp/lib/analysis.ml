@@ -214,11 +214,17 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
       ) d.labels in
       if infos = [] then None else Some infos
     in
+    (* A use of a `@[deprecated("...")]` function: the Deprecated tag
+       (DiagnosticTag 2) is what makes an editor strike the name through. *)
+    let tags =
+      if March_errors.Code.slug_of d.code = March_errors.Code.deprecated
+      then Some [ Lsp.Types.DiagnosticTag.Deprecated ] else None in
     Some (Lsp.Types.Diagnostic.create
       ~range
       ~severity:(severity_to_lsp d.severity)
       ~message:(`String message)
       ~source:"march"
+      ?tags
       ?code
       ?codeDescription
       ?relatedInformation
