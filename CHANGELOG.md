@@ -476,6 +476,13 @@ git log is authoritative for exact commits.
   variable and the combinator (`portable_capture`). Create the handle inside
   the lambda, or use the sequential version. `task_spawn` and `Task.async`
   are unaffected.
+- **A must-reject corpus for the refinement checker.** `specs/lang/refine/reject/` holds 20
+  programs, each with one obligation that must be reported violated (one per obligation
+  kind, one per fixed false proof), and `specs/lang/refine/check_refine.sh` runs them in CI.
+  Before it, a checker that proved everything passed every refinement gate. Three fixtures
+  the checker wrongly accepts today are listed in `known-accepted.txt`, which may only
+  shrink; one is new: a refined session payload type (`Client -> Server : {Int | _ > 0}`)
+  is not checked at `Chan.send`.
 
 ### Changed
 
