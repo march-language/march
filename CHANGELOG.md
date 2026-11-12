@@ -511,7 +511,11 @@ git log is authoritative for exact commits.
   `accept_split*` / `connect_split*`, `ClusterNode.handshake`, `SessionNode.open` and the
   like are marked `@[stdlib_internal]`: naming one from your own code is a `stdlib_internal`
   error. Use `ClusterNode` and the typed node and session APIs instead.
-
+- **A Float-valued `if` or `match` no longer allocates in compiled code.** Every
+  `if c do a else b end` whose arms are Floats used to box its value on the heap and free it
+  again at the join, a malloc and a free per evaluation; a nested `else if` chain paid once per
+  level. The value now stays in a register, like an Int-valued `if`. A clamp-and-max loop went
+  from 22 ns to 0.7 ns per element. Results do not change.
 - **Compiled `NativeArray.get_*` / `set_*` no longer call into the runtime on the
   common path.** The bounds check and the load or store are emitted inline for every
   element width (int, float, f32, i32, u8); a `set` on an array with one owner writes in
