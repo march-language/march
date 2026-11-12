@@ -914,6 +914,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A compiled `match` arm with a qualified constructor pattern no longer returns the wrong
+  constructor when it returns the matched value.** `match s do Shapes.Square(n) -> if n > 3 do s
+  else d end ... end` returned the type's first constructor (`Circle(11)` for `Square(5)`) in a
+  compiled program, with no error; the interpreter was right. It affected every qualified
+  pattern form (`Mod.Ctor`, `Type.Ctor`, an actor's `Counter.Bump`) whose arm returns the value
+  being matched. A bare pattern was not affected.
 - **A derived `Show`, `Ord` or `Hash` no longer calls a user fn named like the method.** With
   `derive Show for P` and your own `fn show(_x : Int)` in the same module, `println(P(1, "a"))`
   printed `P(U, U)`: the generated code called `show(field)` and got your fn, on both backends.
