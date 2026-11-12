@@ -328,8 +328,9 @@ mod File do
 
   doc """
   Open the directory `path` as a read-only `File.Dir`. Returns `Ok(dir)`, or
-  `Err(FileError)` such as `NotFound(path)`, `Permission(path)` or
-  `IsDirectory(path)` (it is not a directory). Hand the `File.Dir` to code
+  `Err(FileError)`: `NotFound(path)`, `Permission(path)`, or, when `path`
+  exists but is not a directory, `IsDirectory(path)` (the kind `Dir.list`
+  reports for that case). Hand the `File.Dir` to code
   that should read files beneath it and nothing else: `open_in` and `list_in`
   need no capability, and refuse any path that leaves the directory.
   `close_dir` it when done; one that is dropped unclosed is closed when its

@@ -158,7 +158,10 @@ int march_beneath_open(int dirfd, const char *rel, int flags, int mode) {
         how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
         long fd = syscall(SYS_openat2, dirfd, norm, &how, sizeof how);
         if (fd >= 0) r = (int)fd;
-        else if (errno == ENOSYS) r = beneath_walk(dirfd, norm, flags, mode);
+        /* No openat2 (ENOSYS: kernel < 5.6; EPERM: a seccomp profile that
+         * predates it): walk instead.  Never on EXDEV/ELOOP or any other
+         * refusal, which is the kernel's answer for this path. */
+        else if (errno == ENOSYS || errno == EPERM) r = beneath_walk(dirfd, norm, flags, mode);
         else r = -errno;
     }
 #else
@@ -241,11 +244,19 @@ int march_beneath_is_escape(int err) {
 #include "march_runtime.h"
 #include <stdio.h>
 
+/* How beneath_err maps an errno: an open beneath a dir, a listing beneath
+ * one (ENOTDIR is IsDirectory, as dir_list reports it), or dir_open's plain
+ * open of a path (no "beneath": ELOOP/EXDEV are an IoError, not Escapes). */
+#define BENEATH_OPEN    0
+#define BENEATH_LIST    1
+#define BENEATH_DIROPEN 2
+
 /* The FileError for -errno [neg] from an operation on [rel] (or [path]):
  * the file_open_write / dir_list mapping of march_runtime.c, plus Escapes. */
-static void *beneath_err(int neg, const char *rel, size_t len, int listing) {
+static void *beneath_err(int neg, const char *rel, size_t len, int mode) {
     int err = -neg;
-    if (march_beneath_is_escape(err))
+    int listing = mode != BENEATH_OPEN;
+    if (mode != BENEATH_DIROPEN && march_beneath_is_escape(err))
         return march_file_err(FILEERR_ESCAPES, rel, (int64_t)len);
     switch (err) {
     case ENOENT: return march_file_err(FILEERR_NOT_FOUND, rel, (int64_t)len);
@@ -270,8 +281,12 @@ static void *beneath_err(int neg, const char *rel, size_t len, int listing) {
  * two builtins exist so each is charged its own capability. */
 void *march_dir_open(void *path_ptr) {
     march_string *ps = (march_string *)path_ptr;
+    /* An embedded NUL would truncate the path open() sees: NotFound, as the
+     * interpreter's stub reports it. */
+    if (memchr(ps->data, '\0', (size_t)ps->len) != NULL)
+        return beneath_err(-ENOENT, ps->data, (size_t)ps->len, BENEATH_DIROPEN);
     int fd = open(ps->data, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return beneath_err(-errno, ps->data, (size_t)ps->len, 1);
+    if (fd < 0) return beneath_err(-errno, ps->data, (size_t)ps->len, BENEATH_DIROPEN);
     /* An Int in a Result payload is tagged (n<<1)|1 (see march_file_seek). */
     return march_file_ok((void *)(intptr_t)(((int64_t)fd << 1) | 1));
 }
@@ -288,11 +303,11 @@ void *march_file_open_at(int64_t dirfd, void *rel_ptr, int64_t flags) {
     if (flags < 0 || flags > 2)
         return march_file_err(FILEERR_IO_ERROR, "file_open_at: bad flags", 23);
     int fd = march_beneath_open_mode((int)dirfd, rs->data, (size_t)rs->len, flags);
-    if (fd < 0) return beneath_err(fd, rs->data, (size_t)rs->len, 0);
+    if (fd < 0) return beneath_err(fd, rs->data, (size_t)rs->len, BENEATH_OPEN);
     FILE *f = fdopen(fd, flags == 0 ? "rb" : (flags == 1 ? "wb" : "ab"));
-    if (!f) { int e = errno; close(fd); return beneath_err(-e, rs->data, (size_t)rs->len, 0); }
+    if (!f) { int e = errno; close(fd); return beneath_err(-e, rs->data, (size_t)rs->len, BENEATH_OPEN); }
     int64_t h = march_fh_register(f);
-    if (h == 0) { fclose(f); return beneath_err(-EMFILE, rs->data, (size_t)rs->len, 0); }
+    if (h == 0) { fclose(f); return beneath_err(-EMFILE, rs->data, (size_t)rs->len, BENEATH_OPEN); }
     return march_file_ok((void *)(intptr_t)h);
 }
 
@@ -302,7 +317,7 @@ void *march_dir_list_at(int64_t dirfd, void *rel_ptr) {
     char **names = NULL;
     int n = 0;
     int r = march_beneath_list((int)dirfd, rs->data, (size_t)rs->len, &names, &n);
-    if (r < 0) return beneath_err(r, rs->data, (size_t)rs->len, 1);
+    if (r < 0) return beneath_err(r, rs->data, (size_t)rs->len, BENEATH_LIST);
     void *lst = march_file_string_list(names, n);
     march_beneath_free_names(names, n);
     return march_file_ok(lst);

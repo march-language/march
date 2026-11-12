@@ -177,11 +177,12 @@ external beneath_list : int -> string -> int * string array = "march_eval_beneat
 external beneath_errinfo : int -> int * string = "march_eval_beneath_errinfo"
 
 (* The FileError for errno [e] on [rel]: march_file_beneath.c's beneath_err
-   ([listing]: ENOTDIR is IsDirectory, as dir_list reports it). *)
-let beneath_error ~(listing : bool) (rel : string) (e : int) : value =
+   ([listing]: ENOTDIR is IsDirectory, as dir_list reports it; [dir_open]: a
+   plain open of a path, where ELOOP/EXDEV are an IoError, not Escapes). *)
+let beneath_error ?(dir_open = false) ~(listing : bool) (rel : string) (e : int) : value =
   let (kind, msg) = beneath_errinfo e in
   match kind with
-  | 0 -> VCon ("Escapes", [VString rel])
+  | 0 when not dir_open -> VCon ("Escapes", [VString rel])
   | 1 -> VCon ("NotFound", [VString rel])
   | 2 -> VCon ("Permission", [VString rel])
   | 3 -> VCon ("IsDirectory", [VString rel])
@@ -1950,14 +1951,14 @@ let base_env : env =
   ; ("dir_open", VBuiltin ("dir_open", function
       | [VString path] ->
         let fd = beneath_dir_open path in
-        if fd < 0 then VCon ("Err", [beneath_error ~listing:true path (-fd)])
+        if fd < 0 then VCon ("Err", [beneath_error ~dir_open:true ~listing:true path (-fd)])
         else VCon ("Ok", [VInt fd])
       | _ -> eval_error "dir_open(path)"))
 
   ; ("dir_open_write", VBuiltin ("dir_open_write", function
       | [VString path] ->
         let fd = beneath_dir_open path in
-        if fd < 0 then VCon ("Err", [beneath_error ~listing:true path (-fd)])
+        if fd < 0 then VCon ("Err", [beneath_error ~dir_open:true ~listing:true path (-fd)])
         else VCon ("Ok", [VInt fd])
       | _ -> eval_error "dir_open_write(path)"))
 

@@ -19809,9 +19809,11 @@ let codegen_suites =
         Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
         Alcotest.test_case "serialize rejects injection (interp = compiled)" `Quick test_http_serialize_injection_parity;
         Alcotest.test_case "transport refuses injected path, sends nothing" `Quick test_http_transport_refuses_injected_path;
-        Alcotest.test_case "dir_beneath_symlink_linux" `Quick test_dir_beneath_symlink_linux;
         Alcotest.test_case "parse response"          `Quick test_http_parse_response;
         Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
+      ]);
+      ("file handles", [
+        Alcotest.test_case "dir_beneath_symlink_linux" `Quick test_dir_beneath_symlink_linux;
       ]);
       ("http client", [
         Alcotest.test_case "new client"              `Quick test_http_client_new;
