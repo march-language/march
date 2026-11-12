@@ -2396,6 +2396,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, args) when decode_simd_call f.Tir.v_name <> None ->
     Llvm_emit_simd.emit_simd_call ~emit_atom ctx f args
 
+  (* ── NativeArray get/set: bounds check + load/store inline, the runtime
+     helper only on the failing (out-of-bounds or shared-array) branch.
+     See [Llvm_emit_narr]. A user function or local of the same name
+     keeps the ordinary call. *)
+  | Tir.EApp (f, ([_; _] | [_; _; _] as args))
+    when (match Llvm_emit_narr.decode f.Tir.v_name with
+          | Some (_, Llvm_emit_narr.Get) -> List.length args = 2
+          | Some (_, Llvm_emit_narr.Set) -> List.length args = 3
+          | None -> false)
+      && not (Hashtbl.mem ctx.top_fns f.Tir.v_name)
+      && not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
+    Llvm_emit_narr.emit_call ~emit_atom ctx f args
+
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
     Llvm_emit_call.emit_generic_app ~emit_atom ctx f args

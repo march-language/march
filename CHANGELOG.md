@@ -486,6 +486,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Compiled `NativeArray.get_*` / `set_*` no longer call into the runtime on the
+  common path.** The bounds check and the load or store are emitted inline for every
+  element width (int, float, f32, i32, u8); a `set` on an array with one owner writes in
+  place inline. The runtime is called only for an out-of-bounds index (same message, same
+  exit) or a shared array (same copy-on-write). Strata's fluid step got faster; see
+  `specs/progress/2026-11-11-native-array-get-set-inline.md`.
 - **Capability operations return `Result(T, CapError)`** (object-capability design,
   phase 1; breaking). Printing (`println`, `IO.puts/write/warn/read_line/read_byte/gets`),
   the clock (`System.now`, `System.now_ms`, new; `DateTime.now`, `local_now`), randomness

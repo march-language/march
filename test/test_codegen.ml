@@ -11037,6 +11037,120 @@ end|} in
   Alcotest.(check bool) "a call on the right branches" false (expr_calls "&&" (body "call_rhs"));
   Alcotest.(check bool) "a variable divisor on the right branches" false (expr_calls "&&" (body "div_rhs"))
 
+(* ── Inline NativeArray get/set (lib/tir/llvm_emit_narr.ml, 2026-11-11) ──
+   `NativeArray.get_<w>` / `set_<w>` used to be out-of-line calls into the C
+   runtime on every element.  They are now a bounds check plus a load/store
+   inline, with the runtime helper called only on the failing branch (out of
+   bounds, or a shared array that needs copy-on-write).  The program covers
+   every width (int, float, f32, i32, u8), narrowing on store and widening on
+   load, copy-on-write of a shared array, and the `||` guard from Strata's
+   fluid hash table (an out-of-bounds read if the right operand ran).  The
+   compiled output must match the interpreter's, a negative index must still
+   die with the runtime's message, and in the emitted IR the runtime helper
+   may appear only inside the failing block. *)
+let narr_inline_src = {|mod NarrInline do
+  needs IO.Console
+  needs IO.Process
+
+  pfn probe(slots : NativeIntArr, d : NativeIntArr, key : Int, s : Int) : Int do
+    let id1 = NativeArray.get_int(slots, s)
+    if id1 == 0 || NativeArray.get_int(d, 12 * (id1 - 1)) == key do s else probe(slots, d, key, s + 1) end
+  end
+
+  pfn fill(a : NativeIntArr, i : Int, n : Int) : NativeIntArr do
+    if i >= n do a else fill(NativeArray.set_int(a, i, i * i), i + 1, n) end
+  end
+
+  pfn sum(a : NativeIntArr, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else sum(a, i + 1, n, acc + NativeArray.get_int(a, i)) end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    match Authority.must(System.argv()) do
+      Cons(_, Cons("neg_get", _)) ->
+        println(int_to_string(NativeArray.get_int(NativeArray.make_int(4, 0), 0 - 12)))
+      Cons(_, Cons("neg_set", _)) ->
+        println(int_to_string(NativeArray.get_u8(NativeArray.set_u8(NativeArray.make_u8(4, 0), 0 - 1, 9), 0)))
+      _ ->
+        println(int_to_string(probe(NativeArray.make_int(8, 0), NativeArray.make_int(96, 0), 5, 0)))
+        let a = fill(NativeArray.make_int(10, 0), 0, 10)
+        println(int_to_string(sum(a, 0, 10, 0)))
+        -- shared: b and a alias; set must copy, leaving a unchanged
+        let b = a
+        let b2 = NativeArray.set_int(b, 3, 1000)
+        println(int_to_string(NativeArray.get_int(a, 3)) ++ " " ++ int_to_string(NativeArray.get_int(b2, 3)))
+        let f = NativeArray.set_float(NativeArray.make_float(3, 1.5), 2, 2.25)
+        println(float_to_string(NativeArray.get_float(f, 0)) ++ " " ++ float_to_string(NativeArray.get_float(f, 2)))
+        let g = NativeArray.set_f32(NativeArray.make_f32(3, 0.0), 1, 0.1)
+        println(float_to_string(NativeArray.get_f32(g, 1)))
+        let h = NativeArray.set_i32(NativeArray.make_i32(3, 0), 0, 4294967295 + 2147483648)
+        println(int_to_string(NativeArray.get_i32(h, 0)))
+        let h2 = NativeArray.set_i32(h, 1, 0 - 7)
+        println(int_to_string(NativeArray.get_i32(h2, 1)))
+        let u = NativeArray.set_u8(NativeArray.make_u8(3, 0), 2, 0 - 1)
+        let u2 = NativeArray.set_u8(u, 1, 300)
+        println(int_to_string(NativeArray.get_u8(u2, 2)) ++ " " ++ int_to_string(NativeArray.get_u8(u2, 1)))
+        let shared = NativeArray.make_u8(2, 5)
+        let s2 = NativeArray.set_u8(shared, 0, 6)
+        println(int_to_string(NativeArray.get_u8(shared, 0)) ++ " " ++ int_to_string(NativeArray.get_u8(s2, 0)))
+    end
+  end
+end
+|}
+
+let narr_inline_expected = String.concat "\n" [
+  "0"; "285"; "9 1000"; "1.5 2.25"; "0.10000000149"; "2147483647"; "-7";
+  "255 44"; "5 6";
+]
+
+let test_native_arr_inline_get_set () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"narr_inline" narr_inline_src in
+  let in_root = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+  let interp_out = read_cmd_output (Printf.sprintf "%s%s %s 2>&1"
+    in_root (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter" narr_inline_expected interp_out;
+  let bin = Filename.concat tmp "narr_inline_bin" in
+  (match compile_march_or_skip ~cmd_prefix:in_root ~main_exe ~bin ~src () with
+   | None -> ()
+   | Some bin ->
+     Alcotest.(check string) "compiled = interpreter" narr_inline_expected
+       (read_cmd_output (Filename.quote bin ^ " 2>&1"));
+     Alcotest.(check string) "negative get index panics as before"
+       "march: runtime error: native_int_arr_get: index -12 out of bounds (len=4)"
+       (read_cmd_output (Filename.quote bin ^ " neg_get 2>&1"));
+     Alcotest.(check string) "negative set index panics as before"
+       "march: runtime error: native_u8_arr_set: index -1 out of bounds (len=4)"
+       (read_cmd_output (Filename.quote bin ^ " neg_set 2>&1")));
+  (* IR shape: the runtime accessor is called only from the block the inline
+     check branches to on failure. *)
+  ignore (read_cmd_output (Printf.sprintf "cd %s && %s --emit-llvm %s 2>&1"
+    (Filename.quote tmp) (Filename.quote main_exe) (Filename.quote src)));
+  let ll = Filename.remove_extension src ^ ".ll" in
+  let lines = In_channel.with_open_text ll In_channel.input_all
+              |> String.split_on_char '\n' in
+  let label = ref "" and helper_calls = ref 0 and misplaced = ref [] in
+  List.iter (fun l ->
+      let t = String.trim l in
+      if String.length t > 1 && t.[String.length t - 1] = ':'
+         && not (String.contains t ' ') then label := t
+      else
+        List.iter (fun (w, block) ->
+            if ir_contains t (Printf.sprintf "@native_%s_arr_%s(" w
+                                (if block = "naget_oob" then "get" else "set"))
+               && ir_contains t "call " then begin
+              incr helper_calls;
+              if not (String.starts_with ~prefix:block !label) then
+                misplaced := t :: !misplaced
+            end)
+          [ ("int", "naget_oob"); ("int", "naset_slow"); ("u8", "naget_oob");
+            ("u8", "naset_slow"); ("float", "naset_slow"); ("i32", "naset_slow") ])
+    lines;
+  Alcotest.(check bool) "the runtime helpers are still the slow path" true
+    (!helper_calls > 0);
+  Alcotest.(check (list string)) "no runtime get/set call outside its slow block" []
+    (List.rev !misplaced)
+
 (* End to end through HttpTransport.request: an injected path is refused
    before the connection is even opened, so a local listener sees no bytes
    (interpreted and compiled). *)
@@ -20033,6 +20147,9 @@ let codegen_suites =
       ("short-circuit bool ops", [
         Alcotest.test_case "&& / || skip the decided operand (interp = compiled)" `Quick test_and_or_short_circuit_parity;
         Alcotest.test_case "eager-safe rhs stays strict, others branch" `Quick test_and_or_lowering_shape;
+      ]);
+      ("native array inline access", [
+        Alcotest.test_case "get/set inline, runtime only on the failing branch" `Quick test_native_arr_inline_get_set;
       ]);
       ("http builtins", [
         Alcotest.test_case "serialize request"       `Quick test_http_serialize_request;
