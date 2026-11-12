@@ -69,6 +69,19 @@ bin="${MARCH_BIN:-$root/_build/default/bin/main.exe}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# keep <path>...: copy a failure's files (the ASan binary, its output, its
+# compile log) to $MARCH_EVIDENCE_DIR/sanitize/ before $work is removed. CI
+# sets the variable (scripts/ci-evidence.sh) and uploads the directory when the
+# job fails; unset, this does nothing.
+keep() {
+  [ -n "${MARCH_EVIDENCE_DIR:-}" ] || return 0
+  mkdir -p "$MARCH_EVIDENCE_DIR/sanitize"
+  local p
+  for p in "$@"; do
+    if [ -e "$p" ]; then cp -R "$p" "$MARCH_EVIDENCE_DIR/sanitize/" 2>/dev/null || true; fi
+  done
+}
+
 if [ ! -x "$bin" ]; then
   echo "march binary not found at $bin — build it (dune build bin/main.exe) or set MARCH_BIN" >&2
   exit 2
@@ -219,12 +232,14 @@ sweep() {
     if ! MARCH_SANITIZE=1 "$bin" --compile "$f" -o "$work/$label-$b.bin" \
          >"$work/$label-$b.clog" 2>&1; then
       echo "  [$tag] COMPILE FAIL"; sed 's/^/    /' "$work/$label-$b.clog"
+      keep "$work/$label-$b.clog"
       fail=$((fail+1)); continue
     fi
     perl -e 'alarm shift; exec @ARGV' "$tmo" "$work/$label-$b.bin" \
       >"$work/$label-$b.out" 2>"$work/$label-$b.err"; rc=$?
     if [ $rc -ne 0 ] || grep -qiE "AddressSanitizer|runtime error:|LeakSanitizer" "$work/$label-$b.err"; then
       echo "  [$tag] SANITIZER FAIL (rc=$rc)"; sed 's/^/    /' "$work/$label-$b.err"
+      keep "$work/$label-$b.bin" "$work/$label-$b.out" "$work/$label-$b.err" "$work/$label-$b.clog"
       fail=$((fail+1))
     else
       echo "  [$tag] CLEAN"; pass=$((pass+1))
@@ -249,6 +264,7 @@ hcr_closure_pin_leg() {
     echo "  [hcr/hcr_closure_pin] CLEAN"; total_pass=$((total_pass+1))
   else
     echo "  [hcr/hcr_closure_pin] SANITIZER FAIL"; sed 's/^/    /' "$work/hcr_closure_pin.log"
+    keep "$work/hcr_closure_pin.log" "$o"
     total_fail=$((total_fail+1))
   fi
   total_ran=$((total_ran+1))
@@ -315,6 +331,9 @@ two_node_sweep() {
       skip=$((skip+1))
     elif [ $rc -ne 0 ] || grep -qiE "AddressSanitizer|runtime error:" "$work/two-node-$s.log"; then
       echo "  [two-node/$s] SANITIZER FAIL (rc=$rc)"; sed 's/^/    /' "$work/two-node-$s.log"
+      # The scenario's own work directory (node binaries and output) is left
+      # in $TMPDIR by two-node.sh; `ci-evidence.sh collect` picks it up.
+      keep "$work/two-node-$s.log"
       fail=$((fail+1))
     else
       echo "  [two-node/$s] CLEAN"; pass=$((pass+1))

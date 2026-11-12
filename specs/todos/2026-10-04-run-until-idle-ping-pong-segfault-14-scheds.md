@@ -143,5 +143,5 @@ check failed; if it still dies silently, the bad context was not one being
 dispatched (e.g. a fault inside a glibc all-signals-blocked window on a green
 stack), which is itself a narrowing.
 
-Next step if it recurs: the CI job's core capture (`Capture test cores (Linux)`
-in ci.yml) plus the new line; a real amd64 host (not Rosetta) loop.
+Next step if it recurs: the CI job's core capture (`scripts/ci-evidence.sh`, the
+`evidence-test-<os>-<shard>` artifact of a failed run) plus the new line; a real amd64 host (not Rosetta) loop.

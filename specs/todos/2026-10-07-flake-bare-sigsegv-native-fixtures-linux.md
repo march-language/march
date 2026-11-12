@@ -65,9 +65,11 @@ Linux job logs from September have none. That is weak evidence (P about 0.3).
 
 ## Next step
 
-`ci.yml` now captures cores on the Linux `test` shards (`/tmp/march-cores`,
-`ulimit -c unlimited`) and, when the job fails, backtraces them and uploads the
-`cores-<os>-<shard>` artifact. On the next occurrence, `p $_siginfo` separates
+`ci.yml` now captures cores on the Linux `test` shards (`ulimit -c unlimited`,
+`scripts/ci-evidence.sh`) and, when the job fails, backtraces them and uploads
+them with the crashing binary and the step's full log as the
+`evidence-test-<os>-<shard>` artifact (7 days; before 2026-11-11 it was
+`cores-<os>-<shard>`, cores only). On the next occurrence, `p $_siginfo` separates
 the three cases above: `si_code` 128 (`SI_KERNEL`) is case 3, a fault code
 (1, 2) with the runtime's line missing is case 1 or 2, and the backtrace says
 which; 0 or a negative code would mean a signal sent by a process after all.

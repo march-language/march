@@ -48,6 +48,11 @@ jobs:
       - name: Test the affected-suite selector
         run: scripts/test-affected.sh
 
+      # scripts/ci-evidence.sh only does its real work after a CI job has
+      # failed. This stages a failure and checks what it keeps.
+      - name: Test the failure-evidence collector
+        run: scripts/test-ci-evidence.sh
+
       # docs/pagefind/ is a COMMITTED build artifact — march-lang.org is served by
       # GitHub's own Jekyll over docs/, which has no post-build hook, so the search index
       # can only reach production by being in git. It is BOT-OWNED: sync-docs-search-index.yml
