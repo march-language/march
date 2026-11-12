@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "monitor_reconnect": node-b (the target's host).
 --
 -- Connection 1: announce the Target's global pid, register node-a's monitor

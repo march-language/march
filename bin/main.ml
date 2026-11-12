@@ -8215,13 +8215,24 @@ let () =
            | Q.Origin | Q.Callers | Q.Callees -> String.equal r.Q.arg
            | _ -> fun _ -> false))
   end;
+  (* An input file whose name starts with `<` would carry a generated-code
+     span tag (`<control>`, `<topology>`, `<none>`); the control wiring's tag
+     may name @[stdlib_internal] functions, so such a name is refused rather
+     than trusted. *)
+  let add_input f =
+    if String.length (Filename.basename f) > 0 && (Filename.basename f).[0] = '<' then begin
+      Printf.eprintf "march: input file name %S starts with `<`, which is reserved for compiler-generated code\n" f;
+      exit 2
+    end;
+    files := f :: !files
+  in
   (match !query_argv with
    | Some a ->
-     (try Arg.parse_argv ~current:(ref 0) a specs (fun f -> files := f :: !files)
+     (try Arg.parse_argv ~current:(ref 0) a specs add_input
             "Usage: march query <sub> [NAME] FILE [options]"
       with Arg.Bad m -> prerr_string m; exit 2 | Arg.Help m -> print_string m; exit 0)
    | None ->
-     Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]");
+     Arg.parse specs add_input "Usage: march [options] [file.march]");
   (match March_tir.Pass_switch.disabled with
    | { contents = [] } ->
      (match March_tir.Pass_switch.of_env () with

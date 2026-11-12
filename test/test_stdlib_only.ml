@@ -871,7 +871,19 @@ end
       let (rc, out) = run_compiler [ "--check"; "--stdlib-source"; file2 ] in
       Alcotest.(check bool) "--stdlib-source exempts it" false
         (contains ~needle:"internal to the standard library" out);
-      ignore rc)
+      Alcotest.(check int) "and --check then exits 0" 0 rc;
+      (* A user file cannot borrow the control wiring's `<control>` tag, which
+         may name internals: the driver refuses the name. *)
+      let spoof = Filename.concat dir "<control>" in
+      write_file spoof {|mod Plumbing3 do
+  fn a() do NetKernel.send_frame(5, Nil) end
+  fn main() do () end
+end
+|};
+      let (rc, out) = run_compiler [ "--check"; spoof ] in
+      Alcotest.(check int) "an input named <control> is refused" 2 rc;
+      Alcotest.(check bool) "with the reason" true
+        (contains ~needle:"reserved for compiler-generated code" out))
 
 (* The typechecker cannot name Hot_reload (lib/tir), so it keeps its own copy
    of the control wiring's file tag. Pin them equal, and pin who may name an

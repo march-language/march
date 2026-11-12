@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "cert_update_replay": node-c, the attacker. It
 -- is a TCP proxy between node-a and node-b that records node-b's
 -- CERT_UPDATE frame off the wire: a sealed frame is a sequence number, the

@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node discovery test (P2, L1-L3).
 --
 -- Exercises the full authenticated peer-connection + SWIM discovery stack

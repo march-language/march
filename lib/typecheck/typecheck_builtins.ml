@@ -155,8 +155,9 @@ let span_is_stdlib (sp : Ast.span) : bool =
 let control_wiring_file = "<control>"
 
 (** Whether a reference at [sp] may name a [@[stdlib_internal]] function: the
-    stdlib's own code, or the compiler's generated control wiring. User code
-    never qualifies. The stdlib-only BUILTIN gate keeps using [span_is_stdlib]. *)
+    stdlib's own code, or the compiler's generated control wiring. The driver
+    refuses an input file named like a generated-code tag (bin/main.ml,
+    [add_input]), so a user file cannot carry `<control>`. The stdlib-only BUILTIN gate keeps using [span_is_stdlib]. *)
 let span_may_name_internal (sp : Ast.span) : bool =
   span_is_stdlib sp || String.equal sp.Ast.file control_wiring_file
 

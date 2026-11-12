@@ -110,6 +110,40 @@ toolchain_stamp() {
   } | sha256 | cut -d' ' -f1
 }
 
+# plumbing_flag <source>: the flags a node's own header asks for, a line
+# `-- compile-flags: --stdlib-source` in its first lines. Explicit per fixture:
+# a node that drives the stdlib's raw-fd cluster plumbing (NetKernel, NodeSend,
+# ... are @[stdlib_internal], ocap phase 2 task 9) by hand says so, so a new
+# fixture that names a marked function is a user-code error until it opts in.
+plumbing_flag() {
+  sed -n '1,5s/^-- compile-flags: \(--stdlib-source\)\( .*\)\{0,1\}$/\1/p' "$1" | head -1
+}
+
+# --precompile-one cds
+TIMEOUT=${TWO_NODE_TIMEOUT:-60}
+
+sha256() { if command -v sha256sum > /dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+
+# What a node binary is a function of, besides its source and flags: the
+# compiler, the runtime and stdlib it compiles against (exe-relative, unless
+# overridden, as bin/toolchain.ml resolves them), the C compiler, and the
+# environment the compiler reads that changes its output (MARCH_SANITIZE: the
+# ASan gate). A miss is only a recompile, so this can afford to be broad.
+toolchain_stamp() {
+  local d exe_dir; exe_dir=$(dirname "$MARCH")
+  {
+    sha256 < "$MARCH"
+    for d in "${MARCH_RUNTIME_DIR:-$exe_dir/../runtime}" "${MARCH_STDLIB:-$exe_dir/../stdlib}"; do
+      [ -d "$d" ] || { echo "missing $d"; continue; }
+      (cd "$d" && find . -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' -o -name '*.march' \) \
+                   | LC_ALL=C sort | while read -r f; do printf '%s ' "$f"; sha256 < "$f"; done)
+    done
+    "${CC:-cc}" --version 2>&1 | head -1
+    echo "MARCH_SANITIZE=${MARCH_SANITIZE:-}"
+    uname -sm
+  } | sha256 | cut -d' ' -f1
+}
+
 # plumbing_flag <source>: `--stdlib-source` when the node drives the stdlib's
 # raw-fd cluster plumbing (NetKernel, NodeSend, ... are @[stdlib_internal]
 # since ocap phase 2, task 9). A two-node node that speaks the wire protocol
