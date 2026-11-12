@@ -1,0 +1,11 @@
+exit: 0
+-- WARNING: PROGRAM ----------- errors/deprecated_1.march
+
+`Temperature.c_to_f` is deprecated: use `Temperature.to_fahrenheit` instead. [deprecated]
+
+14 |     Temperature.c_to_f(100)
+         ^^^^^^^^^^^^^^^^^^
+
+    run `march --explain deprecated`
+
+

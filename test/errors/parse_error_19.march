@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: needs a message
+mod Main do
+  @[deprecated]
+  fn old_name() : Int do
+    1
+  end
+
+  fn main() : Int do
+    old_name()
+  end
+end

@@ -754,6 +754,15 @@ type env = {
       ceiling: a stdlib wrapper's body caps roll up to the user module that
       calls it, exactly as [March_tir.Cap_attrib]'s [~transparent] does on the
       `--compile` side. Keyed like [cap_closures]. *)
+  deprecated_fns : (Typecheck_types.scheme * Ast.span * string) list ref;
+  (** Every function carrying [@[deprecated("message")]] that a module exports:
+      the scheme the export step bound, the span of the declaring module, and
+      the message.  [EVar] warns ([Code.deprecated]) when the scheme a name
+      resolves to IS one of these (physical equality, so a qualified name, an
+      imported one and an alias all match, and a user's own function of the
+      same name never does) and the reference lies outside the declaring
+      module's span.  A list, not a table: a program has a handful of these,
+      and the common case is the empty list. *)
   stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
   (** Qualified name ([Mod.f]) of every stdlib function carrying
       [@[stdlib_internal]], mapped to the module the error points users at and the scheme the export step
@@ -937,6 +946,7 @@ let make_env errors type_map = {
   own_cap_closures = Hashtbl.create 64;
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
+  deprecated_fns = ref [];
   stdlib_internal_fns = Hashtbl.create 8;
   ceiling_extra_roots = Hashtbl.create 16;
   fn_scopes = Hashtbl.create 16;

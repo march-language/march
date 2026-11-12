@@ -222,6 +222,7 @@ let () =
       Alcotest.test_case "empty string: no crash"                `Quick test_analyse_empty_string;
       Alcotest.test_case "type error → diagnostic"               `Quick test_analyse_type_error_produces_diagnostic;
       Alcotest.test_case "parse error → diagnostic"              `Quick test_analyse_parse_error_produces_diagnostic;
+      Alcotest.test_case "deprecated use → Deprecated tag"       `Quick test_analyse_deprecated_use_is_tagged;
       Alcotest.test_case "multiple errors all reported"          `Quick test_analyse_multiple_errors_all_reported;
       Alcotest.test_case "desugar error → positioned diagnostic" `Quick test_analyse_desugar_error_produces_diagnostic;
       Alcotest.test_case "warning severity"                      `Quick test_analyse_warning_severity;

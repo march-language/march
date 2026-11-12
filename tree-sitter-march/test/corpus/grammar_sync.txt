@@ -786,3 +786,38 @@ end
           guard: (comparison_expression
             left: (identifier)
             right: (integer)))))))
+
+================================================================================
+@[deprecated("...")] carries a string payload
+================================================================================
+
+mod Temperature do
+  doc "Converts Celsius to Fahrenheit."
+  @[deprecated("use `Temperature.to_fahrenheit` instead")]
+  fn c_to_f(c : Int) : Int do
+    c
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (doc_annotation
+      content: (string)
+      (attribute
+        (identifier)
+        (string))
+      decl: (function_def
+        name: (identifier)
+        (fn_param
+          (named_param
+            name: (identifier)
+            type: (type_constructor
+              (type_constructor))))
+        return_type: (type_constructor
+          (type_constructor))
+        body: (block_body
+          (identifier))))))
