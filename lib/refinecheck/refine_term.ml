@@ -1194,7 +1194,7 @@ let bounded ~(body : A.expr) ~(p : string) ~(ty : A.ty option) : bool =
    flagged terminating loops (a BFS over a queue, a merge sort's passes) and
    missed event loops named otherwise. *)
 let event_builtins =
-  [ "receive"; "sleep_ms"; "actor_call"; "task_await"; "task_await_unwrap"; "is_alive";
+  [ "receive"; "sleep_ms"; "actor_call"; "task_await"; "task_await_unwrap"; "task_poll"; "is_alive";
     "tcp_accept"; "tcp_accept_timeout"; "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_chunk_timeout";
     "tcp_recv_chunked_frame"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
     "tcp_recv_timeout"; "tls_accept"; "tls_read"; "tls_read_timeout"; "ws_recv"; "ws_select";

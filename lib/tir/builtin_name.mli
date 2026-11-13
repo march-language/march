@@ -54,6 +54,7 @@ type t =
   | Task_cancel_by_id
   | Task_cancel_token_new
   | Task_is_cancelled
+  | Task_poll
   | Task_reductions
   | Task_spawn
   | Task_spawn_steal
