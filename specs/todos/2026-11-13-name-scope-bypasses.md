@@ -47,3 +47,13 @@ A name-taking function passed in through a function-typed parameter (`fn f(reg) 
 "other") end` called as `f(Actor.register)`) is refused only where `Actor.register` is named as
 a value inside a scoped module. If the value is created in an unscoped module and handed to a
 scoped one, the scoped module's call is not judged. Phase 4 closes this.
+
+## Also open (Task 12 re-review)
+
+- **Grandchild widening.** Nested modules are checked against the union of all
+  ancestors' scopes, so `Outer prefix("w.")` > `Mid prefix("w.x.")` > `In prefix("w.")`
+  is accepted: `In` widens back past `Mid`. A nested module's scope should be
+  judged against its nearest enclosing declaration of the same capability.
+- **Over-eager machine fix.** The `prefix(w)` → `prefix("w")` fix is also offered
+  for other identifier-valued options such as `no_redirects(w)`, where quoting does
+  not make the scope valid. Offer it only for `prefix(...)`.
