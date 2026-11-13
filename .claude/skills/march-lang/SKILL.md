@@ -1050,6 +1050,18 @@ fix. Using a handle (`Vault.set`, socket send/recv) is not an operation.
 | `record_keys(m)` / `record_values(m)` / `record_entries(m)` | Iteration |
 | `record_from_list(pairs)` | Create from list |
 
+### Handles (files, sockets, processes)
+
+A `File.Handle`, `File.Dir`, `Socket`, `Listener`, `Udp.UdpSocket`, `Tls.TlsConn`,
+`WebSocket.WsSocket` or `Process` is an unforgeable, reference-counted box, not an `Int`.
+Only a checked open makes one (`File.open`, `Socket.connect`, `Socket.listen`,
+`Process.spawn_async`, ... each returns `Result(Result(Handle, E), CapError)`), and using one
+you hold needs no capability (a `needs ()` function may read a `File.Handle`). A use after
+`close` is `Err(Closed)`; `==` on handles is a type error. `File.Dir` refuses a path that
+leaves it (`Escapes`). A handle never leaves its node: a message type holding one is refused
+(`handle_not_sendable`). `IO.Mut` and `IO.Registry` take name scopes
+(`needs IO.Mut("cache")`, `needs IO.Registry(prefix("worker."))`).
+
 ### Actors / Process
 
 | Builtin | Description |
@@ -1080,15 +1092,16 @@ fix. Using a handle (`Vault.set`, socket send/recv) is not an operation.
 
 ### Network / TLS
 
-| Builtin | Description |
-|---------|-------------|
-| `tcp_connect(host, port)` | Connect |
-| `tcp_send_all(fd, data)` / `tcp_recv_all(fd)` | Send/receive |
-| `tcp_recv_exact(fd, n)` | Receive n bytes |
-| `tcp_close(fd)` | Close |
-| `tls_connect(fd, ctx, host)` | TLS connect |
-| `tls_read(conn, n)` / `tls_write(conn, data)` | TLS IO |
-| `tls_close(conn)` | TLS close |
+The raw descriptor builtins (`tcp_*`, `udp_*`, `tls_*`, `file_open`, `process_spawn_async`,
+`http_server_*`, `ws_*`, ...) are internal to the stdlib: user code calling one gets
+`stdlib_internal` ("use `Socket.connect(host, port)`"). Use the handle modules:
+
+| Need | Use |
+|------|-----|
+| Connect / send / receive / close | `Socket.connect`, `Socket.write`, `Socket.recv`, `Socket.recv_exact`, `Socket.close` |
+| Listen / accept | `Socket.listen`, `Socket.accept`, `Listener` |
+| TLS | `Tls.connect(s, ctx, host)`, `Tls.read`, `Tls.write`, `Tls.close` |
+| UDP | `Udp.open`, `Udp.send_to`, `Udp.recv` |
 
 ### Crypto
 

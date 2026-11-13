@@ -1117,23 +1117,21 @@ mod NodeB do
   fn main() do
     let my_id = NodeIdentity.make("b@127.0.0.1", "node-b-pubkey", 1)
     let secret = -- same secret as Node A
+    let reg    = PeerRegistry.empty()
 
-    -- NetKernel works on raw descriptors (the cluster stack is trusted).
-    match tcp_connect("127.0.0.1", 9000) do
+    -- The cluster stack works on raw descriptors, which are internal to the
+    -- standard library (`stdlib_internal`); `ClusterConn` opens them and
+    -- runs the handshake. Application code never holds one.
+    match ClusterConn.connect_to_peer(reg, "127.0.0.1", 9000, my_id, secret) do
       Err(e) -> Env.exit(1)
-      Ok(fd) ->
-        let nonce = NetKernel.fresh_nonce()
-        match NetKernel.handshake(fd, my_id, secret, nonce) do
-          Err(e)       -> Env.exit(1)
-          Ok(peer_id)  ->
-            -- Now call Math.add on Node A
-            let fref = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
-            let args = Msgpack.encode(
-              Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.int(3), Nil))))
-            let reply_pid = GlobalPid.make(my_id.node_id, 1, 1)
-            let req  = RemoteCall.request(fref, args, reply_pid, 5000, 1)
-            -- send RemoteCall.encode_request(req) over fd, read reply ...
-        end
+      Ok((reg2, peer)) ->
+        -- Now call Math.add on Node A
+        let fref = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
+        let args = Msgpack.encode(
+          Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.int(3), Nil))))
+        let reply_pid = GlobalPid.make(my_id.node_id, 1, 1)
+        let req  = RemoteCall.request(fref, args, reply_pid, 5000, 1)
+        -- send RemoteCall.encode_request(req) over the peer's connection, read reply ...
     end
   end
 end

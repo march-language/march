@@ -1159,7 +1159,7 @@ NetKernel.handshake(fd, my_id, secret, my_nonce)
 
 `cluster_conn.march`: Connection lifecycle: dial or accept, handshake, register.
 
-Requires `needs IO.NetListen` (for `tcp_listen`/`tcp_accept` builtins).
+Requires `needs IO.NetListen` (the plumbing listens through `Socket.listen`'s raw descriptor builtins).
 
 ```march
 ClusterConn.listen(port)

@@ -1253,9 +1253,10 @@ mod App do
   fn main() do
     println("cap-demo server up")
     let _ = Server.handle(1)
-    match tcp_listen(9099) do
-      Err(e) -> println("listen err: " ++ e)
-      Ok(fd) -> let _ = tcp_accept(fd)  println("server shutting down")
+    match Socket.listen(9099) do
+      Err(e) -> println("listen refused")
+      Ok(Err(e)) -> println("listen err: " ++ Socket.error_message(e))
+      Ok(Ok(l)) -> let _ = Socket.accept(l)  println("server shutting down")
     end
   end
 end
