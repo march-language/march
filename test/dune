@@ -4428,6 +4428,29 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/native_arr_pmap_capture.expected native_native_arr_pmap_capture.out)))
 
+;; Parallel.pmap calls one closure from several workers at once, for 1000
+;; rounds: each call must hold the shared environment until its last read of a
+;; capture.  The apply function released it right after loading the captures,
+;; so another worker's release could free the captured list mid-read (SIGSEGV
+;; in ~29 of 30 runs before the fix).  Compiled at --opt 2 like the fixture
+;; above, whose intermittent crash this pins.
+(rule
+ (targets native_pmap_shared_closure_capture native_pmap_shared_closure_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/pmap_shared_closure_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_pmap_shared_closure_capture
+        native/pmap_shared_closure_capture.march)
+   (with-stdout-to native_pmap_shared_closure_capture.out
+        (system "./native_pmap_shared_closure_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pmap_shared_closure_capture.expected native_pmap_shared_closure_capture.out)))
+
 ; Two tasks set the same captured native array in a 300-round loop: the
 ; copy-on-write race that C0's acquire-ordered sole-ownership test protects.
 ; Compiled at --opt 2 so the FBIP/reuse paths are the ones exercised.
