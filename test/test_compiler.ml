@@ -19203,6 +19203,50 @@ let test_handle_user_types_send () =
   Alcotest.(check int) ("user types named like handles send:\n" ^ out) 0 rc;
   Alcotest.(check bool) ("no handle diagnostic:\n" ^ out) false
     (contains_substring out "cannot be sent to another node")
+  ;
+  (* Fix round 1 (review I1): the four stdlib wrapper names are judged by
+     identity too.  Each program sends, and derives Json for, its OWN type
+     spelled like a wrapper: bare in the declaring module (as a field and as
+     the message itself), qualified from a sibling module, as a record, and
+     under a user module named like the stdlib's (`Tls.TlsCtx`). *)
+  List.iter (fun (what, body) ->
+      let rc, out = run_march_on ~flags:"--check" (node_send_prog body) in
+      Alcotest.(check int) (what ^ ": accepted:\n" ^ out) 0 rc;
+      Alcotest.(check bool) (what ^ ": no handle diagnostic:\n" ^ out) false
+        (contains_substring out "cannot be sent to another node"))
+    [ "own UdpSocket, same module", {|
+  type UdpSocket = U(Int)
+  derive Json for UdpSocket
+  type Job = { u : UdpSocket, n : Int }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end
+  fn g(peer : Peer, u : UdpSocket) do Node.send(peer, GlobalPid.make("b", 1, 1), u) end|};
+      "own TlsCtx, qualified from a sibling", {|
+  mod A do
+    type TlsCtx = C(String)
+    derive Json for TlsCtx
+  end
+  mod B do
+    type Job = { c : A.TlsCtx }
+    derive Json for Job
+    fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end
+  end|};
+      "own WsSocket record", {|
+  type WsSocket = { id : Int }
+  derive Json for WsSocket
+  type Job = { w : WsSocket }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end|};
+      "own mod Tls", {|
+  mod Tls do
+    type TlsConn = T(Int)
+    derive Json for TlsConn
+  end
+  mod B do
+    type Job = { t : Tls.TlsConn }
+    derive Json for Job
+    fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end
+  end|} ]
 
 let handle_types_suite =
   ("handle types",

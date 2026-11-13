@@ -32,6 +32,11 @@ val type_def_mentions_tycon : string -> Ast.type_def -> bool
     typed remote send's check both read. *)
 val handle_type_spellings : (string * string) list
 
+(** The opaque stdlib wrappers over a [Socket] box ([UdpSocket], [TlsConn],
+    [TlsCtx], [WsSocket]), bare: a program's own type of one of these names
+    gets a qualified identity in [Typecheck_nominal]. *)
+val handle_wrapper_names : string list
+
 (** [handle_type_named n]: the displayed handle-type name when [n] spells one. *)
 val handle_type_named : string -> string option
 

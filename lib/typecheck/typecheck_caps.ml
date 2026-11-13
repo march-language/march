@@ -2532,10 +2532,16 @@ let schema_hash (env : env) (name : string) : string =
     names, expanded through record fields and constructor arguments the way
     [schema_hash] expands them.  The handle types are
     [Cap_surface_ty.handle_type_spellings], the list `derive Json` refuses
-    too.  A solved [TCon] carries the type's identity, so a program's own
-    [type Process] (a qualified identity, [Typecheck_nominal]) is not the
-    handle; in a declaration's surface types the written span says which one
-    a reserved spelling means.  The result is the handle's displayed name. *)
+    too.  Every spelling is judged by identity, not by name: a program's own
+    type named like a handle box ([Socket], [Listener], [Process]) or like a
+    stdlib wrapper ([UdpSocket], [TlsConn], [TlsCtx], [WsSocket]) gets a
+    qualified identity from [Typecheck_nominal], so a solved [TCon] is a
+    handle only under the handle's exact bare name; in a declaration's
+    surface types [Typecheck_nominal.refers_to_user_decl] says, by the
+    written span, that a handle spelling means the program's own type.  (A
+    nested user type in a check that carries the stdlib's declarations
+    unmarked keeps its bare name; see [Typecheck_nominal.compute].)  The
+    result is the handle's displayed name. *)
 let handle_in_message (env : env) (msg_ty : ty) : string option =
   let short n = match String.rindex_opt n '.' with
     | Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
@@ -2543,18 +2549,26 @@ let handle_in_message (env : env) (msg_ty : ty) : string option =
     match StrMap.find_opt n env.records with
     | Some r -> Some r
     | None -> StrMap.find_opt (short n) env.records in
+  (* A constructor's [ci_type] is its type's identity
+     ([Typecheck_nominal.decl_identity]): match it exactly first, so a
+     program's own `App.UdpSocket` does not pick up the stdlib wrapper's
+     `Socket` argument; the short name is the fallback for a type whose
+     identity is bare. *)
   let ctor_args n =
-    let s = short n in
-    StrMap.fold (fun _ infos acc ->
-        List.fold_left (fun acc ci -> if ci.ci_type = s then ci.ci_arg_tys @ acc else acc) acc infos)
-      env.ctors [] in
+    let with_type t =
+      StrMap.fold (fun _ infos acc ->
+          List.fold_left (fun acc ci -> if ci.ci_type = t then ci.ci_arg_tys @ acc else acc) acc infos)
+        env.ctors [] in
+    match with_type n with
+    | [] when short n <> n -> with_type (short n)
+    | args -> args in
   let first f xs = List.find_map f xs in
   let rec in_ty seen (t : ty) =
     match repr t with
     | TCon (n, args) ->
       (match March_caps.Cap_surface_ty.handle_type_named n with
-       | Some h -> Some h
-       | None -> (match first (in_ty seen) args with Some h -> Some h | None -> in_decl seen n))
+       | Some h when h = n -> Some h
+       | _ -> (match first (in_ty seen) args with Some h -> Some h | None -> in_decl seen n))
     | TTuple ts -> first (in_ty seen) ts
     | TRecord fs -> first (fun (_, t) -> in_ty seen t) fs
     | TLin (_, t) -> in_ty seen t

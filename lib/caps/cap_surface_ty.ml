@@ -127,18 +127,24 @@ let handle_type_spellings : (string * string) list = [
   "WsSocket", "WsSocket";        "WebSocket.WsSocket", "WsSocket";
 ]
 
+(** The four opaque wrappers, by their bare name.  [Typecheck_nominal]
+    forces a program's own type of one of these names to a qualified
+    identity, as it does for [Socket]/[Listener]/[Process], so a solved
+    [TCon "UdpSocket"] is always the stdlib's. *)
+let handle_wrapper_names = [ "UdpSocket"; "TlsConn"; "TlsCtx"; "WsSocket" ]
+
 let handle_type_named (n : string) : string option =
   List.assoc_opt n handle_type_spellings
 
-(** The first handle type named anywhere in [ty], skipping a constructor
-    whose name is in [shadowed] (a type the program declares itself under a
-    handle's name).  Same walk as [mentions_tycon]. *)
+(** The first handle type named anywhere in [ty], skipping a handle whose
+    displayed name is in [shadowed] (a type the program declares itself under
+    a handle's name; [Tls.TlsCtx] is skipped for a program's own [TlsCtx]).  Same walk as [mentions_tycon]. *)
 let rec handle_in_ty ?(shadowed = []) (ty : Ast.ty) : (string * Ast.name) option =
   let go = handle_in_ty ~shadowed in
   match ty with
   | Ast.TyCon (con, args) ->
     (match handle_type_named con.txt with
-     | Some h when not (List.mem con.txt shadowed) -> Some (h, con)
+     | Some h when not (List.mem h shadowed) -> Some (h, con)
      | _ -> List.find_map go args)
   | Ast.TyArrow (a, b) -> (match go a with Some h -> Some h | None -> go b)
   | Ast.TyTuple ts -> List.find_map go ts

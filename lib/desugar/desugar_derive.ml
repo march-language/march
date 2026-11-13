@@ -1281,8 +1281,15 @@ let derive_impl ?(local_types = []) (errors : Err.ctx) (type_name : name) (sp : 
     []
 
 (** Expand a [DDeriving] into zero or more [DImpl] blocks.
-    Emits an error for unknown interfaces and for unknown target types. *)
+    Emits an error for unknown interfaces and for unknown target types.
+    [program_types] are the short names of every type the program declares,
+    in any of its modules: a handle spelling among them may be written for
+    the program's own type (reached through `import`, or qualified by a
+    user module named like the stdlib's), so the `derive Json` handle
+    refusal, which reads spellings, leaves it to the typed send's check,
+    which judges identities ([Typecheck_caps.handle_in_message]). *)
 let expand_derive
+    ?(program_types = [])
     (errors : Err.ctx)
     (type_defs : (string * (name list * type_def)) list)
     (type_name : name)
@@ -1298,7 +1305,7 @@ let expand_derive
     []
   | Some (tparams, td) ->
     List.concat_map (fun (iface_name : name) ->
-        derive_impl ~local_types:(List.map fst type_defs)
+        derive_impl ~local_types:(program_types @ List.map fst type_defs)
           errors type_name sp iface_name.txt iface_name.span tparams td
         |> List.map respan_derived_decl
       ) ifaces

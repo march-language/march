@@ -18,6 +18,16 @@ message shares the handle box, as before; across nodes a handle is refused at co
   (field or constructor) named. A type the module declares itself under a handle's name
   (a user's own `type Process`) is exempt (`local_types`). Before this the derive was
   ACCEPTED: the generated encoder fell through to a generic `to_json` on the box.
+  The derive refusal is SHALLOW: it reads the declaration's own field and constructor
+  types by spelling, so `N { m : M }` with `M { c : TlsConn }` derives (and fails at run
+  time like any missing nested codec); the send check below is DEEP and refuses it. A
+  handle spelling the program also uses for a type of its own (any module, any kind) is
+  left to the send check (`program_types`, fix round 1).
+- **Identity for the wrapper names** (fix round 1, review I1): `Typecheck_nominal` forces a
+  program's own `UdpSocket`/`TlsConn`/`TlsCtx`/`WsSocket` variant to a qualified identity
+  (`is_handle_wrapper` in `forced`) and records references to its own record of that name in
+  `user_reserved_refs`, so the send check judges all nine spellings by identity. Before it, a
+  program's own `type UdpSocket = U(Int)` derived fine but was refused at `Node.send`.
 - **The typed send** (`check_node_send_sites` / `handle_in_message` in
   `lib/typecheck/typecheck_caps.ml`): before the codec check, the message's solved type is
   walked, then every declaration it names (record fields, constructor arguments, the way
@@ -41,4 +51,5 @@ message shares the handle box, as before; across nodes a handle is refused at co
 - Tests: golden `test/errors/handle_not_sendable_1.march`; `test_compiler` "handle types"
   cases `handle_send_direct`, `handle_send_at_depth`, `handle_derive_refused`,
   `handle_remote_actor`, `handle_user_types_send`. Docs: `specs/lang/clustering.md`
-  (Sending), `specs/lang/capabilities.md` (Handles need no capability).
+  (Sending), `specs/lang/capabilities.md` (Handles need no capability), and the explain
+  page `specs/lang/errors/handle_not_sendable.md` (fix round 1).

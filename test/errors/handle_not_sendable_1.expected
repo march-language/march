@@ -13,6 +13,7 @@ exit: 1
 
 13 |   type Relay = { sock : Socket, n : Int }
                              ^^^^^^
+    run `march --explain handle_not_sendable`
 
 
 -- ACTOR ------------- errors/handle_not_sendable_1.march
