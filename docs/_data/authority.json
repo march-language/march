@@ -25,8 +25,8 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "cdb7998ad",
-    "date": "2026-11-12",
+    "commit": "d7a386adc",
+    "date": "2026-11-13",
     "inputs_sha256": "4dd37a1cf3dfd806ff528a77f22ee18fe626ce7fd73c49a6b5ef34aa4527fef9"
   },
   "modules": {
@@ -879,7 +879,8 @@
         "cls": "outside",
         "name": "Actor",
         "needs": [
-          "IO"
+          "IO",
+          "IO.Registry"
         ],
         "own": false
       },
