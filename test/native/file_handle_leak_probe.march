@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (pins raw builtin behaviour; test/dune passes it, test_ir_verify.ml reads it)
 -- Compiled and run with --stdlib-source (test/dune): it pins the raw file_open / csv_open handle table,
 -- which are stdlib-only since ocap phase 2 (Task 10). User code reaches
 -- them through File and Csv.
