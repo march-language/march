@@ -470,11 +470,13 @@ mod NqNarrow do
 end
 |}
 
-(* ...and the fix must not have loosened anything: a program whose [main] is
-   NOT granted `IO.NetConnect` is still rejected for reaching it through
-   NodeQueue's socket writes, and the reason is the program's grant, not a
-   stdlib module's missing `needs`. *)
-let test_nodequeue_without_netconnect_grant_is_rejected () =
+(* ...and without an `IO.NetConnect` grant. This was rejected for reaching
+   `IO.NetConnect` through NodeQueue's socket writes until ocap phase 2 Task
+   10 made writing to an already-open connection a handle use, which charges
+   nothing: `start_local` opens no connection, so the program now compiles.
+   Whatever the verdict, it must never blame stdlib `Socket` (the 2026-09-30
+   bug this test was written for). *)
+let test_nodequeue_without_netconnect_grant_compiles () =
   let src = {|
 mod NqNoNet do
   needs IO.Console
@@ -486,8 +488,7 @@ mod NqNoNet do
   end
 end
 |} in
-  rejects_at_typecheck "NodeQueue.start_local without an IO.NetConnect grant"
-    ~expect:"the program reaches `IO.NetConnect`" src;
+  accepts "NodeQueue.start_local without an IO.NetConnect grant (socket writes are uses)" src;
   let _, out = compile_strict src in
   match Str.search_forward (Str.regexp_string "module `Socket`") out 0 with
   | _ -> Alcotest.failf "the rejection blamed stdlib Socket:\n%s" out
@@ -994,6 +995,6 @@ let tests =
         test_user_nodequeue_start_local_compiles;
       Alcotest.test_case "user NodeQueue.start_local, narrow grant" `Slow
         test_user_nodequeue_start_local_narrow_grant_compiles;
-      Alcotest.test_case "NodeQueue without IO.NetConnect grant rejected" `Slow
-        test_nodequeue_without_netconnect_grant_is_rejected;
+      Alcotest.test_case "NodeQueue without IO.NetConnect grant: socket writes are uses" `Slow
+        test_nodequeue_without_netconnect_grant_compiles;
     ]
