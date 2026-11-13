@@ -1101,6 +1101,42 @@ Tasks run on the same M:N green-thread pool as actors. Spawning 250,000+ tasks i
 
 See the [Task module docs](/docs/stdlib/Task.html) for the full API including `Task.race`, `Task.any`, `Task.scope`, and `Task.all_settled`.
 
+### Checking a task without waiting
+
+`Task.poll(t)` (the builtin `task_poll`) asks whether a task has finished
+without waiting for it. It answers `None` while the task is still running and
+`Some(r)` once it has finished, where `r` is exactly what `Task.await(t)` would
+answer: `Ok(value)`, or `Err(reason)` for a cancelled task.
+
+```march
+-- Called once per frame: collect what is ready, keep the rest for next time.
+fn collect(pending) do
+  List.filter(pending, fn t ->
+    match Task.poll(t) do
+      None -> true                -- still running: check again next frame
+      Some(Ok(mesh)) ->           -- finished: use it, drop it from the list
+        let _ = upload(mesh)
+        false
+      Some(Err(_)) -> false       -- cancelled
+    end)
+end
+```
+
+- **It never waits** and never runs the task on the caller's thread. In
+  compiled code a poll of a running task is one atomic load and allocates
+  nothing, and it borrows the handle (no reference-count traffic), so a main
+  loop can poll hundreds of tasks every frame.
+- **A finished task can be read any number of times.** Polling again, or
+  calling `Task.await`, after a poll answered `Some` gives the same answer
+  again. The task keeps its result until its last handle is dropped; each
+  read hands back its own reference to the result.
+- **The interpreter runs a task to completion when it is spawned**, so there
+  `Task.poll` always answers `Some`. Only compiled code observes `None`.
+- **Dropping a handle is enough.** A task that is never awaited or polled
+  still runs to completion, and its Task cell and result are freed when the
+  task has finished and the last handle is gone; nothing needs to be awaited
+  to avoid a leak.
+
 To run a transformation over a whole collection in parallel without wiring up tasks by hand, use the data-parallel `List` operations (`pmap`, `pmap_n`, `pfilter`, `preduce`); see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/).
 
 ---
@@ -1213,6 +1249,7 @@ diverge or crash compiled (see [Interpreted vs compiled](#interpreted-vs-compile
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
+| `task_poll(t)` | `→ Option(Result(a, String))` | both (the interpreter's tasks finish at spawn, so it never answers `None`) | Non-blocking await: `None` while the task runs, else `Some` of what `task_await` answers (use `Task.poll` instead); see [Checking a task without waiting](#checking-a-task-without-waiting) |
 | `Actor.set_queue_limit(pid, limit, policy)` | `→ ()` | both (policy `3` is compiled-only; interpreted treats it as unbounded) | Bound an actor's mailbox; see [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure) |
 | `Actor.send_after(pid, msg, delay_ms)` | `→ TimerRef` | both | Schedule `msg` for delivery to `pid` after `delay_ms`. Built on the same timer heap that backs `Actor.call`'s timeout and supervisor restart backoff. A pending timer does not keep `run_until_idle()` waiting. |
 | `Actor.cancel_timer(ref)` | `→ ()` | both | Cancel a pending `send_after` timer. Safe to call at any time, including after the timer already fired or was already cancelled (both are no-ops). |

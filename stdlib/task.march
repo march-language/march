@@ -89,6 +89,29 @@ mod Task do
   end
 
   doc """
+  Check whether a task has finished, without waiting for it (the builtin
+  `task_poll`).
+
+  Answers `None` while the task is still running and `Some(r)` once it has
+  finished, where `r` is exactly what `Task.await(task)` would answer:
+  `Ok(value)`, or `Err(reason)` for a cancelled task. It never waits and never
+  runs the task on the caller's thread; in compiled code polling a running
+  task is one atomic load with no allocation, so a frame loop can poll many
+  tasks every frame.
+
+  A finished task may be read any number of times: polling again, or calling
+  `Task.await`, gives the same answer again. In the interpreter a task runs
+  to completion when it is spawned, so `poll` always answers `Some` there.
+
+      march> let t = Authority.must(Task.async(fn () -> 6 * 7))
+      march> Task.poll(t)
+      Some(Ok(42))
+  """
+  fn poll(task) do
+    task_poll(task)
+  end
+
+  doc """
   Await all tasks, returning results in the same order as the input list.
   Each element is Ok(v) or Err(reason).
   Uses a default 5-second timeout per task.

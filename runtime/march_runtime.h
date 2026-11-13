@@ -339,13 +339,15 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
 /* The 48-byte Task object returned by march_task_spawn_thunk /
  * march_task_spawn_with_cancel_thunk. It used to carry tag 0, which made it
  * indistinguishable from an ADT cell, so no free path could release what it
- * owns. It owns the reference to a Float result's march_alloc_float box in
- * task[3] (task_await_unwrap unboxes without consuming, since a task may be
- * awaited twice); march_run_resource_dtor releases it when the Task dies. */
+ * owns. It owns the reference to a heap result in task[3] (a Float result's
+ * march_alloc_float box, a String, any heap value): every read -- task_await,
+ * task_poll, task_await_unwrap -- takes a reference of its own, since a task
+ * may be read any number of times; march_run_resource_dtor releases the
+ * Task's when the Task dies. */
 #define MARCH_TASK_TAG ((int32_t)-7)
 /* A Task's header pad: set by the task trampoline when the result it stored
- * is a Float box the Task owns (released when the Task dies). */
-#define MARCH_TASK_OWNS_FLOAT_BOX ((int32_t)1)
+ * is a heap value the Task owns (released when the Task dies). */
+#define MARCH_TASK_OWNS_RESULT ((int32_t)1)
 /* A TypedArray (typed_array_alloc in march_runtime.c): [hdr][len@16][cap@24]
  * then len 8-byte element slots, each holding a tagged immediate or ONE
  * owned reference to a heap value (a Float is a march_alloc_float box). Tag 0
@@ -1030,6 +1032,9 @@ void    march_install_async_signal(int sig, void (*handler)(int));
 void   *march_task_spawn_thunk(void *clo_ptr);
 /* Wait for a task to complete; returns Ok(result) or Err(msg). */
 void   *march_task_await(void *task_obj);
+/* Non-blocking await: NULL (Option's niche None) while the task runs, else
+ * the Ok(result) / Err(msg) march_task_await would answer. Never waits. */
+void   *march_task_poll(void *task_obj);
 /* Spawn a thunk closure with a cancel token; yields cancel checks. */
 void   *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr);
 /* Mark a task's green thread as DEAD (cooperative cancel). */

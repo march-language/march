@@ -1,4 +1,4 @@
-(** Task codegen: the bodies of [Llvm_emit.emit_expr]'s three non-trivial
+(** Task codegen: the bodies of [Llvm_emit.emit_expr]'s four non-trivial
     task/distribution builtin arms.  See [llvm_emit_task.ml].
 
     The arms themselves — position, guard, order — stay in [emit_expr]; only
@@ -14,6 +14,12 @@ val emit_task_await_unwrap :
 val emit_task_await :
   emit_atom:(Llvm_ctx.ctx -> Tir.atom -> string * string) ->
   Llvm_ctx.ctx -> Tir.atom -> string * string
+
+(** Body of the `task_poll` arm: the raw answer (NULL = niche None), which
+    the arm re-encodes for a call site that decodes Option as boxed. *)
+val emit_task_poll :
+  emit_atom:(Llvm_ctx.ctx -> Tir.atom -> string * string) ->
+  Llvm_ctx.ctx -> Tir.atom -> string
 
 (** Body of the `remote_ref_hashes` arm: constant-folds (sig_hash, impl_hash)
     for a remote function reference. *)

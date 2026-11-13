@@ -28,7 +28,7 @@ let builtin_names : StringSet.t =
       "to_string"; "kill"; "is_alive";
       "actor_stop"; "actor_is_draining"; "actor_pid_indices";
       "send"; "spawn"; "actor_get_int";
-      "task_spawn"; "task_await"; "task_await_unwrap";
+      "task_spawn"; "task_await"; "task_await_unwrap"; "task_poll";
       "task_yield"; "task_spawn_steal"; "task_reductions";
       (* Cancellation/race builtins — each has a dedicated codegen arm in
          llvm_emit (task_cancel_by_id/task_cancel/task_is_cancelled/

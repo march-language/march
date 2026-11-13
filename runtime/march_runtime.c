@@ -634,24 +634,30 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         void **slots = (void **)((char *)p + 32);   /* TYPED_ARRAY_HDR_SIZE */
         for (int64_t i = 0; i < len; i++) march_decrc(slots[i]);
     } else if (tag == MARCH_TASK_TAG) {
-        /* A Task owns the box of a Float result. The trampoline stores
-         * task[3] = (raw << 1) | 1; for a Float task raw is the
-         * march_alloc_float box the apply fn returned, and task_await_unwrap
-         * reads the double out of it WITHOUT consuming it (awaiting twice is
-         * legal), so until now the box outlived the Task: one leaked box per
-         * awaited Float task.
+        /* A Task owns its heap result. The trampoline stores
+         * task[3] = (raw << 1) | 1, raw being what the apply fn returned (a
+         * march_alloc_float box for a Float task, the value itself for any
+         * other heap result), and keeps the reference it was handed. Every
+         * read takes a reference of its own (task_result_ok, and
+         * task_await_unwrap's ptr path in lib/tir/llvm_emit_task.ml), so a
+         * task may be awaited or polled any number of times; this releases
+         * the Task's own reference when the Task dies.
          *
-         * Release only that case. A heap result of any other tag is handed to
-         * the caller by the await paths, which account for it, so it is not
-         * ours to release -- and by the time the Task dies it may already be
-         * FREED, so its tag must not be read here. The trampoline therefore
-         * decides "Float box" while it still owns the result and records it
-         * in the header pad (MARCH_TASK_OWNS_FLOAT_BOX); reading the result's
-         * tag at this point was a heap-use-after-free whenever the awaiter
-         * released a non-Float result and dropped its Task handle before the
-         * trampoline's own reference went (ASAN, tcp_recv_eagain_after_park
-         * at 14 schedulers under load, 2026-10-12). */
-        if (((march_hdr *)p)->pad == MARCH_TASK_OWNS_FLOAT_BOX) {
+         * Until 2026-11-12 only a Float box was the Task's: any other heap
+         * result was handed to the FIRST awaiter, so a second await (or
+         * `let _ = task_await(t)` followed by another) read a value the first
+         * reader had already freed. task_poll, which a frame loop calls on
+         * one task again and again, made that the common case.
+         *
+         * The trampoline decides "heap result" while it still owns the
+         * result and records it in the header pad (MARCH_TASK_OWNS_RESULT),
+         * rather than this reading the result's header here (the history:
+         * that read was a heap-use-after-free under the old hand-over rule,
+         * ASAN, tcp_recv_eagain_after_park at 14 schedulers, 2026-10-12). A
+         * task cancelled after it finished has had task[3] overwritten with
+         * the cancelled sentinel (even), so its result is not released: a
+         * leak, never a double free. */
+        if (((march_hdr *)p)->pad == MARCH_TASK_OWNS_RESULT) {
             int64_t slot = ((int64_t *)p)[3];
             if (slot & 1) march_decrc((void *)(intptr_t)(slot >> 1));
         }
@@ -9429,11 +9435,12 @@ static void march_thunk_trampoline(void *arg) {
         if (!cancelled) {
             int64_t raw = (int64_t)(uintptr_t)result;
             task[3] = (raw << 1) | (int64_t)1; /* tagged result at offset 24 */
-            /* A Float box result stays the Task's (see the MARCH_TASK_TAG
-             * case of march_run_resource_dtor_slow). Decided now, while the
-             * result is still ours: published by the done store below. */
-            if (IS_HEAP_PTR(result) && ((march_hdr *)result)->tag == MARCH_FLOAT_TAG)
-                ((march_hdr *)task)->pad = MARCH_TASK_OWNS_FLOAT_BOX;
+            /* A heap result stays the Task's (see the MARCH_TASK_TAG case of
+             * march_run_resource_dtor_slow); each read takes its own
+             * reference. Decided now, while the result is still ours:
+             * published by the done store below. */
+            if (IS_HEAP_PTR(result))
+                ((march_hdr *)task)->pad = MARCH_TASK_OWNS_RESULT;
         }
         /* SEQ_CST store + SEQ_CST load: this store(task[4])-then-load(task[5])
          * is one half of a Dekker / store-buffering pair with task_wait_done's
@@ -9562,13 +9569,47 @@ void *march_task_spawn_thunk(void *clo_ptr) {
  * reading a dead proc's status here once caused a use-after-free where
  * calloc reuse zeroed the freed memory, making p->status read as
  * PROC_RUNNABLE (0) forever. */
+/* The answer to a read of a FINISHED task: Err("task cancelled"), or a fresh
+ * Ok cell holding task[3] as stored (tagged; the compiled call site untags
+ * the field, Llvm_emit_task.normalise_task_result).  The Task keeps its own
+ * reference to a heap result (MARCH_TASK_OWNS_RESULT), so the Ok cell takes
+ * one of its own: any number of reads may each release theirs. */
+static void *task_result_ok(int64_t *task) {
+    int64_t slot = task[3];
+    if (slot == MARCH_TASK_CANCELLED) return mk_err_cstr("task cancelled");
+    march_incrc((void *)(intptr_t)(slot >> 1));   /* no-op for a scalar */
+    return mk_ok((void *)(uintptr_t)slot);
+}
+
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
     task_wait_done(task);
-    if (task[3] == MARCH_TASK_CANCELLED) return mk_err_cstr("task cancelled");
-    void *result = (void *)(uintptr_t)task[3];
-    return mk_ok(result);
+    return task_result_ok(task);
+}
+
+/* Non-blocking task_await: NULL while the task is still running, else
+ * exactly what march_task_await would answer (Ok(result) or
+ * Err("task cancelled")).  NULL is Option's niche None for an
+ * Option(Result(..)) (Result is a boxed type), so the running case costs one
+ * acquire load and allocates nothing; the compiled call site re-encodes it
+ * where Option is boxed (a program that declares its own Option).
+ *
+ * Never waits, never registers as the task's waiter (word 5), never touches
+ * the proc: it reads only the done flag (word 4) and, once that is set, the
+ * result (word 3), which the trampoline wrote before its release of word 4.
+ * The Task is borrowed (lib/tir/borrow.ml), so polling every frame costs no
+ * refcount traffic.  Once done the result word does not change (except to
+ * the cancelled sentinel, see march_task_cancel_by_id), so repeated polls
+ * and a later task_await answer the same thing; each Some answer is a fresh
+ * Ok cell holding its own reference to the result, as each await's is. */
+void *march_task_poll(void *task_obj) {
+    if (!task_obj) return mk_err_cstr("task_poll: null task");
+    int64_t *task = (int64_t *)task_obj;
+    if (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                             memory_order_acquire) == 0)
+        return NULL;
+    return task_result_ok(task);
 }
 
 /* Like march_task_await, but returns the tagged result value directly
