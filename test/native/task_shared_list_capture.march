@@ -1,0 +1,48 @@
+-- A list captured by a task_spawn closure and still walked by the spawning
+-- thread after the spawn (march-language/march#1266).  Both threads hold a
+-- reference to every cell, and both destructure the list with a consuming
+-- match.  The match used to release the cell FIRST and only then IncRC the
+-- fields it took out on the shared path: the other thread could release the
+-- cell in between, see the count reach 0, take the tail over without an
+-- increment and free it, and the late increment landed on freed memory
+-- (SIGSEGV, SIGBUS or a mimalloc abort).  Many reps so one run reliably hits
+-- the window.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  fn build(n : Int, acc : List((Int, Int, List(Int)))) : List((Int, Int, List(Int))) do
+    if n <= 0 do acc else build(n - 1, Cons((n, n * 3, Cons(n, Cons(n + 1, Nil))), acc)) end
+  end
+
+  fn walk(items : List((Int, Int, List(Int))), acc : Int) : Int do
+    match items do
+      Nil -> acc
+      Cons((a, b, l), t) -> walk(t, acc + a + b + List.length(l))
+    end
+  end
+
+  fn start(left : Int, acc : List((Int, Task(Int)))) : List((Int, Task(Int))) do
+    if left <= 0 do acc
+    else
+      let items = build(64, Nil)
+      let t = task_spawn(fn _ -> walk(items, 0))
+      start(left - 1, Cons((List.length(items), t), acc))
+    end
+  end
+
+  fn collect(ts : List((Int, Task(Int))), acc : Int) : Int do
+    match ts do
+      Nil -> acc
+      Cons((n, t), rest) -> collect(rest, acc + n + Result.unwrap_or(task_await(t), 0))
+    end
+  end
+
+  fn rep(left : Int, acc : Int) : Int do
+    if left <= 0 do acc else rep(left - 1, int_and(acc + collect(start(8, Nil), 0), 1048575)) end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    println("total " ++ int_to_string(rep(15000, 0)))
+  end
+end
