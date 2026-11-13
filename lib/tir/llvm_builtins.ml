@@ -1322,6 +1322,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = None };
   { march_name = "task_await_unwrap"; c_name = None; ret_ty = None;
     in_is_builtin = true; declare_sig = None };
+  { march_name = "task_poll"; c_name = None; ret_ty = None;
+    in_is_builtin = true; declare_sig = None };
   { march_name = "task_yield"; c_name = None; ret_ty = None;
     in_is_builtin = true; declare_sig = None };
   { march_name = "task_spawn_steal"; c_name = None; ret_ty = None;
@@ -1459,6 +1461,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_task_spawn_thunk", "declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)");
   ("march_task_await", "declare ptr  @march_task_await(ptr %task)");
   ("march_task_await_value", "declare ptr  @march_task_await_value(ptr %task)");
+  ("march_task_poll", "declare ptr  @march_task_poll(ptr %task)");
   ("march_sched_yield", "declare void @march_sched_yield()");
   ("march_cancel_token_new", "declare ptr  @march_cancel_token_new()");
   ("march_cancel_token_cancel", "declare void @march_cancel_token_cancel(ptr %tok)");
@@ -1840,6 +1843,7 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_task_spawn_thunk";
   PDeclare "march_task_await";
   PDeclare "march_task_await_value";
+  PDeclare "march_task_poll";
   PDeclare "march_sched_yield";
   PDeclare "march_actor_recv";
   PDeclare "march_cancel_token_new";
@@ -2166,6 +2170,7 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_task_spawn_thunk";
   PDeclare "march_task_await";
   PDeclare "march_task_await_value";
+  PDeclare "march_task_poll";
   PDeclare "march_sched_yield";
   PDeclare "march_actor_recv";
   PDeclare "march_cancel_token_new";

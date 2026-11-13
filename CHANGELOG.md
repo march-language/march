@@ -21,6 +21,17 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`Task.poll(t)` (builtin `task_poll`) checks a task without waiting.** It answers `None`
+  while the task is still running and `Some(r)` once it has finished, `r` being exactly
+  what `Task.await(t)` answers (`Ok(value)`, or `Err(reason)` for a cancelled task). It
+  never waits and never runs the task on the caller's thread; in compiled code a poll of a
+  running task is one atomic load with no allocation and no reference-count traffic, so a
+  frame loop can poll hundreds of tasks every frame. A finished task can be polled or
+  awaited again and gives the same answer. The interpreter runs a task to completion when
+  it is spawned, so there `Task.poll` always answers `Some`.
+- **`forge search` finds a function by its qualified name, or by the builtin it wraps.**
+  `forge search Task.await` and `forge search task_await` both find `Task.await`; before,
+  only the bare name `await` matched.
 - **`@[deprecated("use X instead")]` marks a function as deprecated.** Every use of it from
   outside the module that declares it gets a warning with the code `deprecated` and the
   message; the program still compiles and the exit status does not change. Uses inside the
@@ -925,6 +936,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Awaiting a task twice is safe for any result type in compiled code.** A task whose
+  result is a heap value (a `String`, a list, a record) handed its only reference to the
+  first `task_await`, so a second `task_await` on the same task, or one after
+  `let _ = task_await(t)`, read freed memory and could crash. The task now keeps its
+  result until its last handle is dropped and each await takes its own reference.
 - **A closure called from several threads at once no longer frees what it captured while
   another call is still reading it.** `Parallel.pmap` (and any closure shared between tasks)
   could crash compiled programs intermittently with SIGSEGV: one call released the closure's

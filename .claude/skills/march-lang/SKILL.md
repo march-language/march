@@ -1071,6 +1071,7 @@ fix. Using a handle (`Vault.set`, socket send/recv) is not an operation.
 | `task_spawn(f)` | Spawn task |
 | `task_await(t)` | Await result |
 | `task_await_unwrap(t)` | Await and unwrap |
+| `task_poll(t)` | Non-blocking: `None` while running, else `Some(task_await(t))` (`Task.poll`) |
 | `task_yield()` | Yield scheduler |
 | `task_spawn_steal(f)` | Work-stealing spawn |
 | `task_spawn_link(f)` | Linked task spawn |
