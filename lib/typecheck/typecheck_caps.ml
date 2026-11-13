@@ -2527,6 +2527,60 @@ let schema_hash (env : env) (name : string) : string =
   let body = match def [ name; short name ] name with Some d -> d | None -> short name in
   Digest.to_hex (Digest.string body)
 
+(** The first resource handle a message type holds, at any depth (ocap
+    phase 2b, Task 13): the solved type itself, then every declaration it
+    names, expanded through record fields and constructor arguments the way
+    [schema_hash] expands them.  The handle types are
+    [Cap_surface_ty.handle_type_spellings], the list `derive Json` refuses
+    too.  A solved [TCon] carries the type's identity, so a program's own
+    [type Process] (a qualified identity, [Typecheck_nominal]) is not the
+    handle; in a declaration's surface types the written span says which one
+    a reserved spelling means.  The result is the handle's displayed name. *)
+let handle_in_message (env : env) (msg_ty : ty) : string option =
+  let short n = match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
+  let find_record n =
+    match StrMap.find_opt n env.records with
+    | Some r -> Some r
+    | None -> StrMap.find_opt (short n) env.records in
+  let ctor_args n =
+    let s = short n in
+    StrMap.fold (fun _ infos acc ->
+        List.fold_left (fun acc ci -> if ci.ci_type = s then ci.ci_arg_tys @ acc else acc) acc infos)
+      env.ctors [] in
+  let first f xs = List.find_map f xs in
+  let rec in_ty seen (t : ty) =
+    match repr t with
+    | TCon (n, args) ->
+      (match March_caps.Cap_surface_ty.handle_type_named n with
+       | Some h -> Some h
+       | None -> (match first (in_ty seen) args with Some h -> Some h | None -> in_decl seen n))
+    | TTuple ts -> first (in_ty seen) ts
+    | TRecord fs -> first (fun (_, t) -> in_ty seen t) fs
+    | TLin (_, t) -> in_ty seen t
+    | TRefine (t, _, _) -> in_ty seen t
+    | TArrow _ | TVar _ | TNat _ | TNatOp _ | TChan _ | TError -> None
+  and in_ast seen (t : Ast.ty) =
+    match t with
+    | Ast.TyCon (c, args) ->
+      (match March_caps.Cap_surface_ty.handle_type_named c.txt with
+       | Some h when not (Typecheck_nominal.refers_to_user_decl c) -> Some h
+       | _ -> (match first (in_ast seen) args with Some h -> Some h | None -> in_decl seen c.txt))
+    | Ast.TyTuple ts -> first (in_ast seen) ts
+    | Ast.TyRecord fs -> first (fun (_, t) -> in_ast seen t) fs
+    | Ast.TyLinear (_, t) -> in_ast seen t
+    | Ast.TyRefine (t, _, _) -> in_ast seen t
+    | Ast.TyArrow _ | Ast.TyVar _ | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> None
+  and in_decl seen n =
+    if List.mem (short n) seen then None
+    else
+      let seen = short n :: seen in
+      match find_record n with
+      | Some (_, fields) -> first (fun (_, t) -> in_ast seen t) fields
+      | None -> first (in_ast seen) (ctor_args n)
+  in
+  in_ty [] msg_ty
+
 (** The typed remote send, the call-site half (stdlib/node.march).  For every
     recorded `Node.send(peer, to, msg)` or `Node.enqueue(q, to, msg, policy)` site: resolve `msg`'s solved type to
     the declaration it names, require that declaration to have a `derive Json`
@@ -2631,17 +2685,25 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
       Some (Err.fix (Err.FInsert { after_line = tsp.Ast.end_line;
                                    text = String.make tsp.Ast.start_col ' ' ^ "derive Json for " ^ s }))
     | _ -> None in
+  (* The handlers annotated with payload type [s], as ("Actor.Msg", span). *)
+  let remote_payload_sites s =
+    let sfx = ":" ^ s in
+    Hashtbl.fold (fun k (tsp : Ast.span) acc ->
+        let lk = String.length k and ls = String.length sfx and pfx = "remotepayload:" in
+        let lp = String.length pfx in
+        if lk > lp + ls && String.sub k 0 lp = pfx && String.sub k (lk - ls) ls = sfx then
+          (String.sub k lp (lk - lp - ls), tsp) :: acc
+        else acc) env.decl_sites []
+    |> List.sort (fun (_, a) (_, b) -> compare a b) in
+  let split_handler handler =
+    match String.index_opt handler '.' with
+    | Some i -> String.sub handler 0 i,
+                String.sub handler (i + 1) (String.length handler - i - 1)
+    | None -> handler, handler in
   let remote_codec_missing sp s =
     if not (Hashtbl.mem remote_reported s) then begin
       Hashtbl.add remote_reported s ();
-      let sfx = ":" ^ s in
-      let sites = Hashtbl.fold (fun k (tsp : Ast.span) acc ->
-          let lk = String.length k and ls = String.length sfx and pfx = "remotepayload:" in
-          let lp = String.length pfx in
-          if lk > lp + ls && String.sub k 0 lp = pfx && String.sub k (lk - ls) ls = sfx then
-            (String.sub k lp (lk - lp - ls), tsp) :: acc
-          else acc) env.decl_sites []
-        |> List.sort (fun (_, a) (_, b) -> compare a b) in
+      let sites = remote_payload_sites s in
       match sites with
       | [] ->
         Err.error ~code:Err.Code.codec_missing env.errors ~span:sp
@@ -2649,10 +2711,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
               MPCode "@[remote]"; MPText " needs a JSON codec for "; MPCode s;
               MPText ", and none is derived."])
       | (handler, tsp) :: _ ->
-        let actor, msg = match String.index_opt handler '.' with
-          | Some i -> String.sub handler 0 i,
-                      String.sub handler (i + 1) (String.length handler - i - 1)
-          | None -> handler, handler in
+        let actor, msg = split_handler handler in
         Err.report env.errors
           { Err.severity = Err.Error; span = tsp;
             message = render_parts [
@@ -2680,7 +2739,54 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
            add. *)
         ()
       | Some msg_ty ->
-        (match json_dispatch_head env msg_ty with
+        (match handle_in_message env msg_ty with
+         | Some handle ->
+           (* Checked before the codec: `derive Json` refuses a type holding
+              a handle, so the codec IS missing, but "derive Json for T" is
+              advice that cannot be taken. *)
+           let shown = match json_dispatch_head env msg_ty with
+             | Some n -> short n | None -> pp_ty (repr msg_ty) in
+           let headline = [
+             MPCode handle; MPText " cannot be sent to another node: a handle names a resource on this node.";
+             MPBreak ] in
+           let note = render_parts [
+               MPText "Keep the "; MPCode handle;
+               MPText " on this node and send what the other node needs to know instead: a path, an address, or a ";
+               MPCode "GlobalPid.Pid"; MPText " of an actor here that owns the resource."] in
+           let report span detail =
+             Err.report env.errors
+               { Err.severity = Err.Error; span; labels = [];
+                 code = Err.Code.handle_not_sendable; fix = None;
+                 message = render_parts (headline @ detail); notes = [ note ] } in
+           if callee = "@[remote] dispatch" then begin
+             (* A generated dispatch tests each payload twice, at spans no
+                excerpt can show: report the type once, at the handler's
+                annotation of it, as [remote_codec_missing] does. *)
+             if not (Hashtbl.mem remote_reported shown) then begin
+               Hashtbl.add remote_reported shown ();
+               match remote_payload_sites shown with
+               | (handler, tsp) :: _ ->
+                 let actor, msg = split_handler handler in
+                 report tsp [
+                   MPText "The "; MPCode "@[remote]"; MPText " actor "; MPCode actor;
+                   MPText " receives "; MPCode msg; MPText " from other nodes as a ";
+                   MPCode shown; MPText ", which holds a "; MPCode handle; MPText "."]
+               | [] ->
+                 report sp [
+                   MPCode "@[remote]"; MPText " receives a value of type "; MPCode shown;
+                   MPText ", which holds a "; MPCode handle; MPText "."]
+             end
+           end
+           else if (match repr msg_ty with
+               | TCon (n, _) -> March_caps.Cap_surface_ty.handle_type_named n <> None
+               | _ -> false) then
+             report sp [ MPText "The message "; MPCode callee; MPText " sends here is the handle itself."]
+           else
+             report sp [
+               MPCode callee; MPText " sends a value of type "; MPCode shown;
+               MPText ", which holds a "; MPCode handle; MPText "."]
+         | None ->
+        match json_dispatch_head env msg_ty with
          | None ->
            Err.report env.errors
              { Err.severity = Err.Error; span = sp; labels = [];

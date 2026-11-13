@@ -28,6 +28,15 @@ let collect_type_defs (decls : decl list) : (string * (name list * type_def)) li
     | _ -> None
   ) decls
 
+(** The first resource-handle type in a declaration body (see
+    [Cap_surface_ty.handle_type_spellings]). *)
+let handle_in_type_def ?(shadowed = []) (td : type_def) : (string * name) option =
+  let go = March_caps.Cap_surface_ty.handle_in_ty ~shadowed in
+  match td with
+  | TDRecord fields -> List.find_map (fun (f : field) -> go f.fld_ty) fields
+  | TDVariant variants -> List.find_map (fun (v : variant) -> List.find_map go v.var_args) variants
+  | TDAlias (t, _) -> go t
+
 (** Make a name with a dummy span. *)
 let mk_name txt = { txt; span = dummy_span }
 
@@ -257,8 +266,10 @@ let respan_derived_decl (d : decl) : decl =
     Returns a list of [decl] — usually one [DImpl], but [Json] produces
     two standalone [DFn] declarations (to_json / from_json).
     [iface_span] is the span of the interface name in the source, used for
-    error reporting when the interface is unknown. *)
-let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
+    error reporting when the interface is unknown.  [local_types] are the
+    type names the module declares itself: one spelled like a handle type
+    (a user's own [Process]) is that declaration, not the handle. *)
+let derive_impl ?(local_types = []) (errors : Err.ctx) (type_name : name) (sp : span)
     (iface : string) (iface_span : span) (tparams : name list) (td : type_def) : decl list =
   (* Type annotation for the type being implemented *)
   let self_ty : ty =
@@ -604,6 +615,47 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                     "Carry a `GlobalPid.Pid` (node id, local pid, creation) in `%s` \
                      instead; it is a plain record and derives Json." type_name.txt ];
         code = Err.Code.pid_serialize; fix = None };
+    []
+
+  | "Json" when handle_in_type_def ~shadowed:local_types td <> None ->
+    (* A resource handle (ocap phase 2b: [File.Handle], [Socket], [Process],
+       ...; the list is [Cap_surface_ty.handle_type_spellings]) is a box over
+       a descriptor of THIS node's process.  Encoded and decoded anywhere else
+       it names nothing, or a different descriptor with the same number, so
+       no codec over it is generated.  Without this arm the encoder fell
+       through to a generic [to_json] on the box and the derive was accepted;
+       `Node.send` (whose codec contract `derive Json` is) then had a message
+       it could not honestly send.  The send site gets the same headline from
+       [Typecheck_caps.check_node_send_sites]. *)
+    let handle, written = Option.get (handle_in_type_def ~shadowed:local_types td) in
+    let holds t = March_caps.Cap_surface_ty.handle_in_ty ~shadowed:local_types t <> None in
+    let holder = match td with
+      | TDRecord fields ->
+        List.find_map (fun (f : field) ->
+            if holds f.fld_ty then Some (Printf.sprintf "its field `%s`" f.fld_name.txt) else None)
+          fields
+      | TDVariant variants ->
+        List.find_map (fun (v : variant) ->
+            if List.exists holds v.var_args
+            then Some (Printf.sprintf "its constructor `%s`" v.var_name.txt) else None)
+          variants
+      | TDAlias _ -> None in
+    let what = match holder with Some w -> w | None -> "it" in
+    Err.report errors
+      { Err.severity = Err.Error; span = iface_span;
+        message = Printf.sprintf
+            "`%s` cannot be sent to another node: a handle names a resource on this node.\n\
+             `%s` cannot derive Json, because %s holds a `%s`."
+            handle type_name.txt what handle;
+        labels = (if written.span.start_line > 0 then
+                    [ { Err.lbl_span = written.span;
+                        lbl_message = Printf.sprintf "`%s` is a handle" handle } ]
+                  else []);
+        notes = [ Printf.sprintf
+                    "Keep the `%s` on this node and send what the other node needs to \
+                     know instead: a path, an address, or a `GlobalPid.Pid` of an actor \
+                     here that owns the resource." handle ];
+        code = Err.Code.handle_not_sendable; fix = None };
     []
 
   | "Json" ->
@@ -1246,7 +1298,8 @@ let expand_derive
     []
   | Some (tparams, td) ->
     List.concat_map (fun (iface_name : name) ->
-        derive_impl errors type_name sp iface_name.txt iface_name.span tparams td
+        derive_impl ~local_types:(List.map fst type_defs)
+          errors type_name sp iface_name.txt iface_name.span tparams td
         |> List.map respan_derived_decl
       ) ifaces
 

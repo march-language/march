@@ -846,7 +846,8 @@ checked open (`File.open`, `Socket.connect`, `Socket.listen`,
 the standard library (`stdlib_internal`). Using a handle you hold is therefore
 not charged: a function bounded by `needs ()` may read a `File.Handle`, write to
 a `Socket` or wait on a `Process` it was handed, and accept on a `Listener`;
-it may not open one.
+it may not open one. A handle never leaves its node: a message type holding one
+cannot `derive Json` or go through `Node.send` ([Clustering]({{ site.baseurl }}/docs/clustering/)).
 
 ```march
 mod Wire do

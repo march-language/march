@@ -19089,6 +19089,12 @@ let test_handle_name_tables_agree () =
   List.iter (fun n ->
       Alcotest.(check bool) (n ^ " is undotted") false (String.contains n '.'))
     reserved
+  ;
+  (* Task 13: the not-sendable list covers every builtin handle box. *)
+  List.iter (fun n ->
+      Alcotest.(check (option string)) (n ^ " is a not-sendable handle type") (Some n)
+        (March_caps.Cap_surface_ty.handle_type_named n))
+    lowered
 
 (* MINOR 5: the stdlib declares no type with a reserved handle name (the
    nominal pass would give it an identity the cached stdlib env lacks). *)
@@ -19109,6 +19115,95 @@ let test_stdlib_declares_no_reserved_type () =
   Alcotest.(check bool) "walked the stdlib" true (List.length decls > 50);
   Alcotest.(check (list string)) "no stdlib type named Socket, Listener or Process" [] !found
 
+(* ── Task 13: handles do not cross nodes.  A message type holding a handle
+   (Cap_surface_ty.handle_type_spellings) at any depth is a compile-time
+   error naming the handle type, at the `derive Json` and at the send; the
+   golden case is test/errors/handle_not_sendable_1.march. *)
+let node_send_prog body = Printf.sprintf {|mod App do
+  needs IO.NetConnect
+  needs IO.Mut
+%s
+  fn main(_n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+    ()
+  end
+end
+|} body
+
+let headline h = "`" ^ h ^ "` cannot be sent to another node: a handle names a resource on this node"
+
+let test_handle_send_direct () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  fn f(peer : Peer, h : File.Handle) do Node.send(peer, GlobalPid.make("b", 1, 1), h) end|}) in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("names File.Handle:\n" ^ out) true (contains_substring out (headline "File.Handle"));
+  Alcotest.(check bool) ("says it is the handle itself:\n" ^ out) true
+    (contains_substring out "is the handle itself");
+  Alcotest.(check bool) ("no codec advice:\n" ^ out) false (contains_substring out "derive Json for")
+
+(* Depth: the handle sits in an un-derived variant inside an Option inside a
+   derived record, so the derive itself names no handle and only the send
+   site's expansion through declarations finds it. *)
+let test_handle_send_at_depth () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  type Wrap = Wrap(Option(Udp.UdpSocket)) | Empty
+  type Job = { n : Int, w : Wrap }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end|}) in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("names UdpSocket as written, not its Socket box:\n" ^ out) true
+    (contains_substring out (headline "UdpSocket"));
+  Alcotest.(check bool) ("names the message type:\n" ^ out) true
+    (contains_substring out "sends a value of type `Job`, which holds a `UdpSocket`")
+
+let test_handle_derive_refused () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  type Spawned = Spawned(Process) | Done(Int)
+  derive Json for Spawned|}) in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("names Process:\n" ^ out) true (contains_substring out (headline "Process"));
+  Alcotest.(check bool) ("names the constructor:\n" ^ out) true
+    (contains_substring out "`Spawned` cannot derive Json, because its constructor `Spawned` holds a `Process`")
+
+let test_handle_remote_actor () =
+  let rc, out = run_march_on ~flags:"--check" {|mod App do
+  needs IO.Console
+  type Hit = { n : Int, s : TlsConn }
+  @[remote]
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Bump(h : Hit) do
+      { total: state.total + h.n }
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Counter)
+    ()
+  end
+end
+|} in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("at the handler, naming TlsConn:\n" ^ out) true
+    (contains_substring out "receives `Bump` from other nodes as a `Hit`, which holds a `TlsConn`");
+  Alcotest.(check bool) ("reported once:\n" ^ out) true
+    (List.length (String.split_on_char '\n' out
+                  |> List.filter (fun l -> contains_substring l (headline "TlsConn"))) = 1)
+
+(* Silence: a program's own `type Process` and `type Socket` are not the
+   handles, and a handle-free message still sends. *)
+let test_handle_user_types_send () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  type Process = P(Int)
+  derive Json for Process
+  type Socket = S(String)
+  derive Json for Socket
+  type Job = { p : Process, s : Socket, n : Int }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end|}) in
+  Alcotest.(check int) ("user types named like handles send:\n" ^ out) 0 rc;
+  Alcotest.(check bool) ("no handle diagnostic:\n" ^ out) false
+    (contains_substring out "cannot be sent to another node")
+
 let handle_types_suite =
   ("handle types",
    [ Alcotest.test_case "handle_type_names_resolve" `Quick test_handle_type_names_resolve;
@@ -19122,7 +19217,12 @@ let handle_types_suite =
        test_reserved_json_derive_no_false_collision;
      Alcotest.test_case "handle_name_tables_agree" `Quick test_handle_name_tables_agree;
      Alcotest.test_case "stdlib_declares_no_reserved_type" `Quick
-       test_stdlib_declares_no_reserved_type ])
+       test_stdlib_declares_no_reserved_type;
+     Alcotest.test_case "handle_send_direct" `Quick test_handle_send_direct;
+     Alcotest.test_case "handle_send_at_depth" `Quick test_handle_send_at_depth;
+     Alcotest.test_case "handle_derive_refused" `Quick test_handle_derive_refused;
+     Alcotest.test_case "handle_remote_actor" `Quick test_handle_remote_actor;
+     Alcotest.test_case "handle_user_types_send" `Quick test_handle_user_types_send ])
 
 let compiler_suites =
   [

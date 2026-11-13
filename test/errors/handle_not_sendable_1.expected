@@ -1,0 +1,28 @@
+exit: 1
+-- ACTOR ------------- errors/handle_not_sendable_1.march
+
+`Socket` cannot be sent to another node: a handle names a resource on this node. [handle_not_sendable]
+`Relay` cannot derive Json, because its field `sock` holds a `Socket`.
+
+14 |   derive Json for Relay
+              ^^^^
+
+    Keep the `Socket` on this node and send what the other node needs to know instead: a path, an address, or a `GlobalPid.Pid` of an actor here that owns the resource.
+
+    `Socket` is a handle:
+
+13 |   type Relay = { sock : Socket, n : Int }
+                             ^^^^^^
+
+
+-- ACTOR ------------- errors/handle_not_sendable_1.march
+
+`Socket` cannot be sent to another node: a handle names a resource on this node. [handle_not_sendable]
+`Node.send` sends a value of type `Relay`, which holds a `Socket`.
+
+18 |     Node.send(peer, GlobalPid.make("b", 1, 1), r)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Keep the `Socket` on this node and send what the other node needs to know instead: a path, an address, or a `GlobalPid.Pid` of an actor here that owns the resource.
+
+

@@ -764,6 +764,12 @@ exchange over TCP loopback, including all three failure replies.
 checks and generates both halves.
 
 **Sending.** `msg`'s type must `derive Json`; a missing codec is a compile error at the call.
+A message can never hold a resource handle (`File.Handle`, `File.Dir`, `Socket`, `Listener`,
+`Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`), at any depth: a handle names a
+descriptor of this node's process, so `derive Json` over one is refused at the `derive`, and
+a `Node.send`, `Node.enqueue` or `@[remote]` handler whose message type reaches one is an
+error naming the handle type (`handle_not_sendable`). Send what the other node needs instead:
+a path, an address, or the `GlobalPid` of an actor here that owns the resource.
 The wire tag is the type's declared name, minted by the compiler. It is module-qualified
 below the entry module (`Msgs.Ping` for `mod Msgs` inside the entry file), so the sender and
 the receiver agree when both programs declare the type in the same module path.

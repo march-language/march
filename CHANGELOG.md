@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
+  `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
+  any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:
+  a handle names a resource on this node" (`handle_not_sendable`), at the `derive Json`, at a
+  `Node.send` or `Node.enqueue`, and at an `@[remote]` handler. `derive Json` over a handle used
+  to be accepted, with an encoder that could not work; a send of such a type said only that a
+  JSON codec was missing.
 - **Name scopes on `IO.Mut` and `IO.Registry`.** `needs IO.Mut("sessions")` and
   `needs IO.Registry("logger", prefix("worker."))` narrow a capability to some names: a
   `Vault.new`/`Vault.open`/`Vault.whereis` or `Actor.register`/`unregister`/`whereis` call
