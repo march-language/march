@@ -936,6 +936,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A list (or other value) captured by a `task_spawn` closure and still read by the spawning
+  thread no longer crashes compiled code** (#1266). A consuming `match` on a shared cell
+  released the cell before taking its own references to the fields it pulled out, so
+  another thread could free those fields in between; the compiled program died with
+  SIGSEGV, SIGBUS or SIGABRT. The fields are now retained first.
+
 - **Awaiting a task twice is safe for any result type in compiled code.** A task whose
   result is a heap value (a `String`, a list, a record) handed its only reference to the
   first `task_await`, so a second `task_await` on the same task, or one after
