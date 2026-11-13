@@ -4,6 +4,23 @@
 mod TestProcess do
   needs IO.Process
 
+-- A Process works in a function bounded by `needs ()` (spec §18; ruling R9:
+-- the per-function bound). Reading from and waiting on a child the caller
+-- holds charge nothing (ocap phase 2, Task 10): spawning it was the checked
+-- act. The `march test` rule in test/dune typechecks this module.
+mod ProcReader do
+  fn first_then_exit(p : Process) : Result((Option(String), Int), Process.ProcessError) needs () do
+    match Process.read_line(p) do
+    Err(e) -> Err(e)
+    Ok(line) ->
+      match Process.wait_proc(p) do
+      Err(e) -> Err(e)
+      Ok(code) -> Ok((line, code))
+      end
+    end
+  end
+end
+
 describe "Process" do
 
   describe "cwd" do
@@ -105,6 +122,13 @@ describe "Process" do
       match Authority.must(Process.spawn_async("sh", ["-c", "exit 3"])) do
         Err(e) -> panic("spawn sh failed: " ++ to_string(e))
         Ok(p) -> assert (Process.wait_proc(p) == Ok(3))
+      end
+    end
+
+    test "a held process needs no capability" do
+      match Authority.must(Process.spawn_async("sh", ["-c", "echo hi; exit 2"])) do
+        Err(e) -> panic("spawn sh failed: " ++ to_string(e))
+        Ok(p) -> assert (ProcReader.first_then_exit(p) == Ok((Some("hi"), 2)))
       end
     end
 

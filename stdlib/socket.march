@@ -22,6 +22,7 @@
 --   Socket.recv_timeout(s, max, ms)        : Result(String, SocketError)
 --   Socket.set_recv_timeout(s, ms)         : Result((), SocketError)
 --   Socket.recv_deadline(s, max, ms)       : Result(Option(String), SocketError)
+--   Socket.recv_exact(s, n)                : Result(Bytes, SocketError)
 --   Socket.peer_addr(s)                    : Result(String, SocketError)
 --   Socket.close(s)                        : Result((), SocketError)
 --   Socket.with_connection(host, port, f)  : Result(Result(a, SocketError), CapError)
@@ -349,6 +350,31 @@ mod Socket do
         Err(msg) -> Err(SocketError.RecvFailed(msg))
       end
       closed_read_opt(handle_is_closed(s), r))
+  end
+
+  doc """
+  Receive exactly n bytes from s, waiting (subject to any
+  `set_recv_timeout` deadline) until all of them have arrived. The peer
+  closing the connection before n bytes is `Err(RecvFailed(msg))`; an expired
+  `set_recv_timeout` deadline is `Err(RecvTimeout(0))`; and if another task
+  closes s while this one waits, `Err(SocketError.Closed)`.
+
+  ## Examples
+
+      match Socket.recv_exact(s, 4) do
+        Ok(header) -> decode(header)
+        Err(e) -> println(Socket.error_message(e))
+      end
+  """
+  fn recv_exact(s : Socket, n : Int) : Result(Bytes, SocketError) do
+    with_raw(s, fn fd ->
+      match tcp_recv_exact(fd, n) do
+      Ok(b) -> Ok(b)
+      Err(msg) ->
+        if handle_is_closed(s) do Err(SocketError.Closed)
+        else if msg == "tcp_recv_exact: timed out" do Err(RecvTimeout(0))
+        else Err(SocketError.RecvFailed(msg)) end end
+      end)
   end
 
   doc """

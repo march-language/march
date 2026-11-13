@@ -338,6 +338,24 @@ let test_driver_rejects_user_json_march () =
       Alcotest.(check bool) "with no gate error" false
         (contains ~needle:"internal to the standard library" out))
 
+(* ocap phase 2 (Task 10): the raw handle builtins added to the shipped
+   table, in table order. *)
+let task10_raw_builtins = [
+    "file_open"; "file_read_line"; "file_read_chunk"; "file_close"; "csv_open";
+    "csv_next_row"; "csv_close"; "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all";
+    "tcp_recv_all"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
+    "tcp_recv_chunked_frame"; "tcp_recv_chunk"; "tcp_recv_chunk_timeout";
+    "tcp_recv_timeout"; "tcp_set_recv_timeout"; "tcp_peer_addr"; "tcp_shutdown";
+    "tcp_close"; "tcp_listen"; "tcp_accept"; "tcp_accept_timeout"; "tcp_local_port";
+    "udp_open"; "udp_resolve"; "udp_addr_to_string"; "udp_connect"; "udp_close";
+    "udp_local_addr"; "udp_stats"; "udp_send_batch"; "udp_send_many"; "udp_recv_batch";
+    "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_accept"; "tls_read";
+    "tls_read_timeout"; "tls_write"; "tls_close"; "tls_ctx_free"; "tls_negotiated_alpn";
+    "tls_peer_cn"; "tls_ctx_set_groups"; "tls_negotiated_group"; "tls_pq_available";
+    "ws_recv"; "ws_send"; "ws_select"; "http_server_spawn_n"; "http_server_wait";
+    "http_server_plain_listener"; "http_conn_is_tls"; "process_spawn_async";
+    "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc" ]
+
 (* The shipped table: the four reference-forging builtins, each pointing at
    the `Actor` wrapper that takes a `Cap(Actor.Introspect)`. Every suggestion
    names `Actor.introspect`, the one minting function, so a user who hits the
@@ -345,7 +363,7 @@ let test_driver_rejects_user_json_march () =
 let test_shipped_table () =
   let gated = List.map fst !TB.stdlib_only in
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
-    [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
+    ([ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
       (* ocap phase 1: the capability check point (stdlib/authority.march) *)
@@ -353,7 +371,7 @@ let test_shipped_table () =
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
       "handle_is_closed"; "handle_aux";
       "file_open_write"; "file_write_handle"; "file_seek";
-      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at" ]
+      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at" ] @ task10_raw_builtins)
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
@@ -364,7 +382,8 @@ let test_shipped_table () =
                              && not (String.length name > 7 && String.sub name 0 7 = "handle_")
                              && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek";
                                                      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
-                                                     "cap_check_raw"; "cap_launch_text" ]))
+                                                     "cap_check_raw"; "cap_launch_text" ])
+                             && not (List.mem name task10_raw_builtins))
        !TB.stdlib_only);
   List.iter (fun name ->
       Alcotest.(check bool) (name ^ " suggestion names Authority.check") true
@@ -441,6 +460,63 @@ end|} call) in
       ({|dir_open_write("/tmp")|}, "dir_open_write");
       ({|file_open_at(3, "passwd", 0)|}, "file_open_at");
       ({|dir_list_at(3, "")|}, "dir_list_at") ]
+
+(* ocap phase 2 (Task 10): every raw Int-descriptor builtin behind a handle
+   type is stdlib-only, and the error names the handle API that replaces it.
+   A guessed descriptor number must not reach a socket, file or child process
+   the program holds. *)
+let test_raw_handle_builtins_gated () =
+  List.iter (fun (call, name, wrapper) ->
+      let ctx = typecheck (Printf.sprintf {|mod App do
+  fn forge(p) do
+    %s
+  end
+end|} call) in
+      let gate =
+        List.find_opt (fun (d : March_errors.Errors.diagnostic) ->
+            d.severity = March_errors.Errors.Error
+            && d.code = March_errors.Errors.Code.stdlib_internal
+            && contains ~needle:(Printf.sprintf "`%s` is internal to the standard library" name)
+                 d.message)
+          ctx.March_errors.Errors.diagnostics
+      in
+      match gate with
+      | None -> Alcotest.failf "%s is not refused in user code" name
+      | Some d ->
+        Alcotest.(check bool) (name ^ " names " ^ wrapper) true
+          (contains ~needle:wrapper d.message))
+    [ ({|tcp_send_all(3, "x")|}, "tcp_send_all", "`Socket.write");
+      ({|file_read_line(3)|}, "file_read_line", "`File.read_line");
+      ({|process_wait_proc(p)|}, "process_wait_proc", "`Process.wait_proc") ];
+  (* And the whole shipped set: each raw handle builtin is in the table with
+     a hint naming a stdlib module. *)
+  List.iter (fun name ->
+      match List.assoc_opt name !TB.stdlib_only with
+      | None -> Alcotest.failf "%s is not stdlib-only" name
+      | Some hint ->
+        Alcotest.(check bool) (name ^ "'s hint names a wrapper") true
+          (List.exists (fun m -> contains ~needle:("`" ^ m ^ ".") hint)
+             [ "File"; "Csv"; "Socket"; "Udp"; "Tls"; "WebSocket"; "HttpServer"; "HttpTransport";
+               "Process" ]))
+    [ "file_open"; "file_open_write"; "file_read_line"; "file_read_chunk";
+      "file_write_handle"; "file_seek"; "file_close"; "dir_open"; "file_open_at";
+      "dir_list_at"; "csv_open"; "csv_next_row"; "csv_close";
+      "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all"; "tcp_recv_all";
+      "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers"; "tcp_recv_chunk";
+      "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout"; "tcp_recv_chunked_frame";
+      "tcp_recv_timeout"; "tcp_listen"; "tcp_accept"; "tcp_accept_timeout";
+      "tcp_local_port"; "tcp_close"; "tcp_shutdown"; "tcp_peer_addr";
+      "udp_open"; "udp_resolve"; "udp_addr_to_string"; "udp_connect"; "udp_close";
+      "udp_local_addr"; "udp_stats"; "udp_send_batch"; "udp_send_many"; "udp_recv_batch";
+      "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_accept"; "tls_read";
+      "tls_read_timeout"; "tls_write"; "tls_close"; "tls_ctx_free";
+      "tls_negotiated_alpn"; "tls_peer_cn"; "tls_ctx_set_groups";
+      "tls_negotiated_group"; "tls_pq_available";
+      "ws_recv"; "ws_send"; "ws_select";
+      "http_server_spawn_n"; "http_server_wait"; "http_server_plain_listener";
+      "http_conn_is_tls";
+      "process_spawn_async"; "process_read_line"; "process_write";
+      "process_kill_proc"; "process_wait_proc" ]
 
 (* ── Adversarial sweep over the shipped table ─────────────────────────────
    Every gated name, in every spelling the review's findings list (and
@@ -934,6 +1010,7 @@ let tests =
          test_shipped_table;
        Alcotest.test_case "handle_primitives_gated" `Quick test_handle_primitives_gated;
        Alcotest.test_case "raw_file_handle_builtins_gated" `Quick test_raw_file_handle_builtins_gated;
+       Alcotest.test_case "raw_handle_builtins_gated" `Quick test_raw_handle_builtins_gated;
        Alcotest.test_case "internal_fn_call_refused" `Quick test_internal_fn_call_refused;
        Alcotest.test_case "internal_fn_value_refused" `Quick test_internal_fn_value_refused;
        Alcotest.test_case "internal_fn_stdlib_ok" `Quick test_internal_fn_stdlib_ok;

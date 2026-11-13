@@ -18211,8 +18211,9 @@ let test_cross_tls_gzip_linux_amd64_elf () =
   | Some _sysroot ->
     let main_exe = find_main_exe () in
     let project_root = march_project_root () in
-    (* The TLS calls are guarded by a RUNTIME length (never actually huge) so the
-       optimizer can't dead-code-strip them — otherwise the DT_NEEDED for
+    (* The TLS call (Tls.client_ctx: the raw tls_* builtins are stdlib-only
+       since ocap phase 2) is guarded by a RUNTIME length (never actually huge) so the
+       optimizer can't dead-code-strip it — otherwise the DT_NEEDED for
        libssl/libcrypto would be dropped and the assertion below would be a
        false negative.  The gzip calls are unconditional. *)
     let src_text =
@@ -18230,8 +18231,8 @@ let test_cross_tls_gzip_linux_amd64_elf () =
       \      Err(_) -> gz\n\
       \    end\n\
       \    if Bytes.length(restored) > 1000000000 do\n\
-      \      let _ = tls_write(0, \"ping\")\n\
-      \      tls_close(0)\n\
+      \      let _ = Tls.client_ctx(Tls.default_client_config())\n\
+      \      ()\n\
       \    else\n\
       \      ()\n\
       \    end\n\

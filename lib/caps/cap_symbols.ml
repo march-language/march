@@ -22,6 +22,9 @@
    - task_spawn_with_cancel
                       -> march_task_spawn_with_cancel_thunk. *)
 
+(* Only opens appear (ocap phase 2, Task 10): an operation on a handle the
+   program already holds (march_tcp_send_all, march_tls_read, ...) is no
+   capability witness, since the open that made the handle is one. *)
 let table : (string * string) list = [
   (* IO.Console *)
   ("march_println",                "IO.Console");
@@ -33,14 +36,11 @@ let table : (string * string) list = [
   ("march_file_exists",            "IO.FileRead");
   ("march_file_read",              "IO.FileRead");
   ("march_file_open",              "IO.FileRead");
-  ("march_file_read_line",         "IO.FileRead");
-  ("march_file_read_chunk",        "IO.FileRead");
   ("march_file_stat",              "IO.FileRead");
   ("march_dir_exists",             "IO.FileRead");
   ("march_dir_list",               "IO.FileRead");
   ("march_dir_open",               "IO.FileRead");
   ("march_csv_open",               "IO.FileRead");
-  ("march_csv_next_row",           "IO.FileRead");
   (* IO.FileWrite *)
   ("march_file_write",             "IO.FileWrite");
   ("march_file_append",            "IO.FileWrite");
@@ -57,40 +57,18 @@ let table : (string * string) list = [
   (* IO.NetConnect *)
   ("march_tcp_connect",            "IO.NetConnect");
   ("march_tcp_connect_timeout",    "IO.NetConnect");
-  ("march_tcp_send_all",           "IO.NetConnect");
-  ("march_tcp_recv_all",           "IO.NetConnect");
-  ("march_tcp_recv_exact",         "IO.NetConnect");
   ("march_dist_monitor_register_pid", "IO.NetConnect");
   ("march_dist_monitor_pending",   "IO.NetConnect");
   ("march_dist_monitor_ack_pid",   "IO.NetConnect");
   ("march_dist_monitor_forget_node_str", "IO.NetConnect");
-  ("march_tcp_recv_http",          "IO.NetConnect");
-  ("march_tcp_recv_http_headers",  "IO.NetConnect");
-  ("march_tcp_recv_chunk",         "IO.NetConnect");
-  ("march_tcp_recv_chunk_timeout", "IO.NetConnect");
-  ("march_tcp_set_recv_timeout",   "IO.NetConnect");
-  ("march_tcp_recv_chunked_frame", "IO.NetConnect");
-  ("march_tcp_recv_timeout",       "IO.NetConnect");
-  (* IO.WebSocket *)
-  ("march_ws_recv",                "IO.WebSocket");
-  ("march_ws_send",                "IO.WebSocket");
-  ("march_ws_select",              "IO.WebSocket");
+  (* IO.WebSocket: march_ws_recv / ws_send / ws_select act on a held
+     WsSocket and charge nothing since ocap phase 2 (Task 10). *)
   (* IO.Network *)
   ("march_dns_resolve",            "IO.Network");
   (* IO.NetListen *)
   ("march_tcp_listen",             "IO.NetListen");
-  ("march_tcp_accept",             "IO.NetListen");
-  ("march_tcp_accept_timeout",     "IO.NetListen");
-  ("march_tcp_local_port",         "IO.NetListen");
   ("march_udp_open",                      "IO.NetConnect");
   ("march_udp_resolve",                   "IO.NetConnect");
-  ("march_udp_connect",                   "IO.NetConnect");
-  ("march_udp_close",                     "IO.NetConnect");
-  ("march_udp_local_addr",                "IO.NetConnect");
-  ("march_udp_stats",                     "IO.NetConnect");
-  ("march_udp_send_batch",                "IO.NetConnect");
-  ("march_udp_send_many",                 "IO.NetConnect");
-  ("march_udp_recv_batch",                "IO.NetConnect");
   ("march_http_server_listen",     "IO.NetListen");
   ("march_http_server_spawn_n",    "IO.NetListen");
   ("march_http_server_wait",       "IO.NetListen");
@@ -109,10 +87,6 @@ let table : (string * string) list = [
   ("march_process_spawn_sync",     "IO.Process");
   ("march_process_spawn_lines",    "IO.Process");
   ("march_process_spawn_async",    "IO.Process");
-  ("march_process_read_line",      "IO.Process");
-  ("march_process_write",          "IO.Process");
-  ("march_process_kill_proc",      "IO.Process");
-  ("march_process_wait_proc",      "IO.Process");
   (* IO.Clock *)
   ("march_unix_time",              "IO.Clock");
   ("march_unix_time_ms",           "IO.Clock");
@@ -156,15 +130,6 @@ let table : (string * string) list = [
   (* IO.NetConnect.TLS *)
   ("march_tls_client_ctx",         "IO.NetConnect.TLS");
   ("march_tls_server_ctx",         "IO.NetConnect.TLS");
-  ("march_tls_connect",            "IO.NetConnect.TLS");
-  ("march_tls_accept",             "IO.NetConnect.TLS");
-  ("march_tls_read",               "IO.NetConnect.TLS");
-  ("march_tls_read_timeout",       "IO.NetConnect.TLS");
-  ("march_tls_write",              "IO.NetConnect.TLS");
-  ("march_tls_negotiated_alpn",    "IO.NetConnect.TLS");
-  ("march_tls_peer_cn",            "IO.NetConnect.TLS");
-  ("march_tls_ctx_set_groups",     "IO.NetConnect.TLS");
-  ("march_tls_negotiated_group",   "IO.NetConnect.TLS");
 ]
 
 (* March-name builtins from builtin_cap_table with NO compiled lowering.

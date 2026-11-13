@@ -6,8 +6,11 @@ Task 10). Phase 1 made `Socket.connect`, `Socket.connect_timeout`,
 return `Result(Result(_, E), CapError)`. These still do neither:
 
 - ~~`Udp.open_with` (and `open`, `open_sharded`)~~ (done at the phase 2b merge,
-  2026-11-11: specs/progress/2026-11-11-ocap-p2b-merge-p1-wrapping.md), `Udp.resolve`, `Udp.connect`,
-  `Udp.send_batch`, `Udp.send_batch_connected`, `Udp.send_many`;
+  2026-11-11: specs/progress/2026-11-11-ocap-p2b-merge-p1-wrapping.md), `Udp.resolve`;
+  ~~`Udp.connect`, `Udp.send_batch`, `Udp.send_batch_connected`, `Udp.send_many`~~
+  (not operations since ocap phase 2b Task 10, 2026-11-12: they act on a
+  `Udp.UdpSocket` the caller holds, so their builtins left `builtin_cap_table`;
+  specs/progress/2026-11-10-ocap-p2b-gate-raw-builtins.md);
 - ~~`Tls.client_ctx`, `Tls.server_ctx`~~ (done at the phase 2b merge), `Tls.https_get`;
 - `HttpTransport.connect`, `request`, `simple_get` (they now dial through the checked
   `Socket.connect`; a refusal is folded into `Refused(reason)` until they are re-typed) (and the private

@@ -228,20 +228,28 @@ describe "File.Dir" do
   end
 end
 
--- passes after Task 10 (ocap phase 2): a File.Dir works in a function
--- bounded by `needs ()` (spec §18, ruling R9: the per-function bound).
--- Skipped until then: the ceiling still charges IO.FileRead to
--- File.read_line (Task 10 stops charging handle uses). Task 10 uncomments
--- it; the `march test` rule in test/dune then typechecks it.
---
--- mod DirReader do
---   fn first(d : File.Dir) : Result(Option(String), File.FileError) needs () do
---     match File.open_in(d, "a.txt") do
---     Ok(h) -> File.read_line(h)
---     Err(e) -> Err(e)
---     end
---   end
--- end
+-- A File.Dir works in a function bounded by `needs ()` (spec §18, ruling R9:
+-- the per-function bound). Opening beneath a held directory and reading the
+-- result charge nothing (ocap phase 2, Task 10); the `march test` rule in
+-- test/dune typechecks this module.
+mod DirReader do
+  fn first(d : File.Dir) : Result(Option(String), File.FileError) needs () do
+    match File.open_in(d, "a.txt") do
+    Ok(h) -> File.read_line(h)
+    Err(e) -> Err(e)
+    end
+  end
+end
+
+describe "File.Dir capabilities" do
+  test "dir works in a needs () module" do
+    let root = tree("needs_none")
+    let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
+    assert (DirReader.first(d) == Ok(Some("A")))
+    let _ = File.close_dir(d)
+    cleanup("needs_none")
+  end
+end
 --
 -- describe "File.Dir capabilities" do
 --   test "dir works in a needs () module" do

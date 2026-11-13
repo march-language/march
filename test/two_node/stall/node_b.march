@@ -31,12 +31,12 @@ mod TwoNodeStallB do
     end
   end
 
-  pfn write_msg(fd : Int, msg : SwimDriver.WireMsg) : () do
-    let _ = Result.map_err(tcp_send_all(fd, NetKernel.bytes_to_str(NetFrame.encode(SwimDriver.encode_msg(msg)))), fn m -> Socket.WriteFailed(m))
+  pfn write_msg(fd : Socket, msg : SwimDriver.WireMsg) : () do
+    let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(SwimDriver.encode_msg(msg))))
     ()
   end
 
-  pfn perform(fd : Int, acts : List(Swim.Action)) : () do
+  pfn perform(fd : Socket, acts : List(Swim.Action)) : () do
     match acts do
       Nil -> ()
       Cons(a, rest) ->
@@ -50,7 +50,7 @@ mod TwoNodeStallB do
   end
 
   -- Split every complete frame off [buf]; answer pings; collect events.
-  pfn drain(fd : Int, buf : List(Int), events : List(SwimDriver.Event), acked : Bool) : (List(Int), List(SwimDriver.Event), Bool) do
+  pfn drain(fd : Socket, buf : List(Int), events : List(SwimDriver.Event), acked : Bool) : (List(Int), List(SwimDriver.Event), Bool) do
     match NetFrame.decode(buf) do
       None -> (buf, events, acked)
       Some((frame, rest)) ->
@@ -78,8 +78,8 @@ mod TwoNodeStallB do
 
   -- One tick: read, drain, step, perform. Returns the new driver state, the
   -- leftover bytes, whether an ack arrived, and whether the peer closed.
-  pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int)) : (SwimDriver.State, List(Int), Bool, Bool) do
-    let got = match Result.map_err(tcp_recv_chunk_timeout(fd, 4096, 50), fn m -> if m == "recv: timed out" do Socket.RecvTimeout(50) else Socket.RecvFailed(m) end) do
+  pfn tick(fd : Socket, s : SwimDriver.State, buf : List(Int)) : (SwimDriver.State, List(Int), Bool, Bool) do
+    let got = match Socket.recv_timeout(fd, 4096, 50) do
       Ok(chunk) -> if String.is_empty(chunk) do (buf, false, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false, false) end
       Err(Socket.RecvTimeout(_)) -> (buf, false, false)
       Err(_) -> (buf, false, true)
@@ -106,7 +106,7 @@ mod TwoNodeStallB do
 
   pfn me() : String do "node-b" end
 
-  pfn serve(fd : Int, s : SwimDriver.State, buf : List(Int), inc : Int) : () do
+  pfn serve(fd : Socket, s : SwimDriver.State, buf : List(Int), inc : Int) : () do
     match tick(fd, s, buf) do
       (_, _, _, true) -> Authority.ignore(println("node-b: peer closed"))
       (s2, buf2, _, false) ->
@@ -118,17 +118,18 @@ mod TwoNodeStallB do
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
     let port = Authority.must(Env.require_int("MARCH_NODE_PORT"))
-    let listen_fd = match tcp_listen(port) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
+    let listen_fd = match Authority.must(Socket.listen(port)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
     println("node-b: up")
-    let fd = match tcp_accept(listen_fd) do
+    let fd = match Socket.accept(listen_fd) do
       Ok(fd) -> fd
-      Err(e) -> panic("accept: " ++ e)
+      Err(e) -> panic("accept: " ++ Socket.error_message(e))
     end
     serve(fd, initial("node-a"), Nil, 1)
-    tcp_close(fd)
-    tcp_close(listen_fd)
+    let _ = Socket.close(fd)
+    let _ = Socket.close_listener(listen_fd)
+    ()
   end
 end

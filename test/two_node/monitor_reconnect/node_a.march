@@ -1,4 +1,4 @@
--- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing over raw tcp_* descriptors, the wire layer itself; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "monitor_reconnect": node-a (the watcher).
 --
 -- Connection 1: read node-b's Hello, register a monitor on the Target

@@ -88,10 +88,6 @@ let allowlist : ((string * string) * string) list = [
   (("Topology.runs_pool", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Udp.open_raw", "udp_open"), "private: the bind behind Udp.open/open_with/open_sharded, each of which calls Authority.check(\"IO.NetConnect\", host:port) first");
   (("Udp.resolve", "udp_resolve"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.connect", "udp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.send_batch", "udp_send_batch"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.send_batch_connected", "udp_send_batch"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.send_many", "udp_send_many"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
 ]
 
 let stdlib_dir () =

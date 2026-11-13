@@ -1,4 +1,4 @@
--- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing over raw tcp_* descriptors, the wire layer itself; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "stream": node-b hosts the Cons endpoint; see
 -- node_a.march for the transport and the design pointer. This node's trace
 -- is the Cons projection of stream_endpoints.expected, in order.

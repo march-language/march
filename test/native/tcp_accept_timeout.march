@@ -1,5 +1,5 @@
--- `tcp_accept_timeout`: a listener that nobody dials gives up with
--- Err("tcp_accept: timed out") once the timeout passes, instead of waiting
+-- `Socket.accept_timeout` (over the raw `tcp_accept_timeout`): a listener
+-- that nobody dials gives up with Err(RecvTimeout(ms)) once the timeout passes, instead of waiting
 -- for ever as `tcp_accept` does; one that is dialed accepts as usual. The
 -- session role runner's accept deadline stands on it
 -- (specs/progress/2026-09-18-session-accept-deadline.md).
@@ -11,34 +11,36 @@ mod TcpAcceptTimeout do
   needs IO.Spawn
 
   fn main(c : Cap(IO)) do
-    let listen_fd = match tcp_listen(0) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
+    let l = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
-    let port = match tcp_local_port(listen_fd) do
+    let port = match Socket.local_port(l) do
       Ok(p) -> p
-      Err(e) -> panic("port: " ++ e)
+      Err(e) -> panic("port: " ++ Socket.error_message(e))
     end
-    match tcp_accept_timeout(listen_fd, 300) do
+    match Socket.accept_timeout(l, 300) do
       Ok(_) -> println("nobody dialed, yet accepted")
-      Err(e) -> println("no client: " ++ e)
+      Err(e) -> println("no client: " ++ Socket.error_message(e))
     end
     let dialer = task_spawn(fn _ -> do
       sleep_ms(100)
-      match tcp_connect("127.0.0.1", port) do
-        Ok(fd) ->
-          tcp_close(fd)
+      match Authority.must(Socket.connect("127.0.0.1", port)) do
+        Ok(s) ->
+          let _ = Socket.close(s)
           1
         Err(_) -> 0
       end
     end)
-    match tcp_accept_timeout(listen_fd, 5000) do
-      Ok(fd) ->
+    match Socket.accept_timeout(l, 5000) do
+      Ok(s) ->
         println("client accepted")
-        tcp_close(fd)
-      Err(e) -> Authority.ignore(println("dialed, yet: " ++ e))
+        let _ = Socket.close(s)
+        ()
+      Err(e) -> Authority.ignore(println("dialed, yet: " ++ Socket.error_message(e)))
     end
     println("dialer connected: " ++ int_to_string(task_await_unwrap(dialer)))
-    tcp_close(listen_fd)
+    let _ = Socket.close_listener(l)
+    ()
   end
 end

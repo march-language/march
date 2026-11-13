@@ -14,7 +14,7 @@
       "version": "1.0"
     },
     "v2": {
-      "code": "mod Gauge do\n  needs IO.NetConnect\n\n  fn line(live : Int, at : Int) : String do\n    let text = IOList.to_string(~H\"live ${live}\\nat ${at}\\n\")\n    let _ = tcp_connect(\"collector.gauge.example\", 4317)\n    text\n  end\nend\n",
+      "code": "mod Gauge do\n  needs IO.NetConnect\n\n  fn line(live : Int, at : Int) : String do\n    let text = IOList.to_string(~H\"live ${live}\\nat ${at}\\n\")\n    let _ = Socket.connect(\"collector.gauge.example\", 4317)\n    text\n  end\nend\n",
       "needs": [
         "IO.NetConnect"
       ],
@@ -25,9 +25,9 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "956979c56",
-    "date": "2026-11-11",
-    "inputs_sha256": "ee97b7be8295511e87912f3d638a9cc4bcd26dc7c1a62d1623d00ec67a71740b"
+    "commit": "cdb7998ad",
+    "date": "2026-11-12",
+    "inputs_sha256": "4dd37a1cf3dfd806ff528a77f22ee18fe626ce7fd73c49a6b5ef34aa4527fef9"
   },
   "modules": {
     "classes": {
@@ -1179,15 +1179,15 @@
   "programs": {
     "ceiling": {
       "exit": 1,
-      "headline": "`main` is granted `Cap(IO.Clock)` + `Cap(IO.FileWrite)`, but the program reaches `IO.NetConnect` here. The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]",
-      "output": "-- CAPABILITY ----------------------------- ceiling.march\n\n`main` is granted `Cap(IO.Clock)` + `Cap(IO.FileWrite)`, but the program reaches `IO.NetConnect` here. The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]\nhelp: add a `Cap(IO.NetConnect)` parameter to `main` (e.g. `fn main(\u2026, _cap_netconnect : Cap(IO.NetConnect))`), or widen the whole grant to `Cap(IO)`, or remove the use.\n\n15 |       let _ = tcp_connect(\"collector.example\", 4317)\n                   ^^^^^^^^^^^\n\n\n    `main` calls `report` here:\n\n22 |     Probe.report(\"/tmp\")\n         ^^^^^^^^^^^^\n\n    `main` is granted only `Cap(IO.Clock)` + `Cap(IO.FileWrite)` here:\n\n21 |   fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do\n       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n    fix (`forge fix` applies it):\n\n21 -   fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do\n21 +   fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock), _cap_netconnect : Cap(IO.NetConnect)) : () do\n\n    run `march --explain cap_grant_exceeded`\n",
+      "headline": "`main` is granted `Cap(IO.Clock)` + `Cap(IO.FileWrite)`, but the program reaches `IO.NetConnect` (reached from `main`: main \u2192 Probe.report \u2192 Socket.connect). The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]",
+      "output": "-- CAPABILITY ----------------------------- ceiling.march\n\n`main` is granted `Cap(IO.Clock)` + `Cap(IO.FileWrite)`, but the program reaches `IO.NetConnect` (reached from `main`: main \u2192 Probe.report \u2192 Socket.connect). The grant is a ceiling on the WHOLE program \u2014 declaring `needs IO.NetConnect` does not raise it. [cap_grant_exceeded]\nhelp: add a `Cap(IO.NetConnect)` parameter to `main` (e.g. `fn main(\u2026, _cap_netconnect : Cap(IO.NetConnect))`), or widen the whole grant to `Cap(IO)`, or remove the use.\n\n21 |   fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do\n       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n\n    fix (`forge fix` applies it):\n\n21 -   fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do\n21 +   fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock), _cap_netconnect : Cap(IO.NetConnect)) : () do\n\n    run `march --explain cap_grant_exceeded`\n",
       "shown": "fn main(_files : Cap(IO.FileWrite), _clock : Cap(IO.Clock)) : () do\n  Probe.report(\"/tmp\")\nend\n"
     },
     "undeclared": {
       "exit": 1,
-      "headline": "`report` opens a network connection, but module `Probe` declares no `needs IO.NetConnect`. [cap_needs]",
-      "output": "-- CAPABILITY -------------------------- undeclared.march\n\n`report` opens a network connection, but module `Probe` declares no `needs IO.NetConnect`. [cap_needs]\nhint: add this to the module body \u2014\n        needs IO.NetConnect\n\n9 |     let _ = tcp_connect(\"collector.example\", 4317)\n                ^^^^^^^^^^^\n\n\n    fix (`forge fix` applies it):\n\n3 | mod Probe do\n4 +   needs IO.NetConnect\n\n    run `march --explain cap_needs`\n",
-      "shown": "fn report(home : String) : () do\n  let line = \"at \" ++ int_to_string(unix_time_ms()) ++ \"\\n\"\n  let _ = tcp_connect(\"collector.example\", 4317)\n  let _ = File.write(home ++ \"/lab-probe\", line)\n  ()\nend\n"
+      "headline": "Module `Probe` uses `IO.NetConnect` but does not declare `needs IO.NetConnect`. [cap_ceiling]",
+      "output": "-- CAPABILITY -------------------------- undeclared.march\n\nModule `Probe` uses `IO.NetConnect` but does not declare `needs IO.NetConnect`. [cap_ceiling]\nhelp: add `needs IO.NetConnect` to the module body.\n\n4 |   needs IO.FileWrite\n      ^^^^^^^^^^^^^^^^^^\n\n\n    fix (`forge fix` applies it):\n\n4 |   needs IO.FileWrite\n5 +   needs IO.NetConnect\n\n    run `march --explain cap_ceiling`\n",
+      "shown": "fn report(home : String) : () do\n  let line = \"at \" ++ int_to_string(unix_time_ms()) ++ \"\\n\"\n  let _ = Socket.connect(\"collector.example\", 4317)\n  let _ = File.write(home ++ \"/lab-probe\", line)\n  ()\nend\n"
     }
   },
   "sim": {

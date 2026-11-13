@@ -37,15 +37,15 @@ mod TcpConnectRefusedAfterPark do
 
   fn main(_c : Cap(IO)) do
     -- A port nothing listens on: bind one, learn its number, close it.
-    let listen_fd = match tcp_listen(0) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
+    let l = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
-    let port = match tcp_local_port(listen_fd) do
+    let port = match Socket.local_port(l) do
       Ok(p) -> p
-      Err(e) -> panic("port: " ++ e)
+      Err(e) -> panic("port: " ++ Socket.error_message(e))
     end
-    tcp_close(listen_fd)
+    let _ = Socket.close_listener(l)
     let tasks = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> refusals(port, 40, 0)))
     let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(t))
     println("refused: " ++ int_to_string(total) ++ "/320")

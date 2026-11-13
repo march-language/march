@@ -182,9 +182,9 @@ IO
 │   └── IO.FileWrite    — write, delete, rename files/dirs
 ├── IO.Network
 │   ├── IO.NetConnect   — outbound TCP
-│   │   ├── IO.NetConnect.TLS  — encrypted transport (tls_connect, tls_accept, …)
+│   │   ├── IO.NetConnect.TLS  — encrypted transport (Tls.client_ctx, Tls.server_ctx)
 │   │   ├── IO.Database — database connections (declaration-only; child of NetConnect)
-│   │   └── IO.WebSocket — WebSocket connections (ws_send, ws_recv, ws_select; child of NetConnect)
+│   │   └── IO.WebSocket — WebSocket connections (declaration-only: a WsSocket is a handle; child of NetConnect)
 │   └── IO.NetListen    — bind + listen on a port
 ├── IO.Process          — env vars, child processes, process exit
 ├── IO.Clock            — wall clock (unix_time_ms, DateTime.now); monotonic time is ambient, see below
@@ -717,8 +717,8 @@ well formed and does not decode to `.`, `/`, `\`, `%` or a control character, an
 because a server may resolve it differently (or, with a CR/LF, read a second request). A
 literal prefix proves the host but not the path (`"https://api.example.com/v1/weather/" ++
 "../admin"`), so under a path scope every request's path is checked when it is sent, and
-the compiler reports the violations it can see. A path-scoped host admits no raw
-`tcp_connect`. A URL
+the compiler reports the violations it can see. A path-scoped host admits no plain
+`Socket.connect`. A URL
 with no port uses its scheme's default (80 or 443). Two options may follow, in either
 order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete`,
 `options`, and `no_redirects`. Options alone mean any host:
@@ -733,11 +733,12 @@ fails the build. The check is fail-closed:
 - A literal URL, or a literal prefix that ends its host with `/`
   (`"https://api.stripe.com/" ++ path`), is checked against the scope. Without the `/`
   the rest could extend the host (`".evil.test/"`), so it is refused.
-- A URL from a parameter, a computed string, a socket handle (`tcp_send_all(fd, ...)`,
-  `tls_connect`), or a call the compiler cannot follow is refused (`cap_host_unproven`).
+- A URL from a parameter, a computed string, an operation on a socket the module was
+  handed (`Socket.write(s, ...)`, `Tls.connect`), or a call the compiler cannot follow is
+  refused (`cap_host_unproven`).
 - The method comes from the call: `HttpClient.get`, `HttpTransport.simple_get` are GET,
-  `HttpClient.post` POST, `put_request` PUT, `delete` DELETE. A raw `tcp_connect` shows
-  no method, so it is allowed only to a host declared without `methods(...)`.
+  `HttpClient.post` POST, `put_request` PUT, `delete` DELETE. A plain `Socket.connect`
+  shows no method, so it is allowed only to a host declared without `methods(...)`.
 - The scope covers everything the module reaches, including calls into your other modules
   and dependencies. A helper that takes the URL as a parameter must say so with
   `@[net_dest(url)]`, and is then checked to pass that parameter straight to the
@@ -817,7 +818,26 @@ cap_result_unhandled PATH...` to files outside one.
 
 What is not an operation: using what an operation opened. `Vault.set` on a
 table handle, reading or writing an open socket, the lines of an open file and
-a running process's pipes need no authority and keep their types. Some stdlib
+a running process's pipes need no authority and keep their types.
+
+**Handles need no capability.** A `File.Handle`, `File.Dir`, `Socket`,
+`Listener`, `Udp.UdpSocket`, `Tls.TlsConn`, `WebSocket.WsSocket` or `Process`
+is an unforgeable, reference-counted handle: user code gets one only from a
+checked open (`File.open`, `Socket.connect`, `Socket.listen`,
+`Process.spawn_async`, ...), and the raw integer builtins under them
+(`tcp_send_all`, `file_read_line`, `process_wait_proc`, ...) are internal to
+the standard library (`stdlib_internal`). Using a handle you hold is therefore
+not charged: a function bounded by `needs ()` may read a `File.Handle`, write to
+a `Socket` or wait on a `Process` it was handed, and accept on a `Listener`;
+it may not open one.
+
+```march
+mod Wire do
+  fn send(s : Socket, data : String) : Result((), Socket.SocketError) needs () do
+    Socket.write(s, data)       -- fine: the socket was opened elsewhere, checked
+  end
+end
+``` Some stdlib
 helpers degrade instead of failing: `List.pmap` and friends compute
 sequentially when spawning is refused, `IO.inspect` and `debug` still return
 their argument, and the Logger drops a line or a timestamp.
@@ -871,8 +891,8 @@ This is especially useful for library code that should have no hidden state.
 mod HttpsClient do
   needs IO.NetConnect.TLS  -- plaintext TCP is statically excluded
 
-  fn fetch(fd, h, host) do
-    tls_connect(fd, h, host)
+  fn context() do
+    Tls.client_ctx(Tls.default_client_config())
   end
 end
 ```

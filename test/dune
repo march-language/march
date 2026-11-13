@@ -12978,7 +12978,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/close_returns_ok_atom.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_close_returns_ok_atom
+   ; --stdlib-source: the fixture pins the raw file_close / csv_close
+   ; builtins themselves, which are stdlib-only since ocap phase 2 (Task 10).
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_close_returns_ok_atom
         native/close_returns_ok_atom.march)
    (with-stdout-to native_close_returns_ok_atom.out
         (system "./native_close_returns_ok_atom")))))
@@ -12994,7 +12996,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/close_returns_ok_atom.march))
  (action
   (with-stdout-to native_close_returns_ok_atom.interp.out
-   (run %{exe:../bin/main.exe} native/close_returns_ok_atom.march))))
+   (run %{exe:../bin/main.exe} --stdlib-source native/close_returns_ok_atom.march))))
 
 (rule
  (alias runtest)
@@ -15415,7 +15417,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/file_handle_leak_probe.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_leak_probe
+   ; --stdlib-source: the probe measures the raw file_open / csv_open handle
+   ; table itself (stdlib-only builtins since ocap phase 2, Task 10).
+   (run %{exe:../bin/main.exe} --compile --opt 2 --stdlib-source -o native_file_handle_leak_probe
         native/file_handle_leak_probe.march)
    (with-stdout-to native_file_handle_leak_probe.out
         (system "./native_file_handle_leak_probe")))))

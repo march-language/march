@@ -4177,6 +4177,83 @@ let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
       (contains_substring s "but module `ManyCaps` declares no `needs IO`")
   end
 
+(* ── ocap phase 2 (Task 10): using a handle charges nothing ────────────
+   Opening a socket is the capability operation; using the `Socket` you hold
+   is not (spec §6). A function bounded by `needs ()` (the per-function bound,
+   ruling R9) may therefore write to a socket it is handed, and accept on a
+   `Listener` it is handed, under both the source-level ceiling (`--check`,
+   [cap_strict_ceiling] on) and the compiled TIR ceiling (`--compile`); it may
+   not open one. *)
+let handle_use_program body =
+  Printf.sprintf
+    {|mod Main do
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Console
+
+  mod Wire do
+%s
+  end
+
+  fn main(_n : Cap(IO.NetConnect), _l : Cap(IO.NetListen), _c : Cap(IO.Console)) do
+    println("ok")
+  end
+end
+|}
+    body
+
+let run_march_on ~flags src_text =
+  let src = Filename.temp_file "handle_use" ".march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let out = Filename.temp_file "handle_use" ".out" in
+  let bin = Filename.temp_file "handle_use" ".bin" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s %s %s > %s 2>&1 </dev/null"
+         (Filename.quote compiler_exe_for_cap_dedup)
+         (if flags = "--compile" then "--compile -o " ^ Filename.quote bin else flags)
+         (Filename.quote src) (Filename.quote out))
+  in
+  let ic = open_in out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out; bin ];
+  (rc, s)
+
+let test_handle_use_charges_nothing () =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup;
+  let write_src = handle_use_program
+      {|    fn send(s : Socket, data : String) : Result((), Socket.SocketError) needs () do
+      Socket.write(s, data)
+    end|} in
+  let (rc, out) = run_march_on ~flags:"--check" write_src in
+  if rc <> 0 then
+    Alcotest.failf "Socket.write under `needs ()` should pass --check:\n%s" out;
+  let (rc, out) = run_march_on ~flags:"--compile" write_src in
+  if rc <> 0 then
+    Alcotest.failf "Socket.write under `needs ()` should pass the compiled ceiling:\n%s" out;
+  let connect_src = handle_use_program
+      {|    fn dial(host : String) : Result(Result(Socket, Socket.SocketError), CapError) needs () do
+      Socket.connect(host, 80)
+    end|} in
+  let (rc, out) = run_march_on ~flags:"--check" connect_src in
+  Alcotest.(check bool) "Socket.connect under `needs ()` is refused" true (rc <> 0);
+  Alcotest.(check bool) "and the refusal names IO.NetConnect" true
+    (contains_substring out "IO.NetConnect");
+  let accept_src = handle_use_program
+      {|    fn next(l : Listener) : Result(Socket, Socket.SocketError) needs () do
+      Socket.accept(l)
+    end|} in
+  let (rc, out) = run_march_on ~flags:"--check" accept_src in
+  if rc <> 0 then
+    Alcotest.failf "Socket.accept(l) under `needs ()` should pass --check:\n%s" out;
+  let (rc, out) = run_march_on ~flags:"--compile" accept_src in
+  if rc <> 0 then
+    Alcotest.failf "Socket.accept(l) under `needs ()` should pass the compiled ceiling:\n%s" out
+
 (* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
 
    `fn main(cap : Cap(IO))` makes Check 1 separately demand `needs IO`
@@ -4807,6 +4884,18 @@ end|} in
    builtin_cap_table (typecheck.ml).  A module whose body calls one without
    declaring `needs IO.NetListen` warns; declaring it silences the warning; and
    the DISTINCT NetConnect cap must not satisfy a NetListen requirement. *)
+(* ocap phase 2 (Task 10): the raw handle builtins (tcp_listen, csv_next_row,
+   tls_client_ctx, ws_recv, ...) are stdlib-only. The capability body-scan
+   tests below pin how the SCAN treats such a builtin, which is a property of
+   the scan, not of the gate, so they run with the gate lifted for exactly the
+   names they call (registering the source as stdlib instead would switch the
+   capability checks off with it). *)
+let with_raw_builtins names f =
+  let module TB = March_typecheck.Typecheck_builtins in
+  let saved = !TB.stdlib_only in
+  TB.stdlib_only := List.filter (fun (n, _) -> not (List.mem n names)) saved;
+  Fun.protect f ~finally:(fun () -> TB.stdlib_only := saved)
+
 let netlisten_body_warns name =
   let m =
     (try ignore (Str.search_forward (Str.regexp_string "IO.NetListen") name 0); true
@@ -4816,7 +4905,7 @@ let netlisten_body_warns name =
   in m
 
 let test_netlisten_body_missing_needs_warns () =
-  let ctx = typecheck {|mod Srv do
+  let ctx = with_raw_builtins ["tcp_listen"] @@ fun () -> typecheck {|mod Srv do
     fn serve() do
       tcp_listen(8080)
     end
@@ -4833,7 +4922,7 @@ let test_netlisten_body_missing_needs_warns () =
     "tcp_listen with no needs: ERRORS, naming needs IO.NetListen" true has_diag
 
 let test_netlisten_body_with_needs_no_warning () =
-  let ctx = typecheck {|mod Srv do
+  let ctx = with_raw_builtins ["tcp_listen"] @@ fun () -> typecheck {|mod Srv do
     needs IO.NetListen
     fn serve() do
       tcp_listen(8080)
@@ -4852,7 +4941,7 @@ let test_netlisten_body_with_needs_no_warning () =
 let test_netlisten_not_satisfied_by_netconnect () =
   (* NetConnect (client) is a sibling leaf, NOT a super-cap of NetListen; it must
      not satisfy a NetListen body requirement. *)
-  let ctx = typecheck {|mod Srv do
+  let ctx = with_raw_builtins ["tcp_listen"] @@ fun () -> typecheck {|mod Srv do
     needs IO.NetConnect
     fn serve() do
       tcp_listen(8080)
@@ -7002,7 +7091,7 @@ let test_qualified_opaque_type_evals () =
    specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md);
    the second test below pins that. *)
 let test_qualified_builtin_type_unifies_bare () =
-  let ctx = typecheck {|mod CsvDemo do
+  let ctx = with_raw_builtins ["csv_next_row"] @@ fun () -> typecheck {|mod CsvDemo do
     needs IO.FileRead
     mod Csv do
       needs IO.FileRead
@@ -7025,7 +7114,7 @@ let test_qualified_builtin_type_unifies_bare () =
     false (has_errors ctx)
 
 let test_user_type_named_like_builtin_is_distinct () =
-  let ctx = typecheck {|mod CsvDemo do
+  let ctx = with_raw_builtins ["csv_next_row"] @@ fun () -> typecheck {|mod CsvDemo do
     needs IO.FileRead
     type CsvRow = CsvEof | Row(List(String))
 
@@ -11382,40 +11471,53 @@ let test_cap_body_mut_parent_ok () =
 
 (* ── IO.NetConnect.TLS: encrypted transport capability ──────────────────── *)
 
+(* Making a TLS context is the charged act (ocap phase 2, Task 10):
+   tls_connect runs over a socket the caller already holds and charges nothing
+   (pinned by [test_cap_body_tls_connect_is_a_use]). *)
 let test_cap_body_missing_tls () =
-  let ctx = typecheck {|mod Secure do
-    fn dial(fd, h, host) do tls_connect(fd, h, host) end
+  let ctx = with_raw_builtins ["tls_client_ctx"] @@ fun () -> typecheck {|mod Secure do
+    fn mk(ca, alpn) do tls_client_ctx(ca, alpn, 1, 0) end
   end|} in
-  Alcotest.(check bool) "tls_connect without needs: body-scan ERROR" true
+  Alcotest.(check bool) "tls_client_ctx without needs: body-scan ERROR" true
     (has_error_with ctx "IO.NetConnect.TLS")
 
 let test_cap_body_tls_ok () =
-  let ctx = typecheck {|mod Secure do
+  let ctx = with_raw_builtins ["tls_client_ctx"] @@ fun () -> typecheck {|mod Secure do
     needs IO.NetConnect.TLS
-    fn dial(fd, h, host) do tls_connect(fd, h, host) end
+    fn mk(ca, alpn) do tls_client_ctx(ca, alpn, 1, 0) end
   end|} in
-  Alcotest.(check bool) "tls_connect with needs IO.NetConnect.TLS: no diagnostic" false
+  Alcotest.(check bool) "tls_client_ctx with needs IO.NetConnect.TLS: no diagnostic" false
     (has_error_with ctx "IO.NetConnect.TLS")
 
 let test_cap_body_tls_parent_ok () =
-  let ctx = typecheck {|mod Secure do
+  let ctx = with_raw_builtins ["tls_client_ctx"] @@ fun () -> typecheck {|mod Secure do
     needs IO.NetConnect
+    fn mk(ca, alpn) do tls_client_ctx(ca, alpn, 1, 0) end
+  end|} in
+  Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_client_ctx: no diagnostic" false
+    (has_error_with ctx "IO.NetConnect.TLS")
+
+let test_cap_body_tls_connect_is_a_use () =
+  let ctx = with_raw_builtins ["tls_connect"] @@ fun () -> typecheck {|mod Secure do
     fn dial(fd, h, host) do tls_connect(fd, h, host) end
   end|} in
-  Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_connect: no diagnostic" false
-    (has_error_with ctx "IO.NetConnect.TLS")
+  Alcotest.(check bool) "tls_connect (a use of a held socket) needs no capability" false
+    (has_error_with ctx "IO.NetConnect")
 
 (* ── IO.WebSocket: least-privilege sub-cap of IO.NetConnect ──────────────── *)
 
+(* ws_recv / ws_send / ws_select act on a WebSocket the HTTP server's upgrade
+   handed over: since ocap phase 2 (Task 10) they are uses, charged nothing.
+   IO.WebSocket stays declarable. *)
 let test_cap_body_missing_ws () =
-  let ctx = typecheck {|mod Ws do
+  let ctx = with_raw_builtins ["ws_recv"] @@ fun () -> typecheck {|mod Ws do
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "ws_recv without needs: body-scan ERROR" true
+  Alcotest.(check bool) "ws_recv without needs: a handle use, no capability error" false
     (has_error_with ctx "IO.WebSocket")
 
 let test_cap_body_ws_ok () =
-  let ctx = typecheck {|mod Ws do
+  let ctx = with_raw_builtins ["ws_recv"] @@ fun () -> typecheck {|mod Ws do
     needs IO.WebSocket
     fn go(fd) do ws_recv(fd) end
   end|} in
@@ -11423,11 +11525,11 @@ let test_cap_body_ws_ok () =
     (has_error_with ctx "IO.WebSocket")
 
 let test_cap_body_ws_parent_ok () =
-  let ctx = typecheck {|mod Ws do
+  let ctx = with_raw_builtins ["ws_recv"] @@ fun () -> typecheck {|mod Ws do
     needs IO.NetConnect
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "needs IO.NetConnect umbrella covers ws_recv: no diagnostic" false
+  Alcotest.(check bool) "needs IO.NetConnect with ws_recv: no diagnostic" false
     (has_error_with ctx "IO.WebSocket")
 
 let test_cap_ws_arg_ok () =
@@ -19219,6 +19321,7 @@ let compiler_suites =
           Alcotest.test_case "missing needs reported once per module" `Quick test_missing_needs_reported_once_per_module;
           Alcotest.test_case "missing needs dedup: no orphan cap_infer hint" `Quick test_missing_needs_dedup_no_orphan_hint;
           Alcotest.test_case "missing needs dedup: no orphan hint with main(cap : Cap(IO))" `Quick test_missing_needs_dedup_no_orphan_hint_main_cap_param;
+          Alcotest.test_case "handle_use_charges_nothing" `Quick test_handle_use_charges_nothing;
           Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
           Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
           Alcotest.test_case "nested module uses its own proof cap without needs" `Quick test_nested_module_own_proof_cap_needs_no_needs;
@@ -19589,10 +19692,11 @@ let compiler_suites =
           Alcotest.test_case "vault_new missing needs: warn IO.Mut"        `Quick test_cap_body_missing_mut;
           Alcotest.test_case "vault_new with needs IO.Mut: no warn"        `Quick test_cap_body_mut_ok;
           Alcotest.test_case "needs IO umbrella covers vault_new"          `Quick test_cap_body_mut_parent_ok;
-          Alcotest.test_case "tls_connect missing needs: error TLS"         `Quick test_cap_body_missing_tls;
-          Alcotest.test_case "tls_connect with needs IO.NetConnect.TLS"    `Quick test_cap_body_tls_ok;
+          Alcotest.test_case "tls_client_ctx missing needs: error TLS"      `Quick test_cap_body_missing_tls;
+          Alcotest.test_case "tls_client_ctx with needs IO.NetConnect.TLS" `Quick test_cap_body_tls_ok;
           Alcotest.test_case "needs IO.NetConnect umbrella covers TLS"     `Quick test_cap_body_tls_parent_ok;
-          Alcotest.test_case "ws_recv missing needs: error WebSocket"       `Quick test_cap_body_missing_ws;
+          Alcotest.test_case "tls_connect is a handle use: no capability"  `Quick test_cap_body_tls_connect_is_a_use;
+          Alcotest.test_case "ws_recv is a handle use: no capability"      `Quick test_cap_body_missing_ws;
           Alcotest.test_case "ws_recv with needs IO.WebSocket"             `Quick test_cap_body_ws_ok;
           Alcotest.test_case "needs IO.NetConnect umbrella covers WS"      `Quick test_cap_body_ws_parent_ok;
           Alcotest.test_case "Cap(IO.WebSocket) arg: no error"             `Quick test_cap_ws_arg_ok;

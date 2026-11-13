@@ -2385,7 +2385,75 @@ let stdlib_only : (string * string) list ref =
       ("dir_open", "use `File.open_dir(path)`");
       ("dir_open_write", "use `File.open_dir_write(path)`");
       ("file_open_at", "use `File.open_in(d, rel)` / `File.open_write_in(d, rel, mode)` on a `File.Dir`");
-      ("dir_list_at", "use `File.list_in(d, rel)` on a `File.Dir`") ]
+      ("dir_list_at", "use `File.list_in(d, rel)` on a `File.Dir`");
+      (* ocap phase 2 (Task 10): every remaining raw Int-descriptor builtin
+         behind a handle type. User code reaches files, sockets, TLS, UDP,
+         WebSocket, the HTTP server and child processes through the handle
+         API; a guessed descriptor number must reach nothing the program holds.
+         The stdlib's own wrappers (and the cluster stack, whose fds are
+         trusted plumbing) still call these. *)
+      ("file_open", "use `File.open(path)`");
+      ("file_read_line", "use `File.read_line(h)` on a `File.Handle`");
+      ("file_read_chunk", "use `File.read_chunk(h, size)` on a `File.Handle`");
+      ("file_close", "use `File.close(h)` on a `File.Handle`");
+      ("csv_open", "use `Csv.each_row(path, delimiter, mode, f)` or `Csv.read_all(path, delimiter, mode)`");
+      ("csv_next_row", "use `Csv.each_row(path, delimiter, mode, f)` or `Csv.read_all(path, delimiter, mode)`");
+      ("csv_close", "use `Csv.each_row(path, delimiter, mode, f)` or `Csv.read_all(path, delimiter, mode)`");
+      ("tcp_connect", "use `Socket.connect(host, port)`");
+      ("tcp_connect_timeout", "use `Socket.connect_timeout(host, port, timeout_ms)`");
+      ("tcp_send_all", "use `Socket.write(s, data)` on a `Socket`");
+      ("tcp_recv_all", "use `Socket.recv(s, max_bytes)` on a `Socket`");
+      ("tcp_recv_exact", "use `Socket.recv_exact(s, n)` on a `Socket`");
+      ("tcp_recv_http", "use `HttpClient` (or `HttpTransport.request`)");
+      ("tcp_recv_http_headers", "use `HttpClient` (or `HttpTransport.request`)");
+      ("tcp_recv_chunked_frame", "use `HttpClient` (or `HttpTransport.request`)");
+      ("tcp_recv_chunk", "use `Socket.recv(s, max_bytes)` on a `Socket`");
+      ("tcp_recv_chunk_timeout", "use `Socket.recv_timeout(s, max_bytes, timeout_ms)` on a `Socket`");
+      ("tcp_recv_timeout", "use `Socket.recv_deadline(s, max_bytes, timeout_ms)` on a `Socket`");
+      ("tcp_set_recv_timeout", "use `Socket.set_recv_timeout(s, timeout_ms)` on a `Socket`");
+      ("tcp_peer_addr", "use `Socket.peer_addr(s)` on a `Socket`");
+      ("tcp_shutdown", "use `Socket.close(s)` on a `Socket`");
+      ("tcp_close", "use `Socket.close(s)` on a `Socket` (or `Socket.close_listener(l)`)");
+      ("tcp_listen", "use `Socket.listen(port)`");
+      ("tcp_accept", "use `Socket.accept(l)` on a `Listener`");
+      ("tcp_accept_timeout", "use `Socket.accept_timeout(l, timeout_ms)` on a `Listener`");
+      ("tcp_local_port", "use `Socket.local_port(l)` on a `Listener`");
+      ("udp_open", "use `Udp.open(host, port)` or `Udp.open_with(host, port, opts)`");
+      ("udp_resolve", "use `Udp.resolve(host, port)`");
+      ("udp_addr_to_string", "use `Udp.addr_to_string(a)`");
+      ("udp_connect", "use `Udp.connect(sock, addr)` on a `Udp.UdpSocket`");
+      ("udp_close", "use `Udp.close(sock)` on a `Udp.UdpSocket`");
+      ("udp_local_addr", "use `Udp.local_addr(sock)` on a `Udp.UdpSocket`");
+      ("udp_stats", "use `Udp.stats(sock)` on a `Udp.UdpSocket`");
+      ("udp_send_batch", "use `Udp.send_batch(sock, addr, payloads)` on a `Udp.UdpSocket`");
+      ("udp_send_many", "use `Udp.send_many(sock, pairs)` on a `Udp.UdpSocket`");
+      ("udp_recv_batch", "use `Udp.recv_batch(sock, max_msgs, max_size, timeout_ms)` on a `Udp.UdpSocket`");
+      ("tls_client_ctx", "use `Tls.client_ctx(config)`");
+      ("tls_server_ctx", "use `Tls.server_ctx(config)`");
+      ("tls_connect", "use `Tls.connect(s, ctx, hostname)` on a `Socket`");
+      ("tls_accept", "use `Tls.accept(s, ctx)` on a `Socket`");
+      ("tls_read", "use `Tls.read(conn, max_bytes)` on a `Tls.TlsConn`");
+      ("tls_read_timeout", "use `Tls.read_timeout(conn, max_bytes, timeout_ms)` on a `Tls.TlsConn`");
+      ("tls_write", "use `Tls.write(conn, data)` on a `Tls.TlsConn`");
+      ("tls_close", "use `Tls.close(conn)` on a `Tls.TlsConn`");
+      ("tls_ctx_free", "use `Tls.ctx_free(ctx)` on a `Tls.TlsCtx`");
+      ("tls_negotiated_alpn", "use `Tls.negotiated_alpn(conn)` on a `Tls.TlsConn`");
+      ("tls_peer_cn", "use `Tls.peer_cn(conn)` on a `Tls.TlsConn`");
+      ("tls_ctx_set_groups", "use `Tls.set_groups(ctx, groups)` on a `Tls.TlsCtx`");
+      ("tls_negotiated_group", "use `Tls.negotiated_group(conn)` on a `Tls.TlsConn`");
+      ("tls_pq_available", "use `Tls.post_quantum_available()`");
+      ("ws_recv", "use `WebSocket.recv(socket)` on a `WebSocket.WsSocket`");
+      ("ws_send", "use `WebSocket.send_frame(socket, frame)` on a `WebSocket.WsSocket`");
+      ("ws_select", "use `WebSocket.select(socket, timeout_ms)` on a `WebSocket.WsSocket`");
+      ("http_server_spawn_n", "use `HttpServer.spawn_n(server, n)`");
+      ("http_server_wait", "use `HttpServer.wait_for(handle)`");
+      ("http_server_plain_listener", "use `HttpServer.plain_listener(server, port, plugs)`");
+      ("http_conn_is_tls", "use `HttpServer.scheme(conn)`");
+      ("process_spawn_async", "use `Process.spawn_async(command, args)`");
+      ("process_read_line", "use `Process.read_line(p)` on a `Process`");
+      ("process_write", "use `Process.write(p, data)` on a `Process`");
+      ("process_kill_proc", "use `Process.kill(p)` on a `Process`");
+      ("process_wait_proc", "use `Process.wait_proc(p)` on a `Process`") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

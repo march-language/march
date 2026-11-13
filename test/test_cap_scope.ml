@@ -333,8 +333,19 @@ end
 let test_csv_open_outside_scope_is_rejected () =
   rejects "csv_open outside the declared scope" (csv_open_src "/etc/passwd")
 
+(* The control. Since ocap phase 2 (Task 10) `csv_open` is stdlib-only, so a
+   user call is refused by the stdlib-only gate whatever its path; the
+   control is that the in-scope path draws that refusal ALONE, never the
+   scope error, so the rejection above is still about the path. *)
 let test_csv_open_inside_scope_is_accepted () =
-  accepts "csv_open inside the declared scope" (csv_open_src "/srv/data/users.csv")
+  let rc, out = check_src (csv_open_src "/srv/data/users.csv") in
+  Alcotest.(check bool) "the raw builtin is refused as stdlib-internal" true
+    (rc <> 0
+     && (try ignore (Str.search_forward (Str.regexp_string "[stdlib_internal]") out 0); true
+         with Not_found -> false));
+  Alcotest.(check bool) "but an in-scope path draws no scope error" false
+    (try ignore (Str.search_forward (Str.regexp_string "outside it") out 0); true
+     with Not_found -> false)
 
 (* ── The scope itself must be meaningful ─────────────────────────────
    A scope that cannot constrain anything used to parse and be silently

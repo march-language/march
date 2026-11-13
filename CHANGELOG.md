@@ -505,6 +505,16 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **The raw integer file, socket, TLS, UDP, WebSocket and process builtins are internal to
+  the standard library; use `File`, `Socket`, `Udp`, `Tls`, `WebSocket`, `Process`.**
+  Calling `tcp_send_all`, `file_read_line`, `process_wait_proc` and the rest of the
+  Int-descriptor builtins from your own code is a `stdlib_internal` error that names the
+  wrapper to use (`Socket.write(s, data)`, `File.read_line(h)`, `Process.wait_proc(p)`, ...).
+  In exchange, using a handle you hold is no longer a capability operation: only the open
+  (`File.open`, `Socket.connect`, `Socket.listen`, `Tls.client_ctx`, `Process.spawn_async`,
+  ...) is checked, so a function bounded by `needs ()` may read, write, accept on or wait on
+  a handle it was handed. `Socket.recv_exact(s, n)` is new, for reading an exact byte count.
+  `IO.WebSocket` is now declaration-only.
 - **The standard library's cluster plumbing over raw file descriptors is no longer callable
   from user code.** `NetKernel.send_frame` / `recv_frame` / `handshake*`, `NodeSend.cast*`,
   `NodeCall.call`, `NodeQueue.start`, `PeerReader.serve`, `ClusterConn.listen` /

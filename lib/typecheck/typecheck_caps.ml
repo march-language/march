@@ -215,12 +215,18 @@ let fn_transitive_capability_closures_tbl (env : env)
 (* ── Path-scoped capability checking ──────────────────────────────────
 
    Which builtins take a FILESYSTEM PATH, and at which argument.  Verified
-   against the signature table: the read/write builtins take the path at
-   argument 0, [file_rename] and [file_copy] take two paths, and
-   [file_read_line] / [file_read_chunk] / [csv_next_row] take an INT HANDLE
-   rather than a path — those need no check, because a handle cannot be
-   obtained except through an opening builtin, which is checked.  That is what
-   makes this sound without dataflow analysis. *)
+   against the signature table: the read/write builtins and the opens
+   ([file_open], [file_open_write], [dir_open], [dir_open_write], [csv_open])
+   take the path at argument 0, and [file_rename] and [file_copy] take two
+   paths.  Everything that acts on an open file or directory instead
+   ([file_read_line], [file_read_chunk], [file_write_handle], [file_seek],
+   [csv_next_row], and [file_open_at] / [dir_list_at] beneath a held File.Dir)
+   gets no path check, and needs none: since ocap phase 2 a handle is
+   unforgeable.  User code holds a File.Handle or File.Dir only from a checked
+   open (the raw Int-descriptor builtins are stdlib-only), so the path scope
+   was enforced when the handle was made, and [File.open_in] refuses a
+   relative path that leaves the directory.  That is what makes this sound
+   without dataflow analysis. *)
 let path_arg_builtins : (string * int list) list = [
   ("file_read", [0]); ("file_open", [0]); ("file_exists", [0]);
   ("file_stat", [0]); ("dir_list", [0]); ("dir_exists", [0]);

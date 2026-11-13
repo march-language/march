@@ -236,6 +236,13 @@ let note_stdlib_decls (decls : Ast.decl list) : unit =
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
 let builtin_cap_table : (string * string) list = [
+  (* ocap phase 2 (Task 10): only OPENS are charged. An operation on a handle
+     the caller already holds (a File.Handle, File.Dir, Socket, Listener,
+     Udp.UdpSocket, Tls.TlsConn/TlsCtx, WebSocket.WsSocket or Process) needs no
+     capability: the open was checked, and since this phase a handle is
+     unforgeable (its raw builtins are stdlib-only, [Typecheck_env.stdlib_only]).
+     The removed use builtins are listed in
+     specs/todos/2026-11-10-ocap-p1-handle-uses-not-capability-ops.md. *)
   (* IO.Console *)
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
@@ -248,8 +255,6 @@ let builtin_cap_table : (string * string) list = [
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
   ("file_open",             "IO.FileRead");
-  ("file_read_line",        "IO.FileRead");
-  ("file_read_chunk",       "IO.FileRead");
   ("file_stat",             "IO.FileRead");
   ("dir_exists",            "IO.FileRead");
   ("dir_list",              "IO.FileRead");
@@ -258,7 +263,6 @@ let builtin_cap_table : (string * string) list = [
      a checked open (ocap phase 2). *)
   ("dir_open",              "IO.FileRead");
   ("csv_open",              "IO.FileRead");
-  ("csv_next_row",          "IO.FileRead");
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
@@ -280,42 +284,20 @@ let builtin_cap_table : (string * string) list = [
   (* IO.NetConnect *)
   ("tcp_connect",           "IO.NetConnect");
   ("tcp_connect_timeout",   "IO.NetConnect");
-  ("tcp_send_all",          "IO.NetConnect");
-  ("tcp_recv_all",          "IO.NetConnect");
-  ("tcp_recv_exact",        "IO.NetConnect");
   ("dist_monitor_register", "IO.NetConnect");
   ("dist_monitor_pending",  "IO.NetConnect");
   ("dist_monitor_ack",      "IO.NetConnect");
   ("dist_monitor_forget_node", "IO.NetConnect");
-  ("tcp_recv_http",         "IO.NetConnect");
-  ("tcp_recv_http_headers", "IO.NetConnect");
-  ("tcp_recv_chunk",        "IO.NetConnect");
-  ("tcp_recv_chunk_timeout","IO.NetConnect");
-  ("tcp_set_recv_timeout",  "IO.NetConnect");
-  ("tcp_recv_chunked_frame","IO.NetConnect");
-  ("tcp_recv_timeout",      "IO.NetConnect");
-  (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect; a module that
-     only speaks WebSocket can declare `needs IO.WebSocket` instead of the
-     broader `needs IO.NetConnect`, mirroring IO.NetConnect.TLS. *)
-  ("ws_recv",               "IO.WebSocket");
-  ("ws_send",               "IO.WebSocket");
-  ("ws_select",             "IO.WebSocket");
+  (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect. Its three
+     builtins (ws_recv / ws_send / ws_select) act on a WebSocket.WsSocket the
+     HTTP server's upgrade hands over, so since ocap phase 2 they charge
+     nothing; the capability stays declarable. *)
   (* IO.Network *)
   ("dns_resolve",           "IO.Network");
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
-  ("tcp_accept",            "IO.NetListen");
-  ("tcp_accept_timeout",    "IO.NetListen");
-  ("tcp_local_port",        "IO.NetListen");
   ("udp_open",              "IO.NetConnect");
   ("udp_resolve",           "IO.NetConnect");
-  ("udp_connect",           "IO.NetConnect");
-  ("udp_close",             "IO.NetConnect");
-  ("udp_local_addr",        "IO.NetConnect");
-  ("udp_stats",             "IO.NetConnect");
-  ("udp_send_batch",        "IO.NetConnect");
-  ("udp_send_many",         "IO.NetConnect");
-  ("udp_recv_batch",        "IO.NetConnect");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
@@ -334,10 +316,6 @@ let builtin_cap_table : (string * string) list = [
   ("process_spawn_sync",    "IO.Process");
   ("process_spawn_lines",   "IO.Process");
   ("process_spawn_async",   "IO.Process");
-  ("process_read_line",     "IO.Process");
-  ("process_write",         "IO.Process");
-  ("process_kill_proc",     "IO.Process");
-  ("process_wait_proc",     "IO.Process");
   (* IO.Clock *)
   ("unix_time",             "IO.Clock");
   ("unix_time_ms",          "IO.Clock");
@@ -376,18 +354,12 @@ let builtin_cap_table : (string * string) list = [
   ("vault_whereis",         "IO.Mut");
   ("vault_reap",            "IO.Mut");
   ("vault_close",           "IO.Mut");
-  (* IO.NetConnect.TLS — encrypted transport; tls_close/tls_ctx_free are cleanup, no cap *)
+  (* IO.NetConnect.TLS — encrypted transport. Making a context is the
+     charged act; tls_connect / tls_accept run over a Socket the caller already
+     holds (its open was checked), and reads, writes and cleanup on the
+     resulting TlsConn charge nothing. *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
-  ("tls_connect",           "IO.NetConnect.TLS");
-  ("tls_accept",            "IO.NetConnect.TLS");
-  ("tls_read",              "IO.NetConnect.TLS");
-  ("tls_read_timeout",      "IO.NetConnect.TLS");
-  ("tls_write",             "IO.NetConnect.TLS");
-  ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
-  ("tls_peer_cn",           "IO.NetConnect.TLS");
-  ("tls_ctx_set_groups",    "IO.NetConnect.TLS");
-  ("tls_negotiated_group",  "IO.NetConnect.TLS");
 ]
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]

@@ -226,34 +226,28 @@ let dep_main =
 end
 |}
 
-(* A capability a stdlib LAMBDA reaches (Socket.write's
-   [fn fd -> tcp_send_all(...)], lifted by Defun to a top-level fn with no
+(* A capability a stdlib LAMBDA reaches (Task.async_stream's
+   [fn x -> task_spawn(...)], lifted by Defun to a top-level fn with no
    module in its name) is charged to the stdlib function it was written in,
    and so through it to the caller: [Cap_attrib] used to charge it to the
    entry module, which accepted [Writer] below whenever the entry declared the
    capability and rejected a correct program under `march check` (entry
    `LibCheck`) and the REPL (`Repl`).
-   specs/progress/2026-11-11-cap-attrib-stdlib-lambdas.md *)
+   specs/progress/2026-11-11-cap-attrib-stdlib-lambdas.md. The fixture used
+   Socket.write's lambda until ocap phase 2 Task 10 made socket writes uses,
+   which charge nothing. *)
 let stdlib_lambda writer_needs =
   Printf.sprintf
     {|mod Main do
-  needs IO.Console, IO.NetConnect
-  mod Opener do
-    needs IO.NetConnect
-    fn open() do Authority.must(Socket.connect("127.0.0.1", 9)) end
-  end
+  needs IO.Console, IO.Spawn
   mod Writer do
     %s
-    fn send(s) do Socket.write(s, "x") end
+    fn run(xs) do Task.async_stream(xs, fn n -> n + 1) end
   end
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
-    match Opener.open() do
-    Ok(s) ->
-      match Writer.send(s) do
-      Ok(_) -> println("sent")
-      Err(_) -> println("write err")
-      end
-    Err(_) -> println("no conn")
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    match Writer.run([1, 2]) do
+    Ok(_) -> println("ran")
+    Err(_) -> println("refused")
     end
   end
 end
@@ -261,7 +255,7 @@ end
     writer_needs
 
 let stdlib_lambda_repl writer_needs =
-  Printf.sprintf "mod Writer do\n  %s\n  fn send(s) do Socket.write(s, \"x\") end\nend\n"
+  Printf.sprintf "mod Writer do\n  %s\n  fn run(xs) do Task.async_stream(xs, fn n -> n + 1) end\nend\n"
     writer_needs
 
 (* The same lambda reached from the entry module's own main. *)
@@ -323,8 +317,8 @@ let fixtures =
       ~repl:(host_scope_repl "q");
     fx "stdlib_lambda" [ "cap_ceiling" ] (stdlib_lambda "")
       ~repl:(stdlib_lambda_repl "");
-    fx "stdlib_lambda_ok" [] (stdlib_lambda "needs IO.NetConnect")
-      ~repl:(stdlib_lambda_repl "needs IO.NetConnect");
+    fx "stdlib_lambda_ok" [] (stdlib_lambda "needs IO.Spawn")
+      ~repl:(stdlib_lambda_repl "needs IO.Spawn");
     fx "socket_write_main" [] socket_write_main;
     fx "dep_module" [ "cap_ceiling" ] dep_main ~lib:(dep_lib "IO.Console");
     fx "dep_module_ok" [] dep_main ~lib:(dep_lib "IO.Console, IO.FileRead");
