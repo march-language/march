@@ -726,6 +726,15 @@ order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete
 unscoped `needs IO.NetConnect` still means any host. Scopes are accepted on
 `IO.NetConnect` only; it also bounds the TLS connections built on it.
 
+**Scope syntax.** The parenthesised scope takes several leading strings, then options:
+`needs IO.Mut("a", "b")`. An option may take a string argument as well as identifiers:
+`needs IO.Registry(prefix("worker."))`, or both, `needs IO.Registry("logger",
+prefix("worker."))`. Strings come first; once an option appears no further string may
+follow. Internally a scope is one string: each extra string becomes `name=<s>` and a
+string-argument option `<option>=<s>`, so `IO.Mut("a", "b")` is `a;name=b`. Which
+capabilities accept these forms, and what they mean, is set by the capability, not by the
+syntax.
+
 **What is checked, at compile time.** In a scoped module, every network call must have a
 destination the compiler can see, inside the scope, with an allowed method; anything else
 fails the build. The check is fail-closed:

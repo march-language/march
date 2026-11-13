@@ -21,6 +21,9 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`needs` scopes take several names and string-valued options.** `needs IO.Mut("a", "b")`
+  and `needs IO.Registry("logger", prefix("worker."))` now parse, in the compiler, the formatter
+  and the tree-sitter grammar. No capability uses the new forms yet.
 - **`@[deprecated("use X instead")]` marks a function as deprecated.** Every use of it from
   outside the module that declares it gets a warning with the code `deprecated` and the
   message; the program still compiles and the exit status does not change. Uses inside the

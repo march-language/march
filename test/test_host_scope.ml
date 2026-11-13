@@ -704,8 +704,55 @@ let path_tests =
     Alcotest.test_case "url path of literal" `Quick test_url_path_of_literal;
   ]
 
+(* ── Several names and string-valued options (ocap p2b, Task 11) ────── *)
+
+let needs_scope src =
+  let m = Test_helpers.parse_module (Printf.sprintf "mod S do\n  %s\nend\n" src) in
+  List.concat_map
+    (function
+      | March_ast.Ast.DNeeds (caps, _) -> List.map snd caps
+      | _ -> [])
+    m.March_ast.Ast.mod_decls
+
+let test_parse_multi_name_scope () =
+  Alcotest.(check (list (option string))) "two names"
+    [ Some "a;name=b" ] (needs_scope {|needs IO.Mut("a", "b")|});
+  Alcotest.(check (list (option string))) "three names then an option"
+    [ Some "a;name=b;name=c;no_redirects" ]
+    (needs_scope {|needs IO.Mut("a", "b", "c", no_redirects)|})
+
+let test_parse_string_option_scope () =
+  Alcotest.(check (list (option string))) "string-argument option alone"
+    [ Some ";prefix=w." ] (needs_scope {|needs IO.Registry(prefix("w."))|});
+  Alcotest.(check (list (option string))) "name and string-argument option"
+    [ Some "logger;prefix=worker." ]
+    (needs_scope {|needs IO.Registry("logger", prefix("worker."))|})
+
+let test_parse_methods_scope_unchanged () =
+  Alcotest.(check (list (option string))) "methods"
+    [ Some "h;methods=get" ] (needs_scope {|needs IO.NetConnect("h", methods(get))|});
+  Alcotest.(check (list (option string))) "methods list"
+    [ Some "h;methods=get,post;no_redirects" ]
+    (needs_scope {|needs IO.NetConnect("h", methods(get, post), no_redirects)|})
+
+let test_scope_forms_format_roundtrip () =
+  let src =
+    "mod F do\n  needs IO.Mut(\"a\", \"b\"), IO.Registry(\"l\", prefix(\"w.\")), IO.Registry(prefix(\"x.\"))\nend\n"
+  in
+  let out = March_format.Format.format_source ~filename:"f.march" src in
+  List.iter
+    (fun want ->
+       match Str.search_forward (Str.regexp_string want) out 0 with
+       | _ -> ()
+       | exception Not_found -> Alcotest.failf "formatted output lacks %S:\n%s" want out)
+    [ {|IO.Mut("a", "b")|}; {|IO.Registry("l", prefix("w."))|}; {|IO.Registry(prefix("x."))|} ]
+
 let method_tests =
   path_tests @ [
+    Alcotest.test_case "parse multi-name scope" `Quick test_parse_multi_name_scope;
+    Alcotest.test_case "parse string-option scope" `Quick test_parse_string_option_scope;
+    Alcotest.test_case "parse methods scope unchanged" `Quick test_parse_methods_scope_unchanged;
+    Alcotest.test_case "scope forms format roundtrip" `Quick test_scope_forms_format_roundtrip;
     Alcotest.test_case "methods syntax" `Quick test_methods_syntax;
     Alcotest.test_case "methods format roundtrip" `Quick test_methods_format_roundtrip;
     Alcotest.test_case "methods decl" `Quick test_methods_decl;

@@ -1494,18 +1494,34 @@ needs_decl:
    typechecker validates them (lib/caps/host_scope.ml). *)
 scoped_cap_path:
   | p = cap_path { (p, None) }
-  | p = cap_path; LPAREN; s = STRING; RPAREN { (p, Some s) }
-  | p = cap_path; LPAREN; s = STRING; COMMA;
-    os = separated_nonempty_list(COMMA, scope_option); RPAREN
-    { (p, Some (s ^ ";" ^ String.concat ";" os)) }
+  | p = cap_path; LPAREN; s = STRING; rest = scope_rest; RPAREN
+    { (p, Some (String.concat ";" (s :: rest))) }
   | p = cap_path; LPAREN; os = separated_nonempty_list(COMMA, scope_option); RPAREN
     { (p, Some (";" ^ String.concat ";" os)) }
 
-(* `no_redirects`, or `methods(get, head)` stored as "methods=get,head". *)
+(* After the first string: further strings (each becomes the option
+   "name=<s>"), then options.  Strings may not follow an option.  Several
+   names and string-argument options still ride in the one scope string, so
+   the AST type of [DNeeds] does not change; a string containing `;`, `=` or
+   `,` could be confused with the encoding and is refused by the scope
+   validation, not here. *)
+scope_rest:
+  |                                                  { [] }
+  | COMMA; s = STRING; r = scope_rest                { ("name=" ^ s) :: r }
+  | COMMA; o = scope_option; r = scope_option_tail   { o :: r }
+
+scope_option_tail:
+  |                                                  { [] }
+  | COMMA; o = scope_option; r = scope_option_tail   { o :: r }
+
+(* `no_redirects`, `methods(get, head)` stored as "methods=get,head", or a
+   string argument, `prefix("w.")` stored as "prefix=w.". *)
 scope_option:
   | o = LOWER_IDENT { o }
   | o = LOWER_IDENT; LPAREN; vs = separated_nonempty_list(COMMA, LOWER_IDENT); RPAREN
     { o ^ "=" ^ String.concat "," vs }
+  | o = LOWER_IDENT; LPAREN; s = STRING; RPAREN
+    { o ^ "=" ^ s }
 
 cap_path:
   | id = upper_name { [id] }

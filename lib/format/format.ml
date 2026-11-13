@@ -1429,11 +1429,26 @@ and emit_decl ctx = function
              match String.index_opt o '=' with
              | None -> o
              | Some i ->
-               Printf.sprintf "%s(%s)" (String.sub o 0 i)
-                 (String.concat ", "
-                    (String.split_on_char ',' (String.sub o (i + 1) (String.length o - i - 1))))
+               let k = String.sub o 0 i
+               and v = String.sub o (i + 1) (String.length o - i - 1) in
+               (* `name=<s>` is a further quoted name; `methods` takes
+                  identifiers; any other valued option takes one string
+                  (`prefix("w.")`). *)
+               if k = "name" then quote_string v
+               else if k = "methods" then
+                 Printf.sprintf "%s(%s)" k (String.concat ", " (String.split_on_char ',' v))
+               else Printf.sprintf "%s(%s)" k (quote_string v)
            in
-           (match March_caps.Host_scope.split_options sc with
+           (* Split on ';' directly: string-valued options (`name=`, `prefix=`)
+              can hold characters Host_scope.split_options' word check refuses. *)
+           let key_ok o =
+             let k = match String.index_opt o '=' with
+               | Some i -> String.sub o 0 i | None -> o in
+             k <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || c = '_') k
+           in
+           (match (match String.split_on_char ';' sc with
+                   | s :: (_ :: _ as opts) when List.for_all key_ok opts -> (s, opts)
+                   | _ -> (sc, [])) with
             | s, (_ :: _ as opts) ->
               let os = String.concat ", " (List.map show_opt opts) in
               if s = "" then Printf.sprintf "%s(%s)" path os
