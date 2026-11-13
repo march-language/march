@@ -20280,6 +20280,118 @@ let test_closure_field_tail_not_released_first () =
         (bad false f.fn_body))
     applies
 
+(* An apply function must hold its environment until its last read of a
+   capture (specs/progress/2026-11-12-apply-fn-release-before-capture-read.md).
+   The captures are BORROWED from the environment, and [Drop.rewrite_apply_clo_drop]
+   used to leave the environment's release ([march_decrc_freed($clo)]) where
+   Perceus spliced it, straight after the capture loads.  When two workers call
+   one closure (Parallel.pmap), worker A's release does not free the
+   environment, worker B's does and drops the captured list at its tail, and A
+   is still reading it: the intermittent SIGSEGV in
+   test/native/native_arr_pmap_capture.march.  Asserted on post-Drop TIR for
+   the three tail shapes: a non-tail read (`List.length(xs) * i`), a tail call
+   to a module function that borrows the capture (`weigh(ys, i)`), and a tail
+   call to a builtin (`string_byte_length(s)`): along every path, no release of
+   [$clo] precedes a call that reads a capture. *)
+let apply_release_src = {|
+mod M do
+  fn weigh(xs : List(Int), i : Int) : Int do
+    List.length(xs) * i
+  end
+
+  fn counter(xs : List(Int)) : (Int) -> Int do
+    fn i -> List.length(xs) * i
+  end
+
+  fn weigher(ys : List(Int)) : (Int) -> Int do
+    fn i -> weigh(ys, i)
+  end
+
+  fn sizer(s : String) : (Int) -> Int do
+    fn _ -> string_byte_length(s)
+  end
+
+  fn main() do
+    let a = counter([1, 2, 3])
+    let b = weigher([4, 5])
+    let c = sizer(int_to_string(42))
+    a(2) + b(3) + c(0)
+  end
+end
+|}
+
+let test_apply_fn_holds_env_until_last_capture_read () =
+  let open March_tir.Tir in
+  let m = parse_and_desugar apply_release_src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let k_table = March_tir.Kind.of_module tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let clo = March_tir.Tir_names.clo_param_name in
+  let releases_env = function
+    | EApp (f, [ AVar v ]) ->
+      String.equal f.v_name "march_decrc_freed" && String.equal v.v_name clo
+    | EDecRC (AVar v) -> String.equal v.v_name clo
+    | _ -> false
+  in
+  let rec has_release e =
+    releases_env e ||
+    match e with
+    | ELet (_, a, b) | ESeq (a, b) -> has_release a || has_release b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> has_release br.br_body) brs
+      || (match d with Some e -> has_release e | None -> false)
+    | _ -> false
+  in
+  let applies = List.filter (fun f ->
+      March_tir.Tir_names.is_apply_fn f.fn_name
+      && (String.ends_with ~suffix:"_counter" f.fn_name
+          || String.ends_with ~suffix:"_weigher" f.fn_name
+          || String.ends_with ~suffix:"_sizer" f.fn_name)) tir.tm_fns in
+  Alcotest.(check int) "all three apply fns found" 3 (List.length applies);
+  List.iter (fun f ->
+      (* The capture locals: [let c = $clo.$fvN]. *)
+      let caps = ref [] in
+      let rec collect = function
+        | ELet (v, EField (AVar c, _), b) when String.equal c.v_name clo ->
+          caps := v.v_name :: !caps; collect b
+        | ELet (_, a, b) | ESeq (a, b) -> collect a; collect b
+        | ECase (_, brs, d) ->
+          List.iter (fun br -> collect br.br_body) brs; Option.iter collect d
+        | _ -> ()
+      in
+      collect f.fn_body;
+      let reads_cap args =
+        List.exists (function AVar v -> List.mem v.v_name !caps | _ -> false) args in
+      (* [bad seen e]: a call reading a capture on a path where the
+         environment's release already ran ([seen]).  The guarded drops of the
+         captures on the freeing path come after the release by design and are
+         not reads. *)
+      let is_drop (g : var) =
+        String.starts_with ~prefix:March_tir.Tir_names.drop_fn_prefix g.v_name
+        || String.equal g.v_name "march_clo_release" in
+      let rec bad seen = function
+        | EApp (g, args) when not (is_drop g) && reads_cap args -> seen
+        | ECallPtr (AVar g, args) -> seen && reads_cap (AVar g :: args)
+        | ELet (_, a, b) | ESeq (a, b) -> bad seen a || bad (seen || has_release a) b
+        | ECase (_, brs, d) ->
+          List.exists (fun br -> bad seen br.br_body) brs
+          || (match d with Some e -> bad seen e | None -> false)
+        | _ -> false
+      in
+      Alcotest.(check bool) (f.fn_name ^ " loads a capture") true (!caps <> []);
+      (* Control: the release is still there.  Without it this test would
+         pass on a leak. *)
+      Alcotest.(check bool) (f.fn_name ^ " still releases its environment") true
+        (has_release f.fn_body);
+      Alcotest.(check bool)
+        (f.fn_name ^ ": no environment release before a capture is read") false
+        (bad false f.fn_body))
+    applies
+
 let codegen_suites =
   [
       ( "handle primitives", [
@@ -20386,6 +20498,8 @@ let codegen_suites =
       ( "closure_field_tail", [
           Alcotest.test_case "capture not released before a tail reading its fields" `Quick
             test_closure_field_tail_not_released_first;
+          Alcotest.test_case "apply fn holds its environment until the last capture read" `Quick
+            test_apply_fn_holds_env_until_last_capture_read;
         ] );
       ( "unboxed_aggregates", [
           Alcotest.test_case "identified struct type declared"        `Quick test_unboxed_aggregate_declared_as_struct;

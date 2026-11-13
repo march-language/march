@@ -111,19 +111,22 @@
     now remembered — and prefixes every TAIL with
     [case $freed of True -> drop c1 ; drop c2 | _ -> ()] over those locals.
 
-    {b Nothing moves, and that is the design.}  The captures are BORROWED from
-    the environment ([Perceus.collect_closure_fvs] puts each [let a = $clo.$fvN]
-    binding in the borrowed set, so nothing in the body releases one) and the
-    body reads them well after the splice point, so a release deepened IN PLACE
-    frees a value the body is about to read.  Moving the release to the tails
-    instead — the way [Perceus.insert_owned_aggregate_param_drops] moves an
-    owned aggregate parameter's drop — balances on paper and does not work:
-    see [rewrite_apply_clo_drop] for the measurement that rules it out.
-    Deferring only the CHILD releases keeps the environment's own lifetime
-    bit-for-bit what it was, releases each capture exactly once on exactly the
-    path where the environment died owning it, and puts a branch (not post-call
-    work) before a tail call, so llvm_tco still folds a self-recursive apply
-    function into a loop.
+    {b The release moves to the tails; the deep half rides with it.}  The
+    captures are BORROWED from the environment ([Perceus.collect_closure_fvs]
+    puts each [let a = $clo.$fvN] binding in the borrowed set, so nothing in the
+    body releases one) and the body reads them well after the splice point, so
+    a release deepened IN PLACE frees a value the body is about to read.  Nor
+    can the release stay at the splice point with only the child releases
+    deferred (the shape this pass had until 2026-11-12): a borrowed read is only
+    safe while THIS frame still holds the environment, and once its release has
+    run without freeing, a concurrent holder may be the one that frees it.
+    [Parallel.pmap] calls one closure from several workers; worker A released,
+    worker B's release freed the environment and dropped the captured array at
+    its tail, and A was still reading it (SIGSEGV, [native_arr_pmap_capture]).
+    So the release is placed at each tail, after the last read: in front of a
+    tail that reads no capture (a branch, not post-call work, so a tail call
+    stays one and llvm_tco still folds a self-recursive apply function into a
+    loop), and after any other one.  See [rewrite_apply_clo_drop].
 
     {b Still shallow:} a bare [EDecRC] on a closure value at an outer site (a
     closure dropped without ever being applied, or extracted from a data
@@ -1038,45 +1041,54 @@ let owning_apply_fns (m : Tir.tir_module) : (string, unit) Hashtbl.t =
     environment is the one that frees it.
 
     Perceus splices [dec_rc $clo] just after the prefix of capture reads
-    ([Perceus.insert_apply_fn_clo_drop]).  That release stays exactly where it
-    is; only the CHILD releases the shallow free never performed are added, and
-    they are added at the function's tails.
+    ([Perceus.insert_apply_fn_clo_drop]).  The captures that prefix loaded are
+    BORROWED from the environment: nothing in the body owns a reference to
+    one.  So the frame must keep its reference to the environment until its
+    last read of a capture, and the release is MOVED from the splice point to
+    every tail, where it becomes
 
-    Nothing moves, which is the point.  Two earlier shapes were built and
-    measured, and both are wrong:
+    {v  let $freed = march_decrc_freed($clo) in
+        case $freed of True -> drop c1 ; drop c2 | _ -> () v}
 
-    - {b Deepening the release in place.}  The captures are BORROWED from the
-      environment — [Perceus.collect_closure_fvs] puts each [let a = $clo.$fvN]
-      binding in the borrowed set, so nothing in the body releases one — and
-      the body reads them well after the splice point.  The shallow free is
-      survivable precisely because it orphans the captures rather than freeing
-      them; releasing them there frees a value the body is about to read
-      ([$lam$apply] reads [native_u8_arr_length(a)] two instructions later).
-    - {b Moving the release to the tails} (the way
-      [Perceus.insert_owned_aggregate_param_drops] moves an owned aggregate
-      parameter's drop), so that a deep drop there is safe.  The release count
-      per path is unchanged by that move and the RC arithmetic works out on
-      paper, but it is not sound in practice: with the child releases removed
-      entirely, so that the moved drop does nothing but
-      [march_decrc_freed], [test/native/node_discovery.march] still died with
-      EXC_BAD_ACCESS in the prologue of a recursive list append — a guard-page
-      hit that a 16x larger green-thread stack did not prevent, i.e. unbounded
-      recursion — in 8 of 20 runs against 0 of 20 at the same commit without
-      the move.  The splice point is load-bearing for something this pass
-      should not be relitigating.
+    over the capture locals the prefix loaded.  Those locals are in scope at
+    every tail (their bindings dominate the whole body), and each is released
+    exactly once, on exactly the path where the environment died owning it.
 
-    So: rewrite [dec_rc $clo] to [let $freed = march_decrc_freed($clo)], which
-    releases the same reference at the same instant and merely remembers what
-    that release did, and prefix every tail with
+    {b Why not leave the release at the splice point.}  Until 2026-11-12 the
+    release stayed there and only the child releases were deferred to the
+    tails.  That is sound only if nothing else can free the environment while
+    the body runs, and something can: another holder of the same closure.
+    [Parallel.pmap] runs one closure on several workers at once.  Worker A's
+    release does not free the environment (B still holds it); B's release
+    does, and B drops the captured array at its tail; A is still walking that
+    array.  [test/native/native_arr_pmap_capture.march] crashed in about a
+    third of its runs (heap corruption, found in mimalloc's free-list walk at
+    thread exit), [pmap_shared_closure_capture.march] in 29 of 30.  A deep drop
+    of the closure value elsewhere (its [$clodrop$] glue) is the same hazard.
 
-    {v  case $freed of True -> drop c1 ; drop c2 | _ -> () v}
+    An earlier attempt at moving the release (recorded here before) saw
+    [test/native/node_discovery.march] die of unbounded recursion; a release
+    placed AFTER a tail call turns a folded self-recursive loop into real
+    recursion.  This placement never does that:
 
-    over the capture locals the prefix already loaded.  Those locals are in
-    scope at every tail (their bindings dominate the whole body), they are
-    still valid there (the free was shallow), and each is released exactly once
-    on exactly the path where the environment died owning it.  A [case] before
-    a tail expression is not work AFTER a call, so a tail call stays one and
-    llvm_tco still folds a self-recursive apply function into a loop.
+    - A tail that reads no capture: the release goes in front of it.
+    - A tail CALL to March code that reads a capture: in front of it, when the
+      callee is kept alive another way: either every occurrence of the capture
+      in the call is covered by the run of [inc_rc c] Perceus put right before
+      it (the callee owns a reference), or the call is a self-call through
+      [$clo] or its self-binding alias (the callee owns a reference to the
+      very environment the capture lives in).  A capture the call reads
+      without owning is left out of the release on the freeing path (a leak
+      on that one path, the safe direction), as before.
+    - Any other tail that reads a capture (a builtin, an extern, a call to a
+      module function that borrows the capture without either cover) is bound
+      first and released after: `let r = tail in (release; r)`.  None of
+      these is a self-call, so no folded loop is unfolded.
+
+    A self-alias's release ([dec_rc go] in a recursive closure) stays where
+    Perceus put it: this frame's own [$clo] reference is still held there, so
+    it cannot free anything the body reads, and only one of the two releases
+    can reach zero.
 
     Leaves the body untouched unless the expected shape is found — a prefix of
     [$clo]-source bindings followed by [ESeq (EDecRC $clo, rest)].  Anything
@@ -1150,8 +1162,15 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
        | None -> aliases)
     | _ -> aliases
   in
+  (* Names bound to [$clo] itself in the prefix (the self-binding alias of a
+     recursive closure), filled by [walk] before anything is pushed. *)
+  let clo_aliases : (string, unit) Hashtbl.t = Hashtbl.create 4 in
+  (* [rel k] wraps [k freed] in the release whose outcome [freed] names: for
+     the environment's own release that is the release itself, placed at the
+     tail ([moved]); for a self-alias's release, which stays where Perceus put
+     it, it is just [k] applied to that release's flag. *)
   let rec push ?(incs : string list = []) ?(aliases : (string * string) list = [])
-      (freed : Tir.var) (e : Tir.expr) : Tir.expr =
+      ~(moved : bool) (rel : (Tir.var -> Tir.expr) -> Tir.expr) (e : Tir.expr) : Tir.expr =
     match e with
     | Tir.ELet (v, e1, e2) ->
       let aliases = match e1 with
@@ -1159,9 +1178,9 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
         (* A rebinding shadows whatever the name aliased before. *)
         | _ -> List.remove_assoc v.Tir.v_name aliases
       in
-      Tir.ELet (v, e1, push ~aliases freed e2)
+      Tir.ELet (v, e1, push ~aliases ~moved rel e2)
     | Tir.ESeq ((Tir.EIncRC (Tir.AVar v) as e1), e2) ->
-      Tir.ESeq (e1, push ~incs:(v.Tir.v_name :: incs) ~aliases freed e2)
+      Tir.ESeq (e1, push ~incs:(v.Tir.v_name :: incs) ~aliases ~moved rel e2)
     (* A release of some OTHER variable between those incs and the tail (the
        owned-aggregate parameter drop [Perceus] places right before a tail:
        `fn (_p, s) -> body(s)` releases [_p] there) does not touch the
@@ -1170,18 +1189,18 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
        leaking the role function it captured, once per cluster session
        (specs/progress/2026-10-07-reused-closure-captures-leak.md). *)
     | Tir.ESeq (e1, e2) when releases_other incs e1 ->
-      Tir.ESeq (e1, push ~incs ~aliases freed e2)
-    | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push ~aliases freed e2)
-    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push ~aliases freed inner)
+      Tir.ESeq (e1, push ~incs ~aliases ~moved rel e2)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, push ~aliases ~moved rel e2)
+    | Tir.ELetRec (fns, inner) -> Tir.ELetRec (fns, push ~aliases ~moved rel inner)
     | Tir.ECase (a, branches, default) ->
       Tir.ECase (a,
         List.map (fun br ->
             let aliases = alias_all aliases a br.Tir.br_vars in
-            { br with Tir.br_body = push ~aliases freed br.Tir.br_body })
+            { br with Tir.br_body = push ~aliases ~moved rel br.Tir.br_body })
           branches,
-        Option.map (push ~aliases freed) default)
+        Option.map (push ~aliases ~moved rel) default)
     | tail ->
-      let guarded only =
+      let guarded only freed =
         Tir.ECase (Tir.AVar freed,
           [ { Tir.br_tag = "True"; br_vars = []; br_body = chain (drop_ops_for only) } ],
           Some unit_expr)
@@ -1248,16 +1267,34 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
               count incs >= count names)
             (names_of v)
       in
+      (* A self-call through the environment ([go(…)] on [$clo] or its
+         self-binding alias) hands the callee an owned reference to the very
+         environment the capture lives in, so the capture outlives the call
+         whatever this frame's release does.  Any other call that reads a
+         capture it does not own is only safe while THIS frame still holds the
+         environment: once the release has run and not freed it, a concurrent
+         holder (another worker calling the same closure under Parallel.pmap,
+         or a deep drop of the closure value) may free the environment and the
+         capture with it while the callee is still reading it.  With the
+         release at the tail, that call is bound first and released after. *)
+      let self_call = match tail with
+        | Tir.ECallPtr (Tir.AVar f, _) ->
+          String.equal f.Tir.v_name clo || Hashtbl.mem clo_aliases f.Tir.v_name
+        | _ -> false
+      in
+      let borrowed_by_call =
+        List.exists (fun v -> used v && not (covered v)) !captures in
+      let bind_after () =
+        let r = { Tir.v_name = fresh env "cres"; v_ty = Tir.TVar "_";
+                  v_lin = Tir.Unr } in
+        Tir.ELet (r, tail,
+          rel (fun freed -> Tir.ESeq (guarded (fun _ -> true) freed, Tir.EAtom (Tir.AVar r))))
+      in
       if not (List.exists used !captures) then
-        Tir.ESeq (guarded (fun _ -> true), tail)
-      else if may_recurse then
-        Tir.ESeq (guarded (fun v -> not (used v) || covered v), tail)
-      else begin match tail with
-        | _ ->
-          let r = { Tir.v_name = fresh env "cres"; v_ty = Tir.TVar "_";
-                    v_lin = Tir.Unr } in
-          Tir.ELet (r, tail, Tir.ESeq (guarded (fun _ -> true), Tir.EAtom (Tir.AVar r)))
-      end
+        rel (fun freed -> Tir.ESeq (guarded (fun _ -> true) freed, tail))
+      else if may_recurse && not (moved && borrowed_by_call && not self_call) then
+        rel (fun freed -> Tir.ESeq (guarded (fun v -> not (used v) || covered v) freed, tail))
+      else bind_after ()
   in
   let decrc_freed_fn =
     { Tir.v_name = "march_decrc_freed";
@@ -1271,13 +1308,15 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
      right after it, on the path where that release freed the environment.
      Unlike a heap capture this needs no tail placement: nothing in the body
      reads the box. *)
-  let freed_release (target : Tir.var) (rest : Tir.expr) : Tir.expr =
+  (* [release target k]: load the box slots, release [target] remembering
+     whether that freed it, release the boxes on that path, then [k freed]. *)
+  let release (target : Tir.var) (k : Tir.var -> Tir.expr) : Tir.expr =
     let freed = { Tir.v_name = fresh env "cfree"; v_ty = Tir.TBool;
                   v_lin = Tir.Unr } in
     let box_vars = List.map (fun i ->
         ({ Tir.v_name = fresh env "cub"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr },
          Tir_names.fv_field i)) boxes in
-    let rest' = if !captures = [] then rest else push freed rest in
+    let rest' = k freed in
     let after =
       if box_vars = [] then rest'
       else
@@ -1291,6 +1330,21 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
       box_vars
       (Tir.ELet (freed, Tir.EApp (decrc_freed_fn, [Tir.AVar target]), after))
   in
+  (* A release that stays where Perceus spliced it: a self-alias's (the
+     environment's own reference is still held, so it cannot free anything
+     the body reads), or the environment's own when it captured nothing
+     borrowed (only [boxes], whose structs the prefix already copied out). *)
+  let freed_release (target : Tir.var) (rest : Tir.expr) : Tir.expr =
+    release target (fun freed ->
+        if !captures = [] then rest
+        else push ~moved:false (fun k -> k freed) rest)
+  in
+  (* The environment's own release, moved to every tail: the captures are
+     borrowed from the environment, so they are only safe to read while this
+     frame still holds it.  See [rewrite_apply_clo_drop]. *)
+  let tail_release (rest : Tir.expr) : Tir.expr =
+    push ~moved:true (release clo_var) rest
+  in
   (* The SELF-BINDING ALIAS's release needs the same treatment, and in a
      self-recursive apply function it is the one that actually frees.
      `let go = inc_rc $clo; $clo in … dec_rc $clo; … dec_rc go` is what Perceus
@@ -1300,11 +1354,10 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
      iteration's [dec_rc go] is the release that reaches zero — shallow, so the
      captured lambda leaked once per [map] call.  Rewriting both releases is
      safe because only ONE of them can reach zero, so exactly one guard fires. *)
-  let aliases : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let rec rewrite_alias_drops (e : Tir.expr) : Tir.expr =
     match e with
     | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
-      when Hashtbl.mem aliases v.Tir.v_name ->
+      when Hashtbl.mem clo_aliases v.Tir.v_name ->
       freed_release v (rewrite_alias_drops rest)
     | Tir.ELet (v, e1, e2) ->
       Tir.ELet (v, rewrite_alias_drops e1, rewrite_alias_drops e2)
@@ -1324,11 +1377,12 @@ let rewrite_apply_clo_drop ?(module_fns : (string, unit) Hashtbl.t option)
     | Tir.ELet (v, e1, rest) when is_clo_source clo e1 ->
       (match capture_read clo e1 with
        | Some field -> note_capture field v
-       | None -> Hashtbl.replace aliases v.Tir.v_name ());
+       | None -> Hashtbl.replace clo_aliases v.Tir.v_name ());
       Option.map (fun rest' -> Tir.ELet (v, e1, rest')) (walk rest)
     | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest) when String.equal v.Tir.v_name clo ->
       if !captures = [] && boxes = [] then None
-      else Some (freed_release clo_var (rewrite_alias_drops rest))
+      else if !captures = [] then Some (freed_release clo_var (rewrite_alias_drops rest))
+      else Some (tail_release (rewrite_alias_drops rest))
     | _ -> None
   in
   match walk body with Some body' -> body' | None -> body
