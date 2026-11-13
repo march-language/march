@@ -578,17 +578,21 @@ mod Tls do
 
   pfn https_get_raw(host, port, req) do
     let config = default_client_config()
-    -- https_get keeps its single Result until the deferred HTTPS opens are
-    -- re-typed (specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md):
+    -- https_get keeps its single Result until it is re-typed with ocap
+    -- phase 4 (specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md):
     -- a refused context is reported as a context error, and nothing connects.
     match client_ctx(config) do
     Err(refused) -> Err(TlsContextError(Authority.describe(refused)))
     Ok(Err(e)) -> Err(e)
     Ok(Ok(ctx)) ->
-      let result = match tcp_connect(host, port) do
-        Err(msg) -> Err(TlsHandshakeFailed("tcp_connect: " ++ msg))
-        Ok(fd) ->
-          let s = Socket.adopt(fd)
+      -- The dial is `Socket.connect`, so the target `host:port` is checked
+      -- (`IO.NetConnect`) like every other connect; a refusal is reported
+      -- as a failed connect and nothing is dialled.
+      let result = match Socket.connect(host, port) do
+        Err(refused) -> Err(TlsHandshakeFailed("connect: " ++ Authority.describe(refused)))
+        Ok(Err(Socket.ConnectionFailed(msg))) -> Err(TlsHandshakeFailed("tcp_connect: " ++ msg))
+        Ok(Err(e)) -> Err(TlsHandshakeFailed("tcp_connect: " ++ Socket.error_message(e)))
+        Ok(Ok(s)) ->
           match connect(s, ctx, host) do
           Err(e) ->
             let _ = Socket.close(s)

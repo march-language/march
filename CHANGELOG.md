@@ -1041,6 +1041,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Tls.https_get` checks the host it dials.** It connected with a raw dial that only the
+  TLS-context permission covered; it now dials through `Socket.connect`, so `IO.NetConnect`
+  on `host:port` is checked like every other connect. A refusal comes back as
+  `TlsHandshakeFailed("connect: ...")` and nothing is dialled.
 - **A dependency can no longer write to a socket it does not hold by forging a cluster
   record.** `PeerRegistry.Peer` held its connection descriptors as plain `Int` fields, and
   public functions write to them (`SwimDriver.dispatch`, `DistLink.resend_pending`,
