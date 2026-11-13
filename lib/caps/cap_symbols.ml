@@ -130,6 +130,11 @@ let table : (string * string) list = [
   (* IO.NetConnect.TLS *)
   ("march_tls_client_ctx",         "IO.NetConnect.TLS");
   ("march_tls_server_ctx",         "IO.NetConnect.TLS");
+  (* IO.Registry *)
+  ("march_actor_register",         "IO.Registry");
+  ("march_actor_unregister",       "IO.Registry");
+  ("march_actor_whereis",          "IO.Registry");
+  ("march_actor_registered",       "IO.Registry");
 ]
 
 (* March-name builtins from builtin_cap_table with NO compiled lowering.

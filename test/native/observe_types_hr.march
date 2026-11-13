@@ -8,6 +8,7 @@
 mod Main do
   needs IO.Console
   needs IO.Clock
+  needs IO.Registry
 
   actor Counter do
     state { n : Int }
@@ -44,7 +45,7 @@ mod Main do
     end
   end
 
-  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock)) do
+  fn main(_c : Cap(IO.Console), _k : Cap(IO.Clock), _cap_registry : Cap(IO.Registry)) do
     let _a = spawn(Counter)
     let _b = spawn(Counter)
     let sup = spawn(Sup)

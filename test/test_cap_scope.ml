@@ -397,9 +397,70 @@ let test_absolute_filesystem_scope_is_accepted () =
   accepts "absolute scope on IO.FileSystem"
     (scope_decl_src {|needs IO.FileSystem("/srv")|})
 
+(* ── Name scopes (lib/caps/name_scope.ml, ocap p2b Task 12) ────────── *)
+
+module N = March_caps.Name_scope
+
+let parsed enc =
+  match N.parse enc with
+  | Ok t -> t
+  | Error e -> Alcotest.failf "parse %S: %s" enc e
+
+let test_name_scope_parse () =
+  let t = parsed "logger;prefix=worker." in
+  Alcotest.(check (list string)) "names" [ "logger" ] t.N.names;
+  Alcotest.(check (list string)) "prefixes" [ "worker." ] t.N.prefixes;
+  let t = parsed "a;name=b;name=c.1" in
+  Alcotest.(check (list string)) "several names" [ "a"; "b"; "c.1" ] t.N.names;
+  let t = parsed ";prefix=w." in
+  Alcotest.(check (list string)) "prefix alone: no names" [] t.N.names;
+  Alcotest.(check (list string)) "prefix alone" [ "w." ] t.N.prefixes;
+  let t = parsed {|a"q\b|} in
+  Alcotest.(check (list string)) "quote and backslash are legal" [ {|a"q\b|} ] t.N.names;
+  List.iter (fun enc ->
+      match N.parse enc with
+      | Ok _ -> Alcotest.failf "%S should not parse" enc
+      | Error _ -> ())
+    [ ""; "a=b"; "a,b"; "a;name="; "a;name=b,c"; ";prefix="; "a;no_redirects";
+      "a;methods=get"; "a;bogus=x" ]
+
+let test_name_scope_admits () =
+  let t = parsed "logger;prefix=worker." in
+  List.iter (fun (n, want) ->
+      Alcotest.(check bool) n want (N.admits t n))
+    [ ("logger", true); ("worker.1", true); ("worker.", true); ("other", false);
+      ("worker", false); ("workers.1", false); ("logger2", false) ]
+
+let test_name_scope_subsumes () =
+  let s x = Some (parsed x) in
+  Alcotest.(check bool) "None subsumes a scope" true (N.subsumes None (s "a"));
+  Alcotest.(check bool) "None subsumes None" true (N.subsumes None None);
+  Alcotest.(check bool) "a scope never subsumes None" false (N.subsumes (s "a") None);
+  Alcotest.(check bool) "a prefix covers a name under it" true
+    (N.subsumes (s ";prefix=w.") (s "w.1"));
+  Alcotest.(check bool) "a prefix covers a longer prefix" true
+    (N.subsumes (s ";prefix=w.") (s ";prefix=w.x."));
+  Alcotest.(check bool) "a shorter prefix is not covered" false
+    (N.subsumes (s ";prefix=w.x.") (s ";prefix=w."));
+  Alcotest.(check bool) "names never cover a prefix" false
+    (N.subsumes (s "w.;name=w.1") (s ";prefix=w."));
+  Alcotest.(check bool) "a name outside is not covered" false
+    (N.subsumes (s "a") (s "a;name=b"))
+
+let test_name_scope_surface () =
+  Alcotest.(check string) "surface"
+    {|IO.Registry("logger", prefix("worker."))|}
+    (N.to_surface "IO.Registry" (parsed "logger;prefix=worker."));
+  Alcotest.(check string) "escapes" {|IO.Mut("a\"b\\c")|}
+    (N.to_surface "IO.Mut" (parsed {|a"b\c|}))
+
 let tests =
   tests
   @ [
+      Alcotest.test_case "name scope parse" `Quick test_name_scope_parse;
+      Alcotest.test_case "name scope admits" `Quick test_name_scope_admits;
+      Alcotest.test_case "name scope subsumes" `Quick test_name_scope_subsumes;
+      Alcotest.test_case "name scope surface" `Quick test_name_scope_surface;
       Alcotest.test_case "relative scope is rejected" `Slow
         test_relative_scope_is_rejected;
       Alcotest.test_case "scope on a non-filesystem cap is rejected" `Slow

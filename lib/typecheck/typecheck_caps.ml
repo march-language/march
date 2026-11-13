@@ -289,6 +289,233 @@ let rec literal_path_uses (acc : (string * string * Ast.span) list)
   | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> literal_path_uses acc b
   | _ -> acc
 
+(* ── Name-scoped capability checking (ocap p2b, spec §6) ──────────────
+
+   Which calls turn a NAME into authority, the capability that judges the
+   name, and the argument it sits at.  These are the stdlib WRAPPER names:
+   since ocap phase 2 (Task 10) user code reaches the registry lookups and
+   the named tables only through them.  The raw builtins user code can still
+   name are listed too, so a direct call is no way around the scope.  This is
+   the wrapper-level scan the path scopes do not have yet
+   (specs/todos/2026-11-12-path-scope-not-checked-at-wrappers.md): the
+   wrappers pass the name straight through, so the literal at the call site
+   is the name the operation uses. *)
+let name_arg_fns : (string * (string * int)) list = [
+  ("Vault.new", ("IO.Mut", 0)); ("Vault.open", ("IO.Mut", 0));
+  ("Vault.whereis", ("IO.Mut", 0));
+  ("vault_new", ("IO.Mut", 0)); ("vault_whereis", ("IO.Mut", 0));
+  ("Actor.register", ("IO.Registry", 1)); ("Actor.unregister", ("IO.Registry", 0));
+  ("Actor.whereis", ("IO.Registry", 1));
+  ("actor_register", ("IO.Registry", 1)); ("actor_unregister", ("IO.Registry", 0));
+  ("actor_whereis", ("IO.Registry", 1));
+]
+
+(* Listing every registered name exceeds any name scope. *)
+let name_listing_fns : (string * string) list = [
+  ("Actor.registered", "IO.Registry"); ("actor_registered", "IO.Registry");
+]
+
+type name_use =
+  | NameLit of string * string * string * Ast.span
+      (** function, capability, literal name, span of the literal *)
+  | NameComputed of string * string * Ast.expr * Ast.span
+      (** function, capability, the name expression, its call's span *)
+  | NameListing of string * string * Ast.span
+  | NameFnValue of string * string * Ast.span
+      (** a name-taking function used as a value: its calls are out of sight *)
+
+(* A short rendering of a computed name for the diagnostic.  Only the shapes
+   a name is usually built from; anything else is "this name". *)
+let rec show_name_expr (depth : int) (e : Ast.expr) : string option =
+  if depth > 3 then None
+  else
+    match e with
+    | Ast.ELit (Ast.LitString s, _) -> Some (March_caps.Name_scope.quote s)
+    | Ast.ELit (Ast.LitInt n, _) -> Some (string_of_int n)
+    | Ast.EVar n -> Some n.Ast.txt
+    | Ast.EField (inner, f, _) ->
+      Option.map (fun i -> i ^ "." ^ f.Ast.txt) (show_name_expr (depth + 1) inner)
+    | Ast.EApp (Ast.EVar op, [ a; b ], _)
+      when op.Ast.txt <> ""
+           && (match op.Ast.txt.[0] with
+               | 'a' .. 'z' | 'A' .. 'Z' | '_' -> false
+               | _ -> true) -> (
+        match (show_name_expr (depth + 1) a, show_name_expr (depth + 1) b) with
+        | Some x, Some y -> Some (Printf.sprintf "%s %s %s" x op.Ast.txt y)
+        | _ -> None)
+    | Ast.EApp (Ast.EVar f, args, _) ->
+      let shown = List.map (show_name_expr (depth + 1)) args in
+      if List.for_all Option.is_some shown then
+        Some (Printf.sprintf "%s(%s)" f.Ast.txt
+                (String.concat ", " (List.filter_map Fun.id shown)))
+      else None
+    | _ -> None
+
+(* Every name use in an expression.  Exhaustive over [Ast.expr] on purpose,
+   like [March_ast.Calls.calls_in_expr]: a form added later is a compile
+   error here rather than a place a call slips past the scope. *)
+let rec name_uses (acc : name_use list) (e : Ast.expr) : name_use list =
+  let go = name_uses in
+  let callee_name = function
+    | Ast.EVar fn -> Some (fn.Ast.txt, fn.Ast.span)
+    | Ast.EField (Ast.EVar m, fn, _) | Ast.EField (Ast.ECon (m, [], _), fn, _) ->
+      Some (m.Ast.txt ^ "." ^ fn.Ast.txt, fn.Ast.span)
+    | _ -> None
+  in
+  match e with
+  | Ast.EApp (f, args, sp) -> (
+    let args_acc () = List.fold_left go acc args in
+    match callee_name f with
+    | Some (name, _) when List.mem_assoc name name_arg_fns ->
+      let cap, idx = List.assoc name name_arg_fns in
+      let acc =
+        match List.nth_opt args idx with
+        | Some (Ast.ELit (Ast.LitString s, lsp)) -> NameLit (name, cap, s, lsp) :: acc
+        | Some arg -> NameComputed (name, cap, arg, sp) :: acc
+        | None -> acc (* partial application: the type checker reports it *)
+      in
+      List.fold_left go acc args
+    | Some (name, nsp) when List.mem_assoc name name_listing_fns ->
+      List.fold_left go (NameListing (name, List.assoc name name_listing_fns, nsp) :: acc) args
+    | Some _ -> args_acc ()
+    | None -> List.fold_left go (go acc f) args)
+  | Ast.EVar fn -> (
+    match List.assoc_opt fn.Ast.txt name_arg_fns with
+    | Some (cap, _) -> NameFnValue (fn.Ast.txt, cap, fn.Ast.span) :: acc
+    | None -> (
+      match List.assoc_opt fn.Ast.txt name_listing_fns with
+      | Some cap -> NameListing (fn.Ast.txt, cap, fn.Ast.span) :: acc
+      | None -> acc))
+  | Ast.EField (Ast.EVar m, fn, sp) | Ast.EField (Ast.ECon (m, [], _), fn, sp) -> (
+    let q = m.Ast.txt ^ "." ^ fn.Ast.txt in
+    match List.assoc_opt q name_arg_fns with
+    | Some (cap, _) -> NameFnValue (q, cap, sp) :: acc
+    | None -> (
+      match List.assoc_opt q name_listing_fns with
+      | Some cap -> NameListing (q, cap, sp) :: acc
+      | None -> acc))
+  | Ast.ECon (_, args, _) | Ast.ETuple (args, _) | Ast.EAtom (_, args, _)
+  | Ast.EBlock (args, _) -> List.fold_left go acc args
+  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> go acc body
+  | Ast.ELet (b, _) -> go acc b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    List.fold_left (fun a arm ->
+        let a = Option.fold ~none:a ~some:(go a) arm.Ast.branch_guard in
+        go a arm.Ast.branch_body) (go acc scrut) arms
+  | Ast.ERecord (fields, _) -> List.fold_left (fun a (_, ex) -> go a ex) acc fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    List.fold_left (fun a (_, ex) -> go a ex) (go acc base) fields
+  | Ast.EField (inner, _, _) -> go acc inner
+  | Ast.EIf (c, t, f, _) -> go (go (go acc c) t) f
+  | Ast.ECond (arms, _) -> List.fold_left (fun a (c, b) -> go (go a c) b) acc arms
+  | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go (go acc a) b
+  | Ast.ELetQ (_, a, b, _) | Ast.ELetStar (_, a, b, _) -> go (go acc a) b
+  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _)
+  | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) | Ast.EDbg (Some ex, _) -> go acc ex
+  | Ast.EProof (p, _) -> List.fold_left go acc (Ast.proof_children p)
+  | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> acc
+
+(* [check_name_scopes env decls] judges every name use in a module's own code
+   against the module's OWN name scopes (its [DNeeds] among [decls], not
+   [env.mod_need_scopes], which for a nested module still holds the
+   enclosing module's: specs/todos/2026-11-10-nested-path-scope-unchecked.md).
+   Quiet when the module has no declaration covering the capability (the
+   ceiling reports that) or any unscoped one (any name is in scope). *)
+let check_name_scopes (env : env) (decls : Ast.decl list) : unit =
+  let declared =
+    List.concat_map (function
+        | Ast.DNeeds (caps, _) ->
+          List.map (fun (p, sc) ->
+              (String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) p), sc)) caps
+        | _ -> [])
+      decls
+  in
+  let scopes_for cap : (string * March_caps.Name_scope.t list) option =
+    let relevant = List.filter (fun (d, _) -> cap_subsumes d cap) declared in
+    if relevant = [] || List.exists (fun (_, sc) -> sc = None) relevant then None
+    else
+      (* An invalid scope was reported by the DNeeds check; judging names
+         against it would only add noise. *)
+      match
+        List.filter_map (fun (d, sc) ->
+            if d <> cap then None
+            else Option.bind sc (fun s -> Result.to_option (March_caps.Name_scope.parse s)))
+          relevant
+      with
+      | [] -> None
+      | ss ->
+        Some
+          (String.concat " and "
+             (List.map (fun s -> "`" ^ March_caps.Name_scope.to_surface cap s ^ "`") ss),
+           ss)
+  in
+  if List.exists (fun (_, sc) -> sc <> None) declared then begin
+    let bodies =
+      List.concat_map (function
+          | Ast.DFn (def, _) ->
+            List.concat_map (fun (c : Ast.fn_clause) ->
+                c.Ast.fc_body :: Option.to_list c.Ast.fc_guard)
+              def.fn_clauses
+          | Ast.DLet (_, b, _) -> [ b.Ast.bind_expr ]
+          | Ast.DActor (_, _, a, _) ->
+            a.Ast.actor_init
+            :: List.map (fun (h : Ast.actor_handler) -> h.Ast.ah_body)
+                 (Ast.actor_body_handlers a)
+          | _ -> [])
+        decls
+    in
+    let uses = List.rev (List.fold_left name_uses [] bodies) in
+    List.iter (fun use ->
+        match use with
+        | NameLit (fn, cap, name, sp) -> (
+          match scopes_for cap with
+          | Some (shown, ss)
+            when not (List.exists (fun s -> March_caps.Name_scope.admits s name) ss) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is scoped to %s, but `%s` uses the name `%s`, which is \
+                  outside it.\n\
+                  hint: widen the scope in `needs`, or use a name within it."
+                 cap shown fn name)
+          | _ -> ())
+        | NameComputed (fn, cap, arg, sp) -> (
+          match scopes_for cap with
+          | Some (shown, _) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is given a computed name: cannot prove %s is within %s; \
+                  the check at run time arrives with phase 4.\n\
+                  hint: pass a literal name within the scope, or widen the \
+                  scope in `needs`."
+                 fn
+                 (match show_name_expr 0 arg with
+                  | Some s -> "`" ^ s ^ "`"
+                  | None -> "this name")
+                 shown)
+          | None -> ())
+        | NameListing (fn, cap, sp) -> (
+          match scopes_for cap with
+          | Some (shown, _) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` lists every name, which exceeds %s.\n\
+                  hint: listing needs an unscoped `needs %s`."
+                 fn shown cap)
+          | None -> ())
+        | NameFnValue (fn, cap, sp) -> (
+          match scopes_for cap with
+          | Some (shown, _) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is used as a value, so the names it is called with are \
+                  out of sight: cannot prove they are within %s; the check at \
+                  run time arrives with phase 4.\n\
+                  hint: call it directly with a literal name."
+                 fn shown)
+          | None -> ()))
+      uses
+  end
+
 (* Check 2's "declared but no function requires" warning, shared by
    [check_module_needs] and [check_deferred_imports]. *)
 let warn_unused_needs (env : env) (mod_name : string) (need : string) (need_sp : Ast.span) : unit =
@@ -1247,6 +1474,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             (literal_path_uses [] body))
         bodies)
     decls;
+
+  (* ── Name-scope violations (IO.Mut, IO.Registry) ── *)
+  check_name_scopes env decls;
 
   (* Each use carries the code it sits in, as the subject of a sentence
      ("`greet`", "the `Inc` handler of actor `Counter`"), so the missing-`needs`

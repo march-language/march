@@ -747,8 +747,31 @@ let test_scope_forms_format_roundtrip () =
        | exception Not_found -> Alcotest.failf "formatted output lacks %S:\n%s" want out)
     [ {|IO.Mut("a", "b")|}; {|IO.Registry("l", prefix("w."))|}; {|IO.Registry(prefix("x."))|} ]
 
+(* R16 (Task 12): the scope forms print back to themselves, escapes included,
+   and a second format changes nothing. *)
+let test_scope_forms_format_idempotent () =
+  let src =
+    "mod F do\n  needs IO.Mut(\"a\\\"q\", \"b\\\\s\"), IO.Registry(\"l\", prefix(\"w.\\\"\")), \
+     IO.Registry(prefix(\"x.\")), IO.NetConnect(\"h\", methods(get, post), no_redirects)\nend\n"
+  in
+  let fmt = March_format.Format.format_source ~filename:"f.march" in
+  let once = fmt src in
+  Alcotest.(check string) "format is idempotent" once (fmt once);
+  let scopes =
+    List.concat_map
+      (function
+        | March_ast.Ast.DNeeds (caps, _) -> List.map snd caps
+        | _ -> [])
+      (Test_helpers.parse_module once).March_ast.Ast.mod_decls
+  in
+  Alcotest.(check (list (option string))) "scopes survive formatting"
+    [ Some "a\"q;name=b\\s"; Some "l;prefix=w.\""; Some ";prefix=x.";
+      Some "h;methods=get,post;no_redirects" ]
+    scopes
+
 let method_tests =
   path_tests @ [
+    Alcotest.test_case "scope forms format idempotent" `Quick test_scope_forms_format_idempotent;
     Alcotest.test_case "parse multi-name scope" `Quick test_parse_multi_name_scope;
     Alcotest.test_case "parse string-option scope" `Quick test_parse_string_option_scope;
     Alcotest.test_case "parse methods scope unchanged" `Quick test_parse_methods_scope_unchanged;

@@ -101,6 +101,15 @@ let table : (string * cls) list = [
   ("vault_push_capped",      Use);
   ("vault_reap",             Use);
   ("vault_close",            Use);
+  (* IO.Registry (ocap p2b): finding an actor by name and registering one are
+     opens.  Charged at compile time and judged against name scopes; the
+     run-time Authority.check (and a Result return) arrives with phase 4, so
+     the stdlib wrappers are allowlisted in test/test_cap_check_coverage.ml.
+     actor_whereis / actor_registered were already stdlib-only. *)
+  ("actor_register",         c ~gated:false ["Actor.register"]);
+  ("actor_unregister",       c ~gated:false ["Actor.unregister"]);
+  ("actor_whereis",          c ["Actor.whereis"]);
+  ("actor_registered",       c ["Actor.registered"]);
 ]
 
 let classify name = List.assoc_opt name table

@@ -3240,9 +3240,15 @@ IO                        (root)
 ├── IO.Spawn
 ├── IO.Mut
 ├── IO.Telemetry
-└── IO.Foreign
-    └── IO.Foreign.Blocking
+├── IO.Foreign
+│   └── IO.Foreign.Blocking
+└── IO.Registry
 ```
+
+(Since ocap phase 2 the tree also holds `IO.Signal`, `IO.WebSocket` and
+`IO.Registry`, naming and finding actors by name; `lib/caps/cap_lattice.ml` is
+the authority. The counts below describe the 18-entry tree as it stood when
+this section was written.)
 
 All 18 entries share the single root `IO`: this is one tree, not a forest,
 despite the surface impression that `IO.Console`/`IO.Process`/`IO.Clock`/

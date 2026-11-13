@@ -9464,6 +9464,17 @@ let rec check_decl env (d : Ast.decl) : env =
                      optionally followed by a path prefix, e.g. \
                      `needs IO.NetConnect(\"api.example.com/v1/\")`."
                     path cap reason))
+          else if March_caps.Cap_scope.is_name_scopable cap then
+            (match March_caps.Name_scope.parse path with
+             | Ok _ -> ()
+             | Error reason ->
+               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+                 (Printf.sprintf
+                    "The name scope on `%s` is not valid: %s.\n\
+                     hint: give names as strings and prefixes as \
+                     `prefix(\"...\")`, e.g. \
+                     `needs %s(\"sessions\", prefix(\"cache.\"))`."
+                    cap reason cap))
           else if snd (March_caps.Host_scope.split_options path) <> []
           then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span

@@ -15,7 +15,8 @@
    Supported capabilities (mirrors builtin_cap_table in typecheck.ml):
      IO.Console, IO.FileRead, IO.FileWrite, IO.FileSystem, IO.NetConnect,
      IO.Network, IO.NetListen, IO.Process, IO.Clock, IO.Random,
-     IO.Spawn, IO.Mut, IO.NetConnect.TLS, IO.Foreign, IO.Foreign.Blocking *)
+     IO.Spawn, IO.Mut, IO.NetConnect.TLS, IO.Foreign, IO.Foreign.Blocking,
+     IO.Registry *)
 
 module A = March_ast.Ast
 module Err = March_errors.Errors
@@ -123,6 +124,11 @@ let cap_table : (string * string) list = [
   (* IO.NetConnect.TLS *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
+  (* IO.Registry *)
+  ("actor_register",        "IO.Registry");
+  ("actor_unregister",      "IO.Registry");
+  ("actor_whereis",         "IO.Registry");
+  ("actor_registered",      "IO.Registry");
 ]
 
 let cap_of_call name = List.assoc_opt name cap_table

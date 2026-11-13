@@ -1433,7 +1433,11 @@ and emit_decl ctx = function
                and v = String.sub o (i + 1) (String.length o - i - 1) in
                (* `name=<s>` is a further quoted name; `methods` takes
                   identifiers; any other valued option takes one string
-                  (`prefix("w.")`). *)
+                  (`prefix("w.")`).  The parser holds every encoding to that
+                  one surface form (ocap p2b ruling R16: identifiers only in
+                  `methods(...)`, no `name(...)` option, no `;` in a string,
+                  no empty first string before more), so printing it back
+                  this way reproduces exactly what was parsed. *)
                if k = "name" then quote_string v
                else if k = "methods" then
                  Printf.sprintf "%s(%s)" k (String.concat ", " (String.split_on_char ',' v))

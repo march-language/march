@@ -4298,6 +4298,142 @@ let test_handle_use_charges_nothing () =
   accepted "Socket.accept(l) in a module with no `needs` (compiled TIR ceiling)" "--compile"
     (unbounded accept_src)
 
+(* ── ocap p2b Task 12: IO.Registry and name scopes ─────────────────────
+
+   Through the compiled binary, so the stdlib's `Actor` and `Vault` wrappers
+   are what the calls resolve to: since Task 10 user code reaches the
+   registry and the named tables only through them. *)
+let name_scope_check ?(flags = "--check") src =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup;
+  run_march_on ~flags src
+
+let registry_program ~needs ~body =
+  Printf.sprintf
+    {|mod RegScope do
+  needs Actor.Introspect
+  %s
+  fn go(pid, c : Cap(Actor.Introspect), id : String) do
+    %s
+  end
+end
+|} needs body
+
+let test_registry_kind_required () =
+  let src = {|mod RegKind do
+  needs IO.Console
+  fn reg(pid) do
+    let ok = Actor.register(pid, "x")
+    println(bool_to_string(ok))
+  end
+end
+|} in
+  let (rc, out) = name_scope_check src in
+  Alcotest.(check bool) "Actor.register without `needs IO.Registry` is refused" true (rc <> 0);
+  Alcotest.(check bool) "the refusal names IO.Registry" true
+    (contains_substring out "IO.Registry");
+  let (_, json) = name_scope_check ~flags:"--check-json" src in
+  Alcotest.(check bool) "and carries a machine fix inserting `needs IO.Registry`" true
+    (contains_substring json {|"kind":"insert"|}
+     && contains_substring json {|"text":"  needs IO.Registry"|}
+     && contains_substring json "machine-applicable");
+  (* The fixed program is accepted: the fix is the whole migration. *)
+  let fixed = Str.global_replace (Str.regexp_string "  needs IO.Console\n")
+      "  needs IO.Console\n  needs IO.Registry\n" src in
+  if String.equal fixed src then Alcotest.fail "fixture changed shape";
+  let (rc, out) = name_scope_check fixed in
+  if rc <> 0 then Alcotest.failf "with `needs IO.Registry` it should pass:\n%s" out
+
+let scoped_registry = {|needs IO.Registry("logger", prefix("worker."))|}
+
+let test_registry_scope_literal () =
+  List.iter (fun name ->
+      let (rc, out) = name_scope_check
+          (registry_program ~needs:scoped_registry
+             ~body:(Printf.sprintf "Actor.register(pid, %S)" name)) in
+      if rc <> 0 then Alcotest.failf "%S is within the scope, should pass:\n%s" name out)
+    [ "logger"; "worker.1" ];
+  List.iter (fun name ->
+      let (rc, out) = name_scope_check
+          (registry_program ~needs:scoped_registry
+             ~body:(Printf.sprintf "Actor.register(pid, %S)" name)) in
+      Alcotest.(check bool) (Printf.sprintf "%S is refused" name) true (rc <> 0);
+      Alcotest.(check bool) (Printf.sprintf "the refusal for %S is a scope violation" name)
+        true (contains_substring out "cap_scope_violation");
+      Alcotest.(check bool) (Printf.sprintf "the refusal for %S names the scope" name) true
+        (contains_substring out {|IO.Registry("logger", prefix("worker."))|});
+      Alcotest.(check bool) (Printf.sprintf "the refusal names %S" name) true
+        (contains_substring out (Printf.sprintf "`%s`" name)))
+    [ "other"; "worker"; "workers.1" ]
+
+let test_registry_scope_computed_fails_closed () =
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:scoped_registry
+         ~body:{|Actor.whereis(c, "worker." ++ id)|}) in
+  Alcotest.(check bool) "a computed name under a name scope is refused" true (rc <> 0);
+  Alcotest.(check bool) "with the cannot-prove message" true
+    (contains_substring out "cannot prove"
+     && contains_substring out {|is within `IO.Registry("logger", prefix("worker."))`|}
+     && contains_substring out "phase 4");
+  (* The control: the same computed name under an unscoped grant passes. *)
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:"needs IO.Registry"
+         ~body:{|Actor.whereis(c, "worker." ++ id)|}) in
+  if rc <> 0 then Alcotest.failf "unscoped IO.Registry should accept a computed name:\n%s" out
+
+let test_registry_listing_needs_unscoped () =
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:scoped_registry ~body:"Actor.registered(c)") in
+  Alcotest.(check bool) "Actor.registered under a scoped IO.Registry is refused" true (rc <> 0);
+  Alcotest.(check bool) "the refusal says listing exceeds the scope" true
+    (contains_substring out "Actor.registered" && contains_substring out "every name");
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:"needs IO.Registry" ~body:"Actor.registered(c)") in
+  if rc <> 0 then Alcotest.failf "Actor.registered under bare IO.Registry should pass:\n%s" out
+
+let mut_program name =
+  Printf.sprintf {|mod MutScope do
+  needs IO.Mut("sessions")
+  fn find() : Bool do
+    match Vault.whereis(%S) do
+      Ok(Some(t)) ->
+        let _ = Vault.get(t, "k")
+        true
+      _ -> false
+    end
+  end
+end
+|} name
+
+let test_mut_lookup_scope () =
+  let (rc, out) = name_scope_check (mut_program "sessions") in
+  if rc <> 0 then Alcotest.failf "Vault.whereis(\"sessions\") under IO.Mut(\"sessions\") should pass:\n%s" out;
+  let (rc, out) = name_scope_check (mut_program "tokens") in
+  Alcotest.(check bool) "Vault.whereis(\"tokens\") is refused" true (rc <> 0);
+  Alcotest.(check bool) "as a scope violation naming the scope" true
+    (contains_substring out "cap_scope_violation"
+     && contains_substring out {|IO.Mut("sessions")|})
+
+let test_name_scope_invalid () =
+  List.iter (fun (what, needs) ->
+      let (rc, out) = name_scope_check
+          (Printf.sprintf "mod Bad do\n  %s\n  fn f() do 1 end\nend\n" needs) in
+      Alcotest.(check bool) (what ^ " is refused") true (rc <> 0);
+      Alcotest.(check bool) (what ^ " is invalid_cap_scope") true
+        (contains_substring out "invalid_cap_scope"))
+    [ ("`;` in a name", {|needs IO.Mut("a;b")|});
+      ("`=` in a name", {|needs IO.Mut("a=b")|});
+      ("`,` in a second name", {|needs IO.Registry("a", "b,c")|});
+      ("an empty name", {|needs IO.Mut("")|});
+      ("an empty first name before a second", {|needs IO.Mut("", "b")|});
+      ("an empty prefix", {|needs IO.Registry(prefix(""))|});
+      ("an option IO.Mut does not take", {|needs IO.Mut("a", no_redirects)|});
+      (* R16: one surface form per encoding. *)
+      ("an identifier-valued prefix", {|needs IO.Registry(prefix(w))|});
+      ("a name given as an option", {|needs IO.Mut("a", name("b"))|});
+      ("an identifier-valued name option", {|needs IO.Mut("a", name(b))|});
+      ("a string-valued methods option", {|needs IO.NetConnect("h", methods("get"))|}) ]
+
 (* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
 
    `fn main(cap : Cap(IO))` makes Check 1 separately demand `needs IO`
@@ -19369,6 +19505,12 @@ let compiler_suites =
           Alcotest.test_case "missing needs dedup: no orphan cap_infer hint" `Quick test_missing_needs_dedup_no_orphan_hint;
           Alcotest.test_case "missing needs dedup: no orphan hint with main(cap : Cap(IO))" `Quick test_missing_needs_dedup_no_orphan_hint_main_cap_param;
           Alcotest.test_case "handle_use_charges_nothing" `Quick test_handle_use_charges_nothing;
+          Alcotest.test_case "registry_kind_required" `Quick test_registry_kind_required;
+          Alcotest.test_case "registry_scope_literal" `Quick test_registry_scope_literal;
+          Alcotest.test_case "registry_scope_computed_fails_closed" `Quick test_registry_scope_computed_fails_closed;
+          Alcotest.test_case "registry_listing_needs_unscoped" `Quick test_registry_listing_needs_unscoped;
+          Alcotest.test_case "mut_lookup_scope" `Quick test_mut_lookup_scope;
+          Alcotest.test_case "name_scope_invalid" `Quick test_name_scope_invalid;
           Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
           Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
           Alcotest.test_case "nested module uses its own proof cap without needs" `Quick test_nested_module_own_proof_cap_needs_no_needs;

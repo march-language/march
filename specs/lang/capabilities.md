@@ -58,7 +58,7 @@ callers never have to satisfy. See [The grant](#grant).
 - [Host and method scopes on IO.NetConnect](#host-scopes)
 - [Refusals: capability operations return `Result`](#refusals)
 - [When not to use IO caps](#when-not-to-use-io-caps)
-- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
+- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
 **Behavioral caps**
 
@@ -192,6 +192,7 @@ IO
 ├── IO.Signal           — OS-signal watchers (Signal.watch/unwatch/raise)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
+├── IO.Registry         — naming and finding actors by name (Actor.register/whereis/registered)
 ├── IO.Telemetry        — telemetry/observability emission (declaration-only)
 └── IO.Foreign          — calling unverified C (extern blocks)
     └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
@@ -723,14 +724,18 @@ with no port uses its scheme's default (80 or 443). Two options may follow, in e
 order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete`,
 `options`, and `no_redirects`. Options alone mean any host:
 `needs IO.NetConnect(methods(get))`. Without `methods(...)` every method is allowed, and
-unscoped `needs IO.NetConnect` still means any host. Scopes are accepted on
-`IO.NetConnect` only; it also bounds the TLS connections built on it.
+unscoped `needs IO.NetConnect` still means any host. Host scopes are accepted on
+`IO.NetConnect` only; it also bounds the TLS connections built on it. (`IO.Mut` and
+`IO.Registry` take [name scopes](#name-scopes) instead.)
 
 **Scope syntax.** The parenthesised scope takes several leading strings, then options:
 `needs IO.Mut("a", "b")`. An option may take a string argument as well as identifiers:
 `needs IO.Registry(prefix("worker."))`, or both, `needs IO.Registry("logger",
 prefix("worker."))`. Strings come first; once an option appears no further string may
-follow. Internally a scope is one string: each extra string becomes `name=<s>` and a
+follow. Each encoding has one spelling: only `methods(...)` takes identifiers, every
+other option takes one string (`prefix(w)` is refused; write `prefix("w")`), a further
+name is a further string (there is no `name(...)` option), a scope string may not
+contain `;`, and an empty first string may not be followed by more. Internally a scope is one string: each extra string becomes `name=<s>` and a
 string-argument option `<option>=<s>`, so `IO.Mut("a", "b")` is `a;name=b`. Which
 capabilities accept these forms, and what they mean, is set by the capability, not by the
 syntax.
@@ -891,6 +896,62 @@ end
 This is especially useful for library code that should have no hidden state.
 
 **Reads need no capability.** A Vault table is in-memory: no part of what a `Vault.get`/`Vault.size`/`Vault.keys` lookup does escapes the process, so it exercises no ambient authority and needs no `needs IO.Mut`. What IS authority is turning a NAME into a table handle (`Vault.new`/`Vault.whereis`, the `File.open(path)` shape) and mutating state other actors observe (`Vault.set`, `Vault.set_ttl`, `Vault.drop`, `Vault.update`); those keep `needs IO.Mut`. Accepted trade-off: a read of shared mutable state is non-deterministic (it observes another actor's writes), so `needs` no longer signals "this function is not pure" for a reader. Authority stays auditable at the boundary, since some module still had to name the table and declare the capability to create or write it.
+
+### IO.Registry: naming and finding actors
+{: #ioregistry-naming-and-finding-actors}
+
+`IO.Registry` covers the named actor registry: `Actor.register`, `Actor.unregister`,
+`Actor.whereis` and `Actor.registered`. Finding an actor by name turns a string into a
+`Pid`, which is a capability, and registering a name can impersonate the actor others
+expect behind it, so both are authority. A module that calls them declares
+`needs IO.Registry` (or `needs IO`); the missing-capability error carries the line as a
+machine fix, so `forge fix` adds it. `Actor.whereis` and `Actor.registered` still take a
+`Cap(Actor.Introspect)` as well.
+
+```march
+mod Pool do
+  needs IO.Registry
+
+  fn publish(pid) : Bool do
+    Actor.register(pid, "pool")
+  end
+end
+```
+
+### Name scopes on IO.Mut and IO.Registry
+{: #name-scopes}
+
+`IO.Mut` and `IO.Registry` take a scope of names, and of name prefixes written
+`prefix("...")`:
+
+```march
+mod Sessions do
+  needs IO.Mut("sessions")                         -- only the "sessions" table
+  needs IO.Registry("logger", prefix("worker."))   -- "logger" and any "worker.…"
+
+  fn start(pid) : Bool do
+    Actor.register(pid, "worker.1")                -- in scope
+  end
+end
+```
+
+A name is in scope when it equals one of the names or starts with one of the prefixes:
+`prefix("worker.")` admits `"worker.1"` but not `"worker"` or `"workers.1"`. A name or
+prefix may not be empty or contain `;`, `=` or `,`; anything else is `invalid_cap_scope`.
+
+**What is checked, at compile time.** In a module whose own `needs` scopes the capability
+(and grants no unscoped `IO.Mut`, `IO.Registry` or `IO`), each call of `Vault.new`,
+`Vault.open`, `Vault.whereis`, `Actor.register`, `Actor.unregister` and `Actor.whereis`:
+
+- with a literal name outside the scope is a `cap_scope_violation` naming the scope;
+- with a computed name (`"worker." ++ id`) is refused too: the compiler cannot prove it is
+  within the scope, and the check at run time arrives with phase 4;
+- a name-taking function used as a value (`let f = Actor.register`) is refused for the
+  same reason.
+
+`Actor.registered` lists every name, which exceeds any name scope, so it needs an
+unscoped `IO.Registry`. A lookup by name is an open: `Vault.whereis("tokens")` under
+`needs IO.Mut("sessions")` is refused.
 
 ### IO.NetConnect.TLS: encrypted transport only
 

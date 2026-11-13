@@ -21,6 +21,10 @@ module Ops = March_caps.Cap_ops
    delete their rows as they add the checks; what remains at the end is
    reasoned. *)
 let allowlist : ((string * string) * string) list = [
+  (("Actor.register", "actor_register"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
+  (("Actor.unregister", "actor_unregister"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
+  (("Actor.whereis", "actor_whereis"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
+  (("Actor.registered", "actor_registered"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
   (("ClusterConn.listen", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.credentials", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.config_from_env", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");

@@ -360,6 +360,14 @@ let builtin_cap_table : (string * string) list = [
      resulting TlsConn charge nothing. *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
+  (* IO.Registry — naming and finding actors by name (ocap phase 2, spec §6).
+     A lookup turns a string into a Pid, which is a capability; registering a
+     name can impersonate the actor that name stands for; listing reveals
+     every name. *)
+  ("actor_register",        "IO.Registry");
+  ("actor_unregister",      "IO.Registry");
+  ("actor_whereis",         "IO.Registry");
+  ("actor_registered",      "IO.Registry");
 ]
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
@@ -2119,7 +2127,7 @@ let builtin_types : (string * int) list =
     (* Alloc and Panic — future capability roots excluded from realtime contexts *)
     ("Alloc", 0); ("Panic", 0);
     (* Capability token types — used as arguments to Cap(X).
-       Mirrors the full 18-entry hierarchy in lib/caps/cap_lattice.ml. *)
+       Mirrors the full 21-entry hierarchy in lib/caps/cap_lattice.ml. *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
@@ -2127,7 +2135,7 @@ let builtin_types : (string * int) list =
     ("IO.Signal",     0);
     ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
     ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
-    ("IO.WebSocket",  0);
+    ("IO.WebSocket",  0); ("IO.Registry",   0);
     (* RingBuf — mutable fixed-capacity circular buffer (non-sendable) *)
     ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)

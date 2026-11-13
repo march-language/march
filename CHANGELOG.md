@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Name scopes on `IO.Mut` and `IO.Registry`.** `needs IO.Mut("sessions")` and
+  `needs IO.Registry("logger", prefix("worker."))` narrow a capability to some names: a
+  `Vault.new`/`Vault.open`/`Vault.whereis` or `Actor.register`/`unregister`/`whereis` call
+  with a literal name outside the scope fails to compile (`cap_scope_violation`), as does a
+  computed name in a scoped module and `Actor.registered` under a scoped `IO.Registry`.
+  `prefix(w)`, `name(...)`, `methods("get")`, a `;` in a scope string and an empty first
+  string before more are now refused, so each scope has one spelling and `march --fmt`
+  prints it back unchanged.
 - **`needs` scopes take several names and string-valued options.** `needs IO.Mut("a", "b")`
   and `needs IO.Registry("logger", prefix("worker."))` now parse, in the compiler, the formatter
   and the tree-sitter grammar. No capability uses the new forms yet.
@@ -507,6 +515,11 @@ git log is authoritative for exact commits.
   is not checked at `Chan.send`.
 
 ### Changed
+
+- **Registering and finding actors by name needs the new `IO.Registry` capability;
+  `forge fix` adds the line.** `Actor.register`, `Actor.unregister`, `Actor.whereis` and
+  `Actor.registered` are charged `IO.Registry` (a child of `IO`, so `needs IO` still covers
+  them). The missing-capability error carries `needs IO.Registry` as a machine fix.
 
 - **The raw integer file, socket, TLS, UDP, WebSocket and process builtins are internal to
   the standard library; use `File`, `Socket`, `Udp`, `Tls`, `WebSocket`, `Process`.**

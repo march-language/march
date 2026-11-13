@@ -22,6 +22,7 @@
 mod Main do
   needs IO.Console
   needs IO.Mut
+  needs IO.Registry
 
   actor Counter do
     state { n : Int }
@@ -29,7 +30,7 @@ mod Main do
     on Bump() do { n: state.n + 1 } end
   end
 
-  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _cap_registry : Cap(IO.Registry)) do
     let a = spawn(Counter)
     println("register a: " ++ bool_to_string(Actor.register(a, "worker")))
     match Authority.must(Vault.whereis("$actor_registry")) do
