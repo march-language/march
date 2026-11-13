@@ -907,7 +907,7 @@ let cluster_plumbing =
     ("NodeCall", [ "call"; "serve_one"; "serve_loop" ]);
     ("NodeQueue", [ "start"; "close_fd"; "consumed" ]);
     ("PeerReader", [ "serve" ]);
-    ("PeerRegistry", [ "no_fd"; "add_data" ]);
+    ("PeerRegistry", [ "no_fd"; "add_data"; "make"; "raw_fd"; "raw_data_fd" ]);
     ("ClusterConn", [ "listen"; "accept_split"; "accept_split_within"; "accept_split_auth";
                       "accept_one"; "connect_split"; "connect_split_within";
                       "connect_split_auth"; "connect_to_peer" ]);
@@ -968,6 +968,82 @@ end
       Alcotest.(check bool) "with the same reason" true
         (contains ~needle:"reserved for compiler-generated code" out))
 
+(* Final review C1 (ocap phase 2b): the cluster records and actors that carry
+   a raw descriptor cannot be forged by user code. Before the fix a dependency
+   holding only `IO.Mut` built a `PeerRegistry.Peer` literal around a guessed
+   fd and handed it to `SwimDriver.dispatch`, which wrote a frame into a socket
+   the program held; spawning `NodeQueue.Writer` (or reconfiguring one from
+   `NodeQueue.start_local`) with `Configure(fd, ..)` did the same. *)
+let forged_peer_src = {|mod ForgedPeer do
+  needs IO.Mut
+  fn poke(fd : Int) : () do
+    let id = NodeIdentity.make("x", "pk", 1)
+    let p = { node_id: "victim", identity: id, fd: fd, data_fd: -1 }
+    let reg = PeerRegistry.add(PeerRegistry.empty(), p)
+    SwimDriver.dispatch(Swim.SendPing("victim"), reg, "me")
+  end
+  fn wrapped(fd : Int) : PeerRegistry.Fd do PeerRegistry.Fd(fd) end
+  fn main(_m : Cap(IO.Mut)) do poke(3) end
+end
+|}
+
+let forged_actor_src = {|mod ForgedActor do
+  needs IO.Mut
+  fn spawned(fd : Int) : () do
+    let w = spawn(NodeQueue__Writer)
+    let _ = send(w, NodeQueue.Configure(fd, 1000000))
+    ()
+  end
+  fn reconfigured(fd : Int) : () do
+    match NodeQueue.start_local(fn _ -> ()) do
+      (w, _) ->
+        let _ = send(w, NodeQueue.Configure(fd, 1000000))
+        let _ = send(w, NodeQueue.Enqueue(1, Bytes.from_string("x")))
+        ()
+    end
+  end
+  fn cluster(fd : Int) : () do
+    let c = spawn(ClusterNode__CtlWriter)
+    let _ = send(c, ClusterNode.CtlUse(fd))
+    let _ = spawn(ClusterNode__ClusterNodeActor)
+    ()
+  end
+  fn main(_m : Cap(IO.Mut)) do spawned(3) reconfigured(3) cluster(3) end
+end
+|}
+
+let test_cluster_records_unforgeable () =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  with_temp_dir (fun dir ->
+      let file = Filename.concat dir "forged_peer.march" in
+      write_file file forged_peer_src;
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "a forged Peer literal fails --check" 1 rc;
+      Alcotest.(check bool) "its fd fields want PeerRegistry.Fd, not Int" true
+        (contains ~needle:"expected `Fd`" out);
+      Alcotest.(check bool) "and Fd's constructor is private" true
+        (contains ~needle:"I don't know a constructor called `PeerRegistry.Fd`" out);
+      let file = Filename.concat dir "forged_actor.march" in
+      write_file file forged_actor_src;
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "spawning / messaging the fd-carrying actors fails --check" 1 rc;
+      List.iter (fun (ctor, actor) ->
+          Alcotest.(check bool) (ctor ^ " refused") true
+            (contains ~needle:(Printf.sprintf
+                "`%s` belongs to the actor `%s`, which is internal to the standard library" ctor actor) out))
+        [ ("NodeQueue__Writer", "NodeQueue.Writer");
+          ("NodeQueue.Configure", "NodeQueue.Writer");
+          ("NodeQueue.Enqueue", "NodeQueue.Writer");
+          ("ClusterNode__CtlWriter", "ClusterNode.CtlWriter");
+          ("ClusterNode.CtlUse", "ClusterNode.CtlWriter");
+          ("ClusterNode__ClusterNodeActor", "ClusterNode.ClusterNodeActor") ];
+      (* Control: the same program as stdlib source (the cluster fixtures'
+         spelling) is not refused by the actor gate. *)
+      let (_rc, out) = run_compiler [ "--check"; "--stdlib-source"; file ] in
+      Alcotest.(check bool) "--stdlib-source exempts the actor gate" false
+        (contains ~needle:"which is internal to the standard library" out))
+
 (* The typechecker cannot name Hot_reload (lib/tir), so it keeps its own copy
    of the control wiring's file tag. Pin them equal, and pin who may name an
    internal function. *)
@@ -1025,6 +1101,8 @@ let tests =
        Alcotest.test_case "internal_dotted_use_refused" `Quick test_internal_dotted_use_refused;
        Alcotest.test_case "internal_same_name_user_module_ok" `Quick test_internal_same_name_user_module_ok;
        Alcotest.test_case "cluster_plumbing_internal" `Quick test_cluster_plumbing_internal;
+       Alcotest.test_case "cluster records and actors unforgeable" `Quick
+         test_cluster_records_unforgeable;
        Alcotest.test_case "control wiring may name internals" `Quick test_control_wiring_may_name_internal;
        Alcotest.test_case "adversarial sweep: every name, every spelling, same text" `Quick
          test_adversarial_sweep;

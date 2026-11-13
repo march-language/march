@@ -774,8 +774,9 @@ decl:
       (* `@[remote]`: generate the receiver-side dispatch for the actor's typed
          remote messages (lib/desugar/desugar_remote.ml). *)
       let remote = List.mem "remote" attrs in
+      let internal = List.mem "stdlib_internal" attrs in
       match d with
-      | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat; actor_remote = remote }, span)
+      | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat; actor_remote = remote; actor_internal = internal }, span)
       | d -> d }
   | AT; INVARIANT; LPAREN; inv = expr; RPAREN; d = actor_decl
     { match d with
@@ -792,7 +793,8 @@ decl:
         ) "full" attrs in
       match d with
       | DActor (vis, name, adef, span) ->
-        DActor (vis, name, { adef with actor_invariant = Some inv; actor_compat = compat }, span)
+        DActor (vis, name, { adef with actor_invariant = Some inv; actor_compat = compat;
+                                       actor_internal = List.mem "stdlib_internal" attrs }, span)
       | d -> d }
   | d = fn_decl        { d }
   | d = let_decl       { d }
@@ -1064,7 +1066,8 @@ actor_decl:
               { actor_state = fields; actor_init_params = init_params;
                 actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
-                actor_mailbox = mb; actor_remote = false; actor_on_stop = on_stop },
+                actor_mailbox = mb; actor_remote = false; actor_on_stop = on_stop;
+                actor_internal = false },
               mk_span ($loc)) }
 
 (** `init { ... }`, or the parameterised form `init(env : T, n : Int) { ... }`

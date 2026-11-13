@@ -763,6 +763,13 @@ type env = {
       same name never does) and the reference lies outside the declaring
       module's span.  A list, not a table: a program has a handful of these,
       and the common case is the empty list. *)
+  stdlib_internal_actors : (string, string) Hashtbl.t;
+  (** `@[stdlib_internal]` stdlib actors (ocap phase 2b): the [ci_type] of the
+      actor's name constructor (its name) and of its message constructors
+      ([actor_msg_type_name]), mapped to the actor's name for the error. A
+      constructor of one of these types may be built only where
+      [span_may_name_internal] holds, so user code can neither spawn the actor
+      nor send it a message. *)
   stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
   (** Qualified name ([Mod.f]) of every stdlib function carrying
       [@[stdlib_internal]], mapped to the module the error points users at and the scheme the export step
@@ -947,6 +954,7 @@ let make_env errors type_map = {
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
   deprecated_fns = ref [];
+  stdlib_internal_actors = Hashtbl.create 8;
   stdlib_internal_fns = Hashtbl.create 8;
   ceiling_extra_roots = Hashtbl.create 16;
   fn_scopes = Hashtbl.create 16;

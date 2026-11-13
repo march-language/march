@@ -179,9 +179,7 @@ mod TypedSendLoopback do
       Ok(fd) -> fd
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
-    let peer : Peer = {
-      node_id: "node-b", identity: NodeIdentity.make("node-b", "pk", 1), fd: fd, data_fd: PeerRegistry.no_fd()
-    }
+    let peer : Peer = PeerRegistry.make("node-b", NodeIdentity.make("node-b", "pk", 1), fd, PeerRegistry.no_fd())
     let target = GlobalPid.make("node-b", 42, 1)
     let ping : Ping = { n: 7, who: "node-a" }
     -- Three typed sends. No tag, no codec: the compiler supplies both.

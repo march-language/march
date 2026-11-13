@@ -52,10 +52,10 @@ mod CreditBackpressureLoopback do
     match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, node_b_id(), secret()) do
       Err(e) -> panic("node-b accept: " ++ e)
       Ok((_reg, peer)) ->
-        let _ = NetKernel.recv_frame(peer.fd, Nil)   -- the "go"
-        let got = read_n(peer.data_fd, peer.fd, Nil, 5, 0)
-        tcp_close(peer.data_fd)
-        tcp_close(peer.fd)
+        let _ = NetKernel.recv_frame(PeerRegistry.raw_fd(peer), Nil)   -- the "go"
+        let got = read_n(PeerRegistry.raw_data_fd(peer), PeerRegistry.raw_fd(peer), Nil, 5, 0)
+        tcp_close(PeerRegistry.raw_data_fd(peer))
+        tcp_close(PeerRegistry.raw_fd(peer))
         tcp_close(listen_fd)
         got
     end
@@ -102,7 +102,7 @@ mod CreditBackpressureLoopback do
       Err(e) -> panic("node-a connect: " ++ e)
       Ok((_reg, p)) -> p
     end
-    let q = NodeQueue.start(peer.data_fd, budget())
+    let q = NodeQueue.start(PeerRegistry.raw_data_fd(peer), budget())
     -- Frames 1-2 (88 bytes) fit the budget whatever the writer has done, and
     -- the initial credit (100) lets the writer put both on the wire: wait
     -- until it has, so the rest does not depend on how fast it ran.
@@ -128,11 +128,11 @@ mod CreditBackpressureLoopback do
     println("node-a: refused frame not charged: " ++ bool_to_string(NodeQueue.depth(q) == 88))
     -- Let the receiver consume; its CREDIT frames arrive on control, the
     -- writer drains 3-4, and the fifth fits again.
-    let ctl = task_spawn(fn _ -> match PeerReader.serve(peer.fd, Nil, fn (tag, fr) -> on_control(q, tag, fr)) do
+    let ctl = task_spawn(fn _ -> match PeerReader.serve(PeerRegistry.raw_fd(peer), Nil, fn (tag, fr) -> on_control(q, tag, fr)) do
       Ok(_) -> 0
       Err(e) -> panic("control reader: " ++ e)
     end)
-    let _ = NetKernel.send_frame(peer.fd, SwimDriver.encode_msg(SwimDriver.SwimPing("node-a")))
+    let _ = NetKernel.send_frame(PeerRegistry.raw_fd(peer), SwimDriver.encode_msg(SwimDriver.SwimPing("node-a")))
     let r5b = retry_enqueue(q, 5, 200)
     println("node-a: fifth admitted after credit: " ++ bool_to_string(r5b))
     let _ = task_await(ctl)
@@ -141,8 +141,8 @@ mod CreditBackpressureLoopback do
       Err(e) -> panic("node-b: " ++ e)
     end
     println("node-b: consumed " ++ int_to_string(got) ++ " frames")
-    tcp_close(peer.fd)
-    tcp_close(peer.data_fd)
+    tcp_close(PeerRegistry.raw_fd(peer))
+    tcp_close(PeerRegistry.raw_data_fd(peer))
   end
 
   pfn retry_enqueue(q, seq : Int, attempts : Int) : Bool do

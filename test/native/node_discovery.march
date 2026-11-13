@@ -47,10 +47,10 @@ mod NodeDiscovery do
 
         -- Send a SWIM Ping so node-b adds us to its Membership.
         let ping = SwimDriver.encode_msg(SwimDriver.SwimPing(my_id.node_id))
-        let _ = NetKernel.send_frame(peer.fd, ping)
+        let _ = NetKernel.send_frame(PeerRegistry.raw_fd(peer), ping)
 
         -- Receive the PingAck.
-        match NetKernel.recv_frame(peer.fd, Nil) do
+        match NetKernel.recv_frame(PeerRegistry.raw_fd(peer), Nil) do
           Err(e) -> panic("node-a recv: " ++ e)
           Ok(frame_pair) ->
             let frame = match frame_pair do (f, _) -> f end
@@ -68,7 +68,7 @@ mod NodeDiscovery do
             end
         end
 
-        tcp_close(peer.fd)
+        tcp_close(PeerRegistry.raw_fd(peer))
     end
   end
 
@@ -84,7 +84,7 @@ mod NodeDiscovery do
         println("node-b: handshake ok, peer=" ++ peer.identity.name)
 
         -- Receive a SWIM Ping from node-a.
-        match NetKernel.recv_frame(peer.fd, Nil) do
+        match NetKernel.recv_frame(PeerRegistry.raw_fd(peer), Nil) do
           Err(e) -> panic("node-b recv: " ++ e)
           Ok(frame_pair) ->
             let frame = match frame_pair do (f, _) -> f end
@@ -100,14 +100,14 @@ mod NodeDiscovery do
 
                 -- Send PingAck.
                 let ack = SwimDriver.encode_msg(SwimDriver.SwimPingAck(my_id.node_id))
-                let _ = NetKernel.send_frame(peer.fd, ack)
+                let _ = NetKernel.send_frame(PeerRegistry.raw_fd(peer), ack)
                 println("node-b: sent PingAck")
               _ ->
                 println("node-b: unexpected wire message")
             end
         end
 
-        tcp_close(peer.fd)
+        tcp_close(PeerRegistry.raw_fd(peer))
     end
   end
 

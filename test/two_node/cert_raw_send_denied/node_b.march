@@ -125,7 +125,7 @@ mod CertRawSendDeniedB do
     let _ = task_spawn(fn _ -> do
       match ClusterConn.accept_split_auth(PeerRegistry.empty(), lfd, idb, ClusterAuth.Certified(cb), 10000) do
         Ok((_reg, peer, _cert)) ->
-          let _ = NodeCall.serve_one(NodeRpc.empty(), peer.fd)
+          let _ = NodeCall.serve_one(NodeRpc.empty(), PeerRegistry.raw_fd(peer))
           Vault.set(served, "done", 1)
         Err(e) -> Authority.ignore(println("node-b: direct accept failed: " ++ e))
       end
@@ -136,21 +136,21 @@ mod CertRawSendDeniedB do
       Ok((_reg, peer, _cert)) ->
         let to = GlobalPid.make(idb.node_id, 1, 1)
         -- Node.send lowers to NodeSend.cast on the peer's data connection.
-        match NodeSend.cast(peer.data_fd, 1, to, "Raw.Ping", [1]) do
+        match NodeSend.cast(PeerRegistry.raw_data_fd(peer), 1, to, "Raw.Ping", [1]) do
           Ok(_) -> Authority.ignore(println("node-b: direct Node.send path: sent (wrong)"))
           Err(NodeSend.Refused(_, why)) -> Authority.ignore(println("node-b: direct Node.send path: " ++ why))
           Err(_) -> Authority.ignore(println("node-b: direct Node.send path: no connection"))
         end
         let fref = RemoteCall.remote_ref("Probe", "f", "sig", "impl")
         let now = unix_time_ms()
-        match NodeCall.call(peer.fd, fref, Nil, to, now + 5000, 7, now) do
+        match NodeCall.call(PeerRegistry.raw_fd(peer), fref, Nil, to, now + 5000, 7, now) do
           Ok(_) -> Authority.ignore(println("node-b: direct RemoteCall: returned (wrong)"))
           Err(e) -> Authority.ignore(println("node-b: direct RemoteCall: " ++ RemoteCall.error_message(e)))
         end
         -- Skipping the caller's check: the server refuses it too.
         let req = RemoteCall.request(fref, Nil, to, now + 5000, 8)
-        let _ = NetKernel.send_frame(peer.fd, RemoteCall.encode_request(req))
-        match NetKernel.recv_frame(peer.fd, Nil) do
+        let _ = NetKernel.send_frame(PeerRegistry.raw_fd(peer), RemoteCall.encode_request(req))
+        match NetKernel.recv_frame(PeerRegistry.raw_fd(peer), Nil) do
           Err(e) -> Authority.ignore(println("node-b: direct RemoteCall reply: " ++ e))
           Ok((bytes, _)) ->
             match RemoteCall.decode_reply(bytes) do

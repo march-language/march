@@ -4221,6 +4221,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let _, resolved = resolve_qualified_ctor name.txt env in
            resolved
        in
+       (* `@[stdlib_internal]` actors (ocap phase 2b): their name and message
+          constructors are buildable only by the stdlib, so user code can
+          neither spawn one nor send it a message carrying a forged descriptor. *)
+       (match ci_opt with
+        | Some ci when Hashtbl.length env.stdlib_internal_actors > 0
+                    && not (span_may_name_internal sp) ->
+          (match Hashtbl.find_opt env.stdlib_internal_actors ci.ci_type with
+           | Some actor ->
+             Err.error ~code:Err.Code.stdlib_internal env.errors ~span:sp
+               (Printf.sprintf
+                  "`%s` belongs to the actor `%s`, which is internal to the standard library; \
+                   use the public API of its module instead."
+                  name.txt actor)
+           | None -> ())
+        | _ -> ());
        (match ci_opt with
         | Some ci when !(env.current_decl) <> "" ->
           env.refs := { callee = qualify_ref_name ci.ci_module
@@ -8163,6 +8178,22 @@ let rec check_decl env (d : Ast.decl) : env =
        { env1 with ty_aliases = StrMap.add key (param_names, rhs) env1.ty_aliases })
 
   | Ast.DActor (_vis, name, actor, _sp) ->
+    if actor.actor_internal && span_is_stdlib _sp then begin
+      (* The name as a user would write it: desugar spells a stdlib actor
+         `Mod__Actor`; the error says `Mod.Actor`. *)
+      let shown =
+        let b = Buffer.create (String.length name.txt) in
+        let n = String.length name.txt in
+        let i = ref 0 in
+        while !i < n do
+          if !i + 1 < n && name.txt.[!i] = '_' && name.txt.[!i + 1] = '_'
+          then (Buffer.add_char b '.'; i := !i + 2)
+          else (Buffer.add_char b name.txt.[!i]; incr i)
+        done;
+        Buffer.contents b in
+      Hashtbl.replace env.stdlib_internal_actors name.txt shown;
+      Hashtbl.replace env.stdlib_internal_actors (actor_msg_type_name name.txt) shown
+    end;
     Hashtbl.replace env.decl_sites ("actor:" ^ name.txt) name.span;
     Hashtbl.replace env.decl_sites ("actorbody:" ^ name.txt) _sp;
     (* Each handler parameter, so a message built with a wrong payload can

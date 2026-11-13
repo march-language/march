@@ -65,7 +65,7 @@ mod Node do
   -- The connection a message rides: the data connection when the peer has
   -- one (the control/data split), else the single connection.
   pfn wire_fd(peer : Peer) : Int do
-    if PeerRegistry.has_data(peer) do peer.data_fd else peer.fd end
+    if PeerRegistry.has_data(peer) do PeerRegistry.raw_data_fd(peer) else PeerRegistry.raw_fd(peer) end
   end
 
   doc """

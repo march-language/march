@@ -1041,6 +1041,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A dependency can no longer write to a socket it does not hold by forging a cluster
+  record.** `PeerRegistry.Peer` held its connection descriptors as plain `Int` fields, and
+  public functions write to them (`SwimDriver.dispatch`, `DistLink.resend_pending`,
+  `Node.send`), so a module with only `needs IO.Mut` could build a `Peer` around a guessed
+  descriptor number and send bytes into a connection the program held. The same was
+  possible by spawning the cluster's `NodeQueue.Writer` actor and sending it
+  `Configure(fd, ..)`. A `Peer`'s descriptors are now an opaque `PeerRegistry.Fd` only the
+  standard library can make, and an actor marked `@[stdlib_internal]` (`NodeQueue.Writer`,
+  `ClusterNode.CtlWriter`, `ClusterNode.ClusterNodeActor`) can be neither spawned nor sent
+  a message from user code ("`NodeQueue.Configure` belongs to the actor `NodeQueue.Writer`,
+  which is internal to the standard library", `stdlib_internal`).
 - **A capability reached inside a standard-library closure is charged to the code that
   called the standard library, not to the program's entry module.** `march check` and the
   REPL rejected correct programs that called `Socket.write`, `Tls.read` or

@@ -91,7 +91,7 @@ mod MonitorReconnectB do
     println("node-b: connection 1 dropped; pending fires: " ++ int_to_string(before))
     let fd2 = accept_or_panic(listen_fd)
     let reg = PeerRegistry.add(PeerRegistry.empty(),
-                { node_id: "node-a", identity: NodeIdentity.make("node-a", "pk-a", 1), fd: fd2, data_fd: PeerRegistry.no_fd() })
+                PeerRegistry.make("node-a", NodeIdentity.make("node-a", "pk-a", 1), fd2, PeerRegistry.no_fd()))
     let resent = DistLink.resend_pending(reg)
     println("node-b: resent " ++ int_to_string(resent) ++ " fire(s) on connection 2")
     let _ = PeerReader.serve(fd2, Nil, on_conn2)

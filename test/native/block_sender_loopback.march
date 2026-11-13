@@ -44,10 +44,10 @@ mod BlockSenderLoopback do
     match ClusterConn.accept_split(PeerRegistry.empty(), listen_fd, node_b_id(), secret()) do
       Err(e) -> panic("node-b accept: " ++ e)
       Ok((_reg, peer)) ->
-        let _ = NetKernel.recv_frame(peer.fd, Nil)   -- the "go"
-        let got = read_n(peer.data_fd, peer.fd, Nil, 5, 0)
-        tcp_close(peer.data_fd)
-        tcp_close(peer.fd)
+        let _ = NetKernel.recv_frame(PeerRegistry.raw_fd(peer), Nil)   -- the "go"
+        let got = read_n(PeerRegistry.raw_data_fd(peer), PeerRegistry.raw_fd(peer), Nil, 5, 0)
+        tcp_close(PeerRegistry.raw_data_fd(peer))
+        tcp_close(PeerRegistry.raw_fd(peer))
         tcp_close(listen_fd)
         got
     end
@@ -91,7 +91,7 @@ mod BlockSenderLoopback do
       Err(e) -> panic("node-a connect: " ++ e)
       Ok((_reg, p)) -> p
     end
-    let q = NodeQueue.start(peer.data_fd, budget())
+    let q = NodeQueue.start(PeerRegistry.raw_data_fd(peer), budget())
     let r1 = NodeQueue.enqueue(q, 1, frame(), NodeQueue.DropNew)
     let r2 = NodeQueue.enqueue(q, 2, frame(), NodeQueue.DropNew)
     println("node-a: two frames admitted: " ++ bool_to_string(Result.is_ok(r1) && Result.is_ok(r2)))
@@ -107,14 +107,14 @@ mod BlockSenderLoopback do
     let r3 = NodeQueue.enqueue(q, 3, frame(), NodeQueue.DropNew)
     let r4 = NodeQueue.enqueue(q, 4, frame(), NodeQueue.DropNew)
     println("node-a: two more queued behind the credit line: " ++ bool_to_string(Result.is_ok(r3) && Result.is_ok(r4)))
-    let ctl = task_spawn(fn _ -> match PeerReader.serve(peer.fd, Nil, fn (tag, fr) -> on_control(q, tag, fr)) do
+    let ctl = task_spawn(fn _ -> match PeerReader.serve(PeerRegistry.raw_fd(peer), Nil, fn (tag, fr) -> on_control(q, tag, fr)) do
       Ok(_) -> 0
       Err(e) -> panic("control reader: " ++ e)
     end)
     -- The receiver gets its "go" only after 200 ms.
     let go = task_spawn(fn _ -> do
       let _ = Process.run("sleep", Cons("0.2", Nil))
-      let _ = NetKernel.send_frame(peer.fd, SwimDriver.encode_msg(SwimDriver.SwimPing("node-a")))
+      let _ = NetKernel.send_frame(PeerRegistry.raw_fd(peer), SwimDriver.encode_msg(SwimDriver.SwimPing("node-a")))
       0
     end)
     let t0 = unix_time_ms()
@@ -129,7 +129,7 @@ mod BlockSenderLoopback do
       Err(e) -> panic("node-b: " ++ e)
     end
     println("node-b: consumed " ++ int_to_string(got) ++ " frames")
-    tcp_close(peer.fd)
-    tcp_close(peer.data_fd)
+    tcp_close(PeerRegistry.raw_fd(peer))
+    tcp_close(PeerRegistry.raw_data_fd(peer))
   end
 end

@@ -96,6 +96,10 @@ mod NodeQueue do
   -- own type (`WriterReq`: `EvictedReq` = 0, `WaitReq` = 1). `take_evicted`
   -- used a single-constructor sentinel against handler 0 = `Configure`, and
   -- nothing exercised it; the interpreter test does now.
+  -- Internal (ocap phase 2b): `Configure` carries a raw descriptor, so user
+  -- code must not spawn a writer or send one a message; it goes through
+  -- `enqueue`/`cast`/`credit`/`close` on a queue the stdlib started.
+  @[stdlib_internal]
   actor Writer do
     state { fd : Int, granted : Int, sent : Int, pending : Deque.Deque((Int, Bytes)), evicted : List(Int), budget : Int, dead : Bool,
             waiting : Deque.Deque((Int, Int, Bytes)), waiters : Deque.Deque(Bool -> Unit) }
@@ -416,7 +420,7 @@ mod NodeQueue do
   second `start` on the same fd resets the shared byte counters.
   (`close_fd(q)` later closes the fd through the writer.)
 
-      let q = NodeQueue.start(peer.data_fd, 1048576)
+      let q = NodeQueue.start(PeerRegistry.raw_data_fd(peer), 1048576)
   """
   @[stdlib_internal]
   fn start(fd : Int, budget : Int) do

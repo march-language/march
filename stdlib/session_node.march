@@ -1070,9 +1070,9 @@ mod SessionNode do
   -- to its first suspension runs before `serve`) is pinging its peers all
   -- the while, so it is not taken for dead. See `heartbeat`.
   pfn start_link(p : Party, their_role : Int, conn : Peer, peer_pid : GlobalPid.Pid) : Party do
-    let q = NodeQueue.start(conn.data_fd, budget())
-    let control = task_spawn(fn _ -> serve_control(conn.fd, q))
-    let l = { role: their_role, data_fd: conn.data_fd, control_fd: conn.fd,
+    let q = NodeQueue.start(PeerRegistry.raw_data_fd(conn), budget())
+    let control = task_spawn(fn _ -> serve_control(PeerRegistry.raw_fd(conn), q))
+    let l = { role: their_role, data_fd: PeerRegistry.raw_data_fd(conn), control_fd: PeerRegistry.raw_fd(conn),
               peer: peer_pid, q: q, control: control }
     match heartbeat_config() do
       (interval, limit) ->
@@ -1091,8 +1091,8 @@ mod SessionNode do
   """
   @[stdlib_internal]
   fn accept_from(p : Party, conn : Peer) : Party do
-    announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), "")
-    match await_hello(conn.fd) do
+    announce(PeerRegistry.raw_fd(conn), p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), "")
+    match await_hello(PeerRegistry.raw_fd(conn)) do
       (their_role, peer_pid, _fp) -> start_link(p, their_role, conn, peer_pid)
     end
   end
@@ -1104,12 +1104,12 @@ mod SessionNode do
   """
   @[stdlib_internal]
   fn connect_to(p : Party, their_role : Int, conn : Peer) : Party do
-    match await_hello(conn.fd) do
+    match await_hello(PeerRegistry.raw_fd(conn)) do
       (announced, peer_pid, _fp) ->
         if announced != their_role && announced != 0 && their_role != 0 do
           panic("session_node: connected to role " ++ int_to_string(their_role) ++ " but it announced role " ++ int_to_string(announced))
         else () end
-        announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), "")
+        announce(PeerRegistry.raw_fd(conn), p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), "")
         start_link(p, their_role, conn, peer_pid)
     end
   end
@@ -1131,8 +1131,8 @@ mod SessionNode do
   -- announces the wrong number is still a wiring mistake and panics. The
   -- connection is closed on `Err`.
   pfn join_accepted(p : Party, conn : Peer, timeout_ms : Int, fingerprint : String) : Result(Party, String) do
-    announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), fingerprint)
-    match read_hello_within(conn.fd, timeout_ms) do
+    announce(PeerRegistry.raw_fd(conn), p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), fingerprint)
+    match read_hello_within(PeerRegistry.raw_fd(conn), timeout_ms) do
       Err(e) ->
         close_peer(conn)
         Err(e)
@@ -1147,7 +1147,7 @@ mod SessionNode do
   end
 
   pfn join_dialed(p : Party, their_role : Int, conn : Peer, timeout_ms : Int, fingerprint : String) : Result(Party, String) do
-    match read_hello_within(conn.fd, timeout_ms) do
+    match read_hello_within(PeerRegistry.raw_fd(conn), timeout_ms) do
       Err(e) ->
         close_peer(conn)
         Err(e)
@@ -1159,7 +1159,7 @@ mod SessionNode do
         -- `read_hello_within` and would otherwise wait out its whole
         -- timeout, reporting a quiet peer rather than the skew both sides
         -- can see from the two fingerprints.
-        announce(conn.fd, p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), fingerprint)
+        announce(PeerRegistry.raw_fd(conn), p.my_role, GlobalPid.make(p.node_id, pid_to_int(p.ep), 1), fingerprint)
         match hello_verdict(fingerprint, their_fp) do
           Err(e) ->
             close_peer(conn)
@@ -1170,8 +1170,8 @@ mod SessionNode do
   end
 
   pfn close_peer(conn : Peer) : () do
-    tcp_close(conn.fd)
-    tcp_close(conn.data_fd)
+    tcp_close(PeerRegistry.raw_fd(conn))
+    tcp_close(PeerRegistry.raw_data_fd(conn))
   end
 
   -- Setup failed: tear down every connection made so far, so each peer's

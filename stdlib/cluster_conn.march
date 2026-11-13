@@ -39,7 +39,7 @@ mod ClusterConn do
         tcp_close(fd)
         Err(e)
       Ok(peer_id) ->
-        let peer = { node_id: peer_id.node_id, identity: peer_id, fd: fd, data_fd: PeerRegistry.no_fd() }
+        let peer = PeerRegistry.make(peer_id.node_id, peer_id, fd, PeerRegistry.no_fd())
         Ok((PeerRegistry.add(reg, peer), peer))
     end
   end
@@ -154,7 +154,7 @@ mod ClusterConn do
               Err("ClusterConn: the data connection reached " ++ a2.identity.node_id ++ ", not " ++ a.identity.node_id)
             else
               remember(a)
-              let peer = { node_id: a.identity.node_id, identity: a.identity, fd: cfd, data_fd: dfd }
+              let peer = PeerRegistry.make(a.identity.node_id, a.identity, cfd, dfd)
               Ok((PeerRegistry.add(reg, peer), peer, a.cert))
             end
         end
@@ -222,7 +222,7 @@ mod ClusterConn do
                 Err("ClusterConn: expected " ++ peer_id.node_id ++ "'s data connection, got " ++ role2 ++ " from " ++ peer_id2.node_id)
               else
                 remember(a)
-                let peer = { node_id: peer_id.node_id, identity: peer_id, fd: cfd, data_fd: dfd }
+                let peer = PeerRegistry.make(peer_id.node_id, peer_id, cfd, dfd)
                 Ok((PeerRegistry.add(reg, peer), peer, a.cert))
               end
           end

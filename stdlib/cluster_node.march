@@ -1705,6 +1705,9 @@ mod ClusterNode do
   -- One peer's control writer: every control frame to that peer is written
   -- here, in mailbox order. A failed write marks it dead (the reader will
   -- see the connection end and report it).
+  -- Internal (ocap phase 2b): `CtlUse` carries a raw descriptor, so user code
+  -- must not spawn one or send it a message.
+  @[stdlib_internal]
   actor CtlWriter do
     state { fd : Int, dead : Bool }
     init  { fd: -1, dead: false }
@@ -1762,6 +1765,10 @@ mod ClusterNode do
     end
   end
 
+  -- Internal (ocap phase 2b): `Accepted`/`Dialed`/`MoveReader` carry raw
+  -- descriptors, so user code must not spawn one or build its messages; the
+  -- public API is the `ClusterNode` functions over a `Cap(ClusterNode.Live)`.
+  @[stdlib_internal]
   actor ClusterNodeActor do
     state { st : CnState, h : CnHandle, started : Bool }
     init  { st: core_new(config("", 0, "", Nil, "", 0), 0),
