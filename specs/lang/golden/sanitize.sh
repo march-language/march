@@ -229,7 +229,12 @@ sweep() {
   for f in "$@"; do
     b="$(basename "$f" .march)"
     tag="$label/$b"
-    if ! MARCH_SANITIZE=1 "$bin" --compile "$f" -o "$work/$label-$b.bin" \
+    # A fixture whose header says `-- compile-flags: --stdlib-source` (it drives
+    # the @[stdlib_internal] cluster plumbing, ocap phase 2 task 9) compiles as
+    # a stdlib source, like test/dune's rule for it.
+    local sflag
+    sflag="$(sed -n '1,5s/^-- compile-flags: \(--stdlib-source\)\( .*\)\{0,1\}$/\1/p' "$f" | head -1)"
+    if ! MARCH_SANITIZE=1 "$bin" --compile $sflag "$f" -o "$work/$label-$b.bin" \
          >"$work/$label-$b.clog" 2>&1; then
       echo "  [$tag] COMPILE FAIL"; sed 's/^/    /' "$work/$label-$b.clog"
       keep "$work/$label-$b.clog"

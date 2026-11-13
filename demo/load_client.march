@@ -45,9 +45,9 @@ mod LoadClient do
   end
 
   pfn dial(host : String, port : Int) : Int do
-    match Authority.must(Socket.connect(host, port)) do
+    match tcp_connect(host, port) do
       Ok(fd) -> fd
-      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " — " ++ Socket.error_message(e))
+      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " — " ++ e)
     end
   end
 

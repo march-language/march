@@ -1323,6 +1323,13 @@ end
    declarant and its constructors resolved: `is_Zap(r)` was proved for a row
    the builtin returned. *)
 let ctor_review5 =
+  (* csv_next_row is stdlib-only since ocap phase 2 (Task 10), so this program
+     also draws a [stdlib_internal] typecheck error. The case relies on the
+     refinement check still running after that error (it reports the line-14
+     row regardless); if the checker ever stops after a typecheck error,
+     [not_proved] finds no row and this fails loudly rather than passing.
+     Registering the file as stdlib is not an option: `--stdlib-source` makes
+     this `mod Csv` the stdlib's, and the verdict flips. *)
   [ gated "ctor review5 csv2: a user `CsvRow` under an entry `mod Csv` is conflated with the builtin's `Csv.CsvRow`" (fun () ->
         let out =
           run

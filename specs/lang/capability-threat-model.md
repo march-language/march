@@ -217,6 +217,12 @@ The compile-time claim holds only if all of these are true:
 - **Against whoever builds the binary.** `--cap-sandbox` is chosen by the person
   compiling, so a hostile publisher simply leaves it out. For code you don't trust, use
   `forge cap run --allow-only`.
+  Likewise `--stdlib-source`: it marks the entry file(s) as standard-library source,
+  which exempts them from the stdlib-only builtin gate and from `@[stdlib_internal]`,
+  the gates that keep a handle unforgeable. It is a builder's switch for the stdlib's
+  own cluster tests; a dependency cannot turn it on (only entry files are marked, never
+  `MARCH_LIB_PATH` ones; the compiler does not read a `-- compile-flags:` comment; and
+  forge never passes it), but a program built with it has no handle guarantee.
 - **Capabilities the OS can't tell apart** (the advisory rows above).
 
 ## Known holes (open today)
@@ -227,7 +233,11 @@ The compile-time claim holds only if all of these are true:
 - **Handles minted from a name.** `Vault.open(name)` and `Vault.whereis(name)` turn any
   string into a handle whose element type the caller chooses (`stdlib/vault.march`). This
   is a type-safety gap rather than an authority gap, but it is the same pattern a
-  capability must never follow.
+  capability must never follow. It is also an authority gap for the stdlib's own cluster
+  tables (`node_queue_sinks`, which holds the closures a local queue writes frames
+  through, `net_kernel_mac_hooks` and `net_kernel_raw`): any `IO.Mut` holder can open
+  one by name with an element type of its choosing
+  ([`specs/todos/2026-11-13-reserved-stdlib-vault-names.md`](../todos/2026-11-13-reserved-stdlib-vault-names.md)).
 
 ## Gates
 

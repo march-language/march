@@ -105,6 +105,10 @@ struct conn_state {
     char         *cout;
     size_t        cout_len, cout_pos, cout_cap;
     void         *pipeline;              /* the accepting listener's pipeline */
+    /* The Socket in this connection's Conns (march_http_conn_sock), made at
+     * its first request; closed and released when the loop lets go of the
+     * fd (march_http_conn_sock_done). NULL until then. */
+    void         *sock;
 
     /* A WebSocket upgrade waiting for this connection's earlier responses
      * to drain before the fd goes to its handler thread (TLS only). */

@@ -27,8 +27,8 @@ mod Main do
         let line = Process.read_line(p)
         let _ = Process.wait_proc(p)
         match line do
-          Some(s) -> s == "n" ++ int_to_string(k)
-          None -> false
+          Ok(Some(s)) -> s == "n" ++ int_to_string(k)
+          _ -> false
         end
       Err(_) -> false
     end
@@ -42,8 +42,8 @@ mod Main do
   pfn cat_once(k : Int) : Bool do
     match Authority.must(Process.spawn_async("cat", [])) do
       Ok(p) ->
-        Process.write(p, "x" ++ int_to_string(k) ++ "\n")
-        Process.kill(p)
+        let _ = Process.write(p, "x" ++ int_to_string(k) ++ "\n")
+        let _ = Process.kill(p)
         let _ = Process.wait_proc(p)
         true
       Err(_) -> false

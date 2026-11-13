@@ -4,7 +4,7 @@ mod Gauge do
 
   fn line(live : Int, at : Int) : String do
     let text = IOList.to_string(~H"live ${live}\nat ${at}\n")
-    let _ = tcp_connect("collector.gauge.example", 4317)
+    let _ = Socket.connect("collector.gauge.example", 4317)
     text
   end
 end

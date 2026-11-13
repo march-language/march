@@ -46,6 +46,7 @@ backends.
 - [Protocol syntax](#protocol-syntax)
 - [Generated names](#generated-names)
 - [The entry points](#the-entry-points)
+- [What is proved about a protocol](#what-is-proved-about-a-protocol)
 
 **Running in production**
 
@@ -552,25 +553,80 @@ whether the role's code is a callback body or an actor.
 |---|---|---|---|
 | `run_<Role>(io, node_id, secret, addrs, body)` | its own connections, from an address table | callbacks | `Result(Session.Outcome, RunError)` |
 | `host_<Role>(io, node_id, secret, addrs, actor, start, deliver)` and `host_<Role>_or(…, cancel)` | its own connections | an actor (see [Hosting a role in an actor](#hosting-a-role-in-an-actor)) | `Result(Session.Outcome, RunError)` |
-| `cluster_<Role>(io, node, session, body)` | a running `ClusterNode`, one session under a given id | callbacks | `Result(Session.Outcome, RunError)` |
-| `offer_<Role>(io, node, capacity, body)` | a running `ClusterNode`, any number of sessions | callbacks | `Result(Offer, RunError)` |
-| `initiate_<Role>(io, node, body)` | a running `ClusterNode`, one session it starts | callbacks | `Result(Session.Outcome, RunError)` |
-| `offer_hosted_<Role>(io, node, capacity, actor, start, deliver, cancel)` | a running `ClusterNode`, any number of sessions | one actor for all of them (see [Many sessions in one actor](#many-sessions-in-one-actor)) | `Result(Offer, RunError)` |
-| `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)` | a running `ClusterNode`, one session under a given id | an actor, with the same callbacks | `Result(Session.Outcome, RunError)` |
+| `cluster_<Role>(node, session, body)` | a running `ClusterNode`, one session under a given id | callbacks | `Result(Session.Outcome, RunError)` |
+| `offer_<Role>(node, capacity, body)` | a running `ClusterNode`, any number of sessions | callbacks | `Result(Offer, RunError)` |
+| `initiate_<Role>(node, body)` | a running `ClusterNode`, one session it starts | callbacks | `Result(Session.Outcome, RunError)` |
+| `offer_hosted_<Role>(node, capacity, actor, start, deliver, cancel)` | a running `ClusterNode`, any number of sessions | one actor for all of them (see [Many sessions in one actor](#many-sessions-in-one-actor)) | `Result(Offer, RunError)` |
+| `cluster_hosted_<Role>(node, session, actor, start, deliver, cancel)` | a running `ClusterNode`, one session under a given id | an actor, with the same callbacks | `Result(Session.Outcome, RunError)` |
 
 `<P>_Run.error_message(e)` turns any `RunError` into a line that names the roles.
+
+The two that open their own connections take the root capability, `Cap(IO)`. The five
+that run over a `ClusterNode` take only the node: a program that holds a running node can
+play a role without holding `Cap(IO)`. A role with a [grant](#per-role-grants) adds one
+capability parameter per granted path, straight after the node.
+
+## What is proved about a protocol
+
+The standard library's `Session.Theory` (`stdlib/session_theory.march`) states what a
+protocol means as March code: a protocol is a `SessionGlobal`, a role's part in it is a `SessionLocal`, and
+`Session.Theory.project(g, role, multiparty)` is the projection. Its laws are lemmas, proved
+once in the standard library:
+
+| Law | Says |
+|---|---|
+| `dual_dual` | the other end of the other end is the original |
+| `project_dual` | in a two-role protocol, each role's projection is the other's dual |
+| `pairwise` | for any two roles, what one does with the other is the dual of what the other does with it |
+| `projections_compose` | run together, the roles' projections take every step of the protocol and all finish |
+| `progress` | deadlock freedom: while the protocol has a next step, the roles can take it |
+
+The compiler projects a protocol twice, in OCaml: once for `Chan(Role, Proto)` and once for
+`@[endpoints]`. `march --check --guarantees` (and `forge hot-reload check`) checks each
+projection it built against `Session.Theory.project`, by running `project` in the interpreter
+on that protocol. When they agree, the laws hold for your protocol, and the report says so:
+
+```
+protocol Ring (3 roles): proved (spec) · validated (compiler)
+  projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role
+  pairwise duality  proved (spec) · validated (compiler): what each pair of roles does with each other is dual (Session.Theory.pairwise)
+  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)
+```
+
+A disagreement is a compiler bug, reported as `violated`. `march --validate-projections FILE`
+prints one line per protocol, projector and role, and one `laws` line per protocol saying
+whether `pairwise`, `projections_compose` and `progress` cover it; it exits 1 on a disagreement.
+
+`pairwise`, `projections_compose` and `progress` cover protocols in a fragment
+(`Session.Theory.in_fragment`):
+
+- no `loop`;
+- no crash branch, and no role that may crash;
+- every `choose` sends its first message, from the chooser, to one role, and every other role
+  takes part in the branches the same way whichever is taken (it never needs the label);
+- delivery is synchronous: a message is one step of its sender and receiver together, which
+  is what the runner's per-connection order ([Message order and
+  backpressure](#message-order-and-backpressure)) gives a protocol in this fragment.
+
+A protocol outside the fragment is told which rule it misses, and its lines say
+`checked (compiler)` or `not checked`, never `proved`. Not covered yet:
+
+- loops, crash branches, and roles that may crash;
+- a role in a protocol of more than two roles that is not told which branch a `choose` took
+  (its branches differ and do not all begin with the chooser's message): its projection is
+  not compared at all.
 
 ## Running over a cluster node
 
 If your nodes already run a
 [`ClusterNode`]({{ site.baseurl }}/docs/clustering/#a-running-node-clusternode), a role
 can use it instead of opening connections of its own. The generated
-`<P>_Run.cluster_<Role>(io, node, session, body)` takes the running node (the
+`<P>_Run.cluster_<Role>(node, session, body)` takes the running node (the
 `Cap(ClusterNode.Live)` that `ClusterNode.start` returned) and a session id, which is any
 string the roles agree on, fresh for each session:
 
 ```march
-match Fan_Run.cluster_C(c, node, "fan-" ++ int_to_string(round), fn (s, st) -> role_c(s, st)) do
+match Fan_Run.cluster_C(node, "fan-" ++ int_to_string(round), fn (s, st) -> role_c(s, st)) do
   Ok(_) -> println("C: closed")
   Err(SessionNode.Cancelled(role, cause)) -> println("C: cancelled: " ++ cause)
   Err(e) -> println(Fan_Run.error_message(e))
@@ -606,7 +662,7 @@ its role for every client that turns up.
 A node that plays a role for others **offers** it:
 
 ```march
-match Echo_Run.offer_Server(c, node, 64, fn (s, st) -> serve_one(s, st)) do
+match Echo_Run.offer_Server(node, 64, fn (s, st) -> serve_one(s, st)) do
   Ok(offer) -> ...   -- offering now; each session runs in its own task
   Err(e) -> panic(Echo_Run.error_message(e))
     -- AlreadyOffered: this node already offers this role of this protocol version
@@ -617,7 +673,7 @@ end
 A node that wants a conversation **initiates** one:
 
 ```march
-match Echo_Run.initiate_Client(c, node, fn (s, st) -> ask(s, st)) do
+match Echo_Run.initiate_Client(node, fn (s, st) -> ask(s, st)) do
   Ok(_) -> println("done")
   Err(SessionNode.NoOffer(role, why)) -> println("nobody would take role " ++ Echo_Msg.role_name(role) ++ ": " ++ why)
   Err(e) -> println(Echo_Run.error_message(e))
@@ -855,7 +911,7 @@ let deliver = fn (sid, s, from, msg, ep) ->
 let cancel = fn (sid, s, role, cause, ep) ->
   let _ = send(srv, Cancel(sid, s, role, cause, ep))
   ()
-match Echo_Run.offer_hosted_Server(c, node, 64, srv, start, deliver, cancel) do
+match Echo_Run.offer_hosted_Server(node, 64, srv, start, deliver, cancel) do
   Ok(offer) -> ...        -- offering now; every session goes to srv
   Err(e) -> panic(Echo_Run.error_message(e))
 end
@@ -863,7 +919,7 @@ end
 
 The runner watches the actor once per session (one small watcher actor each). If the
 actor crashes or is restarted, every session it hosts ends with `HostGone`, as for
-`host_<Role>`. `cluster_hosted_<Role>(io, node, session, actor, start, deliver, cancel)`
+`host_<Role>`. `cluster_hosted_<Role>(node, session, actor, start, deliver, cancel)`
 is the same for one session under an id the nodes agreed on, with the same callbacks, so
 one actor can serve both.
 
@@ -892,8 +948,8 @@ the body `run_Ledger` and every other entry point takes is
 ```
 
 one capability per path, in the order the line lists them, after the session and before
-the entry state. The runner narrows them from the `Cap(IO)` it was given and passes them,
-so a body is written as
+the entry state. `run_<Role>` and `host_<Role>` narrow them from the `Cap(IO)` they were
+given and pass them, so a body is written as
 
 ```march
 pfn ledger(s : Cap(Session.Live), fw : Cap(IO.FileWrite), nc : Cap(IO.NetConnect), st : Checkout_Ledger.Entry) : Checkout_Ledger.Yield do
@@ -907,6 +963,18 @@ and a body with a different parameter list does not compile against the runner. 
 hosted in an actor, the grant arrives through `start`: `start(s, fw, nc)`, or
 `start(sid, s, fw, nc)` for the many-session entry points. A role with no grant line keeps
 the plain `(s, st)` body.
+
+The entry points over a cluster node hold no `Cap(IO)` to narrow from, so the caller hands
+the grant over: one parameter per path, after the node, in the order the line lists them.
+They reach the body unchanged:
+
+```march
+Checkout_Run.offer_Ledger(node, fw, nc, 64, fn (s, fw, nc, st) -> ledger(s, fw, nc, st))
+```
+
+A caller that holds the root capability writes `cap_narrow(c)` for each. One that holds
+only `Cap(IO.FileWrite)` and `Cap(IO.NetConnect)` passes those, and a caller that holds
+neither cannot offer the role at all: it does not typecheck.
 
 Because the grant is a value, the composition root is explicit from `main` to every role,
 and a test can hand a body any dictionary it likes in place of the runner's (see
@@ -926,12 +994,24 @@ actor behind `host`) and requires every capability in that reach to sit under th
 grant, exactly as `main`'s grant bounds the program:
 
 ```
-Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the
-body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body:
-body → cons → save). A role's grant bounds everything its code reaches, as `main`'s
-grant bounds the program.
+The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`
+(`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as
+`main`'s grant bounds the program.
 help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+
+26 |     let _ = file_write("/tmp/n", int_to_string(n))
+                 ^^^^^^^^^^
+    the body calls `cons` here:            (line 38)
+    `cons` calls `save` here:              (line 32)
+    the body of role `Cons`, passed to `Stream_Run.run_Cons`
+    role `Cons` is granted only `Cap(IO.Console)` here:  role Cons needs IO.Console
 ```
+
+The error points at the call that needs the authority and labels each call on the way
+to it; its fix adds the capability to the role's `needs` line. When the chain passes
+through a value the walk cannot place in the source (a body bound with `let`, say), the
+error stays on the callback and names the chain in prose instead (`(reached from the
+body: body → wipe)`).
 
 The root of the walk is the *value* that reaches the body parameter, not the expression
 at the call. A body bound with `let` in the calling function, a body passed in through a
@@ -950,13 +1030,13 @@ help: pass a lambda or a named function here, or bind the body with `let` in thi
 function, to have it checked.
 ```
 
-A role's grant must also fit within `main`'s: the runner narrows the role's capabilities
-from what `main` holds, so `role Cons needs IO.FileWrite` under `fn main(c :
-Cap(IO.Console))` is an error at the grant line. And a grant names IO capabilities only:
-`role Cons needs Session.Live` (or `ClusterNode.Live`, or `LibC`) is one error at the
-grant line, because the runner narrows each path from `main`'s `Cap(IO)` and no narrowing
-produces a proof or foreign capability. The session capability is passed to every body
-already.
+A role's grant must also fit within `main`'s: the role's capabilities are narrowed
+from what `main` holds, by the runner or by the caller, so `role Cons needs IO.FileWrite`
+under `fn main(c : Cap(IO.Console))` is an error at the grant line. And a grant names IO
+capabilities only: `role Cons needs Session.Live` (or `ClusterNode.Live`, or `LibC`) is
+one error at the grant line, because each path is narrowed from an IO capability and no
+narrowing produces a proof or foreign capability. The session capability is passed to
+every body already.
 
 The grant bounds the role's *code*, not its *authority*. A body handed a pid to an actor
 with wider capabilities can message it, and a closure it receives can do whatever its
@@ -1367,9 +1447,10 @@ node's (SWIM) and the heartbeat settings do not apply.
 - Messages are encoded as JSON, so every payload type needs a JSON codec. Built-in types
   have one; for your own types, add `derive Json for YourType`.
 - A protocol's name must be unique in the whole program, the standard library included,
-  and so must the name of each payload type that derives `Json`. A derived codec is
-  found by the type's short name, so two `P_Message` types (or two `Note`s) declared in
-  different modules conflict. The conflict is a compile error
+  and so must the name of each payload record type that derives `Json`. A derived record
+  codec is found by the type's short name, so two `P_Message` types (or two record types
+  named `Note`) declared in different modules conflict. Two variant types named `Note` in
+  two of your modules are two types, and both may derive `Json`. The conflict is a compile error
   (`json_derive_name_collision`) that names both types and points at both `derive`
   sites.
 - After a hot deploy, `Topology.reoffer` reopens a role under its new fingerprint only if
@@ -1378,6 +1459,15 @@ node's (SWIM) and the heartbeat settings do not apply.
   role whose body is one of them is reopened with the old code, under the old
   fingerprint. Put role bodies in a nested module, or re-offer from a hosting actor's
   handler, which the deploy replaces.
+
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints for a protocol or role that does not hold together, each with a program you can edit and re-check in the browser:
+
+- [A protocol step after a `loop` that never ends, so it can never run]({{ site.baseurl }}/docs/error-messages/#step-after-loop)
+- [A message from a role that `may crash`, with no plan for when it never arrives]({{ site.baseurl }}/docs/error-messages/#may-crash)
+- [A role implementation that skips a step of the protocol]({{ site.baseurl }}/docs/error-messages/#role-skips-a-step)
+- [A role whose code reaches past its own capability grant]({{ site.baseurl }}/docs/error-messages/#role-grant)
 
 ## See also
 

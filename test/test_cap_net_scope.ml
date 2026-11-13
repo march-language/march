@@ -103,23 +103,30 @@ let test_query_prefix_unproven () =
   rejects "prefix ending at ?" ~code:"cap_host_unproven"
     (program (fn_go (simple_get {|"https://example.com?" ++ p|})))
 
+(* An operation on a socket the module was handed: the handle's host is not
+   visible here. (Since ocap phase 2 the raw tcp_* / tls_* builtins are
+   stdlib-only, so the fixtures go through Socket / Tls.) *)
 let test_handle_unproven () =
-  rejects "fd operation" ~code:"cap_host_unproven"
+  rejects "socket operation" ~code:"cap_host_unproven"
     (program
-       (fn_go
-          {|match tcp_send_all(3, p) do
+       (fn_go {|p|} ^ {|
+    fn send(s : Socket, p : String) : String do
+      match Socket.write(s, p) do
         Ok(_) -> "ok"
         Err(_) -> "err"
-      end|}))
+      end
+    end|}))
 
 let test_tls_connect_unproven () =
-  rejects "tls_connect with an SNI name" ~code:"cap_host_unproven"
+  rejects "Tls.connect with an SNI name" ~code:"cap_host_unproven"
     (program
-       (fn_go
-          {|match tls_connect(3, 4, "example.com") do
+       (fn_go {|p|} ^ {|
+    fn dial(s : Socket, ctx : Tls.TlsCtx) : String do
+      match Tls.connect(s, ctx, "example.com") do
         Ok(_) -> "ok"
         Err(_) -> "err"
-      end|}))
+      end
+    end|}))
 
 let c_module body =
   Printf.sprintf "\n  mod C do\n    needs IO.NetConnect\n%s\n  end\n" body
@@ -318,11 +325,11 @@ let test_module_wide_methods () =
        (fn_go (simple_get {|"https://anywhere.test/" ++ p|})))
 
 let test_raw_tcp_on_method_scoped_host () =
-  rejects "raw tcp_connect to a method-scoped host" ~code:"cap_host_unproven"
+  rejects "Socket.connect to a method-scoped host" ~code:"cap_host_unproven"
     (program
        ~a_needs:{|needs IO.NetConnect("example.com", methods(get))|}
        (fn_go
-          {|match tcp_connect("example.com", 443) do
+          {|match Socket.connect("example.com", 443) do
         Ok(_) -> p
         Err(_) -> "err"
       end|}))
@@ -380,13 +387,13 @@ end
 
 (* C3: a NUL byte ends the C string getaddrinfo sees. *)
 let test_nul_host_rejected () =
-  rejects "NUL in a tcp_connect host" ~code:"cap_host_unproven"
+  rejects "NUL in a Socket.connect host" ~code:"cap_host_unproven"
     (program
        ~a_needs:{|needs IO.NetConnect("*.example.com")|}
        (fn_go
-          {|match tcp_connect("127.0.0.1\0.example.com", 18932) do
+          {|match Socket.connect("127.0.0.1\0.example.com", 18932) do
         Ok(_) -> p
-        Err(e) -> e
+        Err(_) -> "err"
       end|}))
 
 (* I3: a host-less declaration admits any host, so a computed URL is fine;
@@ -404,13 +411,13 @@ let test_any_host_computed_url () =
 
 (* I4: @[net_dest] names a URL; a host parameter cannot be judged. *)
 let test_net_dest_on_host_param_rejected () =
-  rejects "net_dest forwarding to tcp_connect's host" ~code:"cap_host_annotation"
+  rejects "net_dest forwarding to Socket.connect's host" ~code:"cap_host_annotation"
     (program
        ~extra:
          (c_module
             {|    @[net_dest(h)]
     fn dial(h : String) : String do
-      match tcp_connect(h, 443) do
+      match Socket.connect(h, 443) do
         Ok(_) -> "ok"
         Err(_) -> "err"
       end
@@ -637,10 +644,10 @@ let test_helper_unknown_path_unproven () =
        (fn_go {|C.fetch("https://example.com/v1/weather/" ++ p)|}))
 
 let test_raw_to_path_scoped_unproven () =
-  rejects "raw tcp_connect to a path-scoped host" ~code:"cap_host_unproven"
+  rejects "Socket.connect to a path-scoped host" ~code:"cap_host_unproven"
     (program ~a_needs:path_needs
        (fn_go
-          {|match tcp_connect("example.com", 443) do
+          {|match Socket.connect("example.com", 443) do
         Ok(_) -> p
         Err(_) -> "err"
       end|}))

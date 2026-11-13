@@ -322,22 +322,22 @@ mod HttpClient do
   fn reconnect_and_retry(req, retries_left) do
     match HttpTransport.connect(req) do
     Err(ce) -> Err(ce)
-    Ok(new_fd) -> transport_keepalive(new_fd, req, retries_left - 1)
+    Ok(new_s) -> transport_keepalive(new_s, req, retries_left - 1)
     end
   end
 
   doc """
-  Send `req` on the open connection `fd`. Returns `Ok((fd, resp))` on
-  success. On failure, closes `fd` and, while `retries_left > 0`,
+  Send `req` on the open connection `s`. Returns `Ok((s, resp))` on
+  success. On failure, closes `s` and, while `retries_left > 0`,
   reconnects and tries again (each reconnect consumes two from
   `retries_left`); otherwise returns `Err(Closed)`, discarding the original
-  transport error. After a reconnect the returned `fd` is the new one.
+  transport error. After a reconnect the returned socket is the new one.
   """
-  fn transport_keepalive(fd, req, retries_left) do
-    match HttpTransport.request_on(fd, req) do
-    Ok(resp) -> Ok((fd, resp))
+  fn transport_keepalive(s : Socket, req, retries_left) do
+    match HttpTransport.request_on(s, req) do
+    Ok(resp) -> Ok((s, resp))
     Err(_) -> do
-      tcp_close(fd)
+      let _ = Socket.close(s)
       if retries_left > 0 do
         reconnect_and_retry(req, retries_left - 1)
       else
@@ -606,27 +606,27 @@ mod HttpClient do
   -- -----------------------------------------------------------------------
 
   doc """
-  Run `req` through the pipeline on an already-open connection `fd`.
+  Run `req` through the pipeline on an already-open connection `s`.
   This is the engine behind the `do_request` callback of `with_connection`.
 
   Same phases as `run`, except that the request is sent with
-  `transport_keepalive(fd, req, max_retries + 1)`: on a send/receive
+  `transport_keepalive(s, req, max_retries + 1)`: on a send/receive
   failure the connection is closed and a fresh one opened. Redirects still
   go over new connections (`handle_redirects`). Returns `Ok(response)` or
   the result of the error steps.
   """
-  fn run_on_fd(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req) do
-    run_on_fd_scoped(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req, "")
+  fn run_on(s : Socket, req_steps, resp_steps, err_steps, max_redir, max_retries, req) do
+    run_on_scoped(s, req_steps, resp_steps, err_steps, max_redir, max_retries, req, "")
   end
 
-  pfn run_on_fd_scoped(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req, scope) do
+  pfn run_on_scoped(s, req_steps, resp_steps, err_steps, max_redir, max_retries, req, scope) do
     match run_request_steps(req_steps, req) do
     Err(e) -> run_error_steps(err_steps, req, e)
     Ok(transformed_req) ->
       match hc_check_request(scope, transformed_req) do
       Err(e) -> Err(e)
       Ok(_) -> do
-      match transport_keepalive(fd, transformed_req, max_retries + 1) do
+      match transport_keepalive(s, transformed_req, max_retries + 1) do
       Err(transport_err) ->
         run_error_steps(err_steps, transformed_req, HttpTransportError(transport_err))
       Ok((_, resp)) ->
@@ -730,14 +730,14 @@ mod HttpClient do
     Ok(base_req) -> do
       match HttpTransport.connect(base_req) do
       Err(e) -> Err(HttpTransportError(e))
-      Ok(fd) -> do
+      Ok(s) -> do
         match client do
         Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) -> do
           fn do_request(req) do
-            run_on_fd_scoped(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req, scope)
+            run_on_scoped(s, req_steps, resp_steps, err_steps, max_redir, max_retries, req, scope)
           end
           let result = callback(do_request)
-          tcp_close(fd)
+          let _ = Socket.close(s)
           Ok(result)
         end
         end
@@ -786,9 +786,9 @@ mod HttpClient do
           Ok(_) ->
           match HttpTransport.connect(transformed_req) do
           Err(e) -> Err(HttpTransportError(e))
-          Ok(fd) -> do
-            let result = HttpTransport.stream_request_on(fd, transformed_req, on_chunk)
-            tcp_close(fd)
+          Ok(s) -> do
+            let result = HttpTransport.stream_request_on(s, transformed_req, on_chunk)
+            let _ = Socket.close(s)
             match result do
             Err(e) -> Err(HttpTransportError(e))
             Ok((status, headers, last)) -> Ok((status, headers, last))

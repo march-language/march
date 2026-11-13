@@ -390,6 +390,15 @@ void    march_handle_leave(void *h);
  * LISTENER, UDP) are shut down first, so a reader parked in recv wakes; the
  * descriptor is released now, or by the last leave when a use is in flight. */
 int64_t march_handle_close(void *h);
+/* Close [h] and wait (bounded by timeout_ms, parking a green thread or
+ * sleeping an OS thread) until no use is in flight, so the caller may then
+ * close a descriptor the box only borrows (an HTTP Conn's or a ws:// socket's;
+ * a TCP_BORROWED box's release never closes it).  When a use is in flight it
+ * is woken first (shutdown + fd-wait cancel; the cancel is forgotten before
+ * this returns, so a reused number does not inherit it).  1 when nothing is
+ * in flight on return, 0 on timeout (a use is stranded, e.g. by a panic
+ * between enter and leave). */
+int64_t march_handle_close_drain(void *h, int64_t timeout_ms);
 /* Close WITHOUT releasing: ownership of raw moves to the caller (TCP -> TLS,
  * server conn -> WebSocket).  raw, or -1 if already closed. */
 int64_t march_handle_detach(void *h);
@@ -409,6 +418,10 @@ extern void (*march_handle_test_release_hook)(int64_t kind, int64_t raw, int64_t
 /* Release a live-process slot the way process_wait_proc does, without
  * waiting for or signalling the child (march_runtime.c). */
 void    march_process_release_slot(int64_t handle);
+/* Release a Process handle box's child (march_runtime.c): close its
+ * streams, SIGTERM it if still running, reap it without blocking (a child
+ * not yet exited is reaped by a later spawn or release). */
+void    march_process_release_handle(int64_t handle);
 
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
@@ -1112,6 +1125,28 @@ void   *march_file_read_chunk(void *handle, int64_t size);
 void   *march_file_open_write(void *path, int64_t mode);
 void   *march_file_write_handle(int64_t handle, void *data);
 void   *march_file_seek(int64_t handle, int64_t offset);
+/* File.Dir (runtime/march_file_beneath.c): opens beneath a directory fd. */
+void   *march_dir_open(void *path);
+void   *march_dir_open_write(void *path);
+void   *march_file_open_at(int64_t dirfd, void *rel, int64_t flags);
+void   *march_dir_list_at(int64_t dirfd, void *rel);
+int     march_beneath_open(int dirfd, const char *rel, int flags, int mode);
+/* FileError constructor tags: the declaration order of stdlib/file.march's
+ * `ptype FileError`.  Add new constructors at the end, in both places. */
+#define FILEERR_NOT_FOUND    0
+#define FILEERR_PERMISSION   1
+#define FILEERR_IS_DIRECTORY 2
+#define FILEERR_NOT_EMPTY    3
+#define FILEERR_IO_ERROR     4
+#define FILEERR_CLOSED       5
+#define FILEERR_ESCAPES      6
+/* Helpers march_runtime.c exports to march_file_beneath.c: register a FILE*
+ * in the file handle table (0 when it is full), Ok(v), Err(FileError(tag,
+ * payload)), and a List(String) from n C strings. */
+int64_t march_fh_register(void *f);
+void   *march_file_ok(void *value);
+void   *march_file_err(int64_t tag, const char *payload, int64_t len);
+void   *march_file_string_list(char **names, int64_t n);
 void   *march_file_write(void *path, void *data);
 void   *march_file_append(void *path, void *data);
 void   *march_file_delete(void *path);

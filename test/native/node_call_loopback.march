@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- Node.call loopback integration test (P3 L4).
 --
 -- Spins up a listener on an OS-assigned ephemeral port (tcp_listen(0) +
@@ -76,7 +77,7 @@ mod NodeCallLoopback do
   -- March scheduler/runtime race. A same-process immediate retry is the
   -- workaround reported to clear it, since no `sleep` builtin exists.
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Authority.must(Socket.connect(host, port)) do
+    match Result.map_err(tcp_connect(host, port), fn m -> Socket.ConnectionFailed(m)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do

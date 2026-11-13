@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- The control/data split (distributed actors 2/4, step 2): a control frame
 -- is not stuck behind a large data frame.
 --
@@ -30,7 +31,7 @@ mod ControlChannelLoopback do
   pfn write_chunks(fd : Int, n : Int) : () do
     if n <= 0 do ()
     else
-      let _ = Socket.write(fd, chunk())
+      let _ = Result.map_err(tcp_send_all(fd, chunk()), fn m -> Socket.WriteFailed(m))
       write_chunks(fd, n - 1)
     end
   end
@@ -42,15 +43,15 @@ mod ControlChannelLoopback do
       Ok((_reg, peer)) ->
         -- (node-b prints nothing: its lines would race node-a's.)
         -- frame header for data_len() bytes, then the body in 64 KiB chunks
-        let _ = Socket.write(peer.data_fd, NetKernel.bytes_to_str(NetFrame.encode(Nil)))
-        let _ = Socket.write(peer.data_fd, NetKernel.bytes_to_str(
+        let _ = Result.map_err(tcp_send_all(PeerRegistry.raw_data_fd(peer), NetKernel.bytes_to_str(NetFrame.encode(Nil))), fn m -> Socket.WriteFailed(m))
+        let _ = Result.map_err(tcp_send_all(PeerRegistry.raw_data_fd(peer), NetKernel.bytes_to_str(
           Cons(int_shr(data_len(), 24), Cons(int_and(int_shr(data_len(), 16), 255),
-          Cons(int_and(int_shr(data_len(), 8), 255), Cons(int_and(data_len(), 255), Nil))))))
-        write_chunks(peer.data_fd, 64)
-        let _ = NetKernel.send_frame(peer.fd, SwimDriver.encode_msg(SwimDriver.SwimPing("node-b")))
-        write_chunks(peer.data_fd, 192)
-        tcp_close(peer.data_fd)
-        tcp_close(peer.fd)
+          Cons(int_and(int_shr(data_len(), 8), 255), Cons(int_and(data_len(), 255), Nil)))))), fn m -> Socket.WriteFailed(m))
+        write_chunks(PeerRegistry.raw_data_fd(peer), 64)
+        let _ = NetKernel.send_frame(PeerRegistry.raw_fd(peer), SwimDriver.encode_msg(SwimDriver.SwimPing("node-b")))
+        write_chunks(PeerRegistry.raw_data_fd(peer), 192)
+        tcp_close(PeerRegistry.raw_data_fd(peer))
+        tcp_close(PeerRegistry.raw_fd(peer))
         tcp_close(listen_fd)
     end
   end
@@ -59,7 +60,7 @@ mod ControlChannelLoopback do
   -- Reads until EOF; on an error, remembers it so a short count is
   -- diagnosable from the golden diff rather than a bare "false".
   @[diverges] pfn read_data(fd : Int, got : Int) : Int do
-    match Socket.recv(fd, 1048576) do
+    match Result.map_err(tcp_recv_chunk(fd, 1048576), fn m -> Socket.RecvFailed(m)) do
       Ok(s) ->
         if String.is_empty(s) do got else read_data(fd, got + string_length(s)) end
       Err(e) ->
@@ -97,13 +98,13 @@ mod ControlChannelLoopback do
       Err(e) -> panic("node-a connect: " ++ e)
       Ok((_reg, p)) -> p
     end
-    println("node-a: peer " ++ peer.identity.name ++ ", control fd and data fd differ: " ++ bool_to_string(peer.fd != peer.data_fd))
-    let ctl = task_spawn(fn _ -> match PeerReader.serve(peer.fd, Nil, on_control) do
+    println("node-a: peer " ++ peer.identity.name ++ ", control fd and data fd differ: " ++ bool_to_string(PeerRegistry.raw_fd(peer) != PeerRegistry.raw_data_fd(peer)))
+    let ctl = task_spawn(fn _ -> match PeerReader.serve(PeerRegistry.raw_fd(peer), Nil, on_control) do
       Ok(_) -> 0
       Err(e) -> panic("control reader: " ++ e)
     end)
     let dat = task_spawn(fn _ ->
-      let n = read_data(peer.data_fd, 0)
+      let n = read_data(PeerRegistry.raw_data_fd(peer), 0)
       Vault.set(Authority.must(Vault.open("cc_times")), "data", unix_time_ms())
       n)
     let _ = task_await(ctl)
@@ -120,7 +121,7 @@ mod ControlChannelLoopback do
     let t_ping = Vault.get_or(Authority.must(Vault.open("cc_times")), "ping", 0)
     let t_data = Vault.get_or(Authority.must(Vault.open("cc_times")), "data", 0)
     println("node-a: control ping arrived before the data stream finished: " ++ bool_to_string(t_ping > 0 && t_ping <= t_data))
-    tcp_close(peer.fd)
-    tcp_close(peer.data_fd)
+    tcp_close(PeerRegistry.raw_fd(peer))
+    tcp_close(PeerRegistry.raw_data_fd(peer))
   end
 end

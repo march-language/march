@@ -70,6 +70,7 @@ let js_unsupported : (string * string) list = [
   ("spawn_mut_signal_refused", "the JS target has no `signal_watch` or `pmap_threshold`");
   ("file_refused", "the JS target has no `dir_list` or `dir_mkdir_p`");
   ("file_allowed", "the JS target has no `file_exists`");
+  ("tls_https_get_refused", "the JS target has no TLS (`tls_client_ctx`)");
 ]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)

@@ -53,6 +53,17 @@
     March_errors.Errors.parse_error_extra := (code, fix);
     raise (March_errors.Errors.ParseError (msg, hint, pos))
 
+  (* A scope string rides in the one [DNeeds] scope string, joined by `;`
+     ([scoped_cap_path]); a `;` inside one would read back as a further
+     option (`IO.NetConnect("h;no_redirects")` as `("h", no_redirects)`), so
+     it is refused where the string is still a string. *)
+  let scope_string_ok (s : string) (pos : Lexing.position) : unit =
+    if String.contains s ';' then
+      error_raise ~code:March_errors.Code.invalid_cap_scope
+        (Printf.sprintf "A scope string cannot contain `;`: `\"%s\"`." s)
+        (Some "`;` separates a scope's parts; give each name as its own string.")
+        pos
+
   let pos_of_name (n : name) : Lexing.position =
     { Lexing.pos_fname = n.span.file; pos_lnum = n.span.start_line; pos_bol = 0;
       pos_cnum = n.span.start_col }
@@ -763,8 +774,9 @@ decl:
       (* `@[remote]`: generate the receiver-side dispatch for the actor's typed
          remote messages (lib/desugar/desugar_remote.ml). *)
       let remote = List.mem "remote" attrs in
+      let internal = List.mem "stdlib_internal" attrs in
       match d with
-      | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat; actor_remote = remote }, span)
+      | DActor (vis, name, adef, span) -> DActor (vis, name, { adef with actor_compat = compat; actor_remote = remote; actor_internal = internal }, span)
       | d -> d }
   | AT; INVARIANT; LPAREN; inv = expr; RPAREN; d = actor_decl
     { match d with
@@ -781,7 +793,8 @@ decl:
         ) "full" attrs in
       match d with
       | DActor (vis, name, adef, span) ->
-        DActor (vis, name, { adef with actor_invariant = Some inv; actor_compat = compat }, span)
+        DActor (vis, name, { adef with actor_invariant = Some inv; actor_compat = compat;
+                                       actor_internal = List.mem "stdlib_internal" attrs }, span)
       | d -> d }
   | d = fn_decl        { d }
   | d = let_decl       { d }
@@ -1053,7 +1066,8 @@ actor_decl:
               { actor_state = fields; actor_init_params = init_params;
                 actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
-                actor_mailbox = mb; actor_remote = false; actor_on_stop = on_stop },
+                actor_mailbox = mb; actor_remote = false; actor_on_stop = on_stop;
+                actor_internal = false },
               mk_span ($loc)) }
 
 (** `init { ... }`, or the parameterised form `init(env : T, n : Int) { ... }`
@@ -1494,18 +1508,76 @@ needs_decl:
    typechecker validates them (lib/caps/host_scope.ml). *)
 scoped_cap_path:
   | p = cap_path { (p, None) }
-  | p = cap_path; LPAREN; s = STRING; RPAREN { (p, Some s) }
-  | p = cap_path; LPAREN; s = STRING; COMMA;
-    os = separated_nonempty_list(COMMA, scope_option); RPAREN
-    { (p, Some (s ^ ";" ^ String.concat ";" os)) }
+  | p = cap_path; LPAREN; s = STRING; rest = scope_rest; RPAREN
+    { scope_string_ok s $startpos(s);
+      (* "" then more would encode exactly as the options-only form below
+         (`IO.Mut("", "b")` and `IO.Mut(name("b"))` both ";name=b"), so the
+         empty first string is refused here, where the two still differ. *)
+      if s = "" && rest <> [] then
+        error_raise ~code:March_errors.Code.invalid_cap_scope
+          "A scope's first string cannot be empty."
+          (Some "Drop the empty string: `needs IO.Registry(prefix(\"w.\"))` \
+                 scopes to a prefix alone.")
+          $startpos(s);
+      (p, Some (String.concat ";" (s :: rest))) }
   | p = cap_path; LPAREN; os = separated_nonempty_list(COMMA, scope_option); RPAREN
     { (p, Some (";" ^ String.concat ";" os)) }
 
-(* `no_redirects`, or `methods(get, head)` stored as "methods=get,head". *)
+(* After the first string: further strings (each becomes the option
+   "name=<s>"), then options.  Strings may not follow an option.  Several
+   names and string-argument options still ride in the one scope string, so
+   the AST type of [DNeeds] does not change; a string containing `;`, `=` or
+   `,` could be confused with the encoding and is refused by the scope
+   validation, not here. *)
+scope_rest:
+  |                                                  { [] }
+  | COMMA; s = STRING; r = scope_rest
+    { scope_string_ok s $startpos(s); ("name=" ^ s) :: r }
+  | COMMA; o = scope_option; r = scope_option_tail   { o :: r }
+
+scope_option_tail:
+  |                                                  { [] }
+  | COMMA; o = scope_option; r = scope_option_tail   { o :: r }
+
+(* `no_redirects`, `methods(get, head)` stored as "methods=get,head", or a
+   string argument, `prefix("w.")` stored as "prefix=w.".
+
+   One surface form per encoding (ocap p2b ruling R16): `methods` is the one
+   option that takes identifiers, every other valued option takes one
+   string, and `name(...)` is no option at all (a further name is a further
+   string, `IO.Mut("a", "b")`).  Otherwise `prefix(w)` and `prefix("w")`, or
+   `IO.Mut("a", "b")` and `IO.Mut("a", name(b))`, would encode alike, and
+   the formatter could print back only one of each pair. *)
 scope_option:
   | o = LOWER_IDENT { o }
   | o = LOWER_IDENT; LPAREN; vs = separated_nonempty_list(COMMA, LOWER_IDENT); RPAREN
-    { o ^ "=" ^ String.concat "," vs }
+    { if o <> "methods" then
+        error_raise ~code:March_errors.Code.invalid_cap_scope
+          ?fix:(match vs with
+                | [ v ] when o <> "name" ->
+                  (* `prefix(w)` -> `prefix("w")`: the one legal spelling. *)
+                  Some (replace_fix $loc(vs) ("\"" ^ v ^ "\""))
+                | _ -> None)
+          (Printf.sprintf "`%s(...)` takes a quoted string, not a name." o)
+          (Some (if o = "name" then
+                   "A further name is a further string: `needs IO.Mut(\"a\", \"b\")`."
+                 else
+                   Printf.sprintf "Quote it: `%s(\"%s\")`." o (String.concat ", " vs)))
+          $startpos(o);
+      o ^ "=" ^ String.concat "," vs }
+  | o = LOWER_IDENT; LPAREN; s = STRING; RPAREN
+    { if o = "methods" then
+        error_raise ~code:March_errors.Code.invalid_cap_scope
+          "`methods(...)` takes HTTP method names, not a string."
+          (Some (Printf.sprintf "Write the names bare: `methods(%s)`." s))
+          $startpos(o);
+      if o = "name" then
+        error_raise ~code:March_errors.Code.invalid_cap_scope
+          "`name(...)` is not a scope option."
+          (Some "A further name is a further string: `needs IO.Mut(\"a\", \"b\")`.")
+          $startpos(o);
+      scope_string_ok s $startpos(s);
+      o ^ "=" ^ s }
 
 cap_path:
   | id = upper_name { [id] }

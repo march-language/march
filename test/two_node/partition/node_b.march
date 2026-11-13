@@ -30,18 +30,18 @@ mod TwoNodePartitionB do
     end
   end
 
-  pfn write_frame(fd : Int, bytes : List(Int)) : () do
+  pfn write_frame(fd : Socket, bytes : List(Int)) : () do
     let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(bytes)))
     ()
   end
 
-  pfn write_msg(fd : Int, msg : SwimDriver.WireMsg) : () do write_frame(fd, SwimDriver.encode_msg(msg)) end
+  pfn write_msg(fd : Socket, msg : SwimDriver.WireMsg) : () do write_frame(fd, SwimDriver.encode_msg(msg)) end
 
-  pfn send_sync(fd : Int, reg : GlobalRegistry.Names) : () do
+  pfn send_sync(fd : Socket, reg : GlobalRegistry.Names) : () do
     write_frame(fd, NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(reg), GlobalRegistry.all_entries(reg)))
   end
 
-  pfn perform(fd : Int, acts : List(Swim.Action)) : () do
+  pfn perform(fd : Socket, acts : List(Swim.Action)) : () do
     match acts do
       Nil -> ()
       Cons(a, rest) ->
@@ -56,7 +56,7 @@ mod TwoNodePartitionB do
 
   -- Split every complete frame off [buf]: answer pings, collect SWIM events,
   -- and fold any registry sync into [reg] (reporting that one arrived).
-  pfn drain(fd : Int, buf : List(Int), events : List(SwimDriver.Event), acked : Bool, reg : GlobalRegistry.Names, synced : Bool)
+  pfn drain(fd : Socket, buf : List(Int), events : List(SwimDriver.Event), acked : Bool, reg : GlobalRegistry.Names, synced : Bool)
       : (List(Int), List(SwimDriver.Event), Bool, GlobalRegistry.Names, Bool) do
     match NetFrame.decode(buf) do
       None -> (buf, events, acked, reg, synced)
@@ -92,7 +92,7 @@ mod TwoNodePartitionB do
 
   type Tick = { s : SwimDriver.State, buf : List(Int), acked : Bool, closed : Bool, reg : GlobalRegistry.Names, synced : Bool }
 
-  pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names) : Tick do
+  pfn tick(fd : Socket, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names) : Tick do
     let got = match Socket.recv_timeout(fd, 4096, 50) do
       Ok(chunk) -> if String.is_empty(chunk) do (buf, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false) end
       Err(Socket.RecvTimeout(_)) -> (buf, false)
@@ -132,7 +132,7 @@ mod TwoNodePartitionB do
   -- otherwise never print "Alive again" (seen once the transport's reads
   -- parked instead of blocking, which changed the timing). [clock] is this
   -- node's VectorClock.
-  pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool, reply_due : Bool) : () do
+  pfn run(fd : Socket, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool, reply_due : Bool) : () do
     let t = tick(fd, s, buf, reg)
     if t.closed do
       Authority.ignore(println(me() ++ ": peer closed"))
@@ -176,7 +176,7 @@ mod TwoNodePartitionB do
   end
 
   -- node-b waits for node-a's sync.
-  pfn on_healed(_fd : Int, _reg : GlobalRegistry.Names) : () do () end
+  pfn on_healed(_fd : Socket, _reg : GlobalRegistry.Names) : () do () end
 
   -- node-b answers the merge with its merged registry and keeps serving
   -- until node-a closes. The reply is what lets node-a finish and close, so
@@ -184,7 +184,7 @@ mod TwoNodePartitionB do
   -- can arrive before this node's SWIM view flips (it did, under ASAN), and
   -- an immediate reply let node-a close before "Alive again" was printed.
   -- Returns (done, reply still due).
-  pfn on_merged(fd : Int, reg : GlobalRegistry.Names, alive : Bool) : (Bool, Bool) do
+  pfn on_merged(fd : Socket, reg : GlobalRegistry.Names, alive : Bool) : (Bool, Bool) do
     if alive do
       send_sync(fd, reg)
       (false, false)
@@ -195,17 +195,18 @@ mod TwoNodePartitionB do
 
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen), _cap_netconnect : Cap(IO.NetConnect), _cap_process : Cap(IO.Process), _cap_clock : Cap(IO.Clock)) do
     let port = Authority.must(Env.require_int("MARCH_NODE_PORT"))
-    let listen_fd = match tcp_listen(port) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
+    let listen_fd = match Authority.must(Socket.listen(port)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
     println("node-b: up")
-    let fd = match tcp_accept(listen_fd) do
+    let fd = match Socket.accept(listen_fd) do
       Ok(fd) -> fd
-      Err(e) -> panic("accept: " ++ e)
+      Err(e) -> panic("accept: " ++ Socket.error_message(e))
     end
     run(fd, initial(), Nil, GlobalRegistry.empty(), VectorClock.new(), 0, false, false, false)
-    tcp_close(fd)
-    tcp_close(listen_fd)
+    let _ = Socket.close(fd)
+    let _ = Socket.close_listener(listen_fd)
+    ()
   end
 end

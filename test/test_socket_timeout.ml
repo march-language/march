@@ -221,7 +221,8 @@ mod SocketTimeoutProbe do
       Err(other) -> Authority.ignore(println("A FAIL wrong-error " ++ Socket.error_message(other)))
       Ok(_)      -> Authority.ignore(println("A FAIL unexpected-data"))
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -240,7 +241,8 @@ mod SocketTimeoutProbe do
         Ok(_)               -> Authority.ignore(println("B FAIL unexpected-data"))
         end
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -253,7 +255,8 @@ mod SocketTimeoutProbe do
       Ok(data) -> Authority.ignore(println("D OK data " ++ data))
       Err(e)   -> Authority.ignore(println("D FAIL " ++ Socket.error_message(e)))
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -305,7 +308,7 @@ mod TlsTimeoutProbe do
       match Socket.set_recv_timeout(fd, 500) do
       Err(e) -> Authority.ignore(println("C FAIL setopt " ++ Socket.error_message(e)))
       Ok(_) ->
-        match Tls.client_ctx(Tls.default_client_config()) do
+        match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
         Err(_) -> Authority.ignore(println("C FAIL ctx"))
         Ok(ctx) ->
           match Tls.connect(fd, ctx, "127.0.0.1") do
@@ -314,7 +317,8 @@ mod TlsTimeoutProbe do
           end
         end
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 
@@ -353,7 +357,7 @@ mod TlsReadTimeoutProbe do
       match Socket.set_recv_timeout(fd, 500) do
       Err(e) -> Authority.ignore(println("E FAIL setopt " ++ Socket.error_message(e)))
       Ok(_) ->
-        match Tls.client_ctx(TlsConfig("", "", "", ["http/1.1"], Tls12, false)) do
+        match Authority.must(Tls.client_ctx(TlsConfig("", "", "", ["http/1.1"], Tls12, false))) do
         Err(_) -> Authority.ignore(println("E FAIL ctx"))
         Ok(ctx) ->
           match Tls.connect(fd, ctx, "127.0.0.1") do
@@ -367,7 +371,8 @@ mod TlsReadTimeoutProbe do
           end
         end
       end
-      Socket.close(fd)
+      let _ = Socket.close(fd)
+      ()
     end
   end
 

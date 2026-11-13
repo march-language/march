@@ -9,18 +9,78 @@ permalink: /docs/modules/
 
 # Module System
 
-March has an Elixir-inspired module system. Modules are the primary unit of code organization, and all definitions live inside a module.
+A module is a named group of functions, types and constants. Every March file holds
+one top-level module, declared with `mod Name do ... end`, and every definition lives
+inside a module. Code in another module reaches a definition by its qualified name,
+`Math.square(4)`, or brings the name into scope with `import`, `use` or `alias`.
 
-> **Normative cross-references.** This chapter is the tutorial-level
-> introduction. The conformance-tested core references cover the same ground
-> with implementation citations and a runnable corpus: `specs/lang/core-march.md`
-> §4.7 ("Module declaration, nesting, and name resolution") and §4.7.1
-> (`use`/`import`/`alias` selectors and the file-based resolver pre-pass)
-> document the OPERATIONAL rules; `specs/lang/core-march-types.md` §2.5
-> ("Module visibility, the opaque-type imbalance, and the
-> no-per-module-type-namespace design point") documents the TYPING rules,
-> including the precise visibility enforcement described below and the
-> `ptype`/`opaque type` behaviour described under "Visibility".
+Everything in a module is public unless you mark it private: `pfn` for a function,
+`ptype` for a type. `opaque type` keeps a type's name public and hides its
+constructors, so other modules can hold a value of the type but can only build or read
+one through the module's own functions. A dotted name such as `MyApp.Router` maps to a
+file path, `my_app/router.march`, which is how the compiler and `forge` find a module.
+
+This page covers declaring modules, visibility, the ways to bring names into scope,
+multi-file projects and module signatures. The formal rules are in
+[`core-march.md`](core-march.md) §4.7 (declaration, nesting and name resolution) and
+[`core-march-types.md`](core-march-types.md) §2.5 (visibility); this page teaches the
+surface syntax.
+
+## On this page
+
+**Start here**
+
+- [Which form do I need?](#which-form-do-i-need)
+- [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
+
+**Everyday modules**
+
+- [Declaring a Module](#declaring-a-module)
+- [Qualified Access](#qualified-access)
+- [Visibility](#visibility): `pfn`, `ptype` and `opaque type`
+- [Module-Level Constants](#module-level-constants)
+
+**Bringing names into scope**
+
+- [`import`](#import)
+- [`use`](#use)
+- [`alias`](#alias)
+- [A Full Example](#a-full-example)
+
+**Projects**
+
+- [Multi-File Projects](#multi-file-projects)
+- [Module Signatures](#module-signatures)
+
+**Reference**
+
+- [Errors you'll see](#errors-youll-see)
+- [See also](#see-also)
+
+## Which form do I need?
+
+| You want | Write |
+|---|---|
+| A group of related functions and types | `mod Name do ... end`, one top-level `mod` per file |
+| A function from another module | Its qualified name: `Math.square(4)` |
+| A helper only this module can call | `pfn helper(...)` |
+| A type other modules cannot name at all | `ptype T = ...` |
+| A type other modules can name but not build or take apart | `opaque type T = ...` |
+| A constant the whole module shares | A module-level `let`: `let max_items = 1000` |
+| Another module's names without the prefix | `import Mod`, or `import Mod, only: [f, g]` |
+| The same, with glob and brace selectors | `use Mod.*`, `use Mod.{f, g}` |
+| A shorter name for a long module path | `alias Very.Long.Name, as: Short` |
+| A program split across files | `mod MyApp.Router` in `my_app/router.march`; `forge build` finds it |
+
+## How it fits with the rest of March
+
+| Concept | Where modules meet it | Chapter |
+|---|---|---|
+| **Type system** | `ptype` and `opaque type` decide which types and constructors other modules see; a type from another module is written `Http.Method`. | [Type System]({{ site.baseurl }}/docs/types/#opaque-types) |
+| **Capabilities** | A module lists the capabilities its code uses with `needs IO.Console`, and the compiler checks the module's code against that list. `cap no_panic` and the other module caps restrict what a whole module may do. | [Capabilities]({{ site.baseurl }}/docs/capabilities/) |
+| **Interfaces** | An `interface` and its `impl`s are declared inside modules like functions are, and a type's `derive` line sits in the module that declares the type. | [Interfaces]({{ site.baseurl }}/docs/interfaces/) |
+| **Standard library** | Every stdlib module is reachable by its qualified name with no import; `import List, only: [map]` works on it like on your own files. | [Stdlib Guide]({{ site.baseurl }}/docs/stdlib-guide/) |
+| **Tooling** | `forge build` maps module names to files for you; `forge search` finds a function across modules by name or type. | [Tooling]({{ site.baseurl }}/docs/tooling/) |
 
 ---
 
@@ -34,11 +94,9 @@ mod MyApp do
 end
 ```
 
-Modules can be dotted for hierarchical organization. **Each of these lives in
-its own file** (one top-level `mod` per file, see "One-mod-per-file" via
-`core-march.md` §4.7, so this is two files' contents shown together, not one
-file to paste verbatim; see "Multi-File Projects" below for the
-name-to-filename convention):
+Module names can be dotted to group related modules. A file holds only one top-level
+`mod`, so the two blocks below are two files, not one file to paste;
+[Multi-File Projects](#multi-file-projects) has the name-to-file convention:
 
 ```march
 -- my_app/router.march
@@ -71,6 +129,41 @@ end
 
 ---
 
+## Qualified Access
+
+Call functions or access types from another module using `.`:
+
+```march
+mod Main do
+  needs IO.Console
+  mod Math do
+    fn square(n : Int) : Int do n * n end
+    fn cube(n : Int) : Int do n * n * n end
+  end
+
+  fn main() do
+    let s = Math.square(4)   -- 16
+    let c = Math.cube(3)     -- 27
+    println(int_to_string(s + c))    -- 43
+  end
+end
+```
+
+`Math` is nested inside `Main` here because a file can hold only one top-level `mod`;
+two top-level modules in one file is a parse error. Two top-level modules go in two
+files, found through `MARCH_LIB_PATH`; see [Multi-File Projects](#multi-file-projects).
+
+Nested module access chains:
+
+```march
+MyApp.Router.dispatch(conn, request)
+```
+
+A misspelled module name is a compile error that suggests the closest module:
+``Unknown module `Lsit`. Did you mean `List`?``
+
+---
+
 ## Visibility
 
 By default, all definitions are **public** (accessible from outside the module). To make something private, use `pfn` for functions or `ptype` for types:
@@ -89,39 +182,25 @@ mod Passwords do
 end
 ```
 
-`pfn` functions (and private module-level `let` values) cannot be called or
-referenced from outside their declaring module: a qualified cross-module
-reference to one is a hard typecheck error, `` Function `name` is private to
-module `Mod`. `` (`load_module_into_env`'s `ex_public` gate,
-`lib/typecheck/typecheck_env.ml`; cross-referenced in full, with the
-exact commit that landed the enforcement, in `core-march-types.md` §2.5).
-This is enforced identically whether the private member lives in the same
-file (a nested `mod`) or a separate file reached by qualification.
+A `pfn` function, or a private module-level `let` value, cannot be called or referenced
+from outside its module. A qualified reference to one is a compile error,
+``Function `hash` is private to module `Passwords`.``, whether the module is nested in
+the same file or lives in another file.
 
-**What `ptype` hides depends on how the defining module reaches the
-checker.** The parser marks a `ptype` itself `Private` but leaves every
-variant's own visibility (`var_vis`) `Public`; only the separate `opaque type`
-form (below) forces `var_vis = Private` on its variants
-(`lib/parser/parser.mly`, `type_decl`).
+**What `ptype` hides depends on where the type is declared.**
 
-- **A module checked from source** (a nested `mod` in the same file, or a
-  sibling `.march` file discovered via `MARCH_LIB_PATH`): the forward-reference
-  pass `prebind_mod_members` (`lib/typecheck/typecheck.ml`) seeds a type's
-  qualified name and constructors only for a `Public` type, so outside the
-  module both a `T.Tok` annotation and a `T.Tok(...)` construction are
-  rejected. The diagnostic is currently a misleading ``Unknown module `T`.``
-  rather than a privacy message.
-- **A module loaded from the compiled module registry** (the stdlib):
-  `load_module_into_env`'s `ExType` arm is deliberately ungated, and its
-  `ExCtor` arm gates only on the variant's own visibility, which a plain
-  `ptype` leaves `Public`. So from user code `BigInt.BigInt` is usable in an
-  annotation and `BigInt.BigInt(true, [1])` constructs a value, even though
-  `stdlib/bigint.march` declares it `ptype`. This is the "opaque-type
-  imbalance" `core-march-types.md` §2.5 names.
+- **In a module compiled from your source** (a nested `mod`, or a file found through
+  `MARCH_LIB_PATH`): other modules can neither name the type nor use its
+  constructors. Naming it in an annotation gives a misleading ``Unknown module `T`.``
+  rather than a message about privacy; using a constructor gives
+  ``I don't know a constructor called `T.Tok`.``
+- **In a stdlib module:** `ptype` hides nothing. `stdlib/bigint.march` declares
+  `ptype BigInt`, yet user code can write `BigInt.BigInt` in an annotation and build
+  one with `BigInt.BigInt(true, [1])`. `core-march-types.md` §2.5 calls this the
+  opaque-type imbalance.
 
-Use `opaque type` (below) if hiding the constructor is the actual goal. (No
-stdlib module declares an `opaque type` today, so only the source path is
-exercised for it.)
+Use `opaque type` when the goal is to hide the constructors. No stdlib module declares
+an `opaque type` today.
 
 For types that should expose the name but hide the constructors, use `opaque`:
 
@@ -150,54 +229,31 @@ mod Main do
 end
 ```
 
-An explicit qualified annotation like `t : Token.Token` in a caller outside
-the `Token` module unifies with the bare `Token` type `Token.make` returns, in
-both directions (`9001e4c0`, `core-march-types.md` §2.5's "Qualified-type-path
-unification"), so either form works.
-
-`opaque type`'s constructor-hiding holds both for a same-file reference and
-for a qualified reference from a separate file reached via
-`MARCH_LIB_PATH`/auto-discovery: `OqToken.Token("bypass")` from an unrelated
-sibling file is rejected. That cross-file bypass used to typecheck, because
-`prebind_mod_members` seeded the qualified constructor key without checking
-`var_vis`; it was fixed in `48cf9263f` and is guarded by
-`test_opaque_ctor_qualified_bypass_rejected` in `test/test_compiler.ml` (the
-accepting control is `test/imports/opaque_qual/`).
+Outside `Token`, a caller can write the type as `Token.Token` or as the bare `Token`
+that `Token.make` returns; both are the same type. The constructor stays hidden from
+other files too: `Token.Token("bypass")` in an unrelated file that reaches `Token`
+through `MARCH_LIB_PATH` is rejected.
 
 ---
 
-## Qualified Access
+## Module-Level Constants
 
-Call functions or access types from another module using `.`:
+`let` at module level defines a constant accessible throughout the module and (if public) from outside:
 
 ```march
 mod Main do
   needs IO.Console
-  mod Math do
-    fn square(n : Int) : Int do n * n end
-    fn cube(n : Int) : Int do n * n * n end
+  mod Config do
+    let version   = "1.0.0"
+    let max_items = 1000
+    let base_url  = "https://api.example.com"
   end
 
+  -- Access from outside:
   fn main() do
-    let s = Math.square(4)   -- 16
-    let c = Math.cube(3)     -- 27
-    println(int_to_string(s + c))    -- 43
+    println(Config.version)   -- "1.0.0"
   end
 end
-```
-
-(`Math` is nested inside `Main` here because a single `.march` file may have
-only **one** top-level `mod`; see "A Full Example" below, and
-`core-march.md` §4.7's "One-mod-per-file" rule, for the precise grammar-level
-rejection this produces if two top-level `mod`s appear in the same file.
-Two truly separate, same-named-at-top-level modules like `Math` and `Main`
-would instead each live in their own file, resolved via `MARCH_LIB_PATH`;
-see "Multi-File Projects" below.)
-
-Nested module access chains:
-
-```march
-MyApp.Router.dispatch(conn, request)
 ```
 
 ---
@@ -238,6 +294,10 @@ import MyApp.Utils.{format, parse}
 ```
 
 `import` statements can appear anywhere inside a module body. Their scope is the rest of the module from that point.
+
+`import`, `use` and `alias` only find a module that has its own `.march` file. A `mod`
+nested in the same file is reached by its qualified name instead; `import Inner` on
+one reports ``Module `Inner` not found (looked for `inner.march` in the source directory).``
 
 ---
 
@@ -283,19 +343,18 @@ alias MyApp.Data.Repository
 
 Aliases are useful when a module name is long or conflicts with another name in scope.
 
+An alias may not take the name of a module declared in the same scope: `alias Json, as: B`
+next to `mod B do ... end` is the error `alias_shadows_module`, since `B.f` could mean either.
+
 ---
 
 ## A Full Example
 
-A companion, narrower example lives at `examples/modules.march` (qualified
-access + two-level nesting + `pfn` visibility, no `import`/`use`/`alias`).
-The example below is intentionally different from that file: it demonstrates
-qualified access **together with** `import`/`alias`, which means it must
-respect the file-vs-in-file resolver distinction (`core-march.md` §4.7.1):
-`import`/`use`/`alias` only resolve an actual `.march` FILE, never an
-in-file nested `mod`, so `MathUtils` (nested inside `Example` here) can only
-be reached by qualification; the `import`/`alias` demos below instead target
-`List`, a real stdlib module (any real file works identically):
+`examples/modules.march` is a smaller example: qualified access, two levels of nesting
+and `pfn`. The example below adds `import` and `alias`, so it follows the rule from
+[`import`](#import): those only resolve a module with its own file, never a `mod`
+nested in the same file. It reaches its nested `MathUtils` by qualified name, and
+points `import` and `alias` at the stdlib's `List`:
 
 ```march
 mod Example do
@@ -309,24 +368,24 @@ mod Example do
     end
   end
 
-  -- 1. Qualified access — the ONLY way to reach an in-file nested module
+  -- 1. Qualified access: the only way to reach an in-file nested module
   fn demo_qualified() : Int do
     let a = MathUtils.square(4)
     let b = MathUtils.cube(3)
     a + b      -- 43
   end
 
-  -- 2. Import specific names only — MUST target a real file (here, the
-  -- stdlib's List module); `import MathUtils` here would reject with
-  -- `` Module `MathUtils` not found (looked for `math_utils.march` …) ``
-  -- even though MathUtils plainly exists a few lines up, in this same file.
+  -- 2. Import specific names only. This must target a module with its own
+  -- file (here, the stdlib's List); `import MathUtils` would be rejected
+  -- with `` Module `MathUtils` not found (looked for `math_utils.march` …) ``
+  -- even though MathUtils is declared a few lines up, in this same file.
   import List, only: [length]
 
   fn demo_import_only() : Int do
     length([1, 2, 3, 4, 5, 6, 7])   -- 7
   end
 
-  -- 3. Alias — same file-resolution rule as import
+  -- 3. Alias: the same file rule as import
   alias List, as: L
 
   fn demo_alias() : Int do
@@ -341,22 +400,6 @@ mod Example do
 
 end
 ```
-
----
-
-## Module Signatures
-
-A `sig` declaration defines an abstract interface for a module, a named signature separate from the implementation:
-
-```march
-sig Collection do
-  type Elem
-  fn insert : Elem -> List(Elem) -> List(Elem)
-  fn member : Elem -> List(Elem) -> Bool
-end
-```
-
-Signatures are used for compile-time abstraction and caching: downstream code that depends on a `sig` only needs to recompile when the signature changes, not when the implementation changes.
 
 ---
 
@@ -377,36 +420,48 @@ Build with:
 MARCH_LIB_PATH=lib march --compile -o my_app lib/my_app.march
 ```
 
-`forge build` handles this automatically.
+`forge build` handles this automatically; see [Tooling]({{ site.baseurl }}/docs/tooling/).
 
 Module names map to file paths by convention: `MyApp.Router` → `my_app/router.march`, `MyApp.Templates.Layout` → `my_app/templates/layout.march`.
 
 ---
 
-## Module-Level Constants
+## Module Signatures
 
-`let` at module level defines a constant accessible throughout the module and (if public) from outside:
+A `sig` declaration defines an abstract interface for a module, a named signature separate from the implementation:
 
 ```march
-mod Main do
-  needs IO.Console
-  mod Config do
-    let version   = "1.0.0"
-    let max_items = 1000
-    let base_url  = "https://api.example.com"
-  end
-
-  -- Access from outside:
-  fn main() do
-    println(Config.version)   -- "1.0.0"
-  end
+sig Collection do
+  type Elem
+  fn insert : Elem -> List(Elem) -> List(Elem)
+  fn member : Elem -> List(Elem) -> Bool
 end
 ```
 
+Signatures are used for compile-time abstraction and caching: downstream code that depends on a `sig` only needs to recompile when the signature changes, not when the implementation changes.
+
 ---
 
-## Next Steps
+## Errors you'll see
 
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) walks through what the compiler prints for these mistakes, each with a program you can edit and re-check in the browser:
+
+- [A misspelled module name, and the "did you mean" that follows]({{ site.baseurl }}/docs/error-messages/#misspelled-module)
+- [A function that uses a capability its module's `needs` lines leave out]({{ site.baseurl }}/docs/error-messages/#missing-needs)
+
+These codes have their own page, the same text `march --explain` prints:
+
+- [`unknown_qualified_name`]({{ site.baseurl }}/docs/errors/unknown_qualified_name/): a qualified name the module does not have, or a private function called from outside its module
+- [`module_keyword`]({{ site.baseurl }}/docs/errors/module_keyword/): `module Name do` instead of `mod Name do`
+- [`cap_needs`]({{ site.baseurl }}/docs/errors/cap_needs/): a module uses a capability it does not declare with `needs`
+
+---
+
+## See also
+
+- [Type System](type-system.md): `opaque type`, `ptype` and qualified type names
+- [Capabilities](capabilities.md): the `needs` lines at the top of a module, and module caps such as `cap no_panic`
 - [Interfaces](interfaces.md): `interface` and `impl` for ad-hoc polymorphism
+- [Stdlib Guide](../../docs/stdlib.md): the modules March ships with
 - [Getting Started](../../docs/getting-started.md): creating a project with forge
-- [Standard Library](../../docs/stdlib.md): modules you get for free
+- [`core-march.md`](core-march.md) §4.7: the formal rules for declaring, nesting and resolving modules

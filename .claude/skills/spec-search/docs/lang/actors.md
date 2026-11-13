@@ -68,6 +68,8 @@ state while it runs.
 
 - [Builtins Reference](#builtins-reference)
 - [Interpreted vs compiled](#interpreted-vs-compiled)
+- [Handler guarantees: `ensures` and `old`](#handler-guarantees-ensures-and-old)
+- [What is proved about the mailbox](#what-is-proved-about-the-mailbox)
 - [See also](#see-also)
 
 ## Choosing a concurrency primitive
@@ -106,7 +108,7 @@ Rules of thumb:
 | **Linear types** | A linear value moves on `send`; the receiver becomes its sole owner. Native arrays are copy-on-write, so nothing is unsendable. | [Linear Types]({{ site.baseurl }}/docs/linear-types/) |
 | **Session types** | For a two-party conversation with an enforced order, a session channel replaces an ad-hoc message protocol; an actor can host one endpoint. | [Session Types]({{ site.baseurl }}/docs/session-types/) |
 | **Observing a running node** | `Scheduler` and `Actor.top_by_mailbox` answer "is the system behind?" from inside; the observe socket and `forge top` answer it from outside. | [Observe]({{ site.baseurl }}/docs/observe/) |
-| **Hot code reload** | A deploy migrates actor state in place; `on_stop` under a reload is the one registered when the actor was spawned. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) |
+| **Hot code reload** | A deploy migrates actor state at an epoch boundary; `on_stop` resolves against the actor's active code version. | [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/) |
 | **Clustering** | A `Pid` is local; `GlobalPid` and `Node.send` carry messages across nodes, with the same `Down` shape for remote monitors. | [Clustering & RPC]({{ site.baseurl }}/docs/clustering/) |
 | **Overload and resilience** | Mailbox limits, load shedding, deadlines and restart backoff, used together. | [Overload & Resilience]({{ site.baseurl }}/docs/overload-resilience/) |
 
@@ -254,8 +256,26 @@ stdlib type) already declares is ambiguous: writing `send(counter, Ping(…))` w
 stdlib also declares a `Ping` constructor is rejected (`Constructor \`Ping\` is defined by
 multiple types … Use a qualified form to disambiguate`). Pick message names unlikely to
 collide (e.g. `Increment`, `Poke`). Two actors that both declare a handler of the same
-name are the sharp case: a bare name resolves to only one of them, and no qualified
-spelling selects an actor's message today, so rename one of the handlers.
+name are the sharp case: a bare name resolves to only one of them. Qualify the message by
+its actor to select the other: `Counter.Tally(1)` (also `Counter_Msg.Tally(1)`, and
+`Outer.Counter.Tally(1)` from outside a nested module). The same spelling separates an
+actor's message from a variant constructor of the same name, which a `migrate_msg` that
+keeps a message's name needs:
+
+```march
+fn tally_migrate_msg(m : V1.Msg) : Option(Tally.Msg) do
+  match m do
+    V1.Bump(n) -> Some(Tally.Bump(n))
+    V1.Reset -> None
+  end
+end
+```
+
+A handler's parameter refinement is obliged at every construction of its message, shared
+name or not: through the written qualifier, or the construction's type
+([refinement types](refinement-types.md)), and the handler body assumes it. Both backends
+run a message only on its own actor: a variant or another actor's message of the same
+name, sent to the pid, is dropped.
 
 **A `send` is checked against the target, one side only.** When the pid's type shows
 its actor's state, a message of an actor with a different state is a compile error
@@ -722,9 +742,10 @@ Both backends implement the same rules, and each is pinned compiled and interpre
 - The interpreter cannot preempt running code, so there the deadline binds only an
   `on_stop` that *blocks* (a `receive()` it cannot satisfy waits out the deadline and
   the actor is killed); a compute loop in `on_stop` runs to completion.
-- Under `--hot-reload`, the callback registered is the one from the code the actor was
-  spawned with; draining across a reload is still open
-  (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
+- Under `--hot-reload`, `on_stop` resolves against the actor's active code version.
+  A state-changing activation must provide a compatible replacement callback when
+  the actor already has one. Mailbox epoch markers let in-flight and pre-marker
+  work finish on old code before migration; configured drain deadlines still apply.
 
 ---
 
@@ -1273,6 +1294,120 @@ For the typing side (actor declaration, `spawn`/`Pid` typing, message-payload ty
 see the [typing reference](https://github.com/march-language/march/blob/main/specs/lang/core-march-types.md) §2.6;
 for the scheduler and lowering internals, see the implementation reference
 (`specs/impl/index.md`).
+
+---
+
+## Handler guarantees: `ensures` and `old`
+
+A handler can state how one message changes the state, and the compiler proves it on
+every build. Write `ensures` and a predicate between the parameters and `do`:
+
+```march
+@invariant(balance >= 0)
+actor Account do
+  state { balance : Int }
+  init { balance: 0 }
+
+  on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do
+    { balance: state.balance + n }
+  end
+
+  on Withdraw(n : Int) ensures state.balance <= old(state.balance) do
+    if n > 0 && n <= state.balance do { balance: state.balance - n } else state end
+  end
+end
+```
+
+In the predicate:
+
+- `state`, and each field's bare name (`balance`), is the state the handler **returns**;
+- `old(e)` is `e` read of the state the message **arrived with**: `old(state.balance)`,
+  `old(balance)`, or `old(state)` for the whole of it;
+- the message's parameters are in scope. A parameter named like a field means the
+  parameter; write `state.f` for the field.
+
+Each guarantee is proved for its handler alone, as the
+[`@invariant`](refinement-types.md) is: from any incoming state that satisfies the
+invariant, and any arguments that satisfy the parameters' refinements, the state the
+body returns must satisfy the guarantee. A handler that can break it is an error that
+shows both states:
+
+```
+`Account`'s handler `Steal` does not guarantee its `ensures`. [return_refinement_violated]
+
+The handler guarantees:
+
+    balance <= old(balance)
+
+A counterexample was found:
+
+    state = { balance: 0 }
+    n = 1
+
+and the handler returns:
+
+    { balance: 1 }
+```
+
+A guarantee the solver cannot decide is a recorded skip, and an error under
+`cap verified`. `march --check --guarantees` lists each one beside the invariant:
+
+```
+actor Account: proved
+  @invariant           proved: 4 sites at init and after each handler
+  ensures on Deposit   proved: 1 site across the handler's return paths
+  ensures on Withdraw  proved: 2 sites across the handler's return paths
+```
+
+What a guarantee does not cover:
+
+- **Replies and sends.** The guarantee is about the returned state. A call handler's
+  `Actor.reply(reply_to, v)` is an effect, not part of the claim; `ensures state ==
+  old(state)` on a read-only call handler is the usual use.
+- **Sequences of messages.** A guarantee is about one message; an order across messages
+  is a protocol's job.
+- **Running it.** The predicate is proof-only: it is erased, and nothing evaluates it at
+  run time.
+
+`old` has a meaning only in a handler's `ensures`. `old(…)` in an `@invariant`, a state
+field's type, a message parameter's type or a function's type is an `old_misuse` error,
+as is `old` without exactly one argument in a guarantee. Elsewhere `old` and `ensures`
+are ordinary names, and a program that defines its own function `old` can call it in
+refinements.
+
+---
+
+## What is proved about the mailbox
+
+The mailbox lives in the runtime, so no March function implements it. The standard library's
+`Actor.Theory` (`stdlib/actor_theory.march`) is a model of it: a queue of envelopes (a
+message with its sender, a monitor's `Down`, a reply to an `Actor.call`), with the laws this
+chapter promises proved about the model:
+
+| Law | Says |
+|---|---|
+| `enq_self`, `enq_other` | one sender's messages are received in the order it sent them; another sender's message does not change that |
+| `replay_order` | messages set aside during a hot deploy, or stashed, are replayed in front, in order |
+| `call_keeps_others` | an `Actor.call` waiting inside a handler takes only its reply; everything else stays, in order |
+| `stale_reply_ignored`, `call_reply_cat` | a late reply to an earlier call never answers a later one |
+| `down_never_dropped`, `down_at_most_once` | a monitor's `Down` is never dropped by a full mailbox, and is delivered at most once |
+
+A model is only as good as its match with the runtime, so the runtime is tested against it:
+the native fixture `actor_theory_conformance` has three senders message one actor
+concurrently, replays the order the actor handled them through `Actor.Theory.from_sender`,
+and checks each sender's messages arrived in order. `march --check --guarantees` reports each
+law as `proved (model) · tested (runtime)` when a fixture tests the runtime against it, and
+`proved (model)` when none does yet (`Down` delivery, today). Neither is a proof about the
+runtime itself.
+
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints for common actor mistakes, each with a program you can edit and re-check in the browser:
+
+- [Spawning a misspelled actor name]({{ site.baseurl }}/docs/error-messages/#misspelled-actor)
+- [A message sent with an argument of the wrong type]({{ site.baseurl }}/docs/error-messages/#message-argument)
+- [A handler that forgets to return the new state]({{ site.baseurl }}/docs/error-messages/#handler-returns-state)
+- [A message sent to an actor that does not handle it]({{ site.baseurl }}/docs/error-messages/#send-wrong-actor)
 
 ---
 

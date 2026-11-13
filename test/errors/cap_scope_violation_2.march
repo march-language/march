@@ -1,0 +1,11 @@
+-- EXPECT-ERROR: cannot prove `"worker." ++ id` is within
+-- A computed name under a name scope fails closed until the run-time check
+-- of phase 4 (ocap p2b, Task 12).
+mod RegScope do
+  needs Actor.Introspect
+  needs IO.Registry("logger", prefix("worker."))
+
+  fn find(c : Cap(Actor.Introspect), id : String) do
+    Actor.whereis(c, "worker." ++ id)
+  end
+end

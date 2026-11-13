@@ -1159,7 +1159,7 @@ NetKernel.handshake(fd, my_id, secret, my_nonce)
 
 `cluster_conn.march`: Connection lifecycle: dial or accept, handshake, register.
 
-Requires `needs IO.NetListen` (for `tcp_listen`/`tcp_accept` builtins).
+Requires `needs IO.NetListen` (the plumbing listens on raw descriptors internally).
 
 ```march
 ClusterConn.listen(port)
@@ -1183,18 +1183,22 @@ ClusterConn.connect_split_within(reg, host, port, my_id, secret, timeout_ms)
 ClusterConn.accept_split_within(reg, listen_fd, my_id, secret, timeout_ms)
 ```
 
-`tcp_listen` and `tcp_accept` are builtins in the `IO.NetListen` capability group:
+The raw descriptor builtins under this plumbing (`tcp_listen`, `tcp_accept`,
+`tcp_recv_exact`, ...) are internal to the standard library. User code listens and
+accepts through `Socket`, whose `Listener` and `Socket` handles need no capability to use
+(only `Socket.listen` is checked, against `IO.NetListen`):
 
 ```march
-tcp_listen(port)       : Result(Int, String)  -- bind + listen, return fd
-tcp_accept(listen_fd)  : Result(Int, String)  -- block until client, return fd
-tcp_accept_timeout(listen_fd, timeout_ms) : Result(Int, String)
-                       -- as tcp_accept; Err("tcp_accept: timed out") if no client
-                       -- connects within timeout_ms (<= 0 waits for ever)
+Socket.listen(port)              : Result(Result(Listener, SocketError), CapError)
+Socket.accept(l)                 : Result(Socket, SocketError)  -- block until a client
+Socket.accept_timeout(l, ms)     : Result(Socket, SocketError)
+                                 -- Err(RecvTimeout(ms)) if no client connects in time
+                                 -- (<= 0 waits for ever)
+Socket.recv_exact(s, n)          : Result(Bytes, SocketError)
 ```
 
-`tcp_recv_exact` honours a receive timeout set with `tcp_set_recv_timeout`: the whole read
-fails with `Err("tcp_recv_exact: timed out")` once it passes.
+`Socket.recv_exact` honours a receive timeout set with `Socket.set_recv_timeout`: the whole
+read fails with `Err(RecvTimeout(0))` once it passes.
 
 ---
 

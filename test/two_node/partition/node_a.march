@@ -37,18 +37,18 @@ mod TwoNodePartitionA do
     end
   end
 
-  pfn write_frame(fd : Int, bytes : List(Int)) : () do
+  pfn write_frame(fd : Socket, bytes : List(Int)) : () do
     let _ = Socket.write(fd, NetKernel.bytes_to_str(NetFrame.encode(bytes)))
     ()
   end
 
-  pfn write_msg(fd : Int, msg : SwimDriver.WireMsg) : () do write_frame(fd, SwimDriver.encode_msg(msg)) end
+  pfn write_msg(fd : Socket, msg : SwimDriver.WireMsg) : () do write_frame(fd, SwimDriver.encode_msg(msg)) end
 
-  pfn send_sync(fd : Int, reg : GlobalRegistry.Names) : () do
+  pfn send_sync(fd : Socket, reg : GlobalRegistry.Names) : () do
     write_frame(fd, NetKernel.encode_registry_sync_resp(GlobalRegistry.root_hash(reg), GlobalRegistry.all_entries(reg)))
   end
 
-  pfn perform(fd : Int, acts : List(Swim.Action)) : () do
+  pfn perform(fd : Socket, acts : List(Swim.Action)) : () do
     match acts do
       Nil -> ()
       Cons(a, rest) ->
@@ -63,7 +63,7 @@ mod TwoNodePartitionA do
 
   -- Split every complete frame off [buf]: answer pings, collect SWIM events,
   -- and fold any registry sync into [reg] (reporting that one arrived).
-  pfn drain(fd : Int, buf : List(Int), events : List(SwimDriver.Event), acked : Bool, reg : GlobalRegistry.Names, synced : Bool)
+  pfn drain(fd : Socket, buf : List(Int), events : List(SwimDriver.Event), acked : Bool, reg : GlobalRegistry.Names, synced : Bool)
       : (List(Int), List(SwimDriver.Event), Bool, GlobalRegistry.Names, Bool) do
     match NetFrame.decode(buf) do
       None -> (buf, events, acked, reg, synced)
@@ -99,7 +99,7 @@ mod TwoNodePartitionA do
 
   type Tick = { s : SwimDriver.State, buf : List(Int), acked : Bool, closed : Bool, reg : GlobalRegistry.Names, synced : Bool }
 
-  pfn tick(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names) : Tick do
+  pfn tick(fd : Socket, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names) : Tick do
     let got = match Socket.recv_timeout(fd, 4096, 50) do
       Ok(chunk) -> if String.is_empty(chunk) do (buf, true) else (List.append(buf, NetKernel.str_to_bytes(chunk)), false) end
       Err(Socket.RecvTimeout(_)) -> (buf, false)
@@ -139,7 +139,7 @@ mod TwoNodePartitionA do
   -- otherwise never print "Alive again" (seen once the transport's reads
   -- parked instead of blocking, which changed the timing). [clock] is this
   -- node's VectorClock.
-  pfn run(fd : Int, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool, reply_due : Bool) : () do
+  pfn run(fd : Socket, s : SwimDriver.State, buf : List(Int), reg : GlobalRegistry.Names, clock : VectorClock, phase : Int, alive : Bool, merged : Bool, reply_due : Bool) : () do
     let t = tick(fd, s, buf, reg)
     if t.closed do
       Authority.ignore(println(me() ++ ": peer closed"))
@@ -183,13 +183,13 @@ mod TwoNodePartitionA do
   end
 
   -- node-a starts the exchange once it sees node-b back.
-  pfn on_healed(fd : Int, reg : GlobalRegistry.Names) : () do send_sync(fd, reg) end
+  pfn on_healed(fd : Socket, reg : GlobalRegistry.Names) : () do send_sync(fd, reg) end
 
   -- node-a's merge is the last step: done (the caller closes). Returns
   -- (done, reply still due).
-  pfn on_merged(_fd : Int, _reg : GlobalRegistry.Names, _alive : Bool) : (Bool, Bool) do (true, false) end
+  pfn on_merged(_fd : Socket, _reg : GlobalRegistry.Names, _alive : Bool) : (Bool, Bool) do (true, false) end
 
-  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
+  pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Socket, Socket.SocketError) do
     match Authority.must(Socket.connect(host, port)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
@@ -209,7 +209,7 @@ mod TwoNodePartitionA do
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
     run(fd, initial(), Nil, GlobalRegistry.empty(), VectorClock.new(), 0, false, false, false)
-    tcp_close(fd)
+    let _ = Socket.close(fd)
     println("node-a: done")
   end
 end

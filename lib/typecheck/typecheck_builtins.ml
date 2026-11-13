@@ -148,6 +148,19 @@ let file_is_stdlib (f : string) : bool =
 let span_is_stdlib (sp : Ast.span) : bool =
   file_is_stdlib sp.Ast.file
 
+(** The file tag of the control plane's generated wiring, the one generated
+    file that drives the stdlib's raw-fd cluster plumbing ([ClusterNode.handshake],
+    [NetKernel.send_frame], ...). It must equal [Hot_reload.control_wiring_file]
+    (lib/tir cannot be named from here; test_stdlib_only pins the two equal). *)
+let control_wiring_file = "<control>"
+
+(** Whether a reference at [sp] may name a [@[stdlib_internal]] function: the
+    stdlib's own code, or the compiler's generated control wiring. The driver
+    refuses an input file named like a generated-code tag (bin/main.ml,
+    [add_input]), so a user file cannot carry `<control>`. The stdlib-only BUILTIN gate keeps using [span_is_stdlib]. *)
+let span_may_name_internal (sp : Ast.span) : bool =
+  span_is_stdlib sp || String.equal sp.Ast.file control_wiring_file
+
 (** Builtins only the standard library may reference, each with the
     suggestion the error gives user code instead (e.g.
     [("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)")]).
@@ -223,6 +236,13 @@ let note_stdlib_decls (decls : Ast.decl list) : unit =
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
 let builtin_cap_table : (string * string) list = [
+  (* ocap phase 2 (Task 10): only OPENS are charged. An operation on a handle
+     the caller already holds (a File.Handle, File.Dir, Socket, Listener,
+     Udp.UdpSocket, Tls.TlsConn/TlsCtx, WebSocket.WsSocket or Process) needs no
+     capability: the open was checked, and since this phase a handle is
+     unforgeable (its raw builtins are stdlib-only, [Typecheck_env.stdlib_only]).
+     The removed use builtins are listed in
+     specs/todos/2026-11-10-ocap-p1-handle-uses-not-capability-ops.md. *)
   (* IO.Console *)
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
@@ -235,13 +255,14 @@ let builtin_cap_table : (string * string) list = [
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
   ("file_open",             "IO.FileRead");
-  ("file_read_line",        "IO.FileRead");
-  ("file_read_chunk",       "IO.FileRead");
   ("file_stat",             "IO.FileRead");
   ("dir_exists",            "IO.FileRead");
   ("dir_list",              "IO.FileRead");
+  (* dir_open opens a File.Dir (File.open_dir). The handle-taking
+     file_open_at / dir_list_at are charged nothing: the directory came from
+     a checked open (ocap phase 2). *)
+  ("dir_open",              "IO.FileRead");
   ("csv_open",              "IO.FileRead");
-  ("csv_next_row",          "IO.FileRead");
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
@@ -249,6 +270,9 @@ let builtin_cap_table : (string * string) list = [
      handle-taking file_write_handle / file_seek are charged nothing: the
      handle came from a checked open (ocap phase 2). *)
   ("file_open_write",       "IO.FileWrite");
+  (* dir_open_write is dir_open for a write-capable File.Dir
+     (File.open_dir_write): the same open, charged IO.FileWrite. *)
+  ("dir_open_write",        "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");
@@ -260,42 +284,20 @@ let builtin_cap_table : (string * string) list = [
   (* IO.NetConnect *)
   ("tcp_connect",           "IO.NetConnect");
   ("tcp_connect_timeout",   "IO.NetConnect");
-  ("tcp_send_all",          "IO.NetConnect");
-  ("tcp_recv_all",          "IO.NetConnect");
-  ("tcp_recv_exact",        "IO.NetConnect");
   ("dist_monitor_register", "IO.NetConnect");
   ("dist_monitor_pending",  "IO.NetConnect");
   ("dist_monitor_ack",      "IO.NetConnect");
   ("dist_monitor_forget_node", "IO.NetConnect");
-  ("tcp_recv_http",         "IO.NetConnect");
-  ("tcp_recv_http_headers", "IO.NetConnect");
-  ("tcp_recv_chunk",        "IO.NetConnect");
-  ("tcp_recv_chunk_timeout","IO.NetConnect");
-  ("tcp_set_recv_timeout",  "IO.NetConnect");
-  ("tcp_recv_chunked_frame","IO.NetConnect");
-  ("tcp_recv_timeout",      "IO.NetConnect");
-  (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect; a module that
-     only speaks WebSocket can declare `needs IO.WebSocket` instead of the
-     broader `needs IO.NetConnect`, mirroring IO.NetConnect.TLS. *)
-  ("ws_recv",               "IO.WebSocket");
-  ("ws_send",               "IO.WebSocket");
-  ("ws_select",             "IO.WebSocket");
+  (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect. Its three
+     builtins (ws_recv / ws_send / ws_select) act on a WebSocket.WsSocket the
+     HTTP server's upgrade hands over, so since ocap phase 2 they charge
+     nothing; the capability stays declarable. *)
   (* IO.Network *)
   ("dns_resolve",           "IO.Network");
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
-  ("tcp_accept",            "IO.NetListen");
-  ("tcp_accept_timeout",    "IO.NetListen");
-  ("tcp_local_port",        "IO.NetListen");
   ("udp_open",              "IO.NetConnect");
   ("udp_resolve",           "IO.NetConnect");
-  ("udp_connect",           "IO.NetConnect");
-  ("udp_close",             "IO.NetConnect");
-  ("udp_local_addr",        "IO.NetConnect");
-  ("udp_stats",             "IO.NetConnect");
-  ("udp_send_batch",        "IO.NetConnect");
-  ("udp_send_many",         "IO.NetConnect");
-  ("udp_recv_batch",        "IO.NetConnect");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
@@ -314,10 +316,6 @@ let builtin_cap_table : (string * string) list = [
   ("process_spawn_sync",    "IO.Process");
   ("process_spawn_lines",   "IO.Process");
   ("process_spawn_async",   "IO.Process");
-  ("process_read_line",     "IO.Process");
-  ("process_write",         "IO.Process");
-  ("process_kill_proc",     "IO.Process");
-  ("process_wait_proc",     "IO.Process");
   (* IO.Clock *)
   ("unix_time",             "IO.Clock");
   ("unix_time_ms",          "IO.Clock");
@@ -356,18 +354,20 @@ let builtin_cap_table : (string * string) list = [
   ("vault_whereis",         "IO.Mut");
   ("vault_reap",            "IO.Mut");
   ("vault_close",           "IO.Mut");
-  (* IO.NetConnect.TLS — encrypted transport; tls_close/tls_ctx_free are cleanup, no cap *)
+  (* IO.NetConnect.TLS — encrypted transport. Making a context is the
+     charged act; tls_connect / tls_accept run over a Socket the caller already
+     holds (its open was checked), and reads, writes and cleanup on the
+     resulting TlsConn charge nothing. *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
-  ("tls_connect",           "IO.NetConnect.TLS");
-  ("tls_accept",            "IO.NetConnect.TLS");
-  ("tls_read",              "IO.NetConnect.TLS");
-  ("tls_read_timeout",      "IO.NetConnect.TLS");
-  ("tls_write",             "IO.NetConnect.TLS");
-  ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
-  ("tls_peer_cn",           "IO.NetConnect.TLS");
-  ("tls_ctx_set_groups",    "IO.NetConnect.TLS");
-  ("tls_negotiated_group",  "IO.NetConnect.TLS");
+  (* IO.Registry — naming and finding actors by name (ocap phase 2, spec §6).
+     A lookup turns a string into a Pid, which is a capability; registering a
+     name can impersonate the actor that name stands for; listing reveals
+     every name. *)
+  ("actor_register",        "IO.Registry");
+  ("actor_unregister",      "IO.Registry");
+  ("actor_whereis",         "IO.Registry");
+  ("actor_registered",      "IO.Registry");
 ]
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
@@ -1197,6 +1197,16 @@ let builtin_bindings : (string * scheme) list =
     ("file_open_write", Mono (TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
     ("file_write_handle", Mono (TArrow (t_int, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
     ("file_seek",       Mono (TArrow (t_int, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
+    (* File.Dir (ocap phase 2): dir_open(path) / dir_open_write(path) open a
+       directory (O_DIRECTORY) and return its raw fd; file_open_at(dirfd, rel,
+       flags) opens rel beneath it (flags 0 read, 1 truncate, 2 append) as a
+       file handle; dir_list_at(dirfd, rel) lists rel beneath it ("" is the
+       directory itself), sorted. A path that leaves the directory is
+       Err(Escapes(rel)). runtime/march_file_beneath.c. *)
+    ("dir_open",        Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    ("dir_open_write",  Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    ("file_open_at",    Mono (TArrow (t_int, TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", [])))))));
+    ("dir_list_at",     Mono (TArrow (t_int, TArrow (t_string, t_result (t_list t_string) (TCon ("FileError", []))))));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     (* file_close returns :ok on both backends (it was declared Unit while
@@ -2120,7 +2130,7 @@ let builtin_types : (string * int) list =
     (* Alloc and Panic — future capability roots excluded from realtime contexts *)
     ("Alloc", 0); ("Panic", 0);
     (* Capability token types — used as arguments to Cap(X).
-       Mirrors the full 18-entry hierarchy in lib/caps/cap_lattice.ml. *)
+       Mirrors the full 21-entry hierarchy in lib/caps/cap_lattice.ml. *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
@@ -2128,7 +2138,7 @@ let builtin_types : (string * int) list =
     ("IO.Signal",     0);
     ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
     ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
-    ("IO.WebSocket",  0);
+    ("IO.WebSocket",  0); ("IO.Registry",   0);
     (* RingBuf — mutable fixed-capacity circular buffer (non-sendable) *)
     ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)

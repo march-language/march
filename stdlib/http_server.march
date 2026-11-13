@@ -31,7 +31,7 @@ mod HttpServer do
   -- The method field is an Atom (e.g. :get, :post) — interned i64 hash,
   -- allocation-free and safe for pattern matching in compiled mode.
   type Conn = Conn(
-    Int,                    -- fd (TCP socket)
+    Socket,                 -- the connection, borrowed from the server (see `test_conn`)
     Atom,                   -- request method (:get, :post, :put, etc.)
     String,                 -- request path (raw, e.g. "/users/42")
     List(String),           -- path_info (split on "/", empty filtered)
@@ -161,11 +161,45 @@ mod HttpServer do
     end
   end
 
-  doc "The underlying TCP socket file descriptor of the conn."
-  fn fd(conn) do
+  -- The connection's Socket: a TCP_BORROWED box the server runtime made
+  -- over the descriptor it owns (or, for `test_conn`, a closed one).
+  pfn socket(conn) do
     match conn do
-    Conn(f, _, _, _, _, _, _, _, _, _, _, _, _) -> f
+    Conn(s, _, _, _, _, _, _, _, _, _, _, _, _) -> s
     end
+  end
+
+  doc """
+  A `Conn` for a handler unit test, as the server would build it for a
+  request with this method, target, headers and body, but backed by no
+  connection: its socket is already closed, so `peer_addr` is `""` and
+  `scheme` is `"http"`. A `?` in `path` splits off the query string.
+
+  ## Examples
+
+      let c = my_router(HttpServer.test_conn(:get, "/users/42?full=1", [], ""))
+      assert (HttpServer.status(c) == 200)
+  """
+  fn test_conn(method : Atom, path : String, headers : List(Header), body : String) : Conn do
+    let s = Socket.borrow(-1)
+    let _ = Socket.close(s)
+    let (p, qs) = match string_split_first(path, "?") do
+      Some((before, after)) -> (before, after)
+      None -> (path, "")
+    end
+    let pi = List.filter(string_split(p, "/"), fn seg -> not(string_is_empty(seg)))
+    Conn(s, method, p, pi, qs, headers, body, 0, Nil, "", false, Nil, NoUpgrade)
+  end
+
+  doc """
+  The descriptor under the conn's socket, for standard-library code that
+  hands it to the runtime; -1 when no live connection backs the conn: a
+  `test_conn`, or a conn kept after the server closed its socket (compiled:
+  when the connection ends; interpreted: when its request is done).
+  """
+  @[stdlib_internal]
+  fn fd(conn) do
+    Socket.raw_fd(socket(conn))
   end
 
   doc """
@@ -179,7 +213,10 @@ mod HttpServer do
   Returns "" when no live socket backs the conn (e.g. test conns).
   """
   fn peer_addr(conn) do
-    tcp_peer_addr(fd(conn))
+    match Socket.peer_addr(socket(conn)) do
+    Ok(addr) -> addr
+    Err(_) -> ""
+    end
   end
 
   doc """
@@ -255,8 +292,8 @@ mod HttpServer do
   """
   fn put_resp_header(conn, name, value) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
-      Conn(fd, m, p, pi, qs, rh, rb, s, Cons(Header(name, value), rhs), rbody, h, a, u)
+    Conn(sock, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
+      Conn(sock, m, p, pi, qs, rh, rb, s, Cons(Header(name, value), rhs), rbody, h, a, u)
     end
   end
 
@@ -267,8 +304,8 @@ mod HttpServer do
   """
   fn assign(conn, key, value) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
-      Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, Cons((key, value), a), u)
+    Conn(sock, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
+      Conn(sock, m, p, pi, qs, rh, rb, s, rhs, rbody, h, Cons((key, value), a), u)
     end
   end
 
@@ -289,11 +326,11 @@ mod HttpServer do
   """
   fn send_resp(conn, resp_status, body) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, h, a, u) ->
+    Conn(sock, m, p, pi, qs, rh, rb, _, rhs, _, h, a, u) ->
       if h do
         panic("HttpServer.send_resp: conn is already halted — cannot send twice")
       else
-        Conn(fd, m, p, pi, qs, rh, rb, resp_status, rhs, body, true, a, u)
+        Conn(sock, m, p, pi, qs, rh, rb, resp_status, rhs, body, true, a, u)
       end
     end
   end
@@ -305,8 +342,8 @@ mod HttpServer do
   """
   fn halt(conn) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, _, a, u) ->
-      Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, true, a, u)
+    Conn(sock, m, p, pi, qs, rh, rb, s, rhs, rbody, _, a, u) ->
+      Conn(sock, m, p, pi, qs, rh, rb, s, rhs, rbody, true, a, u)
     end
   end
 

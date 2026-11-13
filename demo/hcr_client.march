@@ -20,9 +20,9 @@ mod HcrClient do
   end
 
   pfn dial(host : String, port : Int) : Int do
-    match Authority.must(Socket.connect(host, port)) do
+    match tcp_connect(host, port) do
       Ok(fd) -> fd
-      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " failed: " ++ Socket.error_message(e))
+      Err(e) -> panic("connect " ++ host ++ ":" ++ String.from_int(port) ++ " failed: " ++ e)
     end
   end
 

@@ -36,9 +36,9 @@ mod TwoNodeClient do
         end
       None -> 29852
     end
-    let fd = match Authority.must(Socket.connect(host, port)) do
+    let fd = match tcp_connect(host, port) do
       Ok(fd) -> fd
-      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+      Err(e) -> panic("connect: " ++ e)
     end
     let (sig_h, impl_h) = remote_ref_hashes("TwoNodeClient", "square")
     let r1 = call_square(fd, sig_h, impl_h, 7, 1)

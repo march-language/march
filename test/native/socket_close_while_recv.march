@@ -1,0 +1,76 @@
+-- Socket.close wakes a task parked in Socket.recv on the same Socket.
+--
+-- The handle box (runtime/march_handle.c) closes a socket in two steps: it
+-- marks the box closed so no new use can enter, then wakes whoever is already
+-- inside. The descriptor itself is released only by the last use to leave,
+-- so the parked reader can never wake up on a reused descriptor number.
+-- Here a task blocks in `recv` on an accepted connection whose peer sends
+-- nothing; after 100 ms the main thread closes the socket. The reader must
+-- come back with Err(Closed) within 1 s.
+--
+-- The wake is the scheduler's (march_sched_fdwait_cancel): shutdown() alone
+-- wakes the reader on Linux but not on macOS for every socket state, so the
+-- box also cancels every green thread parked on the descriptor.
+--
+-- The rule runs this at MARCH_NUM_SCHEDULERS=4 (test/dune). If the reader
+-- never wakes, main gives up after 3 s, prints why and exits instead of hanging.
+mod SocketCloseWhileRecv do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+
+  pfn poll_result(left : Int) : String do
+    let v = Vault.get_or(Authority.must(Vault.open("scwr")), "result", "")
+    if v != "" do v
+    else if left <= 0 do "still parked after 3 s"
+    else
+      sleep_ms(10)
+      poll_result(left - 10)
+    end end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let _ = Authority.must(Vault.new("scwr"))
+    let l = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
+    end
+    let port = match Socket.local_port(l) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ Socket.error_message(e))
+    end
+    -- The client connects and then says nothing.
+    let client = match Authority.must(Socket.connect("127.0.0.1", port)) do
+      Ok(c) -> c
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let s = match Socket.accept(l) do
+      Ok(s) -> s
+      Err(e) -> panic("accept: " ++ Socket.error_message(e))
+    end
+    let t0 = sys_uptime_ms()
+    let _reader = task_spawn(fn _ ->
+      let r = Socket.recv(s, 16)
+      let took = sys_uptime_ms() - t0
+      let what = match r do
+        Err(Socket.Closed) ->
+          if took < 1000 do "woke closed"
+          else "woke closed, but late: " ++ int_to_string(took) ++ " ms" end
+        Err(e) -> "woke with the wrong error: " ++ Socket.error_message(e)
+        Ok(d) -> "woke with data: [" ++ d ++ "]"
+      end
+      Vault.set(Authority.must(Vault.open("scwr")), "result", what))
+    sleep_ms(100)
+    let _ = Socket.close(s)
+    let r = poll_result(3000)
+    println(r)
+    -- A reader still parked would keep the process alive past main: leave
+    -- now, so the rule fails on the diff instead of hanging.
+    if r != "woke closed" do Authority.ignore(Process.exit(0)) else () end
+    let _ = Socket.close(client)
+    let _ = Socket.close_listener(l)
+  end
+end

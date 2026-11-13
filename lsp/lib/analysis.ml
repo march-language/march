@@ -4637,7 +4637,8 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
       "csv_open",          "IO.FileRead";  "csv_next_row",      "IO.FileRead";
       "file_write",        "IO.FileWrite"; "file_append",       "IO.FileWrite";
       "file_delete",       "IO.FileWrite"; "file_rename",       "IO.FileWrite";
-      "file_open_write",   "IO.FileWrite";
+      "file_open_write",   "IO.FileWrite"; "dir_open_write",    "IO.FileWrite";
+      "dir_open",          "IO.FileRead";
       "dir_mkdir",         "IO.FileWrite"; "dir_mkdir_p",       "IO.FileWrite";
       "dir_rmdir",         "IO.FileWrite"; "dir_rm_rf",         "IO.FileWrite";
       "file_copy",         "IO.FileSystem";

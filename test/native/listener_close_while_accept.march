@@ -1,0 +1,52 @@
+-- Socket.close_listener wakes a task parked in Socket.accept (ocap phase 2, R3).
+--
+-- On macOS shutdown() on a LISTENING socket fails with ENOTCONN and its
+-- kqueue read filter never fires, so before the handle box cancelled the
+-- parked wait (march_sched_fdwait_cancel) an acceptor stayed parked until a
+-- connection arrived (stdlib/cluster_node.march still wakes its own acceptor
+-- by connecting to itself for this reason). Here a task blocks in accept;
+-- after 100 ms main closes the listener, and the acceptor must return
+-- Err(Closed) within 1 s. MARCH_NUM_SCHEDULERS=4 (test/dune). If it never
+-- wakes, main gives up after 3 s, prints why and exits instead of hanging.
+mod ListenerCloseWhileAccept do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetListen
+  needs IO.Spawn
+
+  pfn poll_result(left : Int) : String do
+    let v = Vault.get_or(Authority.must(Vault.open("lcwa")), "result", "")
+    if v != "" do v
+    else if left <= 0 do "still parked after 3 s"
+    else
+      sleep_ms(10)
+      poll_result(left - 10)
+    end end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let _ = Authority.must(Vault.new("lcwa"))
+    let l = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
+    end
+    let t0 = sys_uptime_ms()
+    let _acceptor = task_spawn(fn _ ->
+      let r = Socket.accept(l)
+      let took = sys_uptime_ms() - t0
+      let what = match r do
+        Err(Socket.Closed) ->
+          if took < 1000 do "woke closed"
+          else "woke closed, but late: " ++ int_to_string(took) ++ " ms" end
+        Err(e) -> "woke with the wrong error: " ++ Socket.error_message(e)
+        Ok(_) -> "accepted a connection nobody made"
+      end
+      Vault.set(Authority.must(Vault.open("lcwa")), "result", what))
+    sleep_ms(100)
+    let _ = Socket.close_listener(l)
+    let r = poll_result(3000)
+    println(r)
+    if r != "woke closed" do Authority.ignore(Process.exit(0)) else () end
+  end
+end

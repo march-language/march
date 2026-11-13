@@ -90,6 +90,13 @@ let make (kind : int) (raw : value) (aux : value) : value =
   Gc.finalise finalise cell;
   VHandle cell
 
+(** Close a box from the runtime side (as march_handle_close): the HTTP
+    server closes a request's borrowed Socket once the request is done. *)
+let close (v : value) : unit =
+  match v with
+  | VHandle c when not c.h_closed -> c.h_closed <- true; release_once c
+  | _ -> ()
+
 let kind_ok ~(want : int) (have : int) : bool =
   have = want || (have = kind_tcp_borrowed && want = kind_tcp)
 
@@ -111,18 +118,21 @@ let builtins : env =
          | [_] -> eval_error "march: handle leave: not a handle box"
          | _ -> eval_error "handle_leave(h)"));
     ("handle_close", VBuiltin ("handle_close", function
-         | [VHandle c] ->
+         | [VHandle c as h] ->
            if c.h_closed then VBool false
            else begin
-             c.h_closed <- true;
-             release_once c;
+             close h;
              VBool true
            end
          | [_] -> eval_error "march: handle close: not a handle box"
          | _ -> eval_error "handle_close(h)"));
     ("handle_detach", VBuiltin ("handle_detach", function
          | [VHandle c] ->
-           if c.h_closed then VInt (-1)
+           (* A borrowed box's descriptor is not its to give away (as the
+              compiled march_handle_detach).  The compiled box also refuses
+              while another use is in flight; the interpreter keeps no
+              in-flight count (see the header). *)
+           if c.h_closed || c.h_kind = kind_tcp_borrowed then VInt (-1)
            else begin
              c.h_closed <- true;
              c.h_released <- true;

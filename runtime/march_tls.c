@@ -35,11 +35,14 @@
 #include <openssl/x509v3.h>
 
 #include <pthread.h>
+#include <signal.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <poll.h>
 #include <time.h>
+
+static void tls_fd_nosigpipe(int fd);
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -455,6 +458,7 @@ void *march_tls_connect(int64_t fd, int64_t ctx_handle, void *hostname) {
         SSL_free(ssl);
         return make_err(e);
     }
+    tls_fd_nosigpipe((int)fd);   /* see tls_shutdown_quiet */
 
     /* The handshake parks on the peer's response (tls_drive); a deadline
      * set on the fd (SO_RCVTIMEO) bounds it, as it always did. */
@@ -479,6 +483,7 @@ void *march_tls_accept(int64_t fd, int64_t ctx_handle) {
         SSL_free(ssl);
         return make_err(e);
     }
+    tls_fd_nosigpipe((int)fd);   /* see tls_shutdown_quiet */
 
     int timed_out, err, en;
     int rc = tls_drive(ssl, (int)fd, TLS_OP_ACCEPT, NULL, 0, tls_rcvtimeo_deadline((int)fd), &timed_out, &err, &en);
@@ -611,10 +616,57 @@ void *march_tls_write(int64_t ssl_handle, void *data) {
 
 /* ── Teardown ─────────────────────────────────────────────────────────── */
 
+/* A TLS write to a peer that has gone (reset the connection) fails with
+ * EPIPE -- and on a socket without SO_NOSIGPIPE / MSG_NOSIGNAL it first
+ * raises SIGPIPE, whose default action kills the process. The commonest
+ * such write is SSL_shutdown's close_notify, which the handle box's release
+ * sends on every close (and on a TlsConn dropped unclosed): a TLS server
+ * whose client hung up first died with exit 141 at its own Tls.close.
+ *
+ * On macOS/BSD the fd gets SO_NOSIGPIPE when the TLS session is made
+ * (tls_fd_nosigpipe from march_tls_connect / march_tls_accept). It must be
+ * set while the socket is healthy: on a socket the peer has already reset,
+ * setsockopt fails with EINVAL, and the write that follows still signals.
+ * Linux has no per-socket option, so there the close blocks SIGPIPE on this
+ * thread around SSL_shutdown and consumes a SIGPIPE it raised. */
+static void tls_fd_nosigpipe(int fd) {
+#if defined(SO_NOSIGPIPE)
+    if (fd >= 0) { int one = 1; (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
+#else
+    (void)fd;
+#endif
+}
+
+static void tls_shutdown_quiet(SSL *ssl) {
+#if defined(SO_NOSIGPIPE)
+    tls_fd_nosigpipe(SSL_get_fd(ssl));   /* set at the handshake already; harmless again */
+    (void)SSL_shutdown(ssl);
+#else
+    sigset_t pipe_set, old, pending;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    sigemptyset(&pending);
+    (void)sigpending(&pending);
+    int was_pending = sigismember(&pending, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_set, &old);
+    (void)SSL_shutdown(ssl);
+    if (!was_pending) {
+        sigemptyset(&pending);
+        (void)sigpending(&pending);
+        if (sigismember(&pending, SIGPIPE)) {
+            struct timespec zero = { 0, 0 };
+            (void)sigtimedwait(&pipe_set, NULL, &zero);
+        }
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+#endif
+    ERR_clear_error();
+}
+
 void march_tls_close(int64_t ssl_handle) {
     if (!ssl_handle) return;
     SSL *ssl = (SSL *)(uintptr_t)ssl_handle;
-    SSL_shutdown(ssl);
+    tls_shutdown_quiet(ssl);
     SSL_free(ssl);
 }
 

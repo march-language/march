@@ -1,3 +1,7 @@
+-- compile-flags: --stdlib-source (pins raw builtin behaviour; test/dune passes it, test_ir_verify.ml reads it)
+-- Compiled and run with --stdlib-source (test/dune): it pins the raw file_close / csv_close builtins,
+-- which are stdlib-only since ocap phase 2 (Task 10). User code reaches
+-- them through File and Csv.
 -- Regression: file_close / csv_close returned three different things.
 -- The typechecker said `Int -> Unit` (file_close) and `Int -> Atom`
 -- (csv_close), the interpreter returned `:ok` for both, and the compiled C

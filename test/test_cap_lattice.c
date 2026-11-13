@@ -8,7 +8,7 @@
  * "cap lattice freshness" dune rule (test/dune) will catch it.
  *
  * Exhaustively checks march_cap_subsumes over every (a, b) pair drawn from
- * the full hierarchy (20 caps => 400 pairs) against the known-correct
+ * the full hierarchy (21 caps => 441 pairs) against the known-correct
  * ancestor relationship, plus root/sibling/unrelated/FFI-not-in-table cases
  * and march_cap_normalize on representative inputs.
  */
@@ -52,6 +52,7 @@ static const expect_entry_t EXPECT[] = {
   { "IO.Foreign.Blocking", 16 }, /* 17 */
   { "IO.Signal",            0 }, /* 18: child of IO */
   { "IO.WebSocket",         6 }, /* 19: child of IO.NetConnect */
+  { "IO.Registry",          0 }, /* 20: child of IO (ocap p2b) */
 };
 #define N_EXPECT (int)(sizeof(EXPECT) / sizeof(EXPECT[0]))
 

@@ -9,11 +9,49 @@ mod PeerRegistry do
   -- `fd` is the CONTROL connection; `data_fd` the data one, -1 until it is
   -- up (a pre-split peer never opens one). See the control/data split in
   -- specs/progress/2026-09-14-distributed-plane-flow-control-and-control-channel.md.
-  type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Int, data_fd : Int }
+  --
+  -- The two descriptors are `Fd`s, not `Int`s (ocap phase 2b): `Fd`'s
+  -- constructor is private to this module and only the stdlib can make one
+  -- (`make`) or read the number back (`raw_fd`/`raw_data_fd`). So user code
+  -- cannot build a `Peer` around a guessed descriptor number and hand it to
+  -- a public function that writes to it (`SwimDriver.dispatch`,
+  -- `DistLink.resend_pending`, `Node.send`).
+  opaque type Fd = Fd(Int)
+
+  type Peer = { node_id : String, identity : NodeIdentity.Identity, fd : Fd, data_fd : Fd }
+
+  doc "A peer record for [node_id] over the control connection [fd] and data connection [data_fd] (`no_fd()` for none)."
+  @[stdlib_internal]
+  fn make(node_id : String, identity : NodeIdentity.Identity, fd : Int, data_fd : Int) : Peer do
+    { node_id: node_id, identity: identity, fd: Fd(fd), data_fd: Fd(data_fd) }
+  end
+
+  doc "Wrap the descriptor [n] (`no_fd()` for none) as an `Fd`, for another stdlib record that holds one (`SessionNode.Link`)."
+  @[stdlib_internal]
+  fn wrap_fd(n : Int) : Fd do Fd(n) end
+
+  doc "The descriptor an `Fd` holds."
+  @[stdlib_internal]
+  fn unwrap_fd(f : Fd) : Int do
+    match f do Fd(n) -> n end
+  end
+
+  doc "The descriptor of [p]'s control connection."
+  @[stdlib_internal]
+  fn raw_fd(p : Peer) : Int do
+    match p.fd do Fd(n) -> n end
+  end
+
+  doc "The descriptor of [p]'s data connection, `no_fd()` when it has none."
+  @[stdlib_internal]
+  fn raw_data_fd(p : Peer) : Int do
+    match p.data_fd do Fd(n) -> n end
+  end
 
   doc """
   The sentinel fd (-1) meaning "no connection", used for `data_fd` until a peer's data connection is up.
   """
+  @[stdlib_internal]
   fn no_fd() : Int do -1 end
 
   type Registry = Registry(Map(String, Peer))
@@ -38,15 +76,16 @@ mod PeerRegistry do
   [node_id], replacing any previous data fd. Returns `Err` if [node_id] is
   not registered.
   """
+  @[stdlib_internal]
   fn add_data(reg : Registry, node_id : String, data_fd : Int) : Result(Registry, String) do
     match lookup(reg, node_id) do
       None -> Err("PeerRegistry: data connection for unknown peer " ++ node_id)
-      Some(p) -> Ok(add(reg, { p with data_fd: data_fd }))
+      Some(p) -> Ok(add(reg, { p with data_fd: Fd(data_fd) }))
     end
   end
 
   doc "Whether [p] has a data connection (its `data_fd` is not `no_fd()`)."
-  fn has_data(p : Peer) : Bool do p.data_fd != no_fd() end
+  fn has_data(p : Peer) : Bool do raw_data_fd(p) != no_fd() end
 
   doc "The peer registered under [node_id], or `None`."
   fn lookup(reg : Registry, node_id : String) : Option(Peer) do

@@ -1737,18 +1737,49 @@ static void *make_int(int64_t value) {
     return i;
 }
 
+/* The Socket every Conn of one connection shares (HttpServer.Conn's first
+ * field): a TCP_BORROWED handle box over [fd], made once per connection.
+ * The server owns the fd; the box never closes it. */
+void *march_http_conn_sock(int fd) {
+    return march_handle_new(MARCH_HANDLE_TCP_BORROWED, (int64_t)fd, 1);  /* aux 1: borrowed (Socket.borrow) */
+}
+
+/* The connection is over: close its box, so a Conn a handler kept (sent to
+ * a task, stored) reaches no descriptor, and drop the server's reference.
+ * Call it before the fd is closed, so the number cannot be reused under a
+ * box that still names it: the close drains, waking and waiting out a use
+ * still in flight (a task parked in Socket.recv on a kept Conn), which would
+ * otherwise go on with the number after the server closes it and the next
+ * accept reuses it. NULL (no request was ever built) is a no-op. */
+#define MARCH_BORROWED_DRAIN_MS 2000
+void march_http_conn_sock_done(void *sock) {
+    if (!sock) return;
+    (void)march_handle_close_drain(sock, MARCH_BORROWED_DRAIN_MS);
+    march_decrc(sock);
+}
+
+/* The connection's fd moves on (to a WebSocket thread) instead of closing:
+ * close its Conns' box without draining or shutting the fd down. */
+void march_http_conn_sock_handoff(void *sock) {
+    if (!sock) return;
+    (void)march_handle_close(sock);
+    march_decrc(sock);
+}
+
 /* Build a full 13-field Conn heap object.
  * Conn is a single-constructor ADT: tag=0, 13 fields at offsets 16..112.
  * Total size: 16 (header) + 13*8 (fields) = 120 bytes.
+ * Field 0 is the connection's Socket, a TCP_BORROWED handle box; the Conn
+ * owns the reference passed in [sock].
  * Field 1 (method) is now an i64 atom hash (not a Method ADT pointer). */
-static void *make_conn(int64_t fd, int64_t method, void *path, void *path_info,
+static void *make_conn(void *sock, int64_t method, void *path, void *path_info,
                         void *query_string, void *req_headers, void *req_body,
                         int64_t resp_status, void *resp_headers, void *resp_body,
                         void *halted, void *assigns, void *upgrade) {
     void *c = march_alloc(16 + 13 * 8);
     /* tag = 0 (single constructor), set by march_alloc's header init */
     char *base = (char *)c;
-    *(int64_t *)(base + 16)  = fd;             /* field 0: fd */
+    *(void **)(base + 16)    = sock;           /* field 0: Socket (borrowed box) */
     *(int64_t *)(base + 24)  = method;         /* field 1: method (atom i64) */
     *(void **)(base + 32)    = path;           /* field 2: path */
     *(void **)(base + 40)    = path_info;      /* field 3: path_info */
@@ -1901,7 +1932,7 @@ int march_detect_keep_alive_simd(const march_http_request_t *req) {
  * march_http_parse_request() path uses. */
 void *march_conn_from_parsed(const march_http_request_t *req,
                               const char *buf, size_t buf_len,
-                              int fd) {
+                              void *sock) {
     /* Method string → atom i64 hash (e.g. "GET" → hash(:GET)) */
     int64_t method = method_string_to_atom(req->method, req->method_len);
 
@@ -1940,8 +1971,9 @@ void *march_conn_from_parsed(const march_http_request_t *req,
         ? march_string_lit(req->body, (int64_t)req->body_len)
         : march_string_lit("", 0);
 
+    march_incrc(sock);                    /* the Conn's own reference */
     return make_conn(
-        (int64_t)fd, method, path_str, path_info, query_str,
+        sock, method, path_str, path_info, query_str,
         headers, req_body,
         0, make_nil(), march_string_lit("", 0),
         make_bool(0), make_nil(), make_no_upgrade()
@@ -1950,11 +1982,11 @@ void *march_conn_from_parsed(const march_http_request_t *req,
 
 /* Process a single parsed request through the March pipeline and send
  * the response.  Returns: 1 = keep going, 0 = close connection, -1 = error. */
-int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
+int march_process_one_request(int fd, void *sock, void *pipeline, closure_fn_t fn,
                                const march_http_request_t *req,
                                const char *buf, size_t buf_len) {
     int keep_alive = march_detect_keep_alive_simd(req);
-    void *conn = march_conn_from_parsed(req, buf, buf_len, fd);
+    void *conn = march_conn_from_parsed(req, buf, buf_len, sock);
 
     /* Call the pipeline.  The compiled apply-fn CONSUMES one reference to the
      * closure (its body opens with march_decrc_local($clo)), so the caller must
@@ -1981,12 +2013,13 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
         void *ws_key     = find_ws_key_header(*(void **)(rc + 56));
         if (ws_key) {
             march_ws_handshake((int64_t)fd, ws_key);
-            void *ws_sock = march_alloc(16 + 8);
-            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+            void *ws_box;
+            void *ws_sock = march_ws_sock_new((int64_t)fd, &ws_box);
             /* The handler call consumes one closure reference; the result
              * Conn's `upgrade` field still owns another, released below. */
             march_incrc(ws_closure);
             call_closure1(ws_closure, ws_sock);
+            march_ws_sock_done(ws_box);
         }
         march_http_release_conn(result_conn);
         return -1;  /* WebSocket took over — close HTTP loop */
@@ -2232,6 +2265,9 @@ static void *connection_thread(void *arg) {
 
     if (!buf) { close(fd); return NULL; }
 
+    /* The Socket in every Conn this connection builds. */
+    void *sock = march_http_conn_sock(fd);
+
     /* HTTPS: a session on the current certificate, registered by fd for
      * HttpServer.scheme and WebSocket I/O, then the handshake. */
     pconn_t pc = { fd, NULL };
@@ -2302,7 +2338,7 @@ static void *connection_thread(void *arg) {
                 for (int i = 0; i < n && running; i++) {
                     int   keep_alive  = march_detect_keep_alive_simd(&reqs[i]);
                     void *conn        = march_conn_from_parsed(&reqs[i],
-                                                                buf, buf_len, fd);
+                                                                buf, buf_len, sock);
                     /* One fresh closure reference per call — the apply-fn
                      * consumes it (see march_process_one_request). */
                     march_incrc_local(pipeline);
@@ -2355,12 +2391,13 @@ static void *connection_thread(void *arg) {
                             if (pc.tls) { mts_ws_begin(pc.tls); ws_handed = 1; }
                             int64_t ws_v = march_ws_sock_value(fd, pc.tls);
                             march_ws_handshake(ws_v, ws_key);
-                            void *ws_sock = march_alloc(16 + 8);
-                            *(int64_t *)((char *)ws_sock + 16) = ws_v;
+                            void *ws_box;
+                            void *ws_sock = march_ws_sock_new(ws_v, &ws_box);
                             /* The call consumes one closure reference; the
                              * result's `upgrade` still owns another. */
                             march_incrc(ws_closure);
                             call_closure1(ws_closure, ws_sock);
+                            march_ws_sock_done(ws_box);
                         }
                         /* Earlier results of this batch were drained by the
                          * writev_all above; this one is done with too. */
@@ -2498,6 +2535,7 @@ static void *connection_thread(void *arg) {
     }
 
     free(buf);
+    march_http_conn_sock_done(sock);
     if (ws_handed) {
         march_ws_tls_teardown(fd, pc.tls);   /* waits out other tasks' sends */
         return NULL;
@@ -3068,6 +3106,24 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
 
 int64_t march_ws_sock_value(int fd, march_tls_session_t *s) {
     return s ? ((int64_t)fd | ((int64_t)mts_gen(s) << 32)) : (int64_t)fd;
+}
+
+/* WsSocket(box): header(16) + one field, a TCP_BORROWED handle box over [v]
+ * (stdlib/websocket.march: `opaque type WsSocket = WsSocket(Socket)`). The
+ * box is never released onto the fd: the server closes the connection. */
+void *march_ws_sock_new(int64_t v, void **box_out) {
+    void *box = march_handle_new(MARCH_HANDLE_TCP_BORROWED, v, 1);  /* aux 1: borrowed (Socket.borrow) */
+    void *ws_sock = march_alloc(16 + 8);
+    *(void **)((char *)ws_sock + 16) = box;   /* the WsSocket owns one reference */
+    march_incrc(box);                         /* ... and the caller another */
+    *box_out = box;
+    return ws_sock;
+}
+
+void march_ws_sock_done(void *box) {
+    /* The caller closes (or tears down) the fd next: drain, as for a Conn. */
+    (void)march_handle_close_drain(box, MARCH_BORROWED_DRAIN_MS);
+    march_decrc(box);
 }
 
 /* The live wss:// session [v] names, referenced and counted as touching the

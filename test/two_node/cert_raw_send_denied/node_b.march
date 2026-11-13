@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "cert_raw_send_denied": node-b, whose
 -- certificate has no raw_send (an isolated IO.Foreign pool). See
 -- scenario.sh.
@@ -28,6 +29,24 @@ mod CertRawSendDeniedB do
       sleep_ms(50)
       wait_cert(h, id, left - 50)
     end end
+  end
+
+  -- The session queue to [id], once the link is published. A peer's
+  -- certificate becomes visible before its link: ClusterNode's Install
+  -- effect stores the certificate for the data reader it is about to start,
+  -- and the link reaches `session_queue_for` at the step's `mirror`, after
+  -- the effects. So `wait_cert` succeeding does not mean the queue is there
+  -- yet (seen once under ASAN on Linux CI); wait for the queue itself, as
+  -- peer_closed_queue_gone does.
+  pfn wait_queue(h : Cap(ClusterNode.Live), id : String, left : Int) : Option((Pid(NodeQueue.WriterState), Int)) do
+    match ClusterNode.session_queue_for(h, id) do
+      Some(q) -> Some(q)
+      None ->
+        if left <= 0 do None else
+          sleep_ms(50)
+          wait_queue(h, id, left - 50)
+        end
+    end
   end
 
   pfn read(path : String) : String do
@@ -106,7 +125,7 @@ mod CertRawSendDeniedB do
     let _ = task_spawn(fn _ -> do
       match ClusterConn.accept_split_auth(PeerRegistry.empty(), lfd, idb, ClusterAuth.Certified(cb), 10000) do
         Ok((_reg, peer, _cert)) ->
-          let _ = NodeCall.serve_one(NodeRpc.empty(), peer.fd)
+          let _ = NodeCall.serve_one(NodeRpc.empty(), PeerRegistry.raw_fd(peer))
           Vault.set(served, "done", 1)
         Err(e) -> Authority.ignore(println("node-b: direct accept failed: " ++ e))
       end
@@ -117,21 +136,21 @@ mod CertRawSendDeniedB do
       Ok((_reg, peer, _cert)) ->
         let to = GlobalPid.make(idb.node_id, 1, 1)
         -- Node.send lowers to NodeSend.cast on the peer's data connection.
-        match NodeSend.cast(peer.data_fd, 1, to, "Raw.Ping", [1]) do
+        match NodeSend.cast(PeerRegistry.raw_data_fd(peer), 1, to, "Raw.Ping", [1]) do
           Ok(_) -> Authority.ignore(println("node-b: direct Node.send path: sent (wrong)"))
           Err(NodeSend.Refused(_, why)) -> Authority.ignore(println("node-b: direct Node.send path: " ++ why))
           Err(_) -> Authority.ignore(println("node-b: direct Node.send path: no connection"))
         end
         let fref = RemoteCall.remote_ref("Probe", "f", "sig", "impl")
         let now = unix_time_ms()
-        match NodeCall.call(peer.fd, fref, Nil, to, now + 5000, 7, now) do
+        match NodeCall.call(PeerRegistry.raw_fd(peer), fref, Nil, to, now + 5000, 7, now) do
           Ok(_) -> Authority.ignore(println("node-b: direct RemoteCall: returned (wrong)"))
           Err(e) -> Authority.ignore(println("node-b: direct RemoteCall: " ++ RemoteCall.error_message(e)))
         end
         -- Skipping the caller's check: the server refuses it too.
         let req = RemoteCall.request(fref, Nil, to, now + 5000, 8)
-        let _ = NetKernel.send_frame(peer.fd, RemoteCall.encode_request(req))
-        match NetKernel.recv_frame(peer.fd, Nil) do
+        let _ = NetKernel.send_frame(PeerRegistry.raw_fd(peer), RemoteCall.encode_request(req))
+        match NetKernel.recv_frame(PeerRegistry.raw_fd(peer), Nil) do
           Err(e) -> Authority.ignore(println("node-b: direct RemoteCall reply: " ++ e))
           Ok((bytes, _)) ->
             match RemoteCall.decode_reply(bytes) do
@@ -189,7 +208,7 @@ mod CertRawSendDeniedB do
         Authority.ignore(println(me() ++ ": raw send_msg to itself: " ++ said(ClusterNode.send_msg(h, ClusterNode.global_pid(h, 1), "Raw.Self", [1], NodeQueue.Unbounded))))
         -- A compromised node skips its own check and writes through the
         -- session queue: each non-exempt kind, then one exempt one.
-        match ClusterNode.session_queue_for(h, a) do
+        match wait_queue(h, a, 60000) do
           None -> panic("node-b: no session queue to node-a")
           Some(q) ->
             let probes = [(101, "raw tag to a pid route", to_raw, "Raw.Ping"),

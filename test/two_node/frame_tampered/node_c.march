@@ -26,15 +26,15 @@ mod FrameTamperedC do
       Bytes.concat(Bytes.from_list([int_xor(Bytes.get(body, i), 255)]), Bytes.slice(body, i + 1, n - i - 1)))
   end
 
-  pfn pump(src : Int, dst : Int, conn : Int, a_to_b : Bool, k : Int) : Int do
-    match tcp_recv_exact(src, 4) do
+  pfn pump(src : Socket, dst : Socket, conn : Int, a_to_b : Bool, k : Int) : Int do
+    match Socket.recv_exact(src, 4) do
       Err(_) ->
-        tcp_shutdown(dst)
+        let _ = Socket.close(dst)
         0
       Ok(hdr) ->
-        match tcp_recv_exact(src, NetFrame.body_length(Bytes.to_list(hdr))) do
+        match Socket.recv_exact(src, NetFrame.body_length(Bytes.to_list(hdr))) do
           Err(_) ->
-            tcp_shutdown(dst)
+            let _ = Socket.close(dst)
             0
           Ok(body) ->
             let hit = a_to_b && conn == tamper_conn() && k == tamper_frame()
@@ -48,9 +48,9 @@ mod FrameTamperedC do
     end
   end
 
-  pfn serve(listen_fd : Int, conn : Int, stop : String) : () do
+  pfn serve(listen_fd : Listener, conn : Int, stop : String) : () do
     if Authority.must(File.exists(stop)) do () else
-      match tcp_accept_timeout(listen_fd, 200) do
+      match Socket.accept_timeout(listen_fd, 200) do
         Err(_) -> serve(listen_fd, conn, stop)
         Ok(fd) ->
           match Authority.must(Socket.connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_B")))) do
@@ -64,7 +64,7 @@ mod FrameTamperedC do
             -- teardown order.
             Err(e) ->
               print_stderr("node-c: upstream: " ++ Socket.error_message(e) ++ "\n")
-              Socket.close(fd)
+              let _ = Socket.close(fd)
               serve(listen_fd, conn, stop)
             Ok(up) ->
               let _ = task_spawn(fn _ -> pump(fd, up, conn, true, 0))
@@ -76,8 +76,8 @@ mod FrameTamperedC do
   end
 
   fn main(_c : Cap(IO)) do
-    match tcp_listen(Authority.must(Env.require_int("MARCH_PORT_C"))) do
-      Err(e) -> panic("node-c: listen: " ++ e)
+    match Authority.must(Socket.listen(Authority.must(Env.require_int("MARCH_PORT_C")))) do
+      Err(e) -> panic("node-c: listen: " ++ Socket.error_message(e))
       Ok(lfd) ->
         Authority.ignore(println("node-c: up"))
         serve(lfd, 0, Authority.must(Env.require("CLUSTER_STOP_FILE")))

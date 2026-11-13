@@ -4177,6 +4177,422 @@ let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
       (contains_substring s "but module `ManyCaps` declares no `needs IO`")
   end
 
+(* ── ocap phase 2 (Task 10): using a handle charges nothing ────────────
+   Opening a socket is the capability operation; using the `Socket` you hold
+   is not (spec §6). A function bounded by `needs ()` (the per-function bound,
+   ruling R9) may therefore write to a socket it is handed, and accept on a
+   `Listener` it is handed, under both the source-level ceiling (`--check`,
+   [cap_strict_ceiling] on) and the compiled TIR ceiling (`--compile`); it may
+   not open one. *)
+(* [Wire] declares no `needs` at all, so the compiled ceiling judges any
+   charge reaching it against an empty declaration (the entry's own `needs`,
+   which [main] uses to open the handles, cannot admit it), and [main] calls
+   the Wire function, so it is live in the TIR the ceiling reads. *)
+let handle_use_program ~wire ~use =
+  Printf.sprintf
+    {|mod Main do
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Console
+
+  mod Wire do
+%s
+  end
+
+  fn main(_n : Cap(IO.NetConnect), _l : Cap(IO.NetListen), _c : Cap(IO.Console)) do
+%s
+    println("ok")
+  end
+end
+|}
+    wire use
+
+let use_socket call =
+  Printf.sprintf
+    {|    match Socket.connect("127.0.0.1", 9) do
+    Ok(Ok(s)) ->
+      let _ = %s
+      ()
+    _ -> ()
+    end|} call
+
+let use_listener call =
+  Printf.sprintf
+    {|    match Socket.listen(0) do
+    Ok(Ok(l)) ->
+      let _ = %s
+      ()
+    _ -> ()
+    end|} call
+
+let run_march_on ~flags src_text =
+  let src = Filename.temp_file "handle_use" ".march" in
+  let oc = open_out src in
+  output_string oc src_text;
+  close_out oc;
+  let out = Filename.temp_file "handle_use" ".out" in
+  let bin = Filename.temp_file "handle_use" ".bin" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s %s %s > %s 2>&1 </dev/null"
+         (Filename.quote compiler_exe_for_cap_dedup)
+         (if flags = "--compile" then "--compile -o " ^ Filename.quote bin else flags)
+         (Filename.quote src) (Filename.quote out))
+  in
+  let ic = open_in out in
+  let s = really_input_string ic (in_channel_length ic) in
+  close_in ic;
+  List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out; bin ];
+  (rc, s)
+
+(* The same program with the Wire function's `needs ()` bound dropped: under
+   `--compile` the typecheck-side ceiling is off, so the only check left is
+   the compiled TIR ceiling, judging [Wire]'s empty `needs`. (With the bound,
+   the per-function bound would answer first and the TIR ceiling would never
+   be the one deciding.) *)
+let unbounded src =
+  let out = Str.global_replace (Str.regexp_string " needs () do") " do" src in
+  (* A reformatted fixture would make this a silent no-op, turning the
+     unbounded legs into repeats of the bounded ones. *)
+  if String.equal out src then
+    Alcotest.fail "unbounded: no ` needs () do` to drop; the fixture changed shape";
+  out
+
+let test_handle_use_charges_nothing () =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup;
+  let accepted what flags src =
+    let (rc, out) = run_march_on ~flags src in
+    if rc <> 0 then Alcotest.failf "%s should pass %s:\n%s" what flags out
+  in
+  let write_src = handle_use_program
+      ~wire:{|    fn send(s : Socket, data : String) : Result((), Socket.SocketError) needs () do
+      Socket.write(s, data)
+    end|}
+      ~use:(use_socket "Wire.send(s, \"x\")") in
+  accepted "Socket.write under `needs ()`" "--check" write_src;
+  accepted "Socket.write under `needs ()`" "--compile" write_src;
+  accepted "Socket.write in a module with no `needs` (compiled TIR ceiling)" "--compile"
+    (unbounded write_src);
+  let connect_src = handle_use_program
+      ~wire:{|    fn dial(host : String) : Result(Result(Socket, Socket.SocketError), CapError) needs () do
+      Socket.connect(host, 80)
+    end|}
+      ~use:{|    let _ = Wire.dial("127.0.0.1")|} in
+  let (rc, out) = run_march_on ~flags:"--check" connect_src in
+  Alcotest.(check bool) "Socket.connect under `needs ()` is refused" true (rc <> 0);
+  Alcotest.(check bool) "and the refusal names IO.NetConnect" true
+    (contains_substring out "IO.NetConnect");
+  (* The control for the TIR-ceiling legs above: the same unbounded module
+     reaching an OPEN is refused by the compiled ceiling, naming [Wire]. *)
+  let (rc, out) = run_march_on ~flags:"--compile" (unbounded connect_src) in
+  Alcotest.(check bool) "Socket.connect in a module with no `needs` fails the compiled ceiling"
+    true (rc <> 0 && contains_substring out "Module `Wire` uses `IO.NetConnect`");
+  let accept_src = handle_use_program
+      ~wire:{|    fn next(l : Listener) : Result(Socket, Socket.SocketError) needs () do
+      Socket.accept(l)
+    end|}
+      ~use:(use_listener "Wire.next(l)") in
+  accepted "Socket.accept(l) under `needs ()`" "--check" accept_src;
+  accepted "Socket.accept(l) under `needs ()`" "--compile" accept_src;
+  accepted "Socket.accept(l) in a module with no `needs` (compiled TIR ceiling)" "--compile"
+    (unbounded accept_src)
+
+(* ── ocap p2b Task 12: IO.Registry and name scopes ─────────────────────
+
+   Through the compiled binary, so the stdlib's `Actor` and `Vault` wrappers
+   are what the calls resolve to: since Task 10 user code reaches the
+   registry and the named tables only through them. *)
+let name_scope_check ?(flags = "--check") src =
+  if not (Sys.file_exists compiler_exe_for_cap_dedup) then
+    Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup;
+  run_march_on ~flags src
+
+let registry_program ~needs ~body =
+  Printf.sprintf
+    {|mod RegScope do
+  needs Actor.Introspect
+  %s
+  fn go(pid, c : Cap(Actor.Introspect), id : String) do
+    %s
+  end
+end
+|} needs body
+
+let test_registry_kind_required () =
+  let src = {|mod RegKind do
+  needs IO.Console
+  fn reg(pid) do
+    let ok = Actor.register(pid, "x")
+    println(bool_to_string(ok))
+  end
+end
+|} in
+  let (rc, out) = name_scope_check src in
+  Alcotest.(check bool) "Actor.register without `needs IO.Registry` is refused" true (rc <> 0);
+  Alcotest.(check bool) "the refusal names IO.Registry" true
+    (contains_substring out "IO.Registry");
+  let (_, json) = name_scope_check ~flags:"--check-json" src in
+  Alcotest.(check bool) "and carries a machine fix inserting `needs IO.Registry`" true
+    (contains_substring json {|"kind":"insert"|}
+     && contains_substring json {|"text":"  needs IO.Registry"|}
+     && contains_substring json "machine-applicable");
+  (* The fixed program is accepted: the fix is the whole migration. *)
+  let fixed = Str.global_replace (Str.regexp_string "  needs IO.Console\n")
+      "  needs IO.Console\n  needs IO.Registry\n" src in
+  if String.equal fixed src then Alcotest.fail "fixture changed shape";
+  let (rc, out) = name_scope_check fixed in
+  if rc <> 0 then Alcotest.failf "with `needs IO.Registry` it should pass:\n%s" out
+
+let scoped_registry = {|needs IO.Registry("logger", prefix("worker."))|}
+
+let test_registry_scope_literal () =
+  List.iter (fun name ->
+      let (rc, out) = name_scope_check
+          (registry_program ~needs:scoped_registry
+             ~body:(Printf.sprintf "Actor.register(pid, %S)" name)) in
+      if rc <> 0 then Alcotest.failf "%S is within the scope, should pass:\n%s" name out)
+    [ "logger"; "worker.1" ];
+  List.iter (fun name ->
+      let (rc, out) = name_scope_check
+          (registry_program ~needs:scoped_registry
+             ~body:(Printf.sprintf "Actor.register(pid, %S)" name)) in
+      Alcotest.(check bool) (Printf.sprintf "%S is refused" name) true (rc <> 0);
+      Alcotest.(check bool) (Printf.sprintf "the refusal for %S is a scope violation" name)
+        true (contains_substring out "cap_scope_violation");
+      Alcotest.(check bool) (Printf.sprintf "the refusal for %S names the scope" name) true
+        (contains_substring out {|IO.Registry("logger", prefix("worker."))|});
+      Alcotest.(check bool) (Printf.sprintf "the refusal names %S" name) true
+        (contains_substring out (Printf.sprintf "`%s`" name)))
+    [ "other"; "worker"; "workers.1" ]
+
+let test_registry_scope_computed_fails_closed () =
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:scoped_registry
+         ~body:{|Actor.whereis(c, "worker." ++ id)|}) in
+  Alcotest.(check bool) "a computed name under a name scope is refused" true (rc <> 0);
+  Alcotest.(check bool) "with the cannot-prove message" true
+    (contains_substring out "cannot prove"
+     && contains_substring out {|is within `IO.Registry("logger", prefix("worker."))`|}
+     && contains_substring out "phase 4");
+  (* The control: the same computed name under an unscoped grant passes. *)
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:"needs IO.Registry"
+         ~body:{|Actor.whereis(c, "worker." ++ id)|}) in
+  if rc <> 0 then Alcotest.failf "unscoped IO.Registry should accept a computed name:\n%s" out
+
+let test_registry_listing_needs_unscoped () =
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:scoped_registry ~body:"Actor.registered(c)") in
+  Alcotest.(check bool) "Actor.registered under a scoped IO.Registry is refused" true (rc <> 0);
+  Alcotest.(check bool) "the refusal says listing exceeds the scope" true
+    (contains_substring out "Actor.registered" && contains_substring out "every name");
+  let (rc, out) = name_scope_check
+      (registry_program ~needs:"needs IO.Registry" ~body:"Actor.registered(c)") in
+  if rc <> 0 then Alcotest.failf "Actor.registered under bare IO.Registry should pass:\n%s" out
+
+let mut_program name =
+  Printf.sprintf {|mod MutScope do
+  needs IO.Mut("sessions")
+  fn find() : Bool do
+    match Vault.whereis(%S) do
+      Ok(Some(t)) ->
+        let _ = Vault.get(t, "k")
+        true
+      _ -> false
+    end
+  end
+end
+|} name
+
+let test_mut_lookup_scope () =
+  let (rc, out) = name_scope_check (mut_program "sessions") in
+  if rc <> 0 then Alcotest.failf "Vault.whereis(\"sessions\") under IO.Mut(\"sessions\") should pass:\n%s" out;
+  let (rc, out) = name_scope_check (mut_program "tokens") in
+  Alcotest.(check bool) "Vault.whereis(\"tokens\") is refused" true (rc <> 0);
+  Alcotest.(check bool) "as a scope violation naming the scope" true
+    (contains_substring out "cap_scope_violation"
+     && contains_substring out {|IO.Mut("sessions")|})
+
+let test_name_scope_invalid () =
+  (* Each case pins the REASON, so a rejection for the wrong cause (another
+     validator firing, a parse error elsewhere) does not pass. *)
+  List.iter (fun (what, needs, reason) ->
+      let (rc, out) = name_scope_check
+          (Printf.sprintf "mod Bad do\n  %s\n  fn f() do 1 end\nend\n" needs) in
+      Alcotest.(check bool) (what ^ " is refused") true (rc <> 0);
+      Alcotest.(check bool) (what ^ " is invalid_cap_scope") true
+        (contains_substring out "invalid_cap_scope");
+      if not (contains_substring out reason) then
+        Alcotest.failf "%s: expected the reason %S in:\n%s" what reason out)
+    [ ("`;` in a name", {|needs IO.Mut("a;b")|}, "cannot contain `;`");
+      ("`=` in a name", {|needs IO.Mut("a=b")|}, "contains `=`");
+      ("`,` in a second name", {|needs IO.Registry("a", "b,c")|}, "contains `,`");
+      ("an empty name", {|needs IO.Mut("")|}, "a name cannot be empty");
+      ("an empty first name before a second", {|needs IO.Mut("", "b")|},
+       "first string cannot be empty");
+      ("an empty prefix", {|needs IO.Registry(prefix(""))|}, "a prefix cannot be empty");
+      ("an option IO.Mut does not take", {|needs IO.Mut("a", no_redirects)|},
+       "is not an option a name scope takes");
+      (* R16: one surface form per encoding. *)
+      ("an identifier-valued prefix", {|needs IO.Registry(prefix(w))|},
+       "takes a quoted string, not a name");
+      ("a name given as an option", {|needs IO.Mut("a", name("b"))|},
+       "is not a scope option");
+      ("an identifier-valued name option", {|needs IO.Mut("a", name(b))|},
+       "takes a quoted string, not a name");
+      ("a string-valued methods option", {|needs IO.NetConnect("h", methods("get"))|},
+       "takes HTTP method names") ]
+
+(* Fix round 1 (review I1-I3, M4): the places a name call used to slip past
+   the scope. Each is a reject case naming the out-of-scope name, and where a
+   rule could over-reach, an accepted control. *)
+let refused_naming what src name =
+  let (rc, out) = name_scope_check src in
+  Alcotest.(check bool) (what ^ " is refused") true (rc <> 0);
+  if not (contains_substring out "cap_scope_violation"
+          && contains_substring out (Printf.sprintf "`%s`" name)) then
+    Alcotest.failf "%s: expected a cap_scope_violation naming `%s`:\n%s" what name out
+
+let accepted what src =
+  let (rc, out) = name_scope_check src in
+  if rc <> 0 then Alcotest.failf "%s should pass:\n%s" what out
+
+let test_name_scope_every_body () =
+  refused_naming "a name call in an impl method"
+    {|mod P do
+  needs IO.Registry("logger")
+  interface Runner(a) do
+    fn run : a -> Bool
+  end
+  type Box = Box(Int)
+  impl Runner(Box) do
+    fn run(b) do
+      Actor.unregister("other")
+    end
+  end
+end
+|} "other";
+  refused_naming "a name call in a test body"
+    {|mod P do
+  needs IO.Registry("logger")
+  test "t" do
+    let _ = Actor.unregister("other")
+    assert true
+  end
+end
+|} "other";
+  refused_naming "a name call in a setup block"
+    {|mod P do
+  needs IO.Registry("logger")
+  setup do
+    let _ = Actor.unregister("other")
+    ()
+  end
+  test "t" do
+    assert true
+  end
+end
+|} "other";
+  refused_naming "a name call in a test inside a describe block"
+    {|mod P do
+  needs IO.Registry("logger")
+  describe "d" do
+    test "t" do
+      let _ = Actor.unregister("another")
+      assert true
+    end
+  end
+end
+|} "another"
+
+let test_name_scope_vault_ns () =
+  refused_naming "Vault.ns_get outside IO.Mut(\"sessions\")"
+    {|mod P do
+  needs IO.Mut("sessions")
+  fn go() do
+    Vault.ns_get("tokens", "k")
+  end
+end
+|} "tokens";
+  accepted "Vault.ns_get inside IO.Mut(\"sessions\")"
+    {|mod P do
+  needs IO.Mut("sessions")
+  fn go() do
+    Vault.ns_get("sessions", "k")
+  end
+end
+|}
+
+let test_name_scope_alias () =
+  refused_naming "an aliased Actor.register"
+    {|mod P do
+  needs IO.Registry("logger")
+  alias Actor, as: A
+  fn go(pid) do
+    A.register(pid, "other")
+  end
+end
+|} "other";
+  refused_naming "an alias from the enclosing module"
+    {|mod Outer do
+  needs IO.Registry
+  alias Actor, as: A
+  mod Inner do
+    needs IO.Registry("logger")
+    fn go(pid) do
+      A.register(pid, "other")
+    end
+  end
+end
+|} "other"
+
+let test_name_scope_nested_cannot_widen () =
+  let (rc, out) = name_scope_check
+      {|mod Outer do
+  needs IO.Registry("logger")
+  mod Inner do
+    needs IO.Registry
+    fn go() do
+      Actor.unregister("other")
+    end
+  end
+  fn f() do Actor.unregister("logger") end
+end
+|} in
+  Alcotest.(check bool) "a nested unscoped IO.Registry under a scoped parent is refused" true
+    (rc <> 0);
+  Alcotest.(check bool) "as wider than the enclosing module's scope" true
+    (contains_substring out "wider than the enclosing module's `IO.Registry(\"logger\")`");
+  accepted "a nested scope within the parent's"
+    {|mod Outer do
+  needs IO.Registry("logger", prefix("w."))
+  mod Inner do
+    needs IO.Registry(prefix("w.x."))
+    fn go() do
+      Actor.unregister("w.x.1")
+    end
+  end
+  fn f() do Actor.unregister("logger") end
+end
+|}
+
+let test_name_scope_fn_value () =
+  let src needs = Printf.sprintf {|mod P do
+  %s
+  fn go() do
+    let f = Actor.unregister
+    f("logger")
+  end
+end
+|} needs in
+  let (rc, out) = name_scope_check (src {|needs IO.Registry("logger")|}) in
+  Alcotest.(check bool) "a name-taking function used as a value under a scope is refused" true
+    (rc <> 0);
+  Alcotest.(check bool) "with the out-of-sight message" true
+    (contains_substring out "is used as a value" && contains_substring out "phase 4");
+  accepted "the same under an unscoped IO.Registry" (src "needs IO.Registry")
+
 (* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
 
    `fn main(cap : Cap(IO))` makes Check 1 separately demand `needs IO`
@@ -4807,6 +5223,18 @@ end|} in
    builtin_cap_table (typecheck.ml).  A module whose body calls one without
    declaring `needs IO.NetListen` warns; declaring it silences the warning; and
    the DISTINCT NetConnect cap must not satisfy a NetListen requirement. *)
+(* ocap phase 2 (Task 10): the raw handle builtins (tcp_listen, csv_next_row,
+   tls_client_ctx, ws_recv, ...) are stdlib-only. The capability body-scan
+   tests below pin how the SCAN treats such a builtin, which is a property of
+   the scan, not of the gate, so they run with the gate lifted for exactly the
+   names they call (registering the source as stdlib instead would switch the
+   capability checks off with it). *)
+let with_raw_builtins names f =
+  let module TB = March_typecheck.Typecheck_builtins in
+  let saved = !TB.stdlib_only in
+  TB.stdlib_only := List.filter (fun (n, _) -> not (List.mem n names)) saved;
+  Fun.protect f ~finally:(fun () -> TB.stdlib_only := saved)
+
 let netlisten_body_warns name =
   let m =
     (try ignore (Str.search_forward (Str.regexp_string "IO.NetListen") name 0); true
@@ -4816,7 +5244,7 @@ let netlisten_body_warns name =
   in m
 
 let test_netlisten_body_missing_needs_warns () =
-  let ctx = typecheck {|mod Srv do
+  let ctx = with_raw_builtins ["tcp_listen"] @@ fun () -> typecheck {|mod Srv do
     fn serve() do
       tcp_listen(8080)
     end
@@ -4833,7 +5261,7 @@ let test_netlisten_body_missing_needs_warns () =
     "tcp_listen with no needs: ERRORS, naming needs IO.NetListen" true has_diag
 
 let test_netlisten_body_with_needs_no_warning () =
-  let ctx = typecheck {|mod Srv do
+  let ctx = with_raw_builtins ["tcp_listen"] @@ fun () -> typecheck {|mod Srv do
     needs IO.NetListen
     fn serve() do
       tcp_listen(8080)
@@ -4852,7 +5280,7 @@ let test_netlisten_body_with_needs_no_warning () =
 let test_netlisten_not_satisfied_by_netconnect () =
   (* NetConnect (client) is a sibling leaf, NOT a super-cap of NetListen; it must
      not satisfy a NetListen body requirement. *)
-  let ctx = typecheck {|mod Srv do
+  let ctx = with_raw_builtins ["tcp_listen"] @@ fun () -> typecheck {|mod Srv do
     needs IO.NetConnect
     fn serve() do
       tcp_listen(8080)
@@ -7002,7 +7430,7 @@ let test_qualified_opaque_type_evals () =
    specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md);
    the second test below pins that. *)
 let test_qualified_builtin_type_unifies_bare () =
-  let ctx = typecheck {|mod CsvDemo do
+  let ctx = with_raw_builtins ["csv_next_row"] @@ fun () -> typecheck {|mod CsvDemo do
     needs IO.FileRead
     mod Csv do
       needs IO.FileRead
@@ -7025,7 +7453,7 @@ let test_qualified_builtin_type_unifies_bare () =
     false (has_errors ctx)
 
 let test_user_type_named_like_builtin_is_distinct () =
-  let ctx = typecheck {|mod CsvDemo do
+  let ctx = with_raw_builtins ["csv_next_row"] @@ fun () -> typecheck {|mod CsvDemo do
     needs IO.FileRead
     type CsvRow = CsvEof | Row(List(String))
 
@@ -11382,53 +11810,66 @@ let test_cap_body_mut_parent_ok () =
 
 (* ── IO.NetConnect.TLS: encrypted transport capability ──────────────────── *)
 
+(* Making a TLS context is the charged act (ocap phase 2, Task 10):
+   tls_connect runs over a socket the caller already holds and charges nothing
+   (pinned by [test_cap_body_tls_connect_is_a_use]). *)
 let test_cap_body_missing_tls () =
-  let ctx = typecheck {|mod Secure do
-    fn dial(fd, h, host) do tls_connect(fd, h, host) end
+  let ctx = with_raw_builtins ["tls_client_ctx"] @@ fun () -> typecheck {|mod Secure do
+    fn mk(ca, alpn) do tls_client_ctx(ca, alpn, 1, 0) end
   end|} in
-  Alcotest.(check bool) "tls_connect without needs: body-scan ERROR" true
+  Alcotest.(check bool) "tls_client_ctx without needs: body-scan ERROR" true
     (has_error_with ctx "IO.NetConnect.TLS")
 
 let test_cap_body_tls_ok () =
-  let ctx = typecheck {|mod Secure do
+  let ctx = with_raw_builtins ["tls_client_ctx"] @@ fun () -> typecheck {|mod Secure do
     needs IO.NetConnect.TLS
-    fn dial(fd, h, host) do tls_connect(fd, h, host) end
+    fn mk(ca, alpn) do tls_client_ctx(ca, alpn, 1, 0) end
   end|} in
-  Alcotest.(check bool) "tls_connect with needs IO.NetConnect.TLS: no diagnostic" false
+  Alcotest.(check bool) "tls_client_ctx with needs IO.NetConnect.TLS: no diagnostic" false
     (has_error_with ctx "IO.NetConnect.TLS")
 
 let test_cap_body_tls_parent_ok () =
-  let ctx = typecheck {|mod Secure do
+  let ctx = with_raw_builtins ["tls_client_ctx"] @@ fun () -> typecheck {|mod Secure do
     needs IO.NetConnect
+    fn mk(ca, alpn) do tls_client_ctx(ca, alpn, 1, 0) end
+  end|} in
+  Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_client_ctx: no diagnostic" false
+    (has_error_with ctx "IO.NetConnect.TLS")
+
+let test_cap_body_tls_connect_is_a_use () =
+  let ctx = with_raw_builtins ["tls_connect"] @@ fun () -> typecheck {|mod Secure do
     fn dial(fd, h, host) do tls_connect(fd, h, host) end
   end|} in
-  Alcotest.(check bool) "needs IO.NetConnect umbrella covers tls_connect: no diagnostic" false
-    (has_error_with ctx "IO.NetConnect.TLS")
+  Alcotest.(check bool) "tls_connect (a use of a held socket) needs no capability" false
+    (has_error_with ctx "IO.NetConnect")
 
 (* ── IO.WebSocket: least-privilege sub-cap of IO.NetConnect ──────────────── *)
 
+(* ws_recv / ws_send / ws_select act on a WebSocket the HTTP server's upgrade
+   handed over: since ocap phase 2 (Task 10) they are uses, charged nothing.
+   IO.WebSocket stays declarable. *)
 let test_cap_body_missing_ws () =
-  let ctx = typecheck {|mod Ws do
+  let ctx = with_raw_builtins ["ws_recv"] @@ fun () -> typecheck {|mod Ws do
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "ws_recv without needs: body-scan ERROR" true
+  Alcotest.(check bool) "ws_recv without needs: a handle use, no capability error" false
     (has_error_with ctx "IO.WebSocket")
 
-let test_cap_body_ws_ok () =
-  let ctx = typecheck {|mod Ws do
+(* What can still go wrong for a module that declares `needs IO.WebSocket` and
+   only receives on a WebSocket: nothing charges the capability any more, so
+   the declaration is unused, and Check 2 says so (a warning). If ws_recv were
+   charged again this warning would disappear. *)
+let test_cap_body_ws_needs_now_unused () =
+  let ctx = with_raw_builtins ["ws_recv"] @@ fun () -> typecheck {|mod Ws do
     needs IO.WebSocket
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "ws_recv with needs IO.WebSocket: no diagnostic" false
-    (has_error_with ctx "IO.WebSocket")
-
-let test_cap_body_ws_parent_ok () =
-  let ctx = typecheck {|mod Ws do
-    needs IO.NetConnect
-    fn go(fd) do ws_recv(fd) end
-  end|} in
-  Alcotest.(check bool) "needs IO.NetConnect umbrella covers ws_recv: no diagnostic" false
-    (has_error_with ctx "IO.WebSocket")
+  Alcotest.(check bool) "no capability error" false (has_error_with ctx "IO.WebSocket");
+  Alcotest.(check bool) "needs IO.WebSocket is reported unused" true
+    (List.exists (fun d ->
+         d.March_errors.Errors.severity = March_errors.Errors.Warning
+         && d.March_errors.Errors.code = March_errors.Errors.Code.unused_needs)
+        (March_errors.Errors.sorted ctx))
 
 let test_cap_ws_arg_ok () =
   let ctx = typecheck {|mod Ws do
@@ -16677,10 +17118,13 @@ let test_stdlib_sorted_set_cmp_curried () =
 let test_stdlib_range_reduce_curried () =
   assert_stdlib_file_typechecks_cleanly "range.march"
 
+(* dist_link.march is stdlib source that drives the @[stdlib_internal]
+   cluster plumbing (NetKernel.send_frame, ocap phase 2 task 9), so it is
+   checked as what it is: --stdlib-source registers its span as stdlib. *)
 let test_stdlib_dist_link_cli_check () =
   let project_root = march_project_root () in
   let main_exe = find_main_exe () in
-  let cmd = Printf.sprintf "cd %s && %s --check stdlib/dist_link.march"
+  let cmd = Printf.sprintf "cd %s && %s --check --stdlib-source stdlib/dist_link.march"
       (Filename.quote project_root) (Filename.quote main_exe) in
   let rc, output = run_capture cmd in
   Alcotest.(check int)
@@ -18645,6 +19089,12 @@ let test_handle_name_tables_agree () =
   List.iter (fun n ->
       Alcotest.(check bool) (n ^ " is undotted") false (String.contains n '.'))
     reserved
+  ;
+  (* Task 13: the not-sendable list covers every builtin handle box. *)
+  List.iter (fun n ->
+      Alcotest.(check (option string)) (n ^ " is a not-sendable handle type") (Some n)
+        (March_caps.Cap_surface_ty.handle_type_named n))
+    lowered
 
 (* MINOR 5: the stdlib declares no type with a reserved handle name (the
    nominal pass would give it an identity the cached stdlib env lacks). *)
@@ -18665,6 +19115,139 @@ let test_stdlib_declares_no_reserved_type () =
   Alcotest.(check bool) "walked the stdlib" true (List.length decls > 50);
   Alcotest.(check (list string)) "no stdlib type named Socket, Listener or Process" [] !found
 
+(* ── Task 13: handles do not cross nodes.  A message type holding a handle
+   (Cap_surface_ty.handle_type_spellings) at any depth is a compile-time
+   error naming the handle type, at the `derive Json` and at the send; the
+   golden case is test/errors/handle_not_sendable_1.march. *)
+let node_send_prog body = Printf.sprintf {|mod App do
+  needs IO.NetConnect
+  needs IO.Mut
+%s
+  fn main(_n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
+    ()
+  end
+end
+|} body
+
+let headline h = "`" ^ h ^ "` cannot be sent to another node: a handle names a resource on this node"
+
+let test_handle_send_direct () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  fn f(peer : Peer, h : File.Handle) do Node.send(peer, GlobalPid.make("b", 1, 1), h) end|}) in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("names File.Handle:\n" ^ out) true (contains_substring out (headline "File.Handle"));
+  Alcotest.(check bool) ("says it is the handle itself:\n" ^ out) true
+    (contains_substring out "is the handle itself");
+  Alcotest.(check bool) ("no codec advice:\n" ^ out) false (contains_substring out "derive Json for")
+
+(* Depth: the handle sits in an un-derived variant inside an Option inside a
+   derived record, so the derive itself names no handle and only the send
+   site's expansion through declarations finds it. *)
+let test_handle_send_at_depth () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  type Wrap = Wrap(Option(Udp.UdpSocket)) | Empty
+  type Job = { n : Int, w : Wrap }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end|}) in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("names UdpSocket as written, not its Socket box:\n" ^ out) true
+    (contains_substring out (headline "UdpSocket"));
+  Alcotest.(check bool) ("names the message type:\n" ^ out) true
+    (contains_substring out "sends a value of type `Job`, which holds a `UdpSocket`")
+
+let test_handle_derive_refused () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  type Spawned = Spawned(Process) | Done(Int)
+  derive Json for Spawned|}) in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("names Process:\n" ^ out) true (contains_substring out (headline "Process"));
+  Alcotest.(check bool) ("names the constructor:\n" ^ out) true
+    (contains_substring out "`Spawned` cannot derive Json, because its constructor `Spawned` holds a `Process`")
+
+let test_handle_remote_actor () =
+  let rc, out = run_march_on ~flags:"--check" {|mod App do
+  needs IO.Console
+  type Hit = { n : Int, s : TlsConn }
+  @[remote]
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Bump(h : Hit) do
+      { total: state.total + h.n }
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let _ = spawn(Counter)
+    ()
+  end
+end
+|} in
+  Alcotest.(check bool) ("refused:\n" ^ out) true (rc <> 0);
+  Alcotest.(check bool) ("at the handler, naming TlsConn:\n" ^ out) true
+    (contains_substring out "receives `Bump` from other nodes as a `Hit`, which holds a `TlsConn`");
+  Alcotest.(check bool) ("reported once:\n" ^ out) true
+    (List.length (String.split_on_char '\n' out
+                  |> List.filter (fun l -> contains_substring l (headline "TlsConn"))) = 1)
+
+(* Silence: a program's own `type Process` and `type Socket` are not the
+   handles, and a handle-free message still sends. *)
+let test_handle_user_types_send () =
+  let rc, out = run_march_on ~flags:"--check" (node_send_prog {|
+  type Process = P(Int)
+  derive Json for Process
+  type Socket = S(String)
+  derive Json for Socket
+  type Job = { p : Process, s : Socket, n : Int }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end|}) in
+  Alcotest.(check int) ("user types named like handles send:\n" ^ out) 0 rc;
+  Alcotest.(check bool) ("no handle diagnostic:\n" ^ out) false
+    (contains_substring out "cannot be sent to another node")
+  ;
+  (* Fix round 1 (review I1): the four stdlib wrapper names are judged by
+     identity too.  Each program sends, and derives Json for, its OWN type
+     spelled like a wrapper: bare in the declaring module (as a field and as
+     the message itself), qualified from a sibling module, as a record, and
+     under a user module named like the stdlib's (`Tls.TlsCtx`). *)
+  List.iter (fun (what, body) ->
+      let rc, out = run_march_on ~flags:"--check" (node_send_prog body) in
+      Alcotest.(check int) (what ^ ": accepted:\n" ^ out) 0 rc;
+      Alcotest.(check bool) (what ^ ": no handle diagnostic:\n" ^ out) false
+        (contains_substring out "cannot be sent to another node"))
+    [ "own UdpSocket, same module", {|
+  type UdpSocket = U(Int)
+  derive Json for UdpSocket
+  type Job = { u : UdpSocket, n : Int }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end
+  fn g(peer : Peer, u : UdpSocket) do Node.send(peer, GlobalPid.make("b", 1, 1), u) end|};
+      "own TlsCtx, qualified from a sibling", {|
+  mod A do
+    type TlsCtx = C(String)
+    derive Json for TlsCtx
+  end
+  mod B do
+    type Job = { c : A.TlsCtx }
+    derive Json for Job
+    fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end
+  end|};
+      "own WsSocket record", {|
+  type WsSocket = { id : Int }
+  derive Json for WsSocket
+  type Job = { w : WsSocket }
+  derive Json for Job
+  fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end|};
+      "own mod Tls", {|
+  mod Tls do
+    type TlsConn = T(Int)
+    derive Json for TlsConn
+  end
+  mod B do
+    type Job = { t : Tls.TlsConn }
+    derive Json for Job
+    fn f(peer : Peer, j : Job) do Node.send(peer, GlobalPid.make("b", 1, 1), j) end
+  end|} ]
+
 let handle_types_suite =
   ("handle types",
    [ Alcotest.test_case "handle_type_names_resolve" `Quick test_handle_type_names_resolve;
@@ -18678,7 +19261,12 @@ let handle_types_suite =
        test_reserved_json_derive_no_false_collision;
      Alcotest.test_case "handle_name_tables_agree" `Quick test_handle_name_tables_agree;
      Alcotest.test_case "stdlib_declares_no_reserved_type" `Quick
-       test_stdlib_declares_no_reserved_type ])
+       test_stdlib_declares_no_reserved_type;
+     Alcotest.test_case "handle_send_direct" `Quick test_handle_send_direct;
+     Alcotest.test_case "handle_send_at_depth" `Quick test_handle_send_at_depth;
+     Alcotest.test_case "handle_derive_refused" `Quick test_handle_derive_refused;
+     Alcotest.test_case "handle_remote_actor" `Quick test_handle_remote_actor;
+     Alcotest.test_case "handle_user_types_send" `Quick test_handle_user_types_send ])
 
 let compiler_suites =
   [
@@ -19219,6 +19807,18 @@ let compiler_suites =
           Alcotest.test_case "missing needs reported once per module" `Quick test_missing_needs_reported_once_per_module;
           Alcotest.test_case "missing needs dedup: no orphan cap_infer hint" `Quick test_missing_needs_dedup_no_orphan_hint;
           Alcotest.test_case "missing needs dedup: no orphan hint with main(cap : Cap(IO))" `Quick test_missing_needs_dedup_no_orphan_hint_main_cap_param;
+          Alcotest.test_case "handle_use_charges_nothing" `Quick test_handle_use_charges_nothing;
+          Alcotest.test_case "registry_kind_required" `Quick test_registry_kind_required;
+          Alcotest.test_case "registry_scope_literal" `Quick test_registry_scope_literal;
+          Alcotest.test_case "registry_scope_computed_fails_closed" `Quick test_registry_scope_computed_fails_closed;
+          Alcotest.test_case "registry_listing_needs_unscoped" `Quick test_registry_listing_needs_unscoped;
+          Alcotest.test_case "mut_lookup_scope" `Quick test_mut_lookup_scope;
+          Alcotest.test_case "name_scope_invalid" `Quick test_name_scope_invalid;
+          Alcotest.test_case "name_scope_every_body" `Quick test_name_scope_every_body;
+          Alcotest.test_case "name_scope_vault_ns" `Quick test_name_scope_vault_ns;
+          Alcotest.test_case "name_scope_alias" `Quick test_name_scope_alias;
+          Alcotest.test_case "name_scope_nested_cannot_widen" `Quick test_name_scope_nested_cannot_widen;
+          Alcotest.test_case "name_scope_fn_value" `Quick test_name_scope_fn_value;
           Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
           Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
           Alcotest.test_case "nested module uses its own proof cap without needs" `Quick test_nested_module_own_proof_cap_needs_no_needs;
@@ -19589,12 +20189,12 @@ let compiler_suites =
           Alcotest.test_case "vault_new missing needs: warn IO.Mut"        `Quick test_cap_body_missing_mut;
           Alcotest.test_case "vault_new with needs IO.Mut: no warn"        `Quick test_cap_body_mut_ok;
           Alcotest.test_case "needs IO umbrella covers vault_new"          `Quick test_cap_body_mut_parent_ok;
-          Alcotest.test_case "tls_connect missing needs: error TLS"         `Quick test_cap_body_missing_tls;
-          Alcotest.test_case "tls_connect with needs IO.NetConnect.TLS"    `Quick test_cap_body_tls_ok;
+          Alcotest.test_case "tls_client_ctx missing needs: error TLS"      `Quick test_cap_body_missing_tls;
+          Alcotest.test_case "tls_client_ctx with needs IO.NetConnect.TLS" `Quick test_cap_body_tls_ok;
           Alcotest.test_case "needs IO.NetConnect umbrella covers TLS"     `Quick test_cap_body_tls_parent_ok;
-          Alcotest.test_case "ws_recv missing needs: error WebSocket"       `Quick test_cap_body_missing_ws;
-          Alcotest.test_case "ws_recv with needs IO.WebSocket"             `Quick test_cap_body_ws_ok;
-          Alcotest.test_case "needs IO.NetConnect umbrella covers WS"      `Quick test_cap_body_ws_parent_ok;
+          Alcotest.test_case "tls_connect is a handle use: no capability"  `Quick test_cap_body_tls_connect_is_a_use;
+          Alcotest.test_case "ws_recv is a handle use: no capability"      `Quick test_cap_body_missing_ws;
+          Alcotest.test_case "needs IO.WebSocket over ws_recv is unused"   `Quick test_cap_body_ws_needs_now_unused;
           Alcotest.test_case "Cap(IO.WebSocket) arg: no error"             `Quick test_cap_ws_arg_ok;
           Alcotest.test_case "needs IO.Telemetry: valid declaration"       `Quick test_cap_body_telemetry_decl_ok;
           Alcotest.test_case "extern block missing IO.Foreign: warn"       `Quick test_cap_body_missing_foreign;

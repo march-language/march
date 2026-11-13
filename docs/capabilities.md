@@ -58,7 +58,7 @@ callers never have to satisfy. See [The grant](#grant).
 - [Host and method scopes on IO.NetConnect](#host-scopes)
 - [Refusals: capability operations return `Result`](#refusals)
 - [When not to use IO caps](#when-not-to-use-io-caps)
-- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
+- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
 **Behavioral caps**
 
@@ -182,9 +182,9 @@ IO
 │   └── IO.FileWrite    — write, delete, rename files/dirs
 ├── IO.Network
 │   ├── IO.NetConnect   — outbound TCP
-│   │   ├── IO.NetConnect.TLS  — encrypted transport (tls_connect, tls_accept, …)
+│   │   ├── IO.NetConnect.TLS  — encrypted transport (Tls.client_ctx, Tls.server_ctx)
 │   │   ├── IO.Database — database connections (declaration-only; child of NetConnect)
-│   │   └── IO.WebSocket — WebSocket connections (ws_send, ws_recv, ws_select; child of NetConnect)
+│   │   └── IO.WebSocket — WebSocket connections (declaration-only: a WsSocket is a handle; child of NetConnect)
 │   └── IO.NetListen    — bind + listen on a port
 ├── IO.Process          — env vars, child processes, process exit
 ├── IO.Clock            — wall clock (unix_time_ms, DateTime.now); monotonic time is ambient, see below
@@ -192,6 +192,7 @@ IO
 ├── IO.Signal           — OS-signal watchers (Signal.watch/unwatch/raise)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
+├── IO.Registry         — naming and finding actors by name (Actor.register/whereis/registered)
 ├── IO.Telemetry        — telemetry/observability emission (declaration-only)
 └── IO.Foreign          — calling unverified C (extern blocks)
     └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
@@ -717,14 +718,27 @@ well formed and does not decode to `.`, `/`, `\`, `%` or a control character, an
 because a server may resolve it differently (or, with a CR/LF, read a second request). A
 literal prefix proves the host but not the path (`"https://api.example.com/v1/weather/" ++
 "../admin"`), so under a path scope every request's path is checked when it is sent, and
-the compiler reports the violations it can see. A path-scoped host admits no raw
-`tcp_connect`. A URL
+the compiler reports the violations it can see. A path-scoped host admits no plain
+`Socket.connect`. A URL
 with no port uses its scheme's default (80 or 443). Two options may follow, in either
 order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete`,
 `options`, and `no_redirects`. Options alone mean any host:
 `needs IO.NetConnect(methods(get))`. Without `methods(...)` every method is allowed, and
-unscoped `needs IO.NetConnect` still means any host. Scopes are accepted on
-`IO.NetConnect` only; it also bounds the TLS connections built on it.
+unscoped `needs IO.NetConnect` still means any host. Host scopes are accepted on
+`IO.NetConnect` only; it also bounds the TLS connections built on it. (`IO.Mut` and
+`IO.Registry` take [name scopes](#name-scopes) instead.)
+
+**Scope syntax.** The parenthesised scope takes several leading strings, then options:
+`needs IO.Mut("a", "b")`. An option may take a string argument as well as identifiers:
+`needs IO.Registry(prefix("worker."))`, or both, `needs IO.Registry("logger",
+prefix("worker."))`. Strings come first; once an option appears no further string may
+follow. Each encoding has one spelling: only `methods(...)` takes identifiers, every
+other option takes one string (`prefix(w)` is refused; write `prefix("w")`), a further
+name is a further string (there is no `name(...)` option), a scope string may not
+contain `;`, and an empty first string may not be followed by more. Internally a scope is one string: each extra string becomes `name=<s>` and a
+string-argument option `<option>=<s>`, so `IO.Mut("a", "b")` is `a;name=b`. Which
+capabilities accept these forms, and what they mean, is set by the capability, not by the
+syntax.
 
 **What is checked, at compile time.** In a scoped module, every network call must have a
 destination the compiler can see, inside the scope, with an allowed method; anything else
@@ -733,11 +747,12 @@ fails the build. The check is fail-closed:
 - A literal URL, or a literal prefix that ends its host with `/`
   (`"https://api.stripe.com/" ++ path`), is checked against the scope. Without the `/`
   the rest could extend the host (`".evil.test/"`), so it is refused.
-- A URL from a parameter, a computed string, a socket handle (`tcp_send_all(fd, ...)`,
-  `tls_connect`), or a call the compiler cannot follow is refused (`cap_host_unproven`).
+- A URL from a parameter, a computed string, an operation on a socket the module was
+  handed (`Socket.write(s, ...)`, `Tls.connect`), or a call the compiler cannot follow is
+  refused (`cap_host_unproven`).
 - The method comes from the call: `HttpClient.get`, `HttpTransport.simple_get` are GET,
-  `HttpClient.post` POST, `put_request` PUT, `delete` DELETE. A raw `tcp_connect` shows
-  no method, so it is allowed only to a host declared without `methods(...)`.
+  `HttpClient.post` POST, `put_request` PUT, `delete` DELETE. A plain `Socket.connect`
+  shows no method, so it is allowed only to a host declared without `methods(...)`.
 - The scope covers everything the module reaches, including calls into your other modules
   and dependencies. A helper that takes the URL as a parameter must say so with
   `@[net_dest(url)]`, and is then checked to pass that parameter straight to the
@@ -822,11 +837,38 @@ helpers degrade instead of failing: `List.pmap` and friends compute
 sequentially when spawning is refused, `IO.inspect` and `debug` still return
 their argument, and the Logger drops a line or a timestamp.
 
+**Handles need no capability.** A `File.Handle`, `File.Dir`, `Socket`,
+`Listener`, `Udp.UdpSocket`, `Tls.TlsConn`, `WebSocket.WsSocket` or `Process`
+is an unforgeable, reference-counted handle: user code gets one only from a
+checked open (`File.open`, `Socket.connect`, `Socket.listen`,
+`Process.spawn_async`, ...), and the raw integer builtins under them
+(`tcp_send_all`, `file_read_line`, `process_wait_proc`, ...) are internal to
+the standard library (`stdlib_internal`). Using a handle you hold is therefore
+not charged: a function bounded by `needs ()` may read a `File.Handle`, write to
+a `Socket` or wait on a `Process` it was handed, and accept on a `Listener`;
+it may not open one. One caveat while a Vault's element type is not part of
+its identity (`Vault.open(name)` lets the caller choose it): an opaque type over
+plain data, such as the cluster's `PeerRegistry.Fd`, can be minted through a
+name-keyed Vault under the interpreter, and compiled code then fails at the
+stdlib's match rather than refusing the open (`specs/todos/2026-11-13-vault-element-type-not-identity.md`);
+the handle boxes themselves cannot. A handle never leaves its node: a message type holding one
+cannot `derive Json` or go through `Node.send` ([Clustering]({{ site.baseurl }}/docs/clustering/)).
+
+```march
+mod Wire do
+  fn send(s : Socket, data : String) : Result((), Socket.SocketError) needs () do
+    Socket.write(s, data)       -- fine: the socket was opened elsewhere, checked
+  end
+end
+```
+
 Until run-time authority lands (ocap phase 4), nothing refuses except the
 test-only `MARCH_TEST_REFUSE` hook, a comma-separated list of capability kinds
-the launch refuses. Network opens that yield a handle (UDP, TLS contexts,
-`HttpClient`, `HttpServer`) still return their old types; they move with
-ocap phase 2.
+the launch refuses. UDP sockets and TLS contexts are handles opened by a
+checked open (`Udp.open`, `Tls.client_ctx`). `HttpClient`, `HttpServer`,
+`Tls.https_get` and `Udp.resolve` still return their old types and move with
+run-time authority (ocap phase 4); `HttpClient` and `Tls.https_get` already
+dial through `Socket.connect`, so their target is checked like any connect.
 
 ### When *not* to use IO caps
 
@@ -863,6 +905,69 @@ This is especially useful for library code that should have no hidden state.
 
 **Reads need no capability.** A Vault table is in-memory: no part of what a `Vault.get`/`Vault.size`/`Vault.keys` lookup does escapes the process, so it exercises no ambient authority and needs no `needs IO.Mut`. What IS authority is turning a NAME into a table handle (`Vault.new`/`Vault.whereis`, the `File.open(path)` shape) and mutating state other actors observe (`Vault.set`, `Vault.set_ttl`, `Vault.drop`, `Vault.update`); those keep `needs IO.Mut`. Accepted trade-off: a read of shared mutable state is non-deterministic (it observes another actor's writes), so `needs` no longer signals "this function is not pure" for a reader. Authority stays auditable at the boundary, since some module still had to name the table and declare the capability to create or write it.
 
+### IO.Registry: naming and finding actors
+{: #ioregistry-naming-and-finding-actors}
+
+`IO.Registry` covers the named actor registry: `Actor.register`, `Actor.unregister`,
+`Actor.whereis` and `Actor.registered`. Finding an actor by name turns a string into a
+`Pid`, which is a capability, and registering a name can impersonate the actor others
+expect behind it, so both are authority. A module that calls them declares
+`needs IO.Registry` (or `needs IO`); the missing-capability error carries the line as a
+machine fix, so `forge fix` adds it. `Actor.whereis` and `Actor.registered` still take a
+`Cap(Actor.Introspect)` as well.
+
+```march
+mod Pool do
+  needs IO.Registry
+
+  fn publish(pid) : Bool do
+    Actor.register(pid, "pool")
+  end
+end
+```
+
+### Name scopes on IO.Mut and IO.Registry
+{: #name-scopes}
+
+`IO.Mut` and `IO.Registry` take a scope of names, and of name prefixes written
+`prefix("...")`:
+
+```march
+mod Sessions do
+  needs IO.Mut("sessions")                         -- only the "sessions" table
+  needs IO.Registry("logger", prefix("worker."))   -- "logger" and any "worker.…"
+
+  fn start(pid) : Bool do
+    Actor.register(pid, "worker.1")                -- in scope
+  end
+end
+```
+
+A name is in scope when it equals one of the names or starts with one of the prefixes:
+`prefix("worker.")` admits `"worker.1"` but not `"worker"` or `"workers.1"`. A name or
+prefix may not be empty or contain `;`, `=` or `,`; anything else is `invalid_cap_scope`.
+
+**What is checked, at compile time.** In a module whose own `needs` scopes the capability
+(and grants no unscoped `IO.Mut`, `IO.Registry` or `IO`), each call of `Vault.new`,
+`Vault.open`, `Vault.whereis`, `Vault.ns_set`, `Vault.ns_get`, `Vault.ns_drop`,
+`Config.new_store`, `Actor.register`, `Actor.unregister` and `Actor.whereis`, in any of the
+module's code (functions, actors, impl methods, tests and setup blocks) and through an
+`alias` of `Actor` or `Vault`:
+
+- with a literal name outside the scope is a `cap_scope_violation` naming the scope;
+- with a computed name (`"worker." ++ id`) is refused too: the compiler cannot prove it is
+  within the scope, and the check at run time arrives with phase 4;
+- a name-taking function used as a value (`let f = Actor.register`) is refused for the
+  same reason.
+
+`Actor.registered` lists every name, which exceeds any name scope, so it needs an
+unscoped `IO.Registry`. A nested module may narrow its parent's name scope but never widen
+it: under a parent's `needs IO.Registry("logger")`, a nested `needs IO.Registry` (or
+`needs IO`) is a `cap_scope_violation`. Not yet checked: a name passed through a function
+written in another module (`Reg.put(pid, "other")`); the run-time check of phase 4 closes it
+(`specs/todos/2026-11-13-name-scope-bypasses.md`). A lookup by name is an open: `Vault.whereis("tokens")` under
+`needs IO.Mut("sessions")` is refused.
+
 ### IO.NetConnect.TLS: encrypted transport only
 
 `IO.NetConnect.TLS` is a child of `IO.NetConnect`. Declaring it (without `IO.NetConnect`) proves the module uses *only* encrypted connections, no plaintext TCP. Declaring `needs IO.NetConnect` covers both.
@@ -871,8 +976,8 @@ This is especially useful for library code that should have no hidden state.
 mod HttpsClient do
   needs IO.NetConnect.TLS  -- plaintext TCP is statically excluded
 
-  fn fetch(fd, h, host) do
-    tls_connect(fd, h, host)
+  fn context() do
+    Tls.client_ctx(Tls.default_client_config())
   end
 end
 ```

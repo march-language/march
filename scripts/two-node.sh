@@ -110,6 +110,15 @@ toolchain_stamp() {
   } | sha256 | cut -d' ' -f1
 }
 
+# plumbing_flag <source>: the flags a node's own header asks for, a line
+# `-- compile-flags: --stdlib-source` in its first lines. Explicit per fixture:
+# a node that drives the stdlib's raw-fd cluster plumbing (NetKernel, NodeSend,
+# ... are @[stdlib_internal], ocap phase 2 task 9) by hand says so, so a new
+# fixture that names a marked function is a user-code error until it opts in.
+plumbing_flag() {
+  sed -n '1,5s/^-- compile-flags: \(--stdlib-source\)\( .*\)\{0,1\}$/\1/p' "$1" | head -1
+}
+
 # --precompile-one <dir> <scenario> <x>: one node, run by --precompile's
 # xargs. In its own directory, which is the compiler's cwd and therefore its
 # own CAS (.march/cas/ under the cwd; its object writes are not atomic, so
@@ -119,7 +128,7 @@ if [ "${1:-}" = "--precompile-one" ]; then
   out=$2/$3; n=$4
   mkdir -p "$out"
   cp "$root/test/two_node/$3/node_$n.march" "$out/node_$n.march"
-  if (cd "$out" && "$MARCH" --compile -o "$out/node_$n.tmp" "$out/node_$n.march") > "$out/compile_$n.log" 2>&1; then
+  if (cd "$out" && "$MARCH" --compile $(plumbing_flag "$out/node_$n.march") -o "$out/node_$n.tmp" "$out/node_$n.march") > "$out/compile_$n.log" 2>&1; then
     mv "$out/node_$n.tmp" "$out/node_$n"
   else
     rm -f "$out/node_$n" "$out/node_$n.tmp"
@@ -377,7 +386,7 @@ compile() {
     return
   fi
   # shellcheck disable=SC2086 # the flags are words, split on purpose
-  "$MARCH" --compile ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
+  "$MARCH" --compile $(plumbing_flag "$work/node_$n.march") ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
     || { cat "$work/compile_$n.log" >&2; fail "node_$n.march did not compile"; }
 }
 

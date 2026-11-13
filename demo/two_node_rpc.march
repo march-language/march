@@ -88,9 +88,9 @@ mod TwoNodeRpc do
     let srv = task_spawn(fn _ -> node_b(listen_fd))
 
     -- Node-A connects to node-b.
-    let fd = match Authority.must(Socket.connect("127.0.0.1", port)) do
+    let fd = match tcp_connect("127.0.0.1", port) do
       Ok(fd) -> fd
-      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+      Err(e) -> panic("connect: " ++ e)
     end
 
     -- Derive the CAS hashes at compile time via the remote_ref_hashes builtin.

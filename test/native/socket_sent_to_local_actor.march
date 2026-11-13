@@ -1,0 +1,56 @@
+-- A Socket sent in a message to a local actor is shared, not copied.
+--
+-- "Within a node, sending a handle in a message shares it" (ocap phase 2,
+-- spec §6): the message copy (runtime/march_message.c copy_value) gives the
+-- receiver the same handle box with one more reference, so the actor writes
+-- to the very connection the main thread accepted. The main thread's client
+-- end then reads what the actor wrote.
+mod SocketSentToLocalActor do
+  needs IO
+  needs IO.Console
+  needs IO.NetConnect
+  needs IO.NetListen
+  needs IO.Spawn
+
+  actor Writer do
+    state { sent : Int }
+    init  { sent: 0 }
+    on Write(s) do
+      match Socket.write(s, "hi") do
+        Ok(_) -> { sent: state.sent + 1 }
+        Err(e) ->
+          println("actor write failed: " ++ Socket.error_message(e))
+          state
+      end
+    end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let l = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
+    end
+    let port = match Socket.local_port(l) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ Socket.error_message(e))
+    end
+    let client = match Authority.must(Socket.connect("127.0.0.1", port)) do
+      Ok(c) -> c
+      Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    end
+    let accepted = match Socket.accept(l) do
+      Ok(s) -> s
+      Err(e) -> panic("accept: " ++ Socket.error_message(e))
+    end
+    let w = spawn(Writer)
+    Actor.cast(w, Write(accepted))
+    match Socket.recv_timeout(client, 16, 2000) do
+      Ok("hi") -> println("shared")
+      Ok(other) -> println("read [" ++ other ++ "]")
+      Err(e) -> println("read failed: " ++ Socket.error_message(e))
+    end
+    let _ = Socket.close(accepted)
+    let _ = Socket.close(client)
+    let _ = Socket.close_listener(l)
+  end
+end

@@ -72,6 +72,7 @@ let endpoints_name_clash = "endpoints_name_clash"
 let extern_cap_missing = "extern_cap_missing"
 let extern_needs_foreign = "extern_needs_foreign"
 let field_access_non_record = "field_access_non_record"
+let handle_not_sendable = "handle_not_sendable"
 let import_cap_missing = "import_cap_missing"
 let import_unresolved = "import_unresolved"
 let internal_error = "internal_error"
@@ -293,6 +294,7 @@ let all = [
   extern_cap_missing;
   extern_needs_foreign;
   field_access_non_record;
+  handle_not_sendable;
   import_cap_missing;
   import_unresolved;
   internal_error;
@@ -524,7 +526,7 @@ let category_table : (string * string list) list = [
   "ACTOR", [
     actor_handler_state_type; actor_init_arity; codec_missing;
     duplicate_actor; duplicate_handler; island_missing_fn; migrate_msg_shape;
-    pid_serialize; remote_actor_unroutable; send_wrong_actor;
+    handle_not_sendable; pid_serialize; remote_actor_unroutable; send_wrong_actor;
     spawn_computed_actor; spawn_not_actor; supervise_field_missing ];
   "PROTOCOL", [
     duplicate_protocol; endpoints_label_invalid; endpoints_name_clash;

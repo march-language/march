@@ -1,0 +1,10 @@
+exit: 1
+-- PROGRAM --------------- errors/stdlib_internal_3.march
+
+`Socket.raw_fd` is internal to the standard library; use the handle API in `Socket`. [stdlib_internal]
+
+13 |     Ok(s) -> println(int_to_string(Socket.raw_fd(s)))
+                                        ^^^^^^^^^^^^^
+
+
+

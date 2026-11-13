@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing over raw tcp_* descriptors, the wire layer itself; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "cert_update_replay": node-c, the attacker. It
 -- is a TCP proxy between node-a and node-b that records node-b's
 -- CERT_UPDATE frame off the wire: a sealed frame is a sequence number, the
@@ -57,7 +58,7 @@ mod CertUpdateReplayC do
             0
           Ok(body) ->
             if from_b do look(body) else () end
-            match Socket.write(dst, Bytes.to_string(Bytes.concat(hdr, body))) do
+            match Result.map_err(tcp_send_all(dst, Bytes.to_string(Bytes.concat(hdr, body))), fn m -> Socket.WriteFailed(m)) do
               Ok(_) -> pump(src, dst, from_b)
               Err(_) -> 0
             end
@@ -70,7 +71,7 @@ mod CertUpdateReplayC do
       match tcp_accept_timeout(listen_fd, 200) do
         Err(_) -> serve(listen_fd, go)
         Ok(fd) ->
-          match Authority.must(Socket.connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_B")))) do
+          match Result.map_err(tcp_connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_B"))), fn m -> Socket.ConnectionFailed(m)) do
             Err(_) ->
               -- node-b has stopped: node-a's redials go nowhere.
               tcp_close(fd)
@@ -113,7 +114,7 @@ mod CertUpdateReplayC do
   -- One connection to node-a, handshaked as node-b with the old credentials.
   pfn connect_as_b(auth : ClusterAuth.Auth, role : String) : Int do
     let me = NodeIdentity.make("node-b", "pk-node-b", 2)
-    match Authority.must(Socket.connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_A")))) do
+    match Result.map_err(tcp_connect("127.0.0.1", Authority.must(Env.require_int("MARCH_PORT_A"))), fn m -> Socket.ConnectionFailed(m)) do
       Err(e) -> panic("node-c: connect: " ++ Socket.error_message(e))
       Ok(fd) ->
         match NetKernel.handshake_auth(fd, me, auth, NetKernel.fresh_nonce(), role, "", 5000) do

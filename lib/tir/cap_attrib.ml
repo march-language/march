@@ -204,6 +204,37 @@ let attribute ?(transparent = fun _ -> false)
   List.iter
     (fun (fn : Tir.fn_def) -> Hashtbl.replace defined fn.Tir.fn_name ())
     m.Tir.tm_fns;
+  (* A lambda is code of the function it was written in.  By this stage Defun
+     has lifted it to a top-level apply fn named structurally
+     ([$lam0_Socket_write$apply$3]): no ['.'] on purpose, so [owner_of]
+     alone resolves it to the ENTRY module, and a stdlib lambda that reaches a
+     capability (Socket.write's [fn fd -> tcp_send_all(...)]) was charged to
+     the program's entry module instead of seen through to Socket.write's
+     callers.  Under `--check` the entry usually declares the capability, which
+     hid it; under `march check` (entry `LibCheck`) and the REPL (`Repl`) it
+     rejected correct programs.  Defun records each lifted fn's lowering host
+     in [Provenance] (clones inherit it), so a function with a recorded host
+     that is still defined here is charged AS that host: its capabilities and
+     its calls count as the host's own.  A host that is gone (or no record:
+     TIR that did not come through this process's Defun) leaves the function
+     charged as itself, as before. *)
+  let charge_as =
+    let memo : (string, string) Hashtbl.t = Hashtbl.create 64 in
+    fun (n : string) ->
+      match Hashtbl.find_opt memo n with
+      | Some r -> r
+      | None ->
+        let rec up seen n =
+          match Provenance.find n with
+          | Some { Provenance.host = Some h; _ }
+            when h <> n && not (List.mem h seen) && Hashtbl.mem defined h ->
+            up (n :: seen) h
+          | _ -> n
+        in
+        let r = up [] n in
+        Hashtbl.replace memo n r;
+        r
+  in
   List.iter
     (fun (fn : Tir.fn_def) ->
        let caps, callees =
@@ -222,32 +253,52 @@ let attribute ?(transparent = fun _ -> false)
          callees)
     m.Tir.tm_fns;
 
-  (* Nearest non-transparent owner, walking the reverse call graph.  A
-     dependency that reads a file through File.read is the responsible party;
-     attributing it to the stdlib wrapper would report the same owner for
-     every dependency in the program and answer nobody's question. *)
+  (* Nearest non-transparent owners of [n]'s code, walking the reverse call
+     graph.  A dependency that reads a file through File.read is the
+     responsible party; attributing it to the stdlib wrapper would report the
+     same owner for every dependency in the program and answer nobody's
+     question.  Empty when nothing outside the transparent set reaches [n].
+
+     A lifted function ([charge_as n <> n]) is judged as its host.  When that
+     finds nobody (a stdlib host run only from an actor handler, a stored
+     callback or a spawned task: indirect calls this graph cannot follow), the
+     lifted function keeps its own owner, the entry module, as before host
+     charging existed: naming the stdlib module would reject every program
+     that reaches it, since a stdlib module declares nothing. *)
+  let reach_from (start : string) : SSet.t =
+    (* Per query: a node's answer is computed once; a node met again while
+       its own answer is still being computed (a cycle) contributes nothing
+       on that path, its other paths already being walked. *)
+    let memo : (string, SSet.t option) Hashtbl.t = Hashtbl.create 16 in
+    let rec reach n =
+      match Hashtbl.find_opt memo n with
+      | Some (Some r) -> r
+      | Some None -> SSet.empty
+      | None ->
+        Hashtbl.replace memo n None;
+        let host = charge_as n in
+        let r =
+          if host <> n then begin
+            let r = reach host in
+            if SSet.is_empty r then SSet.singleton (owner_of n) else r
+          end
+          else if not (see_through n) then SSet.singleton (owner_of n)
+          else
+            List.fold_left (fun acc c -> SSet.union acc (reach c))
+              SSet.empty
+              (Option.value ~default:[] (Hashtbl.find_opt callers n))
+        in
+        Hashtbl.replace memo n (Some r);
+        r
+    in
+    reach start
+  in
+  (* Nothing outside the transparent set reaches it — every caller is stdlib,
+     or it is reached only indirectly.  Naming the stdlib module is then the
+     honest answer rather than dropping the row. *)
   let responsible_owners fn_name =
-    if not (see_through fn_name) then [ owner_of fn_name ]
-    else begin
-      let seen = Hashtbl.create 16 in
-      let found = ref SSet.empty in
-      let rec go n =
-        if not (Hashtbl.mem seen n) then begin
-          Hashtbl.replace seen n ();
-          List.iter
-            (fun c ->
-               if see_through c then go c
-               else found := SSet.add (owner_of c) !found)
-            (Option.value ~default:[] (Hashtbl.find_opt callers n))
-        end
-      in
-      go fn_name;
-      (* Nothing outside the transparent set reaches it — every caller is
-         stdlib, or it is reached only indirectly.  Naming the stdlib module
-         is then the honest answer rather than dropping the row. *)
-      if SSet.is_empty !found then [ owner_of fn_name ]
-      else SSet.elements !found
-    end
+    let r = reach_from fn_name in
+    if SSet.is_empty r then [ owner_of fn_name ] else SSet.elements r
   in
 
   let seen : (string * string, unit) Hashtbl.t = Hashtbl.create 32 in

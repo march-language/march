@@ -5,14 +5,14 @@ refinement violation: a port is at most 65535 [refinement_violated]
 argument `port` of `Udp.open` does not satisfy precondition `_ <= 65535`
 note: `70000` can never satisfy `port <= 65535`; pass a value that does
 
-11 |     match Udp.open("127.0.0.1", 70000) do
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+11 |     match Authority.must(Udp.open("127.0.0.1", 70000)) do
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
     `port` is `70000` here:
 
-11 |     match Udp.open("127.0.0.1", 70000) do
-                                     ^^^^^
+11 |     match Authority.must(Udp.open("127.0.0.1", 70000)) do
+                                                    ^^^^^
     run `march --explain refinement_violated`
 
 

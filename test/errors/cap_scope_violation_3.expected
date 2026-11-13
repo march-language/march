@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY -------- errors/cap_scope_violation_3.march
+
+This `needs` gives `IO.Registry` for any name, which is wider than the enclosing module's `IO.Registry("logger")`. [cap_scope_violation]
+hint: a nested module may narrow a name scope, never widen it; declare a scope within the enclosing one.
+
+7 |     needs IO.Registry
+        ^^^^^^^^^^^^^^^^^
+
+
+

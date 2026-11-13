@@ -7,6 +7,7 @@
 -- in this repo declares it explicitly).
 mod SpawnChurn do
   needs IO.Console
+  needs IO.Registry
 
   actor Cell do
     state { v : Int }
@@ -30,7 +31,7 @@ mod SpawnChurn do
     end
   end
 
-  fn main(_cap_console : Cap(IO.Console)) do
+  fn main(_cap_console : Cap(IO.Console), _cap_registry : Cap(IO.Registry)) do
     churn(0, 40000)
     run_until_idle()
     -- prove the node can still spawn and message afterward

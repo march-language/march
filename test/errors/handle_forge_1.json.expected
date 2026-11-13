@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/handle_forge_1.march","start_line":11,"start_col":12,"end_line":11,"end_col":25,"message":"I don't know a constructor called `Udp.UdpSocket`.\n`Udp` has no constructor `UdpSocket`.","code":"unknown_constructor","fix":null,"labels":[],"notes":[],"category":"NAMING"}

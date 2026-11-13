@@ -35,6 +35,8 @@ conditional implementations, constraints on functions, the four standard interfa
 - [Implementing an Interface](#implementing-an-interface)
 - [Conditional Implementations](#conditional-implementations)
 - [Using Interfaces in Function Signatures](#using-interfaces-in-function-signatures)
+- [Capability bounds on methods](#capability-bounds-on-methods)
+- [Laws](#laws)
 
 **The standard interfaces**
 
@@ -248,7 +250,107 @@ end
 
 ---
 
+## Capability bounds on methods
+
+A method signature can carry a `needs` bound after its type. Every impl of the method, in
+any module, and the interface's default body are checked against it:
+
+```march
+interface Store(a) do
+  fn get : (a, String) -> Option(String) needs IO.FileRead
+  fn describe : a -> String needs ()
+end
+
+impl Store(Disk) do
+  fn get(d, key) do read_entry(d, key) end   -- may read files, nothing else
+  fn describe(_d) do "disk" end              -- may perform no I/O at all
+end
+```
+
+An impl that reaches past the bound is rejected at the impl, with the path to the
+capability. An impl may declare a narrower bound of its own (`fn describe(_d) needs ()`)
+but not a wider one. A method with no bound constrains nothing. The bound is a check on
+impls only: it is not part of the method's type, and a function constrained by
+`when Store(a)` declares nothing new. See
+[Per-function bounds]({{ site.baseurl }}/docs/capabilities/#per-function-bounds) for the
+full rules.
+
+## Laws
+
+An interface can state laws: properties every implementation must have. A law is
+written as a lemma signature with no body, `@[lemma] fn name(params) : {Unit | P}`,
+where `P` may call the interface's methods (see
+[Lemmas]({{ site.baseurl }}/docs/refinement-types/#lemmas-proving-what-one-unfolding-cannot)).
+
+```march
+interface Monoid(a) do
+  fn combine : a -> a -> a
+  @[lemma]
+  fn combine_assoc(x : a, y : a, z : a)
+    : {Unit | combine(combine(x, y), z) == combine(x, combine(y, z))}
+end
+
+impl Monoid(Int) do
+  fn combine(x, y) do x + y end
+end
+```
+
+The checker checks each law once per `impl`, with that impl's methods. Here
+`combine_assoc` is proved for `Int`. An impl whose methods break a law is an error with
+an input that shows it:
+
+```text
+the lemma `combine_assoc__Monoid_Box` is false: its theorem
+`combine(combine(x, y), z) == combine(x, combine(y, z))` does not hold at
+x = Box(-3), y = Box(-2), z = Box(-1)
+```
+
+When a law needs a proof (an induction, say), the impl gives one as a lemma with the
+law's name. Without it, the checker tries the law with an empty body:
+
+```march
+impl Joinable(List(a)) do
+  fn join(xs, ys) do
+    match xs do
+      Nil -> ys
+      Cons(h, t) -> Cons(h, join(t, ys))
+    end
+  end
+  fn none(_xs) do Nil end
+  @[lemma]
+  fn join_none(xs) do        -- proves the interface's join_none for lists
+    match xs do
+      Nil -> ()
+      Cons(_, t) -> join_none(t)
+    end
+  end
+end
+```
+
+A law the checker cannot prove for an impl is `lemma_unproved` (an error in a
+`cap verified` module), and `forge test` tests it on generated inputs, like any
+lemma. Laws never run: they and the code the checker uses for them are removed
+before the program is built.
+
+The checker names each impl's law `<law>__<Interface>_<Type>` in its messages
+(`combine_assoc__Monoid_Int`). Every impl is checked: in the interface's file or in
+another one, and with the interface's default for any method it does not define. A law
+may call a method that takes `Unit` (`combine(empty(()), x) == x`).
+
+`==` in a law is structural equality, so a law about a type with a hand-written `Eq`
+does not use that `eq`.
+
+---
+
 ## Standard Interfaces
+
+All four standard interfaces are bounded by `needs ()`: an impl of `eq`, `compare`, `show`
+or `hash` reaches no `IO` capability, directly or through anything it calls, so showing,
+comparing, ordering and hashing a value never do I/O. (The check covers the `IO` lattice;
+`Map`, `Sort` and most collection operations take a comparator function instead, which is
+charged to whoever passes it, as usual.) `derive` produces pure impls; a hand-written one
+that prints, logs or reads the clock is rejected (`cap_bound`) at the impl. Do that work
+outside the impl instead.
 
 ### `Eq(a)`: Equality
 

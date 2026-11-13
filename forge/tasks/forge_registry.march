@@ -11,7 +11,7 @@
 --   FORGE_INSECURE  "1" to allow an http:// registry (local dev)
 -- Exit codes (specs/forge-publish-client.md §7): 0 ok · 1 config · 2 local ·
 -- 3 transport · 4 server 4xx · 5 server 5xx.  self-contained: only the stdlib
--- (Tls/tcp_*, Crypto, Toml, Uri, Process, File) + one `tar` shell-out.
+-- (Tls/Socket, Crypto, Toml, Uri, Process, File) + one `tar` shell-out.
 mod ForgeRegistry do
 
   needs IO.Console
@@ -88,18 +88,17 @@ end
 -- (resp.status then resp.body) trips a compiled RC-underflow on the success path.
 fn finalize(raw) do (parse_status(raw), response_body(raw)) end
 
-pfn send_over(conn, fd, method, full_path, host, headers, body) do
+-- Tls.close also closes the TCP connection the TlsConn took over.
+pfn send_over(conn, method, full_path, host, headers, body) do
   match Tls.write(conn, build_request(method, full_path, host, headers, body)) do
   Err(e) -> do
     Tls.close(conn)
-    tcp_close(fd)
     Err("write failed: " ++ Tls.error_to_string(e))
   end
   Ok(_) -> do
     match read_chunks(conn, Nil) do
     (rev, _) -> do
       Tls.close(conn)
-      tcp_close(fd)
       Ok(finalize(String.join(List.reverse(rev), "")))
     end
     end
@@ -107,45 +106,62 @@ pfn send_over(conn, fd, method, full_path, host, headers, body) do
   end
 end
 
+pfn connect_message(e) do
+  match e do
+  Socket.ConnectionFailed(m) -> m
+  _ -> Socket.error_message(e)
+  end
+end
+
 pfn send_tls(method, host, port, full_path, headers, body) do
-  match Tls.client_ctx(Tls.default_client_config()) do
+  match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
   Err(e) -> Err("tls ctx: " ++ Tls.error_to_string(e))
   Ok(ctx) ->
-    match tcp_connect(host, port) do
-    Err(m) -> Err("connect " ++ host ++ ": " ++ m)
-    Ok(fd) ->
-      match Tls.connect(fd, ctx, host) do
+    match Authority.must(Socket.connect(host, port)) do
+    Err(e) -> Err("connect " ++ host ++ ": " ++ connect_message(e))
+    Ok(s) ->
+      match Tls.connect(s, ctx, host) do
       Err(e) -> do
-        tcp_close(fd)
+        let _ = Socket.close(s)
         Err("handshake: " ++ Tls.error_to_string(e))
       end
-      Ok(conn) -> send_over(conn, fd, method, full_path, host, headers, body)
+      Ok(conn) -> send_over(conn, method, full_path, host, headers, body)
       end
     end
   end
 end
 
+-- Read the plain response until the server closes (the request says
+-- `Connection: close`). `left` is one more than the bytes still allowed
+-- (send_plain allows 16 MiB, the cap tcp_recv_http applied), so a response of
+-- exactly the cap still reads its EOF. A failed read is an error even
+-- after some bytes arrived: a truncated response must not pass as whole.
+pfn read_socket(s, acc, left) do
+  if left <= 0 do Err("read failed: response exceeds 16777216 bytes") else
+    match Socket.recv(s, if left < 65536 do left else 65536 end) do
+    Err(e) -> Err("read failed: " ++ Socket.error_message(e))
+    Ok(chunk) ->
+      let n = String.byte_size(chunk)
+      if n == 0 do Ok(acc) else read_socket(s, Cons(chunk, acc), left - n) end
+    end
+  end
+end
+
 pfn send_plain(method, host, port, full_path, headers, body) do
-  match tcp_connect(host, port) do
-  Err(m) -> Err("connect " ++ host ++ ": " ++ m)
-  Ok(fd) ->
-    match tcp_send_all(fd, build_request(method, full_path, host, headers, body)) do
-    Err(e) -> do
-      tcp_close(fd)
-      Err("write failed: " ++ e)
+  match Authority.must(Socket.connect(host, port)) do
+  Err(e) -> Err("connect " ++ host ++ ": " ++ connect_message(e))
+  Ok(s) -> do
+    let result = match Socket.write(s, build_request(method, full_path, host, headers, body)) do
+      Err(e) -> Err("write failed: " ++ Socket.error_message(e))
+      Ok(_) ->
+        match read_socket(s, Nil, 16777216 + 1) do
+        Err(e) -> Err(e)
+        Ok(rev) -> Ok(finalize(String.join(List.reverse(rev), "")))
+        end
     end
-    Ok(_) ->
-      match tcp_recv_http(fd, 16777216) do
-      Err(e) -> do
-        tcp_close(fd)
-        Err("read failed: " ++ e)
-      end
-      Ok(raw) -> do
-        tcp_close(fd)
-        Ok(finalize(raw))
-      end
-      end
-    end
+    let _ = Socket.close(s)
+    result
+  end
   end
 end
 

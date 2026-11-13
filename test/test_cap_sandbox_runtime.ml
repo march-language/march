@@ -290,7 +290,7 @@ let check_field (name : string) (expected : int) (output : string) : unit =
    held/allowed ever registered as "used", so they were wrongly denied too.
    What DOES register: a direct call to a real capability-tagged builtin. So
    each fixture below makes one throwaway "anchor" call per class meant to
-   stay held -- tcp_connect to loopback for Network, process_pid for Process,
+   stay held -- Socket.connect to loopback for Network, process_pid for Process,
    file_write to a scratch path for FileWrite -- purely to get that class
    into the module's own-capability set; the result is discarded, and the
    call is otherwise inert (loopback-only, no external network; a real but
@@ -337,7 +337,7 @@ mod SbxDenyExec do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
-    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
@@ -362,7 +362,7 @@ mod SbxDenyWrite do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
-    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_proc = process_pid()
     println("socket=" ++ int_to_string(probe_socket()))
     println("execve=" ++ int_to_string(probe_execve()))
@@ -375,7 +375,7 @@ end
 (* ── Linux: IO.NetListen gates bind/listen separately from IO.Network ──
    Holding only IO.NetConnect makes `holds "IO.Network"` true (holds is
    bidirectional), so socket() stays allowed for connect(); LISTEN is the
-   narrower deny. Anchors: tcp_connect for NetConnect, tcp_listen for
+   narrower deny. Anchors: Socket.connect for NetConnect, Socket.listen for
    NetListen, as with the other classes above. *)
 let linux_deny_listen_src =
   {|
@@ -392,7 +392,7 @@ mod SbxDenyListen do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect)) : Unit do
-    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_net = Socket.connect("127.0.0.1", 1)
     println("socket=" ++ int_to_string(probe_socket()))
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
@@ -415,7 +415,7 @@ mod SbxHoldListen do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _l : Cap(IO.NetListen)) : Unit do
-    let _anchor_listen = tcp_listen(0)
+    let _anchor_listen = Socket.listen(0)
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
     ()
@@ -530,7 +530,7 @@ mod SbxDenyProcessMac do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _w : Cap(IO.FileWrite)) : Unit do
-    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_write = file_write("/tmp/march_sbx_anchor_write", "")
     println("connect=" ++ int_to_string(probe_connect()))
     println("fork=" ++ int_to_string(probe_fork()))
@@ -579,7 +579,7 @@ mod SbxDenyWriteMac do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect), _p : Cap(IO.Process)) : Unit do
-    let _anchor_net = tcp_connect("127.0.0.1", 1)
+    let _anchor_net = Socket.connect("127.0.0.1", 1)
     let _anchor_proc = process_pid()
     println("connect=" ++ int_to_string(probe_connect()))
     println("fork=" ++ int_to_string(probe_fork()))
@@ -629,7 +629,7 @@ let test_macos_deny_write () =
    The embedded profile grants network-outbound for IO.NetConnect and
    network-bind + network-inbound for IO.NetListen, instead of network* for
    either (which let a connect-only program bind).  The deny-listen fixture
-   also does a REAL client round trip through March's own tcp_connect with a
+   also does a REAL client round trip through March's own Socket.connect with a
    hostname ("localhost", so getaddrinfo runs) to a listener this test opens
    outside the sandbox: that is the "a connect-only program still works"
    half, not just a probe returning ECONNREFUSED.  The listener is never
@@ -651,15 +651,16 @@ mod SbxDenyListenMac do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _n : Cap(IO.NetConnect)) : Unit do
-    match tcp_connect("localhost", %d) do
-    Ok(fd) ->
+    match Authority.must(Socket.connect("localhost", %d)) do
+    Ok(s) ->
       println("roundtrip_connect=0")
-      match tcp_send_all(fd, "ping") do
+      match Socket.write(s, "ping") do
       Ok(_) -> Authority.ignore(println("roundtrip_send=0"))
       Err(_) -> Authority.ignore(println("roundtrip_send=1"))
       end
-      tcp_close(fd)
-    Err(m) -> Authority.ignore(println("roundtrip_connect=1 " ++ m))
+      let _ = Socket.close(s)
+      ()
+    Err(m) -> Authority.ignore(println("roundtrip_connect=1 " ++ Socket.error_message(m)))
     end
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
@@ -684,7 +685,7 @@ mod SbxHoldListenMac do
   end
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _l : Cap(IO.NetListen)) : Unit do
-    let _anchor_listen = tcp_listen(0)
+    let _anchor_listen = Socket.listen(0)
     println("bind=" ++ int_to_string(probe_bind()))
     println("listen=" ++ int_to_string(probe_listen()))
     println("connect=" ++ int_to_string(probe_connect()))
