@@ -250,15 +250,5 @@ describe "File.Dir capabilities" do
     cleanup("needs_none")
   end
 end
---
--- describe "File.Dir capabilities" do
---   test "dir works in a needs () module" do
---     let root = tree("needs_none")
---     let d = must(Authority.must(File.open_dir(root)), "File.open_dir")
---     assert (DirReader.first(d) == Ok(Some("A")))
---     let _ = File.close_dir(d)
---     cleanup("needs_none")
---   end
--- end
 
 end

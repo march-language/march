@@ -221,12 +221,15 @@ let fn_transitive_capability_closures_tbl (env : env)
    paths.  Everything that acts on an open file or directory instead
    ([file_read_line], [file_read_chunk], [file_write_handle], [file_seek],
    [csv_next_row], and [file_open_at] / [dir_list_at] beneath a held File.Dir)
-   gets no path check, and needs none: since ocap phase 2 a handle is
-   unforgeable.  User code holds a File.Handle or File.Dir only from a checked
-   open (the raw Int-descriptor builtins are stdlib-only), so the path scope
-   was enforced when the handle was made, and [File.open_in] refuses a
-   relative path that leaves the directory.  That is what makes this sound
-   without dataflow analysis. *)
+   gets no path check here: since ocap phase 2 a handle is unforgeable, so
+   user code holds a File.Handle or File.Dir only from an open (the raw
+   Int-descriptor builtins are stdlib-only), and [File.open_in] refuses a
+   relative path that leaves the directory.  What this does NOT give: the
+   scope itself is enforced only at a DIRECT call of one of these builtins
+   with a literal path.  The stdlib wrappers user code now calls (File.open,
+   File.read, Csv.read_all, ...) pass the path as a variable, so neither this
+   check nor any run-time check applies a path scope to them yet
+   (specs/todos/2026-11-12-path-scope-not-checked-at-wrappers.md). *)
 let path_arg_builtins : (string * int list) list = [
   ("file_read", [0]); ("file_open", [0]); ("file_exists", [0]);
   ("file_stat", [0]); ("dir_list", [0]); ("dir_exists", [0]);

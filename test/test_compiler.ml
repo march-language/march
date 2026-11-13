@@ -4184,7 +4184,11 @@ let test_missing_needs_dedup_no_orphan_hint_main_cap_param () =
    `Listener` it is handed, under both the source-level ceiling (`--check`,
    [cap_strict_ceiling] on) and the compiled TIR ceiling (`--compile`); it may
    not open one. *)
-let handle_use_program body =
+(* [Wire] declares no `needs` at all, so the compiled ceiling judges any
+   charge reaching it against an empty declaration (the entry's own `needs`,
+   which [main] uses to open the handles, cannot admit it), and [main] calls
+   the Wire function, so it is live in the TIR the ceiling reads. *)
+let handle_use_program ~wire ~use =
   Printf.sprintf
     {|mod Main do
   needs IO.NetConnect
@@ -4196,11 +4200,30 @@ let handle_use_program body =
   end
 
   fn main(_n : Cap(IO.NetConnect), _l : Cap(IO.NetListen), _c : Cap(IO.Console)) do
+%s
     println("ok")
   end
 end
 |}
-    body
+    wire use
+
+let use_socket call =
+  Printf.sprintf
+    {|    match Socket.connect("127.0.0.1", 9) do
+    Ok(Ok(s)) ->
+      let _ = %s
+      ()
+    _ -> ()
+    end|} call
+
+let use_listener call =
+  Printf.sprintf
+    {|    match Socket.listen(0) do
+    Ok(Ok(l)) ->
+      let _ = %s
+      ()
+    _ -> ()
+    end|} call
 
 let run_march_on ~flags src_text =
   let src = Filename.temp_file "handle_use" ".march" in
@@ -4222,37 +4245,52 @@ let run_march_on ~flags src_text =
   List.iter (fun f -> try Sys.remove f with Sys_error _ -> ()) [ src; out; bin ];
   (rc, s)
 
+(* The same program with the Wire function's `needs ()` bound dropped: under
+   `--compile` the typecheck-side ceiling is off, so the only check left is
+   the compiled TIR ceiling, judging [Wire]'s empty `needs`. (With the bound,
+   the per-function bound would answer first and the TIR ceiling would never
+   be the one deciding.) *)
+let unbounded src = Str.global_replace (Str.regexp_string " needs () do") " do" src
+
 let test_handle_use_charges_nothing () =
   if not (Sys.file_exists compiler_exe_for_cap_dedup) then
     Alcotest.failf "compiler not found at %s" compiler_exe_for_cap_dedup;
+  let accepted what flags src =
+    let (rc, out) = run_march_on ~flags src in
+    if rc <> 0 then Alcotest.failf "%s should pass %s:\n%s" what flags out
+  in
   let write_src = handle_use_program
-      {|    fn send(s : Socket, data : String) : Result((), Socket.SocketError) needs () do
+      ~wire:{|    fn send(s : Socket, data : String) : Result((), Socket.SocketError) needs () do
       Socket.write(s, data)
-    end|} in
-  let (rc, out) = run_march_on ~flags:"--check" write_src in
-  if rc <> 0 then
-    Alcotest.failf "Socket.write under `needs ()` should pass --check:\n%s" out;
-  let (rc, out) = run_march_on ~flags:"--compile" write_src in
-  if rc <> 0 then
-    Alcotest.failf "Socket.write under `needs ()` should pass the compiled ceiling:\n%s" out;
+    end|}
+      ~use:(use_socket "Wire.send(s, \"x\")") in
+  accepted "Socket.write under `needs ()`" "--check" write_src;
+  accepted "Socket.write under `needs ()`" "--compile" write_src;
+  accepted "Socket.write in a module with no `needs` (compiled TIR ceiling)" "--compile"
+    (unbounded write_src);
   let connect_src = handle_use_program
-      {|    fn dial(host : String) : Result(Result(Socket, Socket.SocketError), CapError) needs () do
+      ~wire:{|    fn dial(host : String) : Result(Result(Socket, Socket.SocketError), CapError) needs () do
       Socket.connect(host, 80)
-    end|} in
+    end|}
+      ~use:{|    let _ = Wire.dial("127.0.0.1")|} in
   let (rc, out) = run_march_on ~flags:"--check" connect_src in
   Alcotest.(check bool) "Socket.connect under `needs ()` is refused" true (rc <> 0);
   Alcotest.(check bool) "and the refusal names IO.NetConnect" true
     (contains_substring out "IO.NetConnect");
+  (* The control for the TIR-ceiling legs above: the same unbounded module
+     reaching an OPEN is refused by the compiled ceiling, naming [Wire]. *)
+  let (rc, out) = run_march_on ~flags:"--compile" (unbounded connect_src) in
+  Alcotest.(check bool) "Socket.connect in a module with no `needs` fails the compiled ceiling"
+    true (rc <> 0 && contains_substring out "Module `Wire` uses `IO.NetConnect`");
   let accept_src = handle_use_program
-      {|    fn next(l : Listener) : Result(Socket, Socket.SocketError) needs () do
+      ~wire:{|    fn next(l : Listener) : Result(Socket, Socket.SocketError) needs () do
       Socket.accept(l)
-    end|} in
-  let (rc, out) = run_march_on ~flags:"--check" accept_src in
-  if rc <> 0 then
-    Alcotest.failf "Socket.accept(l) under `needs ()` should pass --check:\n%s" out;
-  let (rc, out) = run_march_on ~flags:"--compile" accept_src in
-  if rc <> 0 then
-    Alcotest.failf "Socket.accept(l) under `needs ()` should pass the compiled ceiling:\n%s" out
+    end|}
+      ~use:(use_listener "Wire.next(l)") in
+  accepted "Socket.accept(l) under `needs ()`" "--check" accept_src;
+  accepted "Socket.accept(l) under `needs ()`" "--compile" accept_src;
+  accepted "Socket.accept(l) in a module with no `needs` (compiled TIR ceiling)" "--compile"
+    (unbounded accept_src)
 
 (* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
 
@@ -11516,21 +11554,21 @@ let test_cap_body_missing_ws () =
   Alcotest.(check bool) "ws_recv without needs: a handle use, no capability error" false
     (has_error_with ctx "IO.WebSocket")
 
-let test_cap_body_ws_ok () =
+(* What can still go wrong for a module that declares `needs IO.WebSocket` and
+   only receives on a WebSocket: nothing charges the capability any more, so
+   the declaration is unused, and Check 2 says so (a warning). If ws_recv were
+   charged again this warning would disappear. *)
+let test_cap_body_ws_needs_now_unused () =
   let ctx = with_raw_builtins ["ws_recv"] @@ fun () -> typecheck {|mod Ws do
     needs IO.WebSocket
     fn go(fd) do ws_recv(fd) end
   end|} in
-  Alcotest.(check bool) "ws_recv with needs IO.WebSocket: no diagnostic" false
-    (has_error_with ctx "IO.WebSocket")
-
-let test_cap_body_ws_parent_ok () =
-  let ctx = with_raw_builtins ["ws_recv"] @@ fun () -> typecheck {|mod Ws do
-    needs IO.NetConnect
-    fn go(fd) do ws_recv(fd) end
-  end|} in
-  Alcotest.(check bool) "needs IO.NetConnect with ws_recv: no diagnostic" false
-    (has_error_with ctx "IO.WebSocket")
+  Alcotest.(check bool) "no capability error" false (has_error_with ctx "IO.WebSocket");
+  Alcotest.(check bool) "needs IO.WebSocket is reported unused" true
+    (List.exists (fun d ->
+         d.March_errors.Errors.severity = March_errors.Errors.Warning
+         && d.March_errors.Errors.code = March_errors.Errors.Code.unused_needs)
+        (March_errors.Errors.sorted ctx))
 
 let test_cap_ws_arg_ok () =
   let ctx = typecheck {|mod Ws do
@@ -19697,8 +19735,7 @@ let compiler_suites =
           Alcotest.test_case "needs IO.NetConnect umbrella covers TLS"     `Quick test_cap_body_tls_parent_ok;
           Alcotest.test_case "tls_connect is a handle use: no capability"  `Quick test_cap_body_tls_connect_is_a_use;
           Alcotest.test_case "ws_recv is a handle use: no capability"      `Quick test_cap_body_missing_ws;
-          Alcotest.test_case "ws_recv with needs IO.WebSocket"             `Quick test_cap_body_ws_ok;
-          Alcotest.test_case "needs IO.NetConnect umbrella covers WS"      `Quick test_cap_body_ws_parent_ok;
+          Alcotest.test_case "needs IO.WebSocket over ws_recv is unused"   `Quick test_cap_body_ws_needs_now_unused;
           Alcotest.test_case "Cap(IO.WebSocket) arg: no error"             `Quick test_cap_ws_arg_ok;
           Alcotest.test_case "needs IO.Telemetry: valid declaration"       `Quick test_cap_body_telemetry_decl_ok;
           Alcotest.test_case "extern block missing IO.Foreign: warn"       `Quick test_cap_body_missing_foreign;

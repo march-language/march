@@ -818,7 +818,10 @@ cap_result_unhandled PATH...` to files outside one.
 
 What is not an operation: using what an operation opened. `Vault.set` on a
 table handle, reading or writing an open socket, the lines of an open file and
-a running process's pipes need no authority and keep their types.
+a running process's pipes need no authority and keep their types. Some stdlib
+helpers degrade instead of failing: `List.pmap` and friends compute
+sequentially when spawning is refused, `IO.inspect` and `debug` still return
+their argument, and the Logger drops a line or a timestamp.
 
 **Handles need no capability.** A `File.Handle`, `File.Dir`, `Socket`,
 `Listener`, `Udp.UdpSocket`, `Tls.TlsConn`, `WebSocket.WsSocket` or `Process`
@@ -837,10 +840,7 @@ mod Wire do
     Socket.write(s, data)       -- fine: the socket was opened elsewhere, checked
   end
 end
-``` Some stdlib
-helpers degrade instead of failing: `List.pmap` and friends compute
-sequentially when spawning is refused, `IO.inspect` and `debug` still return
-their argument, and the Logger drops a line or a timestamp.
+```
 
 Until run-time authority lands (ocap phase 4), nothing refuses except the
 test-only `MARCH_TEST_REFUSE` hook, a comma-separated list of capability kinds
