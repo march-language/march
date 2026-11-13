@@ -846,7 +846,12 @@ checked open (`File.open`, `Socket.connect`, `Socket.listen`,
 the standard library (`stdlib_internal`). Using a handle you hold is therefore
 not charged: a function bounded by `needs ()` may read a `File.Handle`, write to
 a `Socket` or wait on a `Process` it was handed, and accept on a `Listener`;
-it may not open one. A handle never leaves its node: a message type holding one
+it may not open one. One caveat while a Vault's element type is not part of
+its identity (`Vault.open(name)` lets the caller choose it): an opaque type over
+plain data, such as the cluster's `PeerRegistry.Fd`, can be minted through a
+name-keyed Vault under the interpreter, and compiled code then fails at the
+stdlib's match rather than refusing the open (`specs/todos/2026-11-13-vault-element-type-not-identity.md`);
+the handle boxes themselves cannot. A handle never leaves its node: a message type holding one
 cannot `derive Json` or go through `Node.send` ([Clustering]({{ site.baseurl }}/docs/clustering/)).
 
 ```march
