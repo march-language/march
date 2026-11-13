@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- `SessionNode` with THREE roles on three connections, and the arrival race
 -- two parties never have (specs/progress/2026-09-16-session-node-multiparty-routing.md).
 --

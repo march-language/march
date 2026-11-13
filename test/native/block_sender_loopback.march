@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- `NodeQueue.BlockSender`: the caller blocks until credit admits the frame
 -- (credit-based flow control, the last policy). Same topology as
 -- credit_backpressure_loopback, budget 100 and 44-byte frames. The queue

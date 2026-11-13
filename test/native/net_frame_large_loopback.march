@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- NetKernel.recv_frame is linear in the frame size: a 1 MiB frame over
 -- loopback, sent with send_frame and received with recv_frame, followed by
 -- a small frame that arrives in the same recv() to check the leftover carry.

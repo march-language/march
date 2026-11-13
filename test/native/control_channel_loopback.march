@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- The control/data split (distributed actors 2/4, step 2): a control frame
 -- is not stuck behind a large data frame.
 --

@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- Compiler-emitted enroll/stub integration test (L4).
 --
 -- Demonstrates that the compiler auto-registers __rpc_stub functions at @main

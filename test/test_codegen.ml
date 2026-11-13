@@ -12277,6 +12277,208 @@ end
          --- RC trace report (--rc-trace + MARCH_TRACE_GC=1) ---\n%s"
         run_out (rc_trace_report ~project_root ~main_exe ~src ~tmp)
 
+(* ── A Float-valued `if`/`match` joins in a `double` slot ─────────────────
+
+   [Llvm_case.predicted_unboxed_join] had no case predicting `double`, so a
+   Float-valued case took the `ptr` slot: each arm boxed its value with
+   [march_alloc_float] and the merge unboxed and freed it, a malloc and a
+   free per evaluation (22 ns against 0.7 ns on the clamp-and-max loop in
+   specs/progress/2026-11-12-float-valued-case-join-slot.md).  When every arm
+   that reaches the merge is a Float the slot is `double` and nothing boxes.
+
+   [float_join_fns] is one function per arm shape: a variable against a
+   literal, a nested `else if` chain of arithmetic, a `match` whose arms are
+   a user call, `/.`, a `let` chain and a builtin call, a native-array read,
+   a niche-encoded Option scrutinee (its own slot, [slot_ty_n]), and a
+   `panic` arm that must not spoil the prediction. *)
+let float_join_fns = {|
+  pfn half(x : Float) : Float do x *. 0.5 end
+  pfn clamp(e : Float) : Float do
+    let c = if e > 0.0 do e else 0.0 end
+    c +. 1.0
+  end
+  pfn chain(e : Float) : Float do
+    let c = if e > 2.0 do e -. 2.0 else if e > 1.0 do e *. 3.0 else if e > 0.0 do 0.0 -. e else 0.25 end end end
+    c +. 1.0
+  end
+  pfn pick(i : Int, x : Float) : Float do
+    let c = match i do
+      0 -> half(x)
+      1 -> x /. 4.0
+      2 ->
+        let y = x +. 1.0
+        let z = y *. y
+        z
+      _ -> int_to_float(i)
+    end
+    c +. 1.0
+  end
+  pfn arr(h : NativeF32Arr, k : Int) : Float do
+    let c = if k > 1 do NativeArray.get_f32(h, k) else 0.5 end
+    c +. 1.0
+  end
+  pfn niche(o : Option(String)) : Float do
+    let c = match o do
+      Some(s) -> int_to_float(String.byte_size(s)) *. 1.5
+      None -> 0.0 -. 1.0
+    end
+    c +. 1.0
+  end
+  pfn diverge(i : Int, x : Float) : Float do
+    let c = match i do
+      0 -> x
+      1 -> x *. 2.0
+      _ -> panic("FloatJoin.diverge: bad selector")
+    end
+    c +. 1.0
+  end
+  pfn total(i : Int, n : Int, h : NativeF32Arr, acc : Float) : Float do
+    if i >= n do acc
+    else
+      let x = int_to_float(i % 7) *. 0.5 -. 1.0
+      let o = if i % 2 == 0 do Some("abc") else None end
+      let s = clamp(x) +. chain(x) +. pick(i % 4, x) +. arr(h, i % 4) +. niche(o)
+              +. diverge(i % 2, x)
+      total(i + 1, n, h, acc +. s)
+    end
+  end
+  pfn table() : NativeF32Arr do
+    NativeArray.set_f32(NativeArray.set_f32(NativeArray.make_f32(4, 0.0), 2, 2.5), 3, 0.0 -. 3.5)
+  end
+|}
+
+(* The fallback: one arm calls a closure, which the prediction does not
+   trust, so the join keeps the `ptr` slot, both arms box and
+   [Llvm_case.finish_ptr_merge] frees the box. *)
+let float_join_mixed_fns = {|
+  pfn mixed(f : Float -> Float, x : Float) : Float do
+    let c = if x > 1.0 do f(x) else 0.5 end
+    c +. 1.0
+  end
+  pfn mtotal(i : Int, n : Int, acc : Float) : Float do
+    if i >= n do acc
+    else
+      let x = int_to_float(i % 7) *. 0.5 -. 1.0
+      mtotal(i + 1, n, acc +. mixed(fn v -> v *. x, x))
+    end
+  end
+|}
+
+let float_join_print_main = {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(total(0, 50, table(), 0.0)))
+    println(float_to_string(mtotal(0, 50, 0.0)))
+    ()
+  end
+|}
+
+(* Same loops under the runtime's live-object gauge: warm once, then the
+   count must not move over a run 200 times longer.  Each run builds and
+   drops its own table, so the table does not move the gauge either. *)
+let float_join_gauge_main = {|
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = total(0, 100, table(), 0.0) +. mtotal(0, 100, 0.0)
+    let base = live_allocs()
+    let bulk = total(0, 20000, table(), 0.0) +. mtotal(0, 20000, 0.0)
+    let grew = live_allocs() - base
+    if warm +. bulk > 0.0 && grew == 0 do
+      println("ZERO")
+    else
+      println("GREW " ++ int_to_string(grew))
+    end
+    ()
+  end
+|}
+
+let float_join_src ~name ~needs fns main =
+  Printf.sprintf "mod %s do\n  needs IO.Console\n%s%s%s\nend\n" name needs fns main
+
+(* The `.ll` `march --emit-llvm` writes for [src] (next to the source). *)
+let float_join_cli_ir ~project_root ~main_exe ~src =
+  let ll = Filename.remove_extension src ^ ".ll" in
+  ignore (read_cmd_output (Printf.sprintf "cd %s && %s --emit-llvm %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+  if Sys.file_exists ll then read_file_contents ll
+  else Alcotest.failf "march --emit-llvm wrote no %s" ll
+
+let test_float_case_join_slot_is_double () =
+  let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_floatjoin_ir"
+    (float_join_src ~name:"FloatJoinIr" ~needs:"" float_join_fns
+       {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(total(0, 50, table(), 0.0)))
+    ()
+  end
+|})
+  in
+  let ir = float_join_cli_ir ~project_root ~main_exe ~src in
+  Alcotest.(check bool) "the module has Float-valued joins at all" true
+    (ir_count ir "= alloca double" >= 6);
+  Alcotest.(check int) "no arm of a Float-valued if/match boxes its value" 0
+    (ir_count ir "call ptr @march_alloc_float(");
+  Alcotest.(check int) "so no merge unboxes one" 0
+    (ir_count ir "call double @march_unbox_float(")
+
+let test_float_case_join_mixed_arms_keep_ptr_slot () =
+  let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_floatjoin_mixed_ir"
+    (float_join_src ~name:"FloatJoinMixedIr" ~needs:"" float_join_mixed_fns
+       {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(mtotal(0, 50, 0.0)))
+    ()
+  end
+|})
+  in
+  let fn_ir = ir_define (float_join_cli_ir ~project_root ~main_exe ~src) "mtotal" in
+  Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
+  Alcotest.(check int) "both arms box to cross the ptr join" 2
+    (ir_count fn_ir "call ptr @march_alloc_float(");
+  (* The merge's own box: unboxed, then released by the same merge. *)
+  let re = Str.regexp
+      "\\(%case_r[0-9]+\\) = load ptr, ptr %res_slot[0-9]+\n[^\n]*call double @march_unbox_float(ptr \\1)\n[^\n]*call void @[_a-z]*march[_a-z]*decrc_local(ptr \\1)" in
+  Alcotest.(check bool) "the merge unboxes its box and frees it" true
+    (match Str.search_forward re fn_ir 0 with _ -> true | exception Not_found -> false)
+
+let test_float_case_join_matches_interpreter_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatjoin_parity"
+    (float_join_src ~name:"FloatJoinParity" ~needs:""
+       (float_join_fns ^ float_join_mixed_fns) float_join_print_main)
+  in
+  let cd = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+  let interp = read_cmd_output (Printf.sprintf "%s%s %s 2>&1" cd
+      (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "the interpreter printed two numbers" true
+    (List.length (String.split_on_char '\n' (String.trim interp)) = 2
+     && not (ir_contains interp "rror"));
+  let bin = Filename.concat tmp "floatjoinparitybin" in
+  match compile_march_or_skip ~cmd_prefix:cd ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check string) "compiled output equals the interpreter's" interp
+      (read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)))
+
+let test_float_case_join_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatjoin_gauge"
+    (float_join_src ~name:"FloatJoinGauge" ~needs:"  needs Ffi\n  needs IO.Foreign\n"
+       (float_join_fns ^ float_join_mixed_fns) float_join_gauge_main)
+  in
+  let bin = Filename.concat tmp "floatjoingaugebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    if run_out <> "ZERO" then
+      Alcotest.failf
+        "Float-valued joins hold a double (and the mixed-arm join frees its \
+         box): the live-object count must not move over the loop; expected \
+         ZERO, got %S\n\n\
+         --- RC trace report (--rc-trace + MARCH_TRACE_GC=1) ---\n%s"
+        run_out (rc_trace_report ~project_root ~main_exe ~src ~tmp)
+
 (* Static capture-free closures (Task 1, lib/tir/llvm_emit.ml): a top-level
    named fn used as a first-class value now references ONE immortal
    `internal global` closure object per fn (@<fn>$static_clo, refcount
@@ -19938,6 +20140,14 @@ let codegen_suites =
             test_unboxed_aggregate_multi_arm_joins_are_struct;
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
+          Alcotest.test_case "Float-valued if/match joins in a double slot, no box" `Quick
+            test_float_case_join_slot_is_double;
+          Alcotest.test_case "Float join with an unpredicted arm keeps the ptr slot and frees its box" `Quick
+            test_float_case_join_mixed_arms_keep_ptr_slot;
+          Alcotest.test_case "compiled Float-valued joins equal the interpreter" `Slow
+            test_float_case_join_matches_interpreter_compiled;
+          Alcotest.test_case "compiled Float-valued join loop does not leak" `Slow
+            test_float_case_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
           Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
           Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;

@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- NodeSend loopback integration test (distributed actors 1/4).
 --
 -- Two "nodes" in one process over real TCP loopback, as node_call_loopback:

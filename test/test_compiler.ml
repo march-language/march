@@ -16823,10 +16823,13 @@ let test_stdlib_sorted_set_cmp_curried () =
 let test_stdlib_range_reduce_curried () =
   assert_stdlib_file_typechecks_cleanly "range.march"
 
+(* dist_link.march is stdlib source that drives the @[stdlib_internal]
+   cluster plumbing (NetKernel.send_frame, ocap phase 2 task 9), so it is
+   checked as what it is: --stdlib-source registers its span as stdlib. *)
 let test_stdlib_dist_link_cli_check () =
   let project_root = march_project_root () in
   let main_exe = find_main_exe () in
-  let cmd = Printf.sprintf "cd %s && %s --check stdlib/dist_link.march"
+  let cmd = Printf.sprintf "cd %s && %s --check --stdlib-source stdlib/dist_link.march"
       (Filename.quote project_root) (Filename.quote main_exe) in
   let rc, output = run_capture cmd in
   Alcotest.(check int)

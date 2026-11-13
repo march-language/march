@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- Credit-based flow control over loopback (distributed actors 2/4, step 3):
 -- a sender whose receiver has not yet consumed anything fills its budget,
 -- gets Backpressure under drop_new, and is admitted again once CREDIT
