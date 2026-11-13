@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- Node.call loopback integration test (P3 L4).
 --
 -- Spins up a listener on an OS-assigned ephemeral port (tcp_listen(0) +

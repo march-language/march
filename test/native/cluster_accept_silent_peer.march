@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- `ClusterConn.accept_split_within`: a client that connects and then says
 -- nothing fails the handshake once the timeout passes, instead of holding
 -- the listener for ever. The handshake reads through `tcp_recv_exact`, which

@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- DELIVERY_FAILED as a message to the sending ACTOR (distributed actors 1/4).
 --
 -- node-a's Sender actor casts to a pid node-b does not host, via

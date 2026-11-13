@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- PeerReader loopback (distributed actors 2/4, step 1).
 --
 -- ONE connection carrying frames for TWO consumers, read by ONE reader.
