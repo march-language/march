@@ -455,7 +455,10 @@ code.
 
 ### The handshake in code
 
-`ClusterNode` runs all of this itself. At the connection level:
+`ClusterNode` runs all of this itself. The functions in this subsection are the
+standard library's wire layer: they are `@[stdlib_internal]`, so a program's own
+modules cannot call them (`stdlib_internal`), and they take a raw descriptor, not a
+`Socket`. They are shown to explain what `ClusterNode` does. At the connection level:
 
 ```march
 -- Either mode: ClusterAuth.Secret(secret) or ClusterAuth.Certified(credentials)
@@ -544,7 +547,7 @@ loopback) are never raw sends.
 | `ClusterNode.send_msg` to a peer | `Err(NodeQueue.NotAuthorized)`, never queued |
 | `ClusterNode.queue_for(c, peer)` | `None` |
 | an inbound raw frame from a peer | dropped before any route, and answered `DELIVERY_FAILED` ("not authorized: ..."), so the sender's `on_delivery_failed` hears it |
-| `NodeSend.cast` / `Node.send` on a connection a program opened with `ClusterConn.connect_split_auth` | `Err(Refused(seq, "not authorized: ..."))`; an inbound raw frame is answered `DELIVERY_FAILED` |
+| `NodeSend.cast` / `Node.send` on a connection the standard library opened with `ClusterConn.connect_split_auth` (stdlib-internal) | `Err(Refused(seq, "not authorized: ..."))`; an inbound raw frame is answered `DELIVERY_FAILED` |
 | `NodeCall.call` (`RemoteCall`) on such a connection | `Err(Forbidden)`; the serving side answers `Forbidden` without dispatching |
 
 Every refusal is counted. `ClusterNode.raw_refused(c)` counts a node's own
