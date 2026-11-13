@@ -693,16 +693,27 @@ let search_laws (idx : index) (phrase : string) : (entry * float) list =
       idx.entries
     |> List.sort (fun (_, s1) (_, s2) -> compare s2 s1)
 
-(** Search by function/type name.  Uses substring + Levenshtein fuzzy match. *)
+(** [s] lowercased with every [.] read as [_], so a qualified name and the
+    builtin it wraps compare equal: [Task.poll] and [task_poll]. *)
+let qualified_key (s : string) : string =
+  String.map (fun c -> if c = '.' then '_' else c) (normalize s)
+
+(** Search by function/type name.  Uses substring + Levenshtein fuzzy match,
+    plus an exact match on the module-qualified name ([Task.await], or the
+    builtin spelling [task_await]). *)
 let search_name (idx : index) (query : string) : (entry * float) list =
   if String.length query = 0 then
     List.map (fun e -> (e, 1.0)) idx.entries
   else begin
     let ql = normalize query in
+    let qk = qualified_key query in
     List.filter_map (fun entry ->
       let nl = normalize entry.name in
       if nl = ql then
         Some (entry, 1.0)
+      else if entry.module_name <> ""
+           && qualified_key (entry.module_name ^ "." ^ entry.name) = qk then
+        Some (entry, 0.95)
       else if law_calls entry ql then
         (* A lemma whose theorem calls the function searched for. *)
         Some (entry, 0.75)

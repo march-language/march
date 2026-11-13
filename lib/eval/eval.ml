@@ -3088,6 +3088,20 @@ let task_builtins : env =
          | None -> VCon ("Err", [VString (Printf.sprintf "unknown task %d" tid)]))
       | _ -> eval_error "task_await: expected 1 argument (a Task)"))
 
+  (* Non-blocking task_await.  The interpreter runs a task to completion at
+     spawn, so a poll always finds it finished and answers Some of exactly
+     what task_await answers; the compiled runtime answers None while the
+     task is still running. *)
+  ; ("task_poll", VBuiltin ("task_poll", function
+      | [VTask tid] ->
+        (match Hashtbl.find_opt task_registry tid with
+         | Some entry when entry.te_cancelled ->
+           VCon ("Some", [VCon ("Err", [VString "cancelled"])])
+         | Some { te_result = Some v; _ } -> VCon ("Some", [VCon ("Ok", [v])])
+         | Some { te_result = None; _ } -> VCon ("None", [])
+         | None -> VCon ("Some", [VCon ("Err", [VString (Printf.sprintf "unknown task %d" tid)])]))
+      | _ -> eval_error "task_poll: expected 1 argument (a Task)"))
+
   ; ("task_await_unwrap", VBuiltin ("task_await_unwrap", function
       | [VTask tid] ->
         (match Hashtbl.find_opt task_registry tid with

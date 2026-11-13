@@ -13566,6 +13566,363 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
        interior nested tuple) matches the interpreter"
       "15" run_out
 
+(* ── task_poll: the non-blocking counterpart of task_await ─────────────────
+   task_poll(t) : Option(Result(a, String)) answers None at once while t runs
+   and Some(r) once it has finished, r being exactly task_await(t)'s answer.
+   It borrows the Task (no RC traffic per poll) and never waits, so a frame
+   loop can poll hundreds of tasks.  The interpreter runs a task eagerly at
+   spawn, so there every poll answers Some; the "still running" half is
+   covered by the compiled program below. *)
+
+let test_eval_task_poll_finished () =
+  let src = {|mod Test do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 42)
+      match task_poll(t) do
+        Some(Ok(v)) -> v
+        Some(Err(_)) -> -1
+        None -> -2
+      end
+    end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check int) "finished task polls Some(Ok(42))" 42
+    (vint (call_fn env "main" []))
+
+let test_eval_task_poll_cancelled () =
+  let src = {|mod Test do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 42)
+      task_cancel_by_id(t)
+      match task_poll(t) do
+        Some(Ok(_)) -> 0
+        Some(Err(_)) -> 1
+        None -> 2
+      end
+    end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check int) "cancelled task polls Some(Err(_))" 1
+    (vint (call_fn env "main" []))
+
+let test_eval_task_poll_then_await () =
+  let src = {|mod Test do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 7)
+      let a = match task_poll(t) do
+        Some(Ok(v)) -> v
+        _ -> -1
+      end
+      let b = match task_poll(t) do
+        Some(Ok(v)) -> v
+        _ -> -1
+      end
+      let c = match task_await(t) do
+        Ok(v) -> v
+        Err(_) -> -1
+      end
+      a * 100 + b * 10 + c
+    end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check int) "poll, poll again and await agree" 777
+    (vint (call_fn env "main" []))
+
+let test_compile_task_poll_in_ir () =
+  let ir = emit_actor_ir {|mod TaskPollTest do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 42)
+      task_poll(t)
+    end
+  end|} in
+  Alcotest.(check bool) "uses march_task_poll" true
+    (ir_contains ir "call ptr @march_task_poll");
+  Alcotest.(check bool) "never waits (no march_task_await call)" false
+    (ir_contains ir "call ptr @march_task_await")
+
+(* Backend-neutral: every poll is made after the task has finished, so the
+   interpreter and the compiled binary must print the same thing. *)
+let task_poll_neutral_src = {|mod TaskPollNeutral do
+  needs IO
+
+  pfn poll_until(t, nones) do
+    match task_poll(t) do
+      Some(r) -> (r, nones)
+      None ->
+        task_yield()
+        poll_until(t, nones + 1)
+    end
+  end
+
+  pfn show_int(r : Result(Int, String)) : String do
+    match r do
+      Ok(v) -> "Ok(" ++ int_to_string(v) ++ ")"
+      Err(_) -> "Err"
+    end
+  end
+
+  pfn show_poll(p : Option(Result(Int, String))) : String do
+    match p do
+      None -> "None"
+      Some(r) -> "Some(" ++ show_int(r) ++ ")"
+    end
+  end
+
+  pfn spawn_many(n : Int, acc : List(Task(Int))) : List(Task(Int)) do
+    if n <= 0 do acc
+    else spawn_many(n - 1, Cons(task_spawn(fn _ -> n * 10), acc))
+    end
+  end
+
+  pfn sweep(ts : List(Task(Int)), pending : List(Task(Int)), sum : Int) do
+    match ts do
+      Nil -> (pending, sum)
+      Cons(t, rest) ->
+        match task_poll(t) do
+          None -> sweep(rest, Cons(t, pending), sum)
+          Some(Ok(v)) -> sweep(rest, pending, sum + v)
+          Some(Err(_)) -> sweep(rest, pending, sum - 1000000)
+        end
+    end
+  end
+
+  pfn drain(ts : List(Task(Int)), sum : Int) : Int do
+    match ts do
+      Nil -> sum
+      _ ->
+        let (pending, s2) = sweep(ts, Nil, sum)
+        task_yield()
+        drain(pending, s2)
+    end
+  end
+
+  fn main(_cap : Cap(IO)) do
+    let t = task_spawn(fn _ -> 6 * 7)
+    let (r, _n) = poll_until(t, 0)
+    println("finished: " ++ show_int(r))
+    println("again: " ++ show_poll(task_poll(t)))
+    println("await: " ++ show_int(task_await(t)))
+    println("poll after await: " ++ show_poll(task_poll(t)))
+
+    let doomed = task_spawn(fn _ -> 7)
+    let (r2, _n2) = poll_until(doomed, 0)
+    println("before cancel: " ++ show_int(r2))
+    task_cancel_by_id(doomed)
+    println("cancelled: " ++ show_poll(task_poll(doomed)))
+    println("cancelled await: " ++ show_int(task_await(doomed)))
+
+    let ft = task_spawn(fn _ -> 2.5)
+    let (fr, _n3) = poll_until(ft, 0)
+    let f1 = match fr do
+      Ok(f) -> float_to_string(f)
+      Err(_) -> "Err"
+    end
+    let f2 = match task_poll(ft) do
+      Some(Ok(f)) -> float_to_string(f)
+      _ -> "?"
+    end
+    let f3 = match task_await(ft) do
+      Ok(f) -> float_to_string(f)
+      Err(_) -> "Err"
+    end
+    println("float: " ++ f1 ++ " " ++ f2 ++ " " ++ f3)
+
+    let st = task_spawn(fn _ -> "s" ++ int_to_string(5))
+    let (sr, _n4) = poll_until(st, 0)
+    let s1 = match sr do
+      Ok(s) -> s
+      Err(_) -> "Err"
+    end
+    let s2 = match task_poll(st) do
+      Some(Ok(s)) -> s
+      _ -> "?"
+    end
+    println("string: " ++ s1 ++ " " ++ s2)
+
+    let many = spawn_many(200, Nil)
+    println("many: " ++ int_to_string(drain(many, 0)))
+  end
+end
+|}
+
+let task_poll_neutral_expected =
+  "finished: Ok(42)\nagain: Some(Ok(42))\nawait: Ok(42)\n\
+   poll after await: Some(Ok(42))\nbefore cancel: Ok(7)\n\
+   cancelled: Some(Err)\ncancelled await: Err\n\
+   float: 2.5 2.5 2.5\nstring: s5 s5\nmany: 201000"
+
+(* Compiled only: the task waits on a Vault gate main opens later, so main
+   sees it still running.  The interpreter would run the gated task at spawn.
+   The gate times out after 5 s (answer 41, not 42), so a poll that blocked
+   until the task finished fails "prompt" instead of hanging the suite. *)
+let task_poll_pending_src = {|mod TaskPollPending do
+  needs IO
+
+  pfn wait_gate(g : Vault(Int), deadline : Int) : Int do
+    match Vault.get(g, "go") do
+      Some(v) -> v
+      None ->
+        if unix_time_ms() >= deadline do 0
+        else
+          sleep_ms(1)
+          wait_gate(g, deadline)
+        end
+    end
+  end
+
+  pfn count_nones(t : Task(Int), n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      match task_poll(t) do
+        None -> count_nones(t, n - 1, acc + 1)
+        Some(_) -> count_nones(t, n - 1, acc)
+      end
+    end
+  end
+
+  pfn poll_until(t : Task(Int), nones : Int) do
+    match task_poll(t) do
+      Some(r) -> (r, nones)
+      None ->
+        task_yield()
+        poll_until(t, nones + 1)
+    end
+  end
+
+  pfn show_int(r : Result(Int, String)) : String do
+    match r do
+      Ok(v) -> "Ok(" ++ int_to_string(v) ++ ")"
+      Err(e) -> "Err(" ++ e ++ ")"
+    end
+  end
+
+  pfn poll_any(t, nones) do
+    match task_poll(t) do
+      Some(r) -> (r, nones)
+      None ->
+        task_yield()
+        poll_any(t, nones + 1)
+    end
+  end
+
+  -- Each task's heap result is read four ways; the Task keeps one reference
+  -- and every read takes its own, so nothing may be left over.
+  pfn str_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> "v" ++ int_to_string(n))
+      let (r, _k) = poll_any(t, 0)
+      let a = match r do
+        Ok(s) -> string_byte_length(s)
+        Err(_) -> 0
+      end
+      let b = match task_poll(t) do
+        Some(Ok(s)) -> string_byte_length(s)
+        _ -> 0
+      end
+      let c = match task_await(t) do
+        Ok(s) -> string_byte_length(s)
+        Err(_) -> 0
+      end
+      let d = string_byte_length(task_await_unwrap(t))
+      str_leg(n - 1, acc + a + b + c + d)
+    end
+  end
+
+  pfn float_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> int_to_float(n) +. 0.5)
+      let (r, _k) = poll_any(t, 0)
+      let a = match r do
+        Ok(f) -> f
+        Err(_) -> 0.0
+      end
+      let b = match task_poll(t) do
+        Some(Ok(f)) -> f
+        _ -> 0.0
+      end
+      float_leg(n - 1, acc +. a +. b +. task_await_unwrap(t))
+    end
+  end
+
+  -- live_allocs once the last task's trampoline has dropped its hold.
+  pfn settled_allocs() : Int do
+    sleep_ms(50)
+    live_allocs()
+  end
+
+  fn main(_cap : Cap(IO)) do
+    let g = Authority.must(Vault.new("task_poll_pending_gate"))
+    let deadline = unix_time_ms() + 5000
+    let slow = task_spawn(fn _ -> wait_gate(g, deadline) + 41)
+    let t0 = unix_time_ms()
+    let first = match task_poll(slow) do
+      None -> "None"
+      Some(_) -> "Some"
+    end
+    let nones = count_nones(slow, 1000, 0)
+    let took = unix_time_ms() - t0
+    println("pending: " ++ first)
+    println("polls while pending: " ++ int_to_string(nones) ++ " None")
+    println("prompt: " ++ bool_to_string(took < 1000))
+    Vault.set(g, "go", 1)
+    let (r, _n) = poll_until(slow, 0)
+    println("finished: " ++ show_int(r))
+    println("await: " ++ show_int(task_await(slow)))
+    let _warm = str_leg(4, 0) + float_to_int(float_leg(4, 0.0))
+    let b0 = settled_allocs()
+    let sl = str_leg(1000, 0)
+    let b1 = settled_allocs()
+    let fl = float_leg(1000, 0.0)
+    let b2 = settled_allocs()
+    println("string reads: " ++ int_to_string(sl) ++ " leaked " ++ int_to_string(b1 - b0))
+    println("float reads: " ++ float_to_string(fl) ++ " leaked " ++ int_to_string(b2 - b1))
+  end
+end
+|}
+
+let task_poll_pending_expected =
+  "pending: None\npolls while pending: 1000 None\nprompt: true\n\
+   finished: Ok(42)\nawait: Ok(42)\n\
+   string reads: 15572 leaked 0\nfloat reads: 1503000. leaked 0"
+
+let test_task_poll_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_task_poll_neutral" task_poll_neutral_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter" task_poll_neutral_expected interp_out;
+  let (_, _, psrc, ptmp) =
+    write_march_source ~name:"march_task_poll_pending" task_poll_pending_src in
+  let run label bin expected =
+    List.iter (fun env ->
+        let out = read_cmd_output
+            (Printf.sprintf "%s %s 2>&1; echo EXIT:$?" env (Filename.quote bin)) in
+        Alcotest.(check string) (Printf.sprintf "%s [%s]" label env)
+          (expected ^ "\nEXIT:0") out)
+      [ "MARCH_NUM_SCHEDULERS=1"; "env" ] in
+  List.iter (fun opt ->
+      let extra_args = Printf.sprintf "--opt %d" opt in
+      let cmd_prefix = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+      (match compile_march_or_skip ~cmd_prefix ~extra_args ~main_exe
+               ~bin:(Filename.concat tmp (Printf.sprintf "poll_neutral_o%d" opt)) ~src () with
+       | None -> ()
+       | Some bin ->
+         run (Printf.sprintf "--opt %d: finished/cancelled/many tasks" opt)
+           bin task_poll_neutral_expected);
+      (match compile_march_or_skip ~cmd_prefix ~extra_args ~main_exe
+               ~bin:(Filename.concat ptmp (Printf.sprintf "poll_pending_o%d" opt)) ~src:psrc () with
+       | None -> ()
+       | Some bin ->
+         run (Printf.sprintf "--opt %d: a running task polls None at once" opt)
+           bin task_poll_pending_expected))
+    [0; 2]
+
 (* ── Issue #1173: a generalized `let x = None` used at a niche-UNSAFE type ──
    `let x = None` is generalized (no value restriction), so its RHS lowered at
    the scheme's residual type, `alloc Option.None('a)()`, which codegen
@@ -17468,6 +17825,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare ptr  @march_task_await_value(ptr %task)
+declare ptr  @march_task_poll(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_actor_recv()
 declare ptr  @march_cancel_token_new()
@@ -17796,6 +18154,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare ptr  @march_task_await_value(ptr %task)
+declare ptr  @march_task_poll(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_actor_recv()
 declare ptr  @march_cancel_token_new()
@@ -17879,7 +18238,7 @@ let test_builtin_group_total () =
          March_tir.Builtin_name.all)
   in
   Alcotest.(check int) "arith" 27 (count March_tir.Llvm_emit.Bg_arith);
-  Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
+  Alcotest.(check int) "task" 25 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
 let test_builtin_name_roundtrip () =
@@ -17893,7 +18252,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 70
+  Alcotest.(check int) "constructor count" 71
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
@@ -20847,6 +21206,12 @@ let codegen_suites =
             (with_reset test_compile_task_reductions_reads_tls);
           Alcotest.test_case "task_await uses march_task_await"    `Quick
             (with_reset test_compile_task_await_in_ir);
+          Alcotest.test_case "task_poll uses march_task_poll"      `Quick
+            (with_reset test_compile_task_poll_in_ir);
+          Alcotest.test_case "task_poll finished task"   `Quick (with_reset test_eval_task_poll_finished);
+          Alcotest.test_case "task_poll cancelled task"  `Quick (with_reset test_eval_task_poll_cancelled);
+          Alcotest.test_case "task_poll then await agree" `Quick (with_reset test_eval_task_poll_then_await);
+          Alcotest.test_case "task_poll interp + compiled (--opt 0, 2)" `Quick test_task_poll_compiled;
           Alcotest.test_case "cancel token IR correctness"         `Quick
             (with_reset test_compile_cancel_token_ir);
           (* Phase 5B: cancel tokens *)

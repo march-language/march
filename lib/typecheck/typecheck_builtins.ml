@@ -980,6 +980,9 @@ let builtin_bindings : (string * scheme) list =
     ("task_spawn",         poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
     ("task_await",         poly1 (fun a -> TArrow (TCon ("Task", [a]), t_result a t_string)));
     ("task_await_unwrap",  poly1 (fun a -> TArrow (TCon ("Task", [a]), a)));
+    (* Non-blocking task_await: None while the task runs, else Some of what
+       task_await would answer. *)
+    ("task_poll",          poly1 (fun a -> TArrow (TCon ("Task", [a]), t_option (t_result a t_string))));
     ("task_yield",         Mono (TArrow (t_unit, t_unit)));
     ("task_spawn_steal",   poly1 (fun a -> TArrow (TCon ("WorkPool", []), TArrow (TArrow (t_int, a), TCon ("Task", [a])))));
     ("task_reductions",    Mono (TArrow (t_unit, t_int)));

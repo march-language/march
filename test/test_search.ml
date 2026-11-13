@@ -471,6 +471,17 @@ let test_name_fuzzy () =
   Alcotest.(check bool) "length found via fuzzy" true
     (List.mem "length" names)
 
+let test_name_qualified () =
+  let idx = sample_index () in
+  let found q = List.map (fun (e, _) -> e.Search.module_name ^ "." ^ e.Search.name)
+      (Search.search_name idx q) in
+  Alcotest.(check bool) "List.fold_left found by its qualified name" true
+    (List.mem "List.fold_left" (found "List.fold_left"));
+  Alcotest.(check bool) "String.split found by the builtin spelling string_split" true
+    (List.mem "String.split" (found "string_split"));
+  Alcotest.(check bool) "a qualified query names one module's entry" false
+    (List.mem "List.map" (found "string_map"))
+
 let test_name_no_query () =
   let idx = sample_index () in
   let results = Search.search_name idx "" in
@@ -947,6 +958,7 @@ let name_search_tests = [
   "exact",            `Quick, test_name_exact;
   "substring",        `Quick, test_name_substring;
   "fuzzy",            `Quick, test_name_fuzzy;
+  "qualified",        `Quick, test_name_qualified;
   "empty_query",      `Quick, test_name_no_query;
   "sorted_by_score",  `Quick, test_name_sorted_by_score;
 ]

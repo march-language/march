@@ -182,6 +182,11 @@ let extern_borrow_table : (string * bool list) list = [
      LSan: ~9,000 Tasks). *)
   ("task_cancel_by_id", [true]);
   ("march_task_cancel_by_id", [true]);
+  (* task_poll only reads the Task's done and result words; it is called on
+     the same handle every frame, so borrowing it keeps a poll free of
+     refcount traffic. *)
+  ("task_poll", [true]);
+  ("march_task_poll", [true]);
   ("pid_to_int",        [true]);
   ("pid_index_of",      [true]);
   ("march_pid_index_of", [true]);

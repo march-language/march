@@ -180,7 +180,7 @@ let test_special_lowerings_not_redundant () =
 let dedicated_emit_rows : string list =
   [ "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/."; "=="; "!="; "<"; "<=";
     ">"; ">=";
-    "task_spawn"; "task_await"; "task_await_unwrap"; "task_yield";
+    "task_spawn"; "task_await"; "task_await_unwrap"; "task_poll"; "task_yield";
     "task_spawn_steal"; "task_reductions"; "pmap_threshold"; "get_work_pool";
     "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr";
     "int_popcount"; "remote_ref_hashes" ]

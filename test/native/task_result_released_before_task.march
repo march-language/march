@@ -1,14 +1,16 @@
 -- A Task's result handed to its awaiter, which releases it and drops the
 -- Task handle while the task's own trampoline may still hold the Task.
 --
--- When the last reference to a Task goes, its destructor releases the result
--- only if it is a Float box (task_await_unwrap reads the double out without
--- consuming it). It used to decide that by reading the RESULT's tag at that
--- moment -- but any other result belongs to the awaiter, which may already
--- have freed it: a heap-use-after-free whenever the trampoline's reference
--- was the last one (ASAN, tcp_recv_eagain_after_park at 14 schedulers, about
--- 1 run in 800 under load). The trampoline now records "Float box" in the
--- Task header while it still owns the result.
+-- When the last reference to a Task goes, its destructor releases the Task's
+-- own reference to a heap result. It used to decide whether it had one by
+-- reading the RESULT's tag at that moment -- while a non-Float result was
+-- handed to the awaiter, which may already have freed it: a
+-- heap-use-after-free whenever the trampoline's reference was the last one
+-- (ASAN, tcp_recv_eagain_after_park at 14 schedulers, about 1 run in 800
+-- under load). The trampoline records "owns a heap result" in the Task header
+-- while it still owns the result. Since 2026-11-12 (task_poll) the Task keeps
+-- EVERY heap result and each await/poll/unwrap takes a reference of its own,
+-- so the tuple legs below also check the reads' references balance.
 --
 -- The tuple legs are the use-after-free shape (ASAN's to catch, via
 -- scripts/native-sanitize-sweep.sh; here they assert the values). The Float
