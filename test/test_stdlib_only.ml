@@ -309,7 +309,8 @@ let contains ~needle hay =
 
 let forge_src = {|mod Forge do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  needs IO.Registry
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.Registry)) do
     let p = pid_of_int(0)
     let q = actor_whereis("x")
     let r = actor_registered()
