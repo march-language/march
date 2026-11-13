@@ -45,6 +45,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 /* march_scheduler.c.  Weak, so a test link that leaves the scheduler out
@@ -52,6 +53,9 @@
 extern void march_sched_fdwait_cancel(int fd) __attribute__((weak));
 extern void march_sched_fdwait_forget(int fd) __attribute__((weak));
 extern void march_sched_fdwait_own(int fd, int owned) __attribute__((weak));
+extern void *march_sched_current(void) __attribute__((weak));
+extern int march_sched_park_self_until(int64_t deadline_ms) __attribute__((weak));
+extern int64_t march_now_ms(void) __attribute__((weak));
 
 /* The descriptor a box of [kind] owns and can cancel waits on, or -1. */
 static inline int64_t owned_fd(int64_t kind, int64_t raw, int64_t aux) {
@@ -259,6 +263,77 @@ int64_t march_handle_close(void *h) {
     }
     march_handle_leave(h);                             /* releases if nothing else is in flight */
     return 1;
+}
+
+static int64_t drain_now_ms(void) {
+    if (march_now_ms) return march_now_ms();
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Wait about a millisecond without holding a scheduler thread: park a green
+ * thread (the use we wait for may be another green thread on this scheduler
+ * thread), sleep an OS thread (the HTTP event loop, a WebSocket thread). */
+static void drain_pause(void) {
+    if (march_sched_current && march_sched_current() && march_sched_park_self_until) {
+        (void)march_sched_park_self_until(drain_now_ms() + 1);
+        return;
+    }
+    struct timespec ts = { 0, 1000000 };
+    (void)nanosleep(&ts, NULL);
+}
+
+/* Final review I1 (ocap phase 2b): a borrowed box (an HTTP Conn's socket, a
+ * plain ws:// socket) used to be closed with march_handle_close, whose
+ * release is a no-op for TCP_BORROWED, and the server then closed the fd at
+ * once.  A use already in flight (a task parked in Socket.recv on a Conn it
+ * kept) went on with the descriptor NUMBER after that close, so the next
+ * accept could hand the number to another client and the stale use read that
+ * client's bytes.  Here the close waits for the in-flight uses to leave
+ * first, waking them as close does. */
+int64_t march_handle_close_drain(void *h, int64_t timeout_ms) {
+    check_box(h, "close_drain");
+    _Atomic int64_t *st = h_state(h);
+    int64_t s = atomic_load_explicit(st, memory_order_acquire);
+    int own = 0;
+    for (;;) {
+        if (s & ST_CLOSED) break;                  /* closed already: still drain */
+        if (atomic_compare_exchange_weak_explicit(st, &s, (s | ST_CLOSED) + IN_ONE,
+                                                  memory_order_acq_rel, memory_order_acquire)) {
+            own = 1;
+            break;
+        }
+    }
+    int64_t mine = own ? IN_ONE : 0;
+    int32_t k = h_kind(h);
+    /* A borrowed ws:// value carries a session generation above bit 32. */
+    int64_t fd = (k == MARCH_HANDLE_TLS) ? h_auxv(h)
+               : (k == MARCH_HANDLE_TCP_BORROWED) ? (int64_t)(uint32_t)h_raw(h)
+               : h_raw(h);
+    int woke = 0;
+    if ((s & IN_MASK) != 0 && fd >= 0 &&
+        (k == MARCH_HANDLE_TCP || k == MARCH_HANDLE_TCP_BORROWED ||
+         k == MARCH_HANDLE_LISTENER || k == MARCH_HANDLE_UDP)) {
+        (void)shutdown((int)fd, SHUT_RDWR);       /* wake a parked recv (Linux) */
+        fd_cancel_waits(fd);                       /* ... and everywhere else */
+        woke = 1;
+    }
+    int64_t deadline = drain_now_ms() + (timeout_ms > 0 ? timeout_ms : 0);
+    int drained = 1;
+    for (;;) {
+        int64_t cur = atomic_load_explicit(st, memory_order_acquire);
+        if ((cur & IN_MASK) <= mine) break;
+        if (drain_now_ms() >= deadline) { drained = 0; break; }
+        drain_pause();
+    }
+    /* The sticky cancel would otherwise outlive the borrowed descriptor (a
+     * TCP_BORROWED release never forgets it) and cancel the waits of the
+     * next connection that gets the number.  Owned kinds forget it at
+     * release, which must still see it if a use is stranded. */
+    if (woke && drained && k == MARCH_HANDLE_TCP_BORROWED) fd_forget_cancel(fd);
+    if (own) march_handle_leave(h);                /* releases (owned kinds) */
+    return drained;
 }
 
 /* Hand the descriptor over (to a TLS box, or to code that keeps raw fds):

@@ -390,6 +390,15 @@ void    march_handle_leave(void *h);
  * LISTENER, UDP) are shut down first, so a reader parked in recv wakes; the
  * descriptor is released now, or by the last leave when a use is in flight. */
 int64_t march_handle_close(void *h);
+/* Close [h] and wait (bounded by timeout_ms, parking a green thread or
+ * sleeping an OS thread) until no use is in flight, so the caller may then
+ * close a descriptor the box only borrows (an HTTP Conn's or a ws:// socket's;
+ * a TCP_BORROWED box's release never closes it).  When a use is in flight it
+ * is woken first (shutdown + fd-wait cancel; the cancel is forgotten before
+ * this returns, so a reused number does not inherit it).  1 when nothing is
+ * in flight on return, 0 on timeout (a use is stranded, e.g. by a panic
+ * between enter and leave). */
+int64_t march_handle_close_drain(void *h, int64_t timeout_ms);
 /* Close WITHOUT releasing: ownership of raw moves to the caller (TCP -> TLS,
  * server conn -> WebSocket).  raw, or -1 if already closed. */
 int64_t march_handle_detach(void *h);

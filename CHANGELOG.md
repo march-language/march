@@ -1041,6 +1041,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A task still using an HTTP `Conn`'s socket (or a plain ws:// socket) when the connection
+  ends can no longer read the next client's bytes.** The server closed the descriptor while
+  such a use was in flight, so the number could be reused by the next connection under it.
+  The connection's end now wakes the use and waits (up to 2 s) for it to finish before the
+  descriptor is closed.
 - **`Tls.https_get` checks the host it dials.** It connected with a raw dial that only the
   TLS-context permission covered; it now dials through `Socket.connect`, so `IO.NetConnect`
   on `host:port` is checked like every other connect. A refusal comes back as

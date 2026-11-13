@@ -244,6 +244,77 @@ static void test_borrowed_tcp(void) {
     close(sv[1]);
 }
 
+/* ── close_drain_waits_for_in_flight (final review I1) ─────────────────── */
+/* A borrowed box (an HTTP Conn's socket) is closed when its connection ends,
+ * and the server closes the fd right after.  march_handle_close returned at
+ * once while a use was still in flight, so that use went on holding the
+ * descriptor NUMBER after the server's close(fd): the next accept could hand
+ * the number to another client.  close_drain wakes the use and returns only
+ * once it has left. */
+typedef struct {
+    void *h;
+    atomic_int entered, recv_done, left;
+    ssize_t recv_rc;
+    double  left_at;
+} drain_ctx;
+
+static void *drain_reader(void *arg) {
+    drain_ctx *c = (drain_ctx *)arg;
+    int64_t raw = march_handle_enter(c->h, MARCH_HANDLE_TCP);
+    atomic_store(&c->entered, 1);
+    char buf[16];
+    c->recv_rc = recv((int)raw, buf, sizeof buf, 0);   /* blocks until woken */
+    atomic_store(&c->recv_done, 1);
+    usleep(100 * 1000);                                  /* still using the fd */
+    c->left_at = now_s();
+    march_handle_leave(c->h);
+    atomic_store(&c->left, 1);
+    return NULL;
+}
+
+static void test_close_drain_waits_for_in_flight(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { perror("socketpair"); exit(2); }
+    remove_counter();
+    drain_ctx c;
+    memset(&c, 0, sizeof c);
+    c.h = march_handle_new(MARCH_HANDLE_TCP_BORROWED, sv[0], 1);
+    pthread_t t;
+    pthread_create(&t, NULL, drain_reader, &c);
+    while (!atomic_load(&c.entered)) usleep(1000);
+    usleep(50 * 1000);                      /* let it park in recv */
+    CHECK(!atomic_load(&c.recv_done), "the reader is parked in recv before the drain");
+    double t0 = now_s();
+    int64_t r = march_handle_close_drain(c.h, 5000);
+    double t1 = now_s();
+    CHECK(r == 1, "close_drain reports nothing in flight");
+    CHECK(atomic_load(&c.recv_done), "the parked recv was woken");
+    CHECK(atomic_load(&c.left), "close_drain returned only after the use left");
+    CHECK(c.left_at <= t1, "... and not before its leave");
+    CHECK(t1 - t0 < 2.0, "the drain did not run to its timeout");
+    CHECK(march_handle_enter(c.h, MARCH_HANDLE_TCP) == -1, "a use after the drain is refused");
+    CHECK(fd_is_open(sv[0]), "the borrowed descriptor is still the caller's to close");
+    pthread_join(t, NULL);
+    /* Nothing in flight: returns at once. */
+    void *h2 = march_handle_new(MARCH_HANDLE_TCP_BORROWED, sv[0], 1);
+    t0 = now_s();
+    CHECK(march_handle_close_drain(h2, 5000) == 1, "an idle box drains at once");
+    CHECK(now_s() - t0 < 0.5, "... without waiting");
+    march_decrc(h2);
+    /* A stranded use (entered, never left): bounded by the timeout. */
+    void *h3 = march_handle_new(MARCH_HANDLE_TCP_BORROWED, sv[0], 1);
+    CHECK(march_handle_enter(h3, MARCH_HANDLE_TCP) == sv[0], "enter the stranded use");
+    t0 = now_s();
+    CHECK(march_handle_close_drain(h3, 100) == 0, "a stranded use times the drain out");
+    double waited = now_s() - t0;
+    CHECK(waited >= 0.09 && waited < 2.0, "the timeout bounds the wait");
+    march_handle_leave(h3);
+    march_decrc(h3);
+    march_decrc(c.h);
+    close(sv[0]);
+    close(sv[1]);
+}
+
 /* ── kind_mismatch_is_fatal ────────────────────────────────────────────── */
 static int g_hook_pipe[2];
 static void fatal_hook(const char *why) {
@@ -477,6 +548,7 @@ int main(void) {
     test_dtor_releases_unclosed();
     test_detach_does_not_release();
     test_borrowed_tcp();
+    test_close_drain_waits_for_in_flight();
     test_kind_mismatch_is_fatal();
     test_missing_tls_releaser_is_fatal();
     test_close_cancels_listener_wait();

@@ -457,7 +457,7 @@ static void detach_conn(int evfd, conn_state_t *c) {
 #endif
     /* Do NOT close c->fd — the WebSocket thread takes ownership (through a
      * box of its own); this connection's Conns no longer reach it. */
-    march_http_conn_sock_done(c->sock);
+    march_http_conn_sock_handoff(c->sock);
     c->sock = NULL;
     march_tls_conn_free_out(c);
     march_http_release_conns(c->pending_release, &c->pending_release_n);

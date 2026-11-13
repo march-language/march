@@ -1747,8 +1747,20 @@ void *march_http_conn_sock(int fd) {
 /* The connection is over: close its box, so a Conn a handler kept (sent to
  * a task, stored) reaches no descriptor, and drop the server's reference.
  * Call it before the fd is closed, so the number cannot be reused under a
- * box that still names it. NULL (no request was ever built) is a no-op. */
+ * box that still names it: the close drains, waking and waiting out a use
+ * still in flight (a task parked in Socket.recv on a kept Conn), which would
+ * otherwise go on with the number after the server closes it and the next
+ * accept reuses it. NULL (no request was ever built) is a no-op. */
+#define MARCH_BORROWED_DRAIN_MS 2000
 void march_http_conn_sock_done(void *sock) {
+    if (!sock) return;
+    (void)march_handle_close_drain(sock, MARCH_BORROWED_DRAIN_MS);
+    march_decrc(sock);
+}
+
+/* The connection's fd moves on (to a WebSocket thread) instead of closing:
+ * close its Conns' box without draining or shutting the fd down. */
+void march_http_conn_sock_handoff(void *sock) {
     if (!sock) return;
     (void)march_handle_close(sock);
     march_decrc(sock);
@@ -3109,7 +3121,8 @@ void *march_ws_sock_new(int64_t v, void **box_out) {
 }
 
 void march_ws_sock_done(void *box) {
-    (void)march_handle_close(box);
+    /* The caller closes (or tears down) the fd next: drain, as for a Conn. */
+    (void)march_handle_close_drain(box, MARCH_BORROWED_DRAIN_MS);
     march_decrc(box);
 }
 

@@ -94,6 +94,9 @@ void *march_conn_from_parsed(const march_http_request_t *req,
  * server's reference; call it before close(fd). */
 void *march_http_conn_sock(int fd);
 void march_http_conn_sock_done(void *sock);
+/* The same close for a connection whose fd is handed on (to a WebSocket
+ * thread), not closed: no drain, no shutdown. */
+void march_http_conn_sock_handoff(void *sock);
 
 /* Detect keep-alive from a parsed SIMD request (HTTP version + Connection hdr).
  * Returns 1 for keep-alive, 0 for close. */
