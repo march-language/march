@@ -17763,6 +17763,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare ptr  @march_task_await_value(ptr %task)
+declare ptr  @march_task_poll(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_actor_recv()
 declare ptr  @march_cancel_token_new()
@@ -18087,6 +18088,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare ptr  @march_task_await_value(ptr %task)
+declare ptr  @march_task_poll(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_actor_recv()
 declare ptr  @march_cancel_token_new()
@@ -18170,7 +18172,7 @@ let test_builtin_group_total () =
          March_tir.Builtin_name.all)
   in
   Alcotest.(check int) "arith" 27 (count March_tir.Llvm_emit.Bg_arith);
-  Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
+  Alcotest.(check int) "task" 25 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
 let test_builtin_name_roundtrip () =
@@ -18184,7 +18186,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 70
+  Alcotest.(check int) "constructor count" 71
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
