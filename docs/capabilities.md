@@ -941,7 +941,10 @@ prefix may not be empty or contain `;`, `=` or `,`; anything else is `invalid_ca
 
 **What is checked, at compile time.** In a module whose own `needs` scopes the capability
 (and grants no unscoped `IO.Mut`, `IO.Registry` or `IO`), each call of `Vault.new`,
-`Vault.open`, `Vault.whereis`, `Actor.register`, `Actor.unregister` and `Actor.whereis`:
+`Vault.open`, `Vault.whereis`, `Vault.ns_set`, `Vault.ns_get`, `Vault.ns_drop`,
+`Config.new_store`, `Actor.register`, `Actor.unregister` and `Actor.whereis`, in any of the
+module's code (functions, actors, impl methods, tests and setup blocks) and through an
+`alias` of `Actor` or `Vault`:
 
 - with a literal name outside the scope is a `cap_scope_violation` naming the scope;
 - with a computed name (`"worker." ++ id`) is refused too: the compiler cannot prove it is
@@ -950,7 +953,11 @@ prefix may not be empty or contain `;`, `=` or `,`; anything else is `invalid_ca
   same reason.
 
 `Actor.registered` lists every name, which exceeds any name scope, so it needs an
-unscoped `IO.Registry`. A lookup by name is an open: `Vault.whereis("tokens")` under
+unscoped `IO.Registry`. A nested module may narrow its parent's name scope but never widen
+it: under a parent's `needs IO.Registry("logger")`, a nested `needs IO.Registry` (or
+`needs IO`) is a `cap_scope_violation`. Not yet checked: a name passed through a function
+written in another module (`Reg.put(pid, "other")`); the run-time check of phase 4 closes it
+(`specs/todos/2026-11-13-name-scope-bypasses.md`). A lookup by name is an open: `Vault.whereis("tokens")` under
 `needs IO.Mut("sessions")` is refused.
 
 ### IO.NetConnect.TLS: encrypted transport only

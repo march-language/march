@@ -26,6 +26,8 @@ git log is authoritative for exact commits.
   `Vault.new`/`Vault.open`/`Vault.whereis` or `Actor.register`/`unregister`/`whereis` call
   with a literal name outside the scope fails to compile (`cap_scope_violation`), as does a
   computed name in a scoped module and `Actor.registered` under a scoped `IO.Registry`.
+  `Vault.ns_*`, `Config.new_store` and calls through an `alias` are judged too, and a nested
+  module may narrow its parent's name scope but not widen it.
   `prefix(w)`, `name(...)`, `methods("get")`, a `;` in a scope string and an empty first
   string before more are now refused, so each scope has one spelling and `march --fmt`
   prints it back unchanged.

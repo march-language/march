@@ -32,5 +32,11 @@ name are opens").
   string may not be followed by more. The formatter therefore prints every accepted scope
   back to itself (idempotence and escape test in `test/test_host_scope.ml`).
 
-Not done here: a call reached through an `import Actor` / alias (`register(pid, "x")`) is
-not matched by name, and a run-time check of computed names is phase 4.
+Fix round 1 (review I1-I4): every body kind of the module is scanned (impl and interface
+default methods, app, test, describe, setup), `Vault.ns_set/ns_get/ns_drop` and
+`Config.new_store` are in the table, an alias of `Actor`/`Vault` is resolved (the module's own
+`DAlias`, or an enclosing one by scheme identity), and a nested module may not widen its
+parent's name scope (`Name_scope.subsumes`). `prefix(w)` carries a machine fix to
+`prefix("w")`. Still open, filed as `specs/todos/2026-11-13-name-scope-bypasses.md`: a name
+passed through a wrapper written in another module, and a name-taking function value built
+outside the scoped module; both close with phase 4's run-time check.

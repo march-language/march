@@ -1550,6 +1550,11 @@ scope_option:
   | o = LOWER_IDENT; LPAREN; vs = separated_nonempty_list(COMMA, LOWER_IDENT); RPAREN
     { if o <> "methods" then
         error_raise ~code:March_errors.Code.invalid_cap_scope
+          ?fix:(match vs with
+                | [ v ] when o <> "name" ->
+                  (* `prefix(w)` -> `prefix("w")`: the one legal spelling. *)
+                  Some (replace_fix $loc(vs) ("\"" ^ v ^ "\""))
+                | _ -> None)
           (Printf.sprintf "`%s(...)` takes a quoted string, not a name." o)
           (Some (if o = "name" then
                    "A further name is a further string: `needs IO.Mut(\"a\", \"b\")`."

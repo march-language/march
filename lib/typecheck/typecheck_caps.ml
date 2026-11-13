@@ -303,11 +303,22 @@ let rec literal_path_uses (acc : (string * string * Ast.span) list)
 let name_arg_fns : (string * (string * int)) list = [
   ("Vault.new", ("IO.Mut", 0)); ("Vault.open", ("IO.Mut", 0));
   ("Vault.whereis", ("IO.Mut", 0));
+  (* The namespaced entries open the table named by their first argument
+     (`ns_drop` through vault_whereis): the same name space. *)
+  ("Vault.ns_set", ("IO.Mut", 0)); ("Vault.ns_get", ("IO.Mut", 0));
+  ("Vault.ns_drop", ("IO.Mut", 0));
+  (* The one other stdlib function that passes a caller's table name
+     straight to a Vault open (`Vault.open(name)`). *)
+  ("Config.new_store", ("IO.Mut", 0));
   ("vault_new", ("IO.Mut", 0)); ("vault_whereis", ("IO.Mut", 0));
+  ("vault_ns_set", ("IO.Mut", 0)); ("vault_ns_get", ("IO.Mut", 0));
+  ("vault_ns_drop", ("IO.Mut", 0));
   ("Actor.register", ("IO.Registry", 1)); ("Actor.unregister", ("IO.Registry", 0));
   ("Actor.whereis", ("IO.Registry", 1));
+  (* The raw builtins take the name FIRST except actor_register, whose
+     March-level order is (pid, name) like the wrapper's. *)
   ("actor_register", ("IO.Registry", 1)); ("actor_unregister", ("IO.Registry", 0));
-  ("actor_whereis", ("IO.Registry", 1));
+  ("actor_whereis", ("IO.Registry", 0));
 ]
 
 (* Listing every registered name exceeds any name scope. *)
@@ -354,12 +365,13 @@ let rec show_name_expr (depth : int) (e : Ast.expr) : string option =
 (* Every name use in an expression.  Exhaustive over [Ast.expr] on purpose,
    like [March_ast.Calls.calls_in_expr]: a form added later is a compile
    error here rather than a place a call slips past the scope. *)
-let rec name_uses (acc : name_use list) (e : Ast.expr) : name_use list =
-  let go = name_uses in
+let rec name_uses ?(resolve = Fun.id) (acc : name_use list) (e : Ast.expr)
+    : name_use list =
+  let go = name_uses ~resolve in
   let callee_name = function
-    | Ast.EVar fn -> Some (fn.Ast.txt, fn.Ast.span)
+    | Ast.EVar fn -> Some (resolve fn.Ast.txt, fn.Ast.span)
     | Ast.EField (Ast.EVar m, fn, _) | Ast.EField (Ast.ECon (m, [], _), fn, _) ->
-      Some (m.Ast.txt ^ "." ^ fn.Ast.txt, fn.Ast.span)
+      Some (resolve (m.Ast.txt ^ "." ^ fn.Ast.txt), fn.Ast.span)
     | _ -> None
   in
   match e with
@@ -372,7 +384,9 @@ let rec name_uses (acc : name_use list) (e : Ast.expr) : name_use list =
         match List.nth_opt args idx with
         | Some (Ast.ELit (Ast.LitString s, lsp)) -> NameLit (name, cap, s, lsp) :: acc
         | Some arg -> NameComputed (name, cap, arg, sp) :: acc
-        | None -> acc (* partial application: the type checker reports it *)
+        (* Too few arguments: the type checker reports the arity, and the
+           name is not in sight, so fail closed rather than say nothing. *)
+        | None -> NameFnValue (name, cap, sp) :: acc
       in
       List.fold_left go acc args
     | Some (name, nsp) when List.mem_assoc name name_listing_fns ->
@@ -380,14 +394,15 @@ let rec name_uses (acc : name_use list) (e : Ast.expr) : name_use list =
     | Some _ -> args_acc ()
     | None -> List.fold_left go (go acc f) args)
   | Ast.EVar fn -> (
-    match List.assoc_opt fn.Ast.txt name_arg_fns with
-    | Some (cap, _) -> NameFnValue (fn.Ast.txt, cap, fn.Ast.span) :: acc
+    let q = resolve fn.Ast.txt in
+    match List.assoc_opt q name_arg_fns with
+    | Some (cap, _) -> NameFnValue (q, cap, fn.Ast.span) :: acc
     | None -> (
-      match List.assoc_opt fn.Ast.txt name_listing_fns with
-      | Some cap -> NameListing (fn.Ast.txt, cap, fn.Ast.span) :: acc
+      match List.assoc_opt q name_listing_fns with
+      | Some cap -> NameListing (q, cap, fn.Ast.span) :: acc
       | None -> acc))
   | Ast.EField (Ast.EVar m, fn, sp) | Ast.EField (Ast.ECon (m, [], _), fn, sp) -> (
-    let q = m.Ast.txt ^ "." ^ fn.Ast.txt in
+    let q = resolve (m.Ast.txt ^ "." ^ fn.Ast.txt) in
     match List.assoc_opt q name_arg_fns with
     | Some (cap, _) -> NameFnValue (q, cap, sp) :: acc
     | None -> (
@@ -415,56 +430,177 @@ let rec name_uses (acc : name_use list) (e : Ast.expr) : name_use list =
   | Ast.EProof (p, _) -> List.fold_left go acc (Ast.proof_children p)
   | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> acc
 
-(* [check_name_scopes env decls] judges every name use in a module's own code
-   against the module's OWN name scopes (its [DNeeds] among [decls], not
-   [env.mod_need_scopes], which for a nested module still holds the
-   enclosing module's: specs/todos/2026-11-10-nested-path-scope-unchecked.md).
-   Quiet when the module has no declaration covering the capability (the
-   ceiling reports that) or any unscoped one (any name is in scope). *)
-let check_name_scopes (env : env) (decls : Ast.decl list) : unit =
-  let declared =
-    List.concat_map (function
-        | Ast.DNeeds (caps, _) ->
-          List.map (fun (p, sc) ->
-              (String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) p), sc)) caps
-        | _ -> [])
-      decls
+(* The name-scopable kinds. *)
+let name_scoped_kinds = [ "IO.Mut"; "IO.Registry" ]
+
+(* [(capability, scope)] pairs from [needs] declarations. *)
+let declared_scopes_of (decls : Ast.decl list) : (string * string option) list =
+  List.concat_map (function
+      | Ast.DNeeds (caps, _) ->
+        List.map (fun (p, sc) ->
+            (String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) p), sc)) caps
+      | _ -> [])
+    decls
+
+(* The name scopes [declared] narrows [cap] to: [None] when nothing covers
+   [cap] or an unscoped declaration does (any name), else the parsed scopes.
+   An invalid scope was reported by the DNeeds check and is skipped; if every
+   scope is invalid the result is [None], since judging names against it
+   would only add noise. *)
+let name_scopes_for (declared : (string * string option) list) (cap : string)
+    : March_caps.Name_scope.t list option =
+  let relevant = List.filter (fun (d, _) -> cap_subsumes d cap) declared in
+  if relevant = [] || List.exists (fun (_, sc) -> sc = None) relevant then None
+  else
+    match
+      List.filter_map (fun (d, sc) ->
+          if d <> cap then None
+          else Option.bind sc (fun s -> Result.to_option (March_caps.Name_scope.parse s)))
+        relevant
+    with
+    | [] -> None
+    | ss -> Some ss
+
+let show_name_scopes cap ss =
+  String.concat " and "
+    (List.map (fun s -> "`" ^ March_caps.Name_scope.to_surface cap s ^ "`") ss)
+
+(* Every expression of a module's OWN code, for the name scan.  Exhaustive
+   over [Ast.decl], with no catch-all, for the same reason as [name_uses]:
+   a declaration form added later is a compile error here rather than a body
+   the scope never sees (impl methods were missed that way once).  A nested
+   [DMod] is not walked: it is judged by its own [check_module_needs] call,
+   against its own [needs]. *)
+let rec module_own_exprs (decls : Ast.decl list) : Ast.expr list =
+  let of_fn (def : Ast.fn_def) =
+    List.concat_map (fun (c : Ast.fn_clause) ->
+        (* a default argument moved into an arity-mangled [f$N] body
+           at desugar, which this walk sees as its own [DFn] *)
+        c.Ast.fc_body :: Option.to_list c.Ast.fc_guard)
+      def.Ast.fn_clauses
   in
+  List.concat_map (function
+      | Ast.DFn (def, _) -> of_fn def
+      | Ast.DLet (_, b, _) -> [ b.Ast.bind_expr ]
+      | Ast.DActor (_, _, a, _) ->
+        a.Ast.actor_init
+        :: List.map (fun (h : Ast.actor_handler) -> h.Ast.ah_body)
+             (Ast.actor_body_handlers a)
+      | Ast.DImpl (idef, _) -> List.concat_map (fun (_, fd) -> of_fn fd) idef.Ast.impl_methods
+      | Ast.DInterface (idef, _) ->
+        List.filter_map (fun (m : Ast.method_decl) -> m.Ast.md_default) idef.Ast.iface_methods
+      | Ast.DApp (a, _) ->
+        a.Ast.app_body :: (Option.to_list a.Ast.app_on_start @ Option.to_list a.Ast.app_on_stop)
+      | Ast.DTest (t, _) -> [ t.Ast.test_body ]
+      | Ast.DDescribe (_, inner, _) -> module_own_exprs inner
+      | Ast.DSetup (e, _) | Ast.DSetupAll (e, _) -> [ e ]
+      | Ast.DMod _ | Ast.DType _ | Ast.DProtocol _ | Ast.DSig _ | Ast.DExtern _
+      | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DOpts _
+      | Ast.DAlwaysLinearType _ | Ast.DTransitions _ | Ast.DDeriving _
+      | Ast.DSatisfy _ -> [])
+    decls
+
+(* [check_name_scopes env ~nested decls] judges every name use in a module's
+   own code against the module's OWN name scopes (its [DNeeds] among
+   [decls], not [env.mod_need_scopes], which for a nested module still holds
+   the enclosing module's: specs/todos/2026-11-10-nested-path-scope-unchecked.md).
+   Quiet when the module has no declaration covering the capability (the
+   ceiling reports that) or any unscoped one (any name is in scope).
+
+   For a [nested] module, [env.mod_need_scopes] IS the enclosing modules'
+   declarations, and a nested module's name scope may not be wider than
+   theirs: otherwise `needs IO.Registry` in a nested module would undo the
+   parent's `needs IO.Registry("logger")`. *)
+let check_name_scopes (env : env) ~(nested : bool) (decls : Ast.decl list) : unit =
+  let declared = declared_scopes_of decls in
+  if nested then
+    List.iter (fun cap ->
+        match name_scopes_for env.mod_need_scopes cap with
+        | None -> ()
+        | Some parent ->
+          let merged =
+            { March_caps.Name_scope.names = List.concat_map (fun s -> s.March_caps.Name_scope.names) parent;
+              prefixes = List.concat_map (fun s -> s.March_caps.Name_scope.prefixes) parent }
+          in
+          let relevant = List.exists (fun (d, _) -> cap_subsumes d cap) declared in
+          let own = name_scopes_for declared cap in
+          let own_merged =
+            Option.map (fun ss ->
+                { March_caps.Name_scope.names = List.concat_map (fun s -> s.March_caps.Name_scope.names) ss;
+                  prefixes = List.concat_map (fun s -> s.March_caps.Name_scope.prefixes) ss })
+              own
+          in
+          if relevant && not (March_caps.Name_scope.subsumes (Some merged) own_merged) then begin
+            let sp =
+              List.find_map (function
+                  | Ast.DNeeds (caps, sp)
+                    when List.exists (fun (p, _) ->
+                        cap_subsumes
+                          (String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) p))
+                          cap) caps -> Some sp
+                  | _ -> None)
+                decls
+            in
+            match sp with
+            | Some sp when not (span_is_stdlib sp) ->
+              Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+                (Printf.sprintf
+                   "This `needs` gives %s, which is wider than the enclosing \
+                    module's %s.\n\
+                    hint: a nested module may narrow a name scope, never widen \
+                    it; declare a scope within the enclosing one."
+                   (match own with
+                    | None -> Printf.sprintf "`%s` for any name" cap
+                    | Some ss -> show_name_scopes cap ss)
+                   (show_name_scopes cap parent))
+            | _ -> ()
+          end)
+      name_scoped_kinds;
   let scopes_for cap : (string * March_caps.Name_scope.t list) option =
-    let relevant = List.filter (fun (d, _) -> cap_subsumes d cap) declared in
-    if relevant = [] || List.exists (fun (_, sc) -> sc = None) relevant then None
-    else
-      (* An invalid scope was reported by the DNeeds check; judging names
-         against it would only add noise. *)
-      match
-        List.filter_map (fun (d, sc) ->
-            if d <> cap then None
-            else Option.bind sc (fun s -> Result.to_option (March_caps.Name_scope.parse s)))
-          relevant
-      with
-      | [] -> None
-      | ss ->
-        Some
-          (String.concat " and "
-             (List.map (fun s -> "`" ^ March_caps.Name_scope.to_surface cap s ^ "`") ss),
-           ss)
+    Option.map (fun ss -> (show_name_scopes cap ss, ss)) (name_scopes_for declared cap)
   in
   if List.exists (fun (_, sc) -> sc <> None) declared then begin
-    let bodies =
-      List.concat_map (function
-          | Ast.DFn (def, _) ->
-            List.concat_map (fun (c : Ast.fn_clause) ->
-                c.Ast.fc_body :: Option.to_list c.Ast.fc_guard)
-              def.fn_clauses
-          | Ast.DLet (_, b, _) -> [ b.Ast.bind_expr ]
-          | Ast.DActor (_, _, a, _) ->
-            a.Ast.actor_init
-            :: List.map (fun (h : Ast.actor_handler) -> h.Ast.ah_body)
-                 (Ast.actor_body_handlers a)
-          | _ -> [])
+    (* `alias Actor, as: A` makes `A.register` the wrapper.  The module's own
+       aliases are resolved by spelling; an alias from an enclosing module is
+       found because the alias binds the very same scheme value under the
+       short name ([Typecheck] [DAlias] arm). *)
+    let local_aliases =
+      List.filter_map (function
+          | Ast.DAlias (ad, _) ->
+            Some (ad.Ast.alias_name.Ast.txt,
+                  String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ad.Ast.alias_path))
+          | _ -> None)
         decls
     in
-    let uses = List.rev (List.fold_left name_uses [] bodies) in
+    let table_keys = List.map fst name_arg_fns @ List.map fst name_listing_fns in
+    let resolve (q : string) : string =
+      if List.mem q table_keys then q
+      else
+        match String.index_opt q '.' with
+        | None -> q
+        | Some i ->
+          let head = String.sub q 0 i and rest = String.sub q (i + 1) (String.length q - i - 1) in
+          let by_alias =
+            Option.map (fun long -> long ^ "." ^ rest) (List.assoc_opt head local_aliases)
+          in
+          match by_alias with
+          | Some q' when List.mem q' table_keys -> q'
+          | _ -> (
+            match StrMap.find_opt q env.vars with
+            | None -> q
+            | Some sch ->
+              match
+                List.find_opt (fun k ->
+                    String.contains k '.'
+                    && (match StrMap.find_opt k env.vars with
+                        | Some sch' -> sch' == sch
+                        | None -> false))
+                  table_keys
+              with
+              | Some k -> k
+              | None -> q)
+    in
+    let uses = List.rev (List.fold_left (name_uses ~resolve) [] (module_own_exprs decls)) in
     List.iter (fun use ->
         match use with
         | NameLit (fn, cap, name, sp) -> (
@@ -1476,7 +1612,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     decls;
 
   (* ── Name-scope violations (IO.Mut, IO.Registry) ── *)
-  check_name_scopes env decls;
+  check_name_scopes env ~nested:(cap_qname_prefix <> "") decls;
 
   (* Each use carries the code it sits in, as the subject of a sentence
      ("`greet`", "the `Inc` handler of actor `Counter`"), so the missing-`needs`

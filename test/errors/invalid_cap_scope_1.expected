@@ -1,0 +1,16 @@
+exit: 1
+-- CAPABILITY ---------- errors/invalid_cap_scope_1.march
+
+`prefix(...)` takes a quoted string, not a name. [invalid_cap_scope]
+
+4 |   needs IO.Registry(prefix(worker))
+                        ^^^^^^
+
+    Quote it: `prefix("worker")`.
+
+    fix (`forge fix` applies it):
+
+4 -   needs IO.Registry(prefix(worker))
+4 +   needs IO.Registry(prefix("worker"))
+
+after fix: exit 0

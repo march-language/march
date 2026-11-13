@@ -4415,24 +4415,183 @@ let test_mut_lookup_scope () =
      && contains_substring out {|IO.Mut("sessions")|})
 
 let test_name_scope_invalid () =
-  List.iter (fun (what, needs) ->
+  (* Each case pins the REASON, so a rejection for the wrong cause (another
+     validator firing, a parse error elsewhere) does not pass. *)
+  List.iter (fun (what, needs, reason) ->
       let (rc, out) = name_scope_check
           (Printf.sprintf "mod Bad do\n  %s\n  fn f() do 1 end\nend\n" needs) in
       Alcotest.(check bool) (what ^ " is refused") true (rc <> 0);
       Alcotest.(check bool) (what ^ " is invalid_cap_scope") true
-        (contains_substring out "invalid_cap_scope"))
-    [ ("`;` in a name", {|needs IO.Mut("a;b")|});
-      ("`=` in a name", {|needs IO.Mut("a=b")|});
-      ("`,` in a second name", {|needs IO.Registry("a", "b,c")|});
-      ("an empty name", {|needs IO.Mut("")|});
-      ("an empty first name before a second", {|needs IO.Mut("", "b")|});
-      ("an empty prefix", {|needs IO.Registry(prefix(""))|});
-      ("an option IO.Mut does not take", {|needs IO.Mut("a", no_redirects)|});
+        (contains_substring out "invalid_cap_scope");
+      if not (contains_substring out reason) then
+        Alcotest.failf "%s: expected the reason %S in:\n%s" what reason out)
+    [ ("`;` in a name", {|needs IO.Mut("a;b")|}, "cannot contain `;`");
+      ("`=` in a name", {|needs IO.Mut("a=b")|}, "contains `=`");
+      ("`,` in a second name", {|needs IO.Registry("a", "b,c")|}, "contains `,`");
+      ("an empty name", {|needs IO.Mut("")|}, "a name cannot be empty");
+      ("an empty first name before a second", {|needs IO.Mut("", "b")|},
+       "first string cannot be empty");
+      ("an empty prefix", {|needs IO.Registry(prefix(""))|}, "a prefix cannot be empty");
+      ("an option IO.Mut does not take", {|needs IO.Mut("a", no_redirects)|},
+       "is not an option a name scope takes");
       (* R16: one surface form per encoding. *)
-      ("an identifier-valued prefix", {|needs IO.Registry(prefix(w))|});
-      ("a name given as an option", {|needs IO.Mut("a", name("b"))|});
-      ("an identifier-valued name option", {|needs IO.Mut("a", name(b))|});
-      ("a string-valued methods option", {|needs IO.NetConnect("h", methods("get"))|}) ]
+      ("an identifier-valued prefix", {|needs IO.Registry(prefix(w))|},
+       "takes a quoted string, not a name");
+      ("a name given as an option", {|needs IO.Mut("a", name("b"))|},
+       "is not a scope option");
+      ("an identifier-valued name option", {|needs IO.Mut("a", name(b))|},
+       "takes a quoted string, not a name");
+      ("a string-valued methods option", {|needs IO.NetConnect("h", methods("get"))|},
+       "takes HTTP method names") ]
+
+(* Fix round 1 (review I1-I3, M4): the places a name call used to slip past
+   the scope. Each is a reject case naming the out-of-scope name, and where a
+   rule could over-reach, an accepted control. *)
+let refused_naming what src name =
+  let (rc, out) = name_scope_check src in
+  Alcotest.(check bool) (what ^ " is refused") true (rc <> 0);
+  if not (contains_substring out "cap_scope_violation"
+          && contains_substring out (Printf.sprintf "`%s`" name)) then
+    Alcotest.failf "%s: expected a cap_scope_violation naming `%s`:\n%s" what name out
+
+let accepted what src =
+  let (rc, out) = name_scope_check src in
+  if rc <> 0 then Alcotest.failf "%s should pass:\n%s" what out
+
+let test_name_scope_every_body () =
+  refused_naming "a name call in an impl method"
+    {|mod P do
+  needs IO.Registry("logger")
+  interface Runner(a) do
+    fn run : a -> Bool
+  end
+  type Box = Box(Int)
+  impl Runner(Box) do
+    fn run(b) do
+      Actor.unregister("other")
+    end
+  end
+end
+|} "other";
+  refused_naming "a name call in a test body"
+    {|mod P do
+  needs IO.Registry("logger")
+  test "t" do
+    let _ = Actor.unregister("other")
+    assert true
+  end
+end
+|} "other";
+  refused_naming "a name call in a setup block"
+    {|mod P do
+  needs IO.Registry("logger")
+  setup do
+    let _ = Actor.unregister("other")
+    ()
+  end
+  test "t" do
+    assert true
+  end
+end
+|} "other";
+  refused_naming "a name call in a test inside a describe block"
+    {|mod P do
+  needs IO.Registry("logger")
+  describe "d" do
+    test "t" do
+      let _ = Actor.unregister("another")
+      assert true
+    end
+  end
+end
+|} "another"
+
+let test_name_scope_vault_ns () =
+  refused_naming "Vault.ns_get outside IO.Mut(\"sessions\")"
+    {|mod P do
+  needs IO.Mut("sessions")
+  fn go() do
+    Vault.ns_get("tokens", "k")
+  end
+end
+|} "tokens";
+  accepted "Vault.ns_get inside IO.Mut(\"sessions\")"
+    {|mod P do
+  needs IO.Mut("sessions")
+  fn go() do
+    Vault.ns_get("sessions", "k")
+  end
+end
+|}
+
+let test_name_scope_alias () =
+  refused_naming "an aliased Actor.register"
+    {|mod P do
+  needs IO.Registry("logger")
+  alias Actor, as: A
+  fn go(pid) do
+    A.register(pid, "other")
+  end
+end
+|} "other";
+  refused_naming "an alias from the enclosing module"
+    {|mod Outer do
+  needs IO.Registry
+  alias Actor, as: A
+  mod Inner do
+    needs IO.Registry("logger")
+    fn go(pid) do
+      A.register(pid, "other")
+    end
+  end
+end
+|} "other"
+
+let test_name_scope_nested_cannot_widen () =
+  let (rc, out) = name_scope_check
+      {|mod Outer do
+  needs IO.Registry("logger")
+  mod Inner do
+    needs IO.Registry
+    fn go() do
+      Actor.unregister("other")
+    end
+  end
+  fn f() do Actor.unregister("logger") end
+end
+|} in
+  Alcotest.(check bool) "a nested unscoped IO.Registry under a scoped parent is refused" true
+    (rc <> 0);
+  Alcotest.(check bool) "as wider than the enclosing module's scope" true
+    (contains_substring out "wider than the enclosing module's `IO.Registry(\"logger\")`");
+  accepted "a nested scope within the parent's"
+    {|mod Outer do
+  needs IO.Registry("logger", prefix("w."))
+  mod Inner do
+    needs IO.Registry(prefix("w.x."))
+    fn go() do
+      Actor.unregister("w.x.1")
+    end
+  end
+  fn f() do Actor.unregister("logger") end
+end
+|}
+
+let test_name_scope_fn_value () =
+  let src needs = Printf.sprintf {|mod P do
+  %s
+  fn go() do
+    let f = Actor.unregister
+    f("logger")
+  end
+end
+|} needs in
+  let (rc, out) = name_scope_check (src {|needs IO.Registry("logger")|}) in
+  Alcotest.(check bool) "a name-taking function used as a value under a scope is refused" true
+    (rc <> 0);
+  Alcotest.(check bool) "with the out-of-sight message" true
+    (contains_substring out "is used as a value" && contains_substring out "phase 4");
+  accepted "the same under an unscoped IO.Registry" (src "needs IO.Registry")
 
 (* ── Final whole-branch review, Important 3: Check 1 / Check 1b overlap ───
 
@@ -19511,6 +19670,11 @@ let compiler_suites =
           Alcotest.test_case "registry_listing_needs_unscoped" `Quick test_registry_listing_needs_unscoped;
           Alcotest.test_case "mut_lookup_scope" `Quick test_mut_lookup_scope;
           Alcotest.test_case "name_scope_invalid" `Quick test_name_scope_invalid;
+          Alcotest.test_case "name_scope_every_body" `Quick test_name_scope_every_body;
+          Alcotest.test_case "name_scope_vault_ns" `Quick test_name_scope_vault_ns;
+          Alcotest.test_case "name_scope_alias" `Quick test_name_scope_alias;
+          Alcotest.test_case "name_scope_nested_cannot_widen" `Quick test_name_scope_nested_cannot_widen;
+          Alcotest.test_case "name_scope_fn_value" `Quick test_name_scope_fn_value;
           Alcotest.test_case "Check 1b omits caps subsumed by Check 1" `Quick test_check1b_omits_caps_subsumed_by_check1;
           Alcotest.test_case "Check 1b keeps caps not subsumed by Check 1" `Quick test_check1b_keeps_caps_not_subsumed_by_check1;
           Alcotest.test_case "nested module uses its own proof cap without needs" `Quick test_nested_module_own_proof_cap_needs_no_needs;

@@ -1,0 +1,5 @@
+-- EXPECT-ERROR: `prefix(...)` takes a quoted string, not a name.
+-- One spelling per scope: a prefix is a string (ocap p2b, ruling R16).
+mod RegScope do
+  needs IO.Registry(prefix(worker))
+end
