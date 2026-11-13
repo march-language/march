@@ -925,6 +925,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A closure called from several threads at once no longer frees what it captured while
+  another call is still reading it.** `Parallel.pmap` (and any closure shared between tasks)
+  could crash compiled programs intermittently with SIGSEGV: one call released the closure's
+  environment before it finished reading a captured value, so a concurrent call could free
+  the value under it. Each call now keeps the environment until its last read.
+  `test/native/native_arr_pmap_capture.march` crashed in about a third of its runs.
+
 - **A user type named like a built-in or stdlib type is its own type.** `type CancelToken =
   Tok(Int)` used to be the built-in `CancelToken`, a user `Level` was `Logger`'s `Level`, and a
   program's own `Option` was the prelude's: a value of one type-checked where the other was

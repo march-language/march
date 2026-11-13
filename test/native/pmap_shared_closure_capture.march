@@ -1,0 +1,34 @@
+-- Parallel.pmap calls ONE closure from several workers at once.  Each call
+-- reads the closure's captures out of the shared environment; the frame must
+-- keep holding the environment until its last read of a capture.  The apply
+-- function used to release the environment right after loading the captures
+-- and read them afterwards, borrowed: when another worker's release then freed
+-- the environment, it freed the captured list too, while this worker was
+-- still walking it (SIGSEGV in mimalloc's free-list walk at thread exit, or a
+-- wrong sum).  Many rounds so one run reliably hits the window.
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  -- A module function that borrows the list: the lambda below tail-calls it
+  -- with the capture, the other shape of the same race.
+  fn weigh(xs : List(Int), i : Int) : Int do
+    List.length(xs) * i
+  end
+
+  fn round(n : Int) : Int do
+    let xs = List.map(RRB.to_list(RRB.range(0, 64)), fn k -> k + n)
+    let ys = List.map(RRB.to_list(RRB.range(0, 64)), fn k -> k * 2 + n)
+    let a = Parallel.pmap(RRB.range(0, 16), fn i -> List.length(xs) * i)
+    let b = Parallel.pmap(RRB.range(0, 16), fn i -> weigh(ys, i))
+    List.fold_left(RRB.to_list(a), 0, fn (acc, x) -> acc + x) + List.fold_left(RRB.to_list(b), 0, fn (acc, x) -> acc + x)
+  end
+
+  fn rounds(n : Int, acc : Int) : Int do
+    if n == 0 do acc else rounds(n - 1, acc + round(n)) end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    println("total " ++ int_to_string(rounds(1000, 0)))
+  end
+end
