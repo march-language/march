@@ -1254,7 +1254,7 @@ mod App do
     println("cap-demo server up")
     let _ = Server.handle(1)
     match Socket.listen(9099) do
-      Err(e) -> println("listen refused")
+      Err(_) -> println("listen refused")
       Ok(Err(e)) -> println("listen err: " ++ Socket.error_message(e))
       Ok(Ok(l)) -> let _ = Socket.accept(l)  println("server shutting down")
     end

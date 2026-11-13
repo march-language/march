@@ -1084,7 +1084,7 @@ end
 
 ## Putting It Together
 
-> **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect (identity, listen/connect, handshake, then a `RemoteCall`) but elides two things you must supply for real: (1) the actual byte transport over the socket `fd`, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
+> **This is a layered API-reference skeleton, not a runnable program.** It shows how the pieces connect (a node that listens and dials its seeds, then a `RemoteCall`) but elides two things you must supply for real: (1) the actual byte transport to the peer, and (2) concrete `sig_hash` / `impl_hash` values, which the compiler bakes into your binary for the specific functions you enroll. The send/recv framing is `NetFrame`'s job (length-prefixed frames); see the *Wiring up the transport* note after the skeleton for how to close the loop.
 
 A minimal two-node cluster:
 
@@ -1092,19 +1092,20 @@ A minimal two-node cluster:
 
 ```march
 mod NodeA do
-  fn main() do
-    let my_id = NodeIdentity.make("a@127.0.0.1", "node-a-pubkey", 1)
-    let secret = Crypto.random_hex(32)
-    let reg    = PeerRegistry.empty()
+  needs IO
+  needs IO.Console
 
-    match ClusterConn.listen(9000) do
-      Err(e) -> Env.exit(1)
-      Ok(listen_fd) ->
-        -- Accept one peer (in practice, loop in an actor)
-        match ClusterConn.accept_one(reg, listen_fd, my_id, secret) do
-          Ok(peer_id) -> run_rpc_loop(peer_id)
-          Err(e)      -> Env.exit(1)
-        end
+  fn main(c : Cap(IO)) do
+    -- A node listens on its port and dials its seeds; ClusterNode owns the sockets,
+    -- handshakes and registry (the raw descriptor plumbing under it is internal to the
+    -- standard library). No seeds: this node waits to be dialled.
+    let cfg = ClusterNode.config("a", 9000, "", Nil, "shared-secret", 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e)   -> process_exit(1)
+      Ok(node) ->
+        println("node " ++ ClusterNode.node_id(node) ++ " up")
+        -- In practice, serve RemoteCall requests from an actor.
+        ()
     end
   end
 end
@@ -1114,34 +1115,41 @@ end
 
 ```march
 mod NodeB do
-  fn main() do
-    let my_id = NodeIdentity.make("b@127.0.0.1", "node-b-pubkey", 1)
-    let secret = -- same secret as Node A
-    let reg    = PeerRegistry.empty()
+  needs IO
+  needs IO.Console
 
-    -- The cluster stack works on raw descriptors, which are internal to the
-    -- standard library (`stdlib_internal`); `ClusterConn` opens them and
-    -- runs the handshake. Application code never holds one.
-    match ClusterConn.connect_to_peer(reg, "127.0.0.1", 9000, my_id, secret) do
-      Err(e) -> Env.exit(1)
-      Ok((reg2, peer)) ->
-        -- Now call Math.add on Node A
+  fn main(c : Cap(IO)) do
+    let secret = "shared-secret"  -- same secret as Node A
+    -- Node A's address is a seed: B dials it and handshakes during `start`.
+    let cfg = ClusterNode.config("b", 9001, "", Cons("127.0.0.1:9000", Nil), secret, 1)
+    match ClusterNode.start(c, cfg) do
+      Err(e)   -> process_exit(1)
+      Ok(node) ->
+        -- Peers appear in the membership once the handshake has completed.
+        let peers = ClusterNode.members(node)
+        -- Now call Math.add on Node A (the hashes come from the compiler; see below)
+        let sig_hash = "<sig-hash>"
+        let impl_hash = "<impl-hash>"
         let fref = RemoteCall.remote_ref("Math", "add", sig_hash, impl_hash)
         let args = Msgpack.encode(
           Msgpack.array(Cons(Msgpack.int(2), Cons(Msgpack.int(3), Nil))))
-        let reply_pid = GlobalPid.make(my_id.node_id, 1, 1)
+        let reply_pid = GlobalPid.make(ClusterNode.node_id(node), 1, 1)
         let req  = RemoteCall.request(fref, args, reply_pid, 5000, 1)
-        -- send RemoteCall.encode_request(req) over the peer's connection, read reply ...
+        -- send RemoteCall.encode_request(req) to node A, read the reply ...
+        println("members: " ++ int_to_string(List.length(peers)))
+        ()
     end
   end
 end
 ```
 
+---
+
 ### Wiring up the transport
 
 To turn the skeleton into a running program, close the two gaps the note above flagged:
 
-1. **Framing.** `RemoteCall.encode_request(req)` gives you a `List(Int)` of bytes. Wrap it in a length prefix with `NetFrame` and write it to the socket `fd`; on the other end, read a length-prefixed frame back and hand the bytes to `RemoteCall.decode_reply` (caller side) or `NodeRpc.handle_frame` (responder side). The accept/recv loop is the same shape as the `ClusterConn.listen` example in [The handshake in code](#the-handshake-in-code): receive a frame, dispatch, write the reply.
+1. **Framing.** `RemoteCall.encode_request(req)` gives you a `List(Int)` of bytes. Wrap it in a length prefix with `NetFrame` and write it to the peer's connection; on the other end, read a length-prefixed frame back and hand the bytes to `RemoteCall.decode_reply` (caller side) or `NodeRpc.handle_frame` (responder side). The accept/recv loop is the same shape as the handshake loop in [The handshake in code](#the-handshake-in-code): receive a frame, dispatch, write the reply.
 2. **Hashes.** `sig_hash` and `impl_hash` are produced by the compiler for the enrolled function (`Image.resize`, `Math.add`, …) and recorded in the binary; you reference the compiler-provided values rather than inventing them. A mismatch is caught *before* the remote body runs (`TypeMismatch` / `VersionSkew`), which is the whole point of the type-safe call path.
 
 For a complete, executing example, see the cluster integration tests under the project's `test/` tree (search with `forge search` for `ClusterConn`, `NodeRpc`, and `GlobalRegistry`), which exercise the full accept → handshake → enroll → call → reply loop end to end.
