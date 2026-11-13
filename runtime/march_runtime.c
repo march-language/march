@@ -12934,9 +12934,17 @@ int64_t march_process_write(void *lp_obj, void *data_obj) {
 }
 
 /* process_kill_proc(lp) → () */
+/* Signal only while the slot is live and not closing, under live_proc_mu:
+   wait_proc marks the slot closing before it reaps, so a kill racing a
+   wait_proc on another task can never reach a reaped (and possibly reused)
+   pid (final review M5 of ocap phase 2b). */
 int64_t march_process_kill_proc(void *lp_obj) {
     int64_t pid = MARCH_FIELD(lp_obj, 0);
-    kill((pid_t)pid, SIGTERM);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
+    if (s && (int64_t)s->pid == pid) kill((pid_t)pid, SIGTERM);
+    pthread_mutex_unlock(&live_proc_mu);
     return 0;
 }
 

@@ -1041,6 +1041,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Process.kill` can no longer signal a recycled pid.** A kill racing a `wait_proc` on
+  another task could reach a pid the wait had already reaped; it now signals only while
+  the process's slot is live and not being waited on.
+- **Matching `Process.ProcessError` from outside the module no longer warns of a missing
+  case.** It is a plain `type`, like `Socket.SocketError`, so `Process.Closed` and
+  `Process.ProcessFailed(_)` are seen as exhaustive.
 - **A task still using an HTTP `Conn`'s socket (or a plain ws:// socket) when the connection
   ends can no longer read the next client's bytes.** The server closed the descriptor while
   such a use was in flight, so the number could be reused by the next connection under it.

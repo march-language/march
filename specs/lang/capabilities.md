@@ -859,9 +859,11 @@ end
 
 Until run-time authority lands (ocap phase 4), nothing refuses except the
 test-only `MARCH_TEST_REFUSE` hook, a comma-separated list of capability kinds
-the launch refuses. Network opens that yield a handle (UDP, TLS contexts,
-`HttpClient`, `HttpServer`) still return their old types; they move with
-ocap phase 2.
+the launch refuses. UDP sockets and TLS contexts are handles opened by a
+checked open (`Udp.open`, `Tls.client_ctx`). `HttpClient`, `HttpServer`,
+`Tls.https_get` and `Udp.resolve` still return their old types and move with
+run-time authority (ocap phase 4); `HttpClient` and `Tls.https_get` already
+dial through `Socket.connect`, so their target is checked like any connect.
 
 ### When *not* to use IO caps
 

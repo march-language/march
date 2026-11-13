@@ -127,7 +127,10 @@ mod Socket do
   doc """
   The descriptor inside `s`, for standard-library code that hands it to the
   runtime; -1 if `s` is closed. The number stays valid only while `s` is
-  open and referenced: do not keep it.
+  open, referenced, and not closed by another task: no use is held in
+  flight, so a concurrent `Socket.close` releases the descriptor under the
+  caller. Do not keep it, and call it only where one task owns `s` (as the
+  control wiring does); otherwise hold a use with `with_raw`.
   """
   @[stdlib_internal]
   fn raw_fd(s : Socket) : Int do

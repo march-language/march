@@ -42,7 +42,7 @@ mod Process do
   -- What a Process handle's operations can fail with. `Closed`: the handle
   -- was already waited on (wait_proc closes it). `ProcessFailed(msg)`: the
   -- command could not be started ("cannot execute <cmd>: <reason>").
-  ptype ProcessError = Closed | ProcessFailed(String)
+  type ProcessError = Closed | ProcessFailed(String)
   derive Eq for ProcessError
 
   -- The raw builtins' view of a live child: LiveProcess(pid, stream_slot).
