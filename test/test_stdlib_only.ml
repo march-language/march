@@ -907,7 +907,8 @@ let cluster_plumbing =
     ("NodeCall", [ "call"; "serve_one"; "serve_loop" ]);
     ("NodeQueue", [ "start"; "close_fd"; "consumed" ]);
     ("PeerReader", [ "serve" ]);
-    ("PeerRegistry", [ "no_fd"; "add_data"; "make"; "raw_fd"; "raw_data_fd" ]);
+    ("PeerRegistry", [ "no_fd"; "add_data"; "make"; "raw_fd"; "raw_data_fd"; "wrap_fd"; "unwrap_fd" ]);
+    ("WorkDispatch", [ "dispatch"; "dispatch_affine" ]);
     ("ClusterConn", [ "listen"; "accept_split"; "accept_split_within"; "accept_split_auth";
                       "accept_one"; "connect_split"; "connect_split_within";
                       "connect_split_auth"; "connect_to_peer" ]);
@@ -987,6 +988,25 @@ let forged_peer_src = {|mod ForgedPeer do
 end
 |}
 
+(* Re-review C1b: the same hole through `SessionNode.Link`, which sits in the
+   public `Party`; `finish`/`serve`/`serve_outcome` close, write and read its
+   descriptors. Before the fix this delivered bytes to, then closed, a socket
+   the program held. And `WorkDispatch.dispatch` took the descriptor from a
+   caller's callback. *)
+let forged_link_src = {|mod ForgedLink do
+  needs IO.Mut
+  needs IO.Spawn
+  fn poke(fd : Int) : () do
+    let p0 = SessionNode.party(1, "n", fn _ -> ())
+    let l = { role: 2, data_fd: -1, control_fd: fd, peer: GlobalPid.make("x", 0, 0),
+              q: NodeQueue.start_local(fn _ -> ()), control: task_spawn(fn _ -> 0) }
+    SessionNode.finish({ p0 with links: Cons(l, Nil) })
+  end
+  fn wd(fd : Int) do WorkDispatch.dispatch end
+  fn main(_m : Cap(IO.Mut), _s : Cap(IO.Spawn)) do poke(3) end
+end
+|}
+
 let forged_actor_src = {|mod ForgedActor do
   needs IO.Mut
   fn spawned(fd : Int) : () do
@@ -1008,6 +1028,7 @@ let forged_actor_src = {|mod ForgedActor do
     let _ = spawn(ClusterNode__ClusterNodeActor)
     ()
   end
+  fn dotted() do spawn(NodeQueue.Writer) end
   fn main(_m : Cap(IO.Mut)) do spawned(3) reconfigured(3) cluster(3) end
 end
 |}
@@ -1024,6 +1045,14 @@ let test_cluster_records_unforgeable () =
         (contains ~needle:"expected `Fd`" out);
       Alcotest.(check bool) "and Fd's constructor is private" true
         (contains ~needle:"I don't know a constructor called `PeerRegistry.Fd`" out);
+      let file = Filename.concat dir "forged_link.march" in
+      write_file file forged_link_src;
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "a forged SessionNode.Link in a Party fails --check" 1 rc;
+      Alcotest.(check bool) "its fd fields want PeerRegistry.Fd, not Int" true
+        (contains ~needle:"control_fd : Fd, data_fd : Fd" out);
+      Alcotest.(check bool) "WorkDispatch.dispatch is internal" true
+        (contains ~needle:"`WorkDispatch.dispatch` is internal to the standard library" out);
       let file = Filename.concat dir "forged_actor.march" in
       write_file file forged_actor_src;
       let (rc, out) = run_compiler [ "--check"; file ] in
@@ -1038,6 +1067,8 @@ let test_cluster_records_unforgeable () =
           ("ClusterNode__CtlWriter", "ClusterNode.CtlWriter");
           ("ClusterNode.CtlUse", "ClusterNode.CtlWriter");
           ("ClusterNode__ClusterNodeActor", "ClusterNode.ClusterNodeActor") ];
+      Alcotest.(check bool) "no machine fix steers to an internal actor" false
+        (contains ~needle:"Did you mean `NodeQueue__Writer`" out);
       (* Control: the same program as stdlib source (the cluster fixtures'
          spelling) is not refused by the actor gate. *)
       let (_rc, out) = run_compiler [ "--check"; "--stdlib-source"; file ] in

@@ -1062,8 +1062,11 @@ git log is authoritative for exact commits.
   `Node.send`), so a module with only `needs IO.Mut` could build a `Peer` around a guessed
   descriptor number and send bytes into a connection the program held. The same was
   possible by spawning the cluster's `NodeQueue.Writer` actor and sending it
-  `Configure(fd, ..)`. A `Peer`'s descriptors are now an opaque `PeerRegistry.Fd` only the
-  standard library can make, and an actor marked `@[stdlib_internal]` (`NodeQueue.Writer`,
+  `Configure(fd, ..)`, by putting a forged `SessionNode.Link` in a `Party` and calling
+  `SessionNode.finish`/`serve`, or through the `fd_for` callback of `WorkDispatch.dispatch`.
+  The descriptors of a `Peer` and a `SessionNode.Link` are now an opaque `PeerRegistry.Fd`
+  only the standard library can make, `WorkDispatch.dispatch`/`dispatch_affine` are
+  internal, and an actor marked `@[stdlib_internal]` (`NodeQueue.Writer`,
   `ClusterNode.CtlWriter`, `ClusterNode.ClusterNodeActor`) can be neither spawned nor sent
   a message from user code ("`NodeQueue.Configure` belongs to the actor `NodeQueue.Writer`,
   which is internal to the standard library", `stdlib_internal`).

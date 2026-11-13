@@ -1897,8 +1897,11 @@ let spawn_non_actor env (name : string) : string option =
 (** The actor closest in spelling to [name], for a `spawn` or supervise
     child that names nothing: actor name constructors only. *)
 let suggest_actor_name env (name : string) : string option =
+  (* Never suggest a [@[stdlib_internal]] actor: `NodeQueue__Writer` would
+     only lead to the stdlib_internal error. *)
   let actors = StrMap.fold (fun k cis acc ->
       if spawn_non_actor env k = None
+      && not (Hashtbl.mem env.stdlib_internal_actors k)
       && List.exists (fun (ci : ctor_info) ->
           not ci.ci_is_actor_msg && ci.ci_arg_tys = [] && ci.ci_type = k) cis
       then (k, t_unit) :: acc else acc) env.ctors [] in

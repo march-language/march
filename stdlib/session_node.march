@@ -88,7 +88,10 @@ mod SessionNode do
 
   -- One peer connection: the remote role it reaches and everything that
   -- connection owns.
-  type Link = { role : Int, data_fd : Int, control_fd : Int, peer : GlobalPid.Pid,
+  -- The two descriptors are `PeerRegistry.Fd`s, which only the stdlib can make
+  -- (ocap phase 2b final re-review C1b): `Link` sits in the public `Party`, and
+  -- the public `finish`/`serve`/`serve_outcome` read, write and close them.
+  type Link = { role : Int, data_fd : PeerRegistry.Fd, control_fd : PeerRegistry.Fd, peer : GlobalPid.Pid,
                 q : (Pid(NodeQueue.WriterState), Int), control : Task(Int) }
 
   -- The endpoint actor's state: the delivery count, and the readers'
@@ -326,8 +329,8 @@ mod SessionNode do
   pfn drop_link(p : Party, l : Link, why : String) : () do
     send(p.ep, PeerGone(p, l.role, why))
     NodeQueue.close(l.q)
-    tcp_shutdown(l.data_fd)
-    tcp_shutdown(l.control_fd)
+    tcp_shutdown(PeerRegistry.unwrap_fd(l.data_fd))
+    tcp_shutdown(PeerRegistry.unwrap_fd(l.control_fd))
   end
 
   -- Kinds of our own endpoint's cancellation, for `run`'s result.
@@ -1072,7 +1075,7 @@ mod SessionNode do
   pfn start_link(p : Party, their_role : Int, conn : Peer, peer_pid : GlobalPid.Pid) : Party do
     let q = NodeQueue.start(PeerRegistry.raw_data_fd(conn), budget())
     let control = task_spawn(fn _ -> serve_control(PeerRegistry.raw_fd(conn), q))
-    let l = { role: their_role, data_fd: PeerRegistry.raw_data_fd(conn), control_fd: PeerRegistry.raw_fd(conn),
+    let l = { role: their_role, data_fd: conn.data_fd, control_fd: conn.fd,
               peer: peer_pid, q: q, control: control }
     match heartbeat_config() do
       (interval, limit) ->
@@ -1183,11 +1186,11 @@ mod SessionNode do
       -- Stops its heartbeat, which started with the connection.
       Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
       NodeQueue.close(l.q)
-      tcp_shutdown(l.data_fd)
-      tcp_shutdown(l.control_fd)
+      tcp_shutdown(PeerRegistry.unwrap_fd(l.data_fd))
+      tcp_shutdown(PeerRegistry.unwrap_fd(l.control_fd))
       let _ = task_await(l.control)
-      tcp_close(l.data_fd)
-      tcp_close(l.control_fd)
+      tcp_close(PeerRegistry.unwrap_fd(l.data_fd))
+      tcp_close(PeerRegistry.unwrap_fd(l.control_fd))
       0
     end)
     ()
@@ -1358,7 +1361,7 @@ mod SessionNode do
       match NodeSend.decode_msg(frame) do
         Err(e) -> Err(e)
         Ok(d) ->
-          let _ = NodeQueue.consumed(l.control_fd, budget(), List.length(frame) + 4)
+          let _ = NodeQueue.consumed(PeerRegistry.unwrap_fd(l.control_fd), budget(), List.length(frame) + 4)
           if d.type_tag == "SessionNode.Bye" do
             send(p.ep, PeerGone(p, l.role, "closed"))
             Ok(false)
@@ -1414,7 +1417,7 @@ mod SessionNode do
   -- the stream ("connection lost"); if a Bye or Cancel already arrived, the
   -- endpoint actor ignores the repeat. "" or why the reader stopped.
   pfn read_link(p : Party, l : Link) : String do
-    match PeerReader.serve(l.data_fd, Nil, fn (tag, frame) -> on_frame(p, l, tag, frame)) do
+    match PeerReader.serve(PeerRegistry.unwrap_fd(l.data_fd), Nil, fn (tag, frame) -> on_frame(p, l, tag, frame)) do
       Ok(_) -> ""
       Err(e) ->
         send(p.ep, PeerGone(p, l.role, "connection lost"))
@@ -1513,8 +1516,8 @@ mod SessionNode do
     if is_cluster(p) do () else
       let _ = List.map(p.links, fn l -> do
         Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
-        tcp_shutdown(l.data_fd)
-        tcp_shutdown(l.control_fd)
+        tcp_shutdown(PeerRegistry.unwrap_fd(l.data_fd))
+        tcp_shutdown(PeerRegistry.unwrap_fd(l.control_fd))
         0
       end)
       -- The shutdown wakes each data reader with an end of file; wait for
@@ -1624,10 +1627,10 @@ mod SessionNode do
       -- Its reader has ended, which stopped its heartbeat; a party that
       -- never served stops it here.
       Vault.set(p.meta, "link_done" ++ rkey(l.role), 1)
-      tcp_close(l.data_fd)
-      let _ = NodeSend.cast(l.control_fd, 0, GlobalPid.make("peer", 0, 0), "SessionNode.Bye", Nil)
+      tcp_close(PeerRegistry.unwrap_fd(l.data_fd))
+      let _ = NodeSend.cast(PeerRegistry.unwrap_fd(l.control_fd), 0, GlobalPid.make("peer", 0, 0), "SessionNode.Bye", Nil)
       let _ = task_await(l.control)
-      tcp_close(l.control_fd)
+      tcp_close(PeerRegistry.unwrap_fd(l.control_fd))
       0
     end) end
     ()
@@ -2497,7 +2500,7 @@ mod SessionNode do
       None ->
         Ok(List.filter_map(qs, fn t ->
           match t do
-            (r, g, Some(q)) -> Some({ role: r, data_fd: -1, control_fd: -1, peer: g, q: q,
+            (r, g, Some(q)) -> Some({ role: r, data_fd: PeerRegistry.wrap_fd(-1), control_fd: PeerRegistry.wrap_fd(-1), peer: g, q: q,
                                       control: task_spawn(fn _ -> 0) })
             _ -> None
           end))

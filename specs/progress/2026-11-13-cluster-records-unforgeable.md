@@ -39,13 +39,26 @@ guessed fd (probe compiled and ran: "server side received 6 bytes").
   `Dialed(.., cfd, dfd, ..)`, `MoveReader(.., l : CnLink, ..)`). A user's own message type
   with the same constructor index does not reach the handler: actor message tags are
   globally unique and a foreign tag is dropped (lower_actor.ml, finding 19; probed).
-- The audit of the rest: `ClusterNode.CnLink`/`CnHalf`, `NodeQueue.WriterState` and
-  `SessionNode.Link` reach I/O only through those actors and private functions; the public
-  `ClusterNode.core_*` functions that take a `cfd`/`dfd` are pure state transitions whose
-  effects only the internal actor performs.
+- The audit of the rest, as first written, said that `SessionNode.Link` reached I/O only
+  through those actors and private functions. **That was false**: see the re-review section
+  below.
+
+**Re-review (C1b), same day.** `SessionNode.Link { data_fd : Int, control_fd : Int, .. }` sits
+in the public `Party` (`SessionNode.party` returns one with no links), and the public
+`finish` (close, write a Bye frame, close), `serve`/`serve_outcome` (read, and write CREDIT)
+use its descriptors. A dependency with `IO.Mut` + `IO.Spawn` put a forged `Link` in a `Party`
+and called `finish`: bytes delivered to, then the closing of, a socket `main` held. `Link`'s
+two fields are now `PeerRegistry.Fd` (new `@[stdlib_internal]` `PeerRegistry.wrap_fd` /
+`unwrap_fd`; `start_link` takes the `Peer`'s own `Fd`s). A call-graph audit from every raw
+I/O call in the cluster modules up to the public functions reaching it also found
+`WorkDispatch.dispatch`/`dispatch_affine`, whose public `fd_for` callback handed
+`NodeCall.call` a raw descriptor; both are `@[stdlib_internal]`. What is left with raw `Int`
+fds (`CnLink`, `CnHalf`, `WriterState`) is accepted by no public function. The interpreter's
+Vault route to minting an `Fd` is filed (specs/todos/2026-11-13-vault-element-type-not-identity.md).
+The "did you mean `NodeQueue__Writer`" suggestion no longer names an internal actor.
 
 **Tests.** `test/test_stdlib_only.ml` "cluster records and actors unforgeable": the
-reviewer's forged-`Peer` program and a forged-actor program (spawn of each of the three
+reviewer's forged-`Peer` program, a forged `Link` in a `Party` plus `WorkDispatch.dispatch`, and a forged-actor program (spawn of each of the three
 actors, `NodeQueue.Configure`/`Enqueue` to a spawned and to a `start_local` writer,
 `ClusterNode.CtlUse`) each fail `--check` with the errors above; the same actor program
 under `--stdlib-source` is not refused. `cluster_plumbing_internal` gains

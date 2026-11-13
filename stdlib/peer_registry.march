@@ -26,6 +26,16 @@ mod PeerRegistry do
     { node_id: node_id, identity: identity, fd: Fd(fd), data_fd: Fd(data_fd) }
   end
 
+  doc "Wrap the descriptor [n] (`no_fd()` for none) as an `Fd`, for another stdlib record that holds one (`SessionNode.Link`)."
+  @[stdlib_internal]
+  fn wrap_fd(n : Int) : Fd do Fd(n) end
+
+  doc "The descriptor an `Fd` holds."
+  @[stdlib_internal]
+  fn unwrap_fd(f : Fd) : Int do
+    match f do Fd(n) -> n end
+  end
+
   doc "The descriptor of [p]'s control connection."
   @[stdlib_internal]
   fn raw_fd(p : Peer) : Int do
