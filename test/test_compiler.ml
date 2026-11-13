@@ -4250,7 +4250,13 @@ let run_march_on ~flags src_text =
    the compiled TIR ceiling, judging [Wire]'s empty `needs`. (With the bound,
    the per-function bound would answer first and the TIR ceiling would never
    be the one deciding.) *)
-let unbounded src = Str.global_replace (Str.regexp_string " needs () do") " do" src
+let unbounded src =
+  let out = Str.global_replace (Str.regexp_string " needs () do") " do" src in
+  (* A reformatted fixture would make this a silent no-op, turning the
+     unbounded legs into repeats of the bounded ones. *)
+  if String.equal out src then
+    Alcotest.fail "unbounded: no ` needs () do` to drop; the fixture changed shape";
+  out
 
 let test_handle_use_charges_nothing () =
   if not (Sys.file_exists compiler_exe_for_cap_dedup) then
