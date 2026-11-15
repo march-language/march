@@ -1897,8 +1897,11 @@ let spawn_non_actor env (name : string) : string option =
 (** The actor closest in spelling to [name], for a `spawn` or supervise
     child that names nothing: actor name constructors only. *)
 let suggest_actor_name env (name : string) : string option =
+  (* Never suggest a [@[stdlib_internal]] actor: `NodeQueue__Writer` would
+     only lead to the stdlib_internal error. *)
   let actors = StrMap.fold (fun k cis acc ->
       if spawn_non_actor env k = None
+      && not (Hashtbl.mem env.stdlib_internal_actors k)
       && List.exists (fun (ci : ctor_info) ->
           not ci.ci_is_actor_msg && ci.ci_arg_tys = [] && ci.ci_type = k) cis
       then (k, t_unit) :: acc else acc) env.ctors [] in
@@ -2807,7 +2810,7 @@ let cap_scrutinee env (scrut : Ast.expr) (scrut_ty : ty) (branches : Ast.branch 
    is true when the member bound at [k] is one, and the import at [sp] is not
    itself stdlib code (stdlib modules may import each other's internals). *)
 let import_blocked env (sp : Ast.span) k sch =
-  not (span_is_stdlib sp)
+  not (span_may_name_internal sp)
   && (match Hashtbl.find_opt env.stdlib_internal_fns k with
       | Some (_, isch) -> isch == sch
       | None -> false)
@@ -2897,7 +2900,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          user's own bare `raw_fd` never matches; a stdlib span (including the
          defining module itself) is exempt, exactly as for builtins. *)
       (if Hashtbl.length env.stdlib_internal_fns > 0
-          && not (span_is_stdlib name.span) then
+          && not (span_may_name_internal name.span) then
          match Hashtbl.find_opt env.stdlib_internal_fns name.txt with
          | Some (md, isch)
            when (match lookup_var name.txt env with
@@ -4221,6 +4224,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let _, resolved = resolve_qualified_ctor name.txt env in
            resolved
        in
+       (* `@[stdlib_internal]` actors (ocap phase 2b): their name and message
+          constructors are buildable only by the stdlib, so user code can
+          neither spawn one nor send it a message carrying a forged descriptor. *)
+       (match ci_opt with
+        | Some ci when Hashtbl.length env.stdlib_internal_actors > 0
+                    && not (span_may_name_internal sp) ->
+          (match Hashtbl.find_opt env.stdlib_internal_actors ci.ci_type with
+           | Some actor ->
+             Err.error ~code:Err.Code.stdlib_internal env.errors ~span:sp
+               (Printf.sprintf
+                  "`%s` belongs to the actor `%s`, which is internal to the standard library; \
+                   use the public API of its module instead."
+                  name.txt actor)
+           | None -> ())
+        | _ -> ());
        (match ci_opt with
         | Some ci when !(env.current_decl) <> "" ->
           env.refs := { callee = qualify_ref_name ci.ci_module
@@ -8163,6 +8181,22 @@ let rec check_decl env (d : Ast.decl) : env =
        { env1 with ty_aliases = StrMap.add key (param_names, rhs) env1.ty_aliases })
 
   | Ast.DActor (_vis, name, actor, _sp) ->
+    if actor.actor_internal && span_is_stdlib _sp then begin
+      (* The name as a user would write it: desugar spells a stdlib actor
+         `Mod__Actor`; the error says `Mod.Actor`. *)
+      let shown =
+        let b = Buffer.create (String.length name.txt) in
+        let n = String.length name.txt in
+        let i = ref 0 in
+        while !i < n do
+          if !i + 1 < n && name.txt.[!i] = '_' && name.txt.[!i + 1] = '_'
+          then (Buffer.add_char b '.'; i := !i + 2)
+          else (Buffer.add_char b name.txt.[!i]; incr i)
+        done;
+        Buffer.contents b in
+      Hashtbl.replace env.stdlib_internal_actors name.txt shown;
+      Hashtbl.replace env.stdlib_internal_actors (actor_msg_type_name name.txt) shown
+    end;
     Hashtbl.replace env.decl_sites ("actor:" ^ name.txt) name.span;
     Hashtbl.replace env.decl_sites ("actorbody:" ^ name.txt) _sp;
     (* Each handler parameter, so a message built with a wrong payload can
@@ -9464,6 +9498,17 @@ let rec check_decl env (d : Ast.decl) : env =
                      optionally followed by a path prefix, e.g. \
                      `needs IO.NetConnect(\"api.example.com/v1/\")`."
                     path cap reason))
+          else if March_caps.Cap_scope.is_name_scopable cap then
+            (match March_caps.Name_scope.parse path with
+             | Ok _ -> ()
+             | Error reason ->
+               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+                 (Printf.sprintf
+                    "The name scope on `%s` is not valid: %s.\n\
+                     hint: give names as strings and prefixes as \
+                     `prefix(\"...\")`, e.g. \
+                     `needs %s(\"sessions\", prefix(\"cache.\"))`."
+                    cap reason cap))
           else if snd (March_caps.Host_scope.split_options path) <> []
           then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span

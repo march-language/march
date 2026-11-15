@@ -239,6 +239,13 @@ This is also why you can reason about reuse locally: sharing a value (keeping th
 old binding around, storing it in two places) is exactly what *disables* reuse at
 that site, and the compiler does the safe thing with no visible sign.
 
+To see those sites, run `march --why-copies FILE`. It lists each call in your code
+that passes a value to a function that would reuse it in place, while the value is
+still shared: used again afterwards, also passed to the enclosing call, or captured
+by a closure. Each is a [`copy_shared`]({{ site.baseurl }}/docs/errors/copy_shared/)
+warning, and when moving the later use above the call is safe, it carries that
+move as a fix. `--why-copies-json` prints the same as NDJSON for tools.
+
 ---
 
 ## Writing allocation-free code

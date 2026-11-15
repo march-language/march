@@ -5299,12 +5299,12 @@ waits for the next frame, a ticker that runs until the program stops. Mark one
 
 ```march
 @[diverges]
-fn accept_loop(listen_fd : Int) : Int do
-  match tcp_accept(listen_fd) do
+fn accept_loop(listener : Listener) : Int do
+  match Socket.accept(listener) do
     Err(_) -> 0
-    Ok(fd) ->
-      handle(fd)
-      accept_loop(listen_fd)
+    Ok(conn) ->
+      handle(conn)
+      accept_loop(listener)
   end
 end
 ```

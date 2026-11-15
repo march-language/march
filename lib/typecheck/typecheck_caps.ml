@@ -215,17 +215,26 @@ let fn_transitive_capability_closures_tbl (env : env)
 (* ── Path-scoped capability checking ──────────────────────────────────
 
    Which builtins take a FILESYSTEM PATH, and at which argument.  Verified
-   against the signature table: the read/write builtins take the path at
-   argument 0, [file_rename] and [file_copy] take two paths, and
-   [file_read_line] / [file_read_chunk] / [csv_next_row] take an INT HANDLE
-   rather than a path — those need no check, because a handle cannot be
-   obtained except through an opening builtin, which is checked.  That is what
-   makes this sound without dataflow analysis. *)
+   against the signature table: the read/write builtins and the opens
+   ([file_open], [file_open_write], [dir_open], [dir_open_write], [csv_open])
+   take the path at argument 0, and [file_rename] and [file_copy] take two
+   paths.  Everything that acts on an open file or directory instead
+   ([file_read_line], [file_read_chunk], [file_write_handle], [file_seek],
+   [csv_next_row], and [file_open_at] / [dir_list_at] beneath a held File.Dir)
+   gets no path check here: since ocap phase 2 a handle is unforgeable, so
+   user code holds a File.Handle or File.Dir only from an open (the raw
+   Int-descriptor builtins are stdlib-only), and [File.open_in] refuses a
+   relative path that leaves the directory.  What this does NOT give: the
+   scope itself is enforced only at a DIRECT call of one of these builtins
+   with a literal path.  The stdlib wrappers user code now calls (File.open,
+   File.read, Csv.read_all, ...) pass the path as a variable, so neither this
+   check nor any run-time check applies a path scope to them yet
+   (specs/todos/2026-11-12-path-scope-not-checked-at-wrappers.md). *)
 let path_arg_builtins : (string * int list) list = [
   ("file_read", [0]); ("file_open", [0]); ("file_exists", [0]);
   ("file_stat", [0]); ("dir_list", [0]); ("dir_exists", [0]);
   ("file_write", [0]); ("file_append", [0]); ("file_delete", [0]);
-  ("file_open_write", [0]);
+  ("file_open_write", [0]); ("dir_open", [0]); ("dir_open_write", [0]);
   ("dir_mkdir", [0]); ("dir_mkdir_p", [0]); ("dir_rmdir", [0]);
   ("dir_rm_rf", [0]);
   (* csv_open(path, delimiter, mode): the path is argument 0 (the mode is
@@ -279,6 +288,369 @@ let rec literal_path_uses (acc : (string * string * Ast.span) list)
   | Ast.ESpawn (e, _) | Ast.EAssert (e, _) -> literal_path_uses acc e
   | Ast.ELam (_, b, _) | Ast.ELetFn (_, _, _, b, _) -> literal_path_uses acc b
   | _ -> acc
+
+(* ── Name-scoped capability checking (ocap p2b, spec §6) ──────────────
+
+   Which calls turn a NAME into authority, the capability that judges the
+   name, and the argument it sits at.  These are the stdlib WRAPPER names:
+   since ocap phase 2 (Task 10) user code reaches the registry lookups and
+   the named tables only through them.  The raw builtins user code can still
+   name are listed too, so a direct call is no way around the scope.  This is
+   the wrapper-level scan the path scopes do not have yet
+   (specs/todos/2026-11-12-path-scope-not-checked-at-wrappers.md): the
+   wrappers pass the name straight through, so the literal at the call site
+   is the name the operation uses. *)
+let name_arg_fns : (string * (string * int)) list = [
+  ("Vault.new", ("IO.Mut", 0)); ("Vault.open", ("IO.Mut", 0));
+  ("Vault.whereis", ("IO.Mut", 0));
+  (* The namespaced entries open the table named by their first argument
+     (`ns_drop` through vault_whereis): the same name space. *)
+  ("Vault.ns_set", ("IO.Mut", 0)); ("Vault.ns_get", ("IO.Mut", 0));
+  ("Vault.ns_drop", ("IO.Mut", 0));
+  (* The one other stdlib function that passes a caller's table name
+     straight to a Vault open (`Vault.open(name)`). *)
+  ("Config.new_store", ("IO.Mut", 0));
+  ("vault_new", ("IO.Mut", 0)); ("vault_whereis", ("IO.Mut", 0));
+  ("vault_ns_set", ("IO.Mut", 0)); ("vault_ns_get", ("IO.Mut", 0));
+  ("vault_ns_drop", ("IO.Mut", 0));
+  ("Actor.register", ("IO.Registry", 1)); ("Actor.unregister", ("IO.Registry", 0));
+  ("Actor.whereis", ("IO.Registry", 1));
+  (* The raw builtins take the name FIRST except actor_register, whose
+     March-level order is (pid, name) like the wrapper's. *)
+  ("actor_register", ("IO.Registry", 1)); ("actor_unregister", ("IO.Registry", 0));
+  ("actor_whereis", ("IO.Registry", 0));
+]
+
+(* Listing every registered name exceeds any name scope. *)
+let name_listing_fns : (string * string) list = [
+  ("Actor.registered", "IO.Registry"); ("actor_registered", "IO.Registry");
+]
+
+type name_use =
+  | NameLit of string * string * string * Ast.span
+      (** function, capability, literal name, span of the literal *)
+  | NameComputed of string * string * Ast.expr * Ast.span
+      (** function, capability, the name expression, its call's span *)
+  | NameListing of string * string * Ast.span
+  | NameFnValue of string * string * Ast.span
+      (** a name-taking function used as a value: its calls are out of sight *)
+
+(* A short rendering of a computed name for the diagnostic.  Only the shapes
+   a name is usually built from; anything else is "this name". *)
+let rec show_name_expr (depth : int) (e : Ast.expr) : string option =
+  if depth > 3 then None
+  else
+    match e with
+    | Ast.ELit (Ast.LitString s, _) -> Some (March_caps.Name_scope.quote s)
+    | Ast.ELit (Ast.LitInt n, _) -> Some (string_of_int n)
+    | Ast.EVar n -> Some n.Ast.txt
+    | Ast.EField (inner, f, _) ->
+      Option.map (fun i -> i ^ "." ^ f.Ast.txt) (show_name_expr (depth + 1) inner)
+    | Ast.EApp (Ast.EVar op, [ a; b ], _)
+      when op.Ast.txt <> ""
+           && (match op.Ast.txt.[0] with
+               | 'a' .. 'z' | 'A' .. 'Z' | '_' -> false
+               | _ -> true) -> (
+        match (show_name_expr (depth + 1) a, show_name_expr (depth + 1) b) with
+        | Some x, Some y -> Some (Printf.sprintf "%s %s %s" x op.Ast.txt y)
+        | _ -> None)
+    | Ast.EApp (Ast.EVar f, args, _) ->
+      let shown = List.map (show_name_expr (depth + 1)) args in
+      if List.for_all Option.is_some shown then
+        Some (Printf.sprintf "%s(%s)" f.Ast.txt
+                (String.concat ", " (List.filter_map Fun.id shown)))
+      else None
+    | _ -> None
+
+(* Every name use in an expression.  Exhaustive over [Ast.expr] on purpose,
+   like [March_ast.Calls.calls_in_expr]: a form added later is a compile
+   error here rather than a place a call slips past the scope. *)
+let rec name_uses ?(resolve = Fun.id) (acc : name_use list) (e : Ast.expr)
+    : name_use list =
+  let go = name_uses ~resolve in
+  let callee_name = function
+    | Ast.EVar fn -> Some (resolve fn.Ast.txt, fn.Ast.span)
+    | Ast.EField (Ast.EVar m, fn, _) | Ast.EField (Ast.ECon (m, [], _), fn, _) ->
+      Some (resolve (m.Ast.txt ^ "." ^ fn.Ast.txt), fn.Ast.span)
+    | _ -> None
+  in
+  match e with
+  | Ast.EApp (f, args, sp) -> (
+    let args_acc () = List.fold_left go acc args in
+    match callee_name f with
+    | Some (name, _) when List.mem_assoc name name_arg_fns ->
+      let cap, idx = List.assoc name name_arg_fns in
+      let acc =
+        match List.nth_opt args idx with
+        | Some (Ast.ELit (Ast.LitString s, lsp)) -> NameLit (name, cap, s, lsp) :: acc
+        | Some arg -> NameComputed (name, cap, arg, sp) :: acc
+        (* Too few arguments: the type checker reports the arity, and the
+           name is not in sight, so fail closed rather than say nothing. *)
+        | None -> NameFnValue (name, cap, sp) :: acc
+      in
+      List.fold_left go acc args
+    | Some (name, nsp) when List.mem_assoc name name_listing_fns ->
+      List.fold_left go (NameListing (name, List.assoc name name_listing_fns, nsp) :: acc) args
+    | Some _ -> args_acc ()
+    | None -> List.fold_left go (go acc f) args)
+  | Ast.EVar fn -> (
+    let q = resolve fn.Ast.txt in
+    match List.assoc_opt q name_arg_fns with
+    | Some (cap, _) -> NameFnValue (q, cap, fn.Ast.span) :: acc
+    | None -> (
+      match List.assoc_opt q name_listing_fns with
+      | Some cap -> NameListing (q, cap, fn.Ast.span) :: acc
+      | None -> acc))
+  | Ast.EField (Ast.EVar m, fn, sp) | Ast.EField (Ast.ECon (m, [], _), fn, sp) -> (
+    let q = resolve (m.Ast.txt ^ "." ^ fn.Ast.txt) in
+    match List.assoc_opt q name_arg_fns with
+    | Some (cap, _) -> NameFnValue (q, cap, sp) :: acc
+    | None -> (
+      match List.assoc_opt q name_listing_fns with
+      | Some cap -> NameListing (q, cap, sp) :: acc
+      | None -> acc))
+  | Ast.ECon (_, args, _) | Ast.ETuple (args, _) | Ast.EAtom (_, args, _)
+  | Ast.EBlock (args, _) -> List.fold_left go acc args
+  | Ast.ELam (_, body, _) | Ast.ELetFn (_, _, _, body, _) -> go acc body
+  | Ast.ELet (b, _) -> go acc b.Ast.bind_expr
+  | Ast.EMatch (scrut, arms, _) ->
+    List.fold_left (fun a arm ->
+        let a = Option.fold ~none:a ~some:(go a) arm.Ast.branch_guard in
+        go a arm.Ast.branch_body) (go acc scrut) arms
+  | Ast.ERecord (fields, _) -> List.fold_left (fun a (_, ex) -> go a ex) acc fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    List.fold_left (fun a (_, ex) -> go a ex) (go acc base) fields
+  | Ast.EField (inner, _, _) -> go acc inner
+  | Ast.EIf (c, t, f, _) -> go (go (go acc c) t) f
+  | Ast.ECond (arms, _) -> List.fold_left (fun a (c, b) -> go (go a c) b) acc arms
+  | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go (go acc a) b
+  | Ast.ELetQ (_, a, b, _) | Ast.ELetStar (_, a, b, _) -> go (go acc a) b
+  | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _)
+  | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) | Ast.EDbg (Some ex, _) -> go acc ex
+  | Ast.EProof (p, _) -> List.fold_left go acc (Ast.proof_children p)
+  | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> acc
+
+(* The name-scopable kinds. *)
+let name_scoped_kinds = [ "IO.Mut"; "IO.Registry" ]
+
+(* [(capability, scope)] pairs from [needs] declarations. *)
+let declared_scopes_of (decls : Ast.decl list) : (string * string option) list =
+  List.concat_map (function
+      | Ast.DNeeds (caps, _) ->
+        List.map (fun (p, sc) ->
+            (String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) p), sc)) caps
+      | _ -> [])
+    decls
+
+(* The name scopes [declared] narrows [cap] to: [None] when nothing covers
+   [cap] or an unscoped declaration does (any name), else the parsed scopes.
+   An invalid scope was reported by the DNeeds check and is skipped; if every
+   scope is invalid the result is [None], since judging names against it
+   would only add noise. *)
+let name_scopes_for (declared : (string * string option) list) (cap : string)
+    : March_caps.Name_scope.t list option =
+  let relevant = List.filter (fun (d, _) -> cap_subsumes d cap) declared in
+  if relevant = [] || List.exists (fun (_, sc) -> sc = None) relevant then None
+  else
+    match
+      List.filter_map (fun (d, sc) ->
+          if d <> cap then None
+          else Option.bind sc (fun s -> Result.to_option (March_caps.Name_scope.parse s)))
+        relevant
+    with
+    | [] -> None
+    | ss -> Some ss
+
+let show_name_scopes cap ss =
+  String.concat " and "
+    (List.map (fun s -> "`" ^ March_caps.Name_scope.to_surface cap s ^ "`") ss)
+
+(* Every expression of a module's OWN code, for the name scan.  Exhaustive
+   over [Ast.decl], with no catch-all, for the same reason as [name_uses]:
+   a declaration form added later is a compile error here rather than a body
+   the scope never sees (impl methods were missed that way once).  A nested
+   [DMod] is not walked: it is judged by its own [check_module_needs] call,
+   against its own [needs]. *)
+let rec module_own_exprs (decls : Ast.decl list) : Ast.expr list =
+  let of_fn (def : Ast.fn_def) =
+    List.concat_map (fun (c : Ast.fn_clause) ->
+        (* a default argument moved into an arity-mangled [f$N] body
+           at desugar, which this walk sees as its own [DFn] *)
+        c.Ast.fc_body :: Option.to_list c.Ast.fc_guard)
+      def.Ast.fn_clauses
+  in
+  List.concat_map (function
+      | Ast.DFn (def, _) -> of_fn def
+      | Ast.DLet (_, b, _) -> [ b.Ast.bind_expr ]
+      | Ast.DActor (_, _, a, _) ->
+        a.Ast.actor_init
+        :: List.map (fun (h : Ast.actor_handler) -> h.Ast.ah_body)
+             (Ast.actor_body_handlers a)
+      | Ast.DImpl (idef, _) -> List.concat_map (fun (_, fd) -> of_fn fd) idef.Ast.impl_methods
+      | Ast.DInterface (idef, _) ->
+        List.filter_map (fun (m : Ast.method_decl) -> m.Ast.md_default) idef.Ast.iface_methods
+      | Ast.DApp (a, _) ->
+        a.Ast.app_body :: (Option.to_list a.Ast.app_on_start @ Option.to_list a.Ast.app_on_stop)
+      | Ast.DTest (t, _) -> [ t.Ast.test_body ]
+      | Ast.DDescribe (_, inner, _) -> module_own_exprs inner
+      | Ast.DSetup (e, _) | Ast.DSetupAll (e, _) -> [ e ]
+      | Ast.DMod _ | Ast.DType _ | Ast.DProtocol _ | Ast.DSig _ | Ast.DExtern _
+      | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _ | Ast.DProofCap _ | Ast.DOpts _
+      | Ast.DAlwaysLinearType _ | Ast.DTransitions _ | Ast.DDeriving _
+      | Ast.DSatisfy _ -> [])
+    decls
+
+(* [check_name_scopes env ~nested decls] judges every name use in a module's
+   own code against the module's OWN name scopes (its [DNeeds] among
+   [decls], not [env.mod_need_scopes], which for a nested module still holds
+   the enclosing module's: specs/todos/2026-11-10-nested-path-scope-unchecked.md).
+   Quiet when the module has no declaration covering the capability (the
+   ceiling reports that) or any unscoped one (any name is in scope).
+
+   For a [nested] module, [env.mod_need_scopes] IS the enclosing modules'
+   declarations, and a nested module's name scope may not be wider than
+   theirs: otherwise `needs IO.Registry` in a nested module would undo the
+   parent's `needs IO.Registry("logger")`. *)
+let check_name_scopes (env : env) ~(nested : bool) (decls : Ast.decl list) : unit =
+  let declared = declared_scopes_of decls in
+  if nested then
+    List.iter (fun cap ->
+        match name_scopes_for env.mod_need_scopes cap with
+        | None -> ()
+        | Some parent ->
+          let merged =
+            { March_caps.Name_scope.names = List.concat_map (fun s -> s.March_caps.Name_scope.names) parent;
+              prefixes = List.concat_map (fun s -> s.March_caps.Name_scope.prefixes) parent }
+          in
+          let relevant = List.exists (fun (d, _) -> cap_subsumes d cap) declared in
+          let own = name_scopes_for declared cap in
+          let own_merged =
+            Option.map (fun ss ->
+                { March_caps.Name_scope.names = List.concat_map (fun s -> s.March_caps.Name_scope.names) ss;
+                  prefixes = List.concat_map (fun s -> s.March_caps.Name_scope.prefixes) ss })
+              own
+          in
+          if relevant && not (March_caps.Name_scope.subsumes (Some merged) own_merged) then begin
+            let sp =
+              List.find_map (function
+                  | Ast.DNeeds (caps, sp)
+                    when List.exists (fun (p, _) ->
+                        cap_subsumes
+                          (String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) p))
+                          cap) caps -> Some sp
+                  | _ -> None)
+                decls
+            in
+            match sp with
+            | Some sp when not (span_is_stdlib sp) ->
+              Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+                (Printf.sprintf
+                   "This `needs` gives %s, which is wider than the enclosing \
+                    module's %s.\n\
+                    hint: a nested module may narrow a name scope, never widen \
+                    it; declare a scope within the enclosing one."
+                   (match own with
+                    | None -> Printf.sprintf "`%s` for any name" cap
+                    | Some ss -> show_name_scopes cap ss)
+                   (show_name_scopes cap parent))
+            | _ -> ()
+          end)
+      name_scoped_kinds;
+  let scopes_for cap : (string * March_caps.Name_scope.t list) option =
+    Option.map (fun ss -> (show_name_scopes cap ss, ss)) (name_scopes_for declared cap)
+  in
+  if List.exists (fun (_, sc) -> sc <> None) declared then begin
+    (* `alias Actor, as: A` makes `A.register` the wrapper.  The module's own
+       aliases are resolved by spelling; an alias from an enclosing module is
+       found because the alias binds the very same scheme value under the
+       short name ([Typecheck] [DAlias] arm). *)
+    let local_aliases =
+      List.filter_map (function
+          | Ast.DAlias (ad, _) ->
+            Some (ad.Ast.alias_name.Ast.txt,
+                  String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ad.Ast.alias_path))
+          | _ -> None)
+        decls
+    in
+    let table_keys = List.map fst name_arg_fns @ List.map fst name_listing_fns in
+    let resolve (q : string) : string =
+      if List.mem q table_keys then q
+      else
+        match String.index_opt q '.' with
+        | None -> q
+        | Some i ->
+          let head = String.sub q 0 i and rest = String.sub q (i + 1) (String.length q - i - 1) in
+          let by_alias =
+            Option.map (fun long -> long ^ "." ^ rest) (List.assoc_opt head local_aliases)
+          in
+          match by_alias with
+          | Some q' when List.mem q' table_keys -> q'
+          | _ -> (
+            match StrMap.find_opt q env.vars with
+            | None -> q
+            | Some sch ->
+              match
+                List.find_opt (fun k ->
+                    String.contains k '.'
+                    && (match StrMap.find_opt k env.vars with
+                        | Some sch' -> sch' == sch
+                        | None -> false))
+                  table_keys
+              with
+              | Some k -> k
+              | None -> q)
+    in
+    let uses = List.rev (List.fold_left (name_uses ~resolve) [] (module_own_exprs decls)) in
+    List.iter (fun use ->
+        match use with
+        | NameLit (fn, cap, name, sp) -> (
+          match scopes_for cap with
+          | Some (shown, ss)
+            when not (List.exists (fun s -> March_caps.Name_scope.admits s name) ss) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is scoped to %s, but `%s` uses the name `%s`, which is \
+                  outside it.\n\
+                  hint: widen the scope in `needs`, or use a name within it."
+                 cap shown fn name)
+          | _ -> ())
+        | NameComputed (fn, cap, arg, sp) -> (
+          match scopes_for cap with
+          | Some (shown, _) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is given a computed name: cannot prove %s is within %s; \
+                  the check at run time arrives with phase 4.\n\
+                  hint: pass a literal name within the scope, or widen the \
+                  scope in `needs`."
+                 fn
+                 (match show_name_expr 0 arg with
+                  | Some s -> "`" ^ s ^ "`"
+                  | None -> "this name")
+                 shown)
+          | None -> ())
+        | NameListing (fn, cap, sp) -> (
+          match scopes_for cap with
+          | Some (shown, _) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` lists every name, which exceeds %s.\n\
+                  hint: listing needs an unscoped `needs %s`."
+                 fn shown cap)
+          | None -> ())
+        | NameFnValue (fn, cap, sp) -> (
+          match scopes_for cap with
+          | Some (shown, _) ->
+            Err.error ~code:Err.Code.cap_scope_violation env.errors ~span:sp
+              (Printf.sprintf
+                 "`%s` is used as a value, so the names it is called with are \
+                  out of sight: cannot prove they are within %s; the check at \
+                  run time arrives with phase 4.\n\
+                  hint: call it directly with a literal name."
+                 fn shown)
+          | None -> ()))
+      uses
+  end
 
 (* Check 2's "declared but no function requires" warning, shared by
    [check_module_needs] and [check_deferred_imports]. *)
@@ -1239,6 +1611,9 @@ let check_module_needs (env : env) (mod_name : Ast.name)
         bodies)
     decls;
 
+  (* ── Name-scope violations (IO.Mut, IO.Registry) ── *)
+  check_name_scopes env ~nested:(cap_qname_prefix <> "") decls;
+
   (* Each use carries the code it sits in, as the subject of a sentence
      ("`greet`", "the `Inc` handler of actor `Counter`"), so the missing-`needs`
      error can name it (specs/plans/2026-11-02-diagnostics-depth-plan.md §F1). *)
@@ -2152,6 +2527,74 @@ let schema_hash (env : env) (name : string) : string =
   let body = match def [ name; short name ] name with Some d -> d | None -> short name in
   Digest.to_hex (Digest.string body)
 
+(** The first resource handle a message type holds, at any depth (ocap
+    phase 2b, Task 13): the solved type itself, then every declaration it
+    names, expanded through record fields and constructor arguments the way
+    [schema_hash] expands them.  The handle types are
+    [Cap_surface_ty.handle_type_spellings], the list `derive Json` refuses
+    too.  Every spelling is judged by identity, not by name: a program's own
+    type named like a handle box ([Socket], [Listener], [Process]) or like a
+    stdlib wrapper ([UdpSocket], [TlsConn], [TlsCtx], [WsSocket]) gets a
+    qualified identity from [Typecheck_nominal], so a solved [TCon] is a
+    handle only under the handle's exact bare name; in a declaration's
+    surface types [Typecheck_nominal.refers_to_user_decl] says, by the
+    written span, that a handle spelling means the program's own type.  (A
+    nested user type in a check that carries the stdlib's declarations
+    unmarked keeps its bare name; see [Typecheck_nominal.compute].)  The
+    result is the handle's displayed name. *)
+let handle_in_message (env : env) (msg_ty : ty) : string option =
+  let short n = match String.rindex_opt n '.' with
+    | Some i -> String.sub n (i + 1) (String.length n - i - 1) | None -> n in
+  let find_record n =
+    match StrMap.find_opt n env.records with
+    | Some r -> Some r
+    | None -> StrMap.find_opt (short n) env.records in
+  (* A constructor's [ci_type] is its type's identity
+     ([Typecheck_nominal.decl_identity]): match it exactly first, so a
+     program's own `App.UdpSocket` does not pick up the stdlib wrapper's
+     `Socket` argument; the short name is the fallback for a type whose
+     identity is bare. *)
+  let ctor_args n =
+    let with_type t =
+      StrMap.fold (fun _ infos acc ->
+          List.fold_left (fun acc ci -> if ci.ci_type = t then ci.ci_arg_tys @ acc else acc) acc infos)
+        env.ctors [] in
+    match with_type n with
+    | [] when short n <> n -> with_type (short n)
+    | args -> args in
+  let first f xs = List.find_map f xs in
+  let rec in_ty seen (t : ty) =
+    match repr t with
+    | TCon (n, args) ->
+      (match March_caps.Cap_surface_ty.handle_type_named n with
+       | Some h when h = n -> Some h
+       | _ -> (match first (in_ty seen) args with Some h -> Some h | None -> in_decl seen n))
+    | TTuple ts -> first (in_ty seen) ts
+    | TRecord fs -> first (fun (_, t) -> in_ty seen t) fs
+    | TLin (_, t) -> in_ty seen t
+    | TRefine (t, _, _) -> in_ty seen t
+    | TArrow _ | TVar _ | TNat _ | TNatOp _ | TChan _ | TError -> None
+  and in_ast seen (t : Ast.ty) =
+    match t with
+    | Ast.TyCon (c, args) ->
+      (match March_caps.Cap_surface_ty.handle_type_named c.txt with
+       | Some h when not (Typecheck_nominal.refers_to_user_decl c) -> Some h
+       | _ -> (match first (in_ast seen) args with Some h -> Some h | None -> in_decl seen c.txt))
+    | Ast.TyTuple ts -> first (in_ast seen) ts
+    | Ast.TyRecord fs -> first (fun (_, t) -> in_ast seen t) fs
+    | Ast.TyLinear (_, t) -> in_ast seen t
+    | Ast.TyRefine (t, _, _) -> in_ast seen t
+    | Ast.TyArrow _ | Ast.TyVar _ | Ast.TyNat _ | Ast.TyNatOp _ | Ast.TyChan _ -> None
+  and in_decl seen n =
+    if List.mem (short n) seen then None
+    else
+      let seen = short n :: seen in
+      match find_record n with
+      | Some (_, fields) -> first (fun (_, t) -> in_ast seen t) fields
+      | None -> first (in_ast seen) (ctor_args n)
+  in
+  in_ty [] msg_ty
+
 (** The typed remote send, the call-site half (stdlib/node.march).  For every
     recorded `Node.send(peer, to, msg)` or `Node.enqueue(q, to, msg, policy)` site: resolve `msg`'s solved type to
     the declaration it names, require that declaration to have a `derive Json`
@@ -2256,17 +2699,25 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
       Some (Err.fix (Err.FInsert { after_line = tsp.Ast.end_line;
                                    text = String.make tsp.Ast.start_col ' ' ^ "derive Json for " ^ s }))
     | _ -> None in
+  (* The handlers annotated with payload type [s], as ("Actor.Msg", span). *)
+  let remote_payload_sites s =
+    let sfx = ":" ^ s in
+    Hashtbl.fold (fun k (tsp : Ast.span) acc ->
+        let lk = String.length k and ls = String.length sfx and pfx = "remotepayload:" in
+        let lp = String.length pfx in
+        if lk > lp + ls && String.sub k 0 lp = pfx && String.sub k (lk - ls) ls = sfx then
+          (String.sub k lp (lk - lp - ls), tsp) :: acc
+        else acc) env.decl_sites []
+    |> List.sort (fun (_, a) (_, b) -> compare a b) in
+  let split_handler handler =
+    match String.index_opt handler '.' with
+    | Some i -> String.sub handler 0 i,
+                String.sub handler (i + 1) (String.length handler - i - 1)
+    | None -> handler, handler in
   let remote_codec_missing sp s =
     if not (Hashtbl.mem remote_reported s) then begin
       Hashtbl.add remote_reported s ();
-      let sfx = ":" ^ s in
-      let sites = Hashtbl.fold (fun k (tsp : Ast.span) acc ->
-          let lk = String.length k and ls = String.length sfx and pfx = "remotepayload:" in
-          let lp = String.length pfx in
-          if lk > lp + ls && String.sub k 0 lp = pfx && String.sub k (lk - ls) ls = sfx then
-            (String.sub k lp (lk - lp - ls), tsp) :: acc
-          else acc) env.decl_sites []
-        |> List.sort (fun (_, a) (_, b) -> compare a b) in
+      let sites = remote_payload_sites s in
       match sites with
       | [] ->
         Err.error ~code:Err.Code.codec_missing env.errors ~span:sp
@@ -2274,10 +2725,7 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
               MPCode "@[remote]"; MPText " needs a JSON codec for "; MPCode s;
               MPText ", and none is derived."])
       | (handler, tsp) :: _ ->
-        let actor, msg = match String.index_opt handler '.' with
-          | Some i -> String.sub handler 0 i,
-                      String.sub handler (i + 1) (String.length handler - i - 1)
-          | None -> handler, handler in
+        let actor, msg = split_handler handler in
         Err.report env.errors
           { Err.severity = Err.Error; span = tsp;
             message = render_parts [
@@ -2305,7 +2753,54 @@ let check_node_send_sites ~(entry : string) (env : env) : unit =
            add. *)
         ()
       | Some msg_ty ->
-        (match json_dispatch_head env msg_ty with
+        (match handle_in_message env msg_ty with
+         | Some handle ->
+           (* Checked before the codec: `derive Json` refuses a type holding
+              a handle, so the codec IS missing, but "derive Json for T" is
+              advice that cannot be taken. *)
+           let shown = match json_dispatch_head env msg_ty with
+             | Some n -> short n | None -> pp_ty (repr msg_ty) in
+           let headline = [
+             MPCode handle; MPText " cannot be sent to another node: a handle names a resource on this node.";
+             MPBreak ] in
+           let note = render_parts [
+               MPText "Keep the "; MPCode handle;
+               MPText " on this node and send what the other node needs to know instead: a path, an address, or a ";
+               MPCode "GlobalPid.Pid"; MPText " of an actor here that owns the resource."] in
+           let report span detail =
+             Err.report env.errors
+               { Err.severity = Err.Error; span; labels = [];
+                 code = Err.Code.handle_not_sendable; fix = None;
+                 message = render_parts (headline @ detail); notes = [ note ] } in
+           if callee = "@[remote] dispatch" then begin
+             (* A generated dispatch tests each payload twice, at spans no
+                excerpt can show: report the type once, at the handler's
+                annotation of it, as [remote_codec_missing] does. *)
+             if not (Hashtbl.mem remote_reported shown) then begin
+               Hashtbl.add remote_reported shown ();
+               match remote_payload_sites shown with
+               | (handler, tsp) :: _ ->
+                 let actor, msg = split_handler handler in
+                 report tsp [
+                   MPText "The "; MPCode "@[remote]"; MPText " actor "; MPCode actor;
+                   MPText " receives "; MPCode msg; MPText " from other nodes as a ";
+                   MPCode shown; MPText ", which holds a "; MPCode handle; MPText "."]
+               | [] ->
+                 report sp [
+                   MPCode "@[remote]"; MPText " receives a value of type "; MPCode shown;
+                   MPText ", which holds a "; MPCode handle; MPText "."]
+             end
+           end
+           else if (match repr msg_ty with
+               | TCon (n, _) -> March_caps.Cap_surface_ty.handle_type_named n <> None
+               | _ -> false) then
+             report sp [ MPText "The message "; MPCode callee; MPText " sends here is the handle itself."]
+           else
+             report sp [
+               MPCode callee; MPText " sends a value of type "; MPCode shown;
+               MPText ", which holds a "; MPCode handle; MPText "."]
+         | None ->
+        match json_dispatch_head env msg_ty with
          | None ->
            Err.report env.errors
              { Err.severity = Err.Error; span = sp; labels = [];

@@ -9167,7 +9167,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_call_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_call_loopback
         native/node_call_loopback.march)
    (with-stdout-to native_node_call_loopback.out
         (system "./native_node_call_loopback")))))
@@ -9244,7 +9244,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_loopback
         native/node_send_loopback.march)
    (with-stdout-to native_node_send_loopback.out
         (system "./native_node_send_loopback")))))
@@ -9272,7 +9272,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_peer_reader_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_peer_reader_loopback
         native/peer_reader_loopback.march)
    (with-stdout-to native_peer_reader_loopback.out
         (system "./native_peer_reader_loopback")))))
@@ -9293,7 +9293,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_failed_msg
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_failed_msg
         native/node_send_failed_msg.march)
    (with-stdout-to native_node_send_failed_msg.out
         (system "./native_node_send_failed_msg")))))
@@ -9314,7 +9314,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_control_channel_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_control_channel_loopback
         native/control_channel_loopback.march)
    (with-stdout-to native_control_channel_loopback.out
         (system "./native_control_channel_loopback")))))
@@ -9335,7 +9335,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_net_frame_large_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_net_frame_large_loopback
         native/net_frame_large_loopback.march)
    (with-stdout-to native_net_frame_large_loopback.out
         (system "./native_net_frame_large_loopback")))))
@@ -9736,7 +9736,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_credit_backpressure_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_credit_backpressure_loopback
         native/credit_backpressure_loopback.march)
    (with-stdout-to native_credit_backpressure_loopback.out
         (system "./native_credit_backpressure_loopback")))))
@@ -9860,7 +9860,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_cluster_accept_silent_peer
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_cluster_accept_silent_peer
         native/cluster_accept_silent_peer.march)
    (with-stdout-to native_cluster_accept_silent_peer.out
         (system "./native_cluster_accept_silent_peer")))))
@@ -9879,7 +9879,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_dist_monitor_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_dist_monitor_loopback
         native/dist_monitor_loopback.march)
    (with-stdout-to native_dist_monitor_loopback.out
         (system "./native_dist_monitor_loopback")))))
@@ -9898,7 +9898,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_typed_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_typed_loopback
         native/node_send_typed_loopback.march)
    (with-stdout-to native_node_send_typed_loopback.out
         (system "./native_node_send_typed_loopback")))))
@@ -9930,7 +9930,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_session_node_fan_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_session_node_fan_loopback
         native/session_node_fan_loopback.march)
    (setenv MARCH_NUM_SCHEDULERS 1
     (with-stdout-to native_session_node_fan_loopback.out
@@ -10038,7 +10038,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_block_sender_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_block_sender_loopback
         native/block_sender_loopback.march)
    (with-stdout-to native_block_sender_loopback.out
         (system "./native_block_sender_loopback")))))
@@ -10056,7 +10056,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_after_death_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_after_death_loopback
         native/monitor_after_death_loopback.march)
    (with-stdout-to native_monitor_after_death_loopback.out
         (system "./native_monitor_after_death_loopback")))))
@@ -10075,7 +10075,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_ack_retry_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_ack_retry_loopback
         native/monitor_ack_retry_loopback.march)
    (with-stdout-to native_monitor_ack_retry_loopback.out
         (system "./native_monitor_ack_retry_loopback")))))
@@ -10093,7 +10093,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_expiry_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_expiry_loopback
         native/monitor_expiry_loopback.march)
    (with-stdout-to native_monitor_expiry_loopback.out
         (system "./native_monitor_expiry_loopback")))))
@@ -10201,7 +10201,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/swim_driver.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_discovery
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_discovery
         native/node_discovery.march)
    (with-stdout-to native_node_discovery.out
         (system "./native_node_discovery")))))
@@ -10254,7 +10254,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_rpc_auto_enroll
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_rpc_auto_enroll
         native/rpc_auto_enroll.march)
    (with-stdout-to native_rpc_auto_enroll.out
         (system "./native_rpc_auto_enroll")))))
@@ -13001,7 +13001,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/close_returns_ok_atom.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_close_returns_ok_atom
+   ; --stdlib-source: the fixture pins the raw file_close / csv_close
+   ; builtins themselves, which are stdlib-only since ocap phase 2 (Task 10).
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_close_returns_ok_atom
         native/close_returns_ok_atom.march)
    (with-stdout-to native_close_returns_ok_atom.out
         (system "./native_close_returns_ok_atom")))))
@@ -13017,7 +13019,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/close_returns_ok_atom.march))
  (action
   (with-stdout-to native_close_returns_ok_atom.interp.out
-   (run %{exe:../bin/main.exe} native/close_returns_ok_atom.march))))
+   (run %{exe:../bin/main.exe} --stdlib-source native/close_returns_ok_atom.march))))
 
 (rule
  (alias runtest)
@@ -13989,6 +13991,98 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (deps test_file_handle_compiled.out)
+ (action (progn)))
+
+; File.Dir (ocap phase 2, Task 7): test_file_dir.march runs untyped under
+; stdlib_march; these rules typecheck it (`march test`) and run it compiled,
+; the only CI coverage of the compiled dir_open / file_open_at / dir_list_at
+; (runtime/march_file_beneath.c).
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file_dir.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_file_dir.march)))
+
+(rule
+ (targets test_file_dir_compiled_bin test_file_dir_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_file_dir.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_file_dir_compiled_bin
+        stdlib/test_file_dir.march)
+   (with-stdout-to test_file_dir_compiled.out
+    (system "./test_file_dir_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_file_dir_compiled.out)
+ (action (progn)))
+
+; Process handles (ocap phase 2b, Task 8): test_process.march runs untyped
+; under stdlib_march; these rules typecheck it (`march test`) and run it
+; compiled, the CI coverage of the compiled Process box (spawn_async,
+; read_line, write, kill, wait_proc closing the handle).
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_process.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_process.march)))
+
+(rule
+ (targets test_process_compiled_bin test_process_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_process.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_process_compiled_bin
+        stdlib/test_process.march)
+   (with-stdout-to test_process_compiled.out
+    (system "./test_process_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_process_compiled.out)
+ (action (progn)))
+
+; Socket / Listener handles (ocap phase 2, Task 5): test_socket.march runs
+; untyped under stdlib_march; these rules typecheck it (`march test`) and run
+; it compiled. Its listeners bind port 0, so concurrent runners never collide.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_socket.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_socket.march)))
+
+; HTTP on handles (ocap phase 2b, Task 6): stdlib_march runs these untyped, so a
+; stale `request_on(-1, ...)` once passed there while `march test` rejected it.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_http_transport.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_http_transport.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_http_server.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_http_server.march)))
+
+(rule
+ (targets test_socket_compiled_bin test_socket_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_socket.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_socket_compiled_bin
+        stdlib/test_socket.march)
+   (with-stdout-to test_socket_compiled.out
+    (system "./test_socket_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_socket_compiled.out)
  (action (progn)))
 
 (rule
@@ -15346,7 +15440,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/file_handle_leak_probe.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_leak_probe
+   ; --stdlib-source: the probe measures the raw file_open / csv_open handle
+   ; table itself (stdlib-only builtins since ocap phase 2, Task 10).
+   (run %{exe:../bin/main.exe} --compile --opt 2 --stdlib-source -o native_file_handle_leak_probe
         native/file_handle_leak_probe.march)
    (with-stdout-to native_file_handle_leak_probe.out
         (system "./native_file_handle_leak_probe")))))
@@ -15375,6 +15471,120 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_handle_box_leak_probe.expected native_file_handle_box_leak_probe.out)))
+
+; socket_close_while_recv (ocap phase 2, Task 5, R3): Socket.close wakes a
+; task parked in Socket.recv with Err(Closed) within 1 s, on 4 scheduler
+; threads. On macOS only the scheduler's fd-wait cancellation can wake it
+; for every socket state (shutdown() alone does not).
+(rule
+ (targets native_socket_close_while_recv native_socket_close_while_recv.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/socket_close_while_recv.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_socket_close_while_recv
+        native/socket_close_while_recv.march)
+   (with-stdout-to native_socket_close_while_recv.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_socket_close_while_recv")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/socket_close_while_recv.expected native_socket_close_while_recv.out)))
+
+; listener_close_while_accept (R3): Socket.close_listener wakes a task parked
+; in Socket.accept; on macOS shutdown() on a listening socket wakes nothing.
+(rule
+ (targets native_listener_close_while_accept native_listener_close_while_accept.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/listener_close_while_accept.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_listener_close_while_accept
+        native/listener_close_while_accept.march)
+   (with-stdout-to native_listener_close_while_accept.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_listener_close_while_accept")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/listener_close_while_accept.expected native_listener_close_while_accept.out)))
+
+; udp_close_while_recv (R3): Udp.close wakes a task parked in Udp.recv on an
+; unconnected socket, the case shutdown() alone cannot wake on macOS.
+(rule
+ (targets native_udp_close_while_recv native_udp_close_while_recv.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/udp_close_while_recv.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_udp_close_while_recv
+        native/udp_close_while_recv.march)
+   (with-stdout-to native_udp_close_while_recv.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_udp_close_while_recv")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/udp_close_while_recv.expected native_udp_close_while_recv.out)))
+
+; tls_refuses_borrowed_socket (ruling R10): Tls.connect refuses a borrowed
+; Socket and leaves the owner's socket working. It calls the
+; @[stdlib_internal] Socket.borrow, so it runs with --stdlib-source,
+; interpreted and compiled (and lives outside test/native, whose files the
+; refine audit checks as user code).
+(rule
+ (targets tls_refuses_borrowed_socket_interp.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file stdlib_source/tls_refuses_borrowed_socket.march))
+ (action
+  (with-stdout-to tls_refuses_borrowed_socket_interp.out
+   (run %{exe:../bin/main.exe} --stdlib-source
+        stdlib_source/tls_refuses_borrowed_socket.march))))
+
+(rule
+ (alias runtest)
+ (action (diff stdlib_source/tls_refuses_borrowed_socket.expected tls_refuses_borrowed_socket_interp.out)))
+
+(rule
+ (targets tls_refuses_borrowed_socket_bin tls_refuses_borrowed_socket.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib_source/tls_refuses_borrowed_socket.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o tls_refuses_borrowed_socket_bin
+        stdlib_source/tls_refuses_borrowed_socket.march)
+   (with-stdout-to tls_refuses_borrowed_socket.out
+        (system "./tls_refuses_borrowed_socket_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff stdlib_source/tls_refuses_borrowed_socket.expected tls_refuses_borrowed_socket.out)))
+
+; socket_sent_to_local_actor: a Socket sent to a local actor is shared (the
+; message copy shares the handle box), so the actor writes to the very
+; connection the main thread accepted.
+(rule
+ (targets native_socket_sent_to_local_actor native_socket_sent_to_local_actor.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/socket_sent_to_local_actor.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_socket_sent_to_local_actor
+        native/socket_sent_to_local_actor.march)
+   (with-stdout-to native_socket_sent_to_local_actor.out
+        (system "./native_socket_sent_to_local_actor")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/socket_sent_to_local_actor.expected native_socket_sent_to_local_actor.out)))
 
 ; js_tail_loop — self tail calls (incl. the Perceus ESeq shape) run in constant stack; closures built in the loop keep each iteration's values.
 (rule

@@ -239,7 +239,7 @@ let run_compiler ?(env = []) ~dir ~home args =
   let text = read_file out in
   if rc <> 0 then Alcotest.failf "compiler exited %d in %s:\n%s" rc dir text
 
-(* An app actor next to a stdlib actor (NodeQueue.start spawns the stdlib's
+(* An app actor next to a stdlib actor (NodeQueue.start_local spawns the stdlib's
    Writer). Stdlib actors' glue is module-qualified since #726, so Writer's
    dispatch is NodeQueue__Writer_dispatch. *)
 let app_src = {|mod HrApp do
@@ -254,7 +254,7 @@ let app_src = {|mod HrApp do
   fn main(cap : Cap(IO)) do
     let c = spawn(Counter)
     send(c, Bump(1))
-    let _q = NodeQueue.start(-1, 1024)
+    let _q = NodeQueue.start_local(fn _ -> ())
     println("ok")
   end
 end

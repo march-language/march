@@ -1,0 +1,54 @@
+-- Udp.close wakes a task parked in Udp.recv on the same unconnected socket.
+--
+-- The UDP counterpart of socket_close_while_recv. It is the case shutdown()
+-- cannot handle on macOS: on an unconnected UDP socket it fails with
+-- ENOTCONN and the kqueue read filter never fires, so before the handle box
+-- cancelled the parked wait (march_sched_fdwait_cancel) the reader stayed
+-- parked until its own deadline. Here the reader waits with no deadline
+-- (timeout -1); after 100 ms main closes the socket, and the reader must
+-- return Err(Closed) within 1 s. MARCH_NUM_SCHEDULERS=4 (test/dune).
+mod UdpCloseWhileRecv do
+  needs IO
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.Spawn
+
+  pfn poll_result(left : Int) : String do
+    let v = Vault.get_or(Authority.must(Vault.open("ucwr")), "result", "")
+    if v != "" do v
+    else if left <= 0 do "still parked after 3 s"
+    else
+      sleep_ms(10)
+      poll_result(left - 10)
+    end end
+  end
+
+  fn main(_c : Cap(IO)) do
+    let _ = Authority.must(Vault.new("ucwr"))
+    let sock = match Authority.must(Udp.open("127.0.0.1", 0)) do
+      Ok(s) -> s
+      Err(e) -> panic("open: " ++ Udp.error_message(e))
+    end
+    let t0 = sys_uptime_ms()
+    let _reader = task_spawn(fn _ ->
+      let r = Udp.recv(sock, 1500, -1)
+      let took = sys_uptime_ms() - t0
+      let what = match r do
+        Err(Udp.Closed) ->
+          if took < 1000 do "woke closed"
+          else "woke closed, but late: " ++ int_to_string(took) ++ " ms" end
+        Err(e) -> "woke with the wrong error: " ++ Udp.error_message(e)
+        Ok(None) -> "woke with a timeout"
+        Ok(Some(_)) -> "woke with a datagram"
+      end
+      Vault.set(Authority.must(Vault.open("ucwr")), "result", what))
+    sleep_ms(100)
+    Udp.close(sock)
+    let r = poll_result(3000)
+    println(r)
+    -- A reader still parked would keep the process alive past main: leave
+    -- now, so the rule fails on the diff instead of hanging.
+    if r != "woke closed" do Authority.ignore(Process.exit(0)) else () end
+  end
+end

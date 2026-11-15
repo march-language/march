@@ -61,11 +61,11 @@ mod UdpFloodBench do
   end
 
   pfn pair() : (Udp.UdpSocket, Udp.UdpSocket, Udp.UdpAddr) do
-    let rx = match Udp.open("127.0.0.1", 0) do
+    let rx = match Authority.must(Udp.open("127.0.0.1", 0)) do
       Ok(s) -> s
       Err(e) -> panic(Udp.error_message(e))
     end
-    let tx = match Udp.open("127.0.0.1", 0) do
+    let tx = match Authority.must(Udp.open("127.0.0.1", 0)) do
       Ok(s) -> s
       Err(e) -> panic(Udp.error_message(e))
     end

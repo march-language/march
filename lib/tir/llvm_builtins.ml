@@ -749,6 +749,14 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write_handle(i64 %handle, ptr %data)" };
   { march_name = "file_seek"; c_name = Some "march_file_seek"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_seek(i64 %handle, i64 %offset)" };
+  { march_name = "dir_open"; c_name = Some "march_dir_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_open(ptr %path)" };
+  { march_name = "dir_open_write"; c_name = Some "march_dir_open_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_open_write(ptr %path)" };
+  { march_name = "file_open_at"; c_name = Some "march_file_open_at"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open_at(i64 %dirfd, ptr %rel, i64 %flags)" };
+  { march_name = "dir_list_at"; c_name = Some "march_dir_list_at"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_list_at(i64 %dirfd, ptr %rel)" };
   { march_name = "file_write"; c_name = Some "march_file_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write(ptr %path, ptr %data)" };
   { march_name = "file_append"; c_name = Some "march_file_append"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
@@ -1912,6 +1920,10 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_file_open_write";
   PDeclare "march_file_write_handle";
   PDeclare "march_file_seek";
+  PDeclare "march_dir_open";
+  PDeclare "march_dir_open_write";
+  PDeclare "march_file_open_at";
+  PDeclare "march_dir_list_at";
   PDeclare "march_file_write";
   PDeclare "march_file_append";
   PDeclare "march_file_delete";

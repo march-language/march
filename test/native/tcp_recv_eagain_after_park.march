@@ -25,52 +25,52 @@ mod TcpRecvEagainAfterPark do
   -- One reader: take single bytes off [fd] until the peer goes quiet.
   -- Returns (bytes read, reads that failed). A stale hint is neither: the
   -- runtime retries it and we never see it.
-  pfn drain(fd : Int, budget : Int, got : Int, bad : Int) : (Int, Int) do
+  pfn drain(sock : Socket, budget : Int, got : Int, bad : Int) : (Int, Int) do
     if budget <= 0 do (got, bad)
     else
-      match Socket.recv_deadline(fd, 1, 1500) do
+      match Socket.recv_deadline(sock, 1, 1500) do
         Ok(None) -> (got, bad)                 -- quiet: the sender is done
         Ok(Some(s)) ->
           if s == "" do (got, bad)   -- clean EOF
-          else drain(fd, budget - 1, got + 1, bad) end
-        Err(_) -> drain(fd, budget - 1, got, bad + 1)
+          else drain(sock, budget - 1, got + 1, bad) end
+        Err(_) -> drain(sock, budget - 1, got, bad + 1)
       end
     end
   end
 
   -- Send [n] single-byte messages, each its own wakeup for the readers.
-  pfn dribble(fd : Int, n : Int) : Int do
+  pfn dribble(s : Socket, n : Int) : Int do
     if n <= 0 do 0
     else
-      match Socket.write(fd, "x") do
+      match Socket.write(s, "x") do
         Ok(_) ->
           -- A pause per byte, so every reader is parked when it lands and
           -- all of them wake for it.
           sleep_ms(2)
-          dribble(fd, n - 1)
+          dribble(s, n - 1)
         Err(_) -> n
       end
     end
   end
 
   fn main(_c : Cap(IO)) do
-    let listen_fd = match tcp_listen(0) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
+    let listener = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
-    let port = match tcp_local_port(listen_fd) do
+    let port = match Socket.local_port(listener) do
       Ok(p) -> p
-      Err(e) -> panic("port: " ++ e)
+      Err(e) -> panic("port: " ++ Socket.error_message(e))
     end
 
     let server = task_spawn(fn _ -> do
-      let c = match tcp_accept(listen_fd) do
-        Ok(fd) -> fd
-        Err(e) -> panic("accept: " ++ e)
+      let c = match Socket.accept(listener) do
+        Ok(s) -> s
+        Err(e) -> panic("accept: " ++ Socket.error_message(e))
       end
       let unsent = dribble(c, 60)
       sleep_ms(300)
-      tcp_close(c)
+      let _ = Socket.close(c)
       unsent
     end)
 
@@ -88,8 +88,8 @@ mod TcpRecvEagainAfterPark do
       (ag + g, ab + b))
     let unsent = task_await_unwrap(server)
     let (bytes, failures) = tally
-    Socket.close(fd)
-    tcp_close(listen_fd)
+    let _ = Socket.close(fd)
+    let _ = Socket.close_listener(listener)
     println("unsent: " ++ int_to_string(unsent))
     println("bytes: " ++ int_to_string(bytes) ++ "/60")
     println("failures: " ++ int_to_string(failures))

@@ -244,6 +244,77 @@ static void test_borrowed_tcp(void) {
     close(sv[1]);
 }
 
+/* ── close_drain_waits_for_in_flight (final review I1) ─────────────────── */
+/* A borrowed box (an HTTP Conn's socket) is closed when its connection ends,
+ * and the server closes the fd right after.  march_handle_close returned at
+ * once while a use was still in flight, so that use went on holding the
+ * descriptor NUMBER after the server's close(fd): the next accept could hand
+ * the number to another client.  close_drain wakes the use and returns only
+ * once it has left. */
+typedef struct {
+    void *h;
+    atomic_int entered, recv_done, left;
+    ssize_t recv_rc;
+    double  left_at;
+} drain_ctx;
+
+static void *drain_reader(void *arg) {
+    drain_ctx *c = (drain_ctx *)arg;
+    int64_t raw = march_handle_enter(c->h, MARCH_HANDLE_TCP);
+    atomic_store(&c->entered, 1);
+    char buf[16];
+    c->recv_rc = recv((int)raw, buf, sizeof buf, 0);   /* blocks until woken */
+    atomic_store(&c->recv_done, 1);
+    usleep(100 * 1000);                                  /* still using the fd */
+    c->left_at = now_s();
+    march_handle_leave(c->h);
+    atomic_store(&c->left, 1);
+    return NULL;
+}
+
+static void test_close_drain_waits_for_in_flight(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { perror("socketpair"); exit(2); }
+    remove_counter();
+    drain_ctx c;
+    memset(&c, 0, sizeof c);
+    c.h = march_handle_new(MARCH_HANDLE_TCP_BORROWED, sv[0], 1);
+    pthread_t t;
+    pthread_create(&t, NULL, drain_reader, &c);
+    while (!atomic_load(&c.entered)) usleep(1000);
+    usleep(50 * 1000);                      /* let it park in recv */
+    CHECK(!atomic_load(&c.recv_done), "the reader is parked in recv before the drain");
+    double t0 = now_s();
+    int64_t r = march_handle_close_drain(c.h, 5000);
+    double t1 = now_s();
+    CHECK(r == 1, "close_drain reports nothing in flight");
+    CHECK(atomic_load(&c.recv_done), "the parked recv was woken");
+    CHECK(atomic_load(&c.left), "close_drain returned only after the use left");
+    CHECK(c.left_at <= t1, "... and not before its leave");
+    CHECK(t1 - t0 < 2.0, "the drain did not run to its timeout");
+    CHECK(march_handle_enter(c.h, MARCH_HANDLE_TCP) == -1, "a use after the drain is refused");
+    CHECK(fd_is_open(sv[0]), "the borrowed descriptor is still the caller's to close");
+    pthread_join(t, NULL);
+    /* Nothing in flight: returns at once. */
+    void *h2 = march_handle_new(MARCH_HANDLE_TCP_BORROWED, sv[0], 1);
+    t0 = now_s();
+    CHECK(march_handle_close_drain(h2, 5000) == 1, "an idle box drains at once");
+    CHECK(now_s() - t0 < 0.5, "... without waiting");
+    march_decrc(h2);
+    /* A stranded use (entered, never left): bounded by the timeout. */
+    void *h3 = march_handle_new(MARCH_HANDLE_TCP_BORROWED, sv[0], 1);
+    CHECK(march_handle_enter(h3, MARCH_HANDLE_TCP) == sv[0], "enter the stranded use");
+    t0 = now_s();
+    CHECK(march_handle_close_drain(h3, 100) == 0, "a stranded use times the drain out");
+    double waited = now_s() - t0;
+    CHECK(waited >= 0.09 && waited < 2.0, "the timeout bounds the wait");
+    march_handle_leave(h3);
+    march_decrc(h3);
+    march_decrc(c.h);
+    close(sv[0]);
+    close(sv[1]);
+}
+
 /* ── kind_mismatch_is_fatal ────────────────────────────────────────────── */
 static int g_hook_pipe[2];
 static void fatal_hook(const char *why) {
@@ -252,7 +323,8 @@ static void fatal_hook(const char *why) {
     (void)!write(g_hook_pipe[1], &c, 1);
 }
 
-enum fatal_case { WRONG_KIND, NOT_A_HANDLE, BORROWED_FOR_LISTENER };
+enum fatal_case { WRONG_KIND, NOT_A_HANDLE, BORROWED_FOR_LISTENER,
+                  TLS_NO_RELEASER, TLS_CTX_NO_RELEASER };
 
 static void run_fatal_case(enum fatal_case fc, const char *what) {
     if (pipe(g_hook_pipe) != 0) { perror("pipe"); exit(2); }
@@ -270,9 +342,16 @@ static void run_fatal_case(enum fatal_case fc, const char *what) {
             void *cell = march_alloc(24);
             ((march_hdr *)cell)->tag = 0;
             (void)march_handle_enter(cell, MARCH_HANDLE_FILE);
-        } else {
+        } else if (fc == BORROWED_FOR_LISTENER) {
             void *h = march_handle_new(MARCH_HANDLE_TCP_BORROWED, 99, 0);
             (void)march_handle_enter(h, MARCH_HANDLE_LISTENER);
+        } else {
+            /* This runner links no march_tls.c, so no TLS closer is
+             * registered: releasing the box must abort, not leak (R4). */
+            march_handle_test_release_hook = NULL;
+            void *h = march_handle_new(fc == TLS_NO_RELEASER ? MARCH_HANDLE_TLS
+                                                             : MARCH_HANDLE_TLS_CTX, 1234, -1);
+            (void)march_handle_close(h);
         }
         _exit(0);                            /* reached only if enter did not die */
     }
@@ -293,6 +372,109 @@ static void test_kind_mismatch_is_fatal(void) {
     run_fatal_case(WRONG_KIND, "DIR box entered as FILE");
     run_fatal_case(NOT_A_HANDLE, "ordinary cell entered as a handle");
     run_fatal_case(BORROWED_FOR_LISTENER, "TCP_BORROWED box entered as LISTENER");
+}
+
+static void test_missing_tls_releaser_is_fatal(void) {
+    run_fatal_case(TLS_NO_RELEASER, "TLS box released with no closer registered");
+    run_fatal_case(TLS_CTX_NO_RELEASER, "TLS_CTX box released with no closer registered");
+}
+
+/* ── detach refuses while another use is in flight, or on a borrowed box (R10) */
+static void test_detach_refuses_in_flight_and_borrowed(void) {
+    install_counter();
+    int p[2];
+    if (pipe(p) != 0) { perror("pipe"); exit(2); }
+    void *h = march_handle_new(MARCH_HANDLE_TCP, p[0], 0);
+    CHECK(march_handle_enter(h, MARCH_HANDLE_TCP) == p[0], "first use enters");
+    CHECK(march_handle_enter(h, MARCH_HANDLE_TCP) == p[0], "second use enters");
+    CHECK(march_handle_detach(h) == -1, "detach refused with another use in flight");
+    CHECK(!march_handle_is_closed(h), "a refused detach leaves the box open");
+    CHECK(march_handle_enter(h, MARCH_HANDLE_TCP) == p[0], "and usable");
+    march_handle_leave(h);
+    march_handle_leave(h);
+    CHECK(march_handle_detach(h) == p[0], "detach with only the caller's own use in flight");
+    CHECK(march_handle_is_closed(h), "the detached box is closed");
+    march_handle_leave(h);
+    march_decrc(h);
+    CHECK(atomic_load(&g_releases) == 0, "a detached descriptor is never released");
+    CHECK(fd_is_open(p[0]), "the detached descriptor stays open");
+    /* Not inside any use: count 0 is fine too. */
+    void *h2 = march_handle_new(MARCH_HANDLE_TCP, p[0], 0);
+    CHECK(march_handle_detach(h2) == p[0], "detach outside any use");
+    march_decrc(h2);
+    remove_counter();                  /* the real release: nothing, for a borrowed box */
+    void *b = march_handle_new(MARCH_HANDLE_TCP_BORROWED, p[0], 1);
+    CHECK(march_handle_detach(b) == -1, "a borrowed box refuses detach");
+    CHECK(!march_handle_is_closed(b), "and stays open");
+    march_decrc(b);
+    CHECK(fd_is_open(p[0]), "the borrowed descriptor stays open");
+    close(p[0]);
+    close(p[1]);
+}
+
+/* ── close cancels a wait on the descriptor (R3) ───────────────────────────
+ * A thread waits for a LISTENING socket to become readable (what accept
+ * parks on) through march_sched_wait_fd.  Off a green thread that is the
+ * blocking path.  On macOS shutdown() on a listening socket fails with
+ * ENOTCONN and wakes nothing, so only the scheduler's cancellation can end
+ * the wait; on Linux both do. */
+#include "../runtime/march_scheduler.h"
+#include <netinet/in.h>
+
+static int listening_socket(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof a) != 0 || listen(fd, 4) != 0) {
+        perror("listening_socket"); exit(2);
+    }
+    return fd;
+}
+
+typedef struct { void *h; int rc; int err; int64_t took_ms; } waiter_arg;
+
+static int64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void *wait_listener(void *p) {
+    waiter_arg *a = p;
+    int64_t fd = march_handle_enter(a->h, MARCH_HANDLE_LISTENER);
+    int64_t t0 = mono_ms();
+    a->rc = march_sched_wait_fd((int)fd, 0, mono_ms() + 5000);
+    a->err = errno;
+    a->took_ms = mono_ms() - t0;
+    march_handle_leave(a->h);
+    return NULL;
+}
+
+static void test_close_cancels_listener_wait(void) {
+    remove_counter();
+    int lfd = listening_socket();
+    void *h = march_handle_new(MARCH_HANDLE_LISTENER, lfd, 0);
+    waiter_arg a = { h, 99, 0, 0 };
+    pthread_t t;
+    pthread_create(&t, NULL, wait_listener, &a);
+    struct timespec ts = { 0, 100 * 1000000L };
+    nanosleep(&ts, NULL);
+    CHECK(march_handle_close(h) == 1, "close the listener");
+    pthread_join(t, NULL);
+    CHECK(a.rc == MARCH_FDWAIT_ERROR, "the parked wait ends in an error, not a timeout");
+    CHECK(a.err == ECANCELED, "errno is ECANCELED");
+    CHECK(a.took_ms < 1000, "the wait ends well before its 5 s deadline");
+    CHECK(!fd_is_open(lfd), "the listener is released after the waiter leaves");
+    /* The cancellation went with the descriptor: a new socket that reuses the
+     * number waits normally (times out). */
+    int again = listening_socket();
+    int rc = march_sched_wait_fd(again, 0, mono_ms() + 150);
+    CHECK(rc == MARCH_FDWAIT_TIMEOUT, "a reused descriptor number is not cancelled");
+    close(again);
+    march_decrc(h);
 }
 
 /* ── message copy shares the box ───────────────────────────────────────── */
@@ -366,7 +548,11 @@ int main(void) {
     test_dtor_releases_unclosed();
     test_detach_does_not_release();
     test_borrowed_tcp();
+    test_close_drain_waits_for_in_flight();
     test_kind_mismatch_is_fatal();
+    test_missing_tls_releaser_is_fatal();
+    test_close_cancels_listener_wait();
+    test_detach_refuses_in_flight_and_borrowed();
     test_msg_copy_shares();
     test_to_string();
     if (g_failed) {

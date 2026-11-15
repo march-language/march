@@ -7,8 +7,7 @@
 mod TestDashboard do
 
 pfn make_conn(m, path_, req_hdrs) do
-  let parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
-  Conn(0, m, path_, parts, "", req_hdrs, "", 0, Nil, "", false, Nil, NoUpgrade)
+  HttpServer.test_conn(m, path_, req_hdrs, "")
 end
 
 pfn make_get(path_) do

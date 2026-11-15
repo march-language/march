@@ -94,7 +94,12 @@ mod WorkDispatch do
 
   Note that the remote attempt may already have used up the timeout before
   the local fallback runs.
+
+  Internal to the standard library (ocap phase 2b): [fd_for] returns a raw
+  descriptor that `NodeCall.call` writes a request to, so user code could
+  otherwise name any descriptor the program holds.
   """
+  @[stdlib_internal]
   fn dispatch(
     peers : List(NodeLoad),
     now_ms : Int,
@@ -134,7 +139,9 @@ mod WorkDispatch do
   node. Falls back to load-aware `dispatch` (with the same [now_ms]) when the
   ring is empty, the owner has no connection, or the call fails with
   `NoConnection` or `DeadlineExceeded`; any other result is returned as is.
+  Internal to the standard library, as `dispatch` is (a raw descriptor from [fd_for]).
   """
+  @[stdlib_internal]
   fn dispatch_affine(
     ring : ConsistentHash.HashRing(String),
     peers : List(NodeLoad),

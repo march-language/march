@@ -280,6 +280,8 @@ type env = {
   deprecated_fns : (Typecheck_types.scheme * Typecheck_types.Ast.span * string) list ref;
   (** [@[deprecated("message")]] functions: exported scheme, declaring
       module's span, message.  See the implementation's comment. *)
+  stdlib_internal_actors : (string, string) Hashtbl.t;
+  (** See typecheck_env.ml. *)
   stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   fn_scopes : (string, string) Hashtbl.t;

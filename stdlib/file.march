@@ -11,6 +11,9 @@
 -- stream; a use after `close` returns `Err(Closed)`. Opening is the
 -- capability operation; `read_line`, `read_chunk`, `write_to`, `seek` and
 -- `close` use the handle you already hold and return `Result(_, FileError)`.
+-- Open a `File.Dir` with `open_dir` / `open_dir_write` to hand out authority
+-- over one directory's subtree: `open_in`, `open_write_in` and `list_in`
+-- work beneath it and refuse any path that leaves it (`Err(Escapes(rel))`).
 -- Use with_lines / with_chunks for streaming.  The file handle is
 -- closed when the callback returns *and* if the callback panics —
 -- these wrappers delegate to the runtime `try_finally` primitive to
@@ -25,7 +28,9 @@ mod File do
 
   -- The runtime builds these by tag (runtime/march_runtime.c FILEERR_*):
   -- keep the order, and add new constructors at the end.
-  ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String) | Closed
+  -- `Escapes(rel)`: a path given to a `File.Dir` function would leave the
+  -- directory (see `open_in`).
+  ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String) | Closed | Escapes(String)
   derive Eq for FileError
 
   -- How `open_write` treats an existing file: `Truncate` empties it,
@@ -369,6 +374,146 @@ mod File do
       Ok(result)
     end
     Ok(performed)
+  end
+
+  -- Directories
+
+  doc """
+  Open the directory `path` as a read-only `File.Dir` (a capability
+  operation, IO.FileRead on `path`). Returns `Ok(Ok(dir))`, `Ok(Err(FileError))`:
+  `NotFound(path)`, `Permission(path)`, or, when `path` exists but is not a
+  directory, `IsDirectory(path)` (the kind `Dir.list` reports for that case);
+  or `Err(CapError(...))` when the open is refused. Hand the `File.Dir` to code
+  that should read files beneath it and nothing else: `open_in` and `list_in`
+  need no capability, and refuse any path that leaves the directory.
+  `close_dir` it when done; one that is dropped unclosed is closed when its
+  last reference goes.
+
+  ## Examples
+
+      match Authority.must(File.open_dir("/srv/site")) do
+        Ok(d) -> File.open_in(d, "index.html")
+        Err(e) -> Err(e)
+      end
+  """
+  fn open_dir(path : String) : Result(Result(File.Dir, FileError), CapError) do
+    let? _ = Authority.check("IO.FileRead", path)
+    Ok(open_dir_raw(path))
+  end
+
+  -- The open itself, after the capability check (as open_raw is for open).
+  pfn open_dir_raw(path : String) : Result(File.Dir, FileError) do
+    match dir_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) ->
+      let d : File.Dir = handle_new(2, fd, 0)
+      Ok(d)
+    end
+  end
+
+  doc """
+  Like `open_dir`, but the `File.Dir` can also create and write files
+  beneath the directory with `open_write_in`. A capability operation
+  (IO.FileWrite on `path`): the result is wrapped in `Result(_, CapError)`
+  like `open_dir`'s.
+  """
+  fn open_dir_write(path : String) : Result(Result(File.Dir, FileError), CapError) do
+    let? _ = Authority.check("IO.FileWrite", path)
+    Ok(open_dir_write_raw(path))
+  end
+
+  pfn open_dir_write_raw(path : String) : Result(File.Dir, FileError) do
+    match dir_open_write(path) do
+    Err(e) -> Err(e)
+    Ok(fd) ->
+      -- aux 1 marks a write-capable directory (open_write_in reads it).
+      let d : File.Dir = handle_new(2, fd, 1)
+      Ok(d)
+    end
+  end
+
+  -- Every use of a directory goes through here, as with_raw does for a
+  -- File.Handle: enter the box (refused once it is closed), run the raw
+  -- operation on the directory's fd, then leave.
+  pfn with_dir(d : File.Dir, f : Int -> Result(b, FileError)) : Result(b, FileError) do
+    let fd = handle_enter(d, 2)
+    if fd == -1 do Err(Closed) else
+      let r = f(fd)
+      handle_leave(d)
+      r
+    end
+  end
+
+  pfn open_at(fd : Int, rel : String, flags : Int) : Result(File.Handle, FileError) do
+    match file_open_at(fd, rel, flags) do
+    Err(e) -> Err(e)
+    Ok(raw) ->
+      let h : File.Handle = handle_new(1, raw, 0)
+      Ok(h)
+    end
+  end
+
+  doc """
+  Open `rel` beneath the directory `d` for reading. Returns `Ok(handle)`, or
+  `Err(Escapes(rel))` when `rel` would leave `d`: it is empty, `.`,
+  absolute, or climbs out with `..`, or (on macOS) it goes through ANY
+  symbolic link. Linux follows a symlink that stays inside `d` and refuses
+  one that leaves it; macOS refuses every symlink (best effort; the
+  documented difference). Other errors as for `open`, e.g.
+  `Err(NotFound(rel))`; `Err(Closed)` once `d` is closed.
+
+  The handle holds its own descriptor, so it stays usable after `d` is
+  closed. `d` follows the directory itself: if the directory is renamed
+  after `open_dir`, `rel` still resolves inside it.
+
+  ## Examples
+
+      File.open_in(d, "sub/b.txt")    -- Ok(handle)
+      File.open_in(d, "../secret")    -- Err(Escapes("../secret"))
+  """
+  fn open_in(d : File.Dir, rel : String) : Result(File.Handle, FileError) do
+    with_dir(d, fn fd -> open_at(fd, rel, 0))
+  end
+
+  doc """
+  Open `rel` beneath `d` for writing, creating it if missing (`Truncate`
+  empties an existing file, `Append` writes after its end). `d` must come
+  from `open_dir_write`: on a read-only `File.Dir` this is
+  `Err(Permission(rel))`. Paths are refused as for `open_in`.
+
+  ## Examples
+
+      File.open_write_in(d, "out.log", File.Append)
+  """
+  fn open_write_in(d : File.Dir, rel : String, mode : WriteMode) : Result(File.Handle, FileError) do
+    let flags = match mode do
+      Truncate -> 1
+      Append -> 2
+    end
+    with_dir(d, fn fd ->
+      if handle_aux(d) == 1 do open_at(fd, rel, flags) else Err(Permission(rel)) end)
+  end
+
+  doc """
+  The entry names in the directory `rel` beneath `d`, sorted, without `.` and
+  `..`. `list_in(d, "")` lists `d` itself (the one place an empty `rel` is
+  accepted). Paths are refused as for `open_in`.
+
+  ## Examples
+
+      File.list_in(d, "")      -- Ok(["a.txt", "sub"])
+  """
+  fn list_in(d : File.Dir, rel : String) : Result(List(String), FileError) do
+    with_dir(d, fn fd -> dir_list_at(fd, rel))
+  end
+
+  doc """
+  Close `d`. Returns `Ok(())`, or `Err(Closed)` if it was already closed.
+  Every later `open_in` / `open_write_in` / `list_in` on `d` returns
+  `Err(Closed)`; handles already opened through `d` keep working.
+  """
+  fn close_dir(d : File.Dir) : Result((), FileError) do
+    if handle_close(d) do Ok(()) else Err(Closed) end
   end
 
   -- Streaming: closed when callback returns OR panics (via try_finally).

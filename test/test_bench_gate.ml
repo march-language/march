@@ -293,6 +293,11 @@ let read_file_opt path =
       Some (really_input_string ic (in_channel_length ic)))
   with Sys_error _ -> None
 
+(* Benches that drive the stdlib's @[stdlib_internal] cluster plumbing
+   (NetKernel, PeerReader, ClusterConn) over raw descriptors, so they compile
+   as stdlib sources (ocap phase 2, task 9). *)
+let stdlib_source_benches = [ "cluster_frames" ]
+
 let compile_and_run (name : string) : (string, string) result =
   let main_exe = Test_helpers.find_main_exe () in
   let src = Filename.concat (bench_dir ()) (name ^ ".march") in
@@ -316,7 +321,9 @@ let compile_and_run (name : string) : (string, string) result =
        output_string oc data; close_out oc);
     let src = src_copy in
     match Test_helpers.compile_march_or_skip
-            ~extra_args:"--opt 2" ~main_exe ~bin ~src () with
+            ~extra_args:(if List.mem name stdlib_source_benches
+                         then "--opt 2 --stdlib-source" else "--opt 2")
+            ~main_exe ~bin ~src () with
     | None -> Error "SKIP:no-clang"
     | Some bin ->
       let out_file = Filename.concat tmp "out.txt" in

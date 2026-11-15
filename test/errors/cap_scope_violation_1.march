@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: but `Actor.register` uses the name `other`, which is outside it
+-- A literal registry name outside the module's name scope (ocap p2b, Task 12).
+mod RegScope do
+  needs IO.Registry("logger", prefix("worker."))
+
+  fn publish(pid) : Bool do
+    Actor.register(pid, "other")
+  end
+end

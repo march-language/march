@@ -644,7 +644,7 @@ Functions always in scope without `use`:
 
 ### IO / Files
 
-**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`; handles (`File.Handle`, use after `close` is `Err(Closed)`): `open`, `open_write(path, Truncate | Append)`, `read_line`, `read_chunk`, `write_to`, `seek`, `close`, `with_open`, `with_open_write`
+**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`; handles (`File.Handle`, use after `close` is `Err(Closed)`): `open`, `open_write(path, Truncate | Append)`, `read_line`, `read_chunk`, `write_to`, `seek`, `close`, `with_open`, `with_open_write`; directories (`File.Dir`, refuses a path that leaves it with `Escapes(rel)`; macOS refuses every symlink beneath it): `open_dir`, `open_dir_write`, `open_in`, `open_write_in`, `list_in(d, "")`, `close_dir`
 
 **Dir** — `list`, `list_full`, `mkdir`, `mkdir_p`, `rmdir`, `rm_rf`, `exists`
 
@@ -667,6 +667,8 @@ Functions always in scope without `use`:
 **TLS** — `default_client_config`, `h2_client_config`, `server_config`, `client_ctx`, `server_ctx`, `connect`, `accept`, `read`, `write`, `close`, `ctx_free`, `negotiated_alpn`, `peer_cn`, `https_get`
 
 **WebSocket** — `new`, `send`, `receive`, `close`, `is_open`
+
+**Socket** — handles `Socket` (connection) and `Listener`; a use after `close` is `Err(Closed)`, closing wakes a task parked in `recv`/`accept`: `connect`, `connect_timeout`, `write`, `recv`, `recv_timeout`, `recv_deadline`, `set_recv_timeout`, `peer_addr`, `close`, `with_connection`, `listen(port)` (0 = any free port), `accept`, `accept_timeout`, `local_port`, `close_listener`. `Tls.connect(s, ctx, host)` / `Tls.accept(s, ctx)` take the `Socket` over on success (`Tls.close` closes both)
 
 **Udp** — `open`, `open_with`, `open_sharded`, `defaults`, `resolve`, `connect`, `send_to`, `send`, `send_batch`, `send_batch_connected`, `send_many`, `recv`, `recv_batch`, `local_addr`, `local_port`, `addr_to_string`, `addr_port`, `stats`, `close`. Packets are `String`; types are `UdpSocket`/`UdpAddr`/`UdpOptions`/`UdpStats` (global type namespace)
 
@@ -1048,6 +1050,18 @@ fix. Using a handle (`Vault.set`, socket send/recv) is not an operation.
 | `record_keys(m)` / `record_values(m)` / `record_entries(m)` | Iteration |
 | `record_from_list(pairs)` | Create from list |
 
+### Handles (files, sockets, processes)
+
+A `File.Handle`, `File.Dir`, `Socket`, `Listener`, `Udp.UdpSocket`, `Tls.TlsConn`,
+`WebSocket.WsSocket` or `Process` is an unforgeable, reference-counted box, not an `Int`.
+Only a checked open makes one (`File.open`, `Socket.connect`, `Socket.listen`,
+`Process.spawn_async`, ... each returns `Result(Result(Handle, E), CapError)`), and using one
+you hold needs no capability (a `needs ()` function may read a `File.Handle`). A use after
+`close` is `Err(Closed)`; `==` on handles is a type error. `File.Dir` refuses a path that
+leaves it (`Escapes`). A handle never leaves its node: a message type holding one is refused
+(`handle_not_sendable`). `IO.Mut` and `IO.Registry` take name scopes
+(`needs IO.Mut("cache")`, `needs IO.Registry(prefix("worker."))`).
+
 ### Actors / Process
 
 | Builtin | Description |
@@ -1078,15 +1092,16 @@ fix. Using a handle (`Vault.set`, socket send/recv) is not an operation.
 
 ### Network / TLS
 
-| Builtin | Description |
-|---------|-------------|
-| `tcp_connect(host, port)` | Connect |
-| `tcp_send_all(fd, data)` / `tcp_recv_all(fd)` | Send/receive |
-| `tcp_recv_exact(fd, n)` | Receive n bytes |
-| `tcp_close(fd)` | Close |
-| `tls_connect(fd, ctx, host)` | TLS connect |
-| `tls_read(conn, n)` / `tls_write(conn, data)` | TLS IO |
-| `tls_close(conn)` | TLS close |
+The raw descriptor builtins (`tcp_*`, `udp_*`, `tls_*`, `file_open`, `process_spawn_async`,
+`http_server_*`, `ws_*`, ...) are internal to the stdlib: user code calling one gets
+`stdlib_internal` ("use `Socket.connect(host, port)`"). Use the handle modules:
+
+| Need | Use |
+|------|-----|
+| Connect / send / receive / close | `Socket.connect`, `Socket.write`, `Socket.recv`, `Socket.recv_exact`, `Socket.close` |
+| Listen / accept | `Socket.listen`, `Socket.accept`, `Listener` |
+| TLS | `Tls.connect(s, ctx, host)`, `Tls.read`, `Tls.write`, `Tls.close` |
+| UDP | `Udp.open`, `Udp.send_to`, `Udp.recv` |
 
 ### Crypto
 

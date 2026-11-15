@@ -549,7 +549,7 @@ mod SwimDriver do
     match PeerRegistry.lookup(peers, node_id) do
       None -> ()
       Some(peer) ->
-        match NetKernel.send_frame(peer.fd, bytes) do
+        match NetKernel.send_frame(PeerRegistry.raw_fd(peer), bytes) do
           Ok(_) -> ()
           Err(_) -> ()
         end

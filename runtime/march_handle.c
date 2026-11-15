@@ -20,16 +20,61 @@
  * shuts a socket down under that reference, and then leaves: shutdown must
  * not run on a descriptor a concurrent last leave has already released.
  *
+ * Waking a parked user.  A task blocked in recv/accept on the descriptor is
+ * inside a use (in flight), parked on the scheduler's poller.  close wakes it
+ * two ways: shutdown(SHUT_RDWR), which is enough on Linux, and
+ * march_sched_fdwait_cancel, which is what works on macOS too (there,
+ * shutdown on a listening socket or an unconnected UDP socket fails with
+ * ENOTCONN and its kqueue filter never fires).  The cancellation lasts until
+ * the release, which forgets it (march_sched_fdwait_forget) just before
+ * close(fd), so a reused descriptor number never inherits it.  A TLS
+ * connection's wait is on its TCP fd (aux); close cancels it and shuts down
+ * only its READ side, and only when another use is in flight, so a plain
+ * close still lets the release send close_notify (SSL_shutdown) and a write
+ * after shutdown cannot raise SIGPIPE.
+ *
  * The box stays a core file: the closers that live in optional runtime files
  * (march_udp.c, march_tls.c) register themselves (march_handle_set_releaser)
- * from a constructor, so a program without the HTTP/TLS stack still links. */
+ * from a constructor, so a program without the HTTP/TLS stack still links.
+ * A TLS or TLS_CTX box with no registered closer is fatal at release: it can
+ * only exist in a link that left out march_tls.c, and silently leaking the
+ * SSL object would hide that. */
 #include "march_runtime.h"
 #include "march_reclaim.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
+
+/* march_scheduler.c.  Weak, so a test link that leaves the scheduler out
+ * still links; every real link (core role) has it. */
+extern void march_sched_fdwait_cancel(int fd) __attribute__((weak));
+extern void march_sched_fdwait_forget(int fd) __attribute__((weak));
+extern void march_sched_fdwait_own(int fd, int owned) __attribute__((weak));
+extern void *march_sched_current(void) __attribute__((weak));
+extern int march_sched_park_self_until(int64_t deadline_ms) __attribute__((weak));
+extern int64_t march_now_ms(void) __attribute__((weak));
+
+/* The descriptor a box of [kind] owns and can cancel waits on, or -1. */
+static inline int64_t owned_fd(int64_t kind, int64_t raw, int64_t aux) {
+    switch (kind) {
+    case MARCH_HANDLE_TCP: case MARCH_HANDLE_LISTENER: case MARCH_HANDLE_UDP: return raw;
+    case MARCH_HANDLE_TLS: return aux;
+    default: return -1;
+    }
+}
+static inline void fd_own(int64_t fd, int owned) {
+    if (march_sched_fdwait_own && fd >= 0) march_sched_fdwait_own((int)fd, owned);
+}
+
+static inline void fd_cancel_waits(int64_t fd) {
+    if (march_sched_fdwait_cancel && fd >= 0) march_sched_fdwait_cancel((int)fd);
+}
+static inline void fd_forget_cancel(int64_t fd) {
+    if (march_sched_fdwait_forget && fd >= 0) march_sched_fdwait_forget((int)fd);
+}
 
 #define ST_CLOSED   ((int64_t)1)
 #define ST_RELEASED ((int64_t)2)
@@ -86,6 +131,17 @@ const char *march_handle_kind_name(int64_t kind) {
     }
 }
 
+__attribute__((noinline, cold, noreturn))
+static void missing_releaser(int64_t kind) {
+    char why[160];
+    snprintf(why, sizeof why,
+             "march: handle release: no closer registered for a %s box "
+             "(is march_tls.c linked?)", march_handle_kind_name(kind));
+    fprintf(stderr, "%s\n", why);
+    march_abort(why);
+    __builtin_unreachable();
+}
+
 static void release_kind(int64_t kind, int64_t raw, int64_t aux) {
     void (*fn)(int64_t, int64_t) =
         (kind >= 1 && kind <= MARCH_HANDLE_MAX_KIND)
@@ -101,20 +157,25 @@ static void release_kind(int64_t kind, int64_t raw, int64_t aux) {
     case MARCH_HANDLE_LISTENER:
         /* march_tcp_close (march_http.c) is exactly close(fd); calling it
          * would make this core file need the HTTP stack to link. */
+        fd_forget_cancel(raw);
         close((int)raw);
         break;
     case MARCH_HANDLE_UDP:
+        fd_forget_cancel(raw);
         if (fn) fn(raw, aux); else close((int)raw);   /* march_udp_close */
         break;
     case MARCH_HANDLE_TLS:
-        if (fn) fn(raw, aux);                          /* march_tls_close */
+        if (!fn) missing_releaser(kind);
+        fn(raw, aux);                                  /* march_tls_close */
+        fd_forget_cancel(aux);
         close((int)aux);                               /* its TCP fd */
         break;
     case MARCH_HANDLE_TLS_CTX:
-        if (fn) fn(raw, aux);                          /* march_tls_ctx_free */
+        if (!fn) missing_releaser(kind);
+        fn(raw, aux);                                  /* march_tls_ctx_free */
         break;
     case MARCH_HANDLE_PROCESS:
-        march_process_release_slot(raw);
+        march_process_release_handle(raw);           /* closes, SIGTERMs, reaps */
         break;
     case MARCH_HANDLE_TCP_BORROWED:
     default:
@@ -124,6 +185,7 @@ static void release_kind(int64_t kind, int64_t raw, int64_t aux) {
 
 static void handle_release(void *h) {
     int64_t kind = h_kind(h), raw = h_raw(h), aux = h_auxv(h);
+    fd_own(owned_fd(kind, raw, aux), 0);
     void (*hook)(int64_t, int64_t, int64_t) = march_handle_test_release_hook;
     if (hook) { hook(kind, raw, aux); return; }
     release_kind(kind, raw, aux);
@@ -137,6 +199,7 @@ void *march_handle_new(int64_t kind, int64_t raw, int64_t aux) {
     *(int64_t *)((char *)h + 24) = aux;
     atomic_init(h_state(h), 0);
     *(int64_t *)((char *)h + 40) = 0;
+    fd_own(owned_fd(kind, raw, aux), 1);
     return h;
 }
 
@@ -187,22 +250,112 @@ int64_t march_handle_close(void *h) {
                                                   memory_order_acq_rel, memory_order_acquire))
             break;
     }
+    /* [s] is the state just before our CAS: its in-flight count is exactly
+     * the uses that can still be parked (no new one can enter now). */
+    int others = (s & IN_MASK) != 0;
     int32_t k = h_kind(h);
-    if (k == MARCH_HANDLE_TCP || k == MARCH_HANDLE_LISTENER || k == MARCH_HANDLE_UDP)
-        (void)shutdown((int)h_raw(h), SHUT_RDWR);     /* wake a parked recv/accept */
+    if (k == MARCH_HANDLE_TCP || k == MARCH_HANDLE_LISTENER || k == MARCH_HANDLE_UDP) {
+        (void)shutdown((int)h_raw(h), SHUT_RDWR);     /* wake a parked recv/accept (Linux) */
+        fd_cancel_waits(h_raw(h));                     /* ... and everywhere else */
+    } else if (k == MARCH_HANDLE_TLS && others) {
+        (void)shutdown((int)h_auxv(h), SHUT_RD);      /* a reader parked in SSL_read */
+        fd_cancel_waits(h_auxv(h));
+    }
     march_handle_leave(h);                             /* releases if nothing else is in flight */
     return 1;
 }
 
+static int64_t drain_now_ms(void) {
+    if (march_now_ms) return march_now_ms();
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Wait about a millisecond without holding a scheduler thread: park a green
+ * thread (the use we wait for may be another green thread on this scheduler
+ * thread), sleep an OS thread (the HTTP event loop, a WebSocket thread). */
+static void drain_pause(void) {
+    if (march_sched_current && march_sched_current() && march_sched_park_self_until) {
+        (void)march_sched_park_self_until(drain_now_ms() + 1);
+        return;
+    }
+    struct timespec ts = { 0, 1000000 };
+    (void)nanosleep(&ts, NULL);
+}
+
+/* Final review I1 (ocap phase 2b): a borrowed box (an HTTP Conn's socket, a
+ * plain ws:// socket) used to be closed with march_handle_close, whose
+ * release is a no-op for TCP_BORROWED, and the server then closed the fd at
+ * once.  A use already in flight (a task parked in Socket.recv on a Conn it
+ * kept) went on with the descriptor NUMBER after that close, so the next
+ * accept could hand the number to another client and the stale use read that
+ * client's bytes.  Here the close waits for the in-flight uses to leave
+ * first, waking them as close does. */
+int64_t march_handle_close_drain(void *h, int64_t timeout_ms) {
+    check_box(h, "close_drain");
+    _Atomic int64_t *st = h_state(h);
+    int64_t s = atomic_load_explicit(st, memory_order_acquire);
+    int own = 0;
+    for (;;) {
+        if (s & ST_CLOSED) break;                  /* closed already: still drain */
+        if (atomic_compare_exchange_weak_explicit(st, &s, (s | ST_CLOSED) + IN_ONE,
+                                                  memory_order_acq_rel, memory_order_acquire)) {
+            own = 1;
+            break;
+        }
+    }
+    int64_t mine = own ? IN_ONE : 0;
+    int32_t k = h_kind(h);
+    /* A borrowed ws:// value carries a session generation above bit 32. */
+    int64_t fd = (k == MARCH_HANDLE_TLS) ? h_auxv(h)
+               : (k == MARCH_HANDLE_TCP_BORROWED) ? (int64_t)(uint32_t)h_raw(h)
+               : h_raw(h);
+    int woke = 0;
+    if ((s & IN_MASK) != 0 && fd >= 0 &&
+        (k == MARCH_HANDLE_TCP || k == MARCH_HANDLE_TCP_BORROWED ||
+         k == MARCH_HANDLE_LISTENER || k == MARCH_HANDLE_UDP)) {
+        (void)shutdown((int)fd, SHUT_RDWR);       /* wake a parked recv (Linux) */
+        fd_cancel_waits(fd);                       /* ... and everywhere else */
+        woke = 1;
+    }
+    int64_t deadline = drain_now_ms() + (timeout_ms > 0 ? timeout_ms : 0);
+    int drained = 1;
+    for (;;) {
+        int64_t cur = atomic_load_explicit(st, memory_order_acquire);
+        if ((cur & IN_MASK) <= mine) break;
+        if (drain_now_ms() >= deadline) { drained = 0; break; }
+        drain_pause();
+    }
+    /* The sticky cancel would otherwise outlive the borrowed descriptor (a
+     * TCP_BORROWED release never forgets it) and cancel the waits of the
+     * next connection that gets the number.  Owned kinds forget it at
+     * release, which must still see it if a use is stranded. */
+    if (woke && drained && k == MARCH_HANDLE_TCP_BORROWED) fd_forget_cancel(fd);
+    if (own) march_handle_leave(h);                /* releases (owned kinds) */
+    return drained;
+}
+
+/* Hand the descriptor over (to a TLS box, or to code that keeps raw fds):
+ * close the box without releasing.  Refused (-1, nothing changes) when the
+ * box is closed; when it is a TCP_BORROWED box, whose descriptor is not the
+ * box's to give away; and while another use is in flight -- an in-flight
+ * count above the caller's own one (the caller may be inside a use, as
+ * Tls.connect is, or not) -- because that use would go on with a descriptor
+ * its new owner may close. */
 int64_t march_handle_detach(void *h) {
     check_box(h, "detach");
+    if (h_kind(h) == MARCH_HANDLE_TCP_BORROWED) return -1;
     _Atomic int64_t *st = h_state(h);
     int64_t s = atomic_load_explicit(st, memory_order_acquire);
     for (;;) {
         if (s & ST_CLOSED) return -1;
+        if ((s & IN_MASK) > IN_ONE) return -1;
         if (atomic_compare_exchange_weak_explicit(st, &s, s | ST_CLOSED | ST_RELEASED,
-                                                  memory_order_acq_rel, memory_order_acquire))
+                                                  memory_order_acq_rel, memory_order_acquire)) {
+            fd_own(owned_fd(h_kind(h), h_raw(h), h_auxv(h)), 0);
             return h_raw(h);
+        }
     }
 }
 

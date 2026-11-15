@@ -309,7 +309,8 @@ let contains ~needle hay =
 
 let forge_src = {|mod Forge do
   needs IO.Console
-  fn main(_c : Cap(IO.Console)) do
+  needs IO.Registry
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.Registry)) do
     let p = pid_of_int(0)
     let q = actor_whereis("x")
     let r = actor_registered()
@@ -338,6 +339,24 @@ let test_driver_rejects_user_json_march () =
       Alcotest.(check bool) "with no gate error" false
         (contains ~needle:"internal to the standard library" out))
 
+(* ocap phase 2 (Task 10): the raw handle builtins added to the shipped
+   table, in table order. *)
+let task10_raw_builtins = [
+    "file_open"; "file_read_line"; "file_read_chunk"; "file_close"; "csv_open";
+    "csv_next_row"; "csv_close"; "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all";
+    "tcp_recv_all"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
+    "tcp_recv_chunked_frame"; "tcp_recv_chunk"; "tcp_recv_chunk_timeout";
+    "tcp_recv_timeout"; "tcp_set_recv_timeout"; "tcp_peer_addr"; "tcp_shutdown";
+    "tcp_close"; "tcp_listen"; "tcp_accept"; "tcp_accept_timeout"; "tcp_local_port";
+    "udp_open"; "udp_resolve"; "udp_addr_to_string"; "udp_connect"; "udp_close";
+    "udp_local_addr"; "udp_stats"; "udp_send_batch"; "udp_send_many"; "udp_recv_batch";
+    "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_accept"; "tls_read";
+    "tls_read_timeout"; "tls_write"; "tls_close"; "tls_ctx_free"; "tls_negotiated_alpn";
+    "tls_peer_cn"; "tls_ctx_set_groups"; "tls_negotiated_group"; "tls_pq_available";
+    "ws_recv"; "ws_send"; "ws_select"; "http_server_spawn_n"; "http_server_wait";
+    "http_server_plain_listener"; "http_conn_is_tls"; "process_spawn_async";
+    "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc" ]
+
 (* The shipped table: the four reference-forging builtins, each pointing at
    the `Actor` wrapper that takes a `Cap(Actor.Introspect)`. Every suggestion
    names `Actor.introspect`, the one minting function, so a user who hits the
@@ -345,14 +364,15 @@ let test_driver_rejects_user_json_march () =
 let test_shipped_table () =
   let gated = List.map fst !TB.stdlib_only in
   Alcotest.(check (list string)) "the four forging builtins, the epoch holds and the drain flag are gated"
-    [ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
+    ([ "pid_of_int"; "actor_pid_indices"; "observe_query"; "observe_count_send"; "actor_inspect"; "actor_whereis"; "actor_registered";
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
       (* ocap phase 1: the capability check point (stdlib/authority.march) *)
       "cap_check_raw"; "cap_launch_text"; "reload_request";
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
       "handle_is_closed"; "handle_aux";
-      "file_open_write"; "file_write_handle"; "file_seek" ]
+      "file_open_write"; "file_write_handle"; "file_seek";
+      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at" ] @ task10_raw_builtins)
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
@@ -362,7 +382,9 @@ let test_shipped_table () =
                              && name <> "delivery_failed_watch"
                              && not (String.length name > 7 && String.sub name 0 7 = "handle_")
                              && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek";
-                                                     "cap_check_raw"; "cap_launch_text" ]))
+                                                     "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
+                                                     "cap_check_raw"; "cap_launch_text" ])
+                             && not (List.mem name task10_raw_builtins))
        !TB.stdlib_only);
   List.iter (fun name ->
       Alcotest.(check bool) (name ^ " suggestion names Authority.check") true
@@ -433,7 +455,69 @@ end|} call) in
       Alcotest.(check bool) (name ^ " is refused in user code") true gated)
     [ ({|file_open_write("/tmp/x", 0)|}, "file_open_write");
       ({|file_write_handle(-2, "x")|}, "file_write_handle");
-      ({|file_seek(-2, 0)|}, "file_seek") ]
+      ({|file_seek(-2, 0)|}, "file_seek");
+      (* Task 7: the File.Dir builtins. *)
+      ({|dir_open("/etc")|}, "dir_open");
+      ({|dir_open_write("/tmp")|}, "dir_open_write");
+      ({|file_open_at(3, "passwd", 0)|}, "file_open_at");
+      ({|dir_list_at(3, "")|}, "dir_list_at") ]
+
+(* ocap phase 2 (Task 10): every raw Int-descriptor builtin behind a handle
+   type is stdlib-only, and the error names the handle API that replaces it.
+   A guessed descriptor number must not reach a socket, file or child process
+   the program holds. *)
+let test_raw_handle_builtins_gated () =
+  List.iter (fun (call, name, wrapper) ->
+      let ctx = typecheck (Printf.sprintf {|mod App do
+  fn forge(p) do
+    %s
+  end
+end|} call) in
+      let gate =
+        List.find_opt (fun (d : March_errors.Errors.diagnostic) ->
+            d.severity = March_errors.Errors.Error
+            && d.code = March_errors.Errors.Code.stdlib_internal
+            && contains ~needle:(Printf.sprintf "`%s` is internal to the standard library" name)
+                 d.message)
+          ctx.March_errors.Errors.diagnostics
+      in
+      match gate with
+      | None -> Alcotest.failf "%s is not refused in user code" name
+      | Some d ->
+        Alcotest.(check bool) (name ^ " names " ^ wrapper) true
+          (contains ~needle:wrapper d.message))
+    [ ({|tcp_send_all(3, "x")|}, "tcp_send_all", "`Socket.write");
+      ({|file_read_line(3)|}, "file_read_line", "`File.read_line");
+      ({|process_wait_proc(p)|}, "process_wait_proc", "`Process.wait_proc") ];
+  (* And the whole shipped set: each raw handle builtin is in the table with
+     a hint naming a stdlib module. *)
+  List.iter (fun name ->
+      match List.assoc_opt name !TB.stdlib_only with
+      | None -> Alcotest.failf "%s is not stdlib-only" name
+      | Some hint ->
+        Alcotest.(check bool) (name ^ "'s hint names a wrapper") true
+          (List.exists (fun m -> contains ~needle:("`" ^ m ^ ".") hint)
+             [ "File"; "Csv"; "Socket"; "Udp"; "Tls"; "WebSocket"; "HttpServer"; "HttpTransport";
+               "Process" ]))
+    [ "file_open"; "file_open_write"; "file_read_line"; "file_read_chunk";
+      "file_write_handle"; "file_seek"; "file_close"; "dir_open"; "file_open_at";
+      "dir_list_at"; "csv_open"; "csv_next_row"; "csv_close";
+      "tcp_connect"; "tcp_connect_timeout"; "tcp_send_all"; "tcp_recv_all";
+      "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers"; "tcp_recv_chunk";
+      "tcp_recv_chunk_timeout"; "tcp_set_recv_timeout"; "tcp_recv_chunked_frame";
+      "tcp_recv_timeout"; "tcp_listen"; "tcp_accept"; "tcp_accept_timeout";
+      "tcp_local_port"; "tcp_close"; "tcp_shutdown"; "tcp_peer_addr";
+      "udp_open"; "udp_resolve"; "udp_addr_to_string"; "udp_connect"; "udp_close";
+      "udp_local_addr"; "udp_stats"; "udp_send_batch"; "udp_send_many"; "udp_recv_batch";
+      "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_accept"; "tls_read";
+      "tls_read_timeout"; "tls_write"; "tls_close"; "tls_ctx_free";
+      "tls_negotiated_alpn"; "tls_peer_cn"; "tls_ctx_set_groups";
+      "tls_negotiated_group"; "tls_pq_available";
+      "ws_recv"; "ws_send"; "ws_select";
+      "http_server_spawn_n"; "http_server_wait"; "http_server_plain_listener";
+      "http_conn_is_tls";
+      "process_spawn_async"; "process_read_line"; "process_write";
+      "process_kill_proc"; "process_wait_proc" ]
 
 (* ── Adversarial sweep over the shipped table ─────────────────────────────
    Every gated name, in every spelling the review's findings list (and
@@ -808,6 +892,203 @@ end|} in
   Alcotest.(check bool) "a user module named Inner owns its own Inner.raw" false
     (refused ctx)
 
+(* ocap phase 2 (Task 9): the stdlib's cluster plumbing over a raw `fd : Int`
+   (or a record holding one) is `@[stdlib_internal]`. The public `fd` record
+   types stay, so the point is that no function that does I/O on one is
+   reachable from user code. Driven through the real driver, which loads the
+   shipped stdlib, so it covers the attribute as shipped. *)
+let cluster_plumbing =
+  [ ("NetKernel", [ "send_frame"; "write_framed"; "recv_frame"; "recv_frame_exact";
+                    "handshake"; "handshake_role"; "recv_frame_until"; "handshake_addr";
+                    "raw_allowed"; "note_raw_refused"; "link_binding"; "forget";
+                    "sealed"; "handshake_auth" ]);
+    ("NodeSend", [ "cast"; "cast_schema"; "recv_failure"; "cast_from"; "serve_one";
+                   "serve_one_reply"; "handle_frame" ]);
+    ("NodeCall", [ "call"; "serve_one"; "serve_loop" ]);
+    ("NodeQueue", [ "start"; "close_fd"; "consumed" ]);
+    ("PeerReader", [ "serve" ]);
+    ("PeerRegistry", [ "no_fd"; "add_data"; "make"; "raw_fd"; "raw_data_fd"; "wrap_fd"; "unwrap_fd" ]);
+    ("WorkDispatch", [ "dispatch"; "dispatch_affine" ]);
+    ("ClusterConn", [ "listen"; "accept_split"; "accept_split_within"; "accept_split_auth";
+                      "accept_one"; "connect_split"; "connect_split_within";
+                      "connect_split_auth"; "connect_to_peer" ]);
+    ("ClusterNode", [ "handshake" ]);
+    ("SessionNode", [ "accept_from"; "connect_to"; "open" ]) ]
+
+let test_cluster_plumbing_internal () =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  with_temp_dir (fun dir ->
+      let file = Filename.concat dir "plumbing_user.march" in
+      let fns = List.concat_map (fun (m, names) ->
+          List.map (fun n -> (m, n)) names) cluster_plumbing in
+      let body = String.concat "\n" (List.mapi (fun i (m, n) ->
+          Printf.sprintf "  fn use_%d() do %s.%s end" i m n) fns) in
+      write_file file (Printf.sprintf "mod Plumbing do\n%s\n  fn main() do () end\nend\n" body);
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "--check on user code naming the plumbing exits 1" 1 rc;
+      List.iter (fun (m, n) ->
+          Alcotest.(check bool) (m ^ "." ^ n ^ " is stdlib_internal in user code") true
+            (contains ~needle:(Printf.sprintf "`%s.%s` is internal to the standard library" m n) out))
+        fns;
+      (* The two calls the brief names, written out as calls. *)
+      let file2 = Filename.concat dir "plumbing_calls.march" in
+      write_file file2 {|mod Plumbing2 do
+  fn a() do NetKernel.send_frame(5, Nil) end
+  fn b() do ClusterConn.listen(0) end
+  fn main() do () end
+end
+|};
+      let (rc, out) = run_compiler [ "--check"; file2 ] in
+      Alcotest.(check int) "calls exit 1" 1 rc;
+      Alcotest.(check bool) "send_frame refused" true
+        (contains ~needle:"`NetKernel.send_frame` is internal to the standard library" out);
+      Alcotest.(check bool) "listen refused" true
+        (contains ~needle:"`ClusterConn.listen` is internal to the standard library" out);
+      (* The same file as stdlib source is accepted (the cluster tests' spelling). *)
+      let (rc, out) = run_compiler [ "--check"; "--stdlib-source"; file2 ] in
+      Alcotest.(check bool) "--stdlib-source exempts it" false
+        (contains ~needle:"internal to the standard library" out);
+      Alcotest.(check int) "and --check then exits 0" 0 rc;
+      (* A user file cannot borrow the control wiring's `<control>` tag, which
+         may name internals: the driver refuses the name. *)
+      let spoof = Filename.concat dir "<control>" in
+      write_file spoof {|mod Plumbing3 do
+  fn a() do NetKernel.send_frame(5, Nil) end
+  fn main() do () end
+end
+|};
+      let (rc, out) = run_compiler [ "--check"; spoof ] in
+      Alcotest.(check int) "an input named <control> is refused" 2 rc;
+      Alcotest.(check bool) "with the reason" true
+        (contains ~needle:"reserved for compiler-generated code" out);
+      (* --emit-core-ast takes its file as a flag argument, not a positional
+         one; it is refused the same way rather than reporting "accept". *)
+      let (rc, out) = run_compiler [ "--emit-core-ast"; spoof ] in
+      Alcotest.(check int) "--emit-core-ast <control> is refused" 2 rc;
+      Alcotest.(check bool) "with the same reason" true
+        (contains ~needle:"reserved for compiler-generated code" out))
+
+(* Final review C1 (ocap phase 2b): the cluster records and actors that carry
+   a raw descriptor cannot be forged by user code. Before the fix a dependency
+   holding only `IO.Mut` built a `PeerRegistry.Peer` literal around a guessed
+   fd and handed it to `SwimDriver.dispatch`, which wrote a frame into a socket
+   the program held; spawning `NodeQueue.Writer` (or reconfiguring one from
+   `NodeQueue.start_local`) with `Configure(fd, ..)` did the same. *)
+let forged_peer_src = {|mod ForgedPeer do
+  needs IO.Mut
+  fn poke(fd : Int) : () do
+    let id = NodeIdentity.make("x", "pk", 1)
+    let p = { node_id: "victim", identity: id, fd: fd, data_fd: -1 }
+    let reg = PeerRegistry.add(PeerRegistry.empty(), p)
+    SwimDriver.dispatch(Swim.SendPing("victim"), reg, "me")
+  end
+  fn wrapped(fd : Int) : PeerRegistry.Fd do PeerRegistry.Fd(fd) end
+  fn main(_m : Cap(IO.Mut)) do poke(3) end
+end
+|}
+
+(* Re-review C1b: the same hole through `SessionNode.Link`, which sits in the
+   public `Party`; `finish`/`serve`/`serve_outcome` close, write and read its
+   descriptors. Before the fix this delivered bytes to, then closed, a socket
+   the program held. And `WorkDispatch.dispatch` took the descriptor from a
+   caller's callback. *)
+let forged_link_src = {|mod ForgedLink do
+  needs IO.Mut
+  needs IO.Spawn
+  fn poke(fd : Int) : () do
+    let p0 = SessionNode.party(1, "n", fn _ -> ())
+    let l = { role: 2, data_fd: -1, control_fd: fd, peer: GlobalPid.make("x", 0, 0),
+              q: NodeQueue.start_local(fn _ -> ()), control: task_spawn(fn _ -> 0) }
+    SessionNode.finish({ p0 with links: Cons(l, Nil) })
+  end
+  fn wd(fd : Int) do WorkDispatch.dispatch end
+  fn main(_m : Cap(IO.Mut), _s : Cap(IO.Spawn)) do poke(3) end
+end
+|}
+
+let forged_actor_src = {|mod ForgedActor do
+  needs IO.Mut
+  fn spawned(fd : Int) : () do
+    let w = spawn(NodeQueue__Writer)
+    let _ = send(w, NodeQueue.Configure(fd, 1000000))
+    ()
+  end
+  fn reconfigured(fd : Int) : () do
+    match NodeQueue.start_local(fn _ -> ()) do
+      (w, _) ->
+        let _ = send(w, NodeQueue.Configure(fd, 1000000))
+        let _ = send(w, NodeQueue.Enqueue(1, Bytes.from_string("x")))
+        ()
+    end
+  end
+  fn cluster(fd : Int) : () do
+    let c = spawn(ClusterNode__CtlWriter)
+    let _ = send(c, ClusterNode.CtlUse(fd))
+    let _ = spawn(ClusterNode__ClusterNodeActor)
+    ()
+  end
+  fn dotted() do spawn(NodeQueue.Writer) end
+  fn main(_m : Cap(IO.Mut)) do spawned(3) reconfigured(3) cluster(3) end
+end
+|}
+
+let test_cluster_records_unforgeable () =
+  if not (Sys.file_exists compiler_exe) then
+    Alcotest.failf "compiler not found at %s" compiler_exe;
+  with_temp_dir (fun dir ->
+      let file = Filename.concat dir "forged_peer.march" in
+      write_file file forged_peer_src;
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "a forged Peer literal fails --check" 1 rc;
+      Alcotest.(check bool) "its fd fields want PeerRegistry.Fd, not Int" true
+        (contains ~needle:"expected `Fd`" out);
+      Alcotest.(check bool) "and Fd's constructor is private" true
+        (contains ~needle:"I don't know a constructor called `PeerRegistry.Fd`" out);
+      let file = Filename.concat dir "forged_link.march" in
+      write_file file forged_link_src;
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "a forged SessionNode.Link in a Party fails --check" 1 rc;
+      Alcotest.(check bool) "its fd fields want PeerRegistry.Fd, not Int" true
+        (contains ~needle:"control_fd : Fd, data_fd : Fd" out);
+      Alcotest.(check bool) "WorkDispatch.dispatch is internal" true
+        (contains ~needle:"`WorkDispatch.dispatch` is internal to the standard library" out);
+      let file = Filename.concat dir "forged_actor.march" in
+      write_file file forged_actor_src;
+      let (rc, out) = run_compiler [ "--check"; file ] in
+      Alcotest.(check int) "spawning / messaging the fd-carrying actors fails --check" 1 rc;
+      List.iter (fun (ctor, actor) ->
+          Alcotest.(check bool) (ctor ^ " refused") true
+            (contains ~needle:(Printf.sprintf
+                "`%s` belongs to the actor `%s`, which is internal to the standard library" ctor actor) out))
+        [ ("NodeQueue__Writer", "NodeQueue.Writer");
+          ("NodeQueue.Configure", "NodeQueue.Writer");
+          ("NodeQueue.Enqueue", "NodeQueue.Writer");
+          ("ClusterNode__CtlWriter", "ClusterNode.CtlWriter");
+          ("ClusterNode.CtlUse", "ClusterNode.CtlWriter");
+          ("ClusterNode__ClusterNodeActor", "ClusterNode.ClusterNodeActor") ];
+      Alcotest.(check bool) "no machine fix steers to an internal actor" false
+        (contains ~needle:"Did you mean `NodeQueue__Writer`" out);
+      (* Control: the same program as stdlib source (the cluster fixtures'
+         spelling) is not refused by the actor gate. *)
+      let (_rc, out) = run_compiler [ "--check"; "--stdlib-source"; file ] in
+      Alcotest.(check bool) "--stdlib-source exempts the actor gate" false
+        (contains ~needle:"which is internal to the standard library" out))
+
+(* The typechecker cannot name Hot_reload (lib/tir), so it keeps its own copy
+   of the control wiring's file tag. Pin them equal, and pin who may name an
+   internal function. *)
+let test_control_wiring_may_name_internal () =
+  Alcotest.(check string) "the typechecker's tag is the lowering's"
+    March_tir.Hot_reload.control_wiring_file TB.control_wiring_file;
+  let sp file = { March_ast.Ast.dummy_span with March_ast.Ast.file = file } in
+  Alcotest.(check bool) "the generated control wiring may" true
+    (TB.span_may_name_internal (sp March_tir.Hot_reload.control_wiring_file));
+  Alcotest.(check bool) "a user file may not" false
+    (TB.span_may_name_internal (sp "user.march"));
+  Alcotest.(check bool) "nor the generated topology code" false
+    (TB.span_may_name_internal (sp "<topology>"))
+
 let tests =
   [ ("stdlib-only builtins",
      [ Alcotest.test_case "user call rejected" `Quick test_user_call_rejected;
@@ -837,6 +1118,7 @@ let tests =
          test_shipped_table;
        Alcotest.test_case "handle_primitives_gated" `Quick test_handle_primitives_gated;
        Alcotest.test_case "raw_file_handle_builtins_gated" `Quick test_raw_file_handle_builtins_gated;
+       Alcotest.test_case "raw_handle_builtins_gated" `Quick test_raw_handle_builtins_gated;
        Alcotest.test_case "internal_fn_call_refused" `Quick test_internal_fn_call_refused;
        Alcotest.test_case "internal_fn_value_refused" `Quick test_internal_fn_value_refused;
        Alcotest.test_case "internal_fn_stdlib_ok" `Quick test_internal_fn_stdlib_ok;
@@ -849,6 +1131,10 @@ let tests =
        Alcotest.test_case "internal_use_all_stdlib_ok" `Quick test_internal_use_all_stdlib_ok;
        Alcotest.test_case "internal_dotted_use_refused" `Quick test_internal_dotted_use_refused;
        Alcotest.test_case "internal_same_name_user_module_ok" `Quick test_internal_same_name_user_module_ok;
+       Alcotest.test_case "cluster_plumbing_internal" `Quick test_cluster_plumbing_internal;
+       Alcotest.test_case "cluster records and actors unforgeable" `Quick
+         test_cluster_records_unforgeable;
+       Alcotest.test_case "control wiring may name internals" `Quick test_control_wiring_may_name_internal;
        Alcotest.test_case "adversarial sweep: every name, every spelling, same text" `Quick
          test_adversarial_sweep;
        Alcotest.test_case "sweep negative control: rebound names are silent" `Quick

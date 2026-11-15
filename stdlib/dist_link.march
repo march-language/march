@@ -133,7 +133,7 @@ mod DistLink do
           match PeerRegistry.lookup(reg, watcher_node) do
             None -> n
             Some(peer) ->
-              match NetKernel.send_frame(peer.fd, encode_fire(target_pid, reason_of_tag(rtag, rmsg))) do
+              match NetKernel.send_frame(PeerRegistry.raw_fd(peer), encode_fire(target_pid, reason_of_tag(rtag, rmsg))) do
                 Ok(_) -> n + 1
                 Err(_) -> n
               end

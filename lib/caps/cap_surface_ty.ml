@@ -99,3 +99,57 @@ let type_def_mentions_tycon (name : string) (td : Ast.type_def) : bool =
     List.exists (fun (v : Ast.variant) ->
         List.exists (mentions_tycon name) v.var_args) variants
   | Ast.TDAlias (t, _) -> mentions_tycon name t
+
+(** The resource-handle types (ocap phase 2b, Task 13): every stdlib type
+    that is, or wraps, a handle box over a descriptor of THIS node's process
+    (runtime/march_handle.c).  The ONE list both refusals read: [derive Json]
+    in the desugarer and the typed remote send's sweep in the typechecker
+    ([Typecheck_caps.check_node_send_sites]).
+
+    Each entry is a spelling a program may write and the name a diagnostic
+    shows for it.  The builtin boxes ([File.Handle], [File.Dir], [Socket],
+    [Listener], [Process]) are matched only under their own spelling: a bare
+    [Handle] is the typestate [Handle(r, s)] of stdlib/handle.march, not a
+    file.  The opaque wrappers over a [Socket] box ([UdpSocket], [TlsConn],
+    [TlsCtx], [WsSocket]) are matched bare or qualified by their module, and
+    named bare, the way a program usually writes them.  A wrapper is listed
+    rather than found through its [Socket] field so the message names the
+    type the program wrote.  Add a new handle-wrapping stdlib type here. *)
+let handle_type_spellings : (string * string) list = [
+  "File.Handle", "File.Handle";
+  "File.Dir", "File.Dir";
+  "Socket", "Socket";
+  "Listener", "Listener";
+  "Process", "Process";
+  "UdpSocket", "UdpSocket";      "Udp.UdpSocket", "UdpSocket";
+  "TlsConn", "TlsConn";          "Tls.TlsConn", "TlsConn";
+  "TlsCtx", "TlsCtx";            "Tls.TlsCtx", "TlsCtx";
+  "WsSocket", "WsSocket";        "WebSocket.WsSocket", "WsSocket";
+]
+
+(** The four opaque wrappers, by their bare name.  [Typecheck_nominal]
+    forces a program's own type of one of these names to a qualified
+    identity, as it does for [Socket]/[Listener]/[Process], so a solved
+    [TCon "UdpSocket"] is always the stdlib's. *)
+let handle_wrapper_names = [ "UdpSocket"; "TlsConn"; "TlsCtx"; "WsSocket" ]
+
+let handle_type_named (n : string) : string option =
+  List.assoc_opt n handle_type_spellings
+
+(** The first handle type named anywhere in [ty], skipping a handle whose
+    displayed name is in [shadowed] (a type the program declares itself under
+    a handle's name; [Tls.TlsCtx] is skipped for a program's own [TlsCtx]).  Same walk as [mentions_tycon]. *)
+let rec handle_in_ty ?(shadowed = []) (ty : Ast.ty) : (string * Ast.name) option =
+  let go = handle_in_ty ~shadowed in
+  match ty with
+  | Ast.TyCon (con, args) ->
+    (match handle_type_named con.txt with
+     | Some h when not (List.mem h shadowed) -> Some (h, con)
+     | _ -> List.find_map go args)
+  | Ast.TyArrow (a, b) -> (match go a with Some h -> Some h | None -> go b)
+  | Ast.TyTuple ts -> List.find_map go ts
+  | Ast.TyRecord fields -> List.find_map (fun (_, t) -> go t) fields
+  | Ast.TyLinear (_, t) -> go t
+  | Ast.TyNatOp (_, a, b) -> (match go a with Some h -> Some h | None -> go b)
+  | Ast.TyRefine (base, _, _) -> go base
+  | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> None

@@ -10843,13 +10843,15 @@ let test_compiled_file_open_err_is_real_fileerror () =
     \  end\n\
      end\n";
   close_out oc;
+  (* --stdlib-source: the program pins the raw file_open builtin's FileError
+     cell itself, and file_open is stdlib-only since ocap phase 2 (Task 10). *)
   let (interp_rc, interp_out) =
-    run_capture_rc (Printf.sprintf "%s %s" (Filename.quote main_exe) (Filename.quote src)) in
+    run_capture_rc (Printf.sprintf "%s --stdlib-source %s" (Filename.quote main_exe) (Filename.quote src)) in
   Alcotest.(check int) "interpreter runs file_open-on-missing-path program cleanly" 0 interp_rc;
   Alcotest.(check string) "interpreter matches Err(NotFound(path)) via Show"
     "NotFound(\"/nonexistent/march_fileopenerr_test_xyz/does/not/exist\")" interp_out;
   let bin = Filename.concat tmp "fileopenerrbin" in
-  match compile_march_or_skip ~main_exe ~bin ~src () with
+  match compile_march_or_skip ~extra_args:"--stdlib-source" ~main_exe ~bin ~src () with
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let (run_rc, compiled_out) = run_capture_rc (Filename.quote bin) in
