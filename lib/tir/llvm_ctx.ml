@@ -1359,3 +1359,21 @@ let hr_slot_id ctx (name : string) (id0 : int) : string =
     emit ctx (Printf.sprintf "%s = load i32, ptr %s" r cell);
     r
   end
+
+(** ocap phase 4: a [CapAuthRef] (a saved authority slot, a
+    [List(Authority.Layer)] or NULL) has no type declaration, so no drop glue,
+    and [march_decrc] frees only its top cell.  Its release goes through the
+    runtime's structural [march_cap_release] instead (runtime/march_runtime.c),
+    declared into this module's preamble on first use so a program that never
+    holds one keeps byte-identical IR.  [Some "march_cap_release"] for an
+    atom of that type, else [None]. *)
+let cap_auth_release_fn ctx (atom : Tir.atom) : string option =
+  match atom with
+  | Tir.AVar { Tir.v_ty = Tir.TCon ("CapAuthRef", []); _ } ->
+    let name = "march_cap_release" in
+    if not (Hashtbl.mem ctx.unknown_decls name) then begin
+      Hashtbl.replace ctx.unknown_decls name ();
+      Buffer.add_string ctx.preamble "declare void @march_cap_release(ptr %p)\n"
+    end;
+    Some name
+  | _ -> None

@@ -174,8 +174,52 @@ end
 let test_no_leak () =
   check_all ~skip:[ "js" ] ~name:"no_leak" ~src:leak_src [ ("", "flat\n") ]
 
+(* Compiled code holds the LAST reference to a CapAuthRef and drops it: a
+   saved ref outlives the frame it was taken in (the slot was restored
+   under it), then goes out of scope, both bare and captured by a closure
+   that is never called (Task 4's capture shape).  The drop must release the
+   whole layer list, not just its top cell. *)
+let drop_src = {|mod CapSlotDrop do
+  needs IO.Console
+  fn hold(n : Int) : Int do
+    let old = cap_push(Authority.Layer(ByFnNeeds("f"), "IO.FileRead(\"/srv/\")",
+                Cons(Authority.Scope("IO.FileRead", Authority.Paths(Cons("/srv/", Nil))), Nil)))
+    let r = cap_save()
+    cap_restore(old)
+    n + 1
+  end
+  fn capture(n : Int) : Int do
+    let old = cap_push(Authority.Layer(ByFnNeeds("g"), "IO.Console", Nil))
+    let r = cap_save()
+    cap_restore(old)
+    let f = fn _ -> cap_enter(r)
+    n + 1
+  end
+  fn spin(n : Int) : () do
+    if n == 0 do ()
+    else
+      let a = hold(n)
+      let b = capture(a)
+      spin(b - 3)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    spin(10)
+    let before = live_allocs()
+    spin(1000)
+    let after = live_allocs()
+    println(if after - before <= 0 do "flat" else "leak " ++ int_to_string(after - before) end)
+  end
+end
+|}
+
+let test_compiled_drop () =
+  check_all ~skip:[ "js" ] ~name:"compiled_drop" ~src:drop_src [ ("", "flat\n") ]
+
 let tests =
   [ ( "cap_runtime_slot",
       [ Alcotest.test_case "save/push/enter/restore around cap_check_raw" `Quick test_slot;
         Alcotest.test_case "cap_grant_text reads MARCH_GRANT, trimmed" `Quick test_grant_text;
-        Alcotest.test_case "push/restore leaves nothing live" `Quick test_no_leak ] ) ]
+        Alcotest.test_case "push/restore leaves nothing live" `Quick test_no_leak;
+        Alcotest.test_case "compiled code dropping the last CapAuthRef releases it" `Quick
+          test_compiled_drop ] ) ]

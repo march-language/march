@@ -1082,6 +1082,9 @@ let builtin_group : Builtin_name.t -> builtin_group = function
    (specs/progress/2026-10-05-dropped-closure-captures.md); anything else
    through [default]. *)
 let decrc_fn_for ctx (atom : Tir.atom) (default : string) : string =
+  match Llvm_ctx.cap_auth_release_fn ctx atom with
+  | Some f -> f   (* a saved authority slot: released structurally *)
+  | None ->
   match atom with
   | Tir.AVar { Tir.v_ty = Tir.TFn _; _ } -> "march_clo_release"
   (* An erased value may be a record whose shape carries a registered deep
