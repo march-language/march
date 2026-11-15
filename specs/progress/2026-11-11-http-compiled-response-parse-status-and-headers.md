@@ -1,4 +1,4 @@
-`[P1]` Compiled HTTP client: odd status codes are halved (401 reads as 200), headers are always empty, and a dead connection reads as a 200 (2026-11-11)
+`[P1]` DONE 2026-11-15. Compiled HTTP client: odd status codes are halved (401 reads as 200), headers are always empty, and a dead connection reads as a 200 (2026-11-11)
 
 Not one of the 2026-10-18 claims; found on 2026-11-11 while checking the redirect claim. The compiled `http_parse_response` (runtime/march_http.c, `march_http_parse_response`) disagrees with the interpreter in three ways, and every `HttpTransport` / `HttpClient` response goes through it:
 1. The status is stored as a raw integer where the compiled code expects its Int representation, so every ODD status reads as (n - 1) / 2: 201 as 100, 307 as 153, 401 as 200, 403 as 201, 503 as 251. `step_raise_on_error` therefore lets a 401 through as a success. Rated P1 for that reason.
@@ -32,6 +32,34 @@ fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
 end
 end
 ```
+
+## Fix (2026-11-15)
+
+`march_http_parse_response` (runtime/march_http.c) is rewritten to follow the interpreter's
+parser (lib/eval/eval_builtins.ml) step by step:
+- the status is stored as a tagged Int, `(n << 1) | 1`. Compiled code untags a tuple's Int field
+  only when its low bit is set, which is why even statuses happened to read correctly before;
+- the head is split into lines and every line with a `:` becomes a `Header(name, value)`, both
+  trimmed, in order;
+- the status line needs a second space-separated field that is a decimal number. Otherwise the
+  result is `Err("bad status line: <line>")` or `Err("bad status code: <field>")`, with the
+  interpreter's wording. An empty response is therefore `Err`, which `HttpTransport` reports as
+  `ConnParseError`.
+- The body is everything after the first `\r\n\r\n`. The old `\n\n` fallback, which the
+  interpreter never had, is gone. Every scan is bounded by the string's length, not by a NUL.
+
+One deliberate difference remains. The interpreter's `int_of_string` also accepts OCaml literal
+forms such as `0x1F` or `1_000` in the status field; the C parser takes plain decimal only. No
+real server sends those.
+
+Test: `test/test_codegen.ml`, `http builtins` > "parse response (interp = compiled)"
+(`test_http_parse_response_parity`). It runs ten raw responses through `http_parse_response`
+interpreted and compiled, and requires the expected verdicts and byte-identical output: odd
+statuses, headers with trimming, a header line without a colon, a value holding a colon, no
+body separator, `\r\n\r\n` inside the body, empty input, no status field, and a non-numeric
+code. It fails on the old runtime (the first verdict, `s200 ... [Content-Length=2]`, is missing
+compiled) and passes with the fix. The todo's end-to-end repro against `server.py` now prints the
+interpreter's output on both backends.
 
 The repro needs the local test server from the triage scratch directory: `python3 server.py 47613` (it is reproduced at the end of this file).
 

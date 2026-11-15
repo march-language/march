@@ -1041,6 +1041,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled HTTP clients read the response status, headers and errors correctly.** In
+  compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
+  251), so `HttpClient.step_raise_on_error` let a 401 or 403 through as a success; every
+  response had an empty header list, so `Http.get_header` found nothing and no redirect was
+  followed; and a server that closed the connection without answering produced a 200 with
+  an empty body. `HttpTransport` and `HttpClient` now give the same status, headers and
+  `Err` as the interpreter.
 - **A list (or other value) captured by a `task_spawn` closure and still read by the spawning
   thread no longer crashes compiled code** (#1266). A consuming `match` on a shared cell
   released the cell before taking its own references to the fields it pulled out, so
