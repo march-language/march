@@ -666,6 +666,12 @@ export function march_process_cwd() {
 export function march_process_pid() {
   return (typeof process !== "undefined" && typeof process.pid === "number") ? process.pid : 0;
 }
+/* process_exit(code): node exits at once (Authority's launch errors exit 2
+ * before any module-level code runs); a browser has no process to end. */
+export function march_process_exit(code) {
+  if (typeof process !== "undefined" && process.exit) process.exit(Number(code));
+  throw new Error("process_exit(" + code + "): no process to exit");
+}
 
 /* Int `/` and `%` by zero panic with the operator messages the interpreter
  * and native code use (march_checked_div_op / march_checked_mod_op in
@@ -819,6 +825,12 @@ export function march_cap_enter(r) {
 export function march_cap_grant_text() {
   const raw = (typeof process !== "undefined" && process.env && process.env.MARCH_GRANT) || "";
   return raw.trim();
+}
+
+/** The current directory, for Authority's path checks; "/" with no `process`
+ *  (as march_process_cwd). */
+export function march_cap_cwd() {
+  return (typeof process !== "undefined" && process.cwd) ? process.cwd() : "/";
 }
 
 /** The test hook's trimmed value, the refusing limit's scope text. */

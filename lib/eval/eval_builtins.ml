@@ -2932,6 +2932,9 @@ let base_env : env =
   ; ("cap_grant_text", VBuiltin ("cap_grant_text", function
         | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_grant_text)
         | _ -> eval_error "cap_grant_text: takes no arguments"))
+  ; ("cap_cwd", VBuiltin ("cap_cwd", function
+        | args when args = [] || args = [VUnit] -> VString (Sys.getcwd ())
+        | _ -> eval_error "cap_cwd: takes no arguments"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:

@@ -1060,6 +1060,9 @@ and emit_val_impl ctx expr =
       | "process_pid", _ ->
         use_runtime ctx "march_process_pid";
         emit ctx "march_process_pid()"
+      | "process_exit", [a] ->
+        use_runtime ctx "march_process_exit";
+        emit ctx "march_process_exit("; emit_atom ctx a; emit ctx ")"
       (* ADT structural equality: eq_TypeName / neq_TypeName *)
       | n, [a; b] when String.length n > 3 && String.sub n 0 3 = "eq_" ->
         let ty = mangle (String.sub n 3 (String.length n - 3)) in
@@ -1188,7 +1191,7 @@ and emit_val_impl ctx expr =
         use_runtime ctx "march_cap_launch_text";
         emit ctx "march_cap_launch_text()"
       (* ocap phase 4 authority slot; zero-arg ones take March's Unit *)
-      | ("cap_layers" | "cap_save" | "cap_grant_text"), _ ->
+      | ("cap_layers" | "cap_save" | "cap_grant_text" | "cap_cwd"), _ ->
         let f = "march_" ^ name in
         use_runtime ctx f;
         emit ctx (f ^ "()")

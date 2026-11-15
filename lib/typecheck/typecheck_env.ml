@@ -2399,6 +2399,7 @@ let stdlib_only : (string * string) list ref =
       ("cap_push", "use `Authority.check(kind, target)`");
       ("cap_enter", "use `Authority.check(kind, target)`");
       ("cap_grant_text", "use `Authority.check(kind, target)`");
+      ("cap_cwd", "use `Process.cwd()`");
       (* DD step 12a: runs a request line through the node's own reload-socket
          dispatch; only the control plane's Agent relays operator-signed lines. *)
       ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)");

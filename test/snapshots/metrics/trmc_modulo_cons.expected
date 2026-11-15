@@ -1,5 +1,5 @@
-tir-lower    fns=123 allocs=91 stack=0 inc=0 dec=0 reuse=0 jp=0
-tir-trmc     fns=131 allocs=107 stack=0 inc=0 dec=0 reuse=0 jp=0
-tir-mono     fns=37 allocs=15 stack=0 inc=0 dec=0 reuse=0 jp=0
-tir-defun    fns=37 allocs=16 stack=0 inc=0 dec=0 reuse=0 jp=0
-tir-perceus  fns=37 allocs=16 stack=0 inc=8 dec=53 reuse=2 jp=0
+tir-lower    fns=217 allocs=276 stack=0 inc=0 dec=0 reuse=0 jp=12
+tir-trmc     fns=230 allocs=302 stack=0 inc=0 dec=0 reuse=0 jp=12
+tir-mono     fns=136 allocs=210 stack=0 inc=0 dec=0 reuse=0 jp=12
+tir-defun    fns=136 allocs=217 stack=0 inc=0 dec=0 reuse=0 jp=8
+tir-perceus  fns=136 allocs=215 stack=0 inc=53 dec=1060 reuse=6 jp=8

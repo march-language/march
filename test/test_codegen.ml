@@ -1251,8 +1251,12 @@ let test_tco_nontail_fib_no_loop () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
+  (* Judged on fib's own body: println links Authority's policy, whose
+     tail-recursive helpers do get TCO loops elsewhere in the module. *)
+  let fib_ir = ir_define ir "fib" in
+  Alcotest.(check bool) "non-tail fib: body found" true (fib_ir <> "");
   Alcotest.(check bool) "non-tail fib: no TCO loop" false
-    (ir_contains ir "tco_loop");
+    (ir_contains fib_ir "tco_loop");
   Alcotest.(check bool) "non-tail fib: call instruction present" true
     (ir_contains ir "call i64 @fib")
 
@@ -18062,6 +18066,7 @@ declare void   @march_cap_restore(ptr %saved)
 declare ptr    @march_cap_push(ptr %layer)
 declare ptr    @march_cap_enter(ptr %auth)
 declare ptr    @march_cap_grant_text()
+declare ptr    @march_cap_cwd()
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
 declare i64  @march_vault_live_tables()

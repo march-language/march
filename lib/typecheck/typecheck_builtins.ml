@@ -868,6 +868,10 @@ let builtin_bindings : (string * scheme) list =
     ("cap_push",        Mono (TArrow (TCon ("Authority.Layer", []), TCon ("CapAuthRef", []))));
     ("cap_enter",       Mono (TArrow (TCon ("CapAuthRef", []), TCon ("CapAuthRef", []))));
     ("cap_grant_text",  Mono (TArrow (t_unit, t_string)));
+    (* The current directory, read by Authority.check_layers to resolve a
+       relative path target. Not process_cwd: that is an IO.Process
+       operation, and charging it would charge every checked operation. *)
+    ("cap_cwd",         Mono (TArrow (t_unit, t_string)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,

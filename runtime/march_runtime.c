@@ -11041,6 +11041,15 @@ void *march_cap_grant_text(void) {
     return march_string_lit(v, (int64_t)n);
 }
 
+/* The current directory, for Authority's path checks (cap_cwd). The same
+ * answer as march_process_cwd, under a symbol the capability symbol table
+ * does not attribute to IO.Process: every checked operation links it. */
+void *march_cap_cwd(void) {
+    char buf[4096];
+    if (getcwd(buf, sizeof(buf)) == NULL) return march_string_lit("", 0);
+    return march_string_lit(buf, (int64_t)strlen(buf));
+}
+
 /* Helper: allocate a 2-element tuple (tag=0, 2 ptr fields). */
 /* actor_terminal_reason(pid_index) -> Option((tag, message)): the reason a
  * local actor died, with DistLink's wire tags (0 Normal, 1 Killed, 2 Crash),

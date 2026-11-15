@@ -213,6 +213,7 @@ void    march_cap_restore(void *saved);
 void   *march_cap_push(void *layer);
 void   *march_cap_enter(void *auth);
 void   *march_cap_grant_text(void);
+void   *march_cap_cwd(void);
 void    march_cap_release(void *layers);
 
 /* Process self-inspection: peak RSS in bytes, both platforms. */
