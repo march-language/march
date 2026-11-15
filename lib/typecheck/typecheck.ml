@@ -2941,11 +2941,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* A builtin typed with a qualified name (`Csv.CsvRow`) gets the same
             qualified->bare canonicalization [surface_ty] gives an annotation;
             the physical-equality check leaves a user binding that shadows
-            the builtin alone. *)
+            the builtin alone.  A cached (Marshalled) stdlib env loses that
+            identity, so a stdlib-only builtin no binding has rebound
+            ([env.gated_shadowed], the stdlib-only gate's own test) counts
+            too: the ocap phase 4 slot builtins (`Authority.Layer`). *)
          if StringSet.mem name.txt qualified_type_builtins
             && (match List.assoc_opt name.txt builtin_bindings with
-                | Some b -> b == sch | None -> false)
-         then canon_qualified_tcons env t
+                | Some b ->
+                  b == sch
+                  || (List.mem_assoc name.txt !stdlib_only
+                      && not (StringSet.mem name.txt env.gated_shadowed))
+                | None -> false)
+         then canon_builtin_sig env t
          else t
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)

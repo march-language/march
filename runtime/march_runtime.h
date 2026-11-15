@@ -205,6 +205,15 @@ int64_t march_unix_time_ms(void);
 /* ocap phase 1 capability check point and its test hook (march_extras.c). */
 int64_t march_cap_check_raw(void *kind, void *target);
 void   *march_cap_launch_text(void);
+/* ocap phase 4: the run-time authority (march_runtime.c). */
+void   *march_cap_layers(void);
+void    march_cap_set_launch(void *layers);
+void   *march_cap_save(void);
+void    march_cap_restore(void *saved);
+void   *march_cap_push(void *layer);
+void   *march_cap_enter(void *auth);
+void   *march_cap_grant_text(void);
+void    march_cap_release(void *layers);
 
 /* Process self-inspection: peak RSS in bytes, both platforms. */
 int64_t march_peak_rss_bytes(void);

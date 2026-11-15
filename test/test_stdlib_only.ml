@@ -368,7 +368,10 @@ let test_shipped_table () =
       "epoch_hold"; "epoch_release"; "epoch_draining"; "epoch_drain"; "epoch_hold_next_spawn"; "epoch_holds";
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
       (* ocap phase 1: the capability check point (stdlib/authority.march) *)
-      "cap_check_raw"; "cap_launch_text"; "reload_request";
+      "cap_check_raw"; "cap_launch_text";
+      (* ocap phase 4: the authority slot and the launch layers *)
+      "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push"; "cap_enter"; "cap_grant_text";
+      "reload_request";
       "handle_new"; "handle_enter"; "handle_leave"; "handle_close"; "handle_detach";
       "handle_is_closed"; "handle_aux";
       "file_open_write"; "file_write_handle"; "file_seek";
@@ -383,13 +386,14 @@ let test_shipped_table () =
                              && not (String.length name > 7 && String.sub name 0 7 = "handle_")
                              && not (List.mem name [ "file_open_write"; "file_write_handle"; "file_seek";
                                                      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
-                                                     "cap_check_raw"; "cap_launch_text" ])
+                                                     "cap_check_raw"; "cap_launch_text";
+                                                     "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push"; "cap_enter"; "cap_grant_text" ])
                              && not (List.mem name task10_raw_builtins))
        !TB.stdlib_only);
   List.iter (fun name ->
       Alcotest.(check bool) (name ^ " suggestion names Authority.check") true
         (contains ~needle:"`Authority.check(kind, target)`" (List.assoc name !TB.stdlib_only)))
-    [ "cap_check_raw"; "cap_launch_text" ];
+    [ "cap_check_raw"; "cap_launch_text"; "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push"; "cap_enter"; "cap_grant_text" ];
   Alcotest.(check bool) "actor_inspect suggestion names Actor.debug" true
     (contains ~needle:"`Actor.debug`" (List.assoc "actor_inspect" !TB.stdlib_only));
   (* No throwaway entry installed: the shipped table itself gates user code. *)

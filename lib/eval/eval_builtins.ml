@@ -168,6 +168,21 @@ let cap_test_refuse_kinds =
   lazy (String.split_on_char ',' (Lazy.force cap_test_refuse_text)
         |> List.map String.trim |> List.filter (fun k -> k <> ""))
 
+(* ocap phase 4: the run-time authority (runtime/march_runtime.c has the
+   compiled twin, march_runtime.mjs the JS one). [cap_slot] is the current
+   green thread's slot (a [List(Authority.Layer)], [Nil] when empty);
+   [cap_launch] the launch layers, written once. A CapAuthRef is the list
+   value itself. *)
+let cap_nil = VCon ("Nil", [])
+let cap_slot : value ref = ref cap_nil
+let cap_launch : value option ref = ref None
+let cap_is_empty = function VCon ("Nil", []) -> true | _ -> false
+let cap_layers_now () =
+  if not (cap_is_empty !cap_slot) then !cap_slot
+  else match !cap_launch with Some l -> l | None -> cap_nil
+let cap_grant_text =
+  lazy (String.trim (Option.value (Sys.getenv_opt "MARCH_GRANT") ~default:""))
+
 (* Write streams opened by file_open_write.  The interpreter's file handles
    are channels passed around as the Int [Obj.magic chan] (file_open), and a
    channel does not say which way it points, so this table remembers the
@@ -2882,11 +2897,41 @@ let base_env : env =
        compiled twin; the rule must match it exactly) ---- *)
   ; ("cap_check_raw", VBuiltin ("cap_check_raw", function
         | [VString kind; VString _target] ->
-          VInt (if List.mem kind (Lazy.force cap_test_refuse_kinds) then 1 else 0)
+          (* 2: the TEST-ONLY hook refuses the kind; 0: nothing is in force
+             (empty launch, empty slot); 1: Authority.check walks the layers. *)
+          VInt (if List.mem kind (Lazy.force cap_test_refuse_kinds) then 2
+                else if cap_is_empty (cap_layers_now ()) then 0 else 1)
         | _ -> eval_error "cap_check_raw: expected (String, String)"))
   ; ("cap_launch_text", VBuiltin ("cap_launch_text", function
         | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_test_refuse_text)
         | _ -> eval_error "cap_launch_text: takes no arguments"))
+  ; ("cap_layers", VBuiltin ("cap_layers", function
+        | args when args = [] || args = [VUnit] -> cap_layers_now ()
+        | _ -> eval_error "cap_layers: takes no arguments"))
+  ; ("cap_set_launch", VBuiltin ("cap_set_launch", function
+        | [l] ->
+          (match !cap_launch with
+           | Some _ -> eval_error "panic: cap_set_launch: the launch authority is already set"
+           | None -> cap_launch := Some l; VUnit)
+        | _ -> eval_error "cap_set_launch: expected one List(Authority.Layer)"))
+  ; ("cap_save", VBuiltin ("cap_save", function
+        | args when args = [] || args = [VUnit] -> !cap_slot
+        | _ -> eval_error "cap_save: takes no arguments"))
+  ; ("cap_restore", VBuiltin ("cap_restore", function
+        | [r] -> cap_slot := r; VUnit
+        | _ -> eval_error "cap_restore: expected one CapAuthRef"))
+  ; ("cap_push", VBuiltin ("cap_push", function
+        | [l] ->
+          let old = !cap_slot in
+          cap_slot := VCon ("Cons", [l; cap_layers_now ()]);
+          old
+        | _ -> eval_error "cap_push: expected one Authority.Layer"))
+  ; ("cap_enter", VBuiltin ("cap_enter", function
+        | [r] -> let old = !cap_slot in cap_slot := r; old
+        | _ -> eval_error "cap_enter: expected one CapAuthRef"))
+  ; ("cap_grant_text", VBuiltin ("cap_grant_text", function
+        | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_grant_text)
+        | _ -> eval_error "cap_grant_text: takes no arguments"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:

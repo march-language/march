@@ -18,6 +18,21 @@
 
 mod Authority do
 
+  -- The run-time authority (ocap phase 4, specs/plans/2026-11-15-ocap-p4-
+  -- runtime-plan.md). The current authority is a stack of layers, innermost
+  -- first, held in the running green thread's slot (the builtins `cap_save`,
+  -- `cap_push`, `cap_enter`, `cap_restore`), else the launch layers
+  -- (`cap_set_launch`); `cap_layers()` reads whichever is in force. A layer
+  -- is the limit that set it, that limit's scope list as written, and the
+  -- list parsed once into scopes. `Any` admits every target of its kind.
+  --
+  -- The C runtime releases a dropped slot value structurally
+  -- (march_cap_release in runtime/march_runtime.c walks exactly these
+  -- shapes): change a constructor here and change it there.
+  type Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String))
+  type Scope = Scope(String, Arg)
+  type Layer = Layer(CapLimit, String, List(Scope))
+
   doc """
   A one-line description of a refusal: the refused operation written as a
   scope, the limit that refused it, and that limit's scope list.
@@ -96,8 +111,13 @@ mod Authority do
       Ok(())
   """
   fn check(kind : String, target : String) : Result((), CapError) do
-    if cap_check_raw(kind, target) == 0 do Ok(())
-    else Err(CapError(kind, target, ByLaunch, cap_launch_text())) end
+    let r = cap_check_raw(kind, target)
+    if r == 0 do Ok(())
+    else if r == 2 do Err(CapError(kind, target, ByLaunch, cap_launch_text()))
+    -- Task 2: r == 1 means a frame or a scoped launch is in force; walk
+    -- cap_layers() innermost first and refuse at the first layer that does
+    -- not admit (kind, target).
+    else Ok(()) end end
   end
 
 end

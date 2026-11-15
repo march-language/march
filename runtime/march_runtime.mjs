@@ -767,9 +767,58 @@ function marchCapHookInit() {
   return marchCapHook;
 }
 
-/** 0 when the launch admits an operation of `kind` on `target`, else 1. */
+/* ocap phase 4: the run-time authority. The JS target has one thread of
+ * control and no tasks, so the slot is one module variable. Empty is `null`;
+ * a CapAuthRef is the slot's list value itself. */
+let marchCapSlot = null;
+let marchCapLaunch = null;
+let marchCapLaunchSet = false;
+const marchCapNil = () => ({ $: "Nil" });
+const marchCapEmpty = (l) => l === null || l === undefined || l.$ === "Nil";
+
+/** 2 when the TEST-ONLY hook refuses `kind`; 0 when nothing is in force (an
+ * empty launch and an empty slot); else 1 (Authority.check walks the layers). */
 export function march_cap_check_raw(kind, _target) {
-  return marchCapHookInit().kinds.includes(kind) ? 1 : 0;
+  if (marchCapHookInit().kinds.includes(kind)) return 2;
+  return marchCapEmpty(marchCapSlot) && marchCapEmpty(marchCapLaunch) ? 0 : 1;
+}
+
+/** The layers in force: the slot, else the launch, else Nil. */
+export function march_cap_layers() {
+  if (!marchCapEmpty(marchCapSlot)) return marchCapSlot;
+  if (!marchCapEmpty(marchCapLaunch)) return marchCapLaunch;
+  return marchCapNil();
+}
+
+/** Sets the launch layers, once. */
+export function march_cap_set_launch(l) {
+  if (marchCapLaunchSet) throw march_panic_error("panic: ", "cap_set_launch: the launch authority is already set");
+  marchCapLaunchSet = true;
+  marchCapLaunch = marchCapEmpty(l) ? null : l;
+}
+
+export function march_cap_save() { return marchCapSlot; }
+
+export function march_cap_restore(r) { marchCapSlot = marchCapEmpty(r) ? null : r; }
+
+/** Pushes `layer` over the layers in force; returns the old slot. */
+export function march_cap_push(layer) {
+  const old = marchCapSlot;
+  marchCapSlot = { $: "Cons", _0: layer, _1: march_cap_layers() };
+  return old;
+}
+
+/** Sets the slot to `r`; returns the old slot. */
+export function march_cap_enter(r) {
+  const old = marchCapSlot;
+  marchCapSlot = marchCapEmpty(r) ? null : r;
+  return old;
+}
+
+/** MARCH_GRANT, trimmed; "" when unset or blank (or with no `process`). */
+export function march_cap_grant_text() {
+  const raw = (typeof process !== "undefined" && process.env && process.env.MARCH_GRANT) || "";
+  return raw.trim();
 }
 
 /** The test hook's trimmed value, the refusing limit's scope text. */

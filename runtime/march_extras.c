@@ -22,6 +22,7 @@
 #include "march_ctx_escape.h"
 #include <stdarg.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -4341,17 +4342,35 @@ static void march_cap_hook_init(void) {
     }
 }
 
+/* march_runtime.c: the launch layers (NULL = none) and the flag the first
+ * frame push sets. */
+extern _Atomic(void *) march_cap_launch;
+extern _Atomic int march_cap_frames_ever;
+void **march_sched_auth_slot(void);
+
+/* ocap phase 4 (runtime/march_runtime.c): 0 = admitted without looking
+ * further (no launch layers, empty slot); 1 = Authority.check walks the
+ * layers; 2 = refused by the TEST-ONLY hook above (until the conformance
+ * fixtures move to MARCH_GRANT).  The fast path reads two globals and the
+ * hook count and never touches TLS: with no launch layers and no frame ever
+ * pushed, no slot can be non-empty. */
 int64_t march_cap_check_raw(void *kind, void *target) {
     (void)target;
     pthread_once(&march_cap_hook_once, march_cap_hook_init);
-    if (march_cap_hook_n == 0) return 0;
-    march_string *k = (march_string *)kind;
-    for (int i = 0; i < march_cap_hook_n; i++) {
-        if ((int64_t)march_cap_hook_lens[i] == k->len
-            && memcmp(march_cap_hook_kinds[i], k->data, (size_t)k->len) == 0)
-            return 1;
+    if (march_cap_hook_n != 0) {
+        march_string *k = (march_string *)kind;
+        for (int i = 0; i < march_cap_hook_n; i++) {
+            if ((int64_t)march_cap_hook_lens[i] == k->len
+                && memcmp(march_cap_hook_kinds[i], k->data, (size_t)k->len) == 0)
+                return 2;
+        }
     }
-    return 0;
+    if (atomic_load_explicit(&march_cap_launch, memory_order_relaxed) == NULL
+        && !atomic_load_explicit(&march_cap_frames_ever, memory_order_relaxed))
+        return 0;
+    if (atomic_load_explicit(&march_cap_launch, memory_order_acquire) != NULL)
+        return 1;
+    return *march_sched_auth_slot() != NULL ? 1 : 0;
 }
 
 void *march_cap_launch_text(void) {

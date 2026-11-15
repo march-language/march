@@ -857,6 +857,17 @@ let builtin_bindings : (string * scheme) list =
        Not capability operations themselves, so not in builtin_cap_table. *)
     ("cap_check_raw",   Mono (TArrow (t_string, TArrow (t_string, t_int))));
     ("cap_launch_text", Mono (TArrow (t_unit,  t_string)));
+    (* ocap phase 4: the per-green-thread authority slot and the launch
+       layers (runtime/march_runtime.c; stdlib/authority.march declares
+       Layer). A CapAuthRef is a saved slot value: an erased pointer to the
+       slot's layer list, NULL when the slot is empty, generic RC only. *)
+    ("cap_layers",      Mono (TArrow (t_unit, t_list (TCon ("Authority.Layer", [])))));
+    ("cap_set_launch",  Mono (TArrow (t_list (TCon ("Authority.Layer", [])), t_unit)));
+    ("cap_save",        Mono (TArrow (t_unit, TCon ("CapAuthRef", []))));
+    ("cap_restore",     Mono (TArrow (TCon ("CapAuthRef", []), t_unit)));
+    ("cap_push",        Mono (TArrow (TCon ("Authority.Layer", []), TCon ("CapAuthRef", []))));
+    ("cap_enter",       Mono (TArrow (TCon ("CapAuthRef", []), TCon ("CapAuthRef", []))));
+    ("cap_grant_text",  Mono (TArrow (t_unit, t_string)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,

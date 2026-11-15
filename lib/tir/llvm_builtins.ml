@@ -1079,6 +1079,24 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_check_raw(ptr %kind, ptr %target)" };
   { march_name = "cap_launch_text"; c_name = Some "march_cap_launch_text"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_launch_text()" };
+  (* ocap phase 4: the per-green-thread authority slot and the launch layers
+     (runtime/march_runtime.c). A CapAuthRef is the slot's list pointer,
+     NULL when empty. *)
+  { march_name = "cap_layers"; c_name = Some "march_cap_layers";
+    ret_ty = Some (Tir.TCon ("List", [Tir.TCon ("Authority.Layer", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_layers()" };
+  { march_name = "cap_set_launch"; c_name = Some "march_cap_set_launch"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @march_cap_set_launch(ptr %layers)" };
+  { march_name = "cap_save"; c_name = Some "march_cap_save"; ret_ty = Some (Tir.TCon ("CapAuthRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_save()" };
+  { march_name = "cap_restore"; c_name = Some "march_cap_restore"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @march_cap_restore(ptr %saved)" };
+  { march_name = "cap_push"; c_name = Some "march_cap_push"; ret_ty = Some (Tir.TCon ("CapAuthRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_push(ptr %layer)" };
+  { march_name = "cap_enter"; c_name = Some "march_cap_enter"; ret_ty = Some (Tir.TCon ("CapAuthRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_enter(ptr %auth)" };
+  { march_name = "cap_grant_text"; c_name = Some "march_cap_grant_text"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_grant_text()" };
   (* peak_rss_bytes: process self-inspection, not capability-gated (see
      typecheck.ml — deliberately absent from the capability table). *)
   { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
@@ -2082,6 +2100,13 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_unix_time_ms";
   PDeclare "march_cap_check_raw";
   PDeclare "march_cap_launch_text";
+  PDeclare "march_cap_layers";
+  PDeclare "march_cap_set_launch";
+  PDeclare "march_cap_save";
+  PDeclare "march_cap_restore";
+  PDeclare "march_cap_push";
+  PDeclare "march_cap_enter";
+  PDeclare "march_cap_grant_text";
   PDeclare "march_peak_rss_bytes";
   PDeclare "march_live_allocs";
   PDeclare "march_vault_live_tables";

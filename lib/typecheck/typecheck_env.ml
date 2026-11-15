@@ -1898,6 +1898,30 @@ let resolve_qualified_type (name : string) (env : env) : env * int option =
       let env' = load_module_into_env mod_name exports env in
       env', lookup_type name env'
 
+(** [canon_qualified_tcons] for a builtin's signature at a use site, first
+    loading the module of every qualified type name whose bare name is not in
+    scope yet, exactly as [surface_ty] does for a written `Mod.T`.  Without
+    the load, a builtin typed with `Authority.Layer` stays qualified in a
+    module that has not named `Authority`'s types yet, and fails to unify
+    with the bare `Layer` its constructor produces.  The loaded env is used
+    for the lookup only. *)
+let canon_builtin_sig env ty =
+  let rec quals acc = function
+    | TCon (n, args) ->
+      List.fold_left quals (if String.contains n '.' then n :: acc else acc) args
+    | TArrow (a, b) -> quals (quals acc a) b
+    | TTuple ts -> List.fold_left quals acc ts
+    | _ -> acc
+  in
+  let env' =
+    List.fold_left (fun env n ->
+        match String.rindex_opt n '.' with
+        | Some i when lookup_type (String.sub n (i + 1) (String.length n - i - 1)) env = None ->
+          fst (resolve_qualified_type n env)
+        | _ -> env)
+      env (quals [] (repr ty)) in
+  canon_qualified_tcons env' ty
+
 (** Try to resolve a qualified constructor by loading its module.
     Returns (updated_env, ctor_info option). *)
 let resolve_qualified_ctor (name : string) (env : env) : env * ctor_info option =
@@ -2368,6 +2392,13 @@ let stdlib_only : (string * string) list ref =
       (* ocap phase 1: the capability check point (stdlib/authority.march). *)
       ("cap_check_raw", "use `Authority.check(kind, target)`");
       ("cap_launch_text", "use `Authority.check(kind, target)`");
+      ("cap_layers", "use `Authority.check(kind, target)`");
+      ("cap_set_launch", "use `Authority.check(kind, target)`");
+      ("cap_save", "use `Authority.check(kind, target)`");
+      ("cap_restore", "use `Authority.check(kind, target)`");
+      ("cap_push", "use `Authority.check(kind, target)`");
+      ("cap_enter", "use `Authority.check(kind, target)`");
+      ("cap_grant_text", "use `Authority.check(kind, target)`");
       (* DD step 12a: runs a request line through the node's own reload-socket
          dispatch; only the control plane's Agent relays operator-signed lines. *)
       ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)");

@@ -1187,6 +1187,15 @@ and emit_val_impl ctx expr =
       | "cap_launch_text", _ ->
         use_runtime ctx "march_cap_launch_text";
         emit ctx "march_cap_launch_text()"
+      (* ocap phase 4 authority slot; zero-arg ones take March's Unit *)
+      | ("cap_layers" | "cap_save" | "cap_grant_text"), _ ->
+        let f = "march_" ^ name in
+        use_runtime ctx f;
+        emit ctx (f ^ "()")
+      | ("cap_set_launch" | "cap_restore" | "cap_push" | "cap_enter"), [a] ->
+        let f = "march_" ^ name in
+        use_runtime ctx f;
+        emit ctx (f ^ "("); emit_atom ctx a; emit ctx ")"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with

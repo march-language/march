@@ -10871,6 +10871,176 @@ static void *make_cons(void *head, void *tail) {
     return cons;
 }
 
+/* ── Run-time authority (ocap phase 4) ───────────────────────────────────
+ *
+ * specs/plans/2026-11-15-ocap-p4-runtime-plan.md, Task 1.  The current
+ * authority is a list of Authority.Layer values (stdlib/authority.march),
+ * innermost first, held in the running green thread's slot (march_proc.auth,
+ * read through the scheduler's noinline march_sched_auth_slot: procs migrate
+ * across OS threads, so the slot is never a _Thread_local of its own), else
+ * the launch layers, set once at startup.  NULL is "empty" in both places.
+ * The interpreter (lib/eval/eval_builtins.ml) and the JS runtime
+ * (runtime/march_runtime.mjs) implement the same builtins over the list value
+ * itself.
+ *
+ * march_cap_check_raw's fast path (runtime/march_extras.c) reads only the
+ * two globals below: with no launch layers and no frame ever pushed, no slot
+ * can be non-empty, so it answers 0 without touching TLS. */
+_Atomic(void *) march_cap_launch = NULL;
+_Atomic int march_cap_frames_ever = 0;
+static _Atomic int march_cap_launch_set = 0;
+
+/* A CapAuthRef is generic-RC to the compiler (no drop glue: it has no type
+ * declaration), and march_decrc frees a cell without releasing its fields.
+ * So the runtime releases the slot values IT drops (cap_restore's old slot, a
+ * dead proc's slot) structurally, by the shapes stdlib/authority.march
+ * declares:
+ *   List(Layer)    Nil = tag 0 | Cons(Layer, List(Layer)) = tag 1
+ *   Layer          Layer(CapLimit, String, List(Scope))   = tag 0
+ *   CapLimit       ByLaunch = 0 | ByFnNeeds .. ByGrant(String) = 1..4
+ *   Scope          Scope(String, Arg)                     = tag 0
+ *   Arg            Any = 0 | Paths(List(String)) = 1 | Hosts(String) = 2
+ *                  | Names(List(String), List(String))    = 3
+ * A cell is descended into only when this reference is its last (rc 1: no
+ * other holder exists to race with), and only on a tag this table names.  A
+ * type whose short name collides with a user type takes a global tag from
+ * Llvm_builtins.collision_tag_base, far above these, so it is never misread:
+ * at worst its fields leak.  Change a constructor there, change this. */
+enum { CAP_K_LAYERS, CAP_K_LAYER, CAP_K_LIMIT, CAP_K_SCOPES, CAP_K_SCOPE,
+       CAP_K_ARG, CAP_K_STRINGS, CAP_K_STRING };
+
+static void march_cap_release_k(void *p, int k) {
+    while (IS_HEAP_PTR(p)) {
+        int64_t rc = march_rc_peek(p);
+        if (rc >= MARCH_RC_IMMORTAL) return;
+        void *next = NULL;
+        int next_k = k;
+        if (rc == 1) {
+            int32_t tag = ((march_hdr *)p)->tag;
+            void **f = (void **)((char *)p + 16);
+            switch (k) {
+            case CAP_K_LAYERS:
+            case CAP_K_SCOPES:
+            case CAP_K_STRINGS:
+                if (tag == 1) {
+                    march_cap_release_k(f[0], k == CAP_K_LAYERS ? CAP_K_LAYER
+                                            : k == CAP_K_SCOPES ? CAP_K_SCOPE
+                                            : CAP_K_STRING);
+                    next = f[1];   /* the tail: iterate, don't recurse */
+                }
+                break;
+            case CAP_K_LAYER:
+                if (tag == 0) {
+                    march_cap_release_k(f[0], CAP_K_LIMIT);
+                    march_cap_release_k(f[1], CAP_K_STRING);
+                    next = f[2]; next_k = CAP_K_SCOPES;
+                }
+                break;
+            case CAP_K_LIMIT:
+                if (tag >= 1 && tag <= 4) { next = f[0]; next_k = CAP_K_STRING; }
+                break;
+            case CAP_K_SCOPE:
+                if (tag == 0) {
+                    march_cap_release_k(f[0], CAP_K_STRING);
+                    next = f[1]; next_k = CAP_K_ARG;
+                }
+                break;
+            case CAP_K_ARG:
+                if (tag == 1) { next = f[0]; next_k = CAP_K_STRINGS; }
+                else if (tag == 2) { next = f[0]; next_k = CAP_K_STRING; }
+                else if (tag == 3) {
+                    march_cap_release_k(f[0], CAP_K_STRINGS);
+                    next = f[1]; next_k = CAP_K_STRINGS;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        march_decrc(p);
+        p = next;
+        k = next_k;
+    }
+}
+
+/* Releases one reference to a slot value (a List(Authority.Layer) or NULL). */
+void march_cap_release(void *layers) {
+    march_cap_release_k(layers, CAP_K_LAYERS);
+}
+
+static int march_cap_is_nil(void *l) {
+    return !IS_HEAP_PTR(l) || ((march_hdr *)l)->tag == 0;
+}
+
+/* The slot of the running green thread (or of this OS thread, outside one). */
+static inline void **march_cap_slot(void) { return march_sched_auth_slot(); }
+
+void *march_cap_layers(void) {
+    void *cur = *march_cap_slot();
+    if (cur == NULL)
+        cur = atomic_load_explicit(&march_cap_launch, memory_order_acquire);
+    if (cur == NULL) return make_nil();
+    march_incrc(cur);
+    return cur;
+}
+
+void march_cap_set_launch(void *layers) {
+    if (atomic_exchange_explicit(&march_cap_launch_set, 1, memory_order_acq_rel)) {
+        march_cap_release(layers);
+        march_panic(march_string_lit("cap_set_launch: the launch authority is already set", 51));
+        return;
+    }
+    if (march_cap_is_nil(layers)) {   /* an empty launch keeps the fast path */
+        march_cap_release(layers);
+        return;
+    }
+    atomic_store_explicit(&march_cap_launch, layers, memory_order_release);
+}
+
+void *march_cap_save(void) {
+    void *cur = *march_cap_slot();
+    march_incrc(cur);
+    return cur;
+}
+
+void march_cap_restore(void *saved) {
+    void **slot = march_cap_slot();
+    void *old = *slot;
+    *slot = saved;
+    march_cap_release(old);
+}
+
+void *march_cap_push(void *layer) {
+    void *below = march_cap_layers();
+    void *top = make_cons(layer, below);
+    atomic_store_explicit(&march_cap_frames_ever, 1, memory_order_relaxed);
+    void **slot = march_cap_slot();
+    void *old = *slot;
+    *slot = top;
+    return old;   /* the slot's reference moves to the caller */
+}
+
+void *march_cap_enter(void *auth) {
+    if (auth != NULL)
+        atomic_store_explicit(&march_cap_frames_ever, 1, memory_order_relaxed);
+    march_incrc(auth);
+    void **slot = march_cap_slot();
+    void *old = *slot;
+    *slot = auth;
+    return old;
+}
+
+/* MARCH_GRANT, trimmed of spaces and tabs; "" when unset or blank. */
+void *march_cap_grant_text(void) {
+    const char *v = getenv("MARCH_GRANT");
+    if (v == NULL) v = "";
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+    size_t n = strlen(v);
+    while (n > 0 && (v[n - 1] == ' ' || v[n - 1] == '\t'
+                     || v[n - 1] == '\n' || v[n - 1] == '\r')) n--;
+    return march_string_lit(v, (int64_t)n);
+}
+
 /* Helper: allocate a 2-element tuple (tag=0, 2 ptr fields). */
 /* actor_terminal_reason(pid_index) -> Option((tag, message)): the reason a
  * local actor died, with DistLink's wire tags (0 Normal, 1 Killed, 2 Crash),

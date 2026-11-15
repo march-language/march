@@ -33,6 +33,10 @@ let impure_builtins = [
   (* ocap phase 1: two checks must never be merged; the authority they read
      changes between them from phase 4 on. *)
   "cap_check_raw"; "cap_launch_text";
+  (* ocap phase 4: the authority slot is mutable state; every read and write
+     is ordered against the others and against the checks. *)
+  "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push";
+  "cap_enter"; "cap_grant_text";
   (* Actors / tasks / processes *)
   "send"; "kill"; "actor_stop"; "actor_pid_indices"; "spawn"; "receive";
   "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node";
