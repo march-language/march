@@ -194,7 +194,7 @@ let note_migrate_msg ~prefix (def : Ast.fn_def) (fn : Tir.fn_def) =
 let _resume : (Ast.decl list -> Tir.fn_def list * Tir.type_def list) option ref = ref None
 
 (** Lower a module. *)
-let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) ?(launch=false) (m : Ast.module_) : Tir.tir_module =
   _resume := None;
   reset_counter ();
   Lower_state.reset_hosts ();
@@ -1282,6 +1282,55 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 Tir.ELet (v, rhs, body)) needed fn.fn_body in
             { fn with fn_body = body }
         ) all_fns
+  in
+  (* Ocap phase 4: the program entry sets the launch authority before any
+     user code runs, module-level lets included (they are folded into
+     [main]'s body just above, so the call goes in front of them).  A
+     program's entry is [main]; a test binary's is its setup_all block, which
+     every test runner (native and JS) calls once before the first test, so a
+     test file gets one when it has none.  The request is `main`'s
+     (decision 3), or the module's `needs` line for a test file.
+     [Authority.launch_init] returns at once for an unscoped request with
+     MARCH_GRANT unset, so an ordinary program pays one call.  Only with
+     [~launch:true], which the program pipelines pass (the native/JS build
+     and `--jit`); a REPL fragment, whose wrapper is also called `main`, the
+     static capability analyses and unit tests do not.  Skipped too when the
+     stdlib is not part of the module, where there is no [Authority] to
+     call. *)
+  let all_fns =
+    if not launch
+       || not (List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.launch_init_fn)
+                 all_fns)
+    then all_fns
+    else begin
+      let text, scoped = March_typecheck.Typecheck.launch_request m in
+      let launch_call =
+        Tir.EApp
+          ({ Tir.v_name = Tir_names.launch_init_fn;
+             v_ty = Tir.TFn ([ Tir.TString; Tir.TBool ], Tir.TUnit);
+             v_lin = Tir.Unr },
+           [ Tir.ALit (Ast.LitString text); Tir.ALit (Ast.LitBool scoped) ])
+      in
+      let launch body = Tir.ESeq (launch_call, body) in
+      if !test_pairs = [] then
+        List.map (fun (fn : Tir.fn_def) ->
+            if fn.fn_name = "main" then { fn with fn_body = launch fn.fn_body } else fn)
+          all_fns
+      else if List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.setup_all_fn_name)
+          all_fns
+      then
+        List.map (fun (fn : Tir.fn_def) ->
+            if fn.fn_name = Tir_names.setup_all_fn_name
+            then { fn with fn_body = launch fn.fn_body } else fn)
+          all_fns
+      else
+        all_fns
+        @ [ { Tir.fn_name = Tir_names.setup_all_fn_name;
+              fn_params = [];
+              fn_ret_ty = Tir.TCon ("Unit", []);
+              fn_body = launch_call;
+              fn_kind = Tir.FnNormal } ]
+    end
   in
   (* A reference to a function-typed module-level let calls it for the
      closure first (see [Lower_decls.call_fn_typed_module_lets]). *)

@@ -341,6 +341,38 @@ let wrap_expr_as_module
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [main_decl] }
 
+(** The REPL's launch (ocap phase 4, design §21): the full authority of the
+    person at the terminal, the request ["IO"] unscoped, which MARCH_GRANT /
+    [--grant] narrows (a malformed or too-wide grant exits 2 here, before
+    the first prompt).  Both engines hold an authority, the interpreter's
+    and, under the JIT, the C runtime's, so each is launched; the C side
+    only when a grant is set, since an unscoped launch with no grant sets
+    nothing.  The JIT call is generated code, tagged like the control
+    wiring so it may name the [@[stdlib_internal]] [Authority.launch_init].
+    Returns the JIT context to keep using: [None] (the interpreter only) if
+    the JIT launch fails, so no expression runs unnarrowed. *)
+let launch_repl_authority env tc_env (jit_ctx : March_jit.Repl_jit.t option) =
+  March_eval.Eval.launch_authority env ("IO", false);
+  let grant = String.trim (Option.value (Sys.getenv_opt "MARCH_GRANT") ~default:"") in
+  match jit_ctx with
+  | Some jit when grant <> "" ->
+    let sp col =
+      { March_ast.Ast.file = March_typecheck.Typecheck_builtins.control_wiring_file;
+        start_line = 1; end_line = 1; start_col = col; end_col = col + 1 } in
+    let e =
+      March_ast.Ast.EApp
+        (March_ast.Ast.EVar { txt = "Authority.launch_init"; span = sp 1 },
+         [ March_ast.Ast.ELit (March_ast.Ast.LitString "IO", sp 2);
+           March_ast.Ast.ELit (March_ast.Ast.LitBool false, sp 3) ],
+         sp 4) in
+    (try
+       ignore (March_jit.Repl_jit.run_expr jit ~tc_env (wrap_expr_as_module e));
+       jit_ctx
+     with _ ->
+       Printf.eprintf "march: the JIT could not apply MARCH_GRANT; the REPL runs interpreted\n%!";
+       None)
+  | _ -> jit_ctx
+
 (** Wrap a REPL declaration in a synthetic module for TIR lowering. *)
 let wrap_decl_as_module
     (d : March_ast.Ast.decl) : March_ast.Ast.module_ =
@@ -490,6 +522,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let t_s4 = Unix.gettimeofday () in
   Printf.eprintf "[timing] precompile: %.3fs\n%!" (t_s4 -. t_s3);
+  let jit_ctx =
+    if initial_env = None && not is_debug then launch_repl_authority e0 tc0 jit_ctx
+    else jit_ctx in
   let env         = ref e0 in
   let tc_env      = ref tc0 in
   let result_h    = Result_vars.create () in
@@ -1325,6 +1360,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          (e0, tc0))
   in
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
+  let jit_ctx =
+    if initial_env = None && not is_debug then launch_repl_authority e0 tc0 jit_ctx
+    else jit_ctx in
   let env      = ref e0 in
   let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in

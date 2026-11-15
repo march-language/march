@@ -9461,77 +9461,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let scoped = List.map (fun (names, scope) ->
         (String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names), scope)
       ) caps in
-    (* A path scope is only meaningful on a filesystem capability, and only
-       when absolute.  Both are errors rather than warnings: the scope would
-       otherwise be kept and silently ignored (non-filesystem) or mean a
-       different directory per working directory (relative), and either reads
-       as enforcement that is not there.  Reported at the capability name. *)
-    List.iter2 (fun (names, _) (cap, scope) ->
-        match scope with
-        | None -> ()
-        | Some path ->
-          let span = match List.rev names with
-            | (n : Ast.name) :: _ -> n.span
-            | [] -> sp
-          in
-          let is_net_cap = March_caps.Cap_lattice.cap_subsumes "IO.Network" cap in
-          if not (March_caps.Cap_scope.is_scopable cap) then
-            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-              (if is_net_cap then
-                 Printf.sprintf
-                   "`%s` does not take a path scope or a host scope; only \
-                    `IO.NetConnect` takes a host, so `(\"%s\")` would be \
-                    ignored.\n\
-                    hint: scope the outbound capability instead, e.g. \
-                    `needs IO.NetConnect(\"%s\")`; it also bounds the TLS \
-                    connections built on it."
-                   cap path path
-               else
-                 Printf.sprintf
-                   "`%s` does not take a path scope; only filesystem \
-                    capabilities do (`IO.FileRead`, `IO.FileWrite`, \
-                    `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
-                    hint: remove the scope, or scope the filesystem capability \
-                    you mean, e.g. `needs IO.FileSystem(\"%s\")`."
-                   cap path path)
-          else if March_caps.Cap_scope.is_host_scopable cap then
-            (match March_caps.Host_scope.parse_decl (Some path) with
-             | Ok _ -> ()
-             | Error reason ->
-               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-                 (Printf.sprintf
-                    "The host scope `%s` on `%s` is not valid: %s.\n\
-                     hint: write a host, a host and port, or `*.domain`, \
-                     optionally followed by a path prefix, e.g. \
-                     `needs IO.NetConnect(\"api.example.com/v1/\")`."
-                    path cap reason))
-          else if March_caps.Cap_scope.is_name_scopable cap then
-            (match March_caps.Name_scope.parse path with
-             | Ok _ -> ()
-             | Error reason ->
-               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-                 (Printf.sprintf
-                    "The name scope on `%s` is not valid: %s.\n\
-                     hint: give names as strings and prefixes as \
-                     `prefix(\"...\")`, e.g. \
-                     `needs %s(\"sessions\", prefix(\"cache.\"))`."
-                    cap reason cap))
-          else if snd (March_caps.Host_scope.split_options path) <> []
-          then
-            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-              (Printf.sprintf
-                 "`%s` takes no options; `no_redirects` and `methods(...)` \
-                  apply only to `IO.NetConnect`."
-                 cap)
-          else if not (March_caps.Cap_scope.is_absolute path) then
-            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-              (Printf.sprintf
-                 "The scope `%s` on `%s` is a relative path, so it would \
-                  name a different directory depending on the working \
-                  directory at run time.\n\
-                  hint: give an absolute path, one starting with `/`."
-                 path cap))
-      caps scoped;
+    validate_cap_scopes env.errors ~sp caps;
     let paths = List.map fst scoped in
     { env with mod_needs = paths @ env.mod_needs;
                mod_need_scopes = scoped @ env.mod_need_scopes }
@@ -10391,6 +10321,40 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
       sites
   end
 
+(* `main`'s request (ocap phase 4, decision 3), statically: the kinds of its
+   legacy `Cap(P)` parameters together with the paths of its `needs` clause;
+   with neither, the paths of the module's `needs` line.  Scopes play no part
+   here (they are run-time limits); [launch_request] gives the text the
+   program entry hands to [Authority.launch_init].  [`Params] says the grant
+   is written only as `Cap` parameters, which is how the diagnostics below
+   show it. *)
+let main_request_caps (decls : Ast.decl list) (def : Ast.fn_def)
+    (params : string list) : string list * [ `Params | `Needs ] =
+  let needs =
+    match def.Ast.fn_needs with
+    | Some (caps, _) ->
+      List.map (fun (p, _) -> March_ast.Cap_request.path_text p) caps
+    | None -> []
+  in
+  match params, needs with
+  | [], [] ->
+    let module_needs =
+      List.concat_map
+        (function
+          | Ast.DNeeds (caps, _) ->
+            List.map (fun (p, _) -> March_ast.Cap_request.path_text p) caps
+          | _ -> [])
+        decls
+    in
+    (List.sort_uniq String.compare module_needs, `Needs)
+  | _, [] -> (List.sort_uniq String.compare params, `Params)
+  | _ -> (List.sort_uniq String.compare (params @ needs), `Needs)
+
+(* `main`'s launch request as source text and whether it carries a scope
+   (decision 3); see [March_ast.Cap_request.launch_request]. *)
+let launch_request : Ast.module_ -> string * bool =
+  March_ast.Cap_request.launch_request
+
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
@@ -10412,13 +10376,14 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
      [main_site] is found whether or not a grant is present, because stage D
      needs the span to report a MISSING grant — the case where [grants] is
      empty and the program is nonetheless not pure. *)
+  let grant_form = ref `Params in
   let main_site : (string list * Ast.span * Ast.span) option =
     List.find_map
       (function
         | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
           (match def.Ast.fn_clauses with
            | clause :: _ ->
-             let grants =
+             let params =
                List.concat_map
                  (fun p ->
                     match p with
@@ -10429,8 +10394,11 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                     | Ast.FPPat _ -> [])
                  clause.Ast.fc_params
              in
-             Some (List.sort_uniq String.compare grants, clause.Ast.fc_span,
-                   clause.Ast.fc_params_span)
+             (* Decision 3: the grant is `main`'s request, not only its
+                `Cap` parameters. *)
+             let grants, form = main_request_caps decls def params in
+             grant_form := form;
+             Some (grants, clause.Ast.fc_span, clause.Ast.fc_params_span)
            | [] -> None)
         | _ -> None)
       decls
@@ -10551,7 +10519,10 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
     in
     let covered c = List.exists (fun g -> cap_subsumes g c) grants in
     let show_grant =
-      String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
+      match !grant_form with
+      | `Params ->
+        String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
+      | `Needs -> Printf.sprintf "`needs %s`" (String.concat ", " grants)
     in
     List.iter
       (fun c ->
@@ -10730,8 +10701,9 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
 
 let dump_role_authority : bool ref = ref false
 
-(* `main`'s declared grant, as [check_main_grant] reads it: [Some (caps,
-   span)] when there is a `main`, its caps possibly empty. *)
+(* `main`'s declared grant (its request, decision 3), as [check_main_grant]
+   reads it: [Some (caps, span)] when there is a `main`, its caps possibly
+   empty. *)
 let main_grant_of_decls (decls : Ast.decl list) : (string list * Ast.span) option =
   List.find_map
     (function
@@ -10748,7 +10720,7 @@ let main_grant_of_decls (decls : Ast.decl list) : (string list * Ast.span) optio
                 | Ast.FPPat _ -> [])
               clause.Ast.fc_params
           in
-          Some (List.sort_uniq String.compare grants, clause.Ast.fc_params_span)
+          Some (fst (main_request_caps decls def grants), clause.Ast.fc_params_span)
         | [] -> None)
       | _ -> None)
     decls

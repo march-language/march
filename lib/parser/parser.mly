@@ -356,10 +356,11 @@
         (* A `needs` bound, like a return type, may be written on any one
            clause; two clauses declaring DIFFERENT bounds is an error rather
            than a silent pick. *)
-        let merge_needs (a : (name list list * span) option) b =
+        let merge_needs (a : ((name list * string option) list * span) option) b =
           match a, b with
           | Some (pa, _), Some (pb, sb) ->
-            let paths ps = List.map (List.map (fun (n : name) -> n.txt)) ps in
+            let paths ps =
+              List.map (fun (p, sc) -> (List.map (fun (n : name) -> n.txt) p, sc)) ps in
             if paths pa <> paths pb then
               error_raise
                 (Printf.sprintf
@@ -1492,8 +1493,18 @@ upper_dot_path:
 (** A per-function capability bound in a function header:
       fn fetch(url) : String needs IO.NetConnect do ... end
       fn len(s) needs () do ... end
-    Plain capability paths only (no path scope). *)
+      fn load(p) needs IO.FileRead("/srv/") do ... end
+    Each entry may carry a scope, written and encoded as in a module
+    [needs] ([scoped_cap_path]); a scope is enforced at run time
+    (ocap phase 4). *)
 fn_needs_clause:
+  | NEEDS; LPAREN; RPAREN { ([], mk_span ($loc)) }
+  | NEEDS; caps = separated_nonempty_list(COMMA, scoped_cap_path) { (caps, mk_span ($loc)) }
+
+(** An interface method's bound, [fn m : t needs A.B, C]: plain capability
+    paths only.  It bounds other modules' impls statically and is never a
+    run-time frame, so it has no scope. *)
+method_needs_clause:
   | NEEDS; LPAREN; RPAREN { ([], mk_span ($loc)) }
   | NEEDS; caps = separated_nonempty_list(COMMA, cap_path) { (caps, mk_span ($loc)) }
 
@@ -1694,7 +1705,7 @@ iface_law:
         fn_bounds = []; fn_attr_args = attr_args_of attrs_args; fn_needs = None } }
 
 method_sig:
-  | FN; name = lower_name; COLON; t = ty; needs = option(fn_needs_clause);
+  | FN; name = lower_name; COLON; t = ty; needs = option(method_needs_clause);
     default = option(preceded_by_do_end(expr))
     { { md_name = name; md_ty = t; md_default = default; md_needs = needs } }
 

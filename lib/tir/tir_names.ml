@@ -747,6 +747,11 @@ let setup_fn_name = "__march_setup__"
 (** Fixed synthetic fn name for a module's `setup_all` block. *)
 let setup_all_fn_name = "__march_setup_all__"
 
+(** The stdlib function every program entry calls first (ocap phase 4):
+    [Authority.launch_init(request, scoped)], inserted by [Lower] at the
+    front of [main] (or of a test binary's setup_all block). *)
+let launch_init_fn = "Authority.launch_init"
+
 (* ── C-runtime extern prefix: "march_" ──────────────────────────────────
    Producer: lib/tir/lower.ml injects C-runtime extern calls (e.g.
    march_compare_int, march_hash_int) with this fixed prefix when

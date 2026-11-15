@@ -351,7 +351,17 @@ val task_builtins : env
 val eval_with_reduction_tracking : value -> value * int
 type stub = { mutable sv : value; }
 val eval_decl : env -> March_ast.Ast.decl -> env
-val eval_module_env : March_ast.Ast.module_ -> env
+
+(** [launch_authority env (text, scoped)]: a program launch (ocap phase 4):
+    reset the run-time authority, then run [Authority.launch_init] from
+    [env].  No-op when [env] has no [Authority]. *)
+val launch_authority : env -> string * bool -> unit
+
+(** [launch]: `main`'s request ([March_ast.Cap_request.launch_request]);
+    when given, [Authority.launch_init] runs before the entry file's
+    top-level declarations (ocap phase 4). *)
+val eval_module_env : ?launch:string * bool -> March_ast.Ast.module_ -> env
+
 val eval_stdlib_decls : March_ast.Ast.decl list -> unit
 val letstar_repl_bind :
   env ->

@@ -183,6 +183,11 @@ let cap_layers_now () =
 let cap_grant_text =
   lazy (String.trim (Option.value (Sys.getenv_opt "MARCH_GRANT") ~default:""))
 
+(* A fresh program launch (ocap phase 4): no launch layers, an empty slot. *)
+let reset_cap_authority () =
+  cap_launch := None;
+  cap_slot := cap_nil
+
 (* Write streams opened by file_open_write.  The interpreter's file handles
    are channels passed around as the Int [Obj.magic chan] (file_open), and a
    channel does not say which way it points, so this table remembers the

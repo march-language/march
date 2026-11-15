@@ -294,10 +294,14 @@ and fn_def = {
           [@[decreases(e, ...)]] has one (termination design §2.1), and
           [@[deprecated("message")]] has its one string literal (read it with
           [deprecation_of_fn]); each name is also in [fn_attrs], plain. *)
-  fn_needs : (name list list * span) option;
+  fn_needs : ((name list * string option) list * span) option;
       (** A per-function capability bound, [fn f(x) needs IO.Console do]:
-          the capability paths and the clause's span.  [Some ([], _)] is
-          [needs ()], the empty bound.  [None] when no clause declares one.
+          the capability paths, each with an optional scope written and
+          encoded exactly as in a module [DNeeds]
+          ([fn f() needs IO.FileRead("/srv/") do]), and the clause's span.
+          [Some ([], _)] is [needs ()], the empty bound.  [None] when no
+          clause declares one.  The static checks read only the paths; a
+          scope is enforced at run time (ocap phase 4).
           See specs/plans/2026-11-01-per-function-needs-bounds.md. *)
 }
 
@@ -512,7 +516,7 @@ and method_decl = {
   md_default : expr option;              (** Optional default implementation *)
   md_needs : (name list list * span) option;
     (** [fn m : t needs A.B, C]: a capability bound every impl of [m] (and
-        the default body) is checked against.  Same shape as [fn_needs].  A
+        the default body) is checked against.  Paths only (no scope).  A
         check on impls only, never part of [m]'s type, so it threads nothing
         through callers or [when] constraints. *)
 }

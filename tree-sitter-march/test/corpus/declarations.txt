@@ -232,6 +232,42 @@ end
         (identifier)))))
 
 ================================================================================
+Function with a scoped needs bound
+================================================================================
+mod Foo do
+fn load(p : String) needs IO.FileRead("/srv/"), IO.NetConnect("api.x.com", methods(get)) do p end
+end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      (fn_needs
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (capability_scope
+          (string))
+        (module_path
+          (type_identifier)
+          (type_identifier))
+        (capability_scope
+          (string)
+          (scope_option
+            (identifier)
+            (identifier))))
+      body: (block_body
+        (identifier)))))
+
+================================================================================
 Interface method with a needs bound
 ================================================================================
 mod Foo do

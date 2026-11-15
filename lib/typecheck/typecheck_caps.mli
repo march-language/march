@@ -18,6 +18,12 @@
 open Typecheck_types
 open Typecheck_env
 
+(** Validate the scopes of a `needs` list (a module's [DNeeds] or a
+    function's [fn_needs]): each scope must suit its capability, and a path
+    scope must be absolute.  [sp] is the fallback span. *)
+val validate_cap_scopes :
+  March_errors.Errors.ctx -> sp:Ast.span -> (Ast.name list * string option) list -> unit
+
 val is_migrate_fn_name : string -> bool
 
 val check_module_needs :

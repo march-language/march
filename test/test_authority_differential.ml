@@ -307,7 +307,7 @@ let sh ~dir ~home ?(env = "") cmd =
 (* [src] built once per mode and run under each env; one output per env. *)
 let run_modes ~src ~envs : (string * string list) list =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
-  let modes = [ "interp"; "compiled" ] @ (if Lazy.force have_node then [ "js" ] else []) in
+  let modes = [ "interp"; "jit"; "compiled" ] @ (if Lazy.force have_node then [ "js" ] else []) in
   List.map (fun mode ->
       let dir = Filename.temp_dir "march-auth-launch" "" in
       let home = Filename.concat dir "home" in
@@ -321,6 +321,8 @@ let run_modes ~src ~envs : (string * string list) list =
             match mode with
             | "interp" ->
               List.map (fun env -> sh ~dir ~home ~env (exe ^ " --stdlib-source launch.march")) envs
+            | "jit" ->
+              List.map (fun env -> sh ~dir ~home ~env (exe ^ " --jit --stdlib-source launch.march")) envs
             | "compiled" ->
               let b = sh ~dir ~home (exe ^ " --compile --opt 0 --stdlib-source launch.march -o ./prog") in
               if not (Sys.file_exists (Filename.concat dir "prog")) then List.map (fun _ -> b) envs
@@ -341,8 +343,9 @@ let launch_src = {|mod LaunchFixture do
     Err(e) -> Authority.describe(e)
     end
   end
-  fn main(_c : Cap(IO)) do
-    Authority.launch_init("IO.Console, IO.FileRead(\"/srv/\")", true)
+  -- main's needs clause is the launch request (decision 3): the program
+  -- entry calls Authority.launch_init with it before any user code.
+  fn main() needs IO.Console, IO.FileRead("/srv/") do
     println(show(Authority.check("IO.FileRead", "/srv/a")))
     println(show(Authority.check("IO.FileRead", "/etc/a")))
     println(show(Authority.check("IO.Clock", "")))
@@ -404,8 +407,7 @@ let test_launch () =
    runtime keeps its fast path. *)
 let unscoped_src = {|mod UnscopedFixture do
   needs IO
-  fn main(_c : Cap(IO)) do
-    Authority.launch_init("IO.Console, IO.Clock", false)
+  fn main() needs IO.Console, IO.Clock do
     println("layers " ++ int_to_string(List.length(cap_layers())) ++ " raw "
       ++ int_to_string(cap_check_raw("IO.Clock", "")))
   end
@@ -515,6 +517,177 @@ let test_gone_cwd () =
             Alcotest.(check string) (mode ^ " in a removed cwd") "refused ok\n" out))
     modes
 
+(* ── The program entry (ocap phase 4, Task 3) ──────────────────────────
+   Every entry calls Authority.launch_init exactly once, before module-level
+   code: a top-level `let` that prints runs after the launch, so a launch
+   error leaves no "init" line, and a good launch prints it once. *)
+let entry_src = {|mod EntryFixture do
+  needs IO
+  let banner = println("init")
+  fn verdict(r : Result((), CapError)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(_) -> "refused"
+    end
+  end
+  fn main() needs IO.Console, IO.FileRead("/srv/") do
+    println(verdict(Authority.check("IO.FileRead", "/srv/a")) ++ " "
+      ++ verdict(Authority.check("IO.FileRead", "/etc/a")) ++ " layers "
+      ++ int_to_string(List.length(cap_layers())))
+  end
+end
+|}
+
+let test_entry_order () =
+  let req = "IO.Console, IO.FileRead(\"/srv/\")" in
+  let cases =
+    [ ("", "init\nok refused layers 1\n");
+      ("MARCH_GRANT='IO.Console'", "init\nrefused refused layers 1\n");
+      ("MARCH_GRANT='IO.FileRead(\"/etc/\")'",
+       "<exit 2>\nmarch: MARCH_GRANT grants IO.FileRead(\"/etc\"), which main does not request (main requests: "
+       ^ req ^ ")\n") ]
+  in
+  List.iter (fun (mode, outs) ->
+      List.iter2 (fun (env, want) got ->
+          Alcotest.(check string) (Printf.sprintf "%s [%s]" mode env) want got)
+        cases outs)
+    (run_modes ~src:entry_src ~envs:(List.map fst cases))
+
+(* A pure program (no capability operation, no needs) launches too: its
+   request is empty, so any grant is wider than it. *)
+let pure_src = {|mod PureFixture do
+  fn main() do
+    let _x = 1 + 2
+    ()
+  end
+end
+|}
+
+let test_entry_pure () =
+  let cases =
+    [ ("", "");
+      ("MARCH_GRANT='IO.Console('",
+       "<exit 2>\nmarch: MARCH_GRANT is not a scope list: a scope is not closed: expected `)`\n") ]
+  in
+  List.iter (fun (mode, outs) ->
+      List.iter2 (fun (env, want) got ->
+          Alcotest.(check string) (Printf.sprintf "%s [%s]" mode env) want got)
+        cases outs)
+    (run_modes ~src:pure_src ~envs:(List.map fst cases))
+
+(* A test file's request is its module's needs line (design §21), in each
+   test runner: `march test`, a compiled --test binary and a JS --test
+   module.  The runner output is reduced to its verdict line. *)
+let test_file_src = {|mod LaunchTestFile do
+  needs IO.Console, IO.FileRead("/srv/")
+  fn verdict(r : Result((), CapError)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(_) -> "refused"
+    end
+  end
+  test "the launch request is the module needs line" do
+    assert(verdict(Authority.check("IO.FileRead", "/srv/a")) == "ok")
+    assert(verdict(Authority.check("IO.FileRead", "/etc/a")) == "refused")
+  end
+end
+|}
+
+let test_entry_test_runners () =
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let modes = [ "march test"; "compiled --test" ] @ (if Lazy.force have_node then [ "js --test" ] else []) in
+  List.iter (fun mode ->
+      let dir = Filename.temp_dir "march-auth-tests" "" in
+      let home = Filename.concat dir "home" in
+      Unix.mkdir home 0o755;
+      Unix.mkdir (Filename.concat home ".cache") 0o755;
+      Fun.protect ~finally:(fun () -> try rm_rf dir with _ -> ()) (fun () ->
+          let oc = open_out_bin (Filename.concat dir "launch_test.march") in
+          output_string oc test_file_src;
+          close_out oc;
+          let run env =
+            match mode with
+            | "march test" -> sh ~dir ~home ~env (exe ^ " test launch_test.march")
+            | "compiled --test" ->
+              ignore (sh ~dir ~home (exe ^ " --compile --test --opt 0 launch_test.march -o ./prog"));
+              sh ~dir ~home ~env "./prog"
+            | _ ->
+              ignore (sh ~dir ~home (exe ^ " --target js --test --opt 0 launch_test.march -o ./prog.mjs"));
+              sh ~dir ~home ~env "node ./prog.mjs"
+          in
+          let ok = run "" in
+          (* A runner exits non-zero on a failing test, which [sh] reports
+             as "<exit N>". *)
+          let contains sub str =
+            try ignore (Str.search_forward (Str.regexp_string sub) str 0); true
+            with Not_found -> false in
+          Alcotest.(check bool) (mode ^ ": the test passes under the module's request\n" ^ ok) true
+            (not (contains "<exit" ok) && contains "." ok);
+          let bad = run "MARCH_GRANT='IO.Clock'" in
+          Alcotest.(check bool) (mode ^ ": a wider grant exits 2 before any test\n" ^ bad) true
+            (try
+               ignore (Str.search_forward (Str.regexp_string
+                 "<exit 2>\nmarch: MARCH_GRANT grants IO.Clock, which main does not request (main requests: IO.Console, IO.FileRead(\"/srv/\"))") bad 0);
+               true
+             with Not_found -> false)))
+    modes
+
+(* The REPL launches with the full authority ("IO", unscoped), which a grant
+   narrows; a bad grant exits 2 before the first prompt.  Both engines: the
+   JIT (the default) and the interpreter. *)
+let test_entry_repl () =
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let dir = Filename.temp_dir "march-auth-repl" "" in
+  let home = Filename.concat dir "home" in
+  Unix.mkdir home 0o755;
+  Unix.mkdir (Filename.concat home ".cache") 0o755;
+  Fun.protect ~finally:(fun () -> try rm_rf dir with _ -> ()) (fun () ->
+      let oc = open_out_bin (Filename.concat dir "in.txt") in
+      output_string oc "Authority.check(\"IO.FileRead\", \"/etc/a\")\n:quit\n";
+      close_out oc;
+      let refused out =
+        try ignore (Str.search_forward (Str.regexp_string
+            "= Err(CapError(\"IO.FileRead\", \"/etc/a\", ByLaunch, \"IO.Console\"))") out 0); true
+        with Not_found -> false in
+      List.iter (fun (engine, env0) ->
+          let full = sh ~dir ~home ~env:env0 (exe ^ " < in.txt") in
+          Alcotest.(check bool) (engine ^ ": no grant, nothing refused\n" ^ full) false (refused full);
+          let narrowed = sh ~dir ~home ~env:(env0 ^ " MARCH_GRANT=IO.Console") (exe ^ " < in.txt") in
+          Alcotest.(check bool) (engine ^ ": the grant narrows the REPL\n" ^ narrowed) true (refused narrowed);
+          let bad = sh ~dir ~home ~env:(env0 ^ " MARCH_GRANT='IO.Console('") (exe ^ " < in.txt") in
+          (* stderr also carries the REPL's [timing] lines, so the exit and
+             the launch line are matched separately. *)
+          let has sub = try ignore (Str.search_forward (Str.regexp_string sub) bad 0); true
+            with Not_found -> false in
+          Alcotest.(check bool) (engine ^ ": a malformed grant exits 2\n" ^ bad) true
+            (has "<exit 2>\n" && has "\nmarch: MARCH_GRANT is not a scope list"))
+        [ ("jit", ""); ("interp", "MARCH_REPL_INTERP=1") ])
+
+(* `--grant SCOPES` is MARCH_GRANT for the run (interpreter, --jit,
+   `march test`). *)
+let test_grant_flag () =
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let dir = Filename.temp_dir "march-auth-grant" "" in
+  let home = Filename.concat dir "home" in
+  Unix.mkdir home 0o755;
+  Unix.mkdir (Filename.concat home ".cache") 0o755;
+  Fun.protect ~finally:(fun () -> try rm_rf dir with _ -> ()) (fun () ->
+      let write name src =
+        let oc = open_out_bin (Filename.concat dir name) in
+        output_string oc src; close_out oc in
+      write "entry.march" entry_src;
+      write "launch_test.march" test_file_src;
+      let flag = " --grant 'IO.Console'" in
+      Alcotest.(check string) "interp --grant" "init\nrefused refused layers 1\n"
+        (sh ~dir ~home (exe ^ flag ^ " --stdlib-source entry.march"));
+      Alcotest.(check string) "--jit --grant" "init\nrefused refused layers 1\n"
+        (sh ~dir ~home (exe ^ flag ^ " --jit --stdlib-source entry.march"));
+      let t = sh ~dir ~home (exe ^ " test --grant IO.Clock launch_test.march") in
+      Alcotest.(check bool) ("march test --grant\n" ^ t) true
+        (try ignore (Str.search_forward (Str.regexp_string
+            "<exit 2>\nmarch: MARCH_GRANT grants IO.Clock") t 0); true
+         with Not_found -> false))
+
 let tests =
   [ ( "authority_launch",
       [ Alcotest.test_case "launch_init, the grant, enter_fn and the layered check" `Quick
@@ -524,6 +697,15 @@ let tests =
         Alcotest.test_case "relative targets resolve against the cwd" `Quick test_cwd;
         Alcotest.test_case "an unreadable cwd refuses a relative target" `Quick
           test_gone_cwd ] );
+    ( "launch_entry",
+      [ Alcotest.test_case "every runtime launches before module-level code" `Quick
+          test_entry_order;
+        Alcotest.test_case "a pure program launches too" `Quick test_entry_pure;
+        Alcotest.test_case "test runners launch with the module's needs line" `Quick
+          test_entry_test_runners;
+        Alcotest.test_case "the REPL launches with IO, narrowed by a grant" `Quick
+          test_entry_repl;
+        Alcotest.test_case "--grant sets MARCH_GRANT for the run" `Quick test_grant_flag ] );
     ( "authority_differential",
       [ Alcotest.test_case "the reference admits and refuses" `Quick
           test_reference_not_vacuous;

@@ -529,7 +529,7 @@ let verify_repl ?(repl_vars = []) stage tir =
       tir;
   tir
 
-let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) ?(fragment = true) (m : March_ast.Ast.module_) =
+let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) ?(fragment = true) ?(launch = false) (m : March_ast.Ast.module_) =
   (* [~shadow_builtins:false]: fragments bind fns by bare name through closure
      slots, and [is_c_runtime_fn] already keeps a runtime-defined name out of
      a fragment; renaming here would desynchronise the two. *)
@@ -539,7 +539,7 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
   end;
   let tir =
     Fun.protect ~finally:(fun () -> March_tir.Lower_state.set_fragment_scope "")
-      (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false m) in
+      (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false ~launch m) in
   (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
      immediately post-lower (pre-mono), and without it a function behaves
      differently in the REPL than when compiled.  The position matters as much
@@ -1291,7 +1291,8 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
        long-lived, reused environment. *)
     refs = ref []; current_decl = ref "" } in
   let type_map = checked_type_map (March_typecheck.Typecheck.check_module_with_env env m) in
-  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
+  (* A whole program: its `main` launches the authority (ocap phase 4). *)
+  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~launch:true m in
   (* Prune functions unreachable from `main`, exactly as the ahead-of-time
      pipeline does immediately before LLVM emit (see [Dce.prune_unreachable]'s
      call in bin/main.ml).  This is a LINKABILITY requirement here, not an

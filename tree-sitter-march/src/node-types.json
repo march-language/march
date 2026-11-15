@@ -3407,6 +3407,25 @@
     }
   },
   {
+    "type": "capability_scope",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "scope_option",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "choose_branch",
     "named": true,
     "fields": {
@@ -4833,6 +4852,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "capability_scope",
+          "named": true
+        },
         {
           "type": "module_path",
           "named": true

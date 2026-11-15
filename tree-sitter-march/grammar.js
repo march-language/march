@@ -182,8 +182,18 @@ module.exports = grammar({
       'do', field('body', $.block_body), 'end',
     ),
 
-    // Per-function capability bound: `needs IO.Console`, or `needs ()`.
-    fn_needs: $ => seq('needs', choice(seq('(', ')'), commaSep1($.module_path))),
+    // Per-function capability bound: `needs IO.Console`, or `needs ()`.  An
+    // entry may carry a scope, as in a module `needs` line (ocap phase 4):
+    // `needs IO.FileRead("/srv/")`.  The scope is its own node after the
+    // path, so an unscoped bound keeps its old tree.
+    fn_needs: $ => seq('needs', choice(
+      seq('(', ')'),
+      commaSep1(seq($.module_path, optional($.capability_scope))),
+    )),
+    capability_scope: $ => seq('(', choice(
+      seq($.string, repeat(seq(',', $.string)), repeat(seq(',', $.scope_option))),
+      commaSep1($.scope_option),
+    ), ')'),
 
     fn_param: $ => choice(
       $.named_param,

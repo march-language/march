@@ -22,6 +22,87 @@ open Typecheck_types
 open Typecheck_env
 open Typecheck_builtins
 
+(** Validate the scopes of a `needs` list (a module's [DNeeds] or a
+    function's [fn_needs]): each scope must suit its capability, and a path
+    scope must be absolute.  [sp] is the clause's span, the fallback when an
+    entry has no name span. *)
+let validate_cap_scopes (errors : Err.ctx) ~(sp : Ast.span)
+    (caps : (Ast.name list * string option) list) : unit =
+  let scoped = List.map (fun (names, scope) ->
+      (String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names), scope)
+    ) caps in
+  (* A path scope is only meaningful on a filesystem capability, and only
+     when absolute.  Both are errors rather than warnings: the scope would
+     otherwise be kept and silently ignored (non-filesystem) or mean a
+     different directory per working directory (relative), and either reads
+     as enforcement that is not there.  Reported at the capability name. *)
+  List.iter2 (fun (names, _) (cap, scope) ->
+      match scope with
+      | None -> ()
+      | Some path ->
+        let span = match List.rev names with
+          | (n : Ast.name) :: _ -> n.span
+          | [] -> sp
+        in
+        let is_net_cap = March_caps.Cap_lattice.cap_subsumes "IO.Network" cap in
+        if not (March_caps.Cap_scope.is_scopable cap) then
+          Err.error ~code:Err.Code.invalid_cap_scope errors ~span
+            (if is_net_cap then
+               Printf.sprintf
+                 "`%s` does not take a path scope or a host scope; only \
+                  `IO.NetConnect` takes a host, so `(\"%s\")` would be \
+                  ignored.\n\
+                  hint: scope the outbound capability instead, e.g. \
+                  `needs IO.NetConnect(\"%s\")`; it also bounds the TLS \
+                  connections built on it."
+                 cap path path
+             else
+               Printf.sprintf
+                 "`%s` does not take a path scope; only filesystem \
+                  capabilities do (`IO.FileRead`, `IO.FileWrite`, \
+                  `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
+                  hint: remove the scope, or scope the filesystem capability \
+                  you mean, e.g. `needs IO.FileSystem(\"%s\")`."
+                 cap path path)
+        else if March_caps.Cap_scope.is_host_scopable cap then
+          (match March_caps.Host_scope.parse_decl (Some path) with
+           | Ok _ -> ()
+           | Error reason ->
+             Err.error ~code:Err.Code.invalid_cap_scope errors ~span
+               (Printf.sprintf
+                  "The host scope `%s` on `%s` is not valid: %s.\n\
+                   hint: write a host, a host and port, or `*.domain`, \
+                   optionally followed by a path prefix, e.g. \
+                   `needs IO.NetConnect(\"api.example.com/v1/\")`."
+                  path cap reason))
+        else if March_caps.Cap_scope.is_name_scopable cap then
+          (match March_caps.Name_scope.parse path with
+           | Ok _ -> ()
+           | Error reason ->
+             Err.error ~code:Err.Code.invalid_cap_scope errors ~span
+               (Printf.sprintf
+                  "The name scope on `%s` is not valid: %s.\n\
+                   hint: give names as strings and prefixes as \
+                   `prefix(\"...\")`, e.g. \
+                   `needs %s(\"sessions\", prefix(\"cache.\"))`."
+                  cap reason cap))
+        else if snd (March_caps.Host_scope.split_options path) <> []
+        then
+          Err.error ~code:Err.Code.invalid_cap_scope errors ~span
+            (Printf.sprintf
+               "`%s` takes no options; `no_redirects` and `methods(...)` \
+                apply only to `IO.NetConnect`."
+               cap)
+        else if not (March_caps.Cap_scope.is_absolute path) then
+          Err.error ~code:Err.Code.invalid_cap_scope errors ~span
+            (Printf.sprintf
+               "The scope `%s` on `%s` is a relative path, so it would \
+                name a different directory depending on the working \
+                directory at run time.\n\
+                hint: give an absolute path, one starting with `/`."
+               path cap))
+    caps scoped
+
 (** The `init` arguments of an actor's supervise-block children
     (`Child f(e1, e2)`, D24): expressions that run in the actor's own spawn
     glue, so they are scanned and charged exactly like its init expression. *)
@@ -737,7 +818,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
     match def.Ast.fn_needs with
     | None -> ()
     | Some (paths, nsp) ->
-      let bound = List.map cap_path_of_names paths in
+      validate_cap_scopes env.errors ~sp:nsp paths;
+      (* A scope is a run-time limit (ocap phase 4); statically the bound
+         is its paths. *)
+      let bound = List.map (fun (p, _) -> cap_path_of_names p) paths in
       List.iter
         (fun c ->
            if unknown_bound_cap ~span:nsp c then ()
@@ -1270,7 +1354,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                (match iface_method_bound m with
                 | None -> record_fn_bound ~origin:own_origin ~qname:mangled def
                 | Some (ibound, _) ->
-                  let own = List.sort_uniq String.compare (List.map cap_path_of_names paths) in
+                  let own = List.sort_uniq String.compare (List.map (fun (p, _) -> cap_path_of_names p) paths) in
                   let wider =
                     List.filter (fun c -> not (List.exists (fun b -> cap_subsumes b c) ibound)) own
                   in

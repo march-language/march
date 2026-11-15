@@ -2985,6 +2985,9 @@ let run_test_cmd args =
     | "--ffi-c" :: v :: rest -> ffi_c_files := v :: !ffi_c_files; parse_args rest
     | "--ffi-link" :: v :: rest -> ffi_link_flags := v :: !ffi_link_flags; parse_args rest
     | "--ffi-so" :: v :: rest -> March_eval.Eval.ffi_shim_so := Some v; parse_args rest
+    (* --grant SCOPES narrows each test file's launch authority, as
+       MARCH_GRANT does (ocap phase 4). *)
+    | "--grant" :: v :: rest -> Unix.putenv "MARCH_GRANT" v; parse_args rest
     | a :: rest -> targets := a :: !targets; parse_args rest
   in
   parse_args args;
@@ -4802,7 +4805,7 @@ let compile filename =
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir =
-      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared
+      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) ~launch:true desugared
       with
       | March_errors.Errors.Diagnostic_exn d ->
         (* A positioned rejection of something the compiled backend does not
@@ -8019,6 +8022,8 @@ let () =
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("--jit",        Arg.Set jit_mode,
      " Run the program through the in-process ORC JIT instead of the interpreter (experimental)");
+    ("--grant",      Arg.String (fun g -> Unix.putenv "MARCH_GRANT" g),
+     "<scopes>  Narrow the program's launch authority for this run, as MARCH_GRANT does (interpreter, --jit, REPL); e.g. --grant 'IO.Console, IO.FileRead(\"/srv/\")'");
     ("--compile-so", Arg.Set compile_so,
      " Compile as a shared library for hot reload patching (no @main, no dispatch init)");
     ("--hot-reload", Arg.String (fun p -> hot_reload_prefix := Some p),

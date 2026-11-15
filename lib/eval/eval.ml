@@ -4296,7 +4296,21 @@ let top_level_file_runs (decls : decl list) : decl list list =
   in
   go [] None [] decls
 
-let eval_module_env (m : module_) : env =
+(* Ocap phase 4: a program launch.  [Authority.launch_init(text, scoped)]
+   sets the launch authority (or, for an unscoped request with MARCH_GRANT
+   unset, returns at once); a malformed or too-wide MARCH_GRANT exits 2 from
+   inside it.  The authority state is reset first: each launch is a fresh
+   program, and the interpreter's run_eval suite and `march test` over
+   several files run many in one process.  No-op when [env] has no
+   [Authority] (a program evaluated without the stdlib). *)
+let launch_authority (env : env) ((text, scoped) : string * bool) : unit =
+  match List.assoc_opt "Authority.launch_init" env with
+  | None -> ()
+  | Some f ->
+    Eval_builtins.reset_cap_authority ();
+    ignore (apply f [ VString text; VBool scoped ])
+
+let eval_module_env ?launch (m : module_) : env =
   (* Reset global actor and task state for this module run *)
   closure_prefix_override := None;
   module_stack := [];
@@ -4500,8 +4514,15 @@ let eval_module_env (m : module_) : env =
      module) never sees a later run's top-level bindings, while a later run
      sees everything before it. *)
   scope_tails := [];
-  let run_envs, final_env =
-    List.fold_left (fun (acc, env) run ->
+  let runs = top_level_file_runs m.mod_decls in
+  let n_runs = List.length runs in
+  let run_envs, final_env, _ =
+    List.fold_left (fun (acc, env, i) run ->
+        (* The entry file's run is the last (the stdlib and MARCH_LIB_PATH
+           modules come first): launch before its top-level lets run. *)
+        (match launch with
+         | Some req when i = n_runs - 1 -> launch_authority env req
+         | _ -> ());
         let scope_ref = ref env in
         scope_ref := install_stubs scope_ref run env;
         local_def_scopes := local_fn_names run :: !local_def_scopes;
@@ -4509,8 +4530,8 @@ let eval_module_env (m : module_) : env =
           Fun.protect ~finally:(fun () -> local_def_scopes := List.tl !local_def_scopes)
             (fun () -> make_recursive_env scope_ref run !scope_ref) in
         scope_ref := run_env;
-        (run_env :: acc, run_env))
-      ([], task_builtins @ base_env) (top_level_file_runs m.mod_decls)
+        (run_env :: acc, run_env, i + 1))
+      ([], task_builtins @ base_env, 0) runs
   in
   install_global_tail final_env;
   install_scope_tails
@@ -4683,7 +4704,7 @@ let run_module (m : module_) : unit =
   Array.fill signal_watchers 0 5 None;
   Array.fill signal_pending  0 5 false;
   Array.fill signal_seen     0 5 false;
-  let env = eval_module_env m in
+  let env = eval_module_env ~launch:(March_ast.Cap_request.launch_request m) m in
   (* Install SIGTERM/SIGINT handlers: graceful shutdown by default, or (once a
      Signal.watch watcher is registered) deferred dispatch with a
      second-delivery shutdown escape hatch. *)
@@ -4817,8 +4838,9 @@ let collect_test_decls (m : module_) :
     include it in the failure message if the test fails.  Opt-in via @capture_io
     in the test source. *)
 let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?(capture_io=false) (m : module_) : int * int * (string * string) list =
-  (* Build the module environment (registers all fns, lets, etc.) *)
-  let env = eval_module_env m in
+  (* Build the module environment (registers all fns, lets, etc.).  The
+     launch request of a test file is its module's `needs` line. *)
+  let env = eval_module_env ~launch:(March_ast.Cap_request.launch_request m) m in
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
   (* Apply filter *)
   let tests = if filter = "" then tests
@@ -4954,8 +4976,12 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
 let run_doctests ?(verbose=false) ?(quiet=false) ?(filter="")
     ~(parse_expr : string -> expr)
     (m : module_) : int * int * (string * string) list =
-  (* Build the module environment *)
-  let env = eval_module_env m in
+  (* Build the module environment.  Doctests belong to every documented
+     function in the merged module (the stdlib's included), not to the test
+     file, so they launch as the REPL does: the full authority, narrowed by
+     MARCH_GRANT / --grant (ocap phase 4).  A fresh launch also drops the
+     test file's own authority, which [run_tests] set in this process. *)
+  let env = eval_module_env ~launch:("IO", false) m in
   (* Collect (qualified_fn_name, doc_string) pairs, walking nested mods *)
   let rec collect_docs prefix decls =
     List.concat_map (fun decl ->

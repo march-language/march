@@ -34,8 +34,14 @@ val lower_module :
   ?test_mode:bool ->
   ?hot_reload:bool ->
   ?shadow_builtins:bool ->
-  ?resumable:bool -> Ast.module_ -> Tir.tir_module
-(** [shadow_builtins] (default [true]): lower an entry-file top-level fn named
+  ?resumable:bool ->
+  ?launch:bool -> Ast.module_ -> Tir.tir_module
+(** [launch] (default [false]): the module is a program, so its entry calls
+    [Authority.launch_init] with `main`'s request first (ocap phase 4): at
+    the front of [main], or of the setup_all block of a test binary.  The
+    program pipelines pass [true]; REPL fragments and analyses do not.
+
+    [shadow_builtins] (default [true]): lower an entry-file top-level fn named
     like a builtin with its own C symbol under a distinct name
     ([Tir_names.builtin_shadow_name]) so codegen does not emit it as that
     symbol.  The REPL JIT passes [false]: it binds each fragment's fns by
