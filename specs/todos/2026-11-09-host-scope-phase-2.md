@@ -13,8 +13,12 @@ Phase 1 shipped (`specs/progress/2026-11-09-host-scoped-network-capabilities.md`
 - **Redirect guard through another module.** A scoped module calling another module's
   `HttpClient`-calling helper is refused today (`cap_host_unproven`); the twin rewrite
   would have to clone the helper chain per scope.
-- **Opaque connection handles.** Integer fds are forgeable, so handle-taking calls and the
-  stdlib server APIs are refused in scoped modules.
+- **Opaque connection handles.** Integer fds were forgeable, so handle-taking calls and the
+  stdlib server APIs are refused in scoped modules. Unblocked since ocap phase 2b Task 10
+  (2026-11-12): the raw descriptor builtins are stdlib-only, so a `Socket` / `Tls.TlsConn` a
+  module holds came from a checked open. Until this is done, `Socket.write` (or `Tls.connect`)
+  on a socket a scoped module was handed is a `cap_host_unproven` false positive
+  (`lib/caps/net_dest.ml` still maps handle operations to `Handle`).
 - **Per-role grants** for protocol roles.
 - **Call-site spans.** Violations point at the module (post-lowering TIR has no spans).
 - **Actor messages to a handed-in pid.** A scoped module sending a message to an actor

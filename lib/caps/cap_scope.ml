@@ -47,9 +47,13 @@ let is_scopable (cap : string) : bool =
   match cap with
   | "IO.FileRead" | "IO.FileWrite" | "IO.FileSystem" -> true
   | "IO.NetConnect" -> true (* a HOST scope: lib/caps/host_scope.ml *)
+  | "IO.Mut" | "IO.Registry" -> true (* a NAME scope: lib/caps/name_scope.ml *)
   | _ -> false
 
 let is_host_scopable (cap : string) : bool = cap = "IO.NetConnect"
+
+let is_name_scopable (cap : string) : bool =
+  match cap with "IO.Mut" | "IO.Registry" -> true | _ -> false
 
 (* ── Scope manifest (embedded in compiled binaries) ─────────────────── *)
 

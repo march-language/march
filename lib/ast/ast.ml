@@ -434,6 +434,11 @@ and actor_def = {
       named [on_stop] with no params so body walkers can treat it like one
       ([actor_body_handlers]) — it is NOT a message constructor.
       See specs/lang/actors.md. *)
+  actor_internal : bool;
+  (** `@[stdlib_internal]` on a stdlib actor: code outside the standard
+      library can neither spawn it nor build one of its messages (the
+      typechecker's [ECon] gate). For actors whose messages carry raw
+      descriptors (ocap phase 2b; `NodeQueue.Writer`, the cluster node). *)
 }
 
 and actor_handler = {

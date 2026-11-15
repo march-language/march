@@ -4,7 +4,7 @@ mod TestNode do
   derive Json for Ping
 
   pfn dead_peer() : Peer do
-    { node_id: "nobody", identity: NodeIdentity.make("nobody", "pk", 1), fd: -1, data_fd: PeerRegistry.no_fd() }
+    PeerRegistry.make("nobody", NodeIdentity.make("nobody", "pk", 1), -1, PeerRegistry.no_fd())
   end
 
   describe "Node.send, the typed remote send" do

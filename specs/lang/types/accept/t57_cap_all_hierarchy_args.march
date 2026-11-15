@@ -5,18 +5,21 @@
 -- rejected with `Unknown module `IO``. The missing 8 (IO.Random, IO.Database,
 -- IO.Spawn, IO.Mut, IO.Telemetry, IO.Foreign, IO.Foreign.Blocking,
 -- IO.NetConnect.TLS) are now registered, matching the hierarchy in
--- lib/caps/cap_lattice.ml. See core-march-types.md §2.8.11.
+-- lib/caps/cap_lattice.ml. See core-march-types.md §2.8.11. IO.Registry (ocap
+-- phase 2) is registered the same way.
 mod HierApp do
   needs IO.Random
   needs IO.Mut
   needs IO.Foreign
   needs IO.Telemetry
+  needs IO.Registry
 
   fn use_caps(
     _r : Cap(IO.Random),
     _m : Cap(IO.Mut),
     _f : Cap(IO.Foreign),
-    _t : Cap(IO.Telemetry)
+    _t : Cap(IO.Telemetry),
+    _g : Cap(IO.Registry)
   ) : Int do
     0
   end

@@ -7,9 +7,11 @@
 -- Most users should use HttpClient (Layer 3) instead. Use this
 -- directly only when you need low-level control over connections.
 --
--- HTTPS requests use the certificate-verifying TLS client.  The fd-oriented
--- APIs deliberately remain plain HTTP only: a raw fd carries no TLS context,
--- so accepting an HTTPS request there could leak a request in plaintext.
+-- HTTPS requests use the certificate-verifying TLS client.  The
+-- connection-oriented APIs (`connect`, `request_on`, `stream_request_on`)
+-- deliberately remain plain HTTP only: a plain `Socket` carries no TLS
+-- context, so accepting an HTTPS request there could leak a request in
+-- plaintext.
 --
 -- doc: try
 
@@ -28,7 +30,103 @@ mod HttpTransport do
     | SchemeNotSupported(String)
     | Refused(String)
 
-  -- Guard the fd-oriented APIs: they use tcp_send_all/tcp_recv_* directly.
+  -- One raw socket call each, on the descriptor inside s; Err(Closed) once s
+  -- is closed. The enter/leave pair keeps the descriptor from being
+  -- released, and its number reused, while the call runs, even if another
+  -- task closes s meanwhile.
+  pfn send_all_on(s : Socket, raw_request : String) : Result((), TransportError) do
+    let fd = handle_enter(s, 3)
+    if fd == -1 do Err(Closed) else
+      let r = match tcp_send_all(fd, raw_request) do
+        Err(msg) -> Err(SendError(msg))
+        Ok(_) -> Ok(())
+      end
+      handle_leave(s)
+      r
+    end
+  end
+
+  pfn recv_http_on(s : Socket) : Result(String, TransportError) do
+    let fd = handle_enter(s, 3)
+    if fd == -1 do Err(Closed) else
+      let r = match tcp_recv_http(fd, 1048576) do
+        Err(msg) -> Err(RecvError(msg))
+        Ok(raw) -> Ok(raw)
+      end
+      handle_leave(s)
+      r
+    end
+  end
+
+  pfn recv_all_on(s : Socket) : Result(String, TransportError) do
+    let fd = handle_enter(s, 3)
+    if fd == -1 do Err(Closed) else
+      let r = match tcp_recv_all(fd, 1048576, 30000) do
+        Err(msg) -> Err(RecvError(msg))
+        Ok(raw) -> Ok(raw)
+      end
+      handle_leave(s)
+      r
+    end
+  end
+
+  pfn recv_headers_on(s : Socket) : Result((String, Int, Bool), TransportError) do
+    let fd = handle_enter(s, 3)
+    if fd == -1 do Err(Closed) else
+      let r = match tcp_recv_http_headers(fd) do
+        Err(msg) -> Err(RecvError(msg))
+        Ok(h) -> Ok(h)
+      end
+      handle_leave(s)
+      r
+    end
+  end
+
+  pfn recv_chunked_frame_on(s : Socket) : Result(String, TransportError) do
+    let fd = handle_enter(s, 3)
+    if fd == -1 do Err(Closed) else
+      let r = match tcp_recv_chunked_frame(fd) do
+        Err(msg) -> Err(RecvError(msg))
+        Ok(f) -> Ok(f)
+      end
+      handle_leave(s)
+      r
+    end
+  end
+
+  pfn recv_chunk_on(s : Socket, max : Int) : Result(String, TransportError) do
+    let fd = handle_enter(s, 3)
+    if fd == -1 do Err(Closed) else
+      let r = match tcp_recv_chunk(fd, max) do
+        Err(msg) -> Err(RecvError(msg))
+        Ok(c) -> Ok(c)
+      end
+      handle_leave(s)
+      r
+    end
+  end
+
+  pfn connect_error(e : Socket.SocketError) : TransportError do
+    match e do
+    ConnectionFailed(msg) -> ConnectionRefused(msg)
+    other -> ConnectionRefused(Socket.error_message(other))
+    end
+  end
+
+  -- Socket.connect with its capability refusal folded into this module's
+  -- single Result: a refused connect is `Refused(reason)` (nothing is sent,
+  -- as for a request that would smuggle). HttpTransport keeps that shape
+  -- until its own opens are re-typed
+  -- (specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md).
+  pfn dial(host : String, port : Int) : Result(Socket, TransportError) do
+    match Socket.connect(host, port) do
+    Err(refused) -> Err(Refused(Authority.describe(refused)))
+    Ok(Err(e)) -> Err(connect_error(e))
+    Ok(Ok(s)) -> Ok(s)
+    end
+  end
+
+  -- Guard the Socket-oriented APIs: they write plaintext to the socket.
   pfn require_plain_http(req) do
     match Http.scheme(req) do
     SchemeHttp  -> Ok(())
@@ -38,8 +136,9 @@ mod HttpTransport do
 
   doc """
   Open a TCP connection to the request's host and port (80 when the
-  request has none). Returns `Ok(fd)`, or `Err(ConnectionRefused(msg))` if
-  the connection fails. The caller owns the fd and must `tcp_close` it.
+  request has none). Returns `Ok(socket)`, or `Err(ConnectionRefused(msg))`
+  if the connection fails. Close the socket with `Socket.close` when done
+  (dropping the last reference closes it too).
 
   Refuses https:// requests with `SchemeNotSupported` — use the Tls
   module for TLS-enabled connections.
@@ -48,7 +147,7 @@ mod HttpTransport do
 
       let req = Result.unwrap(Http.get("http://example.com/"))
       match HttpTransport.connect(req) do
-        Ok(fd) -> HttpTransport.request_on(fd, Http.set_body(req, ""))
+        Ok(s) -> HttpTransport.request_on(s, Http.set_body(req, ""))
         Err(e) -> Err(e)
       end
 
@@ -65,17 +164,14 @@ mod HttpTransport do
         Some(p) -> p
         None -> 80
         end
-      match tcp_connect(req_host, req_port) do
-      Err(msg) -> Err(ConnectionRefused(msg))
-      Ok(fd) -> Ok(fd)
-      end
+      dial(req_host, req_port)
     end
     end
   end
 
   doc """
-  Send a request and receive the response on an existing fd.
-  Does NOT close the connection — caller manages the fd lifetime.
+  Send a request and receive the response on an open socket.
+  Does NOT close the connection — the caller manages the socket's lifetime.
   Suitable for keep-alive connection reuse. No `Connection: close` header
   is added. The response is read with a 1 MiB limit.
 
@@ -83,26 +179,27 @@ mod HttpTransport do
   `ConnParseError` for a failed send, receive or unparseable response.
   A method, host, path, query or header that would smuggle a second request
   (a CR, LF, space or other byte the request line or a header cannot carry)
-  gives `Refused(reason)` and nothing is sent.
+  gives `Refused(reason)` and nothing is sent. `Err(Closed)` once the
+  socket is closed.
 
-  Refuses https:// requests with `SchemeNotSupported` even when an fd is
-  provided, because this module uses plain `tcp_send_all` that would
-  bypass TLS on a TLS-wrapped fd.  Use the Tls module for HTTPS.
+  Refuses https:// requests with `SchemeNotSupported` even on an open
+  socket, because this module writes plaintext that would bypass TLS.
+  Use the Tls module for HTTPS.
 
   ## Examples
 
-      let r1 = HttpTransport.request_on(fd, users_req)
-      let r2 = HttpTransport.request_on(fd, posts_req)
-      tcp_close(fd)
+      let r1 = HttpTransport.request_on(s, users_req)
+      let r2 = HttpTransport.request_on(s, posts_req)
+      Socket.close(s)
   """
-  fn request_on(fd, req) do
+  fn request_on(s : Socket, req) do
     match require_plain_http(req) do
     Err(e) -> Err(e)
-    Ok(_) -> request_on_plain(fd, req)
+    Ok(_) -> request_on_plain(s, req)
     end
   end
 
-  pfn request_on_plain(fd, req) do
+  pfn request_on_plain(s, req) do
     let meth = Http.method_to_string(Http.method(req))
     let req_host = Http.host(req)
     let req_path = Http.path(req)
@@ -112,16 +209,16 @@ mod HttpTransport do
 
     match http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body) do
     Err(msg) -> Err(Refused(msg))
-    Ok(raw_request) -> send_and_recv_on(fd, raw_request)
+    Ok(raw_request) -> send_and_recv_on(s, raw_request)
     end
   end
 
-  pfn send_and_recv_on(fd, raw_request) do
-    match tcp_send_all(fd, raw_request) do
-    Err(msg) -> Err(SendError(msg))
+  pfn send_and_recv_on(s, raw_request) do
+    match send_all_on(s, raw_request) do
+    Err(e) -> Err(e)
     Ok(_) -> do
-      match tcp_recv_http(fd, 1048576) do
-      Err(msg) -> Err(RecvError(msg))
+      match recv_http_on(s) do
+      Err(e) -> Err(e)
       Ok(raw_response) ->
         match http_parse_response(raw_response) do
         Err(msg) -> Err(ConnParseError(msg))
@@ -134,29 +231,30 @@ mod HttpTransport do
   end
 
   doc """
-  Send a request on an existing fd and stream the response body.
+  Send a request on an open socket and stream the response body.
   Calls `on_chunk(chunk_string)` for each body chunk as it arrives (chunked
   transfer-encoding frames, or reads of a Content-Length body).
   Returns `Ok((status_code, headers, ()))`: the values returned by
   `on_chunk` are discarded. Errors are `SendError` / `RecvError` /
   `ConnParseError`, and `Refused(reason)` (nothing sent) for a request field
-  that would smuggle a second request. Does NOT close the connection.
+  that would smuggle a second request, and `Closed` once the socket is
+  closed. Does NOT close the connection.
 
   ## Examples
 
-      HttpTransport.stream_request_on(fd, req, fn chunk -> println(chunk))
+      HttpTransport.stream_request_on(s, req, fn chunk -> println(chunk))
 
   Refuses https:// requests with `SchemeNotSupported`.  Use the Tls
   module for streaming over TLS.
   """
-  fn stream_request_on(fd, req, on_chunk) do
+  fn stream_request_on(s : Socket, req, on_chunk) do
     match require_plain_http(req) do
     Err(e) -> Err(e)
-    Ok(_) -> stream_request_on_plain(fd, req, on_chunk)
+    Ok(_) -> stream_request_on_plain(s, req, on_chunk)
     end
   end
 
-  pfn stream_request_on_plain(fd, req, on_chunk) do
+  pfn stream_request_on_plain(s, req, on_chunk) do
     let meth = Http.method_to_string(Http.method(req))
     let req_host = Http.host(req)
     let req_path = Http.path(req)
@@ -166,24 +264,24 @@ mod HttpTransport do
 
     match http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body) do
     Err(msg) -> Err(Refused(msg))
-    Ok(raw_request) -> stream_send_on(fd, raw_request, on_chunk)
+    Ok(raw_request) -> stream_send_on(s, raw_request, on_chunk)
     end
   end
 
-  pfn stream_send_on(fd, raw_request, on_chunk) do
-    match tcp_send_all(fd, raw_request) do
-    Err(msg) -> Err(SendError(msg))
+  pfn stream_send_on(s, raw_request, on_chunk) do
+    match send_all_on(s, raw_request) do
+    Err(e) -> Err(e)
     Ok(_) -> do
-      match tcp_recv_http_headers(fd) do
-      Err(msg) -> Err(RecvError(msg))
+      match recv_headers_on(s) do
+      Err(e) -> Err(e)
       Ok((headers_str, content_length, is_chunked)) ->
         match http_parse_response(headers_str) do
         Err(msg) -> Err(ConnParseError(msg))
         Ok((status_code, resp_headers, _)) ->
           if is_chunked do
-            stream_chunked_body(fd, on_chunk, status_code, resp_headers)
+            stream_chunked_body(s, on_chunk, status_code, resp_headers)
           else
-            stream_fixed_body(fd, content_length, on_chunk, status_code, resp_headers)
+            stream_fixed_body(s, content_length, on_chunk, status_code, resp_headers)
           end
         end
       end
@@ -192,37 +290,38 @@ mod HttpTransport do
   end
 
   doc """
-  Read chunked-encoding frames from `fd`, calling `on_chunk` on each, until
-  the terminating empty frame. Returns `Ok((status_code, resp_headers, ()))`
-  or `Err(RecvError(msg))`. Used by `stream_request_on` after the headers
-  have been read.
+  Read chunked-encoding frames from `s`, calling `on_chunk` on each, until
+  the terminating empty frame. Returns `Ok((status_code, resp_headers, ()))`,
+  `Err(RecvError(msg))`, or `Err(Closed)` once the socket is closed. Used by
+  `stream_request_on` after the headers have been read.
   """
-  @[diverges] fn stream_chunked_body(fd, on_chunk, status_code, resp_headers) do
-    match tcp_recv_chunked_frame(fd) do
-    Err(msg) -> Err(RecvError(msg))
+  @[diverges] fn stream_chunked_body(s : Socket, on_chunk, status_code, resp_headers) do
+    match recv_chunked_frame_on(s) do
+    Err(e) -> Err(e)
     Ok("") -> Ok((status_code, resp_headers, ()))
     Ok(chunk) -> do
       on_chunk(chunk)
-      stream_chunked_body(fd, on_chunk, status_code, resp_headers)
+      stream_chunked_body(s, on_chunk, status_code, resp_headers)
     end
     end
   end
 
   doc """
-  Read a Content-Length body of `remaining` bytes from `fd`, calling
+  Read a Content-Length body of `remaining` bytes from `s`, calling
   `on_chunk` on each piece received. Stops when `remaining` reaches 0 or the
   peer closes early (both give `Ok((status_code, resp_headers, ()))`), or
-  returns `Err(RecvError(msg))`. Used by `stream_request_on`.
+  returns `Err(RecvError(msg))` (`Err(Closed)` once the socket is closed).
+  Used by `stream_request_on`.
   """
-  fn stream_fixed_body(fd, remaining, on_chunk, status_code, resp_headers) do
+  fn stream_fixed_body(s : Socket, remaining, on_chunk, status_code, resp_headers) do
     if remaining == 0 do Ok((status_code, resp_headers, ()))
     else
-      match tcp_recv_chunk(fd, remaining) do
-      Err(msg) -> Err(RecvError(msg))
+      match recv_chunk_on(s, remaining) do
+      Err(e) -> Err(e)
       Ok("") -> Ok((status_code, resp_headers, ()))
       Ok(chunk) -> do
         on_chunk(chunk)
-        stream_fixed_body(fd, remaining - string_length(chunk), on_chunk, status_code, resp_headers)
+        stream_fixed_body(s, remaining - string_length(chunk), on_chunk, status_code, resp_headers)
       end
       end
     end
@@ -292,7 +391,7 @@ mod HttpTransport do
   receives and parses the response, then closes the connection.
 
   HTTPS uses the certificate-verifying TLS client with SNI. `connect`,
-  `request_on`, and `stream_request_on` remain plain-HTTP fd APIs and refuse
+  `request_on`, and `stream_request_on` remain plain-HTTP Socket APIs and refuse
   HTTPS because they cannot safely construct or receive a TLS connection.
 
   In js_of_ocaml builds (where `http_fetch_available()` is true) the request
@@ -343,8 +442,9 @@ mod HttpTransport do
 
   pfn request_https_raw(host, port, raw) do
     match Tls.client_ctx(Tls.default_client_config()) do
-    Err(error) -> Err(ConnectionRefused(Tls.error_to_string(error)))
-    Ok(context) -> do
+    Err(refused) -> Err(Refused(Authority.describe(refused)))
+    Ok(Err(error)) -> Err(ConnectionRefused(Tls.error_to_string(error)))
+    Ok(Ok(context)) -> do
       let result = request_https_with_context(context, host, port, raw)
       Tls.ctx_free(context)
       result
@@ -353,18 +453,21 @@ mod HttpTransport do
   end
 
   pfn request_https_with_context(context, host, port, raw) do
-    match tcp_connect(host, port) do
-    Err(error) -> Err(ConnectionRefused(error))
-    Ok(fd) -> do
-      let result = request_https_on_fd(context, fd, host, raw)
-      tcp_close(fd)
+    match dial(host, port) do
+    Err(error) -> Err(error)
+    Ok(s) -> do
+      -- A successful Tls.connect takes the socket over (closing the TLS
+      -- connection closes it); after a failed one it is still ours, and this
+      -- close is what releases it. On the success path it is a no-op.
+      let result = request_https_on_socket(context, s, host, raw)
+      let _ = Socket.close(s)
       result
     end
     end
   end
 
-  pfn request_https_on_fd(context, fd, host, raw) do
-    match Tls.connect(fd, context, host) do
+  pfn request_https_on_socket(context, s, host, raw) do
+    match Tls.connect(s, context, host) do
     Err(error) -> Err(ConnectionRefused(Tls.error_to_string(error)))
     Ok(connection) -> do
       let result = request_on_tls(connection, raw)
@@ -419,28 +522,21 @@ mod HttpTransport do
   end
 
   pfn request_plain_raw(req_host, req_port, raw_request) do
-    match tcp_connect(req_host, req_port) do
-    Err(msg) -> Err(ConnectionRefused(msg))
-    Ok(fd) -> do
-      match tcp_send_all(fd, raw_request) do
-      Err(msg) -> do
-        tcp_close(fd)
-        Err(SendError(msg))
+    match dial(req_host, req_port) do
+    Err(e) -> Err(e)
+    Ok(s) -> do
+      let received = match send_all_on(s, raw_request) do
+        Err(e) -> Err(e)
+        Ok(_) -> recv_all_on(s)
       end
-      Ok(_) ->
-        match tcp_recv_all(fd, 1048576, 30000) do
-        Err(msg) -> do
-          tcp_close(fd)
-          Err(RecvError(msg))
-        end
-        Ok(raw_response) -> do
-          tcp_close(fd)
-          match http_parse_response(raw_response) do
-          Err(msg) -> Err(ConnParseError(msg))
-          Ok((status_code, resp_headers, resp_body)) ->
-            Ok(Response(Status(status_code), resp_headers, resp_body))
-          end
-        end
+      let _ = Socket.close(s)
+      match received do
+      Err(e) -> Err(e)
+      Ok(raw_response) ->
+        match http_parse_response(raw_response) do
+        Err(msg) -> Err(ConnParseError(msg))
+        Ok((status_code, resp_headers, resp_body)) ->
+          Ok(Response(Status(status_code), resp_headers, resp_body))
         end
       end
     end

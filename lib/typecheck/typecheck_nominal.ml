@@ -154,6 +154,18 @@ let reserved_builtin_names = [ "Socket"; "Listener"; "Process" ]
 
 let is_reserved (short : string) : bool = List.mem short reserved_builtin_names
 
+(** The stdlib's opaque wrappers over a handle box ([UdpSocket], [TlsConn],
+    [TlsCtx], [WsSocket]; [Cap_surface_ty.handle_wrapper_names]).  Unlike a
+    reserved name the stdlib DOES declare these, so they are not
+    [is_reserved] (the lowering must not treat them as the box): a program's
+    own variant of one of these names is forced to a qualified identity like
+    any name the stdlib already declares, and a reference to its own record
+    of one is recorded in [user_reserved_refs], so the typed remote send
+    ([Typecheck_caps.handle_in_message]) can tell the program's type from the
+    handle wrapper. *)
+let is_handle_wrapper (short : string) : bool =
+  List.mem short March_caps.Cap_surface_ty.handle_wrapper_names
+
 (** True iff the written type name [n] (a reserved builtin name, at that
     span) means a declaration of the checked program rather than the
     builtin: a variant's identity or a record/alias reference. *)
@@ -212,7 +224,8 @@ let compute ~(is_stdlib : A.span -> bool) ?(base = fun (_ : string) -> false)
   (* A name whose bare spelling is some other type's: a user variant of that
      name is never the bare name. *)
   let forced short =
-    is_reserved short || base short || Hashtbl.mem stdlib_variants short in
+    is_reserved short || is_handle_wrapper short || base short
+    || Hashtbl.mem stdlib_variants short in
   let nested_ok = user_only || !saw_stdlib in
   let forced_at path short =
     is_reserved short || (forced short && (path = "" || nested_ok)) in
@@ -362,7 +375,8 @@ let compute ~(is_stdlib : A.span -> bool) ?(base = fun (_ : string) -> false)
            | Some id' when id' <> id -> ()   (* a span claimed twice: keep the first *)
            | _ -> Hashtbl.replace refs n.A.span id)
         | None ->
-          if is_reserved (short_of n.A.txt) && resolves_to_other scopes n.A.txt then
+          if (is_reserved (short_of n.A.txt) || is_handle_wrapper (short_of n.A.txt))
+             && resolves_to_other scopes n.A.txt then
             Hashtbl.replace user_reserved_refs n.A.span ()
     in
     (* Pass 2: every written type, with its lexical scope. *)

@@ -444,26 +444,26 @@ end
 -- list of byte Ints, and a 2 MB patch sent over it in chunks drove two nodes
 -- past 2 GB (specs/progress/2026-09-30-dd-step12a-control-wiring.md).
 pfn ctl_fetch_from(host : String, port : Int, hash : String) : Result(String, String) do
-  match tcp_connect_timeout(host, port, 2000) do
+  match ctl_dial(host, port) do
     Result.Err(e) -> Result.Err(host ++ ":" ++ int_to_string(port) ++ ": " ++ e)
-    Result.Ok(fd) ->
-      let _ = tcp_set_recv_timeout(fd, 30000)
-      let out = match tcp_send_all(fd, "CAS_GET " ++ hash ++ "\n") do
-        Result.Err(e) -> Result.Err(e)
+    Result.Ok(sock) ->
+      let _ = Socket.set_recv_timeout(sock, 30000)
+      let out = match Socket.write(sock, "CAS_GET " ++ hash ++ "\n") do
+        Result.Err(e) -> Result.Err(Socket.error_message(e))
         Result.Ok(_) ->
-          match ctl_read_line(fd, "", 0) do
+          match ctl_read_line(sock, "", 0) do
             Option.None -> Result.Err("no answer")
             Option.Some(l) ->
               if String.starts_with(l, "DATA ") do
                 let size = ctl_int(String.slice(l, 5, String.byte_size(l) - 5))
-                match tcp_recv_exact(fd, size) do
+                match Socket.recv_exact(sock, size) do
                   Result.Ok(b) -> Result.Ok(Bytes.to_string(b))
-                  Result.Err(e) -> Result.Err(e)
+                  Result.Err(e) -> Result.Err(Socket.error_message(e))
                 end
               else Result.Err(l) end
           end
       end
-      tcp_close(fd)
+      ctl_close(sock)
       out
   end
 end
@@ -925,20 +925,47 @@ end
 -- served at once, each closed after MARCH_CONTROL_IDLE_MS (default 30 s) of
 -- silence.
 
-pfn ctl_read_line(fd : Int, acc : String, n : Int) : Option(String) do
+-- The control API runs over `Socket` / `Listener` handles (ocap phase 2):
+-- this wiring is spliced into the user's entry module, where the raw tcp_*
+-- builtins are stdlib-only. Only the cluster handshake and its sealed frames
+-- (`ClusterNode.handshake`, `NetKernel.*`), trusted plumbing that takes the
+-- descriptor itself, see `Socket.raw_fd`; the socket stays referenced (and so
+-- open) until its `ctl_close`.
+pfn ctl_dial(host : String, port : Int) : Result(Socket, String) do
+  match Socket.connect_timeout(host, port, 2000) do
+    Result.Err(refused) -> Result.Err(Authority.describe(refused))
+    Result.Ok(Result.Err(e)) -> Result.Err(Socket.error_message(e))
+    Result.Ok(Result.Ok(sock)) -> Result.Ok(sock)
+  end
+end
+
+pfn ctl_listen(port : Int) : Result(Listener, String) do
+  match Socket.listen(port) do
+    Result.Err(refused) -> Result.Err(Authority.describe(refused))
+    Result.Ok(Result.Err(e)) -> Result.Err(Socket.error_message(e))
+    Result.Ok(Result.Ok(l)) -> Result.Ok(l)
+  end
+end
+
+pfn ctl_close(sock : Socket) : () do
+  let _ = Socket.close(sock)
+  ()
+end
+
+pfn ctl_read_line(sock : Socket, acc : String, n : Int) : Option(String) do
   if n > 65536 do Option.None
-  else match tcp_recv_exact(fd, 1) do
+  else match Socket.recv_exact(sock, 1) do
     Result.Err(_) -> if acc == "" do Option.None else Option.Some(acc) end
     Result.Ok(b) ->
       let c = Bytes.to_string(b)
       if c == "\n" do Option.Some(acc)
-      else if c == "\r" do ctl_read_line(fd, acc, n)
-      else ctl_read_line(fd, acc ++ c, n + 1) end end
+      else if c == "\r" do ctl_read_line(sock, acc, n)
+      else ctl_read_line(sock, acc ++ c, n + 1) end end
   end end
 end
 
-pfn ctl_reply(fd : Int, text : String) : () do
-  let _ = tcp_send_all(fd, text)
+pfn ctl_reply(sock : Socket, text : String) : () do
+  let _ = Socket.write(sock, text)
   ()
 end
 
@@ -950,15 +977,15 @@ end
 -- One request to a candidate's control API: send [text], read the first
 -- answer line.
 pfn ctl_call(host : String, port : Int, text : String) : Option(String) do
-  match tcp_connect_timeout(host, port, 2000) do
+  match ctl_dial(host, port) do
     Result.Err(_) -> Option.None
-    Result.Ok(fd) ->
-      let _ = tcp_set_recv_timeout(fd, 15000)
-      let out = match tcp_send_all(fd, text) do
+    Result.Ok(sock) ->
+      let _ = Socket.set_recv_timeout(sock, 15000)
+      let out = match Socket.write(sock, text) do
         Result.Err(_) -> Option.None
-        Result.Ok(_) -> ctl_read_line(fd, "", 0)
+        Result.Ok(_) -> ctl_read_line(sock, "", 0)
       end
-      tcp_close(fd)
+      ctl_close(sock)
       out
   end
 end
@@ -1006,20 +1033,20 @@ pfn ctl_replicate(node : Cap(ClusterNode.Live), port : Int, body : String, hashe
 end
 
 -- A connection to a candidate's control API.
-pfn ctl_open(host : String, port : Int) : Option(Int) do
-  match tcp_connect_timeout(host, port, 2000) do
+pfn ctl_open(host : String, port : Int) : Option(Socket) do
+  match ctl_dial(host, port) do
     Result.Err(_) -> Option.None
-    Result.Ok(fd) ->
-      let _ = tcp_set_recv_timeout(fd, 15000)
-      Option.Some(fd)
+    Result.Ok(sock) ->
+      let _ = Socket.set_recv_timeout(sock, 15000)
+      Option.Some(sock)
   end
 end
 
 -- Send [text] on an open connection and read the answer's first line.
-pfn ctl_ask(fd : Int, text : String) : Option(String) do
-  match tcp_send_all(fd, text) do
+pfn ctl_ask(sock : Socket, text : String) : Option(String) do
+  match Socket.write(sock, text) do
     Result.Err(_) -> Option.None
-    Result.Ok(_) -> ctl_read_line(fd, "", 0)
+    Result.Ok(_) -> ctl_read_line(sock, "", 0)
   end
 end
 
@@ -1028,25 +1055,25 @@ end
 pfn ctl_push_artifacts(host : String, port : Int, body : String, hashes : List(String)) : () do
   match ctl_open(host, port) do
     Option.None -> ()
-    Option.Some(fd) ->
-      match ctl_ask(fd, "STAGE " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body) do
-        Option.Some(l) -> if String.starts_with(l, "OK") do List.each(hashes, fn h -> ctl_push_one(fd, h)) else () end
+    Option.Some(sock) ->
+      match ctl_ask(sock, "STAGE " ++ int_to_string(String.byte_size(body)) ++ "\n" ++ body) do
+        Option.Some(l) -> if String.starts_with(l, "OK") do List.each(hashes, fn h -> ctl_push_one(sock, h)) else () end
         Option.None -> ()
       end
-      tcp_close(fd)
+      ctl_close(sock)
   end
 end
 
-pfn ctl_push_one(fd : Int, h : String) : () do
-  match ctl_ask(fd, "CAS_CHECK " ++ h ++ "\n") do
+pfn ctl_push_one(sock : Socket, h : String) : () do
+  match ctl_ask(sock, "CAS_CHECK " ++ h ++ "\n") do
     Option.Some(resp) ->
       if String.starts_with(resp, "MISSING") do
         match Authority.must(File.read(ctl_artifact_path(h))) do
           Result.Ok(data) ->
-            match ctl_ask(fd, "CAS_PUT " ++ h ++ " " ++ int_to_string(String.byte_size(data)) ++ "\n") do
+            match ctl_ask(sock, "CAS_PUT " ++ h ++ " " ++ int_to_string(String.byte_size(data)) ++ "\n") do
               Option.Some(r) ->
                 if r == "READY" do
-                  let _ = ctl_ask(fd, data)
+                  let _ = ctl_ask(sock, data)
                   ()
                 else () end
               Option.None -> ()
@@ -1232,23 +1259,23 @@ pfn ctl_forward_status(node : Cap(ClusterNode.Live), port : Int) : String do
 end
 
 pfn ctl_call_lines(host : String, port : Int, text : String) : Option(String) do
-  match tcp_connect_timeout(host, port, 2000) do
+  match ctl_dial(host, port) do
     Result.Err(_) -> Option.None
-    Result.Ok(fd) ->
-      let _ = tcp_set_recv_timeout(fd, 15000)
-      let out = match tcp_send_all(fd, text) do
+    Result.Ok(sock) ->
+      let _ = Socket.set_recv_timeout(sock, 15000)
+      let out = match Socket.write(sock, text) do
         Result.Err(_) -> Option.None
-        Result.Ok(_) -> Option.Some(ctl_read_until_end(fd, ""))
+        Result.Ok(_) -> Option.Some(ctl_read_until_end(sock, ""))
       end
-      tcp_close(fd)
+      ctl_close(sock)
       out
   end
 end
 
-pfn ctl_read_until_end(fd : Int, acc : String) : String do
-  match ctl_read_line(fd, "", 0) do
+pfn ctl_read_until_end(sock : Socket, acc : String) : String do
+  match ctl_read_line(sock, "", 0) do
     Option.None -> acc
-    Option.Some(l) -> if l == "END" do acc ++ "END\n" else ctl_read_until_end(fd, acc ++ l ++ "\n") end
+    Option.Some(l) -> if l == "END" do acc ++ "END\n" else ctl_read_until_end(sock, acc ++ l ++ "\n") end
   end
 end
 
@@ -1278,13 +1305,13 @@ pfn ctl_release_hashes(r : Control.CtlRelease) : List(String) do
   List.Cons(r.topology, List.map(r.builds, fn b -> b.manifest))
 end
 
--- The server's half of a candidate-only verb: the cluster handshake on [fd],
+-- The server's half of a candidate-only verb: the cluster handshake on [sock],
 -- then the peer must be a candidate: any holder of the cluster secret
 -- (shared-secret mode: every member holds it, as on the cluster links), or a
 -- certificate carrying `Ctl.Control:offer` (certificate mode). The connection
 -- must be sealed, so the digest frame that binds the body is authentic.
-pfn ctl_api_auth(node : Cap(ClusterNode.Live), fd : Int) : Result((), String) do
-  match ClusterNode.handshake(node, fd, "ctl-api", 5000) do
+pfn ctl_api_auth(node : Cap(ClusterNode.Live), sock : Socket) : Result((), String) do
+  match ClusterNode.handshake(node, Socket.raw_fd(sock), "ctl-api", 5000) do
     Result.Err(e) -> Result.Err(e)
     Result.Ok(a) ->
       if not(a.mac) do Result.Err("the connection is not sealed")
@@ -1297,12 +1324,12 @@ end
 
 -- After the handshake: a sealed frame holding the body's sha256, then the
 -- [size] bytes of the body, which must hash to it.
-pfn ctl_recv_bound(fd : Int, size : Int) : Result(String, String) do
-  match NetKernel.recv_frame_exact(fd) do
+pfn ctl_recv_bound(sock : Socket, size : Int) : Result(String, String) do
+  match NetKernel.recv_frame_exact(Socket.raw_fd(sock)) do
     Result.Err(e) -> Result.Err(e)
     Result.Ok(d) ->
-      match tcp_recv_exact(fd, size) do
-        Result.Err(e) -> Result.Err(e)
+      match Socket.recv_exact(sock, size) do
+        Result.Err(e) -> Result.Err(Socket.error_message(e))
         Result.Ok(b) ->
           let body = Bytes.to_string(b)
           if Crypto.sha256(body) == NetKernel.bytes_to_str(d) do Result.Ok(body) else Result.Err("the body does not match its digest") end
@@ -1312,28 +1339,28 @@ end
 
 -- `<VERB> <size>`, `AUTH`, the handshake, the bound body: [f] gets the body
 -- and answers. Some(()) to keep serving the connection, None to close it.
-pfn ctl_api_authed(node : Cap(ClusterNode.Live), fd : Int, size : Int, f : String -> String) : Option(()) do
+pfn ctl_api_authed(node : Cap(ClusterNode.Live), sock : Socket, size : Int, f : String -> String) : Option(()) do
   if size <= 0 || size > ctl_body_max() do
-    ctl_reply(fd, "ERR bad_size\n")
+    ctl_reply(sock, "ERR bad_size\n")
     Option.Some(())
   else
-    ctl_reply(fd, "AUTH\n")
-    let out = match ctl_api_auth(node, fd) do
+    ctl_reply(sock, "AUTH\n")
+    let out = match ctl_api_auth(node, sock) do
       Result.Err(e) ->
         Authority.ignore(println("control: refused an unauthenticated write: " ++ e))
-        ctl_reply(fd, "ERR unauthenticated\n")
+        ctl_reply(sock, "ERR unauthenticated\n")
         Option.None
       Result.Ok(_) ->
-        match ctl_recv_bound(fd, size) do
+        match ctl_recv_bound(sock, size) do
           Result.Err(e) ->
-            ctl_reply(fd, "ERR bad_body " ++ e ++ "\n")
+            ctl_reply(sock, "ERR bad_body " ++ e ++ "\n")
             Option.None
           Result.Ok(body) ->
-            ctl_reply(fd, f(body) ++ "\n")
+            ctl_reply(sock, f(body) ++ "\n")
             Option.Some(())
         end
     end
-    NetKernel.forget(fd)
+    NetKernel.forget(Socket.raw_fd(sock))
     out
   end
 end
@@ -1344,22 +1371,22 @@ end
 pfn ctl_call_auth(node : Cap(ClusterNode.Live), host : String, port : Int, line : String, body : String) : Option(String) do
   match ctl_open(host, port) do
     Option.None -> Option.None
-    Option.Some(fd) ->
-      let out = match ctl_ask(fd, line ++ "\n") do
+    Option.Some(sock) ->
+      let out = match ctl_ask(sock, line ++ "\n") do
         Option.None -> Option.None
         Option.Some(first) ->
           if first != "AUTH" do Option.Some(first)
-          else match ClusterNode.handshake(node, fd, "ctl-api", 5000) do
+          else match ClusterNode.handshake(node, Socket.raw_fd(sock), "ctl-api", 5000) do
             Result.Err(e) -> Option.Some("ERR unauthenticated " ++ e)
             Result.Ok(_) ->
-              match NetKernel.send_frame(fd, NetKernel.str_to_bytes(Crypto.sha256(body))) do
+              match NetKernel.send_frame(Socket.raw_fd(sock), NetKernel.str_to_bytes(Crypto.sha256(body))) do
                 Result.Err(e) -> Option.Some("ERR " ++ e)
-                Result.Ok(_) -> ctl_ask(fd, body)
+                Result.Ok(_) -> ctl_ask(sock, body)
               end
           end end
       end
-      NetKernel.forget(fd)
-      tcp_close(fd)
+      NetKernel.forget(Socket.raw_fd(sock))
+      ctl_close(sock)
       out
   end
 end
@@ -1536,31 +1563,31 @@ pfn ctl_cas_gc() : Int do
 end
 
 -- `CAS_PUT <hash> <size>` on a connection that staged [staged].
-pfn ctl_api_cas_put(fd : Int, line : String, h : String, size : Int, staged : List(String)) : Option(List(String)) do
+pfn ctl_api_cas_put(sock : Socket, line : String, h : String, size : Int, staged : List(String)) : Option(List(String)) do
   if size <= 0 || size > ctl_artifact_max() do
-    ctl_reply(fd, "ERR bad_size\n")
+    ctl_reply(sock, "ERR bad_size\n")
     Option.Some(staged)
   else if not(ctl_is_hex64(h)) do
-    ctl_reply(fd, "ERR bad_hash\n")
+    ctl_reply(sock, "ERR bad_hash\n")
     Option.Some(staged)
   else if not(List.member(staged, h)) do
-    ctl_reply(fd, "ERR not_staged\n")
+    ctl_reply(sock, "ERR not_staged\n")
     Option.Some(staged)
   else
     let fresh = not(String.starts_with(Control.relay_line("CAS_CHECK " ++ h), "PRESENT"))
     if fresh && not(ctl_pending_claim(size)) do
-      ctl_reply(fd, "ERR cas_quota\n")
+      ctl_reply(sock, "ERR cas_quota\n")
       Option.Some(staged)
     else
-      ctl_reply(fd, "READY\n")
-      match tcp_recv_exact(fd, size) do
+      ctl_reply(sock, "READY\n")
+      match Socket.recv_exact(sock, size) do
         Result.Err(_) ->
           if fresh do ctl_pending_settle(h, size, false) else () end
           Option.None
         Result.Ok(b) ->
           let resp = Control.relay_line(line ++ "\n" ++ Bytes.to_string(b))
           if fresh do ctl_pending_settle(h, size, String.contains(resp, "OK")) else () end
-          ctl_reply(fd, String.replace_all(resp, "READY\n", ""))
+          ctl_reply(sock, String.replace_all(resp, "READY\n", ""))
           Option.Some(staged)
       end
     end
@@ -1569,8 +1596,8 @@ end
 
 -- One request on a connection, which has staged [staged]: the hashes it may
 -- put. None when the connection is done.
-pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged : List(String)) : Option(List(String)) do
-  match ctl_read_line(fd, "", 0) do
+pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, sock : Socket, staged : List(String)) : Option(List(String)) do
+  match ctl_read_line(sock, "", 0) do
     Option.None -> Option.None
     Option.Some(line0) ->
       let fwd = String.starts_with(line0, "FORWARDED ")
@@ -1587,80 +1614,80 @@ pfn ctl_api_request(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged :
       let arg = fn i -> ctl_int(word(i))
       let keep = fn ok -> if ok do Option.Some(staged) else Option.None end
       match verb do
-        "RELEASE" -> keep(ctl_api_release(node, port, fd, fwd, arg(1)))
-        "RELEASE_COPY" -> Option.map(ctl_api_authed(node, fd, arg(1), fn body -> ctl_release_copy(body)), fn _ -> staged)
+        "RELEASE" -> keep(ctl_api_release(node, port, sock, fwd, arg(1)))
+        "RELEASE_COPY" -> Option.map(ctl_api_authed(node, sock, arg(1), fn body -> ctl_release_copy(body)), fn _ -> staged)
         "AUDIT_COPY" ->
           -- Lines a leader audited, to append here.
-          Option.map(ctl_api_authed(node, fd, arg(1), fn body ->
+          Option.map(ctl_api_authed(node, sock, arg(1), fn body ->
             ctl_audit_append(body)
             "OK"), fn _ -> staged)
         "STAGE" ->
           let size = arg(1)
           if size <= 0 || size > ctl_body_max() do
-            ctl_reply(fd, "ERR bad_size\n")
+            ctl_reply(sock, "ERR bad_size\n")
             Option.Some(staged)
-          else match tcp_recv_exact(fd, size) do
+          else match Socket.recv_exact(sock, size) do
             Result.Err(_) -> Option.None
             Result.Ok(b) ->
               match ctl_stage(Bytes.to_string(b)) do
                 Result.Err(e) ->
-                  ctl_reply(fd, "ERR " ++ e ++ "\n")
+                  ctl_reply(sock, "ERR " ++ e ++ "\n")
                   Option.Some(staged)
                 Result.Ok(hs) ->
-                  ctl_reply(fd, "OK staged " ++ int_to_string(List.length(hs)) ++ "\n")
+                  ctl_reply(sock, "OK staged " ++ int_to_string(List.length(hs)) ++ "\n")
                   Option.Some(List.take(List.append(hs, staged), 256))
               end
           end end
-        "CAS_PUT" -> ctl_api_cas_put(fd, line, word(1), arg(2), staged)
+        "CAS_PUT" -> ctl_api_cas_put(sock, line, word(1), arg(2), staged)
         "STATUS" ->
-          if ctl_is_leader(node) do ctl_reply(fd, ctl_status(node))
-          else if fwd do ctl_reply(fd, "ERR not_leader\n")
-          else ctl_reply(fd, ctl_forward_status(node, port)) end end
+          if ctl_is_leader(node) do ctl_reply(sock, ctl_status(node))
+          else if fwd do ctl_reply(sock, "ERR not_leader\n")
+          else ctl_reply(sock, ctl_forward_status(node, port)) end end
           Option.Some(staged)
         "CAS_GET" ->
           -- An artifact's bytes from this node's CAS: `DATA <size>` then the bytes.
           let h = word(1)
-          if not(ctl_is_hex64(h)) do ctl_reply(fd, "ERR bad_hash\n")
+          if not(ctl_is_hex64(h)) do ctl_reply(sock, "ERR bad_hash\n")
           else match Authority.must(File.read(ctl_artifact_path(h))) do
-            Result.Ok(data) -> ctl_reply(fd, "DATA " ++ int_to_string(String.byte_size(data)) ++ "\n" ++ data)
-            Result.Err(_) -> ctl_reply(fd, "ERR missing\n")
+            Result.Ok(data) -> ctl_reply(sock, "DATA " ++ int_to_string(String.byte_size(data)) ++ "\n" ++ data)
+            Result.Err(_) -> ctl_reply(sock, "ERR missing\n")
           end end
           Option.Some(staged)
         "AUDIT" ->
-          ctl_reply(fd, ctl_audit_answer(arg(1)))
+          ctl_reply(sock, ctl_audit_answer(arg(1)))
           Option.Some(staged)
         "LEADER" ->
-          ctl_reply(fd, (if ctl_is_leader(node) do "LEADER yes " else "LEADER no " end) ++ Topology.node_name(node) ++ "\n")
+          ctl_reply(sock, (if ctl_is_leader(node) do "LEADER yes " else "LEADER no " end) ++ Topology.node_name(node) ++ "\n")
           Option.Some(staged)
         _ ->
-          if ctl_passthrough(verb) || verb == "CAS_CHECK" do ctl_reply(fd, Control.relay_line(line))
-          else ctl_reply(fd, "ERR unknown_command\n") end
+          if ctl_passthrough(verb) || verb == "CAS_CHECK" do ctl_reply(sock, Control.relay_line(line))
+          else ctl_reply(sock, "ERR unknown_command\n") end
           Option.Some(staged)
       end
   end
 end
 
 -- `RELEASE <size>`: the document follows the line.
-pfn ctl_api_release(node : Cap(ClusterNode.Live), port : Int, fd : Int, fwd : Bool, size : Int) : Bool do
+pfn ctl_api_release(node : Cap(ClusterNode.Live), port : Int, sock : Socket, fwd : Bool, size : Int) : Bool do
   if size <= 0 || size > ctl_body_max() do
-    ctl_reply(fd, "ERR bad_size\n")
+    ctl_reply(sock, "ERR bad_size\n")
     true
-  else match tcp_recv_exact(fd, size) do
+  else match Socket.recv_exact(sock, size) do
     Result.Err(_) -> false
     Result.Ok(b) ->
       let body = Bytes.to_string(b)
-      if ctl_is_leader(node) do ctl_reply(fd, ctl_release(node, port, body) ++ "\n")
-      else if fwd do ctl_reply(fd, "ERR not_leader\n")
-      else ctl_reply(fd, ctl_forward(node, port, "RELEASE " ++ int_to_string(size) ++ "\n" ++ body) ++ "\n") end end
+      if ctl_is_leader(node) do ctl_reply(sock, ctl_release(node, port, body) ++ "\n")
+      else if fwd do ctl_reply(sock, "ERR not_leader\n")
+      else ctl_reply(sock, ctl_forward(node, port, "RELEASE " ++ int_to_string(size) ++ "\n" ++ body) ++ "\n") end end
       true
   end end
 end
 
-pfn ctl_api_conn(node : Cap(ClusterNode.Live), port : Int, fd : Int, staged : List(String)) : () do
-  match ctl_api_request(node, port, fd, staged) do
-    Option.Some(st) -> ctl_api_conn(node, port, fd, st)
+pfn ctl_api_conn(node : Cap(ClusterNode.Live), port : Int, sock : Socket, staged : List(String)) : () do
+  match ctl_api_request(node, port, sock, staged) do
+    Option.Some(st) -> ctl_api_conn(node, port, sock, st)
     Option.None ->
-      tcp_close(fd)
+      ctl_close(sock)
       let _ = Vault.incr(ctl_locks(), "api_conns", -1)
       ()
   end
@@ -1669,21 +1696,21 @@ end
 -- At most MARCH_CONTROL_MAX_CONNS connections at once (a further one is
 -- answered `ERR busy` and closed), each closed after MARCH_CONTROL_IDLE_MS
 -- without a byte.
-pfn ctl_api_accept(node : Cap(ClusterNode.Live), port : Int, lfd : Int) : Int do
-  match tcp_accept(lfd) do
+pfn ctl_api_accept(node : Cap(ClusterNode.Live), port : Int, lsock : Listener) : Int do
+  match Socket.accept(lsock) do
     Result.Err(_) -> sleep_ms(200)
-    Result.Ok(fd) ->
+    Result.Ok(sock) ->
       if Vault.incr(ctl_locks(), "api_conns", 1) > ctl_cfg_int("max_conns", 64) do
         let _ = Vault.incr(ctl_locks(), "api_conns", -1)
-        ctl_reply(fd, "ERR busy\n")
-        tcp_close(fd)
+        ctl_reply(sock, "ERR busy\n")
+        ctl_close(sock)
       else
-        let _ = tcp_set_recv_timeout(fd, ctl_cfg_int("idle_ms", 30000))
-        let _ = task_spawn(fn _ -> ctl_api_conn(node, port, fd, List.Nil))
+        let _ = Socket.set_recv_timeout(sock, ctl_cfg_int("idle_ms", 30000))
+        let _ = task_spawn(fn _ -> ctl_api_conn(node, port, sock, List.Nil))
         ()
       end
   end
-  ctl_api_accept(node, port, lfd)
+  ctl_api_accept(node, port, lsock)
 end
 
 -- ── starting it all ─────────────────────────────────────────────────────────
@@ -1727,9 +1754,9 @@ fn ctl_start(io : Cap(IO), node : Cap(ClusterNode.Live), label : String, port : 
   let offset = ctl_cfg_int("port_offset", 0)
   let listen_port = if offset == 0 do port else ctl_int(Authority.must(Env.get("MARCH_NODE_PORT", "0"))) + offset end
   if List.member(Topology.node_labels(), label) do
-    match tcp_listen(listen_port) do
-      Result.Ok(lfd) ->
-        let _ = task_spawn(fn _ -> ctl_api_accept(node, port, lfd))
+    match ctl_listen(listen_port) do
+      Result.Ok(lsock) ->
+        let _ = task_spawn(fn _ -> ctl_api_accept(node, port, lsock))
         let _ = task_spawn(fn _ -> ctl_audit_copier(node, port))
         let _ = task_spawn(fn _ -> ctl_cas_gc())
         Authority.ignore(println("control: API listening on port " ++ int_to_string(listen_port)))

@@ -20,10 +20,14 @@ mod Main do
 
   type Job = { id : Int }
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
-    let peer : Peer = { node_id: "w", identity: NodeIdentity.make("w", "pk", 1), fd: 3, data_fd: -1 }
+  -- A `Peer` comes from the cluster layer; user code cannot build one.
+  fn ship(peer : Peer) do
     let job : Job = { id: 7 }
     let _ = Node.send(peer, GlobalPid.make("w", 1, 1), job)
+    ()
+  end
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
     ()
   end
 end
@@ -42,10 +46,14 @@ mod Main do
   type Job = { id : Int }
   derive Json for Job
 
-  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
-    let peer : Peer = { node_id: "w", identity: NodeIdentity.make("w", "pk", 1), fd: 3, data_fd: -1 }
+  -- A `Peer` comes from the cluster layer; user code cannot build one.
+  fn ship(peer : Peer) do
     let job : Job = { id: 7 }
     let _ = Node.send(peer, GlobalPid.make("w", 1, 1), job)
+    ()
+  end
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect), _m : Cap(IO.Mut)) do
     ()
   end
 end

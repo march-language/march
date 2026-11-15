@@ -31,8 +31,9 @@ mod ProcessSpawnErrors do
       Err(e) -> Authority.ignore(println("run_stream missing: Err " ++ e))
     end
     match Authority.must(Process.spawn_async("march_no_such_program_xyz", [])) do
-      Ok(p) -> Authority.ignore(println("spawn_async missing: Ok code=" ++ int_to_string(Process.wait_proc(p))))
-      Err(e) -> Authority.ignore(println("spawn_async missing: Err " ++ e))
+      Ok(p) -> Authority.ignore(println("spawn_async missing: Ok code=" ++ to_string(Process.wait_proc(p))))
+      Err(Process.ProcessFailed(e)) -> Authority.ignore(println("spawn_async missing: Err " ++ e))
+      Err(e) -> Authority.ignore(println("spawn_async missing: Err " ++ to_string(e)))
     end
     -- A path that exists but is not executable.
     show_run("run not executable", Authority.must(Process.run("/etc/hosts", [])))
@@ -45,15 +46,15 @@ mod ProcessSpawnErrors do
     -- stdin/stdout of a live child.
     match Authority.must(Process.spawn_async("cat", [])) do
       Ok(p) ->
-        Process.write(p, "ping\n")
+        let _ = Process.write(p, "ping\n")
         let line = Process.read_line(p)
-        Process.kill(p)
+        let _ = Process.kill(p)
         let _ = Process.wait_proc(p)
         match line do
-          Some(s) -> Authority.ignore(println("cat: " ++ s))
-          None -> Authority.ignore(println("cat: <none>"))
+          Ok(Some(s)) -> Authority.ignore(println("cat: " ++ s))
+          _ -> Authority.ignore(println("cat: <none>"))
         end
-      Err(e) -> Authority.ignore(println("cat: Err " ++ e))
+      Err(e) -> Authority.ignore(println("cat: Err " ++ to_string(e)))
     end
     -- cwd and environment are inherited, including a set_env made here.
     Process.set_env("MARCH_SPAWN_FIXTURE_VAR", "from-parent")

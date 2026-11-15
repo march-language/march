@@ -33,6 +33,10 @@ let hierarchy : (string * string option) list = [
   ("IO.WebSocket",       Some "IO.NetConnect");
   ("IO.Foreign",         Some "IO");
   ("IO.Foreign.Blocking", Some "IO.Foreign");
+  (* Naming and finding actors by name (ocap phase 2, spec §6): finding an
+     actor by name gains a capability from a string, and registering a name
+     can impersonate one. *)
+  ("IO.Registry",        Some "IO");
 ]
 
 (** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.
@@ -179,6 +183,7 @@ let words : (string * (string * string)) list = [
   ("IO.WebSocket",        ("WebSocket",        "opens a WebSocket"));
   ("IO.Foreign",          ("foreign-code",     "calls foreign code"));
   ("IO.Foreign.Blocking", ("blocking foreign-code", "calls blocking foreign code"));
+  ("IO.Registry",         ("registry",         "names an actor"));
 ]
 
 let access cap =

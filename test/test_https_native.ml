@@ -92,7 +92,7 @@ let config_src = {|mod HttpsConfigProbe do
   fn main(_c : Cap(IO.Console), _l : Cap(IO.NetListen), _t : Cap(IO.NetConnect.TLS)) do
     println("reload: " ++ show(http_server_reload_tls(0, "a", "b")))
     println("configure: " ++ show(http_server_tls_configure(0, "/nonexistent.pem", "/nonexistent.key", 0, 0)))
-    let conn = HttpServer.Conn(0, :get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, HttpServer.NoUpgrade)
+    let conn = HttpServer.test_conn(:get, "/", Nil, "")
     println("scheme: " ++ HttpServer.scheme(conn))
   end
 end

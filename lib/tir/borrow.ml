@@ -70,6 +70,13 @@ let extern_borrow_table : (string * bool list) list = [
      data (fwrite). The Int handle / mode / offset carry no RC. *)
   ("file_open_write",   [true; false]);
   ("file_write_handle", [false; true]);
+  (* File.Dir: dir_open / dir_open_write read their path (open);
+     file_open_at / dir_list_at read rel (openat). The Int fd / flags carry
+     no RC. *)
+  ("dir_open",          [true]);
+  ("dir_open_write",    [true]);
+  ("file_open_at",      [false; true; false]);
+  ("dir_list_at",       [false; true]);
   ("file_delete",   [true]);
   ("file_copy",     [true; true]);
   ("file_rename",   [true; true]);

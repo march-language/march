@@ -64,7 +64,7 @@ end
   needs IO.Console
   needs IO.NetConnect.TLS
   fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do
-    match Tls.client_ctx(Tls.default_client_config()) do
+    match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
       Ok(_) -> Authority.ignore(println("tls ctx ok"))
       Err(e) -> Authority.ignore(println("tls err " ++ Tls.error_to_string(e)))
     end

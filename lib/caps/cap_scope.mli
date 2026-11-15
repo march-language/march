@@ -38,12 +38,17 @@ val scope_subsumes : string option -> string option -> bool
 
 val is_scopable : string -> bool
 (** Whether a capability accepts a scope at all: the filesystem capabilities
-    take a path scope and [IO.NetConnect] takes a host scope
-    ({!Host_scope}). A scope elsewhere is rejected rather than ignored,
+    take a path scope, [IO.NetConnect] takes a host scope ({!Host_scope}),
+    and [IO.Mut] and [IO.Registry] take a name scope ({!Name_scope}). A scope elsewhere is rejected rather than ignored,
     because an ignored scope reads as enforcement that is not there. *)
 
 val is_host_scopable : string -> bool
 (** [IO.NetConnect], the one capability whose scope is a host, not a path. *)
+
+val is_name_scopable : string -> bool
+(** [IO.Mut] and [IO.Registry], whose scope is a set of names and name
+    prefixes ({!Name_scope}): a Vault table or a registered actor reached by
+    name. *)
 
 (** {1 Scope manifest}
 

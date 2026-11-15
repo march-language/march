@@ -245,9 +245,9 @@ mod SbNetApp do
   needs IO.Console
   needs IO.NetListen
   fn main(_cap_console : Cap(IO.Console), _cap_netlisten : Cap(IO.NetListen)) : () do
-    match tcp_listen(19097) do
-      Ok(_)  -> Authority.ignore(println("BOUND"))
-      Err(_) -> Authority.ignore(println("BIND-FAILED"))
+    match Socket.listen(19097) do
+      Ok(Ok(_)) -> Authority.ignore(println("BOUND"))
+      _ -> Authority.ignore(println("BIND-FAILED"))
     end
   end
 end

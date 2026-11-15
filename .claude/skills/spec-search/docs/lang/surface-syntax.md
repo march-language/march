@@ -370,7 +370,13 @@ fields or pass the value to a measure.
 {v : Cfg | v.port >= 1}            -- a record field
 {v : Cfg | v.port > v.retries}     -- one field against another
 {v : Tree | size(v) < 100}         -- a @[measure] over a structure
+{Int | _ >= 0 else "must not be negative" && _ < 10 else "must be below 10"}
+                                   -- a message for each conjunct
 ```
+
+A conjunct may carry a message after `else`, shown when a call breaks that
+conjunct (`else` binds tighter than `&&`); see
+[A message for each half of a contract](refinement-types.md#a-message-for-each-half-of-a-contract).
 
 The predicate fragment is `+ - *`, `/ %` (with March's truncating semantics;
 a zero divisor makes the predicate false), the comparisons
@@ -403,7 +409,8 @@ end
 
 Checking is definite-failure: it flags only what can *never* hold, so there
 are no false positives, and silence means "not disproved", never "verified".
-It runs only when `z3` is on `PATH`. A predicate calling a name the checker
+It uses the z3 that ships with the toolchain (or `MARCH_Z3`, or a `z3` on `PATH`), and
+warns once (`solver_unavailable`) when none can be used. A predicate calling a name the checker
 does not know produces a **warning** rather than silently enforcing no check at all.
 
 `Float` predicates are **comparisons only**; float *arithmetic* in a predicate
@@ -597,7 +604,7 @@ Integer arithmetic: `+`, `-`, `*`, `/`, `%`
 Float arithmetic: `+.`, `-.`, `*.`, `/.`
 String/list concat: `++`
 Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
-Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
+Logic: `&&`, `||`, `!` (prefix not; `not x` with an operand right after it is the same `!x`, so `not p(n)` is `!p(n)`), unary `-` (negate)
 
 Each `++` allocates and copies both operands into a new string/list. A chain
 of them (`a ++ b ++ c`) is collapsed by the compiler into a single concat: two
@@ -778,9 +785,12 @@ pfn priv_fn() do ... end      -- private
 doc "Returns the length of a list."
 fn length(xs) do ... end
 
-@[deprecated]
-fn old_api() do ... end
+@[decreases(len(xs) - i)]   -- a termination metric (refinement-types.md)
+fn scan(xs, i) do ... end
 ```
+
+An attribute name the compiler does not know is warned about
+(`unknown_attribute`), not silently ignored.
 
 ### Allocation contracts
 
@@ -916,9 +926,20 @@ end
 
 ```march
 needs IO.Network, IO.Clock
+
+fn log(msg : String) : Unit needs IO.Console do println(msg) end
+fn size(s : String) : Int needs () do string_byte_length(s) end
+
+interface Store(a) do
+  fn get : a -> Int needs IO.FileRead   -- every impl of get is held to this
+end
 ```
 
-Declares capability requirements for the module.
+A `needs` line declares capability requirements for the module. A `needs` clause in a
+function header, after the return type, bounds that function: everything it reaches must
+be covered by the clause, and the clause by the module's `needs`. `needs ()` is the empty
+bound. On an interface method signature, after the type, it bounds every impl of that
+method instead. See [Capabilities]({{ site.baseurl }}/docs/capabilities/#per-function-bounds).
 
 ---
 
@@ -1236,9 +1257,8 @@ sees them. Statement separation inside `block_body` (the
 `block_body: nonempty_list(block_expr)` production in
 `lib/parser/parser.mly`) is therefore purely a side effect of where
 Menhir's grammar happens to close one `expr` and open the next. A line that
-*starts* with a token that can continue the prior expression, `(` (call/tuple),
-`-` (binary minus), or any infix operator (`++`, `+`, etc.), gloms onto the
-previous line instead of starting a new statement.
+*starts* with `-` (binary minus) or any infix operator (`++`, `+`, etc.)
+gloms onto the previous line instead of starting a new statement.
 
 ```march
 -- `- 1` on its own line binds to the previous let, not a new statement:
@@ -1248,30 +1268,43 @@ let b = a
 -- desugars to `let b = a - 1`  (b = 9), not two statements
 ```
 
+The fix is to make the continuation impossible: start the next line with
+something that cannot extend an expression (another `let`, a bare identifier
+call), or put the operator at the end of the previous line when a
+continuation is what you mean.
+
+**A line that starts with `(` is the exception: it is always a new statement
+(or a new match arm) when the previous line ends a complete expression.** The
+token filter retags such a `(` as `LPAREN_STMT`, which the grammar accepts
+only as a parenthesised expression, a tuple, `()` or a parenthesised/tuple
+pattern, never as a call's argument list. "Ends a complete expression" means
+the previous significant token is an identifier, a `)`, a `]`, a literal
+(Int, Float, String, Bool, atom), a `}` (record literal or update), an `end`
+(a `do ... end` block, an `if`/`match`, ...) or the end of an interpolated
+string:
+
 ```march
--- a `(...)` line is parsed as a call on the preceding expression:
 let f = identity
 (5)
--- desugars to `let f = identity(5)`  (f = 5), not `f = identity` then a bare `(5)`
+-- two statements: `f = identity`, then a discarded `(5)`
+
+let r = { x: 1 }
+(r.x + 1)
+-- two statements; the block's value is 2
+
+let g = do
+  fn s -> println(s)
+end
+("discarded")
+-- two statements; `g` is never called
 ```
 
-The sharpest trap is when the previous line's value isn't callable: the
-error surfaces far from the real mistake:
-
-```march
-let a = 5
-println("a = " ++ int_to_string(a))
-let b = 10
-(negate(b))
-println("...")
-```
-
-fails to typecheck with `This is not a function — it has type Int`, pointing
-at `let b = 10`, because `let b = 10 \n (negate(b))` glommed into
-`let b = 10(negate(b))`. The fix is to make the continuation impossible:
-start the next line with something that cannot extend an expression (another
-`let`, a bare identifier call with no leading operator/paren ambiguity), or
-parenthesize/terminate the prior expression so the next line can't attach.
+A call's `(` must therefore sit on the same line as the callee (`f(5)`); its
+arguments may continue on later lines. Before #129/#132 a `(` line after an
+identifier, `)`, `]` or literal was parsed as a call on the preceding
+expression, and before #1179 the same was true after `}`, a `do ... end`
+block and an interpolated string (for a `do ... end` that evaluated to a
+function, silently calling it).
 
 ### Derived `Ord`/`Hash` ignore constructor payloads
 

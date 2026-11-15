@@ -8,6 +8,27 @@ mod TestHttpTransport do
 
   needs IO.NetConnect
   needs IO.NetConnect.TLS
+  needs IO.NetListen
+
+-- A closed Socket: request_on / stream_request_on must refuse https before
+-- they touch the socket, so any Socket will do; a closed one proves it.
+pfn closed_socket() do
+  match Authority.must(Socket.listen(0)) do
+  Err(e) -> panic("listen: " ++ Socket.error_message(e))
+  Ok(l) ->
+    let port = match Socket.local_port(l) do
+      Ok(p) -> p
+      Err(e) -> panic("local_port: " ++ Socket.error_message(e))
+    end
+    match Authority.must(Socket.connect("127.0.0.1", port)) do
+    Err(e) -> panic("connect: " ++ Socket.error_message(e))
+    Ok(s) ->
+      let _ = Socket.close(s)
+      let _ = Socket.close_listener(l)
+      s
+    end
+  end
+end
 
 -- Local error values exercise the constructor shape independently of the
 -- transport. Tests of HttpTransport itself use its qualified constructors.
@@ -127,9 +148,9 @@ describe "https transport dispatch" do
   end
 
   test "request_on rejects https request with SchemeNotSupported" do
-    -- fd=-1 is invalid but we never reach tcp_send because of the early check.
+    -- The socket is closed, but the scheme check comes first.
     let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
-    match HttpTransport.request_on(-1, req) do
+    match HttpTransport.request_on(closed_socket(), req) do
     Err(HttpTransport.SchemeNotSupported(_)) -> ()
     Err(_) -> assert false
     Ok(_)  -> assert false
@@ -138,7 +159,7 @@ describe "https transport dispatch" do
 
   test "stream_request_on rejects https request with SchemeNotSupported" do
     let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
-    match HttpTransport.stream_request_on(-1, req, fn _ -> ()) do
+    match HttpTransport.stream_request_on(closed_socket(), req, fn _ -> ()) do
     Err(HttpTransport.SchemeNotSupported(_)) -> ()
     Err(_) -> assert false
     Ok(_)  -> assert false

@@ -937,6 +937,7 @@ let ensure_runtime_so () =
       ^ (opt_file (Filename.concat runtime_dir "march_pqc.c"))        (* mlkem768_* / mldsa65_* builtins over pqc.c *)
       ^ (opt_file (Filename.concat runtime_dir "march_ctx_escape.c"))  (* ~H contextual escapers; referenced by march_extras.c *)
       ^ (opt_file (Filename.concat runtime_dir "march_handle.c"))  (* handle boxes; referenced by march_runtime.c *)
+      ^ (opt_file (Filename.concat runtime_dir "march_file_beneath.c"))  (* File.Dir: opens beneath a directory fd *)
       ^ (opt_file (Filename.concat runtime_dir "march_remote_registry.c"))  (* L4 remote registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_monitor_registry.c")) (* dist monitor registry *)
       ^ (opt_file (Filename.concat runtime_dir "march_observe.c")) (* observe socket *)

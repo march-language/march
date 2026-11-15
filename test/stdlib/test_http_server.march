@@ -8,19 +8,11 @@ mod TestHttpServer do
 
   needs IO.FileRead
   needs IO.FileWrite
-
--- Local mirrors of HttpServer private types (matched structurally at runtime).
--- Method field is now Atom (:get, :post, etc.) matching HttpServer.Conn.
-ptype Upgrade = NoUpgrade | WebSocketUpgrade(a)
-ptype Conn = Conn(
-  Int, Atom, String, List(String), String,
-  List(Header), String, Int, List(Header), String,
-  Bool, List((String, String)), Upgrade
-)
+  needs IO.NetListen
 
 pfn make_conn(meth, path_, qs, req_hdrs, req_body) do
-  let path_parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
-  Conn(0, meth, path_, path_parts, qs, req_hdrs, req_body, 0, Nil, "", false, Nil, NoUpgrade)
+  let target = if qs == "" do path_ else path_ ++ "?" ++ qs end
+  HttpServer.test_conn(meth, target, req_hdrs, req_body)
 end
 
 pfn make_get(path_) do
@@ -336,6 +328,21 @@ end
 describe "HttpServer scheme" do
   test "a conn with no TLS session is http" do
     assert (HttpServer.scheme(make_get("/")) == "http")
+  end
+end
+
+pfn x_router(conn) do
+  match HttpServer.path_info(conn) do
+  Cons("x", Nil) -> HttpServer.text(conn, 200, "x")
+  _ -> HttpServer.text(conn, 404, "Not Found")
+  end
+end
+
+describe "HttpServer.test_conn" do
+  test "handler unit test with test_conn" do
+    let c = x_router(HttpServer.test_conn(:get, "/x", [], ""))
+    assert (HttpServer.status(c) == 200)
+    assert (HttpServer.resp_body(c) == "x")
   end
 end
 

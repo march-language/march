@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; test/dune passes it, test_ir_verify.ml reads it)
 -- `Node.send(peer, to, msg)` (and `Node.enqueue` through a NodeQueue): the
 -- typed remote send, end to end, both
 -- backends (specs/progress/2026-09-15-remote-actor-dispatch.md).
@@ -129,7 +130,7 @@ mod TypedSendLoopback do
 
   -- ── node-a: send ────────────────────────────────────────────────────
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Authority.must(Socket.connect(host, port)) do
+    match Result.map_err(tcp_connect(host, port), fn m -> Socket.ConnectionFailed(m)) do
       Ok(fd) -> Ok(fd)
       Err(e) -> if attempts_left <= 1 do Err(e) else connect_with_retry(host, port, attempts_left - 1) end
     end
@@ -178,9 +179,7 @@ mod TypedSendLoopback do
       Ok(fd) -> fd
       Err(e) -> panic("connect: " ++ Socket.error_message(e))
     end
-    let peer : Peer = {
-      node_id: "node-b", identity: NodeIdentity.make("node-b", "pk", 1), fd: fd, data_fd: PeerRegistry.no_fd()
-    }
+    let peer : Peer = PeerRegistry.make("node-b", NodeIdentity.make("node-b", "pk", 1), fd, PeerRegistry.no_fd())
     let target = GlobalPid.make("node-b", 42, 1)
     let ping : Ping = { n: 7, who: "node-a" }
     -- Three typed sends. No tag, no codec: the compiler supplies both.

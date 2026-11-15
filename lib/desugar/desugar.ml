@@ -2682,12 +2682,24 @@ let desugar_module ?errors ?(is_entry = true) (m : module_) : module_ =
      visible (its codec check fails closed).  A nested level resolves type
      names against its own declarations first, then the enclosing ones, the
      way a bare type reference in that module does. *)
+  (* Every type name the program declares, at any depth (a stdlib file
+     declares the handle wrappers themselves and exempts nothing). *)
+  let program_types =
+    if !Desugar_actor_names.is_stdlib_file m.mod_name.span.file then []
+    else
+      let rec go acc ds =
+        List.fold_left (fun acc d ->
+            match d with
+            | DType (_, n, _, _, _) | DAlwaysLinearType (_, n, _, _, _) -> n.txt :: acc
+            | DMod (_, _, inner, _) | DDescribe (_, inner, _) -> go acc inner
+            | _ -> acc) acc ds in
+      go [] m.mod_decls in
   let rec expand_level outer_type_defs (decls : decl list) : decl list =
     let type_defs = collect_type_defs decls @ outer_type_defs in
     List.concat_map (fun d ->
         match d with
         | DDeriving (type_name, ifaces, sp) ->
-          expand_derive errors type_defs type_name ifaces sp
+          expand_derive ~program_types errors type_defs type_name ifaces sp
         | DSatisfy (iface_names, type_names, sp) ->
           expand_satisfy errors raw_ifaces raw_fns iface_names type_names sp
         | DMod (name, vis, inner, sp) ->

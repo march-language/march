@@ -21,6 +21,26 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
+  `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
+  any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:
+  a handle names a resource on this node" (`handle_not_sendable`), at the `derive Json`, at a
+  `Node.send` or `Node.enqueue`, and at an `@[remote]` handler. `derive Json` over a handle used
+  to be accepted, with an encoder that could not work; a send of such a type said only that a
+  JSON codec was missing.
+- **Name scopes on `IO.Mut` and `IO.Registry`.** `needs IO.Mut("sessions")` and
+  `needs IO.Registry("logger", prefix("worker."))` narrow a capability to some names: a
+  `Vault.new`/`Vault.open`/`Vault.whereis` or `Actor.register`/`unregister`/`whereis` call
+  with a literal name outside the scope fails to compile (`cap_scope_violation`), as does a
+  computed name in a scoped module and `Actor.registered` under a scoped `IO.Registry`.
+  `Vault.ns_*`, `Config.new_store` and calls through an `alias` are judged too, and a nested
+  module may narrow its parent's name scope but not widen it.
+  `prefix(w)`, `name(...)`, `methods("get")`, a `;` in a scope string and an empty first
+  string before more are now refused, so each scope has one spelling and `march --fmt`
+  prints it back unchanged.
+- **`needs` scopes take several names and string-valued options.** `needs IO.Mut("a", "b")`
+  and `needs IO.Registry("logger", prefix("worker."))` now parse, in the compiler, the formatter
+  and the tree-sitter grammar. No capability uses the new forms yet.
 - **`Task.poll(t)` (builtin `task_poll`) checks a task without waiting.** It answers `None`
   while the task is still running and `Some(r)` once it has finished, `r` being exactly
   what `Task.await(t)` answers (`Ok(value)`, or `Err(reason)` for a cancelled task). It
@@ -41,13 +61,25 @@ git log is authoritative for exact commits.
   says so.
 - **`File.Handle`: open, read, write, seek and close a file through a handle.**
   `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
-  (writes, creates the file, `IO.FileWrite`) return `Result(File.Handle, FileError)`;
+  (writes, creates the file, `IO.FileWrite`) return `Result(Result(File.Handle, FileError), CapError)`;
   `File.read_line`, `File.read_chunk`, `File.write_to`, `File.seek` and `File.close` use it.
   The handle is a reference-counted box: every use after `close` returns the new
   `Err(Closed)` (a second `close` too), and a handle dropped without `close` is closed
   when its last reference goes. `File.with_open` / `File.with_open_write` close it when the
   callback returns or panics. `FileError` now derives `Eq`. `with_lines`, `with_chunks`,
   `each_line` and `each_chunk` keep their signatures and use a handle internally.
+- **`File.Dir`: authority over one directory's subtree.** `File.open_dir(path)`
+  (`IO.FileRead`) and `File.open_dir_write(path)` (`IO.FileWrite`) are checked capability
+  operations on `path` and return `Result(Result(File.Dir, FileError), CapError)` (wrap a
+  call in `Authority.must` to panic on a refusal); the uses of a `File.Dir` below take the
+  handle and need no capability.
+  `File.open_in(d, rel)`, `File.open_write_in(d, rel, mode)` and `File.list_in(d, rel)` open
+  and list beneath it and refuse a path that leaves it with the new `FileError`
+  `Escapes(rel)` (empty, `.`, absolute, or climbing out with `..`). `File.close_dir` closes
+  it; later uses return `Err(Closed)`, while handles already opened through it keep working.
+  Linux resolves through `openat2(RESOLVE_BENEATH)` and follows a symlink that stays
+  inside the directory. **On macOS every symlink beneath a directory handle is refused**
+  (`Escapes`), even one that stays inside: the check is best effort there.
 - **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
   methods(get))` limits a module to a path prefix on a host, matched by whole segment
   (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
@@ -504,6 +536,27 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Registering and finding actors by name needs the new `IO.Registry` capability;
+  `forge fix` adds the line.** `Actor.register`, `Actor.unregister`, `Actor.whereis` and
+  `Actor.registered` are charged `IO.Registry` (a child of `IO`, so `needs IO` still covers
+  them). The missing-capability error carries `needs IO.Registry` as a machine fix.
+
+- **The raw integer file, socket, TLS, UDP, WebSocket and process builtins are internal to
+  the standard library; use `File`, `Socket`, `Udp`, `Tls`, `WebSocket`, `Process`.**
+  Calling `tcp_send_all`, `file_read_line`, `process_wait_proc` and the rest of the
+  Int-descriptor builtins from your own code is a `stdlib_internal` error that names the
+  wrapper to use (`Socket.write(s, data)`, `File.read_line(h)`, `Process.wait_proc(p)`, ...).
+  In exchange, using a handle you hold is no longer a capability operation: only the open
+  (`File.open`, `Socket.connect`, `Socket.listen`, `Tls.client_ctx`, `Process.spawn_async`,
+  ...) is checked, so a function bounded by `needs ()` may read, write, accept on or wait on
+  a handle it was handed. `Socket.recv_exact(s, n)` is new, for reading an exact byte count.
+  `IO.WebSocket` is now declaration-only.
+- **The standard library's cluster plumbing over raw file descriptors is no longer callable
+  from user code.** `NetKernel.send_frame` / `recv_frame` / `handshake*`, `NodeSend.cast*`,
+  `NodeCall.call`, `NodeQueue.start`, `PeerReader.serve`, `ClusterConn.listen` /
+  `accept_split*` / `connect_split*`, `ClusterNode.handshake`, `SessionNode.open` and the
+  like are marked `@[stdlib_internal]`: naming one from your own code is a `stdlib_internal`
+  error. Use `ClusterNode` and the typed node and session APIs instead.
 - **A Float-valued `if` or `match` no longer allocates in compiled code.** Every
   `if c do a else b end` whose arms are Floats used to box its value on the heap and free it
   again at the join, a malloc and a free per evaluation; a nested `else if` chain paid once per
@@ -552,7 +605,44 @@ git log is authoritative for exact commits.
   verdict, so only a changed program pays for the check (about 1.3 s for a small
   program); forge's check cache now also keys the compiler, so a compiler upgrade
   re-checks.
-
+- **`Socket.connect` returns a `Socket`, not an `Int`; `Udp.UdpSocket`, `Tls.TlsConn`,
+  `Tls.TlsCtx` and `WebSocket.WsSocket` can no longer be built from an integer.**
+  Connections and listening sockets are reference-counted handles: `Socket.connect` /
+  `connect_timeout` return `Result(Result(Socket, SocketError), CapError)` (phase 1's
+  capability shape around the handle), every `Socket` function takes the
+  handle, `Socket.close` returns `Result((), SocketError)`, and the new
+  `Socket.listen(port)` / `accept` / `accept_timeout` / `local_port` / `close_listener`
+  work on a `Listener`. A use after `close` is `Err(Closed)` (new in `SocketError`,
+  `UdpError` and `TlsError`), and closing a socket another task is blocked on in `recv`,
+  `accept`, `Udp.recv` or `Tls.read` wakes it with `Err(Closed)`, on macOS as well as
+  Linux. `Tls.connect(s, ctx, host)` / `Tls.accept(s, ctx)` take the `Socket`; on success
+  the `TlsConn` owns the connection (`Tls.close` closes both), on failure `s` stays the
+  caller's. `opaque type` constructors no longer cross a module boundary (`Udp.UdpSocket(5)`
+  is now `unknown_constructor`). Standard-library internals that still need the raw
+  descriptor use `Socket.raw_fd` / `adopt` / `borrow`, marked `@[stdlib_internal]`: a user
+  program naming one gets the `stdlib_internal` error.
+- **Opening a listener, a UDP socket or a TLS context is a checked capability operation.**
+  `Socket.listen(port)` returns `Result(Result(Listener, SocketError), CapError)` (checked
+  as `IO.NetListen` on the port), `Udp.open` / `open_with` / `open_sharded` return
+  `Result(Result(UdpSocket, UdpError), CapError)` (`IO.NetConnect` on `host:port`; one check
+  covers every shard), and `Tls.client_ctx` / `server_ctx` return
+  `Result(Result(TlsCtx, TlsError), CapError)` (`IO.NetConnect.TLS`). Wrap a call in
+  `Authority.must(...)` to keep the old single `Result`. `HttpTransport`, `HttpClient` and
+  `Tls.https_get` keep their single `Result` for now: a refused connect is
+  `HttpTransport.Refused(reason)`, a refused TLS context `TlsContextError(reason)`.
+- **The HTTP client and server use `Socket` handles, not descriptor numbers.**
+  `HttpTransport.connect(req)` returns `Result(Socket, TransportError)` (same errors as
+  before); `HttpTransport.request_on`, `stream_request_on`, `stream_chunked_body`,
+  `stream_fixed_body` and `HttpClient.transport_keepalive` take the `Socket`, and a use
+  after `Socket.close` is `Err(Closed)`. `HttpClient.run_on_fd` is renamed `run_on` (it
+  had no callers outside the standard library). `HttpServer.Conn`'s first field is now
+  the connection's `Socket`, borrowed from the server: closing it never closes the
+  connection, and once the connection ends the socket is closed, so a `Conn` a handler
+  kept reaches no descriptor. `HttpServer.fd` is `@[stdlib_internal]`. Handler unit
+  tests build a request with the new `HttpServer.test_conn(method, path, headers, body)`
+  instead of the 13-field `Conn(...)` constructor: replace
+  `Conn(0, m, path, _, "", headers, body, 0, Nil, "", false, Nil, NoUpgrade)` with
+  `HttpServer.test_conn(m, path, headers, body)` (a query string goes in `path` after a `?`).
 - **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
   `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
   connection (ocap phase 2). A module's own type (variant, record or alias) named
@@ -560,6 +650,21 @@ git log is authoritative for exact commits.
   unified with it. Code that only goes through `Channel.new_socket` and
   the `Channel.socket_*` accessors is unaffected; code that names the type or matches
   on the constructor renames it.
+- **`Process.spawn_async` returns a `Process` handle, not a `LiveProcess`.** Its type is
+  `Result(Result(Process, ProcessError), CapError)`; the new
+  `ProcessError = Closed | ProcessFailed(String)` carries the old `Err(msg)` as
+  `ProcessFailed(msg)`. `Process.read_line(p)` returns `Result(Option(String), ProcessError)`,
+  `write` and `kill` return `Result((), ProcessError)` and `wait_proc` returns
+  `Result(Int, ProcessError)`; none of them needs a capability. `wait_proc` closes the handle,
+  so every later use (a second `wait_proc`, or a `kill` that could reach a reused pid) is
+  `Err(Closed)` (as is a `wait_proc` that races another one on the same handle). A `Process`
+  dropped without `wait_proc` is released when its last reference goes (compiled) or when the
+  garbage collector finalises it (interpreted): its pipes are closed, a child still running is
+  sent SIGTERM and then SIGKILL, and a child that has not exited by then is reaped at the next
+  spawn or release, so it is neither left running nor left a zombie.
+  `Process.LiveProcess` is now opaque and internal to the standard library. Migrate by
+  matching `Ok(Some(line))` where `read_line` returned `Some(line)`, `Ok(code)` for
+  `wait_proc`'s code, and `ProcessFailed(msg)` for a spawn failure.
 
 - **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
   NaN, the infinities and a result outside Int's range** (#1230), with
@@ -936,6 +1041,47 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Process.kill` can no longer signal a recycled pid.** A kill racing a `wait_proc` on
+  another task could reach a pid the wait had already reaped; it now signals only while
+  the process's slot is live and not being waited on.
+- **Matching `Process.ProcessError` from outside the module no longer warns of a missing
+  case.** It is a plain `type`, like `Socket.SocketError`, so `Process.Closed` and
+  `Process.ProcessFailed(_)` are seen as exhaustive.
+- **A task still using an HTTP `Conn`'s socket (or a plain ws:// socket) when the connection
+  ends can no longer read the next client's bytes.** The server closed the descriptor while
+  such a use was in flight, so the number could be reused by the next connection under it.
+  The connection's end now wakes the use and waits (up to 2 s) for it to finish before the
+  descriptor is closed.
+- **`Tls.https_get` checks the host it dials.** It connected with a raw dial that only the
+  TLS-context permission covered; it now dials through `Socket.connect`, so `IO.NetConnect`
+  on `host:port` is checked like every other connect. A refusal comes back as
+  `TlsHandshakeFailed("connect: ...")` and nothing is dialled.
+- **A dependency can no longer write to a socket it does not hold by forging a cluster
+  record.** `PeerRegistry.Peer` held its connection descriptors as plain `Int` fields, and
+  public functions write to them (`SwimDriver.dispatch`, `DistLink.resend_pending`,
+  `Node.send`), so a module with only `needs IO.Mut` could build a `Peer` around a guessed
+  descriptor number and send bytes into a connection the program held. The same was
+  possible by spawning the cluster's `NodeQueue.Writer` actor and sending it
+  `Configure(fd, ..)`, by putting a forged `SessionNode.Link` in a `Party` and calling
+  `SessionNode.finish`/`serve`, or through the `fd_for` callback of `WorkDispatch.dispatch`.
+  The descriptors of a `Peer` and a `SessionNode.Link` are now an opaque `PeerRegistry.Fd`
+  only the standard library can make, `WorkDispatch.dispatch`/`dispatch_affine` are
+  internal, and an actor marked `@[stdlib_internal]` (`NodeQueue.Writer`,
+  `ClusterNode.CtlWriter`, `ClusterNode.ClusterNodeActor`) can be neither spawned nor sent
+  a message from user code ("`NodeQueue.Configure` belongs to the actor `NodeQueue.Writer`,
+  which is internal to the standard library", `stdlib_internal`).
+- **A capability reached inside a standard-library closure is charged to the code that
+  called the standard library, not to the program's entry module.** `march check` and the
+  REPL rejected correct programs that called `Socket.write`, `Tls.read` or
+  `HttpTransport.simple_get` (``Module `LibCheck` uses `IO.NetConnect` ``), and the other
+  modes charged the capability to the entry module, so a nested module that called such a
+  function without the `needs` line was accepted whenever the entry module declared it. It
+  is now rejected there, as for a direct call.
+- **Closing a TLS connection whose peer had already reset it no longer kills the process.**
+  `Tls.close` sends close_notify; to a reset peer that write raised SIGPIPE, so a TLS server
+  that closed after its client hung up could exit with status 141. The descriptor now gets
+  `SO_NOSIGPIPE` at the handshake (macOS/BSD), and on Linux the close blocks and consumes
+  the signal.
 - **Awaiting a task twice is safe for any result type in compiled code.** A task whose
   result is a heap value (a `String`, a list, a record) handed its only reference to the
   first `task_await`, so a second `task_await` on the same task, or one after

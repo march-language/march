@@ -1,3 +1,7 @@
+-- compile-flags: --stdlib-source (pins raw builtin behaviour; test/dune passes it, test_ir_verify.ml reads it)
+-- Compiled and run with --stdlib-source (test/dune): it pins the raw file_open / csv_open handle table,
+-- which are stdlib-only since ocap phase 2 (Task 10). User code reaches
+-- them through File and Csv.
 -- File and CSV handles are `Int`s, so nothing in compiled code releases
 -- them: the handle used to be a heap cell that file_close / csv_close could
 -- not free (a second close must stay a no-op), and every open leaked it

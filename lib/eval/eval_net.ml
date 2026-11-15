@@ -251,11 +251,18 @@ let parse_header_line line =
     let value = String.trim (String.sub line (i + 1) (String.length line - i - 1)) in
     Some (name, value)
 
+(** A request's Socket (HttpServer.Conn field 0): a TCP_BORROWED box over
+    [sock], which the server owns; closing the box never closes the fd.
+    The server closes the box once the request is done (Eval_handle.close),
+    so a Conn a handler kept reaches no descriptor afterwards. *)
+let conn_socket (sock : Unix.file_descr) : value =
+  Eval_handle.make Eval_handle.kind_tcp_borrowed (VInt (Obj.magic sock : int)) (VInt 1)
+
 (** Build a March Conn value from parsed request data.
     The [headers_raw] list contains (name, value) pairs.
-    [fd] is the client socket fd so builtins like tcp_peer_addr can
-    query the connection (0 when no live socket backs the conn). *)
-let build_conn_value ?(fd = 0) ~method_str ~full_path ~headers_raw ~body () =
+    [sock] is the conn's Socket: a TCP_BORROWED box over the client fd
+    ([conn_socket]), so HttpServer.peer_addr can query the connection. *)
+let build_conn_value ~sock ~method_str ~full_path ~headers_raw ~body () =
   let path, query_string =
     match String.index_opt full_path '?' with
     | Some i ->
@@ -272,7 +279,7 @@ let build_conn_value ?(fd = 0) ~method_str ~full_path ~headers_raw ~body () =
       headers_raw (VCon ("Nil", []))
   in
   VCon ("Conn", [
-    VInt fd;                 (* client socket fd (0 = no live socket) *)
+    sock;                    (* the connection's Socket (borrowed box) *)
     method_val;
     VString path;
     path_info;
@@ -757,11 +764,14 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
         | _ -> ""
       in
       (* 4. Build the Conn value *)
+      let conn_sock = conn_socket sock in
       let conn_val = build_conn_value
-          ~fd:(Obj.magic sock : int)
+          ~sock:conn_sock
           ~method_str:meth ~full_path ~headers_raw ~body () in
       (* 5. Call the pipeline closure *)
-      let result_conn = !apply_hook pipeline_fn [conn_val] in
+      let result_conn =
+        Fun.protect ~finally:(fun () -> Eval_handle.close conn_sock)
+          (fun () -> !apply_hook pipeline_fn [conn_val]) in
       (* 6. Check for WebSocket upgrade *)
       (match result_conn with
        | VCon ("Conn", [_fd; _meth; _path; _pi; _qs;
@@ -786,9 +796,11 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
               "Sec-WebSocket-Accept: " ^ accept ^ "\r\n\r\n"
             in
             tcp_send_all sock handshake;
-            (* Store fd as int in WsSocket value *)
+            (* WsSocket(box): a TCP_BORROWED handle over the fd, which this
+               server owns and closes (stdlib/websocket.march). *)
             let fd_int = (Obj.magic sock : int) in
-            let ws_sock = VCon ("WsSocket", [VInt fd_int]) in
+            let ws_sock = VCon ("WsSocket",
+              [Eval_handle.make Eval_handle.kind_tcp_borrowed (VInt fd_int) (VInt 1)]) in
             (try ignore (!apply_hook handler_fn [ws_sock])
              with _ -> ()))
        | _ ->
@@ -940,10 +952,13 @@ let http_run_pipeline_and_respond
     (sock : Unix.file_descr) (pipeline_fn : value)
     (meth : string) (full_path : string)
     (headers_raw : (string * string) list) (body : string) : http_outcome =
+  let conn_sock = conn_socket sock in
   let conn_val = build_conn_value
-      ~fd:(Obj.magic sock : int)
+      ~sock:conn_sock
       ~method_str:meth ~full_path ~headers_raw ~body () in
-  let result_conn = !apply_hook pipeline_fn [conn_val] in
+  let result_conn =
+    Fun.protect ~finally:(fun () -> Eval_handle.close conn_sock)
+      (fun () -> !apply_hook pipeline_fn [conn_val]) in
   match result_conn with
   | VCon ("Conn", [_fd; _meth; _path; _pi; _qs;
                    _rh; _rb; _status; _rhs; _rbody;
@@ -1030,7 +1045,8 @@ let run_http_event_loop (server_sock : Unix.file_descr) (pipeline_fn : value) : 
     }
   in
   let start_ws_fiber fd handler_fn =
-    let ws_sock = VCon ("WsSocket", [VInt (Obj.magic fd : int)]) in
+    let ws_sock = VCon ("WsSocket",
+      [Eval_handle.make Eval_handle.kind_tcp_borrowed (VInt (Obj.magic fd : int)) (VInt 1)]) in
     Effect.Deep.match_with
       (fun () -> ignore (!apply_hook handler_fn [ws_sock]))
       ()

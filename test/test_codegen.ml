@@ -11214,6 +11214,68 @@ end
   | None -> ()
   | Some bin -> check "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
 
+(* File.Dir on Linux (ocap phase 2, Task 7): open_in resolves through
+   openat2(RESOLVE_BENEATH), which follows a symlink that stays inside the
+   directory (root/in -> sub) and refuses one that leaves it (root/out ->
+   /etc).  macOS refuses every symlink beneath a directory handle (the
+   documented difference; test/stdlib/test_file_dir.march covers the refusal
+   on both), so this case is Linux only.  Interpreted and compiled. *)
+let test_dir_beneath_symlink_linux () =
+  let os = String.trim (read_cmd_output "uname -s 2>/dev/null") in
+  if os <> "Linux" then
+    Printf.printf "[skip] dir_beneath_symlink_linux: %s is not Linux; macOS refuses \
+                   every symlink beneath a File.Dir, so an in-tree symlink cannot open there\n%!"
+      (if os = "" then "this OS" else os)
+  else begin
+    let root = Filename.temp_file "march_dir_beneath" "" in
+    Sys.remove root;
+    Unix.mkdir root 0o755;
+    Unix.mkdir (Filename.concat root "sub") 0o755;
+    let oc = open_out (Filename.concat root "sub/b.txt") in
+    output_string oc "B\n";
+    close_out oc;
+    Unix.symlink "sub" (Filename.concat root "in");
+    Unix.symlink "/etc" (Filename.concat root "out");
+    let src_text = Printf.sprintf {|mod DirBeneathLinux do
+  needs IO.FileRead
+  needs IO.Console
+
+  fn main(_r : Cap(IO.FileRead), _c : Cap(IO.Console)) do
+    match Authority.must(File.open_dir("%s")) do
+    Err(e) -> println("OPEN_DIR " ++ to_string(e))
+    Ok(d) ->
+      match File.open_in(d, "in/b.txt") do
+      Ok(h) ->
+        match File.read_line(h) do
+        Ok(Some(l)) -> println("IN " ++ l)
+        _ -> println("IN EMPTY")
+        end
+      Err(e) -> println("IN ERR " ++ to_string(e))
+      end
+      match File.open_in(d, "out/passwd") do
+      Ok(_) -> println("OUT OPENED")
+      Err(File.Escapes(_)) -> println("OUT ESCAPES")
+      Err(e) -> println("OUT ERR " ++ to_string(e))
+      end
+    end
+  end
+end
+|} root in
+    let (project_root, main_exe, src, tmp) =
+      write_march_source ~name:"dir_beneath_linux" src_text in
+    let expect which out =
+      Alcotest.(check string) (which ^ ": in-tree symlink opens, escaping one is refused")
+        "IN B\nOUT ESCAPES" out
+    in
+    expect "interpreter" (read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+    let bin = Filename.concat tmp "dir_beneath_linux_bin" in
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+            ~main_exe ~bin ~src () with
+    | None -> ()
+    | Some bin -> expect "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
+  end
+
 (* A function used only as a value must remain reachable through mono. *)
 let test_other_module_function_value_compiled () =
   let (project_root, main_exe, src, tmp) =
@@ -17831,6 +17893,10 @@ declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
 declare ptr  @march_file_open_write(ptr %path, i64 %mode)
 declare ptr  @march_file_write_handle(i64 %handle, ptr %data)
 declare ptr  @march_file_seek(i64 %handle, i64 %offset)
+declare ptr  @march_dir_open(ptr %path)
+declare ptr  @march_dir_open_write(ptr %path)
+declare ptr  @march_file_open_at(i64 %dirfd, ptr %rel, i64 %flags)
+declare ptr  @march_dir_list_at(i64 %dirfd, ptr %rel)
 declare ptr  @march_file_write(ptr %path, ptr %data)
 declare ptr  @march_file_append(ptr %path, ptr %data)
 declare ptr  @march_file_delete(ptr %path)
@@ -18706,8 +18772,9 @@ let test_cross_tls_gzip_linux_amd64_elf () =
   | Some _sysroot ->
     let main_exe = find_main_exe () in
     let project_root = march_project_root () in
-    (* The TLS calls are guarded by a RUNTIME length (never actually huge) so the
-       optimizer can't dead-code-strip them — otherwise the DT_NEEDED for
+    (* The TLS call (Tls.client_ctx: the raw tls_* builtins are stdlib-only
+       since ocap phase 2) is guarded by a RUNTIME length (never actually huge) so the
+       optimizer can't dead-code-strip it — otherwise the DT_NEEDED for
        libssl/libcrypto would be dropped and the assertion below would be a
        false negative.  The gzip calls are unconditional. *)
     let src_text =
@@ -18725,8 +18792,8 @@ let test_cross_tls_gzip_linux_amd64_elf () =
       \      Err(_) -> gz\n\
       \    end\n\
       \    if Bytes.length(restored) > 1000000000 do\n\
-      \      let _ = tls_write(0, \"ping\")\n\
-      \      tls_close(0)\n\
+      \      let _ = Tls.client_ctx(Tls.default_client_config())\n\
+      \      ()\n\
       \    else\n\
       \      ()\n\
       \    end\n\
@@ -20189,6 +20256,31 @@ let test_handle_vs_user_record_named_socket () =
     [ "42"; "x42"; "[W({ fd: 42, name: \"x\" }), W({ fd: 1, name: \"y\" })]"; "[#<Socket>]" ]
     (program_lines compiled)
 
+(* ocap phase 2b, Task 8 (R4): a Process released without wait_proc, by
+   close or by dropping its last reference, leaves no zombie
+   (Test_helpers.process_reap_src). The interpreter runs the close variant
+   (test_eval); only the compiled box releases a dropped handle at a known
+   point. *)
+let test_process_release_reaps_child () =
+  List.iter (fun (trap, drop, name) ->
+      let (rc, out) =
+        run_handle_fixture ~compiled:true ~name (process_reap_src ~trap ~drop ()) in
+      if rc <> 0 then Alcotest.failf "%s exited %d:\n%s" name rc out;
+      Alcotest.(check bool) (name ^ ": child reaped:\n" ^ out) true
+        (contains process_reap_expected out))
+    (* trap: the child ignores SIGTERM, so only the release's SIGKILL ends it *)
+    [ (false, false, "process_reap_close"); (false, true, "process_reap_drop");
+      (true, true, "process_reap_trap_drop") ]
+
+(* Fix round 1: racing wait_procs, compiled (Test_helpers.process_wait_race_src):
+   the loser of the waitpid race is Err(Closed), not Ok(0). *)
+let test_process_wait_race () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:true ~name:"process_wait_race" process_wait_race_src in
+  if rc <> 0 then Alcotest.failf "wait race exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("one Ok, one Closed:\n" ^ out) true
+    (contains process_wait_race_expected out)
+
 (* A closure that matches a CAPTURED value and hands the pattern's fields to a
    borrowing builtin in tail position must not release the capture before the
    call (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md).
@@ -20400,7 +20492,10 @@ let codegen_suites =
           Alcotest.test_case "handle_vs_user_type_named_process" `Quick
             test_handle_vs_user_type_named_process;
           Alcotest.test_case "handle_vs_user_record_named_socket" `Quick
-            test_handle_vs_user_record_named_socket ] );
+            test_handle_vs_user_record_named_socket;
+          Alcotest.test_case "process_release_reaps_child" `Quick
+            test_process_release_reaps_child;
+          Alcotest.test_case "process_wait_race" `Quick test_process_wait_race ] );
       ( "string_allocator", [
           Alcotest.test_case "strings use the March object allocator" `Quick
             test_string_alloc_uses_march_allocator;
@@ -21061,6 +21156,9 @@ let codegen_suites =
         Alcotest.test_case "transport refuses injected path, sends nothing" `Quick test_http_transport_refuses_injected_path;
         Alcotest.test_case "parse response"          `Quick test_http_parse_response;
         Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
+      ]);
+      ("file handles", [
+        Alcotest.test_case "dir_beneath_symlink_linux" `Quick test_dir_beneath_symlink_linux;
       ]);
       ("http client", [
         Alcotest.test_case "new client"              `Quick test_http_client_new;

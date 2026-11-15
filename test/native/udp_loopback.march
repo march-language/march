@@ -11,7 +11,7 @@ mod UdpLoopback do
   needs IO.NetConnect
 
   pfn sock(host : String) : UdpSocket do
-    match Udp.open(host, 0) do
+    match Authority.must(Udp.open(host, 0)) do
       Ok(s) -> s
       Err(e) -> panic(Udp.error_message(e))
     end
@@ -152,7 +152,7 @@ mod UdpLoopback do
     end
 
     -- IPv6
-    match Udp.open("::1", 0) do
+    match Authority.must(Udp.open("::1", 0)) do
       Err(e) -> Authority.ignore(println("ipv6: " ++ Udp.error_message(e)))
       Ok(r6) ->
         let t6 = sock("::1")
@@ -165,7 +165,7 @@ mod UdpLoopback do
     end
 
     -- shards share one port
-    match Udp.open_sharded("127.0.0.1", 0, 3, Udp.defaults()) do
+    match Authority.must(Udp.open_sharded("127.0.0.1", 0, 3, Udp.defaults())) do
       Err(e) -> Authority.ignore(println("sharded: " ++ Udp.error_message(e)))
       Ok(shards) ->
         let ports = List.map(shards, fn s -> Udp.addr_port(addr_of(s)))

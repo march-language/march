@@ -25,3 +25,22 @@ val mentions_tycon : string -> Ast.ty -> bool
     a declaration body.  [derive Json] uses it to refuse a type with a [Pid]
     anywhere in it -- a local pid means nothing on another node. *)
 val type_def_mentions_tycon : string -> Ast.type_def -> bool
+
+(** The resource-handle types (ocap phase 2b): each spelling a program may
+    write for a stdlib type that is or wraps a handle box, with the name a
+    diagnostic shows for it.  The one list the [derive Json] refusal and the
+    typed remote send's check both read. *)
+val handle_type_spellings : (string * string) list
+
+(** The opaque stdlib wrappers over a [Socket] box ([UdpSocket], [TlsConn],
+    [TlsCtx], [WsSocket]), bare: a program's own type of one of these names
+    gets a qualified identity in [Typecheck_nominal]. *)
+val handle_wrapper_names : string list
+
+(** [handle_type_named n]: the displayed handle-type name when [n] spells one. *)
+val handle_type_named : string -> string option
+
+(** [handle_in_ty ?shadowed ty]: the first handle type named anywhere in
+    [ty] (its displayed name and the written constructor), ignoring a
+    constructor whose spelling is in [shadowed]. *)
+val handle_in_ty : ?shadowed:string list -> Ast.ty -> (string * Ast.name) option

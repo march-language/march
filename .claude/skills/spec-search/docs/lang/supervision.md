@@ -512,10 +512,10 @@ Children are detached from the supervisor before being stopped, so an orderly
 teardown does not trigger a restart; otherwise the children would come back
 and the tree would never go down.
 
-**Still open:** draining across a hot code reload. A deploy's own drains are
-described under [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#drains);
-the `on_stop` that runs under a reload is the one registered when the actor was
-spawned (`specs/todos/2026-08-12-graceful-shutdown-and-drain.md`).
+Hot reload drains queued old-epoch work before migrating actor state, while
+continuing to accept newer messages. The `on_stop` callback is resolved from the
+actor's active version and receives its migrated state. Deploy deadlines are
+described under [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#drains).
 
 ---
 

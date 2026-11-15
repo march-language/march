@@ -10,7 +10,13 @@ mod WebSocket do
 
   type WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
 
-  type WsSocket = WsSocket(Int)
+  -- The connection a WebSocket handler is given. Opaque: only the server
+  -- runtime builds one (runtime/march_http.c march_ws_sock_new), as a
+  -- borrowed Socket handle over the connection it owns, so user code cannot
+  -- forge one from a descriptor number. When the handler returns the server
+  -- closes it; a task still holding it afterwards gets no further access
+  -- (`recv` reports `Close(1001, "going away")`, `send_frame` does nothing).
+  opaque type WsSocket = WsSocket(Socket)
 
   type SelectResult = WsData(WsFrame) | ActorMsg | Timeout
 
@@ -78,9 +84,15 @@ mod WebSocket do
         end
       end
   """
-  fn recv(socket) do
+  fn recv(socket : WsSocket) : WsFrame do
     match socket do
-    WsSocket(fd) -> ws_recv(fd)
+    WsSocket(b) ->
+      let v = handle_enter(b, 3)
+      if v == -1 do Close(1001, "going away") else
+        let f = ws_recv(v)
+        handle_leave(b)
+        f
+      end
     end
   end
 
@@ -91,9 +103,14 @@ mod WebSocket do
 
       WebSocket.send_frame(socket, TextFrame("hello"))
   """
-  fn send_frame(socket, frame) do
+  fn send_frame(socket : WsSocket, frame : WsFrame) : () do
     match socket do
-    WsSocket(fd) -> ws_send(fd, frame)
+    WsSocket(b) ->
+      let v = handle_enter(b, 3)
+      if v == -1 do () else
+        ws_send(v, frame)
+        handle_leave(b)
+      end
     end
   end
 
@@ -125,9 +142,15 @@ mod WebSocket do
         _ -> WebSocket.send_frame(socket, Ping)
       end
   """
-  fn select(socket, timeout_ms) do
+  fn select(socket : WsSocket, timeout_ms : Int) : SelectResult do
     match socket do
-    WsSocket(fd) -> ws_select(fd, 0, timeout_ms)
+    WsSocket(b) ->
+      let v = handle_enter(b, 3)
+      if v == -1 do WsData(Close(1001, "going away")) else
+        let r = ws_select(v, 0, timeout_ms)
+        handle_leave(b)
+        r
+      end
     end
   end
 

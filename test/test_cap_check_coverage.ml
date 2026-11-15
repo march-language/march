@@ -21,6 +21,10 @@ module Ops = March_caps.Cap_ops
    delete their rows as they add the checks; what remains at the end is
    reasoned. *)
 let allowlist : ((string * string) * string) list = [
+  (("Actor.register", "actor_register"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
+  (("Actor.unregister", "actor_unregister"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
+  (("Actor.whereis", "actor_whereis"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
+  (("Actor.registered", "actor_registered"), "IO.Registry (ocap p2b): charged at compile time and judged against name scopes; the run-time Authority.check, and a Result return, arrive with phase 4");
   (("ClusterConn.listen", "tcp_listen"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.credentials", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("ClusterNode.config_from_env", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
@@ -41,13 +45,12 @@ let allowlist : ((string * string) * string) list = [
   (("Config.global_table", "vault_whereis"), "Config's own table (\"__march_config__\"), not one a caller names: the stdlib's state, charged to Config's IO.Mut as today");
   (("File.open_raw", "file_open"), "private: the open behind File.open/with_open/with_lines/with_chunks/each_line/each_chunk, each of which calls Authority.check(\"IO.FileRead\", path) first");
   (("File.open_write_raw", "file_open_write"), "private: the open behind File.open_write/with_open_write, each of which calls Authority.check(\"IO.FileWrite\", path) first");
-  (("HttpServer.configure_runtime", "http_server_plain_listener"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("HttpServer.listen", "http_server_listen"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("HttpServer.spawn_n", "http_server_spawn_n"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("HttpServer.bind_host", "http_server_bind_host"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("HttpTransport.connect", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("HttpTransport.request_https_with_context", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("HttpTransport.request_plain_raw", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
+  (("File.open_dir_raw", "dir_open"), "private: the open behind File.open_dir, which calls Authority.check(\"IO.FileRead\", path) first");
+  (("File.open_dir_write_raw", "dir_open_write"), "private: the open behind File.open_dir_write, which calls Authority.check(\"IO.FileWrite\", path) first");
+  (("HttpServer.configure_runtime", "http_server_plain_listener"), "deferred past ocap phase 2b to phase 4 (run-time authority): charged statically today, the Authority.check and Result re-typing land with phase 4; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
+  (("HttpServer.listen", "http_server_listen"), "deferred past ocap phase 2b to phase 4 (run-time authority): charged statically today, the Authority.check and Result re-typing land with phase 4; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
+  (("HttpServer.spawn_n", "http_server_spawn_n"), "deferred past ocap phase 2b to phase 4 (run-time authority): charged statically today, the Authority.check and Result re-typing land with phase 4; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
+  (("HttpServer.bind_host", "http_server_bind_host"), "deferred past ocap phase 2b to phase 4 (run-time authority): charged statically today, the Authority.check and Result re-typing land with phase 4; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("List.pmap", "task_spawn"), "checked through spawn_allowed() (Authority.check); a refusal computes the same result sequentially");
   (("List.pmap_n", "task_spawn"), "checked through spawn_allowed() (Authority.check); a refusal computes the same result sequentially");
   (("List.pfilter", "task_spawn"), "checked through spawn_allowed() (Authority.check); a refusal computes the same result sequentially");
@@ -66,9 +69,6 @@ let allowlist : ((string * string) * string) list = [
   (("SessionNode.actor OfferActor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("SessionNode.retire_offer", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("SessionNode.hosted_trace", "print_stderr"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
-  (("Tls.client_ctx", "tls_client_ctx"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Tls.server_ctx", "tls_server_ctx"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Tls.https_get_raw", "tcp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
   (("Topology.actor Anchor", "task_spawn"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.place", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.place", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
@@ -89,12 +89,8 @@ let allowlist : ((string * string) * string) list = [
   (("Topology.config_plain_from_env", "unix_time_ms"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.start_failed", "process_exit"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
   (("Topology.runs_pool", "process_env"), "cluster plumbing: the authority is checked where the cluster starts (ClusterNode.start / Topology.place, ocap phase 7)");
-  (("Udp.open_with", "udp_open"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.resolve", "udp_resolve"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.connect", "udp_connect"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.send_batch", "udp_send_batch"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.send_batch_connected", "udp_send_batch"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
-  (("Udp.send_many", "udp_send_many"), "deferred to ocap phase 2: this open yields a handle (UDP socket, TLS context, HTTP connection or listener) phase 2 re-types; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
+  (("Udp.open_raw", "udp_open"), "private: the bind behind Udp.open/open_with/open_sharded, each of which calls Authority.check(\"IO.NetConnect\", host:port) first");
+  (("Udp.resolve", "udp_resolve"), "deferred past ocap phase 2b to phase 4 (run-time authority): charged statically today, the Authority.check and Result re-typing land with phase 4; specs/todos/2026-11-10-ocap-p1-network-opens-deferred-to-p2.md");
 ]
 
 let stdlib_dir () =

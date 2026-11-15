@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "stream": node-a hosts the Prod endpoint of the
 -- Stream protocol; node-b (node_b.march) hosts Cons, over the stdlib
 -- `Session.Ops` network transport (`SessionNode`): the same generated

@@ -15,7 +15,8 @@
    Supported capabilities (mirrors builtin_cap_table in typecheck.ml):
      IO.Console, IO.FileRead, IO.FileWrite, IO.FileSystem, IO.NetConnect,
      IO.Network, IO.NetListen, IO.Process, IO.Clock, IO.Random,
-     IO.Spawn, IO.Mut, IO.NetConnect.TLS, IO.Foreign, IO.Foreign.Blocking *)
+     IO.Spawn, IO.Mut, IO.NetConnect.TLS, IO.Foreign, IO.Foreign.Blocking,
+     IO.Registry *)
 
 module A = March_ast.Ast
 module Err = March_errors.Errors
@@ -30,7 +31,8 @@ let cap_subsumes = March_caps.Cap_lattice.cap_subsumes
 (* ── Builtin → capability table ──────────────────────────────────────────── *)
 
 (** Mirrors [builtin_cap_table] in typecheck.ml.  Keep in sync when new
-    capabilities are added. *)
+    capabilities are added. Like it, charges only opens: an operation on a
+    handle the caller holds needs no capability (ocap phase 2, Task 10). *)
 let cap_table : (string * string) list = [
   (* IO.Console *)
   ("println",               "IO.Console");
@@ -40,17 +42,16 @@ let cap_table : (string * string) list = [
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
   ("file_open",             "IO.FileRead");
-  ("file_read_line",        "IO.FileRead");
-  ("file_read_chunk",       "IO.FileRead");
   ("file_stat",             "IO.FileRead");
   ("dir_exists",            "IO.FileRead");
   ("dir_list",              "IO.FileRead");
+  ("dir_open",              "IO.FileRead");
   ("csv_open",              "IO.FileRead");
-  ("csv_next_row",          "IO.FileRead");
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
   ("file_open_write",       "IO.FileWrite");
+  ("dir_open_write",        "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");
@@ -62,35 +63,12 @@ let cap_table : (string * string) list = [
   (* IO.NetConnect *)
   ("tcp_connect",           "IO.NetConnect");
   ("tcp_connect_timeout",   "IO.NetConnect");
-  ("tcp_send_all",          "IO.NetConnect");
-  ("tcp_recv_all",          "IO.NetConnect");
-  ("tcp_recv_exact",        "IO.NetConnect");
-  ("tcp_recv_http",         "IO.NetConnect");
-  ("tcp_recv_http_headers", "IO.NetConnect");
-  ("tcp_recv_chunk",        "IO.NetConnect");
-  ("tcp_recv_chunk_timeout","IO.NetConnect");
-  ("tcp_set_recv_timeout",  "IO.NetConnect");
-  ("tcp_recv_chunked_frame","IO.NetConnect");
-  ("tcp_recv_timeout",      "IO.NetConnect");
-  ("ws_recv",               "IO.NetConnect");
-  ("ws_send",               "IO.NetConnect");
-  ("ws_select",             "IO.NetConnect");
   (* IO.Network *)
   ("dns_resolve",           "IO.Network");
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
-  ("tcp_accept",            "IO.NetListen");
-  ("tcp_accept_timeout",    "IO.NetListen");
-  ("tcp_local_port",        "IO.NetListen");
   ("udp_open",              "IO.NetConnect");
   ("udp_resolve",           "IO.NetConnect");
-  ("udp_connect",           "IO.NetConnect");
-  ("udp_close",             "IO.NetConnect");
-  ("udp_local_addr",        "IO.NetConnect");
-  ("udp_stats",             "IO.NetConnect");
-  ("udp_send_batch",        "IO.NetConnect");
-  ("udp_send_many",         "IO.NetConnect");
-  ("udp_recv_batch",        "IO.NetConnect");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
@@ -109,10 +87,6 @@ let cap_table : (string * string) list = [
   ("process_spawn_sync",    "IO.Process");
   ("process_spawn_lines",   "IO.Process");
   ("process_spawn_async",   "IO.Process");
-  ("process_read_line",     "IO.Process");
-  ("process_write",         "IO.Process");
-  ("process_kill_proc",     "IO.Process");
-  ("process_wait_proc",     "IO.Process");
   (* IO.Clock *)
   ("unix_time",             "IO.Clock");
   ("unix_time_ms",          "IO.Clock");
@@ -150,15 +124,11 @@ let cap_table : (string * string) list = [
   (* IO.NetConnect.TLS *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
-  ("tls_connect",           "IO.NetConnect.TLS");
-  ("tls_accept",            "IO.NetConnect.TLS");
-  ("tls_read",              "IO.NetConnect.TLS");
-  ("tls_read_timeout",      "IO.NetConnect.TLS");
-  ("tls_write",             "IO.NetConnect.TLS");
-  ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
-  ("tls_peer_cn",           "IO.NetConnect.TLS");
-  ("tls_ctx_set_groups",    "IO.NetConnect.TLS");
-  ("tls_negotiated_group",  "IO.NetConnect.TLS");
+  (* IO.Registry *)
+  ("actor_register",        "IO.Registry");
+  ("actor_unregister",      "IO.Registry");
+  ("actor_whereis",         "IO.Registry");
+  ("actor_registered",      "IO.Registry");
 ]
 
 let cap_of_call name = List.assoc_opt name cap_table

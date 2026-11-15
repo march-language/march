@@ -1,0 +1,17 @@
+-- EXPECT-ERROR: which is wider than the enclosing module's
+-- A nested module may narrow a name scope, never widen it (ocap p2b, Task 12).
+mod Outer do
+  needs IO.Registry("logger")
+
+  mod Inner do
+    needs IO.Registry
+
+    fn drop_any(name : String) : Bool do
+      Actor.unregister(name)
+    end
+  end
+
+  fn drop_logger() : Bool do
+    Actor.unregister("logger")
+  end
+end
