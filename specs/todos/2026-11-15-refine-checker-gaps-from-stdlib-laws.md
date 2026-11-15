@@ -38,5 +38,14 @@ fact is simple; none makes it wrong, so they are P3.
    proved; the same law over `Option(Int)` in user code proves. That disagreement between the
    two runs is itself worth a look.
 
+9. **A return contract whose return expression is a builtin call is `unreflectable-subject`.**
+   `fn abs(x : Float) : {Float | is_nan(x) || _ >= 0.0} do float_abs(x) end` and the same for
+   `math_sqrt` do not check, although `float_abs`/`math_sqrt` reflect inside other functions
+   (`fp.abs`/`fp.sqrt`). `Math.abs` and `Math.sqrt` state those facts as lemmas instead.
+10. **`fp.sqrt` next to an uninterpreted function is `unknown` at any rlimit tried.**
+    `sqrt(x) >= 0.0` for `x >= 0.0` is unsat in 0.2 s as a bare query, but the stage-2 form
+    (`(= (sq x) (fp.sqrt RNE x))` with `sq` declared) stays `unknown` at 3M and 30M steps.
+    `Math.sqrt_nonneg` was dropped for this; `sqrt_neg_nan` proves.
+
 Repro for 1 and 2: the probes `need_eqb(true, List.is_empty(xs))` and the nested
 `drop_last(append(...))` above, checked with `march --check --refine-report-sites=all`.

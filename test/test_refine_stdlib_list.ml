@@ -90,6 +90,41 @@ let laws_pass_tests =
         expect out ~line:8 ~callee:"Math.clamp_int_idem" "proved";
         expect out ~line:9 ~callee:"need_eqi" "proved") ]
 
+(* The Math Float contracts and laws (2026-11-15), as a caller sees them.
+   Header lines 1-4, so a test's first function starts at 5. *)
+let float_needs =
+  {|  fn need_nonneg(x : {Float | _ >= 0.0}) : Int do 0 end
+  fn need_unit(x : {Float | _ >= 0.0 && _ <= 1.0}) : Int do 0 end
+  fn need_nan(x : {Float | is_nan(_)}) : Int do 0 end
+|}
+
+let fprog body = "mod U do\n" ^ float_needs ^ body ^ "end\n"
+
+let float_laws_tests =
+  [ gated "std_min_float_contract: min of two non-negatives is non-negative, from the return type" (fun () ->
+        let out =
+          run (fprog "  fn a(x : {Float | _ >= 0.0}, y : {Float | _ >= 0.0}) : Int do need_nonneg(Math.min_float(x, y)) end\n")
+        in
+        expect out ~line:5 ~callee:"need_nonneg" "proved");
+    gated "std_clamp_float_contract: clamping a non-NaN into [0, 1] lands in [0, 1]" (fun () ->
+        let out = run (fprog "  fn b(x : {Float | !is_nan(_)}) : Int do need_unit(Math.clamp_float(x, 0.0, 1.0)) end\n") in
+        expect out ~line:5 ~callee:"need_unit" "proved");
+    gated "std_clamp_float_contract: a possibly-NaN input is not proved in range" (fun () ->
+        let out = run (fprog "  fn c(x : Float) : Int do need_unit(Math.clamp_float(x, 0.0, 1.0)) end\n") in
+        U.not_proved out ~line:5 ~callee:"need_unit");
+    (* Holds by unfolding `abs` (fp.abs) at the caller too; the lemma states
+       it as a law and its call must be accepted. *)
+    gated "std_abs_nonneg: abs of a non-NaN is non-negative" (fun () ->
+        let out =
+          run (fprog "  fn d(x : {Float | !is_nan(_)}) : Int do\n    Math.abs_nonneg(x)\n    need_nonneg(Math.abs(x))\n  end\n")
+        in
+        expect out ~line:7 ~callee:"need_nonneg" "proved");
+    gated "std_sqrt_neg_nan: sqrt of a negative is NaN" (fun () ->
+        let out =
+          run (fprog "  fn e(x : {Float | _ < 0.0}) : Int do\n    Math.sqrt_neg_nan(x)\n    need_nan(Math.sqrt(x))\n  end\n")
+        in
+        expect out ~line:7 ~callee:"need_nan" "proved") ]
+
 let manifest_path () =
   Filename.concat (Filename.dirname (U.exe ())) "../stdlib/lemmas.verified"
 

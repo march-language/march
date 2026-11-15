@@ -151,7 +151,7 @@ let span_within (a : A.span) (b : A.span) =
    reachable [eq]s (§3.5). *)
 let table_ops =
   [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"; "+."; "-."; "*."; "/."; "<."; "<=."; ">."; ">=.";
-    "string_byte_length"; "float_is_nan"; "float_is_infinite" ]
+    "string_byte_length"; "float_is_nan"; "float_is_infinite"; "float_abs"; "math_sqrt" ]
 
 let comparison_ops = [ "<"; "<="; ">"; ">=" ]
 let eq_ops = [ "=="; "!=" ]
@@ -2122,6 +2122,8 @@ and builtin c env nm args =
   (* IEEE class tests: `fp.isNaN` / `fp.isInfinite` of the operand. *)
   | "float_is_nan", [ a ] -> Smt.FpNaN (v a)
   | "float_is_infinite", [ a ] -> Smt.FpInf (v a)
+  | "float_abs", [ a ] -> Smt.App (RS.float_sym "fabs", [ v a ])
+  | "math_sqrt", [ a ] -> Smt.App (RS.float_sym "fsqrt", [ v a ])
   (* D9: Float arithmetic and comparison are one symbol per operator, each
      defined by its IEEE meaning in the query preamble (Reflect_state.float_def). *)
   | "negate", [ a ] when is_float_ty (ty_of a) -> Smt.App (RS.float_sym "fneg", [ v a ])

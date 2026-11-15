@@ -27,6 +27,11 @@ git log is authoritative for exact commits.
   it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
   `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
   state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
+- **`Math` Float functions state what they return.** `Math.min_float`, `Math.max_float` and
+  `Math.clamp_float` carry return types that hold unless an argument is NaN, so a caller
+  passing non-NaN values gets the bound without a call, and `Math` has new proved lemmas
+  `min_float_comm`, `max_float_comm`, `clamp_float_within`, `abs_idem`, `abs_nonneg` and
+  `sqrt_neg_nan`.
 - **16 more proved laws in the standard library.** `List` (`drop_last_snoc`:
   `drop_last(append(xs, [x])) == xs`, `len_drop_last`, `is_empty_len`, `head_opt_nth_opt`,
   `head_opt_append`), `Option` (`zip_is_some`, `is_none_not_some`, `len_to_list`,
@@ -1053,6 +1058,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
+  `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
+  there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
+  backend.
 - **Compiled HTTP clients read the response status, headers and errors correctly.** In
   compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
   251), so `HttpClient.step_raise_on_error` let a 401 or 403 through as a success; every

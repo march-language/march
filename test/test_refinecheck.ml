@@ -30593,6 +30593,7 @@ let () =
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
       ("reflect-stdlib-laws", Test_refine_stdlib_list.laws_pass_tests);
+      ("reflect-stdlib-float-laws", Test_refine_stdlib_list.float_laws_tests);
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);

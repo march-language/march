@@ -2861,6 +2861,9 @@ predicate and in a function body, so a function that guards on them reflects (se
 
 Most laws about Floats need one of these as a hypothesis. `min(a, b) <= a` is false when `a`
 is NaN, because every comparison with NaN is false; with `a : {Float | !is_nan(_)}` it holds.
+The standard library states its own this way: `Math.min_float`, `Math.max_float` and
+`Math.clamp_float` carry return types that hold unless an argument is NaN, and `Math` has
+proved lemmas such as `abs_nonneg` (`is_nan(x) || abs(x) >= 0.0`) and `sqrt_neg_nan`.
 
 ### Float operations in a function body
 
