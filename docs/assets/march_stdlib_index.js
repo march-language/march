@@ -619,7 +619,8 @@ window.marchModuleIndex = {
    "uses": [
     "Http",
     "HttpTransport",
-    "Result"
+    "Result",
+    "Socket"
    ]
   },
   "HttpServer": {
@@ -630,6 +631,7 @@ window.marchModuleIndex = {
     "HttpClient",
     "IO",
     "List",
+    "Socket",
     "Vault"
    ]
   },
@@ -637,9 +639,11 @@ window.marchModuleIndex = {
    "file": "http_transport.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "Http",
     "IO",
     "Result",
+    "Socket",
     "Tls"
    ]
   },
@@ -898,6 +902,7 @@ window.marchModuleIndex = {
     "NetFrame",
     "NetKernel",
     "NodeSend",
+    "PeerRegistry",
     "Vault"
    ]
   },
@@ -983,7 +988,8 @@ window.marchModuleIndex = {
    "unavailable": "it needs the cluster runtime",
    "uses": [
     "Map",
-    "NodeIdentity"
+    "NodeIdentity",
+    "SessionNode"
    ]
   },
   "Plot": {
@@ -1321,6 +1327,7 @@ window.marchModuleIndex = {
    "file": "tls.march",
    "unavailable": "it needs network sockets",
    "uses": [
+    "Authority",
     "HttpTransport",
     "IO",
     "Result",
@@ -1390,6 +1397,7 @@ window.marchModuleIndex = {
    "file": "udp.march",
    "unavailable": null,
    "uses": [
+    "Authority",
     "IO",
     "List"
    ]
