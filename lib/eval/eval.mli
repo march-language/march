@@ -354,12 +354,15 @@ val eval_decl : env -> March_ast.Ast.decl -> env
 
 (** [launch_authority env (text, scoped)]: a program launch (ocap phase 4):
     reset the run-time authority, then run [Authority.launch_init] from
-    [env].  No-op when [env] has no [Authority]. *)
+    [env].  Fails closed ([Failure]) when [env] holds the [Authority] module
+    but no [launch_init]; a no-op only when [env] has no [Authority] at all
+    (a bare module evaluated without the stdlib). *)
 val launch_authority : env -> string * bool -> unit
 
-(** [launch]: `main`'s request ([March_ast.Cap_request.launch_request]);
-    when given, [Authority.launch_init] runs before the entry file's
-    top-level declarations (ocap phase 4). *)
+(** [launch]: the program's request ([March_ast.Cap_request.launch_request],
+    or [test_request]); when given, [Authority.launch_init] runs right after
+    the stdlib's `mod Authority` is evaluated, before every later top-level
+    declaration (ocap phase 4). *)
 val eval_module_env : ?launch:string * bool -> March_ast.Ast.module_ -> env
 
 val eval_stdlib_decls : March_ast.Ast.decl list -> unit

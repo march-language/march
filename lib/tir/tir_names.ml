@@ -752,6 +752,19 @@ let setup_all_fn_name = "__march_setup_all__"
     front of [main] (or of a test binary's setup_all block). *)
 let launch_init_fn = "Authority.launch_init"
 
+(** The program entry among a module's fn names (in [tm_fns] order): a bare
+    [main] if there is one, otherwise the last module-qualified [Mod.main].
+    The one rule every backend applies (native, [--jit], JS) and that [Lower]
+    uses to place the launch call; [March_ast.Cap_request.entry_main] is its
+    AST twin, which the interpreter and the launch request use. *)
+let entry_main_of_names (names : string list) : string option =
+  if List.mem "main" names then Some "main"
+  else
+    List.fold_left
+      (fun acc n ->
+         if String.length n > 5 && String.ends_with ~suffix:".main" n then Some n else acc)
+      None names
+
 (* ── C-runtime extern prefix: "march_" ──────────────────────────────────
    Producer: lib/tir/lower.ml injects C-runtime extern calls (e.g.
    march_compare_int, march_hash_int) with this fixed prefix when

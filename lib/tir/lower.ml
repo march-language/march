@@ -1294,42 +1294,63 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      MARCH_GRANT unset, so an ordinary program pays one call.  Only with
      [~launch:true], which the program pipelines pass (the native/JS build
      and `--jit`); a REPL fragment, whose wrapper is also called `main`, the
-     static capability analyses and unit tests do not.  Skipped too when the
-     stdlib is not part of the module, where there is no [Authority] to
-     call. *)
+     static capability analyses and unit tests do not. *)
   let all_fns =
-    if not launch
-       || not (List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.launch_init_fn)
-                 all_fns)
-    then all_fns
+    if not launch then all_fns
+    else if not (List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.launch_init_fn)
+                   all_fns)
+    then begin
+      (* Fail closed: a program that links the stdlib must launch.  The one
+         genuine no-stdlib case is a module lowered without the stdlib at all
+         (no [Authority] module anywhere), which has nothing to call. *)
+      let rec has_authority = function
+        | [] -> false
+        | Ast.DMod (n, _, _, _) :: _ when n.txt = "Authority" -> true
+        | _ :: rest -> has_authority rest in
+      if has_authority m.mod_decls || has_authority stdlib_context then
+        failwith "internal compiler error: the stdlib is linked but \
+                  Authority.launch_init was not lowered, so the program \
+                  entry cannot set its launch authority"
+      else all_fns
+    end
     else begin
-      let text, scoped = March_typecheck.Typecheck.launch_request m in
-      let launch_call =
+      let launch_call (text, scoped) =
         Tir.EApp
           ({ Tir.v_name = Tir_names.launch_init_fn;
              v_ty = Tir.TFn ([ Tir.TString; Tir.TBool ], Tir.TUnit);
              v_lin = Tir.Unr },
            [ Tir.ALit (Ast.LitString text); Tir.ALit (Ast.LitBool scoped) ])
       in
-      let launch body = Tir.ESeq (launch_call, body) in
-      if !test_pairs = [] then
-        List.map (fun (fn : Tir.fn_def) ->
-            if fn.fn_name = "main" then { fn with fn_body = launch fn.fn_body } else fn)
+      if !test_pairs = [] then begin
+        (* The entry is chosen by the rule every backend applies
+           ([Tir_names.entry_main_of_names]): a bare [main], else the last
+           [Mod.main]; its request comes from the same entry in the AST. *)
+        let req = March_typecheck.Typecheck.launch_request m in
+        match Tir_names.entry_main_of_names
+                (List.map (fun (fn : Tir.fn_def) -> fn.fn_name) all_fns) with
+        | None -> all_fns
+        | Some entry ->
+          List.map (fun (fn : Tir.fn_def) ->
+              if fn.fn_name = entry
+              then { fn with fn_body = Tir.ESeq (launch_call req, fn.fn_body) } else fn)
+            all_fns
+      end else begin
+        let req = March_ast.Cap_request.test_request m in
+        if List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.setup_all_fn_name)
+            all_fns
+        then
+          List.map (fun (fn : Tir.fn_def) ->
+              if fn.fn_name = Tir_names.setup_all_fn_name
+              then { fn with fn_body = Tir.ESeq (launch_call req, fn.fn_body) } else fn)
+            all_fns
+        else
           all_fns
-      else if List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.setup_all_fn_name)
-          all_fns
-      then
-        List.map (fun (fn : Tir.fn_def) ->
-            if fn.fn_name = Tir_names.setup_all_fn_name
-            then { fn with fn_body = launch fn.fn_body } else fn)
-          all_fns
-      else
-        all_fns
-        @ [ { Tir.fn_name = Tir_names.setup_all_fn_name;
-              fn_params = [];
-              fn_ret_ty = Tir.TCon ("Unit", []);
-              fn_body = launch_call;
-              fn_kind = Tir.FnNormal } ]
+          @ [ { Tir.fn_name = Tir_names.setup_all_fn_name;
+                fn_params = [];
+                fn_ret_ty = Tir.TCon ("Unit", []);
+                fn_body = launch_call req;
+                fn_kind = Tir.FnNormal } ]
+      end
     end
   in
   (* A reference to a function-typed module-level let calls it for the

@@ -2182,7 +2182,7 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   let preamble = runtime_import ^ extern_imports ^ builtin_wrappers ^ runtime_wrappers ^ extern_consts ^ raises_helper in
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
-  let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
+  let entry = Tir_names.entry_main_of_names (List.map (fun fn -> fn.Tir.fn_name) m.Tir.tm_fns) in
   let has_fn n = List.exists (fun fn -> fn.Tir.fn_name = n) m.Tir.tm_fns in
   if m.Tir.tm_tests <> [] then begin
     (* --test (issue #1176): run every test as the native test binary does
@@ -2204,10 +2204,16 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
              (mangle fn_name) (js_string_lit display) setup))
       m.Tir.tm_tests;
     Buffer.add_string export_buf "march_test_report();\n"
-  end else if has_main then begin
-    Buffer.add_string export_buf "export { main };\n";
+  end else if entry <> None then begin
+    let entry = Option.get entry in
     let call =
-      if Hashtbl.mem ctx.async_fns "main" then "await main();" else "main();" in
+      if entry = "main" then begin
+        Buffer.add_string export_buf "export { main };\n";
+        if Hashtbl.mem ctx.async_fns "main" then "await main();" else "main();"
+      end else
+        (* A module-qualified entry ([App.main]), as the native backend
+           runs it ([Tir_names.entry_main_of_names]). *)
+        (if Hashtbl.mem ctx.async_fns entry then "await " else "") ^ mangle entry ^ "();" in
     (* A program that registers a crash observer reports an error escaping
        main to it, then rethrows (Node prints it and exits 1 as before). *)
     if Hashtbl.mem ctx.runtime_uses "march_diag_observe" then

@@ -5849,10 +5849,12 @@ let compile filename =
                         @ [ March_tir.Tir_names.setup_fn_name;
                             March_tir.Tir_names.setup_all_fn_name ])
                 tir_for_js
-            else if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
-                 tir_for_js.March_tir.Tir.tm_fns
-            then March_tir.Dce.prune_unreachable ~roots:[ "main" ] tir_for_js
-            else tir_for_js in
+            else
+              match March_tir.Tir_names.entry_main_of_names
+                      (List.map (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name)
+                         tir_for_js.March_tir.Tir.tm_fns) with
+              | Some entry -> March_tir.Dce.prune_unreachable ~roots:[ entry ] tir_for_js
+              | None -> tir_for_js in
           (* Collect source lines from user AST for source map generation.
              user_ast = desugared before stdlib injection, so only user functions. *)
           let rec collect_fn_lines prefix = function

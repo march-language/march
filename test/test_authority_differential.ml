@@ -663,6 +663,99 @@ let test_entry_repl () =
             (has "<exit 2>\n" && has "\nmarch: MARCH_GRANT is not a scope list"))
         [ ("jit", ""); ("interp", "MARCH_REPL_INTERP=1") ])
 
+(* Fix round 1, I2: an entry that lowers to `App.main` (the file's own
+   module wraps a nested one) launches in every runtime, with App.main's
+   request, not the outer module's needs line. *)
+let nested_src = {|mod Outer do
+  needs IO.Console, IO.Clock
+  mod App do
+    needs IO.Console
+    fn main() do
+      println("hi")
+    end
+  end
+end
+|}
+
+let test_entry_nested () =
+  let cases =
+    [ ("", "hi\n");
+      ("MARCH_GRANT=IO.Clock",
+       "<exit 2>\nmarch: MARCH_GRANT grants IO.Clock, which main does not request (main requests: IO.Console)\n") ]
+  in
+  List.iter (fun (mode, outs) ->
+      List.iter2 (fun (env, want) got ->
+          Alcotest.(check string) (Printf.sprintf "%s [%s]" mode env) want got)
+        cases outs)
+    (run_modes ~src:nested_src ~envs:(List.map fst cases))
+
+(* Gap 3: `needs ()` on main is a clause that requests nothing; the
+   module's needs line is not the fallback. *)
+let unit_needs_src = {|mod UnitNeeds do
+  needs IO.Console
+  fn main() needs () do
+    let _x = 1 + 2
+    ()
+  end
+end
+|}
+
+let test_entry_unit_needs () =
+  let cases =
+    [ ("", "");
+      ("MARCH_GRANT=IO.Console",
+       "<exit 2>\nmarch: MARCH_GRANT grants IO.Console, which main does not request (main requests: )\n") ]
+  in
+  List.iter (fun (mode, outs) ->
+      List.iter2 (fun (env, want) got ->
+          Alcotest.(check string) (Printf.sprintf "%s [%s]" mode env) want got)
+        cases outs)
+    (run_modes ~src:unit_needs_src ~envs:(List.map fst cases))
+
+(* Fix round 1, I1: the launch precedes a MARCH_LIB_PATH dependency's
+   module-level code in the interpreter as in a compiled binary.  (With no
+   grant the two differ, as before: the interpreter evaluates a library's
+   top-level lets eagerly, a compiled binary on first use.) *)
+let test_entry_lib_dep () =
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let dir = Filename.temp_dir "march-auth-libdep" "" in
+  let home = Filename.concat dir "home" in
+  Unix.mkdir home 0o755;
+  Unix.mkdir (Filename.concat home ".cache") 0o755;
+  Unix.mkdir (Filename.concat dir "lib") 0o755;
+  Fun.protect ~finally:(fun () -> try rm_rf dir with _ -> ()) (fun () ->
+      let write name src =
+        let oc = open_out_bin (Filename.concat dir name) in
+        output_string oc src; close_out oc in
+      write "lib/dep.march" {|mod Dep do
+  needs IO.Console
+  let banner = println("dep-init")
+  fn hello() do
+    println("dep-hello")
+  end
+end
+|};
+      write "main.march" {|mod Main do
+  needs IO.Console, IO.Clock
+  fn main() do
+    match Dep.hello() do
+      Ok(_) -> ()
+      Err(_) -> ()
+    end
+  end
+end
+|};
+      let lib = "MARCH_LIB_PATH=" ^ Filename.quote (Filename.concat dir "lib") in
+      ignore (sh ~dir ~home ~env:lib (exe ^ " --compile --opt 0 main.march -o ./prog"));
+      List.iter (fun (env, want) ->
+          Alcotest.(check string) ("interp [" ^ env ^ "]") want
+            (sh ~dir ~home ~env:(lib ^ " " ^ env) (exe ^ " main.march"));
+          Alcotest.(check string) ("compiled [" ^ env ^ "]") want
+            (sh ~dir ~home ~env:(lib ^ " " ^ env) "./prog"))
+        [ ("MARCH_GRANT=IO.Clock", "");
+          ("MARCH_GRANT=IO.Process",
+           "<exit 2>\nmarch: MARCH_GRANT grants IO.Process, which main does not request (main requests: IO.Console, IO.Clock)\n") ])
+
 (* `--grant SCOPES` is MARCH_GRANT for the run (interpreter, --jit,
    `march test`). *)
 let test_grant_flag () =
@@ -705,7 +798,11 @@ let tests =
           test_entry_test_runners;
         Alcotest.test_case "the REPL launches with IO, narrowed by a grant" `Quick
           test_entry_repl;
-        Alcotest.test_case "--grant sets MARCH_GRANT for the run" `Quick test_grant_flag ] );
+        Alcotest.test_case "--grant sets MARCH_GRANT for the run" `Quick test_grant_flag;
+        Alcotest.test_case "a nested App.main entry launches everywhere" `Quick test_entry_nested;
+        Alcotest.test_case "needs () on main requests nothing" `Quick test_entry_unit_needs;
+        Alcotest.test_case "a library's top-level lets run after the launch" `Quick
+          test_entry_lib_dep ] );
     ( "authority_differential",
       [ Alcotest.test_case "the reference admits and refuses" `Quick
           test_reference_not_vacuous;

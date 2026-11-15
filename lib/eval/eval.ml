@@ -4301,16 +4301,29 @@ let top_level_file_runs (decls : decl list) : decl list list =
    unset, returns at once); a malformed or too-wide MARCH_GRANT exits 2 from
    inside it.  The authority state is reset first: each launch is a fresh
    program, and the interpreter's run_eval suite and `march test` over
-   several files run many in one process.  No-op when [env] has no
-   [Authority] (a program evaluated without the stdlib). *)
+   several files run many in one process.  Fails closed: an [env] that holds
+   the [Authority] module but no [launch_init] is an internal error.  The one
+   genuine no-stdlib case, an [env] with no [Authority] at all (an in-process
+   unit test evaluating a bare module, or a REPL started without the
+   stdlib), has nothing to call and is skipped. *)
 let launch_authority (env : env) ((text, scoped) : string * bool) : unit =
   match List.assoc_opt "Authority.launch_init" env with
-  | None -> ()
   | Some f ->
     Eval_builtins.reset_cap_authority ();
     ignore (apply f [ VString text; VBool scoped ])
+  | None ->
+    if List.exists (fun (k, _) -> String.starts_with ~prefix:"Authority." k) env then
+      failwith "internal error: the stdlib is loaded but Authority.launch_init is not \
+                bound, so the program cannot set its launch authority"
 
 let eval_module_env ?launch (m : module_) : env =
+  (* The launch happens as soon as [Authority] is defined: right after the
+     stdlib's `mod Authority` is evaluated (stdlib/authority.march, second in
+     the stdlib manifest), so before every later stdlib, MARCH_LIB_PATH and
+     entry-file top-level let; only prelude.march's constants run earlier.
+     The stdlib and library modules share one source-file run, so this is
+     done at that declaration, not between runs. *)
+  let pending = ref launch in
   (* Reset global actor and task state for this module run *)
   closure_prefix_override := None;
   module_stack := [];
@@ -4453,12 +4466,17 @@ let eval_module_env ?launch (m : module_) : env =
         Hashtbl.replace actor_defs_tbl qual (def, env_ref);
       make_recursive_env env_ref rest env
 
-    | DMod _ as d :: rest ->
+    | DMod (mname, _, _, _) as d :: rest ->
       (* Evaluate nested module via eval_decl (which handles module_stack push/pop
          and exposes prefixed bindings). Docs inside nested modules are registered
          as a side effect of eval_decl recursing into the module body. *)
       let env' = eval_decl env d in
       env_ref := env';
+      (match !pending with
+       | Some req when mname.txt = "Authority" && !module_stack = [] ->
+         pending := None;
+         launch_authority env' req
+       | _ -> ());
       make_recursive_env env_ref rest env'
 
     | DImpl _ as d :: rest ->
@@ -4515,14 +4533,8 @@ let eval_module_env ?launch (m : module_) : env =
      sees everything before it. *)
   scope_tails := [];
   let runs = top_level_file_runs m.mod_decls in
-  let n_runs = List.length runs in
-  let run_envs, final_env, _ =
-    List.fold_left (fun (acc, env, i) run ->
-        (* The entry file's run is the last (the stdlib and MARCH_LIB_PATH
-           modules come first): launch before its top-level lets run. *)
-        (match launch with
-         | Some req when i = n_runs - 1 -> launch_authority env req
-         | _ -> ());
+  let run_envs, final_env =
+    List.fold_left (fun (acc, env) run ->
         let scope_ref = ref env in
         scope_ref := install_stubs scope_ref run env;
         local_def_scopes := local_fn_names run :: !local_def_scopes;
@@ -4530,9 +4542,14 @@ let eval_module_env ?launch (m : module_) : env =
           Fun.protect ~finally:(fun () -> local_def_scopes := List.tl !local_def_scopes)
             (fun () -> make_recursive_env scope_ref run !scope_ref) in
         scope_ref := run_env;
-        (run_env :: acc, run_env, i + 1))
-      ([], task_builtins @ base_env, 0) runs
+        (run_env :: acc, run_env))
+      ([], task_builtins @ base_env) runs
   in
+  (* Never launched: no [Authority] was defined (or [launch_authority]
+     fails closed on a half-defined one). *)
+  (match !pending with
+   | Some req -> launch_authority final_env req
+   | None -> ());
   install_global_tail final_env;
   install_scope_tails
     (match run_envs with _last :: earlier -> earlier | [] -> []);
@@ -4743,7 +4760,13 @@ let run_module (m : module_) : unit =
     (* 5. Call on_stop hook (after tree is down) *)
     call_hook_opt on_stop_opt)
   | None ->
-    match List.assoc_opt "main" env with
+    (* The entry: a top-level `main`, else the last nested module's
+       (`App.main`), the rule every compiled backend applies
+       ([March_ast.Cap_request.entry_main]). *)
+    let entry = March_ast.Cap_request.entry_main m in
+    match (match entry with
+           | Some (name, _, _) -> List.assoc_opt name env
+           | None -> None) with
     | None   -> ()
     | Some v ->
       (* [main] may be declared 0-arity or take ANY NUMBER of [Cap(P)]
@@ -4767,13 +4790,13 @@ let run_module (m : module_) : unit =
          the [DFn] case of [eval_decl], the "<rec:name/arity>" closure), not
          directly to a [VClosure], so arity can't be read off [v] itself —
          read it from the entry module's own AST instead. *)
-      let main_arity = List.find_map (function
-          | DFn (def, _) when def.fn_name.txt = "main" ->
-            (match def.fn_clauses with
-             | [clause] -> Some (List.length (clause_params clause))
-             | _ -> None)
-          | _ -> None
-        ) m.mod_decls
+      let main_arity =
+        match entry with
+        | Some (_, def, _) ->
+          (match def.fn_clauses with
+           | [clause] -> Some (List.length (clause_params clause))
+           | _ -> None)
+        | None -> None
       in
       let args = match main_arity with
         | Some n when n > 0 -> List.init n (fun _ -> VUnit)
@@ -4840,7 +4863,7 @@ let collect_test_decls (m : module_) :
 let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?(capture_io=false) (m : module_) : int * int * (string * string) list =
   (* Build the module environment (registers all fns, lets, etc.).  The
      launch request of a test file is its module's `needs` line. *)
-  let env = eval_module_env ~launch:(March_ast.Cap_request.launch_request m) m in
+  let env = eval_module_env ~launch:(March_ast.Cap_request.test_request m) m in
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
   (* Apply filter *)
   let tests = if filter = "" then tests

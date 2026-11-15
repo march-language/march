@@ -1317,14 +1317,14 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
   let all_types = ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types in
   (* Same entry-point rule as [Llvm_toplevel.emit_module]: a bare `main` or a
      module-qualified `Mod.main`. *)
-  let is_main (f : March_tir.Tir.fn_def) =
-    f.March_tir.Tir.fn_name = "main"
-    || String.ends_with ~suffix:".main" f.March_tir.Tir.fn_name in
   let main_fn =
-    match List.find_opt (fun f -> f.March_tir.Tir.fn_name = "main")
-            tir.March_tir.Tir.tm_fns with
-    | Some f -> Some f
-    | None -> List.find_opt is_main tir.March_tir.Tir.tm_fns in
+    match March_tir.Tir_names.entry_main_of_names
+            (List.map (fun (f : March_tir.Tir.fn_def) -> f.March_tir.Tir.fn_name)
+               tir.March_tir.Tir.tm_fns) with
+    | None -> None
+    | Some n ->
+      List.find_opt (fun (f : March_tir.Tir.fn_def) -> f.March_tir.Tir.fn_name = n)
+        tir.March_tir.Tir.tm_fns in
   match main_fn with
   | None ->
     (* A library module with no entry point: there is nothing to run.  Mirrors

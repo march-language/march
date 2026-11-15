@@ -10330,14 +10330,10 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
    show it. *)
 let main_request_caps (decls : Ast.decl list) (def : Ast.fn_def)
     (params : string list) : string list * [ `Params | `Needs ] =
-  let needs =
-    match def.Ast.fn_needs with
-    | Some (caps, _) ->
-      List.map (fun (p, _) -> March_ast.Cap_request.path_text p) caps
-    | None -> []
-  in
-  match params, needs with
-  | [], [] ->
+  (* A clause, even `needs ()`, is the request; only with neither a clause
+     nor a `Cap` parameter is it the module's `needs` line. *)
+  match params, def.Ast.fn_needs with
+  | [], None ->
     let module_needs =
       List.concat_map
         (function
@@ -10347,8 +10343,10 @@ let main_request_caps (decls : Ast.decl list) (def : Ast.fn_def)
         decls
     in
     (List.sort_uniq String.compare module_needs, `Needs)
-  | _, [] -> (List.sort_uniq String.compare params, `Params)
-  | _ -> (List.sort_uniq String.compare (params @ needs), `Needs)
+  | _, None -> (List.sort_uniq String.compare params, `Params)
+  | _, Some (caps, _) ->
+    let needs = List.map (fun (p, _) -> March_ast.Cap_request.path_text p) caps in
+    (List.sort_uniq String.compare (params @ needs), `Needs)
 
 (* `main`'s launch request as source text and whether it carries a scope
    (decision 3); see [March_ast.Cap_request.launch_request]. *)

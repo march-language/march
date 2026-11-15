@@ -88,53 +88,91 @@ let rec cap_params_of_ty (t : ty) : string list =
   | TyCon (_, args) -> List.concat_map cap_params_of_ty args
   | _ -> []
 
-(** `main`'s launch request (decision 3): `main`'s legacy [Cap(P)]
-    parameters, then its `needs` clause, in source order, duplicates
-    dropped; with neither, the module's top-level `needs` line.  Returns the
-    canonical text (entries joined by [", "], each printed as written) and
-    whether any entry carries a scope.  With no `main`, the request is the
-    module's `needs` line: a test file's request (design §21). *)
-let launch_request (m : module_) : string * bool =
-  let module_needs =
-    List.concat_map (function DNeeds (caps, _) -> caps | _ -> []) m.mod_decls
-  in
-  let main_entries =
+let dedup xs =
+  List.rev (List.fold_left (fun acc x -> if List.mem x acc then acc else x :: acc) [] xs)
+
+(** A `needs` list as a request: entries printed as written, joined by
+    [", "], and whether any carries a scope. *)
+let request_of_entries (entries : (name list * string option) list) : string * bool =
+  ( String.concat ", " (dedup (List.map (fun e -> scoped_text e) entries)),
+    List.exists (fun (_, sc) -> sc <> None) entries )
+
+let needs_of (decls : decl list) : (name list * string option) list =
+  List.concat_map (function DNeeds (caps, _) -> caps | _ -> []) decls
+
+(** The program's entry `main`: a top-level [main] if there is one, else the
+    last [main] of a (nested) module, in declaration order.  The AST twin of
+    [Tir_names.entry_main_of_names], the rule every backend applies to the
+    lowered fns.  Returns its qualified name ([main], [App.main]), its
+    definition, and the `needs` line of the module that declares it. *)
+let entry_main (m : module_) :
+    (string * fn_def * (name list * string option) list) option =
+  let top =
     List.find_map
       (function
-        | DFn (def, _) when def.fn_name.txt = "main" ->
-          let params =
-            match def.fn_clauses with
-            | clause :: _ ->
-              List.concat_map
-                (function
-                  | FPNamed p | FPDefault (p, _) -> (
-                    match p.param_ty with
-                    | Some ty -> cap_params_of_ty ty
-                    | None -> [])
-                  | FPPat _ -> [])
-                clause.fc_params
-            | [] -> []
-          in
-          let needs =
-            match def.fn_needs with
-            | Some (caps, _) -> List.map (fun e -> scoped_text e) caps
-            | None -> []
-          in
-          let scoped =
-            match def.fn_needs with
-            | Some (caps, _) -> List.exists (fun (_, sc) -> sc <> None) caps
-            | None -> false
-          in
-          Some (params @ needs, scoped)
+        | DFn (def, _) when def.fn_name.txt = "main" -> Some ("main", def, needs_of m.mod_decls)
         | _ -> None)
       m.mod_decls
   in
-  let dedup xs =
-    List.rev
-      (List.fold_left (fun acc x -> if List.mem x acc then acc else x :: acc) [] xs)
+  match top with
+  | Some _ -> top
+  | None ->
+    let rec walk prefix decls acc =
+      List.fold_left
+        (fun acc d ->
+           match d with
+           | DMod (n, _, inner, _) ->
+             let p = prefix ^ n.txt ^ "." in
+             let acc =
+               match
+                 List.find_map
+                   (function
+                     | DFn (def, _) when def.fn_name.txt = "main" -> Some def
+                     | _ -> None)
+                   inner
+               with
+               | Some def -> Some (p ^ "main", def, needs_of inner)
+               | None -> acc
+             in
+             walk p inner acc
+           | _ -> acc)
+        acc decls
+    in
+    walk "" m.mod_decls None
+
+(** The request of an entry [def] declared in a module whose `needs` line
+    is [module_needs] (decision 3): its legacy [Cap(P)] parameters, then
+    its `needs` clause, in source order, duplicates dropped.  A clause,
+    even [needs ()], is the request; only with neither a clause nor a [Cap]
+    parameter is it the module's `needs` line. *)
+let request_of_main (def : fn_def) (module_needs : (name list * string option) list) :
+    string * bool =
+  let params =
+    match def.fn_clauses with
+    | clause :: _ ->
+      List.concat_map
+        (function
+          | FPNamed p | FPDefault (p, _) -> (
+            match p.param_ty with Some ty -> cap_params_of_ty ty | None -> [])
+          | FPPat _ -> [])
+        clause.fc_params
+    | [] -> []
   in
-  match main_entries with
-  | Some ((_ :: _ as entries), scoped) -> (String.concat ", " (dedup entries), scoped)
-  | Some ([], _) | None ->
-    ( String.concat ", " (dedup (List.map (fun e -> scoped_text e) module_needs)),
-      List.exists (fun (_, sc) -> sc <> None) module_needs )
+  match params, def.fn_needs with
+  | [], None -> request_of_entries module_needs
+  | _, None -> (String.concat ", " (dedup params), false)
+  | _, Some (caps, _) ->
+    ( String.concat ", " (dedup (params @ List.map (fun e -> scoped_text e) caps)),
+      List.exists (fun (_, sc) -> sc <> None) caps )
+
+(** `main`'s launch request (decision 3) as source text, and whether any
+    entry carries a scope: [request_of_main] of the [entry_main].  With no
+    `main`, the module's `needs` line. *)
+let launch_request (m : module_) : string * bool =
+  match entry_main m with
+  | Some (_, def, module_needs) -> request_of_main def module_needs
+  | None -> request_of_entries (needs_of m.mod_decls)
+
+(** A test file's request: its module's `needs` line (design §21), whatever
+    `main` it may also declare. *)
+let test_request (m : module_) : string * bool = request_of_entries (needs_of m.mod_decls)

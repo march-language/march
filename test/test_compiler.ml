@@ -19336,6 +19336,69 @@ end|});
   fn f() do 1 end
 end|})
 
+let test_launch_request_needs_unit_clause () =
+  (* `needs ()` is a clause: it requests nothing, and the module's needs
+     line is not consulted (decision 3). *)
+  Alcotest.(check (pair string bool)) "needs () requests nothing"
+    ("", false)
+    (launch_request_of {|mod M do
+  needs IO.Console
+  fn main() needs () do () end
+end|});
+  (* The static grant agrees: under `needs ()` main is granted nothing. *)
+  Alcotest.(check bool) "needs () grants nothing statically" true
+    (has_errors (typecheck {|mod M do
+  needs IO.Console
+  fn main() needs () do println("x") end
+end|}))
+
+let test_launch_request_nested_entry () =
+  (* The entry is a top-level main, else the last nested module's; its
+     request falls back to ITS module's needs line, not the outer one. *)
+  let m = parse_and_desugar {|mod Outer do
+  needs IO.Console, IO.Clock
+  mod App do
+    needs IO.Console
+    fn main() do println("hi") end
+  end
+end|} in
+  Alcotest.(check (option string)) "the entry is App.main" (Some "App.main")
+    (Option.map (fun (n, _, _) -> n) (March_ast.Cap_request.entry_main m));
+  Alcotest.(check (pair string bool)) "App's needs line" ("IO.Console", false)
+    (March_typecheck.Typecheck.launch_request m);
+  Alcotest.(check (option string)) "the TIR rule agrees" (Some "App.main")
+    (March_tir.Tir_names.entry_main_of_names [ "Lib.main"; "App.helper"; "App.main" ]);
+  Alcotest.(check (option string)) "a bare main wins" (Some "main")
+    (March_tir.Tir_names.entry_main_of_names [ "main"; "App.main" ])
+
+let test_launch_fails_closed () =
+  (* M2: with an Authority module present but no launch_init, a program
+     launch is an internal error, not a silent skip. *)
+  let m = parse_and_desugar {|mod M do
+  mod Authority do
+    fn other() : Int do 1 end
+  end
+  fn main() do () end
+end|} in
+  let raised =
+    try ignore (March_tir.Lower.lower_module ~launch:true m); false
+    with Failure msg ->
+      (try ignore (Str.search_forward (Str.regexp_string "launch_init") msg 0); true
+       with Not_found -> false) in
+  Alcotest.(check bool) "lower: missing launch_init is an internal error" true raised;
+  let raised_eval =
+    try
+      March_eval.Eval.launch_authority [ ("Authority.other", March_eval.Eval.VUnit) ] ("", false);
+      false
+    with Failure _ -> true in
+  Alcotest.(check bool) "interpreter: missing launch_init is an internal error" true raised_eval;
+  (* The genuine no-stdlib case (no Authority at all) is a no-op. *)
+  March_eval.Eval.launch_authority [] ("", false);
+  ignore (March_tir.Lower.lower_module ~launch:true
+            (parse_and_desugar {|mod M do
+  fn main() do () end
+end|}))
+
 let test_scoped_fn_needs_parses () =
   let m = parse_module {|mod M do
   needs IO.FileRead
@@ -19420,6 +19483,9 @@ let launch_request_suite =
       Alcotest.test_case "a legacy Cap parameter" `Quick test_launch_request_cap_param;
       Alcotest.test_case "the module's needs line" `Quick test_launch_request_module_needs;
       Alcotest.test_case "union order and options" `Quick test_launch_request_union_and_options;
+      Alcotest.test_case "needs () is a clause" `Quick test_launch_request_needs_unit_clause;
+      Alcotest.test_case "a nested entry main" `Quick test_launch_request_nested_entry;
+      Alcotest.test_case "a missing launch_init fails closed" `Quick test_launch_fails_closed;
       Alcotest.test_case "a scoped fn needs parses" `Quick test_scoped_fn_needs_parses;
       Alcotest.test_case "a scoped fn needs typechecks" `Quick test_scoped_fn_needs_typecheck;
       Alcotest.test_case "main's needs clause is the grant" `Quick test_main_needs_is_the_grant;
