@@ -38,6 +38,58 @@ let stdlib_lemma_rows out =
       | _ -> None)
     (lines out)
 
+(* The 2026-11-15 laws pass: List accessors, Option, Result and Math.  A
+   second header with its own needs, lines 1-6, so a test's first function
+   starts at 7.  Each case checks the caller gets the fact with the lemma call
+   and does not without it, so the lemma is what proves it. *)
+let needs2 =
+  {|  fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
+  fn need_eq(a : List(Int), b : {List(Int) | _ == a}) : Int do 0 end
+  fn need_eqi(a : Int, b : {Int | _ == a}) : Int do 0 end
+  fn need_le1(xs : {List(Int) | len(_) <= 1}) : Int do 0 end
+  fn need_some(o : {Option((Int, Int)) | is_Some(_)}) : Int do 0 end
+|}
+
+let prog2 body = "mod U do\n" ^ needs2 ^ body ^ "end\n"
+
+(* [fn_head] at line 7, [setup] lines next, then the optional lemma call, then
+   the need.  Returns the need's line with and without the lemma call. *)
+let with_and_without ?(setup = []) ~fn_head ~lemma ~need ~callee () =
+  let src calls = prog2 (String.concat "\n    " ((fn_head :: calls) @ setup @ [ need ]) ^ "\n  end\n") in
+  let need_line with_lemma = 7 + (if with_lemma then 1 else 0) + List.length setup + 1 in
+  let out = run (src [ lemma ]) in
+  expect out ~line:(need_line true) ~callee "proved";
+  let out = run (src []) in
+  U.not_proved out ~line:(need_line false) ~callee
+
+let laws_pass_tests =
+  [ gated "std_drop_last_snoc: drop_last(append(xs, [x])) == xs" (fun () ->
+        with_and_without ~fn_head:"  fn a(xs : List(Int), x : Int) : Int do"
+          ~setup:[ "let ys = List.append(xs, Cons(x, Nil))" ]
+          ~lemma:"List.drop_last_snoc(xs, x)" ~need:"need_eq(xs, List.drop_last(ys))" ~callee:"need_eq" ());
+    gated "std_len_drop_last: drop_last of a non-empty list is one shorter" (fun () ->
+        with_and_without ~fn_head:"  fn b(xs : {List(Int) | len(_) == 4}) : Int do"
+          ~lemma:"List.len_drop_last(xs)" ~need:"need3(List.drop_last(xs))" ~callee:"need3" ());
+    gated "std_option_zip_is_some: zip of two Somes is Some" (fun () ->
+        with_and_without
+          ~fn_head:"  fn c(oa : {Option(Int) | is_Some(_)}, ob : {Option(Int) | is_Some(_)}) : Int do"
+          ~lemma:"Option.zip_is_some(oa, ob)" ~need:"need_some(Option.zip(oa, ob))" ~callee:"need_some" ());
+    (* The next two hold by unfolding alone at a caller; the lemma states them as
+       laws (forge doc, --law-coverage) and its call must still be accepted. *)
+    gated "std_option_len_to_list: to_list has at most one element" (fun () ->
+        let out =
+          run (prog2 "  fn d(o : Option(Int)) : Int do\n    Option.len_to_list(o)\n    need_le1(Option.to_list(o))\n  end\n")
+        in
+        expect out ~line:9 ~callee:"need_le1" "proved");
+    gated "std_math_clamp_int_idem: clamping twice is clamping once" (fun () ->
+        let out =
+          run
+            (prog2
+               "  fn e(x : Int, lo : Int, hi : {Int | _ >= lo}) : Int do\n    Math.clamp_int_idem(x, lo, hi)\n    need_eqi(Math.clamp_int(x, lo, hi), Math.clamp_int(Math.clamp_int(x, lo, hi), lo, hi))\n  end\n")
+        in
+        expect out ~line:8 ~callee:"Math.clamp_int_idem" "proved";
+        expect out ~line:9 ~callee:"need_eqi" "proved") ]
+
 let manifest_path () =
   Filename.concat (Filename.dirname (U.exe ())) "../stdlib/lemmas.verified"
 
@@ -89,7 +141,8 @@ let tests =
         let lemmas =
           [ "append_nil"; "append_assoc"; "len_append"; "reverse_onto_append"; "reverse_append";
             "reverse_reverse"; "len_reverse_onto"; "len_reverse"; "len_take_onto"; "len_take"; "len_drop";
-            "take_onto_drop"; "take_drop" ]
+            "take_onto_drop"; "take_drop"; "is_empty_len"; "head_opt_nth_opt"; "head_opt_append";
+            "reverse_onto_single"; "drop_last_snoc"; "len_drop_last" ]
         in
         List.iter
           (fun l ->

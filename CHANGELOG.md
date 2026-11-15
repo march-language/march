@@ -21,6 +21,12 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **16 more proved laws in the standard library.** `List` (`drop_last_snoc`:
+  `drop_last(append(xs, [x])) == xs`, `len_drop_last`, `is_empty_len`, `head_opt_nth_opt`,
+  `head_opt_append`), `Option` (`zip_is_some`, `is_none_not_some`, `len_to_list`,
+  `to_list_is_some`), `Result` (`is_err_not_ok`) and `Math` (`min_int_comm`,
+  `max_int_comm`, `min_plus_max`, `clamp_int_within`, `clamp_int_idem`). Call one before a contract that needs its
+  fact; like every lemma they are erased before the program runs.
 - **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
   `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
   any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:

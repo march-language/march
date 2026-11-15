@@ -513,4 +513,28 @@ mod Math do
     if b == 0 do None else Some(a % b) end
   end
 
+  -- ---- Laws (2026-11-15 laws pass) ----
+
+  doc "`min_int` does not depend on the order of its arguments."
+  @[lemma]
+  fn min_int_comm(a : Int, b : Int) : {Unit | min_int(a, b) == min_int(b, a)} do () end
+
+  doc "`max_int` does not depend on the order of its arguments."
+  @[lemma]
+  fn max_int_comm(a : Int, b : Int) : {Unit | max_int(a, b) == max_int(b, a)} do () end
+
+  doc "`min_int` and `max_int` together give back both arguments."
+  @[lemma]
+  fn min_plus_max(a : Int, b : Int) : {Unit | min_int(a, b) + max_int(a, b) == a + b} do () end
+
+  doc "A value already within `[low, high]` is unchanged by `clamp_int`."
+  @[lemma]
+  fn clamp_int_within(x : Int, low : Int, high : Int)
+    : {Unit | x < low || x > high || clamp_int(x, low, high) == x} do () end
+
+  doc "Clamping twice is clamping once, when `low <= high`."
+  @[lemma]
+  fn clamp_int_idem(x : Int, low : Int, high : {Int | _ >= low})
+    : {Unit | clamp_int(clamp_int(x, low, high), low, high) == clamp_int(x, low, high)} do () end
+
 end
