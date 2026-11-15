@@ -1041,6 +1041,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A list (or other value) captured by a `task_spawn` closure and still read by the spawning
+  thread no longer crashes compiled code** (#1266). A consuming `match` on a shared cell
+  released the cell before taking its own references to the fields it pulled out, so
+  another thread could free those fields in between; the compiled program died with
+  SIGSEGV, SIGBUS or SIGABRT. The fields are now retained first.
+
 - **`Process.kill` can no longer signal a recycled pid.** A kill racing a `wait_proc` on
   another task could reach a pid the wait had already reaped; it now signals only while
   the process's slot is live and not being waited on.
