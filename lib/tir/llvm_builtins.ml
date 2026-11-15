@@ -1101,6 +1101,11 @@ let builtins : builtin list = [
      answer under a symbol cap_symbols does not attribute to IO.Process. *)
   { march_name = "cap_cwd"; c_name = Some "march_cap_cwd"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_cwd()" };
+  (* Authority.launch_init's launch error: the text on fd 2, exit 2. Its own
+     symbol, not attributed in cap_symbols (print_stderr / process_exit
+     would be, and launch_init is linked into every program). *)
+  { march_name = "cap_launch_fail"; c_name = Some "march_cap_launch_fail"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @march_cap_launch_fail(ptr %text)" };
   (* peak_rss_bytes: process self-inspection, not capability-gated (see
      typecheck.ml — deliberately absent from the capability table). *)
   { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
@@ -2112,6 +2117,7 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_cap_enter";
   PDeclare "march_cap_grant_text";
   PDeclare "march_cap_cwd";
+  PDeclare "march_cap_launch_fail";
   PDeclare "march_peak_rss_bytes";
   PDeclare "march_live_allocs";
   PDeclare "march_vault_live_tables";

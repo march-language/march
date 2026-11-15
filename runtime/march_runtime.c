@@ -11050,6 +11050,24 @@ void *march_cap_cwd(void) {
     return march_string_lit(buf, (int64_t)strlen(buf));
 }
 
+/* Authority.launch_init's launch error (cap_launch_fail): the text verbatim
+ * on fd 2, then exit status 2. Its own symbol, deliberately absent from the
+ * capability symbol table (lib/caps/cap_symbols.ml). */
+void march_cap_launch_fail(void *text) {
+    fflush(stdout);
+    if (text != NULL) {
+        march_string *s = (march_string *)text;
+        const char *p = s->data;
+        size_t left = (size_t)s->len;
+        while (left > 0) {
+            ssize_t w = write(2, p, left);
+            if (w < 0) { if (errno == EINTR) continue; break; }
+            p += w; left -= (size_t)w;
+        }
+    }
+    _exit(2);
+}
+
 /* Helper: allocate a 2-element tuple (tag=0, 2 ptr fields). */
 /* actor_terminal_reason(pid_index) -> Option((tag, message)): the reason a
  * local actor died, with DistLink's wire tags (0 Normal, 1 Killed, 2 Crash),

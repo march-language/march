@@ -872,6 +872,11 @@ let builtin_bindings : (string * scheme) list =
        relative path target. Not process_cwd: that is an IO.Process
        operation, and charging it would charge every checked operation. *)
     ("cap_cwd",         Mono (TArrow (t_unit, t_string)));
+    (* Authority.launch_init's launch error: writes the text verbatim to fd 2
+       and exits with status 2; never returns. Unit is what its one call
+       site (a `()`-typed helper) needs. Not process_exit / print_stderr:
+       those are capability operations and their symbols are attributed. *)
+    ("cap_launch_fail", Mono (TArrow (t_string, t_unit)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,

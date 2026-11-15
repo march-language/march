@@ -2933,8 +2933,19 @@ let base_env : env =
         | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_grant_text)
         | _ -> eval_error "cap_grant_text: takes no arguments"))
   ; ("cap_cwd", VBuiltin ("cap_cwd", function
-        | args when args = [] || args = [VUnit] -> VString (Sys.getcwd ())
+        (* "" when the directory cannot be read (every backend agrees):
+           Authority then refuses a relative path target. *)
+        | args when args = [] || args = [VUnit] ->
+          VString (try Sys.getcwd () with Sys_error _ -> "")
         | _ -> eval_error "cap_cwd: takes no arguments"))
+  ; ("cap_launch_fail", VBuiltin ("cap_launch_fail", function
+        (* Authority.launch_init's launch error: the text verbatim on fd 2,
+           then exit status 2. *)
+        | [VString text] ->
+          flush stdout;
+          prerr_string text; flush stderr;
+          exit 2
+        | _ -> eval_error "cap_launch_fail: expected String"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:

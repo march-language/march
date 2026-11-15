@@ -113,6 +113,11 @@ describe "Authority" do
       assert (Result.is_err(Authority.parse("IO.Clock(\"x\")")))
     end
 
+    test "a relative path scope is an error" do
+      assert (Result.is_err(Authority.parse("IO.FileRead(\"data\")")))
+      assert (Result.is_err(Authority.parse("IO.FileSystem(\"/srv\", \"x/\")")))
+    end
+
     test "a malformed host is an error" do
       assert (Result.is_err(Authority.parse("IO.NetConnect(\"https://x.com\")")))
     end
@@ -127,6 +132,19 @@ describe "Authority" do
       assert (not(Authority.admits(s, "IO.FileRead", "/srvx", "/")))
       assert (not(Authority.admits(s, "IO.FileRead", "../x", "/srv")))
       assert (Authority.admits(s, "IO.FileRead", "x/y", "/srv"))
+    end
+
+    test "an unknown current directory refuses a relative target" do
+      let s = [Authority.Scope("IO.FileSystem", Authority.Paths(["/"]))]
+      assert (not(Authority.admits(s, "IO.FileRead", "srv/x", "")))
+      assert (Authority.admits(s, "IO.FileRead", "/srv/x", ""))
+    end
+
+    test "a host scope admits the host-neutral TLS setup" do
+      let h = [Authority.Scope("IO.NetConnect", Authority.Hosts("api.x.com"))]
+      assert (Authority.admits(h, "IO.NetConnect.TLS", "", "/"))
+      assert (not(Authority.admits(h, "IO.NetConnect.TLS", "evil.com:443", "/")))
+      assert (not(Authority.admits(h, "IO.NetConnect", "", "/")))
     end
 
     test "an unscoped ancestor admits every target" do

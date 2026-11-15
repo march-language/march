@@ -1060,9 +1060,6 @@ and emit_val_impl ctx expr =
       | "process_pid", _ ->
         use_runtime ctx "march_process_pid";
         emit ctx "march_process_pid()"
-      | "process_exit", [a] ->
-        use_runtime ctx "march_process_exit";
-        emit ctx "march_process_exit("; emit_atom ctx a; emit ctx ")"
       (* ADT structural equality: eq_TypeName / neq_TypeName *)
       | n, [a; b] when String.length n > 3 && String.sub n 0 3 = "eq_" ->
         let ty = mangle (String.sub n 3 (String.length n - 3)) in
@@ -1195,7 +1192,7 @@ and emit_val_impl ctx expr =
         let f = "march_" ^ name in
         use_runtime ctx f;
         emit ctx (f ^ "()")
-      | ("cap_set_launch" | "cap_restore" | "cap_push" | "cap_enter"), [a] ->
+      | ("cap_set_launch" | "cap_restore" | "cap_push" | "cap_enter" | "cap_launch_fail"), [a] ->
         let f = "march_" ^ name in
         use_runtime ctx f;
         emit ctx (f ^ "("); emit_atom ctx a; emit ctx ")"

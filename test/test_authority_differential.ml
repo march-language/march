@@ -14,7 +14,11 @@
    - paths: the target and any relative scope are resolved against [cwd],
      then compared segment by segment ([Cap_scope.within]);
    - hosts: the target is `host:port` (split at the last `:`; no port reads
-     as port 0), judged by [Host_scope.permits];
+     as port 0), judged by [Host_scope.permits].  Under a host scope, a
+     capability below IO.NetConnect with the host-neutral target `""` is
+     admitted exactly when the static checker lets a host-scoped module
+     call it: some builtin of that capability is [Net_dest.Neutral]
+     (tls_client_ctx: "it also bounds the TLS connections built on it");
    - names: [Name_scope.admits].
 
    The March verdict comes from ONE interpreted program that prints
@@ -59,9 +63,6 @@ let rows : (string * string * string * string) list = [
   ("IO.FileSystem(\"/srv\")", "IO.FileWrite", "/srvx", "/");
   ("IO.FileSystem(\"/srv\")", "IO.Console", "stdout", "/");
   ("IO.FileWrite(\"/\")", "IO.FileWrite", "/anything/at/all", "/");
-  ("IO.FileRead(\"data/\")", "IO.FileRead", "data/x.csv", "/home/u");
-  ("IO.FileRead(\"data/\")", "IO.FileRead", "/home/u/data/x.csv", "/home/u");
-  ("IO.FileRead(\"data/\")", "IO.FileRead", "/home/v/data/x.csv", "/home/u");
   ("IO.FileRead(\"/a/\"), IO.FileRead(\"/b/\")", "IO.FileRead", "/b/c", "/");
   ("IO.FileRead(\"/a/\"), IO.FileRead", "IO.FileRead", "/z", "/");
   ("IO.FileRead(\"/a/\"), IO.Console", "IO.FileRead", "/z", "/");
@@ -87,6 +88,10 @@ let rows : (string * string * string * string) list = [
   ("IO.NetConnect(\"127.0.0.1\")", "IO.NetConnect", "127.0.0.1:5432", "/");
   ("IO.NetConnect(\"api.x.com\")", "IO.Database", "api.x.com:5432", "/");
   ("IO.NetConnect(\"api.x.com\")", "IO.NetConnect.TLS", "", "/");
+  ("IO.NetConnect(\"*.x.com\", methods(get))", "IO.NetConnect.TLS", "", "/");
+  ("IO.NetConnect(\"api.x.com\")", "IO.NetConnect.TLS", "api.x.com:443", "/");
+  ("IO.NetConnect(\"api.x.com\")", "IO.NetConnect", "", "/");
+  ("IO.FileRead(\"/\")", "IO.FileRead", "rel/x", "/home/u");
   ("IO.NetConnect(\"api.x.com\"), IO.Network", "IO.NetConnect", "evil.com:443", "/");
   ("IO.Network", "IO.NetConnect", "evil.com:443", "/");
   (* names and prefixes *)
@@ -150,6 +155,14 @@ let split_target (t : string) : string * int =
     let h = String.sub t 0 i and p = String.sub t (i + 1) (String.length t - i - 1) in
     (h, parse_port p)
 
+(* A capability the static checker lets a host-scoped module use without a
+   host: one with a [Net_dest.Neutral] builtin in the compiler's own table. *)
+let host_neutral_kind kind =
+  List.exists
+    (fun (b, c) ->
+       c = kind && March_caps.Net_dest.builtin_dest b = Some March_caps.Net_dest.Neutral)
+    March_typecheck.Typecheck_builtins.builtin_cap_table
+
 let entry_admits ~kind ~target ~cwd (cap, sc) =
   L.cap_subsumes cap kind
   &&
@@ -161,6 +174,8 @@ let entry_admits ~kind ~target ~cwd (cap, sc) =
       List.exists
         (fun s -> CS.within ~scope:(resolve ~cwd s) (resolve ~cwd target))
         (scope_paths sc)
+    else if CS.is_host_scopable cap && not (CS.is_host_scopable kind) then
+      target = "" && host_neutral_kind kind
     else if CS.is_host_scopable kind && CS.is_host_scopable cap then
       match HS.parse_decl (Some sc) with
       | Ok d ->
@@ -373,19 +388,14 @@ let test_launch () =
           @ tail "IO.FileRead(\"/srv/b\") refused by the launch grant (IO.Console, IO.FileRead(\"/srv/a/\"))"));
       ("MARCH_GRANT='IO.Console('",
        "<exit 2>\nmarch: MARCH_GRANT is not a scope list: a scope is not closed: expected `)`\n");
+      ("MARCH_GRANT='IO.FileRead(\"data/\")'",
+       "<exit 2>\nmarch: MARCH_GRANT is not a scope list: the scope `data/` on `IO.FileRead` is a relative path; give an absolute path, one starting with `/`\n");
       ("MARCH_GRANT='IO.FileRead(\"/etc/\")'",
        "<exit 2>\nmarch: MARCH_GRANT grants IO.FileRead(\"/etc\"), which main does not request (main requests: "
        ^ req ^ ")\n") ]
   in
-  (* The JS target's print_stderr is console.error, which adds a newline of
-     its own (pre-existing; the interpreter and native print the string as
-     given), so a JS launch error ends in one extra blank line. *)
-  let js_stderr got =
-    let n = String.length got in
-    if n >= 2 && String.sub got (n - 2) 2 = "\n\n" then String.sub got 0 (n - 1) else got in
   List.iter (fun (mode, outs) ->
       List.iter2 (fun (env, want) got ->
-          let got = if mode = "js" then js_stderr got else got in
           Alcotest.(check string) (Printf.sprintf "%s [%s]" mode env) want got)
         cases outs)
     (run_modes ~src:launch_src ~envs:(List.map fst cases))
@@ -409,8 +419,8 @@ let test_unscoped () =
         [ ("", "layers 0 raw 0\n"); ("MARCH_GRANT=IO.Console", "layers 1 raw 1\n") ] outs)
     (run_modes ~src:unscoped_src ~envs:[ ""; "MARCH_GRANT=IO.Console" ])
 
-(* A relative target, and a relative path scope, are resolved against the
-   current directory (cap_cwd) in every runtime.  The fixture's cwd is a
+(* A relative target is resolved against the current directory (cap_cwd)
+   in every runtime.  The fixture's cwd is a
    fresh temp dir, so the frame's scope is built from it at run time. *)
 let cwd_src = {|mod CwdFixture do
   needs IO
@@ -427,9 +437,9 @@ let cwd_src = {|mod CwdFixture do
     let b = verdict(Authority.check("IO.FileRead", "../x"))
     let c = verdict(Authority.check("IO.FileRead", here ++ "/z"))
     cap_restore(r)
-    let r2 = Authority.enter_fn("h", "IO.FileRead(\"sub/\")")
+    let r2 = Authority.enter_fn("h", "IO.FileRead(\"" ++ here ++ "/sub/\")")
     let d = verdict(Authority.check("IO.FileRead", "sub/y"))
-    let e = verdict(Authority.check("IO.FileRead", here ++ "/sub/y"))
+    let e = verdict(Authority.check("IO.FileRead", "sub/../y"))
     let f = verdict(Authority.check("IO.FileRead", "/elsewhere/sub/y"))
     cap_restore(r2)
     println(a ++ " " ++ b ++ " " ++ c ++ " " ++ d ++ " " ++ e ++ " " ++ f)
@@ -440,9 +450,70 @@ end
 let test_cwd () =
   List.iter (fun (mode, outs) ->
       List.iter (fun got ->
-          Alcotest.(check string) mode "ok refused ok ok ok refused\n" got)
+          Alcotest.(check string) mode "ok refused ok ok refused refused\n" got)
         outs)
     (run_modes ~src:cwd_src ~envs:[ "" ])
+
+(* When the current directory cannot be read (here: it was removed), cap_cwd
+   is "" in every runtime and a relative target is refused, never resolved
+   against "/".  Each mode's program is built in a live dir and then run
+   from a removed one.  Not the interpreter: its driver cannot start in a
+   removed cwd at all (refine_check reads the cwd and raises Sys_error,
+   pre-existing), so its cap_cwd (Sys_error -> "") is covered only by the
+   admits(.., "") unit cases in test/stdlib/test_authority.march. *)
+let gone_src = {|mod GoneFixture do
+  needs IO
+  fn verdict(r : Result((), CapError)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(_) -> "refused"
+    end
+  end
+  fn main(_c : Cap(IO)) do
+    let r = Authority.enter_fn("g", "IO.FileRead(\"/\")")
+    let a = verdict(Authority.check("IO.FileRead", "srv/x"))
+    let b = verdict(Authority.check("IO.FileRead", "/srv/x"))
+    cap_restore(r)
+    println(a ++ " " ++ b)
+  end
+end
+|}
+
+let test_gone_cwd () =
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let modes = [ "compiled" ] @ (if Lazy.force have_node then [ "js" ] else []) in
+  List.iter (fun mode ->
+      let dir = Filename.temp_dir "march-auth-gone" "" in
+      let home = Filename.concat dir "home" in
+      Unix.mkdir home 0o755;
+      Unix.mkdir (Filename.concat home ".cache") 0o755;
+      Fun.protect ~finally:(fun () -> try rm_rf dir with _ -> ()) (fun () ->
+          let src = Filename.concat dir "gone.march" in
+          let oc = open_out_bin src in
+          output_string oc gone_src;
+          close_out oc;
+          let run_cmd =
+            match mode with
+            | "compiled" ->
+              ignore (sh ~dir ~home (exe ^ " --compile --opt 0 --stdlib-source gone.march -o ./prog"));
+              Some (Filename.quote (Filename.concat dir "prog"))
+            | _ ->
+              ignore (sh ~dir ~home (exe ^ " --target js --opt 0 --stdlib-source gone.march -o ./prog.mjs"));
+              Some ("node " ^ Filename.quote (Filename.concat dir "prog.mjs"))
+          in
+          match run_cmd with
+          | None -> ()
+          | Some cmd ->
+            let gone = Filename.concat dir "gone" in
+            let full =
+              Printf.sprintf "mkdir %s && cd %s && rmdir %s && HOME=%s %s 2>&1"
+                (Filename.quote gone) (Filename.quote gone) (Filename.quote gone)
+                (Filename.quote home) cmd in
+            let ic = Unix.open_process_in full in
+            let out = read_all ic in
+            ignore (Unix.close_process_in ic);
+            Alcotest.(check string) (mode ^ " in a removed cwd") "refused ok\n" out))
+    modes
 
 let tests =
   [ ( "authority_launch",
@@ -450,8 +521,9 @@ let tests =
           test_launch;
         Alcotest.test_case "an unscoped launch with no grant sets nothing" `Quick
           test_unscoped;
-        Alcotest.test_case "relative targets and scopes resolve against the cwd" `Quick
-          test_cwd ] );
+        Alcotest.test_case "relative targets resolve against the cwd" `Quick test_cwd;
+        Alcotest.test_case "an unreadable cwd refuses a relative target" `Quick
+          test_gone_cwd ] );
     ( "authority_differential",
       [ Alcotest.test_case "the reference admits and refuses" `Quick
           test_reference_not_vacuous;

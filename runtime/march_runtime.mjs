@@ -666,12 +666,7 @@ export function march_process_cwd() {
 export function march_process_pid() {
   return (typeof process !== "undefined" && typeof process.pid === "number") ? process.pid : 0;
 }
-/* process_exit(code): node exits at once (Authority's launch errors exit 2
- * before any module-level code runs); a browser has no process to end. */
-export function march_process_exit(code) {
-  if (typeof process !== "undefined" && process.exit) process.exit(Number(code));
-  throw new Error("process_exit(" + code + "): no process to exit");
-}
+
 
 /* Int `/` and `%` by zero panic with the operator messages the interpreter
  * and native code use (march_checked_div_op / march_checked_mod_op in
@@ -827,10 +822,27 @@ export function march_cap_grant_text() {
   return raw.trim();
 }
 
-/** The current directory, for Authority's path checks; "/" with no `process`
- *  (as march_process_cwd). */
+/** The current directory, for Authority's path checks; "" when it cannot be
+ *  read (no `process`, or a removed directory), as in every backend:
+ *  Authority then refuses a relative path target. */
 export function march_cap_cwd() {
-  return (typeof process !== "undefined" && process.cwd) ? process.cwd() : "/";
+  try {
+    return (typeof process !== "undefined" && process.cwd) ? process.cwd() : "";
+  } catch (_e) {
+    return "";
+  }
+}
+
+/** Authority.launch_init's launch error: the text verbatim on fd 2
+ *  (synchronously, so the exit cannot truncate it), then exit status 2. */
+export function march_cap_launch_fail(text) {
+  if (typeof process !== "undefined" && process.exit) {
+    const fs = process.getBuiltinModule ? process.getBuiltinModule("fs") : null;
+    if (fs && fs.writeSync) fs.writeSync(2, text);
+    else if (process.stderr) process.stderr.write(text);
+    process.exit(2);
+  }
+  throw new Error(text);
 }
 
 /** The test hook's trimmed value, the refusing limit's scope text. */

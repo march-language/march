@@ -3,1824 +3,15 @@ type Row = Row(List(Int))
 type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String))
 type Authority.Scope = Scope(String, Arg)
 type Authority.Layer = Layer(CapLimit, String, List(Scope))
--- fns (158) --
-## Authority.admits
-fn Authority.admits(scopes : List(Scope), kind : String, target : String, cwd : String) : Bool =
-  case scopes of
-  Nil() -> false
-  Cons($f289, $f290) -> case $f289 of
-  Scope($f291, $f292) -> let rest : '_ = $f290 in
-let arg : '_ = $f292 in
-let k : '_ = $f291 in
-let $t288 : '_ = let $t287 : '_ = Authority.kind_subsumes(k, kind) in
-case $t287 of
-  True() -> Authority.arg_admits(arg, kind, target, cwd)
-  _ -> false in
-case $t288 of
-  True() -> true
-  _ -> Authority.admits(rest, kind, target, cwd)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.all_chars
-fn Authority.all_chars(s : String, allowed : String, i : Int) : Bool =
-  let $t495 : '_ = let $t494 : '_ = string_byte_length(s) in
->=(i, $t494) in
-case $t495 of
-  True() -> true
-  _ -> let $t497 : '_ = let $t496 : '_ = string_slice(s, i, 1) in
-string_contains(allowed, $t496) in
-case $t497 of
-  True() -> let $t498 : '_ = +(i, 1) in
-Authority.all_chars(s, allowed, $t498)
-  _ -> false
-
-## Authority.all_member
-fn Authority.all_member(xs : List(String), l : List(String)) : Bool =
-  case xs of
-  Nil() -> true
-  Cons($f1205, $f1206) -> let rest : '_ = $f1206 in
-let x : '_ = $f1205 in
-let $t1204 : '_ = Authority.member(l, x) in
-case $t1204 of
-  True() -> Authority.all_member(rest, l)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.all_names_admitted
-fn Authority.all_names_admitted(ns : List(String), o_names : List(String), o_pre : List(String)) : Bool =
-  case ns of
-  Nil() -> true
-  Cons($f371, $f372) -> let rest : '_ = $f372 in
-let n : '_ = $f371 in
-let $t370 : '_ = Authority.name_admits(o_names, o_pre, n) in
-case $t370 of
-  True() -> Authority.all_names_admitted(rest, o_names, o_pre)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.all_paths_within
-fn Authority.all_paths_within(i_paths : List(String), o_paths : List(String)) : Bool =
-  case i_paths of
-  Nil() -> true
-  Cons($f357, $f358) -> let rest : '_ = $f358 in
-let p : '_ = $f357 in
-let $t356 : '_ = Authority.path_in_any(p, o_paths) in
-case $t356 of
-  True() -> Authority.all_paths_within(rest, o_paths)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.all_prefixes_under
-fn Authority.all_prefixes_under(i_pre : List(String), o_pre : List(String)) : Bool =
-  case i_pre of
-  Nil() -> true
-  Cons($f378, $f379) -> let rest : '_ = $f379 in
-let p : '_ = $f378 in
-let $t377 : '_ = Authority.starts_with_any(p, o_pre) in
-case $t377 of
-  True() -> Authority.all_prefixes_under(rest, o_pre)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.any_relative
-fn Authority.any_relative(ps : List(String)) : Bool =
-  case ps of
-  Nil() -> false
-  Cons($f235, $f236) -> let rest : '_ = $f236 in
-let p : '_ = $f235 in
-let $t234 : '_ = let $t233 : '_ = string_starts_with(p, "/") in
-not($t233) in
-case $t234 of
-  True() -> true
-  _ -> Authority.any_relative(rest)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.any_within
-fn Authority.any_within(ps : List(String), p : String, cwd : String) : Bool =
-  case ps of
-  Nil() -> false
-  Cons($f315, $f316) -> let rest : '_ = $f316 in
-let s : '_ = $f315 in
-let $t314 : '_ = let $t313 : '_ = Authority.resolve(cwd, s) in
-Authority.path_within($t313, p) in
-case $t314 of
-  True() -> true
-  _ -> Authority.any_within(rest, p, cwd)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.append
-fn Authority.append(a : List(String), b : List(String)) : List(String) =
-  let $t1196 : '_ = let $t1195 : '_ = alloc Nil() in
-Authority.rev(a, $t1195) in
-Authority.rev($t1196, b)
-
-## Authority.arg_admits
-fn Authority.arg_admits(arg : Arg, kind : String, target : String, cwd : String) : Bool =
-  case arg of
-  Any() -> true
-  Paths($f305) -> let ps : '_ = $f305 in
-let $t301 : '_ = Authority.path_kind(kind) in
-case $t301 of
-  True() -> let $t302 : '_ = Authority.resolve(cwd, target) in
-Authority.any_within(ps, $t302, cwd)
-  _ -> false
-  Hosts($f306) -> let spec : '_ = $f306 in
-let $t303 : '_ = Authority.host_kind(kind) in
-case $t303 of
-  True() -> Authority.host_permits(spec, target)
-  _ -> false
-  Names($f307, $f308) -> let pre : '_ = $f308 in
-let ns : '_ = $f307 in
-let $t304 : '_ = Authority.name_kind(kind) in
-case $t304 of
-  True() -> Authority.name_admits(ns, pre, target)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.arg_subsumes
-fn Authority.arg_subsumes(outer : Arg, inner : Arg) : Bool =
-  case outer of
-  Any() -> true
-  Paths($f348) -> let o_paths : '_ = $f348 in
-case inner of
-  Paths($f343) -> let i_paths : '_ = $f343 in
-Authority.all_paths_within(i_paths, o_paths)
-  _ -> false
-  Names($f349, $f350) -> let o_pre : '_ = $f350 in
-let o_names : '_ = $f349 in
-case inner of
-  Names($f345, $f346) -> let i_pre : '_ = $f346 in
-let i_names : '_ = $f345 in
-let $t344 : '_ = Authority.all_names_admitted(i_names, o_names, o_pre) in
-case $t344 of
-  True() -> Authority.all_prefixes_under(i_pre, o_pre)
-  _ -> false
-  _ -> false
-  Hosts($f355) -> let o : '_ = $f355 in
-case inner of
-  Hosts($f347) -> let i : '_ = $f347 in
-Authority.host_subsumes(o, i)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.bad_method
-fn Authority.bad_method(ms : List(String)) : Option(String) =
-  case ms of
-  Nil() -> alloc None()
-  Cons($f638, $f639) -> let rest : '_ = $f639 in
-let m : '_ = $f638 in
-let $t637 : '_ = let $t636 : '_ = let $t635 : '_ = let $t634 : '_ = let $t633 : '_ = let $t632 : '_ = let $t631 : '_ = let $t630 : '_ = let $t629 : '_ = alloc Nil() in
-alloc Cons("options", $t629) in
-alloc Cons("delete", $t630) in
-alloc Cons("patch", $t631) in
-alloc Cons("put", $t632) in
-alloc Cons("post", $t633) in
-alloc Cons("head", $t634) in
-alloc Cons("get", $t635) in
-Authority.member($t636, m) in
-case $t637 of
-  True() -> Authority.bad_method(rest)
-  _ -> alloc Some(m)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.bad_name_text
-fn Authority.bad_name_text(ns : List(String), what : String) : Option(String) =
-  case ns of
-  Nil() -> alloc None()
-  Cons($f1087, $f1088) -> let rest : '_ = $f1088 in
-let n : '_ = $f1087 in
-let $t1081 : '_ = ==(n, "") in
-case $t1081 of
-  True() -> let $t1082 : '_ = ++(what, " cannot be empty") in
-alloc Some($t1082)
-  _ -> let $t1085 : '_ = let $t1084 : '_ = let $t1083 : '_ = string_contains(n, ";") in
-case $t1083 of
-  True() -> true
-  _ -> string_contains(n, "=") in
-case $t1084 of
-  True() -> true
-  _ -> string_contains(n, ",") in
-case $t1085 of
-  True() -> let $t1086 : '_ = string_concat_n(what, " `", n, "` contains `;`, `=` or `,`") in
-alloc Some($t1086)
-  _ -> Authority.bad_name_text(rest, what)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.bad_scope_segment
-fn Authority.bad_scope_segment(segs : List(String)) : Option(String) =
-  case segs of
-  Nil() -> alloc None()
-  Cons($f605, $f606) -> let rest : '_ = $f606 in
-let s : '_ = $f605 in
-let $t604 : '_ = let $t602 : '_ = let $t601 : '_ = let $t600 : '_ = ==(s, "") in
-case $t600 of
-  True() -> true
-  _ -> ==(s, ".") in
-case $t601 of
-  True() -> true
-  _ -> ==(s, "..") in
-case $t602 of
-  True() -> true
-  _ -> let $t603 : '_ = Authority.all_chars(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~", 0) in
-not($t603) in
-case $t604 of
-  True() -> alloc Some(s)
-  _ -> Authority.bad_scope_segment(rest)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.check
-fn Authority.check(kind : String, target : String) : Result((), CapError) =
-  let r : '_ = cap_check_raw(kind, target) in
-let $t160 : '_ = ==(r, 0) in
-case $t160 of
-  True() -> let $t161 : () = () in
-alloc Ok($t161)
-  _ -> let $t162 : '_ = ==(r, 2) in
-case $t162 of
-  True() -> let $t165 : '_ = let $t163 : '_ = alloc ByLaunch() in
-let $t164 : '_ = cap_launch_text() in
-alloc CapError(kind, target, $t163, $t164) in
-alloc Err($t165)
-  _ -> let $t166 : '_ = cap_layers() in
-Authority.check_layers(kind, target, $t166)
-
-## Authority.check_layers
-fn Authority.check_layers(kind : String, target : String, layers : List(Layer)) : Result((), CapError) =
-  let cwd : '_ = let $t170 : '_ = let $t167 : '_ = Authority.path_kind(kind) in
-case $t167 of
-  True() -> let $t169 : '_ = let $t168 : '_ = string_starts_with(target, "/") in
-not($t168) in
-case $t169 of
-  True() -> true
-  _ -> Authority.layers_relative(layers)
-  _ -> false in
-case $t170 of
-  True() -> cap_cwd()
-  _ -> "/" in
-Authority.first_refusal(kind, target, cwd, layers)
-
-## Authority.covered
-fn Authority.covered(s : Scope, b : List(Scope)) : Bool =
-  case b of
-  Nil() -> false
-  Cons($f331, $f332) -> case $f331 of
-  Scope($f333, $f334) -> let rest : '_ = $f332 in
-let outer : '_ = $f334 in
-let k : '_ = $f333 in
-case s of
-  Scope($f325, $f326) -> let inner : '_ = $f326 in
-let ik : '_ = $f325 in
-let $t324 : '_ = let $t323 : '_ = Authority.kind_subsumes(k, ik) in
-case $t323 of
-  True() -> Authority.arg_subsumes(outer, inner)
-  _ -> false in
-case $t324 of
-  True() -> true
-  _ -> Authority.covered(s, rest)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.describe
-fn Authority.describe(e : CapError) : String =
-  case e of
-  CapError($f136, $f137, $f138, $f139) -> let scope : '_ = $f139 in
-let limit : '_ = $f138 in
-let target : '_ = $f137 in
-let kind : '_ = $f136 in
-let o_pre : '_ = let $t134 : '_ = ==(target, "") in
-case $t134 of
-  True() -> kind
-  _ -> string_concat_n(kind, "(\"", target, "\")") in
-let who : '_ = Authority.limit_text(limit) in
-let allowed : '_ = let $t135 : '_ = ==(scope, "") in
-case $t135 of
-  True() -> "nothing"
-  _ -> scope in
-string_concat_n(o_pre, " refused by ", who, " (", allowed, ")")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.describe_tok
-fn Authority.describe_tok(t : String) : String =
-  let $t797 : '_ = Authority.is_string_tok(t) in
-case $t797 of
-  True() -> "a string"
-  _ -> string_concat3("`", t, "`")
-
-## Authority.drop_first
-fn Authority.drop_first(l : List(String)) : List(String) =
-  case l of
-  Cons($f589, $f590) -> let rest : '_ = $f590 in
-rest
-  Nil() -> alloc Nil()
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.drop_last_empty
-fn Authority.drop_last_empty(l : List(String)) : List(String) =
-  let $t596 : '_ = let $t595 : '_ = alloc Nil() in
-Authority.rev(l, $t595) in
-case $t596 of
-  Cons($f598, $f599) -> case $f598 of
-  ""() -> let r : '_ = $f599 in
-let $t597 : '_ = alloc Nil() in
-Authority.rev(r, $t597)
-  _ -> l
-  _ -> l
-
-## Authority.enter_fn
-fn Authority.enter_fn(name : String, needs_text : String) : '_ =
-  let $t273 : '_ = let $t272 : '_ = cap_layers() in
-Authority.top_is_frame($t272, name, needs_text) in
-case $t273 of
-  True() -> cap_save()
-  _ -> let $t274 : '_ = Authority.parse(needs_text) in
-case $t274 of
-  Ok($f278) -> let scopes : '_ = $f278 in
-let $t276 : '_ = let $t275 : '_ = alloc ByFnNeeds(name) in
-alloc Layer($t275, needs_text, scopes) in
-cap_push($t276)
-  Err($f279) -> let e : '_ = $f279 in
-__panic_site("stdlib/authority.march", 235, 16, 96);
-let $t277 : '_ = string_concat_n("internal: the needs clause of ", name, " is not a scope list: ", e) in
-panic($t277)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.first_outside
-fn Authority.first_outside(a : List(Scope), b : List(Scope)) : Option(Scope) =
-  case a of
-  Nil() -> alloc None()
-  Cons($f266, $f267) -> let rest : '_ = $f267 in
-let s : '_ = $f266 in
-let $t265 : '_ = Authority.covered(s, b) in
-case $t265 of
-  True() -> Authority.first_outside(rest, b)
-  _ -> alloc Some(s)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.first_refusal
-fn Authority.first_refusal(kind : String, target : String, cwd : String, layers : List(Layer)) : Result((), CapError) =
-  case layers of
-  Nil() -> let $t171 : () = () in
-alloc Ok($t171)
-  Cons($f174, $f175) -> case $f174 of
-  Layer($f176, $f177, $f178) -> let rest : '_ = $f175 in
-let scopes : '_ = $f178 in
-let text : '_ = $f177 in
-let limit : '_ = $f176 in
-let $t172 : '_ = Authority.admits(scopes, kind, target, cwd) in
-case $t172 of
-  True() -> Authority.first_refusal(kind, target, cwd, rest)
-  _ -> let $t173 : '_ = alloc CapError(kind, target, limit, text) in
-alloc Err($t173)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.fold_segments
-fn Authority.fold_segments(parts : List(String), acc : List(String)) : List(String) =
-  case parts of
-  Nil() -> acc
-  Cons($f405, $f406) -> let rest : '_ = $f406 in
-let s : '_ = $f405 in
-let $t395 : '_ = let $t394 : '_ = ==(s, "") in
-case $t394 of
-  True() -> true
-  _ -> ==(s, ".") in
-case $t395 of
-  True() -> Authority.fold_segments(rest, acc)
-  _ -> let $t396 : '_ = ==(s, "..") in
-case $t396 of
-  True() -> case acc of
-  Nil() -> let $t397 : '_ = alloc Nil() in
-Authority.fold_segments(rest, $t397)
-  Cons($f398, $f399) -> let up : '_ = $f399 in
-Authority.fold_segments(rest, up)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t404 : '_ = alloc Cons(s, acc) in
-Authority.fold_segments(rest, $t404)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.host_decl
-fn Authority.host_decl(spec : String) : Result((String, Bool, Bool, List(String)), String) =
-  let $t644 : '_ = string_split(spec, ";") in
-case $t644 of
-  Nil() -> alloc Err("a host scope cannot be empty")
-  Cons($f671, $f672) -> let opts : '_ = $f672 in
-let p : '_ = $f671 in
-let $t646 : '_ = let $t645 : '_ = ==(p, "") in
-case $t645 of
-  True() -> Authority.is_nil(opts)
-  _ -> false in
-case $t646 of
-  True() -> alloc Err("a host scope cannot be empty")
-  _ -> let pat_ok : '_ = let $t647 : '_ = ==(p, "") in
-case $t647 of
-  True() -> let $t648 : () = () in
-alloc Ok($t648)
-  _ -> let $t649 : '_ = Authority.parse_host_pattern(p) in
-case $t649 of
-  Ok($f651) -> let $t650 : () = () in
-alloc Ok($t650)
-  Err($f652) -> let e : '_ = $f652 in
-alloc Err(e)
-  _ -> panic("non-exhaustive pattern match") in
-case pat_ok of
-  Err($f669) -> let e : '_ = $f669 in
-alloc Err(e)
-  Ok($f670) -> let $t654 : '_ = let $t653 : '_ = alloc Nil() in
-Authority.host_options(opts, false, false, $t653) in
-case $t654 of
-  Err($f656) -> let e : '_ = $f656 in
-alloc Err(e)
-  Ok($f657) -> case $f657 of
-  $Tuple3($f658, $f659, $f660) -> let ms : '_ = $f660 in
-let mg : '_ = $f659 in
-let nr : '_ = $f658 in
-let $t655 : ('_, '_, '_, '_) = (p, nr, mg, ms) in
-alloc Ok($t655)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.host_kind
-fn Authority.host_kind(k : String) : Bool =
-  ==(k, "IO.NetConnect")
-
-## Authority.host_matches
-fn Authority.host_matches(h : String, wild : Bool, port : Int, host : String, tport : Int) : Bool =
-  let th : '_ = Authority.normalize_host(host) in
-let $t478 : '_ = let $t477 : '_ = !=(port, 0) in
-case $t477 of
-  True() -> !=(port, tport)
-  _ -> false in
-case $t478 of
-  True() -> false
-  _ -> case wild of
-  True() -> let suffix : '_ = ++(".", h) in
-let $t481 : '_ = let $t479 : '_ = string_byte_length(th) in
-let $t480 : '_ = string_byte_length(suffix) in
->($t479, $t480) in
-case $t481 of
-  True() -> string_ends_with(th, suffix)
-  _ -> false
-  _ -> ==(th, h)
-
-## Authority.host_options
-fn Authority.host_options(opts : List(String), nr : Bool, mg : Bool, ms : List(String)) : Result((Bool, Bool, List(String)), String) =
-  case opts of
-  Nil() -> let $t611 : ('_, '_, '_) = (nr, mg, ms) in
-alloc Ok($t611)
-  Cons($f623, $f624) -> let rest : '_ = $f624 in
-let o : '_ = $f623 in
-let $t612 : '_ = ==(o, "no_redirects") in
-case $t612 of
-  True() -> case nr of
-  True() -> alloc Err("`no_redirects` is given twice")
-  _ -> Authority.host_options(rest, true, mg, ms)
-  _ -> let $t613 : '_ = string_starts_with(o, "methods=") in
-case $t613 of
-  True() -> case mg of
-  True() -> alloc Err("`methods(...)` is given twice")
-  _ -> let v : '_ = let $t615 : '_ = let $t614 : '_ = string_byte_length(o) in
--($t614, 8) in
-string_slice(o, 8, $t615) in
-let $t617 : '_ = let $t616 : '_ = string_split(v, ",") in
-Authority.bad_method($t616) in
-case $t617 of
-  None() -> let $t618 : '_ = ==(v, "") in
-case $t618 of
-  True() -> alloc Err("`methods(...)` needs at least one method")
-  _ -> let $t619 : '_ = string_split(v, ",") in
-Authority.host_options(rest, nr, true, $t619)
-  Some($f621) -> let m : '_ = $f621 in
-let $t620 : '_ = string_concat3("`", m, "` is not an HTTP method a scope can name; use `get`, `head`, `post`, `put`, `patch`, `delete`, `options`") in
-alloc Err($t620)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t622 : '_ = string_concat3("unknown option `", o, "`: the options are `no_redirects` and `methods(...)`") in
-alloc Err($t622)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.host_part_pattern
-fn Authority.host_part_pattern(s : String, path : Option(List(String))) : Result((String, Bool, Int, Option(List(String))), String) =
-  let $t514 : '_ = ==(s, "") in
-case $t514 of
-  True() -> alloc Err("a host scope needs a host before its path")
-  _ -> let $t515 : '_ = string_contains(s, "@") in
-case $t515 of
-  True() -> alloc Err("a host scope cannot carry userinfo (`user@`)")
-  _ -> let $p539 : '_ = Authority.split_host_port(s) in
-let linear host_part : '_ = $p539.$fv0 in
-let linear port_text : '_ = $p539.$fv1 in
-let port : '_ = let $t516 : '_ = ==(port_text, "") in
-case $t516 of
-  True() -> 0
-  _ -> Authority.port_or_zero(port_text) in
-let $t518 : '_ = let $t517 : '_ = !=(port_text, "") in
-case $t517 of
-  True() -> ==(port, 0)
-  _ -> false in
-case $t518 of
-  True() -> let $t519 : '_ = string_concat3("`", port_text, "` is not a port (1-65535)") in
-alloc Err($t519)
-  _ -> let $t520 : '_ = string_starts_with(host_part, "[") in
-case $t520 of
-  True() -> let n : '_ = string_byte_length(host_part) in
-let $t525 : '_ = let $t522 : '_ = let $t521 : '_ = >=(n, 2) in
-case $t521 of
-  True() -> string_ends_with(host_part, "]")
-  _ -> false in
-case $t522 of
-  True() -> let $t524 : '_ = let $t523 : '_ = -(n, 2) in
-string_slice(host_part, 1, $t523) in
-Authority.ipv6_body_ok($t524)
-  _ -> false in
-case $t525 of
-  True() -> let $t526 : ('_, '_, '_, '_) = (host_part, false, port, path) in
-alloc Ok($t526)
-  _ -> let $t527 : '_ = string_concat3("`", host_part, "` is not an IPv6 literal") in
-alloc Err($t527)
-  _ -> let wild : '_ = let $t529 : '_ = let $t528 : '_ = string_byte_length(host_part) in
->=($t528, 2) in
-case $t529 of
-  True() -> string_starts_with(host_part, "*.")
-  _ -> false in
-let name : '_ = let $t532 : '_ = case wild of
-  True() -> let $t531 : '_ = let $t530 : '_ = string_byte_length(host_part) in
--($t530, 2) in
-string_slice(host_part, 2, $t531)
-  _ -> host_part in
-Authority.normalize_host($t532) in
-let $t534 : '_ = let $t533 : '_ = string_contains(name, "*") in
-case $t533 of
-  True() -> true
-  _ -> ==(host_part, "*") in
-case $t534 of
-  True() -> alloc Err("a wildcard must be the whole leftmost label (`*.example.com`)")
-  _ -> let $t536 : '_ = let $t535 : '_ = Authority.valid_host_name(name) in
-not($t535) in
-case $t536 of
-  True() -> let $t537 : '_ = string_concat3("`", host_part, "` is not a host name: labels are letters, digits and `-`, separated by single dots") in
-alloc Err($t537)
-  _ -> let $t538 : ('_, '_, '_, '_) = (name, wild, port, path) in
-alloc Ok($t538)
-
-## Authority.host_permits
-fn Authority.host_permits(spec : String, target : String) : Bool =
-  let raw : '_ = Authority.spec_pattern(spec) in
-let $t439 : '_ = ==(raw, "") in
-case $t439 of
-  True() -> true
-  _ -> let $t440 : '_ = Authority.parse_host_pattern(raw) in
-case $t440 of
-  Err($f448) -> false
-  Ok($f449) -> case $f449 of
-  $Tuple4($f450, $f451, $f452, $f453) -> let port : '_ = $f452 in
-let wild : '_ = $f451 in
-let h : '_ = $f450 in
-let $t441 : '_ = Authority.split_target(target) in
-case $t441 of
-  $Tuple2($f442, $f443) -> let tp : '_ = $f443 in
-let th : '_ = $f442 in
-Authority.host_matches(h, wild, port, th, tp)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.host_subsumes
-fn Authority.host_subsumes(o : String, i : String) : Bool =
-  let $t677 : '_ = Authority.host_decl(o) in
-let $t678 : '_ = Authority.host_decl(i) in
-let $t679 : ('_, '_) = ($t677, $t678) in
-case $t679 of
-  $Tuple2($f686, $f687) -> case $f686 of
-  Ok($f688) -> case $f688 of
-  $Tuple4($f689, $f690, $f691, $f692) -> case $f687 of
-  Ok($f693) -> case $f693 of
-  $Tuple4($f694, $f695, $f696, $f697) -> let ims : '_ = $f697 in
-let img : '_ = $f696 in
-let inr : '_ = $f695 in
-let i_pre : '_ = $f694 in
-let oms : '_ = $f692 in
-let omg : '_ = $f691 in
-let onr : '_ = $f690 in
-let o_pre : '_ = $f689 in
-let $t683 : '_ = let $t681 : '_ = let $t680 : '_ = not(onr) in
-||($t680, inr) in
-case $t681 of
-  True() -> let $t682 : '_ = not(omg) in
-case $t682 of
-  True() -> true
-  _ -> case img of
-  True() -> Authority.all_member(ims, oms)
-  _ -> false
-  _ -> false in
-case $t683 of
-  True() -> let $t684 : '_ = ==(o_pre, "") in
-case $t684 of
-  True() -> true
-  _ -> let $t685 : '_ = !=(i_pre, "") in
-case $t685 of
-  True() -> Authority.pattern_subsumes(o_pre, i_pre)
-  _ -> false
-  _ -> false
-  _ -> false
-  _ -> false
-  _ -> false
-  _ -> false
-  _ -> false
-
-## Authority.ignore
-fn Authority.ignore(_r : Result('a, CapError)) : () =
-  ()
-
-## Authority.ipv6_body_ok
-fn Authority.ipv6_body_ok(b : String) : Bool =
-  let $t567 : '_ = !=(b, "") in
-case $t567 of
-  True() -> Authority.all_chars(b, "0123456789abcdef:.", 0)
-  _ -> false
-
-## Authority.is_kind
-fn Authority.is_kind(w : String) : Bool =
-  let $t878 : '_ = let $t877 : '_ = let $t876 : '_ = let $t875 : '_ = let $t874 : '_ = Authority.is_string_tok(w) in
-not($t874) in
-case $t875 of
-  True() -> !=(w, "(")
-  _ -> false in
-case $t876 of
-  True() -> !=(w, ")")
-  _ -> false in
-case $t877 of
-  True() -> !=(w, ",")
-  _ -> false in
-case $t878 of
-  True() -> let $t879 : '_ = string_split(w, ".") in
-Authority.kind_parts_ok($t879)
-  _ -> false
-
-## Authority.is_nil
-fn Authority.is_nil(l : List(String)) : Bool =
-  case l of
-  Nil() -> true
-  _ -> false
-
-## Authority.is_option_name
-fn Authority.is_option_name(w : String) : Bool =
-  let $t889 : '_ = !=(w, "") in
-case $t889 of
-  True() -> Authority.all_chars(w, "abcdefghijklmnopqrstuvwxyz_", 0)
-  _ -> false
-
-## Authority.is_string_tok
-fn Authority.is_string_tok(t : String) : Bool =
-  string_starts_with(t, "\"")
-
-## Authority.is_word_char
-fn Authority.is_word_char(c : String) : Bool =
-  let $t775 : '_ = !=(c, "") in
-case $t775 of
-  True() -> string_contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.", c)
-  _ -> false
-
-## Authority.kind_parts_ok
-fn Authority.kind_parts_ok(ps : List(String)) : Bool =
-  case ps of
-  Nil() -> true
-  Cons($f883, $f884) -> let rest : '_ = $f884 in
-let p : '_ = $f883 in
-let $t882 : '_ = let $t880 : '_ = !=(p, "") in
-case $t880 of
-  True() -> let $t881 : '_ = string_slice(p, 0, 1) in
-string_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", $t881)
-  _ -> false in
-case $t882 of
-  True() -> Authority.kind_parts_ok(rest)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.kind_subsumes
-fn Authority.kind_subsumes(parent : String, child : String) : Bool =
-  let $t384 : '_ = ==(parent, child) in
-case $t384 of
-  True() -> true
-  _ -> let p : '_ = Authority.lattice_parent(child) in
-let $t385 : '_ = ==(p, "") in
-case $t385 of
-  True() -> false
-  _ -> Authority.kind_subsumes(parent, p)
-
-## Authority.labels_ok
-fn Authority.labels_ok(ls : List(String)) : Bool =
-  case ls of
-  Nil() -> true
-  Cons($f572, $f573) -> let rest : '_ = $f573 in
-let l : '_ = $f572 in
-let $t571 : '_ = let $t570 : '_ = !=(l, "") in
-case $t570 of
-  True() -> Authority.all_chars(l, "abcdefghijklmnopqrstuvwxyz0123456789-", 0)
-  _ -> false in
-case $t571 of
-  True() -> Authority.labels_ok(rest)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.lattice_parent
-fn Authority.lattice_parent(kind : String) : String =
-  case kind of
-  "IO.Console"() -> "IO"
-  "IO.FileSystem"() -> "IO"
-  "IO.FileRead"() -> "IO.FileSystem"
-  "IO.FileWrite"() -> "IO.FileSystem"
-  "IO.Network"() -> "IO"
-  "IO.NetConnect"() -> "IO.Network"
-  "IO.NetListen"() -> "IO.Network"
-  "IO.Process"() -> "IO"
-  "IO.Clock"() -> "IO"
-  "IO.Random"() -> "IO"
-  "IO.Signal"() -> "IO"
-  "IO.Database"() -> "IO.NetConnect"
-  "IO.Spawn"() -> "IO"
-  "IO.Mut"() -> "IO"
-  "IO.Telemetry"() -> "IO"
-  "IO.NetConnect.TLS"() -> "IO.NetConnect"
-  "IO.WebSocket"() -> "IO.NetConnect"
-  "IO.Foreign"() -> "IO"
-  "IO.Foreign.Blocking"() -> "IO.Foreign"
-  "IO.Registry"() -> "IO"
-  _ -> ""
-
-## Authority.launch_error
-fn Authority.launch_error(msg : String) : () =
-  let $t264 : '_ = ++(msg, "\n") in
-print_stderr($t264);
-process_exit(2)
-
-## Authority.launch_init
-fn Authority.launch_init(request : String, scoped : Bool) : () =
-  let grant : '_ = cap_grant_text() in
-let $t242 : '_ = let $t241 : '_ = not(scoped) in
-case $t241 of
-  True() -> ==(grant, "")
-  _ -> false in
-case $t242 of
-  True() -> ()
-  _ -> let $t243 : '_ = Authority.parse(request) in
-case $t243 of
-  Err($f262) -> let e : '_ = $f262 in
-__panic_site("stdlib/authority.march", 189, 16, 76);
-let $t244 : '_ = ++("internal: main's request is not a scope list: ", e) in
-panic($t244)
-  Ok($f263) -> let req : '_ = $f263 in
-let $t245 : '_ = ==(grant, "") in
-case $t245 of
-  True() -> let $t249 : '_ = let $t247 : '_ = let $t246 : '_ = alloc ByLaunch() in
-alloc Layer($t246, request, req) in
-let $t248 : '_ = alloc Nil() in
-alloc Cons($t247, $t248) in
-cap_set_launch($t249)
-  _ -> let $t250 : '_ = Authority.parse(grant) in
-case $t250 of
-  Err($f260) -> let e : '_ = $f260 in
-let $t251 : '_ = ++("march: MARCH_GRANT is not a scope list: ", e) in
-Authority.launch_error($t251)
-  Ok($f261) -> let g : '_ = $f261 in
-let $t252 : '_ = Authority.first_outside(g, req) in
-case $t252 of
-  Some($f259) -> let s : '_ = $f259 in
-let $t254 : '_ = let $t253 : '_ = Authority.scope_text(s) in
-string_concat_n("march: MARCH_GRANT grants ", $t253, ", which main does not request (main requests: ", request, ")") in
-Authority.launch_error($t254)
-  None() -> let $t258 : '_ = let $t256 : '_ = let $t255 : '_ = alloc ByLaunch() in
-alloc Layer($t255, grant, g) in
-let $t257 : '_ = alloc Nil() in
-alloc Cons($t256, $t257) in
-cap_set_launch($t258)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.layers_relative
-fn Authority.layers_relative(layers : List(Layer)) : Bool =
-  case layers of
-  Nil() -> false
-  Cons($f192, $f193) -> case $f192 of
-  Layer($f194, $f195, $f196) -> let rest : '_ = $f193 in
-let scopes : '_ = $f196 in
-let $t191 : '_ = Authority.scopes_relative(scopes) in
-case $t191 of
-  True() -> true
-  _ -> Authority.layers_relative(rest)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.limit_text
-fn Authority.limit_text(limit : CapLimit) : String =
-  case limit of
-  ByLaunch() -> "the launch grant"
-  ByFnNeeds($f152) -> let f : '_ = $f152 in
-string_concat3("function ", f, "'s needs")
-  ByModNeeds($f153) -> let m : '_ = $f153 in
-string_concat3("module ", m, "'s needs")
-  ByRestrict($f154) -> let w : '_ = $f154 in
-++("the restrict at ", w)
-  ByGrant($f155) -> let p : '_ = $f155 in
-++("the grant to package ", p)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.map_normalize
-fn Authority.map_normalize(l : List(String)) : List(String) =
-  case l of
-  Nil() -> alloc Nil()
-  Cons($f1221, $f1222) -> let rest : '_ = $f1222 in
-let x : '_ = $f1221 in
-let $t1219 : '_ = Authority.normalize(x) in
-let $t1220 : '_ = Authority.map_normalize(rest) in
-alloc Cons($t1219, $t1220)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.member
-fn Authority.member(l : List(String), x : String) : Bool =
-  case l of
-  Nil() -> false
-  Cons($f1198, $f1199) -> let rest : '_ = $f1199 in
-let y : '_ = $f1198 in
-let $t1197 : '_ = ==(y, x) in
-case $t1197 of
-  True() -> true
-  _ -> Authority.member(rest, x)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.method_words
-fn Authority.method_words(toks : List(String), acc : List(String)) : Result((List(String), List(String)), String) =
-  case toks of
-  Cons($f1006, $f1007) -> let $jp_clo1025 : () -> '_ = letrec [$jp7_method_words] in
-$jp7_method_words in
-case $f1007 of
-  Cons($f1026, $f1027) -> case $f1026 of
-  ","() -> let rest : '_ = $f1027 in
-let m : '_ = $f1006 in
-let $t999 : '_ = Authority.is_option_name(m) in
-case $t999 of
-  True() -> let $t1000 : '_ = alloc Cons(m, acc) in
-Authority.method_words(rest, $t1000)
-  _ -> alloc Err("`methods(...)` takes HTTP method names")
-  _ -> $jp_clo1025()
-  _ -> $jp_clo1025()
-  _ -> alloc Err("`methods(...)` is not closed")
-
-## Authority.must
-fn Authority.must(r : Result('a, CapError)) : 'a =
-  case r of
-  Ok($f158) -> let v : '_ = $f158 in
-v
-  Err($f159) -> let e : '_ = $f159 in
-__panic_site("stdlib/authority.march", 84, 14, 58);
-let $t157 : '_ = let $t156 : '_ = Authority.describe(e) in
-++("capability refused: ", $t156) in
-panic($t157)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.name_admits
-fn Authority.name_admits(ns : List(String), pre : List(String), n : String) : Bool =
-  let $t431 : '_ = Authority.member(ns, n) in
-case $t431 of
-  True() -> true
-  _ -> Authority.starts_with_any(n, pre)
-
-## Authority.name_kind
-fn Authority.name_kind(k : String) : Bool =
-  let $t388 : '_ = ==(k, "IO.Mut") in
-case $t388 of
-  True() -> true
-  _ -> ==(k, "IO.Registry")
-
-## Authority.name_options
-fn Authority.name_options(opts : List(String), acc : List(String)) : Result(List(String), String) =
-  case opts of
-  Nil() -> let $t1068 : '_ = let $t1067 : '_ = alloc Nil() in
-Authority.rev(acc, $t1067) in
-alloc Ok($t1068)
-  Cons($f1075, $f1076) -> let rest : '_ = $f1076 in
-let o : '_ = $f1075 in
-let $t1069 : '_ = string_starts_with(o, "prefix=") in
-case $t1069 of
-  True() -> let $t1073 : '_ = let $t1072 : '_ = let $t1071 : '_ = let $t1070 : '_ = string_byte_length(o) in
--($t1070, 7) in
-string_slice(o, 7, $t1071) in
-alloc Cons($t1072, acc) in
-Authority.name_options(rest, $t1073)
-  _ -> let $t1074 : '_ = string_concat3("`", o, "` is not an option a name scope takes; it takes names and `prefix(\"...\")`") in
-alloc Err($t1074)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.normalize
-fn Authority.normalize(p : String) : String =
-  let body : '_ = let $t411 : '_ = Authority.segments(p) in
-string_join($t411, "/") in
-let $t412 : '_ = string_starts_with(p, "/") in
-case $t412 of
-  True() -> ++("/", body)
-  _ -> body
-
-## Authority.normalize_host
-fn Authority.normalize_host(h : String) : String =
-  let l : '_ = string_to_lowercase(h) in
-let $t482 : '_ = string_ends_with(l, ".") in
-case $t482 of
-  True() -> let $t484 : '_ = let $t483 : '_ = string_byte_length(l) in
--($t483, 1) in
-string_slice(l, 0, $t484)
-  _ -> l
-
-## Authority.option_texts
-fn Authority.option_texts(opts : List(String)) : List(String) =
-  case opts of
-  Nil() -> alloc Nil()
-  Cons($f1157, $f1158) -> let rest : '_ = $f1158 in
-let o : '_ = $f1157 in
-let t : '_ = let $t1145 : '_ = string_index_of(o, "=") in
-case $t1145 of
-  None() -> o
-  Some($f1155) -> let i : '_ = $f1155 in
-let name : '_ = string_slice(o, 0, i) in
-let v : '_ = let $t1146 : '_ = +(i, 1) in
-let $t1149 : '_ = let $t1148 : '_ = let $t1147 : '_ = string_byte_length(o) in
--($t1147, i) in
--($t1148, 1) in
-string_slice(o, $t1146, $t1149) in
-let $t1150 : '_ = ==(name, "name") in
-case $t1150 of
-  True() -> Authority.quote(v)
-  _ -> let $t1151 : '_ = ==(name, "methods") in
-case $t1151 of
-  True() -> let $t1153 : '_ = let $t1152 : '_ = string_split(v, ",") in
-string_join($t1152, ", ") in
-string_concat3("methods(", $t1153, ")")
-  _ -> let $t1154 : '_ = Authority.quote(v) in
-string_concat_n(name, "(", $t1154, ")")
-  _ -> panic("non-exhaustive pattern match") in
-let $t1156 : '_ = Authority.option_texts(rest) in
-alloc Cons(t, $t1156)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.parse
-fn Authority.parse(text : String) : Result(List(Scope), String) =
-  let $t722 : '_ = let $t720 : '_ = string_byte_length(text) in
-let $t721 : '_ = alloc Nil() in
-Authority.tokenize(text, 0, $t720, $t721) in
-case $t722 of
-  Err($f742) -> let e : '_ = $f742 in
-alloc Err(e)
-  Ok($f743) -> let toks : '_ = $f743 in
-case toks of
-  Nil() -> let $t723 : '_ = alloc Nil() in
-alloc Ok($t723)
-  Cons($f728, $f729) -> let $jp_clo731 : () -> '_ = letrec [$jp1_parse] in
-$jp1_parse in
-case $f728 of
-  "("() -> let $jp_clo733 : () -> '_ = letrec [$jp2_parse] in
-$jp2_parse in
-case $f729 of
-  Cons($f734, $f735) -> let $jp_clo737 : () -> '_ = letrec [$jp3_parse] in
-$jp3_parse in
-case $f734 of
-  ")"() -> case $f735 of
-  Nil() -> let $t724 : '_ = alloc Nil() in
-alloc Ok($t724)
-  _ -> $jp_clo737()
-  _ -> $jp_clo737()
-  _ -> $jp_clo733()
-  _ -> $jp_clo731()
-  _ -> let $t725 : '_ = alloc Nil() in
-Authority.parse_entries(toks, $t725)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.parse_entries
-fn Authority.parse_entries(toks : List(String), acc : List(Scope)) : Result(List(Scope), String) =
-  let $t798 : '_ = Authority.parse_entry(toks) in
-case $t798 of
-  Err($f815) -> let e : '_ = $f815 in
-alloc Err(e)
-  Ok($f816) -> case $f816 of
-  $Tuple2($f817, $f818) -> let rest : '_ = $f818 in
-let scope : '_ = $f817 in
-case rest of
-  Nil() -> let $t801 : '_ = let $t799 : '_ = alloc Cons(scope, acc) in
-let $t800 : '_ = alloc Nil() in
-Authority.rev_scopes($t799, $t800) in
-alloc Ok($t801)
-  Cons($f805, $f806) -> case $f805 of
-  ","() -> let more : '_ = $f806 in
-let $t802 : '_ = alloc Cons(scope, acc) in
-Authority.parse_entries(more, $t802)
-  _ -> let t : '_ = $f805 in
-let $t804 : '_ = let $t803 : '_ = Authority.describe_tok(t) in
-++("expected `,` between capabilities, found ", $t803) in
-alloc Err($t804)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.parse_entry
-fn Authority.parse_entry(toks : List(String)) : Result((Scope, List(String)), String) =
-  case toks of
-  Nil() -> alloc Err("expected a capability at the end")
-  Cons($f868, $f869) -> let rest : '_ = $f869 in
-let k : '_ = $f868 in
-let $t824 : '_ = let $t823 : '_ = Authority.is_kind(k) in
-not($t823) in
-case $t824 of
-  True() -> let $t826 : '_ = let $t825 : '_ = Authority.describe_tok(k) in
-++("expected a capability such as `IO.Console`, found ", $t825) in
-alloc Err($t826)
-  _ -> case rest of
-  Cons($f860, $f861) -> case $f860 of
-  "("() -> let after : '_ = $f861 in
-case after of
-  Cons($f849, $f850) -> case $f849 of
-  ")"() -> let $t827 : '_ = string_concat_n("`", k, "()` names no scope: write `", k, "` for any target") in
-alloc Err($t827)
-  _ -> let $t830 : '_ = let $t828 : '_ = alloc Nil() in
-let $t829 : '_ = alloc Nil() in
-Authority.parse_items(after, $t828, $t829) in
-case $t830 of
-  Err($f836) -> let e : '_ = $f836 in
-alloc Err(e)
-  Ok($f837) -> case $f837 of
-  $Tuple3($f838, $f839, $f840) -> let more : '_ = $f840 in
-let opts : '_ = $f839 in
-let strs : '_ = $f838 in
-let $t831 : '_ = Authority.scope_arg(k, strs, opts) in
-case $t831 of
-  Err($f834) -> let e : '_ = $f834 in
-alloc Err(e)
-  Ok($f835) -> let arg : '_ = $f835 in
-let $t832 : '_ = alloc Scope(k, arg) in
-let $t833 : ('_, '_) = ($t832, more) in
-alloc Ok($t833)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t830 : '_ = let $t828 : '_ = alloc Nil() in
-let $t829 : '_ = alloc Nil() in
-Authority.parse_items(after, $t828, $t829) in
-case $t830 of
-  Err($f836) -> let e : '_ = $f836 in
-alloc Err(e)
-  Ok($f837) -> case $f837 of
-  $Tuple3($f838, $f839, $f840) -> let more : '_ = $f840 in
-let opts : '_ = $f839 in
-let strs : '_ = $f838 in
-let $t831 : '_ = Authority.scope_arg(k, strs, opts) in
-case $t831 of
-  Err($f834) -> let e : '_ = $f834 in
-alloc Err(e)
-  Ok($f835) -> let arg : '_ = $f835 in
-let $t832 : '_ = alloc Scope(k, arg) in
-let $t833 : ('_, '_) = ($t832, more) in
-alloc Ok($t833)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t858 : '_ = let $t857 : '_ = alloc Any() in
-alloc Scope(k, $t857) in
-let $t859 : ('_, '_) = ($t858, rest) in
-alloc Ok($t859)
-  _ -> let $t858 : '_ = let $t857 : '_ = alloc Any() in
-alloc Scope(k, $t857) in
-let $t859 : ('_, '_) = ($t858, rest) in
-alloc Ok($t859)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.parse_host_pattern
-fn Authority.parse_host_pattern(raw : String) : Result((String, Bool, Int, Option(List(String))), String) =
-  let $t499 : '_ = ==(raw, "") in
-case $t499 of
-  True() -> alloc Err("a host scope cannot be empty")
-  _ -> let $t500 : '_ = string_contains(raw, "://") in
-case $t500 of
-  True() -> alloc Err("a host scope names a host, not a URL: drop the scheme (`https://`)")
-  _ -> let $p513 : '_ = let $t501 : '_ = string_index_of(raw, "/") in
-case $t501 of
-  None() -> let $t503 : '_ = let $t502 : '_ = alloc None() in
-alloc Ok($t502) in
-(raw, $t503)
-  Some($f509) -> let i : '_ = $f509 in
-let $t504 : '_ = string_slice(raw, 0, i) in
-let $t508 : '_ = let $t507 : '_ = let $t506 : '_ = let $t505 : '_ = string_byte_length(raw) in
--($t505, i) in
-string_slice(raw, i, $t506) in
-Authority.parse_scope_path($t507) in
-($t504, $t508)
-  _ -> panic("non-exhaustive pattern match") in
-let linear host_raw : '_ = $p513.$fv0 in
-let linear path_r : '_ = $p513.$fv1 in
-case path_r of
-  Err($f511) -> let e : '_ = $f511 in
-alloc Err(e)
-  Ok($f512) -> let path : '_ = $f512 in
-let $t510 : '_ = string_to_lowercase(host_raw) in
-Authority.host_part_pattern($t510, path)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.parse_items
-fn Authority.parse_items(toks : List(String), strs : List(String), opts : List(String)) : Result((List(String), List(String), List(String)), String) =
-  case toks of
-  Nil() -> alloc Err("a scope is not closed: expected `)`")
-  Cons($f943, $f944) -> let rest : '_ = $f944 in
-let t : '_ = $f943 in
-let item : '_ = let $t890 : '_ = Authority.is_string_tok(t) in
-case $t890 of
-  True() -> let $t891 : '_ = Authority.is_nil(opts) in
-case $t891 of
-  True() -> let $t893 : '_ = let $t892 : '_ = Authority.string_tok_text(t) in
-alloc Cons($t892, strs) in
-let $t894 : ('_, '_, '_) = ($t893, opts, rest) in
-alloc Ok($t894)
-  _ -> alloc Err("a string cannot follow an option in a scope")
-  _ -> let $t895 : '_ = Authority.is_option_name(t) in
-case $t895 of
-  True() -> let $t896 : '_ = Authority.parse_option(t, rest) in
-case $t896 of
-  Err($f899) -> let e : '_ = $f899 in
-alloc Err(e)
-  Ok($f900) -> case $f900 of
-  $Tuple2($f901, $f902) -> let more : '_ = $f902 in
-let o : '_ = $f901 in
-let $t897 : '_ = alloc Cons(o, opts) in
-let $t898 : ('_, '_, '_) = (strs, $t897, more) in
-alloc Ok($t898)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t908 : '_ = let $t907 : '_ = Authority.describe_tok(t) in
-++("expected a string or an option in a scope, found ", $t907) in
-alloc Err($t908) in
-case item of
-  Err($f930) -> let e : '_ = $f930 in
-alloc Err(e)
-  Ok($f931) -> case $f931 of
-  $Tuple3($f932, $f933, $f934) -> let more : '_ = $f934 in
-let o2 : '_ = $f933 in
-let s2 : '_ = $f932 in
-case more of
-  Cons($f916, $f917) -> case $f916 of
-  ")"() -> let after : '_ = $f917 in
-let $t910 : '_ = let $t909 : '_ = alloc Nil() in
-Authority.rev(s2, $t909) in
-let $t912 : '_ = let $t911 : '_ = alloc Nil() in
-Authority.rev(o2, $t911) in
-let $t913 : ('_, '_, '_) = ($t910, $t912, after) in
-alloc Ok($t913)
-  ","() -> let after : '_ = $f917 in
-Authority.parse_items(after, s2, o2)
-  _ -> let x : '_ = $f916 in
-let $t915 : '_ = let $t914 : '_ = Authority.describe_tok(x) in
-++("expected `,` or `)` in a scope, found ", $t914) in
-alloc Err($t915)
-  Nil() -> alloc Err("a scope is not closed: expected `)`")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.parse_option
-fn Authority.parse_option(name : String, toks : List(String)) : Result((String, List(String)), String) =
-  case toks of
-  Cons($f975, $f976) -> case $f975 of
-  "("() -> case $f976 of
-  Cons($f983, $f984) -> let $jp_clo990 : () -> '_ = letrec [$jp7_parse_option] in
-$jp7_parse_option in
-case $f984 of
-  Cons($f991, $f992) -> case $f991 of
-  ")"() -> let rest : '_ = $f992 in
-let v : '_ = $f983 in
-let $t949 : '_ = Authority.is_string_tok(v) in
-case $t949 of
-  True() -> let $t950 : '_ = ==(name, "methods") in
-case $t950 of
-  True() -> alloc Err("`methods(...)` takes HTTP method names, not a string")
-  _ -> let $t952 : '_ = let $t951 : '_ = Authority.string_tok_text(v) in
-string_concat3(name, "=", $t951) in
-let $t953 : ('_, '_) = ($t952, rest) in
-alloc Ok($t953)
-  _ -> let $t955 : '_ = let $t954 : '_ = ==(name, "methods") in
-case $t954 of
-  True() -> Authority.is_option_name(v)
-  _ -> false in
-case $t955 of
-  True() -> let $t956 : '_ = ++("methods=", v) in
-let $t957 : ('_, '_) = ($t956, rest) in
-alloc Ok($t957)
-  _ -> let $t958 : '_ = string_concat3("`", name, "(...)` takes a quoted string") in
-alloc Err($t958)
-  _ -> $jp_clo990()
-  _ -> $jp_clo990()
-  _ -> let more : '_ = $f976 in
-let $t959 : '_ = ==(name, "methods") in
-case $t959 of
-  True() -> let $t961 : '_ = let $t960 : '_ = alloc Nil() in
-Authority.method_words(more, $t960) in
-case $t961 of
-  Err($f965) -> let e : '_ = $f965 in
-alloc Err(e)
-  Ok($f966) -> case $f966 of
-  $Tuple2($f967, $f968) -> let rest : '_ = $f968 in
-let ms : '_ = $f967 in
-let $t963 : '_ = let $t962 : '_ = string_join(ms, ",") in
-++("methods=", $t962) in
-let $t964 : ('_, '_) = ($t963, rest) in
-alloc Ok($t964)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t973 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
-alloc Err($t973)
-  _ -> let $t974 : ('_, '_) = (name, toks) in
-alloc Ok($t974)
-  _ -> let $t974 : ('_, '_) = (name, toks) in
-alloc Ok($t974)
-
-## Authority.parse_scope_path
-fn Authority.parse_scope_path(p : String) : Result(Option(List(String)), String) =
-  let parts : '_ = let $t579 : '_ = let $t578 : '_ = string_split(p, "/") in
-Authority.drop_first($t578) in
-Authority.drop_last_empty($t579) in
-let $t580 : '_ = Authority.bad_scope_segment(parts) in
-case $t580 of
-  None() -> let $t581 : '_ = alloc Some(parts) in
-alloc Ok($t581)
-  Some($f586) -> case $f586 of
-  ""() -> alloc Err("a path scope cannot contain `//`")
-  _ -> let seg : '_ = $f586 in
-let $t583 : '_ = let $t582 : '_ = ==(seg, ".") in
-case $t582 of
-  True() -> true
-  _ -> ==(seg, "..") in
-case $t583 of
-  True() -> let $t584 : '_ = string_concat3("a path scope cannot contain a `", seg, "` segment") in
-alloc Err($t584)
-  _ -> let $t585 : '_ = string_concat3("the path segment `", seg, "` may contain only letters, digits, `-`, `_`, `.` and `~` (no `%`, `?`, `#` or `\\`)") in
-alloc Err($t585)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.path_in_any
-fn Authority.path_in_any(p : String, o_paths : List(String)) : Bool =
-  case o_paths of
-  Nil() -> false
-  Cons($f364, $f365) -> let rest : '_ = $f365 in
-let o : '_ = $f364 in
-let $t363 : '_ = Authority.path_within(o, p) in
-case $t363 of
-  True() -> true
-  _ -> Authority.path_in_any(p, rest)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.path_kind
-fn Authority.path_kind(k : String) : Bool =
-  let $t387 : '_ = let $t386 : '_ = ==(k, "IO.FileRead") in
-case $t386 of
-  True() -> true
-  _ -> ==(k, "IO.FileWrite") in
-case $t387 of
-  True() -> true
-  _ -> ==(k, "IO.FileSystem")
-
-## Authority.path_within
-fn Authority.path_within(scope : String, p : String) : Bool =
-  let $t415 : '_ = let $t413 : '_ = string_starts_with(scope, "/") in
-let $t414 : '_ = string_starts_with(p, "/") in
-==($t413, $t414) in
-case $t415 of
-  True() -> let $t416 : '_ = Authority.segments(scope) in
-let $t417 : '_ = Authority.segments(p) in
-Authority.segs_prefix($t416, $t417)
-  _ -> false
-
-## Authority.pattern_subsumes
-fn Authority.pattern_subsumes(o : String, i : String) : Bool =
-  let $t698 : '_ = Authority.parse_host_pattern(o) in
-let $t699 : '_ = Authority.parse_host_pattern(i) in
-let $t700 : ('_, '_) = ($t698, $t699) in
-case $t700 of
-  $Tuple2($f708, $f709) -> case $f708 of
-  Ok($f710) -> case $f710 of
-  $Tuple4($f711, $f712, $f713, $f714) -> case $f709 of
-  Ok($f715) -> case $f715 of
-  $Tuple4($f716, $f717, $f718, $f719) -> let ipath : '_ = $f719 in
-let iport : '_ = $f718 in
-let iw : '_ = $f717 in
-let ih : '_ = $f716 in
-let opath : '_ = $f714 in
-let oport : '_ = $f713 in
-let ow : '_ = $f712 in
-let oh : '_ = $f711 in
-let host_ok : '_ = case ow of
-  True() -> let $t701 : '_ = case iw of
-  True() -> ==(ih, oh)
-  _ -> false in
-case $t701 of
-  True() -> true
-  _ -> let $t702 : '_ = ++(".", oh) in
-string_ends_with(ih, $t702)
-  _ -> let $t703 : '_ = not(iw) in
-case $t703 of
-  True() -> ==(ih, oh)
-  _ -> false in
-let port_ok : '_ = let $t704 : '_ = ==(oport, 0) in
-case $t704 of
-  True() -> true
-  _ -> ==(oport, iport) in
-let path_ok : '_ = case opath of
-  None() -> true
-  Some($f706) -> let o_paths : '_ = $f706 in
-case ipath of
-  None() -> false
-  Some($f705) -> let i_paths : '_ = $f705 in
-Authority.segs_prefix(o_paths, i_paths)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match") in
-let $t707 : '_ = &&(host_ok, port_ok) in
-&&($t707, path_ok)
-  _ -> false
-  _ -> false
-  _ -> false
-  _ -> false
-  _ -> false
-
-## Authority.port_or_zero
-fn Authority.port_or_zero(s : String) : Int =
-  let $t489 : '_ = let $t487 : '_ = let $t485 : '_ = ==(s, "") in
-case $t485 of
-  True() -> true
-  _ -> let $t486 : '_ = string_byte_length(s) in
->($t486, 5) in
-case $t487 of
-  True() -> true
-  _ -> let $t488 : '_ = Authority.all_chars(s, "0123456789", 0) in
-not($t488) in
-case $t489 of
-  True() -> 0
-  _ -> let $t490 : '_ = string_to_int(s) in
-case $t490 of
-  Some($f493) -> let n : '_ = $f493 in
-let $t492 : '_ = let $t491 : '_ = >=(n, 1) in
-case $t491 of
-  True() -> <=(n, 65535)
-  _ -> false in
-case $t492 of
-  True() -> n
-  _ -> 0
-  None() -> 0
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.port_text_of
-fn Authority.port_text_of(p : String) : String =
-  let $t566 : '_ = ==(p, "") in
-case $t566 of
-  True() -> ":"
-  _ -> p
-
-## Authority.prefix_all
-fn Authority.prefix_all(l : List(String), pre : String) : List(String) =
-  case l of
-  Nil() -> alloc Nil()
-  Cons($f1213, $f1214) -> let rest : '_ = $f1214 in
-let x : '_ = $f1213 in
-let $t1211 : '_ = ++(pre, x) in
-let $t1212 : '_ = Authority.prefix_all(rest, pre) in
-alloc Cons($t1211, $t1212)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.quote
-fn Authority.quote(s : String) : String =
-  let $t1164 : '_ = let $t1163 : '_ = string_replace_all(s, "\\", "\\\\") in
-string_replace_all($t1163, "\"", "\\\"") in
-string_concat3("\"", $t1164, "\"")
-
-## Authority.quote_all
-fn Authority.quote_all(l : List(String)) : List(String) =
-  case l of
-  Nil() -> alloc Nil()
-  Cons($f1167, $f1168) -> let rest : '_ = $f1168 in
-let x : '_ = $f1167 in
-let $t1165 : '_ = Authority.quote(x) in
-let $t1166 : '_ = Authority.quote_all(rest) in
-alloc Cons($t1165, $t1166)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.read_string
-fn Authority.read_string(s : String, i : Int, n : Int, acc : String) : Result((String, Int), String) =
-  let $t780 : '_ = >=(i, n) in
-case $t780 of
-  True() -> alloc Err("a string is not closed")
-  _ -> let c : '_ = string_slice(s, i, 1) in
-let $t781 : '_ = ==(c, "\"") in
-case $t781 of
-  True() -> let $t782 : '_ = +(i, 1) in
-let $t783 : ('_, '_) = (acc, $t782) in
-alloc Ok($t783)
-  _ -> let $t784 : '_ = ==(c, "\\") in
-case $t784 of
-  True() -> let $t786 : '_ = let $t785 : '_ = +(i, 1) in
->=($t785, n) in
-case $t786 of
-  True() -> alloc Err("a string is not closed")
-  _ -> let e : '_ = let $t787 : '_ = +(i, 1) in
-string_slice(s, $t787, 1) in
-let d : '_ = let $t788 : '_ = ==(e, "n") in
-case $t788 of
-  True() -> "\n"
-  _ -> let $t789 : '_ = ==(e, "t") in
-case $t789 of
-  True() -> "\t"
-  _ -> let $t790 : '_ = ==(e, "r") in
-case $t790 of
-  True() -> "\r"
-  _ -> e in
-let $t791 : '_ = +(i, 2) in
-let $t792 : '_ = ++(acc, d) in
-Authority.read_string(s, $t791, n, $t792)
-  _ -> let $t793 : '_ = +(i, 1) in
-let $t794 : '_ = ++(acc, c) in
-Authority.read_string(s, $t793, n, $t794)
-
-## Authority.resolve
-fn Authority.resolve(cwd : String, p : String) : String =
-  let $t389 : '_ = string_starts_with(p, "/") in
-case $t389 of
-  True() -> p
-  _ -> string_concat3(cwd, "/", p)
-
-## Authority.rev
-fn Authority.rev(l : List(String), acc : List(String)) : List(String) =
-  case l of
-  Nil() -> acc
-  Cons($f1182, $f1183) -> let rest : '_ = $f1183 in
-let x : '_ = $f1182 in
-let $t1181 : '_ = alloc Cons(x, acc) in
-Authority.rev(rest, $t1181)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.rev_scopes
-fn Authority.rev_scopes(l : List(Scope), acc : List(Scope)) : List(Scope) =
-  case l of
-  Nil() -> acc
-  Cons($f1189, $f1190) -> let rest : '_ = $f1190 in
-let x : '_ = $f1189 in
-let $t1188 : '_ = alloc Cons(x, acc) in
-Authority.rev_scopes(rest, $t1188)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.scope_arg
-fn Authority.scope_arg(k : String, strs : List(String), opts : List(String)) : Result(Arg, String) =
-  let $t1034 : '_ = Authority.path_kind(k) in
-case $t1034 of
-  True() -> let $t1036 : '_ = let $t1035 : '_ = Authority.is_nil(opts) in
-not($t1035) in
-case $t1036 of
-  True() -> let $t1037 : '_ = string_concat3("a path scope on `", k, "` takes only paths") in
-alloc Err($t1037)
-  _ -> let $t1038 : '_ = Authority.member(strs, "") in
-case $t1038 of
-  True() -> alloc Err("a path scope cannot be empty")
-  _ -> let $t1040 : '_ = let $t1039 : '_ = Authority.map_normalize(strs) in
-alloc Paths($t1039) in
-alloc Ok($t1040)
-  _ -> let $t1041 : '_ = Authority.host_kind(k) in
-case $t1041 of
-  True() -> let spec : '_ = case strs of
-  Nil() -> let $t1042 : '_ = string_join(opts, ";") in
-++(";", $t1042)
-  Cons($f1046, $f1047) -> let more : '_ = $f1047 in
-let first : '_ = $f1046 in
-let $t1045 : '_ = let $t1044 : '_ = let $t1043 : '_ = Authority.prefix_all(more, "name=") in
-Authority.append($t1043, opts) in
-alloc Cons(first, $t1044) in
-string_join($t1045, ";")
-  _ -> panic("non-exhaustive pattern match") in
-let $t1052 : '_ = Authority.host_decl(spec) in
-case $t1052 of
-  Err($f1054) -> let e : '_ = $f1054 in
-alloc Err(e)
-  Ok($f1055) -> let $t1053 : '_ = alloc Hosts(spec) in
-alloc Ok($t1053)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t1056 : '_ = Authority.name_kind(k) in
-case $t1056 of
-  True() -> let $t1058 : '_ = let $t1057 : '_ = alloc Nil() in
-Authority.name_options(opts, $t1057) in
-case $t1058 of
-  Err($f1064) -> let e : '_ = $f1064 in
-alloc Err(e)
-  Ok($f1065) -> let prefixes : '_ = $f1065 in
-let $t1059 : '_ = Authority.bad_name_text(strs, "a name") in
-case $t1059 of
-  Some($f1063) -> let e : '_ = $f1063 in
-alloc Err(e)
-  None() -> let $t1060 : '_ = Authority.bad_name_text(prefixes, "a prefix") in
-case $t1060 of
-  Some($f1062) -> let e : '_ = $f1062 in
-alloc Err(e)
-  None() -> let $t1061 : '_ = alloc Names(strs, prefixes) in
-alloc Ok($t1061)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t1066 : '_ = string_concat3("`", k, "` takes no scope") in
-alloc Err($t1066)
-
-## Authority.scope_text
-fn Authority.scope_text(s : Scope) : String =
-  case s of
-  Scope($f1113, $f1114) -> case $f1114 of
-  Any() -> let k : '_ = $f1113 in
-k
-  _ -> case $f1114 of
-  Paths($f1136) -> let ps : '_ = $f1136 in
-let k : '_ = $f1113 in
-let $t1094 : '_ = let $t1093 : '_ = Authority.quote_all(ps) in
-string_join($t1093, ", ") in
-string_concat_n(k, "(", $t1094, ")")
-  _ -> case $f1114 of
-  Names($f1124, $f1125) -> let pre : '_ = $f1125 in
-let ns : '_ = $f1124 in
-let k : '_ = $f1113 in
-let $t1099 : '_ = let $t1098 : '_ = let $t1095 : '_ = Authority.quote_all(ns) in
-let $t1097 : '_ = let $t1096 : '_ = Authority.quote_all(pre) in
-Authority.wrap_all($t1096, "prefix(") in
-Authority.append($t1095, $t1097) in
-string_join($t1098, ", ") in
-string_concat_n(k, "(", $t1099, ")")
-  _ -> case $f1114 of
-  Hosts($f1117) -> let spec : '_ = $f1117 in
-let k : '_ = $f1113 in
-let $t1100 : '_ = string_split(spec, ";") in
-case $t1100 of
-  Nil() -> k
-  Cons($f1107, $f1108) -> let opts : '_ = $f1108 in
-let first : '_ = $f1107 in
-let head : '_ = let $t1101 : '_ = ==(first, "") in
-case $t1101 of
-  True() -> alloc Nil()
-  _ -> let $t1102 : '_ = Authority.quote(first) in
-let $t1103 : '_ = alloc Nil() in
-alloc Cons($t1102, $t1103) in
-let $t1106 : '_ = let $t1105 : '_ = let $t1104 : '_ = Authority.option_texts(opts) in
-Authority.append(head, $t1104) in
-string_join($t1105, ", ") in
-string_concat_n(k, "(", $t1106, ")")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.scopes_relative
-fn Authority.scopes_relative(scopes : List(Scope)) : Bool =
-  case scopes of
-  Nil() -> false
-  Cons($f210, $f211) -> case $f210 of
-  Scope($f216, $f217) -> case $f217 of
-  Paths($f224) -> let rest : '_ = $f211 in
-let ps : '_ = $f224 in
-let $t209 : '_ = Authority.any_relative(ps) in
-case $t209 of
-  True() -> true
-  _ -> Authority.scopes_relative(rest)
-  _ -> let rest : '_ = $f211 in
-Authority.scopes_relative(rest)
-  _ -> let rest : '_ = $f211 in
-Authority.scopes_relative(rest)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.segments
-fn Authority.segments(p : String) : List(String) =
-  let $t392 : '_ = let $t390 : '_ = string_split(p, "/") in
-let $t391 : '_ = alloc Nil() in
-Authority.fold_segments($t390, $t391) in
-let $t393 : '_ = alloc Nil() in
-Authority.rev($t392, $t393)
-
-## Authority.segs_prefix
-fn Authority.segs_prefix(pre : List(String), segs : List(String)) : Bool =
-  case pre of
-  Nil() -> true
-  Cons($f425, $f426) -> let pt : '_ = $f426 in
-let a : '_ = $f425 in
-case segs of
-  Nil() -> false
-  Cons($f419, $f420) -> let st : '_ = $f420 in
-let b : '_ = $f419 in
-let $t418 : '_ = ==(a, b) in
-case $t418 of
-  True() -> Authority.segs_prefix(pt, st)
-  _ -> false
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.spec_pattern
-fn Authority.spec_pattern(spec : String) : String =
-  let $t466 : '_ = string_index_of(spec, ";") in
-case $t466 of
-  None() -> spec
-  Some($f467) -> let i : '_ = $f467 in
-string_slice(spec, 0, i)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.split_host_port
-fn Authority.split_host_port(s : String) : (String, String) =
-  let $t540 : '_ = string_starts_with(s, "[") in
-case $t540 of
-  True() -> let $t541 : '_ = string_index_of(s, "]") in
-case $t541 of
-  None() -> (s, "")
-  Some($f556) -> let i : '_ = $f556 in
-let rest : '_ = let $t542 : '_ = +(i, 1) in
-let $t545 : '_ = let $t544 : '_ = let $t543 : '_ = string_byte_length(s) in
--($t543, i) in
--($t544, 1) in
-string_slice(s, $t542, $t545) in
-let $t546 : '_ = ==(rest, "") in
-case $t546 of
-  True() -> let $t548 : '_ = let $t547 : '_ = +(i, 1) in
-string_slice(s, 0, $t547) in
-($t548, "")
-  _ -> let $t549 : '_ = string_starts_with(rest, ":") in
-case $t549 of
-  True() -> let $t551 : '_ = let $t550 : '_ = +(i, 1) in
-string_slice(s, 0, $t550) in
-let $t555 : '_ = let $t554 : '_ = let $t553 : '_ = let $t552 : '_ = string_byte_length(rest) in
--($t552, 1) in
-string_slice(rest, 1, $t553) in
-Authority.port_text_of($t554) in
-($t551, $t555)
-  _ -> (s, "")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t557 : '_ = string_last_index_of(s, ":") in
-case $t557 of
-  None() -> (s, "")
-  Some($f565) -> let i : '_ = $f565 in
-let $t558 : '_ = string_slice(s, 0, i) in
-let $t564 : '_ = let $t563 : '_ = let $t559 : '_ = +(i, 1) in
-let $t562 : '_ = let $t561 : '_ = let $t560 : '_ = string_byte_length(s) in
--($t560, i) in
--($t561, 1) in
-string_slice(s, $t559, $t562) in
-Authority.port_text_of($t563) in
-($t558, $t564)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.split_target
-fn Authority.split_target(t : String) : (String, Int) =
-  let $t468 : '_ = string_last_index_of(t, ":") in
-case $t468 of
-  None() -> (t, 0)
-  Some($f476) -> let i : '_ = $f476 in
-let $t469 : '_ = string_slice(t, 0, i) in
-let $t475 : '_ = let $t474 : '_ = let $t470 : '_ = +(i, 1) in
-let $t473 : '_ = let $t472 : '_ = let $t471 : '_ = string_byte_length(t) in
--($t471, i) in
--($t472, 1) in
-string_slice(t, $t470, $t473) in
-Authority.port_or_zero($t474) in
-($t469, $t475)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.starts_with_any
-fn Authority.starts_with_any(n : String, pre : List(String)) : Bool =
-  case pre of
-  Nil() -> false
-  Cons($f433, $f434) -> let rest : '_ = $f434 in
-let p : '_ = $f433 in
-let $t432 : '_ = string_starts_with(n, p) in
-case $t432 of
-  True() -> true
-  _ -> Authority.starts_with_any(n, rest)
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.string_tok_text
-fn Authority.string_tok_text(t : String) : String =
-  let $t796 : '_ = let $t795 : '_ = string_byte_length(t) in
--($t795, 1) in
-string_slice(t, 1, $t796)
-
-## Authority.subset
-fn Authority.subset(a : List(Scope), b : List(Scope)) : Bool =
-  let $t321 : '_ = Authority.first_outside(a, b) in
-case $t321 of
-  None() -> true
-  Some($f322) -> false
-  _ -> panic("non-exhaustive pattern match")
-
-## Authority.tokenize
-fn Authority.tokenize(s : String, i : Int, n : Int, acc : List(String)) : Result(List(String), String) =
-  let $t744 : '_ = >=(i, n) in
-case $t744 of
-  True() -> let $t746 : '_ = let $t745 : '_ = alloc Nil() in
-Authority.rev(acc, $t745) in
-alloc Ok($t746)
-  _ -> let c : '_ = string_slice(s, i, 1) in
-let $t750 : '_ = let $t749 : '_ = let $t748 : '_ = let $t747 : '_ = ==(c, " ") in
-case $t747 of
-  True() -> true
-  _ -> ==(c, "\t") in
-case $t748 of
-  True() -> true
-  _ -> ==(c, "\n") in
-case $t749 of
-  True() -> true
-  _ -> ==(c, "\r") in
-case $t750 of
-  True() -> let $t751 : '_ = +(i, 1) in
-Authority.tokenize(s, $t751, n, acc)
-  _ -> let $t754 : '_ = let $t753 : '_ = let $t752 : '_ = ==(c, "(") in
-case $t752 of
-  True() -> true
-  _ -> ==(c, ")") in
-case $t753 of
-  True() -> true
-  _ -> ==(c, ",") in
-case $t754 of
-  True() -> let $t755 : '_ = +(i, 1) in
-let $t756 : '_ = alloc Cons(c, acc) in
-Authority.tokenize(s, $t755, n, $t756)
-  _ -> let $t757 : '_ = ==(c, "\"") in
-case $t757 of
-  True() -> let $t759 : '_ = let $t758 : '_ = +(i, 1) in
-Authority.read_string(s, $t758, n, "") in
-case $t759 of
-  Err($f762) -> let e : '_ = $f762 in
-alloc Err(e)
-  Ok($f763) -> case $f763 of
-  $Tuple2($f764, $f765) -> let j : '_ = $f765 in
-let str : '_ = $f764 in
-let $t761 : '_ = let $t760 : '_ = ++("\"", str) in
-alloc Cons($t760, acc) in
-Authority.tokenize(s, j, n, $t761)
-  _ -> panic("non-exhaustive pattern match")
-  _ -> panic("non-exhaustive pattern match")
-  _ -> let $t770 : '_ = Authority.is_word_char(c) in
-case $t770 of
-  True() -> let j : '_ = Authority.word_end(s, i, n) in
-let $t773 : '_ = let $t772 : '_ = let $t771 : '_ = -(j, i) in
-string_slice(s, i, $t771) in
-alloc Cons($t772, acc) in
-Authority.tokenize(s, j, n, $t773)
-  _ -> let $t774 : '_ = string_concat3("unexpected `", c, "`") in
-alloc Err($t774)
-
-## Authority.top_is_frame
-fn Authority.top_is_frame(layers : List(Layer), name : String, text : String) : Bool =
-  case layers of
-  Cons($f281, $f282) -> case $f281 of
-  Layer($f283, $f284, $f285) -> case $f283 of
-  ByFnNeeds($f286) -> let t : '_ = $f284 in
-let n : '_ = $f286 in
-let $t280 : '_ = ==(n, name) in
-case $t280 of
-  True() -> ==(t, text)
-  _ -> false
-  _ -> false
-  _ -> false
-  _ -> false
-
-## Authority.valid_host_name
-fn Authority.valid_host_name(h : String) : Bool =
-  let $t568 : '_ = !=(h, "") in
-case $t568 of
-  True() -> let $t569 : '_ = string_split(h, ".") in
-Authority.labels_ok($t569)
-  _ -> false
-
-## Authority.word_end
-fn Authority.word_end(s : String, i : Int, n : Int) : Int =
-  let $t778 : '_ = let $t776 : '_ = <(i, n) in
-case $t776 of
-  True() -> let $t777 : '_ = string_slice(s, i, 1) in
-Authority.is_word_char($t777)
-  _ -> false in
-case $t778 of
-  True() -> let $t779 : '_ = +(i, 1) in
-Authority.word_end(s, $t779, n)
-  _ -> i
-
-## Authority.wrap_all
-fn Authority.wrap_all(l : List(String), pre : String) : List(String) =
-  case l of
-  Nil() -> alloc Nil()
-  Cons($f1175, $f1176) -> let rest : '_ = $f1176 in
-let x : '_ = $f1175 in
-let $t1173 : '_ = string_concat3(pre, x, ")") in
-let $t1174 : '_ = Authority.wrap_all(rest, pre) in
-alloc Cons($t1173, $t1174)
-  _ -> panic("non-exhaustive pattern match")
-
+-- fns (65) --
 ## List.all
 fn List.all(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
   Nil() -> true
-  Cons($f1358, $f1359) -> let t : '_ = $f1359 in
-let h : '_ = $f1358 in
-let $t1357 : '_ = pred(h) in
-case $t1357 of
+  Cons($f1320, $f1321) -> let t : '_ = $f1321 in
+let h : '_ = $f1320 in
+let $t1319 : '_ = pred(h) in
+case $t1319 of
   True() -> List.all(t, pred)
   _ -> false
   _ -> panic("non-exhaustive pattern match")
@@ -1829,10 +20,10 @@ case $t1357 of
 fn List.any(xs : List('a), pred : ('a) -> Bool) : Bool =
   case xs of
   Nil() -> false
-  Cons($f1351, $f1352) -> let t : '_ = $f1352 in
-let h : '_ = $f1351 in
-let $t1350 : '_ = pred(h) in
-case $t1350 of
+  Cons($f1313, $f1314) -> let t : '_ = $f1314 in
+let h : '_ = $f1313 in
+let $t1312 : '_ = pred(h) in
+case $t1312 of
   True() -> true
   _ -> List.any(t, pred)
   _ -> panic("non-exhaustive pattern match")
@@ -1851,12 +42,12 @@ alloc Cons(h, $t89)
 fn List.chunks(xs : List('a), size : Int) : List(List('a)) =
   let go : (List('a), List(List('a))) -> List(List('a)) = letrec [go] in
 go in
-let $t1502 : '_ = <=(size, 0) in
-case $t1502 of
+let $t1464 : '_ = <=(size, 0) in
+case $t1464 of
   True() -> __panic_site("stdlib/list.march", 1035, 20, 63);
 panic("List.chunks: size must be positive")
-  _ -> let $t1503 : '_ = alloc Nil() in
-go(xs, $t1503)
+  _ -> let $t1465 : '_ = alloc Nil() in
+go(xs, $t1465)
 
 ## List.concat
 fn List.concat(xss : List(List('a))) : List('a) =
@@ -1864,8 +55,8 @@ fn List.concat(xss : List(List('a))) : List('a) =
 prepend_reversed in
 let go : (List(List('a)), List('a)) -> List('a) = letrec [go] in
 go in
-let $t1320 : '_ = alloc Nil() in
-go(xss, $t1320)
+let $t1282 : '_ = alloc Nil() in
+go(xss, $t1282)
 
 ## List.dedup
 fn List.dedup(xs : List('a)) : List('a) =
@@ -1873,32 +64,32 @@ fn List.dedup(xs : List('a)) : List('a) =
 go in
 case xs of
   Nil() -> alloc Nil()
-  Cons($f1614, $f1615) -> let t : '_ = $f1615 in
-let h : '_ = $f1614 in
-let $t1613 : '_ = let $t1612 : '_ = alloc Nil() in
-alloc Cons(h, $t1612) in
-go(t, h, $t1613)
+  Cons($f1576, $f1577) -> let t : '_ = $f1577 in
+let h : '_ = $f1576 in
+let $t1575 : '_ = let $t1574 : '_ = alloc Nil() in
+alloc Cons(h, $t1574) in
+go(t, h, $t1575)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop
 fn List.drop(xs : List('a), n : Int) : List('a) =
-  let $t1443 : '_ = <=(n, 0) in
-case $t1443 of
+  let $t1405 : '_ = <=(n, 0) in
+case $t1405 of
   True() -> xs
   _ -> case xs of
   Nil() -> alloc Nil()
-  Cons($f1445, $f1446) -> let t : '_ = $f1446 in
-let $t1444 : '_ = -(n, 1) in
-List.drop(t, $t1444)
+  Cons($f1407, $f1408) -> let t : '_ = $f1408 in
+let $t1406 : '_ = -(n, 1) in
+List.drop(t, $t1406)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.drop_last
 fn List.drop_last(xs : List('a)) : List('a) =
-  let $t1492 : '_ = List.reverse(xs) in
-case $t1492 of
+  let $t1454 : '_ = List.reverse(xs) in
+case $t1454 of
   Nil() -> alloc Nil()
-  Cons($f1493, $f1494) -> let rest : '_ = $f1494 in
-let ig : '_ = $f1493 in
+  Cons($f1455, $f1456) -> let rest : '_ = $f1456 in
+let ig : '_ = $f1455 in
 List.reverse(rest)
   _ -> panic("non-exhaustive pattern match")
 
@@ -1906,10 +97,10 @@ List.reverse(rest)
 fn List.drop_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f1460, $f1461) -> let t : '_ = $f1461 in
-let h : '_ = $f1460 in
-let $t1459 : '_ = pred(h) in
-case $t1459 of
+  Cons($f1422, $f1423) -> let t : '_ = $f1423 in
+let h : '_ = $f1422 in
+let $t1421 : '_ = pred(h) in
+case $t1421 of
   True() -> List.drop_while(t, pred)
   _ -> xs
   _ -> panic("non-exhaustive pattern match")
@@ -1928,8 +119,8 @@ fn List.empty() : List('a) =
 fn List.enumerate(xs : List('a)) : List((Int, 'a)) =
   let go : (List('a), Int, List((Int, 'a))) -> List((Int, 'a)) = letrec [go] in
 go in
-let $t1561 : '_ = alloc Nil() in
-go(xs, 0, $t1561)
+let $t1523 : '_ = alloc Nil() in
+go(xs, 0, $t1523)
 
 ## List.filter
 fn List.filter(xs : List('a), pred : ('a) -> Bool) : List('a) =
@@ -1948,13 +139,13 @@ alloc Cons(h, $t127)
 fn List.filter_map(xs : List('a), f : ('a) -> Option('b)) : List('b) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f1281, $f1282) -> let t : '_ = $f1282 in
-let h : '_ = $f1281 in
-let $t1278 : '_ = f(h) in
-case $t1278 of
-  Some($f1280) -> let v : '_ = $f1280 in
-let $t1279 : '_ = List.filter_map(t, f) in
-alloc Cons(v, $t1279)
+  Cons($f1243, $f1244) -> let t : '_ = $f1244 in
+let h : '_ = $f1243 in
+let $t1240 : '_ = f(h) in
+case $t1240 of
+  Some($f1242) -> let v : '_ = $f1242 in
+let $t1241 : '_ = List.filter_map(t, f) in
+alloc Cons(v, $t1241)
   None() -> List.filter_map(t, f)
   _ -> panic("non-exhaustive pattern match")
   _ -> panic("non-exhaustive pattern match")
@@ -1963,10 +154,10 @@ alloc Cons(v, $t1279)
 fn List.find(xs : List('a), pred : ('a) -> Bool) : Option('a) =
   case xs of
   Nil() -> alloc None()
-  Cons($f1336, $f1337) -> let t : '_ = $f1337 in
-let h : '_ = $f1336 in
-let $t1335 : '_ = pred(h) in
-case $t1335 of
+  Cons($f1298, $f1299) -> let t : '_ = $f1299 in
+let h : '_ = $f1298 in
+let $t1297 : '_ = pred(h) in
+case $t1297 of
   True() -> alloc Some(h)
   _ -> List.find(t, pred)
   _ -> panic("non-exhaustive pattern match")
@@ -2002,18 +193,18 @@ List.flat_map_go($t113, t, f)
 fn List.fold_left(xs : List('a), acc : 'b, f : ('b) -> ('a) -> 'b) : 'b =
   case xs of
   Nil() -> acc
-  Cons($f1288, $f1289) -> let t : '_ = $f1289 in
-let h : '_ = $f1288 in
-let $t1287 : '_ = f(acc, h) in
-List.fold_left(t, $t1287, f)
+  Cons($f1250, $f1251) -> let t : '_ = $f1251 in
+let h : '_ = $f1250 in
+let $t1249 : '_ = f(acc, h) in
+List.fold_left(t, $t1249, f)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.fold_right
 fn List.fold_right(xs : List('a), acc : 'b, f : ('a) -> ('b) -> 'b) : 'b =
-  let $t1294 : '_ = List.reverse(xs) in
-let $t1296 : ('_, '_) -> '_ = letrec [$lam0_fold_right] in
+  let $t1256 : '_ = List.reverse(xs) in
+let $t1258 : ('_, '_) -> '_ = letrec [$lam0_fold_right] in
 $lam0_fold_right in
-List.fold_left($t1294, acc, $t1296)
+List.fold_left($t1256, acc, $t1258)
 
 ## List.head
 fn List.head(xs : List('a)) : 'a =
@@ -2036,8 +227,8 @@ alloc Some(h)
 fn List.intersperse(xs : List('a), sep : 'a) : List('a) =
   let go : (List('a), List('a)) -> List('a) = letrec [go] in
 go in
-let $t1334 : '_ = alloc Nil() in
-go(xs, $t1334)
+let $t1296 : '_ = alloc Nil() in
+go(xs, $t1296)
 
 ## List.is_empty
 fn List.is_empty(xs : List('a)) : Bool =
@@ -2086,10 +277,10 @@ alloc Cons($t96, $t97)
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1596, $f1597) -> let r : '_ = $f1597 in
-let x : '_ = $f1596 in
-let $t1595 : '_ = >(x, m) in
-case $t1595 of
+  Cons($f1558, $f1559) -> let r : '_ = $f1559 in
+let x : '_ = $f1558 in
+let $t1557 : '_ = >(x, m) in
+case $t1557 of
   True() -> List.max_onto(r, x)
   _ -> List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
@@ -2099,25 +290,25 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f1589, $f1590) -> let t : '_ = $f1590 in
-let h : '_ = $f1589 in
+  Cons($f1551, $f1552) -> let t : '_ = $f1552 in
+let h : '_ = $f1551 in
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.member
 fn List.member(xs : List('a), x : 'a) : Bool =
-  let $t1603 : ('_) -> '_ = letrec [$lam0_member] in
+  let $t1565 : ('_) -> '_ = letrec [$lam0_member] in
 $lam0_member in
-List.any(xs, $t1603)
+List.any(xs, $t1565)
 
 ## List.min_onto
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1583, $f1584) -> let r : '_ = $f1584 in
-let x : '_ = $f1583 in
-let $t1582 : '_ = <(x, m) in
-case $t1582 of
+  Cons($f1545, $f1546) -> let r : '_ = $f1546 in
+let x : '_ = $f1545 in
+let $t1544 : '_ = <(x, m) in
+case $t1544 of
   True() -> List.min_onto(r, x)
   _ -> List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
@@ -2127,8 +318,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f1576, $f1577) -> let t : '_ = $f1577 in
-let h : '_ = $f1576 in
+  Cons($f1538, $f1539) -> let t : '_ = $f1539 in
+let h : '_ = $f1538 in
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
 
@@ -2161,48 +352,102 @@ List.nth_opt(t, $t67)
 
 ## List.partition
 fn List.partition(xs : List('a), pred : ('a) -> Bool) : (List('a), List('a)) =
-  let $t1479 : '_ = alloc Nil() in
-let $t1480 : '_ = alloc Nil() in
-List.partition_go(xs, pred, $t1479, $t1480)
+  let $t1441 : '_ = alloc Nil() in
+let $t1442 : '_ = alloc Nil() in
+List.partition_go(xs, pred, $t1441, $t1442)
 
 ## List.partition_go
 fn List.partition_go(lst : List('a), pred : ('a) -> Bool, yes : List('a), no : List('a)) : (List('a), List('a)) =
   case lst of
-  Nil() -> let $t1481 : '_ = List.reverse(yes) in
-let $t1482 : '_ = List.reverse(no) in
-($t1481, $t1482)
-  Cons($f1486, $f1487) -> let t : '_ = $f1487 in
-let h : '_ = $f1486 in
-let $t1483 : '_ = pred(h) in
-case $t1483 of
-  True() -> let $t1484 : '_ = alloc Cons(h, yes) in
-List.partition_go(t, pred, $t1484, no)
-  _ -> let $t1485 : '_ = alloc Cons(h, no) in
-List.partition_go(t, pred, yes, $t1485)
+  Nil() -> let $t1443 : '_ = List.reverse(yes) in
+let $t1444 : '_ = List.reverse(no) in
+($t1443, $t1444)
+  Cons($f1448, $f1449) -> let t : '_ = $f1449 in
+let h : '_ = $f1448 in
+let $t1445 : '_ = pred(h) in
+case $t1445 of
+  True() -> let $t1446 : '_ = alloc Cons(h, yes) in
+List.partition_go(t, pred, $t1446, no)
+  _ -> let $t1447 : '_ = alloc Cons(h, no) in
+List.partition_go(t, pred, yes, $t1447)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.pfilter
 fn List.pfilter(xs : List('a), pred : ('a) -> Bool) : List('a) =
   let t : '_ = pmap_threshold() in
-let $t1260 : '_ = let $t1258 : '_ = let $t1257 : '_ = List.length(xs) in
-<=($t1257, t) in
-case $t1258 of
+let $t1222 : '_ = let $t1220 : '_ = let $t1219 : '_ = List.length(xs) in
+<=($t1219, t) in
+case $t1220 of
   True() -> true
-  _ -> let $t1259 : '_ = List.spawn_allowed() in
-not($t1259) in
-case $t1260 of
+  _ -> let $t1221 : '_ = List.spawn_allowed() in
+not($t1221) in
+case $t1222 of
   True() -> List.filter(xs, pred)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t1264 : ('_) -> '_ = letrec [$lam0_pfilter] in
+let tasks : '_ = let $t1226 : ('_) -> '_ = letrec [$lam0_pfilter] in
 $lam0_pfilter in
-List.map(cs, $t1264) in
-let $t1267 : '_ = let $t1266 : ('_) -> '_ = letrec [$lam1_pfilter] in
+List.map(cs, $t1226) in
+let $t1229 : '_ = let $t1228 : ('_) -> '_ = letrec [$lam1_pfilter] in
 $lam1_pfilter in
-List.map(tasks, $t1266) in
-List.concat($t1267)
+List.map(tasks, $t1228) in
+List.concat($t1229)
 
 ## List.pmap
 fn List.pmap(xs : List('a), f : ('a) -> 'b) : List('b) =
+  let t : '_ = pmap_threshold() in
+let $t1195 : '_ = let $t1193 : '_ = let $t1192 : '_ = List.length(xs) in
+<=($t1192, t) in
+case $t1193 of
+  True() -> true
+  _ -> let $t1194 : '_ = List.spawn_allowed() in
+not($t1194) in
+case $t1195 of
+  True() -> List.map(xs, f)
+  _ -> let cs : '_ = List.chunks(xs, t) in
+let tasks : '_ = let $t1199 : ('_) -> '_ = letrec [$lam0_pmap] in
+$lam0_pmap in
+List.map(cs, $t1199) in
+let $t1202 : '_ = let $t1201 : ('_) -> '_ = letrec [$lam1_pmap] in
+$lam1_pmap in
+List.map(tasks, $t1201) in
+List.concat($t1202)
+
+## List.pmap_n
+fn List.pmap_n(xs : List('a), f : ('a) -> 'b, max_concurrency : Int) : List('b) =
+  let n : '_ = List.length(xs) in
+let $t1205 : '_ = let $t1203 : '_ = ==(n, 0) in
+case $t1203 of
+  True() -> true
+  _ -> let $t1204 : '_ = List.spawn_allowed() in
+not($t1204) in
+case $t1205 of
+  True() -> List.map(xs, f)
+  _ -> let cap : '_ = let $t1206 : '_ = <(max_concurrency, 1) in
+case $t1206 of
+  True() -> 1
+  _ -> max_concurrency in
+let csize : '_ = let $t1209 : '_ = let $t1208 : '_ = let $t1207 : '_ = /(n, cap) in
+*($t1207, cap) in
+==($t1208, n) in
+case $t1209 of
+  True() -> /(n, cap)
+  _ -> let $t1210 : '_ = /(n, cap) in
++($t1210, 1) in
+let csize2 : '_ = let $t1211 : '_ = <(csize, 1) in
+case $t1211 of
+  True() -> 1
+  _ -> csize in
+let cs : '_ = List.chunks(xs, csize2) in
+let tasks : '_ = let $t1215 : ('_) -> '_ = letrec [$lam0_pmap_n] in
+$lam0_pmap_n in
+List.map(cs, $t1215) in
+let $t1218 : '_ = let $t1217 : ('_) -> '_ = letrec [$lam1_pmap_n] in
+$lam1_pmap_n in
+List.map(tasks, $t1217) in
+List.concat($t1218)
+
+## List.preduce
+fn List.preduce(xs : List('a), identity : 'a, combine : ('a) -> ('a) -> 'a) : 'a =
   let t : '_ = pmap_threshold() in
 let $t1233 : '_ = let $t1231 : '_ = let $t1230 : '_ = List.length(xs) in
 <=($t1230, t) in
@@ -2211,68 +456,14 @@ case $t1231 of
   _ -> let $t1232 : '_ = List.spawn_allowed() in
 not($t1232) in
 case $t1233 of
-  True() -> List.map(xs, f)
-  _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t1237 : ('_) -> '_ = letrec [$lam0_pmap] in
-$lam0_pmap in
-List.map(cs, $t1237) in
-let $t1240 : '_ = let $t1239 : ('_) -> '_ = letrec [$lam1_pmap] in
-$lam1_pmap in
-List.map(tasks, $t1239) in
-List.concat($t1240)
-
-## List.pmap_n
-fn List.pmap_n(xs : List('a), f : ('a) -> 'b, max_concurrency : Int) : List('b) =
-  let n : '_ = List.length(xs) in
-let $t1243 : '_ = let $t1241 : '_ = ==(n, 0) in
-case $t1241 of
-  True() -> true
-  _ -> let $t1242 : '_ = List.spawn_allowed() in
-not($t1242) in
-case $t1243 of
-  True() -> List.map(xs, f)
-  _ -> let cap : '_ = let $t1244 : '_ = <(max_concurrency, 1) in
-case $t1244 of
-  True() -> 1
-  _ -> max_concurrency in
-let csize : '_ = let $t1247 : '_ = let $t1246 : '_ = let $t1245 : '_ = /(n, cap) in
-*($t1245, cap) in
-==($t1246, n) in
-case $t1247 of
-  True() -> /(n, cap)
-  _ -> let $t1248 : '_ = /(n, cap) in
-+($t1248, 1) in
-let csize2 : '_ = let $t1249 : '_ = <(csize, 1) in
-case $t1249 of
-  True() -> 1
-  _ -> csize in
-let cs : '_ = List.chunks(xs, csize2) in
-let tasks : '_ = let $t1253 : ('_) -> '_ = letrec [$lam0_pmap_n] in
-$lam0_pmap_n in
-List.map(cs, $t1253) in
-let $t1256 : '_ = let $t1255 : ('_) -> '_ = letrec [$lam1_pmap_n] in
-$lam1_pmap_n in
-List.map(tasks, $t1255) in
-List.concat($t1256)
-
-## List.preduce
-fn List.preduce(xs : List('a), identity : 'a, combine : ('a) -> ('a) -> 'a) : 'a =
-  let t : '_ = pmap_threshold() in
-let $t1271 : '_ = let $t1269 : '_ = let $t1268 : '_ = List.length(xs) in
-<=($t1268, t) in
-case $t1269 of
-  True() -> true
-  _ -> let $t1270 : '_ = List.spawn_allowed() in
-not($t1270) in
-case $t1271 of
   True() -> List.fold_left(xs, identity, combine)
   _ -> let cs : '_ = List.chunks(xs, t) in
-let tasks : '_ = let $t1275 : ('_) -> '_ = letrec [$lam0_preduce] in
+let tasks : '_ = let $t1237 : ('_) -> '_ = letrec [$lam0_preduce] in
 $lam0_preduce in
-List.map(cs, $t1275) in
-let partials : '_ = let $t1277 : ('_) -> '_ = letrec [$lam1_preduce] in
+List.map(cs, $t1237) in
+let partials : '_ = let $t1239 : ('_) -> '_ = letrec [$lam1_preduce] in
 $lam1_preduce in
-List.map(tasks, $t1277) in
+List.map(tasks, $t1239) in
 List.fold_left(partials, identity, combine)
 
 ## List.product_int
@@ -2283,10 +474,10 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1570, $f1571) -> let t : '_ = $f1571 in
-let x : '_ = $f1570 in
-let $t1569 : '_ = *(acc, x) in
-List.product_onto(t, $t1569)
+  Cons($f1532, $f1533) -> let t : '_ = $f1533 in
+let x : '_ = $f1532 in
+let $t1531 : '_ = *(acc, x) in
+List.product_onto(t, $t1531)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -2343,8 +534,8 @@ List.reverse_onto(t, $t82)
 fn List.scan_left(xs : List('a), acc : 'b, f : ('b) -> ('a) -> 'b) : List('b) =
   let go : ('b, List('a), List('b)) -> List('b) = letrec [go] in
 go in
-let $t1305 : '_ = alloc Nil() in
-go(acc, xs, $t1305)
+let $t1267 : '_ = alloc Nil() in
+go(acc, xs, $t1267)
 
 ## List.singleton
 fn List.singleton(x : 'a) : List('a) =
@@ -2363,24 +554,24 @@ let sort_loop : (List(List('a))) -> List('a) = letrec [sort_loop] in
 sort_loop in
 let to_singletons : (List('a), List(List('a))) -> List(List('a)) = letrec [to_singletons] in
 to_singletons in
-let $t1432 : '_ = let $t1431 : '_ = alloc Nil() in
-to_singletons(xs, $t1431) in
-sort_loop($t1432)
+let $t1394 : '_ = let $t1393 : '_ = alloc Nil() in
+to_singletons(xs, $t1393) in
+sort_loop($t1394)
 
 ## List.spawn_allowed
 fn List.spawn_allowed() : Bool =
-  let $t1227 : '_ = Authority.check("IO.Spawn", "") in
-case $t1227 of
-  Ok($f1228) -> true
-  Err($f1229) -> false
+  let $t1189 : '_ = Authority.check("IO.Spawn", "") in
+case $t1189 of
+  Ok($f1190) -> true
+  Err($f1191) -> false
   _ -> panic("non-exhaustive pattern match")
 
 ## List.split_at
 fn List.split_at(xs : List('a), n : Int) : (List('a), List('a)) =
   let go : (List('a), Int, List('a)) -> (List('a), List('a)) = letrec [go] in
 go in
-let $t1478 : '_ = alloc Nil() in
-go(xs, n, $t1478)
+let $t1440 : '_ = alloc Nil() in
+go(xs, n, $t1440)
 
 ## List.sum_int
 fn List.sum_int(xs : List(Int)) : Int =
@@ -2390,10 +581,10 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1563, $f1564) -> let t : '_ = $f1564 in
-let x : '_ = $f1563 in
-let $t1562 : '_ = +(acc, x) in
-List.sum_onto(t, $t1562)
+  Cons($f1525, $f1526) -> let t : '_ = $f1526 in
+let x : '_ = $f1525 in
+let $t1524 : '_ = +(acc, x) in
+List.sum_onto(t, $t1524)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.tail
@@ -2415,33 +606,33 @@ alloc Some(t)
 
 ## List.take
 fn List.take(xs : List('a), n : Int) : List('a) =
-  let $t1433 : '_ = alloc Nil() in
-List.take_onto(xs, n, $t1433)
+  let $t1395 : '_ = alloc Nil() in
+List.take_onto(xs, n, $t1395)
 
 ## List.take_onto
 fn List.take_onto(lst : List('a), k : Int, acc : List('a)) : List('a) =
-  let $t1434 : '_ = <=(k, 0) in
-case $t1434 of
+  let $t1396 : '_ = <=(k, 0) in
+case $t1396 of
   True() -> List.reverse(acc)
   _ -> case lst of
   Nil() -> List.reverse(acc)
-  Cons($f1437, $f1438) -> let t : '_ = $f1438 in
-let h : '_ = $f1437 in
-let $t1435 : '_ = -(k, 1) in
-let $t1436 : '_ = alloc Cons(h, acc) in
-List.take_onto(t, $t1435, $t1436)
+  Cons($f1399, $f1400) -> let t : '_ = $f1400 in
+let h : '_ = $f1399 in
+let $t1397 : '_ = -(k, 1) in
+let $t1398 : '_ = alloc Cons(h, acc) in
+List.take_onto(t, $t1397, $t1398)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.take_while
 fn List.take_while(xs : List('a), pred : ('a) -> Bool) : List('a) =
   case xs of
   Nil() -> alloc Nil()
-  Cons($f1453, $f1454) -> let t : '_ = $f1454 in
-let h : '_ = $f1453 in
-let $t1451 : '_ = pred(h) in
-case $t1451 of
-  True() -> let $t1452 : '_ = List.take_while(t, pred) in
-alloc Cons(h, $t1452)
+  Cons($f1415, $f1416) -> let t : '_ = $f1416 in
+let h : '_ = $f1415 in
+let $t1413 : '_ = pred(h) in
+case $t1413 of
+  True() -> let $t1414 : '_ = List.take_while(t, pred) in
+alloc Cons(h, $t1414)
   _ -> alloc Nil()
   _ -> panic("non-exhaustive pattern match")
 
@@ -2449,23 +640,23 @@ alloc Cons(h, $t1452)
 fn List.unzip(pairs : List(('a, 'b))) : (List('a), List('b)) =
   let go : (List(('a, 'b)), List('a), List('b)) -> (List('a), List('b)) = letrec [go] in
 go in
-let $t1550 : '_ = alloc Nil() in
-let $t1551 : '_ = alloc Nil() in
-go(pairs, $t1550, $t1551)
+let $t1512 : '_ = alloc Nil() in
+let $t1513 : '_ = alloc Nil() in
+go(pairs, $t1512, $t1513)
 
 ## List.zip
 fn List.zip(xs : List('a), ys : List('b)) : List(('a, 'b)) =
   let go : (List('a), List('b), List(('a, 'b))) -> List(('a, 'b)) = letrec [go] in
 go in
-let $t1518 : '_ = alloc Nil() in
-go(xs, ys, $t1518)
+let $t1480 : '_ = alloc Nil() in
+go(xs, ys, $t1480)
 
 ## List.zip_with
 fn List.zip_with(xs : List('a), ys : List('b), f : ('a) -> ('b) -> 'c) : List('c) =
   let go : (List('a), List('b), List('c)) -> List('c) = letrec [go] in
 go in
-let $t1533 : '_ = alloc Nil() in
-go(xs, ys, $t1533)
+let $t1495 : '_ = alloc Nil() in
+go(xs, ys, $t1495)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
@@ -2480,15 +671,15 @@ let $t8 : List(Row) = alloc List.Nil(Row)() in
 alloc List.Cons($t7, $t8) in
 alloc List.Cons($t4, $t9) in
 case rows of
-  Cons($f1624, $f1625) -> case $f1624 of
-  Row($f1626) -> let rest : List(Row) = $f1625 in
-let fp : List(Int) = $f1626 in
-let $t1621 : String = let $t1620 : Int = List.length(fp) in
-int_to_string($t1620) in
-println($t1621);
-let $t1623 : String = let $t1622 : Int = List.length(rest) in
-int_to_string($t1622) in
-println($t1623)
+  Cons($f1586, $f1587) -> case $f1586 of
+  Row($f1588) -> let rest : List(Row) = $f1587 in
+let fp : List(Int) = $f1588 in
+let $t1583 : String = let $t1582 : Int = List.length(fp) in
+int_to_string($t1582) in
+println($t1583);
+let $t1585 : String = let $t1584 : Int = List.length(rest) in
+int_to_string($t1584) in
+println($t1585)
   _ -> panic("non-exhaustive pattern match")
   Nil() -> println("empty")
   _ -> panic("non-exhaustive pattern match");

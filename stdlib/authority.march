@@ -124,7 +124,7 @@ mod Authority do
   The layered check behind `check`: `Err(CapError(kind, target, limit,
   text))` for the first layer (innermost first) whose scopes do not admit
   `(kind, target)`, else `Ok(())`. A relative path target is resolved
-  against the current directory.
+  against the current directory (and refused when that cannot be read).
 
   ## Examples
 
@@ -132,9 +132,7 @@ mod Authority do
       Err(CapError("IO.Clock", "", ByFnNeeds("f"), "IO.Console"))
   """
   fn check_layers(kind : String, target : String, layers : List(Layer)) : Result((), CapError) do
-    let cwd = if path_kind(kind) && (not(string_starts_with(target, "/")) || layers_relative(layers)) do
-      cap_cwd()
-    else "/" end
+    let cwd = if path_kind(kind) && not(string_starts_with(target, "/")) do cap_cwd() else "/" end
     first_refusal(kind, target, cwd, layers)
   end
 
@@ -144,30 +142,6 @@ mod Authority do
     Cons(Layer(limit, text, scopes), rest) ->
       if admits(scopes, kind, target, cwd) do first_refusal(kind, target, cwd, rest)
       else Err(CapError(kind, target, limit, text)) end
-    end
-  end
-
-  -- Whether any layer holds a relative path scope (resolved against the
-  -- current directory, so only then is it worth reading).
-  pfn layers_relative(layers : List(Layer)) : Bool do
-    match layers do
-    Nil -> false
-    Cons(Layer(_, _, scopes), rest) -> scopes_relative(scopes) || layers_relative(rest)
-    end
-  end
-
-  pfn scopes_relative(scopes : List(Scope)) : Bool do
-    match scopes do
-    Nil -> false
-    Cons(Scope(_, Paths(ps)), rest) -> any_relative(ps) || scopes_relative(rest)
-    Cons(_, rest) -> scopes_relative(rest)
-    end
-  end
-
-  pfn any_relative(ps : List(String)) : Bool do
-    match ps do
-    Nil -> false
-    Cons(p, rest) -> not(string_starts_with(p, "/")) || any_relative(rest)
     end
   end
 
@@ -205,9 +179,12 @@ mod Authority do
     end
   end
 
+  -- One line on fd 2, then exit status 2 (cap_launch_fail: an internal
+  -- builtin, so the launch code links neither print_stderr nor
+  -- process_exit, which would attribute IO.Console / IO.Process to every
+  -- binary).
   pfn launch_error(msg : String) : () do
-    print_stderr(msg ++ "\n")
-    process_exit(2)
+    cap_launch_fail(msg ++ "\n")
   end
 
   -- The first entry of `a` that no entry of `b` covers.
@@ -251,7 +228,11 @@ mod Authority do
   `target`. An entry admits when its capability is `kind` or a lattice
   ancestor of it, and it is unscoped, or `kind` takes its kind of scope and
   `target` matches: a path (a relative one resolved against `cwd`, then
-  compared by whole segments), a `host:port`, or a name.
+  compared by whole segments; refused when `cwd` is `""`, unknown), a
+  `host:port`, or a name. A host scope also admits the host-neutral
+  operations (target `""`) of the capabilities under `IO.NetConnect`, such
+  as building a TLS context: the connections they serve are still bounded
+  by the scope.
 
   ## Examples
 
@@ -272,16 +253,19 @@ mod Authority do
   pfn arg_admits(arg : Arg, kind : String, target : String, cwd : String) : Bool do
     match arg do
     Any -> true
-    Paths(ps) -> path_kind(kind) && any_within(ps, resolve(cwd, target), cwd)
-    Hosts(spec) -> host_kind(kind) && host_permits(spec, target)
+    Paths(ps) ->
+      if not(path_kind(kind)) do false
+      else if cwd == "" && not(string_starts_with(target, "/")) do false
+      else any_within(ps, resolve(cwd, target)) end end
+    Hosts(spec) -> if host_kind(kind) do host_permits(spec, target) else target == "" end
     Names(ns, pre) -> name_kind(kind) && name_admits(ns, pre, target)
     end
   end
 
-  pfn any_within(ps : List(String), p : String, cwd : String) : Bool do
+  pfn any_within(ps : List(String), p : String) : Bool do
     match ps do
     Nil -> false
-    Cons(s, rest) -> path_within(resolve(cwd, s), p) || any_within(rest, p, cwd)
+    Cons(s, rest) -> path_within(s, p) || any_within(rest, p)
     end
   end
 
@@ -957,7 +941,11 @@ mod Authority do
     if path_kind(k) do
       if not(is_nil(opts)) do Err("a path scope on `" ++ k ++ "` takes only paths")
       else if member(strs, "") do Err("a path scope cannot be empty")
-      else Ok(Paths(map_normalize(strs))) end end
+      else match first_relative(strs) do
+        Some(p) -> Err("the scope `" ++ p ++ "` on `" ++ k ++ "` is a relative path; give an absolute path, one starting with `/`")
+        None -> Ok(Paths(map_normalize(strs)))
+        end
+      end end
     else if host_kind(k) do
       let spec = match strs do
         Nil -> ";" ++ string_join(opts, ";")
@@ -981,6 +969,13 @@ mod Authority do
         end
       end
     else Err("`" ++ k ++ "` takes no scope") end end end
+  end
+
+  pfn first_relative(ps : List(String)) : Option(String) do
+    match ps do
+    Nil -> None
+    Cons(p, rest) -> if string_starts_with(p, "/") do first_relative(rest) else Some(p) end
+    end
   end
 
   pfn name_options(opts : List(String), acc : List(String)) : Result(List(String), String) do

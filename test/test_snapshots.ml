@@ -132,8 +132,15 @@ let builtin_type_names = ["Option"; "Result"; "List"]
 let has_prefix p s =
   String.length s >= String.length p && String.sub s 0 (String.length p) = p
 
+(* Authority's run-time policy (stdlib/authority.march, ocap phase 4) is
+   linked into every program that performs a capability operation (println
+   -> Authority.check -> check_layers ...); its ~100 helpers would bury the
+   user code each snapshot pins, so they are filtered like the prelude
+   impls.  Its own shape is pinned by its tests, not by this corpus. *)
+let filtered_fn_prefixes = prelude_iface_prefixes @ [ "Authority." ]
+
 let is_prelude_fn (fn : March_tir.Tir.fn_def) =
-  List.exists (fun p -> has_prefix p fn.March_tir.Tir.fn_name) prelude_iface_prefixes
+  List.exists (fun p -> has_prefix p fn.March_tir.Tir.fn_name) filtered_fn_prefixes
 
 let is_builtin_type (td : March_tir.Tir.type_def) =
   match td with
