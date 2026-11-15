@@ -936,6 +936,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Compiled HTTP clients read the response status, headers and errors correctly.** In
+  compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
+  251), so `HttpClient.step_raise_on_error` let a 401 or 403 through as a success; every
+  response had an empty header list, so `Http.get_header` found nothing and no redirect was
+  followed; and a server that closed the connection without answering produced a 200 with
+  an empty body. `HttpTransport` and `HttpClient` now give the same status, headers and
+  `Err` as the interpreter.
 - **Awaiting a task twice is safe for any result type in compiled code.** A task whose
   result is a heap value (a `String`, a list, a record) handed its only reference to the
   first `task_await`, so a second `task_await` on the same task, or one after
