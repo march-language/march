@@ -23,6 +23,7 @@ march_scheduler.c            core            jit
 march_reclaim.c              core            jit
 march_extras.c               core            jit
 march_handle.c               core            jit
+march_file_beneath.c         core            jit
 march_compress.c             core            -
 march_compress_zstd.c        codec           -
 march_compress_brotli.c      codec           -

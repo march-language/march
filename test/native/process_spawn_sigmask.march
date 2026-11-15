@@ -30,10 +30,10 @@ mod ProcessSpawnSigmask do
         let line = Process.read_line(p)
         let _ = Process.wait_proc(p)
         match line do
-          Some(s) -> Authority.ignore(println("async USR1: " ++ s))
-          None -> Authority.ignore(println("async USR1: <none>"))
+          Ok(Some(s)) -> Authority.ignore(println("async USR1: " ++ s))
+          _ -> Authority.ignore(println("async USR1: <none>"))
         end
-      Err(e) -> Authority.ignore(println("async USR1: Err " ++ e))
+      Err(e) -> Authority.ignore(println("async USR1: Err " ++ to_string(e)))
     end
   end
 end

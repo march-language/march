@@ -14,8 +14,7 @@ mod TestRouting do
 -- ---------------------------------------------------------------------------
 
 pfn make_conn(m, path_, req_hdrs, body) do
-  let parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
-  Conn(0, m, path_, parts, "", req_hdrs, body, 0, Nil, "", false, Nil, NoUpgrade)
+  HttpServer.test_conn(m, path_, req_hdrs, body)
 end
 
 pfn make_get(path_) do

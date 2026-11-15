@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY -------- errors/cap_scope_violation_1.march
+
+`IO.Registry` is scoped to `IO.Registry("logger", prefix("worker."))`, but `Actor.register` uses the name `other`, which is outside it. [cap_scope_violation]
+hint: widen the scope in `needs`, or use a name within it.
+
+7 |     Actor.register(pid, "other")
+                            ^^^^^^^
+
+
+

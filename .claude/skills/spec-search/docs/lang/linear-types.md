@@ -663,6 +663,16 @@ might be affine: the operation is valid with or without it.
 
 ---
 
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints when a linear value is misused, each with a program you can edit and re-check in the browser:
+
+- [A linear value used twice]({{ site.baseurl }}/docs/error-messages/#linear-used-twice)
+- [A linear value consumed on some branches but not others]({{ site.baseurl }}/docs/error-messages/#linear-some-branches)
+- [A linear value captured by a closure]({{ site.baseurl }}/docs/error-messages/#linear-captured)
+
+---
+
 ## See also
 
 - [Type System](type-system.md): the broader type system context

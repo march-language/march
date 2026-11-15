@@ -18,6 +18,8 @@
 #      and hcr file (those are what the driver links, so they are what the
 #      rule's output depends on).
 #   5. runtime/march_ffi.h never names the string struct or its fields.
+#   6. lib/eval/eval_beneath_stubs.c still #includes runtime/march_file_beneath.c
+#      and lib/eval/dune names it in extra_deps (the interpreter's copy).
 #
 # Usage: scripts/check-runtime-sources.sh     # exit 1 on any problem
 set -euo pipefail
@@ -138,6 +140,20 @@ if grep -nE 'march_string|struct[[:space:]]+march_str|->(len|data)\b' runtime/ma
   c5=1
 fi
 [[ $c5 -eq 0 ]] && echo "  ok — no string struct or field in the public header"
+
+# Check 6: runtime C the interpreter compiles in. lib/eval/eval_beneath_stubs.c
+# #includes runtime/march_file_beneath.c's core, so the interpreter and a compiled
+# binary resolve a path beneath a File.Dir with the same C; lib/eval/dune must name
+# the runtime file in extra_deps or an edit to it never rebuilds the interpreter.
+echo "== Check 6: interpreter stubs that compile runtime C (lib/eval) =="
+c6=0
+for pair in "lib/eval/eval_beneath_stubs.c:march_file_beneath.c"; do
+  stub=${pair%%:*}; rt=${pair##*:}
+  [[ -e "runtime/$rt" ]] || { problem "$stub binds runtime/$rt, which does not exist"; c6=1; continue; }
+  grep -q "^#include \"$rt\"" "$stub" 2>/dev/null || { problem "$stub no longer #includes \"$rt\""; c6=1; }
+  grep -q "\.\./\.\./runtime/$rt" lib/eval/dune || { problem "lib/eval/dune does not name ../../runtime/$rt in extra_deps"; c6=1; }
+done
+[[ $c6 -eq 0 ]] && echo "  ok — eval_beneath_stubs.c compiles runtime/march_file_beneath.c"
 
 echo
 if [[ $fail -ne 0 ]]; then echo "check-runtime-sources FAILED"; exit 1; fi

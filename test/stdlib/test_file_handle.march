@@ -157,27 +157,26 @@ describe "File.Handle" do
   end
 end
 
--- passes after Task 10 (ocap phase 2): a handle works in a module with
--- `needs ()` (spec §18). Skipped until then, for two reasons: the ceiling
--- still charges IO.FileRead to File.read_line, and a module-level
--- `needs ()` line does not parse yet (only the fn-level `needs ()` bound
--- does). Task 10 uncomments it; the `march test` rule in test/dune then
--- typechecks it.
---
--- mod Reader do
---   needs ()
---   fn first(h : File.Handle) do File.read_line(h) end
--- end
---
--- describe "File.Handle capabilities" do
---   test "handle needs no capability" do
---     let p = scratch("needs_none")
---     write_ab(p)
---     let h = open_ok(p)
---     assert (Reader.first(h) == Ok(Some("a")))
---     let _ = File.close(h)
---     cleanup("needs_none")
---   end
--- end
+-- A handle works in a function bounded by `needs ()` (spec §18; ruling R9:
+-- the per-function bound, since a module-level `needs ()` line does not
+-- parse). Reading through a File.Handle charges nothing (ocap phase 2, Task
+-- 10): the open was the checked act. The `march test` rule in test/dune
+-- typechecks this module, so a regression to charging handle uses fails it.
+mod Reader do
+  fn first(h : File.Handle) : Result(Option(String), File.FileError) needs () do
+    File.read_line(h)
+  end
+end
+
+describe "File.Handle capabilities" do
+  test "handle needs no capability" do
+    let p = scratch("needs_none")
+    write_ab(p)
+    let h = open_ok(p)
+    assert (Reader.first(h) == Ok(Some("a")))
+    let _ = File.close(h)
+    cleanup("needs_none")
+  end
+end
 
 end

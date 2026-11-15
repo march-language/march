@@ -58,12 +58,17 @@ let contains hay needle =
 
 (* A helper module used by the entry file: the entry alone cannot be analyzed,
    which is exactly why per-file analysis under-reports. *)
+(* The helper calls a capability BUILTIN directly: `march caps` reads each
+   function's own capability closure, which does not follow a stdlib wrapper
+   (specs/todos/2026-11-12-march-caps-misses-stdlib-mediated-caps.md). It
+   used `tcp_connect` until ocap phase 2 Task 10 made the raw socket builtins
+   stdlib-only; `file_read` is still charged and callable. *)
 let helper_src =
   {|
 mod PkgHelper do
-  needs IO.NetConnect
-  fn fetch(host : String) : Bool do
-    match tcp_connect(host, 80) do
+  needs IO.FileRead
+  fn fetch(path : String) : Bool do
+    match file_read(path) do
       Ok(_)  -> true
       Err(_) -> false
     end
@@ -76,7 +81,7 @@ let entry_src =
 mod PkgEntry do
   needs IO.Console
   fn main(_cap_console : Cap(IO.Console)) : () do
-    if PkgHelper.fetch("example.com") do
+    if PkgHelper.fetch("/nonexistent/cap_pkg") do
       println("y")
     else
       println("n")
@@ -92,10 +97,10 @@ let test_package_union_includes_sibling_caps () =
     (fun dir paths ->
       let rc, out, err = run_caps dir paths in
       if rc <> 0 then Alcotest.failf "march caps failed (rc=%d):\n%s" rc err;
-      (* IO.NetConnect lives in the HELPER, not the entry: a per-file union
+      (* IO.FileRead lives in the HELPER, not the entry: a per-file union
          that could not analyze the helper would miss it entirely. *)
-      Alcotest.(check bool) "sibling's IO.NetConnect is in the package set" true
-        (contains out "IO.NetConnect");
+      Alcotest.(check bool) "sibling's IO.FileRead is in the package set" true
+        (contains out "IO.FileRead");
       Alcotest.(check bool) "entry's IO.Console is in the package set" true
         (contains out "IO.Console"))
 

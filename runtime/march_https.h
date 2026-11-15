@@ -43,6 +43,16 @@ int64_t march_ws_sock_value(int fd, march_tls_session_t *s);
 void    march_ws_tls_teardown(int fd, march_tls_session_t *s);
 void    march_ws_send_101(int64_t v, const char *key, size_t key_len);
 
+/* The WsSocket handed to a WebSocket handler: WsSocket(box), the box a
+ * TCP_BORROWED handle over the WsSocket value v (march_ws_sock_value). A
+ * borrowed box never closes the descriptor: the server owns it. *box_out is
+ * a reference of the caller's own; after the handler returns, the caller
+ * passes it to march_ws_sock_done, which closes the box (a task still holding
+ * the WsSocket then gets no further access to the connection, whose fd the
+ * server is about to close and the OS may reuse) and drops the reference. */
+void   *march_ws_sock_new(int64_t v, void **box_out);
+void    march_ws_sock_done(void *box);
+
 /* Called by march_http_server_listen: starts the certificate file poller
  * (once) for a TlsFiles server with a nonzero poll interval. */
 void    march_https_on_listen(void);

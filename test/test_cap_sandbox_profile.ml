@@ -327,7 +327,7 @@ mod SbxNetConnect do
   needs IO.Console
   needs IO.NetConnect
   fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
-    match tcp_connect("127.0.0.1", 1) do
+    match Socket.connect("127.0.0.1", 1) do
       Ok(_) -> println("ok")
       Err(_) -> println("e")
     end
@@ -341,7 +341,7 @@ mod SbxNetListen do
   needs IO.Console
   needs IO.NetListen
   fn main(_c : Cap(IO.Console), _l : Cap(IO.NetListen)) do
-    match tcp_listen(0) do
+    match Socket.listen(0) do
       Ok(_) -> println("ok")
       Err(_) -> println("e")
     end

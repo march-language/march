@@ -1,0 +1,3 @@
+# `@[stdlib_internal]` diagnostics name a "handle API" that cluster modules don't have (2026-11-12)
+
+The function gate's message is fixed text: "`NetKernel.send_frame` is internal to the standard library; use the handle API in `NetKernel`." That fits `Socket`/`File`; it is wrong for the cluster plumbing (`NetKernel`, `NodeSend`, `ClusterConn`, ...), whose public route is `ClusterNode`. Let `@[stdlib_internal]` carry an optional hint (attribute arguments are not parsed for it today) or default to a generic "internal to the standard library" with no pointer, then regenerate the errors corpus (`UPDATE_ERRORS=1 ./_build/default/test/run_errors.exe -e`, review `git diff test/errors/`) and the exact strings in `test/test_stdlib_only.ml`.

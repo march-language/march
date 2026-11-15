@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing over raw tcp_* descriptors, the wire layer itself; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "restart": node-b.
 --
 -- Hosts one actor (`Sink`) and serves ACTOR_MSG frames for it on one

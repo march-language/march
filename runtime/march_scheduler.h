@@ -1081,6 +1081,32 @@ int march_sched_getaddrinfo(const char *host, const char *port,
 int march_sched_wait_fds(const int *fds, int n, int64_t deadline_ms);
 int march_sched_wait_fd(int fd, int want_write, int64_t deadline_ms);
 
+/* Cancel every wait on [fd], now and until march_sched_fdwait_forget(fd).
+ *
+ * The handle box (march_handle.c) calls it when a Socket, Listener, Udp
+ * socket or TLS connection is closed while another task may be parked on the
+ * descriptor.  shutdown() alone does not wake such a task everywhere: on
+ * macOS it fails with ENOTCONN on a listening socket and on an unconnected
+ * UDP socket, and the kqueue filter never fires.  Every green thread parked
+ * in march_sched_wait_fd / march_sched_wait_fds on [fd] wakes, and those
+ * calls (and every later one on [fd], until the forget) return
+ * MARCH_FDWAIT_ERROR with errno ECANCELED, so the raw socket call fails and
+ * the stdlib reports Err(Closed).  A blocking (off-scheduler) wait on a
+ * descriptor a handle box owns (march_sched_fdwait_own) notices within about
+ * 100 ms.
+ *
+ * The descriptor stays open (the box still holds it) until the last use in
+ * flight leaves; the box then calls march_sched_fdwait_forget(fd) just before
+ * close(fd), so a reused descriptor number never inherits the cancellation. */
+void march_sched_fdwait_cancel(int fd);
+void march_sched_fdwait_forget(int fd);
+
+/* Mark [fd] as owned by a handle box (owned = 1, from march_handle_new) or
+ * no longer (0, at its release or detach).  Only an owned descriptor can be
+ * cancelled, so only a blocking wait on one polls in slices to notice a
+ * cancellation; every other blocking wait keeps a single poll. */
+void march_sched_fdwait_own(int fd, int owned);
+
 /* errno of the OS thread running the caller NOW.  Read errno through this,
  * never directly, in a function that parked earlier in the same activation
  * (march_sched_wait_fd and friends): the green thread may resume on another

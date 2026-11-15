@@ -252,8 +252,29 @@ type fixture_result =
   | EmitFailed of string * int * string   (* name, rc, compiler output *)
   | VerifyFailed of string * string       (* name, verifier output *)
 
+(* A fixture that drives @[stdlib_internal] plumbing opts in with the header
+   line `-- compile-flags: --stdlib-source` in its first five lines, the
+   explicit per-fixture marker scripts/two-node.sh and sanitize.sh read (ocap
+   phase 2, task 9); its test/dune rule passes the flag too. *)
+let header_compile_flags src =
+  let marker = "-- compile-flags: --stdlib-source" in
+  let ic = open_in src in
+  let rec scan n =
+    if n = 0 then "" else
+      match input_line ic with
+      | exception End_of_file -> ""
+      | l ->
+        let ml = String.length marker in
+        if String.length l >= ml && String.sub l 0 ml = marker
+           && (String.length l = ml || l.[ml] = ' ')
+        then "--stdlib-source" else scan (n - 1)
+  in
+  Fun.protect ~finally:(fun () -> close_in ic) (fun () -> scan 5)
+
 let run_fixture ?(extra_flags = "") main_exe name =
   let src = Filename.concat (native_dir ()) name in
+  let extra_flags = String.concat " "
+      (List.filter (( <> ) "") [ header_compile_flags src; extra_flags ]) in
   match emit_llvm_ir_to_file ~extra_flags ~main_exe ~src () with
   | `Failed (rc, output) -> EmitFailed (name, rc, output)
     (* emit_llvm_ir_to_file cleans up its own temp dir on failure. *)

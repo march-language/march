@@ -82,6 +82,7 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Type system (tutorial companion to core-march-types.md) | [`type-system.md`](type-system.md) | canonical |
 | Linear types | [`linear-types.md`](linear-types.md) | canonical |
 | Refinement types | [`refinement-types.md`](refinement-types.md) | canonical |
+| Lemmas (proofs as code, `@[lemma]`) | [`lemmas.md`](lemmas.md) | canonical |
 | Session types | [`session-types.md`](session-types.md) | canonical |
 | Choreography | [`choreography.md`](choreography.md) | canonical |
 | Capabilities | [`capabilities.md`](capabilities.md) | canonical |
@@ -93,6 +94,9 @@ document outside `specs/lang/` and linked from here rather than duplicated.
 | Parallelism | [`parallelism.md`](parallelism.md) | canonical |
 | Clustering | [`clustering.md`](clustering.md) | canonical |
 | Standard library (overview/pointer chapter) | [`standard-library.md`](standard-library.md) | canonical |
+| 1.0: compatibility and deprecation policy | [`compatibility.md`](compatibility.md) | canonical |
+| 1.0: supported platforms (tiers) | [`platforms.md`](platforms.md) | canonical |
+| Capability threat model (reconciles the capability pages) | [`capability-threat-model.md`](capability-threat-model.md) | canonical |
 | Implementation reference (compiler internals, sibling) | [`specs/impl/index.md`](../impl/index.md) | external (sibling) |
 
 ---

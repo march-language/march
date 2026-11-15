@@ -5711,11 +5711,39 @@ let test_handle_in_generic_containers () =
   Alcotest.(check bool) ("never prints the raw descriptor as a field:\n" ^ out) false
     (contains "Socket(7" out)
 
+(* ocap phase 2b, Task 8 (R4): a Process closed without wait_proc leaves no
+   zombie (Test_helpers.process_reap_src; the compiled twin, and the dropped
+   variant, are in test_codegen). *)
+let test_process_release_reaps_child () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"process_reap_close"
+      (process_reap_src ~drop:false ()) in
+  if rc <> 0 then Alcotest.failf "process reap exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("child reaped after close:\n" ^ out) true
+    (contains process_reap_expected out);
+  (* A child that ignores SIGTERM: the release's SIGKILL ends it. *)
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"process_reap_trap"
+      (process_reap_src ~trap:true ~drop:false ()) in
+  if rc <> 0 then Alcotest.failf "process reap (TERM trapped) exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("TERM-trapping child reaped after close:\n" ^ out) true
+    (contains process_reap_expected out)
+
+(* Fix round 1: racing wait_procs, interpreted (Test_helpers.process_wait_race_src). *)
+let test_process_wait_race () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"process_wait_race" process_wait_race_src in
+  if rc <> 0 then Alcotest.failf "wait race exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("one Ok, one Closed:\n" ^ out) true
+    (contains process_wait_race_expected out)
+
 let eval_suites =
   [
       ( "handle primitives", [
           Alcotest.test_case "handle_primitive_roundtrip" `Quick test_handle_primitive_roundtrip;
-          Alcotest.test_case "handle_in_generic_containers" `Quick test_handle_in_generic_containers ] );
+          Alcotest.test_case "handle_in_generic_containers" `Quick test_handle_in_generic_containers;
+          Alcotest.test_case "process_release_reaps_child" `Quick test_process_release_reaps_child;
+          Alcotest.test_case "process_wait_race" `Quick test_process_wait_race ] );
       ( "march_test_cli", [
           Alcotest.test_case "fresh runtime per test file" `Quick test_march_test_fresh_runtime_per_file;
           Alcotest.test_case "default method of an impl in another file" `Quick test_default_method_across_files ] );

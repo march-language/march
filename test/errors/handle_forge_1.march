@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: UdpSocket
+-- Handles are unforgeable (ocap phase 2, spec §6). `Udp.UdpSocket` is an
+-- `opaque type` over a handle box: its constructor is private to the Udp
+-- module, so user code cannot turn an integer it wrote down into a socket
+-- (before phase 2, `type UdpSocket = UdpSocket(Int)` let anyone forge one
+-- for any descriptor number). Sockets come from `Udp.open`.
+mod ForgesAUdpSocket do
+  needs IO.NetConnect
+
+  fn main(_c : Cap(IO.NetConnect)) do
+    let s = Udp.UdpSocket(5)
+    Udp.close(s)
+  end
+end

@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing over raw tcp_* descriptors, the wire layer itself; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "restart": node-a.
 --
 -- Connects to node-b (MARCH_PEER_PORT), learns the global pid of node-b's
@@ -56,7 +57,7 @@ mod TwoNodeRestartA do
   end
 
   pfn connect_with_retry(host : String, port : Int, attempts_left : Int) : Result(Int, Socket.SocketError) do
-    match Authority.must(Socket.connect(host, port)) do
+    match Result.map_err(tcp_connect(host, port), fn m -> Socket.ConnectionFailed(m)) do
       Ok(fd) -> Ok(fd)
       Err(e) ->
         if attempts_left <= 1 do

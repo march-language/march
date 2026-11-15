@@ -56,6 +56,9 @@
 
 mod Actor do
   needs IO
+  -- Naming and finding actors by name (ocap phase 2). `needs IO` already
+  -- covers it; the line says which part of IO the registry functions use.
+  needs IO.Registry
 
   -- Introspection authority: the right to reach an actor you were never
   -- handed a Pid for. `pid_from_int`, `list`, `whereis` and `registered`

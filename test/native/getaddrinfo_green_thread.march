@@ -1,4 +1,5 @@
--- `tcp_connect` to a hostname resolves it from a green thread.
+-- `Socket.connect` (the raw `tcp_connect` under it) to a hostname resolves it
+-- from a green thread.
 --
 -- With preemption on (always, once the scheduler runs) the lookup goes to a
 -- helper OS thread while the calling green thread parks
@@ -26,11 +27,11 @@ mod GetaddrinfoGreenThread do
 
   -- 1 if dialling localhost:[port] resolved and was refused, else 0.
   pfn dial(port : Int) : Int do
-    match tcp_connect("localhost", port) do
-      Ok(fd) ->
-        tcp_close(fd)
+    match Authority.must(Socket.connect("localhost", port)) do
+      Ok(s) ->
+        let _ = Socket.close(s)
         0
-      Err(e) -> if String.contains(e, "refused") do 1 else 0 end
+      Err(e) -> if String.contains(Socket.error_message(e), "refused") do 1 else 0 end
     end
   end
 
@@ -46,15 +47,15 @@ mod GetaddrinfoGreenThread do
 
   fn main(_c : Cap(IO)) do
     -- A port nothing listens on: bind one, learn its number, close it.
-    let listen_fd = match tcp_listen(0) do
-      Ok(fd) -> fd
-      Err(e) -> panic("listen: " ++ e)
+    let l = match Authority.must(Socket.listen(0)) do
+      Ok(l) -> l
+      Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
-    let port = match tcp_local_port(listen_fd) do
+    let port = match Socket.local_port(l) do
       Ok(p) -> p
-      Err(e) -> panic("port: " ++ e)
+      Err(e) -> panic("port: " ++ Socket.error_message(e))
     end
-    tcp_close(listen_fd)
+    let _ = Socket.close_listener(l)
     println("main: " ++ int_to_string(dial(port)) ++ "/1")
     let tasks = List.map(List.range(0, 160), fn d -> task_spawn(fn _ -> at_depth(List.range(0, d), port)))
     let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(t))

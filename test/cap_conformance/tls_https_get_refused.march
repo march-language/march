@@ -1,0 +1,17 @@
+-- REFUSE: IO.NetConnect
+-- `Tls.https_get` dials through `Socket.connect`, so its target host:port is
+-- checked as `IO.NetConnect` like every other connect (final review I2 of
+-- ocap phase 2b): with IO.NetConnect refused it fails before dialling, and
+-- the error names the refused target. The TLS context check
+-- (`IO.NetConnect.TLS`) is a different kind and still passes.
+mod TlsHttpsGetRefused do
+  needs IO.Console
+  needs IO.NetConnect
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+    match Tls.https_get("127.0.0.1", 1, "/") do
+    Ok(_) -> println("fetched")
+    Err(e) -> println(Tls.error_to_string(e))
+    end
+  end
+end

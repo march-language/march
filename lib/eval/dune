@@ -15,4 +15,11 @@
   (language c)
   (names compress_stubs eval_ffi_stubs ffi_marshal)
   (flags (:standard (:include compress_cflags.sexp))))
+ ; File.Dir: eval_beneath_stubs.c #includes runtime/march_file_beneath.c, so
+ ; both backends resolve paths beneath a directory with the same C.
+ (foreign_stubs
+  (language c)
+  (names eval_beneath_stubs)
+  (include_dirs ../../runtime)
+  (extra_deps ../../runtime/march_file_beneath.c))
  (c_library_flags (:include compress_libs.sexp)))
