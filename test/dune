@@ -52,8 +52,8 @@
 ; ubuntu runner), so ci.yml runs each as its own job via its per-test alias
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
-; and alias both) from `dune runtest`, along with run_cap_conformance and
-; run_errors, which CI runs in the `compiler` and `forge` shards. Unset --
+; and alias both) from `dune runtest`, along with run_cap_conformance,
+; run_errors and test_jit, which CI runs in the `compiler` and `forge` shards. Unset --
 ; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
@@ -1386,6 +1386,9 @@
 ; not shared with the developer's interactive sessions.
 (test
  (name test_jit)
+ ; Runs in CI's `forge` shard on Linux, not `rest` (with run_errors, below;
+ ; ~10 CPU-minutes). macOS still runs it: the JIT is OS-sensitive.
+ (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules test_jit)
  (libraries march_jit alcotest unix str)
  ; The session tests spawn the real compiler binary and need the staged

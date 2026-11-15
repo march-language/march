@@ -205,10 +205,12 @@ jobs:
                 exit 1
               fi
               MARCH_CI_RUNTEST_SPLIT=1 dune build @test/runtest @lsp/runtest ;;
-            # run_errors (golden diagnostics, ~32 CPU-min) runs here, not in
-            # `rest`: `rest` ran 50-58 min against this step's 75 and timed out
-            # on every slow runner (November 2026); `forge` ran 13-19 min.
-            forge)       dune build @forge/runtest @test/runtest-run_errors ;;
+            # run_errors (golden diagnostics, ~32 CPU-min) and test_jit (~10)
+            # run here, not in `rest`: `rest` ran 50-58 min against this
+            # step's 75 and timed out on every slow runner (November 2026);
+            # `forge` ran 13-19 min. With run_errors alone moved, `rest` took
+            # 47 and `forge` 40 (PR #1271).
+            forge)       dune build @forge/runtest @test/runtest-run_errors @test/runtest-test_jit ;;
             # macOS skips the suites whose answer does not depend on the OS
             # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
             # test/dune), and runs only the OS-sensitive groups listed in
