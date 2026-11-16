@@ -1070,6 +1070,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`on`, `loop`, `by` and `opaque` work as ordinary names.** They stay keywords only where
+  written as one (`on Msg(…)`, a protocol `loop do`, `choose by` / `assert P by hint`,
+  `opaque type` / `@[opaque]`); elsewhere a parameter `on`, a `pfn loop(…)`, a pattern variable
+  `by` or a `let opaque = …` used to be a bare "I got stuck here". Float literals also take an
+  exponent now (`1.0e-12`, `2.5E3`), which was a confusing "expecting `do`" error.
+
 - **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
   `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
   there and `+inf` everywhere else); it now uses the IEEE absolute value like every other

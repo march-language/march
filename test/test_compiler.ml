@@ -16288,6 +16288,102 @@ end|} in
   Alcotest.(check bool) "soft-keyword var-pattern match arm parses to a module" true
     (List.length m.March_ast.Ast.mod_decls >= 1)
 
+(* ── `on` / `loop` / `by` / `opaque` as ordinary names (Strata GAPS
+   S1/S2/S4/S7), and float exponents (S13) ────────────────────────────────
+   The four words are keywords only where written as one (token_filter.ml):
+   `on Msg(…)`, `loop do`, `choose by C:` / `assert P by hint`,
+   `opaque type` / `@[opaque]`.  Everywhere else they name a variable,
+   parameter or function.  The module is typechecked and evaluated, not only
+   parsed, so each name must also resolve. *)
+let soft_names_src = {|mod SoftNames do
+  fn on_off(d : Int, on : Bool) : Int do if on do d else 0 end end
+  pfn loop(n : Int, acc : Int) : Int do if n == 0 do acc else loop(n - 1, acc + n) end end
+  fn sum_to(n : Int) : Int do loop(n, 0) end
+  fn pair_sum(p : (Int, Int)) : Int do
+    match p do
+      (bx, by) -> bx + by
+    end
+  end
+  fn doubled_plus_one(x : Int) : Int do
+    let opaque = x * 2
+    opaque + 1
+  end
+  fn by(x : Int) : Int do x + 100 end
+  fn call_by() : Int do by(1) end
+  fn if_loop(loop : Bool) : Int do if loop do 1 else 2 end end
+  fn match_by(by : Bool) : Int do
+    match by do
+      true -> 1
+      false -> 2
+    end
+  end
+  fn one_list(opaque : Int) : List(Int) do [opaque] end
+  fn head_or_zero(xs : List(Int)) : Int do
+    match xs do
+      Cons(h, _) -> h
+      Nil -> 0
+    end
+  end
+  fn run() : Int do
+    on_off(7, true) + sum_to(4) + pair_sum((2, 3)) + doubled_plus_one(5)
+      + call_by() + if_loop(false) + match_by(true)
+      + head_or_zero(one_list(9))
+  end
+end|}
+
+let test_soft_names_typecheck_and_run () =
+  Alcotest.(check bool) "no type errors" false (has_errors (typecheck soft_names_src));
+  let env = eval_module soft_names_src in
+  (* 7 + 10 + 5 + 11 + 101 + 2 + 1 + 9 *)
+  Alcotest.(check int) "run()" 146 (vint (call_fn env "run" []))
+
+(* The keyword uses still parse as keywords: an actor handler, a protocol
+   loop, `choose by`, `assert … by lemma(…)` / `by do`, `opaque type` and
+   `@[opaque]`. *)
+let test_soft_names_keyword_forms_still_parse () =
+  let src = {|mod KwForms do
+  opaque type Handle = Handle(Int)
+  @[opaque]
+  fn secret() : Int do 1 end
+  protocol Ping do
+    loop do
+      Client -> Server : Int
+    end
+  end
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(k : Int) do
+      { n: state.n + k }
+    end
+  end
+  fn f(x : Int) : Int do
+    assert x == x by refl_lemma(x)
+    assert x == x by do
+      refl_lemma(x)
+    end
+    x
+  end
+end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "keyword forms parse" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+let test_float_exponent_literals () =
+  let src = {|mod FloatExp do
+  fn a() : Float do 1.0e-12 end
+  fn b() : Float do 2.5E3 end
+  fn c() : Float do 1.0e+2 end
+end|} in
+  Alcotest.(check bool) "no type errors" false (has_errors (typecheck src));
+  let env = eval_module src in
+  let f name = match call_fn env name [] with
+    | March_eval.Eval.VFloat x -> x
+    | _ -> Alcotest.fail "expected a Float" in
+  Alcotest.(check (float 0.0)) "1.0e-12" 1.0e-12 (f "a");
+  Alcotest.(check (float 0.0)) "2.5E3" 2500.0 (f "b");
+  Alcotest.(check (float 0.0)) "1.0e+2" 100.0 (f "c")
+
 (* ── Cond-form / when-guard newline-led arms with comparison operators ────────
 
    The contextual newline filter (token_filter.ml lookahead_is_new_arm) decides
@@ -20485,6 +20581,11 @@ let compiler_suites =
           Alcotest.test_case "FLOAT: newline-led float match arms parse"           `Quick test_float_literal_match_arm_parses;
           Alcotest.test_case "MINUS FLOAT: newline-led negative float arms parse"  `Quick test_negative_float_literal_match_arm_parses;
           Alcotest.test_case "soft-keyword var pattern: newline-led arm parses"    `Quick test_soft_keyword_var_pattern_match_arm_parses;
+        ] );
+      ( "soft_keyword_names", [
+          Alcotest.test_case "on/loop/by/opaque as names typecheck and run"       `Quick test_soft_names_typecheck_and_run;
+          Alcotest.test_case "their keyword forms still parse"                    `Quick test_soft_names_keyword_forms_still_parse;
+          Alcotest.test_case "float literals take an exponent"                    `Quick test_float_exponent_literals;
         ] );
       ( "token_filter_cond_guard_operators", [
           Alcotest.test_case "cond form: 2+ >= arms parse without parens"          `Quick test_cond_ge_arms_parse;

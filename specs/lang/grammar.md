@@ -141,16 +141,20 @@ plus five auxiliary string/comment sub-lexers).
   ordinary `LOWER_IDENT`/`UPPER_IDENT` space entirely at the lexer level;
   some of these keywords are later **demoted back to ordinary identifiers**
   in specific contexts by `token_filter` (§3.1); the lexer itself does no
-  such demotion.
+  such demotion. `on`, `loop`, `by` and `opaque` are demoted everywhere
+  except their keyword position (see surface-syntax.md, "Reserved
+  soft-keyword imbalance").
 - **Literals.**
   - `INT`, `digit+` (`lexer.mll:106–119`); parsed with `int_of_string_opt`
     and raises a positioned `ParseError` (not an uncaught exception) if the
     literal exceeds a 63-bit OCaml `int` (`lexer.mll:110–119`), which is
     also March's runtime `Int` range on every backend (see
     [type-system.md, "Int width and overflow"](type-system.md#int-width-and-overflow)).
-  - `FLOAT`, `digit+ '.' digit+` (`lexer.mll:105`); note this requires at
-    least one digit on both sides of `.`, matched *before* the bare `INT`
-    rule so `1.5` lexes as one `FLOAT` token, not `INT DOT INT`.
+  - `FLOAT`, `digit+ '.' digit+ (['e' 'E'] ['+' '-']? digit+)?`
+    (`lexer.mll`); note this requires at least one digit on both sides of
+    `.` (`1e5` is not a float literal; write `1.0e5`), matched *before* the
+    bare `INT` rule so `1.5` lexes as one `FLOAT` token, not `INT DOT INT`.
+    The exponent is optional: `1.0e-12`, `2.5E3`, `1.0e+2`.
   - `STRING`, `'"' … '"'` (`lexer.mll:121`, sub-lexer `read_string` at
     `lexer.mll:204–227`) and triple-quoted `"""…"""` (`lexer.mll:120`,
     sub-lexer `read_triple_string` at `lexer.mll:231–241`), both supporting

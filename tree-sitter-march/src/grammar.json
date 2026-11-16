@@ -7049,7 +7049,7 @@
     },
     "float": {
       "type": "PATTERN",
-      "value": "[0-9]+\\.[0-9]+"
+      "value": "[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?"
     },
     "boolean": {
       "type": "CHOICE",
@@ -7459,10 +7459,6 @@
       {
         "type": "STRING",
         "value": "for"
-      },
-      {
-        "type": "STRING",
-        "value": "loop"
       },
       {
         "type": "STRING",
