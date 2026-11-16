@@ -29,6 +29,21 @@ mod Foo do let x = 3.14 end
       value: (float))))
 
 ================================================================================
+Float literal with an exponent
+================================================================================
+mod Foo do let x = 1.0e-12 end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (let_declaration
+      pattern: (variable_pattern
+        (variable_pattern))
+      value: (float))))
+
+================================================================================
 String literal
 ================================================================================
 mod Foo do let x = "hello" end
