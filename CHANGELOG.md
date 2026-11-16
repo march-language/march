@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Rename or convert actor state fields in one hot deploy.** A `migrate old -> { total:
+  old.count }` clause after an actor's `init` says what moves; the compiler writes the rest of
+  `<actor>_migrate_state` (kept fields copied, new ones from `init`). A bare copy keeps the
+  running version's refinement, so an unchanged one needs no proof; any other expression is
+  checked like a written migration. A rename also gets its reverse derived and proved, so
+  redeploying the old source copies the value back. A removed field is dropped only when the
+  clause reads it.
 - **Derived rollbacks for hot deploys.** When the compiler derives a `migrate_state` because
   an actor's state only gained fields, it now derives the reverse `<actor>_rollback_state`
   too (copy back the old fields, drop the added ones) and proves the round trip. Rolling

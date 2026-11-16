@@ -1,0 +1,63 @@
+---
+layout: docs
+title: "migrate_clause_invalid"
+permalink: /docs/errors/migrate_clause_invalid/
+---
+
+# `migrate_clause_invalid`: an actor's `migrate` clause cannot mean anything
+
+An actor's `migrate old -> { ... }` clause names the part of a hot deploy's
+state migration that moves or converts data; the compiler writes the rest of
+`<actor>_migrate_state`. Its body must be a record literal that gives state
+fields of the new version, each once.
+
+## A program that triggers it
+
+```march
+mod Main do
+  actor Counter do
+    state { total : Int }
+    init { total: 0 }
+    migrate old -> { totl: old.count }
+    on Inc() do { total: state.total + 1 } end
+  end
+  fn main() : Int do 0 end
+end
+```
+
+`totl` is not a field of `Counter`'s state. The same error reports a field
+given twice, and a body that is not a record literal (`migrate old -> old`).
+These are errors in every build, with or without a deployed version to
+migrate from.
+
+## The fix
+
+Give each moved field by its new name, reading the running version's fields
+through the clause's binder:
+
+```march
+mod Main do
+  actor Counter do
+    state { total : Int }
+    init { total: 0 }
+    migrate old -> { total: old.count }
+    on Inc() do { total: state.total + 1 } end
+  end
+  fn main() : Int do 0 end
+end
+```
+
+## The warnings with the same code
+
+Against a deployed build, two situations are warnings rather than errors,
+because a build need not be a deploy:
+
+- the clause cannot derive the migration (it does not read a field the new
+  state removed, so that field's data would be dropped; or it does not give a
+  field whose type changed): the warning names the reason, and the deploy is
+  refused with it until the clause or a written `<actor>_migrate_state`
+  covers it;
+- the clause reads a field the deployed state does not have: it was written
+  for an earlier deploy, is ignored, and can be deleted.
+
+See also: [the Hot Code Reload guide](https://march-lang.org/docs/hot-code-reload/#moving-data-the-migrate-clause).

@@ -426,7 +426,7 @@ module.exports = grammar({
       'actor', field('name', $.type_identifier), 'do',
       $.actor_state,
       $.actor_init,
-      optional($.mailbox_clause),
+      repeat(choice($.mailbox_clause, $.migrate_clause)),
       optional($.supervise_block),
       repeat(choice($.actor_handler, $.on_stop_block)),
       'end',
@@ -438,6 +438,8 @@ module.exports = grammar({
     ),
     init_param: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
     mailbox_clause: $ => seq('mailbox', $.integer, $.identifier),
+    // `migrate old -> { total: old.count }`: a hot deploy's data moves.
+    migrate_clause: $ => seq('migrate', field('old', $.identifier), '->', field('body', $._expr)),
     supervise_block: $ => seq(
       'supervise', 'do',
       'strategy', field('strategy', $.identifier),

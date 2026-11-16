@@ -2164,9 +2164,13 @@ source wins, but no construct below is left as a shape-only sketch.
 actor_decl ::= "actor" upper_name "do"
                  "state" "{" field ("," field)* "}"
                  "init" expr
+                 actor_clause*
                  supervise_block?
                  actor_handler*
                "end"
+
+actor_clause ::= "mailbox" INT lower_name               (* at most once *)
+               | "migrate" soft_lower_name "->" expr    (* at most once *)
 
 actor_handler ::= "on" upper_name "(" param,* ")" ("ensures" expr)? "do" block_body "end"
 ```
@@ -2189,7 +2193,15 @@ end` message handlers, each pattern-matching on one message constructor
 via `param,*`'s reuse of `soft_lower_name` for parameter names, so a
 handler parameter may legally be named `state`, `on`, `loop`, etc. (the
 same soft-keyword set patterns/`let`-bindings elsewhere in the grammar
-already draw from). `actor_decl` also has its own missing-`do` error
+already draw from). Between `init` and the
+`supervise` block come the `actor_clause`s (p48): a `mailbox N policy` bound
+and a `migrate old -> { … }` clause (the non-mechanical part of a hot deploy's
+state migration, see the Hot Code Reload guide), in either order, each at most
+once (a second is `An actor can declare only one ... clause`). `mailbox` and
+`migrate` are contextual words, not keywords, so both rules start with
+`lower_name` and share one `list(actor_clause)`: two `option(...)`s in a row
+would be an LR(1) conflict on that word, and the token after it (`INT` or a
+name) tells them apart. `actor_decl` also has its own missing-`do` error
 alternative (`parser.mly:491–495`): `` I was expecting `do` after the
 actor name here: ``.
 

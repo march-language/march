@@ -978,6 +978,12 @@ actor Worker do
 end
 ```
 
+An actor may also carry a `migrate old -> { ... }` clause in the same place,
+before or after `mailbox`: it says how a hot deploy moves data between state
+fields (`migrate old -> { total: old.count }` for a rename), and the compiler
+writes the rest of the migration. See
+[Moving data: the `migrate` clause]({{ site.baseurl }}/docs/hot-code-reload/#moving-data-the-migrate-clause).
+
 `mailbox N policy` takes the policy by name (`drop_new`, `drop_old` or
 `block_sender`) and lowers to `Actor.set_queue_limit(pid, N, policy)` right
 after each `spawn(Worker)`. `block_sender` is compiled-only there too: under the
