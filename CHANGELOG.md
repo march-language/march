@@ -1077,6 +1077,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
+  compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
+  but failed to compile natively (clang: "use of undefined value '@compare'") and threw
+  `ReferenceError` under `--target js`. An interface method used as a value now resolves to the
+  implementation for its argument type, as a call does.
+
 - **A discarded `Ok(())` is released.** Compiled code leaked the `Result` cell a call such as
   `println` returns in two places: a `match` or `if` used as a statement whose arms all end in a
   call, and a block-final `let _ = e`, which returned `e`'s value although the block's type is

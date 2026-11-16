@@ -24,3 +24,22 @@ Actual (interpreted / compiled): interpreted prints `[(1, a), (2, b)]`; compiled
 Source: builtin-as-value wrapper emission in `lib/tir/llvm_emit*.ml` (not investigated further). Workaround: pass an explicit lambda that does more than forward to the builtin.
 
 Found 2026-11-11 on a7110f95f while re-verifying the 2026-10-18 doc sweep claims.
+
+## Fixed 2026-11-16
+
+Not a builtin-wrapper bug: `compare` and `hash` are interface methods (`Ord`, `Hash`).
+`Mono.rewrite_calls` resolved one to its impl (`Ord$Int.compare`, `Hash$Int.hash`) only at a
+call site, from the call's first-argument type. Used as a value
+(`let cmp : (Int, Int) -> Int = compare`, `List.map(xs, hash)`), it kept the bare method name,
+and codegen wrapped that in a `compare$clo_wrap` calling an undefined `@compare`. The JS target
+emitted `const cmp = compare`, a `ReferenceError` at run time.
+
+Mono now resolves an interface-method atom whose type is a concrete `TFn` to the impl for its
+parameter types, wherever an atom is a value (`EAtom`, `EApp`/`ECallPtr` arguments). A user fn
+of the same name is in `fn_table` and is left alone. `fn k -> hash(k)` was already fine; the
+original report's `Hamt` failure came from the same program's `compare`.
+
+Regression: `test/test_codegen.ml` "interface method passed as a value" (OrderedMap with Int and
+String keys, a user HOF taking `compare`, `List.map(xs, hash)`, Hamt with a hash lambda). On JS,
+`compare` as a value now runs; `hash` does not, for an unrelated reason
+(`todos/2026-11-16-js-target-hash-builtins-missing.md`).

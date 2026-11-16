@@ -795,16 +795,42 @@ let rec rewrite_calls
        | None -> None)
     | _ -> None
   in
+  (* An interface method used as a VALUE (`OrderedMap.from_list(xs, compare)`,
+     `List.map(xs, hash)`): resolve it to the impl for its concrete parameter
+     types, as a call is resolved above.  Left as the bare method name, codegen
+     wraps it in a `compare$clo_wrap` whose body calls an undefined `@compare`
+     (a clang "use of undefined value"; the interpreter dispatches at run
+     time).  A user fn of the same name is in [fn_table] and is left alone. *)
+  let resolve_iface_value (a : Tir.atom) : Tir.atom =
+    match a with
+    | Tir.AVar v when not (SSet.mem v.Tir.v_name shadowed)
+                   && not (Hashtbl.mem fn_table v.Tir.v_name) ->
+      (match v.Tir.v_ty with
+       | Tir.TFn ((_ :: _) as ps, _) ->
+         let args = List.mapi (fun i t ->
+             Tir.AVar { v with Tir.v_name = Printf.sprintf "$iface_arg%d" i;
+                               v_ty = t }) ps in
+         (match iface_impl_name v.Tir.v_name args with
+          | Some m ->
+            Tir.AVar { v with Tir.v_name = enqueue_specialized_impl m args }
+          | None -> a)
+       | _ -> a)
+    | _ -> a
+  in
   match expr with
-  | Tir.EAtom (Tir.AVar v as a) when not (SSet.mem v.Tir.v_name shadowed) ->
+  | Tir.EAtom (Tir.AVar v as a0) when not (SSet.mem v.Tir.v_name shadowed) ->
     (* A let-bound or returned function is reachable just like a function
        passed as an argument. Polymorphic definitions are not seeded, so
        omitting this edge leaves a closure referring to an absent symbol
        (for example [let k = List.length]). Keep the generic body: a
        generalized binding may be called at more than one element type. *)
+    let a = resolve_iface_value a0 in
     ensure_atom_fns fn_table done_set worklist [a];
-    expr
-  | Tir.EApp (f_var, args) ->
+    if a == a0 then expr else Tir.EAtom a
+  | Tir.EApp (f_var, args0) ->
+    let args = List.map resolve_iface_value args0 in
+    let expr =
+      if List.for_all2 (==) args args0 then expr else Tir.EApp (f_var, args) in
     (* Ensure functions passed as arguments are discovered *)
     ensure_atom_fns fn_table done_set worklist args;
     (* Check if the *callee's definition* is polymorphic (has TVar in params),
@@ -1097,7 +1123,11 @@ let rec rewrite_calls
          Tir.EApp (f_var', args)
        end))
   (* ECallPtr: if the callee is a known top-level fn, ensure it's discovered *)
-  | Tir.ECallPtr (fn_atom, args) ->
+  | Tir.ECallPtr (fn_atom, args0) ->
+    let args = List.map resolve_iface_value args0 in
+    let expr =
+      if List.for_all2 (==) args args0 then expr
+      else Tir.ECallPtr (fn_atom, args) in
     (match fn_atom with
      | Tir.AVar v ->
        let orig_name = v.Tir.v_name in
