@@ -1,0 +1,12 @@
+exit: 1
+-- TYPE MISMATCH -- errors/callback_arity_mismatch_1.march
+
+This lambda takes 2 arguments, but `List.map` calls its parameter `f` with 1 argument. [callback_arity_mismatch]
+`List.map` calls `f` with one argument, so pass a function of one parameter:
+    fn x -> …
+
+4 |     List.map([1, 2], fn (a, b) -> a + b)
+                         ^^^^^^^^^^^^^^^^^^
+
+
+

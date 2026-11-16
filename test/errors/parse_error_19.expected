@@ -1,0 +1,20 @@
+exit: 1
+-- SYNTAX ------------------- errors/parse_error_19.march
+
+A function's return type comes after a colon, `: Int`, not an arrow `-> Int`: [parse_error]
+
+3 |   fn f(x: Int, y: Int) -> Int do
+                           ^
+
+    fn name(x : Int) : Int do
+        ...
+    end
+
+    fix (`forge fix` applies it):
+
+3 -   fn f(x: Int, y: Int) -> Int do
+3 +   fn f(x: Int, y: Int) : Int do
+
+    run `march --explain parse_error`
+
+after fix: exit 0

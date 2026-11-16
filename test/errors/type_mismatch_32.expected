@@ -6,7 +6,7 @@ expected `Result(List(String), String)` but got `Result(List(Int), String)`. [ty
 8 |     take(r)
              ^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `take`, its parameter `_r`.
     The types differ here:
         Result(List(Int), String)
                     ^^^ expected `String`

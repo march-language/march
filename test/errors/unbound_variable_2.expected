@@ -1,0 +1,18 @@
+exit: 1
+-- NAMING --------------- errors/unbound_variable_2.march
+
+March has no `return`: a function's value is its last expression. [unbound_variable]
+Write the value on its own as the block's last line. To leave a function early, use `if ... do ... else ... end` or `match`.
+
+4 |     return x + 1
+        ^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+4 -     return x + 1
+4 +     x + 1
+
+
+
+after fix: exit 0

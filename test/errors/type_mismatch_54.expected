@@ -1,0 +1,20 @@
+exit: 1
+-- TYPE MISMATCH ---------- errors/type_mismatch_54.march
+
+expected `Result(String, String)` but got `Result(Int, String)`. [type_mismatch]
+
+6 |     Ok(n)
+        ^^^^^
+
+    This is the declared return type of `run`.
+    The types differ here:
+        Result(Int, String)
+               ^^^ expected `String`
+
+    the expected type comes from here:
+
+4 |   fn run() : Result(String, String) do
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain type_mismatch`
+
+

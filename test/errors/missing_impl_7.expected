@@ -1,0 +1,12 @@
+exit: 1
+-- INTERFACE ---------------- errors/missing_impl_7.march
+
+String does not implement Num (only Int and Float do). [missing_impl]
+`+` needs it here.
+
+4 |     List.fold_left([1, 2], "", fn (acc, x) -> acc + x)
+                                                  ^^^^^^^
+
+    March joins strings with `++`, not `+`. To put a number in a string, convert it first: `"total: " ++ int_to_string(n)`.
+
+

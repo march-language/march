@@ -77,7 +77,7 @@ let format_ty_for_error t =
 let report_cap_mismatch env ~span ~reason ~(p : provided) ~have ~need =
   let module L = March_caps.Cap_lattice in
   let call = match reason with
-    | Some (RFnArg (sp, _)) -> Some sp
+    | Some (RFnArg (sp, _)) | Some (RBecause (RFnArg (sp, _), _)) -> Some sp
     | _ -> None in
   let subject = match call with Some _ -> "this call" | None -> "this" in
   let arg = match p.p_name with

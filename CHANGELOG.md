@@ -21,6 +21,29 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Syntax mistakes from other languages get their own messages, most with a fix:**
+  - braces for a block (`fn f() {`): replaced with `do` ... `end`;
+  - a leading `|` before a type's first variant: removed;
+  - `-> Int` for a return type: replaced with `: Int`;
+  - `def` / `defp` / `function` / `func` / `fun`: replaced with `fn` (or `pfn`);
+  - a trailing comma in a call or list: removed;
+  - an operator with nothing on its right, reported at the operator rather than at the
+    next line's `end`;
+  - an unclosed `(` or `[`, reported where it opens, with a fix that closes it at the end
+    of that line when that balances it;
+  - an unterminated string, reported where it starts rather than at the end of the file.
+    The suggested close-quote is offered as a guess, since a string may span lines.
+  - `return x`: March has no `return`; the fix deletes the word.
+  - `"total: " + n`: a note says strings are joined with `++`, and the follow-on operand
+    mismatch is no longer reported.
+- **Errors point at the code you wrote, not the desugared form:**
+  - "argument #N of a function call" now names the callee and its parameter:
+    "argument #2 of `Option.unwrap_or`, its parameter `default`". A piped value is
+    "the value piped into `f`", and the other arguments are numbered as written.
+  - a `let?` block whose value has the wrong type is reported at the expression that
+    produces the value, not the `let?` line.
+  - the result-type mismatch that follows from a callback taking the wrong number of
+    arguments is no longer reported beside the arity error.
 - **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
   `march --check-json`, a fix's `applicability` is `machine-applicable`,
   `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,

@@ -207,6 +207,226 @@ let refine_structural ~filename ~src ~generic (st : Token_filter.open_state)
          fix = (match fix with Some f -> Some (Errors.fix f) | None -> d.fix) })
   | _ -> d
 
+(* ── Habits from other languages, read off the source text ─────────────────
+
+   When the parser gets stuck, the token it stopped at and the text around it
+   often say which habit from another language caused it.  Each pattern below
+   replaces a generic "I got stuck here" (or another production's message)
+   with what March wants instead, at the place the habit is, and with a fix
+   when the edit is mechanical.  `--check` and `--check-json` re-check each
+   fix before calling it machine-applicable (bin/fix_verify.ml), so a guess
+   that does not parse is shown as one. *)
+
+(* Positions of the brackets left open, and the string left open, at
+   (line [stop_ln], column [stop_c]) of [src]: a scan that skips comments and
+   string literals, including `${...}` interpolations inside strings. *)
+type scan_ctx = Code | Str | Interp of int ref
+
+let scan_open ~src ~stop_ln ~stop_c =
+  let lines = src_lines src in
+  let opens = ref [] in              (* (char, line, col), innermost first *)
+  let str_start = ref None in
+  let first_multiline = ref None in  (* the first string that spans lines *)
+  let ctx = ref [ Code ] in
+  (try
+     Array.iteri (fun li text ->
+         let ln = li + 1 in
+         if ln > stop_ln then raise Exit;
+         let n = String.length text in
+         let i = ref 0 in
+         let stop = if ln = stop_ln then min stop_c n else n in
+         (try
+            while !i < stop do
+              let ch = text.[!i] in
+              (match !ctx with
+               | (Code | Interp _) :: _ ->
+                 if ch = '-' && !i + 1 < n && text.[!i + 1] = '-' then raise Exit
+                 else if ch = '"' then begin
+                   ctx := Str :: !ctx; str_start := Some (ln, !i) end
+                 else if ch = '(' || ch = '[' then opens := (ch, ln, !i) :: !opens
+                 else if ch = ')' || ch = ']' then
+                   (match !opens with _ :: rest -> opens := rest | [] -> ())
+                 else if ch = '{' then
+                   (match !ctx with Interp d :: _ -> incr d | _ -> ())
+                 else if ch = '}' then
+                   (match !ctx with
+                    | Interp d :: rest -> if !d = 0 then ctx := rest else decr d
+                    | _ -> ())
+               | Str :: rest ->
+                 if ch = '\\' then incr i
+                 else if ch = '"' then begin
+                   ctx := rest;
+                   (match !str_start, !first_multiline with
+                    | Some (sl, sc), None when sl < ln -> first_multiline := Some (sl, sc)
+                    | _ -> ());
+                   str_start := None end
+                 else if ch = '$' && !i + 1 < n && text.[!i + 1] = '{' then begin
+                   ctx := Interp (ref 0) :: !ctx; incr i end
+               | [] -> ());
+              incr i
+            done
+          with Exit -> ()))
+       lines
+   with Exit -> ());
+  (!opens, (match !ctx with Str :: _ -> !str_start | _ -> None), !first_multiline)
+
+let binary_operators =
+  [ "++"; "+"; "-"; "*"; "/"; "%"; "&&"; "||"; "=="; "!="; "<="; ">="; "<"; ">"; "|>" ]
+
+let syntax_patterns ~filename ~src ~generic (d : Errors.diagnostic) =
+  let lines = src_lines src in
+  let sp = d.Errors.span in
+  let ln = sp.March_ast.Ast.start_line and c = sp.March_ast.Ast.start_col in
+  let text = line_text lines ln in
+  let n = String.length text in
+  let at i = if i >= 0 && i < n then text.[i] else '\000' in
+  let mk ?fix ?(notes = []) ?(span = sp) msg =
+    Some { d with Errors.span; message = msg; notes; fix = Option.map Errors.fix fix } in
+  let mkspan l c0 c1 = { March_ast.Ast.file = (if filename <> "" then filename else sp.March_ast.Ast.file);
+                         start_line = l; start_col = c0; end_line = l; end_col = c1 } in
+  let trimmed = String.trim text in
+  let starts w = String.length trimmed >= String.length w
+                 && String.sub trimmed 0 (String.length w) = w in
+  (* The last non-blank character before the error, possibly on an earlier
+     line: (line, col). *)
+  let rec prev_char l i =
+    if l < 1 then None
+    else
+      let t = line_text lines l in
+      let i = min i (String.length t - 1) in
+      let rec back i = if i >= 0 && (t.[i] = ' ' || t.[i] = '\t') then back (i - 1) else i in
+      let j = back i in
+      if j >= 0 then Some (l, j) else prev_char (l - 1) max_int in
+  let word_at i =
+    let rec e j = if j < n && (match text.[j] with 'a'..'z' | 'A'..'Z' | '_' -> true | _ -> false)
+      then e (j + 1) else j in
+    String.sub text i (e i - i) in
+  if not generic && not (String.starts_with ~prefix:"I was expecting `do` to start the function body" d.message)
+  then None
+  (* `fn f(x : Int) -> Int do`: a return type after an arrow. *)
+  else if at c = '-' && at (c + 1) = '>' then
+    mk ~fix:(Errors.FReplace { span = mkspan ln c (c + 2); text = ":" })
+      ~notes:[ "fn name(x : Int) : Int do\n    ...\nend" ]
+      "A function's return type comes after a colon, `: Int`, not an arrow `-> Int`:"
+  else if not generic then None
+  (* Braces for a block: `fn f() {` / `if x > 0 {`. *)
+  else if at c = '{' && String.trim (String.sub text (c + 1) (n - c - 1)) = "" then begin
+    let ind = indent_of text in
+    let close =
+      let rec find k =
+        if k > Array.length lines then None
+        else
+          let t = line_text lines k in
+          if String.trim t = "}" && indent_of t = ind then Some (k, indent_of t)
+          else find (k + 1) in
+      find (ln + 1) in
+    let open_edit = Errors.FReplace { span = mkspan ln c (c + 1); text = "do" } in
+    let fix = match close with
+      | Some (k, ci) ->
+        Some (Errors.FMulti [ open_edit; Errors.FReplace { span = mkspan k ci (ci + 1); text = "end" } ])
+      | None -> None in
+    mk ?fix ~notes:[ "fn name(params) do\n    body\nend" ]
+      "March blocks are written `do ... end`, not with braces:"
+  end
+  (* `type Color = | Red | Green`: a leading `|`. *)
+  else if at c = '|' && starts "type " && (match prev_char ln (c - 1) with
+      | Some (l, j) -> l = ln && at j = '=' | None -> false) then begin
+    let rec skip j = if j < n && text.[j] = ' ' then skip (j + 1) else j in
+    mk ~fix:(Errors.FReplace { span = mkspan ln c (skip (c + 1)); text = "" })
+      ~notes:[ "type Color = Red | Green" ]
+      "A type's variants are listed without a leading `|`:"
+  end
+  (* `f(x, )`, `[1, 2, ]`: a trailing comma. *)
+  else if (at c = ')' || at c = ']') && (match prev_char ln (c - 1) with
+      | Some (l, j) -> (line_text lines l).[j] = ',' | None -> false) then begin
+    let (l, j) = Option.get (prev_char ln (c - 1)) in
+    let fix =
+      if l = ln then Errors.FReplace { span = mkspan ln j c; text = "" }
+      else Errors.FReplace { span = mkspan l j (j + 1); text = "" } in
+    mk ~fix ~span:(mkspan l j (j + 1))
+      (Printf.sprintf "This `,` has nothing after it: the last %s is not followed by a comma."
+         (if at c = ')' then "argument" else "item"))
+  end
+  (* `x +` with nothing after the operator. *)
+  else if (match prev_char ln (c - 1) with
+      | Some (l, j) ->
+        let t = line_text lines l in
+        List.exists (fun op ->
+            let k = String.length op in
+            j - k + 1 >= 0 && String.sub t (j - k + 1) k = op
+            && (j - k < 0 || t.[j - k] = ' ')) binary_operators
+      | None -> false) then begin
+    let (l, j) = Option.get (prev_char ln (c - 1)) in
+    let t = line_text lines l in
+    let op = List.find (fun op ->
+        let k = String.length op in
+        j - k + 1 >= 0 && String.sub t (j - k + 1) k = op) binary_operators in
+    let k = String.length op in
+    mk ~span:(mkspan l (j - k + 1) (j + 1))
+      ~notes:[ Printf.sprintf "Finish the expression after `%s`, or remove the `%s`." op op ]
+      (Printf.sprintf "`%s` has nothing on its right: the expression stops here." op)
+  end
+  (* `def f()`, `function f()`: another language's function keyword. *)
+  else if starts "def " || starts "defp " || starts "function " || starts "func " || starts "fun " then begin
+    let w = word_at c in
+    let repl = if w = "defp" then "pfn" else "fn" in
+    if w = "" || not (List.mem w [ "def"; "defp"; "function"; "func"; "fun" ]) then None
+    else
+      mk ~fix:(Errors.FReplace { span = mkspan ln c (c + String.length w); text = repl })
+        ~notes:[ "fn name(params) do\n    body\nend" ]
+        (Printf.sprintf "Functions are declared with `fn` (`pfn` for a private one), not `%s`:" w)
+  end
+  else
+    (* A bracket opened earlier and never closed: the parser only notices
+       at the next `end` or declaration. *)
+    match scan_open ~src ~stop_ln:ln ~stop_c:c with
+    | ((ch, ol, oc) :: _, _, _) when ol < ln ->
+      let ot = line_text lines ol in
+      let closer = if ch = '(' then ")" else "]" in
+      (* Close it at the end of its own line when the rest of that line
+         closes everything it opens. *)
+      let rest_balanced =
+        let d = ref 0 and ok = ref true in
+        String.iteri (fun i x -> if i > oc then
+                         if x = '(' || x = '[' then incr d
+                         else if x = ')' || x = ']' then (decr d; if !d < 0 then ok := false)) ot;
+        !ok && !d = 0 in
+      let e = String.length (String.trim ot) + indent_of ot in
+      let fix = if rest_balanced then
+          Some (Errors.FReplace { span = mkspan ol e e; text = closer }) else None in
+      mk ?fix ~span:(mkspan ol oc (oc + 1))
+        ~notes:[ Printf.sprintf "I only noticed at line %d." ln ]
+        (Printf.sprintf "This `%c` is never closed." ch)
+    | _ -> None
+
+(* An unterminated string: the lexer reaches the end of the file inside it;
+   point at where the string starts, and close it at the end of its line. *)
+let unterminated_string ~filename ~src (d : Errors.diagnostic) =
+  if d.Errors.message <> "Unterminated string literal" then d
+  else
+    let lines = src_lines src in
+    (* A string may span lines, so one missing quote flips every later one:
+       the first string that runs onto a later line is where it most likely
+       went missing, before the one left open at the end. *)
+    match scan_open ~src ~stop_ln:(Array.length lines + 1) ~stop_c:max_int with
+    | (_, Some open_at, multi) ->
+      let (ln, c) = Option.value multi ~default:open_at in
+      let t = line_text lines ln in
+      let file = if filename <> "" then filename else d.Errors.span.March_ast.Ast.file in
+      let e = String.length t in
+      { d with
+        Errors.span = { March_ast.Ast.file; start_line = ln; start_col = c; end_line = ln; end_col = c + 1 };
+        message = "This string is never closed: I reached the end of the file inside it.";
+        notes = [ (if multi <> None && multi <> Some open_at then
+                     "A string can span lines, so a missing `\"` makes the strings after it \
+                      swap inside and out. This is the first one that runs past its line; \
+                      close it where it should end."
+                   else "Close it where it should end.") ];
+        fix = Some (Errors.fix ~tier:Errors.Maybe_incorrect (Errors.FReplace {
+            span = { March_ast.Ast.file; start_line = ln; start_col = e; end_line = ln; end_col = e };
+            text = "\"" })) }
+    | _ -> d
+
 (* `let? x : T = e` / `let* x : T = e` (the parser stops at the `:`, [pos]):
    the fix deletes the annotation, from the `:` to the `=` that ends it on
    the same line. *)
@@ -236,7 +456,9 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
   let (lexer, state) = Token_filter.make_with_state Lexer.token in
   let refine ~generic (d : Errors.diagnostic) =
     let generic = generic || List.mem d.message generic_messages in
-    refine_structural ~filename ~src ~generic (state ()) d in
+    match syntax_patterns ~filename ~src ~generic d with
+    | Some d' -> d'
+    | None -> refine_structural ~filename ~src ~generic (state ()) d in
   (* Clear any value a ParseError caught elsewhere (a [*_of_lexbuf] caller)
      may have left, so this parse's extras are its own. *)
   ignore (Errors.take_parse_error_extra ());
@@ -259,9 +481,10 @@ let run ?(filename = "") ?(stuck = "I got stuck here:") entry src =
   | exception Lexer.Lexer_error msg ->
     (* The lexer's sub-rules leave no usable lexeme; one caret where it
        stopped. *)
-    Error [ { (Errors.parse_error_diagnostic_at ~filename ~len:1 ~msg
-                 (Lexing.lexeme_start_p lexbuf))
-              with code = code_lex_error } ]
+    Error [ unterminated_string ~filename ~src
+              { (Errors.parse_error_diagnostic_at ~filename ~len:1 ~msg
+                   (Lexing.lexeme_start_p lexbuf))
+                with code = code_lex_error } ]
   | exception Lexer.Lexer_error_fix { msg; code; note; replace } ->
     (* A one-character lexeme the lexer knows how to repair (`;`). The fix
        covers the lexeme and the blanks after it: a trailing one is deleted,

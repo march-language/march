@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: first one that runs past its line
+mod M do
+  fn f() : String do
+    let a = "one
+    let b = "two"
+    b
+  end
+end

@@ -6,7 +6,7 @@ expected `(Int, Int)` but got `(Int, Int, Int)`. [type_mismatch]
 10 |     println(int_to_string(takes_pair((1, 2, 3))))
                                           ^^^^^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `takes_pair`, its parameter `p`.
 
     the expected type comes from here:
 

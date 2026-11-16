@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: joins strings with `++`
+mod M do
+  fn f(x : Int) : String do
+    "value: " + x
+  end
+end

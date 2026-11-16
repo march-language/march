@@ -495,6 +495,14 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
   let needs_codes =
     List.filter_map (fun d ->
         if is_err d && has_slug Code.cap_needs d then Some d.code else None) ds in
+  (* `"total: " + n`: the operator's missing impl is the mistake, and the
+     operand mismatch inside it ("expected `String` but got `Int`") is what
+     the checker found next on the same `+`. *)
+  let missing_impl_spans =
+    List.filter_map (fun d ->
+        if is_err d && has_slug Code.missing_impl d
+           && contains_sub d.message "does not implement Num"
+        then Some d.span else None) ds in
   (* Exact duplicates go; [type_mismatch]es on one span merge into the first,
      which takes the others' notes and labels: for `let? x = f()` one says
      "the declared return type of `bad`" and the other states the `let?`
@@ -517,7 +525,12 @@ let suppress_cascades ?(visible = fun (_ : diagnostic) -> true)
   let kept = List.filter (fun d ->
       let sl = slug_of_code d.code in
       not (
-        (sl = Code.type_mismatch && List.mem d.span arity_spans)
+        (sl = Code.type_mismatch
+         && (List.mem d.span arity_spans
+             (* `List.map(xs, fn (a, b) -> …)`: the call's result type is wrong
+                only because the lambda takes the wrong number of arguments. *)
+             || List.exists (fun a -> within a d.span) arity_spans
+             || List.exists (fun m -> m <> d.span && within d.span m) missing_impl_spans))
         || (sl = Code.unused_binding
             && (match first_backticked d.message with
                 | Some x ->
