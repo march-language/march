@@ -7,7 +7,11 @@
     - the clause carries a scope (a computed target can fall outside it), or
     - [f] reaches an actor spawn: the actor's handlers are charged to the
       actor's module, not to [f], yet a worker spawned under [f] keeps [f]'s
-      authority for life (the spawn copies the current authority).
+      authority for life (the spawn copies the current authority);
+    - [f] reaches a call of a function value: the checker proves only direct
+      calls, and a function value runs under its caller's authority, so the
+      call must happen under [f]'s frame (this also covers a spawn reached
+      only through a function value, e.g. [List.each(xs, spawner)]).
 
     Such an [f] is rewritten to
 
@@ -16,7 +20,8 @@
                       let s = Authority.enter_fn(l) in
                       let r = f$auth(args) in
                       cap_restore(s); r
-      f$auth(args)  = the original body, self calls to f retargeted here
+      f$auth(args)  = the original body, its own self calls (not those
+                      in a lambda it makes) retargeted here
       f$auth_layer()= Authority.frame_layer("<name>", "<needs text>")
     v}
 
@@ -52,24 +57,52 @@ let rec iter_calls (k : string -> unit) (e : Tir.expr) : unit =
    [spawn(A_spawn())]; a supervise block's child to [spawn_supervised]). *)
 let spawn_builtins = [ "spawn"; "spawn_supervised" ]
 
-(** The fns of [m] that reach an actor spawn through direct calls (a lambda
-    or local fn's body counts for the fn it is written in): the least
-    fixpoint seeded by direct calls to the spawn builtins. *)
-let reaches_actor_spawn (m : Tir.tir_module) : SSet.t =
+(** Whether [e] (the body of a fn with params [params]) calls a function
+    VALUE: an [ECallPtr], or an [EApp] whose callee is a local binding (a
+    parameter, a let or case binder) rather than a top-level fn, a builtin
+    or a local fn written right there (a [ELetRec] name: its body is part
+    of this fn's code and is scanned with it).  The type checker proves
+    nothing about what such a call runs, so it must run under the caller's
+    authority. *)
+let calls_fn_value (params : Tir.var list) (e : Tir.expr) : bool =
+  let add (v : Tir.var) b = SSet.add v.Tir.v_name b in
+  let rec go bound (e : Tir.expr) =
+    match e with
+    | Tir.ECallPtr _ -> true
+    | Tir.EApp (f, _) -> SSet.mem f.Tir.v_name bound
+    | Tir.ELet (v, a, b) -> go bound a || go (add v bound) b
+    | Tir.ESeq (a, b) -> go bound a || go bound b
+    | Tir.ELetRec (fns, b) ->
+      let bound =
+        List.fold_left (fun bd (fd : Tir.fn_def) -> SSet.remove fd.Tir.fn_name bd) bound fns in
+      List.exists
+        (fun (fd : Tir.fn_def) -> go (List.fold_right add fd.Tir.fn_params bound) fd.Tir.fn_body)
+        fns
+      || go bound b
+    | Tir.ECase (_, brs, d) ->
+      List.exists
+        (fun (br : Tir.branch) -> go (List.fold_right add br.Tir.br_vars bound) br.Tir.br_body)
+        brs
+      || (match d with Some d -> go bound d | None -> false)
+    | _ -> false
+  in
+  go (List.fold_right add params SSet.empty) e
+
+(** The least fixpoint over direct calls to fns of [m] (a lambda or local
+    fn's body counts for the fn it is written in), seeded by the fns for
+    which [seed] holds. *)
+let reaching (m : Tir.tir_module) ~(seed : defined:(string, unit) Hashtbl.t -> Tir.fn_def -> bool)
+  : SSet.t =
   let defined = Hashtbl.create 256 in
   List.iter (fun (f : Tir.fn_def) -> Hashtbl.replace defined f.Tir.fn_name ()) m.Tir.tm_fns;
   let callees = Hashtbl.create 256 in
   let seeds =
     List.fold_left
       (fun acc (f : Tir.fn_def) ->
-         let cs = ref SSet.empty and spawns = ref false in
-         iter_calls
-           (fun n ->
-              if List.mem n spawn_builtins && not (Hashtbl.mem defined n) then spawns := true
-              else if Hashtbl.mem defined n then cs := SSet.add n !cs)
-           f.Tir.fn_body;
+         let cs = ref SSet.empty in
+         iter_calls (fun n -> if Hashtbl.mem defined n then cs := SSet.add n !cs) f.Tir.fn_body;
          Hashtbl.replace callees f.Tir.fn_name !cs;
-         if !spawns then SSet.add f.Tir.fn_name acc else acc)
+         if seed ~defined f then SSet.add f.Tir.fn_name acc else acc)
       SSet.empty m.Tir.tm_fns
   in
   let rec fix reach =
@@ -85,22 +118,43 @@ let reaches_actor_spawn (m : Tir.tir_module) : SSet.t =
   in
   fix seeds
 
-(* [e] with every direct call of [from] retargeted to [to_]. *)
+(** The fns of [m] that reach an actor spawn through direct calls. *)
+let reaches_actor_spawn (m : Tir.tir_module) : SSet.t =
+  reaching m ~seed:(fun ~defined f ->
+      let spawns = ref false in
+      iter_calls
+        (fun n -> if List.mem n spawn_builtins && not (Hashtbl.mem defined n) then spawns := true)
+        f.Tir.fn_body;
+      !spawns)
+
+(** The fns of [m] that reach a call of a function value through direct
+    calls ([calls_fn_value]); e.g. a fn that calls [List.each] with any
+    argument. *)
+let reaches_indirect_call (m : Tir.tir_module) : SSet.t =
+  reaching m ~seed:(fun ~defined:_ f -> calls_fn_value f.Tir.fn_params f.Tir.fn_body)
+
+(* [e], [f]'s own body, with its direct self calls retargeted to [to_].
+   Only [f]'s own code: never a lambda's or local fn's body (an [ELetRec]),
+   which may escape and run outside [f]'s frame, so it must call the
+   wrapper; and not under a local binder of the same name. *)
 let rec retarget ~from ~to_ (e : Tir.expr) : Tir.expr =
   let go = retarget ~from ~to_ in
   match e with
   | Tir.EApp (f, args) when f.Tir.v_name = from -> Tir.EApp ({ f with Tir.v_name = to_ }, args)
-  | Tir.ELet (v, a, b) -> Tir.ELet (v, go a, go b)
+  | Tir.ELet (v, a, b) ->
+    Tir.ELet (v, go a, if v.Tir.v_name = from then b else go b)
   | Tir.ESeq (a, b) -> Tir.ESeq (go a, go b)
   | Tir.ELetRec (fns, b) ->
-    (* A local fn of the same name shadows [f] in its scope. *)
     if List.exists (fun (fd : Tir.fn_def) -> fd.Tir.fn_name = from) fns then e
-    else
-      Tir.ELetRec
-        (List.map (fun (fd : Tir.fn_def) -> { fd with Tir.fn_body = go fd.Tir.fn_body }) fns, go b)
+    else Tir.ELetRec (fns, go b)
   | Tir.ECase (s, brs, d) ->
     Tir.ECase
-      (s, List.map (fun (br : Tir.branch) -> { br with Tir.br_body = go br.Tir.br_body }) brs,
+      (s,
+       List.map
+         (fun (br : Tir.branch) ->
+            if List.exists (fun (v : Tir.var) -> v.Tir.v_name = from) br.Tir.br_vars then br
+            else { br with Tir.br_body = go br.Tir.br_body })
+         brs,
        Option.map go d)
   | other -> other
 
@@ -182,11 +236,14 @@ let frames (m : Tir.tir_module) ~(needs : (string, Lower_state.fn_needs) Hashtbl
     if candidates = [] then (m, false)
     else begin
       let spawners = lazy (reaches_actor_spawn m) in
+      let indirect = lazy (reaches_indirect_call m) in
       let framed =
         List.filter
           (fun (f : Tir.fn_def) ->
              let n = Hashtbl.find needs f.Tir.fn_name in
-             n.Lower_state.fnn_scoped || SSet.mem f.Tir.fn_name (Lazy.force spawners))
+             n.Lower_state.fnn_scoped
+             || SSet.mem f.Tir.fn_name (Lazy.force spawners)
+             || SSet.mem f.Tir.fn_name (Lazy.force indirect))
           candidates
       in
       if framed = [] then (m, false)

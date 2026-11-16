@@ -2,11 +2,13 @@
    run-time frames for function `needs` clauses ([March_tir.Auth_rt]).
 
    A fn with a `needs` clause gets a frame only when the clause carries a
-   scope or the fn reaches an actor spawn; everything else the static
+   scope, or the fn reaches an actor spawn or a call of a function value
+   (the checker proves only direct calls); everything else the static
    checker already proves.  A framed [f] becomes a wrapper that enters the
    frame (its layer built once by [f$auth_layer]) around [f$auth], the
    original body, whose self calls target [f$auth] so a self tail call stays
-   a loop.  No frame for the program entry.
+   a loop; a lambda it makes keeps calling the wrapper, since it may run
+   outside the frame.  No frame for the program entry.
 
    The first group inspects the lowered TIR; the second runs a framed
    program in every runtime. *)
@@ -176,6 +178,98 @@ let test_main_not_framed () =
   Alcotest.(check bool) "main's clause is the launch request, not a frame" false has;
   Alcotest.(check bool) "unchanged" true (out == tir)
 
+let fn_value = {|mod F do
+  needs IO.Console
+  fn apply_it(h : String -> String, p : String) : String needs IO.Console do
+    h(p)
+  end
+  fn via_helper(p : String) : String needs IO.Console do
+    apply_it(fn s -> s, p)
+  end
+  fn local_fn(p : String) : String needs IO.Console do
+    let twice = fn s -> s ++ s
+    p
+  end
+  fn main() do
+    println(via_helper("a"))
+    println(local_fn("b"))
+  end
+end
+|}
+
+let test_fn_value_framed () =
+  let _, out, has = frames fn_value in
+  Alcotest.(check bool) "has_frames" true has;
+  Alcotest.(check bool) "a fn that calls a function value is framed" true
+    (fn_opt "apply_it$auth" out <> None);
+  Alcotest.(check bool) "a fn that reaches one through a direct call is framed" true
+    (fn_opt "via_helper$auth" out <> None);
+  Alcotest.(check bool) "making a lambda without calling a value is not" true
+    (fn_opt "local_fn$auth" out = None)
+
+let spawn_via_value = {|mod G do
+  needs IO.Console
+  needs IO.Spawn
+  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on Go() do
+      state
+    end
+  end
+  fn spawner(_i : Int) : Unit do
+    let _pid = spawn(Worker)
+    ()
+  end
+  fn each(xs : List(Int), f : Int -> Unit) : Unit do
+    match xs do
+    Nil -> ()
+    Cons(x, rest) ->
+      f(x)
+      each(rest, f)
+    end
+  end
+  fn start_all(xs : List(Int)) : Unit needs IO.Console, IO.Spawn do
+    each(xs, spawner)
+  end
+  fn main() do
+    start_all([1, 2])
+  end
+end
+|}
+
+let test_spawn_via_value_framed () =
+  let _, out, _ = frames spawn_via_value in
+  Alcotest.(check bool) "a spawn reached only through a function value is framed" true
+    (fn_opt "start_all$auth" out <> None)
+
+let escaping_lambda = {|mod H do
+  needs IO.Console
+  needs IO.FileRead
+  fn mk(p : String) : String -> String needs IO.FileRead("/a/") do
+    if p == "self" do
+      fn q ->
+        let h = mk(q)
+        h(q)
+    else
+      fn _ -> p
+    end
+  end
+  fn main() needs IO.Console, IO.FileRead("/a/") do
+    let g = mk("self")
+    println(g("/a/x"))
+  end
+end
+|}
+
+let test_lambda_calls_wrapper () =
+  let _, out, _ = frames escaping_lambda in
+  let body = fn_exn "mk$auth" out in
+  Alcotest.(check bool) "a lambda's self call stays on the wrapper" true
+    (List.mem "mk" (callees body.Tir.fn_body));
+  Alcotest.(check bool) "and never targets the unframed body" false
+    (List.mem "mk$auth" (callees body.Tir.fn_body))
+
 (* ── every runtime ─────────────────────────────────────────────────── *)
 
 let frame_src = {|mod FrameFixture do
@@ -225,6 +319,70 @@ let test_frames_every_runtime () =
        List.iter (fun out -> Alcotest.(check string) mode want out) outs)
     (Test_authority_differential.run_modes ~src:frame_src ~envs:[ "" ])
 
+(* One program, every runtime, the same output. *)
+let same_everywhere ~want src =
+  List.iter
+    (fun (mode, outs) -> List.iter (fun out -> Alcotest.(check string) mode want out) outs)
+    (Test_authority_differential.run_modes ~src ~envs:[ "" ])
+
+let show_fn = {|  fn show(r : Result((), CapError)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+|}
+
+(* A lambda made inside a framed fn that calls it escapes: it must enter the
+   frame itself, not run the unframed body. *)
+let test_escaping_lambda_every_runtime () =
+  same_everywhere
+    ~want:
+      "IO.FileRead(\"/etc/passwd\") refused by function mk's needs (IO.FileRead(\"/srv/\"))\n\
+       IO.FileRead(\"/etc/passwd\") refused by function mk's needs (IO.FileRead(\"/srv/\"))\n"
+    ({|mod Esc do
+  needs IO.Console
+  needs IO.FileRead
+|} ^ show_fn ^ {|  fn mk(p : String) : String -> String needs IO.FileRead("/srv/") do
+    if p == "self" do
+      fn q ->
+        let h = mk(q)
+        h(q)
+    else
+      let r = show(Authority.check("IO.FileRead", p))
+      fn _ -> r
+    end
+  end
+  fn main() do
+    let g = mk("self")
+    println(g("/etc/passwd"))
+    let d = mk("/etc/passwd")
+    println(d("x"))
+  end
+end
+|})
+
+(* A function value called inside an unscoped-needs fn runs under that fn's
+   authority. *)
+let test_fn_value_every_runtime () =
+  same_everywhere
+    ~want:"IO.FileRead(\"/etc/passwd\") refused by function apply_it's needs (IO.Console)\nok\n"
+    ({|mod Hof do
+  needs IO.Console
+  needs IO.FileRead
+|} ^ show_fn ^ {|  fn probe(p : String) : String do
+    show(Authority.check("IO.FileRead", p))
+  end
+  fn apply_it(h : String -> String, p : String) : String needs IO.Console do
+    h(p)
+  end
+  fn main() do
+    println(apply_it(probe, "/etc/passwd"))
+    println(probe("/etc/passwd"))
+  end
+end
+|})
+
 let tests =
   [ ( "auth_rt",
       [ Alcotest.test_case "an unscoped needs clause that reaches no spawn gets no frame" `Quick
@@ -233,7 +391,17 @@ let tests =
         Alcotest.test_case "a fn that reaches an actor spawn is framed" `Quick test_spawn_framed;
         Alcotest.test_case "a framed fn's self tail call targets its body" `Quick
           test_self_tail_call;
-        Alcotest.test_case "main gets no frame" `Quick test_main_not_framed ] );
+        Alcotest.test_case "main gets no frame" `Quick test_main_not_framed;
+        Alcotest.test_case "a fn that reaches a call of a function value is framed" `Quick
+          test_fn_value_framed;
+        Alcotest.test_case "a spawn reached through a function value is framed" `Quick
+          test_spawn_via_value_framed;
+        Alcotest.test_case "a lambda's self call keeps the frame" `Quick
+          test_lambda_calls_wrapper ] );
     ( "auth_rt_runtime",
       [ Alcotest.test_case "frames enforce the clause in every runtime" `Quick
-          test_frames_every_runtime ] ) ]
+          test_frames_every_runtime;
+        Alcotest.test_case "an escaping lambda enters the frame in every runtime" `Quick
+          test_escaping_lambda_every_runtime;
+        Alcotest.test_case "a function value runs under its caller's frame in every runtime"
+          `Quick test_fn_value_every_runtime ] ) ]

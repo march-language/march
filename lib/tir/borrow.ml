@@ -223,6 +223,8 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_cap_restore",          [false]);
   ("march_cap_push",             [false]);
   ("march_cap_enter",            [true]);
+  (* cap_launch_fail writes its text to fd 2 and exits: it only reads it. *)
+  ("march_cap_launch_fail",      [true]);
   ("march_string_starts_with",   [true; true]);
   ("march_string_ends_with",     [true; true]);
   ("march_string_split",         [true; true]);
@@ -423,6 +425,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("cap_restore",          [false]);
   ("cap_push",             [false]);
   ("cap_enter",            [true]);
+  ("cap_launch_fail",      [true]);
   ("string_starts_with",   [true; true]);
   ("string_ends_with",     [true; true]);
   ("string_split",         [true; true]);

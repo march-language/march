@@ -5,9 +5,11 @@ Plan: specs/plans/2026-11-15-ocap-p4-runtime-plan.md, Task 4.
 - `lib/tir/auth_rt.ml` (`Auth_rt.frames`) runs right after lowering in every
   compiled pipeline (bin/main.ml native and JS, `lib/jit/repl_jit.ml`,
   `lib/driver/js_pipeline.ml`). A fn whose `needs` clause carries a scope, or
-  that reaches an actor spawn through direct calls, becomes a wrapper that
-  enters the frame around `f$auth` (the original body; self calls retargeted,
-  so a self tail call stays a loop). The entry `main` is never framed. With
+  that reaches an actor spawn or a call of a function value (an `ECallPtr` or
+  an `EApp` of a local binding) through direct calls, becomes a wrapper that
+  enters the frame around `f$auth` (the original body; its own self calls
+  retargeted, so a self tail call stays a loop; a lambda it makes keeps
+  calling the wrapper, since it may escape the frame). The entry `main` is never framed. With
   nothing to frame the module is returned physically unchanged.
 - The frame's layer comes from `f$auth_layer()` =
   `Authority.frame_layer(name, text)`: the LLVM emitter turns its call into
