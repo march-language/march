@@ -1077,6 +1077,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A discarded `Ok(())` is released.** Compiled code leaked the `Result` cell a call such as
+  `println` returns in two places: a `match` or `if` used as a statement whose arms all end in a
+  call, and a block-final `let _ = e`, which returned `e`'s value although the block's type is
+  `()`. Both leak tools (`--rc-trace` with `scripts/gc-trace-report.py`, and LSan) reported one
+  or two such cells on most programs, hiding real leaks.
 - **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
   `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
   there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
