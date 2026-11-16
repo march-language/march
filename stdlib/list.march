@@ -1570,4 +1570,64 @@ mod List do
     product_onto_reverse_onto(xs, Nil, 1)
   end
 
+  -- ---- Laws for the accessors (2026-11-15 laws pass) ----
+
+  doc "`is_empty(xs)` is `len(xs) == 0`."
+  @[lemma]
+  fn is_empty_len(xs : List(a)) : {Unit | is_empty(xs) == (len(xs) == 0)} do
+    match xs do
+    Nil        -> ()
+    Cons(_, _) -> ()
+    end
+  end
+
+  doc "`head_opt(xs)` is `nth_opt(xs, 0)`."
+  @[lemma]
+  fn head_opt_nth_opt(xs : List(a)) : {Unit | head_opt(xs) == nth_opt(xs, 0)} do
+    match xs do
+    Nil        -> ()
+    Cons(_, _) -> ()
+    end
+  end
+
+  doc "Appending to a non-empty list keeps its head."
+  @[lemma]
+  fn head_opt_append(xs : {List(a) | len(_) > 0}, ys : List(a))
+    : {Unit | head_opt(append(xs, ys)) == head_opt(xs)} do
+    match xs do
+    Nil        -> ()
+    Cons(_, _) -> ()
+    end
+  end
+
+  doc "`reverse`'s loop moves a one-element list onto the accumulator."
+  @[lemma]
+  fn reverse_onto_single(x : a, acc : List(a)) : {Unit | reverse_onto(Cons(x, Nil), acc) == reverse_onto(Nil, Cons(x, acc))} do
+    ()
+  end
+
+  doc "`drop_last` undoes appending one element."
+  @[lemma]
+  fn drop_last_snoc(xs : List(a), x : a) : {Unit | drop_last(append(xs, Cons(x, Nil))) == xs} do
+    reverse_onto_single(x, Nil)
+    reverse_append(xs, Cons(x, Nil))
+    reverse_reverse(xs)
+    assert reverse(Cons(x, Nil)) == Cons(x, Nil)
+    assert append(Cons(x, Nil), reverse(xs)) == Cons(x, reverse(xs))
+    assert reverse(append(xs, Cons(x, Nil))) == Cons(x, reverse(xs))
+  end
+
+  doc "`drop_last` of a non-empty list is one element shorter."
+  @[lemma]
+  fn len_drop_last(xs : {List(a) | len(_) > 0}) : {Unit | len(drop_last(xs)) == len(xs) - 1} do
+    len_reverse(xs)
+    let r = reverse(xs)
+    match r do
+    Nil           -> ()
+    Cons(_, rest) ->
+      len_reverse(rest)
+      assert drop_last(xs) == reverse(rest)
+    end
+  end
+
 end
