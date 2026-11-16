@@ -316,9 +316,23 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
        in
        collect_iface_methods stdlib_context;
        collect_iface_methods m.mod_decls;
+       (* Every bare name the typechecker treats as a builtin.  The backends
+          and the TIR folds dispatch a builtin call on its callee's BARE name
+          (`not`, `negate`, `string_length`, `int_xor`, ...), with no C
+          symbol to collide on, so a user fn of such a name kept its bare TIR
+          name and became indistinguishable from the builtin: the stdlib's
+          own `not(...)` calls (Authority, Topology, VectorClock, ...) then
+          ran the entry module's `fn not` natively and on --target js, while
+          the interpreter (which scopes by file) ran the builtin.  Renaming
+          the definition here, where the scope is known, is the only place
+          the two can be told apart. *)
+       let builtin_names = Hashtbl.create 512 in
+       List.iter (fun n -> Hashtbl.replace builtin_names n ())
+         Typecheck.prelude_collision_builtin_names;
        List.iter (fun n ->
            if n <> "main"
-              && (Llvm_builtins.has_c_mapping n || Hashtbl.mem iface_methods n)
+              && (Llvm_builtins.has_c_mapping n || Hashtbl.mem iface_methods n
+                  || Hashtbl.mem builtin_names n)
               && not (has_defaults n)
            then Hashtbl.replace tbl n (Tir_names.builtin_shadow_name n))
          entry_fns;

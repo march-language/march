@@ -1095,6 +1095,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A function named like a builtin no longer captures the standard library's calls to that
+  builtin.** An entry-module `fn not` (or any other builtin name, such as `negate` or
+  `int_xor`) is the program's own function only in the file that defines it. Compiled natively
+  and under `--target js`, the standard library's own calls to the builtin ran the user's
+  function instead: `Topology.labels_of`, `VectorClock.compare` and others returned wrong
+  results, and on `--target js` the capability policy ran it at every launch. The interpreter
+  was already right.
+
 - **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
   compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
   but failed to compile natively (clang: "use of undefined value '@compare'") and threw

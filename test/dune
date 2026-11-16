@@ -9030,6 +9030,60 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/shadowed_negate_not.expected native_shadowed_negate_not.out)))
 
+; A builtin call in a NON-entry (stdlib) module stays the builtin even when the
+; entry module defines a fn of the same bare name (`not`, `string_is_empty`):
+; Topology.labels_of's `not(String.is_empty(l))` ran the user's `fn not`
+; natively and on --target js (and Authority's `not` calls ran it at launch on
+; JS).  Interpreter, native and JS must all print the same thing.
+(rule
+ (targets js_shadowed_builtin_cross_module.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_cross_module.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_builtin_cross_module.mjs
+              native/shadowed_builtin_cross_module.march)))
+
+(rule
+ (targets js_shadowed_builtin_cross_module.out)
+ (deps js_shadowed_builtin_cross_module.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_builtin_cross_module.out
+          (run node js_shadowed_builtin_cross_module.mjs))))
+
+(rule (alias runtest)
+ (action (diff native/shadowed_builtin_cross_module.expected
+               js_shadowed_builtin_cross_module.out)))
+
+(rule
+ (targets native_shadowed_builtin_cross_module native_shadowed_builtin_cross_module.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_cross_module.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadowed_builtin_cross_module
+        native/shadowed_builtin_cross_module.march)
+   (with-stdout-to native_shadowed_builtin_cross_module.out
+        (system "./native_shadowed_builtin_cross_module")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadowed_builtin_cross_module.expected
+               native_shadowed_builtin_cross_module.out)))
+
+(rule
+ (targets interp_shadowed_builtin_cross_module.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/shadowed_builtin_cross_module.march))
+ (action
+  (with-stdout-to interp_shadowed_builtin_cross_module.out
+    (run %{exe:../bin/main.exe} native/shadowed_builtin_cross_module.march))))
+
+(rule (alias runtest)
+ (action (diff native/shadowed_builtin_cross_module.expected
+               interp_shadowed_builtin_cross_module.out)))
+
 ; The native shadowed-builtin witness on --target js: a user `fn int_mod`
 ; collided with the first-class `const int_mod = {...}` builtin wrapper.
 (rule
