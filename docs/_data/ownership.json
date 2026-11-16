@@ -37,9 +37,9 @@
     }
   },
   "generated": {
-    "commit": "4230f741d",
+    "commit": "4e0560690",
     "compiler": "march 0.7.0",
-    "date": "2026-11-11",
+    "date": "2026-11-16",
     "inputs_sha256": "6b8bbe83b2b010d7540bacfb1eb80d6abfacb015b78f009a5c8abdd4da94809c"
   },
   "linear": {
@@ -145,7 +145,7 @@
         "main": 2,
         "plumbing": 0,
         "tasks": 0,
-        "total": 38
+        "total": 37
       },
       "excerpt": "fn inc_leaves(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))\n  end\nend\n\nfn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\n  ()\nend\n",
       "exit": 0,
@@ -165,7 +165,7 @@
         "main": 1,
         "plumbing": 13,
         "tasks": 2,
-        "total": 52
+        "total": 53
       },
       "excerpt": "fn inc_parallel(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) ->\n    match List.pmap_n([l, r], fn half -> inc_leaves(half), 2) do\n    [left, right] -> Node(left, right)\n    _ -> panic(\"two halves\")\n    end\n  end\nend\n",
       "exit": 0,
@@ -185,7 +185,7 @@
         "main": 2,
         "plumbing": 0,
         "tasks": 0,
-        "total": 69
+        "total": 68
       },
       "excerpt": "fn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\n  ()\nend\n",
       "exit": 0,
@@ -213,7 +213,7 @@
       "incs": {
         "build": 0,
         "inc_leaves": 30,
-        "main": 4
+        "main": 3
       },
       "output": "392",
       "why_copies": "No copies found: every value passed to a function that reuses it in place is its last use.\n"
