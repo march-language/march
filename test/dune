@@ -52,7 +52,9 @@
 ; ubuntu runner), so ci.yml runs each as its own job via its per-test alias
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
-; and alias both) from `dune runtest`. Unset -- every local run -- nothing
+; and alias both) from `dune runtest`, along with run_cap_conformance,
+; run_errors and test_jit, which CI runs in the `compiler` and `forge` shards. Unset --
+; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
 ;
@@ -1422,6 +1424,9 @@
 ; not shared with the developer's interactive sessions.
 (test
  (name test_jit)
+ ; Runs in CI's `forge` shard on Linux, not `rest` (with run_errors, below;
+ ; ~10 CPU-minutes). macOS still runs it: the JIT is OS-sensitive.
+ (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules test_jit)
  (libraries march_jit alcotest unix str)
  ; The session tests spawn the real compiler binary and need the staged
@@ -4488,6 +4493,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/pmap_shared_closure_capture.expected native_pmap_shared_closure_capture.out)))
+
+; A list captured by a task_spawn closure and still walked by the spawner
+; (march-language/march#1266): a consuming match released the shared cell
+; before IncRC'ing the fields it took out, racing the other thread's free.
+(rule
+ (targets native_task_shared_list_capture native_task_shared_list_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/task_shared_list_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_task_shared_list_capture
+        native/task_shared_list_capture.march)
+   (with-stdout-to native_task_shared_list_capture.out
+        (system "./native_task_shared_list_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_shared_list_capture.expected native_task_shared_list_capture.out)))
 
 ; Two tasks set the same captured native array in a 300-round loop: the
 ; copy-on-write race that C0's acquire-ordered sole-ownership test protects.
@@ -15257,7 +15282,13 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; test/run_errors.ml).
 (test
  (name run_errors)
- (enabled_if (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1))   ; see "CI sharding" above
+ ; Runs in CI's `forge` shard (ci.yml), not `rest`: ~32 CPU-minutes on a
+ ; GitHub ubuntu runner (November 2026), the longest suite in `rest`, which
+ ; left `rest` at 50-58 min against its 75 min step timeout and over it on
+ ; every slow runner. `forge` took 13-19 min.
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
  (modules run_errors)
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))

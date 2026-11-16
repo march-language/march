@@ -240,4 +240,15 @@ mod Result do
     end
   end
 
+  -- ---- Laws (2026-11-15 laws pass) ----
+
+  doc "`is_err` is the negation of `is_ok`."
+  @[lemma]
+  fn is_err_not_ok(res : Result(a, e)) : {Unit | is_err(res) == !is_ok(res)} do
+    match res do
+    Ok(_)  -> ()
+    Err(_) -> ()
+    end
+  end
+
 end

@@ -20,7 +20,7 @@ let rec consts (t : Smt.term) : string list =
   | Smt.Const n -> [ n ]
   | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.concat_map consts ts
-  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> consts a
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a | Smt.FpNaN a | Smt.FpInf a -> consts a
   | Smt.MulLit (_, a) -> consts a
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> consts a
   | Smt.Ite (c, a, b) -> consts c @ consts a @ consts b
@@ -41,7 +41,7 @@ let rec app_heads (t : Smt.term) : string list =
   | Smt.Quant (_, _, _, g, b) -> app_heads g @ app_heads b
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> []
   | Smt.App (f, ts) | Smt.Ctor (f, _, ts) -> f :: List.concat_map app_heads ts
-  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> app_heads a
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a | Smt.FpNaN a | Smt.FpInf a -> app_heads a
   | Smt.MulLit (_, a) -> app_heads a
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> app_heads a
   | Smt.Ite (c, a, b) -> app_heads c @ app_heads a @ app_heads b
@@ -122,7 +122,7 @@ let rec nonlinear (t : Smt.term) : bool =
   | Smt.Div (_, _) | Smt.Mod (_, _) -> true
   | Smt.Const _ | Smt.IntLit _ | Smt.BoolLit _ | Smt.FloatLit _ -> false
   | Smt.App (_, ts) | Smt.Ctor (_, _, ts) -> List.exists nonlinear ts
-  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a -> nonlinear a
+  | Smt.IsCtor (_, a) | Smt.IsCtorAt (_, _, _, a) | Smt.Neg a | Smt.Not a | Smt.FpNaN a | Smt.FpInf a -> nonlinear a
   | Smt.MulLit (_, a) -> nonlinear a
   (* Division by a literal keeps the query linear, like [MulLit]. *)
   | Smt.DivLit (a, _) | Smt.ModLit (a, _) -> nonlinear a

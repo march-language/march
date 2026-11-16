@@ -151,7 +151,7 @@ let span_within (a : A.span) (b : A.span) =
    reachable [eq]s (§3.5). *)
 let table_ops =
   [ "+"; "-"; "*"; "negate"; "not"; "&&"; "||"; "+."; "-."; "*."; "/."; "<."; "<=."; ">."; ">=.";
-    "string_byte_length" ]
+    "string_byte_length"; "float_is_nan"; "float_is_infinite"; "float_abs"; "math_sqrt" ]
 
 let comparison_ops = [ "<"; "<="; ">"; ">=" ]
 let eq_ops = [ "=="; "!=" ]
@@ -1353,6 +1353,8 @@ let map_term (f : Smt.term -> Smt.term) (t : Smt.term) : Smt.term =
   | FpLe (a, b) -> FpLe (f a, f b)
   | FpGt (a, b) -> FpGt (f a, f b)
   | FpGe (a, b) -> FpGe (f a, f b)
+  | FpNaN a -> FpNaN (f a)
+  | FpInf a -> FpInf (f a)
   | SetMem (a, b) -> SetMem (f a, f b)
   | SetUnion (a, b) -> SetUnion (f a, f b)
   | SetInter (a, b) -> SetInter (f a, f b)
@@ -1799,7 +1801,7 @@ let poly_sort (vars : (int * int) list ref) (t : T.ty) : Smt.sort =
       | None -> raise Decline)
     | T.TCon ("Int", []) -> Smt.SInt
     | T.TCon ("Bool", []) -> Smt.SBool
-    (* D9: the checker's Float sort, every operation on it opaque. *)
+    (* D9: the checker's Float sort; operations on it defined by their IEEE meaning. *)
     | T.TCon ("Float", []) -> Smt.SFloat
     (* D9: the opaque `$Str`, with only `$strlen`. *)
     | T.TCon ("String", []) -> RS.str_sort
@@ -2117,7 +2119,13 @@ and builtin c env nm args =
   | "*", [ a; b ] -> Smt.Mul (v a, v b)
   | "negate", [ a ] when is_int_ty (ty_of a) -> Smt.Neg (v a)
   | "string_byte_length", [ a ] -> Smt.App (RE.strlen_fn, [ v a ])
-  (* D9: Float arithmetic and comparison are opaque symbols (§2.3). *)
+  (* IEEE class tests: `fp.isNaN` / `fp.isInfinite` of the operand. *)
+  | "float_is_nan", [ a ] -> Smt.FpNaN (v a)
+  | "float_is_infinite", [ a ] -> Smt.FpInf (v a)
+  | "float_abs", [ a ] -> Smt.App (RS.float_sym "fabs", [ v a ])
+  | "math_sqrt", [ a ] -> Smt.App (RS.float_sym "fsqrt", [ v a ])
+  (* D9: Float arithmetic and comparison are one symbol per operator, each
+     defined by its IEEE meaning in the query preamble (Reflect_state.float_def). *)
   | "negate", [ a ] when is_float_ty (ty_of a) -> Smt.App (RS.float_sym "fneg", [ v a ])
   | (("+." | "-." | "*." | "/.") as op), [ a; b ] ->
     let f = match op with "+." -> "fadd" | "-." -> "fsub" | "*." -> "fmul" | _ -> "fdiv" in
@@ -2303,8 +2311,30 @@ let pre_of (u : RT.unit_) (psorts : Smt.sort list) : Smt.term list =
                    if is_list j then Some (Smt.App (RE.list_len_measure, [ t ])) else None
                  | _ -> None
                in
+               (* `_.f` over a RECORD parameter: its datatype's selector
+                  (`{Old | _.count >= 0}`, the refinement Hcr_baseline and
+                  Refine_anon give a migration's parameter).  Without it the
+                  guard did not translate, and a function with a field
+                  refinement on a parameter had no unfolding at all. *)
+               let field x f =
+                 match var x with
+                 | Some (Smt.Const c as t) -> (
+                   match int_of_string_opt (String.sub c 3 (String.length c - 3)) with
+                   | Some j -> (
+                     match List.nth_opt psorts j with
+                     | Some (Smt.SData (a, _)) -> (
+                       match record_of_adt a with
+                       | Some (_, ctor, names) -> (
+                         match List.find_index (( = ) f) names with
+                         | Some k -> Some (field_sel ctor k t)
+                         | None -> None)
+                       | None -> None)
+                     | _ -> None)
+                   | None -> None)
+                 | _ -> None
+               in
                match
-                 Refine_scope.smt_of ~resolve_var:var ~resolve_measure:measure
+                 Refine_scope.smt_of ~resolve_var:var ~resolve_measure:measure ~resolve_field:field
                    ~resolve_tester:(fun ctor a ->
                      match a with
                      | A.EVar x ->
@@ -2378,7 +2408,8 @@ let declared_logic_symbols (preamble : string) (vc : Smt.vc) : bool =
     if !ok then begin
       (match t with
        | Smt.App (f, _) when String.length f > 3 && String.sub f 0 3 = "|r:" ->
-         if not (contains preamble ("(declare-fun " ^ f ^ " ")) then ok := false
+         if not (contains preamble ("(declare-fun " ^ f ^ " ") || contains preamble ("(define-fun " ^ f ^ " "))
+         then ok := false
        | _ -> ());
       List.iter walk (Smt.children t)
     end

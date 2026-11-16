@@ -283,6 +283,7 @@ let rec mentions_str (is_str : string -> bool) (t : Smt.term) : bool =
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
   | Smt.FpGe (a, b) -> m a || m b
+  | Smt.FpNaN a | Smt.FpInf a -> m a
   (* A set is never itself `Str`-sorted; a `Str` constant INSIDE one (as an
      element) is well-sorted there, and is [wellsorted]'s business. *)
   | Smt.SetEmpty _ | Smt.SetSng _ | Smt.SetMem _ | Smt.SetUnion _ | Smt.SetInter _
@@ -356,6 +357,7 @@ let rec wellsorted (is_str : string -> bool) (t : Smt.term) : bool =
      genuinely FLOATS is [float_wellsorted]'s job, not this guard's. *)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
   | Smt.FpGe (a, b) -> (not (m a)) && not (m b)
+  | Smt.FpNaN a | Smt.FpInf a -> not (m a)
   (* A set ELEMENT may be a `Str` constant (a string-element set) or an Int
      term; a set OPERAND is a set term, checked recursively.  Whether the
      element sorts AGREE across a formula is [resolve_set_sorts]'s job. *)
@@ -388,6 +390,7 @@ let rec abs_apps (t : Smt.term) : (string * Smt.term list) list =
   | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
   | Smt.SetSub (a, b) ->
     m a @ m b
+  | Smt.FpNaN a | Smt.FpInf a -> m a
 
 (* One `declare-fun` per abstract symbol the query mentions, at the sort of
    its argument (a declared constant: well-formedness rule 2 makes the
@@ -440,7 +443,7 @@ let float_term (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.FloatLit _ -> true
   | Smt.Const c -> is_float c
   (* A reflected function's Float result (reflection D9: the checker's Float
-     sort, its body's operations opaque). *)
+     sort; its body's operations defined by their IEEE meaning). *)
   | Smt.App (f, _) -> (
     match Reflect_state.sig_of f with Some s -> s.Reflect_state.fs_ret = Smt.SFloat | None -> false)
   | _ -> false
@@ -500,6 +503,7 @@ let rec mentions_float (is_float : string -> bool) (t : Smt.term) : bool =
   | Smt.Le (a, b) | Smt.Gt (a, b) | Smt.Ge (a, b)
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
   | Smt.FpGe (a, b) -> m a || m b
+  | Smt.FpNaN a | Smt.FpInf a -> m a
   | Smt.SetEmpty _ -> false
   | Smt.SetSng (_, a) -> m a
   | Smt.SetMem (a, b) | Smt.SetUnion (a, b) | Smt.SetInter (a, b) | Smt.SetDiff (a, b)
@@ -520,6 +524,7 @@ let rec float_wellsorted (is_float : string -> bool) (t : Smt.term) : bool =
   match t with
   | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b) | Smt.FpGt (a, b)
   | Smt.FpGe (a, b) -> float_term is_float a && float_term is_float b
+  | Smt.FpNaN a | Smt.FpInf a -> float_term is_float a
   | Smt.Not a -> w a
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
   (* A bare float where the enclosing context wants a Bool or an Int. *)
@@ -551,7 +556,7 @@ let rec formula_wellsorted (sort_of : string -> Smt.sort option) (t : Smt.term) 
   | Smt.Not a -> w a
   | Smt.And (a, b) | Smt.Or (a, b) | Smt.Implies (a, b) -> w a && w b
   | Smt.Eq _ | Smt.Ne _ | Smt.Lt _ | Smt.Le _ | Smt.Gt _ | Smt.Ge _
-  | Smt.FpEq _ | Smt.FpLt _ | Smt.FpLe _ | Smt.FpGt _ | Smt.FpGe _ -> true
+  | Smt.FpEq _ | Smt.FpLt _ | Smt.FpLe _ | Smt.FpGt _ | Smt.FpGe _ | Smt.FpNaN _ | Smt.FpInf _ -> true
   (* Membership and subset are the two Bool-valued set operators. *)
   | Smt.SetMem _ | Smt.SetSub _ -> true
   (* An `ite` is Bool-valued exactly when its branches are.  The reflector's
@@ -1486,6 +1491,7 @@ let vc_set_elem_sorts (vc : Smt.vc) : Smt.sort list =
     | Smt.Implies (a, b) | Smt.Eq (a, b) | Smt.Ne (a, b) | Smt.Lt (a, b) | Smt.Le (a, b)
     | Smt.Gt (a, b) | Smt.Ge (a, b) | Smt.FpEq (a, b) | Smt.FpLt (a, b) | Smt.FpLe (a, b)
     | Smt.FpGt (a, b) | Smt.FpGe (a, b) -> go a; go b
+    | Smt.FpNaN a | Smt.FpInf a -> go a
   in
   go vc.Smt.goal;
   List.iter go vc.Smt.assumptions;
@@ -4177,6 +4183,7 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       let ta = infer a in
       let tb = infer b in
       unify ta tb; IBool
+    | Smt.FpNaN a | Smt.FpInf a -> ignore (infer a); IBool
     | Smt.Ctor (c, srt, args) ->
       let inst =
         match srt with
@@ -4358,6 +4365,8 @@ let resolve_sorts_exact (decls : (string * Smt.sort) list) (goal : Smt.term)
       | Smt.FpLe (a, b) -> let a' = rewrite a in Smt.FpLe (a', rewrite b)
       | Smt.FpGt (a, b) -> let a' = rewrite a in Smt.FpGt (a', rewrite b)
       | Smt.FpGe (a, b) -> let a' = rewrite a in Smt.FpGe (a', rewrite b)
+      | Smt.FpNaN a -> Smt.FpNaN (rewrite a)
+      | Smt.FpInf a -> Smt.FpInf (rewrite a)
       | Smt.Ctor (c, srt, args) ->
         let args' = List.map rewrite args in
         let inst = pop () in
@@ -4488,6 +4497,7 @@ let rec term_sorts (acc : Smt.sort list) (t : Smt.term) : Smt.sort list =
   | Smt.FpGt (a, b) | Smt.FpGe (a, b) | Smt.SetMem (a, b) | Smt.SetUnion (a, b)
   | Smt.SetInter (a, b) | Smt.SetDiff (a, b) | Smt.SetSub (a, b) ->
     term_sorts (term_sorts acc a) b
+  | Smt.FpNaN a | Smt.FpInf a -> term_sorts acc a
   | Smt.SetCard (e, a) -> term_sorts (e :: acc) a
 
 (* The element sorts [query_instance_preamble]'s own `mis` need `MSet$<elem>`
@@ -4619,8 +4629,11 @@ let query_instance_preamble ~(declared : string) ~(measures : bool)
     String.concat ""
       (List.map
          (fun (f, (ps, r)) ->
-           Printf.sprintf "(declare-fun %s (%s) %s)\n" f (String.concat " " (List.map Smt.string_of_sort ps))
-             (Smt.string_of_sort r))
+           match Reflect_state.float_def f with
+           | Some d -> d
+           | None ->
+             Printf.sprintf "(declare-fun %s (%s) %s)\n" f (String.concat " " (List.map Smt.string_of_sort ps))
+               (Smt.string_of_sort r))
          rapps)
   in
   let elem =

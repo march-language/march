@@ -165,8 +165,24 @@ the lemma `counter_rollback_roundtrip` is false: its theorem `counter_rollback_s
 
 `forge hot-reload check` prints a `rollback round trip` line for the actor. The rollback
 deploy itself is unchanged: its `migrate_state` is this function. The check unfolds both
-functions, so it covers what the refinement checker can reflect; a state with a `String`
-field is reported `not proved` for now.
+functions, so it covers what the refinement checker can reflect. The old state's
+refinements, including the ones the running version guaranteed, are assumed of `old`.
+
+When the compiler derives the forward migration (a state that only gained fields, see
+[Derived migrations](#derived-migrations-adding-a-field-needs-no-migrate_state)), it derives this reverse too, unless you wrote
+one: it copies back the fields the running version had and drops the added ones. The
+round trip is proved like a written one, and the line reads
+`rollback round trip (derived)`. The build's sidecar records the state the rollback
+returns to, so the rollback deploy needs nothing written either: redeploying the old
+source, whose state only lacks the added fields, gets its `migrate_state` derived as that
+proved rollback (`migrate_state (derived rollback)`), and forge says so:
+
+```
+actor Counter: migrate_state derived as the running version's proved rollback (drops hits, the fields that version added)
+```
+
+A removed field is otherwise never derived away: only a rollback to exactly the state the
+running version's proved rollback returns to drops data without a written migration.
 
 ## Server setup
 
@@ -527,6 +543,8 @@ actor Counter: migrate_state derived from the running version's state (adds hist
 ```
 
 A derived migration is checked like one you wrote: the same refinement and `@invariant` proofs, the same counterexample search, and the same live-data check before `ACTIVATE`. Copying a field keeps whatever the running version guaranteed of it, and a new field's `init` value is checked against its refinement. Both rules are proved once in the compiler's test suite, so with unchanged refinements there is nothing left for you to prove. If you also tightened a kept field's refinement, the build fails at that field with the running state that breaks it, and asks you to write the migration.
+
+The derived migration comes with its reverse, `<actor>_rollback_state`, and the build proves that rolling back loses nothing; see [Schema baselines and rollback](#schema-baselines-and-rollback).
 
 Nothing is derived when the change needs a decision. The deploy is then refused as before, and the refusal says why:
 

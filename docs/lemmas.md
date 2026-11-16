@@ -867,8 +867,19 @@ This module builds. Replace the body of `cat_nil` with `()` and the build fails 
 The standard library proves lemmas about `List`: `List.append_nil`, `List.append_assoc`,
 `List.len_append`, `List.reverse_reverse`, `List.reverse_append`, `List.len_reverse`,
 `List.len_take`, `List.len_drop`, `List.take_drop`, `List.take_append`, `List.drop_append`,
-`List.nth_opt_append`, `List.sum_int_append`, `List.sum_int_reverse`, `List.product_int_append`
-and `List.product_int_reverse`, and about protocols in `Session.Theory` (`dual_dual`,
+`List.nth_opt_append`, `List.sum_int_append`, `List.sum_int_reverse`, `List.product_int_append`,
+`List.product_int_reverse`, `List.is_empty_len`, `List.head_opt_nth_opt`, `List.head_opt_append`,
+`List.drop_last_snoc` and `List.len_drop_last`; about `Option` (`is_none_not_some`,
+`zip_is_some`, `len_to_list`, `to_list_is_some`), `Result` (`is_err_not_ok`) and
+`Math` (`min_int_comm`, `max_int_comm`, `min_plus_max`, `clamp_int_within`,
+`clamp_int_idem`, and for Floats `min_float_comm`, `max_float_comm`, `clamp_float_within`,
+`abs_idem`, `abs_nonneg`, `sqrt_neg_nan`); about `Tuple` (`swap_swap`, `first_swap`,
+`second_swap`, `first_second_make`, `len_to_list`, `len_zip`), `Duration`
+(`to_milliseconds_add`, `add_comm`, `add_assoc`, `subtract_add`, `unit_steps`,
+`compare_antisym`, `compare_zero`), `Queue` (`size_to_list`, `size_push_back`,
+`size_push_front`, `is_empty_size`, and its helpers `len_rev`, `list_len_len`,
+`len_list_append`) and `Deque` (`size_push_front`, `size_push_back`, `is_empty_size`); and
+about protocols in `Session.Theory` (`dual_dual`,
 `project_dual`, `pairwise`, `projections_compose`, `progress`; see [What is proved about a protocol]({{ site.baseurl }}/docs/choreography/#what-is-proved-about-a-protocol)).
 You call them like your own lemmas, so
 you don't need to re-prove `reverse(reverse(xs)) == xs` in every project. The manifest
@@ -877,7 +888,10 @@ re-proving it on every build.
 
 `Math.min_int`, `Math.max_int` and `Math.clamp_int` state their laws in their result types
 instead, so you get them without a call: `min_int(a, b)` is at most `a` and `b` and is one of
-them, and `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`.
+them, and `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`. The Float
+versions do the same unless an argument is NaN: `min_float(a, b)` and `max_float(a, b)` are
+bounded by both and equal to one of them, and `clamp_float(x, low, high)` is within
+`[low, high]`.
 
 ## Which lemma to call: `--refine-infer`
 
@@ -1173,9 +1187,13 @@ build checks it, so a reviewer doesn't have to.
   apart, so a function over it isn't used in a theorem (the warning says so). Rename the type.
   A user function or constructor named like a stdlib one (`fn unwrap`, a `Reply`
   constructor) is fine: the call resolves to your own.
-- **`String`, `Bytes` and `Float` theorems are limited.** The logic treats `String` and
-  `Bytes` contents as opaque, so a round-trip law such as `decode(encode(s)) == s` can't be
-  proved yet. `forge test` can't generate `String` or `Float` inputs for a lemma either.
+- **`String` and `Bytes` theorems are limited, and `Float` ones need a NaN hypothesis.** The
+  logic treats `String` and `Bytes` contents as opaque, so a round-trip law such as
+  `decode(encode(s)) == s` can't be proved yet. Float operations in a body are their IEEE
+  meaning, so a Float law proves once its parameters rule out NaN (`{Float | !is_nan(_)}`;
+  see [Float Refinements]({{ site.baseurl }}/docs/refinement-types/#float-refinements));
+  arithmetic inside a predicate (`{Float | _ +. 1.0 > 0.0}`) is still skipped. `forge test`
+  can't generate `String` or `Float` inputs for a lemma either.
 - **A hand-written `==` is not used.** `==` in a theorem is structural equality. A type
   with its own `Eq` (as `List` has) gets a `predicate_eq_structural` warning; for laws over
   a custom equality, write the equality as a reflected function.

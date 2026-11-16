@@ -21,6 +21,35 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Derived rollbacks for hot deploys.** When the compiler derives a `migrate_state` because
+  an actor's state only gained fields, it now derives the reverse `<actor>_rollback_state`
+  too (copy back the old fields, drop the added ones) and proves the round trip. Rolling
+  back is then free: redeploying the old source gets its migration derived as that proved
+  rollback, where before a removed field always needed a hand-written migration.
+  `forge hot-reload check` shows `rollback round trip (derived)` and
+  `migrate_state (derived rollback)`.
+- **Laws for `Tuple`, `Duration`, `Queue` and `Deque`.** 23 proved lemmas: `Tuple.swap_swap`,
+  `Tuple.len_zip` and the `first`/`second`/`make` laws; `Duration.add_comm`, `add_assoc`,
+  `subtract_add`, `to_milliseconds_add`, `unit_steps` (a minute is 60 seconds, and so on) and
+  two `compare` laws; and `size` laws for `Queue` and `Deque` (each push adds one, `is_empty`
+  is size 0, a queue's size is the length of its list).
+- **`Math` Float functions state what they return.** `Math.min_float`, `Math.max_float` and
+  `Math.clamp_float` carry return types that hold unless an argument is NaN, so a caller
+  passing non-NaN values gets the bound without a call, and `Math` has new proved lemmas
+  `min_float_comm`, `max_float_comm`, `clamp_float_within`, `abs_idem`, `abs_nonneg` and
+  `sqrt_neg_nan`.
+- **16 more proved laws in the standard library.** `List` (`drop_last_snoc`:
+  `drop_last(append(xs, [x])) == xs`, `len_drop_last`, `is_empty_len`, `head_opt_nth_opt`,
+  `head_opt_append`), `Option` (`zip_is_some`, `is_none_not_some`, `len_to_list`,
+  `to_list_is_some`), `Result` (`is_err_not_ok`) and `Math` (`min_int_comm`,
+  `max_int_comm`, `min_plus_max`, `clamp_int_within`, `clamp_int_idem`). Call one before a contract that needs its
+  fact; like every lemma they are erased before the program runs.
+- **Float laws can be proved, and a contract can say "not NaN".** A function's Float
+  operations (`+.`, `-.`, `*.`, `/.`, `<`, `<=`, `>`, `>=`) now mean exactly what the program
+  computes (IEEE-754 binary64, round to nearest even) when the refinement checker reasons about
+  it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
+  `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
+  state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
 - **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
   `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
   any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:
@@ -1040,6 +1069,27 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
+  `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
+  there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
+  backend.
+- **A lemma can unfold a function whose parameter has a field refinement**
+  (`fn mig(old : {Old | _.count >= 0})`). Before, such a function had no unfolding at all, so
+  the rollback round trip of any actor with a refined state field was `not proved`.
+
+- **Compiled HTTP clients read the response status, headers and errors correctly.** In
+  compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
+  251), so `HttpClient.step_raise_on_error` let a 401 or 403 through as a success; every
+  response had an empty header list, so `Http.get_header` found nothing and no redirect was
+  followed; and a server that closed the connection without answering produced a 200 with
+  an empty body. `HttpTransport` and `HttpClient` now give the same status, headers and
+  `Err` as the interpreter.
+- **A list (or other value) captured by a `task_spawn` closure and still read by the spawning
+  thread no longer crashes compiled code** (#1266). A consuming `match` on a shared cell
+  released the cell before taking its own references to the fields it pulled out, so
+  another thread could free those fields in between; the compiled program died with
+  SIGSEGV, SIGBUS or SIGABRT. The fields are now retained first.
 
 - **`Process.kill` can no longer signal a recycled pid.** A kill racing a `wait_proc` on
   another task could reach a pid the wait had already reaped; it now signals only while

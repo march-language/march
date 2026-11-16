@@ -5769,6 +5769,20 @@ let compile filename =
                   | Some (March_desugar.Desugar_migrate_derive.Not_derived why) ->
                     Printf.sprintf "    \"migrate_not_derived\": %S,\n" why
                   | None -> "" in
+                (* Derived rollbacks (todo 2026-11-08-hcr-derive-rollback-state):
+                   the shape this build's proved derived rollback returns to,
+                   so the rollback deploy can derive its migration; and the
+                   fields a drop-only migration (that rollback) drops. *)
+                let names_json l =
+                  String.concat ", " (List.map Schema_migration.json_string l) in
+                let derive_line =
+                  derive_line
+                  ^ (match List.assoc_opt actor_name !March_desugar.Desugar_migrate_derive.rollbacks with
+                     | Some keeps -> Printf.sprintf "    \"rollback_derived\": [%s],\n" (names_json keeps)
+                     | None -> "")
+                  ^ (match List.assoc_opt actor_name !March_desugar.Desugar_migrate_derive.drops with
+                     | Some ds -> Printf.sprintf "    \"migrate_derived_drops\": [%s],\n" (names_json ds)
+                     | None -> "") in
                 (* H3: a `@compat(simulation)` actor's handler bodies, as
                    source, so the NEXT build can check that migrating
                    commutes with handling (Desugar_simulation). *)

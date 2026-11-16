@@ -25924,6 +25924,30 @@ let hcr_rollback_suite =
         has out "the lemma `counter_rollback_roundtrip` is false";
         has out "announced: true";
         has out "rollback round trip  violated: rolling back loses part of the old state");
+    gated "a function whose parameter has a field refinement unfolds in a lemma" (fun () ->
+        (* Reflect's unfolding guard translates `_.count >= 0` through the
+           record's selector (Refine_reflect.pre_of); without it `mig` had no
+           equations and both lemmas below were skips.  A deployed field
+           refinement puts exactly this guard on every migration. *)
+        let src ~rb =
+          "mod NR do\n\
+          \  type Old = { count : Int }\n\
+          \  type New = { count : Int, label : Int }\n\
+          \  fn mig(old : {Old | _.count >= 0}) : New do { count: old.count, label: 2 } end\n\
+          \  fn rb(new : New) : Old do " ^ rb ^ " end\n\
+          \  @[lemma]\n\
+          \  fn rt(old : {Old | _.count >= 0}) : {Unit | rb(mig(old)) == old} do () end\n\
+          end\n"
+        in
+        let code, out = run_cli "--check --refine-report-sites=all" (src ~rb:"{ count: new.count }") in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "proved\tuser";
+        Alcotest.(check bool) ("rt proved\n" ^ out) true
+          (List.exists (fun l -> contains l "proved\t" && contains l "\trt\t") (String.split_on_char '\n' out));
+        let code, out = run_cli "--check" (src ~rb:"{ count: new.count + 1 }") in
+        Alcotest.(check bool) "a wrong rollback is rejected" true (code <> 0);
+        has out "rt");
+
     gated "no rollback_state: no round-trip lemma, no line" (fun () ->
         let src =
           "mod N do\n\
@@ -26041,8 +26065,11 @@ let guarantees_suite =
             let code, out = run_cli_in dir "--check --guarantees --hcr-baseline base.schemas.json" in
             Alcotest.(check int) "accepted" 0 code;
             Alcotest.(check string) "summary" "actor Counter: proved" (first_line out);
-            has out "state refinements        proved: 3 sites in init and handlers";
-            has out "migrate_state (derived)  proved: 1 site against the deployed build"));
+            has out "state refinements              proved: 3 sites in init and handlers";
+            has out "migrate_state (derived)        proved: 1 site against the deployed build";
+            (* Its reverse is derived too, and the round trip proved
+               (todo 2026-11-08-hcr-derive-rollback-state). *)
+            has out "rollback round trip (derived)  proved"));
     Alcotest.test_case "nothing to report" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" "mod G do\n  fn f(x : Int) : Int do x end\nend\n" in
         has out "no actors or protocols in m.march") ]
@@ -30116,6 +30143,105 @@ end
    `--hot-reload`, which writes each `@compat(simulation)` handler's body into
    the sidecar (`"steps"`); v2 is checked against that sidecar, which
    generates the step functions and one lemma per message. *)
+(* Derived rollbacks (todo 2026-11-08-hcr-derive-rollback-state;
+   Desugar_migrate_derive).  An add-only derived migration gets its reverse
+   as `<actor>_rollback_state`, which the generated round-trip lemma proves,
+   and the sidecar records the shape it returns to (`rollback_derived`).
+   Redeploying the old source against that sidecar derives the drop-only
+   migration (`migrate_derived_drops`) instead of refusing a removed field.
+   End to end through real `--compile-so --hot-reload` sidecars. *)
+let hcr_derived_rollback_suite =
+  let prog ~fields ~init ~extra =
+    "mod Main do\n\
+    \  actor Counter do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n\
+    \    on Tick() do { state with count: state.count + 1 } end\n\
+    \  end\n" ^ extra ^ "\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  let v1 = prog ~fields:"count : Int, label : String" ~init:"count: 0, label: \"v1\"" ~extra:"" in
+  let v2 ?(extra = "") () =
+    prog ~fields:"count : Int, label : String, hits : Int" ~init:"count: 0, label: \"v1\", hits: 0" ~extra
+  in
+  let dir () = Filename.temp_dir "hcr_drb" "" in
+  (* The sidecar of [src] built in [d] against [baseline] (a file in [d]). *)
+  let sidecar ?baseline d name src =
+    let src_p = Filename.concat d (name ^ ".march") in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc src);
+    let so = Filename.concat d (name ^ ".so") in
+    let base = match baseline with Some b -> [ "--hcr-baseline"; Filename.concat d b ] | None -> [] in
+    let rc, _, err =
+      run_march_on_env ~cwd:d [ ("HOME", d) ]
+        ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ base @ [ "-o"; so ]) src_p
+    in
+    Alcotest.(check int) (name ^ " compiles; stderr:\n" ^ err) 0 rc;
+    let text = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat d (name ^ ".json")) (fun oc -> output_string oc text);
+    text
+  in
+  let check d ~baseline src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d ("--check --guarantees --hcr-baseline " ^ baseline)
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  [ gated "an add-only derivation gets a proved rollback, recorded in the sidecar" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d ~baseline:"v1.json" (v2 ()) in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "migrate_state (derived)";
+        has out "rollback round trip (derived)  proved";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (v2 ()) in
+        has s2 {|"migrate_derived": ["hits"]|};
+        has s2 {|"rollback_derived": ["count", "label"]|});
+    gated "a written rollback_state wins over the derived one" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let extra =
+          "  fn counter_rollback_state(new : { count : Int, label : String, hits : Int }) : { count : Int, label : String } do\n\
+          \    { count: new.count, label: new.label }\n\
+          \  end"
+        in
+        let _, out = check d ~baseline:"v1.json" (v2 ~extra ()) in
+        (* The report pads labels into a column, so match the line. *)
+        Alcotest.(check bool) ("a proved rollback line\n" ^ out) true
+          (List.exists
+             (fun l -> contains l "rollback round trip " && contains l "proved: rollback_state")
+             (String.split_on_char '\n' out));
+        Alcotest.(check bool) "not labelled derived" false (contains out "rollback round trip (derived)");
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (v2 ~extra ()) in
+        Alcotest.(check bool) "no rollback_derived" false (contains s2 "rollback_derived"));
+    gated "redeploying the old source derives its migration as that rollback" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (v2 ()));
+        let code, out = check d ~baseline:"v2.json" v1 in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "migrate_state (derived rollback)  proved";
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v1 in
+        has s3 {|"migrate_derived_drops": ["hits"]|});
+    gated "without the recorded rollback a removed field is still not derived" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (v2 ()) in
+        let stripped =
+          String.concat "\n"
+            (List.filter (fun l -> not (contains l "rollback_derived")) (String.split_on_char '\n' s2))
+        in
+        Out_channel.with_open_bin (Filename.concat d "v2.json") (fun oc -> output_string oc stripped);
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v1 in
+        has s3 {|"migrate_not_derived": "it removes hits"|});
+    gated "a rollback to another shape than the recorded one is not derived" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (v2 ()));
+        let v0 = prog ~fields:"count : Int" ~init:"count: 0" ~extra:"" in
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v0 in
+        Alcotest.(check bool) "not derived" true (contains s3 "migrate_not_derived");
+        Alcotest.(check bool) "no drops" false (contains s3 "migrate_derived_drops")) ]
+
 let hcr_simulation_suite =
   let v1 =
     {|mod Main do
@@ -30547,6 +30673,7 @@ let () =
       ("actor-invariant", actor_invariant_suite);
       ("hcr-rollback", hcr_rollback_suite);
       ("hcr-simulation", hcr_simulation_suite);
+      ("hcr-derived-rollback", hcr_derived_rollback_suite);
       ("session-theory", session_theory_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
@@ -30592,6 +30719,9 @@ let () =
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
+      ("reflect-stdlib-laws", Test_refine_stdlib_list.laws_pass_tests);
+      ("reflect-stdlib-float-laws", Test_refine_stdlib_list.float_laws_tests);
+      ("reflect-stdlib-wave2-laws", Test_refine_stdlib_list.wave2_laws_tests);
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
@@ -30606,7 +30736,7 @@ let () =
       ("aliases", Test_refine_alias.tests);
       ("two-state", Test_refine_two_state.tests);
       ("ghost", Test_refine_ghost.tests);
-      ("reflect-lemma", Test_refine_lemma.scoped_asserts @ Test_refine_lemma.scoped_hint_bindings @ Test_refine_lemma.scoped_directives @ Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.scalar_fields @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
+      ("reflect-lemma", Test_refine_lemma.scoped_asserts @ Test_refine_lemma.scoped_hint_bindings @ Test_refine_lemma.scoped_directives @ Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.float_ieee @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.scalar_fields @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

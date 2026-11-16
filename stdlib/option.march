@@ -249,4 +249,46 @@ mod Option do
     end
   end
 
+  -- ---- Laws (2026-11-15 laws pass) ----
+
+  doc "`is_none` is the negation of `is_some`."
+  @[lemma]
+  fn is_none_not_some(opt : Option(a)) : {Unit | is_none(opt) == !is_some(opt)} do
+    match opt do
+    None    -> ()
+    Some(_) -> ()
+    end
+  end
+
+  doc "`zip` is `Some` exactly when both options are."
+  @[lemma]
+  fn zip_is_some(oa : Option(a), ob : Option(b)) : {Unit | is_some(zip(oa, ob)) == (is_some(oa) && is_some(ob))} do
+    match oa do
+    None    -> ()
+    Some(_) ->
+      match ob do
+      None    -> ()
+      Some(_) -> ()
+      end
+    end
+  end
+
+  doc "`to_list` has at most one element."
+  @[lemma]
+  fn len_to_list(opt : Option(a)) : {Unit | len(to_list(opt)) <= 1} do
+    match opt do
+    None    -> ()
+    Some(_) -> ()
+    end
+  end
+
+  doc "`to_list` has an element exactly when the option is `Some`."
+  @[lemma]
+  fn to_list_is_some(opt : Option(a)) : {Unit | is_some(opt) == (len(to_list(opt)) == 1)} do
+    match opt do
+    None    -> ()
+    Some(_) -> ()
+    end
+  end
+
 end
