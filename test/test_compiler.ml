@@ -14559,11 +14559,13 @@ let test_stage_d_with_stdlib_prepended () =
    the grant is not a judgement call, it is `caps(main)`, which the compiler
    has already computed by the time it reports the error. Emitting it as a
    `FReplace` over the parameter list lets `forge fix` apply it. *)
-(* The grant's parameter-list edit, from the first diagnostic that carries
-   a fix.  Since ocap phase 4 (decision 3) these programs declare no module
-   `needs` (a module `needs` line is itself `main`'s request), so the missing
-   grant is folded into the missing-`needs` error, whose fix carries both the
-   `needs` line and this edit: look among its edits. *)
+(* The grant's replace edit, from the first diagnostic whose fix carries one.
+   Since ocap phase 4 (decision 3) `main`'s grant is its request: its `needs`
+   clause and `Cap` parameters, or, with neither, the module's `needs` line.
+   So the replace fix lives on `fn main() needs ()`, the one shape whose
+   request is empty while the module says what it needs: it rewrites the
+   clause.  A module that declares nothing gets the missing-`needs` error,
+   whose fix is the `needs` line alone (pinned below). *)
 let stage_d_fix_of src =
   let ctx = typecheck src in
   List.fold_left
@@ -14582,7 +14584,8 @@ let stage_d_fix_of src =
 let test_stage_d_emits_replace_fix () =
   match
     stage_d_fix_of {|mod StageDFix do
-      fn main() : () do
+      needs IO.Console
+      fn main() : () needs () do
         println("hi")
         ()
       end
@@ -14591,17 +14594,16 @@ let test_stage_d_emits_replace_fix () =
   | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
   | Some (text, _) ->
     Alcotest.(check string)
-      "the fix is the parameter list the compiler computed"
-      "(_cap_console : Cap(IO.Console))" text
+      "the fix is the clause the compiler computed"
+      "needs IO.Console" text
 
 let test_stage_d_fix_spans_the_parameter_list () =
-  (* The span must cover `()` and NOTHING else. Replacing the function NAME
-     instead would produce `fn main(_cap_console : Cap(IO.Console))() : ()`,
-     which is why `fn_clause` had to grow a parameter-list span rather than
-     reuse one it already had. *)
+  (* The span must cover `needs ()` and NOTHING else: replacing more (the
+     return type, the `do`) would corrupt the signature. *)
   match
     stage_d_fix_of {|mod StageDFixSpan do
-      fn main() : () do
+      needs IO.Console
+      fn main() : () needs () do
         println("hi")
         ()
       end
@@ -14611,13 +14613,14 @@ let test_stage_d_fix_spans_the_parameter_list () =
   | Some (_, span) ->
     Alcotest.(check int) "fix starts and ends on one line"
       span.March_ast.Ast.start_line span.March_ast.Ast.end_line;
-    Alcotest.(check int) "the replaced text is exactly `()`" 2
+    Alcotest.(check int) "the replaced text is exactly `needs ()`" 8
       (span.March_ast.Ast.end_col - span.March_ast.Ast.start_col)
 
 let test_stage_d_fix_covers_multiple_capabilities () =
   match
     stage_d_fix_of {|mod StageDFixMulti do
-      fn main() : () do
+      needs IO.Console, IO.FileWrite
+      fn main() : () needs () do
         match file_write("/tmp/stage_d_fix", "d") do
           Ok(_) -> Authority.ignore(println("ok"))
           Err(_) -> Authority.ignore(println("e"))
@@ -14628,8 +14631,54 @@ let test_stage_d_fix_covers_multiple_capabilities () =
   | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
   | Some (text, _) ->
     Alcotest.(check string)
-      "every reached capability appears in the generated parameter list"
-      "(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite))" text
+      "every reached capability appears in the generated clause"
+      "needs IO.Console, IO.FileWrite" text
+
+let test_stage_d_needs_unit_reported_once () =
+  (* `fn main() needs ()` doing IO is one finding: [cap_grant], whose fix
+     rewrites the clause.  The function-bound check does not repeat it as a
+     [cap_bound] at the same clause. *)
+  let ctx = typecheck {|mod StageDOnce do
+      needs IO.Console
+      fn main() : () needs () do
+        println("hi")
+        ()
+      end
+    end|} in
+  let codes =
+    List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+        if d.severity = March_errors.Errors.Error
+        then Some (March_errors.Errors.Code.slug_of d.code) else None)
+      ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check (list string)) "exactly one error, cap_grant" ["cap_grant"] codes
+
+let test_stage_d_module_without_needs_fix_is_needs_line () =
+  (* A module that declares nothing: `main` (no clause, no `Cap` parameter)
+     requests the module's `needs` line, so the missing-`needs` error's fix,
+     the `needs` line, is the whole remedy.  It carries no edit to `main`'s
+     parameters any more. *)
+  let src = {|mod StageDNeedsLine do
+      fn main() : () do
+        println("hi")
+        ()
+      end
+    end|} in
+  Alcotest.(check bool) "no replace edit on main" true (stage_d_fix_of src = None);
+  let ctx = typecheck src in
+  let inserts =
+    List.concat_map (fun (d : March_errors.Errors.diagnostic) ->
+        match d.fix with
+        | Some f ->
+          List.filter_map (function
+              | March_errors.Errors.FInsert { text; _ } -> Some (String.trim text)
+              | _ -> None)
+            (March_errors.Errors.fix_edits f.March_errors.Errors.edit)
+        | None -> [])
+      ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "the fix inserts `needs IO.Console`" true
+    (List.mem "needs IO.Console" inserts);
+  Alcotest.(check bool) "and still says main is granted nothing" true
+    (has_error_with ctx "granted nothing")
 
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
@@ -20562,8 +20611,10 @@ let compiler_suites =
           Alcotest.test_case "module without main is not gated"    `Quick test_module_without_main_is_not_gated;
           Alcotest.test_case "real stdlib-prepended shape"         `Quick test_stage_d_with_stdlib_prepended;
           Alcotest.test_case "diagnostic carries a replace fix"     `Quick test_stage_d_emits_replace_fix;
-          Alcotest.test_case "fix span covers exactly `()`"         `Quick test_stage_d_fix_spans_the_parameter_list;
+          Alcotest.test_case "fix span covers exactly `needs ()`"   `Quick test_stage_d_fix_spans_the_parameter_list;
           Alcotest.test_case "fix lists every reached capability"   `Quick test_stage_d_fix_covers_multiple_capabilities;
+          Alcotest.test_case "needs () reported once, as cap_grant" `Quick test_stage_d_needs_unit_reported_once;
+          Alcotest.test_case "no-needs module: fix is the needs line" `Quick test_stage_d_module_without_needs_fix_is_needs_line;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;
