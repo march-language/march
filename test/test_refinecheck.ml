@@ -30389,6 +30389,104 @@ let hcr_derive_rename_suite =
         let formatted = March_format.Format.format_source ~filename:"m.march" src in
         has formatted "migrate old -> { total: old.count }") ]
 
+(* `--hcr-drop Actor.field` (forge deploy hot --drop, todo
+   2026-11-15-hcr-deploy-drop-consent) and the rename suggestion (todo
+   2026-11-15-hcr-migrate-clause-suggestion), end to end over real
+   `--hot-reload` sidecars. *)
+let hcr_drop_and_suggest_suite =
+  let prog ?(clause = "") ~fields ~init () =
+    "mod Main do\n\
+    \  actor Counter do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n" ^ (if clause = "" then "" else "    " ^ clause ^ "\n") ^ "\
+    \    on Tick() do { state with label: \"t\" } end\n\
+    \  end\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  let v1 =
+    prog ~fields:"count : {Int | _ >= 0}, label : String, history : List(Int)"
+      ~init:"count: 0, label: \"v1\", history: []" ()
+  in
+  let dir () = Filename.temp_dir "hcr_drop" "" in
+  let sidecar ?baseline ?(flags = []) d name src =
+    let src_p = Filename.concat d (name ^ ".march") in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc src);
+    let so = Filename.concat d (name ^ ".so") in
+    let base = match baseline with Some b -> [ "--hcr-baseline"; Filename.concat d b ] | None -> [] in
+    let rc, _, err =
+      run_march_on_env ~cwd:d [ ("HOME", d) ]
+        ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ base @ flags @ [ "-o"; so ]) src_p
+    in
+    Alcotest.(check int) (name ^ " compiles; stderr:\n" ^ err) 0 rc;
+    let text = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat d (name ^ ".json")) (fun oc -> output_string oc text);
+    text
+  in
+  let check ?(flags = "") d src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d ("--check --guarantees --hcr-baseline v1.json " ^ flags)
+  in
+  let check_json d src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d "--check-json --hcr-baseline v1.json"
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  let lacks out s = Alcotest.(check bool) (Printf.sprintf "output lacks %S\n%s" s out) false (contains out s) in
+  let dropped = prog ~fields:"count : {Int | _ >= 0}, label : String" ~init:"count: 0, label: \"v2\"" () in
+  let renamed ?(total_ty = "{Int | _ >= 0}") ?(extra = "") () =
+    prog ~fields:("total : " ^ total_ty ^ ", label : String, history : List(Int)" ^ extra)
+      ~init:("total: 0, label: \"v2\", history: []" ^ if extra = "" then "" else ", hits: 0") ()
+  in
+  [ gated "--hcr-drop lets the derivation discard a field nothing reads, recorded" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        (* The same file built first without the consent, then with it: a
+           cache key that ignored --hcr-drop would serve the first build. *)
+        let s0 = sidecar ~baseline:"v1.json" d "v2" dropped in
+        has s0 {|"migrate_not_derived": "it removes history"|};
+        let code, out = check ~flags:"--hcr-drop Counter.history" d dropped in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        has out "migrate_state (derived)";
+        lacks out "rollback round trip";
+        let s2 = sidecar ~baseline:"v1.json" ~flags:[ "--hcr-drop"; "Counter.history" ] d "v2" dropped in
+        has s2 {|"migrate_drops_consented": ["history"]|};
+        lacks s2 "rollback_derived");
+    gated "--hcr-drop names fields per actor and combines with a migrate clause" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let src =
+          prog ~fields:"total : {Int | _ >= 0}, label : String" ~init:"total: 0, label: \"v2\""
+            ~clause:"migrate old -> { total: old.count }" ()
+        in
+        let s_other = sidecar ~baseline:"v1.json" ~flags:[ "--hcr-drop"; "Other.history" ] d "v2a" src in
+        has s_other "it removes history, which the migrate clause does not read";
+        let s2 = sidecar ~baseline:"v1.json" ~flags:[ "--hcr-drop"; "Counter.history" ] d "v2" src in
+        has s2 {|"migrate_clause": ["total"]|};
+        has s2 {|"migrate_drops_consented": ["history"]|});
+    gated "a one-for-one field swap of the same type suggests the clause, as a guess" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ()) in
+        Alcotest.(check int) ("a warning, not an error\n" ^ out) 0 code;
+        has out "`Counter` removes `count` and adds `total` of the same type";
+        has out "[migrate_rename_suggested]";
+        has out "possible fix (a guess";
+        let _, js = check_json d (renamed ()) in
+        has js {|"code":"migrate_rename_suggested"|};
+        has js {|"fix":{"kind":"insert","after_line":4,"text":"    migrate old -> { total: old.count }","applicability":"maybe-incorrect"}|};
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ()) in
+        has s2 "it removes count (if `total` renames it, add `migrate old -> { total: old.count }` to the actor)");
+    gated "no suggestion when the swap is not one-for-one or the types differ" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let _, out = check d (renamed ~total_ty:"String" ()) in
+        lacks out "migrate_rename_suggested";
+        let _, out = check d (renamed ~extra:", hits : Int" ()) in
+        lacks out "migrate_rename_suggested";
+        let _, out = check d dropped in
+        lacks out "migrate_rename_suggested") ]
+
 let hcr_simulation_suite =
   let v1 =
     {|mod Main do
@@ -30822,6 +30920,7 @@ let () =
       ("hcr-simulation", hcr_simulation_suite);
       ("hcr-derived-rollback", hcr_derived_rollback_suite);
       ("hcr-derive-rename", hcr_derive_rename_suite);
+      ("hcr-drop-and-suggest", hcr_drop_and_suggest_suite);
       ("session-theory", session_theory_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);

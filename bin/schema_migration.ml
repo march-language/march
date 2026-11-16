@@ -660,6 +660,7 @@ let load_derive_baseline ~(filename : string) : unit =
   D.rollback_moves := [];
   D.clause_fields := [];
   D.moves := [];
+  D.consented := [];
   D.baseline :=
     (match find_baseline ~filename with
      | None -> []
@@ -698,3 +699,8 @@ let baseline_cas_tag () : string list =
     | None -> []
     | Some path ->
       (try [ "hbase:" ^ Digest.to_hex (Digest.file path) ] with Sys_error _ -> [])
+      (* --hcr-drop changes the derived migration, and is written into the
+         image's schemas. *)
+      @ (match !March_desugar.Desugar_migrate_derive.consented_drops with
+         | [] -> []
+         | ds -> [ "hdrop:" ^ String.concat "," (List.sort_uniq compare ds) ])

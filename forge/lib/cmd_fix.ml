@@ -38,19 +38,26 @@ let parse_fix_kind fix_j : fix_kind =
    diagnostic whose repair touches two places, e.g. a `needs` line and
    `main`'s grant) contributes each of its edits, all positioned against the
    original file like any other fix's. *)
-let parse_fix_line line : fix_item list =
+(* A code carries a suffix after a colon (`cap_ceiling:IO.FileRead`). *)
+let base_code c = match String.index_opt c ':' with Some i -> String.sub c 0 i | None -> c
+
+let parse_fix_line ?(opt_in = []) line : fix_item list =
   try
     let j = Yojson.Basic.from_string line in
     let open Yojson.Basic.Util in
     let fix_j = j |> member "fix" in
     (* Only a machine-applicable fix is applied unasked: a guess or a fix
        with a placeholder is the programmer's call.  A fix with no tier (an
-       older compiler) counts as machine-applicable. *)
+       older compiler) counts as machine-applicable.  Naming a diagnostic's
+       code with `--only` ([opt_in]) is that call: its fixes apply whatever
+       their tier (`forge fix --only migrate_rename_suggested` takes the
+       compiler's rename guess). *)
     let tier = match fix_j with
       | `Assoc kv -> (match List.assoc_opt "applicability" kv with
           | Some (`String t) -> t | _ -> "machine-applicable")
       | _ -> "machine-applicable" in
-    if fix_j = `Null || tier <> "machine-applicable" then []
+    let code = match j |> member "code" with `String c -> base_code c | _ -> "" in
+    if fix_j = `Null || (tier <> "machine-applicable" && not (List.mem code opt_in)) then []
     else begin
       let file = j |> member "file" |> to_string in
       let sev  = j |> member "severity" |> to_string in
@@ -79,7 +86,7 @@ let march_bin () =
    (`march --compile --report-contracts`), which emits the same NDJSON shape
    with an `insert` fix per function verified allocation-free.  [scope_globs]
    comes from forge.toml's `[contracts] no_alloc`. *)
-let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ~lib_path_env files
+let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ?(opt_in = []) ~lib_path_env files
   : fix_item list =
   let all_items = ref [] in
   List.iter (fun file ->
@@ -112,7 +119,7 @@ let collect_all_fixes ?(contracts = false) ?(scope_globs = []) ~lib_path_env fil
     (try
       while true do
         let line = input_line ic in
-        List.iter (fun fi -> all_items := fi :: !all_items) (parse_fix_line line)
+        List.iter (fun fi -> all_items := fi :: !all_items) (parse_fix_line ~opt_in line)
       done
     with End_of_file -> ());
     ignore (Unix.close_process_in ic)
@@ -281,12 +288,10 @@ let run_paths ?(dry_run = false) ?(only = []) (paths : string list) =
   if files = [] then Error "no .march files under the given paths"
   else begin
     let rec go pass files_acc fixes_acc =
-      let items = collect_all_fixes ~lib_path_env:"" files in
-      (* A code carries a suffix after a colon (`cap_ceiling:IO.FileRead`). *)
-      let base c = match String.index_opt c ':' with Some i -> String.sub c 0 i | None -> c in
+      let items = collect_all_fixes ~opt_in:only ~lib_path_env:"" files in
       let items =
         if only = [] then items
-        else List.filter (fun fi -> List.mem (base fi.fi_code) only) items in
+        else List.filter (fun fi -> List.mem (base_code fi.fi_code) only) items in
       let (nf, nx) = apply_items items dry_run in
       let files_acc = files_acc + nf and fixes_acc = fixes_acc + nx in
       if nx = 0 || dry_run || pass >= max_passes then (files_acc, fixes_acc)
@@ -301,7 +306,7 @@ let run_paths ?(dry_run = false) ?(only = []) (paths : string list) =
             (if dry_run then " (dry run — no files written)" else ""))
   end
 
-let run ?(dry_run = false) ?(contracts = false) () =
+let run ?(dry_run = false) ?(contracts = false) ?(only = []) () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -323,9 +328,12 @@ let run ?(dry_run = false) ?(contracts = false) () =
     else begin
       let lib_path_env = Cmd_build.lib_path_env proj in
       let items =
-        collect_all_fixes ~contracts
+        collect_all_fixes ~contracts ~opt_in:only
           ~scope_globs:(if contracts then proj.Project.contracts_no_alloc else [])
           ~lib_path_env all_files in
+      let items =
+        if only = [] then items
+        else List.filter (fun fi -> List.mem (base_code fi.fi_code) only) items in
       let root = proj.Project.root in
         let owned = List.filter (fun fi ->
           let abs      = try Unix.realpath fi.fi_file with _ -> fi.fi_file in

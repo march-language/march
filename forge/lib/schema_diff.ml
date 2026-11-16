@@ -38,6 +38,8 @@ type actor_schema = {
   derived_clause: string list;
   (* the fields this build's `migrate` clause gave *)
   derived_moves: (string * string) list;
+  consented_drops: string list;
+  (* removed fields the derived migration dropped by --drop (audited) *)
   (* (new field, running field) copied under a new name: by a `migrate`
      clause, or by a rollback deploy that undoes one *)
 }
@@ -131,6 +133,19 @@ let unembedded_overrides (schemas : (string * actor_schema) list) (laws : string
       | Some s -> not (List.mem rest s.accepted || List.mem "*" s.accepted)
       | None -> true) laws
 
+(** The `--drop Actor.field` entries the new build's schemas do not record
+    as dropped by consent: a typo, a field that was kept or moved, or a
+    pre-built patch built without that --drop. *)
+let unused_drops (schemas : (string * actor_schema) list) (drops : string list) : string list =
+  List.filter (fun d ->
+      match String.index_opt d '.' with
+      | None -> true
+      | Some i ->
+        let actor = String.sub d 0 i and f = String.sub d (i + 1) (String.length d - i - 1) in
+        (match List.assoc_opt actor schemas with
+         | Some s -> not (List.mem f s.consented_drops)
+         | None -> true)) drops
+
 type field_change =
   | FieldAdded   of field
   | FieldRemoved of field
@@ -176,6 +191,8 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
                derived_drops = (match member "migrate_derived_drops" j with
                    | `Null -> [] | v -> v |> to_list |> List.map to_string);
                derived_clause = (match member "migrate_clause" j with
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string);
+               consented_drops = (match member "migrate_drops_consented" j with
                    | `Null -> [] | v -> v |> to_list |> List.map to_string);
                derived_moves = (match member "migrate_derived_moves" j with
                    | `Null -> []
@@ -241,7 +258,17 @@ let check_compat (compat : string) (changes : field_change list) : (unit, string
     did not derive one, when the new build's schema says. *)
 let not_derived_note (new_schemas : (string * actor_schema) list) (actor : string) : string =
   match List.assoc_opt actor new_schemas with
-  | Some { not_derived = Some why; _ } -> Printf.sprintf " (not derived: %s)" why
+  | Some { not_derived = Some why; _ } ->
+    let removes = "it removes " in
+    let hint =
+      if String.length why > String.length removes
+         && String.sub why 0 (String.length removes) = removes
+         && not (String.contains why '(')
+      then
+        Printf.sprintf "; to discard that data, deploy with --drop %s.<field>" actor
+      else ""
+    in
+    Printf.sprintf " (not derived: %s%s)" why hint
   | _ -> ""
 
 (** The line announcing a derived migration, when [actor]'s was. *)
@@ -258,20 +285,24 @@ let derived_note (new_schemas : (string * actor_schema) list) (actor : string) :
                [ (if ms = [] then "" else "copies back " ^ moved ms);
                  (if ds = [] then ""
                   else "drops " ^ String.concat ", " ds ^ ", the fields that version added") ]))
-  | Some { derived = Some added; derived_clause = (_ :: _ as given); derived_moves = ms; _ } ->
+  | Some { derived = Some added; derived_clause = (_ :: _ as given); derived_moves = ms;
+           consented_drops = cd; _ } ->
     let computed = List.filter (fun f -> not (List.mem_assoc f ms)) given in
     Some (Printf.sprintf "actor %s: migrate_state derived from the migrate clause (%s)"
             actor
             (join
                [ (if ms = [] then "" else "renames: " ^ moved ms);
                  (if computed = [] then "" else String.concat ", " computed ^ " from the clause");
-                 (if added = [] then "" else "adds " ^ String.concat ", " added ^ " from init") ]))
-  | Some { derived = Some added; _ } ->
+                 (if added = [] then "" else "adds " ^ String.concat ", " added ^ " from init");
+                 (if cd = [] then "" else "drops " ^ String.concat ", " cd ^ " by --drop") ]))
+  | Some { derived = Some added; consented_drops = cd; _ } ->
     Some (Printf.sprintf "actor %s: migrate_state derived from the running version's state (%s)"
             actor
-            (match added with
-             | [] -> "every field kept"
-             | fs -> "adds " ^ String.concat ", " fs ^ " from init"))
+            (join
+               [ (match added with
+                  | [] -> if cd = [] then "every field kept" else ""
+                  | fs -> "adds " ^ String.concat ", " fs ^ " from init");
+                 (if cd = [] then "" else "drops " ^ String.concat ", " cd ^ " by --drop") ]))
   | _ -> None
 
 (** Compute diffs for all actors appearing in both old and new schemas. *)

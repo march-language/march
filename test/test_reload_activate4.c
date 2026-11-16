@@ -591,8 +591,10 @@ static void test_schema_baseline(void) {
     {
         char line[4096]; last_audit_line(line, sizeof(line));
         CHECK(strstr(line, "\"fn\":\"Counter_dispatch\"") != NULL
-              && strstr(line, "\"accepted_unproved\":[\"state\",\"Bump\"],\"result\":\"ok\"") != NULL,
+              && strstr(line, "\"accepted_unproved\":[\"state\",\"Bump\"],") != NULL,
               "audit: an image built with --accept-unproved records the laws, on one line");
+        CHECK(strstr(line, "\"dropped\":[\"history\"],\"result\":\"ok\"") != NULL,
+              "audit: an image built with --drop records the dropped fields");
         if (g_failed) fprintf(stderr, "    audit line: %s", line);
     }
     send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
@@ -621,6 +623,8 @@ static void test_epoch_model_wait_pins_drain(void) {
         char line[4096]; last_audit_line(line, sizeof(line));
         CHECK(strstr(line, "accepted_unproved") == NULL,
               "audit: a non-actor function's line carries no accepted_unproved");
+        CHECK(strstr(line, "\"dropped\"") == NULL,
+              "audit: a non-actor function's line carries no dropped fields");
     }
     uint32_t e1 = march_epoch_current();
     CHECK(e1 > base, "and advances the epoch");
