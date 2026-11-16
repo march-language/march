@@ -434,6 +434,15 @@ and actor_def = {
       named [on_stop] with no params so body walkers can treat it like one
       ([actor_body_handlers]) — it is NOT a message constructor.
       See specs/lang/actors.md. *)
+  actor_migrate : (name * expr) option;
+  (** `migrate old -> { total: old.count }` (todo
+      2026-11-06-hcr-derive-field-rename): the non-mechanical part of a hot
+      deploy's state migration.  The binder names the deployed state; the body
+      is a record literal giving the new fields whose value moves or converts
+      data.  With a deployed baseline, Desugar_migrate_derive writes the whole
+      `<actor>_migrate_state` from it (the clause's fields, kept fields copied,
+      other added fields from `init`).  Without one it derives nothing and the
+      clause is inert.  Nothing else reads it. *)
   actor_internal : bool;
   (** `@[stdlib_internal]` on a stdlib actor: code outside the standard
       library can neither spawn it nor build one of its messages (the

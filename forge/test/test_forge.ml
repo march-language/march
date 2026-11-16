@@ -2019,6 +2019,33 @@ let test_derived_drops_note () =
   Alcotest.(check bool) "an add-only derivation keeps its wording" true
     (contains (note (schemas "")) "every field kept")
 
+(* Migrate clauses (todo 2026-11-06-hcr-derive-field-rename): the plan says
+   which fields the clause renamed or computed, and a rollback deploy that
+   undoes a rename says it copies the value back. *)
+let test_derived_clause_note () =
+  let schemas extra =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string (Printf.sprintf {|{
+      "Counter": {"compat": "full", "migrate_derived": ["hits"]%s,
+                  "state_fields": [{"name": "total", "ty": "Int"}]}}|} extra)) in
+  let note s = Option.value ~default:"" (Schema_diff.derived_note s "Counter") in
+  let s =
+    schemas {|, "migrate_clause": ["total", "scaled"], "migrate_derived_moves": [["total", "count"]]|} in
+  Alcotest.(check (list (pair string string))) "moves parsed" [ ("total", "count") ]
+    (List.assoc "Counter" s).Schema_diff.derived_moves;
+  Alcotest.(check string) "clause note"
+    "actor Counter: migrate_state derived from the migrate clause (renames: total from count; \
+     scaled from the clause; adds hits from init)"
+    (note s);
+  let back =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string {|{
+      "Counter": {"compat": "full", "migrate_derived": [], "migrate_derived_drops": [],
+                  "migrate_derived_moves": [["count", "total"]],
+                  "state_fields": [{"name": "count", "ty": "Int"}]}}|}) in
+  Alcotest.(check string) "rollback that undoes a rename"
+    "actor Counter: migrate_state derived as the running version's proved rollback \
+     (copies back count from total)"
+    (note back)
+
 let test_schema_tag_check () =
   let parse s = List.assoc "Tally" (Schema_diff.parse_schemas_json (Yojson.Safe.from_string s)) in
   let schema ?(mm = "") handlers =
@@ -3598,6 +3625,8 @@ let () =
       Alcotest.test_case "schemas: actor-message tags compared at deploy (H7)" `Quick test_schema_tag_check;
       Alcotest.test_case "schemas: a derived drop-only migration is named as the rollback" `Quick
         test_derived_drops_note;
+      Alcotest.test_case "derived note: a migrate clause and the rename it undoes" `Quick
+        test_derived_clause_note;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;

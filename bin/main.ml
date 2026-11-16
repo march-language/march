@@ -5764,7 +5764,26 @@ let compile filename =
                      | None -> "")
                   ^ (match List.assoc_opt actor_name !March_desugar.Desugar_migrate_derive.drops with
                      | Some ds -> Printf.sprintf "    \"migrate_derived_drops\": [%s],\n" (names_json ds)
-                     | None -> "") in
+                     | None -> "")
+                  (* Migrate clauses (todo 2026-11-06-hcr-derive-field-rename):
+                     the fields the clause gave, the renames (new field <-
+                     deployed field), and the renames a derived rollback
+                     undoes (field returned to <- field of this state). *)
+                  ^ (let pairs l =
+                       String.concat ", "
+                         (List.map (fun (a, b) ->
+                              Printf.sprintf "[%s, %s]" (Schema_migration.json_string a)
+                                (Schema_migration.json_string b)) l) in
+                     let module D = March_desugar.Desugar_migrate_derive in
+                     (match List.assoc_opt actor_name !D.clause_fields with
+                      | Some fs -> Printf.sprintf "    \"migrate_clause\": [%s],\n" (names_json fs)
+                      | None -> "")
+                     ^ (match List.assoc_opt actor_name !D.moves with
+                        | Some ms -> Printf.sprintf "    \"migrate_derived_moves\": [%s],\n" (pairs ms)
+                        | None -> "")
+                     ^ (match List.assoc_opt actor_name !D.rollback_moves with
+                        | Some ms -> Printf.sprintf "    \"rollback_derived_moves\": [%s],\n" (pairs ms)
+                        | None -> "")) in
                 (* H3: a `@compat(simulation)` actor's handler bodies, as
                    source, so the NEXT build can check that migrating
                    commutes with handling (Desugar_simulation). *)

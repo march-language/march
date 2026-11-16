@@ -1046,11 +1046,23 @@ actor_decl:
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     init = actor_init;
-    mb = option(mailbox_clause);
+    clauses = list(actor_clause);
     sup = option(supervise_block);
     items = list(actor_item);
     END
     { let (init_params, init_expr) = init in
+      let mbs = List.filter_map (function `Mailbox (m, p) -> Some (m, p) | `Migrate _ -> None) clauses in
+      let migs = List.filter_map (function `Migrate (m, p) -> Some (m, p) | `Mailbox _ -> None) clauses in
+      let only what hint = function
+        | [] -> None
+        | [ (x, _) ] -> Some x
+        | _ :: (_, pos2) :: _ ->
+          error_raise
+            (Printf.sprintf "An actor can declare only one `%s` clause; this is the second:" what)
+            (Some hint) pos2
+      in
+      let mb = only "mailbox" "mailbox 1000 drop_old" mbs in
+      let migrate = only "migrate" "migrate old -> { total: old.count }" migs in
       let handlers = List.filter_map (function `H h -> Some h | `S _ -> None) items in
       let stops = List.filter_map (function `S s -> Some s | `H _ -> None) items in
       let on_stop = match stops with
@@ -1067,8 +1079,24 @@ actor_decl:
                 actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup; actor_compat = "full"; actor_invariant = None;
                 actor_mailbox = mb; actor_remote = false; actor_on_stop = on_stop;
-                actor_internal = false },
+                actor_internal = false; actor_migrate = migrate },
               mk_span ($loc)) }
+
+(** What may follow `init`, before `supervise` and the handlers: a mailbox
+    bound and a migrate clause, in either order, each at most once.  Both
+    start with a contextual lower-case word, so they share one list: two
+    separate `option(...)`s would be an LR(1) conflict on that word.
+    `migrate` is contextual like `mailbox` (`fn migrate(...)` keeps working);
+    the token after it tells the two apart (`mailbox N`, `migrate old ->`). *)
+actor_clause:
+  | m = mailbox_clause { `Mailbox (m, $startpos) }
+  | kw = lower_name; old = soft_lower_name; ARROW; body = expr
+    { if kw.txt <> "migrate" then
+        error_raise
+          (Printf.sprintf "I don't recognize `%s` here -- after `init`, an actor body continues with `mailbox N policy`, `migrate old -> { ... }`, a `supervise` block, or `on` handlers." kw.txt)
+          (Some "migrate old -> { total: old.count }")
+          $startpos(kw);
+      `Migrate ((old, body), $startpos) }
 
 (** `init { ... }`, or the parameterised form `init(env : T, n : Int) { ... }`
     (D24): the parameters are supplied at `spawn(A, env, n)` and are in scope
@@ -1128,7 +1156,7 @@ mailbox_clause:
   | kw = lower_name; n = INT; p = lower_name
     { if kw.txt <> "mailbox" then
         error_raise
-          (Printf.sprintf "I don't recognize `%s` here -- after `init`, an actor body continues with `mailbox N policy`, a `supervise` block, or `on` handlers." kw.txt)
+          (Printf.sprintf "I don't recognize `%s` here -- after `init`, an actor body continues with `mailbox N policy`, `migrate old -> { ... }`, a `supervise` block, or `on` handlers." kw.txt)
           (Some "mailbox 1000 drop_old")
           $startpos(kw);
       let policy = match p.txt with
