@@ -15393,10 +15393,23 @@ let hcr_derived_migration_suite =
 
     gated "a removed field is not derived" (fun () ->
         deployed (fun () ->
-            let derived, _, _ = run (actor ~state:"total : Int" ~init:"total: 0" ()) in
+            (* `total : String` replaces `count : Int`: not rename-shaped, so
+               the reason is the bare removal, with no clause suggested. *)
+            let derived, _, _ = run (actor ~state:"total : String" ~init:"total: \"\"" ()) in
             Alcotest.(check bool) "not derived" false derived;
             Alcotest.(check bool) "says why" true
               (outcome () = Some (D.Not_derived "it removes count"))));
+
+    gated "a removed field replaced by one of its type names the migrate clause" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ = run (actor ~state:"total : Int" ~init:"total: 0" ()) in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why, and how to say it is a rename" true
+              (outcome ()
+               = Some
+                   (D.Not_derived
+                      "it removes count (if `total` renames it, add `migrate old -> { total: \
+                       old.count }` to the actor)"))));
 
     gated "a field whose type changed is not derived" (fun () ->
         deployed (fun () ->
