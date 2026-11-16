@@ -20,8 +20,8 @@ Left by Task 4b (the native slow path in C, runtime/march_authority.c):
 
 - Hello world's macOS arm64 binary (272,184 B) sits about 190 B under a 16 KB `__TEXT` page
   boundary. Any runtime growth that a printing program links pushes it to about 289 KB, past
-  the 274 KB target that `authority_size` asserts. Task 7, which removes the
-  MARCH_TEST_REFUSE hook, frees a little. A real margin needs a smaller C parser, or
+  the 274 KB target. `authority_size` prints the size but does not gate on it. Task 7, which
+  removes the MARCH_TEST_REFUSE hook, frees a little. A real margin needs a smaller C parser, or
   `first_outside` run over the C-side scopes so the launch links no release walk.
 - The C policy and the March policy are two implementations of one policy. Only the
   differential test (`authority_differential`) keeps them in step. A rule changed in

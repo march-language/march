@@ -79,5 +79,6 @@ Slow path, measured with the Task 4 microbench (1e6 ops, `--opt 2`, load 13 to 2
 - `authority_differential` 3: about 100 parse, subset and hand-built `Paths`/`Hosts` rows. The C
   output must equal March's line for line, including every error text.
 - `authority_size`: hello world has at most 13 `define`s, defines no Authority policy function
-  other than `check`, and launches through `march_cap_rt_launch_init`. On macOS arm64 its binary
-  must be at most 274 KB.
+  other than `check`, and launches through `march_cap_rt_launch_init`. With the matcher linked
+  back in, it would define 118. The binary size is printed, not gated, because it is
+  page-rounded and depends on the toolchain.
