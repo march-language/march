@@ -1,5 +1,5 @@
 -- types (10) --
-type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String))
+type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
 type Authority.Scope = Scope(String, Arg)
 type Authority.Layer = Layer(CapLimit, String, List(Scope))
 closure $Clo_go$0_List_range(Ptr(Unit), Int)
@@ -14,16 +14,16 @@ closure $Clo_$jp3_method_words$1_Authority_method_words(Ptr(Unit))
 fn $jp1_parse$apply$0_Authority_parse($clo : Ptr(Unit)) : '_ =
   let toks : '_ = $clo.$fv1 in
 dec_rc $clo;
-let $t676 : '_ = alloc Nil() in
+let $t792 : '_ = alloc Nil() in
 inc_rc toks;
-Authority.parse_entries(toks, $t676)
+Authority.parse_entries(toks, $t792)
 
 ## $jp2_parse$apply$1_Authority_parse
 fn $jp2_parse$apply$1_Authority_parse($clo : Ptr(Unit)) : '_ =
-  let $jp_clo682 : () -> '_ = $clo.$fv1 in
+  let $jp_clo798 : () -> '_ = $clo.$fv1 in
 dec_rc $clo;
-inc_rc $jp_clo682;
-call_ptr $jp_clo682()
+inc_rc $jp_clo798;
+call_ptr $jp_clo798()
 
 ## $jp3_method_words$apply$1_Authority_method_words
 fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
@@ -31,90 +31,90 @@ fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
 
 ## $jp3_parse$apply$2_Authority_parse
 fn $jp3_parse$apply$2_Authority_parse($clo : Ptr(Unit)) : '_ =
-  let $jp_clo684 : () -> '_ = $clo.$fv1 in
+  let $jp_clo800 : () -> '_ = $clo.$fv1 in
 dec_rc $clo;
-inc_rc $jp_clo684;
-call_ptr $jp_clo684()
+inc_rc $jp_clo800;
+call_ptr $jp_clo800()
 
 ## $jp7_method_words$apply$0_Authority_method_words
 fn $jp7_method_words$apply$0_Authority_method_words($clo : Ptr(Unit)) : '_ =
-  let $f957 : '_ = $clo.$fv1 in
-let $f958 : '_ = $clo.$fv2 in
+  let $f1073 : '_ = $clo.$fv1 in
+let $f1074 : '_ = $clo.$fv2 in
 let acc : List(String) = $clo.$fv3 in
 dec_rc $clo;
-let $jp_clo966 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
-case $f958 of
-  Cons($f967, $f968) -> case $f967 of
-  ")"() -> dec_rc $jp_clo966;
-let rest : '_ = $f968 in
-let m : '_ = inc_rc $f957;
-$f957 in
-let $t952 : '_ = Authority.is_option_name(m) in
-case $t952 of
-  True() -> dec_rc $t952;
-let $t955 : '_ = let $t953 : '_ = inc_rc acc;
+let $jp_clo1082 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
+case $f1074 of
+  Cons($f1083, $f1084) -> case $f1083 of
+  ")"() -> dec_rc $jp_clo1082;
+let rest : '_ = $f1084 in
+let m : '_ = inc_rc $f1073;
+$f1073 in
+let $t1068 : '_ = Authority.is_option_name(m) in
+case $t1068 of
+  True() -> dec_rc $t1068;
+let $t1071 : '_ = let $t1069 : '_ = inc_rc acc;
 alloc Cons(m, acc) in
-let $t954 : '_ = alloc Nil() in
-Authority.rev($t953, $t954) in
-let $t956 : ('_, '_) = inc_rc rest;
-($t955, rest) in
-alloc Ok($t956)
-  _ -> dec_rc $t952;
+let $t1070 : '_ = alloc Nil() in
+Authority.rev($t1069, $t1070) in
+let $t1072 : ('_, '_) = inc_rc rest;
+($t1071, rest) in
+alloc Ok($t1072)
+  _ -> dec_rc $t1068;
 dec_rc m;
 alloc Err("`methods(...)` takes HTTP method names")
-  _ -> call_ptr $jp_clo966()
-  _ -> call_ptr $jp_clo966()
+  _ -> call_ptr $jp_clo1082()
+  _ -> call_ptr $jp_clo1082()
 
 ## $jp7_parse_option$apply$0_Authority_parse_option
 fn $jp7_parse_option$apply$0_Authority_parse_option($clo : Ptr(Unit)) : '_ =
-  let $f927 : '_ = $clo.$fv1 in
+  let $f1043 : '_ = $clo.$fv1 in
 let name : String = $clo.$fv2 in
 dec_rc $clo;
-let more : '_ = inc_rc $f927;
-$f927 in
-let $t910 : '_ = ==(name, "methods") in
-case $t910 of
-  True() -> dec_rc $t910;
-let $t912 : '_ = let $t911 : '_ = alloc Nil() in
-Authority.method_words(more, $t911) in
-case $t912 of
-  Err($f916) -> dec_rc $t912;
-let e : '_ = $f916 in
+let more : '_ = inc_rc $f1043;
+$f1043 in
+let $t1026 : '_ = ==(name, "methods") in
+case $t1026 of
+  True() -> dec_rc $t1026;
+let $t1028 : '_ = let $t1027 : '_ = alloc Nil() in
+Authority.method_words(more, $t1027) in
+case $t1028 of
+  Err($f1032) -> dec_rc $t1028;
+let e : '_ = $f1032 in
 alloc Err(e)
-  Ok($f917) -> dec_rc $t912;
-case $f917 of
-  $Tuple2($f918, $f919) -> dec_rc $f917;
-let rest : '_ = $f919 in
-let ms : '_ = $f918 in
-let $t914 : '_ = let $t913 : '_ = let $rc_120 : '_ = string_join(ms, ",") in
+  Ok($f1033) -> dec_rc $t1028;
+case $f1033 of
+  $Tuple2($f1034, $f1035) -> dec_rc $f1033;
+let rest : '_ = $f1035 in
+let ms : '_ = $f1034 in
+let $t1030 : '_ = let $t1029 : '_ = let $rc_140 : '_ = string_join(ms, ",") in
 dec_rc ms;
-$rc_120 in
-let $rc_119 : '_ = ++("methods=", $t913) in
-dec_rc $t913;
-$rc_119 in
-let $t915 : ('_, '_) = ($t914, rest) in
-alloc Ok($t915)
-  _ -> dec_rc $f917;
+$rc_140 in
+let $rc_139 : '_ = ++("methods=", $t1029) in
+dec_rc $t1029;
+$rc_139 in
+let $t1031 : ('_, '_) = ($t1030, rest) in
+alloc Ok($t1031)
+  _ -> dec_rc $f1033;
 panic("non-exhaustive pattern match")
-  _ -> dec_rc $t912;
+  _ -> dec_rc $t1028;
 panic("non-exhaustive pattern match")
-  _ -> dec_rc $t910;
+  _ -> dec_rc $t1026;
 dec_rc more;
-let $t924 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
-alloc Err($t924)
+let $t1040 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
+alloc Err($t1040)
 
 ## List.max_onto
 fn List.max_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1557, $f1558) -> let r : '_ = $f1558 in
-let x : '_ = $f1557 in
-let $t1556 : '_ = >(x, m) in
-case $t1556 of
-  True() -> dec_rc $t1556;
+  Cons($f1741, $f1742) -> let r : '_ = $f1742 in
+let x : '_ = $f1741 in
+let $t1740 : '_ = >(x, m) in
+case $t1740 of
+  True() -> dec_rc $t1740;
 inc_rc x;
 List.max_onto(r, x)
-  _ -> dec_rc $t1556;
+  _ -> dec_rc $t1740;
 List.max_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -123,8 +123,8 @@ fn List.maximum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1209, 18, 55);
 panic("List.maximum_int: empty list")
-  Cons($f1550, $f1551) -> let t : '_ = $f1551 in
-let h : '_ = $f1550 in
+  Cons($f1734, $f1735) -> let t : '_ = $f1735 in
+let h : '_ = $f1734 in
 inc_rc h;
 List.max_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -133,14 +133,14 @@ List.max_onto(t, h)
 fn List.min_onto(lst : List(Int), m : Int) : Int =
   case lst of
   Nil() -> m
-  Cons($f1544, $f1545) -> let r : '_ = $f1545 in
-let x : '_ = $f1544 in
-let $t1543 : '_ = <(x, m) in
-case $t1543 of
-  True() -> dec_rc $t1543;
+  Cons($f1728, $f1729) -> let r : '_ = $f1729 in
+let x : '_ = $f1728 in
+let $t1727 : '_ = <(x, m) in
+case $t1727 of
+  True() -> dec_rc $t1727;
 inc_rc x;
 List.min_onto(r, x)
-  _ -> dec_rc $t1543;
+  _ -> dec_rc $t1727;
 List.min_onto(r, m)
   _ -> panic("non-exhaustive pattern match")
 
@@ -149,8 +149,8 @@ fn List.minimum_int(xs : List(Int)) : Int =
   case xs of
   Nil() -> __panic_site("stdlib/list.march", 1186, 18, 55);
 panic("List.minimum_int: empty list")
-  Cons($f1537, $f1538) -> let t : '_ = $f1538 in
-let h : '_ = $f1537 in
+  Cons($f1721, $f1722) -> let t : '_ = $f1722 in
+let h : '_ = $f1721 in
 inc_rc h;
 List.min_onto(t, h)
   _ -> panic("non-exhaustive pattern match")
@@ -163,11 +163,11 @@ fn List.product_int(xs : List(Int)) : Int =
 fn List.product_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1531, $f1532) -> let t : '_ = $f1532 in
-let x : '_ = $f1531 in
-let $t1530 : '_ = inc_rc x;
+  Cons($f1715, $f1716) -> let t : '_ = $f1716 in
+let x : '_ = $f1715 in
+let $t1714 : '_ = inc_rc x;
 *(acc, x) in
-List.product_onto(t, $t1530)
+List.product_onto(t, $t1714)
   _ -> panic("non-exhaustive pattern match")
 
 ## List.range
@@ -224,15 +224,15 @@ List.range_step_go$dps(next, stop, step, $trmc5)
 
 ## List.spawn_allowed
 fn List.spawn_allowed() : Bool =
-  let $t1188 : '_ = Authority.check("IO.Spawn", "") in
-case $t1188 of
-  Ok($f1189) -> dec_rc $t1188;
-dec_rc $f1189;
+  let $t1372 : '_ = Authority.check("IO.Spawn", "") in
+case $t1372 of
+  Ok($f1373) -> dec_rc $t1372;
+dec_rc $f1373;
 true
-  Err($f1190) -> dec_rc $t1188;
-dec_rc $f1190;
+  Err($f1374) -> dec_rc $t1372;
+dec_rc $f1374;
 false
-  _ -> dec_rc $t1188;
+  _ -> dec_rc $t1372;
 panic("non-exhaustive pattern match")
 
 ## List.sum_int
@@ -243,11 +243,11 @@ fn List.sum_int(xs : List(Int)) : Int =
 fn List.sum_onto(lst : List(Int), acc : Int) : Int =
   case lst of
   Nil() -> acc
-  Cons($f1524, $f1525) -> let t : '_ = $f1525 in
-let x : '_ = $f1524 in
-let $t1523 : '_ = inc_rc x;
+  Cons($f1708, $f1709) -> let t : '_ = $f1709 in
+let x : '_ = $f1708 in
+let $t1707 : '_ = inc_rc x;
 +(acc, x) in
-List.sum_onto(t, $t1523)
+List.sum_onto(t, $t1707)
   _ -> panic("non-exhaustive pattern match")
 
 ## bump
@@ -299,12 +299,12 @@ call_ptr go($t15, $t16)
 
 ## main
 fn main(_cap_console : Cap(IO.Console)) : () =
-  let $t1583 : String = let $t1582 : List(Int) = let $t1581 : List(Int) = List.range(1, 5) in
-bump($t1581) in
-let $rc_118 : String = List.sum_int($t1582) in
-dec_rc $t1582;
-$rc_118 in
-let $rc_117 : () = println($t1583) in
-dec_rc $t1583;
-$rc_117
+  let $t1767 : String = let $t1766 : List(Int) = let $t1765 : List(Int) = List.range(1, 5) in
+bump($t1765) in
+let $rc_138 : String = List.sum_int($t1766) in
+dec_rc $t1766;
+$rc_138 in
+let $rc_137 : () = println($t1767) in
+dec_rc $t1767;
+$rc_137
 

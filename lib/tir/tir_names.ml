@@ -752,6 +752,21 @@ let setup_all_fn_name = "__march_setup_all__"
     front of [main] (or of a test binary's setup_all block). *)
 let launch_init_fn = "Authority.launch_init"
 
+(** Run-time frames for function `needs` clauses (ocap phase 4,
+    [Auth_rt]).  A framed fn [f] keeps its name as the wrapper that enters
+    the frame; its body moves to [f ^ auth_body_suffix], and the frame's
+    layer is built by the zero-arg [f ^ auth_layer_suffix], whose every call
+    the LLVM emitter routes through [march_cap_layer_once] (built once, then
+    shared) and the JS emitter memoises.  The inliners leave the layer fn
+    alone ([is_auth_layer_fn]) so that call survives to codegen. *)
+let auth_body_suffix = "$auth"
+let auth_layer_suffix = "$auth_layer"
+let enter_fn_name = "Authority.enter_fn"
+let frame_layer_fn_name = "Authority.frame_layer"
+
+let is_auth_layer_fn (name : string) : bool =
+  String.ends_with ~suffix:auth_layer_suffix name
+
 (** The program entry among a module's fn names (in [tm_fns] order): a bare
     [main] if there is one, otherwise the last module-qualified [Mod.main].
     The one rule every backend applies (native, [--jit], JS) and that [Lower]

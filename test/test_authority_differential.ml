@@ -349,8 +349,8 @@ let launch_src = {|mod LaunchFixture do
     println(show(Authority.check("IO.FileRead", "/srv/a")))
     println(show(Authority.check("IO.FileRead", "/etc/a")))
     println(show(Authority.check("IO.Clock", "")))
-    let r = Authority.enter_fn("f", "IO.FileRead(\"/srv/a/\")")
-    let r2 = Authority.enter_fn("f", "IO.FileRead(\"/srv/a/\")")
+    let r = Authority.enter_fn(Authority.frame_layer("f", "IO.FileRead(\"/srv/a/\")"))
+    let r2 = Authority.enter_fn(Authority.frame_layer("f", "IO.FileRead(\"/srv/a/\")"))
     let n = List.length(cap_layers())
     let in_b = show(Authority.check("IO.FileRead", "/srv/b"))
     let in_ax = show(Authority.check("IO.FileRead", "/srv/a/x"))
@@ -434,12 +434,12 @@ let cwd_src = {|mod CwdFixture do
   end
   fn main(_c : Cap(IO)) do
     let here = process_cwd()
-    let r = Authority.enter_fn("g", "IO.FileRead(\"" ++ here ++ "\")")
+    let r = Authority.enter_fn(Authority.frame_layer("g", "IO.FileRead(\"" ++ here ++ "\")"))
     let a = verdict(Authority.check("IO.FileRead", "x/y"))
     let b = verdict(Authority.check("IO.FileRead", "../x"))
     let c = verdict(Authority.check("IO.FileRead", here ++ "/z"))
     cap_restore(r)
-    let r2 = Authority.enter_fn("h", "IO.FileRead(\"" ++ here ++ "/sub/\")")
+    let r2 = Authority.enter_fn(Authority.frame_layer("h", "IO.FileRead(\"" ++ here ++ "/sub/\")"))
     let d = verdict(Authority.check("IO.FileRead", "sub/y"))
     let e = verdict(Authority.check("IO.FileRead", "sub/../y"))
     let f = verdict(Authority.check("IO.FileRead", "/elsewhere/sub/y"))
@@ -472,7 +472,7 @@ let gone_src = {|mod GoneFixture do
     end
   end
   fn main(_c : Cap(IO)) do
-    let r = Authority.enter_fn("g", "IO.FileRead(\"/\")")
+    let r = Authority.enter_fn(Authority.frame_layer("g", "IO.FileRead(\"/\")"))
     let a = verdict(Authority.check("IO.FileRead", "srv/x"))
     let b = verdict(Authority.check("IO.FileRead", "/srv/x"))
     cap_restore(r)

@@ -28,8 +28,21 @@ mod Authority do
   --
   -- The C runtime releases a dropped slot value structurally
   -- (march_cap_release in runtime/march_runtime.c walks exactly these
-  -- shapes): change a constructor here and change it there.
+  -- shapes): change a constructor here and change it there.  Constructors
+  -- are only ever APPENDED: the C walk reads them by tag.
+  --
+  -- `HostAt(spec, host, wildcard, port)` is what `parse` makes of a host
+  -- scope: the packed spec (as `Hosts` holds it, for `subset` and for
+  -- writing the scope back), and its pattern decoded once, so a check
+  -- compares instead of re-parsing.  `host` is "" when the spec names no
+  -- host (`IO.NetConnect(no_redirects)`): any host is admitted.
+  -- `PathsAt(paths)` is what `parse` makes of a path scope: the paths
+  -- normalized once (absolute, no `.`/`..`/empty segment, no trailing `/`),
+  -- so a check compares the normalized target with each path as a string
+  -- instead of splitting the path.  `Hosts` and `Paths` stay for values
+  -- built by hand (a `Paths` entry need not be normalized).
   type Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String))
+           | HostAt(String, String, Bool, Int) | PathsAt(List(String))
   type Scope = Scope(String, Arg)
   type Layer = Layer(CapLimit, String, List(Scope))
 
@@ -133,14 +146,15 @@ mod Authority do
   """
   fn check_layers(kind : String, target : String, layers : List(Layer)) : Result((), CapError) do
     let cwd = if path_kind(kind) && not(string_starts_with(target, "/")) do cap_cwd() else "/" end
-    first_refusal(kind, target, cwd, layers)
+    first_refusal(kind, kind_chain(kind), target, cwd, layers)
   end
 
-  pfn first_refusal(kind : String, target : String, cwd : String, layers : List(Layer)) : Result((), CapError) do
+  -- `chain` is `kind_chain(kind)`, walked once per check, not per scope.
+  pfn first_refusal(kind : String, chain : List(String), target : String, cwd : String, layers : List(Layer)) : Result((), CapError) do
     match layers do
     Nil -> Ok(())
     Cons(Layer(limit, text, scopes), rest) ->
-      if admits(scopes, kind, target, cwd) do first_refusal(kind, target, cwd, rest)
+      if admits_in(scopes, chain, kind, target, cwd) do first_refusal(kind, chain, target, cwd, rest)
       else Err(CapError(kind, target, limit, text)) end
     end
   end
@@ -196,27 +210,44 @@ mod Authority do
   end
 
   doc """
-  Enters the frame of function `name`, whose `needs` clause is
-  `needs_text`, and returns the authority to restore on leaving it. A frame
-  already in force (the top layer has the same limit and scope text) is
-  not pushed again.
+  The layer of function `name`'s frame, whose `needs` clause is
+  `needs_text`: the clause parsed into scopes. The compiler calls it once
+  per framed function and keeps the result (lib/tir/auth_rt.ml); the
+  interpreter once per definition.
+
+  ## Examples
+
+      march> Authority.frame_layer("f", "IO.Console")
+      Layer(ByFnNeeds("f"), "IO.Console", [Scope("IO.Console", Any)])
+  """
+  fn frame_layer(name : String, needs_text : String) : Layer do
+    match parse(needs_text) do
+    Ok(scopes) -> Layer(ByFnNeeds(name), needs_text, scopes)
+    Err(e) -> panic("internal: the needs clause of " ++ name ++ " is not a scope list: " ++ e)
+    end
+  end
+
+  doc """
+  Enters a function's frame (`layer`, from `frame_layer`) and returns the
+  authority to restore on leaving it. A frame already in force (the top
+  layer has the same limit and scope text) is not pushed again: two string
+  comparisons, no parsing.
   """
   @[stdlib_internal]
   -- The result is a CapAuthRef (the builtins' opaque type, which has no
   -- declaration to name in an annotation).
-  fn enter_fn(name : String, needs_text : String) do
-    if top_is_frame(cap_layers(), name, needs_text) do cap_save()
-    else
-      match parse(needs_text) do
-      Ok(scopes) -> cap_push(Layer(ByFnNeeds(name), needs_text, scopes))
-      Err(e) -> panic("internal: the needs clause of " ++ name ++ " is not a scope list: " ++ e)
-      end
-    end
+  fn enter_fn(layer : Layer) do
+    if top_is_frame(cap_layers(), layer) do cap_save()
+    else cap_push(layer) end
   end
 
-  pfn top_is_frame(layers : List(Layer), name : String, text : String) : Bool do
+  pfn top_is_frame(layers : List(Layer), layer : Layer) : Bool do
     match layers do
-    Cons(Layer(ByFnNeeds(n), t, _), _) -> n == name && t == text
+    Cons(Layer(ByFnNeeds(n), t, _), _) ->
+      match layer do
+      Layer(ByFnNeeds(name), text, _) -> n == name && t == text
+      _ -> false
+      end
     _ -> false
     end
   end
@@ -242,11 +273,18 @@ mod Authority do
       false
   """
   fn admits(scopes : List(Scope), kind : String, target : String, cwd : String) : Bool do
+    admits_in(scopes, kind_chain(kind), kind, target, cwd)
+  end
+
+  -- An entry's capability subsumes `kind` when it is in `chain`
+  -- (`kind_chain(kind)`): a membership test per entry instead of a lattice
+  -- walk per entry.
+  pfn admits_in(scopes : List(Scope), chain : List(String), kind : String, target : String, cwd : String) : Bool do
     match scopes do
     Nil -> false
     Cons(Scope(k, arg), rest) ->
-      (kind_subsumes(k, kind) && arg_admits(arg, kind, target, cwd))
-        || admits(rest, kind, target, cwd)
+      (member(chain, k) && arg_admits(arg, kind, target, cwd))
+        || admits_in(rest, chain, kind, target, cwd)
     end
   end
 
@@ -259,13 +297,46 @@ mod Authority do
       else any_within(ps, resolve(cwd, target)) end end
     Hosts(spec) -> if host_kind(kind) do host_permits(spec, target) else target == "" end
     Names(ns, pre) -> name_kind(kind) && name_admits(ns, pre, target)
+    HostAt(_, h, wild, port) ->
+      if host_kind(kind) do
+        if h == "" do true
+        else
+          match split_target(target) do
+          (th, tp) -> host_matches(h, wild, port, th, tp)
+          end
+        end
+      else target == "" end
+    PathsAt(ps) ->
+      if not(path_kind(kind)) do false
+      else if cwd == "" && not(string_starts_with(target, "/")) do false
+      else any_normal_within(ps, normalize(resolve(cwd, target))) end end
     end
   end
 
-  pfn any_within(ps : List(String), p : String) : Bool do
+  -- `n` is a normalized absolute path, each of `ps` too (PathsAt): `n` is
+  -- within `p` when it is `p`, or `p` followed by `/`, or `p` is the root.
+  -- The same answer as path_within, by string comparison.
+  pfn any_normal_within(ps : List(String), n : String) : Bool do
     match ps do
     Nil -> false
-    Cons(s, rest) -> path_within(s, p) || any_within(rest, p)
+    Cons(p, rest) ->
+      p == "/" || n == p
+        || (string_starts_with(n, p) && string_slice(n, string_byte_length(p), 1) == "/")
+        || any_normal_within(rest, n)
+    end
+  end
+
+  -- The target's segments are computed once, not once per scope path.
+  pfn any_within(ps : List(String), p : String) : Bool do
+    any_within_segs(ps, string_starts_with(p, "/"), segments(p))
+  end
+
+  pfn any_within_segs(ps : List(String), abs : Bool, segs : List(String)) : Bool do
+    match ps do
+    Nil -> false
+    Cons(s, rest) ->
+      (string_starts_with(s, "/") == abs && segs_prefix(segments(s), segs))
+        || any_within_segs(rest, abs, segs)
     end
   end
 
@@ -301,9 +372,14 @@ mod Authority do
     match outer do
     Any -> true
     Paths(o_paths) ->
-      match inner do
-      Paths(i_paths) -> all_paths_within(i_paths, o_paths)
-      _ -> false
+      match path_list(inner) do
+      Some(i_paths) -> all_paths_within(i_paths, o_paths)
+      None -> false
+      end
+    PathsAt(o_paths) ->
+      match path_list(inner) do
+      Some(i_paths) -> all_paths_within(i_paths, o_paths)
+      None -> false
       end
     Names(o_names, o_pre) ->
       match inner do
@@ -311,10 +387,33 @@ mod Authority do
       _ -> false
       end
     Hosts(o) ->
-      match inner do
-      Hosts(i) -> host_subsumes(o, i)
-      _ -> false
+      match host_spec(inner) do
+      Some(i) -> host_subsumes(o, i)
+      None -> false
       end
+    HostAt(o, _, _, _) ->
+      match host_spec(inner) do
+      Some(i) -> host_subsumes(o, i)
+      None -> false
+      end
+    end
+  end
+
+  -- The paths of a path scope, either form.
+  pfn path_list(a : Arg) : Option(List(String)) do
+    match a do
+    Paths(ps) -> Some(ps)
+    PathsAt(ps) -> Some(ps)
+    _ -> None
+    end
+  end
+
+  -- The packed spec of a host scope, either form.
+  pfn host_spec(a : Arg) : Option(String) do
+    match a do
+    Hosts(s) -> Some(s)
+    HostAt(s, _, _, _) -> Some(s)
+    _ -> None
     end
   end
 
@@ -347,6 +446,13 @@ mod Authority do
   end
 
   -- ── The lattice and which kinds take which scope ─────────────────────
+
+  -- `kind` and its lattice ancestors, innermost first: `parent` subsumes
+  -- `kind` exactly when it is a member (kind_subsumes).
+  pfn kind_chain(kind : String) : List(String) do
+    let p = lattice_parent(kind)
+    if p == "" do Cons(kind, Nil) else Cons(kind, kind_chain(p)) end
+  end
 
   -- Whether `parent` is `child` or a lattice ancestor of it
   -- (Cap_lattice.cap_subsumes).
@@ -943,7 +1049,7 @@ mod Authority do
       else if member(strs, "") do Err("a path scope cannot be empty")
       else match first_relative(strs) do
         Some(p) -> Err("the scope `" ++ p ++ "` on `" ++ k ++ "` is a relative path; give an absolute path, one starting with `/`")
-        None -> Ok(Paths(map_normalize(strs)))
+        None -> Ok(PathsAt(map_normalize(strs)))
         end
       end end
     else if host_kind(k) do
@@ -953,7 +1059,14 @@ mod Authority do
         end
       match host_decl(spec) do
       Err(e) -> Err(e)
-      Ok(_) -> Ok(Hosts(spec))
+      Ok((p, _, _, _)) ->
+        if p == "" do Ok(HostAt(spec, "", false, 0))
+        else
+          match parse_host_pattern(p) do
+          Ok((h, wild, port, _)) -> Ok(HostAt(spec, h, wild, port))
+          Err(e) -> Err(e)
+          end
+        end
       end
     else if name_kind(k) do
       match name_options(opts, Nil) do
@@ -1006,15 +1119,20 @@ mod Authority do
     match s do
     Scope(k, Any) -> k
     Scope(k, Paths(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
+    Scope(k, PathsAt(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
     Scope(k, Names(ns, pre)) ->
       k ++ "(" ++ string_join(append(quote_all(ns), wrap_all(quote_all(pre), "prefix(")), ", ") ++ ")"
-    Scope(k, Hosts(spec)) ->
-      match string_split(spec, ";") do
-      Nil -> k
-      Cons(first, opts) ->
-        let head = if first == "" do Nil else Cons(quote(first), Nil) end
-        k ++ "(" ++ string_join(append(head, option_texts(opts)), ", ") ++ ")"
-      end
+    Scope(k, Hosts(spec)) -> host_scope_text(k, spec)
+    Scope(k, HostAt(spec, _, _, _)) -> host_scope_text(k, spec)
+    end
+  end
+
+  pfn host_scope_text(k : String, spec : String) : String do
+    match string_split(spec, ";") do
+    Nil -> k
+    Cons(first, opts) ->
+      let head = if first == "" do Nil else Cons(quote(first), Nil) end
+      k ++ "(" ++ string_join(append(head, option_texts(opts)), ", ") ++ ")"
     end
   end
 

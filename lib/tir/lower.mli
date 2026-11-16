@@ -81,6 +81,19 @@ val collect_type_names :
     the JIT/JS drivers. *)
 val get_iface_methods : unit -> (string, (string * string) list) Hashtbl.t
 
+(** A function's `needs` clause as the run-time frames see it
+    ([Auth_rt]): the name its frame reports, the clause as canonical scope
+    text, and whether it carries a scope. *)
+type fn_needs = Lower_state.fn_needs = {
+  fnn_name : string;
+  fnn_text : string;
+  fnn_scoped : bool;
+}
+
+(** Final TIR fn name -> its `needs` clause, for every fn the last
+    [lower_module] lowered that has one ([Auth_rt.frames]'s input). *)
+val fn_needs_tbl : (string, fn_needs) Hashtbl.t
+
 (** {1 Cross-run state}
 
     Lowering keeps module-level tables; a driver that lowers more than once in

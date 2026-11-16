@@ -10901,6 +10901,9 @@ static _Atomic int march_cap_launch_set = 0;
  *   Scope          Scope(String, Arg)                     = tag 0
  *   Arg            Any = 0 | Paths(List(String)) = 1 | Hosts(String) = 2
  *                  | Names(List(String), List(String))    = 3
+ *                  | HostAt(String, String, Bool, Int)    = 4
+ *                    (fields 2 and 3 are scalars: never followed)
+ *                  | PathsAt(List(String))                = 5
  * A cell is descended into only when this reference is its last (rc 1: no
  * other holder exists to race with), and only on a tag this table names.  A
  * type whose short name collides with a user type takes a global tag from
@@ -10952,6 +10955,11 @@ static void march_cap_release_k(void *p, int k) {
                     march_cap_release_k(f[0], CAP_K_STRINGS);
                     next = f[1]; next_k = CAP_K_STRINGS;
                 }
+                else if (tag == 4) {
+                    march_cap_release_k(f[0], CAP_K_STRING);
+                    next = f[1]; next_k = CAP_K_STRING;
+                }
+                else if (tag == 5) { next = f[0]; next_k = CAP_K_STRINGS; }
                 break;
             default:
                 break;
@@ -10966,6 +10974,91 @@ static void march_cap_release_k(void *p, int k) {
 /* Releases one reference to a slot value (a List(Authority.Layer) or NULL). */
 void march_cap_release(void *layers) {
     march_cap_release_k(layers, CAP_K_LAYERS);
+}
+
+/* Makes every cell of a value of shape [k] immortal, by the same table as
+ * march_cap_release_k.  A cell that is already immortal (a literal string, a
+ * static nullary constructor) is left alone, and so are its fields: nothing
+ * mortal hangs off an immortal cell here. */
+static void march_cap_immortalize_k(void *p, int k) {
+    while (IS_HEAP_PTR(p)) {
+        if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return;
+        __atomic_store_n(&((march_hdr *)p)->rc, MARCH_RC_IMMORTAL, __ATOMIC_RELAXED);
+        if (gc_trace_on()) gc_emit("immortal", p, 0, MARCH_RC_IMMORTAL, ((march_hdr *)p)->tag);
+        int32_t tag = ((march_hdr *)p)->tag;
+        void **f = (void **)((char *)p + 16);
+        void *next = NULL;
+        int next_k = k;
+        switch (k) {
+        case CAP_K_LAYERS:
+        case CAP_K_SCOPES:
+        case CAP_K_STRINGS:
+            if (tag == 1) {
+                march_cap_immortalize_k(f[0], k == CAP_K_LAYERS ? CAP_K_LAYER
+                                        : k == CAP_K_SCOPES ? CAP_K_SCOPE
+                                        : CAP_K_STRING);
+                next = f[1];
+            }
+            break;
+        case CAP_K_LAYER:
+            if (tag == 0) {
+                march_cap_immortalize_k(f[0], CAP_K_LIMIT);
+                march_cap_immortalize_k(f[1], CAP_K_STRING);
+                next = f[2]; next_k = CAP_K_SCOPES;
+            }
+            break;
+        case CAP_K_LIMIT:
+            if (tag >= 1 && tag <= 4) { next = f[0]; next_k = CAP_K_STRING; }
+            break;
+        case CAP_K_SCOPE:
+            if (tag == 0) {
+                march_cap_immortalize_k(f[0], CAP_K_STRING);
+                next = f[1]; next_k = CAP_K_ARG;
+            }
+            break;
+        case CAP_K_ARG:
+            if (tag == 1) { next = f[0]; next_k = CAP_K_STRINGS; }
+            else if (tag == 2) { next = f[0]; next_k = CAP_K_STRING; }
+            else if (tag == 3) {
+                march_cap_immortalize_k(f[0], CAP_K_STRINGS);
+                next = f[1]; next_k = CAP_K_STRINGS;
+            }
+            else if (tag == 4) {
+                march_cap_immortalize_k(f[0], CAP_K_STRING);
+                next = f[1]; next_k = CAP_K_STRING;
+            }
+            else if (tag == 5) { next = f[0]; next_k = CAP_K_STRINGS; }
+            break;
+        default:
+            break;
+        }
+        p = next;
+        k = next_k;
+    }
+}
+
+/* A framed function's layer, built once (ocap phase 4, lib/tir/auth_rt.ml).
+ * The compiler emits every call to a `<f>$auth_layer` function as a call of
+ * this, with a per-site cell: the first call runs [build]
+ * (Authority.frame_layer, which parses the needs clause), makes the result
+ * immortal and publishes it; every later call returns it without parsing,
+ * allocating or touching a count.  Immortal, so the frames of every thread
+ * can share it with no RC traffic, and cap_restore's walk stops at it.  Two
+ * threads racing on a cold cell both build; the loser's copy, already
+ * immortal (it must be before it is published: a reader treats the result
+ * as a reference it may drop), is left unreferenced, a bounded one-time
+ * cost. */
+void *march_cap_layer_once(void **cell, void *(*build)(void)) {
+    _Atomic(void *) *slot = (_Atomic(void *) *)cell;
+    void *cached = atomic_load_explicit(slot, memory_order_acquire);
+    if (cached) return cached;
+    void *layer = build();
+    march_cap_immortalize_k(layer, CAP_K_LAYER);
+    void *winner = NULL;
+    if (atomic_compare_exchange_strong_explicit(
+            slot, &winner, layer, memory_order_acq_rel, memory_order_acquire))
+        return layer;
+    return winner;
 }
 
 static int march_cap_is_nil(void *l) {

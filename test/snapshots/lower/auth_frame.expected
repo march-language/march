@@ -1,0 +1,39 @@
+-- types (3) --
+type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
+type Authority.Scope = Scope(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(Scope))
+-- fns (5) --
+## count_in
+fn count_in(n : Int, acc : Int) : Int =
+  let $auth_l : Layer = count_in$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = count_in$auth(n, acc) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## count_in$auth
+fn count_in$auth(n : Int, acc : Int) : Int =
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
+  True() -> acc
+  _ -> let $t2 : Int = -(n, 1) in
+let $t3 : Int = +(acc, 1) in
+count_in$auth($t2, $t3)
+
+## count_in$auth_layer
+fn count_in$auth_layer() : Layer =
+  Authority.frame_layer("count_in", "IO.FileRead(\"/srv/\")")
+
+## main
+fn main() : () =
+  let $t1243 : Result((), CapError) = probe() in
+case $t1243 of
+  Ok($f1245) -> let $t1244 : Int = count_in(5, 0) in
+println($t1244)
+  Err($f1246) -> println(0)
+  _ -> panic("non-exhaustive pattern match")
+
+## probe
+fn probe() : Result((), CapError) =
+  Authority.check("IO.FileRead", "/srv/x")
+

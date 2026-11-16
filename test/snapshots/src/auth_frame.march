@@ -1,0 +1,27 @@
+-- Run-time frame for a scoped function `needs` clause (ocap phase 4,
+-- lib/tir/auth_rt.ml): pins the wrapper (enter the frame around the body,
+-- restore after), the body fn whose self tail call targets itself, and the
+-- layer fn the emitters build once.  `probe` makes the lowerer load
+-- Authority (this harness links no stdlib), so the frame's calls resolve.
+mod AuthFrame do
+  needs IO.Console
+  needs IO.FileRead
+  fn count_in(n : Int, acc : Int) : Int needs IO.FileRead("/srv/") do
+    if n == 0 do
+      acc
+    else
+      count_in(n - 1, acc + 1)
+    end
+  end
+
+  fn probe() : Result((), CapError) do
+    Authority.check("IO.FileRead", "/srv/x")
+  end
+
+  fn main() needs IO.Console, IO.FileRead("/srv/") do
+    match probe() do
+    Ok(_) -> println(count_in(5, 0))
+    Err(_) -> println(0)
+    end
+  end
+end

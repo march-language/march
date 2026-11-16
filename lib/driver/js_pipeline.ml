@@ -48,6 +48,9 @@ let compile_module_to_js ~source_file ~fn_lines (m : March_ast.Ast.module_) :
     | decls ->
     let m = { m with March_ast.Ast.mod_decls = decls } in
     let tir = March_tir.Lower.lower_module ~type_map m in
+    (* Run-time frames for function `needs` clauses, as every other
+       pipeline adds them right after lowering (lib/tir/auth_rt.ml). *)
+    let tir, _has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
     let iface_methods = March_tir.Lower.get_iface_methods () in
     let tir = March_tir.Mono.monomorphize ~iface_methods tir in
     let tir = March_tir.Fusion.run ~changed:(ref false) tir in

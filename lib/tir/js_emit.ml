@@ -1684,6 +1684,16 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
   ctx.tco <- saved_tco;
   emit_indent ctx;
   emit ctx "}\n";
+  (* A framed fn's layer builder runs once ([Auth_rt]): later calls return
+     the first result (a promise, for an async builder, which awaits to the
+     same layer). *)
+  if Tir_names.is_auth_layer_fn fn.Tir.fn_name then begin
+    let fname = mangle fn.Tir.fn_name in
+    emit_indent ctx;
+    emit ctx (Printf.sprintf
+                "%s = ((build) => { let once; return function () { return once ??= build(); }; })(%s);\n"
+                fname fname)
+  end;
   emit_clo_wrapper ctx fn
 
 (* `[async] function NAME(P0, P1, ...) {` with a source-map segment. *)

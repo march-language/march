@@ -4895,6 +4895,13 @@ let compile filename =
       ) typecheck_env.March_typecheck.Typecheck.module_caps
     in
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
+    (* Ocap phase 4: run-time frames for function `needs` clauses that carry
+       a scope or reach an actor spawn (lib/tir/auth_rt.ml).  After the
+       passes above, which key on a fn's source name and body, and before
+       Mono.  A program with no such clause comes back physically unchanged.
+       [has_frames] is consumed by the closure-capture pass (Task 5). *)
+    let tir, _has_frames =
+      March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
     snap_tir "tir-lower" tir;
     (* A6: the same per-pass counts Contract_pipeline puts on its stamps. *)
     stamp (if !do_timings

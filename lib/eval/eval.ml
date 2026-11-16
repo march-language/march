@@ -3668,6 +3668,35 @@ let forward_stub (scope_ref : (string * value) list ref) (name : string) : value
       | Some v -> apply v args
       | None -> eval_error "stub %s called before initialisation" name)
 
+(** Ocap phase 4: the call of a fn with a `needs` clause runs in a frame of
+    that clause (lib/tir/auth_rt.ml is the compiled twin, which frames only
+    the clauses the static checker cannot discharge; the interpreter frames
+    them all).  [call] is the fn's plain call; [env_ref] resolves
+    [Authority.*] at call time.  The layer is parsed once per definition
+    ([Authority.frame_layer]); entering is [Authority.enter_fn]; leaving
+    restores the slot even when the body raises.  When this definition's
+    layer is already on top (a self call) nothing is entered, so the call
+    stays a tail call.  [main] gets no frame: its clause is the launch
+    request.  The frame reports the fn's module-qualified source name, the
+    name the compiled frame uses ([Lower_state.fn_needs]). *)
+let framed_call (def : fn_def) (defn_prefix : string) (env_ref : env ref)
+    (call : value list -> value) : value list -> value =
+  match def.fn_needs with
+  | Some (entries, _) when def.fn_name.txt <> "main" ->
+    let text, _ = March_ast.Cap_request.request_of_entries entries in
+    let name = defn_prefix ^ def.fn_name.txt in
+    let layer = lazy (apply (lookup "Authority.frame_layer" !env_ref)
+                        [ VString name; VString text ]) in
+    fun args ->
+      let l = Lazy.force layer in
+      (match !Eval_builtins.cap_slot with
+       | VCon ("Cons", [ top; _ ]) when top == l -> call args
+       | _ ->
+         let saved = apply (lookup "Authority.enter_fn" !env_ref) [ l ] in
+         Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved)
+           (fun () -> call args))
+  | _ -> call
+
 (** Evaluate a single declaration, extending [env].
     Returns the updated environment. *)
 let rec eval_decl (env : env) (d : decl) : env =
@@ -3693,10 +3722,10 @@ let rec eval_decl (env : env) (d : decl) : env =
        correct here) — see [VClosure]'s doc comment. *)
     let defn_prefix = effective_module_prefix () in
     let rec_closure = VBuiltin (rec_name,
-                                fun args ->
+                                framed_call def defn_prefix env_ref (fun args ->
                                   let call_env = !env_ref in
                                   let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-                                  apply fn_v args) in
+                                  apply fn_v args)) in
     let env' = (def.fn_name.txt, rec_closure)
                :: List.remove_assoc def.fn_name.txt env in
     env_ref := env';
@@ -3781,10 +3810,10 @@ let rec eval_decl (env : env) (d : decl) : env =
            point in the walk) — see [VClosure]'s doc comment. *)
         let defn_prefix = effective_module_prefix () in
         let rec_closure = VBuiltin (rec_name,
-                                    fun args ->
+                                    framed_call def defn_prefix inner_ref (fun args ->
                                       let call_env = !inner_ref in
                                       let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-                                      apply fn_v args) in
+                                      apply fn_v args)) in
         let parse_rec_arity n =
           match String.rindex_opt n '/' with
           | None -> None
@@ -4395,10 +4424,10 @@ let eval_module_env ?launch (m : module_) : env =
       let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
       let defn_prefix = effective_module_prefix () in
       let rec_closure = VBuiltin (rec_name,
-                                  fun args ->
+                                  framed_call def defn_prefix env_ref (fun args ->
                                     let call_env = !env_ref in
                                     let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-                                    apply fn_v args) in
+                                    apply fn_v args)) in
       (* Support default-arg overloading: if a same-named fn already has a real
          closure (VMultiarity or a previous single-arity VBuiltin), combine into
          VMultiarity so both arities are callable. *)
@@ -4590,10 +4619,10 @@ let eval_stdlib_decls (decls : decl list) : unit =
           let params = clause_params clause in
           let defn_prefix = effective_module_prefix () in
           let rec_clo = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
-            fun args ->
+            framed_call def defn_prefix inner_ref (fun args ->
               let call_env = !inner_ref in
               let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-              apply fn_v args) in
+              apply fn_v args)) in
           let e' = (def.fn_name.txt, rec_clo) :: List.remove_assoc def.fn_name.txt e in
           inner_ref := e';
           eval_inner r e'

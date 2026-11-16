@@ -1,0 +1,143 @@
+-- types (9) --
+type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
+type Authority.Scope = Scope(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(Scope))
+closure $Clo_$jp1_parse$0_Authority_parse(Ptr(Unit), '_)
+closure $Clo_$jp2_parse$1_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp3_parse$2_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp7_parse_option$0_Authority_parse_option(Ptr(Unit), '_, String)
+closure $Clo_$jp7_method_words$0_Authority_method_words(Ptr(Unit), '_, '_, List(String))
+closure $Clo_$jp3_method_words$1_Authority_method_words(Ptr(Unit))
+-- fns (11) --
+## $jp1_parse$apply$0_Authority_parse
+fn $jp1_parse$apply$0_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let toks : '_ = $clo.$fv1 in
+dec_rc $clo;
+let $t663 : '_ = alloc Nil() in
+inc_rc toks;
+Authority.parse_entries(toks, $t663)
+
+## $jp2_parse$apply$1_Authority_parse
+fn $jp2_parse$apply$1_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo669 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo669;
+call_ptr $jp_clo669()
+
+## $jp3_method_words$apply$1_Authority_method_words
+fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  alloc Err("`methods(...)` is not closed")
+
+## $jp3_parse$apply$2_Authority_parse
+fn $jp3_parse$apply$2_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo671 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo671;
+call_ptr $jp_clo671()
+
+## $jp7_method_words$apply$0_Authority_method_words
+fn $jp7_method_words$apply$0_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  let $f944 : '_ = $clo.$fv1 in
+let $f945 : '_ = $clo.$fv2 in
+let acc : List(String) = $clo.$fv3 in
+dec_rc $clo;
+let $jp_clo953 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
+case $f945 of
+  Cons($f954, $f955) -> case $f954 of
+  ")"() -> dec_rc $jp_clo953;
+let rest : '_ = $f955 in
+let m : '_ = inc_rc $f944;
+$f944 in
+let $t939 : '_ = Authority.is_option_name(m) in
+case $t939 of
+  True() -> dec_rc $t939;
+let $t942 : '_ = let $t940 : '_ = inc_rc acc;
+alloc Cons(m, acc) in
+let $t941 : '_ = alloc Nil() in
+Authority.rev($t940, $t941) in
+let $t943 : ('_, '_) = inc_rc rest;
+($t942, rest) in
+alloc Ok($t943)
+  _ -> dec_rc $t939;
+dec_rc m;
+alloc Err("`methods(...)` takes HTTP method names")
+  _ -> call_ptr $jp_clo953()
+  _ -> call_ptr $jp_clo953()
+
+## $jp7_parse_option$apply$0_Authority_parse_option
+fn $jp7_parse_option$apply$0_Authority_parse_option($clo : Ptr(Unit)) : '_ =
+  let $f914 : '_ = $clo.$fv1 in
+let name : String = $clo.$fv2 in
+dec_rc $clo;
+let more : '_ = inc_rc $f914;
+$f914 in
+let $t897 : '_ = ==(name, "methods") in
+case $t897 of
+  True() -> dec_rc $t897;
+let $t899 : '_ = let $t898 : '_ = alloc Nil() in
+Authority.method_words(more, $t898) in
+case $t899 of
+  Err($f903) -> dec_rc $t899;
+let e : '_ = $f903 in
+alloc Err(e)
+  Ok($f904) -> dec_rc $t899;
+case $f904 of
+  $Tuple2($f905, $f906) -> dec_rc $f904;
+let rest : '_ = $f906 in
+let ms : '_ = $f905 in
+let $t901 : '_ = let $t900 : '_ = let $rc_138 : '_ = string_join(ms, ",") in
+dec_rc ms;
+$rc_138 in
+let $rc_137 : '_ = ++("methods=", $t900) in
+dec_rc $t900;
+$rc_137 in
+let $t902 : ('_, '_) = ($t901, rest) in
+alloc Ok($t902)
+  _ -> dec_rc $f904;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t899;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t897;
+dec_rc more;
+let $t911 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
+alloc Err($t911)
+
+## count_in
+fn count_in(n : Int, acc : Int) : Int =
+  let $auth_l : Layer = count_in$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = count_in$auth(n, acc) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## count_in$auth
+fn count_in$auth(n : Int, acc : Int) : Int =
+  let $t1 : Bool = ==(n, 0) in
+case $t1 of
+  True() -> acc
+  _ -> let $t2 : Int = -(n, 1) in
+let $t3 : Int = +(acc, 1) in
+count_in$auth($t2, $t3)
+
+## count_in$auth_layer
+fn count_in$auth_layer() : Layer =
+  Authority.frame_layer("count_in", "IO.FileRead(\"/srv/\")")
+
+## main
+fn main() : () =
+  let $t1243 : Result((), CapError) = probe() in
+case $t1243 of
+  Ok($f1245) -> dec_rc $t1243;
+dec_rc $f1245;
+let $t1244 : Int = count_in(5, 0) in
+println($t1244)
+  Err($f1246) -> dec_rc $t1243;
+dec_rc $f1246;
+println(0)
+  _ -> dec_rc $t1243;
+panic("non-exhaustive pattern match")
+
+## probe
+fn probe() : Result((), CapError) =
+  Authority.check("IO.FileRead", "/srv/x")
+

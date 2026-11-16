@@ -9,3 +9,8 @@ val base_env : Eval_types.env
 (** Clear the run-time authority (launch layers and the current slot) for a
     fresh program launch (ocap phase 4). *)
 val reset_cap_authority : unit -> unit
+
+(** The current authority slot (a [List(Authority.Layer)] value; [Nil] when
+    empty), which the interpreter's function frames read and restore
+    directly (ocap phase 4). *)
+val cap_slot : Eval_types.value ref

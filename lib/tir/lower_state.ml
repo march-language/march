@@ -117,6 +117,33 @@ let note_module_let (fn : Tir.fn_def) : unit =
   | Tir.TFn _ -> Hashtbl.replace _fn_typed_module_lets fn.fn_name fn.fn_ret_ty
   | _ -> ()
 
+(** A function's `needs` clause, for the run-time frames of ocap phase 4
+    ([Auth_rt]): the name the frame reports (the fn's source name qualified
+    by its module path, as the interpreter spells it: [f] in the entry
+    module, [Inner.f] in a nested one, [Mod.f] in a library), the clause as
+    canonical scope text ([March_ast.Cap_request.request_of_entries], the
+    printer the launch request uses) and whether it carries a scope. *)
+type fn_needs = {
+  fnn_name : string;
+  fnn_text : string;
+  fnn_scoped : bool;
+}
+
+(** Lowered (final TIR) fn name -> its `needs` clause, for every fn that has
+    one.  Filled where each fn gets its final name; reset per
+    [lower_module]. *)
+let fn_needs_tbl : (string, fn_needs) Hashtbl.t = Hashtbl.create 8
+
+(** Record [def]'s `needs` clause (if any) under the TIR name [final]; the
+    frame reports [display]. *)
+let note_fn_needs ~(final : string) ~(display : string) (def : Ast.fn_def) : unit =
+  match def.Ast.fn_needs with
+  | None -> ()
+  | Some (entries, _) ->
+    let text, scoped = March_ast.Cap_request.request_of_entries entries in
+    Hashtbl.replace fn_needs_tbl final
+      { fnn_name = display; fnn_text = text; fnn_scoped = scoped }
+
 (** Emit a runtime panic for a non-exhaustive match that the typechecker
     missed.  Returning [LitInt 0] here would silently reinterpret a value of
     the match's real (possibly non-Int) type as a tagged int — e.g. treated

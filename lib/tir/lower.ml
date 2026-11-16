@@ -76,6 +76,14 @@ let _ensure_module_lowered = Lower_state._ensure_module_lowered
 let _iface_methods = Lower_state._iface_methods
 let _saved_iface_methods = Lower_state._saved_iface_methods
 let get_iface_methods = Lower_state.get_iface_methods
+
+type fn_needs = Lower_state.fn_needs = {
+  fnn_name : string;
+  fnn_text : string;
+  fnn_scoped : bool;
+}
+
+let fn_needs_tbl = Lower_state.fn_needs_tbl
 let _default_dispatch = Lower_state._default_dispatch
 let _alias_candidates = Lower_state._alias_candidates
 let _alias_reported = Lower_state._alias_reported
@@ -263,6 +271,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
   Hashtbl.reset Lower_state._fn_typed_module_lets;
+  Hashtbl.reset Lower_state.fn_needs_tbl;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
      get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
      decls WRITTEN in the entry file count: [m.mod_decls] also carries the
@@ -853,6 +862,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | Ast.DFn (def, _) ->
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
           let fn = Lower_decls.lower_fn_def env def in   (* evaluate before reading !fns *)
+          Lower_state.note_fn_needs ~final:fn.fn_name ~display:def.fn_name.txt def;
           fns := fn :: !fns
         end
       | _ -> ()
@@ -891,6 +901,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | None -> fn
           in
           note_migrate_msg ~prefix:"" def fn;
+          Lower_state.note_fn_needs ~final:fn.fn_name ~display:def.fn_name.txt def;
           if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
             Hot_reload.note_work_entry fn.fn_name;
           (* The entry file's own top-level fns, by provenance: they may be
@@ -988,6 +999,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 Provenance.rename ~old:fn.fn_name ~new_:qname;
                 let fn = { fn with fn_name = qname } in
                 note_migrate_msg ~prefix def fn;
+                Lower_state.note_fn_needs ~final:qname ~display:(prefix ^ def.fn_name.txt) def;
                 if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
                   Hot_reload.note_work_entry fn.fn_name;
                 fns := fn :: !fns
