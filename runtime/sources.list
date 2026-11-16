@@ -35,6 +35,7 @@ march_observe.c              core            jit
 march_observe_snapshot.c     core            jit
 march_observe_debug.c        core            jit
 march_sig.c                  core            jit
+march_authority.c            core            jit
 base64.c                     core            jit
 sha1.c                       core            jit
 march_http.c                 http            -

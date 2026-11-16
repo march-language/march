@@ -22,7 +22,13 @@
    - names: [Name_scope.admits].
 
    The March verdict comes from ONE interpreted program that prints
-   [Authority.admits] for every row.  They must agree row for row. *)
+   [Authority.admits] for every row.  The C verdict comes from the same
+   program compiled: a native binary calls the C runtime's copy of the policy
+   (runtime/march_authority.c; lib/tir/auth_native.ml retargets
+   [Authority.parse] / [Authority.admits] to it).  All three must agree row
+   for row (ocap phase 4, Task 4b).  Further rows pin the parser's results and
+   error texts, [Authority.subset] and the hand-built [Paths] / [Hosts] forms,
+   interpreted against compiled. *)
 
 module L = March_caps.Cap_lattice
 module CS = March_caps.Cap_scope
@@ -241,7 +247,7 @@ let read_all ic =
    with End_of_file -> ());
   Buffer.contents b
 
-let run_march src =
+let run_march ?(compiled = false) src =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let dir = Filename.temp_dir "march-auth-diff" "" in
   let home = Filename.concat dir "home" in
@@ -252,26 +258,189 @@ let run_march src =
       output_string oc src;
       close_out oc;
       let cmd =
-        Printf.sprintf "cd %s && HOME=%s %s diff.march 2>&1" (Filename.quote dir)
-          (Filename.quote home) exe in
+        if compiled then
+          Printf.sprintf "cd %s && HOME=%s %s --compile --opt 0 diff.march -o ./prog >build.txt 2>&1 && ./prog 2>&1 || cat build.txt"
+            (Filename.quote dir) (Filename.quote home) exe
+        else
+          Printf.sprintf "cd %s && HOME=%s %s diff.march 2>&1" (Filename.quote dir)
+            (Filename.quote home) exe in
       let ic = Unix.open_process_in cmd in
       let out = read_all ic in
       ignore (Unix.close_process_in ic);
       out)
 
-let test_agree () =
-  let out = run_march (program ()) in
+let agree ~compiled () =
+  let out = run_march ~compiled (program ()) in
   let lines = List.filter (fun l -> l <> "") (String.split_on_char '\n' out) in
   if List.length lines <> List.length rows then
-    Alcotest.failf "expected %d verdicts from the March program, got:\n%s"
-      (List.length rows) out;
+    Alcotest.failf "expected %d verdicts from the %s program, got:\n%s"
+      (List.length rows) (if compiled then "compiled (C)" else "March") out;
   List.iter2
     (fun ((text, kind, target, cwd) as row) got ->
        let want = if ocaml_verdict row then "1" else "0" in
        Alcotest.(check string)
-         (Printf.sprintf "needs %s; %s(%S) in %s" text kind target cwd)
+         (Printf.sprintf "%s: needs %s; %s(%S) in %s"
+            (if compiled then "C" else "March") text kind target cwd)
          want got)
     rows lines
+
+let test_agree () = agree ~compiled:false ()
+
+(* The same rows judged by the C policy: the program compiled. *)
+let test_agree_c () = agree ~compiled:true ()
+
+(* ── C against March: the parser, subset and the hand-built forms ────── *)
+
+(* Scope texts, accepted and refused: each is parsed and its result written
+   out constructor by constructor (or its error text), so the C parser must
+   build the same values, field for field, and refuse with the same words. *)
+let parse_rows : string list = [
+  "()"; ""; "IO"; "IO.Console, IO.Clock"; "  IO.Console ,IO.Clock\n";
+  "IO.FileRead(\"/srv/a/../b/./c//\")"; "IO.FileSystem(\"/\", \"/x\")";
+  "IO.NetConnect(\"*.X.com:443/v1/\", methods(get, post), no_redirects)";
+  "IO.NetConnect(\"API.x.com.\")"; "IO.NetConnect(\"[::1]:8080\")"; "IO.NetConnect(no_redirects)";
+  "IO.NetConnect(methods(get))"; "IO.NetConnect(\"a.com\", methods(\"get\"))";
+  "IO.NetConnect(\"a.com\", methods get)"; "IO.NetConnect(\"a.com\", methods(get)";
+  "IO.Mut(\"a\", \"b\", prefix(\"c.\"))"; "IO.Registry(prefix(\"w.\"))";
+  (* refused *)
+  "IO.Console("; "IO.Console()"; "IO.Console IO.Clock"; "io.console"; "IO..Console"; "IO.Console,";
+  ","; "IO.Console(\"x\")"; "IO.FileRead(\"rel/\")"; "IO.FileRead(\"\")"; "IO.FileRead(no_redirects)";
+  "IO.FileRead(\"/a\" \"/b\")"; "IO.FileRead(\"/a\""; "IO.FileRead(\"/a\\\"";
+  "IO.NetConnect(\"https://a.com\")"; "IO.NetConnect(\"user@a.com\")"; "IO.NetConnect(\"a.com:0\")";
+  "IO.NetConnect(\"a.com:\")"; "IO.NetConnect(\"a.com:99999\")"; "IO.NetConnect(\"*\")";
+  "IO.NetConnect(\"a.*.com\")"; "IO.NetConnect(\"a..com\")"; "IO.NetConnect(\"a_b.com\")";
+  "IO.NetConnect(\"[zz]\")"; "IO.NetConnect(\"[::1\")"; "IO.NetConnect(\"/v1/\")";
+  "IO.NetConnect(\"a.com//x\")"; "IO.NetConnect(\"a.com/../x\")"; "IO.NetConnect(\"a.com/a%20\")";
+  "IO.NetConnect(\"a.com\", no_redirects, no_redirects)"; "IO.NetConnect(methods(get), methods(put))";
+  "IO.NetConnect(methods(fetch))"; "IO.NetConnect(\"a.com\", bogus)"; "IO.NetConnect(\"a\", \"b\")";
+  "IO.NetConnect(no_redirects, \"a.com\")"; "IO.NetConnect(path(\"x\"))"; "IO.NetConnect(methods(get, \"x\"))";
+  "IO.Mut(\"\")"; "IO.Mut(\"a;b\")"; "IO.Mut(prefix(\"\"))"; "IO.Mut(other(\"x\"))"; "IO.Mut(prefix)";
+  "IO.Mut(prefix(\"a\", \"b\"))"; "IO.Console@"; "IO.FileRead(\"/\xc3\xa9\")";
+]
+
+(* (a, b): is every entry of scope list [a] covered by one of [b]? *)
+let subset_rows : (string * string) list = [
+  ("IO.FileRead(\"/srv/a\")", "IO.FileSystem(\"/srv\")");
+  ("IO.FileRead(\"/srv\")", "IO.FileSystem(\"/srv/a\")");
+  ("IO.FileRead", "IO.FileRead(\"/\")");
+  ("IO.FileRead(\"/x\")", "IO.FileRead");
+  ("IO.FileRead(\"/x\"), IO.Console", "IO");
+  ("IO.Console, IO.Clock", "IO.Console");
+  ("()", "()");
+  ("IO.Mut(\"a\", prefix(\"c.x\"))", "IO.Mut(prefix(\"c.\"), \"a\")");
+  ("IO.Mut(prefix(\"c\"))", "IO.Mut(prefix(\"c.\"))");
+  ("IO.NetConnect(\"a.x.com\")", "IO.NetConnect(\"*.x.com\")");
+  ("IO.NetConnect(\"*.x.com\")", "IO.NetConnect(\"*.x.com\")");
+  ("IO.NetConnect(\"*.x.com\")", "IO.NetConnect(\"a.x.com\")");
+  ("IO.NetConnect(\"x.com:443\")", "IO.NetConnect(\"x.com\")");
+  ("IO.NetConnect(\"x.com\")", "IO.NetConnect(\"x.com:443\")");
+  ("IO.NetConnect(\"x.com/v1/a/\")", "IO.NetConnect(\"x.com/v1/\")");
+  ("IO.NetConnect(\"x.com\")", "IO.NetConnect(\"x.com/v1/\")");
+  ("IO.NetConnect(\"x.com\", methods(get))", "IO.NetConnect(\"x.com\", methods(get, post))");
+  ("IO.NetConnect(\"x.com\")", "IO.NetConnect(\"x.com\", methods(get))");
+  ("IO.NetConnect(\"x.com\")", "IO.NetConnect(no_redirects)");
+  ("IO.NetConnect(\"x.com\", no_redirects)", "IO.NetConnect(no_redirects)");
+  ("IO.NetConnect(\"x.com\")", "IO.NetConnect");
+  ("IO.NetConnect", "IO.NetConnect(\"x.com\")");
+  ("IO.Database", "IO.NetConnect");
+  ("IO.NetConnect(\"x.com\")", "IO.Network");
+]
+
+let render_program () =
+  let q = march_string in
+  Printf.sprintf
+    {|mod AuthorityRender do
+  needs IO.Console
+  fn arg_text(a : Authority.Arg) : String do
+    match a do
+    Authority.Any -> "Any"
+    Authority.Paths(ps) -> "Paths[" ++ String.join(ps, "|") ++ "]"
+    Authority.Hosts(s) -> "Hosts[" ++ s ++ "]"
+    Authority.Names(ns, pre) -> "Names[" ++ String.join(ns, "|") ++ ";" ++ String.join(pre, "|") ++ "]"
+    Authority.HostAt(s, h, w, p) ->
+      "HostAt[" ++ s ++ "," ++ h ++ "," ++ (if w do "wild" else "exact" end) ++ "," ++ int_to_string(p) ++ "]"
+    Authority.PathsAt(ps) -> "PathsAt[" ++ String.join(ps, "|") ++ "]"
+    end
+  end
+  fn scope_text(s : Authority.Scope) : String do
+    match s do
+    Authority.Scope(k, a) -> k ++ "=" ++ arg_text(a)
+    end
+  end
+  fn parsed(text : String) : List(Authority.Scope) do
+    match Authority.parse(text) do
+    Ok(s) -> s
+    Err(_) -> Nil
+    end
+  end
+  fn p(text : String) : () do
+    match Authority.parse(text) do
+    Ok(ss) -> Authority.ignore(println("ok " ++ int_to_string(List.length(ss)) ++ " " ++ String.join(List.map(ss, scope_text), " ")))
+    Err(e) -> Authority.ignore(println("error " ++ e))
+    end
+  end
+  fn sub(a : String, b : String) : () do
+    Authority.ignore(println(if Authority.subset(parsed(a), parsed(b)) do "subset" else "not" end))
+  end
+  fn adm(ss : List(Authority.Scope), kind : String, target : String, cwd : String) : () do
+    Authority.ignore(println(if Authority.admits(ss, kind, target, cwd) do "admits" else "refuses" end))
+  end
+  fn main() do
+%s
+%s
+    let paths = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv/./a/", "rel/x"]))]
+    adm(paths, "IO.FileRead", "/srv/a/b", "/")
+    adm(paths, "IO.FileRead", "/srv/ab", "/")
+    adm(paths, "IO.FileRead", "rel/x/y", "/")
+    adm(paths, "IO.FileRead", "x/y", "/home")
+    adm(paths, "IO.FileRead", "x/y", "")
+    adm(paths, "IO.Console", "", "/")
+    let hosts = [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com:443/v1/;methods=get"))]
+    adm(hosts, "IO.NetConnect", "a.x.com:443", "/")
+    adm(hosts, "IO.NetConnect", "a.x.com:80", "/")
+    adm(hosts, "IO.NetConnect", "x.com:443", "/")
+    adm(hosts, "IO.NetConnect.TLS", "", "/")
+    adm(hosts, "IO.Database", "a.x.com:443", "/")
+    adm([Authority.Scope("IO.NetConnect", Authority.Hosts(";no_redirects"))], "IO.NetConnect", "e.org:1", "/")
+    adm([Authority.Scope("IO.NetConnect", Authority.Hosts("bad host"))], "IO.NetConnect", "e.org:1", "/")
+    sub("IO.FileRead(\"/srv/a\")", "IO.FileRead(\"/srv\")")
+    Authority.ignore(println(if Authority.subset([Authority.Scope("IO.FileRead", Authority.Paths(["/srv/a/../b"]))], [Authority.Scope("IO.FileRead", Authority.Paths(["/srv/b"]))]) do "subset" else "not" end))
+    Authority.ignore(println(if Authority.subset([Authority.Scope("IO.NetConnect", Authority.Hosts("a.x.com"))], [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com"))]) do "subset" else "not" end))
+    Authority.ignore(println(if Authority.subset([Authority.Scope("IO.NetConnect", Authority.Hosts(""))], [Authority.Scope("IO.NetConnect", Authority.Hosts(""))]) do "subset" else "not" end))
+  end
+end
+|}
+    (String.concat "
+" (List.map (fun t -> Printf.sprintf "    p(%s)" (q t)) parse_rows))
+    (String.concat "
+" (List.map (fun (a, b) -> Printf.sprintf "    sub(%s, %s)" (q a) (q b)) subset_rows))
+
+let test_render () =
+  let src = render_program () in
+  let march = run_march src and c = run_march ~compiled:true src in
+  let ml = String.split_on_char '\n' march and cl = String.split_on_char '\n' c in
+  let want = List.length parse_rows + List.length subset_rows + 17 + 1 in
+  if List.length ml <> want then
+    Alcotest.failf "expected %d lines from the interpreted program, got:\n%s" want march;
+  if List.length cl <> want then
+    Alcotest.failf "expected %d lines from the compiled program, got:\n%s" want c;
+  let labels =
+    List.map (fun t -> "parse " ^ t) parse_rows
+    @ List.map (fun (a, b) -> Printf.sprintf "subset %s <= %s" a b) subset_rows
+    @ List.init 18 (fun i -> Printf.sprintf "hand-built row %d" (i + 1)) in
+  List.iteri (fun i (m, cc) ->
+      Alcotest.(check string) (Printf.sprintf "C = March: %s" (List.nth labels i)) m cc)
+    (List.combine ml cl);
+  (* Not vacuous: both verdicts and both parse outcomes occur. *)
+  let has sub = List.exists (fun l -> l = sub) ml in
+  let starts pre = List.exists (fun l -> String.length l >= String.length pre
+                                         && String.sub l 0 (String.length pre) = pre) ml in
+  Alcotest.(check bool) "some parse succeeds" true (starts "ok ");
+  Alcotest.(check bool) "some parse fails" true (starts "error ");
+  Alcotest.(check bool) "some subset holds" true (has "subset");
+  Alcotest.(check bool) "some subset fails" true (has "not");
+  Alcotest.(check bool) "some admits" true (has "admits");
+  Alcotest.(check bool) "some refuses" true (has "refuses")
 
 (* The reference itself must not be vacuous: both verdicts occur, in each
    family of rows. *)
@@ -781,6 +950,62 @@ let test_grant_flag () =
             "<exit 2>\nmarch: MARCH_GRANT grants IO.Clock") t 0); true
          with Not_found -> false))
 
+(* ── Size: a printing program links no March matcher (Task 4b) ─────────
+   Hello world (`needs IO.Console` + println), compiled --opt 2: the IR
+   defines at most 13 functions (the pre-phase-4 baseline was 10), none of
+   them an Authority policy function other than `check`, and launches through
+   the C runtime.  On macOS arm64, where the baseline was measured (254 KB),
+   the binary stays within 8% of it: 274 KB. *)
+let hello_src = {|mod Hello do
+  needs IO.Console
+  fn main() do
+    println("Hello, world!")
+  end
+end
+|}
+
+let test_hello_size () =
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let dir = Filename.temp_dir "march-auth-size" "" in
+  let home = Filename.concat dir "home" in
+  Unix.mkdir home 0o755;
+  Unix.mkdir (Filename.concat home ".cache") 0o755;
+  Fun.protect ~finally:(fun () -> try rm_rf dir with _ -> ()) (fun () ->
+      let oc = open_out_bin (Filename.concat dir "hello.march") in
+      output_string oc hello_src;
+      close_out oc;
+      ignore (sh ~dir ~home (exe ^ " --emit-llvm --opt 2 hello.march"));
+      ignore (sh ~dir ~home (exe ^ " --compile --opt 2 hello.march -o ./hello"));
+      let ll =
+        let ic = open_in_bin (Filename.concat dir "hello.ll") in
+        let s = really_input_string ic (in_channel_length ic) in
+        close_in ic; s in
+      let defines =
+        List.filter (fun l -> String.length l > 7 && String.sub l 0 7 = "define ")
+          (String.split_on_char '\n' ll) in
+      let names = String.concat "\n" defines in
+      Alcotest.(check bool) (Printf.sprintf "at most 13 defined functions, got %d:\n%s"
+                               (List.length defines) names) true (List.length defines <= 13);
+      List.iter (fun l ->
+          let contains sub = try ignore (Str.search_forward (Str.regexp_string sub) l 0); true
+            with Not_found -> false in
+          if contains "@Authority." && not (contains "@Authority.check(") then
+            Alcotest.failf "hello world defines an Authority policy function: %s" l)
+        defines;
+      Alcotest.(check bool) "the entry launches through the C runtime" true
+        (try ignore (Str.search_forward (Str.regexp_string "@march_cap_rt_launch_init(") ll 0); true
+         with Not_found -> false);
+      Alcotest.(check string) "it still prints" "Hello, world!\n" (sh ~dir ~home "./hello");
+      let size = (Unix.stat (Filename.concat dir "hello")).Unix.st_size in
+      let macos_arm64 =
+        let ic = Unix.open_process_in "uname -sm" in
+        let s = try input_line ic with End_of_file -> "" in
+        ignore (Unix.close_process_in ic);
+        s = "Darwin arm64" in
+      if macos_arm64 then
+        Alcotest.(check bool) (Printf.sprintf "binary at most 274 KB (280576 B), got %d B" size) true
+          (size <= 280576))
+
 let tests =
   [ ( "authority_launch",
       [ Alcotest.test_case "launch_init, the grant, enter_fn and the layered check" `Quick
@@ -807,4 +1032,10 @@ let tests =
       [ Alcotest.test_case "the reference admits and refuses" `Quick
           test_reference_not_vacuous;
         Alcotest.test_case "Authority.admits agrees with lib/caps row for row" `Quick
-          test_agree ] ) ]
+          test_agree;
+        Alcotest.test_case "the C policy (compiled) agrees with lib/caps row for row" `Quick
+          test_agree_c;
+        Alcotest.test_case "the C parser, subset and hand-built forms agree with March" `Quick
+          test_render ] );
+    ( "authority_size",
+      [ Alcotest.test_case "hello world links no March matcher" `Quick test_hello_size ] ) ]

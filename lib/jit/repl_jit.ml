@@ -543,6 +543,9 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
   (* Run-time frames for function `needs` clauses, as the native pipeline
      (bin/main.ml) adds them right after lowering. *)
   let tir, _has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  (* ...and judges capability operations with the C runtime's policy
+     (lib/tir/auth_native.ml), as a native binary does. *)
+  let tir = March_tir.Auth_native.retarget tir in
   (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
      immediately post-lower (pre-mono), and without it a function behaves
      differently in the REPL than when compiled.  The position matters as much

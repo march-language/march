@@ -11077,17 +11077,25 @@ void *march_cap_layers(void) {
     return cur;
 }
 
-void march_cap_set_launch(void *layers) {
+/* Sets the launch layers, once: 1 (and [layers] released) when they were
+ * already set.  The C policy's launch (march_authority.c) calls this
+ * directly, so a printing binary does not link march_panic. */
+int march_cap_set_launch_once(void *layers) {
     if (atomic_exchange_explicit(&march_cap_launch_set, 1, memory_order_acq_rel)) {
         march_cap_release(layers);
-        march_panic(march_string_lit("cap_set_launch: the launch authority is already set", 51));
-        return;
+        return 1;
     }
     if (march_cap_is_nil(layers)) {   /* an empty launch keeps the fast path */
         march_cap_release(layers);
-        return;
+        return 0;
     }
     atomic_store_explicit(&march_cap_launch, layers, memory_order_release);
+    return 0;
+}
+
+void march_cap_set_launch(void *layers) {
+    if (march_cap_set_launch_once(layers))
+        march_panic(march_string_lit("cap_set_launch: the launch authority is already set", 51));
 }
 
 void *march_cap_save(void) {

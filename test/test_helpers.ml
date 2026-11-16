@@ -913,7 +913,7 @@ let setup_jit_runtime () =
       "march_gc.c"; "sha1.c"; "march_extras.c"; "march_ctx_escape.c";
       "march_handle.c"; "march_file_beneath.c"; "base64.c"; "march_ffi.c";
       "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
-      "march_monitor_registry.c"; "march_observe.c"; "march_observe_snapshot.c"; "march_observe_debug.c"; "march_trace.c"; "march_sig.c"; "tweetnacl.c"; "march_nacl.c";
+      "march_monitor_registry.c"; "march_observe.c"; "march_observe_snapshot.c"; "march_observe_debug.c"; "march_trace.c"; "march_sig.c"; "march_authority.c"; "tweetnacl.c"; "march_nacl.c";
       "pqc.c"; "march_pqc.c";
     ] in
     let c_inputs = runtime_c :: extra_src_list in

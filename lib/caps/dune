@@ -19,3 +19,11 @@
  (name emit_march_lattice)
  (modules emit_march_lattice)
  (libraries march_caps))
+
+; Emitter: writes runtime/march_authority_tables.h (the lattice and the
+; scope-kind tables the C run-time authority judges with, ocap phase 4 Task
+; 4b).  See emit_c_lattice.ml and test/dune's "authority tables freshness".
+(executable
+ (name emit_c_lattice)
+ (modules emit_c_lattice)
+ (libraries march_caps))

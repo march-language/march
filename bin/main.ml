@@ -4902,6 +4902,14 @@ let compile filename =
        [has_frames] is consumed by the closure-capture pass (Task 5). *)
     let tir, _has_frames =
       March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+    (* Ocap phase 4, Task 4b: a native binary judges capability operations
+       with the C runtime's copy of the Authority policy
+       (runtime/march_authority.c), so it links no March matcher or parser
+       (lib/tir/auth_native.ml).  JS and wasm keep the March policy. *)
+    let tir =
+      let t = parse_target !target_str in
+      if t = March_tir.Llvm_emit.Js || March_tir.Llvm_emit.is_wasm_target t then tir
+      else March_tir.Auth_native.retarget tir in
     snap_tir "tir-lower" tir;
     (* A6: the same per-pass counts Contract_pipeline puts on its stamps. *)
     stamp (if !do_timings
@@ -6347,6 +6355,7 @@ let compile filename =
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe_snapshot.c")) (* observe verbs *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe_debug.c")) (* signed debug verbs *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_sig.c")) (* deploy-key signatures, nonces, audit log *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_authority.c")) (* the run-time authority's policy (ocap p4) *)
               ^ (if hcr_identity_flags <> "" then opt_file2 hcr_identity_c2 else "")
               ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in

@@ -1155,6 +1155,25 @@
  (name runtest)
  (deps (alias cap_lattice_march_check)))
 
+; ── authority tables freshness ───────────────────────────────────────────
+; Regenerates runtime/march_authority_tables.h (the C run-time authority's
+; lattice and scope-kind tables) from lib/caps via lib/caps/emit_c_lattice.ml
+; and diffs it against the committed copy.  Target it alone with
+; `dune build --root . @test/authority_tables_check`.
+(rule
+ (targets authority_tables_fresh.h)
+ (deps    (file %{exe:../lib/caps/emit_c_lattice.exe}))
+ (action  (run %{exe:../lib/caps/emit_c_lattice.exe} authority_tables_fresh.h)))
+
+(rule
+ (alias authority_tables_check)
+ (deps  ../runtime/march_authority_tables.h authority_tables_fresh.h)
+ (action (diff ../runtime/march_authority_tables.h authority_tables_fresh.h)))
+
+(alias
+ (name runtest)
+ (deps (alias authority_tables_check)))
+
 ; ── Distributed-OTP function-by-identity registry unit test ──────────────
 (rule
  (targets test_remote_registry_runner)

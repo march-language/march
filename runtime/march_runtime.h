@@ -208,6 +208,7 @@ void   *march_cap_launch_text(void);
 /* ocap phase 4: the run-time authority (march_runtime.c). */
 void   *march_cap_layers(void);
 void    march_cap_set_launch(void *layers);
+int     march_cap_set_launch_once(void *layers);
 void   *march_cap_save(void);
 void    march_cap_restore(void *saved);
 void   *march_cap_push(void *layer);
