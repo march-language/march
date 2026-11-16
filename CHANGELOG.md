@@ -1077,6 +1077,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A generic function whose type variable is only in its return type no longer crashes
+  compiled.** `fn make_none() : Option(a) do None end` used as an `Option(Float)`,
+  `Option(())` or `Option(Option(Int))` died with SIGSEGV at address 0x8: it was compiled once,
+  generic, while the caller expected a different layout. Such a function is now specialised
+  for each return type it is used at.
+
 - **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
   `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
   there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
