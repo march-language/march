@@ -32,6 +32,9 @@ type actor_schema = {
   (* M11: Some fields = the compiler derived this build's migrate_state from
      the deployed schema, the listed fields taking their `init` values *)
   not_derived: string option;  (* why it could not, when the state changed *)
+  derived_drops: string list;
+  (* the fields a derived drop-only migration drops: the running version's
+     proved derived rollback, taken back by a rollback deploy *)
 }
 
 (** The deploy changed the actor's message type (D30, plan 6.3): a handler
@@ -164,7 +167,9 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
                    | `Null -> [] | v -> v |> to_list |> List.map to_string);
                derived = optional "migrate_derived"
                    (fun v -> v |> to_list |> List.map to_string) j;
-               not_derived = optional "migrate_not_derived" to_string j })
+               not_derived = optional "migrate_not_derived" to_string j;
+               derived_drops = (match member "migrate_derived_drops" j with
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string) })
 
 let parse_schemas_file path =
   if not (Sys.file_exists path) then []
@@ -228,6 +233,11 @@ let not_derived_note (new_schemas : (string * actor_schema) list) (actor : strin
 (** The line announcing a derived migration, when [actor]'s was. *)
 let derived_note (new_schemas : (string * actor_schema) list) (actor : string) : string option =
   match List.assoc_opt actor new_schemas with
+  | Some { derived = Some _; derived_drops = (_ :: _ as ds); _ } ->
+    Some (Printf.sprintf
+            "actor %s: migrate_state derived as the running version's proved rollback (drops %s, \
+             the fields that version added)"
+            actor (String.concat ", " ds))
   | Some { derived = Some added; _ } ->
     Some (Printf.sprintf "actor %s: migrate_state derived from the running version's state (%s)"
             actor

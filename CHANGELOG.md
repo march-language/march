@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Derived rollbacks for hot deploys.** When the compiler derives a `migrate_state` because
+  an actor's state only gained fields, it now derives the reverse `<actor>_rollback_state`
+  too (copy back the old fields, drop the added ones) and proves the round trip. Rolling
+  back is then free: redeploying the old source gets its migration derived as that proved
+  rollback, where before a removed field always needed a hand-written migration.
+  `forge hot-reload check` shows `rollback round trip (derived)` and
+  `migrate_state (derived rollback)`.
 - **16 more proved laws in the standard library.** `List` (`drop_last_snoc`:
   `drop_last(append(xs, [x])) == xs`, `len_drop_last`, `is_empty_len`, `head_opt_nth_opt`,
   `head_opt_append`), `Option` (`zip_is_some`, `is_none_not_some`, `len_to_list`,
@@ -1052,6 +1059,10 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A lemma can unfold a function whose parameter has a field refinement**
+  (`fn mig(old : {Old | _.count >= 0})`). Before, such a function had no unfolding at all, so
+  the rollback round trip of any actor with a refined state field was `not proved`.
 
 - **Compiled HTTP clients read the response status, headers and errors correctly.** In
   compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
