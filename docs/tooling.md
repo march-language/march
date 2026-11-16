@@ -489,6 +489,8 @@ forge fix --dry-run    # show what would change without writing any files
 | Unused function parameter | Prefixes the parameter name with `_` |
 | Redundant (unreachable) match arm | Deletes the entire arm (pattern + body) |
 
+`forge fix --only CODE[,CODE]` applies only the fixes of diagnostics with those codes. Naming a code is also how you take a fix the compiler only guesses (tier `maybe-incorrect`), which plain `forge fix` never applies: `forge fix --only migrate_rename_suggested` adds the `migrate` clause the compiler proposes when an actor's state field looks renamed since the running version (see [Hot Code Reload]({{ site.baseurl }}/docs/hot-code-reload/#moving-data-the-migrate-clause)).
+
 `forge fix` will not apply any fixes if the project has errors; fix those first. It only touches files inside your project root, applies edits bottom-up so earlier line offsets stay valid, and deduplicates identical fixes before writing.
 
 ### Testing

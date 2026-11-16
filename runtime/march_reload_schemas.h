@@ -105,6 +105,7 @@ static void schema_write_compact(FILE *f, const char *v) {
  * deploy unproved (--accept-unproved), from its actor's schema; NULL when
  * none.  The image is signed, so the audit line records a signed override. */
 static const char *schema_accepted_for(const char *fn);
+static const char *schema_dropped_for(const char *fn);
 static void schemas_free(schema_entry *s) {
     while (s) { schema_entry *n = s->next; free(s->name); free(s->json); free(s); s = n; }
 }
@@ -150,6 +151,13 @@ static int schemas_extract(schema_entry **out, const char *json,
 static const char *schema_accepted_for(const char *fn) {
     for (const schema_entry *s = g_schemas; s; s = s->next)
         if (schema_dispatch_matches(s->name, fn)) return schema_member(s->json, "accepted_unproved");
+    return NULL;
+}
+/* The removed state fields this image's derived migration of [fn]'s actor
+ * discards by --drop: its schema's "migrate_drops_consented", or NULL. */
+static const char *schema_dropped_for(const char *fn) {
+    for (const schema_entry *s = g_schemas; s; s = s->next)
+        if (schema_dispatch_matches(s->name, fn)) return schema_member(s->json, "migrate_drops_consented");
     return NULL;
 }
 static void schemas_merge(schema_entry *updates) {

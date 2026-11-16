@@ -136,6 +136,16 @@ let rollback_moves : (string * (string * string) list) list ref = ref []
     clause or from a rollback deploy that undoes one.  Both reset with
     [report]. *)
 let clause_fields : (string * string list) list ref = ref []
+
+(** `--hcr-drop Actor.field` (forge deploy hot --drop, todo
+    2026-11-15-hcr-deploy-drop-consent): removed fields a derived migration
+    may drop although nothing reads them.  Set by the driver's flag, never
+    reset (it is the build's input).  [consented]: actor -> the fields this
+    build's derivation dropped by that consent, for the image's schemas
+    (`migrate_drops_consented`, which the server audits).  Reset with
+    [report]. *)
+let consented_drops : string list ref = ref []
+let consented : (string * string list) list ref = ref []
 let moves : (string * (string * string) list) list ref = ref []
 
 (** The parsed types of the deployed fields, per actor: what a removed or
@@ -342,7 +352,10 @@ let derive ~(actor : string) (adef : actor_def) (sp : span)
   | _ ->
     let binder, given = match clause with Some (b, fs) -> (b, fs) | None -> (param_name, []) in
     let read = List.concat_map (fun (_, e) -> reads binder e) given in
-    let unread = List.filter (fun (f, _) -> not (List.mem f read)) removed in
+    let consents f = List.mem (actor ^ "." ^ f) !consented_drops in
+    let unread = List.filter (fun (f, _) -> not (List.mem f read) && not (consents f)) removed in
+    let dropped_by_consent =
+      List.filter_map (fun (f, _) -> if List.mem f read || not (consents f) then None else Some f) removed in
     let unconverted = List.filter (fun (f, _) -> not (List.mem_assoc f given)) changed in
     if unread <> [] then
       Error
@@ -415,6 +428,7 @@ let derive ~(actor : string) (adef : actor_def) (sp : span)
             then Some (List.map (fun (g, f) -> (g, Option.get f)) back, old_ty)
             else None
           in
+          if dropped_by_consent <> [] then consented := (actor, dropped_by_consent) :: !consented;
           Ok
             { fn = mk_fn ~name:(migrate_fn_name actor) ~param:binder sp old_ty new_ty body;
               added = List.map fst from_init; sources; reverse }
@@ -430,6 +444,52 @@ let derive_rollback ~(actor : string) (adef : actor_def) (sp : span)
   let body =
     ERecord (List.map (fun (g, f) -> (n g, EField (EVar (n rollback_param), n f, sp))) back, sp) in
   mk_fn ~name:(rollback_fn_name actor) ~param:rollback_param sp new_ty old_ty body
+
+(** The rename suggestion (todo 2026-11-15-hcr-migrate-clause-suggestion).
+    A deploy that removes exactly one field and adds exactly one of the same
+    type, changing nothing else, may be a rename: (removed, added).  Only a
+    guess, so the clause is offered as a fix the programmer chooses
+    ([Maybe_incorrect]: an editor offers it, `forge fix --only
+    migrate_rename_suggested` applies it), never applied on its own. *)
+let rename_guess (adef : actor_def) (old_fields : (string * string) list) : (string * string) option =
+  let str t = try Some (schema_str t) with Unrenderable -> None in
+  let new_fields = List.map (fun (f : field) -> (f.fld_name.txt, str f.fld_ty)) adef.actor_state in
+  let removed = List.filter (fun (f, _) -> not (List.mem_assoc f new_fields)) old_fields in
+  let added = List.filter (fun (f, _) -> not (List.mem_assoc f old_fields)) new_fields in
+  let changed =
+    List.filter (fun (f, s) -> match List.assoc_opt f new_fields with
+      | Some t -> t <> Some s | None -> false) old_fields
+  in
+  match removed, added, changed with
+  | [ (g, s) ], [ (f, Some t) ], [] when s = t -> Some (g, f)
+  | _ -> None
+
+let clause_text ~gone ~added = Printf.sprintf "migrate old -> { %s: old.%s }" added gone
+
+(* The last line of [e], for the expression forms an `init` is written
+   with; [None] when it cannot be told, and then no edit is offered. *)
+let end_line (e : expr) : int option =
+  match e with
+  | ERecord (_, sp) | EBlock (_, sp) | EApp (_, _, sp) | ECon (_, _, sp)
+  | ERecordUpdate (_, _, sp) | ETuple (_, sp) | EIf (_, _, _, sp) | EMatch (_, _, sp) ->
+    if sp.end_line > 0 then Some sp.end_line else None
+  | EVar n -> if n.span.end_line > 0 then Some n.span.end_line else None
+  | _ -> None
+
+let suggest_clause errors ~(actor : name) ~(sp : span) (adef : actor_def) ~gone ~added : unit =
+  let message =
+    Printf.sprintf
+      "`%s` removes `%s` and adds `%s` of the same type; if `%s` renames `%s`, a migrate \
+       clause moves the running data: `%s`"
+      actor.txt gone added added gone (clause_text ~gone ~added)
+  in
+  match end_line adef.actor_init with
+  | Some line ->
+    let indent = String.make (sp.start_col + 2) ' ' in
+    Err.warning_with_fix ~tier:Err.Maybe_incorrect ~code:Err.Code.migrate_rename_suggested errors
+      ~span:actor.span ~fix:(Err.FInsert { after_line = line; text = indent ^ clause_text ~gone ~added })
+      message
+  | None -> Err.warning ~code:Err.Code.migrate_rename_suggested errors ~span:actor.span message
 
 (** The deployed layout of [actor], when it differs from the new one. *)
 let changed_from_baseline ~(actor : string) (adef : actor_def)
@@ -534,6 +594,13 @@ let rec expand ?errors (decls : decl list) : decl list =
                 in
                 d :: Desugar_derive.respan_derived_decl r.fn :: rollback
               | Error why ->
+                let why =
+                  match adef.actor_migrate, rename_guess adef old_fields with
+                  | None, Some (gone, added) ->
+                    Printf.sprintf "%s (if `%s` renames it, add `%s` to the actor)" why added
+                      (clause_text ~gone ~added)
+                  | _ -> why
+                in
                 report := (name.txt, Not_derived why) :: !report;
                 (* The clause exists only to derive this migration: say why
                    it did not, at the clause, rather than first at the deploy
@@ -544,7 +611,11 @@ let rec expand ?errors (decls : decl list) : decl list =
                      (Printf.sprintf
                         "the migrate clause does not derive `%s` against the deployed build: %s"
                         (migrate_fn_name name.txt) why)
-                 | _ -> ());
+                 | Some errors, None ->
+                   (match rename_guess adef old_fields with
+                    | Some (gone, added) -> suggest_clause errors ~actor:name ~sp adef ~gone ~added
+                    | None -> ())
+                 | None, _ -> ());
                 [ d ]))
         | DMod (nm, vis, inner, s) -> [ DMod (nm, vis, expand ?errors inner, s) ]
         | d -> [ d ])

@@ -67,7 +67,8 @@ expected `String` but got `Int`. [type_mismatch]              ← the message, a
     part to fill in, such as the missing `match` arm whose body is `todo("handle None")`.
   - `maybe-incorrect` ("possible fix (a guess: check it before applying it)"): one
     plausible repair among several, such as a field name with another field spelled just
-    as close. It is offered and never applied unasked.
+    as close. It is offered and never applied unasked; `forge fix --only <code>` applies
+    one when you name its diagnostic's code.
 
 ---
 
