@@ -1457,9 +1457,11 @@ let guard_call =
         let out = run (guard_call_src ^ "  @[lemma]\n  fn wn(x : Int) : {Unit | wrap(x) == 2} do () end\nend\n") in
         if not (unproved out "wn" || refuted out "wn") then Alcotest.failf "wrap(0) is 1:\n%s" out) ]
 
-(* Float (D9): a function over Floats reflects, every Float operation an
-   opaque symbol.  What does not depend on a Float operation's value
-   proves; what does (`f < 1.0` at 0.5) and IEEE equality (NaN) never do. *)
+(* Float (D9): a function over Floats reflects.  Since 2026-11-15 each Float
+   operation in a body is DEFINED by its IEEE meaning (binary64,
+   round-to-nearest-even), so a fact that depends on an operation's value
+   (`f < 1.0` at 0.5) proves; a theorem that NaN breaks (`f == f`) and a false
+   one (`f < 1.0` at 1.5) never do. *)
 let float_body_src =
   {|mod FB do
   fn hk(f : Float) : Int do 3 end
@@ -1480,15 +1482,72 @@ let float_body =
         expect_admitted out "l_hk";
         expect_admitted out "l_cls";
         expect_admitted out "l_tk");
-    gated "float_body_red: Float operations stay opaque, Float == is IEEE" (fun () ->
+    gated "float_body_ieee: a Float operation's IEEE value proves a fact" (fun () ->
         let out =
           run
             (float_body_src
-           ^ "  @[lemma]\n  fn l_hk2(u : Int) : {Unit | hk2(0.5) == 1} do () end\n  @[lemma]\n  fn l_same(f : Float) : {Unit | same(f, f)} do () end\n  @[lemma]\n  fn l_tw(f : Float) : {Unit | twice(f) == twice(f)} do () end\nend\n")
+           ^ "  @[lemma]\n  fn l_hk2(u : Int) : {Unit | hk2(0.5) == 1} do () end\n  @[lemma]\n  fn l_tw1(f : {Float | _ >= 0.0 && _ <= 0.25}) : {Unit | twice(f) <= 0.5} do () end\nend\n")
+        in
+        expect_admitted out "l_hk2";
+        expect_admitted out "l_tw1");
+    gated "float_body_red: NaN and a false Float fact never prove" (fun () ->
+        let out =
+          run
+            (float_body_src
+           ^ "  @[lemma]\n  fn l_hk3(u : Int) : {Unit | hk2(1.5) == 1} do () end\n  @[lemma]\n  fn l_same(f : Float) : {Unit | same(f, f)} do () end\n  @[lemma]\n  fn l_tw(f : Float) : {Unit | twice(f) == twice(f)} do () end\n  @[lemma]\n  fn l_tw2(f : {Float | _ >= 0.0}) : {Unit | twice(f) > f} do () end\nend\n")
         in
         List.iter
           (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
-          [ "l_hk2"; "l_same"; "l_tw" ]) ]
+          [ "l_hk3"; "l_same"; "l_tw"; "l_tw2" ]) ]
+
+(* IEEE class tests and Float laws (2026-11-15): `is_nan`, `is_infinite`,
+   `is_finite` in a predicate, `float_is_nan`/`float_is_infinite` in a
+   reflected body, and the laws they make provable.  Each law needs the
+   not-NaN hypothesis: without it, the same theorem must not prove. *)
+let float_ieee_src =
+  {|mod FI do
+  fn min_f(a : Float, b : Float) : Float do if a < b do a else b end end
+  fn clamp_f(x : Float, lo : Float, hi : Float) : Float do if x < lo do lo else if x > hi do hi else x end end end
+  fn abs_f(x : Float) : Float do if x < 0.0 do 0.0 -. x else x end end
+  fn safe(x : Float) : Float do if float_is_nan(x) do 0.0 else x end end
+|}
+
+let callsite_row out v line =
+  List.exists
+    (fun l -> String.starts_with ~prefix:(v ^ "\tuser\tm.march:" ^ string_of_int line ^ ":") l && contains l "\tprecondition\t")
+    (lines out)
+
+let float_ieee =
+  [ gated "float_ieee_laws: min, clamp, abs and a NaN guard prove under their hypotheses" (fun () ->
+        let out =
+          run
+            (float_ieee_src
+           ^ "  @[lemma]\n  fn l_min(a : {Float | !is_nan(_)}, b : {Float | !is_nan(_)}) : {Unit | min_f(a, b) <= a && min_f(a, b) <= b} do () end\n"
+           ^ "  @[lemma]\n  fn l_clamp(x : {Float | is_finite(_)}, lo : {Float | is_finite(_)}, hi : {Float | is_finite(_) && _ >= lo}) : {Unit | clamp_f(x, lo, hi) >= lo && clamp_f(x, lo, hi) <= hi} do () end\n"
+           ^ "  @[lemma]\n  fn l_abs(x : {Float | !is_nan(_)}) : {Unit | abs_f(x) >= 0.0} do () end\n"
+           ^ "  @[lemma]\n  fn l_safe(x : Float) : {Unit | !is_nan(safe(x))} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_min"; "l_clamp"; "l_abs"; "l_safe" ]);
+    gated "float_ieee_red: without the NaN hypothesis the same laws do not prove" (fun () ->
+        let out =
+          run
+            (float_ieee_src
+           ^ "  @[lemma]\n  fn l_min(a : Float, b : Float) : {Unit | min_f(a, b) <= a} do () end\n"
+           ^ "  @[lemma]\n  fn l_abs(x : Float) : {Unit | abs_f(x) >= 0.0} do () end\n"
+           ^ "  @[lemma]\n  fn l_fin(x : {Float | !is_nan(_)}) : {Unit | is_finite(x)} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_min"; "l_abs"; "l_fin" ]);
+    gated "float_ieee_callsite: is_finite / is_infinite / is_nan contracts at call sites" (fun () ->
+        (* Lines: 1 mod, 2-4 needs, 5 c1, 6 c2, 7 c3, 8 c4. *)
+        let out =
+          run
+            "mod FC do\n  fn need_fin(x : {Float | is_finite(_)}) : Int do 0 end\n  fn need_inf(x : {Float | is_infinite(_)}) : Int do 0 end\n  fn need_num(x : {Float | !is_nan(_)}) : Int do 0 end\n  fn c1() : Int do need_fin(1.5) end\n  fn c2(y : {Float | _ >= 0.0 && _ <= 10.0}) : Int do need_fin(y) end\n  fn c3() : Int do need_inf(2.0) end\n  fn c4(y : {Float | _ <= 1.0}) : Int do need_num(y) end\nend\n"
+        in
+        if not (callsite_row out "proved" 5 && callsite_row out "proved" 6 && callsite_row out "violated" 7
+                && callsite_row out "proved" 8)
+        then Alcotest.failf "expected proved at 5, 6, 8 and violated at 7:\n%s" out) ]
 
 (* String (D9): the opaque `$Str` with its byte length; a literal is one
    constant per content, distinct from every other and shared with the

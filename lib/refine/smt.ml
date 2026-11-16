@@ -143,6 +143,12 @@ type term =
   | FpLe of term * term
   | FpGt of term * term
   | FpGe of term * term
+  (* An IEEE-754 class test of a Float term, Bool-valued: [FpNaN] is
+     `fp.isNaN`, [FpInf] is `fp.isInfinite` (either sign).  The predicate
+     words `is_nan`/`is_infinite`/`is_finite` and the program builtins
+     `float_is_nan`/`float_is_infinite` reflect to these. *)
+  | FpNaN of term
+  | FpInf of term
   (* ── Finite sets (specs/2026-09-13-set-refinements-design.md §4.2) ─────
      [SetEmpty]/[SetSng] carry the ELEMENT sort, because `(as const …)` needs
      the full array sort spelled out; [SetMem] and [SetSub] are Bool-valued,
@@ -175,7 +181,7 @@ let children (t : term) : term list =
   | Const _ | IntLit _ | BoolLit _ | FloatLit _ | SetEmpty _ -> []
   | App (_, args) | Ctor (_, _, args) -> args
   | IsCtor (_, a) | IsCtorAt (_, _, _, a) | MulLit (_, a) | DivLit (a, _) | ModLit (a, _)
-  | Neg a | Not a | SetSng (_, a) | SetCard (_, a) -> [ a ]
+  | Neg a | Not a | SetSng (_, a) | SetCard (_, a) | FpNaN a | FpInf a -> [ a ]
   | Ite (c, a, b) -> [ c; a; b ]
   | Add (a, b) | Sub (a, b) | Mul (a, b) | Div (a, b) | Mod (a, b) | And (a, b) | Or (a, b) | Implies (a, b) | Eq (a, b)
   | Ne (a, b) | Lt (a, b) | Le (a, b) | Gt (a, b) | Ge (a, b) | FpEq (a, b) | FpLt (a, b)
@@ -348,6 +354,8 @@ let rec render = function
   | FpLe (a, b) -> Printf.sprintf "(fp.leq %s %s)" (render a) (render b)
   | FpGt (a, b) -> Printf.sprintf "(fp.gt %s %s)" (render a) (render b)
   | FpGe (a, b) -> Printf.sprintf "(fp.geq %s %s)" (render a) (render b)
+  | FpNaN a -> Printf.sprintf "(fp.isNaN %s)" (render a)
+  | FpInf a -> Printf.sprintf "(fp.isInfinite %s)" (render a)
   | SetEmpty e ->
     Printf.sprintf "((as const %s) false)" (string_of_sort (SSet (render_elem_sort e)))
   | SetSng (e, x) ->
@@ -456,6 +464,8 @@ let map_term (f : term -> term) (t : term) : term =
   | FpLe (a, b) -> FpLe (f a, f b)
   | FpGt (a, b) -> FpGt (f a, f b)
   | FpGe (a, b) -> FpGe (f a, f b)
+  | FpNaN a -> FpNaN (f a)
+  | FpInf a -> FpInf (f a)
   | SetMem (a, b) -> SetMem (f a, f b)
   | SetUnion (a, b) -> SetUnion (f a, f b)
   | SetInter (a, b) -> SetInter (f a, f b)

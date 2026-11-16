@@ -2838,6 +2838,58 @@ negative zero, which is just as bad a divisor as a positive one. Under `fp.eq`,
 `-0.0 == 0.0` is true (so a negative-zero argument **is** reported) and `NaN`
 equals no value, itself included.
 
+### NaN, infinities and finite values: `is_nan`, `is_infinite`, `is_finite`
+
+Three predicate words test a Float's IEEE class, the way `len` measures a list:
+
+| Word | Holds when |
+|---|---|
+| `is_nan(x)` | `x` is NaN |
+| `is_infinite(x)` | `x` is `+inf` or `-inf` |
+| `is_finite(x)` | `x` is neither NaN nor an infinity |
+
+```march
+fn need_num(x : {Float | !is_nan(_)}) : Float do x end
+fn need_fin(x : {Float | is_finite(_)}) : Float do x end
+
+fn ok(y : {Float | _ >= 0.0 && _ <= 10.0}) : Float do need_fin(y) end   -- proved: a bounded value is finite
+```
+
+The program builtins `float_is_nan(x)` and `float_is_infinite(x)` mean the same thing in a
+predicate and in a function body, so a function that guards on them reflects (see
+[Float operations in a function body](#float-operations-in-a-function-body)).
+
+Most laws about Floats need one of these as a hypothesis. `min(a, b) <= a` is false when `a`
+is NaN, because every comparison with NaN is false; with `a : {Float | !is_nan(_)}` it holds.
+
+### Float operations in a function body
+
+A reflected function's Float operations mean exactly what the running program computes:
+`+.`, `-.`, `*.` and `/.` are IEEE-754 binary64 with round-to-nearest-even, unary minus is
+negation, and `<`, `<=`, `>`, `>=` are IEEE comparisons, false whenever either side is NaN.
+The compiled code, the interpreter and the JavaScript target all compute these the same way,
+and the compiler emits no fast-math flags on them, so a proof about the definition is a proof
+about the program. So a lemma can prove facts that depend on a Float operation's value:
+
+```march
+fn min_f(a : Float, b : Float) : Float do if a < b do a else b end end
+fn twice(f : Float) : Float do f +. f end
+
+@[lemma]
+fn min_le(a : {Float | !is_nan(_)}, b : {Float | !is_nan(_)})
+  : {Unit | min_f(a, b) <= a && min_f(a, b) <= b} do () end        -- proved
+
+@[lemma]
+fn twice_small(f : {Float | _ >= 0.0 && _ <= 0.25}) : {Unit | twice(f) <= 0.5} do () end   -- proved
+```
+
+Before 2026-11-15 these operations were opaque symbols, and neither lemma could be proved.
+`==` and `!=` between Floats in a function body are still the opaque program equality, so a
+theorem that turns on whether two computed Floats are equal does not prove; compare with
+`<=` both ways instead. A query that expands Float operations is bit-precise and costs the
+solver more than integer reasoning does, so it gets the main resource limit, not the smaller
+one other function-body expansions get.
+
 ### What Float refinements do *not* do
 
 - **Arithmetic in a predicate is skipped, not guessed.** `{Float | _ +. 1.0 >
@@ -2850,9 +2902,9 @@ equals no value, itself included.
   lemmas carry it through (`unf(mkf(x)) == x`), but a record literal holding a
   float is not built in a call-site query: the field stays an unknown value
   there, so only the record's other fields are checked.
-- **No special values.** There is no `is_nan` or `is_finite` vocabulary, so a
-  predicate cannot mention them. NaN is nevertheless modelled correctly inside
-  the solver, which is what keeps the encoding from reporting correct code.
+- **NaN is reported only when it is certain.** A theorem false only at NaN (`abs(x) >= 0.0`
+  for an unrestricted `x`) is reported not proved rather than false: the checker reports a
+  violation only for a counterexample it can confirm. Add `!is_nan(_)` to the parameter.
 - **A literal with no exact plain-decimal form is skipped.** SMT-LIB decimals
   admit neither exponent notation nor infinities, so a magnitude that cannot be
   written out exactly is not reflected at all.
@@ -6948,10 +7000,9 @@ edges:
   functions and lemmas carry it through; at a call site a record literal's
   float field is an unknown value, so the record's other fields are still
   checked but nothing is concluded about the float.
-- **There is no special-value vocabulary.** No `is_nan`, no `is_finite`. You
-  cannot write a predicate expressing "not NaN"; see
-  [Float Refinements](#float-refinements) for why NaN nevertheless never causes
-  a false report.
+- **Float special values have their own words.** `is_nan`, `is_infinite` and
+  `is_finite` (since 2026-11-15); see
+  [NaN, infinities and finite values](#nan-infinities-and-finite-values-is_nan-is_infinite-is_finite).
 - **An AXIOMATISED measure applied to the refined value itself is now
   enforced against the actual argument** (fixed 2026-07-29; this bullet
   previously documented the opposite as a limitation, and that limitation was a
