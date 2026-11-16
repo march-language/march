@@ -1070,6 +1070,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
+  compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
+  but failed to compile natively (clang: "use of undefined value '@compare'") and threw
+  `ReferenceError` under `--target js`. An interface method used as a value now resolves to the
+  implementation for its argument type, as a call does.
+
 - **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
   `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
   there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
