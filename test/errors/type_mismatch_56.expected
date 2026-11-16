@@ -6,7 +6,7 @@ expected `Main.CancelToken` but got `CancelToken`. [type_mismatch]
 14 |     print_line(int_to_string(id_of(task_cancel_token_new())))
                                         ^^^^^^^^^^^^^^^^^^^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `id_of`, its parameter `t`.
 
     the expected type comes from here:
 
