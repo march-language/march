@@ -13072,7 +13072,7 @@ module Audit_fixture = struct
         actor_init = A.ELet (init_binding, dummy);
         actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_ensures = None; ah_body = A.ELit (A.LitInt 0, dummy) } ];
         actor_supervise = Some supervise_cfg;
-        actor_mailbox = None; actor_remote = false; actor_on_stop = None; actor_internal = false;
+        actor_mailbox = None; actor_remote = false; actor_on_stop = None; actor_internal = false; actor_migrate = None;
         actor_compat = "full";
         actor_invariant = Some (A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 33 int_ty, dummy)) }
     in
@@ -30242,6 +30242,153 @@ let hcr_derived_rollback_suite =
         Alcotest.(check bool) "not derived" true (contains s3 "migrate_not_derived");
         Alcotest.(check bool) "no drops" false (contains s3 "migrate_derived_drops")) ]
 
+(* Migrate clauses (todo 2026-11-06-hcr-derive-field-rename): `migrate old ->
+   { total: old.count }` names what a deploy moves; the compiler writes the
+   rest of `<actor>_migrate_state` (KEEP, ADD) and, for bare copies, the
+   proved reverse.  COPY (a bare `old.f` carries the deployed refinement of
+   `f`) is pinned here like KEEP and ADD are in `hcr-derived-migration`. *)
+let hcr_derive_rename_suite =
+  let prog ?(clause = "") ~fields ~init () =
+    "mod Main do\n\
+    \  actor Counter do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n" ^ (if clause = "" then "" else "    " ^ clause ^ "\n") ^ "\
+    \    on Tick() do { state with label: \"t\" } end\n\
+    \  end\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  let v1 = prog ~fields:"count : {Int | _ >= 0}, label : String" ~init:"count: 0, label: \"v1\"" () in
+  let renamed ?(ty = "{Int | _ >= 0}") ?(expr = "old.count") () =
+    prog ~fields:("total : " ^ ty ^ ", label : String, hits : Int")
+      ~init:"total: 1, label: \"v2\", hits: 0"
+      ~clause:("migrate old -> { total: " ^ expr ^ " }") ()
+  in
+  let dir () = Filename.temp_dir "hcr_ren" "" in
+  let sidecar ?baseline d name src =
+    let src_p = Filename.concat d (name ^ ".march") in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc src);
+    let so = Filename.concat d (name ^ ".so") in
+    let base = match baseline with Some b -> [ "--hcr-baseline"; Filename.concat d b ] | None -> [] in
+    let rc, _, err =
+      run_march_on_env ~cwd:d [ ("HOME", d) ]
+        ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ base @ [ "-o"; so ]) src_p
+    in
+    Alcotest.(check int) (name ^ " compiles; stderr:\n" ^ err) 0 rc;
+    let text = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat d (name ^ ".json")) (fun oc -> output_string oc text);
+    text
+  in
+  let check d ?(baseline = "v1.json") src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d (if baseline = "" then "--check" else "--check --guarantees --hcr-baseline " ^ baseline)
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  let lacks out s = Alcotest.(check bool) (Printf.sprintf "output lacks %S\n%s" s out) false (contains out s) in
+  (* The report pads labels into a column, so match one line. *)
+  let line out a b =
+    Alcotest.(check bool) (Printf.sprintf "a line with %S and %S\n%s" a b out) true
+      (List.exists (fun l -> contains l a && contains l b) (String.split_on_char '\n' out))
+  in
+  [ gated "a rename derives the migration and its proved reverse" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ()) in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        line out "migrate_state (derived, migrate clause)" "proved";
+        line out "rollback round trip (derived)" "proved";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ()) in
+        has s2 {|"migrate_derived": ["hits"]|};
+        has s2 {|"migrate_clause": ["total"]|};
+        has s2 {|"migrate_derived_moves": [["total", "count"]]|};
+        has s2 {|"rollback_derived": ["count", "label"]|};
+        has s2 {|"rollback_derived_moves": [["count", "total"]]|});
+    gated "COPY: a tightened refinement on the renamed field is refused, at the clause" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ~ty:"{Int | _ >= 1}" ()) in
+        Alcotest.(check int) ("refused\n" ^ out) 1 code;
+        has out "A running `Counter` can hold a state this version rejects";
+        has out "migrate old -> { total: old.count }";
+        has out "takes each field a `migrate` clause gives");
+    gated "a computed field is checked like a written migration, and has no reverse" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ~expr:"old.count * 100" ()) in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        line out "migrate_state (derived, migrate clause)" "proved";
+        lacks out "rollback round trip";
+        let code, out = check d (renamed ~expr:"old.count - 1" ()) in
+        Alcotest.(check int) ("refused\n" ^ out) 1 code;
+        line out "migrate_state (derived, migrate clause)" "violated";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ~expr:"old.count * 100" ()) in
+        lacks s2 "rollback_derived";
+        lacks s2 "migrate_derived_moves");
+    gated "a removed field the clause does not read is not dropped" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let _, out = check d (renamed ~expr:"0" ()) in
+        has out "the migrate clause does not derive `counter_migrate_state`";
+        has out "it removes count, which the migrate clause does not read";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ~expr:"0" ()) in
+        has s2 {|"migrate_not_derived": "it removes count, which the migrate clause does not read"|});
+    gated "the clause converts a field whose type changed" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let conv clause =
+          prog ~fields:"count : String, label : String" ~init:"count: \"0\", label: \"v2\"" ~clause () in
+        let _, out = check d (conv "") in
+        lacks out "migrate_state (derived";
+        let code, out = check d (conv "migrate old -> { count: int_to_string(old.count) }") in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        has out "migrate_state (derived, migrate clause)";
+        ignore (sidecar ~baseline:"v1.json" d "v2" (conv "migrate old -> { count: int_to_string(old.count) }")));
+    gated "redeploying the old source after a rename copies the value back" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (renamed ()));
+        let code, out = check d ~baseline:"v2.json" v1 in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        line out "migrate_state (derived rollback)" "proved";
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v1 in
+        has s3 {|"migrate_derived_drops": ["hits"]|};
+        has s3 {|"migrate_derived_moves": [["count", "total"]]|});
+    gated "a clause written for an earlier deploy is ignored, with a warning" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (renamed ()));
+        let v3 =
+          prog ~fields:"total : {Int | _ >= 0}, label : String, hits : Int, extra : Int"
+            ~init:"total: 0, label: \"v3\", hits: 0, extra: 0"
+            ~clause:"migrate old -> { total: old.count }" ()
+        in
+        let code, out = check d ~baseline:"v2.json" v3 in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        has out "the migrate clause reads `count`, which the deployed build's state does not have";
+        line out "migrate_state (derived)" "proved");
+    Alcotest.test_case "a malformed clause is an error, with or without a deploy" `Quick (fun () ->
+        let d = dir () in
+        let code, out =
+          check d ~baseline:"" (prog ~fields:"total : Int, label : String" ~init:"total: 0, label: \"x\""
+                                  ~clause:"migrate old -> { totl: old.count }" ())
+        in
+        Alcotest.(check int) ("rejected\n" ^ out) 1 code;
+        has out "the migrate clause gives `totl`, which is not a state field of `Counter`";
+        has out "[migrate_clause_invalid]";
+        let code, out =
+          check d ~baseline:"" (prog ~fields:"total : Int, label : String" ~init:"total: 0, label: \"x\""
+                                  ~clause:"migrate old -> old" ())
+        in
+        Alcotest.(check int) ("rejected\n" ^ out) 1 code;
+        has out "a migrate clause's body is a record literal");
+    Alcotest.test_case "without a deployed build the clause is inert and formats back" `Quick (fun () ->
+        let d = dir () in
+        let src = renamed () in
+        let code, out = check d ~baseline:"" src in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        let formatted = March_format.Format.format_source ~filename:"m.march" src in
+        has formatted "migrate old -> { total: old.count }") ]
+
 let hcr_simulation_suite =
   let v1 =
     {|mod Main do
@@ -30674,6 +30821,7 @@ let () =
       ("hcr-rollback", hcr_rollback_suite);
       ("hcr-simulation", hcr_simulation_suite);
       ("hcr-derived-rollback", hcr_derived_rollback_suite);
+      ("hcr-derive-rename", hcr_derive_rename_suite);
       ("session-theory", session_theory_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
@@ -30720,6 +30868,8 @@ let () =
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
       ("reflect-stdlib-laws", Test_refine_stdlib_list.laws_pass_tests);
+      ("reflect-stdlib-float-laws", Test_refine_stdlib_list.float_laws_tests);
+      ("reflect-stdlib-wave2-laws", Test_refine_stdlib_list.wave2_laws_tests);
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);

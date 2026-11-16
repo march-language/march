@@ -1223,10 +1223,13 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                       callee callee (pred_str rp.pred) where old ret);
                notes =
                  [ Printf.sprintf
-                     "the state only gained fields, so the compiler derived `%s`: it keeps \
-                      every old field and gives each new one its `init` value"
+                     "the compiler derived `%s` from the deployed state: it keeps every old \
+                      field, takes each field a `migrate` clause gives from it, and gives each \
+                      other new field its `init` value"
                      short;
-                   Printf.sprintf "write `%s` yourself to convert the old values" short ] }
+                   Printf.sprintf
+                     "change the `migrate` clause, or write `%s` yourself, to convert the old values"
+                     short ] }
          | None ->
         Err.error ~code:Err.Code.refinement_violated errctx ~span
           (display_measures

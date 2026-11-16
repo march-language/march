@@ -279,4 +279,37 @@ mod Duration do
     rev_and_join(parts)
   end
 
+  -- ---- Laws (2026-11-16) ----
+
+  doc "The milliseconds of a sum are the sum of the milliseconds."
+  @[lemma]
+  fn to_milliseconds_add(a : Duration, b : Duration)
+    : {Unit | to_milliseconds(add(a, b)) == to_milliseconds(a) + to_milliseconds(b)} do () end
+
+  doc "`add` does not depend on the order of its arguments."
+  @[lemma]
+  fn add_comm(a : Duration, b : Duration) : {Unit | add(a, b) == add(b, a)} do () end
+
+  doc "`add` is associative."
+  @[lemma]
+  fn add_assoc(a : Duration, b : Duration, c : Duration) : {Unit | add(add(a, b), c) == add(a, add(b, c))} do () end
+
+  doc "`subtract` undoes `add`."
+  @[lemma]
+  fn subtract_add(a : Duration, b : Duration) : {Unit | subtract(add(a, b), b) == a} do () end
+
+  doc "A minute is sixty seconds, an hour sixty minutes, a day twenty-four hours, a week seven days."
+  @[lemma]
+  fn unit_steps(n : Int)
+    : {Unit | minutes(n) == seconds(n * 60) && hours(n) == minutes(n * 60) && days(n) == hours(n * 24) && weeks(n) == days(n * 7)} do () end
+
+  doc "`compare` with the arguments swapped is the negation."
+  @[lemma]
+  fn compare_antisym(a : Duration, b : Duration) : {Unit | compare(a, b) == 0 - compare(b, a)} do () end
+
+  doc "`compare` is 0 exactly when the two durations have the same milliseconds."
+  @[lemma]
+  fn compare_zero(a : Duration, b : Duration)
+    : {Unit | (compare(a, b) == 0) == (to_milliseconds(a) == to_milliseconds(b))} do () end
+
 end

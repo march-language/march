@@ -872,7 +872,14 @@ The standard library proves lemmas about `List`: `List.append_nil`, `List.append
 `List.drop_last_snoc` and `List.len_drop_last`; about `Option` (`is_none_not_some`,
 `zip_is_some`, `len_to_list`, `to_list_is_some`), `Result` (`is_err_not_ok`) and
 `Math` (`min_int_comm`, `max_int_comm`, `min_plus_max`, `clamp_int_within`,
-`clamp_int_idem`); and about protocols in `Session.Theory` (`dual_dual`,
+`clamp_int_idem`, and for Floats `min_float_comm`, `max_float_comm`, `clamp_float_within`,
+`abs_idem`, `abs_nonneg`, `sqrt_neg_nan`); about `Tuple` (`swap_swap`, `first_swap`,
+`second_swap`, `first_second_make`, `len_to_list`, `len_zip`), `Duration`
+(`to_milliseconds_add`, `add_comm`, `add_assoc`, `subtract_add`, `unit_steps`,
+`compare_antisym`, `compare_zero`), `Queue` (`size_to_list`, `size_push_back`,
+`size_push_front`, `is_empty_size`, and its helpers `len_rev`, `list_len_len`,
+`len_list_append`) and `Deque` (`size_push_front`, `size_push_back`, `is_empty_size`); and
+about protocols in `Session.Theory` (`dual_dual`,
 `project_dual`, `pairwise`, `projections_compose`, `progress`; see [What is proved about a protocol]({{ site.baseurl }}/docs/choreography/#what-is-proved-about-a-protocol)).
 You call them like your own lemmas, so
 you don't need to re-prove `reverse(reverse(xs)) == xs` in every project. The manifest
@@ -881,7 +888,10 @@ re-proving it on every build.
 
 `Math.min_int`, `Math.max_int` and `Math.clamp_int` state their laws in their result types
 instead, so you get them without a call: `min_int(a, b)` is at most `a` and `b` and is one of
-them, and `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`.
+them, and `clamp_int(x, low, high)` is within `[low, high]` when `low <= high`. The Float
+versions do the same unless an argument is NaN: `min_float(a, b)` and `max_float(a, b)` are
+bounded by both and equal to one of them, and `clamp_float(x, low, high)` is within
+`[low, high]`.
 
 ## Which lemma to call: `--refine-infer`
 

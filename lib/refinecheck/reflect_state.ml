@@ -129,7 +129,7 @@ let float_ops : (string * (Smt.sort list * Smt.sort)) list =
   let f = Smt.SFloat in
   [ ("fadd", ([ f; f ], f)); ("fsub", ([ f; f ], f)); ("fmul", ([ f; f ], f)); ("fdiv", ([ f; f ], f));
     ("fneg", ([ f ], f)); ("flt", ([ f; f ], Smt.SBool)); ("fle", ([ f; f ], Smt.SBool));
-    ("fgt", ([ f; f ], Smt.SBool)); ("fge", ([ f; f ], Smt.SBool)) ]
+    ("fgt", ([ f; f ], Smt.SBool)); ("fge", ([ f; f ], Smt.SBool)); ("fabs", ([ f ], f)); ("fsqrt", ([ f ], f)) ]
 
 let float_sym (op : string) : string = "|r:float:" ^ op ^ "|"
 
@@ -149,6 +149,11 @@ let float_body (op : string) : string option =
   | "fle" -> Some "(fp.leq a b)"
   | "fgt" -> Some "(fp.gt a b)"
   | "fge" -> Some "(fp.geq a b)"
+  (* `float_abs` is fabs/Math.abs/abs_float on every backend (the WASM
+     runtime's since 2026-11-15); `math_sqrt` is the correctly rounded IEEE
+     square root on every backend. *)
+  | "fabs" -> Some "(fp.abs a)"
+  | "fsqrt" -> Some "(fp.sqrt RNE a)"
   | _ -> None
 
 (** The `define-fun` of a Float operator's symbol [f], or [None] when [f] is

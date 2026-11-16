@@ -365,4 +365,18 @@ mod Deque do
     List.all(to_list(d), f)
   end
 
+  -- ---- Laws (2026-11-16) ----
+
+  doc "Pushing at the front adds one element."
+  @[lemma]
+  fn size_push_front(d : Deque(a), x : a) : {Unit | size(push_front(d, x)) == size(d) + 1} do () end
+
+  doc "Pushing at the back adds one element."
+  @[lemma]
+  fn size_push_back(d : Deque(a), x : a) : {Unit | size(push_back(d, x)) == size(d) + 1} do () end
+
+  doc "A deque is empty exactly when its size is 0."
+  @[lemma]
+  fn is_empty_size(d : Deque(a)) : {Unit | is_empty(d) == (size(d) == 0)} do () end
+
 end
