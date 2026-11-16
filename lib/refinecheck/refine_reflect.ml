@@ -2311,8 +2311,30 @@ let pre_of (u : RT.unit_) (psorts : Smt.sort list) : Smt.term list =
                    if is_list j then Some (Smt.App (RE.list_len_measure, [ t ])) else None
                  | _ -> None
                in
+               (* `_.f` over a RECORD parameter: its datatype's selector
+                  (`{Old | _.count >= 0}`, the refinement Hcr_baseline and
+                  Refine_anon give a migration's parameter).  Without it the
+                  guard did not translate, and a function with a field
+                  refinement on a parameter had no unfolding at all. *)
+               let field x f =
+                 match var x with
+                 | Some (Smt.Const c as t) -> (
+                   match int_of_string_opt (String.sub c 3 (String.length c - 3)) with
+                   | Some j -> (
+                     match List.nth_opt psorts j with
+                     | Some (Smt.SData (a, _)) -> (
+                       match record_of_adt a with
+                       | Some (_, ctor, names) -> (
+                         match List.find_index (( = ) f) names with
+                         | Some k -> Some (field_sel ctor k t)
+                         | None -> None)
+                       | None -> None)
+                     | _ -> None)
+                   | None -> None)
+                 | _ -> None
+               in
                match
-                 Refine_scope.smt_of ~resolve_var:var ~resolve_measure:measure
+                 Refine_scope.smt_of ~resolve_var:var ~resolve_measure:measure ~resolve_field:field
                    ~resolve_tester:(fun ctor a ->
                      match a with
                      | A.EVar x ->

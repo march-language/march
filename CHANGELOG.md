@@ -21,12 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
-- **Float laws can be proved, and a contract can say "not NaN".** A function's Float
-  operations (`+.`, `-.`, `*.`, `/.`, `<`, `<=`, `>`, `>=`) now mean exactly what the program
-  computes (IEEE-754 binary64, round to nearest even) when the refinement checker reasons about
-  it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
-  `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
-  state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
+- **Derived rollbacks for hot deploys.** When the compiler derives a `migrate_state` because
+  an actor's state only gained fields, it now derives the reverse `<actor>_rollback_state`
+  too (copy back the old fields, drop the added ones) and proves the round trip. Rolling
+  back is then free: redeploying the old source gets its migration derived as that proved
+  rollback, where before a removed field always needed a hand-written migration.
+  `forge hot-reload check` shows `rollback round trip (derived)` and
+  `migrate_state (derived rollback)`.
 - **Laws for `Tuple`, `Duration`, `Queue` and `Deque`.** 23 proved lemmas: `Tuple.swap_swap`,
   `Tuple.len_zip` and the `first`/`second`/`make` laws; `Duration.add_comm`, `add_assoc`,
   `subtract_add`, `to_milliseconds_add`, `unit_steps` (a minute is 60 seconds, and so on) and
@@ -43,6 +44,12 @@ git log is authoritative for exact commits.
   `to_list_is_some`), `Result` (`is_err_not_ok`) and `Math` (`min_int_comm`,
   `max_int_comm`, `min_plus_max`, `clamp_int_within`, `clamp_int_idem`). Call one before a contract that needs its
   fact; like every lemma they are erased before the program runs.
+- **Float laws can be proved, and a contract can say "not NaN".** A function's Float
+  operations (`+.`, `-.`, `*.`, `/.`, `<`, `<=`, `>`, `>=`) now mean exactly what the program
+  computes (IEEE-754 binary64, round to nearest even) when the refinement checker reasons about
+  it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
+  `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
+  state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
 - **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
   `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
   any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:
@@ -1067,6 +1074,10 @@ git log is authoritative for exact commits.
   `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
   there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
   backend.
+- **A lemma can unfold a function whose parameter has a field refinement**
+  (`fn mig(old : {Old | _.count >= 0})`). Before, such a function had no unfolding at all, so
+  the rollback round trip of any actor with a refined state field was `not proved`.
+
 - **Compiled HTTP clients read the response status, headers and errors correctly.** In
   compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
   251), so `HttpClient.step_raise_on_error` let a 401 or 403 through as a success; every
