@@ -370,6 +370,7 @@ mod Recon do
   """
   fn print_top(c : Cap(Actor.Introspect), attr : String, n : Int) : Unit do
     println(format_top(top(c, attr, n)))
+    ()
   end
 
   pfn counter(a : ActorInfo, attr : String) : Int do

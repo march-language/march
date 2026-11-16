@@ -226,7 +226,7 @@ let ast_phase (m : module_) phase_name =
     | DAlwaysLinearType (vis, name, _tvars, tdef, _) ->
       let id = "type_" ^ name.txt in
       let detail = match tdef with
-        | TDAlias t  -> "alias " ^ ty_to_str t
+        | TDAlias (t, _)  -> "alias " ^ ty_to_str t
         | TDVariant vs ->
           String.concat " | " (List.map (fun v ->
             match v.var_args with

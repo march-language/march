@@ -24,14 +24,14 @@ mod StalledReaderB do
   pfn take(s : Cap(Session.Live), st : Stall_B.S_offer_more_done, got : Int) : Stall_B.Yield do
     Stall_B.offer_more_done(s, st,
       fn (_m, st2) ->
-        if got == 0 do println("B: receiving") else () end
+        if got == 0 do Authority.ignore(println("B: receiving")) else () end
         take(s, st2, got + 1),
       fn (_n, st2) -> Stall_B.close(s, st2))
   end
 
   fn main(c : Cap(IO)) do
     match Stall_Run.run_B(c, "node-b", "stall-secret", Stall_Run.addrs_from_env(), fn (s, st) -> take(s, Stall_B.send_Msg_B_A_1(s, st, 1), 0)) do
-      Ok(_) -> println("B: closed")
+      Ok(_) -> Authority.ignore(println("B: closed"))
       Err(e) -> panic(SessionNode.run_error_message(e))
     end
   end

@@ -35,7 +35,7 @@ mod ClusterFanLateCrashC do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-c", Env.require_int("MARCH_PORT_C"), "", Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil), "fan-secret", 1)
+    let cfg = ClusterNode.config("node-c", Authority.must(Env.require_int("MARCH_PORT_C")), "", Cons("127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))), Nil), "fan-secret", 1)
     let h = match ClusterNode.start(c, cfg) do
       Ok(h0) -> h0
       Err(e) -> panic(e)

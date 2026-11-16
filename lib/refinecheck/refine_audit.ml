@@ -107,7 +107,8 @@ let expr_span (e : A.expr) : A.span =
   | A.ELetQ (_, _, _, sp)
   | A.ELetStar (_, _, _, sp)
   | A.EAssert (_, sp)
-  | A.ESigil (_, _, sp) -> sp
+  | A.ESigil (_, _, sp)
+  | A.EProof (_, sp) -> sp
   | A.ERefineMsg (_, _, sp) -> sp
   | A.EVar n -> n.A.span
   | A.EResultRef _ -> A.dummy_span
@@ -271,6 +272,7 @@ let rec walk_expr (sites : site list ref) (e : A.expr) : unit =
     ge body
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> ge e1; ge e2
   | A.EAssert (e, _) -> ge e
+  | A.EProof (p, _) -> List.iter ge (A.proof_children p)
   | A.ESigil (_, e, _) -> ge e
   | A.ERefineMsg (e, _, _) -> ge e
 

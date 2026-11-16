@@ -485,10 +485,10 @@ mod TestJsonTyped do
 
     test "ndjson file decodes to typed records via each_value" do
       let path = "/tmp/march_json_typed_test.jsonl"
-      match File.write(path, "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n") do
+      match Authority.must(File.write(path, "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        let r = JsonStream.each_value(path, nd_cb)
+        let r = Authority.must(JsonStream.each_value(path, nd_cb))
         match File.delete(path) do _ -> () end
         match r do
         Ok(_) -> assert (true)
@@ -503,10 +503,10 @@ mod TestJsonTyped do
     -- -- this is the error path a genuinely malformed stream takes.
     test "malformed json line surfaces as a stream-level error" do
       let path = "/tmp/march_json_typed_test_bad.jsonl"
-      match File.write(path, "{\"id\":1}\n{\"id\":2\n{\"id\":3}\n") do
+      match Authority.must(File.write(path, "{\"id\":1}\n{\"id\":2\n{\"id\":3}\n")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        let r = JsonStream.each_value(path, nd_cb)
+        let r = Authority.must(JsonStream.each_value(path, nd_cb))
         match File.delete(path) do _ -> () end
         match r do
         Ok(_) -> assert (false)
@@ -524,10 +524,10 @@ mod TestJsonTyped do
     -- record of the failure. See capability map.
     test "wrong-typed field inside ndjson is swallowed by the stream result" do
       let path = "/tmp/march_json_typed_test_wrongtype.jsonl"
-      match File.write(path, "{\"id\":1}\n{\"id\":\"not-an-int\"}\n{\"id\":3}\n") do
+      match Authority.must(File.write(path, "{\"id\":1}\n{\"id\":\"not-an-int\"}\n{\"id\":3}\n")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        let r = JsonStream.each_value(path, nd_cb)
+        let r = Authority.must(JsonStream.each_value(path, nd_cb))
         match File.delete(path) do _ -> () end
         match r do
         Ok(_) -> do IO.puts("WRONG-TYPE-IN-STREAM: each_value still Ok despite a decode error") assert (true) end
@@ -543,10 +543,10 @@ mod TestJsonTyped do
 
     test "decodes an ndjson file to typed records" do
       let path = "/tmp/march_each_typed_ok.jsonl"
-      match File.write(path, "{\"id\":1}\n{\"id\":2}\n") do
+      match Authority.must(File.write(path, "{\"id\":1}\n{\"id\":2}\n")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        let r = JsonStream.each_typed(path, fn r -> ())
+        let r = Authority.must(JsonStream.each_typed(path, fn r -> ()))
         match File.delete(path) do _ -> () end
         match r do
         Ok(n) -> assert (n == 2)
@@ -559,10 +559,10 @@ mod TestJsonTyped do
     -- second record is malformed; its offset is past the first record
     test "a bad record reports its field AND a nonzero byte offset" do
       let path = "/tmp/march_each_typed_bad.jsonl"
-      match File.write(path, "{\"id\":1}\n{\"id\":\"nope\"}\n") do
+      match Authority.must(File.write(path, "{\"id\":1}\n{\"id\":\"nope\"}\n")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        let r = JsonStream.each_typed(path, fn r -> ())
+        let r = Authority.must(JsonStream.each_typed(path, fn r -> ()))
         match File.delete(path) do _ -> () end
         match r do
         Ok(_) -> assert (false)

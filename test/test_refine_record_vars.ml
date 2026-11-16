@@ -129,3 +129,23 @@ let tests =
         in
         if contains out "<predicate>" then Alcotest.failf "a record literal printed as <predicate>:\n%s" out;
         if not (contains out "{ x: n, y: 1 }") then Alcotest.failf "the literal is not rendered:\n%s" out) ]
+
+(* A record with type parameters (todo 2026-10-31-reflection-encoder-gaps,
+   "Parametric records"): a parameter `p : Pr(Int)` is declared at the
+   record's datatype sort at its instance, so a theorem over it reflects. *)
+let par_head =
+  {|  type Pr(a) = { fst : a, snd : a }
+  fn sw(p : Pr(Int)) : Pr(Int) do { fst: p.snd, snd: p.fst } end
+  fn swg(p : Pr(a)) : Pr(a) do { fst: p.snd, snd: p.fst } end
+  fn sum(p : Pr(Int)) : Int do p.fst + p.snd end
+|}
+
+let parametric =
+  [ gated "lemma: an involution over a parametric record parameter is admitted" (fun () ->
+        admitted (par_head ^ "  @[lemma]\n  fn l_sw(p : Pr(Int)) : {Unit | sw(sw(p)) == p} do () end\n") "l_sw");
+    gated "lemma: a generic function over a parametric record, at an instance" (fun () ->
+        admitted (par_head ^ "  @[lemma]\n  fn l_swg(p : Pr(Int)) : {Unit | swg(swg(p)) == p} do () end\n") "l_swg");
+    gated "lemma: a reflected function reads a parametric record's fields" (fun () ->
+        admitted (par_head ^ "  @[lemma]\n  fn l_sum(p : Pr(Int)) : {Unit | sum(sw(p)) == sum(p)} do () end\n") "l_sum");
+    gated "REJECT: a false theorem over a parametric record is not admitted" (fun () ->
+        not_admitted (par_head ^ "  @[lemma]\n  fn l_bad(p : Pr(Int)) : {Unit | sw(p) == p} do () end\n") "l_bad") ]

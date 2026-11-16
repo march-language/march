@@ -17,6 +17,7 @@ environment variables override them. Uses `File`, `Toml`, and `Env`.
 `Toml.parse` returns `Result(TomlValue, TomlError)`. The `get_*` accessors each
 return an `Option`, so a missing key becomes a default rather than a crash:
 
+<!-- repl:skip -->
 ```march
 mod AppConfig do
 
@@ -32,7 +33,7 @@ mod AppConfig do
   end
 
   fn load(path : String) : Result(Settings, String) do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Err(_)   -> Err("cannot read " ++ path)
       Ok(text) ->
         match Toml.parse(text) do
@@ -44,7 +45,7 @@ mod AppConfig do
                 None    -> "localhost"
               end
             -- Env var wins over the file; the file value is the fallback.
-            let port = Env.get_int("PORT", default_port(tv))
+            let port = Authority.must(Env.get_int("PORT", default_port(tv)))
             Ok(Settings(host, port))
         end
     end
@@ -80,6 +81,12 @@ port = 5432
 
 <!-- scroll:skip -->
 ```march
+let tv =
+  match Toml.parse("[database]\nhost = \"db.internal\"\n") do
+    Ok(t)  -> t
+    Err(e) -> panic(e)
+  end
+
 let db_host =
   match Toml.get_in(tv, ["database", "host"]) do
     Some(TomlValue.TStr(h)) -> h

@@ -136,7 +136,12 @@ cat <<NEXT
   Push, in this order:
 
       git push origin main
+      scripts/release-gate.sh $(git rev-parse HEAD)   # once CI and Doc lint finish on it
       git push origin v$version      # this STARTS the release publish
+
+  release.yml's gate job refuses a tag whose commit is not green on main
+  (the same script), so wait for the release commit's own runs. If a later
+  merge cancelled its CI run, the script prints how to run CI on the commit.
 
   Still manual -- no script should own these:
 

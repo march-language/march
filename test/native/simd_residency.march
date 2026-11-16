@@ -46,5 +46,6 @@ mod SimdResidency do
     let b = NativeArray.from_list_f32([5.0, 6.0, 7.0, 8.0])
     println(kernel(a, b))
     println(List.length(escape(a)))
+    ()
   end
 end

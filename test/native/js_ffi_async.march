@@ -17,5 +17,6 @@ mod JsFfiAsync do
   fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     let r = compute(32)
     println(int_to_string(r))
+    ()
   end
 end

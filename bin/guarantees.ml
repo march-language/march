@@ -21,7 +21,9 @@
 module A = March_ast.Ast
 module O = March_refinecheck.Obligation
 
-type label = Proved | Violated | Not_proved | Not_checked | Checked_compiler | Proved_spec | Assumed
+type label =
+  | Proved | Violated | Not_proved | Not_checked | Checked_compiler
+  | Proved_model | Proved_model_tested | Proved_spec | Assumed
 
 let label_text = function
   | Proved -> "proved"
@@ -29,6 +31,8 @@ let label_text = function
   | Not_proved -> "not proved"
   | Not_checked -> "not checked"
   | Checked_compiler -> "checked (compiler)"
+  | Proved_model -> "proved (model)"
+  | Proved_model_tested -> "proved (model) · tested (runtime)"
   | Proved_spec -> "proved (spec) · validated (compiler)"
   | Assumed -> "assumed"
 
@@ -36,7 +40,7 @@ let label_text = function
    not a weakness of this build, so it never decides the summary. *)
 let rank = function
   | Violated -> 0 | Not_checked -> 1 | Not_proved -> 2 | Checked_compiler -> 3
-  | Proved_spec -> 4 | Proved -> 5 | Assumed -> 6
+  | Proved_model -> 4 | Proved_model_tested -> 5 | Proved_spec -> 6 | Proved -> 7 | Assumed -> 8
 
 type line = { what : string; label : label; detail : string }
 
@@ -156,14 +160,41 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
     | None when refined_fields -> [ line "state refinements" (Not_proved, "no state is built where the checker sees it") ]
     | None -> []
   in
+  (* The `@invariant` as an inductive invariant: `init` establishes it and
+     each handler preserves it.  [Refine_check]'s `DActor` arm files one
+     postcondition per site, named `<Actor>.init` and `<Actor>.<Msg>`. *)
+  let is_inv (o : O.t) =
+    o.O.kind = O.Postcondition
+    && (o.O.callee = name ^ ".init"
+        || List.exists (fun h -> o.O.callee = name ^ "." ^ h) handlers)
+  in
   let invariant_line =
     match ad.A.actor_invariant with
     | None -> []
     | Some _ ->
-      [ line "@invariant"
-          ( Not_checked,
-            "init and handler results are not checked against it; a hot deploy checks \
-             it on the migrated state" ) ]
+      (match summarise ~where:"at init and after each handler" (List.filter is_inv obs) with
+       | Some s -> [ line "@invariant" s ]
+       | None ->
+         [ line "@invariant"
+             (Not_checked, "no init or handler result was checked against it") ])
+  in
+  (* Handler guarantees (two-state specs): `on Msg(…) ensures P do`, one
+     postcondition per handler, filed by [Refine_check]'s `DActor` arm as
+     `<Actor>.<Msg>.ensures`. *)
+  let ensures_lines =
+    List.filter_map
+      (fun (h : A.actor_handler) ->
+        match h.A.ah_ensures with
+        | None -> None
+        | Some _ ->
+          let m = h.A.ah_msg.A.txt in
+          let what = Printf.sprintf "ensures on %s" m in
+          let mine (o : O.t) = o.O.kind = O.Postcondition && o.O.callee = name ^ "." ^ m ^ ".ensures" in
+          Some
+            (match summarise ~where:"across the handler's return paths" (List.filter mine obs) with
+             | Some s -> line what s
+             | None -> line what (Not_checked, "the handler's guarantee was not checked")))
+      ad.A.actor_handlers
   in
   let msg_line =
     match summarise ~where:"where a message is built" msgs with
@@ -183,7 +214,13 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
     match fn_span "_migrate_state" with
     | None -> []
     | Some _ ->
-      let what = if derived then "migrate_state (derived)" else "migrate_state" in
+      let what =
+        if List.mem_assoc name !March_desugar.Desugar_migrate_derive.drops then
+          "migrate_state (derived rollback)"
+        else if derived && List.mem_assoc name !March_desugar.Desugar_migrate_derive.clause_fields then
+          "migrate_state (derived, migrate clause)"
+        else if derived then "migrate_state (derived)"
+        else "migrate_state" in
       (match summarise ~where:deployed_note migrate_state with
        | Some (Not_proved, d) ->
          [ line what
@@ -205,18 +242,101 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
        | Some s -> [ line "migrate_msg" s ]
        | None -> [ line "migrate_msg" (Proved, "converts to no refined message") ])
   in
+  (* H5: `<actor>_rollback_state` beside the migration gets the generated
+     round-trip lemma `<actor>_rollback_roundtrip` (Desugar_rollback). *)
+  let rollback_line =
+    match fn_span "_rollback_state" with
+    | None -> []
+    | Some _ ->
+      let rt = low ^ "_rollback_roundtrip" in
+      let rb_what =
+        if List.mem_assoc name !March_desugar.Desugar_migrate_derive.rollbacks then
+          "rollback round trip (derived)"
+        else "rollback round trip" in
+      (* A refuted lemma keeps its stage-1 skip in the ledger; the refutation
+         itself is [Refine_call.lemma_refuted] (the build's error). *)
+      let refuted =
+        Hashtbl.fold
+          (fun name at acc ->
+            if acc = None && (name = rt || String.ends_with ~suffix:("." ^ rt) name) then Some at
+            else acc)
+          March_refinecheck.Refine_call.lemma_refuted None
+      in
+      match refuted with
+      | Some at ->
+        [ line rb_what
+            (Violated, Printf.sprintf "rolling back loses part of the old state at %s" at) ]
+      | None ->
+      (match
+         summarise ~where:"rolling back loses nothing the old version had"
+           (List.filter (fun (o : O.t) -> o.O.kind = O.Postcondition && o.O.callee = rt) obs)
+       with
+       | Some (l, _) when l = Proved ->
+         [ line rb_what (Proved, "rollback_state(migrate_state(old)) == old for every old state") ]
+       | Some s -> [ line rb_what s ]
+       | None ->
+         [ line rb_what
+             (Not_checked, "no migrate_state to pair rollback_state with") ])
+  in
+  (* H3 (Desugar_simulation): per message, migrating commutes with handling,
+     for a `@compat(simulation)` actor. *)
+  let simulation_line =
+    if ad.A.actor_compat <> March_desugar.Desugar_simulation.compat then []
+    else
+      let module S = March_desugar.Desugar_simulation in
+      let lemma_refuted name =
+        Hashtbl.fold
+          (fun n at acc ->
+            if acc = None && (n = name || String.ends_with ~suffix:("." ^ name) n) then Some at else acc)
+          March_refinecheck.Refine_call.lemma_refuted None
+      in
+      match List.assoc_opt name !S.report with
+      | None | Some [] ->
+        [ line "simulation"
+            ( Not_checked,
+              "no deployed build with handler steps is known (a deploy of this \
+               @compat(simulation) actor records them)" ) ]
+      | Some outs ->
+        let per =
+          List.map
+            (fun (m, o) ->
+              match o with
+              | S.Not_checked why -> (m, Not_checked, why)
+              | S.New_handler -> (m, Proved, "a new handler: no deployed message names it")
+              | S.Checked lemma -> (
+                match lemma_refuted lemma with
+                | Some at -> (m, Violated, "differs at " ^ at)
+                | None -> (
+                  match
+                    summarise ~where:""
+                      (List.filter (fun (o : O.t) -> o.O.kind = O.Postcondition && o.O.callee = lemma) obs)
+                  with
+                  | Some (Proved, _) -> (m, Proved, "commutes")
+                  | Some (l, d) -> (m, l, d)
+                  | None -> (m, Not_proved, "no verdict recorded"))))
+            outs
+        in
+        let worst =
+          List.fold_left (fun acc (_, l, _) -> if rank l < rank acc then l else acc) Proved per
+        in
+        [ line "simulation"
+            ( worst,
+              String.concat "; " (List.map (fun (m, l, d) -> Printf.sprintf "%s %s (%s)" m (label_text l) d) per) ) ]
+  in
   let remote_line =
     if ad.A.actor_remote then
       [ line "messages from other nodes"
           (Assumed, "a remote sender's message is not checked against the handler contracts") ]
     else []
   in
-  state_line @ invariant_line @ msg_line @ migrate_state_line @ migrate_msg_line @ remote_line
+  state_line @ invariant_line @ ensures_lines @ msg_line @ migrate_state_line @ migrate_msg_line @ rollback_line
+  @ simulation_line @ remote_line
 
 (* The protocol's lines from its translation-validation rows
    ([Session_validate], M6): a projection that agrees with
    [Session.Theory.project] inherits what the stdlib proves about it. *)
-let protocol_lines (rows : Session_validate.row list) (pd : A.protocol_def) : int * line list =
+let protocol_lines ~(fragment : (unit, string) result) (rows : Session_validate.row list) (pd : A.protocol_def)
+    : int * line list =
   let rec roles acc = function
     | [] -> acc
     | A.ProtoMsg (s, r, _, _) :: rest -> roles (s.A.txt :: r.A.txt :: acc) rest
@@ -272,15 +392,33 @@ let protocol_lines (rows : Session_validate.row list) (pd : A.protocol_def) : in
             (if String.contains projectors ' ' then "" else "s")
             (if n = 2 then ", whose two projections are dual (Session.Theory.project_dual)" else "") }
   in
+  (* C3-C5 hold for a protocol in Session.Theory's fragment once its
+     projections are validated (the laws are about `project`). *)
+  let laws =
+    if projection.label <> Proved_spec then Error "its projections are not validated"
+    else fragment
+  in
   let pairwise =
     if n = 2 then []
     else
-      [ { what = "pairwise duality"; label = Checked_compiler;
-          detail = "every send has the matching receive at its peer (not yet proved for more than two roles)" } ]
+      match laws with
+      | Ok () ->
+        [ { what = "pairwise duality"; label = Proved_spec;
+            detail = "what each pair of roles does with each other is dual (Session.Theory.pairwise)" } ]
+      | Error why ->
+        [ { what = "pairwise duality"; label = Checked_compiler;
+            detail = "every send has the matching receive at its peer; not proved: " ^ why } ]
   in
-  ( n,
-    (projection :: pairwise)
-    @ [ { what = "deadlock freedom"; label = Not_checked; detail = "no proof covers this protocol yet" } ] )
+  let deadlock =
+    match laws with
+    | Ok () ->
+      { what = "deadlock freedom"; label = Proved_spec;
+        detail =
+          "on the protocol's own schedule every role can take each step and every role finishes \
+           (Session.Theory.progress, projections_compose; synchronous delivery)" }
+    | Error why -> { what = "deadlock freedom"; label = Not_checked; detail = "not proved: " ^ why }
+  in
+  (n, (projection :: pairwise) @ [ deadlock ])
 
 let pad s w = if String.length s >= w then s else s ^ String.make (w - String.length s) ' '
 
@@ -318,13 +456,32 @@ let print ?(oc = stdout) ~filename ~user_files ~(surface : A.decl list) (desugar
   let rows = Session_validate.run surface in
   List.iter
     (fun (name, pd) ->
-      let n, lines = protocol_lines (List.filter (fun (r : Session_validate.row) -> r.Session_validate.proto = name) rows) pd in
+      let n, lines =
+        protocol_lines ~fragment:(Session_validate.fragment name)
+          (List.filter (fun (r : Session_validate.row) -> r.Session_validate.proto = name) rows) pd
+      in
       print_block oc (Printf.sprintf "protocol %s (%d roles)" name n) lines)
     (protocols surface);
   if acts <> [] then
+    (* Actor.Theory (stdlib/actor_theory.march) proves these about a model
+       of the mailbox; the runtime is tied to the model by the native
+       fixtures named here (lemmas design §4.2, M8).  Never more than
+       `proved (model) · tested (runtime)`. *)
     print_block oc "runtime"
-      [ { what = "mailbox order, Actor.call replies, DOWN delivery";
-          label = Assumed;
-          detail = "the runtime is trusted; nothing here proves it" } ];
+      [ { what = "per-sender message order";
+          label = Proved_model_tested;
+          detail =
+            "Actor.Theory.enq_self, enq_other, replay_order, call_keeps_others; tested: \
+             actor_theory_conformance, actor_call_in_handler_keeps_messages" };
+        { what = "Actor.call replies";
+          label = Proved_model_tested;
+          detail =
+            "a late reply never answers a later call (Actor.Theory.stale_reply_ignored, \
+             call_reply_cat); tested: actor_call_late_reply" };
+        { what = "DOWN delivery";
+          label = Proved_model;
+          detail =
+            "at most once, never dropped by a full mailbox (Actor.Theory.down_at_most_once, \
+             down_never_dropped); the runtime is not yet tested against it" } ];
   if acts = [] && protocols surface = [] then
     Printf.fprintf oc "no actors or protocols in %s\n" filename

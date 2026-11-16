@@ -23,5 +23,6 @@ mod Main do
     println(to_string(({ a: 1 }, [{ b: Meters(2) }])))
     println([{ m: 1, n: true }])
     println(inspect([{ s: "q" }]))
+    ()
   end
 end

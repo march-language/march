@@ -1,0 +1,14 @@
+-- EXPECT-VIOLATED: postcondition Account.Take
+-- EXPECT-ERROR: balance
+-- Kind: actor invariant. `Take` can return a negative balance.
+mod K10 do
+  @invariant(balance >= 0)
+  actor Account do
+    state { balance : Int }
+    init { balance: 0 }
+
+    on Take(n : {Int | _ > 0}) do
+      { balance: state.balance - n }
+    end
+  end
+end

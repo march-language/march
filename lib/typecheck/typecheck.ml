@@ -205,7 +205,7 @@ let record_use_noted ?(notes = []) name span env =
      | (Ast.Linear | Ast.Affine) ->
        le.le_used := true;
        if !(le.le_first_use) = None then le.le_first_use := Some span
-     | Ast.Unrestricted -> ())
+     | Ast.Unrestricted | Ast.Ghost -> ())
 
 let record_use name span env = record_use_noted name span env
 
@@ -819,10 +819,11 @@ let ambiguous_ctor_hint env ctor all_types =
   in
   let describe t = match actor_of t with
     | Some a -> Printf.sprintf "a message of actor `%s`" a
-    | None -> "`" ^ t ^ "`"
+    | None -> "`" ^ Typecheck_nominal.display t ^ "`"
   in
   let qualified t =
-    Printf.sprintf "`%s.%s`" (Option.value ~default:t (actor_of t)) ctor in
+    Printf.sprintf "`%s.%s`"
+      (Option.value ~default:(Typecheck_nominal.display t) (actor_of t)) ctor in
   let spellings = String.concat " or " (List.map qualified all_types) in
   if List.for_all (fun t -> actor_of t <> None) all_types then
     Printf.sprintf
@@ -1930,8 +1931,11 @@ let spawn_non_actor env (name : string) : string option =
 (** The actor closest in spelling to [name], for a `spawn` or supervise
     child that names nothing: actor name constructors only. *)
 let suggest_actor_name env (name : string) : string option =
+  (* Never suggest a [@[stdlib_internal]] actor: `NodeQueue__Writer` would
+     only lead to the stdlib_internal error. *)
   let actors = StrMap.fold (fun k cis acc ->
       if spawn_non_actor env k = None
+      && not (Hashtbl.mem env.stdlib_internal_actors k)
       && List.exists (fun (ci : ctor_info) ->
           not ci.ci_is_actor_msg && ci.ci_arg_tys = [] && ci.ci_type = k) cis
       then (k, t_unit) :: acc else acc) env.ctors [] in
@@ -2567,6 +2571,20 @@ let binary_operators =
   [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/.";
     "<"; "<="; ">"; ">="; "=="; "!="; "&&"; "||" ]
 
+(* A literal value, possibly negated, or a bare atom: what `x == <it>`
+   compares a value against, never a [Result]. *)
+let rec plain_literal (e : Ast.expr) =
+  match e with
+  | Ast.ELit _ -> true
+  | Ast.EAtom (_, [], _) -> true
+  | Ast.EApp (Ast.EVar n, [ x ], _) when n.Ast.txt = "negate" -> plain_literal x
+  | _ -> false
+
+(* Operators whose operands are never a capability operation's
+   [Result(T, CapError)] on purpose (`==` is: `println(x) == Ok(())`). *)
+let cap_operand_operators =
+  [ "++"; "+"; "-"; "*"; "/"; "%"; "+."; "-."; "*."; "/."; "<"; "<="; ">"; ">=" ]
+
 (** The type a literal has on its face, if it is one. *)
 let literal_ty (e : Ast.expr) =
   match e with
@@ -2805,6 +2823,91 @@ let poison_linear_operands env (e : Ast.expr) =
         | _ -> ())
       env.lin
 
+(** A `match` over a capability operation's [Result(T, CapError)] written
+    for the [T] (`match Process.env("HOME") do Some(v) -> ... end`, from
+    before operations could be refused): report [cap_result_unhandled] on the
+    scrutinee, with the [Authority.must] fix, and return [T] for the arms to
+    check against.  Only when some arm's pattern is shaped like a value and
+    none is an [Ok]/[Err] pattern: a match that handles the [Result] (or binds
+    it whole) is left alone. *)
+let cap_scrutinee env (scrut : Ast.expr) (scrut_ty : ty) (branches : Ast.branch list) : ty =
+  match repr scrut_ty with
+  | TCon ("Result", [ p; err ]) when is_cap_error_ty err ->
+    let rec heads (pat : Ast.pattern) = match pat with
+      | Ast.PatAs (q, _, _) -> heads q
+      | Ast.PatOr (qs, _) -> List.concat_map heads qs
+      | Ast.PatWild _ | Ast.PatVar _ -> []
+      | Ast.PatCon (n, _) ->
+        let short = match String.rindex_opt n.Ast.txt '.' with
+          | Some i -> String.sub n.Ast.txt (i + 1) (String.length n.Ast.txt - i - 1)
+          | None -> n.Ast.txt in
+        [ (if short = "Ok" || short = "Err" then `Result else `Value) ]
+      | _ -> [ `Value ] in
+    let hs = List.concat_map (fun (b : Ast.branch) -> heads b.Ast.branch_pat) branches in
+    (* Written for an operation's own Result, now nested inside the capability
+       one (`match File.read(p) do ... Err(NotFound(_)) -> ... end`): some
+       `Err(...)` arm names a constructor other than [CapError]. *)
+    let nested_inner =
+      (match repr p with TCon ("Result", [ _; _ ]) -> true | _ -> false)
+      && List.exists (fun (b : Ast.branch) ->
+          let rec err_ctor (pat : Ast.pattern) = match pat with
+            | Ast.PatAs (q, _, _) -> err_ctor q
+            | Ast.PatOr (qs, _) -> List.exists err_ctor qs
+            | Ast.PatCon (n, [ Ast.PatCon (inner, _) ])
+              when (n.Ast.txt = "Err" || n.Ast.txt = "Result.Err")
+                   && inner.Ast.txt <> "CapError" -> true
+            | _ -> false in
+          err_ctor b.Ast.branch_pat) branches in
+    if (hs <> [] && not (List.mem `Result hs)) || nested_inner then begin
+      report_cap_result_unhandled env ~span:(span_of_expr scrut)
+        ~provided:(provided_of_expr scrut scrut_ty) ~payload:p scrut_ty p;
+      p
+    end else scrut_ty
+  | _ -> scrut_ty
+
+(* [@[stdlib_internal]] members cannot be imported by `use` or `alias` from
+   user code: an import rebinds the member under another key, which the
+   reference gate's spelled name would not see. [import_blocked env sp k sch]
+   is true when the member bound at [k] is one, and the import at [sp] is not
+   itself stdlib code (stdlib modules may import each other's internals). *)
+let import_blocked env (sp : Ast.span) k sch =
+  not (span_may_name_internal sp)
+  && (match Hashtbl.find_opt env.stdlib_internal_fns k with
+      | Some (_, isch) -> isch == sch
+      | None -> false)
+
+(* `@[deprecated("message")]` (specs/lang/compatibility.md): a reference to
+   a deprecated function from outside the module that declares it is a
+   warning carrying the message.  Inside the declaring module (and modules
+   nested in it) the old name is still the implementation's to use. *)
+let span_within (inner : Ast.span) (outer : Ast.span) =
+  inner.Ast.file = outer.Ast.file
+  && (inner.Ast.start_line, inner.Ast.start_col) >= (outer.Ast.start_line, outer.Ast.start_col)
+  && (inner.Ast.end_line, inner.Ast.end_col) <= (outer.Ast.end_line, outer.Ast.end_col)
+
+let warn_if_deprecated env (name : Ast.name) sch =
+  match !(env.deprecated_fns) with
+  | [] -> ()
+  | fns ->
+    (match List.find_opt (fun (dsch, _, _) -> dsch == sch) fns with
+     | Some (_, home, msg) when not (span_within name.span home) ->
+       let already =
+         List.exists (fun (d : Err.diagnostic) ->
+             d.Err.code = Err.Code.deprecated && d.Err.span = name.span)
+           env.errors.Err.diagnostics in
+       if not already then begin
+         (* The author's message, closed with a full stop if they left it
+            open, so the line reads as a sentence either way. *)
+         let msg = String.trim msg in
+         let stop =
+           if msg = "" then ""
+           else match msg.[String.length msg - 1] with '.' | '!' | '?' -> "" | _ -> "." in
+         Err.warning ~code:Err.Code.deprecated env.errors ~span:name.span
+           (if msg = "" then Printf.sprintf "`%s` is deprecated." name.txt
+            else Printf.sprintf "`%s` is deprecated: %s%s" name.txt msg stop)
+       end
+     | _ -> ())
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -2852,8 +2955,25 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
            (Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint)
        | _ -> ());
+      (* [@[stdlib_internal]] stdlib functions (ocap phase 2): the same gate,
+         for a function instead of a builtin. [env.stdlib_internal_fns] is
+         keyed by the qualified name a reference spells (`Socket.raw_fd`), so a
+         user's own bare `raw_fd` never matches; a stdlib span (including the
+         defining module itself) is exempt, exactly as for builtins. *)
+      (if Hashtbl.length env.stdlib_internal_fns > 0
+          && not (span_may_name_internal name.span) then
+         match Hashtbl.find_opt env.stdlib_internal_fns name.txt with
+         | Some (md, isch)
+           when (match lookup_var name.txt env with
+                 | Some sch -> sch == isch | None -> false) ->
+           Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
+             (Printf.sprintf
+                "`%s` is internal to the standard library; use the handle API in `%s`."
+                name.txt md)
+         | _ -> ());
       (match lookup_var name.txt env with
        | Some sch ->
+         warn_if_deprecated env name sch;
          (if StrMap.mem name.txt env.local_fns && !(env.current_decl) <> "" then
             env.refs := { callee = qualify_ref_name env.current_module name.txt;
                           caller = !(env.current_decl);
@@ -2892,6 +3012,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* Try qualified module resolution: "Mod.func" *)
          match resolve_qualified_var name.txt env with
          | env', Some sch ->
+           warn_if_deprecated env name sch;
            (* [env'] is the env AFTER [load_module_into_env] merged the
               resolved module's exports — [qual_fn_names] is only populated
               there for the ExFn case, so this correctly excludes a qualified
@@ -2932,6 +3053,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
               modules) — so this guard cannot misfire on that case. *)
            Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span (qualified_error_msg name.txt env);
            TError
+         | _ when (match split_qualified name.txt with
+                   | Some (q, member) when not (String.contains member '.') ->
+                     q <> env.current_module
+                     && not (StrMap.mem q env.local_mods)
+                     && (StrMap.mem q env.types || StrMap.mem q env.records
+                         || StrMap.mem q env.ty_aliases)
+                   | _ -> false) ->
+           (* A type is not a value namespace. The suffix fallback used to
+              type Int.to_string as to_string while leaving the qualified
+              AST name unresolved in both execution backends. Real module
+              and interface exports have already resolved above. The current
+              module may also name a type (including its implicit capability);
+              its own qualified private calls still need the suffix fallback. *)
+           let q, member = Option.get (split_qualified name.txt) in
+           let hint = match lookup_var member env with
+             | Some _ -> Printf.sprintf " Write `%s` without the type qualifier." member
+             | None -> " Use an exported module member or an unqualified function." in
+           Err.error ~code:Err.Code.unknown_qualified_name env.errors ~span:name.span
+             (Printf.sprintf "`%s` is a type, not a module.%s" q hint);
+           TError
          | _ ->
            (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
               interface methods are registered without the outer module prefix
@@ -2951,9 +3092,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
               module, no `Q.`-prefixed binding) is a misspelled module, not a
               path to strip: stripping `Lsit.` off `Lsit.length` resolved the
               builtin `length`, so the typo checked clean and failed only at
-              run time with "unbound variable: Lsit.length".  A qualifier
-              that names a TYPE keeps the fallback: `Int.to_string(n)` is
-              how programs spell the bare `to_string` on an Int. *)
+              run time with "unbound variable: Lsit.length". Type qualifiers
+              are rejected separately above. *)
            let unknown_single_qualifier =
              match split_qualified name.txt with
              | Some (q, member) when not (String.contains member '.') ->
@@ -3018,6 +3158,44 @@ let rec infer_expr env (e : Ast.expr) : ty =
           notes   = [ "Fill this hole with an expression of the type shown above." ];
           code    = Err.Code.typed_hole; fix = None };
       t
+
+    | Ast.EApp (_, _, sp) when March_ast.Bounded_pred.view e <> None ->
+      if not env.in_logical_predicate then begin
+        Err.error ~code:Err.Code.type_mismatch env.errors ~span:sp
+          "Bounded quantifiers are predicate-only: use a refinement or an erased proof assertion.";
+        TError
+      end else begin
+        let q = Option.get (March_ast.Bounded_pred.view e) in
+        let binder_ty = match q.domain with
+          | March_ast.Bounded_pred.Range (lo, hi) ->
+            check_expr env lo t_int ~reason:None;
+            check_expr env hi t_int ~reason:None;
+            t_int
+          | March_ast.Bounded_pred.Elements set ->
+            (match repr (infer_expr env set) with
+             | TCon ("$LogicSet", [a]) -> a
+             | _ -> Err.error ~code:Err.Code.type_mismatch env.errors ~span:sp "A quantified set domain must be elts(xs) or keys(map)."; TError) in
+        let local = bind_var q.binder.txt (Mono binder_ty) env in
+        check_expr local q.body t_bool ~reason:None;
+        Hashtbl.replace env.type_map sp t_bool;
+        t_bool
+      end
+    | Ast.EApp (Ast.EVar {txt = "nth"; _}, [xs; i], sp) when env.in_logical_predicate ->
+      let a = fresh_var env.level in
+      check_expr env xs (TCon ("List", [a])) ~reason:None;
+      check_expr env i t_int ~reason:None;
+      Hashtbl.replace env.type_map sp a;
+      a
+    | Ast.EApp (Ast.EVar {txt = ("elts" | "keys") as m; _}, [xs], sp) when env.in_logical_predicate ->
+      let a = fresh_var env.level in
+      let actual = infer_expr env xs in
+      if m = "keys" then unify env ~span:sp ~reason:None actual (TCon ("Map", [a; fresh_var env.level]))
+      else (match repr actual with
+        | TCon ("Set", [elem]) -> unify env ~span:sp ~reason:None elem a
+        | _ -> unify env ~span:sp ~reason:None actual (TCon ("List", [a])));
+      let ty = TCon ("$LogicSet", [a]) in
+      Hashtbl.replace env.type_map sp ty;
+      ty
 
     (* ── Function application ─────────────────────────────────────── *)
     (* ── Session channel operations (special casing for session type advancement) ── *)
@@ -4082,7 +4260,15 @@ let rec infer_expr env (e : Ast.expr) : ty =
               | _ -> Some (call_arg_payload env name.txt args sp))
            | _ -> None in
          let mark_args = env.errors.Err.diagnostics in
-         let res = infer_app ?payload env sp f_ty args 0 in
+         let cap_op = match f, args with
+           | Ast.EVar name, [ _; right ] ->
+             List.mem name.txt cap_operand_operators
+             (* `==`/`!=` compare Results on purpose (`println(x) == Ok(())`);
+                against a plain literal (`Env.get(k, "") == "1"`) it is the
+                value that was meant. *)
+             || ((name.txt = "==" || name.txt = "!=") && plain_literal right)
+           | _ -> false in
+         let res = infer_app ?payload ~cap_op env sp f_ty args 0 in
          (match f with
           | Ast.EVar name -> suggest_argument_order env name args mark_args
           | _ -> ());
@@ -4109,6 +4295,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
            let _, resolved = resolve_qualified_ctor name.txt env in
            resolved
        in
+       (* `@[stdlib_internal]` actors (ocap phase 2b): their name and message
+          constructors are buildable only by the stdlib, so user code can
+          neither spawn one nor send it a message carrying a forged descriptor. *)
+       (match ci_opt with
+        | Some ci when Hashtbl.length env.stdlib_internal_actors > 0
+                    && not (span_may_name_internal sp) ->
+          (match Hashtbl.find_opt env.stdlib_internal_actors ci.ci_type with
+           | Some actor ->
+             Err.error ~code:Err.Code.stdlib_internal env.errors ~span:sp
+               (Printf.sprintf
+                  "`%s` belongs to the actor `%s`, which is internal to the standard library; \
+                   use the public API of its module instead."
+                  name.txt actor)
+           | None -> ())
+        | _ -> ());
        (match ci_opt with
         | Some ci when !(env.current_decl) <> "" ->
           env.refs := { callee = qualify_ref_name ci.ci_module
@@ -4248,7 +4449,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── match ────────────────────────────────────────────────────── *)
     | Ast.EMatch (scrut, branches, sp) ->
-      let scrut_ty = infer_expr env scrut in
+      let scrut_ty = cap_scrutinee env scrut (infer_expr env scrut) branches in
       infer_match env sp scrut scrut_ty branches
 
     (* ── Tuples ───────────────────────────────────────────────────── *)
@@ -4712,9 +4913,39 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── Test assertion ─────────────────────────────────────────────── *)
     | Ast.EAssert (inner, sp) ->
       (* The inner expression must be Bool. Assert evaluates to Unit. *)
-      check_expr env inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
+      check_expr {env with in_logical_predicate = env.in_proof_hints} inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
       Hashtbl.replace env.type_map sp t_unit;
       t_unit
+
+    (* ── Proof hints (ghost; erased after the refinement checker) ─────── *)
+    | Ast.EProof (p, sp) ->
+      let hints hs = List.iter (fun h -> ignore (infer_expr {env with in_proof_hints = true} h)) hs in
+      let ty =
+        match p with
+        | Ast.PAssertBy (pred, hs) ->
+          check_expr {env with in_logical_predicate = true} pred t_bool ~reason:(Some (RBuiltin "assert … by expects a Bool expression"));
+          hints hs;
+          t_unit
+        | Ast.PReveal f ->
+          ignore (infer_expr env f);
+          t_unit
+        | Ast.PWithFuel (f, _, body) ->
+          ignore (infer_expr env f);
+          infer_block env body
+        | Ast.PCalc (e0, steps) ->
+          (* Each step is `prev op rhs`, typed as that comparison would be. *)
+          ignore
+            (List.fold_left
+               (fun prev (st : Ast.calc_step) ->
+                 let cmp = Ast.EApp (Ast.EVar { Ast.txt = st.Ast.cs_op; Ast.span = st.Ast.cs_span }, [ prev; st.Ast.cs_rhs ], st.Ast.cs_span) in
+                 check_expr env cmp t_bool ~reason:(Some (RBuiltin "a calc step compares its two sides"));
+                 hints st.Ast.cs_hint;
+                 st.Ast.cs_rhs)
+               e0 steps);
+          t_unit
+      in
+      Hashtbl.replace env.type_map sp ty;
+      ty
 
     (* ── Local recursive named function (block-scoped) ─────────────── *)
     | Ast.ELetFn (name, params, ret_ann, body, sp) ->
@@ -5009,7 +5240,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
 
   (* Match in check mode: check each arm against expected *)
   | Ast.EMatch (scrut, branches, msp), _ ->
-    let scrut_ty = infer_expr env scrut in
+    let scrut_ty = cap_scrutinee env scrut (infer_expr env scrut) branches in
     iter_arms_linear env ~span:msp branches (fun (br : Ast.branch) ->
         let (bindings, pat_ty), wilds =
           with_wildcards (fun () -> infer_pattern ~expected:scrut_ty env br.branch_pat) in
@@ -5074,11 +5305,17 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     let mark = env.errors.Err.diagnostics in
     let inferred =
       with_suggest_need e (NeedType expected) (fun () -> infer_expr env e) in
+    (* A block whose value is a capability operation's Result: the
+       cap_result_unhandled fix belongs on that last expression, not the
+       block. *)
+    let provided_e = match repr inferred with
+      | TCon ("Result", [ _; err ]) when is_cap_error_ty err -> branch_leaf e
+      | _ -> e in
     (* Only the expected-type check below may be moved onto a `let?`'s
        continuation: an error inferring the binding itself (`let? x = 42`)
        is about the binding. *)
     let mark_check = env.errors.Err.diagnostics in
-    unify env ~span:sp ~reason ~provided:(provided_of_expr e inferred) inferred expected;
+    unify env ~span:sp ~reason ~provided:(provided_of_expr provided_e inferred) inferred expected;
     relocate_literal_mismatch env ~mark ~reason e sp expected;
     relocate_letq_mismatch env ~mark:mark_check e sp;
     relocate_callback_mismatch env ~mark e sp inferred expected;
@@ -5086,7 +5323,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     explain_concat_result env ~mark e sp
 
 (** Thread function application through argument list, tracking arg index. *)
-and infer_app ?payload env span f_ty args idx =
+and infer_app ?payload ?(cap_op = false) env span f_ty args idx =
   match args, repr f_ty with
   | [], t ->
     (* A call written with empty parens — `f()`, i.e. zero surface arguments
@@ -5157,7 +5394,25 @@ and infer_app ?payload env span f_ty args idx =
        same fn is unaffected. *)
     if ty_has_tagged_cap_producer env param_ty then
       tag_cap_producer_result env ret_ty span;
-    let result = infer_app ?payload env span ret_ty rest (idx + 1) in
+    (* An operator's operand that is a capability operation's
+       [Result(T, CapError)] (`System.now_ms() + 1000`) has just bound the
+       operator's shared type variable to the [Result]; report it with its
+       [Authority.must] fix and re-link the variable to [T], so the other
+       operand and the operator's constraint check against the value. *)
+    if cap_op then
+      List.iter (fun r ->
+          match !r with
+          | Link t ->
+            (match repr t with
+             | TCon ("Result", [ p; err ])
+               when is_cap_error_ty err && Typecheck_suggest.informative p ->
+               report_cap_result_unhandled env ~span:(span_of_expr arg)
+                 ~provided:(provided_of_expr arg t) ~payload:p t p;
+               r := Link p
+             | _ -> ())
+          | Unbound _ -> ())
+        param_vars;
+    let result = infer_app ?payload ~cap_op env span ret_ty rest (idx + 1) in
     if failed then TError else result
   | arg :: rest, TVar _ ->
     (* f_ty not yet known — constrain it *)
@@ -5447,6 +5702,12 @@ and infer_block env exprs =
     (match b.bind_pat with
      | Ast.PatVar name ->
        Hashtbl.replace env.type_map name.span (repr rhs_ty);
+       (* `let t = Vault.new("x")`: a later use of [t] that wanted the value
+          gets its cap_result_unhandled fix here, on the operation. *)
+       (match repr rhs_ty with
+        | TCon ("Result", [ _; err ]) when is_cap_error_ty err ->
+          Hashtbl.replace cap_result_rhs name.span (span_of_expr b.bind_expr)
+        | _ -> ());
        (match b.bind_expr with
         | Ast.ESpawn (_, ssp) -> Hashtbl.replace env.decl_sites (spawn_site_key name.span) ssp
         | _ -> ())
@@ -5481,7 +5742,8 @@ and infer_block env exprs =
        constructor, auto-promote the binding to Linear.
        Otherwise, propagate linearity from the RHS expression type. *)
     let auto_lin =
-      match b.bind_lin with
+      (* `ghost let` is erased; it binds like a plain `let`. *)
+      match (if b.bind_lin = Ast.Ghost then Ast.Unrestricted else b.bind_lin) with
       | Ast.Unrestricted ->
         let rty = repr rhs_ty in
         (match rty with
@@ -5857,8 +6119,10 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | None, Some t -> t
     | None, None   -> fresh_var env.level
   in
-  if p.param_lin <> Ast.Unrestricted then mark_linear_ok env t;
+  if p.param_lin = Ast.Linear || p.param_lin = Ast.Affine then mark_linear_ok env t;
   let effective_lin = match p.param_lin with
+    (* A ghost parameter is erased; it carries no use obligation. *)
+    | Ast.Ghost -> Ast.Unrestricted
     | Ast.Unrestricted ->
       (match repr t with
        | t when holds_linear env t -> Ast.Linear
@@ -6238,8 +6502,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
                 | Some ann -> surface_ty env' ~tvars:fn_tvars ann
                 | None -> fresh_var env'.level
               in
-              if p.param_lin <> Ast.Unrestricted then mark_linear_ok env' t;
+              if p.param_lin = Ast.Linear || p.param_lin = Ast.Affine then mark_linear_ok env' t;
               let effective_lin = match p.param_lin with
+                | Ast.Ghost -> Ast.Unrestricted
                 | Ast.Unrestricted ->
                   (match repr t with
                    | t when holds_linear env' t -> Ast.Linear
@@ -6301,7 +6566,8 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
          require declaring-module + public provenance. Lambdas inherit this
          (they don't call check_fn); nested named fns/modules reset it via their
          own check_fn. *)
-      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public) } in
+      let body_env = { body_env with cur_fn_public = (def.fn_vis = Ast.Public);
+        in_logical_predicate = false; in_proof_hints = List.mem "lemma" def.fn_attrs } in
 
       (* `@[trusted_linear(v)]` (specs/progress/2026-09-18-linear-map.md): the
          stdlib's LinearMap kernel.  Callers may instantiate the signature's
@@ -6320,6 +6586,34 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       let body_env =
         if trusted_vars = [] then body_env
         else { body_env with trusted_linear_body = true } in
+
+      (* `@[net_dest(p)]`: parameter [p] carries a URL destination, so a
+         host-scoped caller's argument is checked against its scope
+         (specs/2026-11-09-host-scoped-network-capabilities-design.md §4).
+         What the body does with [p] is checked on the compile path
+         (lib/tir/net_scope.ml); here only that [p] names a parameter. *)
+      (match March_caps.Net_dest.net_dest_attr def.fn_attrs with
+       | None -> ()
+       | Some p ->
+         let names =
+           match def.fn_clauses with
+           | c :: _ ->
+             List.filter_map (function
+                 | Ast.FPNamed prm | Ast.FPDefault (prm, _) -> Some prm.Ast.param_name.txt
+                 | Ast.FPPat (Ast.PatVar n) -> Some n.txt
+                 | Ast.FPPat _ -> None) c.Ast.fc_params
+           | [] -> []
+         in
+         if not (List.mem p names) then
+           Err.error ~code:Err.Code.cap_host_annotation env.errors
+             ~span:def.fn_name.span
+             (Printf.sprintf
+                "`@[net_dest(%s)]` on `%s` names no parameter: `%s` should be \
+                 the parameter that carries the URL.\n\
+                 hint: the parameters are %s."
+                p def.fn_name.txt p
+                (if names = [] then "unnamed patterns"
+                 else String.concat ", " (List.map (fun n -> "`" ^ n ^ "`") names))));
 
       (* ── A set-valued `@[measure]` body is LOGIC, not code ──────────────────
          (specs/2026-09-13-set-refinements-design.md §4.4, plan §2.1 option 1.)
@@ -6353,7 +6647,10 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               ("singleton", poly1 (fun a -> TArrow (a, t_set a)));
               ("member", poly1 (fun a -> TArrow (a, TArrow (t_set a, t_bool))));
               ("subset", poly1 (fun a -> TArrow (t_set a, TArrow (t_set a, t_bool))));
-              ("empty", poly1 (fun a -> t_set a)) ]
+              ("empty", poly1 (fun a -> t_set a));
+              (* A list's elements, the predicate vocabulary's [elts]: a
+                 HAMT branch's collision bucket is a [List(a)]. *)
+              ("elts", poly1 (fun a -> TArrow (TCon ("List", [ a ]), t_set a))) ]
             body_env
         end
         else body_env
@@ -6661,6 +6958,8 @@ let register_impl_shape ?(decl_module="") env (idef : Ast.impl_def) =
          let v = fresh_var 1 in
          tvars := M.add n.txt v !tvars;
          v)
+    | Ast.TyCon (n, args) when Typecheck_nominal.ref_identity n <> None ->
+      TCon (Option.get (Typecheck_nominal.ref_identity n), List.map lenient_ty args)
     | Ast.TyCon (n, args)  ->
       let args' = List.map lenient_ty args in
       (* Expand a record type name to its structural form, exactly as
@@ -7867,7 +8166,6 @@ let rec check_decl env (d : Ast.decl) : env =
            | _ -> false
       in
       env.current_module = "DistLink"
-      && env.enclosing_package = "DistLink"
       && name.txt = "DownReason"
       && params = []
       && match typedef with
@@ -7878,16 +8176,29 @@ let rec check_decl env (d : Ast.decl) : env =
            && nullary "NodeDown" node_down
          | _ -> false
     in
-    if env.current_module = env.enclosing_package
+    (* Only the entry module's own top-level types collide: TIR unwraps the
+       entry module, so its `DownReason` reaches the backend under the bare
+       name the monitor ABI reserves, while a nested or library module's type
+       is qualified (`Sub.DownReason`) and shadows the built-in harmlessly.
+       [cap_qual_prefix] is "" exactly at the entry module's top level.  (This
+       used to test [current_module = enclosing_package], which never held for
+       user code: the stdlib baseline env leaves [enclosing_package] set to
+       "StdlibBaseline", so the redeclaration slipped through and crashed
+       [Llvm_toplevel.emit_module].) *)
+    if env.cap_qual_prefix = ""
        && (name.txt = "Down" || name.txt = "DownReason")
        && not is_canonical_dist_link_down_reason then begin
       Err.error ~code:Err.Code.reserved_type_name env.errors ~span:name.span
         (Printf.sprintf
-           "type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared"
+           "Type `%s` is reserved by the local-monitor runtime ABI and cannot be redeclared here. Rename it, or declare it inside a nested module."
            name.txt);
       env
     end else
     let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
+    let env1 =
+      let id = Typecheck_nominal.decl_identity name in
+      if id = name.txt then env1
+      else { env1 with types = StrMap.add id (List.length params) env1.types } in
     (match typedef with
      | Ast.TDVariant variants ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -7908,7 +8219,7 @@ let rec check_decl env (d : Ast.decl) : env =
            | None -> (v.var_name.txt, v.var_name.span) :: seen
          ) [] variants in
        List.fold_left (fun e (v : Ast.variant) ->
-           let ci = { ci_type    = name.txt
+           let ci = { ci_type    = Typecheck_nominal.decl_identity name
                     ; ci_params  = param_names
                     ; ci_arg_tys = v.var_args
                     ; ci_module  = env.current_module
@@ -7948,7 +8259,7 @@ let rec check_decl env (d : Ast.decl) : env =
          ) fields in
        register_record_name ~name:name.txt (List.map fst field_pairs);
        { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
-     | Ast.TDAlias rhs ->
+     | Ast.TDAlias (rhs, _) ->
        (* A transparent alias: record the right-hand side so [surface_ty]
           resolves a mention of this name to it.  Keyed by the QUALIFIED name
           inside a module — see [ty_aliases]'s comment for why the bare key is
@@ -7960,6 +8271,22 @@ let rec check_decl env (d : Ast.decl) : env =
        { env1 with ty_aliases = StrMap.add key (param_names, rhs) env1.ty_aliases })
 
   | Ast.DActor (_vis, name, actor, _sp) ->
+    if actor.actor_internal && span_is_stdlib _sp then begin
+      (* The name as a user would write it: desugar spells a stdlib actor
+         `Mod__Actor`; the error says `Mod.Actor`. *)
+      let shown =
+        let b = Buffer.create (String.length name.txt) in
+        let n = String.length name.txt in
+        let i = ref 0 in
+        while !i < n do
+          if !i + 1 < n && name.txt.[!i] = '_' && name.txt.[!i + 1] = '_'
+          then (Buffer.add_char b '.'; i := !i + 2)
+          else (Buffer.add_char b name.txt.[!i]; incr i)
+        done;
+        Buffer.contents b in
+      Hashtbl.replace env.stdlib_internal_actors name.txt shown;
+      Hashtbl.replace env.stdlib_internal_actors (actor_msg_type_name name.txt) shown
+    end;
     Hashtbl.replace env.decl_sites ("actor:" ^ name.txt) name.span;
     Hashtbl.replace env.decl_sites ("actorbody:" ^ name.txt) _sp;
     (* Each handler parameter, so a message built with a wrong payload can
@@ -8180,7 +8507,7 @@ let rec check_decl env (d : Ast.decl) : env =
       actor.actor_on_stop;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
-  | Ast.DMod (name, _vis, decls, _sp) ->
+  | Ast.DMod (name, _vis, decls, sp) ->
     (* A module nested inside another may name an enclosing module's fn by
        its QUALIFIED path (`Outer.helper`) as well as bare, and that includes
        a `pfn`: the caller is lexically inside `Outer`, so the fn is in scope.
@@ -8409,14 +8736,38 @@ let rec check_decl env (d : Ast.decl) : env =
           | Some outer -> outer == cis
           | None -> false)
     in
+    (* A type this module declares under a nominal identity of its own
+       ([Typecheck_nominal]: `UserValues.Down`, not the bare `Down`) owns the
+       constructors whose [ci_type] is that identity.  A constructor of the
+       bare-named type it is merely named like (the built-in `Down`, inherited
+       from the base env) is not this module's to export: exporting it put
+       the built-in's `Down` under `UserValues.Down`. *)
+    let own_identity : (string, string) Hashtbl.t = Hashtbl.create 8 in
+    List.iter (function
+        | Ast.DType (_, n, _, _, _) | Ast.DAlwaysLinearType (_, n, _, _, _) ->
+          let id = Typecheck_nominal.decl_identity n in
+          if id <> n.Ast.txt then Hashtbl.replace own_identity n.Ast.txt id
+        | _ -> ()) decls;
+    let ctor_type_short ty =
+      if Hashtbl.length own_identity = 0 then Some ty
+      else match Hashtbl.find_opt own_identity ty with
+        | Some _ -> None                      (* the bare namesake *)
+        | None ->
+          let short = Typecheck_nominal.bare ty in
+          if short <> ty && Hashtbl.find_opt own_identity short = Some ty
+          then Some short else Some ty
+    in
     let new_ctors = StrMap.filter_map (fun k cis ->
         if inherited_qualified k cis then None else
         let filtered = List.filter (fun ci ->
+          match ctor_type_short ci.ci_type with
+          | None -> false
+          | Some ty ->
           (* Hide constructors for opaque types declared in the sig *)
-          not (List.mem ci.ci_type opaque_types) &&
+          not (List.mem ty opaque_types) &&
           (* Export constructor only if its parent type is public AND
              the constructor itself is explicitly marked Public. *)
-          is_pub ci.ci_type && ci.ci_vis = Ast.Public
+          is_pub ty && ci.ci_vis = Ast.Public
         ) cis in
         match filtered with [] -> None | _ -> Some filtered
       ) inner_env.ctors in
@@ -8482,6 +8833,18 @@ let rec check_decl env (d : Ast.decl) : env =
       if cap_qname = name.txt then with_qual
       else (name.txt, inner_needs) :: with_qual
     in
+    let inner_need_scopes = List.concat_map (function
+        | Ast.DNeeds (caps, _) ->
+          List.map (fun (p, sc) -> (cap_path_of_names p, sc)) caps
+        | _ -> []) decls in
+    (* Keyed by the QUALIFIED name only.  [module_caps] above also files a
+       short-name entry for its own lookups, but two modules sharing a short
+       name (`P1.Inner`, a top-level `Inner`) would then collide there and
+       whichever was declared later would judge both.  The host check resolves
+       owners by qualified name. *)
+    let module_need_scopes' =
+      (cap_qname, inner_need_scopes) :: inner_env.module_need_scopes
+    in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly.
        Export both the local name ("JobRow") and the fully-qualified name
@@ -8501,6 +8864,37 @@ let rec check_decl env (d : Ast.decl) : env =
       check_no_extern_module env.errors inner_env decls;
     if inner_env.deterministic_mod then
       check_deterministic_module env.errors inner_env decls;
+    (* [@[stdlib_internal]] functions of a stdlib module, filed under the
+       qualified name a reference spells and, for a nested module, under each
+       enclosing path too ([Outer.Inner.f] as well as [Inner.f]). *)
+    (* [@[deprecated("message")]] functions this module exports: see
+       [warn_if_deprecated]. *)
+    List.iter (function
+        | Ast.DFn (fd, _) ->
+          (match Ast.deprecation_of_fn fd with
+           | Some msg ->
+             (match List.assoc_opt (name.txt ^ "." ^ fd.Ast.fn_name.txt) new_names with
+              | Some sch -> env.deprecated_fns := (sch, sp, msg) :: !(env.deprecated_fns)
+              | None -> ())
+           | None -> ())
+        | _ -> ()) decls;
+    List.iter (function
+        | Ast.DFn (fd, fsp)
+          when List.mem "stdlib_internal" fd.Ast.fn_attrs && span_is_stdlib fsp ->
+          let q = name.txt ^ "." ^ fd.Ast.fn_name.txt in
+          (match List.assoc_opt q new_names with
+           | Some sch -> Hashtbl.replace env.stdlib_internal_fns q (name.txt, sch)
+           | None -> ())
+        | _ -> ()) decls;
+    List.iter (function
+        | Ast.DMod (inner, _, _, _) ->
+          let prefix = inner.txt ^ "." in
+          let n = String.length prefix in
+          Hashtbl.iter (fun k v ->
+              if String.length k > n && String.sub k 0 n = prefix then
+                Hashtbl.replace env.stdlib_internal_fns (name.txt ^ "." ^ k) v)
+            (Hashtbl.copy env.stdlib_internal_fns)
+        | _ -> ()) decls;
     let env' = bind_vars new_names env in
     let no_panic_modules' =
       if inner_env.no_panic_mod then name.txt :: env'.no_panic_modules
@@ -8521,6 +8915,7 @@ let rec check_decl env (d : Ast.decl) : env =
       param_call_arities =
         StrMap.union (fun _k a _ -> Some a) new_param_call_arities env'.param_call_arities;
       module_caps = module_caps';
+      module_need_scopes = module_need_scopes';
       proof_caps = inner_env.proof_caps;
       cap_dicts = inner_env.cap_dicts;
       always_linear_types = inner_env.always_linear_types;
@@ -8939,6 +9334,7 @@ let rec check_decl env (d : Ast.decl) : env =
              let rest = String.sub k plen (String.length k - plen) in
              let short_key = short_prefix ^ rest in
              if StrMap.mem short_key env.vars then acc
+             else if import_blocked env sp k sch then acc
              else (short_key, sch) :: acc
            else acc) env.vars [] in
        (* The entry is registered UNCONDITIONALLY, but pre-marked used when it
@@ -8984,6 +9380,7 @@ let rec check_decl env (d : Ast.decl) : env =
            then
              let short = String.sub k plen (String.length k - plen) in
              if StrMap.mem short env.local_fns then acc
+             else if import_blocked env sp k sch then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
        (* Import interfaces from the module prefix into scope as short names *)
@@ -9041,6 +9438,14 @@ let rec check_decl env (d : Ast.decl) : env =
      | Ast.UseNames names ->
        List.fold_left (fun env n ->
            match StrMap.find_opt (prefix ^ n.Ast.txt) env.vars with
+           | Some sch when import_blocked env sp (prefix ^ n.Ast.txt) sch ->
+             Err.error ~code:Err.Code.stdlib_internal env.errors ~span:n.Ast.span
+               (Printf.sprintf
+                  "`%s%s` is internal to the standard library; use the handle API in `%s`."
+                  prefix n.Ast.txt
+                  (match Hashtbl.find_opt env.stdlib_internal_fns (prefix ^ n.Ast.txt) with
+                   | Some (md, _) -> md | None -> mod_str));
+             env
            | Some sch ->
              (* Track for unused-import warning: warn if this specific name is unused. *)
              let entry = { ie_span = n.Ast.span
@@ -9069,6 +9474,7 @@ let rec check_decl env (d : Ast.decl) : env =
              if List.mem short excl_set then acc
              (* Local definitions shadow bulk imports — see UseAll. *)
              else if StrMap.mem short env.local_fns then acc
+             else if import_blocked env sp k sch then acc
              else (short, sch) :: acc
            else acc) env.vars [] in
        (* Track for unused-import warning: warn if nothing from this module is
@@ -9107,7 +9513,8 @@ let rec check_decl env (d : Ast.decl) : env =
         let plen = String.length orig_prefix in
         if String.length k > plen && String.sub k 0 plen = orig_prefix then
           let rest = String.sub k plen (String.length k - plen) in
-          (short_prefix ^ rest, sch) :: acc
+          if import_blocked env sp k sch then acc
+          else (short_prefix ^ rest, sch) :: acc
         else acc) env.vars [] in
     (* Track for unused-alias warning: warn if no "Short.*" name is referenced. *)
     if new_bindings <> [] then begin
@@ -9150,15 +9557,55 @@ let rec check_decl env (d : Ast.decl) : env =
             | (n : Ast.name) :: _ -> n.span
             | [] -> sp
           in
+          let is_net_cap = March_caps.Cap_lattice.cap_subsumes "IO.Network" cap in
           if not (March_caps.Cap_scope.is_scopable cap) then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+              (if is_net_cap then
+                 Printf.sprintf
+                   "`%s` does not take a path scope or a host scope; only \
+                    `IO.NetConnect` takes a host, so `(\"%s\")` would be \
+                    ignored.\n\
+                    hint: scope the outbound capability instead, e.g. \
+                    `needs IO.NetConnect(\"%s\")`; it also bounds the TLS \
+                    connections built on it."
+                   cap path path
+               else
+                 Printf.sprintf
+                   "`%s` does not take a path scope; only filesystem \
+                    capabilities do (`IO.FileRead`, `IO.FileWrite`, \
+                    `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
+                    hint: remove the scope, or scope the filesystem capability \
+                    you mean, e.g. `needs IO.FileSystem(\"%s\")`."
+                   cap path path)
+          else if March_caps.Cap_scope.is_host_scopable cap then
+            (match March_caps.Host_scope.parse_decl (Some path) with
+             | Ok _ -> ()
+             | Error reason ->
+               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+                 (Printf.sprintf
+                    "The host scope `%s` on `%s` is not valid: %s.\n\
+                     hint: write a host, a host and port, or `*.domain`, \
+                     optionally followed by a path prefix, e.g. \
+                     `needs IO.NetConnect(\"api.example.com/v1/\")`."
+                    path cap reason))
+          else if March_caps.Cap_scope.is_name_scopable cap then
+            (match March_caps.Name_scope.parse path with
+             | Ok _ -> ()
+             | Error reason ->
+               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
+                 (Printf.sprintf
+                    "The name scope on `%s` is not valid: %s.\n\
+                     hint: give names as strings and prefixes as \
+                     `prefix(\"...\")`, e.g. \
+                     `needs %s(\"sessions\", prefix(\"cache.\"))`."
+                    cap reason cap))
+          else if snd (March_caps.Host_scope.split_options path) <> []
+          then
+            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
-                 "`%s` does not take a path scope; only filesystem \
-                  capabilities do (`IO.FileRead`, `IO.FileWrite`, \
-                  `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
-                  hint: remove the scope, or scope the filesystem capability \
-                  you mean, e.g. `needs IO.FileSystem(\"%s\")`."
-                 cap path path)
+                 "`%s` takes no options; `no_redirects` and `methods(...)` \
+                  apply only to `IO.NetConnect`."
+                 cap)
           else if not (March_caps.Cap_scope.is_absolute path) then
             Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
               (Printf.sprintf
@@ -9266,6 +9713,13 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DTransitions (handle_ty, arms, sp) ->
     let handle_name = handle_ty.txt in
+    (* The handle type's identity: a variant named like a base type
+       (`Handle`, the short name of `File.Handle`) is entry-qualified
+       ([Typecheck_nominal]), so the via function's types carry that name. *)
+    let handle_id = match Typecheck_nominal.ref_identity handle_ty with
+      | Some id -> id
+      | None -> Typecheck_nominal.identity_of_path_name handle_name in
+    let is_handle hn = hn = handle_name || hn = handle_id in
     (* Extract the last (state) type argument from Handle(args).
        Handles both single-param Handle(s) and two-param Handle(r,s). *)
     let last_arg = function
@@ -9295,7 +9749,7 @@ let rec check_decl env (d : Ast.decl) : env =
         | Some sch ->
           let ty = repr (instantiate env.level env sch) in
           (match ty with
-           | TArrow (TCon (hn, param_args), ret_t) when hn = handle_name ->
+           | TArrow (TCon (hn, param_args), ret_t) when is_handle hn ->
              (match last_arg param_args with
               | Some (TCon (s, []) as from_t) when s <> a.tr_from.txt ->
                 Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
@@ -9304,7 +9758,7 @@ let rec check_decl env (d : Ast.decl) : env =
                      via_name (pp_ty from_t) a.tr_from.txt)
               | _ -> ());
              (match repr ret_t with
-              | TCon (hn2, ret_args) when hn2 = handle_name ->
+              | TCon (hn2, ret_args) when is_handle hn2 ->
                 (match last_arg ret_args with
                  | Some (TCon (s, []) as to_t) when s <> a.tr_to.txt ->
                    Err.error ~code:Err.Code.transition_via_mismatch env.errors ~span:a.tr_span
@@ -9338,7 +9792,7 @@ let rec check_decl env (d : Ast.decl) : env =
           let ty = repr (instantiate env.level env sch) in
           match ty with
           | TArrow (TCon (hn, param_args), TCon (hn2, ret_args))
-            when hn = handle_name && hn2 = handle_name ->
+            when is_handle hn && is_handle hn2 ->
             (match last_arg param_args, last_arg ret_args with
              | Some from_t, Some to_t ->
                let from_s = pp_ty from_t in
@@ -9446,11 +9900,17 @@ let prebind_fn_scheme (def : Ast.fn_def) : scheme option =
          `Config`).  Returning None falls back to the [fresh_var] placeholder,
          which unifies with anything and imposes no false constraint; the
          callee's own [check_fn] still derives and enforces its real type. *)
+      (match Typecheck_nominal.ref_identity name with
+       | Some id ->
+         (match opt_all (List.map conv args) with
+          | Some args' -> Some (TCon (id, args'))
+          | None -> None)
+       | None ->
       if String.contains name.txt '.' then None
       else
         (match opt_all (List.map conv args) with
          | Some args' -> Some (TCon (name.txt, args'))
-         | None -> None)
+         | None -> None))
     | Ast.TyVar v ->
       (match List.assoc_opt v.txt !tvars with
        | Some t -> Some t
@@ -10399,6 +10859,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (_, _, _, body, _) -> go body
   | Ast.ELetQ (_, r, k, _) | Ast.ELetStar (_, r, k, _) -> go r; go k
@@ -10475,6 +10936,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
+  | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
   | Ast.ESend (a, b, _) -> go a; go b
   | Ast.ELetFn (name, ps, _, body, _) ->
     (* outside a block: only its own body sees it *)
@@ -11743,7 +12205,17 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
   in
   let seen = ref seed in
   List.iter (fun ((q, sp) as site) ->
-      (match List.find_opt (fun (q', _) -> q' <> q && short q' = short q) !seen with
+      (* Two colliding VARIANT types have their own identities
+         ([Typecheck_nominal]), so [from_json]'s dispatch names the right
+         codec: only a pair involving a type without one (a record) is
+         still ambiguous. *)
+      let distinct q q' =
+        (* [q] is entry-relative; a reserved name's top-level identity is
+           entry-qualified ([Typecheck_nominal.identity_of_path_name]). *)
+        let id = Typecheck_nominal.identity_of_path_name in
+        Typecheck_nominal.is_identity (id q) && Typecheck_nominal.is_identity (id q') in
+      (match List.find_opt (fun (q', _) ->
+           q' <> q && short q' = short q && not (distinct q q')) !seen with
        | Some (q', sp') ->
          (* A type inside a generated `<Name>_Msg` module (the message type an
             `@[endpoints] protocol` or actor declares) is named by what
@@ -11782,6 +12254,41 @@ let check_json_derive_collisions errors ~(seed : (string * Ast.span) list)
        | None -> ());
       seen := !seen @ [site]) own
 
+(** Reject an `alias Path, as: B` whose name [B] is also a module declared in
+    the same scope (`mod B do ... end`).  The interpreter resolved `B.g` to
+    the declared module and the compiled build to the alias target, so one
+    program printed two answers
+    (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md).
+    Stdlib declarations are not checked. *)
+let check_alias_shadows_module errors (decls : Ast.decl list) : unit =
+  let rec walk decls =
+    let mods = List.filter_map (function
+        | Ast.DMod (n, _, _, sp) -> Some (n.Ast.txt, sp)
+        | _ -> None) decls in
+    List.iter (function
+        | Ast.DAlias (ad, sp) when not (Typecheck_builtins.span_is_stdlib sp) ->
+          let short = ad.Ast.alias_name.Ast.txt in
+          (match List.assoc_opt short mods with
+           | Some msp ->
+             let target = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) ad.Ast.alias_path) in
+             if target <> short then
+               Err.report errors
+                 { Err.severity = Err.Error; span = ad.Ast.alias_name.Ast.span;
+                   message = Printf.sprintf
+                       "This alias names `%s` as `%s`, but this module also declares a module `%s`.\n\
+                        A reference like `%s.f` could mean either one. Pick a different alias \
+                        name, or rename the module."
+                       target short short short;
+                   labels = [{ Err.lbl_span = msp;
+                               Err.lbl_message = Printf.sprintf "module `%s` is declared here" short }];
+                   notes = [];
+                   code = Err.Code.alias_shadows_module; fix = None }
+           | None -> ())
+        | Ast.DMod (_, _, inner, sp) when not (Typecheck_builtins.span_is_stdlib sp) -> walk inner
+        | _ -> ()) decls
+  in
+  walk decls
+
 (** The [nonexhaustive_match_spans] of the last [check_module_core] run,
     guarded matches included (see [check_exhaustiveness]).  Read only by
     [--reflect-report]'s R5 (lib/refinecheck/refine_reflect.ml): the driver's
@@ -11798,6 +12305,26 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
+  (* Colliding variant types' identities (`A.Note` / `B.Note`).  Recomputed
+     per check, so per REPL fragment too: a fragment sees only its own
+     declarations, and a user type with a reserved handle name (`Process`)
+     declared in an EARLIER fragment has no identity in a later one (known
+     edge, ocap phase 2 Task 2 review item 8). *)
+  (let base =
+     (* Variant types the seed (the cached stdlib env) already declares, by
+        the bare name its signatures spell them with. *)
+     let seeded : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+     (match seed_env with
+      | Some (se : env) ->
+        StrMap.iter (fun _ cis ->
+            List.iter (fun (ci : ctor_info) ->
+                if not (String.contains ci.ci_type '.') then
+                  Hashtbl.replace seeded ci.ci_type ()) cis) se.ctors
+      | None -> ());
+     fun short ->
+       Typecheck_builtins.is_base_type_short_name short || Hashtbl.mem seeded short in
+   Typecheck_nominal.compute ~is_stdlib:Typecheck_builtins.span_is_stdlib ~base
+     ~user_only:(seed_env <> None) m);
   (* Type-variable letters in messages are assigned on first print from a
      process-wide table.  A cold run typechecks the stdlib first and can
      print one of its variables, so the user's first variable came out `b`
@@ -11817,6 +12344,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
       | None -> [] in
     let own = collect_json_derive_sites m.Ast.mod_decls in
     check_json_derive_collisions errors ~seed ~own;
+    check_alias_shadows_module errors m.Ast.mod_decls;
     seed @ own
   in
   let type_map = match seed_env with
@@ -11888,7 +12416,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                     signature uses ("expected X but got Mod.X").  The type side
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
-                 let ci = { ci_type = name.txt; ci_params = param_names;
+                 let ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                             ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
@@ -11916,7 +12444,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
                  if v.var_vis <> Ast.Public then acc
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
-                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                   let type_ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                                    ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
@@ -11954,7 +12482,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | Ast.TDAlias rhs ->
+           | Ast.TDAlias (rhs, _) ->
              (* Seed the alias for a SIBLING that mentions it: the declaring
                 module's own [check_decl] runs later, so a referrer checked
                 before it would otherwise see `Mod.Entry` as an unknown type.
@@ -12012,7 +12540,7 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
+               let ci = { ci_type    = Typecheck_nominal.decl_identity name
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt
@@ -12201,6 +12729,32 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
     check_deterministic_module errors final_env m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
+  (* Two-state specs (lib/desugar/two_state.ml): `old(e)` only in a
+     handler's `ensures`. *)
+  March_desugar.Two_state.check errors m.Ast.mod_decls;
+  (* Ghost code (lib/desugar/ghost.ml): a ghost value reaches only ghost
+     positions, and no linear value is observed by ghost code. *)
+  March_desugar.Ghost.check errors m.Ast.mod_decls ~top:m.Ast.mod_name.Ast.txt
+    (* A check seeded with the stdlib's environment has no stdlib
+       declarations to scan: its globals are the seed's names. *)
+    ~globals:(fun n -> match seed_env with Some (se : env) -> StrMap.mem n se.vars | None -> false)
+    ~exports:(fun path ->
+        Option.map
+          (fun (me : March_modules.Module_registry.module_exports) ->
+            List.filter_map
+              (fun (e : March_modules.Module_registry.export_entry) ->
+                if e.ex_public then Some e.ex_name else None)
+              me.me_entries)
+          (March_modules.Module_registry.ensure_loaded path))
+    ~reserved:(March_desugar.Lemma_erase.reserved_by
+                 (List.map fst Typecheck_builtins.builtin_bindings
+                  @ List.map fst Typecheck_builtins.builtin_interface_bindings))
+    ~is_linear:(fun sp ->
+        match Hashtbl.find_opt type_map sp with
+        | Some t ->
+          holds_linear final_env t
+          || (match repr t with TLin ((Ast.Linear | Ast.Affine), _) -> true | _ -> false)
+        | None -> false);
   (* Pass 3: tail-call enforcement *)
   check_nonregular_types errors m.Ast.mod_decls;
   enforce_tail_calls_in_decls ~file_mod:m.Ast.mod_name.txt errors m.Ast.mod_decls;
@@ -12294,7 +12848,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                     signature uses ("expected X but got Mod.X").  The type side
                     already canonicalizes qualified->bare (see [canon_name]); the
                     constructor side must agree by carrying the bare type. *)
-                 let ci = { ci_type = name.txt; ci_params = param_names;
+                 let ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                             ci_is_actor_msg = false } in
                  (* Only seed the bare module-qualified ctor key (`Mod.Ctor`)
@@ -12322,7 +12876,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                  if v.var_vis <> Ast.Public then acc
                  else
                    let type_qctor = qname ^ "." ^ v.var_name.txt in
-                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                   let type_ci = { ci_type = Typecheck_nominal.decl_identity name; ci_params = param_names;
                                    ci_arg_tys = v.var_args; ci_module = prefix; ci_vis = v.var_vis;
                                    ci_is_actor_msg = false } in
                    let acc = { acc with ctors = add_ctor type_qctor type_ci acc.ctors } in
@@ -12357,7 +12911,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
              register_record_name ~name:qname (List.map fst field_pairs);
              let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
              { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
-           | Ast.TDAlias rhs ->
+           | Ast.TDAlias (rhs, _) ->
              (* Seed the alias for a SIBLING that mentions it: the declaring
                 module's own [check_decl] runs later, so a referrer checked
                 before it would otherwise see `Mod.Entry` as an unknown type.
@@ -12403,7 +12957,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            List.fold_left (fun e (v : Ast.variant) ->
-               let ci = { ci_type    = name.txt
+               let ci = { ci_type    = Typecheck_nominal.decl_identity name
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_module  = m.Ast.mod_name.txt

@@ -827,6 +827,10 @@ static void json_write_str(FILE *f, const char *s, size_t n) {
  * laws (schema_accepted_for), so the log answers "what was deployed without
  * its contract proved, and by whom". */
 static const char *g_audit_accepted;
+/* Likewise the state fields the image's derived migration discards by
+ * `forge deploy hot --drop` (schema_dropped_for): "what live data did a
+ * deploy throw away, and who signed it". */
+static const char *g_audit_dropped;
 
 /* Append one JSON line to the audit log. Path is $MARCH_AUDIT_LOG, or
  * ${XDG_DATA_HOME:-$HOME/.local/share}/march/audit.jsonl by default.
@@ -886,6 +890,11 @@ static void write_audit_log(const char *fn, const char *impl_hash,
     if (g_audit_accepted) {
         fputs("\"accepted_unproved\":", f);
         schema_write_compact(f, g_audit_accepted);
+        fputc(',', f);
+    }
+    if (g_audit_dropped) {
+        fputs("\"dropped\":", f);
+        schema_write_compact(f, g_audit_dropped);
         fputc(',', f);
     }
     fprintf(f, "\"result\":\"%s\"}\n", result);
@@ -1242,8 +1251,10 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
             march_dispatch_set_callers(u[i].slot,
                 it[i].callers && it[i].callers[0] ? it[i].callers : NULL);
             g_audit_accepted = schema_accepted_for(it[i].name);
+            g_audit_dropped = schema_dropped_for(it[i].name);
             write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac, "ok");
             g_audit_accepted = NULL;
+            g_audit_dropped = NULL;
         }
     }
     free(u);

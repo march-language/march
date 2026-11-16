@@ -55,8 +55,10 @@ callers never have to satisfy. See [The grant](#grant).
 - [What the compiler tells you](#what-the-compiler-tells-you)
 - [The capability upper limit](#cap-strict)
 - [The grant: `main`'s parameter bounds the whole program](#grant)
+- [Host and method scopes on IO.NetConnect](#host-scopes)
+- [Refusals: capability operations return `Result`](#refusals)
 - [When not to use IO caps](#when-not-to-use-io-caps)
-- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
+- [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
 **Behavioral caps**
 
@@ -92,8 +94,8 @@ callers never have to satisfy. See [The grant](#grant).
 | Prove integer division and arithmetic can never panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisors and operands |
 | Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` for a whole module, `@[no_alloc]` for one function (the same check) |
 | Keep a module free of C/FFI | `cap no_extern` |
-| Guarantee zero side effects, not just no IO caps declared | `cap pure` |
-| Guarantee reproducible output (no clock, no RNG) | `cap deterministic` |
+| Guarantee zero side effects, not just no IO caps declared (no `needs` allowed; effectful builtins, monotonic clock reads included, rejected) | `cap pure` |
+| Guarantee reproducible output (no clock, no RNG; no `needs` on `IO.Clock`/`IO.Random`/`IO`) | `cap deterministic` |
 | Guarantee migrations run before any query | A proof cap: `proof cap Migrated` in `mod Db` |
 | Prove a specific string has been sanitized | An opaque refined type (`ptype`), not a proof cap |
 | Track that a file handle is open vs closed | Typestate: `always_linear type` + `transitions` |
@@ -180,20 +182,29 @@ IO
 │   └── IO.FileWrite    — write, delete, rename files/dirs
 ├── IO.Network
 │   ├── IO.NetConnect   — outbound TCP
-│   │   ├── IO.NetConnect.TLS  — encrypted transport (tls_connect, tls_accept, …)
+│   │   ├── IO.NetConnect.TLS  — encrypted transport (Tls.client_ctx, Tls.server_ctx)
 │   │   ├── IO.Database — database connections (declaration-only; child of NetConnect)
-│   │   └── IO.WebSocket — WebSocket connections (ws_send, ws_recv, ws_select; child of NetConnect)
+│   │   └── IO.WebSocket — WebSocket connections (declaration-only: a WsSocket is a handle; child of NetConnect)
 │   └── IO.NetListen    — bind + listen on a port
 ├── IO.Process          — env vars, child processes, process exit
-├── IO.Clock            — wall clock, monotonic time
+├── IO.Clock            — wall clock (unix_time_ms, DateTime.now); monotonic time is ambient, see below
 ├── IO.Random           — CSPRNG (random_bytes, uuid_v4)
 ├── IO.Signal           — OS-signal watchers (Signal.watch/unwatch/raise)
 ├── IO.Spawn            — task spawning (task_spawn, task_spawn_link, …)
 ├── IO.Mut              — shared mutable state (Vault tables)
+├── IO.Registry         — naming and finding actors by name (Actor.register/whereis/registered)
 ├── IO.Telemetry        — telemetry/observability emission (declaration-only)
 └── IO.Foreign          — calling unverified C (extern blocks)
     └── IO.Foreign.Blocking — blocking extern (spawns OS thread)
 ```
+
+**Monotonic time is ambient.** `sys_uptime_ms` and its stdlib wrapper
+`System.monotonic_time` (milliseconds since the process started) are not gated
+by `IO.Clock`: they read elapsed time inside the process, not the wall clock,
+and gating them would break every timing caller granted only `IO.Console`. They
+are still a clock read, so `cap pure` and `cap deterministic` both reject them,
+called directly or through a stdlib wrapper (see
+[Behavioral caps](#behavioral-caps)).
 
 **declaration-only** (`IO.Database`, `IO.Telemetry`): the compiler accepts the
 `needs` as a surface-contract annotation but does not scan for specific builtins
@@ -358,18 +369,21 @@ The error above is easy to over-read. What it covers:
 - It catches a **direct** call to a capability builtin: `file_read(p)`.
 - It does **not** catch, on its own, the same operation routed through a stdlib
   wrapper: `File.read(p)`. That call is invisible to *this* check. It is caught
-  by the **capability upper limit** instead. Since 2026-08-17 a sound subset of
-  the upper limit runs under `--check` and `--check-json` too, enough to catch the
-  common stdlib-mediated route without lowering, so `--check` exits 1 on it rather
-  than 0.
+  by the **capability upper limit** instead.
 - The complete check is the [upper limit](#cap-strict), which works on
   **emitted code** and therefore cannot be evaded by re-routing through a helper.
-  It runs on the compile path: `--compile` remains the complete check.
+  It runs however the program is checked or run: `--compile`, `--check`,
+  `--check-json`, `march check` (what `forge check` and `forge build` run), the
+  interpreter, `--jit`, `march test`, the REPL (for a `mod` declared at the
+  prompt) and the editor. Outside `--compile` the program is lowered on demand
+  for it; the interpreter remembers a clean verdict until a source changes.
 
 So `needs` is a **mandatory, mechanically-verified manifest** of the builtins a
 module calls directly, not, on its own, proof that a module cannot reach a
-capability. That proof comes from the upper-limit check, which means it comes from
-`march --compile`, not from `--check`.
+capability. That proof comes from the upper-limit check. A program the compiler
+cannot build (one using an interpreter-only builtin such as `App.stop`) cannot be
+held to it outside `--compile` either: it runs with one `cap_unchecked` warning
+saying so, and `--compile` rejects it.
 
 There is also a distinction hiding in the word "capability": this check makes you
 *declare* what you touch. It does not make anyone *grant* it: `needs` is a
@@ -490,7 +504,13 @@ capability, so each fix is one line. `--no-cap-strict` unblocks a build you do n
 want to migrate yet.
 
 `IO.Foreign` is excluded: `extern` blocks are already an error when undeclared,
-and what linked C code does is outside the capability model entirely.
+and what linked C code does is outside the capability model entirely. The
+exclusion also covers first-party stdlib modules built on `extern`, such as
+`Js.Dom`, `Js.Canvas` and `Js.Audio` on `--target js`: those modules declare
+`needs IO.Foreign` themselves, so a module can call them without declaring any
+`needs`. Function-level `needs ()` bounds and `main`'s grant still see the
+reach: a bounded function that calls `Js.Dom.set_text` gets `[cap_bound]`, and
+a `main` granted only `Cap(IO.Console)` gets `[cap_grant_exceeded]`.
 
 The same upper limit can be re-checked on a compiled binary with
 [`forge cap inspect --strict`]({{ site.baseurl }}/docs/capability-audit/#auditing-a-compiled-binary),
@@ -664,9 +684,195 @@ by a `when Iface(a)` constraint, so no caller, generic function or signature has
 declare anything because of it. A call through an interface is charged what the impls in
 the program actually reach, exactly as before.
 
+### Host and method scopes on IO.NetConnect
+{: #host-scopes}
+
+A module can narrow outbound network access to the hosts it may reach, and to the HTTP
+methods it may use on them:
+
+```march
+mod Billing do                          -- your own code
+  needs IO.NetConnect("api.stripe.com", methods(get, post))
+end
+
+mod Weather do                          -- wraps a dependency: read only
+  needs IO.NetConnect("api.weather.test", methods(get), no_redirects)
+end
+```
+
+`Billing` may reach only `api.stripe.com`, with GET or POST; `Weather` only
+`api.weather.test`, with GET, and never follows a redirect. Scopes are per module and per
+host: each module's own `needs` lines decide.
+
+**Scope syntax.** A host (`example.com`), a host and port (`example.com:8443`), any
+subdomain (`*.example.com`, which does not include `example.com` itself), or an IP
+literal, optionally followed by a path prefix (`api.example.com/v1/weather/`). No scheme or
+userinfo; host names are compared case-insensitively, paths case-sensitively.
+
+**Path prefixes** match by whole segment: `/v1/weather/` admits `/v1/weather` and
+`/v1/weather/today`, not `/v1/weatherman`; the query string never counts. A request path is
+judged only if every character is a plain path character (letters, digits and
+`-._~!$&'()*+,=:@/`; no `;`, `?`, `#`, space or control character), every `%` escape is
+well formed and does not decode to `.`, `/`, `\`, `%` or a control character, and it has no
+`//` and no `.` or `..` segment. Anything else is refused outright rather than cleaned up,
+because a server may resolve it differently (or, with a CR/LF, read a second request). A
+literal prefix proves the host but not the path (`"https://api.example.com/v1/weather/" ++
+"../admin"`), so under a path scope every request's path is checked when it is sent, and
+the compiler reports the violations it can see. A path-scoped host admits no plain
+`Socket.connect`. A URL
+with no port uses its scheme's default (80 or 443). Two options may follow, in either
+order: `methods(...)` with any of `get`, `head`, `post`, `put`, `patch`, `delete`,
+`options`, and `no_redirects`. Options alone mean any host:
+`needs IO.NetConnect(methods(get))`. Without `methods(...)` every method is allowed, and
+unscoped `needs IO.NetConnect` still means any host. Host scopes are accepted on
+`IO.NetConnect` only; it also bounds the TLS connections built on it. (`IO.Mut` and
+`IO.Registry` take [name scopes](#name-scopes) instead.)
+
+**Scope syntax.** The parenthesised scope takes several leading strings, then options:
+`needs IO.Mut("a", "b")`. An option may take a string argument as well as identifiers:
+`needs IO.Registry(prefix("worker."))`, or both, `needs IO.Registry("logger",
+prefix("worker."))`. Strings come first; once an option appears no further string may
+follow. Each encoding has one spelling: only `methods(...)` takes identifiers, every
+other option takes one string (`prefix(w)` is refused; write `prefix("w")`), a further
+name is a further string (there is no `name(...)` option), a scope string may not
+contain `;`, and an empty first string may not be followed by more. Internally a scope is one string: each extra string becomes `name=<s>` and a
+string-argument option `<option>=<s>`, so `IO.Mut("a", "b")` is `a;name=b`. Which
+capabilities accept these forms, and what they mean, is set by the capability, not by the
+syntax.
+
+**What is checked, at compile time.** In a scoped module, every network call must have a
+destination the compiler can see, inside the scope, with an allowed method; anything else
+fails the build. The check is fail-closed:
+
+- A literal URL, or a literal prefix that ends its host with `/`
+  (`"https://api.stripe.com/" ++ path`), is checked against the scope. Without the `/`
+  the rest could extend the host (`".evil.test/"`), so it is refused.
+- A URL from a parameter, a computed string, an operation on a socket the module was
+  handed (`Socket.write(s, ...)`, `Tls.connect`), or a call the compiler cannot follow is
+  refused (`cap_host_unproven`).
+- The method comes from the call: `HttpClient.get`, `HttpTransport.simple_get` are GET,
+  `HttpClient.post` POST, `put_request` PUT, `delete` DELETE. A plain `Socket.connect`
+  shows no method, so it is allowed only to a host declared without `methods(...)`.
+- The scope covers everything the module reaches, including calls into your other modules
+  and dependencies. A helper that takes the URL as a parameter must say so with
+  `@[net_dest(url)]`, and is then checked to pass that parameter straight to the
+  connection; its caller's argument is checked against the caller's scope. A helper with
+  a fixed URL is checked as if its call were written in the scoped module. A helper in
+  another module that makes `HttpClient` calls is refused for now (see below).
+- A function you hand in as a parameter is charged to whoever wrote it, as elsewhere on
+  this page: a closure built in an unscoped `main` may be called by a scoped module.
+
+**What is checked, at run time.** A redirect's target and a request rewritten by client
+request steps are only known when the program runs. In a scoped module the compiler
+routes `HttpClient` calls through a variant that receives the module's scope, and the
+client refuses, before connecting, a request outside it: `HttpClient.OutOfScope(host)`,
+`MethodRefused("POST host")`, or under `no_redirects` `RedirectRefused(host)`.
+
+**Limits.** The compile-time check runs in every mode, like the
+[upper limit](#cap-strict): `--compile`, `--check`, `march check`, the interpreter, the
+REPL, the JIT and the editor. The run-time guard does not: a program run by the
+interpreter, the REPL or the JIT follows redirects freely, and only a compiled binary
+refuses a redirect or a step-rewritten host outside the scope.
+A message a scoped module sends to an actor it was handed (a pid from `main`) runs that
+actor's handler under the handler's module, not the sender's: the same rule as a function
+handed in as a parameter. A scoped module that spawns a network-reaching actor itself is
+refused. They bound the
+name a module connects to, not the address it resolves to, and no OS sandbox enforces
+them: what C code reached through `extern` does is outside them, as it is outside every
+check here. A scoped module cannot call a stdlib server API (its socket handles are plain
+integers) or another module's `HttpClient`-calling helper; move those to an unscoped
+module. A scope on `main`'s grant, which would bound dependencies' own code as well, is
+planned (`specs/todos/2026-11-09-host-scope-phase-2.md`).
+
+<a id="refusals"></a>
+### Refusals: capability operations return `Result`
+
+Every capability operation can be refused by the authority the code runs
+under, and a refusal is a value, never a crash or a silent no-op
+(specs/2026-11-10-object-capability-design.md §15). So each one returns
+`Result(T, CapError)`:
+
+```march
+println("hi")                       -- Result((), CapError)
+System.now_ms()                     -- Result(Int, CapError)
+Process.env("HOME")                 -- Result(Option(String), CapError)
+Task.async(fn () -> work())         -- Result(Task(a), CapError)
+Vault.new("sessions")               -- Result(Vault(v), CapError)
+```
+
+An operation that already had its own failure keeps it, inside: the outer
+`Result` says whether the operation was permitted, the inner one whether it
+worked.
+
+```march
+match File.read("/etc/motd") do
+Ok(Ok(text))           -> text
+Ok(Err(File.NotFound(_))) -> ""          -- the file is missing
+Ok(Err(e))             -> panic(to_string(e))
+Err(refused)           -> panic(Authority.describe(refused))
+end
+```
+
+`CapError(kind, target, limit, limit_scope)` names the refused operation as a
+scope (`IO.FileRead("/etc/motd")`) and the limit that refused it
+(`ByLaunch`, `ByFnNeeds(f)`, `ByModNeeds(m)`, `ByRestrict(at)`, `ByGrant(pkg)`)
+with that limit's scope list. `Authority.describe(e)` renders it.
+
+Using an operation only for its effect needs nothing: a statement's result is
+discarded (`println("hi")` on its own line). Where the value is wanted, handle
+the refusal (`match`, `let?`), or write `Authority.must(e)`, which takes the
+value and panics with the description on a refusal. `Authority.ignore(e)`
+discards a result where `()` is expected.
+
+Code written before operations returned `Result` gets the diagnostic
+`cap_result_unhandled` with the fix: a line `()` after a unit result on its own
+line, `Authority.ignore(...)` around other unit results, `Authority.must(...)`
+around values. `forge fix` applies it to a project; `forge fix --only
+cap_result_unhandled PATH...` to files outside one.
+
+What is not an operation: using what an operation opened. `Vault.set` on a
+table handle, reading or writing an open socket, the lines of an open file and
+a running process's pipes need no authority and keep their types. Some stdlib
+helpers degrade instead of failing: `List.pmap` and friends compute
+sequentially when spawning is refused, `IO.inspect` and `debug` still return
+their argument, and the Logger drops a line or a timestamp.
+
+**Handles need no capability.** A `File.Handle`, `File.Dir`, `Socket`,
+`Listener`, `Udp.UdpSocket`, `Tls.TlsConn`, `WebSocket.WsSocket` or `Process`
+is an unforgeable, reference-counted handle: user code gets one only from a
+checked open (`File.open`, `Socket.connect`, `Socket.listen`,
+`Process.spawn_async`, ...), and the raw integer builtins under them
+(`tcp_send_all`, `file_read_line`, `process_wait_proc`, ...) are internal to
+the standard library (`stdlib_internal`). Using a handle you hold is therefore
+not charged: a function bounded by `needs ()` may read a `File.Handle`, write to
+a `Socket` or wait on a `Process` it was handed, and accept on a `Listener`;
+it may not open one. One caveat while a Vault's element type is not part of
+its identity (`Vault.open(name)` lets the caller choose it): an opaque type over
+plain data, such as the cluster's `PeerRegistry.Fd`, can be minted through a
+name-keyed Vault under the interpreter, and compiled code then fails at the
+stdlib's match rather than refusing the open (`specs/todos/2026-11-13-vault-element-type-not-identity.md`);
+the handle boxes themselves cannot. A handle never leaves its node: a message type holding one
+cannot `derive Json` or go through `Node.send` ([Clustering]({{ site.baseurl }}/docs/clustering/)).
+
+```march
+mod Wire do
+  fn send(s : Socket, data : String) : Result((), Socket.SocketError) needs () do
+    Socket.write(s, data)       -- fine: the socket was opened elsewhere, checked
+  end
+end
+```
+
+Until run-time authority lands (ocap phase 4), nothing refuses except the
+test-only `MARCH_TEST_REFUSE` hook, a comma-separated list of capability kinds
+the launch refuses. UDP sockets and TLS contexts are handles opened by a
+checked open (`Udp.open`, `Tls.client_ctx`). `HttpClient`, `HttpServer`,
+`Tls.https_get` and `Udp.resolve` still return their old types and move with
+run-time authority (ocap phase 4); `HttpClient` and `Tls.https_get` already
+dial through `Socket.connect`, so their target is checked like any connect.
+
 ### When *not* to use IO caps
 
-**Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. A module with no `needs` that calls IO builtins directly in function bodies is rejected (`--check` exits 1); a stdlib-mediated call is outside that check but is caught by the upper-limit subset that runs under `--check`, and by the full upper limit under `--compile`. The guarantee is strongest when the functions in question actually take `Cap(X)` parameters or `use` something that does, because the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import.
+**Pure functions need no declaration.** If a function hashes a string, parses JSON, sorts a list, or formats a number, write no `needs`. A module with no `needs` that calls IO builtins directly in function bodies is rejected (`--check` exits 1); a stdlib-mediated call is outside that check but is caught by the upper limit, which runs in every mode. The one exception is `IO.Foreign`, which the upper limit excludes: a module with no `needs` can call a first-party stdlib module built on `extern` (`Js.Dom`, `Js.Canvas` on `--target js`), and only a function-level `needs ()` bound or `main`'s grant reports that reach. The guarantee is strongest when the functions in question actually take `Cap(X)` parameters or `use` something that does, because the compiler cannot force you to declare a capability that never appears in a signature and is never transitively required by an import.
 
 **Don't over-narrow to look principled.** Declaring `needs IO.FileRead` when your function also writes is a lie the compiler will catch. If a function reads and writes, `needs IO.FileSystem` is correct even if it feels less precise. Accurate beats narrow-but-wrong.
 
@@ -699,6 +905,69 @@ This is especially useful for library code that should have no hidden state.
 
 **Reads need no capability.** A Vault table is in-memory: no part of what a `Vault.get`/`Vault.size`/`Vault.keys` lookup does escapes the process, so it exercises no ambient authority and needs no `needs IO.Mut`. What IS authority is turning a NAME into a table handle (`Vault.new`/`Vault.whereis`, the `File.open(path)` shape) and mutating state other actors observe (`Vault.set`, `Vault.set_ttl`, `Vault.drop`, `Vault.update`); those keep `needs IO.Mut`. Accepted trade-off: a read of shared mutable state is non-deterministic (it observes another actor's writes), so `needs` no longer signals "this function is not pure" for a reader. Authority stays auditable at the boundary, since some module still had to name the table and declare the capability to create or write it.
 
+### IO.Registry: naming and finding actors
+{: #ioregistry-naming-and-finding-actors}
+
+`IO.Registry` covers the named actor registry: `Actor.register`, `Actor.unregister`,
+`Actor.whereis` and `Actor.registered`. Finding an actor by name turns a string into a
+`Pid`, which is a capability, and registering a name can impersonate the actor others
+expect behind it, so both are authority. A module that calls them declares
+`needs IO.Registry` (or `needs IO`); the missing-capability error carries the line as a
+machine fix, so `forge fix` adds it. `Actor.whereis` and `Actor.registered` still take a
+`Cap(Actor.Introspect)` as well.
+
+```march
+mod Pool do
+  needs IO.Registry
+
+  fn publish(pid) : Bool do
+    Actor.register(pid, "pool")
+  end
+end
+```
+
+### Name scopes on IO.Mut and IO.Registry
+{: #name-scopes}
+
+`IO.Mut` and `IO.Registry` take a scope of names, and of name prefixes written
+`prefix("...")`:
+
+```march
+mod Sessions do
+  needs IO.Mut("sessions")                         -- only the "sessions" table
+  needs IO.Registry("logger", prefix("worker."))   -- "logger" and any "worker.…"
+
+  fn start(pid) : Bool do
+    Actor.register(pid, "worker.1")                -- in scope
+  end
+end
+```
+
+A name is in scope when it equals one of the names or starts with one of the prefixes:
+`prefix("worker.")` admits `"worker.1"` but not `"worker"` or `"workers.1"`. A name or
+prefix may not be empty or contain `;`, `=` or `,`; anything else is `invalid_cap_scope`.
+
+**What is checked, at compile time.** In a module whose own `needs` scopes the capability
+(and grants no unscoped `IO.Mut`, `IO.Registry` or `IO`), each call of `Vault.new`,
+`Vault.open`, `Vault.whereis`, `Vault.ns_set`, `Vault.ns_get`, `Vault.ns_drop`,
+`Config.new_store`, `Actor.register`, `Actor.unregister` and `Actor.whereis`, in any of the
+module's code (functions, actors, impl methods, tests and setup blocks) and through an
+`alias` of `Actor` or `Vault`:
+
+- with a literal name outside the scope is a `cap_scope_violation` naming the scope;
+- with a computed name (`"worker." ++ id`) is refused too: the compiler cannot prove it is
+  within the scope, and the check at run time arrives with phase 4;
+- a name-taking function used as a value (`let f = Actor.register`) is refused for the
+  same reason.
+
+`Actor.registered` lists every name, which exceeds any name scope, so it needs an
+unscoped `IO.Registry`. A nested module may narrow its parent's name scope but never widen
+it: under a parent's `needs IO.Registry("logger")`, a nested `needs IO.Registry` (or
+`needs IO`) is a `cap_scope_violation`. Not yet checked: a name passed through a function
+written in another module (`Reg.put(pid, "other")`); the run-time check of phase 4 closes it
+(`specs/todos/2026-11-13-name-scope-bypasses.md`). A lookup by name is an open: `Vault.whereis("tokens")` under
+`needs IO.Mut("sessions")` is refused.
+
 ### IO.NetConnect.TLS: encrypted transport only
 
 `IO.NetConnect.TLS` is a child of `IO.NetConnect`. Declaring it (without `IO.NetConnect`) proves the module uses *only* encrypted connections, no plaintext TCP. Declaring `needs IO.NetConnect` covers both.
@@ -707,8 +976,8 @@ This is especially useful for library code that should have no hidden state.
 mod HttpsClient do
   needs IO.NetConnect.TLS  -- plaintext TCP is statically excluded
 
-  fn fetch(fd, h, host) do
-    tls_connect(fd, h, host)
+  fn context() do
+    Tls.client_ctx(Tls.default_client_config())
   end
 end
 ```
@@ -891,7 +1160,7 @@ mod PureMath do
 end
 ```
 
-A module with `cap pure` bans every call to a builtin that performs any side effect (file IO, network IO, spawning, sending, vault access, console output, randomness, the clock), as well as `spawn`/`send`/`exit`. The banned set is derived from the same authoritative builtin-to-capability table (`builtin_cap_table`) the ordinary IO-cap body-scan check consults, so it stays in sync with the real builtin surface: a module declaring `cap pure` and calling `file_write` is rejected:
+A module with `cap pure` bans every call to a builtin that performs any side effect (file IO, network IO, spawning, sending, vault access, console output, randomness, the clock), as well as `spawn`/`send`/`exit` and the monotonic clock read `sys_uptime_ms`. The banned set is derived from the same authoritative builtin-to-capability table (`builtin_cap_table`) the ordinary IO-cap body-scan check consults, so it stays in sync with the real builtin surface: a module declaring `cap pure` and calling `file_write` is rejected:
 
 ```
 $ march --check leaky_pure.march   # cap pure; fn write(...) : Result(Unit, String) do file_write(path, contents) end
@@ -899,6 +1168,17 @@ $ march --check leaky_pure.march   # cap pure; fn write(...) : Result(Unit, Stri
 $ echo $?
 1
 ```
+
+The check covers stdlib wrappers too, by two rules. A `cap pure` module may not declare any `needs`: a pure module holding a capability is a contradiction, and every stdlib wrapper over a capability-gated builtin (`File.read`, `DateTime.now`, …) is reachable only from a module that declares its `needs`, so rejecting the `needs` line closes that route. A banned builtin that needs no capability (the monotonic clock behind `System.monotonic_time`, `spawn`, `send`, `exit`) is followed through the stdlib: a call to a stdlib function that reaches one is rejected like a direct call.
+
+```
+$ march --check pure_clock.march   # cap pure; fn t() : Int do System.monotonic_time() end
+-- CONTRACT -- `t` in `mod Pure` (declared `cap pure`) calls `System.monotonic_time`, which has side effects: it reaches `sys_uptime_ms`.
+$ march --check pure_needs.march   # cap pure; needs IO.FileRead
+-- CONTRACT -- `mod Pure` (declared `cap pure`) declares `needs IO.FileRead`, but a pure module cannot hold a capability: …
+```
+
+Calls through user-defined modules are outside both caps: each module is checked against its own declarations.
 
 ### `cap deterministic`: no clock, no randomness
 
@@ -912,7 +1192,7 @@ mod DeterministicSim do
 end
 ```
 
-`cap deterministic` is **strictly weaker than `cap pure`**: it bans only the two nondeterminism sources (wall-clock/monotonic-clock reads and random-number generation), so a `cap deterministic` module may still perform ordinary IO such as `file_read`, as long as it never touches the clock or an RNG:
+`cap deterministic` is **strictly weaker than `cap pure`**: it bans only the two nondeterminism sources (wall-clock/monotonic-clock reads and random-number generation), so a `cap deterministic` module may still perform ordinary IO such as `file_read`, as long as it never touches the clock or an RNG. The same two rules carry it through stdlib wrappers: the module may not declare `needs IO.Clock`, `needs IO.Random` or `needs IO` (which includes both), so `DateTime.now` and the RNG wrappers are out of reach, and a stdlib call that reaches the ambient monotonic clock (`System.monotonic_time`) is rejected like a direct `sys_uptime_ms()`:
 
 ```
 $ march --check clock_leak.march   # cap deterministic; calls unix_time_ms(())

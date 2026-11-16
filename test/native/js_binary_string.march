@@ -49,5 +49,6 @@ mod JsBinaryString do
     let total = sum_bytes(big, 0, n, 0)
     let t1 = nowMs()
     println(int_to_string(string_byte_length(big)) ++ " " ++ int_to_string(total) ++ " fast " ++ bool_to_string(t1 - t0 < 1000))
+    ()
   end
 end

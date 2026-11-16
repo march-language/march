@@ -41,7 +41,7 @@ mod MyApp do
     { count: old.count, history: [] }
   end
 
-  fn main() do
+  fn main(_cap_console : Cap(IO.Console)) do
     let pid = spawn(Counter)
     let _ = send(pid, Inc())
     let _ = send(pid, Inc())

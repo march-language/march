@@ -54,6 +54,7 @@ mod Main do
     println(NativeArray.to_list_int(NativeArray.map2_int(a, b, closure)))
     -- [16, 27, 38]
     println(closure(100, 200))
+    ()
     -- 305
   end
 end

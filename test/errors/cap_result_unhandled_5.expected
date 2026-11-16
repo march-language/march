@@ -1,0 +1,42 @@
+exit: 1
+-- CAPABILITY ------- errors/cap_result_unhandled_5.march
+
+This capability operation returns `Result(Result(String, FileError), CapError)`, which says whether it was permitted, but `Result(String, FileError)` is expected here. [cap_result_unhandled]
+
+10 |     match File.read("/etc/motd") do
+               ^^^^^^^^^^^^^^^^^^^^^^
+
+    Handle the refusal (`match`, `let?`), or write `Authority.must(...)` to take the value and panic if the operation is refused.
+
+    fix (`forge fix` applies it):
+
+10 -     match File.read("/etc/motd") do
+10 +     match Authority.must(File.read("/etc/motd")) do
+
+    run `march --explain cap_result_unhandled`
+
+
+-- TYPE MISMATCH ---- errors/cap_result_unhandled_5.march
+
+expected `FileError` but got `DnsError`. [type_mismatch]
+
+12 |     Err(NotFound(_)) -> ""
+         ^^^
+
+    I'm checking the pattern for constructor `Err`.
+    run `march --explain type_mismatch`
+
+
+-- TYPE MISMATCH ---- errors/cap_result_unhandled_5.march
+
+expected `FileError` but got `DnsError`. [type_mismatch]
+
+12 |     Err(NotFound(_)) -> ""
+             ^^^^^^^^
+
+    I'm checking the pattern for constructor `NotFound`.
+
+
+
+after fix: exit 1
+expected `FileError` but got `DnsError`. [type_mismatch]

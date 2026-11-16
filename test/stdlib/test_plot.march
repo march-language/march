@@ -2,6 +2,8 @@
 -- Run with: dune exec march -- test/stdlib/test_plot.march
 
 mod TestPlot do
+  needs IO.FileRead
+  needs IO.FileWrite
 
 pfn contains(haystack : String, needle : String) : Bool do
   String.contains(haystack, needle)
@@ -184,7 +186,7 @@ test "save writes file" do
   let path = "/tmp/test_plot_output.svg"
   let _ = Plot.save(p, path)
   -- verify the file was written
-  let contents = match File.read(path) do
+  let contents = match Authority.must(File.read(path)) do
     Ok(s) -> s
     Err(_) -> ""
     end

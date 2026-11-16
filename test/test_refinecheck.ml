@@ -2845,12 +2845,13 @@ end|}));
   fn probe() : Int do needs_empty(insr(Leaf, 5)) end
 end|}));
 
-    (* MUTUAL recursion is NOT supported: the IH is minted only for a call to
-       the function's OWN name, so `f`'s call to `g` reflects to nothing and
-       neither postcondition is proven.  Asserted as silence and documented in
-       specs/lang/refinement-types.md rather than made to work. *)
-    gated "mutual recursion gets no induction hypothesis (silent)" (fun () ->
-        Alcotest.(check bool) "no error" false
+    (* MUTUAL recursion (2026-11-08): `f`'s call to `g` inside the certified
+       SCC carries `g`'s hypothesis, so both postconditions prove, and the
+       proved `sz(f(A)) == 1` makes `needs_empty(f(A))` a definite violation.
+       Before, the IH was minted only for a call to the function's own name
+       and this was silent. *)
+    gated "mutual recursion gets the induction hypothesis" (fun () ->
+        Alcotest.(check bool) "definite error" true
           (has_refine_error
              {|mod P do
   type T = A | B(T)
@@ -6666,6 +6667,7 @@ mod DSC do
     test "divides" do
       let d = zero()
       println(int_to_string(100 / d))
+      ()
     end
   end
 end|}))
@@ -6678,6 +6680,7 @@ mod DSC2 do
     test "divides" do
       let d = zero()
       println(int_to_string(100 / d))
+      ()
     end
   end
 end|}))
@@ -6690,6 +6693,7 @@ mod TST do
   test "divides" do
     let d = zero()
     println(int_to_string(100 / d))
+    ()
   end
 end|}))
   ; Alcotest.test_case "cap no_panic sees a division in setup and setup_all" `Quick (fun () ->
@@ -6701,9 +6705,11 @@ mod STP do
   fn zero() : Int do 0 end
   setup do
     println(int_to_string(100 / zero()))
+    ()
   end
   setup_all do
     println(int_to_string(200 / zero()))
+    ()
   end
 end|})))
   ; Alcotest.test_case "cap no_panic sees a division in an actor handler and init" `Quick
@@ -13064,9 +13070,9 @@ module Audit_fixture = struct
       { A.actor_state = [ { A.fld_name = nm "value"; fld_ty = refine_or_plain 34 int_ty; fld_lin = A.Unrestricted } ];
         actor_init_params = [];
         actor_init = A.ELet (init_binding, dummy);
-        actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_body = A.ELit (A.LitInt 0, dummy) } ];
+        actor_handlers = [ { A.ah_msg = nm "Bump"; ah_params = [ actor_param ]; ah_ensures = None; ah_body = A.ELit (A.LitInt 0, dummy) } ];
         actor_supervise = Some supervise_cfg;
-        actor_mailbox = None; actor_remote = false; actor_on_stop = None;
+        actor_mailbox = None; actor_remote = false; actor_on_stop = None; actor_internal = false; actor_migrate = None;
         actor_compat = "full";
         actor_invariant = Some (A.EAnnot (A.ELit (A.LitBool true, dummy), refine_or_plain 33 int_ty, dummy)) }
     in
@@ -13503,7 +13509,7 @@ let audit_classify_reason_suite =
       `Quick (fun () ->
         let _, d = classify_only_site
             {|mod M do
-                type Box = { v : {(Int, Int) | true} }
+                type Box = { v : {Char | true} }
               end|}
         in
         match d with
@@ -13723,13 +13729,21 @@ let audit_classify_fixloop1_suite =
           (compiler_warns src "carries a refinement, which enforces nothing"))
 
   ; (* Section 6 / Mutation M4: a rejecting-side fixture for rule 3.
-       [refined_param_ty] has no [TyTuple] arm, so a parameter refined at a
-       TUPLE base is [Unenforced] -- without this fixture, a classifier that
+       [refined_param_ty] has no [Char] arm, so a parameter refined at a
+       CHAR base is [Unenforced] -- without this fixture, a classifier that
        hardcodes every top-level-fn [Param] as [Enforced], never calling
        [refined_param_ty] at all, still passes the whole group (the review's
-       own M4). *)
-    check_unenforced "a parameter refined at a tuple base is Unenforced (refined_param_ty has no TyTuple arm)"
+       own M4).  It used a tuple base until 2026-11-06, when tuples became a
+       predicate sort (specs/progress/2026-11-06-stdlib-lemma-sweep-s3-tuples.md). *)
+    check_unenforced "a parameter refined at a Char base is Unenforced (refined_param_ty has no Char arm)"
       {|mod TUPP1 do
+          fn f(p : { t : Char | true }) : Int do 0 end
+        end|}
+
+  ; (* Its positive twin: since tuples are a predicate sort, a tuple-refined
+       parameter is Enforced (an obligation at every call). *)
+    check_enforced "a parameter refined at a tuple base is Enforced (tuples are a predicate sort)"
+      {|mod TUPP2 do
           fn f(p : { t : (Int, Int) | true }) : Int do 0 end
         end|}
 
@@ -15379,10 +15393,23 @@ let hcr_derived_migration_suite =
 
     gated "a removed field is not derived" (fun () ->
         deployed (fun () ->
-            let derived, _, _ = run (actor ~state:"total : Int" ~init:"total: 0" ()) in
+            (* `total : String` replaces `count : Int`: not rename-shaped, so
+               the reason is the bare removal, with no clause suggested. *)
+            let derived, _, _ = run (actor ~state:"total : String" ~init:"total: \"\"" ()) in
             Alcotest.(check bool) "not derived" false derived;
             Alcotest.(check bool) "says why" true
               (outcome () = Some (D.Not_derived "it removes count"))));
+
+    gated "a removed field replaced by one of its type names the migrate clause" (fun () ->
+        deployed (fun () ->
+            let derived, _, _ = run (actor ~state:"total : Int" ~init:"total: 0" ()) in
+            Alcotest.(check bool) "not derived" false derived;
+            Alcotest.(check bool) "says why, and how to say it is a rename" true
+              (outcome ()
+               = Some
+                   (D.Not_derived
+                      "it removes count (if `total` renames it, add `migrate old -> { total: \
+                       old.count }` to the actor)"))));
 
     gated "a field whose type changed is not derived" (fun () ->
         deployed (fun () ->
@@ -23972,14 +23999,19 @@ let module_qualified_measure_and_sort_suite =
      constructors resolve through a conflated type).  Both proofs this suite
      used to pin were therefore not safe; see
      specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md and
-     specs/todos/2026-11-02-typecheck-conflates-same-short-named-types.md.
+     specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md.
      What still holds, and is pinned: the collision makes neither call a
      proof nor a violation. *)
+  (* Since 2026-11-06 (specs/progress/2026-11-06-predicate-names.md) the
+     first is PROVED again: the user's `Tree` takes no type argument and
+     `OrderedMap.Tree(k, v)` takes two, and the typechecker never unifies
+     types of different arities, so the two are told apart by arity.  A
+     same-arity collision still skips (the `pred-names` suite pins it). *)
   [ gated
-      "a user's own top-level Tree, colliding with the real stdlib OrderedMap.Tree \
-       once its whole stdlib is prepended, is skipped, not proved (short-name conflation)"
+      "a user's own top-level Tree, beside the stdlib's OrderedMap.Tree(k, v) of \
+       another arity, is proved (types told apart by arity)"
       (fun () ->
-        Alcotest.(check (triple int int int)) "ledger" (0, 0, 1)
+        Alcotest.(check (triple int int int)) "ledger" (1, 0, 0)
           (ledger_counts3_with_ordered_map (fixture ~pred:"member(3, tree_elts(_))")));
 
     gated "...and a literal that is not a member is skipped too, not proved" (fun () ->
@@ -25463,7 +25495,25 @@ let session_theory_suite =
             Alcotest.(check bool) (lemma ^ " is listed as proved") true
               (contains manifest ("Session.Theory." ^ lemma ^ "\t")))
           [ "dual_dual"; "dual_dual_bs"; "same_eq"; "same_eq_bs"; "dual_loop_of"; "erase_loop_of";
-            "merge_binary"; "project_dual"; "project_dual_bs" ]);
+            "merge_binary"; "project_dual"; "project_dual_bs";
+            (* C4 and C5 *)
+            "present_config"; "act_msg"; "apply_msg"; "step_msg"; "act_pick"; "apply_pick"; "step_pick";
+            "trace_bs_found"; "end_done"; "compose_msg"; "compose_pick"; "projections_compose"; "projections_compose_bs"; "progress";
+            (* C3 *)
+            "restrict_choice"; "collapse_dual"; "pairwise_choice"; "pairwise"; "pairwise_bs" ]);
+    Alcotest.test_case "Actor.Theory's lemmas are in the proved-lemma manifest" `Quick (fun () ->
+        let manifest =
+          In_channel.with_open_bin
+            (Filename.concat (Filename.dirname (march_exe_rel ())) "../stdlib/lemmas.verified")
+            In_channel.input_all
+        in
+        List.iter
+          (fun lemma ->
+            Alcotest.(check bool) (lemma ^ " is listed as proved") true
+              (contains manifest ("Actor.Theory." ^ lemma ^ "\t")))
+          [ "qcat_end"; "from_cat"; "enq_other"; "enq_self"; "replay_order"; "call_keeps_others";
+            "stale_reply_ignored"; "call_reply_cat"; "call_reply_later"; "deadline_law";
+            "downs_cat"; "down_never_dropped"; "unmonitor_gone"; "down_at_most_once" ]);
     Alcotest.test_case "both projectors agree on two-role, three-role and loop/choice protocols" `Quick (fun () ->
         let code, out = run_cli "--validate-projections" protocols in
         Alcotest.(check int) "exit 0" 0 code;
@@ -25492,9 +25542,10 @@ let session_theory_suite =
         has out "projection Blind C (typecheck): not compared: the role is not told which branch a choice took";
         has out "projection Blind C (endpoints): not compared: the role is not told which branch a choice took";
         has out "projection Blind A (typecheck): agrees");
-    Alcotest.test_case "endpoints: unlabelled messages are distinct, so the bystander is not told" `Quick (fun () ->
-        (* specs/todos/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
-           the typechecker merges C's branches, the generator does not. *)
+    Alcotest.test_case "endpoints: the same unlabelled message in both branches is merged, as the theory merges it" `Quick (fun () ->
+        (* specs/progress/2026-11-06-endpoints-merge-compares-synthesised-ctors.md:
+           the generator shares the synthesised constructor across equivalent
+           branch tails, so C's projection is one receive, as Session.Theory.project's is. *)
         let src =
           "mod P do\n\
           \  protocol Three do\n\
@@ -25510,7 +25561,8 @@ let session_theory_suite =
         let code, out = run_cli "--validate-projections" src in
         Alcotest.(check int) "exit 0" 0 code;
         has out "projection Three C (typecheck): agrees";
-        has out "projection Three C (endpoints): not compared: the role is not told");
+        has out "projection Three C (endpoints): agrees with Session.Theory.project";
+        has out "laws Three: in the fragment");
     Alcotest.test_case "a role that may crash is outside the fragment" `Quick (fun () ->
         let src =
           "mod P do\n\
@@ -25545,11 +25597,386 @@ let session_theory_suite =
         Alcotest.(check int) (Printf.sprintf "accepted\n%s" out) 0 code);
     Alcotest.test_case "--guarantees: a validated projection inherits the theory's laws" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" protocols in
-        has out "protocol Relay (2 roles): not checked\n";
+        has out "protocol Relay (2 roles): proved (spec) · validated (compiler)\n";
         has out "projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)";
-        has out "protocol Ring (3 roles): not checked\n";
-        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
-        has out "deadlock freedom  not checked") ]
+        has out "protocol Ring (3 roles): proved (spec) · validated (compiler)\n";
+        has out "pairwise duality  proved (spec) · validated (compiler): what each pair of roles does with each other is dual (Session.Theory.pairwise)";
+        has out "deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)";
+        (* A loop is outside the fragment the laws cover: said, not claimed. *)
+        has out "protocol Shop (2 roles): not checked\n";
+        has out "deadlock freedom  not checked: not proved: a loop (the laws cover loop-free protocols for now)");
+    Alcotest.test_case "--validate-projections: which protocols the laws cover" `Quick (fun () ->
+        let src =
+          "mod P do\n\
+          \  protocol Ring do\n\
+          \    X -> Y : String\n\
+          \    Y -> Z : String\n\
+          \    Z -> X : Int\n\
+          \  end\n\
+          \  protocol Blind do\n\
+          \    choose by A:\n\
+          \      go -> A -> B : Int\n\
+          \            B -> C : Int\n\
+          \      halt -> A -> B : String\n\
+          \              B -> C : String\n\
+          \    end\n\
+          \  end\n\
+          \  protocol Loop do\n\
+          \    loop do\n\
+          \      A -> B : Int\n\
+          \    end\n\
+          \  end\n\
+          end\n"
+        in
+        let code, out = run_cli "--validate-projections" src in
+        Alcotest.(check int) "exit 0" 0 code;
+        has out "laws Ring: in the fragment (pairwise duality, composition, deadlock freedom)";
+        has out "laws Blind: outside the fragment: a choice whose other roles do not all see the same branches";
+        has out "laws Loop: outside the fragment: a loop");
+    Alcotest.test_case "gate: a lemma waiting only on an ordinary lemma proved in an IH round is admitted" `Quick (fun () ->
+        (* add_z is an induction (admitted in an IH round); add_z2 calls it and
+           is proved in that round; add_z3 calls only add_z2.  Before the fix
+           the next IH round retried only items calling a group admitted in
+           that round, so add_z3 was never retried and stayed unproved
+           although its one path proves (refine_post.ml, ih_rounds). *)
+        let src =
+          "mod G do\n\
+          \  type N = Z | S(N)\n\
+          \  fn add(a : N, b : N) : N do\n\
+          \    match a do\n\
+          \      Z -> b\n\
+          \      S(k) -> S(add(k, b))\n\
+          \    end\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z(a : N) : {Unit | add(a, Z) == a} do\n\
+          \    match a do\n\
+          \      Z -> ()\n\
+          \      S(k) -> add_z(k)\n\
+          \    end\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z2(a : N) : {Unit | add(add(a, Z), Z) == a} do\n\
+          \    add_z(a)\n\
+          \  end\n\
+          \  @[lemma]\n\
+          \  fn add_z3(a : N) : {Unit | add(add(a, Z), Z) == a} do\n\
+          \    add_z2(a)\n\
+          \  end\n\
+          \  fn main() : Int do 0 end\n\
+          end\n"
+        in
+        let _, out = run_cli "--check --reflect-deps" src in
+        List.iter
+          (fun l ->
+            Alcotest.(check bool) (Printf.sprintf "%s admitted\n%s" l out) true
+              (List.exists
+                 (fun line -> contains line ("\tG." ^ l ^ "\t") && contains line ":admitted")
+                 (String.split_on_char '\n' out)))
+          [ "add_z"; "add_z2"; "add_z3" ]) ]
+
+(* `@invariant` as an INDUCTIVE invariant (todo
+   2026-11-06-invariant-unchecked-on-init-and-handlers; phase F of
+   specs/2026-11-04-lemmas-hcr-actors-choreography-design.md): `init` must
+   establish it and every handler must preserve it, assuming it of the
+   incoming `state` and the message's refinement.  Each case asserts the
+   ledger rows `<Actor>.init` / `<Actor>.<Msg>` (postconditions), never just
+   the absence of an error. *)
+let actor_invariant_suite =
+  let run src =
+    let desugared = March_desugar.Desugar.desugar_module (parse src) in
+    let _tc, type_map = March_typecheck.Typecheck.check_module desugared in
+    March_refinecheck.Obligation.reset ();
+    let ctx = March_errors.Errors.create () in
+    March_refinecheck.Refine_check.check_module ~type_map ctx desugared;
+    let errors =
+      String.concat "\n"
+        (List.filter_map
+           (fun (d : March_errors.Errors.diagnostic) ->
+             if d.March_errors.Errors.severity = March_errors.Errors.Error then
+               Some d.March_errors.Errors.message
+             else None)
+           ctx.March_errors.Errors.diagnostics)
+    in
+    let module O = March_refinecheck.Obligation in
+    let rows =
+      List.filter_map
+        (fun (o : O.t) ->
+          if o.O.kind = O.Postcondition && String.contains o.O.callee '.' then
+            Some
+              (Printf.sprintf "%s %s" o.O.callee
+                 (match o.O.verdict with
+                  | O.Proved -> "proved"
+                  | O.Violated -> "violated"
+                  | O.Trusted -> "trusted"
+                  | O.Skipped _ -> "skip"))
+          else None)
+        (O.all ())
+    in
+    (errors, List.sort_uniq compare rows)
+  in
+  let rows_are label expected rows =
+    Alcotest.(check (list string)) label (List.sort_uniq compare expected) rows
+  in
+  let counter ~dec =
+    "mod C do\n\
+    \  @invariant(count >= 0)\n\
+    \  actor Counter do\n\
+    \    state { count : Int }\n\
+    \    init { count: 0 }\n\
+    \    on Inc(n : {Int | _ > 0}) do { state with count: state.count + n } end\n\
+    \    on Dec() do " ^ dec ^ " end\n\
+    \    on Reset() do { count: 0 } end\n\
+    \  end\n\
+    end\n"
+  in
+  [ gated "the guarded counter proves at init and after every handler" (fun () ->
+        let errors, rows =
+          run (counter ~dec:"if state.count > 0 do { state with count: state.count - 1 } else state end")
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "every site proved"
+          [ "Counter.init proved"; "Counter.Inc proved"; "Counter.Dec proved"; "Counter.Reset proved" ]
+          rows);
+
+    gated "an unguarded decrement is refused with the breaking state" (fun () ->
+        let errors, rows = run (counter ~dec:"{ state with count: state.count - 1 }") in
+        Alcotest.(check bool) "names the handler" true
+          (contains errors "`Counter`'s handler `Dec` does not preserve its `@invariant`.");
+        Alcotest.(check bool) "states the invariant as written" true
+          (contains errors "The invariant requires:\n\n    count >= 0");
+        Alcotest.(check bool) "the counterexample state" true (contains errors "state = { count: 0 }");
+        rows_are "only Dec violated"
+          [ "Counter.init proved"; "Counter.Inc proved"; "Counter.Dec violated"; "Counter.Reset proved" ]
+          rows);
+
+    gated "a bad init is refused, and an unrefined message breaks the invariant" (fun () ->
+        let errors, rows =
+          run
+            "mod P1 do\n\
+            \  @invariant(count <= limit)\n\
+            \  actor Counter do\n\
+            \    state { count : Int, limit : Int }\n\
+            \    init { count: 50, limit: 10 }\n\
+            \    on Inc(n : Int) do { state with count: state.count + n } end\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check bool) "init" true
+          (contains errors "`Counter`'s `init` does not establish its `@invariant`.");
+        Alcotest.(check bool) "Inc" true
+          (contains errors "`Counter`'s handler `Inc` does not preserve its `@invariant`.");
+        rows_are "both violated" [ "Counter.init violated"; "Counter.Inc violated" ] rows);
+
+    gated "two actors sharing a message name are checked each against its own" (fun () ->
+        let errors, rows =
+          run
+            "mod Two do\n\
+            \  @invariant(count >= 0)\n\
+            \  actor A do\n\
+            \    state { count : Int }\n\
+            \    init { count: 0 }\n\
+            \    on Bump(n : {Int | _ > 0}) do { state with count: state.count + n } end\n\
+            \  end\n\
+            \  @invariant(total >= 0)\n\
+            \  actor B do\n\
+            \    state { total : Int }\n\
+            \    init { total: 0 }\n\
+            \    on Bump(n : Int) do { state with total: state.total + n } end\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check bool) "B's Bump" true
+          (contains errors "`B`'s handler `Bump` does not preserve its `@invariant`.");
+        Alcotest.(check bool) "not A's" false (contains errors "`A`'s handler");
+        rows_are "per actor"
+          [ "A.init proved"; "A.Bump proved"; "B.init proved"; "B.Bump violated" ] rows);
+
+    gated "a call handler's reply is not part of the claim; a let-bound field value is" (fun () ->
+        (* `state.count` spells a field too; the `let` is inlined, so `next`
+           is not a free value a model may pick (it was: `next = -1`). *)
+        let errors, rows =
+          run
+            "mod Call do\n\
+            \  @invariant(state.count >= 0)\n\
+            \  actor Counter do\n\
+            \    state { count : Int }\n\
+            \    init { count: 0 }\n\
+            \    on GetCount(reply_to) do\n\
+            \      Actor.reply(reply_to, state.count)\n\
+            \      state\n\
+            \    end\n\
+            \    on Inc(n : {Int | _ > 0}) do\n\
+            \      let next = state.count + n\n\
+            \      { state with count: next }\n\
+            \    end\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "proved"
+          [ "Counter.init proved"; "Counter.GetCount proved"; "Counter.Inc proved" ] rows);
+
+    gated "an undecidable invariant is a skip, an error only under cap verified" (fun () ->
+        let src ~cap =
+          "mod U do\n" ^ (if cap then "  cap verified\n" else "")
+          ^ "  @[opaque]\n\
+            \  fn wobble(n : Int) : Bool do n >= 0 end\n\
+            \  @invariant(wobble(count))\n\
+            \  actor Counter do\n\
+            \    state { count : Int }\n\
+            \    init { count: 0 }\n\
+            \    on Inc() do { state with count: state.count + 1 } end\n\
+            \  end\n\
+            end\n"
+        in
+        let errors, rows = run (src ~cap:false) in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "skipped" [ "Counter.init skip"; "Counter.Inc skip" ] rows;
+        let errors, _ = run (src ~cap:true) in
+        Alcotest.(check bool) "cap verified names the invariant and the handler" true
+          (contains errors
+             "cannot verify `Counter`'s `@invariant` `wobble(count)` after handler `Inc`"));
+
+    gated "an invariant calling the program's own function is reflected (M2)" (fun () ->
+        (* The invariant's call resolves by span like any predicate's: its
+           sites come from Refine_term walking the @invariant with the actor,
+           and the check runs under the module's reflection prefix. *)
+        let src ~guard =
+          "mod M do\n\
+          \  fn not_137(n : Int) : Bool do n != 137 end\n\
+          \  @invariant(not_137(count))\n\
+          \  actor A do\n\
+          \    state { count : Int }\n\
+          \    init { count: 0 }\n\
+          \    on Inc() do " ^ guard ^ " end\n\
+          \  end\n\
+          end\n"
+        in
+        let errors, rows =
+          run (src ~guard:"if state.count < 100 do { state with count: state.count + 1 } else state end")
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        rows_are "proved through not_137" [ "A.init proved"; "A.Inc proved" ] rows;
+        let errors, rows = run (src ~guard:"{ state with count: state.count + 1 }") in
+        Alcotest.(check bool) "Inc can reach 137" true
+          (contains errors "`A`'s handler `Inc` does not preserve its `@invariant`.");
+        rows_are "Inc violated" [ "A.init proved"; "A.Inc violated" ] rows);
+
+    gated "a record return reads a let-bound field; a destructuring let is no counterexample" (fun () ->
+        (* The return-contract fixes this slice needed, on plain functions:
+           `{ r with f: e }` reflects, `r` returned as is is its own sort,
+           and an un-inlined binder makes a model no counterexample. *)
+        let errors, rows =
+          run
+            "mod R do\n\
+            \  type CS = { count : Int }\n\
+            \  fn upd(s : {s : CS | s.count >= 0}, n : {Int | _ > 0}) : {v : CS | v.count >= 0} do\n\
+            \    let next = s.count + n\n\
+            \    { s with count: next }\n\
+            \  end\n\
+            \  fn same(s : {s : CS | s.count >= 0}) : {v : CS | v.count >= 0} do s end\n\
+            \  fn tup(s : {s : CS | s.count >= 0}, n : {Int | _ > 0}) : {v : CS | v.count >= 0} do\n\
+            \    let (a, b) = (s.count + n, 0)\n\
+            \    { count: a + b }\n\
+            \  end\n\
+            end\n"
+        in
+        Alcotest.(check string) "no errors" "" errors;
+        let module O = March_refinecheck.Obligation in
+        let verdict f =
+          match List.find_opt (fun (o : O.t) -> o.O.callee = f && o.O.kind = O.Postcondition) (O.all ()) with
+          | Some { O.verdict = O.Proved; _ } -> "proved"
+          | Some { O.verdict = O.Violated; _ } -> "violated"
+          | Some { O.verdict = O.Skipped _; _ } -> "skip"
+          | Some _ -> "other"
+          | None -> "none"
+        in
+        ignore rows;
+        Alcotest.(check string) "upd" "proved" (verdict "upd");
+        Alcotest.(check string) "same" "proved" (verdict "same");
+        Alcotest.(check bool) "tup is not violated" true (verdict "tup" <> "violated")) ]
+
+(* H5, the rollback round trip (phase F of
+   specs/2026-11-04-lemmas-hcr-actors-choreography-design.md):
+   `<actor>_rollback_state` beside `<actor>_migrate_state` gets the generated
+   lemma `<actor>_rollback_roundtrip` (Desugar_rollback), whose two functions
+   reflect because Refine_anon lifts every anonymous record in their
+   signatures, reusing a declared type of the same shape, and reflection lets
+   an actor's state sort give way to the record type it shares a field set
+   with. *)
+let hcr_rollback_suite =
+  let prog ~rollback =
+    "mod R do\n\
+    \  actor Counter do\n\
+    \    state { count : Int, announced : Bool, label : Int }\n\
+    \    init { count: 0, announced: false, label: 2 }\n\
+    \    on Tick() do { state with count: state.count + 1 } end\n\
+    \  end\n\
+    \  fn counter_migrate_state(old : { count : Int, announced : Bool }) : { count : Int, announced : Bool, label : Int } do\n\
+    \    { count: old.count, announced: old.announced, label: 2 }\n\
+    \  end\n\
+    \  fn counter_rollback_state(new : { count : Int, announced : Bool, label : Int }) : { count : Int, announced : Bool } do\n\
+    \    " ^ rollback ^ "\n\
+    \  end\n\
+    end\n"
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  [ gated "a faithful rollback proves the round trip" (fun () ->
+        let code, out =
+          run_cli "--check --guarantees" (prog ~rollback:"{ count: new.count, announced: new.announced }")
+        in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "actor Counter: proved";
+        has out "rollback round trip  proved: rollback_state(migrate_state(old)) == old for every old state");
+    gated "a lossy rollback is refused with the old state it loses" (fun () ->
+        let code, out =
+          run_cli "--check --guarantees" (prog ~rollback:"{ count: new.count, announced: false }")
+        in
+        Alcotest.(check bool) "rejected" true (code <> 0);
+        has out "the lemma `counter_rollback_roundtrip` is false";
+        has out "announced: true";
+        has out "rollback round trip  violated: rolling back loses part of the old state");
+    gated "a function whose parameter has a field refinement unfolds in a lemma" (fun () ->
+        (* Reflect's unfolding guard translates `_.count >= 0` through the
+           record's selector (Refine_reflect.pre_of); without it `mig` had no
+           equations and both lemmas below were skips.  A deployed field
+           refinement puts exactly this guard on every migration. *)
+        let src ~rb =
+          "mod NR do\n\
+          \  type Old = { count : Int }\n\
+          \  type New = { count : Int, label : Int }\n\
+          \  fn mig(old : {Old | _.count >= 0}) : New do { count: old.count, label: 2 } end\n\
+          \  fn rb(new : New) : Old do " ^ rb ^ " end\n\
+          \  @[lemma]\n\
+          \  fn rt(old : {Old | _.count >= 0}) : {Unit | rb(mig(old)) == old} do () end\n\
+          end\n"
+        in
+        let code, out = run_cli "--check --refine-report-sites=all" (src ~rb:"{ count: new.count }") in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "proved\tuser";
+        Alcotest.(check bool) ("rt proved\n" ^ out) true
+          (List.exists (fun l -> contains l "proved\t" && contains l "\trt\t") (String.split_on_char '\n' out));
+        let code, out = run_cli "--check" (src ~rb:"{ count: new.count + 1 }") in
+        Alcotest.(check bool) "a wrong rollback is rejected" true (code <> 0);
+        has out "rt");
+
+    gated "no rollback_state: no round-trip lemma, no line" (fun () ->
+        let src =
+          "mod N do\n\
+          \  actor Counter do\n\
+          \    state { count : Int, label : Int }\n\
+          \    init { count: 0, label: 2 }\n\
+          \    on Tick() do state end\n\
+          \  end\n\
+          \  fn counter_migrate_state(old : { count : Int }) : { count : Int, label : Int } do\n\
+          \    { count: old.count, label: 2 }\n\
+          \  end\n\
+          end\n"
+        in
+        let _, out = run_cli "--check --guarantees" src in
+        Alcotest.(check bool) "no rollback line" false (contains out "rollback round trip");
+        Alcotest.(check bool) "no lemma" false (contains out "counter_rollback_roundtrip")) ]
 
 (* `--guarantees` (lemmas phase B, bin/guarantees.ml): one labelled block per
    actor and protocol, read off the ledger after the check; it changes no
@@ -25566,15 +25993,21 @@ let guarantees_suite =
   in
   let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
   let first_line out = List.hd (String.split_on_char '\n' out) in
-  [ Alcotest.test_case "proved state, unchecked @invariant, assumed runtime" `Quick (fun () ->
-        let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(count <= limit)\n" ~init:"0" ()) in
+  [ Alcotest.test_case "proved state, proved @invariant, the runtime proved on a model" `Quick (fun () ->
+        let code, out = run_cli "--check --guarantees" (actor ~inv:"  @invariant(limit == 10)\n" ~init:"0" ()) in
         Alcotest.(check int) "accepted" 0 code;
-        Alcotest.(check string) "the invariant decides the summary" "actor Counter: not checked" (first_line out);
+        Alcotest.(check string) "summary" "actor Counter: proved" (first_line out);
         has out "state refinements  proved: ";
-        has out "@invariant         not checked: init and handler results are not checked against it";
+        (* Inductive since 2026-11-08 (todo invariant-unchecked-on-init-and-
+           handlers): init and Inc's result, each checked. *)
+        has out "@invariant         proved: 2 sites at init and after each handler";
         has out "handler contracts";
-        has out "runtime: assumed\n";
-        has out "assumed: the runtime is trusted");
+        (* Actor.Theory: the runtime's laws are proved on a model, and tested
+           against the runtime where a fixture covers them. *)
+        has out "runtime: proved (model)\n";
+        has out "per-sender message order  proved (model) · tested (runtime): Actor.Theory.enq_self";
+        has out "Actor.call replies        proved (model) · tested (runtime)";
+        has out "DOWN delivery             proved (model): at most once");
     Alcotest.test_case "no @invariant: proved" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" (actor ~init:"0" ()) in
         Alcotest.(check string) "summary" "actor Counter: proved" (first_line out));
@@ -25602,7 +26035,7 @@ let guarantees_suite =
         let _, out = run_cli "--check --guarantees" src in
         has out "migrate_state";
         has out "against its parameter type (no deployed build known)");
-    Alcotest.test_case "protocols: projection checked, deadlock freedom not" `Quick (fun () ->
+    Alcotest.test_case "protocols: projection, pairwise duality and deadlock freedom validated" `Quick (fun () ->
         let src =
           "mod G do\n\
           \  protocol Relay do\n\
@@ -25618,11 +26051,11 @@ let guarantees_suite =
         in
         let code, out = run_cli "--check --guarantees" src in
         Alcotest.(check int) "accepted" 0 code;
-        has out "protocol Relay (2 roles): not checked\n";
+        has out "protocol Relay (2 roles): proved (spec) · validated (compiler)\n";
         has out "proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual";
-        has out "protocol Ring (3 roles): not checked\n";
-        has out "pairwise duality  checked (compiler): every send has the matching receive at its peer";
-        has out "deadlock freedom  not checked";
+        has out "protocol Ring (3 roles): proved (spec) · validated (compiler)\n";
+        has out "pairwise duality  proved (spec) · validated (compiler)";
+        has out "deadlock freedom  proved (spec) · validated (compiler)";
         Alcotest.(check bool) "no runtime block without actors" false (contains out "runtime:"));
     Alcotest.test_case "a derived migrate_state is told apart from the actor's own sites" `Quick (fun () ->
         (* The derived function sits under the actor's span with synthetic
@@ -25645,8 +26078,11 @@ let guarantees_suite =
             let code, out = run_cli_in dir "--check --guarantees --hcr-baseline base.schemas.json" in
             Alcotest.(check int) "accepted" 0 code;
             Alcotest.(check string) "summary" "actor Counter: proved" (first_line out);
-            has out "state refinements        proved: 3 sites in init and handlers";
-            has out "migrate_state (derived)  proved: 1 site against the deployed build"));
+            has out "state refinements              proved: 3 sites in init and handlers";
+            has out "migrate_state (derived)        proved: 1 site against the deployed build";
+            (* Its reverse is derived too, and the round trip proved
+               (todo 2026-11-08-hcr-derive-rollback-state). *)
+            has out "rollback round trip (derived)  proved"));
     Alcotest.test_case "nothing to report" `Quick (fun () ->
         let _, out = run_cli "--check --guarantees" "mod G do\n  fn f(x : Int) : Int do x end\nend\n" in
         has out "no actors or protocols in m.march") ]
@@ -29714,6 +30150,451 @@ let hcr_tally_src =
 end
 |}
 
+(* H3, migration is a simulation (phase F of
+   specs/2026-11-04-lemmas-hcr-actors-choreography-design.md;
+   lib/desugar/desugar_simulation.ml).  End to end: v1 is built with
+   `--hot-reload`, which writes each `@compat(simulation)` handler's body into
+   the sidecar (`"steps"`); v2 is checked against that sidecar, which
+   generates the step functions and one lemma per message. *)
+(* Derived rollbacks (todo 2026-11-08-hcr-derive-rollback-state;
+   Desugar_migrate_derive).  An add-only derived migration gets its reverse
+   as `<actor>_rollback_state`, which the generated round-trip lemma proves,
+   and the sidecar records the shape it returns to (`rollback_derived`).
+   Redeploying the old source against that sidecar derives the drop-only
+   migration (`migrate_derived_drops`) instead of refusing a removed field.
+   End to end through real `--compile-so --hot-reload` sidecars. *)
+let hcr_derived_rollback_suite =
+  let prog ~fields ~init ~extra =
+    "mod Main do\n\
+    \  actor Counter do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n\
+    \    on Tick() do { state with count: state.count + 1 } end\n\
+    \  end\n" ^ extra ^ "\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  let v1 = prog ~fields:"count : Int, label : String" ~init:"count: 0, label: \"v1\"" ~extra:"" in
+  let v2 ?(extra = "") () =
+    prog ~fields:"count : Int, label : String, hits : Int" ~init:"count: 0, label: \"v1\", hits: 0" ~extra
+  in
+  let dir () = Filename.temp_dir "hcr_drb" "" in
+  (* The sidecar of [src] built in [d] against [baseline] (a file in [d]). *)
+  let sidecar ?baseline d name src =
+    let src_p = Filename.concat d (name ^ ".march") in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc src);
+    let so = Filename.concat d (name ^ ".so") in
+    let base = match baseline with Some b -> [ "--hcr-baseline"; Filename.concat d b ] | None -> [] in
+    let rc, _, err =
+      run_march_on_env ~cwd:d [ ("HOME", d) ]
+        ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ base @ [ "-o"; so ]) src_p
+    in
+    Alcotest.(check int) (name ^ " compiles; stderr:\n" ^ err) 0 rc;
+    let text = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat d (name ^ ".json")) (fun oc -> output_string oc text);
+    text
+  in
+  let check d ~baseline src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d ("--check --guarantees --hcr-baseline " ^ baseline)
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  [ gated "an add-only derivation gets a proved rollback, recorded in the sidecar" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d ~baseline:"v1.json" (v2 ()) in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "migrate_state (derived)";
+        has out "rollback round trip (derived)  proved";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (v2 ()) in
+        has s2 {|"migrate_derived": ["hits"]|};
+        has s2 {|"rollback_derived": ["count", "label"]|});
+    gated "a written rollback_state wins over the derived one" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let extra =
+          "  fn counter_rollback_state(new : { count : Int, label : String, hits : Int }) : { count : Int, label : String } do\n\
+          \    { count: new.count, label: new.label }\n\
+          \  end"
+        in
+        let _, out = check d ~baseline:"v1.json" (v2 ~extra ()) in
+        (* The report pads labels into a column, so match the line. *)
+        Alcotest.(check bool) ("a proved rollback line\n" ^ out) true
+          (List.exists
+             (fun l -> contains l "rollback round trip " && contains l "proved: rollback_state")
+             (String.split_on_char '\n' out));
+        Alcotest.(check bool) "not labelled derived" false (contains out "rollback round trip (derived)");
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (v2 ~extra ()) in
+        Alcotest.(check bool) "no rollback_derived" false (contains s2 "rollback_derived"));
+    gated "redeploying the old source derives its migration as that rollback" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (v2 ()));
+        let code, out = check d ~baseline:"v2.json" v1 in
+        Alcotest.(check int) "accepted" 0 code;
+        has out "migrate_state (derived rollback)  proved";
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v1 in
+        has s3 {|"migrate_derived_drops": ["hits"]|});
+    gated "without the recorded rollback a removed field is still not derived" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (v2 ()) in
+        let stripped =
+          String.concat "\n"
+            (List.filter (fun l -> not (contains l "rollback_derived")) (String.split_on_char '\n' s2))
+        in
+        Out_channel.with_open_bin (Filename.concat d "v2.json") (fun oc -> output_string oc stripped);
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v1 in
+        has s3 {|"migrate_not_derived": "it removes hits"|});
+    gated "a rollback to another shape than the recorded one is not derived" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (v2 ()));
+        let v0 = prog ~fields:"count : Int" ~init:"count: 0" ~extra:"" in
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v0 in
+        Alcotest.(check bool) "not derived" true (contains s3 "migrate_not_derived");
+        Alcotest.(check bool) "no drops" false (contains s3 "migrate_derived_drops")) ]
+
+(* Migrate clauses (todo 2026-11-06-hcr-derive-field-rename): `migrate old ->
+   { total: old.count }` names what a deploy moves; the compiler writes the
+   rest of `<actor>_migrate_state` (KEEP, ADD) and, for bare copies, the
+   proved reverse.  COPY (a bare `old.f` carries the deployed refinement of
+   `f`) is pinned here like KEEP and ADD are in `hcr-derived-migration`. *)
+let hcr_derive_rename_suite =
+  let prog ?(clause = "") ~fields ~init () =
+    "mod Main do\n\
+    \  actor Counter do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n" ^ (if clause = "" then "" else "    " ^ clause ^ "\n") ^ "\
+    \    on Tick() do { state with label: \"t\" } end\n\
+    \  end\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  let v1 = prog ~fields:"count : {Int | _ >= 0}, label : String" ~init:"count: 0, label: \"v1\"" () in
+  let renamed ?(ty = "{Int | _ >= 0}") ?(expr = "old.count") () =
+    prog ~fields:("total : " ^ ty ^ ", label : String, hits : Int")
+      ~init:"total: 1, label: \"v2\", hits: 0"
+      ~clause:("migrate old -> { total: " ^ expr ^ " }") ()
+  in
+  let dir () = Filename.temp_dir "hcr_ren" "" in
+  let sidecar ?baseline d name src =
+    let src_p = Filename.concat d (name ^ ".march") in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc src);
+    let so = Filename.concat d (name ^ ".so") in
+    let base = match baseline with Some b -> [ "--hcr-baseline"; Filename.concat d b ] | None -> [] in
+    let rc, _, err =
+      run_march_on_env ~cwd:d [ ("HOME", d) ]
+        ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ base @ [ "-o"; so ]) src_p
+    in
+    Alcotest.(check int) (name ^ " compiles; stderr:\n" ^ err) 0 rc;
+    let text = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat d (name ^ ".json")) (fun oc -> output_string oc text);
+    text
+  in
+  let check d ?(baseline = "v1.json") src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d (if baseline = "" then "--check" else "--check --guarantees --hcr-baseline " ^ baseline)
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  let lacks out s = Alcotest.(check bool) (Printf.sprintf "output lacks %S\n%s" s out) false (contains out s) in
+  (* The report pads labels into a column, so match one line. *)
+  let line out a b =
+    Alcotest.(check bool) (Printf.sprintf "a line with %S and %S\n%s" a b out) true
+      (List.exists (fun l -> contains l a && contains l b) (String.split_on_char '\n' out))
+  in
+  [ gated "a rename derives the migration and its proved reverse" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ()) in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        line out "migrate_state (derived, migrate clause)" "proved";
+        line out "rollback round trip (derived)" "proved";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ()) in
+        has s2 {|"migrate_derived": ["hits"]|};
+        has s2 {|"migrate_clause": ["total"]|};
+        has s2 {|"migrate_derived_moves": [["total", "count"]]|};
+        has s2 {|"rollback_derived": ["count", "label"]|};
+        has s2 {|"rollback_derived_moves": [["count", "total"]]|});
+    gated "COPY: a tightened refinement on the renamed field is refused, at the clause" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ~ty:"{Int | _ >= 1}" ()) in
+        Alcotest.(check int) ("refused\n" ^ out) 1 code;
+        has out "A running `Counter` can hold a state this version rejects";
+        has out "migrate old -> { total: old.count }";
+        has out "takes each field a `migrate` clause gives");
+    gated "a computed field is checked like a written migration, and has no reverse" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ~expr:"old.count * 100" ()) in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        line out "migrate_state (derived, migrate clause)" "proved";
+        lacks out "rollback round trip";
+        let code, out = check d (renamed ~expr:"old.count - 1" ()) in
+        Alcotest.(check int) ("refused\n" ^ out) 1 code;
+        line out "migrate_state (derived, migrate clause)" "violated";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ~expr:"old.count * 100" ()) in
+        lacks s2 "rollback_derived";
+        lacks s2 "migrate_derived_moves");
+    gated "a removed field the clause does not read is not dropped" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let _, out = check d (renamed ~expr:"0" ()) in
+        has out "the migrate clause does not derive `counter_migrate_state`";
+        has out "it removes count, which the migrate clause does not read";
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ~expr:"0" ()) in
+        has s2 {|"migrate_not_derived": "it removes count, which the migrate clause does not read"|});
+    gated "the clause converts a field whose type changed" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let conv clause =
+          prog ~fields:"count : String, label : String" ~init:"count: \"0\", label: \"v2\"" ~clause () in
+        let _, out = check d (conv "") in
+        lacks out "migrate_state (derived";
+        let code, out = check d (conv "migrate old -> { count: int_to_string(old.count) }") in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        has out "migrate_state (derived, migrate clause)";
+        ignore (sidecar ~baseline:"v1.json" d "v2" (conv "migrate old -> { count: int_to_string(old.count) }")));
+    gated "redeploying the old source after a rename copies the value back" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (renamed ()));
+        let code, out = check d ~baseline:"v2.json" v1 in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        line out "migrate_state (derived rollback)" "proved";
+        let s3 = sidecar ~baseline:"v2.json" d "v3" v1 in
+        has s3 {|"migrate_derived_drops": ["hits"]|};
+        has s3 {|"migrate_derived_moves": [["count", "total"]]|});
+    gated "a clause written for an earlier deploy is ignored, with a warning" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        ignore (sidecar ~baseline:"v1.json" d "v2" (renamed ()));
+        let v3 =
+          prog ~fields:"total : {Int | _ >= 0}, label : String, hits : Int, extra : Int"
+            ~init:"total: 0, label: \"v3\", hits: 0, extra: 0"
+            ~clause:"migrate old -> { total: old.count }" ()
+        in
+        let code, out = check d ~baseline:"v2.json" v3 in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        has out "the migrate clause reads `count`, which the deployed build's state does not have";
+        line out "migrate_state (derived)" "proved");
+    Alcotest.test_case "a malformed clause is an error, with or without a deploy" `Quick (fun () ->
+        let d = dir () in
+        let code, out =
+          check d ~baseline:"" (prog ~fields:"total : Int, label : String" ~init:"total: 0, label: \"x\""
+                                  ~clause:"migrate old -> { totl: old.count }" ())
+        in
+        Alcotest.(check int) ("rejected\n" ^ out) 1 code;
+        has out "the migrate clause gives `totl`, which is not a state field of `Counter`";
+        has out "[migrate_clause_invalid]";
+        let code, out =
+          check d ~baseline:"" (prog ~fields:"total : Int, label : String" ~init:"total: 0, label: \"x\""
+                                  ~clause:"migrate old -> old" ())
+        in
+        Alcotest.(check int) ("rejected\n" ^ out) 1 code;
+        has out "a migrate clause's body is a record literal");
+    Alcotest.test_case "without a deployed build the clause is inert and formats back" `Quick (fun () ->
+        let d = dir () in
+        let src = renamed () in
+        let code, out = check d ~baseline:"" src in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        let formatted = March_format.Format.format_source ~filename:"m.march" src in
+        has formatted "migrate old -> { total: old.count }") ]
+
+(* `--hcr-drop Actor.field` (forge deploy hot --drop, todo
+   2026-11-15-hcr-deploy-drop-consent) and the rename suggestion (todo
+   2026-11-15-hcr-migrate-clause-suggestion), end to end over real
+   `--hot-reload` sidecars. *)
+let hcr_drop_and_suggest_suite =
+  let prog ?(clause = "") ~fields ~init () =
+    "mod Main do\n\
+    \  actor Counter do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n" ^ (if clause = "" then "" else "    " ^ clause ^ "\n") ^ "\
+    \    on Tick() do { state with label: \"t\" } end\n\
+    \  end\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  let v1 =
+    prog ~fields:"count : {Int | _ >= 0}, label : String, history : List(Int)"
+      ~init:"count: 0, label: \"v1\", history: []" ()
+  in
+  let dir () = Filename.temp_dir "hcr_drop" "" in
+  let sidecar ?baseline ?(flags = []) d name src =
+    let src_p = Filename.concat d (name ^ ".march") in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc src);
+    let so = Filename.concat d (name ^ ".so") in
+    let base = match baseline with Some b -> [ "--hcr-baseline"; Filename.concat d b ] | None -> [] in
+    let rc, _, err =
+      run_march_on_env ~cwd:d [ ("HOME", d) ]
+        ([ "--compile"; "--compile-so"; "--hot-reload"; "Main" ] @ base @ flags @ [ "-o"; so ]) src_p
+    in
+    Alcotest.(check int) (name ^ " compiles; stderr:\n" ^ err) 0 rc;
+    let text = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat d (name ^ ".json")) (fun oc -> output_string oc text);
+    text
+  in
+  let check ?(flags = "") d src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d ("--check --guarantees --hcr-baseline v1.json " ^ flags)
+  in
+  let check_json d src =
+    Out_channel.with_open_bin (Filename.concat d "m.march") (fun oc -> output_string oc src);
+    run_cli_in d "--check-json --hcr-baseline v1.json"
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  let lacks out s = Alcotest.(check bool) (Printf.sprintf "output lacks %S\n%s" s out) false (contains out s) in
+  let dropped = prog ~fields:"count : {Int | _ >= 0}, label : String" ~init:"count: 0, label: \"v2\"" () in
+  let renamed ?(total_ty = "{Int | _ >= 0}") ?(extra = "") () =
+    prog ~fields:("total : " ^ total_ty ^ ", label : String, history : List(Int)" ^ extra)
+      ~init:("total: 0, label: \"v2\", history: []" ^ if extra = "" then "" else ", hits: 0") ()
+  in
+  [ gated "--hcr-drop lets the derivation discard a field nothing reads, recorded" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        (* The same file built first without the consent, then with it: a
+           cache key that ignored --hcr-drop would serve the first build. *)
+        let s0 = sidecar ~baseline:"v1.json" d "v2" dropped in
+        has s0 {|"migrate_not_derived": "it removes history"|};
+        let code, out = check ~flags:"--hcr-drop Counter.history" d dropped in
+        Alcotest.(check int) ("accepted\n" ^ out) 0 code;
+        has out "migrate_state (derived)";
+        lacks out "rollback round trip";
+        let s2 = sidecar ~baseline:"v1.json" ~flags:[ "--hcr-drop"; "Counter.history" ] d "v2" dropped in
+        has s2 {|"migrate_drops_consented": ["history"]|};
+        lacks s2 "rollback_derived");
+    gated "--hcr-drop names fields per actor and combines with a migrate clause" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let src =
+          prog ~fields:"total : {Int | _ >= 0}, label : String" ~init:"total: 0, label: \"v2\""
+            ~clause:"migrate old -> { total: old.count }" ()
+        in
+        let s_other = sidecar ~baseline:"v1.json" ~flags:[ "--hcr-drop"; "Other.history" ] d "v2a" src in
+        has s_other "it removes history, which the migrate clause does not read";
+        let s2 = sidecar ~baseline:"v1.json" ~flags:[ "--hcr-drop"; "Counter.history" ] d "v2" src in
+        has s2 {|"migrate_clause": ["total"]|};
+        has s2 {|"migrate_drops_consented": ["history"]|});
+    gated "a one-for-one field swap of the same type suggests the clause, as a guess" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let code, out = check d (renamed ()) in
+        Alcotest.(check int) ("a warning, not an error\n" ^ out) 0 code;
+        has out "`Counter` removes `count` and adds `total` of the same type";
+        has out "[migrate_rename_suggested]";
+        has out "possible fix (a guess";
+        let _, js = check_json d (renamed ()) in
+        has js {|"code":"migrate_rename_suggested"|};
+        has js {|"fix":{"kind":"insert","after_line":4,"text":"    migrate old -> { total: old.count }","applicability":"maybe-incorrect"}|};
+        let s2 = sidecar ~baseline:"v1.json" d "v2" (renamed ()) in
+        has s2 "it removes count (if `total` renames it, add `migrate old -> { total: old.count }` to the actor)");
+    gated "no suggestion when the swap is not one-for-one or the types differ" (fun () ->
+        let d = dir () in
+        ignore (sidecar d "v1" v1);
+        let _, out = check d (renamed ~total_ty:"String" ()) in
+        lacks out "migrate_rename_suggested";
+        let _, out = check d (renamed ~extra:", hits : Int" ()) in
+        lacks out "migrate_rename_suggested";
+        let _, out = check d dropped in
+        lacks out "migrate_rename_suggested") ]
+
+let hcr_simulation_suite =
+  let v1 =
+    {|mod Main do
+  @compat(simulation)
+  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Bump(n : Int) do
+      let next = state.count + n
+      { state with count: next }
+    end
+  end
+  fn main() : Int do 0 end
+end
+|}
+  in
+  let v2 ~fields ~init ~bump ~extra =
+    "mod Main do\n\
+    \  @compat(simulation)\n\
+    \  actor Tally do\n\
+    \    state { " ^ fields ^ " }\n\
+    \    init  { " ^ init ^ " }\n\
+    \    on Bump(n : Int) do " ^ bump ^ " end\n\
+    \    on Reset() do { state with count: 0 } end\n\
+    \  end\n" ^ extra ^ "\n\
+    \  fn main() : Int do 0 end\n\
+    end\n"
+  in
+  (* The deployed sidecar, built once per case in its own dir. *)
+  let with_baseline f =
+    let dir = Filename.temp_dir "hcr_sim" "" in
+    let src_p = Filename.concat dir "app.march" in
+    Out_channel.with_open_bin src_p (fun oc -> output_string oc v1);
+    let so = Filename.concat dir "v1.so" in
+    let rc, _, err =
+      run_march_on_env ~cwd:dir [] [ "--compile"; "--compile-so"; "--hot-reload"; "Main"; "-o"; so ] src_p
+    in
+    Alcotest.(check int) ("v1 compiles; stderr:\n" ^ err) 0 rc;
+    let sidecar = read_whole_file (so ^ ".schemas.json") in
+    Out_channel.with_open_bin (Filename.concat dir "base.schemas.json") (fun oc -> output_string oc sidecar);
+    f dir sidecar
+  in
+  let check dir src =
+    Out_channel.with_open_bin (Filename.concat dir "m.march") (fun oc -> output_string oc src);
+    run_cli_in dir "--check --guarantees --hcr-baseline base.schemas.json"
+  in
+  let has out s = Alcotest.(check bool) (Printf.sprintf "output has %S\n%s" s out) true (contains out s) in
+  [ Alcotest.test_case "the sidecar records a simulation actor's handler bodies" `Quick (fun () ->
+        with_baseline (fun _ sidecar ->
+            has sidecar {|"compat": "simulation"|};
+            has sidecar {|"steps": [{"msg":"Bump","params":["n"],"body":|}));
+    gated "an unchanged handler commutes; a new one has no deployed messages" (fun () ->
+        with_baseline (fun dir _ ->
+            let code, out =
+              check dir
+                (v2 ~fields:"count : Int" ~init:"count: 1" ~bump:"{ state with count: state.count + n }" ~extra:"")
+            in
+            Alcotest.(check int) "accepted" 0 code;
+            has out "simulation";
+            has out "Bump proved (commutes)";
+            has out "Reset proved (a new handler: no deployed message names it)"));
+    gated "a handler that now does something else does not commute" (fun () ->
+        with_baseline (fun dir _ ->
+            let code, out =
+              check dir
+                (v2 ~fields:"count : Int" ~init:"count: 1" ~bump:"{ state with count: state.count + n + 1 }"
+                   ~extra:"")
+            in
+            Alcotest.(check bool) "rejected" true (code <> 0);
+            has out "the lemma `tally_simulates__Bump`";
+            has out "when `n` is";
+            has out "Bump violated";
+            Alcotest.(check bool) "no unknown-attribute warning" false (contains out "unknown_attribute")));
+    gated "with a migrate_state, handling commutes with migrating" (fun () ->
+        with_baseline (fun dir _ ->
+            let code, out =
+              check dir
+                (v2 ~fields:"count : Int, hits : Int" ~init:"count: 1, hits: 0"
+                   ~bump:"{ state with count: state.count + n }"
+                   ~extra:
+                     "  fn tally_migrate_state(old : { count : Int }) : { count : Int, hits : Int } do\n\
+                     \    { count: old.count, hits: 0 }\n\
+                     \  end")
+            in
+            Alcotest.(check int) "accepted" 0 code;
+            has out "Bump proved (commutes)"));
+    gated "a body outside the carried grammar is not checked, with the reason" (fun () ->
+        with_baseline (fun dir _ ->
+            let _, out =
+              check dir
+                (v2 ~fields:"count : Int" ~init:"count: 1" ~bump:"{ state with count: bump(state.count, n) }"
+                   ~extra:"  fn bump(a : Int, b : Int) : Int do a + b end")
+            in
+            has out "Bump not checked (this handler: it calls `bump`, which the deployed build may define differently)")) ]
+
 (* Runs `--check-migration` from [prior] to [next] (schema JSON text) over
    [src]; returns the exit code and the `migration:` lines. *)
 let hcr_check ?(src = hcr_tally_src) ?(extra = []) (prior : string) (next : string) =
@@ -29818,6 +30699,110 @@ let hcr_variance_suite =
         let accepted = build [ "--accept-unproved"; "Tally.state,Tally.Bump,Other" ] in
         if not (contains accepted {|"accepted_unproved": ["Bump", "state"]|}) then
           Alcotest.failf "sidecar lacks the accepted laws:\n%s" accepted);
+    (* H7, tag consistency: every constructor both versions name must keep
+       its actor-message tag (Schema_diff.tag_check). A tag moves between
+       builds only when a hash collision made its key probe, and nothing
+       compared them before: these hand-written pairs force the move. *)
+    Alcotest.test_case "equal actor-message tags compared, not refused" `Quick (fun () ->
+        let h t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+        hcr_expect ~rc:0 ~has:[ "actor-message tags: unchanged (1 constructor of 1 actor compared)" ]
+          (hcr_check (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~handlers:(h 0x01000010) (st None))));
+    Alcotest.test_case "a moved actor-message tag is refused" `Quick (fun () ->
+        let h t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+        hcr_expect ~rc:1
+          ~has:[ "Tally.Bump.tag: REFUSED, Tally.Bump's actor-message tag moved: the running \
+                  version tags it 0x01000010, this build 0x01000011";
+                 "hash collision" ]
+          (hcr_check (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~handlers:(h 0x01000011) (st None)));
+        (* Not a proof obligation: no override reaches it. *)
+        hcr_expect ~rc:1 ~has:[ "Tally.Bump.tag: REFUSED" ]
+          (hcr_check ~extra:[ "--accept-unproved"; "Tally" ]
+             (hcr_schema ~handlers:(h 0x01000010) (st None))
+             (hcr_schema ~accepted:[ "*" ] ~handlers:(h 0x01000011) (st None))));
+    Alcotest.test_case "a baseline that predates tag recording is noted, not refused" `Quick (fun () ->
+        hcr_expect ~rc:0
+          ~has:[ "Tally.tags: not compared (the running version's schema predates \
+                  actor-message tag recording"; "not a refusal" ]
+          (hcr_check (hcr_schema ~handlers:{|{"name":"Bump","params":["Int"]}|} (st None))
+             (hcr_schema ~handlers:{|{"name":"Bump","params":["Int"],"tag":16777232}|} (st None))));
+    (* The writer side: each handler's tag is recorded, it is the tag the
+       emitted code stores, and two builds that declare the same actors in a
+       different order (one with an extra actor) record the same tags, so
+       the gate passes them. *)
+    Alcotest.test_case "the writer records each handler's tag; reordered builds agree" `Quick (fun () ->
+        let dir = Filename.temp_dir "hcr_tags" "" in
+        (* A private HOME: a hit in the shared ~/.march CAS (an earlier run of
+           this same source) restores the .so and its sidecars but writes no
+           .ll, and the IR is what the recorded tags are checked against. *)
+        let home = Filename.concat dir "home" in
+        Unix.mkdir home 0o755;
+        let build name src =
+          let src_p = Filename.concat dir (name ^ ".march") in
+          let oc = open_out src_p in output_string oc src; close_out oc;
+          let so = Filename.concat dir (name ^ ".so") in
+          let rc, _, err = run_march_on_env ~cwd:dir [ ("HOME", home) ]
+              [ "--compile"; "--compile-so"; "--hot-reload"; "Main"; "-o"; so ] src_p in
+          Alcotest.(check int) ("compile " ^ name ^ "; stderr:\n" ^ err) 0 rc;
+          (so ^ ".schemas.json", Filename.concat dir (name ^ ".ll")) in
+        let actor_tally = {|  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Bump(n : Int) do { state with count: state.count + n } end
+    on Reset() do { state with count: 0 } end
+  end
+|} in
+        let actor_tally_reordered = {|  actor Tally do
+    state { count : Int }
+    init  { count: 1 }
+    on Reset() do { state with count: 0 } end
+    on Bump(n : Int) do { state with count: state.count + n } end
+  end
+|} in
+        let actor_other = {|  actor Other do
+    state { seen : Int }
+    init  { seen: 0 }
+    on Poke() do { state with seen: state.seen + 1 } end
+  end
+|} in
+        let actor_extra = {|  actor Extra do
+    state { n : Int }
+    init  { n: 0 }
+    on Ping(k : Int) do { state with n: k } end
+  end
+|} in
+        let prog actors = "mod Main do\n" ^ String.concat "" actors
+                          ^ "  fn main() : Int do 0 end\nend\n" in
+        let a_json, a_ll = build "a" (prog [ actor_tally; actor_other ]) in
+        let b_json, _ = build "b" (prog [ actor_extra; actor_other; actor_tally_reordered ]) in
+        let tags path =
+          let schemas = March_forge.Schema_diff.parse_schemas_file path in
+          List.concat_map (fun actor ->
+              match List.assoc_opt actor schemas with
+              | None -> Alcotest.failf "%s missing from %s" actor path
+              | Some s ->
+                List.map (fun (c : March_forge.Schema_diff.ctor) ->
+                    match c.March_forge.Schema_diff.tag with
+                    | Some t -> (actor ^ "." ^ c.March_forge.Schema_diff.cname, t)
+                    | None -> Alcotest.failf "%s.%s has no tag in %s" actor
+                                c.March_forge.Schema_diff.cname path)
+                  (Option.value ~default:[] s.March_forge.Schema_diff.handlers))
+            [ "Tally"; "Other" ]
+          |> List.sort compare in
+        let ta = tags a_json and tb = tags b_json in
+        Alcotest.(check (list (pair string int))) "same tags whatever the declaration order" ta tb;
+        let ir = read_whole_file a_ll in
+        List.iter (fun (k, t) ->
+            if not (contains ir (Printf.sprintf "i32 %d" t)) then
+              Alcotest.failf "%s's recorded tag %d is not in the emitted IR" k t) ta;
+        hcr_expect ~rc:0 ~has:[ "actor-message tags: unchanged" ]
+          (let rc, _, err = run_march_on_env ~cwd:dir []
+               [ "--check-migration"; "--prior-schema"; a_json; "--new-schema"; b_json ]
+               (Filename.concat dir "b.march") in
+           let lines = List.filter (fun l -> String.length l > 10 && String.sub l 0 10 = "migration:")
+               (String.split_on_char '\n' err) in
+           (rc, lines, err)));
     (* The migrate_state path: proved once the return type is the actor's
        own state sort (a synthesised `State` of the same field set made the
        literal ambiguous, so before this a correct migration never proved
@@ -29943,6 +30928,12 @@ let () =
       ("hcr-migration", hcr_migration_suite);
       ("hcr-derived-migration", hcr_derived_migration_suite);
       ("guarantees", guarantees_suite);
+      ("actor-invariant", actor_invariant_suite);
+      ("hcr-rollback", hcr_rollback_suite);
+      ("hcr-simulation", hcr_simulation_suite);
+      ("hcr-derived-rollback", hcr_derived_rollback_suite);
+      ("hcr-derive-rename", hcr_derive_rename_suite);
+      ("hcr-drop-and-suggest", hcr_drop_and_suggest_suite);
       ("session-theory", session_theory_suite);
       ("stored-field-contract", stored_field_suite);
       ("impl-dispatch", impl_dispatch_suite);
@@ -29984,18 +30975,28 @@ let () =
       ("termination-report", Test_refine_term.report_suite);
       ("reflect-report", Test_refine_reflect.suite @ Test_refine_reflect.fixture_suite);
       ("reflect-unfold", Test_refine_unfold.suite @ Test_refine_unfold.soundness @ Test_refine_unfold.review @ Test_refine_unfold.review2 @ Test_refine_unfold.review3 @ Test_refine_unfold.identical);
-      ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr);
+      ("reflect-1b", Test_refine_reflect1b.gaps @ Test_refine_reflect1b.d17 @ Test_refine_reflect1b.hcr @ Test_refine_reflect1b.uses_query_frontier);
       ("reflect-parity", Test_refine_reflect1b.parity);
       ("reflect-fuel", Test_refine_fuel.tests);
       ("reflect-stdlib-list", Test_refine_stdlib_list.tests);
+      ("reflect-stdlib-laws", Test_refine_stdlib_list.laws_pass_tests);
+      ("reflect-stdlib-float-laws", Test_refine_stdlib_list.float_laws_tests);
+      ("reflect-stdlib-wave2-laws", Test_refine_stdlib_list.wave2_laws_tests);
       ("reflect-infer-lemma", Test_refine_infer_lemma.tests);
       ("return-block-facts", Test_refine_return_facts.tests);
       ("law-coverage", Test_refine_law_coverage.tests);
-      ("reflect-record-vars", Test_refine_record_vars.tests);
-      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2);
+      ("reflect-record-vars", Test_refine_record_vars.tests @ Test_refine_record_vars.parametric);
+      ("nested-measure", Test_refine_nested_measure.suite);
+      ("proof-hints", Test_refine_proof_hints.suite);
+      ("reflect-stdlib-sweep", Test_refine_stdlib_sweep.tests @ Test_refine_stdlib_sweep.s2 @ Test_refine_stdlib_sweep.cap_verified @ Test_refine_stdlib_sweep.s3);
+      ("pred-names", Test_refine_pred_names.suite);
       ("reflect-spec", Test_refine_spec.tests);
       ("reflect-overflow", Test_refine_overflow.tests);
-      ("reflect-lemma", Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.tuple_body);
+      ("quantifiers", Test_refine_quantifier.tests);
+      ("aliases", Test_refine_alias.tests);
+      ("two-state", Test_refine_two_state.tests);
+      ("ghost", Test_refine_ghost.tests);
+      ("reflect-lemma", Test_refine_lemma.scoped_asserts @ Test_refine_lemma.scoped_hint_bindings @ Test_refine_lemma.scoped_directives @ Test_refine_lemma.rules @ Test_refine_lemma.posts @ Test_refine_lemma.calls @ Test_refine_lemma.l4 @ Test_refine_lemma.erase @ Test_refine_lemma.lemma_tests @ Test_refine_lemma.iface_laws @ Test_refine_lemma.hypotheses @ Test_refine_lemma.lemma_positions @ Test_refine_lemma.name_clashes @ Test_refine_lemma.let_match @ Test_refine_lemma.div_nonliteral @ Test_refine_lemma.lemma_test_len @ Test_refine_lemma.metric_cert @ Test_refine_lemma.match_value @ Test_refine_lemma.div_solver @ Test_refine_lemma.guard_call @ Test_refine_lemma.float_body @ Test_refine_lemma.float_ieee @ Test_refine_lemma.string_body @ Test_refine_lemma.record_body @ Test_refine_lemma.scalar_fields @ Test_refine_lemma.tuple_body @ Test_refine_lemma.derived_eq);
       ("reflect-ctor", Test_refine_reflect1b.ctor_registry @ Test_refine_reflect1b.ctor_review @ Test_refine_reflect1b.ctor_review2 @ Test_refine_reflect1b.ctor_review3 @ Test_refine_reflect1b.ctor_review4 @ Test_refine_reflect1b.ctor_review5 @ Test_refine_reflect1b.builtin_names_cover_signatures);
       ("termination-structural", Test_refine_term.structural_suite);
       ("termination-metric", Test_refine_term.metric_suite);

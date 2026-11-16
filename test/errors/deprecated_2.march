@@ -1,0 +1,29 @@
+-- One warning per use: a value reference and a call each get their own. Uses
+-- inside the declaring module do not warn.
+mod Main do
+  mod Legacy do
+    @[deprecated("use `Legacy.add` instead; `old_add` goes away in 2.0")]
+    fn old_add(a : Int, b : Int) : Int do
+      add(a, b)
+    end
+
+    fn add(a : Int, b : Int) : Int do
+      a + b
+    end
+
+    fn inside() : Int do
+      old_add(1, 2)
+    end
+  end
+
+  mod App do
+    fn run() : Int do
+      let f = Legacy.old_add
+      f(1, 2) + Legacy.old_add(3, 4) + Legacy.inside()
+    end
+  end
+
+  fn main() : Int do
+    App.run()
+  end
+end

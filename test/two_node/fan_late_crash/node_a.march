@@ -24,7 +24,7 @@ mod FanLateCrashNodeA do
   end
 
   pfn wait_for(path : String) : () do
-    if File.exists(path) do ()
+    if Authority.must(File.exists(path)) do ()
     else
       sleep_ms(50)
       wait_for(path)
@@ -32,7 +32,7 @@ mod FanLateCrashNodeA do
   end
 
   pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
-    wait_for(Env.require("FAN_GO_FILE"))
+    wait_for(Authority.must(Env.require("FAN_GO_FILE")))
     println("A: sends 7")
     let st1 = Fan_A.send_Msg_A_C_1(s, st, 7)
     Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->

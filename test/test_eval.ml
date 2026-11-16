@@ -3992,7 +3992,7 @@ let test_borrow_read_only_param_is_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> Authority.ignore(println(s)) end
     end
   end|} in
   Alcotest.(check bool) "log's conn param is borrowed" true
@@ -4120,7 +4120,7 @@ let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> Authority.ignore(println(s)) end
     end
     fn log_twice(conn : Conn) : Unit do
       log(conn)
@@ -4158,7 +4158,7 @@ let test_borrow_no_incrc_at_call_site () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> Authority.ignore(println(s)) end
     end
     fn handle(conn : Conn) : Conn do
       log(conn)
@@ -4954,6 +4954,31 @@ end|} in
       | _ -> Alcotest.fail "bad Response shape")
    | _ -> Alcotest.fail "expected Ok(Response ...)")
 
+(* HTTPS needs the compiled server: the interpreter's HTTP server is a
+   separate OCaml implementation with no TLS, so a TLS configuration must
+   fail loudly there rather than quietly serve plain HTTP on the TLS port. *)
+let test_https_listen_needs_compiled_build () =
+  let list_mod = load_stdlib_file_for_test "list.march" in
+  let http     = load_stdlib_file_for_test "http.march" in
+  let server   = load_stdlib_file_for_test "http_server.march" in
+  let env = eval_with_stdlib [list_mod; http; server]
+    {|mod T do
+  fn run() do
+    HttpServer.new(0)
+    |> HttpServer.tls(HttpServer.TlsPem("cert", "key"))
+    |> HttpServer.listen()
+  end
+end|} in
+  match call_fn env "run" [] with
+  | _ -> Alcotest.fail "an HTTPS listen under the interpreter returned instead of failing"
+  | exception March_eval.Eval.Eval_error msg ->
+    let want = "need a compiled build" in
+    let found =
+      let n = String.length want and m = String.length msg in
+      let rec go i = i + n <= m && (String.sub msg i n = want || go (i + 1)) in
+      go 0 in
+    if not found then Alcotest.failf "wrong interpreter error: %s" msg
+
 (* ── B16 + conn-gated CSRF: ~H auto-injection ───────────────────────────────
    Every ~H literal containing a mutating <form method="post|put|patch|delete">
    gets an injected `CSRF.tag_string(conn)` call — but ONLY when a `conn`
@@ -5206,6 +5231,7 @@ let test_main_cap_io_runs () =
     fn main(cap : Cap(IO)) : () do
       let _console : Cap(IO.Console) = cap_narrow(cap)
       println("main ran with cap")
+      ()
     end
   end|} in
   let buf = Buffer.create 64 in
@@ -5223,6 +5249,7 @@ let test_main_zero_arity_still_runs () =
   needs IO.Console
     fn main(_cap_console : Cap(IO.Console)) : () do
       println("zero-arity main ran")
+      ()
     end
   end|} in
   let buf = Buffer.create 64 in
@@ -5659,8 +5686,64 @@ let test_default_method_across_files () =
   let code, out = sh (exe ^ " --compile -o prog run.march && ./prog") in
   if code <> 0 || last out <> "42" then Alcotest.failf "compiled: expected 42 (exit %d):\n%s" code out
 
+(* ocap phase 2, Task 2: the handle primitives, interpreted. The fixtures are
+   shared with the other backend's suite (Test_helpers.handle_*_src). *)
+let test_handle_primitive_roundtrip () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"handle_roundtrip" handle_roundtrip_src in
+  if rc <> 0 then Alcotest.failf "handle roundtrip exited %d:\n%s" rc out;
+  let last =
+    match List.rev (List.filter (fun l -> String.trim l <> "")
+                      (String.split_on_char '\n' out)) with
+    | l :: _ -> String.trim l
+    | [] -> ""
+  in
+  Alcotest.(check string) "raw, first close, enter after close, second close"
+    handle_roundtrip_expected last
+
+let test_handle_in_generic_containers () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"handle_containers" handle_containers_src in
+  if rc <> 0 then Alcotest.failf "handle containers exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("prints #<Socket>:\n" ^ out) true (contains "#<Socket>" out);
+  Alcotest.(check bool) ("prints #<Socket closed> after close:\n" ^ out) true
+    (contains "#<Socket closed>" out);
+  Alcotest.(check bool) ("never prints the raw descriptor as a field:\n" ^ out) false
+    (contains "Socket(7" out)
+
+(* ocap phase 2b, Task 8 (R4): a Process closed without wait_proc leaves no
+   zombie (Test_helpers.process_reap_src; the compiled twin, and the dropped
+   variant, are in test_codegen). *)
+let test_process_release_reaps_child () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"process_reap_close"
+      (process_reap_src ~drop:false ()) in
+  if rc <> 0 then Alcotest.failf "process reap exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("child reaped after close:\n" ^ out) true
+    (contains process_reap_expected out);
+  (* A child that ignores SIGTERM: the release's SIGKILL ends it. *)
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"process_reap_trap"
+      (process_reap_src ~trap:true ~drop:false ()) in
+  if rc <> 0 then Alcotest.failf "process reap (TERM trapped) exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("TERM-trapping child reaped after close:\n" ^ out) true
+    (contains process_reap_expected out)
+
+(* Fix round 1: racing wait_procs, interpreted (Test_helpers.process_wait_race_src). *)
+let test_process_wait_race () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:false ~name:"process_wait_race" process_wait_race_src in
+  if rc <> 0 then Alcotest.failf "wait race exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("one Ok, one Closed:\n" ^ out) true
+    (contains process_wait_race_expected out)
+
 let eval_suites =
   [
+      ( "handle primitives", [
+          Alcotest.test_case "handle_primitive_roundtrip" `Quick test_handle_primitive_roundtrip;
+          Alcotest.test_case "handle_in_generic_containers" `Quick test_handle_in_generic_containers;
+          Alcotest.test_case "process_release_reaps_child" `Quick test_process_release_reaps_child;
+          Alcotest.test_case "process_wait_race" `Quick test_process_wait_race ] );
       ( "march_test_cli", [
           Alcotest.test_case "fresh runtime per test file" `Quick test_march_test_fresh_runtime_per_file;
           Alcotest.test_case "default method of an impl in another file" `Quick test_default_method_across_files ] );
@@ -5722,6 +5805,7 @@ let eval_suites =
           Alcotest.test_case "fetch returns Ok raw"         `Quick test_http_fetch_returns_ok_raw;
           Alcotest.test_case "fetch maps Error to Err"      `Quick test_http_fetch_maps_error;
           Alcotest.test_case "HttpTransport.request via fetch" `Quick test_http_transport_request_via_fetch;
+          Alcotest.test_case "HTTPS listen needs a compiled build" `Quick test_https_listen_needs_compiled_build;
         ] );
       ( "eval",
         [

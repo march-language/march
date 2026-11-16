@@ -375,10 +375,26 @@ let strip_specialization_suffix (name : string) : string =
    symbol at emission; both mean "the user's fn, not the C one".  A `$` is
    unlexable in March source, so no user name can collide with it, and
    [strip_specialization_suffix] maps it back to the bare name, which
-   consumers that match by base name (exports, contracts) rely on. *)
+   consumers that match by base name (exports, contracts) rely on.
+
+   The same rename covers the other ways a user definition and a stdlib one
+   came out as ONE TIR symbol (specs/progress/2026-11-10-user-stdlib-name-collisions.md):
+   a user fn named like an interface method (`show` -> `show$u`, so mono never
+   has to guess from argument types whether a `show` call means the user's fn
+   or the Show method), and a fn of an entry-file module named like a stdlib
+   module (`List.sum_int` -> `List.sum_int$u`, so the stdlib's `List.sum_int`
+   keeps its own symbol).  [Lower.lower_module] decides which names; the table
+   is [Lower_state._entry_builtin_shadows]. *)
 
 (** [builtin_shadow_name "file_read" = "file_read$u"]. *)
 let builtin_shadow_name (name : string) : string = name ^ "$u"
+
+(** Inverse of [builtin_shadow_name] on a name that may or may not carry the
+    suffix: [unshadow_name "List.eq$u" = "List.eq"], identity otherwise. *)
+let unshadow_name (name : string) : string =
+  let n = String.length name in
+  if n > 2 && String.sub name (n - 2) 2 = "$u" then String.sub name 0 (n - 2)
+  else name
 
 (* ── Default-argument mangling: "base$N" ────────────────────────────────
    Producer: lib/desugar/desugar.ml's [expand_defaults_decl] mints, for a

@@ -40,3 +40,63 @@ end
                   object: (identifier)
                   field: (identifier))
                 right: (integer)))))))))
+
+================================================================================
+Handler guarantee (ensures, old)
+================================================================================
+
+mod Bank do
+  actor Account do
+    state { balance : Int }
+    init { balance: 0 }
+    on Deposit(n : Int) ensures state.balance == old(state.balance) + n do
+      { balance: state.balance + n }
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    (module_path
+      (type_identifier))
+    (actor_def
+      (type_identifier)
+      (actor_state
+        (record_type_field
+          (identifier)
+          (type_constructor
+            (type_constructor))))
+      (actor_init
+        (record_expression
+          (record_field
+            (identifier)
+            (integer))))
+      (actor_handler
+        (type_identifier)
+        (fn_param
+          (named_param
+            (identifier)
+            (type_constructor
+              (type_constructor))))
+        (comparison_expression
+          (field_expression
+            (identifier)
+            (identifier))
+          (additive_expression
+            (call_expression
+              (identifier)
+              (field_expression
+                (identifier)
+                (identifier)))
+            (identifier)))
+        (block_body
+          (record_expression
+            (record_field
+              (identifier)
+              (additive_expression
+                (field_expression
+                  (identifier)
+                  (identifier))
+                (identifier)))))))))

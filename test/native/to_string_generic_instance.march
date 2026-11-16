@@ -68,5 +68,6 @@ mod Main do
     println(inspect(b))
     println(inspect(Has(Flag(false))))
     println(IOList.to_string(~H"<p>${b} ${t}</p>"))
+    ()
   end
 end

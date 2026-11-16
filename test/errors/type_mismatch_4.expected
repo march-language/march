@@ -11,7 +11,7 @@ expected `Int` but got `String`. [type_mismatch]
     the expected type comes from here:
 
  7 |     match s do
-               ^^^^
+         ^^^^^^^^^^
     run `march --explain type_mismatch`
 
 

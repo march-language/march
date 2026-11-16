@@ -160,6 +160,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
     | Ast.ERefineMsg (c, _, _) -> ex c
+    | Ast.EProof (p, _) -> List.iter ex (Ast.proof_children p)
   in
   let fn_param (fp : Ast.fn_param) =
     match fp with
@@ -179,7 +180,7 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
     | Ast.DType (_, _, _, td, _)
     | Ast.DAlwaysLinearType (_, _, _, td, _) ->
       (match td with
-       | Ast.TDAlias t -> ty t
+       | Ast.TDAlias (t, _) -> ty t
        | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
        | Ast.TDVariant vs ->
          List.iter (fun (v : Ast.variant) -> List.iter ty v.Ast.var_args) vs)
@@ -272,6 +273,7 @@ let unqualified_module_deps
     | Ast.EAssert (e, _) -> ex e
     | Ast.ESigil (_, c, _) -> ex c
     | Ast.ERefineMsg (c, _, _) -> ex c
+    | Ast.EProof (p, _) -> List.iter ex (Ast.proof_children p)
   in
   let decl (d : Ast.decl) =
     match d with
@@ -285,7 +287,7 @@ let unqualified_module_deps
     | Ast.DType (_, _, _, td, _)
     | Ast.DAlwaysLinearType (_, _, _, td, _) ->
       (match td with
-       | Ast.TDAlias t -> ty t
+       | Ast.TDAlias (t, _) -> ty t
        | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
        | Ast.TDVariant vs ->
          List.iter (fun (v : Ast.variant) -> List.iter ty v.Ast.var_args) vs)

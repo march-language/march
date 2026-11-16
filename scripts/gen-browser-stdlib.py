@@ -30,7 +30,7 @@ STDLIB = os.path.join(ROOT, "stdlib")
 # on first use. Kept to what the REPL loaded before on-demand loading existed, minus
 # random.march (it needs 63-bit Int; see UNAVAILABLE), so startup cost is unchanged.
 CORE = [
-    "prelude.march", "option.march", "result.march", "list.march",
+    "prelude.march", "authority.march", "option.march", "result.march", "list.march",
     "task.march",
     "hamt.march", "map.march", "math.march", "string.march", "sort.march",
     "seq.march", "set.march", "array.march", "tuple.march", "char.march",

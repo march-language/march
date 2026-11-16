@@ -22,6 +22,8 @@ march_runtime.c              core            jit
 march_scheduler.c            core            jit
 march_reclaim.c              core            jit
 march_extras.c               core            jit
+march_handle.c               core            jit
+march_file_beneath.c         core            jit
 march_compress.c             core            -
 march_compress_zstd.c        codec           -
 march_compress_brotli.c      codec           -
@@ -42,6 +44,10 @@ march_http_io.c              http            -
 march_http_evloop.c          http            -
 march_udp.c                  http            -
 march_tls.c                  http            -
+march_tls_session.c          http            -
+march_tls_server.c           http            -
+march_https.c                http            -
+march_https_tls.c            http            -
 march_dispatch.c             hcr             jit
 march_trace.c                hcr             jit
 march_reload.c               hcr             jit

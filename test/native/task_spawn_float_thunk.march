@@ -68,6 +68,7 @@ mod TaskSpawnFloatThunk do
       Ok(n)  -> println("int_capture=" ++ int_to_string(n))
       Err(_) -> println("int_capture_err")
     end
+    ()
   end
 
 end

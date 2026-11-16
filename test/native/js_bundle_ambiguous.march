@@ -11,5 +11,6 @@ mod JsBundleAmbiguous do
 
   fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do
     println(which())
+    ()
   end
 end

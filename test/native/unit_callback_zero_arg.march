@@ -17,8 +17,9 @@ mod UnitCallbackZeroArg do
   end
 
   fn main(_cap_console : Cap(IO.Console)) : Unit do
-    run_twice(fn -> println("a"))
+    run_twice(fn -> Authority.ignore(println("a")))
     let g = fn -> println("b")
     g()
+    ()
   end
 end

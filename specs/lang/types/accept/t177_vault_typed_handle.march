@@ -7,7 +7,7 @@ mod M do
   needs IO.Mut
 
   fn main(_m : Cap(IO.Mut)) : Int do
-    let names = Vault.new("names")
+    let names = Authority.must(Vault.new("names"))
     Vault.set(names, "a", "alice")
     Vault.set_ttl(names, "b", "bob", 60)
     Vault.update(names, "a", fn s -> s ++ "!")
@@ -20,10 +20,10 @@ mod M do
     Vault.drop(names, "b")
 
     -- A separate table at a different element type, in the same scope.
-    let hits = Vault.new("hits")
+    let hits = Authority.must(Vault.new("hits"))
     let n = Vault.incr(hits, "page", 1)
 
-    let recent = Vault.new("recent")
+    let recent = Authority.must(Vault.new("recent"))
     Vault.push_capped(recent, "log", 7, 10)
 
     first + n + List.length(ks) + Vault.size(names)

@@ -39,6 +39,7 @@ end
 
 pfn report(case_name : String, variant : String, ms : Float) : Unit do
   println("TIME " ++ case_name ++ " " ++ variant ++ " " ++ float_to_string(ms))
+  ()
 end
 
 -- ── Int: 3-deep map chain, light body ──────────────────────────────────────
@@ -206,6 +207,7 @@ fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let fb = NativeArray.from_list_float(make_float_list(n))
   let check = rounds(9, ia, ib, fa, fb, 0.0)
   println("CHECKSUM " ++ float_to_string(check))
+  ()
 end
 
 end

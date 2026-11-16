@@ -62,5 +62,6 @@ mod Main do
     let add = fn (s, x) -> s + x
     println(int_to_string(NativeArray.fold_int(ia, 0, add)))
     println(int_to_string(apply_twice(add, 5, 6)))
+    ()
   end
 end

@@ -58,5 +58,6 @@ mod Main do
     println("sessions failed: " ++ int_to_string(bad))
     println("objects left per session under 120: " ++ bool_to_string(per < 120))
     Process.exit(0)
+    ()
   end
 end

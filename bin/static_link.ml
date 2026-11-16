@@ -31,7 +31,8 @@ let reached (called : string list) : reach =
   let uses prefix = List.exists (fun s ->
       String.length s >= String.length prefix
       && String.sub s 0 (String.length prefix) = prefix) called in
-  { tls = uses "march_tls_";
+  { tls = uses "march_tls_" || uses "march_http_server_tls_configure"
+          || uses "march_http_server_reload_tls";
     zlib = uses "march_gzip_" || uses "march_deflate_";
     zstd = uses "march_zstd_";
     brotli = uses "march_brotli_" }

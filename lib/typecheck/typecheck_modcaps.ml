@@ -348,6 +348,15 @@ let check_no_panic_module (errors : Err.ctx) (env : env) (decls : Ast.decl list)
 let is_nondeterministic_cap (cap : string) : bool =
   cap = "IO.Clock" || cap = "IO.Random"
 
+(* Monotonic-clock reads (`sys_uptime_ms`, behind `System.monotonic_time`).
+   AMBIENT for `needs` on purpose (see the comment at its signature in
+   [Typecheck_builtins]: gating it on `IO.Clock` would break every timing
+   caller granted only `IO.Console`), so it has no [builtin_cap_table] row and
+   a banned set derived from the table alone missed it (issue #1180).  A clock
+   read is still both a side effect and a nondeterminism source, so BOTH
+   module caps ban it by name. *)
+let monotonic_clock_builtins : StringSet.t = StringSet.of_list [ "sys_uptime_ms" ]
+
 (* `cap pure` = NO side effect at all → ban every builtin the authoritative
    effect map (`builtin_cap_table`) attributes an IO/effect cap to. Derived
    from the table (not a hand-guessed parallel list) so it stays in lockstep
@@ -359,10 +368,134 @@ let is_nondeterministic_cap (cap : string) : bool =
 let pure_banned : StringSet.t =
   let from_table = builtin_cap_table |> List.map fst |> StringSet.of_list in
   StringSet.union from_table
-    (StringSet.of_list [ "spawn"; "send"; "exit"; "read_byte" ])
+    (StringSet.union monotonic_clock_builtins
+       (StringSet.of_list [ "spawn"; "send"; "exit"; "read_byte" ]))
 
 let pure_suggestion : string =
-  "Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module."
+  "Use pure functions (no IO, spawn, vault, clock, or random ops) in a `cap pure` module."
+
+(* -- Stdlib wrappers of ambient banned builtins (issue #1180) ------------
+
+   The name scan below sees only DIRECT calls, so `System.monotonic_time()`
+   (a stdlib function whose body is `sys_uptime_ms()`) passed both caps.
+   A banned builtin that HAS a capability row is already unreachable through
+   a stdlib wrapper: the module cannot declare its `needs` (see
+   [check_module_cap_needs]) and the capability ceiling rejects the wrapper
+   call without it.  What the ceiling cannot see is a banned builtin with NO
+   row (an ambient one), so only those are followed through the stdlib:
+   [ceiling_blind] picks them out of a banned set, and [stdlib_reach] walks
+   the same reference edges the capability closure uses ([env.fn_refs],
+   resolved exactly as [Cap_rows.resolve_ref] resolves them) through stdlib
+   functions only.  A user callee is checked by its own module's caps, and
+   the stdlib never calls user code statically.  Derived from the stdlib's
+   own bodies, not a hand-kept list of wrapper names, so a new wrapper is
+   covered the day it lands. *)
+let ceiling_blind (banned : StringSet.t) : StringSet.t =
+  StringSet.filter (fun n -> not (List.mem_assoc n builtin_cap_table)) banned
+
+(* [stdlib_reach env ~ambient] is a memoized lookup: for a call name that IS
+   a stdlib function, [Some b] when that function reaches the ambient banned
+   builtin [b] through stdlib-only edges; [None] otherwise (including for
+   every non-stdlib name). *)
+let stdlib_reach (env : env) ~(ambient : StringSet.t) : string -> string option =
+  let memo : (string, string option) Hashtbl.t = Hashtbl.create 16 in
+  (* [Cap_rows.resolve_ref]'s rule (not exported): the owner's module prefix
+     first, then the raw name. *)
+  let resolve owner r =
+    let qualified = March_caps.Cap_rows.ref_prefix ~scopes:env.fn_scopes owner ^ r in
+    if Hashtbl.mem env.stdlib_fns qualified then Some qualified
+    else if Hashtbl.mem env.stdlib_fns r then Some r
+    else None
+  in
+  let walk root =
+    let visited = Hashtbl.create 32 in
+    let rec go = function
+      | [] -> None
+      | k :: rest when Hashtbl.mem visited k -> go rest
+      | k :: rest ->
+        Hashtbl.replace visited k ();
+        let refs = Option.value ~default:[] (Hashtbl.find_opt env.fn_refs k) in
+        let resolved = List.map (fun r -> (r, resolve k r)) refs in
+        (* An unresolved reference is a builtin (or a name outside the
+           stdlib); a resolved one is a stdlib function, including a sibling
+           that merely shares a builtin's name, which is walked, not banned. *)
+        match
+          List.find_opt (fun (r, q) -> q = None && StringSet.mem r ambient) resolved
+        with
+        | Some (b, _) -> Some b
+        | None -> go (List.filter_map snd resolved @ rest)
+    in
+    go [ root ]
+  in
+  fun name ->
+    if not (Hashtbl.mem env.stdlib_fns name) then None
+    else
+      match Hashtbl.find_opt memo name with
+      | Some r -> r
+      | None ->
+        let r = walk name in
+        Hashtbl.replace memo name r;
+        r
+
+(* -- The `needs` half of `cap pure` / `cap deterministic` (issue #1180) ---
+
+   A stdlib wrapper (`File.read`, `DateTime.now`, ...) is not a banned NAME,
+   so the call scan cannot see it; but the capability ceiling admits a wrapper
+   only when the calling module declares the wrapper's `needs`.  Rejecting the
+   `needs` line itself therefore closes the wrapper route for every capability
+   a module cap forbids:
+
+   - `cap pure` forbids every `needs`: a pure module holding a capability is
+     a contradiction, since a `needs` exists only to admit an effect;
+   - `cap deterministic` forbids a `needs` that admits a nondeterminism source
+     (`IO.Clock`, `IO.Random`) or a parent that includes one (`IO`); ordinary
+     IO capabilities stay allowed.
+
+   Only the module's OWN `needs` lines are checked (a stdlib-spanned one is
+   not the user's: prelude is unwrapped into the entry module). *)
+let nondeterministic_caps : string list = [ "IO.Clock"; "IO.Random" ]
+
+let admits_nondeterminism (need : string) : bool =
+  List.exists (March_caps.Cap_lattice.cap_subsumes need) nondeterministic_caps
+
+let check_module_cap_needs (errors : Err.ctx) ~(mod_name : string) ~(pure : bool)
+    (decls : Ast.decl list) : unit =
+  List.iter (function
+    | Ast.DNeeds (caps, sp) when not (span_is_stdlib sp) ->
+      List.iter (fun (path, _scope) ->
+        let need = String.concat "." (List.map (fun (n : Ast.name) -> n.Ast.txt) path) in
+        if need <> "" && (pure || admits_nondeterminism need) then
+          if pure then
+            Err.error ~code:Err.Code.pure_violation errors ~span:sp
+              (Printf.sprintf
+                 "`mod %s` (declared `cap pure`) declares `needs %s`, but a pure module \
+                  cannot hold a capability: `needs` exists only to admit side effects, \
+                  directly or through a stdlib wrapper such as `File.read` or \
+                  `DateTime.now`.\n\n\
+                  Remove the `needs` line, and move the code that needs it to a module \
+                  without `cap pure`."
+                 mod_name need)
+          else
+            let admits =
+              match
+                List.filter (March_caps.Cap_lattice.cap_subsumes need) nondeterministic_caps
+              with
+              | [ "IO.Clock" ] -> "the clock, a nondeterminism source"
+              | [ "IO.Random" ] -> "a random-number generator, a nondeterminism source"
+              | _ -> "the clock and a random-number generator, both nondeterminism sources"
+            in
+            Err.error ~code:Err.Code.deterministic_violation errors ~span:sp
+              (Printf.sprintf
+                 "`mod %s` (declared `cap deterministic`) declares `needs %s`, which \
+                  admits %s, directly or through a stdlib wrapper such as \
+                  `DateTime.now`.\n\n\
+                  Declare only capabilities that are neither the clock nor an RNG \
+                  (`IO.Console`, `IO.FileRead`, ...), and move the code that reads the \
+                  clock or an RNG to a module without `cap deterministic`."
+                 mod_name need admits)
+      ) caps
+    | _ -> ()
+  ) decls
 
 (* Names a clause's parameters bind: a call through one of them is a call to
    the argument, not to a banned builtin of the same name (see
@@ -379,6 +512,8 @@ let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : u
      sharing a builtin's name (e.g. its own `random_bytes`) is not a call to
      that builtin. *)
   let locally_declared_names = locally_declared_names_of decls in
+  check_module_cap_needs errors ~mod_name ~pure:true decls;
+  let reach = stdlib_reach env ~ambient:(ceiling_blind pure_banned) in
   List.iter (fun d ->
     match d with
     | Ast.DFn (def, _fn_span) ->
@@ -388,12 +523,21 @@ let check_pure_module (errors : Err.ctx) (env : env) (decls : Ast.decl list) : u
             ~bound:(clause_param_names clause) clause.Ast.fc_body
         in
         List.iter (fun (name, site_span) ->
-          if StringSet.mem name pure_banned
-             && not (Hashtbl.mem locally_declared_names name) then
-            Err.error ~code:Err.Code.pure_violation errors ~span:site_span
-              (Printf.sprintf
-                 "`%s` in `mod %s` (declared `cap pure`) calls `%s`, which has side effects.\n\n%s"
-                 def.Ast.fn_name.txt mod_name name pure_suggestion)
+          if not (Hashtbl.mem locally_declared_names name) then
+            if StringSet.mem name pure_banned then
+              Err.error ~code:Err.Code.pure_violation errors ~span:site_span
+                (Printf.sprintf
+                   "`%s` in `mod %s` (declared `cap pure`) calls `%s`, which has side effects.\n\n%s"
+                   def.Ast.fn_name.txt mod_name name pure_suggestion)
+            else
+              match reach name with
+              | Some b ->
+                Err.error ~code:Err.Code.pure_violation errors ~span:site_span
+                  (Printf.sprintf
+                     "`%s` in `mod %s` (declared `cap pure`) calls `%s`, which has side \
+                      effects: it reaches `%s`.\n\n%s"
+                     def.Ast.fn_name.txt mod_name name b pure_suggestion)
+              | None -> ()
         ) calls
       ) def.Ast.fn_clauses
     | _ -> ()
@@ -441,6 +585,7 @@ let deterministic_banned : StringSet.t =
   |> List.filter (fun (_, cap) -> is_nondeterministic_cap cap)
   |> List.map fst
   |> StringSet.of_list
+  |> StringSet.union monotonic_clock_builtins
 
 let deterministic_suggestion : string =
   "Use deterministic operations only in a `cap deterministic` module. \
@@ -451,6 +596,8 @@ let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl 
   (* See [locally_declared_names_of]: same shadowing guard as
      [check_pure_module]. *)
   let locally_declared_names = locally_declared_names_of decls in
+  check_module_cap_needs errors ~mod_name ~pure:false decls;
+  let reach = stdlib_reach env ~ambient:(ceiling_blind deterministic_banned) in
   List.iter (fun d ->
     match d with
     | Ast.DFn (def, _fn_span) ->
@@ -460,13 +607,22 @@ let check_deterministic_module (errors : Err.ctx) (env : env) (decls : Ast.decl 
             ~bound:(clause_param_names clause) clause.Ast.fc_body
         in
         List.iter (fun (name, site_span) ->
-          if StringSet.mem name deterministic_banned
-             && not (Hashtbl.mem locally_declared_names name) then
-            Err.error ~code:Err.Code.deterministic_violation errors ~span:site_span
-              (Printf.sprintf
-                 "`%s` in `mod %s` (declared `cap deterministic`) calls `%s`, \
-                  which is non-deterministic.\n\n%s"
-                 def.Ast.fn_name.txt mod_name name deterministic_suggestion)
+          if not (Hashtbl.mem locally_declared_names name) then
+            if StringSet.mem name deterministic_banned then
+              Err.error ~code:Err.Code.deterministic_violation errors ~span:site_span
+                (Printf.sprintf
+                   "`%s` in `mod %s` (declared `cap deterministic`) calls `%s`, \
+                    which is non-deterministic.\n\n%s"
+                   def.Ast.fn_name.txt mod_name name deterministic_suggestion)
+            else
+              match reach name with
+              | Some b ->
+                Err.error ~code:Err.Code.deterministic_violation errors ~span:site_span
+                  (Printf.sprintf
+                     "`%s` in `mod %s` (declared `cap deterministic`) calls `%s`, \
+                      which is non-deterministic: it reaches `%s`.\n\n%s"
+                     def.Ast.fn_name.txt mod_name name b deterministic_suggestion)
+              | None -> ()
         ) calls
       ) def.Ast.fn_clauses
     | _ -> ()

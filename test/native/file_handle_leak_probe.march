@@ -1,3 +1,7 @@
+-- compile-flags: --stdlib-source (pins raw builtin behaviour; test/dune passes it, test_ir_verify.ml reads it)
+-- Compiled and run with --stdlib-source (test/dune): it pins the raw file_open / csv_open handle table,
+-- which are stdlib-only since ocap phase 2 (Task 10). User code reaches
+-- them through File and Csv.
 -- File and CSV handles are `Int`s, so nothing in compiled code releases
 -- them: the handle used to be a heap cell that file_close / csv_close could
 -- not free (a second close must stay a no-op), and every open leaked it
@@ -38,7 +42,7 @@ mod Main do
   pfn csv_leg(path : String, n : Int, acc : Int) : Int do
     if n <= 0 do acc
     else
-      match Csv.read_all(path, ",", :rfc4180) do
+      match Authority.must(Csv.read_all(path, ",", :rfc4180)) do
       Err(_) -> -1
       Ok(rows) -> csv_leg(path, n - 1, acc + List.length(rows))
       end
@@ -54,7 +58,7 @@ mod Main do
 
   fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : Unit do
     let path = "/tmp/march_native_file_handle_leak_probe.csv"
-    match File.write(path, "a,b,c\n1,2,3\n") do
+    match Authority.must(File.write(path, "a,b,c\n1,2,3\n")) do
     Err(_) -> panic("write failed")
     Ok(_) -> :ok
     end
@@ -69,15 +73,15 @@ mod Main do
     println("csv open/close: total " ++ int_to_string(y) ++ ", flat: " ++ bool_to_string(a2 - a1 < 30))
 
     match file_open(path) do
-    Err(_) -> println("file_open err")
+    Err(_) -> Authority.ignore(println("file_open err"))
     Ok(old) ->
       let _ = file_close(old)
       println("second close == :ok: " ++ bool_to_string(file_close(old) == :ok))
       println("read after close: " ++ line_of(file_read_line(old)))
       match file_open(path) do
-      Err(_) -> println("file_open err")
+      Err(_) -> Authority.ignore(println("file_open err"))
       Ok(fresh) ->
-        println("stale handle reads: " ++ line_of(file_read_line(old)))
+        Authority.ignore(println("stale handle reads: " ++ line_of(file_read_line(old))))
         println("fresh handle reads: " ++ line_of(file_read_line(fresh)))
         let _ = file_close(old)
         println("fresh after stale close: " ++ line_of(file_read_line(fresh)))
@@ -86,6 +90,6 @@ mod Main do
       end
     end
 
-    match File.delete(path) do _ -> () end
+    match Authority.must(File.delete(path)) do _ -> () end
   end
 end

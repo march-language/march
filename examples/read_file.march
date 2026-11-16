@@ -10,33 +10,36 @@ mod ReadFile do
     let path = "examples/read_file.march"
 
     -- Read the whole file at once
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
     Err(e) ->
-      println("Error reading file: " ++ to_string(e))
+      Authority.ignore(println("Error reading file: " ++ to_string(e)))
     Ok(contents) -> do
-      println("=== Full file contents ===")
+      Authority.ignore(println("=== Full file contents ==="))
       println(contents)
+      ()
     end
     end
 
     -- Read as a list of lines
-    match File.read_lines(path) do
+    match Authority.must(File.read_lines(path)) do
     Err(e) ->
-      println("Error: " ++ to_string(e))
+      Authority.ignore(println("Error: " ++ to_string(e)))
     Ok(lines) -> do
-      println("=== Line count ===")
+      Authority.ignore(println("=== Line count ==="))
       println(String.from_int(List.length(lines)) ++ " lines")
+      ()
     end
     end
     -- dbg()
     -- Stream lines with with_lines, collect first 3
     println("=== First 3 lines (streaming) ===")
-    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do
+    match Authority.must(File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3)))) do
     Err(e) ->
-      println("Error: " ++ to_string(e))
+      Authority.ignore(println("Error: " ++ to_string(e)))
     Ok(first3) -> do
       let joined = List.fold_left(first3, "", fn(acc, line) -> acc ++ line ++ "\n")
       println(joined)
+      ()
     end
     end
   end

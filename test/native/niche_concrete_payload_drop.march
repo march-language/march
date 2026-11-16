@@ -49,5 +49,6 @@ mod NicheConcretePayloadDrop do
     -- 9 x 2 + 90 x 3 + 900 x 4 + 1 x 5 = 3893
     println(int_to_string(spin(1000, 0)))
     println(int_to_string(size(Z)))
+    ()
   end
 end

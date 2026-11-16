@@ -148,21 +148,22 @@ mod Main do
 
   fn refuse(d, label : String, o : Trace.Options, limit : Trace.Limit) : Unit do
     match Trace.start_with(d, o, limit) do
-      Ok(_) -> println(label ++ ": STARTED (should be refused)")
-      Err(e) -> println(label ++ ": " ++ err_name(e))
+      Ok(_) -> Authority.ignore(println(label ++ ": STARTED (should be refused)"))
+      Err(e) -> Authority.ignore(println(label ++ ": " ++ err_name(e)))
     end
   end
 
   fn summary(label : String, r : Result(Trace.Batch, Trace.TraceError)) : Unit do
     match r do
       Ok(x) ->
-        println(label ++ ": actor_events=" ++ int_to_string(List.length(x.actor_events))
+        Authority.ignore(println(label ++ ": actor_events=" ++ int_to_string(List.length(x.actor_events))
           ++ " calls=" ++ int_to_string(List.length(x.events))
           ++ " recorded=" ++ int_to_string(x.recorded)
           ++ " dropped=" ++ int_to_string(x.dropped)
           ++ " rate_dropped=" ++ int_to_string(x.rate_dropped)
-          ++ " done=" ++ bool_str(x.done) ++ " why=" ++ why_str(x.why))
-      Err(e) -> println(label ++ ": " ++ err_name(e))
+          ++ " done=" ++ bool_str(x.done) ++ " why=" ++ why_str(x.why)))
+        ()
+      Err(e) -> Authority.ignore(println(label ++ ": " ++ err_name(e)))
     end
   end
 
@@ -174,7 +175,7 @@ mod Main do
     match Trace.drain(d, s) do
       Ok(x) -> x.actor_events
       Err(e) -> do
-        println("drain: " ++ err_name(e))
+        Authority.ignore(println("drain: " ++ err_name(e)))
         Nil
       end
     end
@@ -200,7 +201,7 @@ mod Main do
     -- sends it a message (Sent).  The child is not named, so it is seen only
     -- as the peer of its parent's events.
     match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.MaxEvents(100)) do
-      Err(e) -> println("flow start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("flow start: " ++ err_name(e)))
       Ok(s) ->
         send(p, Make(5))
         run_until_idle()
@@ -227,7 +228,7 @@ mod Main do
 
     -- Kind filter: only Received.  Events of other kinds are not recorded.
     match Trace.start_with(d, Trace.actors([Trace.Received], [pi]), Trace.MaxEvents(100)) do
-      Err(e) -> println("kind start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("kind start: " ++ err_name(e)))
       Ok(s) ->
         send(p, Make(1))
         run_until_idle()
@@ -241,7 +242,7 @@ mod Main do
     let l = spawn(Kid)
     let li = pid_to_int(l)
     match Trace.start_with(d, Trace.actors(all_kinds(), [li]), Trace.MaxEvents(100)) do
-      Err(e) -> println("pid start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("pid start: " ++ err_name(e)))
       Ok(s) ->
         send(p, Make(1))
         run_until_idle()
@@ -258,21 +259,21 @@ mod Main do
 
     -- An existing boundary-call session is unchanged: no actor events leak in.
     match Trace.start_with(d, Trace.calls(["step"]), Trace.MaxEvents(5)) do
-      Err(e) -> println("calls start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("calls start: " ++ err_name(e)))
       Ok(s) ->
         send(p, Make(1))
         run_until_idle()
         match Trace.drain(d, s) do
-          Ok(x) -> println("calls-only session: actor_events=" ++ int_to_string(List.length(x.actor_events))
-            ++ " calls=" ++ int_to_string(List.length(x.events)))
-          Err(e) -> println("calls drain: " ++ err_name(e))
+          Ok(x) -> Authority.ignore(println("calls-only session: actor_events=" ++ int_to_string(List.length(x.actor_events))
+            ++ " calls=" ++ int_to_string(List.length(x.events))))
+          Err(e) -> Authority.ignore(println("calls drain: " ++ err_name(e)))
         end
         let _ = Trace.stop(d, s)
     end
 
     -- Count bounds an event session exactly: 3 Makes make more than 2 events.
     match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.MaxEvents(2)) do
-      Err(e) -> println("count start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("count start: " ++ err_name(e)))
       Ok(s) ->
         send(p, Make(1))
         send(p, Make(1))
@@ -287,7 +288,7 @@ mod Main do
 
     -- Rate bounds it per window and counts the excess.
     match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.Rate(3, 60)) do
-      Err(e) -> println("rate start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("rate start: " ++ err_name(e)))
       Ok(s) ->
         send(p, Make(1))
         send(p, Make(1))
@@ -295,12 +296,12 @@ mod Main do
         run_until_idle()
         match Trace.drain(d, s) do
           Ok(x) -> do
-            println("rate(3,60): kept=" ++ int_to_string(List.length(x.actor_events))
+            Authority.ignore(println("rate(3,60): kept=" ++ int_to_string(List.length(x.actor_events))
               ++ " recorded=" ++ int_to_string(x.recorded)
               ++ " over budget counted=" ++ bool_str(x.rate_dropped > 0)
-              ++ " done=" ++ bool_str(x.done))
+              ++ " done=" ++ bool_str(x.done)))
           end
-          Err(e) -> println("rate drain: " ++ err_name(e))
+          Err(e) -> Authority.ignore(println("rate drain: " ++ err_name(e)))
         end
         let _ = Trace.stop(d, s)
     end
@@ -316,7 +317,7 @@ mod Main do
     end
     let child_pid = Actor.pid_from_int(intro, child)
     match Trace.start_with(d, Trace.actors([Trace.Exited], [pid_to_int(x), pid_to_int(y), child]), Trace.MaxEvents(20)) do
-      Err(e) -> println("exit start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("exit start: " ++ err_name(e)))
       Ok(s) ->
         kill(x)
         let _ = Actor.stop(y, 5000)
@@ -334,7 +335,7 @@ mod Main do
     -- Dropped: a send to a dead actor named by the session, and a full mailbox.
     let z = spawn(Kid)
     match Trace.start_with(d, Trace.actors([Trace.Dropped], [pid_to_int(z)]), Trace.MaxEvents(100)) do
-      Err(e) -> println("drop start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("drop start: " ++ err_name(e)))
       Ok(s) ->
         kill(z)
         let r = send(z, Hit(1))
@@ -350,7 +351,7 @@ mod Main do
     let slow = spawn(Slow)
     Actor.set_queue_limit(slow, 1, 1)
     match Trace.start_with(d, Trace.actors([Trace.Dropped], [pid_to_int(slow)]), Trace.MaxEvents(200)) do
-      Err(e) -> println("full start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("full start: " ++ err_name(e)))
       Ok(s) ->
         let go = fn i -> send(slow, Work(i))
         go(1)
@@ -371,13 +372,13 @@ mod Main do
     -- Sessions free their bits: after stop, traffic costs and records nothing,
     -- and a new session on the same actor starts clean.
     match Trace.start_with(d, Trace.actors(all_kinds(), [pi]), Trace.MaxEvents(100)) do
-      Err(e) -> println("again start: " ++ err_name(e))
+      Err(e) -> Authority.ignore(println("again start: " ++ err_name(e)))
       Ok(s) ->
         let _ = Trace.stop(d, s)
         send(p, Make(1))
         run_until_idle()
         match Trace.start_with(d, Trace.actors([Trace.Received], [pi]), Trace.MaxEvents(100)) do
-          Err(e) -> println("again start 2: " ++ err_name(e))
+          Err(e) -> Authority.ignore(println("again start 2: " ++ err_name(e)))
           Ok(s2) ->
             send(p, Make(1))
             run_until_idle()

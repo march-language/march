@@ -468,7 +468,8 @@ mod Seq do
       end
   """
   fn from_file_lines(path) do
-    match file_open(path) do
+    let? _ = Authority.check("IO.FileRead", path)
+    let performed = match file_open(path) do
     Err(e) -> Err(e)
     Ok(fd) -> do
       fn do_lines(a, f) do
@@ -483,6 +484,7 @@ mod Seq do
       Ok(Seq(fn(acc, f) -> do_lines(acc, f)))
     end
     end
+    Ok(performed)
   end
 
   doc """
@@ -492,7 +494,8 @@ mod Seq do
   EOF, so consume to completion (`to_list`, `fold`, etc.).
   """
   fn from_file_chunks(path, size) do
-    match file_open(path) do
+    let? _ = Authority.check("IO.FileRead", path)
+    let performed = match file_open(path) do
     Err(e) -> Err(e)
     Ok(fd) -> do
       fn do_chunks(a, f) do
@@ -507,6 +510,7 @@ mod Seq do
       Ok(Seq(fn(acc, f) -> do_chunks(acc, f)))
     end
     end
+    Ok(performed)
   end
 
   doc """

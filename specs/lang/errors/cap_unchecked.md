@@ -1,0 +1,53 @@
+---
+layout: docs
+title: "cap_unchecked"
+permalink: /docs/errors/cap_unchecked/
+---
+
+# `cap_unchecked`: the capability ceiling and host scopes could not be checked
+
+Two capability checks, the module `needs` ceiling and host scopes on
+`IO.NetConnect`, run on the compiled form of a program. `march --check`, the
+interpreter, `march check` and the REPL build that form on demand. When the
+program uses something the compiler cannot build (an interpreter-only builtin
+such as `App.stop` or the value-level supervisor DSL), those two checks cannot
+run. The program is not
+rejected for it: this warning says the checks were skipped and why, and every
+other capability check still ran. `march --compile` rejects the program, for
+the reason the warning names.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  fn main(c : Cap(IO.Console)) do
+    println("before")
+    App.stop()
+    println("after")
+  end
+end
+```
+
+## The fix
+
+Write what the compiler can build: here, a compiled program ends when `main`
+returns, so the call can go. Then the ceiling and host scopes are checked in
+every mode.
+
+```march
+mod Main do
+  needs IO.Console
+  fn main(c : Cap(IO.Console)) do
+    println("before")
+    println("after")
+  end
+end
+```
+
+## Why the rule exists
+
+A program must be held to the same capability rules however it runs. When one
+mode cannot apply a check, it says so instead of passing the program silently.
+
+See also: [the language reference](../capabilities.md).

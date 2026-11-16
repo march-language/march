@@ -121,6 +121,7 @@ before returning the result.
 | `task_spawn` | `(Int → a) → Task(a)` | Spawn (runs eagerly) |
 | `task_await` | `Task(a) → Result(a, String)` | Await result |
 | `task_await_unwrap` | `Task(a) → a` | Await, panic on Err |
+| `task_poll` | `Task(a) → Option(Result(a, String))` | Non-blocking await: `None` while running, else `Some` of `task_await`'s answer (interpreter: always `Some`) |
 | `task_cancel_token_new` | `CancelToken` | New uncancelled token |
 | `task_cancel` | `CancelToken → Unit` | Set token cancelled |
 | `task_is_cancelled` | `CancelToken → Bool` | Check token |

@@ -11,5 +11,6 @@ mod FloatLoop do
   fn main(_c : Cap(IO.Console)) : Unit do
     let r = step(200000, 0.0)
     println("checksum=" ++ int_to_string(float_to_int(r)))
+    ()
   end
 end

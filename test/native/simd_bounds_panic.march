@@ -10,5 +10,6 @@ mod Main do
     let arr = NativeArray.make_f32(5, 0.0)
     let v = Simd.load_f32x4(arr, 2)
     println(Simd.extract_f32x4(v, 0))
+    ()
   end
 end

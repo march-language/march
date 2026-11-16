@@ -625,8 +625,11 @@ end
           ^ "  fn main(_cap : Cap(IO.Console)) do\n    let kids = Supervisor.which_children(:nope)\n    println(int_to_string(List.length(kids)))\n  end\nend\n"
         in
         let a = output `Interp (src ~lemma:true) and b = output `Interp (src ~lemma:false) in
-        let last s = match List.rev (lines s) with l :: _ -> String.trim l | [] -> "" in
-        if last a <> "0" || last b <> "0" || contains a "panic" then
+        (* The program's own line, not the last one: dynamic supervisors are
+           interpreter-only, so every mode now also warns [cap_unchecked]
+           (ocap phase 3) after it. *)
+        let printed_zero s = List.exists (fun l -> String.trim l = "0") (lines s) in
+        if not (printed_zero a) || not (printed_zero b) || contains a "panic" then
           Alcotest.failf "the builtin call must survive erasure:\n--with--\n%s\n--without--\n%s" a b);
     gated "lemma_shadow: a non-lemma sharing a lemma's name keeps its calls" (fun () ->
         let src =
@@ -642,6 +645,7 @@ end
     needs IO.Console
     fn l(n : Int) : Unit do
       println("B.l ran")
+      ()
     end
   end
   fn main(_cap : Cap(IO.Console)) do
@@ -918,20 +922,23 @@ let iface_laws =
         expect_status out "twice_def__Sem_Int" "admitted";
         expect_status out "unit_left__Sem_Int" "admitted");
     gated "conflated_type: a parameter type that shares a stdlib type's name is named in the warning" (fun () ->
-        (* `Tree` is also `OrderedMap.Tree`: the logic cannot tell them apart,
-           so `k` cannot be used, and the warning says why (it used to say
-           "not a measure or known predicate"). *)
-        let src ty =
+        (* `Tree(k, v)` is also `OrderedMap.Tree(k, v)`, at the same arity: the
+           typechecker conflates the two, so the logic cannot tell them apart,
+           `k` cannot be used, and the warning says why (it used to say "not a
+           measure or known predicate").  At ANOTHER arity (`type Tree`, no
+           parameter) the two are told apart since 2026-11-06, so it proves. *)
+        let src ~decl ~ty =
           Printf.sprintf
             "mod N do\n  type %s = Leaf | Node(%s, Int, %s)\n  fn k(t : %s) : Int do\n    match t do\n      Leaf -> 0\n      Node(_, _, _) -> 1\n    end\n  end\n  @[lemma]\n  fn l(t : %s) : {Unit | k(t) >= 0} do\n    ()\n  end\nend\n"
-            ty ty ty ty ty
+            decl ty ty ty ty
         in
-        let out = run ~args:"--check --reflect-deps" (src "Tree") in
+        let out = run ~args:"--check --reflect-deps" (src ~decl:"Tree(a, b)" ~ty:"Tree(Int, Int)") in
         if not (contains out "its parameter type `Tree` has the same name as a type declared in" && contains out "`OrderedMap`") then
           Alcotest.failf "expected the name-clash warning:\n%s" out;
         if contains out "is not a measure or known predicate" then Alcotest.failf "not the generic warning:\n%s" out;
-        (* Renamed, the same lemma proves. *)
-        let out = run ~args:"--check --reflect-deps" (src "Bush") in
+        (* Another arity, and renamed: the same lemma proves. *)
+        expect_status (run ~args:"--check --reflect-deps" (src ~decl:"Tree" ~ty:"Tree")) "l" "admitted";
+        let out = run ~args:"--check --reflect-deps" (src ~decl:"Bush" ~ty:"Bush") in
         expect_status out "l" "admitted");
     gated "iface_law_syntax: a body-less interface `fn` must be a `@[lemma]`" (fun () ->
         let out =
@@ -1450,9 +1457,11 @@ let guard_call =
         let out = run (guard_call_src ^ "  @[lemma]\n  fn wn(x : Int) : {Unit | wrap(x) == 2} do () end\nend\n") in
         if not (unproved out "wn" || refuted out "wn") then Alcotest.failf "wrap(0) is 1:\n%s" out) ]
 
-(* Float (D9): a function over Floats reflects, every Float operation an
-   opaque symbol.  What does not depend on a Float operation's value
-   proves; what does (`f < 1.0` at 0.5) and IEEE equality (NaN) never do. *)
+(* Float (D9): a function over Floats reflects.  Since 2026-11-15 each Float
+   operation in a body is DEFINED by its IEEE meaning (binary64,
+   round-to-nearest-even), so a fact that depends on an operation's value
+   (`f < 1.0` at 0.5) proves; a theorem that NaN breaks (`f == f`) and a false
+   one (`f < 1.0` at 1.5) never do. *)
 let float_body_src =
   {|mod FB do
   fn hk(f : Float) : Int do 3 end
@@ -1473,15 +1482,72 @@ let float_body =
         expect_admitted out "l_hk";
         expect_admitted out "l_cls";
         expect_admitted out "l_tk");
-    gated "float_body_red: Float operations stay opaque, Float == is IEEE" (fun () ->
+    gated "float_body_ieee: a Float operation's IEEE value proves a fact" (fun () ->
         let out =
           run
             (float_body_src
-           ^ "  @[lemma]\n  fn l_hk2(u : Int) : {Unit | hk2(0.5) == 1} do () end\n  @[lemma]\n  fn l_same(f : Float) : {Unit | same(f, f)} do () end\n  @[lemma]\n  fn l_tw(f : Float) : {Unit | twice(f) == twice(f)} do () end\nend\n")
+           ^ "  @[lemma]\n  fn l_hk2(u : Int) : {Unit | hk2(0.5) == 1} do () end\n  @[lemma]\n  fn l_tw1(f : {Float | _ >= 0.0 && _ <= 0.25}) : {Unit | twice(f) <= 0.5} do () end\nend\n")
+        in
+        expect_admitted out "l_hk2";
+        expect_admitted out "l_tw1");
+    gated "float_body_red: NaN and a false Float fact never prove" (fun () ->
+        let out =
+          run
+            (float_body_src
+           ^ "  @[lemma]\n  fn l_hk3(u : Int) : {Unit | hk2(1.5) == 1} do () end\n  @[lemma]\n  fn l_same(f : Float) : {Unit | same(f, f)} do () end\n  @[lemma]\n  fn l_tw(f : Float) : {Unit | twice(f) == twice(f)} do () end\n  @[lemma]\n  fn l_tw2(f : {Float | _ >= 0.0}) : {Unit | twice(f) > f} do () end\nend\n")
         in
         List.iter
           (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
-          [ "l_hk2"; "l_same"; "l_tw" ]) ]
+          [ "l_hk3"; "l_same"; "l_tw"; "l_tw2" ]) ]
+
+(* IEEE class tests and Float laws (2026-11-15): `is_nan`, `is_infinite`,
+   `is_finite` in a predicate, `float_is_nan`/`float_is_infinite` in a
+   reflected body, and the laws they make provable.  Each law needs the
+   not-NaN hypothesis: without it, the same theorem must not prove. *)
+let float_ieee_src =
+  {|mod FI do
+  fn min_f(a : Float, b : Float) : Float do if a < b do a else b end end
+  fn clamp_f(x : Float, lo : Float, hi : Float) : Float do if x < lo do lo else if x > hi do hi else x end end end
+  fn abs_f(x : Float) : Float do if x < 0.0 do 0.0 -. x else x end end
+  fn safe(x : Float) : Float do if float_is_nan(x) do 0.0 else x end end
+|}
+
+let callsite_row out v line =
+  List.exists
+    (fun l -> String.starts_with ~prefix:(v ^ "\tuser\tm.march:" ^ string_of_int line ^ ":") l && contains l "\tprecondition\t")
+    (lines out)
+
+let float_ieee =
+  [ gated "float_ieee_laws: min, clamp, abs and a NaN guard prove under their hypotheses" (fun () ->
+        let out =
+          run
+            (float_ieee_src
+           ^ "  @[lemma]\n  fn l_min(a : {Float | !is_nan(_)}, b : {Float | !is_nan(_)}) : {Unit | min_f(a, b) <= a && min_f(a, b) <= b} do () end\n"
+           ^ "  @[lemma]\n  fn l_clamp(x : {Float | is_finite(_)}, lo : {Float | is_finite(_)}, hi : {Float | is_finite(_) && _ >= lo}) : {Unit | clamp_f(x, lo, hi) >= lo && clamp_f(x, lo, hi) <= hi} do () end\n"
+           ^ "  @[lemma]\n  fn l_abs(x : {Float | !is_nan(_)}) : {Unit | abs_f(x) >= 0.0} do () end\n"
+           ^ "  @[lemma]\n  fn l_safe(x : Float) : {Unit | !is_nan(safe(x))} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_min"; "l_clamp"; "l_abs"; "l_safe" ]);
+    gated "float_ieee_red: without the NaN hypothesis the same laws do not prove" (fun () ->
+        let out =
+          run
+            (float_ieee_src
+           ^ "  @[lemma]\n  fn l_min(a : Float, b : Float) : {Unit | min_f(a, b) <= a} do () end\n"
+           ^ "  @[lemma]\n  fn l_abs(x : Float) : {Unit | abs_f(x) >= 0.0} do () end\n"
+           ^ "  @[lemma]\n  fn l_fin(x : {Float | !is_nan(_)}) : {Unit | is_finite(x)} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_min"; "l_abs"; "l_fin" ]);
+    gated "float_ieee_callsite: is_finite / is_infinite / is_nan contracts at call sites" (fun () ->
+        (* Lines: 1 mod, 2-4 needs, 5 c1, 6 c2, 7 c3, 8 c4. *)
+        let out =
+          run
+            "mod FC do\n  fn need_fin(x : {Float | is_finite(_)}) : Int do 0 end\n  fn need_inf(x : {Float | is_infinite(_)}) : Int do 0 end\n  fn need_num(x : {Float | !is_nan(_)}) : Int do 0 end\n  fn c1() : Int do need_fin(1.5) end\n  fn c2(y : {Float | _ >= 0.0 && _ <= 10.0}) : Int do need_fin(y) end\n  fn c3() : Int do need_inf(2.0) end\n  fn c4(y : {Float | _ <= 1.0}) : Int do need_num(y) end\nend\n"
+        in
+        if not (callsite_row out "proved" 5 && callsite_row out "proved" 6 && callsite_row out "violated" 7
+                && callsite_row out "proved" 8)
+        then Alcotest.failf "expected proved at 5, 6, 8 and violated at 7:\n%s" out) ]
 
 (* String (D9): the opaque `$Str` with its byte length; a literal is one
    constant per content, distinct from every other and shared with the
@@ -1543,6 +1609,84 @@ let record_body =
         let out = run (record_body_src ^ "  @[lemma]\n  fn l_bad(n : Int) : {Unit | px(bump(mk(n))) == 2 * n + 1} do () end\nend\n") in
         if not (unproved out "l_bad" || refuted out "l_bad") then Alcotest.failf "l_bad is false:\n%s" out) ]
 
+(* A record or variant with a String or Float field (todo
+   2026-11-08-reflect-records-with-string-fields).  Such fields were declared
+   at the opaque `Elem` sort while reflection encodes a String at `$Str` and a
+   Float at the FloatingPoint sort, so building one (`N(x, "v2")`) was a sort
+   conflict and every lemma over the record an `unreflectable-predicate`
+   skip; an actor whose state held a String could not prove its rollback round
+   trip. *)
+let scalar_fields_src =
+  {|mod SF do
+  type N = { a : Int, s : String }
+  type F = { b : Int, f : Float }
+  type Tag = Named(String, Int) | Anon(Int)
+  fn mk(x : Int) : N do { a: x, s: "v2" } end
+  fn un(n : N) : Int do n.a end
+  fn label(n : N) : String do n.s end
+  fn mkf(x : Int) : F do { b: x, f: 2.5 } end
+  fn unf(r : F) : Int do r.b end
+  fn named(x : Int) : Tag do Named("k", x) end
+  fn num(t : Tag) : Int do
+    match t do
+      Named(_, n) -> n
+      Anon(n) -> 0 - n
+    end
+  end
+  fn rename(n : N, t : String) : N do { n with s: t } end
+|}
+
+let scalar_fields =
+  [ gated "scalar_fields: records and variants with String and Float fields reflect" (fun () ->
+        let out =
+          run
+            (scalar_fields_src
+           ^ "  @[lemma]\n  fn l_un(x : Int) : {Unit | un(mk(x)) == x} do () end\n  @[lemma]\n  fn l_label(x : Int) : {Unit | label(mk(x)) == \"v2\"} do () end\n  @[lemma]\n  fn l_unf(x : Int) : {Unit | unf(mkf(x)) == x} do () end\n  @[lemma]\n  fn l_num(x : Int) : {Unit | num(named(x)) == x} do () end\n  @[lemma]\n  fn l_rename(x : Int, t : String) : {Unit | label(rename(mk(x), t)) == t && un(rename(mk(x), t)) == x} do () end\nend\n")
+        in
+        List.iter (expect_admitted out) [ "l_un"; "l_label"; "l_unf"; "l_num"; "l_rename" ]);
+    gated "scalar_fields_red: false theorems over String and Float fields are not proved" (fun () ->
+        let out =
+          run
+            (scalar_fields_src
+           ^ "  @[lemma]\n  fn l_bad(x : Int) : {Unit | un(mk(x)) == x + 1} do () end\n  @[lemma]\n  fn l_bad2(x : Int) : {Unit | label(mk(x)) == \"v3\"} do () end\n  @[lemma]\n  fn l_bad3(x : Int) : {Unit | unf(mkf(x)) == 0} do () end\n  @[lemma]\n  fn l_bad4(x : Int, t : String) : {Unit | label(rename(mk(x), t)) == \"v2\"} do () end\nend\n")
+        in
+        List.iter
+          (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
+          [ "l_bad"; "l_bad2"; "l_bad3"; "l_bad4" ]);
+    gated "scalar_fields_callsite: a call passing a record with a Float field is still checked" (fun () ->
+        (* A Float at the record's Float field must not trip the float sort
+           gate (it did once the field stopped being `Elem`). *)
+        let out =
+          run
+            "mod SC do\n  type F = { b : Int, f : Float }\n  fn needf(r : {F | _.b > 0}) : Int do r.b end\n  fn go() : Int do needf({ b: 2, f: 1.5 }) end\n  fn bad() : Int do needf({ b: 0, f: 1.5 }) end\nend\n"
+        in
+        let row v line =
+          List.exists
+            (fun l -> String.starts_with ~prefix:(v ^ "\tuser\tm.march:" ^ line ^ ":") l && contains l "\tprecondition\t")
+            (lines out)
+        in
+        if not (row "proved" "4" && row "violated" "5") then
+          Alcotest.failf "expected proved at line 4 and violated at line 5:\n%s" out);
+    gated "scalar_fields_order: no query declares a String-field datatype before `$Str`" (fun () ->
+        (* A datatype with a String field names `$Str`; a query that declares
+           it before `(declare-sort $Str 0)` is rejected by z3 (16 such
+           queries in this program, stdlib ones included, before
+           [Smt.hoist_string_decls]).  A cold cache, so every query is sent. *)
+        let dir = Filename.temp_dir "scalar_fields" "" in
+        Fun.protect ~finally:(fun () -> ignore (Sys.command ("rm -rf " ^ Filename.quote dir))) (fun () ->
+            Out_channel.with_open_bin (Filename.concat dir "m.march") (fun oc ->
+                output_string oc
+                  (scalar_fields_src
+                 ^ "  @[lemma]\n  fn l_un(x : Int) : {Unit | un(mk(x)) == x} do () end\n  fn need(u : {v : N | member(v.s, singleton(v.s))}) : Int do 0 end\n  fn ok() : Int do need({ a: 1, s: \"a\" }) end\nend\n"));
+            let lg = Filename.concat dir "z3.log" in
+            let out = U.run_in ~env:("MARCH_REFINE_Z3_LOG=" ^ Filename.quote lg) ~dir "--check --refine-report-sites=all" "m.march" in
+            expect_admitted out "l_un";
+            let log = In_channel.with_open_bin lg In_channel.input_all in
+            if contains log "verdict: rejected" then
+              Alcotest.failf "z3 rejected a query:\n%s"
+                (String.concat "\n"
+                   (List.filter (fun l -> contains l "declare-sort" || contains l "rejected") (String.split_on_char '\n' log)))) ) ]
+
 (* Tuples (§3.2): one datatype per arity, its constructor and selectors; a
    tuple literal in a predicate at a tuple parameter is that constructor. *)
 let tuple_body_src =
@@ -1582,3 +1726,334 @@ let tuple_body =
         List.iter
           (fun l -> if not (unproved out l || refuted out l) then Alcotest.failf "%s must not prove:\n%s" l out)
           [ "l_bad"; "l_bad2" ]) ]
+
+(* A derived `Eq` on a recursive type (todo 2026-11-06-derived-eq-recursive-type-unreflected):
+   the derived `eq` recurses through `match (a, b) do (B(_, x), B(_, y)) -> x == y`, and a
+   component bound through a tuple of parameters did not count as structurally smaller, so
+   no function using `==` on the type was reflected.  (The todo's example names its type
+   `T`, which `Crdt.T` also declares at the same arity: that clash is
+   2026-11-03-reflect-type-name-clash-with-stdlib, so the test uses `Chain`.) *)
+let reflect_row out name =
+  List.find_map
+    (fun l ->
+      match String.split_on_char '\t' l with
+      | "reflect" :: _ :: n :: verdict :: _ when n = name -> Some verdict
+      | _ -> None)
+    (lines out)
+
+let expect_reflected out name want =
+  match reflect_row out name with
+  | Some v when v = want -> ()
+  | v -> Alcotest.failf "reflect `%s`: expected %s, got %s:\n%s" name want (Option.value ~default:"no row" v) out
+
+let derived_eq =
+  [ gated "derived_eq: == on a recursive type with derive Eq is usable in a lemma" (fun () ->
+        let out =
+          run ~args:"--check --reflect-report --reflect-deps"
+            "mod D do\n\
+             \  type Chain = A | B(Int, Chain)\n\
+             \  derive Eq for Chain\n\
+             \  fn same(x : Chain, y : Chain) : Bool do x == y end\n\
+             \  @[lemma]\n\
+             \  fn refl(x : Chain) : {Unit | same(x, x)} do () end\n\
+             end\n"
+        in
+        expect_reflected out "same" "reflected";
+        expect_status out "refl" "admitted");
+    gated "derived_eq: a recursion on components of a tuple of parameters is structural" (fun () ->
+        let out =
+          run ~args:"--check --reflect-report"
+            "mod Z do\n\
+             \  fn zlen(xs : List(Int), ys : List(Int)) : Int do\n\
+             \    match (xs, ys) do\n\
+             \      (Cons(_, xt), Cons(_, yt)) -> 1 + zlen(xt, yt)\n\
+             \      _ -> 0\n\
+             \    end\n\
+             \  end\n\
+             end\n"
+        in
+        expect_reflected out "zlen" "reflected");
+    gated "derived_eq control: a component passed in another parameter's position is not structural" (fun () ->
+        (* `xt` is smaller than `xs`, but it is passed where `ys` goes, and `ys`
+           itself is passed where `xs` goes: neither position decreases. *)
+        let out =
+          run ~args:"--check --reflect-report"
+            "mod Z do\n\
+             \  fn swp(xs : List(Int), ys : List(Int)) : Int do\n\
+             \    match (xs, ys) do\n\
+             \      (Cons(_, xt), _) -> swp(ys, xt)\n\
+             \      _ -> 0\n\
+             \    end\n\
+             \  end\n\
+             end\n"
+        in
+        expect_reflected out "swp" "no") ]
+
+
+let scoped_asserts =
+  [ gated "assert by: proves and exports its goal" (fun () ->
+        let out = run {|mod N do
+  fn positive(x : {Int | _ > 0}) : Int do x end
+  fn consume(x : {Int | _ > 0}) : Int do
+    assert x > 0 by do () end
+    positive(x)
+  end
+end
+|} in
+        if contains out "error" || not (contains out "proved\tuser") then
+          Alcotest.failf "scoped assertion should prove:\n%s" out);
+    gated "assert by: false goal never escapes" (fun () ->
+        let out = run {|mod N do
+  fn positive(x : {Int | _ > 0}) : Int do x end
+  fn consume(x : Int) : Int do
+    assert x > 0 by do () end
+    positive(x)
+  end
+end
+|} in
+        if not (contains out "assert" && not (contains out "proved\tuser")) then
+          Alcotest.failf "false scoped assertion must be refuted:\n%s" out); gated "assert by: only the goal escapes, in functions and lemmas" (fun () ->
+      let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ {|
+  fn isolated(xs : List(Int)) : Int do
+    assert true by do cat_nil(xs) end
+    need_eq(xs, cat(xs, Nil))
+  end
+  fn exported(xs : List(Int)) : Int do
+    assert cat(xs, Nil) == xs by do cat_nil(xs) end
+    need_eq(xs, cat(xs, Nil))
+  end
+  fn plain(xs : List(Int)) : Int do
+    cat_nil(xs)
+    need_eq(xs, cat(xs, Nil))
+  end
+  @[lemma]
+  fn isolated_lemma(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    assert true by do cat_nil(xs) end
+  end
+  @[lemma]
+  fn exported_lemma(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    assert cat(xs, Nil) == xs by do cat_nil(xs) end
+  end
+end
+|}) in
+      expect_unproved out "isolated_lemma";
+      expect_admitted out "exported_lemma";
+      let rows = List.filter (fun l -> contains l "\tprecondition\tneed_eq\t") (lines out) in
+      Alcotest.(check int) "three function call obligations" 3 (List.length rows);
+      Alcotest.(check int) "only exported and plain prove" 2
+        (List.length (List.filter (fun l -> String.starts_with ~prefix:"proved\t" l) rows)));
+    gated "assert by: nested scopes preserve local facts without exporting helpers" (fun () ->
+      let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ {|
+  @[lemma]
+  fn nested(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    assert cat(xs, Nil) == xs by do
+      let y = 1
+      assert y == 1
+      assert cat(xs, Nil) == xs by do cat_nil(xs) end
+    end
+  end
+end
+|}) in expect_admitted out "nested");
+    gated "assert by: false hints cannot prove a false goal" (fun () ->
+      let out = run {|mod N do
+  @[lemma]
+  fn bad(n : Int) : {Unit | n > 0} do
+    assert n > 0 by do assert false end
+  end
+end
+|} in
+      if lemma_line out "bad" = Some "proved" then Alcotest.failf "false proof admitted:\n%s" out;
+      if not (contains out "\tassert\t") then Alcotest.failf "missing assertion obligation:\n%s" out);
+    gated "assert by: rejects effects and nonreflectable calls" (fun () ->
+      List.iter (fun hint ->
+        let out = run ("mod N do\n  needs IO.Console\n  fn f(n : Int) : Int do\n    assert true by do " ^ hint ^ " end\n    n\n  end\nend\n") in
+        if not (contains out "[invalid_lemma]") then Alcotest.failf "invalid proof accepted:\n%s" out)
+        ["println(\"erased effect\")"; "panic(\"bad\")"]);
+    gated "assert by: rejects shadowing of a goal variable" (fun () ->
+      let out = run {|mod N do
+  fn f(n : Int) : Int do
+    assert n == 0 by do
+      let n = 0
+      ()
+    end
+    n
+  end
+end
+|} in
+      if not (contains out "rename the hint-local binding") then Alcotest.failf "goal was captured:\n%s" out);
+    gated "assert by: strict verification rejects an unknown goal" (fun () ->
+      let out = run {|mod N do
+  cap verified
+  fn f(n : Int) : Int do
+    assert n > 0 by do () end
+    n
+  end
+end
+|} in
+      if not (contains out "[lemma_unproved]") then
+        Alcotest.failf "strict proof accepted:\n%s" out); gated "assert by: erasure without lemma declarations" (fun () ->
+      let src proof = String.concat "\n" [
+        "mod Main do"; "  needs IO.Console";
+        "  fn main(_cap : Cap(IO.Console)) do";
+        (if proof then "    assert 1 == 1 by do let x = 40 + 2 end" else "");
+        "    println(\"42\")"; "  end"; "end"; ""] in
+      List.iter (fun mode -> Alcotest.(check string) "runtime output" "42\n" (output mode (src true)))
+        [`Interp; `Compiled; `Jit];
+      Alcotest.(check string) "proof-free LLVM" (ll (src false)) (ll (src true)));
+    gated "assert by: unverified proof is erased with reflection disabled" (fun () ->
+      let src = {|mod Main do
+  needs IO.Console
+  fn unchecked(n : Int) : Unit do
+    assert n > 0 by do () end
+  end
+  fn main(_cap : Cap(IO.Console)) do
+    unchecked(0)
+    println("alive")
+  end
+end
+|} in
+      List.iter (fun mode ->
+        let out = output ~env:"MARCH_REFLECT=0" mode src in
+        if not (contains out "alive") || contains out "Assertion failed" then
+          Alcotest.failf "erased assertion executed:\n%s" out) [`Interp; `Compiled; `Jit]); gated "assert by: failed helper precondition withholds the goal" (fun () ->
+      let out = run {|mod N do
+  @[lemma]
+  fn positive(n : {Int | _ > 0}) : {Unit | n > 0} do () end
+  @[lemma]
+  fn bad(n : Int) : {Unit | n > 0} do
+    assert n > 0 by do positive(n) end
+  end
+end
+|} in
+      if not (unproved out "bad" || refuted out "bad") then
+        Alcotest.failf "failed helper admitted a theorem:\n%s" out;
+      if not (contains out "[lemma_unproved_call]") then Alcotest.failf "helper precondition unchecked:\n%s" out);
+    gated "assert by: hint branch facts do not escape" (fun () ->
+      let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ {|
+  @[lemma]
+  fn bad(xs : List(Int), b : Bool) : {Unit | cat(xs, Nil) == xs} do
+    assert cat(xs, Nil) == xs by do
+      if b do cat_nil(xs) else () end
+    end
+  end
+end
+|}) in expect_unproved out "bad");
+    gated "assert by: a proved block in a let RHS exports only its goal" (fun () ->
+      let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ {|
+  @[lemma]
+  fn good(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    let _ = assert cat(xs, Nil) == xs by do cat_nil(xs) end
+    ()
+  end
+end
+|}) in expect_admitted out "good");
+    gated "assert by: divergence and opaque callees rejected" (fun () ->
+      List.iter (fun definition ->
+        let out = run ("mod N do\n" ^ definition ^ "\n  fn f(n : Int) : Int do\n    assert true by do hidden(n) end\n    n\n  end\nend\n") in
+        if not (contains out "[invalid_lemma]") then Alcotest.failf "invalid callee accepted:\n%s" out)
+        ["  fn hidden(n : Int) : Int do hidden(n) end";
+         "  @[opaque]\n  fn hidden(n : Int) : Int do n end"]);
+    gated "assert by: disabled reflection still rejects erased effects" (fun () ->
+      let out = run ~env:"MARCH_REFLECT=0" {|mod N do
+  needs IO.Console
+  fn f() : Unit do assert true by do println("effect") end end
+end
+|} in
+      if not (contains out "[invalid_lemma]") then Alcotest.failf "effectful proof accepted:\n%s" out);
+    gated "assert by: branch-tail assertions remain static obligations" (fun () ->
+      let out = run {|mod N do
+  fn f(b : Bool) : Unit do
+    assert true by do
+      if b do assert false else () end
+    end
+  end
+end
+|} in
+      if not (contains out "[refinement_violated]") then Alcotest.failf "branch assert was not checked:\n%s" out);
+    gated "assert by: ordinary hint equality checks custom Eq totality" (fun () ->
+      let out = run {|mod N do
+  type P = P(Int)
+  impl Eq(P) do
+    fn eq(_a, _b) : Bool do panic("bad") end
+  end
+  fn check(x : P) : Unit do
+    assert true by do
+      let b = x == x
+      ()
+    end
+  end
+end
+|} in
+      if not (contains out "[invalid_lemma]") then
+        Alcotest.failf "partial Eq in proof hint accepted:\n%s" out);
+    gated "assert by: static hint assertions preserve reflection" (fun () ->
+      let out = run {|mod N do
+  @[reflect]
+  fn ident(x : Int) : Int do
+    assert x == x by do assert x == x end
+    x
+  end
+  @[lemma]
+  fn identity(x : Int) : {Unit | ident(x) == x} do () end
+end
+|} in
+      if contains out "[invalid_reflect]" then Alcotest.failf "proof blocked reflection:\n%s" out;
+      expect_admitted out "identity");
+    gated "assert by: case-splitting hints prove the goal on every exit" (fun () ->
+      let out = run ("mod N do\n" ^ defs4_6 ^ cat_nil ^ {|
+  @[lemma]
+  fn scoped(xs : List(Int)) : {Unit | cat(xs, Nil) == xs} do
+    assert cat(xs, Nil) == xs by do
+      match xs do
+        Nil -> ()
+        Cons(_, t) -> cat_nil(t)
+      end
+    end
+  end
+end
+|}) in expect_admitted out "scoped") ]
+
+let scoped_hint_bindings =
+  [ gated "assert by: sequential hint bindings retain lexical scope" (fun () ->
+        let out = run {|mod N do
+  fn checked() : Unit do
+    assert true by do
+      let y = 1
+      fn same(x : Int) : Int do x end
+      assert same(y) == 1
+    end
+  end
+end
+|} in
+        if contains out "[invalid_lemma]" || contains out "[lemma_unproved]"
+           || not (contains out "proved\tuser") then
+          Alcotest.failf "hint-local bindings must remain in scope:\n%s" out) ]
+
+let scoped_directives =
+  [ gated "assert by: reveal inside and before the hint remains scoped" (fun () ->
+        let out = run {|mod N do
+  @[opaque]
+  fn dbl(n : Int) : Int do n + n end
+  fn inside() : Unit do assert dbl(2) == 4 by do reveal dbl end end
+  fn outside() : Unit do
+    reveal dbl
+    assert dbl(2) == 4 by do () end
+  end
+end
+|} in
+        U.expect out ~line:4 ~callee:"assert" "proved";
+        U.expect out ~line:7 ~callee:"assert" "proved";
+        if contains out "[invalid_lemma]" || contains out "[lemma_unproved]" then
+          Alcotest.failf "explicit reveal must remain available:\n%s" out);
+    gated "assert by: trailing fuel covers the goal and restores afterwards" (fun () ->
+        let out = run {|mod N do
+  @[decreases(n)]
+  fn cnt(n : {Int | _ >= 0}) : Int do if n == 0 do 0 else cnt(n - 1) + 1 end end
+  fn checked() : Unit do
+    assert cnt(3) == 3 by do with fuel(cnt, 5) do () end end
+    assert cnt(7) == 7 by do () end
+  end
+end
+|} in
+        U.expect out ~line:5 ~callee:"assert" "proved";
+        U.not_proved out ~line:6 ~callee:"assert") ]

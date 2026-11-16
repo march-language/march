@@ -1,0 +1,42 @@
+mod Main do
+  needs IO.Console
+  -- User variants named like a built-in type (`CancelToken`), a prelude type
+  -- (`Option`) and a stdlib type (`Level`, of `Logger`) are the program's own
+  -- types, usable beside the ones they are named like: a bare name written in
+  -- this file means the declaration here, a constructor is picked by the type
+  -- it is checked against, and the base types keep working
+  -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
+  type CancelToken = Tok(Int) | Other(String)
+  type Option(a) = Some(a) | None
+  type Level = Low | High
+  fn show_tok(t : CancelToken) : String do
+    match t do
+      Tok(n) -> "Tok " ++ int_to_string(n)
+      Other(s) -> "Other " ++ s
+    end
+  end
+  fn mine(o : Option(Int)) : Int do
+    match o do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+  fn rank(l : Level) : Int do
+    match l do
+      Low -> 0
+      High -> 1
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    let b = task_cancel_token_new()
+    print_line(show_tok(Tok(7)))
+    print_line(to_string(task_is_cancelled(b)))
+    print_line(int_to_string(mine(Some(4))))
+    match List.find([1, 2], fn x -> x > 1) do
+      Some(h) -> print_line("found " ++ int_to_string(h))
+      None -> print_line("none")
+    end
+    Logger.set_module_level("m", Logger.Warn)
+    print_line(int_to_string(rank(High)))
+  end
+end

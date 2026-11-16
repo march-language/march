@@ -222,6 +222,7 @@ let () =
       Alcotest.test_case "empty string: no crash"                `Quick test_analyse_empty_string;
       Alcotest.test_case "type error → diagnostic"               `Quick test_analyse_type_error_produces_diagnostic;
       Alcotest.test_case "parse error → diagnostic"              `Quick test_analyse_parse_error_produces_diagnostic;
+      Alcotest.test_case "deprecated use → Deprecated tag"       `Quick test_analyse_deprecated_use_is_tagged;
       Alcotest.test_case "multiple errors all reported"          `Quick test_analyse_multiple_errors_all_reported;
       Alcotest.test_case "desugar error → positioned diagnostic" `Quick test_analyse_desugar_error_produces_diagnostic;
       Alcotest.test_case "warning severity"                      `Quick test_analyse_warning_severity;
@@ -507,6 +508,9 @@ let () =
     ];
     "perf insights phase 3: TIR pipeline", [
       "run_tir_pass does not crash",            `Quick, test_tir_pass_does_not_crash;
+      "run_tir_pass: stdlib-mediated ceiling",  `Quick, test_tir_pass_reports_stdlib_mediated_ceiling;
+      "run_tir_pass: host scope",                `Quick, test_tir_pass_reports_host_scope;
+      "run_tir_pass: ceiling not duplicated",    `Quick, test_tir_pass_does_not_duplicate_ceiling;
       "consumed hint on an owning call",        `Quick, test_consume_hint_on_owning_call;
       "no consumed hint on a scalar arg",       `Quick, test_no_consume_hint_on_scalar_arg;
       "no consumed hint on a temporary",        `Quick, test_no_consume_hint_on_temporary_arg;

@@ -69,6 +69,7 @@ type t =
   | Task_cancel_by_id
   | Task_cancel_token_new
   | Task_is_cancelled
+  | Task_poll
   | Task_reductions
   | Task_spawn
   | Task_spawn_steal
@@ -144,6 +145,7 @@ let to_string = function
   | Task_cancel_by_id -> "task_cancel_by_id"
   | Task_cancel_token_new -> "task_cancel_token_new"
   | Task_is_cancelled -> "task_is_cancelled"
+  | Task_poll -> "task_poll"
   | Task_reductions -> "task_reductions"
   | Task_spawn -> "task_spawn"
   | Task_spawn_steal -> "task_spawn_steal"
@@ -177,7 +179,7 @@ let all =
     Record_from_list; Record_get; Record_has_key; Record_put;
     Remote_ref_hashes; Send; Signal_raise_self; Signal_unwatch;
     Signal_watch; Task_await; Task_await_unwrap; Task_cancel;
-    Task_cancel_by_id; Task_cancel_token_new; Task_is_cancelled;
+    Task_cancel_by_id; Task_cancel_token_new; Task_is_cancelled; Task_poll;
     Task_reductions; Task_spawn; Task_spawn_steal; Task_spawn_with_cancel;
     Task_yield; To_string; Vault_drop; Vault_get; Vault_incr;
     Vault_ns_drop; Vault_ns_get; Vault_ns_set; Vault_push_capped;

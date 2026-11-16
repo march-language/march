@@ -56,6 +56,7 @@ mod ArraySort do
     let head_val = NativeArray.get_int(sorted, 0)
     println("  native " ++ label ++ ": " ++ int_to_string(elapsed_us(t0, t1))
             ++ " us  (first=" ++ int_to_string(head_val) ++ ")")
+    ()
   end
 
   pfn bench_list(label : String, xs : List(Int)) : Unit do
@@ -68,6 +69,7 @@ mod ArraySort do
     end
     println("  list   " ++ label ++ ": " ++ int_to_string(elapsed_us(t0, t1))
             ++ " us  (first=" ++ int_to_string(head_val) ++ ")")
+    ()
   end
 
   fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
@@ -103,5 +105,6 @@ mod ArraySort do
 
     println("")
     println("Done.")
+    ()
   end
 end

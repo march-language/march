@@ -56,6 +56,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
 
   -- verify long-lived tree
   println("long lived tree of depth " ++ int_to_string(max_depth) ++ " check: " ++ int_to_string(check(long_lived)))
+  ()
 end
 
 end

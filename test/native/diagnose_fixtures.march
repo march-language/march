@@ -18,7 +18,7 @@ mod Main do
   end
 
   fn run(name : String) : String do
-    match File.read(dir() ++ name ++ ".json") do
+    match Authority.must(File.read(dir() ++ name ++ ".json")) do
       Ok(text) ->
         match Json.parse(text) do
           Ok(j) ->
@@ -32,11 +32,11 @@ mod Main do
   end
 
   fn main(io : Cap(IO)) do
-    match File.read(dir() ++ "expected.txt") do
+    match Authority.must(File.read(dir() ++ "expected.txt")) do
       Ok(text) ->
         List.each(List.filter(String.split(text, "\n"), fn l -> l != ""), fn l ->
           println(run(name_of(l))))
-      Err(_) -> println("expected.txt unreadable")
+      Err(_) -> Authority.ignore(println("expected.txt unreadable"))
     end
     -- Diagnose.run on this program itself: it runs (two in-process
     -- snapshots) on both backends. Not printed: its findings depend on the

@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "stream_labelled": the "stream" scenario with
 -- its plain step labelled (`item: Prod -> Cons : Int`), so the generated
 -- names say `Item` where "stream" says the synthesised name. Same transport,
@@ -56,7 +57,7 @@ mod StreamOverNodesA do
   end
 
   fn main(c : Cap(IO)) do
-    let conn = match connect_split_retry(Env.require_int("MARCH_PEER_PORT"), 100) do
+    let conn = match connect_split_retry(Authority.must(Env.require_int("MARCH_PEER_PORT")), 100) do
       Ok(p) -> p
       Err(e) -> panic("connect: " ++ e)
     end

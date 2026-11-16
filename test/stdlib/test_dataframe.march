@@ -1234,4 +1234,30 @@ describe "col_z_score and col_normalize on zero-row columns" do
 end
 
 
+describe "to_html escaping" do
+  test "every <, >, & and \" in a cell or header is escaped (no raw <script)" do
+    let rows = [
+      Row([("<i>c</i><i>", StrVal("<b>x</b><script>alert(\"a&b\" & 'q')</script>"))])
+    ]
+    match DataFrame.from_rows(rows) do
+    Err(_) -> assert false
+    Ok(df) -> do
+      let h = DataFrame.to_html(df)
+      assert (not(String.contains(h, "<script")))
+      assert (not(String.contains(h, "</script")))
+      assert (not(String.contains(h, "<i>")))
+      assert (String.contains(h, "&lt;b&gt;x&lt;/b&gt;&lt;script&gt;alert(&quot;a&amp;b&quot; &amp; &#39;q&#39;)&lt;/script&gt;"))
+      assert (String.contains(h, "<th>&lt;i&gt;c&lt;/i&gt;&lt;i&gt;</th>"))
+      end
+    end
+  end
+
+  test "an already-escaped entity is escaped again (& first)" do
+    match DataFrame.from_rows([Row([("v", StrVal("&lt;&lt;"))])]) do
+    Err(_) -> assert false
+    Ok(df) -> assert (String.contains(DataFrame.to_html(df), "<td>&amp;lt;&amp;lt;</td>"))
+    end
+  end
+end
+
 end -- mod TestDataFrame

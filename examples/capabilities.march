@@ -33,10 +33,12 @@ fn square(n : Int) : Int do n * n end
 fn greet(cap : Cap(IO.Console), name : String) : Unit do
   -- cap is passed explicitly — the caller must hold Cap(IO.Console)
   println(format_greeting(name))
+  ()
 end
 
 fn print_result(cap : Cap(IO.Console), label : String, value : Int) : Unit do
   println(label ++ ": " ++ String.from_int(value))
+  ()
 end
 
 -- ─── Network IO ───────────────────────────────────────────────────────────
@@ -63,6 +65,7 @@ fn demo_narrowing(cap : Cap(IO)) : Unit do
   greet(console_cap, "narrowed-cap user")
   let resp = simulate_fetch(net_cap, "https://example.com/api")
   println("fetch result: " ++ resp)
+  ()
 end
 
 -- ─── Higher-order capability passing ──────────────────────────────────────
@@ -70,8 +73,9 @@ end
 -- that flows through the call graph — closures can capture it freely.
 
 fn run_with_logging(cap : Cap(IO.Console), items : List(Int), label : String) : Unit do
-  if is_nil(items) do println(label ++ ": empty")
+  if is_nil(items) do Authority.ignore(println(label ++ ": empty"))
   else print_result(cap, label ++ " first", head(items)) end
+  ()
 end
 
 -- ─── Main — receives the root capability from the runtime ─────────────────
@@ -125,6 +129,7 @@ fn main(cap : Cap(IO)) : Unit do
   println("")
 
   println("=== Done ===")
+  ()
 end
 
 end

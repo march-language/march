@@ -9,7 +9,7 @@
 mod TestCaching do
 
 pfn make_conn(m, path_, req_hdrs) do
-  Conn(0, m, path_, Nil, "", req_hdrs, "", 0, Nil, "", false, Nil, NoUpgrade)
+  HttpServer.test_conn(m, path_, req_hdrs, "")
 end
 
 pfn get_with_headers(hdrs) do

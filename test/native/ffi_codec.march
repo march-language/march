@@ -23,5 +23,6 @@ mod Test do
       Rect(w, h) -> println(int_to_string(w * h))  -- 49
       Circle(_)  -> println("circle")
     end
+    ()
   end
 end

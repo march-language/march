@@ -37,6 +37,7 @@ fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let t1 = unix_time(())
   println("RESULT " ++ float_to_string(s))
   println("TIME_MS " ++ float_to_string(elapsed_ms(t0, t1)))
+  ()
 end
 
 end

@@ -30,9 +30,9 @@ mod CertOrderB do
 
   -- Certificate mode, from the files scenario.sh made with `forge cluster`.
   pfn config(me : String, port_var : String, seeds : String) : ClusterNode.CnConfig do
-    let pki = Env.require("PKI")
+    let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me)
-    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int(port_var)))
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int(port_var))))
     Process.set_env("MARCH_CLUSTER_NODES", seeds)
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me ++ ".key")
@@ -45,7 +45,7 @@ mod CertOrderB do
 
   pfn stock(s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
     Order_Stock.recv_Want(s, st, fn (n, st1) ->
-      if n == 1 do println("stock: a session on node-b") else () end
+      if n == 1 do Authority.ignore(println("stock: a session on node-b")) else () end
       if n < 3 do
         let st2 = Order_Stock.choose_have(s, st1, "have " ++ int_to_string(n))
         stock(s, Order_Stock.send_Book(s, st2, n))
@@ -56,14 +56,14 @@ mod CertOrderB do
   end
 
   fn main(c : Cap(IO)) do
-    match ClusterNode.start(c, config("node-b", "MARCH_PORT_B", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")))) do
+    match ClusterNode.start(c, config("node-b", "MARCH_PORT_B", "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))))) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
         match Order_Run.offer_Stock(h, 8, fn (s, st) -> stock(s, st)) do
           Err(e) -> panic(Order_Run.error_message(e))
           Ok(_) ->
-            println("node-b: offering")
+            Authority.ignore(println("node-b: offering"))
             sleep_ms(600000)
         end
     end

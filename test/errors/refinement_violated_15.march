@@ -8,7 +8,7 @@ mod UdpBadPort do
   needs IO.NetConnect
 
   fn main(_n : Cap(IO.NetConnect)) : () do
-    match Udp.open("127.0.0.1", 70000) do
+    match Authority.must(Udp.open("127.0.0.1", 70000)) do
       Ok(s) -> Udp.close(s)
       Err(_) -> ()
     end

@@ -1,0 +1,80 @@
+-- Use-after-free guard: a closure that matches a CAPTURED value and passes the
+-- pattern's fields to a borrowing builtin in tail position must not release
+-- the capture before the call reads them
+-- (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md).
+--
+-- Drop.rewrite_apply_clo_drop releases a closure's captures at its tails, on
+-- the path where the closure's own release freed the environment. It asked
+-- whether the tail USES a capture by the capture's own name only, so
+-- `match src do Pair(a, b) -> string_concat(a, b) end` (the tail names `a`
+-- and `b`, fields of `src`) released `src` -- and freed `a` and `b` -- right
+-- before string_concat read them. HttpServer.tls had this shape with
+-- http_server_tls_configure; ASAN reported a heap-use-after-free in str_dup.
+--
+-- Each leg calls a closure exactly once, so that call is the one that frees
+-- the environment, and prints what the builtin computed. The sanitizer sweep
+-- (scripts/native-sanitize-sweep.sh) runs this file under ASAN.
+mod Main do
+  needs IO.Console
+
+  type Pair = Pair(String, String) | Solo(String)
+  type Nest = Nest(Pair, String)
+
+  -- The original shape: a tuple argument matched, then the capture matched.
+  fn joiner(src : Pair) : ((Int, Int)) -> String do
+    fn pw ->
+      match pw do
+      (x, y) ->
+        match src do
+        Pair(a, b) -> string_concat(a, b)
+        Solo(a) -> string_concat(a, int_to_string(x + y))
+        end
+      end
+  end
+
+  -- A field of a field: the alias chain is two matches deep.
+  fn nested(n : Nest) : (Int) -> Int do
+    fn _ ->
+      match n do
+      Nest(p, s) ->
+        match p do
+        Pair(a, _) -> string_byte_length(a) + string_byte_length(s)
+        Solo(a) -> string_byte_length(a)
+        end
+      end
+  end
+
+  -- A rebinding of a field (`let t = a`) still reads the capture.
+  fn rebinder(src : Pair) : (Int) -> String do
+    fn k ->
+      match src do
+      Pair(a, b) ->
+        let t = a
+        string_concat(t, b)
+      Solo(a) -> a
+      end
+  end
+
+  pfn run(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = int_to_string(n * 1000003)
+      let f = joiner(Pair(string_concat("left-", s), string_concat("right-", s)))
+      let g = joiner(Solo(string_concat("solo-", s)))
+      let h = nested(Nest(Pair(string_concat("a-", s), "b"), string_concat("s-", s)))
+      let r = rebinder(Pair(string_concat("t-", s), string_concat("u-", s)))
+      let v = string_byte_length(f((1, 2))) + string_byte_length(g((3, 4))) + h(0)
+        + string_byte_length(r(0))
+      run(n - 1, acc + v)
+    end
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    let f = joiner(Pair(string_concat("left-", int_to_string(7)), string_concat("right-", int_to_string(8))))
+    println(f((1, 2)))
+    let r = rebinder(Pair(string_concat("t-", int_to_string(9)), string_concat("u-", int_to_string(10))))
+    println(r(0))
+    let h = nested(Nest(Pair(string_concat("a-", int_to_string(11)), "b"), string_concat("s-", int_to_string(12))))
+    println(int_to_string(h(0)))
+    println(int_to_string(run(2000, 0)))
+  end
+end

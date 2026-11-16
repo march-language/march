@@ -210,6 +210,7 @@ let named_builtin_allocates : Builtin_name.t -> bool = function
   | Builtin_name.Record_get | Builtin_name.Record_has_key | Builtin_name.Record_put
   | Builtin_name.Remote_ref_hashes | Builtin_name.Send
   | Builtin_name.Signal_unwatch | Builtin_name.Signal_watch
+  | Builtin_name.Task_poll
   | Builtin_name.Task_await | Builtin_name.Task_await_unwrap
   | Builtin_name.Task_cancel | Builtin_name.Task_cancel_by_id
   | Builtin_name.Task_cancel_token_new | Builtin_name.Task_spawn
@@ -623,6 +624,7 @@ let named_builtin_retains : Builtin_name.t -> bool = function
   | Builtin_name.Record_get | Builtin_name.Record_has_key | Builtin_name.Record_put
   | Builtin_name.Remote_ref_hashes
   | Builtin_name.Signal_unwatch
+  | Builtin_name.Task_poll
   | Builtin_name.Task_await | Builtin_name.Task_await_unwrap
   | Builtin_name.Task_cancel | Builtin_name.Task_cancel_by_id
   | Builtin_name.Task_yield

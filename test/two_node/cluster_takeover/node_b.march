@@ -22,7 +22,7 @@ mod ClusterTakeoverB do
   end
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
@@ -40,20 +40,20 @@ mod ClusterTakeoverB do
   end
 
   fn main(c : Cap(IO)) do
-    let creation = Env.require_int("MARCH_NODE_CREATION")
-    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
-    let cfg = ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "takeover-secret", creation)
+    let creation = Authority.must(Env.require_int("MARCH_NODE_CREATION"))
+    let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
+    let cfg = ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "takeover-secret", creation)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        println("node-b: up (creation " ++ int_to_string(creation) ++ ")")
-        if ClusterNode.await_members(h, 1, 120000) do () else println("node-b: never joined") end
+        Authority.ignore(println("node-b: up (creation " ++ int_to_string(creation) ++ ")"))
+        if ClusterNode.await_members(h, 1, 120000) do () else Authority.ignore(println("node-b: never joined")) end
         if creation == 1 do
           let holder = spawn(Holder)
           let r1 = ClusterNode.register(h, "leader", holder)
           let r2 = ClusterNode.register(h, "cfg", holder)
-          if Result.is_ok(r1) && Result.is_ok(r2) do println("node-b: registered leader and cfg") else println("node-b: register refused") end
-          wait_file(Env.require("CLUSTER_STOP_FILE"))
+          if Result.is_ok(r1) && Result.is_ok(r2) do Authority.ignore(println("node-b: registered leader and cfg")) else Authority.ignore(println("node-b: register refused")) end
+          wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         else
           match wait_leader(h, 120000) do
             Some(p) ->
@@ -61,14 +61,14 @@ mod ClusterTakeoverB do
                 Some(n) -> n
                 None -> "?"
               end
-              println("node-b: leader held by " ++ who)
-            None -> println("node-b: leader not found")
+              Authority.ignore(println("node-b: leader held by " ++ who))
+            None -> Authority.ignore(println("node-b: leader not found"))
           end
-          println("node-b: my stale bindings: " ++ int_to_string(ClusterNode.stale_bindings(h)))
-          println("node-b: cfg visible: " ++ bool_to_string(Option.is_some(ClusterNode.lookup(h, "cfg"))))
-          wait_file(Env.require("CLUSTER_STOP_FILE"))
+          Authority.ignore(println("node-b: my stale bindings: " ++ int_to_string(ClusterNode.stale_bindings(h))))
+          Authority.ignore(println("node-b: cfg visible: " ++ bool_to_string(Option.is_some(ClusterNode.lookup(h, "cfg")))))
+          wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
           ClusterNode.stop(h)
-          println("node-b: done")
+          Authority.ignore(println("node-b: done"))
         end
     end
   end

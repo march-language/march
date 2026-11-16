@@ -11,5 +11,6 @@ mod JsIntCheck do
     let a = unwrap_or(string_to_int("1804289383"), 0)
     let b = unwrap_or(string_to_int("1103515245"), 0)
     println(int_to_string(a * b))
+    ()
   end
 end

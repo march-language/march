@@ -3,7 +3,7 @@ exit: 1
 
 `greet` needs console access, but `cap` is the full IO capability. [cap_mismatch]
 
-12 |     greet(cap, "march")
+13 |     greet(cap, "march")
                ^^^
 
     `IO` contains `IO.Console`, but a capability is never narrowed implicitly.
@@ -11,18 +11,18 @@ exit: 1
 
     `greet` needs `Cap(IO.Console)`:
 
-12 |     greet(cap, "march")
+13 |     greet(cap, "march")
          ^^^^^^^^^^^^^^^^^^^
 
     `cap` was bound here as `Cap(IO)`:
 
-11 |   fn main(cap : Cap(IO)) do
+12 |   fn main(cap : Cap(IO)) do
                ^^^
 
     fix (`forge fix` applies it):
 
-12 -     greet(cap, "march")
-12 +     greet(cap_narrow(cap), "march")
+13 -     greet(cap, "march")
+13 +     greet(cap_narrow(cap), "march")
 
 
 

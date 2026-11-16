@@ -36,7 +36,7 @@ mod Main do
   end
 
   fn snapshot_table(table_name) do
-    match Vault.whereis(table_name) do
+    match Authority.must(Vault.whereis(table_name)) do
       None -> Nil
       Some(tbl) ->
         let ks = Vault.keys(tbl)
@@ -64,7 +64,7 @@ mod Main do
 
   fn main(cap: Cap(IO)) do
     -- ── nested Option element, type-honest: Vault(Option(String)) ────────
-    let o = Vault.new("vnu_opt")
+    let o = Authority.must(Vault.new("vnu_opt"))
     Vault.set(o, "row1", Some("hello"))
     Vault.set(o, "row2", Some("world"))
     match Vault.get(o, "row1") do
@@ -89,13 +89,13 @@ mod Main do
     end
 
     -- ── the filed repro's own shape: a whereis-minted handle ─────────────
-    let n = Vault.new("vnu_nested")
+    let n = Authority.must(Vault.new("vnu_nested"))
     Vault.set(n, "row1", "hello")
     walk(snapshot_table("vnu_nested"))
     walk(snapshot_table("vnu_never_registered"))
 
     -- ── Float element (niche-unsafe: 0.0's bits are 0 = the None niche) ──
-    let f = Vault.new("vnu_float")
+    let f = Authority.must(Vault.new("vnu_float"))
     Vault.set(f, "half", 0.5)
     Vault.set(f, "zero", 0.0)
     match Vault.get(f, "half") do
@@ -112,7 +112,7 @@ mod Main do
     end
 
     -- ── Unit element (niche-unsafe: Unit is raw 0) ───────────────────────
-    let u = Vault.new("vnu_unit")
+    let u = Authority.must(Vault.new("vnu_unit"))
     Vault.set(u, "k", ())
     match Vault.get(u, "k") do
       Some(_) -> println("unit present: SOME")
@@ -124,7 +124,7 @@ mod Main do
     end
 
     -- ── Int element: the NICHE control, ODD and EVEN (see header) ────────
-    let i = Vault.new("vnu_int")
+    let i = Authority.must(Vault.new("vnu_int"))
     Vault.set(i, "odd", 7)
     Vault.set(i, "even", 8)
     println(Vault.get(i, "odd"))

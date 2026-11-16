@@ -1,0 +1,23 @@
+exit: 1
+-- CONTRACT ------ errors/deterministic_violation_2.march
+
+`direct` in `mod Det` (declared `cap deterministic`) calls `sys_uptime_ms`, which is non-deterministic. [deterministic_violation]
+
+Use deterministic operations only in a `cap deterministic` module. Avoid random/time builtins.
+
+12 |       sys_uptime_ms()
+           ^^^^^^^^^^^^^
+
+
+
+-- CONTRACT ------ errors/deterministic_violation_2.march
+
+`wrapped` in `mod Det` (declared `cap deterministic`) calls `System.monotonic_time`, which is non-deterministic: it reaches `sys_uptime_ms`. [deterministic_violation]
+
+Use deterministic operations only in a `cap deterministic` module. Avoid random/time builtins.
+
+15 |       System.monotonic_time()
+           ^^^^^^^^^^^^^^^^^^^^^
+
+
+

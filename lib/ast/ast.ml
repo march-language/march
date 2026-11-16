@@ -22,6 +22,10 @@ type linearity =
   | Unrestricted  (** Normal value, can be used any number of times *)
   | Linear        (** Must be used exactly once *)
   | Affine        (** Must be used at most once *)
+  | Ghost         (** Proof-only (`ghost x : T`, `ghost let`): used only by
+                      refinements, lemmas and other ghost code, and erased
+                      before the program runs ([March_desugar.Ghost]).  Never
+                      the qualifier of a type ([TyLinear]). *)
 
 (** Visibility qualifiers for module system. *)
 type visibility =
@@ -103,6 +107,11 @@ type expr =
           The string is the sigil name (e.g. "H", "xml", "toml").
           The expr is the string content (may include interpolation).
           Desugared to Sigil.x(content) call by the desugar pass. *)
+  | EProof of proof * span
+      (** A ghost proof statement (proof hints: todos 2026-11-06-proof-assert-by,
+          -proof-reveal-and-local-fuel, -proof-calc-blocks).  The refinement
+          checker uses it; [Lemma_erase] removes it (keeping a [PWithFuel]
+          body) before anything lowers, interprets or JIT-compiles. *)
   | ERefineMsg of expr * string * span
       (** A conjunct of a refinement predicate with an author-written message:
           `{Int | _ >= 0 else "index must not be negative" && ...}`.  Only
@@ -110,6 +119,27 @@ type expr =
           [TyRefine] predicate.  The refinement checker strips it on entry
           ([Refine_msg.strip]) and keeps the message for its diagnostics, so
           no predicate reasoning ever sees this node. *)
+
+and proof =
+  | PAssertBy of expr * expr list
+      (** `assert P by do hints end` / `assert P by hint(…)`: [P] proved with the
+          hints' facts in scope, then assumed; the hints' facts do not leak. *)
+  | PReveal of expr
+      (** `reveal f`: an [@[opaque]] function's definition is usable by the
+          obligations after it in the enclosing block. *)
+  | PWithFuel of expr * int * expr list
+      (** `with fuel(f, N) do body end`: [f]'s unfolding depth is [N] for the
+          obligations in [body].  The body is ordinary code and is kept. *)
+  | PCalc of expr * calc_step list
+      (** `calc do e0  op1 e1 by h1  op2 e2 … end`: each step is its own
+          obligation; the chain's conclusion is assumed afterwards. *)
+
+and calc_step = {
+  cs_op : string;          (** "==", "<", "<=", ">", ">=" *)
+  cs_rhs : expr;
+  cs_hint : expr list;     (** the step's hint statements; [] for none *)
+  cs_span : span;          (** the step's operator through its operand *)
+}
 
 and param = {
   param_name : name;
@@ -260,9 +290,10 @@ and fn_def = {
   fn_clauses : fn_clause list;  (** One or more pattern-matching heads *)
   fn_bounds : (name * ty) list; (** Explicit type-variable bounds: [s : ConnState, ...] *)
   fn_attr_args : (string * expr list) list;
-      (** Expression payloads of attributes, by attribute name.  Only
-          [@[decreases(e, ...)]] has one (termination design §2.1); its name is
-          also in [fn_attrs] as plain ["decreases"]. *)
+      (** Expression payloads of attributes, by attribute name.
+          [@[decreases(e, ...)]] has one (termination design §2.1), and
+          [@[deprecated("message")]] has its one string literal (read it with
+          [deprecation_of_fn]); each name is also in [fn_attrs], plain. *)
   fn_needs : (name list list * span) option;
       (** A per-function capability bound, [fn f(x) needs IO.Console do]:
           the capability paths and the clause's span.  [Some ([], _)] is
@@ -301,7 +332,14 @@ and fn_param =
   | FPDefault of param * expr     (** Default value: fn greet(name, greeting \\ "Hello") *)
 
 and type_def =
-  | TDAlias of ty                              (** Type alias *)
+  | TDAlias of ty * (name * ty) list
+      (** Type alias: its right-hand side, and its VALUE parameters with their
+          sorts (`type Vec(a, n : Int) = {List(a) | len(_) == n}` has [n : Int];
+          the declaration's parameter list holds every parameter, type and
+          value, in order).  Source aliases are refinement aliases, expanded at
+          each use by [March_desugar.Desugar] (refinement-indexed aliases,
+          specs/lang/refinement-types.md); value parameters appear only in the
+          predicate. *)
   | TDVariant of variant list                  (** Sum type / ADT *)
   | TDRecord of field list                     (** Record type *)
 
@@ -396,11 +434,32 @@ and actor_def = {
       named [on_stop] with no params so body walkers can treat it like one
       ([actor_body_handlers]) — it is NOT a message constructor.
       See specs/lang/actors.md. *)
+  actor_migrate : (name * expr) option;
+  (** `migrate old -> { total: old.count }` (todo
+      2026-11-06-hcr-derive-field-rename): the non-mechanical part of a hot
+      deploy's state migration.  The binder names the deployed state; the body
+      is a record literal giving the new fields whose value moves or converts
+      data.  With a deployed baseline, Desugar_migrate_derive writes the whole
+      `<actor>_migrate_state` from it (the clause's fields, kept fields copied,
+      other added fields from `init`).  Without one it derives nothing and the
+      clause is inert.  Nothing else reads it. *)
+  actor_internal : bool;
+  (** `@[stdlib_internal]` on a stdlib actor: code outside the standard
+      library can neither spawn it nor build one of its messages (the
+      typechecker's [ECon] gate). For actors whose messages carry raw
+      descriptors (ocap phase 2b; `NodeQueue.Writer`, the cluster node). *)
 }
 
 and actor_handler = {
   ah_msg    : name;
   ah_params : param list;
+  ah_ensures : expr option;
+  (** `on Msg(…) ensures P do … end` (two-state specs): a guarantee about
+      the state the handler returns.  `state` and the bare field names read
+      the RETURNED state, `old(e)` reads [e] of the state the message
+      arrived with, and the message's parameters are in scope.  Proof-only:
+      the refinement checker proves it per handler (Refine_check, DActor);
+      nothing runs it. *)
   ah_body   : expr;
 }
 
@@ -547,7 +606,7 @@ let rec show_ty = function
     Printf.sprintf "{ %s }" (String.concat ", " fs)
   | TyLinear (Linear, t) -> "linear " ^ show_ty t
   | TyLinear (Affine, t) -> "affine " ^ show_ty t
-  | TyLinear (Unrestricted, t) -> show_ty t
+  | TyLinear ((Unrestricted | Ghost), t) -> show_ty t
   | TyNat n -> string_of_int n
   | TyNatOp (NatAdd, a, b) -> Printf.sprintf "%s + %s" (show_ty a) (show_ty b)
   | TyNatOp (NatMul, a, b) -> Printf.sprintf "%s * %s" (show_ty a) (show_ty b)
@@ -564,6 +623,24 @@ let rec show_ty = function
   | TyRefine (base, None, _) -> Printf.sprintf "{ %s | ... }" (show_ty base)
   | TyRefine (base, Some v, _) ->
     Printf.sprintf "{ %s : %s | ... }" v.txt (show_ty base)
+
+(** The expressions a proof statement contains, in source order (the
+    asserted predicate or the calc chain's terms, then the hints / body). *)
+let proof_children (p : proof) : expr list =
+  match p with
+  | PAssertBy (e, hints) -> e :: hints
+  | PReveal f -> [ f ]
+  | PWithFuel (f, _, body) -> f :: body
+  | PCalc (e0, steps) -> e0 :: List.concat_map (fun s -> s.cs_rhs :: s.cs_hint) steps
+
+(** Rebuild a proof statement with [f] applied to every expression it holds. *)
+let map_proof (f : expr -> expr) (p : proof) : proof =
+  match p with
+  | PAssertBy (e, hints) -> PAssertBy (f e, List.map f hints)
+  | PReveal e -> PReveal (f e)
+  | PWithFuel (e, n, body) -> PWithFuel (f e, n, List.map f body)
+  | PCalc (e0, steps) ->
+    PCalc (f e0, List.map (fun s -> { s with cs_rhs = f s.cs_rhs; cs_hint = List.map f s.cs_hint }) steps)
 
 (** Compact expression summary — used in test failure messages. *)
 let show_expr = function
@@ -600,6 +677,7 @@ let show_expr = function
   | EAssert _ -> "EAssert(...)"
   | ESigil _ -> "ESigil(...)"
   | ERefineMsg _ -> "ERefineMsg(...)"
+  | EProof _ -> "EProof(...)"
 
 (** The restart-backoff curve a `supervise` block gets when it declares no
     `backoff` clause: exactly the constants that were hardcoded in the runtime
@@ -645,3 +723,10 @@ let rec inspect_unprintable_ty (t : ty) : bool =
 (** The text such a field renders as; [None] means it prints normally. *)
 let inspect_field_placeholder (t : ty) : string option =
   if inspect_unprintable_ty t then Some "<opaque>" else None
+
+(** The message of a function's [@[deprecated("message")]] attribute, if it
+    carries one (specs/lang/compatibility.md, "How something is deprecated"). *)
+let deprecation_of_fn (fd : fn_def) : string option =
+  match List.assoc_opt "deprecated" fd.fn_attr_args with
+  | Some [ ELit (LitString msg, _) ] -> Some msg
+  | _ -> None

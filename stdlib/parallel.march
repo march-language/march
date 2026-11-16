@@ -69,12 +69,23 @@ mod Parallel do
       march> RRB.to_list(Parallel.pmap_n(RRB.from_list([1, 2]), fn n -> n + 1, 0))
       [2, 3]
   """
+  -- Whether this code may spawn tasks (IO.Spawn); see pmap_n.
+  pfn spawn_allowed() : Bool do
+    match Authority.check("IO.Spawn", "") do
+    Ok(_) -> true
+    Err(_) -> false
+    end
+  end
+
   fn pmap_n(input, f, workers: Int) do
     let chunks = RRB.chunk(input, workers)
-    let tasks  = List.map(Array.to_list(chunks), fn chunk ->
-      task_spawn(fn _ ->
-        RRB.fold(chunk, RRB.empty(), fn (acc, x) -> RRB.push(acc, f(x)))))
-    let partials = List.map(tasks, fn t -> task_await_unwrap(t))
+    let work = fn chunk -> RRB.fold(chunk, RRB.empty(), fn (acc, x) -> RRB.push(acc, f(x)))
+    -- A refused IO.Spawn computes the same result sequentially.
+    let partials =
+      if spawn_allowed() do
+        let tasks = List.map(Array.to_list(chunks), fn chunk -> task_spawn(fn _ -> work(chunk)))
+        List.map(tasks, fn t -> task_await_unwrap(t))
+      else List.map(Array.to_list(chunks), work) end
     List.fold_left(partials, RRB.empty(), fn (acc, r) -> RRB.concat(acc, r))
   end
 
@@ -124,10 +135,12 @@ mod Parallel do
   """
   fn preduce_n(input, zero, f, merge, workers: Int) do
     let chunks = RRB.chunk(input, workers)
-    let tasks  = List.map(Array.to_list(chunks), fn chunk ->
-      task_spawn(fn _ ->
-        RRB.fold(chunk, zero, fn (acc, x) -> merge(acc, f(x)))))
-    let partials = List.map(tasks, fn t -> task_await_unwrap(t))
+    let work = fn chunk -> RRB.fold(chunk, zero, fn (acc, x) -> merge(acc, f(x)))
+    let partials =
+      if spawn_allowed() do
+        let tasks = List.map(Array.to_list(chunks), fn chunk -> task_spawn(fn _ -> work(chunk)))
+        List.map(tasks, fn t -> task_await_unwrap(t))
+      else List.map(Array.to_list(chunks), work) end
     List.fold_left(partials, zero, fn (acc, r) -> merge(acc, r))
   end
 

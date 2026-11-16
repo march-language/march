@@ -30,7 +30,7 @@ mod TopologyMoveB do
   -- Print [me]'s offering state each time it changes and then holds for
   -- 1.5 s, until the stop file exists.
   pfn watch(h : Cap(ClusterNode.Live), me : String, shown : Bool, seen : Bool, since : Int, stop : String) : () do
-    if File.exists(stop) do () else
+    if Authority.must(File.exists(stop)) do () else
       let now = Topology.offered(h) == ["Echo.Server"]
       let t = unix_time_ms()
       let since2 = if now == seen do since else t end
@@ -53,8 +53,8 @@ mod TopologyMoveB do
   fn main(c : Cap(IO)) do
     let me = "node-b"
     let other = "node-a"
-    let seeds = Cons("127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")), Nil)
-    let port = Env.require_int("MARCH_PORT_B")
+    let seeds = Cons("127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))), Nil)
+    let port = Authority.must(Env.require_int("MARCH_PORT_B"))
     match ClusterNode.start(c, ClusterNode.config(me, port, "", seeds, "topo-move-secret", 1)) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -74,7 +74,7 @@ mod TopologyMoveB do
         else () end
         Topology.place(h, [ Topology.role("Echo.Server", Topology.count(1),
                               fn () -> Echo_Run.offer_Server(h, 4, fn (s, st) -> serve_one(s, st))) ])
-        watch(h, me, false, false, unix_time_ms(), Env.require("TOPOLOGY_STOP_FILE"))
+        watch(h, me, false, false, unix_time_ms(), Authority.must(Env.require("TOPOLOGY_STOP_FILE")))
         println(me ++ ": stopping")
         Topology.stop(h)
     end

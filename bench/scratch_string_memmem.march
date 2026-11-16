@@ -45,5 +45,6 @@ mod ScratchStringMemmem do
     let t3 = unix_time(())
     println("LATE_RESULT " ++ String.from_int(late))
     println("LATE_TIME_MS " ++ float_to_string(elapsed_ms(t2, t3)))
+    ()
   end
 end

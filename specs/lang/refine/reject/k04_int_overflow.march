@@ -1,0 +1,7 @@
+-- EXPECT-VIOLATED: overflow +
+-- EXPECT-ERROR: may overflow Int
+-- Kind: Int overflow. `cap no_panic` and an unbounded operand.
+mod K04 do
+  cap no_panic
+  fn next(n : Int) : Int do n + 1 end
+end

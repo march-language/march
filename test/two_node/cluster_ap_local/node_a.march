@@ -72,7 +72,7 @@ mod ClusterApLocal do
               -- Client may print "pong" before this handler gets here (it
               -- did under the sanitizer build).  main prints it once the
               -- hosted session is done, keeping the output in one order.
-              Vault.set(Vault.open("ap_local_holds"), "n", Session.epoch_holds_here())
+              Vault.set(Authority.must(Vault.open("ap_local_holds")), "n", Session.epoch_holds_here())
               { sessions: LinearMap.vacate(slot) }
           end
       end
@@ -100,7 +100,7 @@ mod ClusterApLocal do
   -- PingServer's holds count after its session finished, once its handler
   -- has recorded it (-1 until then).
   pfn holds_after_finish(left : Int) : Int do
-    let n = Vault.get_or(Vault.open("ap_local_holds"), "n", -1)
+    let n = Vault.get_or(Authority.must(Vault.open("ap_local_holds")), "n", -1)
     if n >= 0 do n
     else if left <= 0 do panic("PingServer never recorded its holds") else
       sleep_ms(20)
@@ -110,8 +110,8 @@ mod ClusterApLocal do
 
   fn session(c : Cap(IO), h : Cap(ClusterNode.Live), n : Int) : () do
     match Echo_Run.initiate_Client(h, fn (s, st) -> ask(s, st, n)) do
-      Ok(_) -> println("Client: session " ++ int_to_string(n) ++ " done")
-      Err(e) -> println("Client: " ++ Echo_Run.error_message(e))
+      Ok(_) -> Authority.ignore(println("Client: session " ++ int_to_string(n) ++ " done"))
+      Err(e) -> Authority.ignore(println("Client: " ++ Echo_Run.error_message(e)))
     end
   end
 
@@ -119,10 +119,11 @@ mod ClusterApLocal do
     let now = Scheduler.live_procs()
     println("procs retired after the " ++ what ++ ": " ++ bool_to_string(now <= before)
       ++ (if now <= before do "" else " (" ++ int_to_string(now - before) ++ " over)" end))
+    ()
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -161,7 +162,7 @@ mod ClusterApLocal do
           Ok(o) ->
             visible(h, o, 10000)
             let before = Scheduler.live_procs()
-            Vault.set(Vault.new("ap_local_before"), "n", before)
+            Vault.set(Authority.must(Vault.new("ap_local_before")), "n", before)
             match Hosted_Run.initiate_Client(h, fn (s, st) ->
                 Hosted_Client.recv_Pong(s, Hosted_Client.send_Ping(s, st, 41), fn (m, st2) ->
                   println("Client: pong " ++ int_to_string(m))
@@ -187,7 +188,7 @@ mod ClusterApLocal do
         end
         let _ = task_await_unwrap(server)
         sleep_ms(300)
-        retired("hosted and pair sessions", Vault.get_or(Vault.open("ap_local_before"), "n", -1))
+        retired("hosted and pair sessions", Vault.get_or(Authority.must(Vault.open("ap_local_before")), "n", -1))
         ClusterNode.stop(h)
     end
   end

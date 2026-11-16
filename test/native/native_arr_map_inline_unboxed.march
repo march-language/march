@@ -37,5 +37,6 @@ mod Main do
     let f = 10.0
     let arr3 = NativeArray.map_float(arr, fn x -> x +. f)
     println(NativeArray.to_list_float(arr3))   -- [6.5, 9., 10., 11., 13.5]
+    ()
   end
 end

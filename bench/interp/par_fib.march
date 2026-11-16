@@ -44,6 +44,7 @@ pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   -- Scaled down from fib(40, 20) for interpreter speed.
   let result = par_fib(25, 18)
   println("checksum=" ++ int_to_string(result))
+  ()
 end
 
 end

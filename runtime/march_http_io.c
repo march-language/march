@@ -9,6 +9,8 @@
 
 #include "march_http_io.h"
 #include "march_http_parse_simd.h"
+#define MARCH_TLS_VIA_OPS     /* TLS through g_march_tls_ops: see march_tls_ops.h */
+#include "march_tls_ops.h"
 
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -26,9 +28,124 @@ int march_set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/* ── Header-end scan (both servers' header/body deadlines) ─────────────── */
+
+int march_http_has_header_end(const char *buf, size_t len) {
+    const char *p = buf, *end = buf + len;
+    while (end - p >= 4) {
+        const char *r = memchr(p, '\r', (size_t)(end - p - 3));
+        if (!r) return 0;
+        if (r[1] == '\n' && r[2] == '\r' && r[3] == '\n') return 1;
+        p = r + 1;
+    }
+    return 0;
+}
+
 /* ── Non-blocking recv ────────────────────────────────────────────────── */
 
+/* Make room for at least one more byte in c->rbuf; 0 ok, -1 at the cap. */
+static int rbuf_reserve(conn_state_t *c) {
+    if (c->rbuf_len < c->rbuf_cap) return 0;
+    if (c->rbuf_cap >= CONN_READ_BUF_MAX) return -1;
+    size_t ncap = c->rbuf_cap ? c->rbuf_cap * 2 : CONN_READ_BUF_SIZE;
+    if (ncap > CONN_READ_BUF_MAX) ncap = CONN_READ_BUF_MAX;
+    char *nbuf = (char *)realloc(c->rbuf, ncap);
+    if (!nbuf) return -1;
+    c->rbuf     = nbuf;
+    c->rbuf_cap = ncap;
+    return 0;
+}
+
+static int rbuf_has_request(conn_state_t *c) {
+    if (c->rbuf_len == 0) return 0;
+    march_http_request_t probe;
+    size_t consumed = 0;
+    return march_http_parse_pipelined(c->rbuf, c->rbuf_len, &probe, 1, &consumed) > 0;
+}
+
+/* The TLS read edge: drain the socket into the session (edge-triggered:
+ * read until EAGAIN), advance the handshake, then decrypt everything
+ * available into rbuf. The caller flushes the session's output afterwards
+ * (handshake messages, session tickets). */
+static io_result_t recv_tls(conn_state_t *c) {
+    int peer_closed = 0;
+    for (;;) {
+        char tmp[16384];
+        ssize_t n = recv(c->fd, tmp, sizeof tmp, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            return IO_ERROR;
+        }
+        if (n == 0) { peer_closed = 1; break; }
+        if (mts_feed(c->tls, tmp, (size_t)n) != 0) return IO_ERROR;
+    }
+    if (!mts_is_established(c->tls)) {
+        mts_rc h = mts_handshake(c->tls);
+        if (h == MTS_FAIL) return IO_ERROR;
+        if (h != MTS_DONE) return peer_closed ? IO_ERROR : IO_PARTIAL;
+    }
+    for (;;) {
+        if (rbuf_reserve(c) != 0) return IO_ERROR;
+        size_t k = 0;
+        mts_rc r = mts_read(c->tls, c->rbuf + c->rbuf_len, c->rbuf_cap - c->rbuf_len, &k);
+        c->rbuf_len += k;
+        if (r == MTS_NEED_INPUT) break;
+        if (r == MTS_EOF) { peer_closed = 1; break; }
+        if (r == MTS_FAIL) return IO_ERROR;
+    }
+    if (rbuf_has_request(c)) return IO_COMPLETE;
+    return peer_closed ? IO_ERROR : IO_PARTIAL;
+}
+
+int march_tls_write_iov(conn_state_t *c, const struct iovec *iov, int n) {
+    for (int i = 0; i < n; i++)
+        if (iov[i].iov_len && mts_write(c->tls, iov[i].iov_base, iov[i].iov_len) != 0)
+            return -1;
+    return 0;
+}
+
+io_result_t march_tls_flush(conn_state_t *c, size_t *sent) {
+    if (sent) *sent = 0;
+    /* Collect: compact first so the buffer does not creep. */
+    size_t pending = mts_out_len(c->tls);
+    if (pending > 0) {
+        if (c->cout_pos > 0 && c->cout_pos == c->cout_len) c->cout_pos = c->cout_len = 0;
+        if (c->cout_len + pending > c->cout_cap) {
+            size_t ncap = c->cout_cap ? c->cout_cap : 16384;
+            while (ncap < c->cout_len + pending) ncap *= 2;
+            char *nb = (char *)realloc(c->cout, ncap);
+            if (!nb) return IO_ERROR;
+            c->cout = nb;
+            c->cout_cap = ncap;
+        }
+        c->cout_len += mts_take_out(c->tls, c->cout + c->cout_len, c->cout_cap - c->cout_len);
+    }
+    while (c->cout_pos < c->cout_len) {
+        ssize_t n = send(c->fd, c->cout + c->cout_pos, c->cout_len - c->cout_pos, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return IO_PARTIAL;
+            return IO_ERROR;
+        }
+        c->cout_pos += (size_t)n;
+        if (sent) *sent += (size_t)n;
+    }
+    c->cout_pos = c->cout_len = 0;
+    /* A connection that once sent a large response should not keep the
+     * buffer while it idles. */
+    if (c->cout_cap > 256 * 1024) { free(c->cout); c->cout = NULL; c->cout_cap = 0; }
+    return IO_COMPLETE;
+}
+
+void march_tls_conn_free_out(conn_state_t *c) {
+    free(c->cout);
+    c->cout = NULL;
+    c->cout_len = c->cout_pos = c->cout_cap = 0;
+}
+
 io_result_t march_recv_nonblocking(conn_state_t *c) {
+    if (c->tls) return recv_tls(c);
     /* Drain until EAGAIN, growing the buffer as needed.
      *
      * Both halves matter, and the event loop is edge-triggered (EPOLLET /

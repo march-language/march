@@ -48,6 +48,7 @@ fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let sc = NativeArray.sum_f32(combined)
   println("MAP2_RESULT " ++ float_to_string(sc))
   println("MAP2_TIME_MS " ++ float_to_string(elapsed_ms(t0c, t1c)))
+  ()
 end
 
 end

@@ -31,5 +31,6 @@ mod Main do
     Ok(FloatCol(_, data)) -> println(NativeArray.to_list_float(data))   -- [11., 22., 33.]
     _ -> println("unexpected")
     end
+    ()
   end
 end

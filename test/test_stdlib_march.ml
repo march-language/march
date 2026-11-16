@@ -87,6 +87,7 @@ let load_stdlib_decls name =
 let all_stdlib_decls =
   let files = [
     "prelude.march";
+    "authority.march";
     "option.march";
     "result.march";
     "list.march";
@@ -116,6 +117,7 @@ let all_stdlib_decls =
     "websocket.march";
     "tls.march";
     "http_server.march";
+    "http_acme.march";
     "iterable.march";
     "set.march";
     "hash_map.march";
@@ -438,6 +440,10 @@ let () =
         "every test/stdlib/test_*.march file is registered or documented as deferred"
         `Quick check_registry_drift;
     ]);
+    ("authority", [
+      Alcotest.test_case "Authority module"
+        `Quick (run_stdlib_test "test_authority.march" "TestAuthority");
+    ]);
     ("http", [
       Alcotest.test_case "Http module"
         `Quick (run_stdlib_test "test_http.march" "TestHttp");
@@ -526,6 +532,14 @@ let () =
       Alcotest.test_case "Seq module"
         `Quick (run_stdlib_test "test_seq.march" "TestSeq");
     ]);
+    ("file_handle", [
+      Alcotest.test_case "File.Handle: open, open_write, read_line, write_to, seek, close, with_open"
+        `Quick (run_stdlib_test "test_file_handle.march" "TestFileHandle");
+    ]);
+    ("file_dir", [
+      Alcotest.test_case "File.Dir: open_dir, open_in, open_write_in, list_in, close_dir"
+        `Quick (run_stdlib_test "test_file_dir.march" "TestFileDir");
+    ]);
     ("json", [
       Alcotest.test_case "Json module"
         `Quick (run_stdlib_test "test_json.march" "TestJson");
@@ -545,6 +559,8 @@ let () =
     ("json_collision", [
       Alcotest.test_case "derive Json on same-short-name types in two modules"
         `Quick (run_stdlib_test "test_json_collision.march" "TestJsonCollision");
+      Alcotest.test_case "same-short-name variant types are distinct (Show/Eq/Json)"
+        `Quick (run_stdlib_test "test_same_short_name_types.march" "TestSameShortNameTypes");
     ]);
     ("msgpack", [
       Alcotest.test_case "Msgpack module"

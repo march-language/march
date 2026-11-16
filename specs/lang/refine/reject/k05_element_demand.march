@@ -1,0 +1,7 @@
+-- EXPECT-VIOLATED: precondition sum_pos
+-- EXPECT-ERROR: `-2 > 0` is never true
+-- Kind: element demand. One element of the literal breaks `_ > 0`.
+mod K05 do
+  fn sum_pos(xs : List({Int | _ > 0})) : Int do List.length(xs) end
+  fn go() : Int do sum_pos([1, -2, 3]) end
+end

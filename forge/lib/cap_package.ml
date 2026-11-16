@@ -67,48 +67,17 @@ let of_package ~root ~env_prefix =
 
 (* ── the toolchain behind `march caps` ─────────────────────────────── *)
 
-(* Run [cmd] through the shell, returning (exit code, stdout, stderr). *)
-let run_capture cmd_body =
-  let out = Filename.temp_file "cap_probe" ".out" in
-  let err = Filename.temp_file "cap_probe" ".err" in
-  let rc =
-    Sys.command
-      (Printf.sprintf "%s > %s 2> %s" cmd_body (Filename.quote out) (Filename.quote err))
-  in
-  let o = try read_all out with Sys_error _ -> "" in
-  let e = try read_all err with Sys_error _ -> "" in
-  (try Sys.remove out with Sys_error _ -> ());
-  (try Sys.remove err with Sys_error _ -> ());
-  (rc, o, e)
-
-let resolve_march ~toolchain_prefix =
-  match run_capture (Printf.sprintf "%ssh -c 'command -v march'" toolchain_prefix) with
-  | 0, o, _ when String.trim o <> "" -> Some (String.trim o)
-  | _ -> None
+let run_capture = Cmd_build.run_capture
+let resolve_march = Cmd_build.resolve_march
 
 let march_version ~toolchain_prefix =
   match run_capture (Printf.sprintf "%smarch --version" toolchain_prefix) with
   | 0, o, _ when String.trim o <> "" -> Some (String.trim o)
   | _ -> None
 
-let realpath p = try Unix.realpath p with Unix.Unix_error _ -> p
 
-let compiler_identity ~toolchain_prefix =
-  let parts =
-    match resolve_march ~toolchain_prefix with
-    | None -> [ "march-unresolved" ]
-    | Some p ->
-      let real = realpath p in
-      let digest = try Digest.to_hex (Digest.file real) with Sys_error _ -> "unreadable" in
-      [ p; real; digest ]
-  in
-  (* The executable's digest alone misses two ways the SAME binary can run a
-     different compiler: a wrapper script that execs through
-     ~/.march/current (its bytes never change when the active toolchain
-     does), and a stdlib picked up from MARCH_STDLIB. *)
-  let global = Option.value ~default:"" (try Toolchain.global_version () with _ -> None) in
-  let stdlib = Option.value ~default:"" (Sys.getenv_opt "MARCH_STDLIB") in
-  Digest.to_hex (Digest.string (String.concat "\x00" (parts @ [ global; stdlib ])))
+
+let compiler_identity = Cmd_build.compiler_identity
 
 (* `march caps` first shipped in 0.3.0 (nightly-20260805 for nightlies). *)
 let caps_min_version = "0.3.0 (or nightly-20260805)"

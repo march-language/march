@@ -1,10 +1,10 @@
-# Golden corpus index (g01–g47)
+# Golden corpus index (g01–g49)
 
 Navigable map of the Core March golden conformance corpus: each program in this
 directory (`specs/lang/golden/*.march`) to the construct(s) and operational
 rule(s) it anchors in `specs/lang/core-march.md`. Every program is verified to
 produce **identical output interpreted and compiled**; run the whole corpus
-with `specs/lang/golden/verify.sh` (47/47 MATCH, exit 0). See §5 of
+with `specs/lang/golden/verify.sh` (49/49 MATCH, exit 0). See §5 of
 `core-march.md` for the full per-program prose (divergences found and routed
 around, expected output, guardrails).
 
@@ -49,7 +49,9 @@ hold by proof therefore runs byte-identically, the same erasure property golden 
 established for linear/affine annotations); `g47` the `let*` generalized
 monadic-bind addition (`specs/lang/let-star-generalized-bind.md`: the same
 type-directed `flat_map` dispatch works across three different types in one
-program, proving it isn't secretly hardwired to any one of them).
+program, proving it isn't secretly hardwired to any one of them); `g48` the same-short-name
+types addition (each colliding variant type is its own nominal type); `g49` the same for a
+user type named like a built-in, prelude or stdlib type.
 
 | Program | Construct anchored | Rule(s) in core-march.md §4 |
 |---|---|---|
@@ -65,7 +67,7 @@ program, proving it isn't secretly hardwired to any one of them).
 | `g10_arithmetic` | `-`,`*`,`/`,`%`, truncating `/`/`%`, unary `negate`, Float `-`/`*` | δ-Sub/Mul/Div/Mod-I, δ-Neg-I, δ-Sub-F/δ-Mul-F (§4.4) |
 | `g11_comparison` | `!=`,`<`,`<=`,`>`,`>=` on Int/Float/String | δ-Neq/Lt/Le/Gt/Ge-* (§4.4) |
 | `g12_bool_ops` | `&&`,`\|\|`,`!`/`not`, `++` | δ-And, δ-Or, δ-Not, δ-Concat (§4.4) |
-| `g13_strict_bool` | `&&`/`\|\|` **strictness** (rhs side effect fires) | §4.4.1 (strict, not short-circuiting); E-App-Prim (§4.2) |
+| `g13_short_circuit_bool` | `&&`/`\|\|` **short-circuit** (a decided rhs's side effect never fires) | §4.4.1 (E-And-F/T, E-Or-T/F) |
 | `g14_tuple_let` | `ETuple` construction, `PatTuple` in a block `let` | E-Tuple (§4.2), match(PatTuple, VTuple) (§4.3) |
 | `g15_tuple_match` | `PatTuple` as a `match` branch, alongside a literal-tuple pattern | E-Match (§4.2), match(PatTuple …) + branch-selection (§4.3) |
 | `g16_tuple_nested` | nested `ETuple` destructured by nested `PatTuple` in a `match` | E-Tuple (§4.2), match(PatTuple …) via match_list recursion (§4.3) |
@@ -100,6 +102,8 @@ program, proving it isn't secretly hardwired to any one of them).
 | `g45_dual_position_borrow` | Perceus dual-position dup/drop invariant (B1, `specs/perceus-invariants.md` §2.1): `both(a: owned, b: borrowed, n: owned)` called as `both(s, s, 1)`: the exact shape that used to RC-underflow (owned-side and borrowed-side accounting each independently believing itself the only consumer of the one reference). Verified three ways: interp==compiled to the byte; post-Perceus TIR matches `test/snapshots/perceus/mixed_owned_borrowed_args.expected` exactly (one `inc_rc s` before the call, one `dec_rc` after); compiled binary clean under `MARCH_SANITIZE=1` (ASan+UBSan), exit 0, no leak/UAF report | E-Call-Dual-Position (§4.16): exactly one balancing `EIncRC`/`EDecRC` pair for a variable at both an owned and a borrowed position of the same call |
 | `g46_refinement_erasure` | refinement types (`core-march-types.md` §2.14) have ZERO runtime footprint: `typecheck.ml` erases every `TyRefine` to its base type (repr strips it); a separate post-typecheck pass (`lib/refinecheck`) discharges the proof obligations entirely at `--check`/`--compile` front-end time, inserting no runtime check on either backend. A `clamp_nonneg`/`take_n` pair with a postcondition and precondition that both hold by proof (`--check` exit 0) therefore runs byte-identically; same erasure property golden `g41` established for linear/affine annotations | T-Refine-Erase (`core-march-types.md` §2.14): a refined type has the identical typing derivation as its base type; no runtime check is inserted at any point |
 | `g47_letstar_generalized_bind` | `let*` generalized monadic-bind across three different types in one program: `Option` (propagates through two steps, short-circuits on the first `None`), `Result` (same two-step shape as `g42`'s `let?`, proving `let*` subsumes it), `List` (`flat_map` as cartesian product, proving `let*` isn't secretly special-cased to short-circuiting types); matching to the byte on both backends | `let*` generalized bind (`specs/lang/let-star-generalized-bind.md`): native `ELetStar` typechecked by resolving `<Type>.flat_map` from the RHS's inferred type, lowered to an ordinary `flat_map`/lambda/match call; interpreted path dispatches on the runtime value's type instead |
+| `g48_same_short_name_types` | three variant types named `Note` (entry level, `mod A`, `mod B`): a constructor wrapping one used cross-module, `A.Note` / `Main.A.Note` written from outside, derived `Show`/`Eq` on each, and both nested types deriving `Json` and round-tripping; matching to the byte on both backends | each colliding variant type is its own nominal type (`lib/typecheck/typecheck_nominal.ml`); the interpreter's type-dispatched builtins read a colliding type's qualified impl slot (`Eval_runtime.find_impl_for`) |
+| `g49_user_type_named_like_base_type` | user variants named `CancelToken` (a built-in), `Option` and `Result` (the prelude's) and `Level` (`Logger`'s), each used beside the type it is named like: the program's `Some`/`None` and the prelude's told apart by the checked-against type, derived `Show`/`Eq` on the user types, a builtin cancel token created and queried, the prelude `Result` matched by constructor; matching to the byte on both backends | a user variant named like a base type has its own identity, entry-qualified at the top level (`Main.CancelToken`, `lib/typecheck/typecheck_nominal.ml`); the backends keep the short name |
 
 ## Coverage notes (rules NOT anchored by a golden program, and why)
 
@@ -112,11 +116,11 @@ note explaining why:
   source program can construct them. Collected in §4.3.1; `g27` is the reachable
   substitute for `PatAs`'s "bindings visible to the arm" semantics.
 - **E-Cond-Fail (truly all-false)** and the **`Match_failure`
-  exhaustiveness** case and the **`&&`/`||` crashing strictness** witness; all
+  exhaustiveness** case; both
   RAISE at runtime, and `verify.sh` treats any nonzero interpreter exit as an
   automatic `INTERP FAIL`, so a crashing program can never register as a golden
-  `MATCH`. `g32` (routed through a `_ ->` catch-all) and `g13` (a non-crashing
-  `println` side-effect witness) are the non-crashing substitutes.
+  `MATCH`. `g32` (routed through a `_ ->` catch-all) is the non-crashing
+  substitute.
 - **`ERecordUpdate` on a missing field**: the adjudicated-and-converged
   divergence (§4.2.1). Its resolved form is "both backends reject with a nonzero
   exit", which (per the harness limitation above) cannot be a golden `MATCH`; it

@@ -98,7 +98,7 @@ mod HostedProtocolChange do
                                  let _ = client(s, Hold_Client.register(s, 0), n, gate)
                                  ()) do
       Ok(_) -> ()
-      Err(e) -> println("client " ++ int_to_string(n) ++ ": " ++ SessionNode.run_error_message(e))
+      Err(e) -> Authority.ignore(println("client " ++ int_to_string(n) ++ ": " ++ SessionNode.run_error_message(e)))
     end
   end
 
@@ -138,14 +138,14 @@ mod HostedProtocolChange do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "hpc-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "hpc-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        let version : Vault(String) = Vault.new("hpc_version")
+        let version : Vault(String) = Authority.must(Vault.new("hpc_version"))
         Vault.set(version, "fp", "hold-v1")
-        let hosts : Vault(Pid(HoldState)) = Vault.new("hpc_hosts")
-        let gens : Vault(Int) = Vault.new("hpc_gens")
+        let hosts : Vault(Pid(HoldState)) = Authority.must(Vault.new("hpc_hosts"))
+        let gens : Vault(Int) = Authority.must(Vault.new("hpc_gens"))
         let mk = fn () -> new_host(gens, hosts)
         let open = fn (a, cap) ->
           SessionNode.offer_hosted(h, "Hold", Option.unwrap_or(Vault.get(version, "fp"), "?"), Hold_Msg.role_names(), Nil,
@@ -162,7 +162,7 @@ mod HostedProtocolChange do
         Topology.place(h, Cons(Topology.offer_actor_role("Hold.Server", Topology.everywhere(), 8, mk, open), Nil))
         wait_until("the first offer", fn _ -> registered(h, "hold-v1"), 10000)
         -- Three old-version sessions, each parked after its hello.
-        let gate : Vault(Int) = Vault.new("hpc_gate")
+        let gate : Vault(Int) = Authority.must(Vault.new("hpc_gate"))
         let olds = List.map(Cons(1, Cons(2, Cons(3, Nil))), fn n ->
           let t = task_spawn(fn _ -> do
             session(c, h, "hold-v1", n, gate)
@@ -187,7 +187,7 @@ mod HostedProtocolChange do
         println("old offer draining: " ++ int_to_string(Topology.running(h)) ++ " sessions")
         -- A new session is served by the new actor while the old one holds
         -- its three.
-        let fresh : Vault(Int) = Vault.new("hpc_gate_new")
+        let fresh : Vault(Int) = Authority.must(Vault.new("hpc_gate_new"))
         Vault.set(fresh, "open4", 1)
         Vault.set(fresh, "open5", 1)
         session(c, h, "hold-v2", 4, fresh)

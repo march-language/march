@@ -2,6 +2,24 @@
 -- Run with: dune exec march -- test test/stdlib/test_process.march
 
 mod TestProcess do
+  needs IO.Process
+
+-- A Process works in a function bounded by `needs ()` (spec §18; ruling R9:
+-- the per-function bound). Reading from and waiting on a child the caller
+-- holds charge nothing (ocap phase 2, Task 10): spawning it was the checked
+-- act. The `march test` rule in test/dune typechecks this module.
+mod ProcReader do
+  fn first_then_exit(p : Process) : Result((Option(String), Int), Process.ProcessError) needs () do
+    match Process.read_line(p) do
+    Err(e) -> Err(e)
+    Ok(line) ->
+      match Process.wait_proc(p) do
+      Err(e) -> Err(e)
+      Ok(code) -> Ok((line, code))
+      end
+    end
+  end
+end
 
 describe "Process" do
 
@@ -9,12 +27,12 @@ describe "Process" do
 
     test "cwd is non-empty" do
       let dir = Process.cwd()
-      assert not(string_is_empty(dir))
+      assert not(string_is_empty(Authority.must(dir)))
     end
 
     test "cwd has at least one character" do
       let dir = Process.cwd()
-      assert (string_byte_length(dir) >= 1)
+      assert (string_byte_length(Authority.must(dir)) >= 1)
     end
 
   end
@@ -23,12 +41,12 @@ describe "Process" do
 
     test "PATH is set" do
       let path = Process.env("PATH")
-      assert Option.is_some(path)
+      assert Option.is_some(Authority.must(path))
     end
 
     test "PATH is non-empty" do
       let path_opt = Process.env("PATH")
-      match path_opt do
+      match Authority.must(path_opt) do
       None -> ()
       Some(p) -> assert not(string_is_empty(p))
       end
@@ -36,7 +54,7 @@ describe "Process" do
 
     test "HOME if set is non-empty" do
       let home = Process.env("HOME")
-      match home do
+      match Authority.must(home) do
       None    -> ()
       Some(h) -> assert not(string_is_empty(h))
       end
@@ -44,12 +62,12 @@ describe "Process" do
 
     test "unset variable is None" do
       let val_ = Process.env("__MARCH_TEST_UNSET_VAR_ZXQVWP__")
-      assert Option.is_none(val_)
+      assert Option.is_none(Authority.must(val_))
     end
 
     test "env returns Option" do
       let result = Process.env("PATH")
-      match result do
+      match Authority.must(result) do
       Some(_) -> ()
       None    -> ()
       end
@@ -61,14 +79,64 @@ describe "Process" do
 
     test "argv is non-nil" do
       let args = Process.argv()
-      assert not(is_nil(args))
+      assert not(is_nil(Authority.must(args)))
     end
 
     test "argv first element is non-empty string" do
       let args = Process.argv()
-      match args do
+      match Authority.must(args) do
       Nil        -> panic("argv is empty — expected at least argv[0]")
       Cons(a, _) -> assert not(string_is_empty(a))
+      end
+    end
+
+  end
+
+  describe "async handles" do
+
+    test "write, read_line, kill, wait_proc" do
+      match Authority.must(Process.spawn_async("cat", [])) do
+        Err(e) -> panic("spawn cat failed: " ++ to_string(e))
+        Ok(p) ->
+          assert (Process.write(p, "x\n") == Ok(()))
+          assert (Process.read_line(p) == Ok(Some("x")))
+          assert (Process.kill(p) == Ok(()))
+          assert Result.is_ok(Process.wait_proc(p))
+      end
+    end
+
+    test "wait_proc closes the handle" do
+      match Authority.must(Process.spawn_async("cat", [])) do
+        Err(e) -> panic("spawn cat failed: " ++ to_string(e))
+        Ok(p) ->
+          assert (Process.kill(p) == Ok(()))
+          assert Result.is_ok(Process.wait_proc(p))
+          assert (Process.wait_proc(p) == Err(Process.Closed))
+          assert (Process.write(p, "y") == Err(Process.Closed))
+          assert (Process.read_line(p) == Err(Process.Closed))
+          assert (Process.kill(p) == Err(Process.Closed))
+      end
+    end
+
+    test "exit code through wait_proc" do
+      match Authority.must(Process.spawn_async("sh", ["-c", "exit 3"])) do
+        Err(e) -> panic("spawn sh failed: " ++ to_string(e))
+        Ok(p) -> assert (Process.wait_proc(p) == Ok(3))
+      end
+    end
+
+    test "a held process needs no capability" do
+      match Authority.must(Process.spawn_async("sh", ["-c", "echo hi; exit 2"])) do
+        Err(e) -> panic("spawn sh failed: " ++ to_string(e))
+        Ok(p) -> assert (ProcReader.first_then_exit(p) == Ok((Some("hi"), 2)))
+      end
+    end
+
+    test "a program that cannot run is ProcessFailed" do
+      match Authority.must(Process.spawn_async("/nonexistent", [])) do
+        Err(Process.ProcessFailed(_)) -> ()
+        Err(e) -> panic("expected ProcessFailed, got " ++ to_string(e))
+        Ok(_) -> panic("spawning /nonexistent succeeded")
       end
     end
 

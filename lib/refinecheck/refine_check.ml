@@ -3081,6 +3081,9 @@ let rec rename_heads (f : string -> string option) (e : A.expr) : A.expr =
   | A.EAtom (a, es, sp) -> A.EAtom (a, List.map go es, sp)
   | A.EAnnot (x, t, sp) -> A.EAnnot (go x, t, sp)
   | A.EField (r, n, sp) -> A.EField (go r, n, sp)
+  (* A bounded quantifier's body is a lambda; its binder is a variable, never
+     an applied head, so renaming heads under it cannot capture. *)
+  | A.ELam (ps, b, sp) -> A.ELam (ps, go b, sp)
   | e -> e
 
 let to_own (e : A.expr) : A.expr =
@@ -3533,11 +3536,11 @@ let rec check_elements ~root errctx defs (ctx : rctx) path lets sc re (cb : cben
      relation when one [Within] field holds every related slot (leftovers
      phase E's rule), and a recorded skip for any other shape. *)
   | A.ECon (k, args, _)
-    when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+    when (match ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt with
           | Some kk -> Hashtbl.mem ctor_param_fields kk
           | None -> false) ->
     (* [container]'s own constructor of that name (2026-11-02). *)
-    let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+    let kk = Option.get (ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt) in
     let roles = Hashtbl.find ctor_param_fields kk in
     let fparams = Hashtbl.find_opt ctor_field_params kk in
     if List.length roles <> List.length args then true
@@ -4932,6 +4935,41 @@ let post_walk_ok = ref false
    hypothesis is withheld. *)
 let lemma_body : bool ref = ref false
 
+(* `ghost fn` names of the module being checked (lib/desugar/ghost.ml).  A
+   match arm whose scope holds a hypothesis about one gets the lemma body's
+   pattern links (§4.3): a ghost specification is about structure the
+   program never computes, and those links are what let the checker unfold
+   it at the matched constructor.  Gated, like the quantified case, so a
+   program without ghost code sends the solver exactly what it did before. *)
+let ghost_fn_names : (string, unit) Hashtbl.t = Hashtbl.create 8
+
+let rec mentions_ghost_fn (e : A.expr) : bool =
+  match e with
+  | A.EApp (f, args, _) ->
+    (match f with
+     | A.EVar { A.txt; _ } -> Hashtbl.mem ghost_fn_names (March_desugar.Lemma_erase.last_segment txt)
+     | _ -> false)
+    || mentions_ghost_fn f || List.exists mentions_ghost_fn args
+  | A.ELam (_, b, _) | A.EAnnot (b, _, _) | A.ERefineMsg (b, _, _) | A.EField (b, _, _) -> mentions_ghost_fn b
+  | A.EIf (c, a, b, _) -> mentions_ghost_fn c || mentions_ghost_fn a || mentions_ghost_fn b
+  | A.ETuple (es, _) | A.ECon (_, es, _) -> List.exists mentions_ghost_fn es
+  | _ -> false
+let proof_depth = ref 0
+let proof_assertions : (A.span, bool) Hashtbl.t = Hashtbl.create 16
+let proof_results : (A.span, (A.expr * bool) list) Hashtbl.t = Hashtbl.create 16
+
+(* Speculative walks must not publish proof facts into their caller's walk. *)
+let with_proof_scratch f =
+  let facts = Hashtbl.copy proof_results and assertions = Hashtbl.copy proof_assertions in
+  let depth = !proof_depth in
+  Fun.protect ~finally:(fun () ->
+    Hashtbl.reset proof_results;
+    Hashtbl.iter (Hashtbl.replace proof_results) facts;
+    Hashtbl.reset proof_assertions;
+    Hashtbl.iter (Hashtbl.replace proof_assertions) assertions;
+    proof_depth := depth) f
+
+
 (** Lemmas that passed L1-L3 and L5 in this module, by declaring span. *)
 let lemma_valid : (A.span, unit) Hashtbl.t = Hashtbl.create 16
 
@@ -4972,17 +5010,28 @@ let read_manifest (path : string) : (string * string) list =
 (* A parameter type of the program function [f] whose short name is
    conflated with another declaration ([Refine_encode.conflated_declarants]):
    the type and the modules declaring it. *)
-let conflated_param_type (f : string) : (string * string list) option =
+let conflated_param_type ?decl_span (f : string) : (string * string list) option =
   match !Witness.current_module with
   | None -> None
   | Some m ->
-    let rec find ds =
+    (* The declaration the predicate's name denotes: the one in scope where
+       the predicate is written ([decl_span]), else a user file's, else any.
+       The first bare-name match was a stdlib `fn size` (`Deque.size`, …),
+       so a user's `size` over a conflated type never got this message. *)
+    let rec find ok ds =
       List.find_map
         (function
-          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f -> Some fd
-          | A.DMod (_, _, inner, _) -> find inner
+          | A.DFn (fd, _) when fd.A.fn_name.A.txt = f && ok fd -> Some fd
+          | A.DMod (_, _, inner, _) -> find ok inner
           | _ -> None)
         ds
+    in
+    let find ds =
+      let user (fd : A.fn_def) = not (March_typecheck.Typecheck_builtins.file_is_stdlib fd.A.fn_name.A.span.A.file) in
+      let in_scope (fd : A.fn_def) = Some fd.A.fn_name.A.span = decl_span in
+      match (if decl_span = None then None else find in_scope ds) with
+      | Some fd -> Some fd
+      | None -> ( match find user ds with Some fd -> Some fd | None -> find (fun _ -> true) ds)
     in
     let rec tys (t : A.ty) : string list =
       match t with
@@ -5031,6 +5080,23 @@ let rec lemma_tails (e : A.expr) : A.expr list =
   | A.EMatch (_, brs, _) -> List.concat_map (fun (br : A.branch) -> lemma_tails br.A.branch_body) brs
   | _ -> [ e ]
 
+(* Check a scoped goal at each normal exit of its hint body, retaining the
+   branch's facts. Like a lemma's tails, only the last statement branches;
+   earlier statements are walked normally in their lexical scope. *)
+let rec proof_body (goal : A.expr) (span : A.span) (hints : A.expr) : A.expr =
+  let finish = proof_body goal span in
+  match hints with
+  | A.EBlock (es, sp) ->
+    (match List.rev es with
+     | [] -> A.EAssert (goal, span)
+     | last :: rest -> A.EBlock (List.rev_append rest [finish last], sp))
+  | A.EIf (c, t, f, sp) -> A.EIf (c, finish t, finish f, sp)
+  | A.EProof (A.PWithFuel (f, n, body), sp) ->
+    A.EProof (A.PWithFuel (f, n, [finish (A.EBlock (body, sp))]), sp)
+  | A.EMatch (e, brs, sp) ->
+    A.EMatch (e, List.map (fun (b : A.branch) -> { b with branch_body = finish b.branch_body }) brs, sp)
+  | e -> A.EBlock ([e; A.EAssert (goal, span)], span)
+
 (* A goal as a call to a synthetic signature (the [Decreases] device): one
    refined parameter ["$t"], applied to [0], whose predicate is [goal] over the
    formals [names], applied to themselves.  [base] supplies the formals'
@@ -5052,6 +5118,7 @@ let rec surface_of_tc (t : T.ty) : A.ty option =
   let nm txt = { A.txt; span = A.dummy_span } in
   match T.repr t with
   | T.TCon (n, args) ->
+    let n = March_typecheck.Typecheck_nominal.refine_name n in
     let args' = List.filter_map surface_of_tc args in
     if List.length args' = List.length args then Some (A.TyCon (nm n, args')) else None
   | T.TVar _ -> Some (A.TyVar (nm "a"))
@@ -5066,8 +5133,9 @@ let rec surface_of_tc (t : T.ty) : A.ty option =
    its element sort, not at the `Int` default). *)
 let goal_vars_typed (e : A.expr) : (string * A.ty option) list =
   let acc = ref [] in
+  let bound = ref [] in
   let add (v : A.name) =
-    if v.A.txt <> "_" && not (List.mem_assoc v.A.txt !acc) then
+    if not (List.mem v.A.txt !bound) && v.A.txt <> "_" && not (List.mem_assoc v.A.txt !acc) then
       let ty =
         match !Refine_encode.call_type_map with
         | Some tm -> Option.bind (Hashtbl.find_opt tm v.A.span) surface_of_tc
@@ -5076,7 +5144,14 @@ let goal_vars_typed (e : A.expr) : (string * A.ty option) list =
       acc := (v.A.txt, ty) :: !acc
   in
   let rec go (e : A.expr) =
-    match e with
+    match March_ast.Bounded_pred.view e with
+    | Some q ->
+      List.iter go (March_ast.Bounded_pred.domain_exprs q.domain);
+      let saved = !bound in
+      bound := q.binder.txt :: saved;
+      go q.body;
+      bound := saved
+    | None -> match e with
     | A.EVar v -> add v
     | A.EApp (A.EVar _, args, _) -> List.iter go args
     | A.EApp (f, args, _) -> go f; List.iter go args
@@ -5114,47 +5189,49 @@ let rec visit ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
 and lemma_call_facts ~root errctx defs (ctx : rctx) ?(quiet = false) path lets sc re cb ce (e : A.expr) :
     (A.expr * bool) list =
   ignore (root, path, lets, sc, re, cb, ce);
-  match stmt_call e with
-  | Some (A.EApp (A.EVar f, args, sp)) -> (
-    match Hashtbl.find_opt lemma_call_sites sp with
-    | None -> []
-    | Some lfd -> (
-      let theorem = Refine_post.assumed_return lfd in
-      let fact (_, pred, _) = [ (pred, false) ] in
-      (* At an eligible span [check_group] has already checked that this
-         checker's resolution reaches the member the graph names. *)
-      match !Refine_post.ih_at sp f.A.txt args with
-      | Some r -> fact r
-      | None -> (
-        match resolve_call_arity ctx defs f.A.txt (List.length args), theorem with
-        | Some (Some sg), Some p when (match sg.ret with Some (_, p1) -> p1 == p | None -> false) -> (
-          match instantiate_ret sg args with
-          | None -> []
-          | Some r ->
-            let pres =
-              List.filter (fun (o : Obligation.t) -> o.Obligation.kind = Obligation.Precondition)
-                (Obligation.obligations_at sp)
-            in
-            if List.for_all (fun (o : Obligation.t) -> o.Obligation.verdict = Obligation.Proved) pres
-               && (pres <> [] || sg.refined = [])
-            then begin
-              Hashtbl.replace lemma_fact_spans sp ();
-              fact r
-            end
-            else begin
-              let msg =
-                Printf.sprintf
-                  "this call of the lemma `%s` gives no facts: its precondition is not proved here, and \
-                   a lemma is never run, so there is no check to fall back on"
-                  f.A.txt
+  match e with
+  | A.EProof (A.PAssertBy _, sp) -> (match Hashtbl.find_opt proof_results sp with Some facts -> facts | None -> [])
+  | _ -> (match stmt_call e with
+    | Some (A.EApp (A.EVar f, args, sp)) -> (
+      match Hashtbl.find_opt lemma_call_sites sp with
+      | None -> []
+      | Some lfd -> (
+        let theorem = Refine_post.assumed_return lfd in
+        let fact (_, pred, _) = [ (pred, false) ] in
+        (* At an eligible span [check_group] has already checked that this
+           checker's resolution reaches the member the graph names. *)
+        match !Refine_post.ih_at sp f.A.txt args with
+        | Some r -> fact r
+        | None -> (
+          match resolve_call_arity ctx defs f.A.txt (List.length args), theorem with
+          | Some (Some sg), Some p when (match sg.ret with Some (_, p1) -> p1 == p | None -> false) -> (
+            match instantiate_ret sg args with
+            | None -> []
+            | Some r ->
+              let pres =
+                List.filter (fun (o : Obligation.t) -> o.Obligation.kind = Obligation.Precondition)
+                  (Obligation.obligations_at sp)
               in
-              if quiet then ()
-              else if !strict_verified then Err.error ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg
-              else Err.warning ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg;
-              []
-            end)
-        | _ -> [])))
-  | _ -> []
+              if List.for_all (fun (o : Obligation.t) -> o.Obligation.verdict = Obligation.Proved) pres
+                 && (pres <> [] || sg.refined = [])
+              then begin
+                Hashtbl.replace lemma_fact_spans sp ();
+                fact r
+              end
+              else begin
+                let msg =
+                  Printf.sprintf
+                    "this call of the lemma `%s` gives no facts: its precondition is not proved here, and \
+                     a lemma is never run, so there is no check to fall back on"
+                    f.A.txt
+                in
+                if quiet then ()
+                else if !strict_verified then Err.error ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg
+                else Err.warning ~code:Err.Code.lemma_unproved_call errctx ~span:sp msg;
+                []
+              end)
+          | _ -> [])))
+    | _ -> [])
 
 (* The facts of the lemma calls [e] always evaluates, wherever they sit in it
    (todo 2026-11-02-lemma-facts-from-non-statement-calls): an argument, a
@@ -5171,6 +5248,7 @@ and inner_lemma_facts ~root errctx defs (ctx : rctx) ?(quiet = false) ?(extra = 
      statement-position call is warned by that block's own walk. *)
   let rec calls ~stmt acc (e : A.expr) =
     match e with
+    | A.EProof (A.PAssertBy _, _) -> (e, false) :: acc
     | A.EApp (A.EVar { A.txt = "&&" | "||"; _ }, a :: _, _) -> calls ~stmt:false acc a
     | A.EApp (A.EVar _, args, sp) ->
       let acc = List.fold_left (calls ~stmt:false) acc args in
@@ -5198,7 +5276,7 @@ and inner_lemma_facts ~root errctx defs (ctx : rctx) ?(quiet = false) ?(extra = 
 
 (* A static `assert p` inside a lemma (I5): an [Assertion] obligation, and a
    fact for the rest of the block only when proved. *)
-and lemma_assert ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.expr) (sp : A.span) : bool =
+and lemma_assert ?(callee = "assert") ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.expr) (sp : A.span) : bool =
   let vars = goal_vars_typed p in
   let tys = List.map snd vars in
   let base =
@@ -5210,9 +5288,82 @@ and lemma_assert ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.exp
   let sg, args = goal_sig ~base base.param_names p in
   let cx = cx_of ~root errctx defs ctx path lets sc re cb ce in
   let out = ref None in
-  check_call cx ~span:sp ~callee:"assert" ~subject:Lemma_goal ~kind:Obligation.Assertion ~verdict_out:out sg args
+  check_call cx ~span:sp ~callee ~subject:Lemma_goal ~kind:Obligation.Assertion ~verdict_out:out sg args
     (List.hd sg.refined);
   !out = Some Obligation.Proved
+
+(* The path a proof hint adds (todo 2026-11-06-proof-assert-by): each lemma
+   call's theorem, and each assert or nested `assert … by` that is PROVED
+   there, in order, on top of [path].  A hint never runs (erasure removes it),
+   so nothing in it may be assumed unchecked (review C1).  A `let` in the hint
+   retires facts about the names it rebinds (review C2); [hint_binders] then
+   lets the caller drop every fact about a hint-bound name. *)
+and hint_path ~root errctx defs (ctx : rctx) path lets sc re cb ce (hints : A.expr list) =
+  List.fold_left
+    (fun path (h : A.expr) ->
+      match h with
+      | A.EBlock (es, _) -> hint_path ~root errctx defs ctx path lets sc re cb ce es
+      | _ when (match stmt_call h with
+                | Some (A.EApp (_, _, sp)) -> Hashtbl.mem lemma_call_sites sp
+                | _ -> false) ->
+        lemma_call_facts ~root errctx defs ctx path lets sc re cb ce h @ path
+      | A.EAssert (q, sp) ->
+        if lemma_assert ~root errctx defs ctx path lets sc re cb ce q sp then (q, false) :: path else path
+      | A.EProof (A.PAssertBy _, sp) ->
+        (match Hashtbl.find_opt proof_results sp with Some facts -> facts @ path | None -> path)
+      | A.ELet (b, _) -> path_shadow path (pat_binders b.A.bind_pat)
+      | A.ELetFn (n, _, _, _, _) -> path_shadow path [ n.A.txt ]
+      | _ -> path)
+    path hints
+
+(* The names a hint binds (its `let`s and local `fn`s, at any depth of block). *)
+and hint_binders (hints : A.expr list) : string list =
+  List.concat_map
+    (fun (h : A.expr) ->
+      match h with
+      | A.EBlock (es, _) -> hint_binders es
+      | A.ELet (b, _) -> pat_binders b.A.bind_pat
+      | A.ELetFn (n, _, _, _, _) -> [ n.A.txt ]
+      | _ -> [])
+    hints
+
+(* `assert P by hints`: [P] is proved under [path] plus the hints' facts.
+   Ghost and static in every context (a function's too): never a runtime
+   check, so only a proved [P] may be assumed afterwards.  A fact the hint
+   produced about a name it binds is about the hint's own value, not the one
+   [P] names, so it is dropped first. *)
+and proof_assert_by ?callee ~root errctx defs (ctx : rctx) path lets sc re cb ce (p : A.expr) hints sp : bool =
+  let bound = hint_binders hints in
+  let hp = hint_path ~root errctx defs ctx path lets sc re cb ce hints in
+  (* Inside the hint a `let` retired the outer facts about the names it
+     rebinds; [P] is about the OUTER names, so those facts come back, and
+     every fact that mentions a hint-bound name (about the inner value) goes. *)
+  let hp =
+    if bound = [] then hp
+    else
+      List.filter (fun (f, _) -> not (expr_mentions bound f)) hp
+      @ List.filter (fun (f, _) -> expr_mentions bound f) path
+  in
+  lemma_assert ?callee ~root errctx defs ctx hp lets sc re cb ce p sp
+
+(* `calc do e0 op1 e1 by h1 … end`: step i is `e(i-1) op_i e(i)`, proved with
+   its own hint only; every proved step is a fact afterwards (together they
+   give the chain's conclusion).  A step after a failed one is still checked,
+   so each failure is reported by its own number. *)
+and proof_calc ~root errctx defs (ctx : rctx) path lets sc re cb ce (e0 : A.expr) (steps : A.calc_step list) =
+  let _, facts, _ =
+    List.fold_left
+      (fun (prev, facts, i) (st : A.calc_step) ->
+        let sp = st.A.cs_span in
+        let goal = A.EApp (A.EVar { A.txt = st.A.cs_op; A.span = sp }, [ prev; st.A.cs_rhs ], sp) in
+        let ok =
+          proof_assert_by ~callee:(Printf.sprintf "calc step %d" i) ~root errctx defs ctx path lets sc re cb ce goal
+            st.A.cs_hint sp
+        in
+        (st.A.cs_rhs, (if ok then (goal, false) :: facts else facts), i + 1))
+      (e0, [], 1) steps
+  in
+  facts
 
 and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
     (lets : launder) (sc : scope) (re : recenv) (cb : cbenv) (ce : contenv) (e : A.expr) : unit =
@@ -5225,6 +5376,40 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
        verdict := false
    | _ -> ());
   match e with
+  | A.EAssert (p, sp) when !proof_depth > 0 ->
+    go p;
+    Hashtbl.replace proof_assertions sp (lemma_assert ~root errctx defs ctx path lets sc re cb ce p sp)
+  | A.EProof (A.PAssertBy (goal, hint_list), sp) ->
+    let hints = A.EBlock (hint_list, sp) in
+    Hashtbl.remove proof_results sp;
+    let invalid why =
+      ignore (lemma_assert ~root errctx defs ctx path lets sc re cb ce goal sp);
+      Err.error ~code:Err.Code.invalid_lemma errctx ~span:sp
+        ("This proof block is invalid: " ^ why) in
+    let bound = Refine_param.binder_occurrences [] hints in
+    if expr_mentions bound goal then
+      invalid "a hint binds a name used by the goal; rename the hint-local binding"
+    else (match Hashtbl.find_opt Refine_reflect.proof_blocks sp with
+    | None -> invalid "proof blocks must be inside a checked function body"
+    | Some (Some why) -> invalid (why ^ "; proof hints must be total, pure, and use only reflected functions or lemmas")
+    | Some None ->
+      let saved_depth = !proof_depth and saved_walk = !lemma_walk and saved_body = !lemma_body in
+      Fun.protect ~finally:(fun () -> proof_depth := saved_depth; lemma_walk := saved_walk; lemma_body := saved_body)
+        (fun () ->
+          proof_depth := saved_depth + 1;
+          lemma_walk := None;
+          lemma_body := true;
+          go (proof_body goal sp hints);
+          let obs = List.filter (fun (o : Obligation.t) -> Refine_reflect.span_within o.span sp) (Obligation.all ()) in
+          if obs <> [] && List.for_all (fun (o : Obligation.t) -> o.verdict = Obligation.Proved) obs
+          then Hashtbl.replace proof_results sp [(goal, false)]
+          else begin
+            Hashtbl.remove proof_results sp;
+            let msg = "this proof block is not proved; its goal gives no facts after the block"
+              ^ March_ast.Bounded_pred.witness_hint goal in
+            if !strict_verified then Err.error ~code:Err.Code.lemma_unproved errctx ~span:sp msg
+            else Err.warning ~code:Err.Code.lemma_unproved errctx ~span:sp msg
+          end))
   | A.EApp (A.EVar { A.txt = fname; _ }, args, sp) ->
     if Hashtbl.mem ih_watch sp then Hashtbl.replace ih_reached sp ();
     (match Hashtbl.find_opt !term_sites sp with
@@ -5464,9 +5649,13 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                lemma_call_facts ~root errctx defs ctx path lets sc re cb ce e @ path
              (* A lemma is never run, so its `assert` is a fact only once
                 proved; a function's runs, also in its result walk. *)
+             | A.EAssert (p, sp) when !proof_depth > 0 ->
+               if Hashtbl.find_opt proof_assertions sp = Some true then (p, false) :: path else path
              | A.EAssert (p, sp) when (match !lemma_walk with Some lw -> not lw.lw_ret | None -> false) ->
                if lemma_assert ~root errctx defs ctx path lets sc re cb ce p sp then (p, false) :: path else path
              | A.EAssert (p, _) -> (p, false) :: path
+             | A.EProof ((A.PAssertBy _ | A.PCalc _), sp) ->
+               (match Hashtbl.find_opt proof_results sp with Some facts -> facts @ path | None -> path)
              (* A `let` REBINDS its names: retire any fact about them first
                 (the shadow discipline every other channel obeys), then, for
                 an admitted RHS shape, push `n == rhs` as an ordinary path
@@ -5707,7 +5896,16 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
              | A.ELetFn (n, _, _, _, _) -> cont_shadow ce [ n.A.txt ]
              | _ -> ce
            in
-           loop (ctx', path', lets', sc', re', cb', ce') rest
+           (match e with
+            (* `reveal f`: [f]'s definition is usable by the rest of this
+               block only ([Reflect_state.resolve_site]). *)
+            | A.EProof (A.PReveal (A.EVar { A.txt = f; _ }), _) ->
+              let saved = !Reflect_state.revealed in
+              Reflect_state.revealed := f :: saved;
+              Fun.protect
+                ~finally:(fun () -> Reflect_state.revealed := saved)
+                (fun () -> loop (ctx', path', lets', sc', re', cb', ce') rest)
+            | _ -> loop (ctx', path', lets', sc', re', cb', ce') rest)
     in
     loop (ctx, path, lets, sc, re, cb, ce) es
   | A.ELet (b, _) -> go b.A.bind_expr
@@ -5873,7 +6071,11 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
             let links =
               (* Inside a lemma (§4.3): each component bound by name, as a
                  selector of the scrutinee, for stage 2. *)
-              match !lemma_walk <> None || !lemma_body, resolve_tested_ctor subj_adt ctor.A.txt, br.A.branch_pat with
+              match !lemma_walk <> None || !lemma_body
+                    || List.exists (fun (_, (_, q, _)) -> March_ast.Bounded_pred.contains q) sc
+                    || (Hashtbl.length ghost_fn_names > 0
+                        && List.exists (fun (_, (_, q, _)) -> mentions_ghost_fn q) sc),
+                    resolve_tested_ctor subj_adt ctor.A.txt, br.A.branch_pat with
               | true, Some (_, k), A.PatCon (_, ps) ->
                 List.concat
                   (List.mapi
@@ -6086,12 +6288,12 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
           | A.PatCon (k, subpats) ->
             (match container_entry_of_expr ctx defs cb ce_outer subj with
              | Some ({ cont = container; slots; _ } as entry)
-               when (match ctor_of_adt (adt_sort_name container) k.A.txt with
+               when (match ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt with
                      | Some kk -> (match Hashtbl.find_opt ctor_param_fields kk with
                                    | Some roles -> List.length roles = List.length subpats
                                    | None -> false)
                      | None -> false) ->
-               let kk = Option.get (ctor_of_adt (adt_sort_name container) k.A.txt) in
+               let kk = Option.get (ctor_of_adt (adt_sort_name ~arity:(List.length slots) container) k.A.txt) in
                let roles = Hashtbl.find ctor_param_fields kk in
                (* Table-driven (P3 design §2a): a `PatVar` at a [Param i]
                   field takes slot [i] — a refined slot as a scope fact, a
@@ -6264,6 +6466,18 @@ and visit_inner ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
   | A.EField (r, _, _) -> go r
   | A.EPipe (a, b, _) -> go a; go b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _) -> go e
+  (* Calculations retain per-step hint checking and report labels. *)
+  | A.EProof (A.PCalc (e0, steps), sp) ->
+    List.iter (fun (st : A.calc_step) -> if st.A.cs_hint <> [] then go (A.EBlock (st.A.cs_hint, sp))) steps;
+    Hashtbl.replace proof_results sp (proof_calc ~root errctx defs ctx path lets sc re cb ce e0 steps)
+  | A.EProof (A.PReveal _, _) -> ()
+  | A.EProof (A.PWithFuel (f, n, body), sp) -> (
+    match f with
+    | A.EVar { A.txt = fname; _ } ->
+      let saved = !Reflect_state.fuel_override in
+      Reflect_state.fuel_override := (fname, max 1 (min 8 n)) :: saved;
+      Fun.protect ~finally:(fun () -> Reflect_state.fuel_override := saved) (fun () -> go (A.EBlock (body, sp)))
+    | _ -> go (A.EBlock (body, sp)))
   | A.ESend (a, b, _) -> go a; go b
   | A.ELetQ (p, e1, e2, _) | A.ELetStar (p, e1, e2, _) ->
     go e1;
@@ -6458,6 +6672,7 @@ and visit_local_fn ~root errctx defs (ctx : rctx) (path : (A.expr * bool) list)
                last_elem_return_proved := saved_last;
                local_elem_ret_proved := saved_locals)
              (fun () ->
+               with_proof_scratch @@ fun () ->
                Obligation.with_scratch (fun () ->
                    strict_verified := false;
                    walk (Err.create ()) gate_hyp))
@@ -6575,8 +6790,35 @@ let warn_qualified_call (errctx : Err.ctx) ~(span : A.span) (qname : string) : u
         never reflected here, so the refinement enforces nothing.%s"
        qname remedy)
 
-let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
-    (e : A.expr) : unit =
+(* A function declared directly in a module enclosing a predicate, innermost
+   module first: what a bare name in that predicate would denote in program
+   code ([warn_predicate_decls] collects them). *)
+type scope_fn = { sf_name : string; sf_qualified : string; sf_span : A.span }
+
+(* Reflection design F21 (todo 2026-10-29-predicate-vocabulary-shadows-user-
+   functions): in a predicate, `len`, `elts`, `keys` and `is_<Ctor>` keep their
+   built-in meaning even where the program's own function of that name is in
+   scope.  The verdict is unchanged; this says which meaning was taken.  Only
+   for a user's function: the stdlib declares `Map.keys` beside predicates
+   that mean the built-in on purpose. *)
+let vocabulary_shadow (in_scope : scope_fn list) (f : string) : (scope_fn * string) option =
+  let meaning =
+    match f with
+    | "len" -> Some "length measure"
+    | "elts" -> Some "set of elements"
+    | "keys" -> Some "set of keys"
+    | _ when ctor_of_tester f <> None -> Some "constructor test"
+    | _ -> None
+  in
+  match meaning with
+  | None -> None
+  | Some what ->
+    let user_file file = not (March_typecheck.Typecheck_builtins.file_is_stdlib file) in
+    List.find_opt (fun sf -> sf.sf_name = f && user_file sf.sf_span.A.file) in_scope
+    |> Option.map (fun sf -> (sf, what))
+
+let warn_predicate_expr ?(abstract_refs : string list = []) ?(in_scope : scope_fn list = [])
+    (errctx : Err.ctx) (e : A.expr) : unit =
   (* A name this signature declares as an abstract refinement
      (specs/2026-09-20-abstract-refinements-design.md §1) is NOT unknown
      vocabulary: it is checked by [Refine_abstract.check], which reports its
@@ -6609,8 +6851,21 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
             not checked. A predicate cannot call a program function of that name."
            f);
       List.iter go args
+    | A.EApp (A.EVar { A.txt = f; _ }, _, span) when vocabulary_shadow in_scope f <> None ->
+      let sf, what = Option.get (vocabulary_shadow in_scope f) in
+      Err.warning ~code:Err.Code.predicate_vocabulary_shadowed errctx ~span
+        (Printf.sprintf
+           "In a refinement predicate `%s` means the built-in %s, not your function `%s` \
+            (line %d): a predicate cannot call a function whose name is predicate vocabulary. \
+            Rename your function to use it in a predicate."
+           f what sf.sf_qualified sf.sf_span.A.start_line);
+      (match e with A.EApp (_, args, _) -> List.iter go args | _ -> ())
     | A.EApp (A.EVar { A.txt = f; _ }, args, span) ->
-      if (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
+      (* A call reflection resolved at this site (by span, so a qualified
+         `Inner.dbl` too) is checked: no "unchecked" warning of any kind. *)
+      let resolved = !Reflect_state.active && Reflect_state.resolve_site span <> None in
+      let decl_span = Option.map (fun sf -> sf.sf_span) (List.find_opt (fun sf -> sf.sf_name = f) in_scope) in
+      if (not resolved) && (not (known_predicate_fn f)) && not (List.mem f abstract_refs) then begin
         if String.contains f '.' then
           (* [Desugar.desugar_ty] (Task 8) now flattens a MODULE-PATH call head
              (`List.length(_)`) in predicate position into this dotted `EVar`
@@ -6648,12 +6903,12 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
                   note: a function is usable in a predicate when it terminates, has no effects, \
                   cannot fail, and calls only such functions."
                  f why at.A.start_line)
-          | _ when conflated_param_type f <> None ->
+          | _ when conflated_param_type ?decl_span f <> None ->
             (* The function is reflectable, but one of its parameter types
                shares its short name with another declaration (often a
                stdlib one): the logic cannot tell the two apart, so it uses
                neither.  Say so, rather than "not a measure". *)
-            let ty, paths = Option.get (conflated_param_type f) in
+            let ty, paths = Option.get (conflated_param_type ?decl_span f) in
             Err.warning ~code:Err.Code.refinement_unchecked errctx ~span
               (Printf.sprintf
                  "`%s` cannot be used in this refinement predicate, so the refinement is not \
@@ -6688,13 +6943,13 @@ let warn_predicate_expr ?(abstract_refs : string list = []) (errctx : Err.ctx)
   in
   go e
 
-let rec warn_predicate_ty ?(abstract_refs : string list = []) (errctx : Err.ctx)
-    (t : A.ty) : unit =
-  let go = warn_predicate_ty ~abstract_refs errctx in
+let rec warn_predicate_ty ?(abstract_refs : string list = []) ?(in_scope : scope_fn list = [])
+    (errctx : Err.ctx) (t : A.ty) : unit =
+  let go = warn_predicate_ty ~abstract_refs ~in_scope errctx in
   match t with
   | A.TyRefine (base, binder, pred) ->
     go base;
-    warn_predicate_expr ~abstract_refs errctx pred;
+    warn_predicate_expr ~abstract_refs ~in_scope errctx pred;
     (* Reflection §3.5: `==` in a predicate is structural (logical) equality,
        whatever the type's `Eq` says.  At a type with a hand-written `Eq` that
        differs from what the program's `==` runs, so say so.  No verdict
@@ -7016,6 +7271,7 @@ let rec warn_predicate_expr_tys (errctx : Err.ctx) (e : A.expr) : unit =
     ge body
   | A.ELetQ (_, e1, e2, _) | A.ELetStar (_, e1, e2, _) -> ge e1; ge e2
   | A.EAssert (e, _) -> ge e
+  | A.EProof (pr, _) -> List.iter ge (A.proof_children pr)
   | A.ESigil (_, e, _) -> ge e
   | A.ERefineMsg (e, _, _) -> ge e
 
@@ -7038,7 +7294,18 @@ let decls_declare_verified (decls : A.decl list) : bool =
    and recomputes from its own decls (below); a `describe` block is not a
    module and inherits the flag unchanged, matching [visit_decl]'s own
    [visit_group] treatment of `DDescribe`. *)
-let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl list) : unit =
+let rec warn_predicate_decls ?(path = "") ?(in_scope : scope_fn list = []) (errctx : Err.ctx)
+    ~(strict : bool) (decls : A.decl list) : unit =
+  let in_scope =
+    List.filter_map
+      (function
+        | A.DFn (fd, _) ->
+          let n = fd.A.fn_name.A.txt in
+          Some { sf_name = n; sf_qualified = (if path = "" then n else path ^ "." ^ n); sf_span = fd.A.fn_name.A.span }
+        | _ -> None)
+      decls
+    @ in_scope
+  in
   let set_fns =
     List.filter_map
       (function
@@ -7057,13 +7324,13 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
     Refine_abstract.check ~entry_shaped:(fun ~name_of c s -> entry_shaped ~name_of c s) errctx
       ~is_known:known_predicate_fn fd;
     let abstract_refs = Refine_abstract.names ~is_known:known_predicate_fn fd in
-    Option.iter (warn_predicate_ty ~abstract_refs errctx) fd.A.fn_ret_ty;
+    Option.iter (warn_predicate_ty ~abstract_refs ~in_scope errctx) fd.A.fn_ret_ty;
     List.iter
       (fun (c : A.fn_clause) ->
         List.iter
           (function
             | A.FPNamed p | A.FPDefault (p, _) ->
-              Option.iter (warn_predicate_ty ~abstract_refs errctx) p.A.param_ty
+              Option.iter (warn_predicate_ty ~abstract_refs ~in_scope errctx) p.A.param_ty
             | A.FPPat _ -> ())
           c.A.fc_params;
         warn_predicate_expr_tys errctx c.A.fc_body)
@@ -7073,8 +7340,10 @@ let rec warn_predicate_decls (errctx : Err.ctx) ~(strict : bool) (decls : A.decl
   List.iter
     (function
       | A.DFn (fd, _) -> warn_fn fd
-      | A.DMod (_, _, ds, _) -> warn_predicate_decls errctx ~strict:(decls_declare_verified ds) ds
-      | A.DDescribe (_, ds, _) -> warn_predicate_decls errctx ~strict ds
+      | A.DMod (name, _, ds, _) ->
+        let path = if path = "" then name.A.txt else path ^ "." ^ name.A.txt in
+        warn_predicate_decls ~path ~in_scope errctx ~strict:(decls_declare_verified ds) ds
+      | A.DDescribe (_, ds, _) -> warn_predicate_decls ~path ~in_scope errctx ~strict ds
       | A.DImpl (idf, _) -> List.iter (fun (_, fd) -> warn_fn fd) idf.A.impl_methods
       | A.DInterface (idf, _) ->
         List.iter
@@ -7245,6 +7514,8 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
          "`@[assume]` on `%s` has no effect: it declares no refined return \
           type, so there is no postcondition to assume."
          fd.A.fn_name.A.txt);
+  let saved_proof_depth = !proof_depth in
+  proof_depth := 0;
   let saved_trusted = !trusted_fn in
   let saved_enclosing = !enclosing_fn in
   let saved_abstracts = !current_abstracts in
@@ -7265,6 +7536,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
     ~finally:(fun () ->
       Hashtbl.reset const_shadowed;
       Hashtbl.iter (fun n () -> Hashtbl.replace const_shadowed n ()) saved_shadowed;
+      proof_depth := saved_proof_depth;
       trusted_fn := saved_trusted;
       enclosing_fn := saved_enclosing;
       current_abstracts := saved_abstracts)
@@ -7465,6 +7737,7 @@ let visit_fn ~root errctx defs ?(assume_params = true) (ctx : rctx) (fd : A.fn_d
             lw.lw_name
             (match Refine_post.assumed_return fd with Some p -> pred_str p | None -> "?")
             k n
+          ^ (match Refine_post.assumed_return fd with Some p -> March_ast.Bounded_pred.witness_hint p | None -> "")
         in
         match Hashtbl.find_opt Refine_call.lemma_refuted lw.lw_name with
         | Some at ->
@@ -7515,6 +7788,7 @@ and post_scratch_verdict ~root defs (fd : A.fn_def) : bool =
 (* A walk of [fd] that leaves nothing behind (ledger, diagnostics, the
    walk's caches), answered by [result] over its diagnostics. *)
 and scratch_walk ~root defs (fd : A.fn_def) (result_of : Err.ctx -> bool) : bool =
+  with_proof_scratch @@ fun () ->
   let saved_acc = Hashtbl.copy annotated_acc_facts in
   let saved_ctr = !ret_ctr and saved_budget = !Witness.wall_budget in
   let saved_mal = !March_refine.Solver.malformed_count
@@ -7725,6 +7999,269 @@ and visit_decl ~root errctx defs (ctx : rctx) (d : A.decl) : unit =
         visit ~root errctx defs ctx path [] sc re cb (if enforced then cont_of_fnparams ps else [])
           h.A.ah_body)
       ad.A.actor_handlers;
+    (* (4) The `@invariant` as an INDUCTIVE invariant (todo
+       2026-11-06-invariant-unchecked-on-init-and-handlers; phase F of
+       specs/2026-11-04-lemmas-hcr-actors-choreography-design.md).  Before
+       this, the predicate was only read across a hot deploy, so
+       `@invariant(count <= limit)` over `init { count: 50, limit: 10 }` built
+       with no diagnostic.  Now `init` must establish it and every handler
+       must re-establish it of the state it returns, assuming it of the
+       incoming `state`: together, a theorem about every state a live actor
+       can hold, which is what the deploy gate already takes it for.
+
+       Each is stated as a function returning the state under
+       `{v : <Actor> | inv(v)}` and checked by [check_fn_post_verdict], the
+       return-contract checker (counterexamples, `cap verified` escalation,
+       the ledger), worded as the invariant's ([with_post_subject]).  A
+       handler's parameters carry their refinements exactly when the body
+       walk above assumes them ([enforced]); `init`'s are stripped, as
+       above.  The predicate's bare field names (and `state.f`) read the
+       state, the spelling the schema and the deploy gate use.
+
+       Scope (the inductive-invariants todo's boundary): a handler's sends
+       and replies are other actors' business and not part of the claim; a
+       restart re-runs `init`, which is checked; a hot migration installs a
+       state the deploy gate checks against the new invariant. *)
+    (match ad.A.actor_invariant with
+     | Some inv when not !calls_only_walk ->
+       let a = aname.A.txt in
+       let nm sp s = { A.txt = s; A.span = sp } in
+       let fields = List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state in
+       (* Each field read keeps the span it was written at: reflection looks
+          a call argument's type up by span, so a synthesized span left
+          `not_137(count)` an unreflectable predicate. *)
+       let rec inv_of sp b (e : A.expr) : A.expr =
+         let go = inv_of sp b in
+         match e with
+         | A.EVar v when v.A.txt = "state" -> A.EVar { v with A.txt = b }
+         | A.EVar v when List.mem v.A.txt fields ->
+           A.EField (A.EVar { v with A.txt = b }, v, v.A.span)
+         | A.EApp ((A.EVar _ as hd), args, asp) -> A.EApp (hd, List.map go args, asp)
+         | A.EApp (f, args, asp) -> A.EApp (go f, List.map go args, asp)
+         | A.EField (r, n, fsp) -> A.EField (go r, n, fsp)
+         | A.ETuple (es, tsp) -> A.ETuple (List.map go es, tsp)
+         | A.ECon (c, es, csp) -> A.ECon (c, List.map go es, csp)
+         | A.EAnnot (x, t, asp) -> A.EAnnot (go x, t, asp)
+         | A.EIf (c, t, f, isp) -> A.EIf (go c, go t, go f, isp)
+         | _ -> e
+       in
+       let inv_of sp b = inv_of sp b inv in
+       let inv_ty sp b = A.TyRefine (A.TyCon (nm sp a, []), Some (nm sp b), inv_of sp b) in
+       let shown = pred_str inv in
+       let as_fn ~name ~sp ps body : A.fn_def =
+         { A.fn_name = nm sp name; fn_vis = A.Private; fn_doc = None; fn_attrs = [];
+           fn_ret_ty = Some (inv_ty sp "v");
+           fn_clauses =
+             [ { A.fc_params = List.map (fun p -> A.FPNamed p) ps; fc_guard = None; fc_body = body;
+                 fc_span = sp; fc_params_span = sp } ];
+           fn_bounds = []; fn_attr_args = []; fn_needs = None }
+       in
+       (* The context [visit_fn] gives a top-level function's return check:
+          the module path reflection resolves user functions under (an
+          invariant calling `not_137(count)` was an unreflectable skip
+          without it), proved callee returns, and the scalar tail demand. *)
+       let check ~headline ~what ~note fd =
+         let saved_prefix = !Refine_post.lemma_prefix in
+         Refine_post.lemma_prefix := ctx.modpath;
+         Fun.protect ~finally:(fun () -> Refine_post.lemma_prefix := saved_prefix) @@ fun () ->
+         with_post_subject
+           { ps_headline = headline; ps_requires = "The invariant requires"; ps_what = what;
+             ps_pred = shown; ps_note = note; ps_after = None; ps_rename = [] }
+           (fun () ->
+             with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+                 with_post_lookup (postcond_of ctx defs) (fun () ->
+                     ignore (check_fn_post_verdict ~root errctx fd))))
+       in
+       let init_sp = March_typecheck.Typecheck.span_of_expr ad.A.actor_init in
+       check
+         ~headline:(Printf.sprintf "`%s`'s `init` does not establish its `@invariant`." a)
+         ~what:(Printf.sprintf "`%s`'s `@invariant` `%s` at `init`" a shown)
+         ~note:"The state `init` builds must satisfy the actor's `@invariant`."
+         (as_fn ~name:(a ^ ".init") ~sp:init_sp
+            (strip_params_refinements ad.A.actor_init_params) ad.A.actor_init);
+       List.iter
+         (fun (h : A.actor_handler) ->
+           let m = h.A.ah_msg.A.txt in
+           let enforced =
+             Hashtbl.mem !handler_sigs m
+             || Hashtbl.mem !handler_sigs (Refine_scope.handler_key a m) in
+           let ps = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
+           let sp = h.A.ah_msg.A.span in
+           let state_p =
+             { A.param_name = nm sp "state"; param_ty = Some (inv_ty sp "s");
+               param_lin = A.Unrestricted } in
+           check
+             ~headline:
+               (Printf.sprintf "`%s`'s handler `%s` does not preserve its `@invariant`." a m)
+             ~what:(Printf.sprintf "`%s`'s `@invariant` `%s` after handler `%s`" a shown m)
+             ~note:
+               "Every handler must return a state satisfying the `@invariant`, given a \
+                `state` that satisfies it."
+             (as_fn ~name:(a ^ "." ^ m) ~sp (state_p :: ps) h.A.ah_body))
+         ad.A.actor_handlers
+     | _ -> ());
+    (* (5) Handler guarantees, the two-state specs
+       (todo 2026-11-06-two-state-specs; specs/lang/actors.md, "Handler
+       guarantees").  `on Deposit(n) ensures state.balance ==
+       old(state.balance) + n do … end` is stated exactly as (4) states the
+       invariant: the handler as a function from the incoming `state` (and
+       its parameters) to the state it returns, now under
+       `{after : <Actor> | ens}`, and proved by [check_fn_post_verdict].  In
+       the guarantee, `state` and the bare field names read the RETURNED
+       state, and `old(e)` reads [e] of the incoming one, the handler's
+       `state` parameter.  The `@invariant`, when there is one, is assumed of
+       the incoming state, the same assumption (4) makes; a parameter of the
+       message shadows a field of the same name.  Each guarantee is its own
+       ledger row, `<Actor>.<Msg>.ensures`, beside (4)'s `<Actor>.<Msg>`. *)
+    (if not !calls_only_walk then
+       let a = aname.A.txt in
+       let nm sp s = { A.txt = s; A.span = sp } in
+       let fields = List.map (fun (f : A.field) -> f.A.fld_name.A.txt) ad.A.actor_state in
+       let rec spec ?(ren = []) ~params ~cur ~before (e : A.expr) : A.expr =
+         let go = spec ~ren ~params ~cur ~before in
+         match e with
+         | A.EApp (A.EVar o, [ x ], _) when o.A.txt = "old" -> spec ~ren ~params ~cur:before ~before x
+         | A.EVar v when List.mem_assoc v.A.txt ren -> A.EVar { v with A.txt = List.assoc v.A.txt ren }
+         | A.EVar v when v.A.txt = "state" -> A.EVar { v with A.txt = cur }
+         | A.EVar v when List.mem v.A.txt fields && not (List.mem v.A.txt params) ->
+           A.EField (A.EVar { v with A.txt = cur }, v, v.A.span)
+         | A.EApp ((A.EVar _ as hd), args, asp) -> A.EApp (hd, List.map go args, asp)
+         | A.EApp (f, args, asp) -> A.EApp (go f, List.map go args, asp)
+         | A.EField (r, n, fsp) -> A.EField (go r, n, fsp)
+         | A.ETuple (es, tsp) -> A.ETuple (List.map go es, tsp)
+         | A.ECon (c, es, csp) -> A.ECon (c, List.map go es, csp)
+         | A.EAnnot (x, t, asp) -> A.EAnnot (go x, t, asp)
+         | A.EIf (c, t, f, isp) -> A.EIf (go c, go t, go f, isp)
+         | _ -> e
+       in
+       (* The witness decoder reads the state record by its fields. *)
+       if not (Hashtbl.mem Witness.record_fields a) then
+         Hashtbl.replace Witness.record_fields a
+           (List.map (fun (f : A.field) -> (f.A.fld_name.A.txt, f.A.fld_ty)) ad.A.actor_state);
+       (* The incoming state's assumption: the invariant, read of `state`. *)
+       let incoming sp =
+         match ad.A.actor_invariant with
+         | None ->
+           (* Stated as a (trivial) record precondition all the same: a
+              model over a refined record parameter is a counterexample
+              ([check_post_stage]'s [scope_has_record]); over a bare one
+              only an all-inputs refutation is. *)
+           A.TyRefine (A.TyCon (nm sp a, []), Some (nm sp "s"), A.ELit (A.LitBool true, sp))
+         | Some inv ->
+           A.TyRefine (A.TyCon (nm sp a, []), Some (nm sp "s"),
+                       spec ~params:[] ~cur:"s" ~before:"s" inv)
+       in
+       List.iter
+         (fun (h : A.actor_handler) ->
+           match h.A.ah_ensures with
+           | None -> ()
+           | Some ens ->
+             let m = h.A.ah_msg.A.txt in
+             let enforced =
+               Hashtbl.mem !handler_sigs m
+               || Hashtbl.mem !handler_sigs (Refine_scope.handler_key a m) in
+             let ps = if enforced then h.A.ah_params else strip_params_refinements h.A.ah_params in
+             let params = List.map (fun (p : A.param) -> p.A.param_name.A.txt) h.A.ah_params in
+             (* The returned state's binder: any name the guarantee cannot
+                mean (not a parameter, a field, or `state`). *)
+             let rec fresh i =
+               let b = if i = 0 then "after" else Printf.sprintf "after%d" i in
+               if List.mem b params || List.mem b fields || b = "state" then fresh (i + 1) else b
+             in
+             let after = fresh 0 in
+             let sp = h.A.ah_msg.A.span in
+             let ens_sp = March_typecheck.Typecheck.span_of_expr ens in
+             (* A parameter named like a field: in a refinement over the
+                state record a bare field name reads the field, so the
+                parameter is renamed apart (`count` -> `count_arg`), in the
+                guarantee and, by a `let`, at the head of the body. *)
+             let taken = after :: "state" :: params @ fields in
+             let ren =
+               List.filter_map
+                 (fun p ->
+                   if not (List.mem p fields) then None
+                   else
+                     let rec pick i =
+                       let c = if i = 0 then p ^ "_arg" else Printf.sprintf "%s_arg%d" p i in
+                       if List.mem c taken then pick (i + 1) else c
+                     in
+                     Some (p, pick 0))
+                 params
+             in
+             let ps =
+               List.map
+                 (fun (p : A.param) ->
+                   match List.assoc_opt p.A.param_name.A.txt ren with
+                   | Some n -> { p with A.param_name = { p.A.param_name with A.txt = n } }
+                   | None -> p)
+                 ps
+             in
+             let body =
+               if ren = [] then h.A.ah_body
+               else
+                 A.EBlock
+                   (List.map
+                      (fun (o, n) ->
+                        A.ELet
+                          ( { A.bind_pat = A.PatVar (nm sp o); bind_ty = None; bind_lin = A.Unrestricted;
+                              bind_expr = A.EVar (nm sp n) },
+                            sp ))
+                      ren
+                    @ [ h.A.ah_body ],
+                    sp)
+             in
+             let pred = spec ~ren ~params ~cur:after ~before:"state" ens in
+             let state_p =
+               { A.param_name = nm sp "state"; param_ty = Some (incoming sp);
+                 param_lin = A.Unrestricted } in
+             let fd : A.fn_def =
+               { A.fn_name = nm ens_sp (a ^ "." ^ m ^ ".ensures"); fn_vis = A.Private; fn_doc = None;
+                 fn_attrs = [];
+                 fn_ret_ty = Some (A.TyRefine (A.TyCon (nm ens_sp a, []), Some (nm ens_sp after), pred));
+                 fn_clauses =
+                   [ { A.fc_params = List.map (fun p -> A.FPNamed p) (state_p :: ps); fc_guard = None;
+                       fc_body = body; fc_span = ens_sp; fc_params_span = sp } ];
+                 fn_bounds = []; fn_attr_args = []; fn_needs = None }
+             in
+             let shown = pred_str ens in
+             (* The returned state, for the message: the counterexample's
+                incoming state and arguments run through the body by the
+                interpreter, uncharged (display only). *)
+             let after_of model =
+               let typed =
+                 ("state", A.TyCon (nm sp a, []))
+                 :: List.filter_map
+                      (fun (p : A.param) -> Option.map (fun t -> (p.A.param_name.A.txt, t)) p.A.param_ty)
+                      ps
+               in
+               if List.length typed <> 1 + List.length ps then None
+               else
+                 match Witness.decode_model ~params:typed ~model with
+                 | None -> None
+                 | Some binds ->
+                   (match Witness.uncharged (fun () -> Witness.eval_classified ~bindings:binds body) with
+                    | Witness.C_ret v -> Witness.render_value v
+                    | _ -> None)
+             in
+             let saved_prefix = !Refine_post.lemma_prefix in
+             Refine_post.lemma_prefix := ctx.modpath;
+             Fun.protect ~finally:(fun () -> Refine_post.lemma_prefix := saved_prefix) @@ fun () ->
+             with_post_subject
+               { ps_headline =
+                   Printf.sprintf "`%s`'s handler `%s` does not guarantee its `ensures`." a m;
+                 ps_requires = "The handler guarantees";
+                 ps_what = Printf.sprintf "`%s`'s guarantee `%s` of handler `%s`" a shown m;
+                 ps_pred = shown;
+                 ps_note =
+                   "In `ensures`, `state` is the state the handler returns and `old(e)` is `e` \
+                    of the state the message arrived with.";
+                 ps_after = Some after_of;
+                 ps_rename = List.map (fun (o, n) -> (n, o)) ren }
+               (fun () ->
+                 with_tail_demand (tail_demand_impl ~root ctx defs) (fun () ->
+                     with_post_lookup (postcond_of ctx defs) (fun () ->
+                         ignore (check_fn_post_verdict ~root errctx fd)))))
+         ad.A.actor_handlers);
     (* The @invariant predicate is evaluated at run time like any other
        expression, so obligations inside it count. *)
     Option.iter visit_expr ad.A.actor_invariant
@@ -7768,6 +8305,7 @@ let register_types_for_check (decls : A.decl list) : unit =
   Hashtbl.clear ctor_field_sorts_poly;
   Hashtbl.clear ctor_field_sorts;
   Hashtbl.clear ctor_field_names;
+  Hashtbl.clear actor_state_adts;
   Hashtbl.clear ctor_param_fields;
   Hashtbl.clear ctor_field_params;
   Hashtbl.clear ctor_field_joint;
@@ -7810,6 +8348,17 @@ let register_types_for_check (decls : A.decl list) : unit =
    duplicate-named measure from axiomatisation outright (below, under
    [measure_axioms]) is the variant proven safe so far; see
    specs/progress/2026-09-15-refine-sort-and-measure-names-unqualified.md. *)
+(* Every function carrying `@[abstraction(..)]`, with its module path. *)
+let rec collect_abstraction_fns ?(prefix = "") (decls : A.decl list) : (string * A.fn_def) list =
+  List.concat_map
+    (function
+      | A.DFn (fd, _) when List.exists (String.starts_with ~prefix:"abstraction:") fd.A.fn_attrs ->
+        [ (prefix, fd) ]
+      | A.DMod (n, _, ds, _) ->
+        collect_abstraction_fns ~prefix:(if prefix = "" then n.A.txt else prefix ^ "." ^ n.A.txt) ds
+      | _ -> [])
+    decls
+
 let rec collect_measure_fns (decls : A.decl list) : (string * A.fn_def) list =
   List.concat_map
     (function
@@ -8543,6 +9092,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
         strict_verified := saved_strict;
         unverified_hinted := saved_hinted)
       (fun () ->
+        with_proof_scratch @@ fun () ->
         Obligation.with_scratch (fun () ->
             Obligation.reset ();
             strict_verified := false;
@@ -8578,7 +9128,7 @@ let gate_elem_returns ~root defs (decls : A.decl list) : unit =
    so `@[decrease(n)]` would look like a metric that found nothing.  These are
    every `fn` attribute some pass reads (the name before a `:` payload). *)
 let known_fn_attributes =
-  [ "assume"; "decreases"; "diverges"; "lemma"; "measure"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "trusted";
+  [ "abstraction"; "assume"; "decreases"; "deprecated"; "diverges"; "ghost"; "lemma"; "measure"; "net_dest"; "no_alloc"; "no_warn_recursion"; "opaque"; "reflect"; "stdlib_internal"; "trusted";
     "trusted_linear"; "vectorize" ]
 
 (* Levenshtein distance, for the did-you-mean. *)
@@ -8679,7 +9229,9 @@ let warn_unknown_attributes errctx (decls : A.decl list) : unit =
     List.iter
       (fun a ->
         let name = match String.index_opt a ':' with Some i -> String.sub a 0 i | None -> a in
-        if not (List.mem name known_fn_attributes) then begin
+        (* `hcr_logic` marks the simulation steps Desugar_simulation
+           generates; no user writes it, so it is not offered either. *)
+        if name <> "hcr_logic" && not (List.mem name known_fn_attributes) then begin
           let near =
             List.filter (fun k -> edit_distance k name <= 2) known_fn_attributes
             |> List.sort (fun x y -> compare (edit_distance x name) (edit_distance y name))
@@ -8951,7 +9503,7 @@ let unproved_text (t : Refine_term.t) (certs : string array) fails (si : int) : 
              function, an interface method, a builtin or an extern, so it may diverge"
             (String.concat ", " names)
         | "no-int-parameter" -> "a function in its recursive cycle has no Int parameter to measure"
-        | "no-structural-arg" | "not-same-family" ->
+        | "no-structural-arg" ->
           "no argument shrinks structurally at every recursive call, and no Int metric was checked"
         | "shadowed" ->
           "a recursive call sits under a binding that reuses a parameter the metric names, so \
@@ -9088,6 +9640,7 @@ let report_cap_total errctx (t : Refine_term.t) (certs : string array) fails
 let term_scratch_walk ~root defs (decls : A.decl list)
     ~(sites : (A.span, Refine_term.metric_site) Hashtbl.t) ~(after : unit -> unit) :
     (A.span, Obligation.verdict list) Hashtbl.t =
+  with_proof_scratch @@ fun () ->
   let saved_sites = !term_sites in
   let saved_verdicts = Hashtbl.copy term_verdicts in
   let saved_acc = Hashtbl.copy annotated_acc_facts in
@@ -9398,6 +9951,16 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   let m = Hcr_baseline.strengthen m in
   let m = Refine_anon.lift m in
   call_type_map := type_map;
+  Hashtbl.reset ghost_fn_names;
+  let rec note_ghost (ds : A.decl list) =
+    List.iter
+      (function
+        | A.DFn (fd, _) when March_desugar.Ghost.is_ghost_fn fd -> Hashtbl.replace ghost_fn_names fd.A.fn_name.A.txt ()
+        | A.DMod (_, _, inner, _) -> note_ghost inner
+        | _ -> ())
+      ds
+  in
+  note_ghost m.A.mod_decls;
   (* A module owns one solver declaration scope.  Z3 4.8.x does not reliably
      retract datatype declarations on [pop], even with [:global-decls false]:
      checking a later module that reuses a qualified type name with a different
@@ -9457,6 +10020,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   Hashtbl.reset ctor_field_sorts_poly;
   Hashtbl.reset ctor_field_sorts;
   Hashtbl.reset ctor_field_names;
+  Hashtbl.reset actor_state_adts;
   Hashtbl.reset ctor_param_fields;
   Hashtbl.reset ctor_field_params;
   Hashtbl.reset ctor_field_joint;
@@ -9654,11 +10218,21 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
        match Hashtbl.find_opt tbl sp with
        | Some b -> b
        | None -> (not any_user) && not (List.mem sp.A.file user_negate_files));
-  if Sys.getenv_opt "MARCH_REFLECT" <> Some "0" then begin
+  let reflection_off = Sys.getenv_opt "MARCH_REFLECT" = Some "0" in
+  let has_proof_blocks =
+    reflection_off && Array.exists (fun (u : Refine_term.unit_) ->
+      List.exists (fun (c : Refine_term.owner) ->
+        let found = ref false in
+        Refine_encode.iter_all (function A.EProof (A.PAssertBy _, _) -> found := true | _ -> ()) c.o_body;
+        !found) u.u_clauses) (Lazy.force term).graph.units
+  in
+  Hashtbl.reset Refine_reflect.proof_blocks;
+  if not reflection_off || has_proof_blocks then begin
     Refine_reflect.install ~user_files:[] ~type_map (Lazy.force term) m.A.mod_decls;
     List.iter
       (fun (span, msg) -> Err.error ~code:Err.Code.internal_error errctx ~span msg)
-      !Refine_reflect.install_errors
+      !Refine_reflect.install_errors;
+    if reflection_off then Reflect_state.reset ()
   end;
   (* The first blocker of a function the encoder does not reflect, as
      (rule number, "R<k>:<text>"). *)
@@ -9709,7 +10283,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
     List.concat_map
       (function
         | A.DFn (fd, _)
-          when List.exists (fun a -> a = "reflect" || String.starts_with ~prefix:"reflect:" a) fd.A.fn_attrs
+          when List.exists (fun a -> a = "reflect" || a = "ghost" || String.starts_with ~prefix:"reflect:" a) fd.A.fn_attrs
                && not (List.mem "lemma" fd.A.fn_attrs) -> [ fd ]
         | A.DMod (_, _, inner, _) -> reflect_fns inner
         | _ -> [])
@@ -9718,7 +10292,10 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   List.iter
     (fun (fd : A.fn_def) ->
       let name = fd.A.fn_name.A.txt and span = fd.A.fn_name.A.span in
-      let bad why = Err.error ~code:Err.Code.invalid_reflect errctx ~span (Printf.sprintf "`@[reflect]` on `%s`: %s" name why) in
+      (* A ghost function is never compiled, so it exists only as its
+         reflection: the same assertion, phrased for the keyword. *)
+      let what = if List.mem "ghost" fd.A.fn_attrs then "ghost function" else "`@[reflect]` on" in
+      let bad why = Err.error ~code:Err.Code.invalid_reflect errctx ~span (Printf.sprintf "%s `%s`: %s" what name why) in
       let payloads =
         List.filter_map
           (fun a -> if String.starts_with ~prefix:"reflect:" a then Some (String.sub a 8 (String.length a - 8)) else None)
@@ -9760,6 +10337,9 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
      certificates, so it is decided where they are ([invalid_lemma_l4]). *)
   Hashtbl.reset lemma_valid;
   Hashtbl.reset lemma_call_sites;
+  Hashtbl.reset proof_results;
+  Hashtbl.reset proof_assertions;
+  proof_depth := 0;
   Hashtbl.reset lemma_fact_spans;
   (match lemma_fns m.A.mod_decls with
    | [] -> ()
@@ -10033,6 +10613,39 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
               (Printf.sprintf "@[measure] `%s` %s" fd.A.fn_name.A.txt msg))
           msgs)
       mfns;
+    (* `@[abstraction(elts)]` / `@[abstraction(keys)]` (2026-11-08): an
+       axiomatised measure over one of the module's datatypes stands for the
+       built-in measure on that type, inside its module only
+       ([Refine_post.abstraction_measure]). *)
+    Hashtbl.reset Refine_post.abstractions;
+    List.iter
+      (fun (modpath, (fd : A.fn_def)) ->
+        List.iter
+          (fun a ->
+            match String.index_opt a ':' with
+            | Some i when String.sub a 0 i = "abstraction" -> (
+              let bm = String.sub a (i + 1) (String.length a - i - 1) in
+              let err msg =
+                Err.error ~code:Err.Code.invalid_measure errctx ~span:fd.A.fn_name.A.span
+                  (Printf.sprintf "@[abstraction(%s)] on `%s` %s" bm fd.A.fn_name.A.txt msg)
+              in
+              if not (List.mem "measure" fd.A.fn_attrs) then
+                err "needs @[measure]: the attribute names the measure that stands for the built-in one"
+              else if not (is_builtin_set_measure bm) then
+                err "names no built-in set measure; the ones it can stand for are `elts` and `keys`"
+              else
+                match fd.A.fn_clauses with
+                | [ { A.fc_params = [ A.FPNamed { A.param_ty = Some (A.TyCon (tn, targs)); _ } ]; _ } ]
+                  when not (String.contains tn.A.txt '.') ->
+                  if is_axiom_measure fd.A.fn_name.A.txt then
+                    Hashtbl.replace Refine_post.abstractions
+                      (adt_sort_name ~arity:(List.length targs) tn.A.txt)
+                      (bm, fd.A.fn_name.A.txt, modpath)
+                  else err "is not axiomatised, so it cannot stand for the built-in measure"
+                | _ -> err "must take one parameter whose type is a datatype of its own module")
+            | _ -> ())
+          fd.A.fn_attrs)
+      (collect_abstraction_fns m.A.mod_decls);
     (* Scalar-field measure notice.  A measure reading a scalar constructor
        field (`Array.length` reading `PVec`'s count) is axiomatised correctly;
        since 2026-09-13 (P3 design §4a) call-site reflection places that field
@@ -10319,7 +10932,7 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
   (* Vocabulary warning: runs last so [registered_measures] (set at the top of
      this function) is already populated — otherwise a user `@[measure]`
      would look unrecognized and warn spuriously. *)
-  warn_predicate_decls errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
+  warn_predicate_decls ~path:m.A.mod_name.A.txt errctx ~strict:(decls_declare_verified m.A.mod_decls) m.A.mod_decls;
   (* Coverage audit: runs last, only when asked, and touches neither [errctx]
      nor the obligation ledger; it is a read-only classification of every
      declared refinement occurrence against the registration state this
@@ -10386,21 +10999,43 @@ let check_module_pass ?(root = Sys.getcwd ()) ?(measure_axioms = true)
    diagnostics are dropped.  The certificate is a proof on its own (the first
    pass decided it without the function's equation), so the second pass may
    rely on it.  Only a module whose walk planned metrics (`@[decreases]`,
-   `cap total`, the termination report) can need it. *)
+   `cap total`, the termination report) can need it, and never for an
+   `@[opaque]` function, whose body stays out of the logic whatever its
+   certificate: the stdlib is checked with every program, so one opaque
+   stdlib function with a metric would otherwise check every program twice. *)
+let rec opaque_spans acc (ds : A.decl list) =
+  List.fold_left
+    (fun acc -> function
+      | A.DFn (fd, _) when List.mem "opaque" fd.A.fn_attrs -> fd.A.fn_name.A.span :: acc
+      | A.DMod (_, _, inner, _) -> opaque_spans acc inner
+      | _ -> acc)
+    acc ds
+
 let check_module ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map (errctx : Err.ctx)
     (m : A.module_) : unit =
   Hashtbl.reset Refine_reflect.seed_certs;
   let before = errctx.Err.diagnostics in
   check_module_pass ?root ?measure_axioms ?stdlib_files ?audit ?pre_desugar_decls ?type_map errctx m;
+  let opaque = lazy (opaque_spans [] m.A.mod_decls) in
   let late =
     Hashtbl.fold
       (fun sp c acc ->
         match Hashtbl.find_opt Refine_reflect.encoder_blocked sp with
-        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt -> (sp, c) :: acc
+        | Some txt when c = "metric" && String.starts_with ~prefix:"R2:" txt && not (List.mem sp (Lazy.force opaque)) ->
+          (sp, c) :: acc
         | _ -> acc)
       Refine_term.last_certs []
   in
   if late <> [] then begin
+    (* MARCH_REFLECT_DEBUG names what forced the second pass: a stdlib span
+       here means every program's check runs twice (test_refine_reflect,
+       "one pass"). *)
+    (if Sys.getenv_opt "MARCH_REFLECT_DEBUG" <> None then
+       List.iter
+         (fun ((sp : A.span), _) ->
+           Printf.eprintf "reflect-recheck: %s:%d: a late metric certificate re-runs the whole check\n%!" sp.A.file
+             sp.A.start_line)
+         late);
     List.iter (fun (sp, c) -> Hashtbl.replace Refine_reflect.seed_certs sp c) late;
     errctx.Err.diagnostics <- before;
     Fun.protect

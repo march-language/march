@@ -1,0 +1,13 @@
+-- REFUSE: IO.Console
+-- IO.read_byte refused: the result names stdin. The verdict is the exit code.
+mod ConsoleReadByte do
+  needs IO.Console
+  needs IO.Process
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    match IO.read_byte() do
+    Err(CapError("IO.Console", "stdin", ByLaunch, "IO.Console")) -> Process.exit(0)
+    _ -> Process.exit(1)
+    end
+  end
+end

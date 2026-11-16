@@ -9,5 +9,6 @@ mod Fib do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println("checksum=" ++ int_to_string(fib(25)))
+    ()
   end
 end

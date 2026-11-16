@@ -155,14 +155,16 @@ let patch_migrate_fn (fd : March_ast.Ast.fn_def)
 (* strengthening-unchecked.md, design §3.3)                            *)
 (* ------------------------------------------------------------------ *)
 
-(* What one law came to.  Only [Proved] passes on its own; [Unproved] and
-   [Unchecked] pass when the law is named in --accept-unproved; [Refuted]
-   never does. *)
+(* What one law came to.  Only [Proved] and [Noted] pass on their own;
+   [Unproved] and [Unchecked] pass when the law is named in
+   --accept-unproved; [Refuted] and [Refused] never do. *)
 type verdict =
   | Proved of string            (* how: "proved", "unchanged" *)
   | Refuted
+  | Refused of string           (* a fact of the two builds, not a proof: why *)
   | Unproved of string          (* the implication that was not shown *)
   | Unchecked of string         (* why it could not be checked *)
+  | Noted of string             (* not compared, and not a refusal: why *)
 
 let conj (ps : March_ast.Ast.expr list) : March_ast.Ast.expr option =
   let module A = March_ast.Ast in
@@ -265,6 +267,7 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
     let results : (string * verdict) list ref = ref [] in
     let diags = ref [] in
     let note law v = results := (law, v) :: !results in
+    let tags_actors = ref 0 and tags_ctors = ref 0 in
 
     (* One synthesised function's postcondition, in its own error context so
        a counterexample is told apart from an undecided query. *)
@@ -280,6 +283,19 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
       match List.assoc_opt actor_name prior_schemas with
       | None -> ()   (* a new actor: no live state, no queued messages *)
       | Some (old_s : Sd.actor_schema) ->
+        (* H7: the actor-message tags of every constructor both builds name
+           (Schema_diff.tag_check).  Independent of the contracts below: a
+           moved tag misreads queued messages whatever the refinements say. *)
+        List.iter (function
+            | Sd.Tag_moved { ctor; old_tag; new_tag } ->
+              note (actor_name ^ "." ^ ctor ^ ".tag")
+                (Refused (Sd.tag_moved_message ~actor:actor_name ~ctor ~old_tag ~new_tag))
+            | Sd.Tags_unrecorded why -> note (actor_name ^ ".tags") (Noted why)
+            | Sd.Tags_agree n ->
+              (* One summary line for all of them, below: every stdlib actor
+                 the program links in agrees on every deploy. *)
+              incr tags_actors; tags_ctors := !tags_ctors + n)
+          (Sd.tag_check ~old_s ~new_s);
         let state_law = actor_name ^ ".state" in
         let new_has_refines =
           List.exists (fun (f : Sd.field) -> f.Sd.refine <> None) new_s.Sd.state_fields
@@ -399,7 +415,9 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
     List.iter (fun (law, v) ->
         (* A law checked more than once (one handler, several parameters)
            reports its weakest result. *)
-        let rank = function Refuted -> 3 | Unchecked _ -> 2 | Unproved _ -> 1 | Proved _ -> 0 in
+        let rank = function
+          | Refuted | Refused _ -> 3 | Unchecked _ -> 2 | Unproved _ -> 1
+          | Proved _ | Noted _ -> 0 in
         match Hashtbl.find_opt worst law with
         | Some w when rank w >= rank v -> ()
         | _ -> Hashtbl.replace worst law v)
@@ -410,6 +428,8 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
         let line = match v with
           | Proved how -> Printf.sprintf "%s: %s" law how
           | Refuted -> failed := true; Printf.sprintf "%s: REFUSED, a counterexample exists" law
+          | Refused why -> failed := true; Printf.sprintf "%s: REFUSED, %s" law why
+          | Noted why -> Printf.sprintf "%s: not compared (%s); not a refusal" law why
           | Unproved shows when accepted law ->
             Printf.sprintf "%s: not proved that %s; accepted by --accept-unproved" law shows
           | Unproved shows -> failed := true;
@@ -424,6 +444,11 @@ let run ~(src : string) ~(desugared : March_ast.Ast.module_) : unit =
         in
         Printf.eprintf "migration: %s\n" line)
       laws;
+    if !tags_actors > 0 then
+      Printf.eprintf "migration: actor-message tags: unchanged (%d constructor%s of %d actor%s \
+                      compared)\n"
+        !tags_ctors (if !tags_ctors = 1 then "" else "s")
+        !tags_actors (if !tags_actors = 1 then "" else "s");
     if !failed then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
           Printf.eprintf "%s\n\n" (March_errors.Errors.render_diagnostic ~src d))
@@ -507,6 +532,117 @@ let load_baseline ~(filename : string) : unit =
               (name, { B.field_names; fields; handlers }))
             schemas))
 
+(** A JSON string literal (RFC 8259): quotes, backslashes and control
+    characters escaped, UTF-8 left as it is.  OCaml's [%S] writes decimal
+    escapes JSON rejects, which a handler body's string literal would hit. *)
+let json_string (s : string) : string =
+  let b = Buffer.create (String.length s + 2) in
+  Buffer.add_char b '"';
+  String.iter
+    (fun c ->
+      match c with
+      | '"' -> Buffer.add_string b "\\\""
+      | '\\' -> Buffer.add_string b "\\\\"
+      | '\n' -> Buffer.add_string b "\\n"
+      | '\r' -> Buffer.add_string b "\\r"
+      | '\t' -> Buffer.add_string b "\\t"
+      | c when Char.code c < 0x20 -> Buffer.add_string b (Printf.sprintf "\\u%04x" (Char.code c))
+      | c -> Buffer.add_char b c)
+    s;
+  Buffer.add_char b '"';
+  Buffer.contents b
+
+(** H3: the deployed build's handler steps and state field types, for the
+    simulation law (Desugar_simulation).  Read straight from the sidecar's
+    JSON (`"steps"`, written for `@compat(simulation)` actors).  A step whose
+    body or a field whose type does not parse leaves that actor out, and the
+    pass then reports it as having no deployed step. *)
+let load_simulation_baseline (path : string option) : unit =
+  let module D = March_desugar.Desugar_simulation in
+  D.report := [];
+  D.baseline :=
+    (match path with
+     | None -> []
+     | Some file ->
+       (try
+          let open Yojson.Safe.Util in
+          let parse_with f s = try Some (f (Lexing.from_string s)) with _ -> None in
+          Yojson.Safe.from_file file |> to_assoc
+          |> List.filter_map (fun (actor, j) ->
+              match member "steps" j with
+              | `Null -> None
+              | steps ->
+                let fields =
+                  member "state_fields" j |> to_list
+                  |> List.map (fun f ->
+                      ( f |> member "name" |> to_string,
+                        parse_with March_parser.Parse.ty_of_lexbuf (f |> member "ty" |> to_string) ))
+                in
+                let steps =
+                  steps |> to_list
+                  |> List.map (fun st ->
+                      ( st |> member "msg" |> to_string,
+                        st |> member "params" |> to_list |> List.map to_string,
+                        parse_with March_parser.Parse.expr_of_lexbuf (st |> member "body" |> to_string) ))
+                in
+                if List.exists (fun (_, t) -> t = None) fields
+                   || List.exists (fun (_, _, b) -> b = None) steps
+                then None
+                else
+                  Some
+                    ( actor,
+                      { D.fields = List.map (fun (n, t) -> (n, Option.get t)) fields;
+                        steps =
+                          List.map (fun (msg, params, b) -> { D.msg; params; body = Option.get b }) steps }
+                    ))
+        with _ -> []))
+
+(** The deployed build's derived rollbacks (`"rollback_derived"`): per actor,
+    the fields it returns to and the parsed types of the fields it drops.  An
+    actor whose dropped field's type does not parse is left out: its rollback
+    deploy then needs a written migration, as before. *)
+let load_rollback_baseline (path : string option) : unit =
+  let module D = March_desugar.Desugar_migrate_derive in
+  D.rollback_baseline :=
+    (match path with
+     | None -> []
+     | Some file ->
+       (try
+          let open Yojson.Safe.Util in
+          Yojson.Safe.from_file file |> to_assoc
+          |> List.filter_map (fun (actor, j) ->
+              match member "rollback_derived" j with
+              | `Null -> None
+              | keeps ->
+                let keeps = keeps |> to_list |> List.map to_string in
+                let dropped =
+                  member "state_fields" j |> to_list
+                  |> List.filter_map (fun f ->
+                      let name = f |> member "name" |> to_string in
+                      if List.mem name keeps then None
+                      else
+                        Some
+                          ( name,
+                            try Some (March_parser.Parse.ty_of_lexbuf
+                                        (Lexing.from_string (f |> member "ty" |> to_string)))
+                            with _ -> None ))
+                in
+                if List.exists (fun (_, t) -> t = None) dropped then None
+                else
+                  Some
+                    ( actor,
+                      { D.keeps; drops_tys = List.map (fun (n, t) -> (n, Option.get t)) dropped;
+                        moves =
+                          (match member "rollback_derived_moves" j with
+                           | `Null -> []
+                           | ms ->
+                             ms |> to_list
+                             |> List.map (fun p ->
+                                 match to_list p with
+                                 | [ a; b ] -> (to_string a, to_string b)
+                                 | _ -> raise Exit)) } ))
+        with _ -> []))
+
 (** The deployed state layouts, for the derived migrations
     (Desugar_migrate_derive, M11).  Called before desugar; an unreadable
     baseline derives nothing, and the deploy gate then asks for a written
@@ -514,8 +650,17 @@ let load_baseline ~(filename : string) : unit =
 let load_derive_baseline ~(filename : string) : unit =
   let module Sd = March_forge.Schema_diff in
   let module D = March_desugar.Desugar_migrate_derive in
+  load_simulation_baseline (find_baseline ~filename);
+  load_rollback_baseline (find_baseline ~filename);
   D.report := [];
   D.origins := [];
+  D.baseline_tys := [];
+  D.rollbacks := [];
+  D.drops := [];
+  D.rollback_moves := [];
+  D.clause_fields := [];
+  D.moves := [];
+  D.consented := [];
   D.baseline :=
     (match find_baseline ~filename with
      | None -> []
@@ -523,6 +668,18 @@ let load_derive_baseline ~(filename : string) : unit =
        (match Sd.parse_schemas_file path with
         | exception _ -> []
         | schemas ->
+          (* The deployed field types, parsed, for a migrate clause that
+             removes or converts a field (desugar cannot parse). *)
+          D.baseline_tys :=
+            List.map
+              (fun (name, (s : Sd.actor_schema)) ->
+                ( name,
+                  List.filter_map
+                    (fun (f : Sd.field) ->
+                      try Some (f.Sd.name, March_parser.Parse.ty_of_lexbuf (Lexing.from_string f.Sd.ty))
+                      with _ -> None)
+                    s.Sd.state_fields ))
+              schemas;
           List.map
             (fun (name, (s : Sd.actor_schema)) ->
               (name, List.map (fun (f : Sd.field) -> (f.Sd.name, f.Sd.ty)) s.Sd.state_fields))
@@ -542,3 +699,8 @@ let baseline_cas_tag () : string list =
     | None -> []
     | Some path ->
       (try [ "hbase:" ^ Digest.to_hex (Digest.file path) ] with Sys_error _ -> [])
+      (* --hcr-drop changes the derived migration, and is written into the
+         image's schemas. *)
+      @ (match !March_desugar.Desugar_migrate_derive.consented_drops with
+         | [] -> []
+         | ds -> [ "hdrop:" ^ String.concat "," (List.sort_uniq compare ds) ])

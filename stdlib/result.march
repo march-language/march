@@ -7,7 +7,7 @@
 -- doc: try
 
 mod Result do
-
+  cap verified
   doc """
   Returns true if the result is Ok.
 
@@ -237,6 +237,17 @@ mod Result do
       (Err(a), Err(b)) -> a == b
       _                -> false
       end
+    end
+  end
+
+  -- ---- Laws (2026-11-15 laws pass) ----
+
+  doc "`is_err` is the negation of `is_ok`."
+  @[lemma]
+  fn is_err_not_ok(res : Result(a, e)) : {Unit | is_err(res) == !is_ok(res)} do
+    match res do
+    Ok(_)  -> ()
+    Err(_) -> ()
     end
   end
 

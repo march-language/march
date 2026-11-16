@@ -6,7 +6,7 @@ exit: 1
 A `cap no_panic` module must handle every case, or add a `_ -> ...` catch-all arm.
 
 22 |     match opt do
-               ^^^^^^
+         ^^^^^^^^^^^^
 
 
 

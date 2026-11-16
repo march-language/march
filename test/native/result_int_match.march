@@ -16,5 +16,6 @@ mod ResultIntMatch do
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(pick(Ok(7)))         -- 7  (was "15" before the fix)
     println(pick(Err("nope")))   -- nope
+    ()
   end
 end

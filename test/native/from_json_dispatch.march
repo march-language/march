@@ -75,5 +75,6 @@ mod FromJsonDispatch do
         println("again " ++ show_point(p2))
       _ -> println("parse failed")
     end
+    ()
   end
 end

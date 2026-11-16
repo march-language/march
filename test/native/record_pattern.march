@@ -51,5 +51,6 @@ fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(wrapped(W({ rate: 1.5, code: 9 })))
   println(wrapped(W({ rate: 2.5, code: 9 })))
   println(wrapped(Z))
+  ()
 end
 end

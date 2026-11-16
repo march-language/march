@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY ------------- errors/cap_host_scope_1.march
+
+`go` connects to `evil.test` (port 80), but module `A` may reach only `example.com`. [cap_host_scope]
+hint: add `needs IO.NetConnect("evil.test")` to module `A`, or connect to a host it already names.
+
+4 |     needs IO.NetConnect("example.com")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

@@ -262,6 +262,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Hot_reload.reset_work_entries ();
   Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
+  Hashtbl.reset Lower_state._fn_typed_module_lets;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
      get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
      decls WRITTEN in the entry file count: [m.mod_decls] also carries the
@@ -283,10 +284,79 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
          List.exists (fun other -> match Tir_names.parse_default_arg other with
              | Some (base, _) -> base = n
              | None -> false) entry_fns in
+       (* Every interface method name the program can dispatch on: the
+          built-in four plus every method an interface (stdlib or user)
+          declares.  A user fn of one of these names shared the method's
+          bare TIR name, and mono chose between the two by comparing the
+          user fn's first-parameter type with the argument's, which is wrong
+          in both directions: a generic user `fn show(r)` lost the user's own
+          call to `Show$Result.show`, and a user `fn show(r : T)` captured the
+          prelude's `println` -> `show(x)` call on a `T`.
+          specs/progress/2026-11-10-user-stdlib-name-collisions.md *)
+       let iface_methods = Hashtbl.create 32 in
+       List.iter (fun n -> Hashtbl.replace iface_methods n ())
+         [ "eq"; "compare"; "show"; "hash" ];
+       let rec collect_iface_methods decls =
+         List.iter (function
+             | Ast.DInterface (idef, _) ->
+               List.iter (fun (md : Ast.method_decl) ->
+                   Hashtbl.replace iface_methods md.md_name.txt ())
+                 idef.iface_methods
+             | Ast.DMod (_, _, inner, _) -> collect_iface_methods inner
+             | _ -> ()) decls
+       in
+       collect_iface_methods stdlib_context;
+       collect_iface_methods m.mod_decls;
        List.iter (fun n ->
-           if n <> "main" && Llvm_builtins.has_c_mapping n && not (has_defaults n)
+           if n <> "main"
+              && (Llvm_builtins.has_c_mapping n || Hashtbl.mem iface_methods n)
+              && not (has_defaults n)
            then Hashtbl.replace tbl n (Tir_names.builtin_shadow_name n))
-         entry_fns
+         entry_fns;
+       (* Modules written in the entry file.  Their fns are lowered under
+          qualified names ([List.sum_int]), the same names a stdlib (or
+          MARCH_LIB_PATH) module of that name lowers to, so an entry-level
+          `mod List` and the stdlib's `List` were one symbol each and the
+          linker kept one.  The interpreter and the typechecker resolve
+          `List.sum_int` to the user's fn when the user's module defines it
+          and to the stdlib's otherwise, so give every fn of an entry module
+          whose top-level name another module also has its own name, and
+          every entry-module fn named like an interface method (mono strips
+          the module prefix to find interface methods).  The key is the
+          qualified name a reference resolves to; [Lower_state.resolve_use_alias]
+          (references written qualified), [Lower_decls.rename_tir_vars]
+          (bare calls qualified by the enclosing module) and [lower_mod_decls]
+          (the definition) all map it through the table. *)
+       let foreign_mods = Hashtbl.create 64 in
+       List.iter (function
+           | Ast.DMod (nm, _, _, sp) when sp.Ast.file <> !Lower_state._entry_file ->
+             Hashtbl.replace foreign_mods nm.txt ()
+           | _ -> ()) (stdlib_context @ m.mod_decls);
+       let shared_name mod_name =
+         Hashtbl.mem foreign_mods mod_name
+         || March_modules.Module_registry.find_stdlib_file mod_name <> None
+       in
+       let rec walk_mod prefix shared decls =
+         let names = Lower_decls.direct_def_names decls in
+         let defaults n =
+           List.exists (fun other -> match Tir_names.parse_default_arg other with
+               | Some (base, _) -> base = n
+               | None -> false) names in
+         List.iter (function
+             | Ast.DFn (def, _) ->
+               let n = def.fn_name.txt in
+               if (shared || Hashtbl.mem iface_methods n) && not (defaults n)
+                  && Tir_names.parse_default_arg n = None
+               then Hashtbl.replace tbl (prefix ^ n)
+                   (Tir_names.builtin_shadow_name (prefix ^ n))
+             | Ast.DMod (sub, _, inner, _) ->
+               walk_mod (prefix ^ sub.txt ^ ".") shared inner
+             | _ -> ()) decls
+       in
+       List.iter (function
+           | Ast.DMod (nm, _, inner, sp) when sp.Ast.file = !Lower_state._entry_file ->
+             walk_mod (nm.txt ^ ".") (shared_name nm.txt) inner
+           | _ -> ()) m.mod_decls
      end;
      tbl);
   (* Pre-register every top-level DMod name from the combined module.
@@ -363,9 +433,22 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       fn_kind       = Tir.FnNormal }
   in
   let reg_method meth_name ty_name mangled_name =
-    let existing = match Hashtbl.find_opt !_iface_methods meth_name with
-      | Some l -> l | None -> [] in
-    Hashtbl.replace !_iface_methods meth_name ((ty_name, mangled_name) :: existing)
+    let reg key =
+      let existing = match Hashtbl.find_opt !_iface_methods key with
+        | Some l -> l | None -> [] in
+      Hashtbl.replace !_iface_methods key ((ty_name, mangled_name) :: existing)
+    in
+    reg meth_name;
+    (* Also under the qualified key (`Show.show`, from `Show$Int.show`), as
+       [collect_iface_impls] does for every written impl.  The qualified
+       spelling cannot be captured by a user fn named like the method, so
+       derived impl bodies call their fields' methods that way
+       (Desugar_derive); without these rows `Ord.compare` on an Int field
+       found only the program's own impls and no primitive one.
+       specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+    match String.index_opt mangled_name '$' with
+    | Some i -> reg (String.sub mangled_name 0 i ^ "." ^ meth_name)
+    | None -> ()
   in
   let emit_builtin_fn name params ret_ty body_fn_name body_params =
     let fn : Tir.fn_def = {
@@ -893,8 +976,17 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
               | Ast.DFn (def, _) ->
                 let fn = Lower_decls.lower_fn_def mod_env def in
                 let fn = Lower_decls.rename_scoped_vars scopes fn in
-                Provenance.rename ~old:fn.fn_name ~new_:(prefix ^ fn.fn_name);
-                let fn = { fn with fn_name = prefix ^ fn.fn_name } in
+                (* An entry-module fn whose qualified name a stdlib / interface
+                   name also has is defined under its own name (see
+                   [Lower_state._entry_builtin_shadows]). *)
+                let qname =
+                  let q = prefix ^ fn.fn_name in
+                  match Hashtbl.find_opt !Lower_state._builtin_shadows q with
+                  | Some renamed -> renamed
+                  | None -> q
+                in
+                Provenance.rename ~old:fn.fn_name ~new_:qname;
+                let fn = { fn with fn_name = qname } in
                 note_migrate_msg ~prefix def fn;
                 if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
                   Hot_reload.note_work_entry fn.fn_name;
@@ -922,6 +1014,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      fn_body   = rhs;
                      fn_kind   = Tir.FnNormal;  (* module-level `let` as zero-arg fn *)
                    } in
+                   Lower_state.note_module_let fn;
                    fns := fn :: !fns
                  | _ -> ())
               | Ast.DUse (ud, _) ->
@@ -1190,6 +1283,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             { fn with fn_body = body }
         ) all_fns
   in
+  (* A reference to a function-typed module-level let calls it for the
+     closure first (see [Lower_decls.call_fn_typed_module_lets]). *)
+  let fn_lets = Hashtbl.copy Lower_state._fn_typed_module_lets in
+  let all_fns = List.map (Lower_decls.call_fn_typed_module_lets fn_lets) all_fns in
   (* Alpha-rename any shadowed local binder to a fresh unique name so that
      every name-based downstream pass (cprop/fold/inline/dce and the JS
      [const] emitter) is immune to variable capture across shadowing.  A
@@ -1268,6 +1365,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                          fn.fn_name = "main" || fn_body_uses v.Tir.v_name fn.fn_body) lets in
                      { fn with fn_body = List.fold_right (fun (v, rhs) body ->
                            Tir.ELet (v, rhs, body)) needed fn.fn_body }) new_fns in
+             (* Lets lowered lazily by these decls join the module's. *)
+             Hashtbl.iter (Hashtbl.replace fn_lets) Lower_state._fn_typed_module_lets;
+             let new_fns = List.map (Lower_decls.call_fn_typed_module_lets fn_lets) new_fns in
              (List.map uniquify_fn new_fns, List.rev !types))
         with e ->
           Hashtbl.filter_map_inplace (fun k v ->

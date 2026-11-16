@@ -111,5 +111,6 @@ mod Main do
     -- 500 iterations/second; the compiled binary does the same work in
     -- milliseconds.
     println(walk(0, 100000, 1, 0))
+    ()
   end
 end

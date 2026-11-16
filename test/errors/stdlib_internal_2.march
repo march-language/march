@@ -1,0 +1,9 @@
+-- EXPECT-ERROR: is internal to the standard library; use `Authority.check(kind, target)`
+mod Main do
+  -- The ocap phase 1 check point is reached through Authority.check, never
+  -- called directly: the raw answer is an Int code, and phase 4 changes what
+  -- it consults.
+  fn main() do
+    cap_check_raw("IO.Clock", "")
+  end
+end

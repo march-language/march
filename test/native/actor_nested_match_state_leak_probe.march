@@ -116,6 +116,7 @@ mod Main do
 
   pfn report(label : String, grew : Int) : () do
     println(label ++ ", flat: " ++ bool_to_string(grew < 100))
+    ()
   end
 
   fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do

@@ -22,6 +22,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let n = 500000
   let s = string_join(build(n, Nil), "")
   println(int_to_string(string_byte_length(s)))
+  ()
 end
 
 end

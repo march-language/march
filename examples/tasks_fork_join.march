@@ -79,6 +79,7 @@ fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   -- Max Collatz steps in 1..10000
   let max_steps = max_collatz(1, 10000, 500)
   println("max collatz steps in 1..10000 = " ++ String.from_int(max_steps))
+  ()
 end
 
 end

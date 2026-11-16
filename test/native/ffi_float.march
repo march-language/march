@@ -36,5 +36,6 @@ mod Test do
     println(show_half(maybe_half(0.0 - 1.0)))  -- None        -> none
     println(show_unit(maybe_unit(1)))      -- Some(())        -> some
     println(show_unit(maybe_unit(0)))      -- None            -> none
+    ()
   end
 end

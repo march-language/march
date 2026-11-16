@@ -192,6 +192,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
     | Ast.EAtom (_, es, _) -> List.iter expr es
     | Ast.ESpawn (e, _) | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _)
     | Ast.EDbg (Some e, _) -> expr e
+    | Ast.EProof (p, _) -> List.iter expr (Ast.proof_children p)
     | Ast.ELetFn (n, ps, rt, body, _) ->
       f SFn n; List.iter param ps;
       (match rt with Some t -> ty t | None -> ()); expr body
@@ -208,7 +209,7 @@ let iter_names (f : site -> Ast.name -> unit) (m : Ast.module_) : unit =
   let type_def name params (td : Ast.type_def) =
     f SType name; List.iter (f SType) params;
     match td with
-    | Ast.TDAlias t -> ty t
+    | Ast.TDAlias (t, _) -> ty t
     | Ast.TDVariant vs ->
       List.iter (fun (v : Ast.variant) -> f SCtor v.var_name; List.iter ty v.var_args) vs
     | Ast.TDRecord fs ->
@@ -627,7 +628,7 @@ and span_of_expr (e : Ast.expr) : Ast.span =
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
-  | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) | Ast.ERefineMsg (_, _, sp) -> sp
+  | Ast.EAssert (_, sp) | Ast.ESigil (_, _, sp) | Ast.ERefineMsg (_, _, sp) | Ast.EProof (_, sp) -> sp
   | Ast.EVar n -> n.Ast.span
   | Ast.EResultRef _ -> Ast.dummy_span
 
@@ -731,7 +732,8 @@ let unshadowed_uses (targets : string list) (e : Ast.expr) : (string * Ast.span)
       walk bound r;
       walk bound c
     | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.ESpawn (e, _)
-    | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _) | Ast.EDbg (Some e, _) -> walk bound e in
+    | Ast.EAssert (e, _) | Ast.ESigil (_, e, _) | Ast.ERefineMsg (e, _, _) | Ast.EDbg (Some e, _) -> walk bound e
+    | Ast.EProof (p, _) -> List.iter (walk bound) (Ast.proof_children p) in
   walk [] e;
   !acc
 

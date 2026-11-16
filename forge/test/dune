@@ -105,11 +105,16 @@
  (modules test_build_check)
  (libraries march_forge alcotest unix qcheck-core qcheck-alcotest march_cas))
 
+; MARCH_TEST_STDLIB_DIR: the `forge fix PATH` cases check programs that reach
+; on-demand stdlib modules (Authority), which a PATH-symlinked march cannot
+; find exe-relative on macOS (Sys.executable_name is the link's directory).
 (rule
  (alias runtest)
+ (deps (source_tree %{workspace_root}/stdlib))
  (action
   (setenv MARCH_TEST_BIN %{bin:march}
-   (run %{exe:test_build_check.exe}))))
+   (setenv MARCH_TEST_STDLIB_DIR %{workspace_root}/stdlib
+    (run %{exe:test_build_check.exe})))))
 
 ; test_offline.ml: `forge --offline` and the registry tarball cache
 ; (specs/2026-09-11-forge-offline-and-versioned-dep-cache-design.md §3/§4/§2.4).

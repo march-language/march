@@ -1,0 +1,67 @@
+-- Two nested modules that each declare a variant type named `Note`, both
+-- deriving Show, Eq and Json, beside an entry-level `Note`. Each is its own
+-- type (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md):
+-- the interpreter used to run whichever same-short-name type's derived
+-- Show/Eq impl registered last, and the typechecker rejected the two Json
+-- derives (`from_json` could not tell the codecs apart).
+-- Run: dune exec march -- test test/stdlib/test_same_short_name_types.march
+
+mod TestSameShortNameTypes do
+
+  type Note = Top(Int)
+  derive Eq, Show for Note
+
+  mod A do
+    type Note = NA(Int) | NB(String)
+    derive Eq, Show, Json for Note
+    fn roundtrip(n : Note) : String do
+      match Json.parse(Json.to_string(to_json(n))) do
+        Ok(j) ->
+          let r : Result(Note, Json.DecodeError) = from_json(j)
+          match r do
+            Ok(NA(k)) -> "NA " ++ int_to_string(k)
+            Ok(NB(s)) -> "NB " ++ s
+            Err(_) -> "decode error"
+          end
+        Err(_) -> "parse error"
+      end
+    end
+  end
+
+  mod B do
+    type Note = NC(Bool) | ND(Int, Int)
+    derive Eq, Show, Json for Note
+    fn roundtrip(n : Note) : String do
+      match Json.parse(Json.to_string(to_json(n))) do
+        Ok(j) ->
+          let r : Result(Note, Json.DecodeError) = from_json(j)
+          match r do
+            Ok(NC(b)) -> if b do "NC t" else "NC f" end
+            Ok(ND(x, y)) -> "ND " ++ int_to_string(x + y)
+            Err(_) -> "decode error"
+          end
+        Err(_) -> "parse error"
+      end
+    end
+  end
+
+  describe "same short name, three types" do
+    test "each type's derived Show" do
+      assert show(A.NA(3)) == "NA(3)"
+      assert show(B.ND(1, 2)) == "ND(1, 2)"
+      assert show(Top(7)) == "Top(7)"
+    end
+    test "each type's derived Eq" do
+      assert A.NB("x") == A.NB("x")
+      assert A.NA(1) != A.NA(2)
+      assert B.NC(true) != B.NC(false)
+      assert Top(4) == Top(4)
+    end
+    test "both Json codecs round-trip" do
+      assert A.roundtrip(A.NA(3)) == "NA 3"
+      assert A.roundtrip(A.NB("x")) == "NB x"
+      assert B.roundtrip(B.ND(1, 2)) == "ND 3"
+      assert B.roundtrip(B.NC(true)) == "NC t"
+    end
+  end
+end

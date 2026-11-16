@@ -277,6 +277,9 @@ type t = {
       `@[no_alloc(transient)]` when everything it allocates is released before
       it returns.  Same predicate `forge fix --contracts` uses, so the editor
       offers the action exactly where forge would insert it. *)
+  cap_program : (Ast.module_ * Tc.env) option;
+  (** The whole program (stdlib, dependencies, this file) and its typecheck
+      env, for the TIR-side capability checks [run_tir_pass] runs. *)
   tir_fn_insights  : tir_fn_insight list;
   (** TIR-pipeline function-level insights: stack promotions, FBIP reuse, indirect calls. *)
   code_lens_items  : code_lens_item list;

@@ -1,0 +1,16 @@
+-- EXPECT-VIOLATED: precondition need1
+-- EXPECT-ERROR: `0` can never satisfy `x == 1`
+-- Fixed 2026-11-02 (specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md,
+-- review round 2, c3). A user `type Option` beside the built-in one: `Only(_)`
+-- was taken to exhaust it, so `need1(0)` in the `_` arm was PROVED. `f(None)`
+-- reaches it.
+mod S03 do
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  type Option(a) = Only(a)
+  fn f(x : Option(Int)) : Int do
+    match x do
+      Only(_) -> 1
+      _ -> need1(0)
+    end
+  end
+end

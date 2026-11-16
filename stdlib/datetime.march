@@ -141,13 +141,16 @@ mod DateTime do
   doc """
   Return the current Unix timestamp as an Int (whole seconds since
   1970-01-01 UTC; the fractional part of the clock is truncated).
-  Nondeterministic, so there is no runnable example.
+  Nondeterministic, so there is no runnable example. A capability
+  operation (IO.Clock): `Err(CapError(...))` when the current authority
+  refuses it.
 
-      let started = DateTime.now()
+      let started = Authority.must(DateTime.now())
       DateTime.format(DateTime.from_timestamp(started), "%H:%M:%S")
   """
-  fn now() do
-    float_to_int(unix_time(()))
+  fn now() : Result(Int, CapError) do
+    let? _ = Authority.check("IO.Clock", "")
+    Ok(float_to_int(unix_time(())))
   end
 
   doc """
@@ -577,12 +580,14 @@ mod DateTime do
 
   doc """
   Return the current wall-clock time in zone `tz` (see `now`).
-  Nondeterministic, so there is no runnable example.
+  Nondeterministic, so there is no runnable example. `Err(CapError(...))`
+  when reading the clock (IO.Clock) is refused.
 
-      DateTime.local_format(DateTime.local_now(DateTime.fixed_zone_hours(9)), "%H:%M%:z")
+      DateTime.local_format(Authority.must(DateTime.local_now(DateTime.fixed_zone_hours(9))), "%H:%M%:z")
   """
-  fn local_now(tz : Tz) : LocalDateTime do
-    local_from_timestamp(now(), tz)
+  fn local_now(tz : Tz) : Result(LocalDateTime, CapError) do
+    let? t = now()
+    Ok(local_from_timestamp(t, tz))
   end
 
   doc """

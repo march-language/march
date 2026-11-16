@@ -13,9 +13,10 @@ mod ProcessRunStream do
     match r do
       Ok(seq) ->
         let lines = Seq.to_list(seq)
-        println(label ++ ": " ++ int_to_string(List.length(lines)) ++ " lines ["
-                ++ String.join(lines, "|") ++ "]")
-      Err(e) -> println(label ++ ": error")
+        Authority.ignore(println(label ++ ": " ++ int_to_string(List.length(lines)) ++ " lines ["
+                ++ String.join(lines, "|") ++ "]"))
+        ()
+      Err(e) -> Authority.ignore(println(label ++ ": error"))
     end
   end
 
@@ -27,15 +28,15 @@ mod ProcessRunStream do
   end
 
   fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
-    report("echo", Process.run_stream("echo", ["hello"]))
-    report("printf", Process.run_stream("printf", ["a\nb\n\nc\n"]))
-    report("no trailing newline", Process.run_stream("printf", ["x\ny"]))
-    report("empty", Process.run_stream("true", []))
-    match Process.run_stream("printf", ["1\n2\n3\n"]) do
+    report("echo", Authority.must(Process.run_stream("echo", ["hello"])))
+    report("printf", Authority.must(Process.run_stream("printf", ["a\nb\n\nc\n"])))
+    report("no trailing newline", Authority.must(Process.run_stream("printf", ["x\ny"])))
+    report("empty", Authority.must(Process.run_stream("true", [])))
+    match Authority.must(Process.run_stream("printf", ["1\n2\n3\n"])) do
       Ok(seq) ->
         let total = Seq.fold(seq, 0, fn (acc, line) -> acc + string_to_int_or_zero(line))
-        println("sum: " ++ int_to_string(total))
-      Err(_) -> println("sum: error")
+        Authority.ignore(println("sum: " ++ int_to_string(total)))
+      Err(_) -> Authority.ignore(println("sum: error"))
     end
   end
 end

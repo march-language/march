@@ -85,6 +85,7 @@ mod UnboxedJoinSlot do
     let grew = live_allocs() - before
     println(label ++ " = " ++ int_to_string(result) ++ ", flat: "
             ++ bool_to_string(grew < n / 4))
+    ()
   end
 
   fn main(_c : Cap(IO.Console)) do

@@ -9,6 +9,6 @@ mod JsDomTimeoutCallback do
   needs IO.Console
   needs IO.Foreign
   fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
-    Js.Dom.set_timeout(0, fn _ -> println("fired"))
+    Js.Dom.set_timeout(0, fn _ -> Authority.ignore(println("fired")))
   end
 end

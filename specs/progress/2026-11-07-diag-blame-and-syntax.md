@@ -53,5 +53,5 @@ nothing). Each fix is re-checked as usual (`Fix_verify.verify_parse`).
   deletes `return `.
 - **`"…" + n`:** the String `missing_impl` gets a note about `++` and `int_to_string`.
 
-Corpus: 15 new cases (syntax_error_7..11, parse_error_19..20, lex_error_1..2,
-unbound_variable_2, missing_impl_6..7, type_mismatch_54..55, callback_arity_mismatch_1).
+Corpus: 15 new cases (syntax_error_7..11, parse_error_21..22, lex_error_1..2,
+unbound_variable_2, missing_impl_6..7, type_mismatch_54, type_mismatch_57, callback_arity_mismatch_1).

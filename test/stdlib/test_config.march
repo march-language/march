@@ -9,26 +9,26 @@ mod TestConfig do
 describe "Config.store_put and store_get (2-level)" do
 
   test "stores and retrieves an Int" do
-    let cfg = Config.new_store("test_cfg_int_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_int_1"))
     let port = Config.key(:myapp, :port, Config.int())
     Config.store_put(cfg, port, 4000)
     assert (Config.store_get(cfg, port) == Some(4000))
   end
 
   test "stores and retrieves a String" do
-    let cfg = Config.new_store("test_cfg_str_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_str_1"))
     let host = Config.key(:myapp, :host, Config.string())
     Config.store_put(cfg, host, "localhost")
     assert (Config.store_get(cfg, host) == Some("localhost"))
   end
 
   test "returns None for a missing key" do
-    let cfg = Config.new_store("test_cfg_none_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_none_1"))
     assert (Config.store_get(cfg, Config.key(:myapp, :missing, Config.int())) == None)
   end
 
   test "overwrites existing value" do
-    let cfg = Config.new_store("test_cfg_overwrite_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_overwrite_1"))
     let port = Config.key(:myapp, :port, Config.int())
     Config.store_put(cfg, port, 3000)
     Config.store_put(cfg, port, 4000)
@@ -36,7 +36,7 @@ describe "Config.store_put and store_get (2-level)" do
   end
 
   test "different namespaces are isolated" do
-    let cfg = Config.new_store("test_cfg_iso_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_iso_1"))
     let a = Config.key(:app_a, :key, Config.string())
     let b = Config.key(:app_b, :key, Config.string())
     Config.store_put(cfg, a, "alpha")
@@ -46,7 +46,7 @@ describe "Config.store_put and store_get (2-level)" do
   end
 
   test "one store holds values of several types" do
-    let cfg = Config.new_store("test_cfg_keys_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_keys_1"))
     let host = Config.key(:myapp, :host, Config.string())
     let port = Config.key(:myapp, :port, Config.int())
     Config.store_put(cfg, host, "localhost")
@@ -56,7 +56,7 @@ describe "Config.store_put and store_get (2-level)" do
   end
 
   test "stores and retrieves a Bool" do
-    let cfg = Config.new_store("test_cfg_bool_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_bool_1"))
     let debug = Config.key(:myapp, :debug, Config.bool())
     Config.store_put(cfg, debug, true)
     assert (Config.store_get(cfg, debug) == Some(true))
@@ -67,19 +67,19 @@ end
 describe "Config.key_in (3-level)" do
 
   test "stores and retrieves a nested Int" do
-    let cfg = Config.new_store("test_cfg_3l_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_3l_1"))
     let pool = Config.key_in(:myapp, :database, :pool_size, Config.int())
     Config.store_put(cfg, pool, 10)
     assert (Config.store_get(cfg, pool) == Some(10))
   end
 
   test "returns None for a missing nested key" do
-    let cfg = Config.new_store("test_cfg_3l_none_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_3l_none_1"))
     assert (Config.store_get(cfg, Config.key_in(:myapp, :database, :missing, Config.int())) == None)
   end
 
   test "2-level and 3-level keys with the same leaf are distinct" do
-    let cfg = Config.new_store("test_cfg_3l_iso_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_3l_iso_1"))
     let top = Config.key(:myapp, :port, Config.int())
     let nested = Config.key_in(:myapp, :database, :port, Config.int())
     Config.store_put(cfg, top, 4000)
@@ -89,7 +89,7 @@ describe "Config.key_in (3-level)" do
   end
 
   test "different sections are isolated" do
-    let cfg = Config.new_store("test_cfg_sections_1")
+    let cfg = Authority.must(Config.new_store("test_cfg_sections_1"))
     let db = Config.key_in(:myapp, :database, :host, Config.string())
     let cache = Config.key_in(:myapp, :cache, :host, Config.string())
     Config.store_put(cfg, db, "db.local")
@@ -237,14 +237,14 @@ describe "Config.from_env" do
   test "loads string from env var" do
     process_set_env("MARCH_CFG_TEST_HOST_1", "db.example.com")
     let host = Config.key(:cfg_env_test_a, :host, Config.string())
-    let result = Config.from_env(host, "MARCH_CFG_TEST_HOST_1", "localhost")
+    let result = Authority.must(Config.from_env(host, "MARCH_CFG_TEST_HOST_1", "localhost"))
     assert (result == "db.example.com")
     assert (Config.get(host) == Some("db.example.com"))
   end
 
   test "uses default when env var not set" do
     let host = Config.key(:cfg_env_test_b, :host, Config.string())
-    let result = Config.from_env(host, "MARCH_CFG_UNSET_HOST_XYZ", "localhost")
+    let result = Authority.must(Config.from_env(host, "MARCH_CFG_UNSET_HOST_XYZ", "localhost"))
     assert (result == "localhost")
     assert (Config.get(host) == Some("localhost"))
   end
@@ -252,37 +252,37 @@ describe "Config.from_env" do
   test "from_env_int parses integer from env var" do
     process_set_env("MARCH_CFG_TEST_PORT_1", "5432")
     let port = Config.key(:cfg_env_test_c, :port, Config.int())
-    let result = Config.from_env_int(port, "MARCH_CFG_TEST_PORT_1", 3000)
+    let result = Authority.must(Config.from_env_int(port, "MARCH_CFG_TEST_PORT_1", 3000))
     assert (result == 5432)
     assert (Config.get(port) == Some(5432))
   end
 
   test "from_env_int uses default when env var not set" do
-    let result = Config.from_env_int(Config.key(:cfg_env_test_d, :port, Config.int()), "MARCH_CFG_UNSET_PORT_XYZ", 4000)
+    let result = Authority.must(Config.from_env_int(Config.key(:cfg_env_test_d, :port, Config.int()), "MARCH_CFG_UNSET_PORT_XYZ", 4000))
     assert (result == 4000)
   end
 
   test "from_env_int uses default when value is not an integer" do
     process_set_env("MARCH_CFG_TEST_BAD_PORT_1", "not-a-port")
-    let result = Config.from_env_int(Config.key(:cfg_env_test_e, :port, Config.int()), "MARCH_CFG_TEST_BAD_PORT_1", 4000)
+    let result = Authority.must(Config.from_env_int(Config.key(:cfg_env_test_e, :port, Config.int()), "MARCH_CFG_TEST_BAD_PORT_1", 4000))
     assert (result == 4000)
   end
 
   test "from_env_bool reads true from env var" do
     process_set_env("MARCH_CFG_TEST_DEBUG_1", "true")
     let result = Config.from_env_bool(Config.key(:cfg_env_test_f, :debug, Config.bool()), "MARCH_CFG_TEST_DEBUG_1", false)
-    assert result
+    assert Authority.must(result)
   end
 
   test "from_env_bool reads false from env var" do
     process_set_env("MARCH_CFG_TEST_DEBUG_2", "false")
     let result = Config.from_env_bool(Config.key(:cfg_env_test_g, :debug, Config.bool()), "MARCH_CFG_TEST_DEBUG_2", true)
-    assert not(result)
+    assert not(Authority.must(result))
   end
 
   test "from_env_bool uses default when not set" do
     let result = Config.from_env_bool(Config.key(:cfg_env_test_h, :debug, Config.bool()), "MARCH_CFG_UNSET_DEBUG_XYZ", false)
-    assert not(result)
+    assert not(Authority.must(result))
   end
 
 end
@@ -324,32 +324,32 @@ describe "Config.env" do
 
   test "env detection: set to test" do
     process_set_env("MARCH_ENV", "test")
-    assert (Config.env() == :test)
-    assert (Config.is_test())
-    assert not(Config.is_dev())
-    assert not(Config.is_prod())
+    assert (Authority.must(Config.env()) == :test)
+    assert (Authority.must(Config.is_test()))
+    assert not(Authority.must(Config.is_dev()))
+    assert not(Authority.must(Config.is_prod()))
   end
 
   test "env detection: set to prod" do
     process_set_env("MARCH_ENV", "prod")
-    assert (Config.env() == :prod)
-    assert (Config.is_prod())
-    assert not(Config.is_dev())
-    assert not(Config.is_test())
+    assert (Authority.must(Config.env()) == :prod)
+    assert (Authority.must(Config.is_prod()))
+    assert not(Authority.must(Config.is_dev()))
+    assert not(Authority.must(Config.is_test()))
   end
 
   test "env detection: set to dev" do
     process_set_env("MARCH_ENV", "dev")
-    assert (Config.env() == :dev)
-    assert (Config.is_dev())
-    assert not(Config.is_test())
-    assert not(Config.is_prod())
+    assert (Authority.must(Config.env()) == :dev)
+    assert (Authority.must(Config.is_dev()))
+    assert not(Authority.must(Config.is_test()))
+    assert not(Authority.must(Config.is_prod()))
   end
 
   test "env defaults to dev for unknown value" do
     process_set_env("MARCH_ENV", "staging")
-    assert (Config.env() == :dev)
-    assert (Config.is_dev())
+    assert (Authority.must(Config.env()) == :dev)
+    assert (Authority.must(Config.is_dev()))
   end
 
 end
@@ -369,8 +369,8 @@ end
 describe "Config.new_store" do
 
   test "new_store returns an isolated table" do
-    let s1 = Config.new_store("isolated_store_a_1")
-    let s2 = Config.new_store("isolated_store_b_1")
+    let s1 = Authority.must(Config.new_store("isolated_store_a_1"))
+    let s2 = Authority.must(Config.new_store("isolated_store_b_1"))
     let k = Config.key(:app, :key, Config.string())
     Config.store_put(s1, k, "in_s1")
     Config.store_put(s2, k, "in_s2")
@@ -379,15 +379,15 @@ describe "Config.new_store" do
   end
 
   test "new_store called twice with same name returns same store" do
-    let s1 = Config.new_store("same_name_store_1")
+    let s1 = Authority.must(Config.new_store("same_name_store_1"))
     let k = Config.key(:app, :key, Config.string())
     Config.store_put(s1, k, "value1")
-    let s2 = Config.new_store("same_name_store_1")
+    let s2 = Authority.must(Config.new_store("same_name_store_1"))
     assert (Config.store_get(s2, k) == Some("value1"))
   end
 
   test "store_fetch reports a type mismatch" do
-    let s = Config.new_store("store_fetch_wrong_1")
+    let s = Authority.must(Config.new_store("store_fetch_wrong_1"))
     Config.store_put(s, Config.key(:app, :n, Config.int()), 1)
     assert (Config.store_fetch(s, Config.key(:app, :n, Config.atom()))
             == Err(Config.KeyWrongType(":app/:n", "Atom", "Int")))

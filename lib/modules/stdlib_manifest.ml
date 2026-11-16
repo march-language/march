@@ -20,6 +20,7 @@
 (** The ordered list of stdlib file names. *)
 let stdlib_file_list = [
   "prelude.march";
+  "authority.march";
   "option.march";
   "result.march";
   "list.march";
@@ -55,6 +56,7 @@ let stdlib_file_list = [
   "csv.march";
   "websocket.march";
   "http_server.march";
+  "http_acme.march";
   "iterable.march";
   "set.march";
   "hash_map.march";
@@ -91,6 +93,10 @@ let stdlib_file_list = [
   "logger.march";
   "diagnostics.march";
   "actor.march";
+  (* Actor.Theory: a model of the mailbox (per-sender order, Actor.call
+     replies, monitors) and its laws (lemmas design §4).  Depends on nothing
+     but Option. *)
+  "actor_theory.march";
   "scheduler.march";
   "flow.march";
   "json.march";

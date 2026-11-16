@@ -101,6 +101,7 @@ mod Main do
       ++ " actor=" ++ bool_to_string(r.process.pid >= 0)
       ++ " context=" ++ ctx_text(r.context)
       ++ " backtrace_ok=" ++ bool_to_string(backtrace_ok(r)))
+    ()
   end
 
   fn is_err(r : Result(Bool, String)) : Bool do

@@ -1,0 +1,11 @@
+-- EXPECT-VIOLATED: precondition g
+-- EXPECT-ERROR: refinement violation
+-- KNOWN ACCEPTED (specs/todos/2026-10-18-callback-param-element-demands-unchecked.md).
+-- `g` demands `_ < 5` of every element and `ys` may hold 59. No obligation is
+-- filed at `g(ys)`, so `cap verified` accepts the module.
+mod A01 do
+  cap verified
+  fn go(g : (List({Int | _ < 5})) -> Int, ys : List({Int | _ < 60})) : Int do
+    g(ys)
+  end
+end

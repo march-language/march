@@ -1,0 +1,38 @@
+mod P47NotPrefixOperand do
+  needs IO.Console
+  -- §7.3 — `not` directly followed by an operand on the same line is the
+  -- prefix `!`: `not p(n)` is `!p(n)`. `not` is still an ordinary name
+  -- otherwise (`not(x)`, `fn not(`, `not` passed as a value, `not` at a
+  -- line end).
+  --
+  -- It used to be two block statements, a discarded `not` and the value
+  -- `p(n)`, so `else not p(n) end` silently returned `p(n)`, and
+  -- `let b = not p(n)` bound the function `not`. `negated` below is
+  -- rejected by `--check` under that reading (`b` would be `Bool -> Bool`).
+  fn p(n : Int) : Bool do n > 5 end
+
+  fn negated(n : Int) : Bool do
+    let b = not p(n)
+    b
+  end
+
+  fn branch(n : Int) : Bool do
+    if n >= 0 do false else not p(n) end
+  end
+
+  fn arms(n : Int) : Bool do
+    match n do
+      0 -> not true
+      _ -> not not p(n)
+    end
+  end
+
+  fn called(x : Bool) : Bool do not(x) end
+
+  fn main(_c : Cap(IO.Console)) do
+    print_line(bool_to_string(negated(9)))
+    print_line(bool_to_string(branch(-1)))
+    print_line(bool_to_string(arms(0)) ++ " " ++ bool_to_string(arms(9)))
+    print_line(bool_to_string(called(true)))
+  end
+end

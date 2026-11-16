@@ -40,9 +40,9 @@ mod ProtocolEvolveA do
   end
 
   pfn offers() : Vault(SessionNode.Offer) do
-    match Vault.whereis("evolve_offers") do
+    match Authority.must(Vault.whereis("evolve_offers")) do
       Some(v) -> v
-      None -> Vault.new("evolve_offers")
+      None -> Authority.must(Vault.new("evolve_offers"))
     end
   end
 
@@ -62,8 +62,8 @@ mod ProtocolEvolveA do
             Ok(o2) ->
               Vault.set(v, "cur", o2)
               SessionNode.close_offer(o)
-              println("node-a: Shop re-offered under version " ++ int_to_string(version()) ++ "; the old offer drains")
-            Err(e) -> println("node-a: could not re-offer: " ++ SessionNode.run_error_message(e))
+              Authority.ignore(println("node-a: Shop re-offered under version " ++ int_to_string(version()) ++ "; the old offer drains"))
+            Err(e) -> Authority.ignore(println("node-a: could not re-offer: " ++ SessionNode.run_error_message(e)))
           end
         end
       None ->
@@ -99,9 +99,9 @@ mod ProtocolEvolveA do
   -- ── the Buyer (node-b): a receiver ────────────────────────────────────
 
   pfn tally() : Vault(Int) do
-    match Vault.whereis("evolve_tally") do
+    match Authority.must(Vault.whereis("evolve_tally")) do
       Some(t) -> t
-      None -> Vault.new("evolve_tally")
+      None -> Authority.must(Vault.new("evolve_tally"))
     end
   end
 
@@ -131,10 +131,12 @@ mod ProtocolEvolveA do
         count("returned", k)
       Err(SessionNode.NoOffer(_, why)) ->
         count("refused", 1)
-        println("node-b: refused at formation: " ++ why)
+        Authority.ignore(println("node-b: refused at formation: " ++ why))
+        ()
       Err(e) ->
         count("failed", 1)
-        println("node-b: session failed: " ++ Order_Run.error_message(e))
+        Authority.ignore(println("node-b: session failed: " ++ Order_Run.error_message(e)))
+        ()
     end
     count("ended", 1)
   end
@@ -171,16 +173,17 @@ mod ProtocolEvolveA do
 
   fn summary() : () do
     let t = tally()
-    println("node-b: sessions lost: " ++ int_to_string(Vault.get_or(t, "failed", 0)))
-    println("node-b: sessions refused at formation: " ++ int_to_string(Vault.get_or(t, "refused", 0)))
-    println("node-b: every session Finished or Drained: "
-      ++ bool_to_string(Vault.get_or(t, "finished", 0) + Vault.get_or(t, "drained", 0) == Vault.get_or(t, "started", 0)))
-    println("node-b: v1 Buyer with a v1 Shop: " ++ seen("pair:1/1"))
-    println("node-b: v2 Buyer with a v1 Shop: " ++ seen("pair:2/1"))
-    println("node-b: v2 Buyer with a v2 Shop: " ++ seen("pair:2/2"))
-    println("node-b: v1 Buyer with a v2 Shop: " ++ seen("pair:1/2"))
-    println("node-b: later from a v2 Shop: " ++ seen("later:2"))
-    println("node-b: later from a v1 Shop: " ++ seen("later:1"))
+    Authority.ignore(println("node-b: sessions lost: " ++ int_to_string(Vault.get_or(t, "failed", 0))))
+    Authority.ignore(println("node-b: sessions refused at formation: " ++ int_to_string(Vault.get_or(t, "refused", 0))))
+    Authority.ignore(println("node-b: every session Finished or Drained: "
+      ++ bool_to_string(Vault.get_or(t, "finished", 0) + Vault.get_or(t, "drained", 0) == Vault.get_or(t, "started", 0))))
+    Authority.ignore(println("node-b: v1 Buyer with a v1 Shop: " ++ seen("pair:1/1")))
+    Authority.ignore(println("node-b: v2 Buyer with a v1 Shop: " ++ seen("pair:2/1")))
+    Authority.ignore(println("node-b: v2 Buyer with a v2 Shop: " ++ seen("pair:2/2")))
+    Authority.ignore(println("node-b: v1 Buyer with a v2 Shop: " ++ seen("pair:1/2")))
+    Authority.ignore(println("node-b: later from a v2 Shop: " ++ seen("later:2")))
+    Authority.ignore(println("node-b: later from a v1 Shop: " ++ seen("later:1")))
+    ()
   end
 
   pfn run(host : Pid(ShopHostState), c : Cap(IO), h : Cap(ClusterNode.Live)) : () do
@@ -190,14 +193,14 @@ mod ProtocolEvolveA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "evolve-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "evolve-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let host = start_host()
         tick(host, c, h)
         sleep_ms(300)
-        println("node-a: offering")
+        Authority.ignore(println("node-a: offering"))
         run(host, c, h)
     end
   end

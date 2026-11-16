@@ -1,0 +1,3 @@
+IO.Clock allowed
+IO.FileRead allowed
+exit 0

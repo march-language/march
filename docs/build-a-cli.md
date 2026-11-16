@@ -75,11 +75,11 @@ mod Mcount do
   needs IO.Console
   needs IO.Process
   fn main() do
-    match System.argv() do
+    match Authority.must(System.argv()) do
       [_exe, path] -> println("counting " ++ path)
       _ ->
         IO.warn("usage: mcount <file>")
-        System.exit(2)
+        Authority.ignore(System.exit(2))
     end
   end
 end
@@ -107,11 +107,11 @@ clean error instead of a crash:
 
 <!-- scroll:skip -->
 ```march
-match File.read(path) do
+match Authority.must(File.read(path)) do
   Ok(text) -> report(path, text)
   Err(_)   ->
     IO.warn("mcount: cannot read " ++ path)
-    System.exit(1)
+    Authority.ignore(System.exit(1))
 end
 ```
 
@@ -174,20 +174,21 @@ mod Mcount do
     println(String.from_int(lines) ++ " " ++
             String.from_int(words) ++ " " ++
             String.from_int(bytes) ++ " " ++ path)
+    ()
   end
 
   fn main() do
-    match System.argv() do
+    match Authority.must(System.argv()) do
       [_exe, path] ->
-        match File.read(path) do
+        match Authority.must(File.read(path)) do
           Ok(text) -> report(path, text)
           Err(_)   ->
             IO.warn("mcount: cannot read " ++ path)
-            System.exit(1)
+            Authority.ignore(System.exit(1))
         end
       _ ->
         IO.warn("usage: mcount <file>")
-        System.exit(2)
+        Authority.ignore(System.exit(2))
     end
   end
 

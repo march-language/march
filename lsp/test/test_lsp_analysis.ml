@@ -95,6 +95,38 @@ end|} in
   Alcotest.(check bool) "has error diagnostic" true
     (count_errors a > 0)
 
+(* A use of a `@[deprecated("...")]` function is a warning tagged Deprecated
+   (DiagnosticTag 2), so an editor strikes the name through; no other
+   diagnostic carries the tag. *)
+let test_analyse_deprecated_use_is_tagged () =
+  let src = {|mod Test do
+  mod Legacy do
+    @[deprecated("use `Legacy.add` instead")]
+    fn old_add(a : Int, b : Int) : Int do a + b end
+  end
+  fn run(unused : Int) : Int do Legacy.old_add(1, 2) end
+end|} in
+  let a = analyse src in
+  let tagged, untagged =
+    List.partition (fun (d : Lsp.Types.Diagnostic.t) ->
+        d.tags = Some [ Lsp.Types.DiagnosticTag.Deprecated ]) a.diagnostics in
+  (match tagged with
+   | [ d ] ->
+     Alcotest.(check bool) "code" true (d.code = Some (`String "deprecated"));
+     Alcotest.(check bool) "a warning" true
+       (d.severity = Some Lsp.Types.DiagnosticSeverity.Warning);
+     Alcotest.(check int) "on the use's line" 5 d.range.start.line;
+     Alcotest.(check bool) "carries the message" true
+       (match d.message with
+        | `String m ->
+          (try ignore (Str.search_forward (Str.regexp_string "use `Legacy.add` instead") m 0); true
+           with Not_found -> false)
+        | _ -> false)
+   | ds -> Alcotest.failf "expected one Deprecated-tagged diagnostic, got %d" (List.length ds));
+  Alcotest.(check bool) "no other diagnostic is tagged" true
+    (List.for_all (fun (d : Lsp.Types.Diagnostic.t) -> d.tags = None) untagged);
+  Alcotest.(check int) "a deprecation is not an error" 0 (count_errors a)
+
 let test_analyse_parse_error_produces_diagnostic () =
   (* Use a source whose tokens are valid but whose grammar is wrong,
      so Menhir (not the lexer) produces the parse error.

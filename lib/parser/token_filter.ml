@@ -171,10 +171,50 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         | _ -> false
       in
       match tok with
+      (* Proof hints (specs/lang/lemmas.md): `calc` and `reveal` are keywords
+         only where the statement is written, `calc do` and `reveal f`.  A
+         call (`calc(…)`), a binding (`let reveal = …`) or a declaration
+         (`fn calc()`) keeps the word an ordinary name. *)
+      | Parser.LOWER_IDENT "forall" ->
+        promote_to Parser.FORALL ~when_:(function Parser.LOWER_IDENT _ -> true | _ -> false)
+      | Parser.LOWER_IDENT "exists" ->
+        promote_to Parser.EXISTS ~when_:(function Parser.LOWER_IDENT _ -> true | _ -> false)
+      (* Ghost code: `ghost` is a keyword only before `let`, `fn`/`pfn` or a
+         parameter name (`ghost s : Set(Int)`).  A name is never followed by
+         another name in an expression (calls take parentheses), so
+         `let ghost = …`, `ghost(…)` and `fn ghost()` keep the ordinary name. *)
+      | Parser.LOWER_IDENT "ghost" ->
+        promote_to Parser.GHOST ~when_:(function
+          | Parser.LET | Parser.FN | Parser.PFN | Parser.LOWER_IDENT _ -> true
+          | _ -> false)
+      (* Two-state specs: `on Msg(…) ensures P do`.  `ensures` is a keyword
+         only before a token that can start its predicate but never follows a
+         name in an expression (calls take parentheses), so `ensures` stays
+         an ordinary name everywhere else. *)
+      | Parser.LOWER_IDENT "ensures" ->
+        promote_to Parser.ENSURES ~when_:(function
+          | Parser.STATE -> true (* `ensures state.balance …` *)
+          | t -> starts_condition t)
+      | Parser.LOWER_IDENT "calc" ->
+        promote_to Parser.CALC ~when_:(function Parser.DO -> true | _ -> false)
+      | Parser.LOWER_IDENT "reveal" ->
+        promote_to Parser.REVEAL ~when_:(function Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _ -> true | _ -> false)
       | Parser.LOWER_IDENT "module" ->
         promote_to Parser.MODULE_KW ~when_:after_upper_ident
       | Parser.LOWER_IDENT ("elif" | "elsif") ->
         promote_to Parser.ELIF ~when_:starts_condition
+      (* `not` is an ordinary function name (`not(x)`, a user's own `fn not`),
+         but `not p(n)`, with an operand directly after it, means `!p(n)`.
+         Left alone it was two block statements, a discarded `not` and the
+         value `p(n)`, so `else not p(n) end` silently returned `p(n)`
+         (specs/progress/2026-10-29-not-at-block-start-parses-as-two-statements.md).
+         Same test as `elif`: a name, a literal or `!` can never follow an
+         identifier in an expression, while `not(…)`, `fn not(`, `not,`,
+         `not)` and `not` at a line end keep the name.  [Parser.BANG] builds
+         the same `EApp (EVar "not", …)` a call does, so a user-defined
+         `not` still shadows it. *)
+      | Parser.LOWER_IDENT "not" ->
+        promote_to Parser.BANG ~when_:starts_condition
       | Parser.ROLE      -> demote "role"      ~keep_when:after_upper_ident
       | Parser.INIT      -> promote_init ()
       | Parser.MAY       -> demote "may"       ~keep_when:after_crash
@@ -241,10 +281,21 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
      ⏎ `()` was still glued into `1()`. Interpreted that raised "applied
      non-function value: 1"; compiled it reached codegen as a call to a
      literal and emitted invalid IR — `declare ptr @<lit>()` — which clang
-     rejected with "expected function name". *)
+     rejected with "expected function name".
+
+     The same holds for the closing token of every other [expr_atom] (#1179):
+     `}` (a record literal or update), `end` (a `do ... end` block) and the
+     end of an interpolated string. Without them `let r = { x: 1 }` ⏎
+     `(r.x + 1)` was glued into `{ x: 1 }(r.x + 1)`, and `let g = do ... end`
+     ⏎ `("x")` silently CALLED `g`. Every other `end` (of an `if`, `match`,
+     local `fn`, `mod`, ...) and `}` (a record type or pattern) already ended
+     a statement, or is followed by a keyword rather than a `(`; at those
+     sites the retag is a no-op, because [LPAREN_STMT] is accepted wherever
+     a statement or a match-arm pattern can start. *)
   let ends_expression = function
     | Parser.INT _ | Parser.FLOAT _ | Parser.STRING _
-    | Parser.BOOL _ | Parser.ATOM _ -> true
+    | Parser.BOOL _ | Parser.ATOM _
+    | Parser.RBRACE | Parser.END | Parser.INTERP_END _ -> true
     | t -> is_value_ending t
   in
 
@@ -277,6 +328,21 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       start_p = lexbuf.Lexing.lex_start_p;
       curr_p  = lexbuf.Lexing.lex_curr_p;
     } buffer
+  in
+
+  (* Peek one token and re-queue it, leaving the lexbuf positions on the
+     token being returned. Menhir reads $startpos/$endpos of a token from the
+     lexbuf after the lexer returns it, so a bare [raw]+[push_buf] would give
+     that token the PEEKED token's position: every `match x do ... end` span
+     then started at `x`, and a fix that wraps the whole expression
+     (`Authority.ignore(...)`) was spliced in after the `match` keyword. *)
+  let peek_keeping_pos lexbuf =
+    let start_p = lexbuf.Lexing.lex_start_p and curr_p = lexbuf.Lexing.lex_curr_p in
+    let peeked = raw lexbuf in
+    push_buf peeked lexbuf;
+    lexbuf.Lexing.lex_start_p <- start_p;
+    lexbuf.Lexing.lex_curr_p <- curr_p;
+    peeked
   in
 
   (* Check if a token could start a match arm pattern.
@@ -440,9 +506,8 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
          leaves the downstream NL handling byte-for-byte as before. The
          idiomatic cond form always writes `match do` on one line, so no NL
          ever sits between the keyword and DO here. *)
-      let peeked = raw lexbuf in
+      let peeked = peek_keeping_pos lexbuf in
       Stack.push (peeked = Parser.DO) pending_match_conds;
-      push_buf peeked lexbuf;
       tok
 
     (* `<-` (GETS) appears only in monadic with-bindings. Record the with's
@@ -459,17 +524,14 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     (* CHOOSE BY chooser: ... END has END without DO — peek ahead
        for BY to distinguish from Chan.choose(...) expressions. *)
     | Parser.CHOOSE ->
-      let next_tok = raw lexbuf in
+      let next_tok = peek_keeping_pos lexbuf in
       (match next_tok with
        | Parser.BY ->
          (* Protocol choose block — push Match so NL works as branch separator *)
          Stack.push Match stack;
          Stack.push { ms_suppress_nl = false; ms_in_arm_body = false; ms_is_choose = true; ms_is_cond = false } match_states;
-         push_buf Parser.BY lexbuf;
          tok
-       | other ->
-         push_buf other lexbuf;
-         tok)
+       | _ -> tok)
 
     | Parser.DO ->
       if not (Stack.is_empty pending_match_depths)

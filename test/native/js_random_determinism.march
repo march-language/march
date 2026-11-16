@@ -21,5 +21,6 @@ mod JsRandomDeterminism do
     println(if f >= 0.0 && f < 1.0 do "float-ok" else "float-bad" end)
     println(if a == b do "collision" else "distinct" end)
     println(if a >= 0 && a <= 1000000 && b >= 0 && b <= 1000000 do "range-ok" else "range-bad" end)
+    ()
   end
 end

@@ -1,0 +1,8 @@
+# Reject fixtures the refinement checker wrongly ACCEPTS today.
+# One basename of reject/ per line. This list may only shrink: check_refine.sh
+# fails when a listed fixture starts being rejected (remove its line, lower
+# KNOWN_ACCEPTED_MAX in check_refine.sh) and when the list grows past that
+# ceiling. Each line has an open todo, named in the fixture's header.
+a01_callback_param_element_demand.march
+a02_multi_param_callable_domain.march
+a03_session_payload.march

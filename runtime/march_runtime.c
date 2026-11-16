@@ -623,6 +623,10 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         void (*dtor)(void *) = *(void (**)(void *))((char *)p + 24);
         void *native = *(void **)((char *)p + 16);
         if (dtor) dtor(native);
+    } else if (tag == MARCH_HANDLE_TAG) {
+        /* A handle box releases its descriptor unless closed-and-released
+         * or detached already (runtime/march_handle.c). */
+        march_handle_dtor(p);
     } else if (tag == MARCH_TYPED_ARR_TAG) {
         /* Every slot owns one reference (each typed_array_ producer takes its
          * own); march_decrc ignores a tagged immediate. */
@@ -630,24 +634,30 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         void **slots = (void **)((char *)p + 32);   /* TYPED_ARRAY_HDR_SIZE */
         for (int64_t i = 0; i < len; i++) march_decrc(slots[i]);
     } else if (tag == MARCH_TASK_TAG) {
-        /* A Task owns the box of a Float result. The trampoline stores
-         * task[3] = (raw << 1) | 1; for a Float task raw is the
-         * march_alloc_float box the apply fn returned, and task_await_unwrap
-         * reads the double out of it WITHOUT consuming it (awaiting twice is
-         * legal), so until now the box outlived the Task: one leaked box per
-         * awaited Float task.
+        /* A Task owns its heap result. The trampoline stores
+         * task[3] = (raw << 1) | 1, raw being what the apply fn returned (a
+         * march_alloc_float box for a Float task, the value itself for any
+         * other heap result), and keeps the reference it was handed. Every
+         * read takes a reference of its own (task_result_ok, and
+         * task_await_unwrap's ptr path in lib/tir/llvm_emit_task.ml), so a
+         * task may be awaited or polled any number of times; this releases
+         * the Task's own reference when the Task dies.
          *
-         * Release only that case. A heap result of any other tag is handed to
-         * the caller by the await paths, which account for it, so it is not
-         * ours to release -- and by the time the Task dies it may already be
-         * FREED, so its tag must not be read here. The trampoline therefore
-         * decides "Float box" while it still owns the result and records it
-         * in the header pad (MARCH_TASK_OWNS_FLOAT_BOX); reading the result's
-         * tag at this point was a heap-use-after-free whenever the awaiter
-         * released a non-Float result and dropped its Task handle before the
-         * trampoline's own reference went (ASAN, tcp_recv_eagain_after_park
-         * at 14 schedulers under load, 2026-10-12). */
-        if (((march_hdr *)p)->pad == MARCH_TASK_OWNS_FLOAT_BOX) {
+         * Until 2026-11-12 only a Float box was the Task's: any other heap
+         * result was handed to the FIRST awaiter, so a second await (or
+         * `let _ = task_await(t)` followed by another) read a value the first
+         * reader had already freed. task_poll, which a frame loop calls on
+         * one task again and again, made that the common case.
+         *
+         * The trampoline decides "heap result" while it still owns the
+         * result and records it in the header pad (MARCH_TASK_OWNS_RESULT),
+         * rather than this reading the result's header here (the history:
+         * that read was a heap-use-after-free under the old hand-over rule,
+         * ASAN, tcp_recv_eagain_after_park at 14 schedulers, 2026-10-12). A
+         * task cancelled after it finished has had task[3] overwritten with
+         * the cancelled sentinel (even), so its result is not released: a
+         * leak, never a double free. */
+        if (((march_hdr *)p)->pad == MARCH_TASK_OWNS_RESULT) {
             int64_t slot = ((int64_t *)p)[3];
             if (slot & 1) march_decrc((void *)(intptr_t)(slot >> 1));
         }
@@ -1359,6 +1369,10 @@ void *march_int_to_string(int64_t n) {
  * Shared by march_float_to_string and march_print_float so the two cannot
  * drift. Writes into [buf] (64 bytes) and returns the length. */
 static int march_format_float_ocaml(char *buf, double f) {
+    /* NaN has no meaningful sign: glibc prints a sign-bit-set NaN (x86's
+     * default NaN from inf - inf) as "-nan" and arm64's as "nan".  Print "nan"
+     * everywhere, as the interpreter and the JS runtime do. */
+    if (isnan(f)) { memcpy(buf, "nan", 4); return 3; }
     int len = snprintf(buf, 64, "%.12g", f);
     if (len < 0) len = 0;
     if (len > 63) len = 63;
@@ -5994,7 +6008,7 @@ static void hcr_marker_dtor(void *msg, uint32_t epoch) {
  * One record per deploy: for each activated slot, which ring version holds
  * it and what the deploy's schema diff changed.  An actor advancing across
  * several deploys applies each one's state migration, in order; the message
- * path finds the migrate_msg of the deploy that changed the message type.
+ * path chains the migrate_msg of every deploy that changed the message type.
  * The function pointers live in the deploy's .so: callers pin that ring
  * version (march_dispatch_enter_version) and check its epoch before calling,
  * and a version that carries a migration is kept while any older epoch is
@@ -6093,24 +6107,50 @@ static int hcr_log_state_migrations(uint32_t slot, uint32_t from, uint32_t to,
     return n;
 }
 
-/* How many deploys in (from, to] changed [slot]'s message type; with
- * [last] non-NULL, the newest one's migrate_msg entry is written there. */
-static int hcr_log_msg_changes(uint32_t slot, uint32_t from, uint32_t to,
-                               hcr_mig *last) {
+/* How many deploys in (from, to] changed [slot]'s message type (the D30
+ * early-advance test; the conversion path walks hcr_log_msg_chain). */
+static int hcr_log_msg_changes(uint32_t slot, uint32_t from, uint32_t to) {
     int n = 0;
+    pthread_mutex_lock(&g_hcr_log_mu);
+    for (hcr_log_rec *r = g_hcr_log_head; r; r = r->next) {
+        if (r->epoch <= from || r->epoch > to) continue;
+        for (int i = 0; i < r->n; i++)
+            if (r->e[i].slot == slot && r->e[i].msgs_changed) n++;
+    }
+    pthread_mutex_unlock(&g_hcr_log_mu);
+    return n;
+}
+
+/* Every deploy in (from, to] that changed [slot]'s message type, in epoch
+ * order (oldest first), each with its migrate_msg (msg_fn NULL when that
+ * deploy has none).  Chaining them converts a message several message-type
+ * changes old (H6): each deploy's migrate_msg reads the previous build's
+ * format.  Fills [buf] (room for [cap]); with more, *out is malloc'd and the
+ * caller frees it when *out != buf.  Returns the count. */
+static int hcr_log_msg_chain(uint32_t slot, uint32_t from, uint32_t to,
+                             hcr_mig *buf, int cap, hcr_mig **out) {
+    int n = 0;
+    hcr_mig *m = buf;
     pthread_mutex_lock(&g_hcr_log_mu);
     for (hcr_log_rec *r = g_hcr_log_head; r; r = r->next) {
         if (r->epoch <= from || r->epoch > to) continue;
         for (int i = 0; i < r->n; i++) {
             if (r->e[i].slot != slot || !r->e[i].msgs_changed) continue;
-            n++;
-            if (last) {
-                last->epoch = r->epoch; last->ring_idx = r->e[i].ring_idx;
-                last->state_fn = NULL; last->msg_fn = r->e[i].migrate_msg_fn;
+            if (n == cap) {
+                cap *= 2;
+                hcr_mig *g = (hcr_mig *)malloc((size_t)cap * sizeof(*m));
+                if (!g) { fputs("march: out of memory (hot-reload log)\n", stderr); exit(1); }
+                memcpy(g, m, (size_t)n * sizeof(*m));
+                if (m != buf) free(m);
+                m = g;
             }
+            m[n].epoch = r->epoch; m[n].ring_idx = r->e[i].ring_idx;
+            m[n].state_fn = NULL; m[n].msg_fn = r->e[i].migrate_msg_fn;
+            n++;
         }
     }
     pthread_mutex_unlock(&g_hcr_log_mu);
+    *out = m;
     return n;
 }
 
@@ -6482,6 +6522,27 @@ static int64_t g_hcr_none_cell[3] __attribute__((aligned(16))) = {
 #define HCR_DISPATCH 0
 #define HCR_CONSUMED 1
 
+#define HCR_LINK_OK   0   /* *msgp is the converted message (ours) */
+#define HCR_LINK_NONE 1   /* migrate_msg returned None; it consumed the input */
+#define HCR_LINK_GONE 2   /* the link's version is not loaded; *msgp untouched */
+
+/* Run one deploy's migrate_msg on *msgp inside that deploy's version frame,
+ * after checking the ring slot still holds that deploy's version. */
+static int hcr_msg_link(uint32_t slot, const hcr_mig *l, void **msgp) {
+    uint32_t v;
+    if (!march_dispatch_enter_version_frame(slot, (uint32_t)l->ring_idx, &v))
+        return HCR_LINK_GONE;
+    if (march_dispatch_epoch(slot, (uint32_t)l->ring_idx) != l->epoch) {
+        march_dispatch_leave_unit(slot, v);
+        return HCR_LINK_GONE;
+    }
+    void *out = l->msg_fn(*msgp, (void *)g_hcr_none_cell);
+    march_dispatch_leave_unit(slot, v);
+    if (out == (void *)g_hcr_none_cell) return HCR_LINK_NONE;
+    *msgp = out;
+    return HCR_LINK_OK;
+}
+
 /* Apply II.4.6's message rules to a dequeued user message stamped
  * [mepoch].  HCR_DISPATCH: dispatch *msgp (possibly converted) at the
  * actor's epoch; HCR_CONSUMED: deferred, or dropped. */
@@ -6512,7 +6573,7 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         /* D30: a sender that has already advanced, and a message type that
          * changed in between: this message is in a format the actor's code
          * cannot read.  Move now (the marker, when it comes, is a no-op). */
-        if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch, NULL))
+        if (mse <= cur || !hcr_log_msg_changes(slot, cur, mepoch))
             return HCR_DISPATCH;
         if (atomic_load_explicit(&self->epoch_holds, memory_order_relaxed) > 0) {
             hcr_defer(meta, *msgp, mepoch, conn, seq);
@@ -6523,38 +6584,63 @@ static int hcr_route_slow(march_actor_meta *meta, int64_t *a, march_proc *self,
         cur = atomic_load_explicit(&self->code_epoch, memory_order_relaxed);
         if (mepoch >= cur) return HCR_DISPATCH;
     }
-    /* An old-format message after the actor moved past a message-type
-     * change (D10): convert it with that deploy's migrate_msg, or drop it. */
+    /* An old-format message after the actor moved past one or more
+     * message-type changes (D10, H6): convert it with each of those deploys'
+     * migrate_msg in turn, oldest first, or drop it. */
     if (mse <= mepoch) return HCR_DISPATCH;
-    hcr_mig mm;
-    int changes = hcr_log_msg_changes(slot, mepoch, cur, &mm);
-    if (changes == 0) return HCR_DISPATCH;
-    if (changes == 1 && mm.msg_fn) {
-        uint32_t v;
-        if (march_dispatch_enter_version_frame(slot, (uint32_t)mm.ring_idx, &v)) {
-            if (march_dispatch_epoch(slot, (uint32_t)mm.ring_idx) == mm.epoch) {
-                void *out = mm.msg_fn(*msgp, (void *)g_hcr_none_cell);
-                march_dispatch_leave_unit(slot, v);
-                if (out != (void *)g_hcr_none_cell) {
-                    *msgp = out;
-                    atomic_fetch_add_explicit(&g_hcr_converted, 1, memory_order_relaxed);
-                    return HCR_DISPATCH;
-                }
-                /* None: dropped on purpose; migrate_msg consumed it. */
-                meta->hcr_dropped++;
-                atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
-                hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
-                return HCR_CONSUMED;
+    hcr_mig mbuf[4], *m;
+    int n = hcr_log_msg_chain(slot, mepoch, cur, mbuf, 4, &m);
+    if (n == 0) return HCR_DISPATCH;
+    char why[160];
+    why[0] = 0;
+    /* Every link must exist before any runs: a chain with a gap drops the
+     * message without running conversions it could not finish. */
+    for (int i = 0; i < n && !why[0]; i++)
+        if (!m[i].msg_fn) {
+            if (n == 1) snprintf(why, sizeof why, "old message format: no migrate_msg for it");
+            else snprintf(why, sizeof why,
+                          "old message format: no migrate_msg for it (message-type change %d of %d has none)",
+                          i + 1, n);
+        }
+    /* Ownership: [msg] is always the one message we own.  A link consumes
+     * its input and returns either a new message (now ours) or the None
+     * cell (nothing left to own); a link we could not enter leaves [msg]
+     * ours, to dispose below. */
+    void *msg = *msgp;
+    for (int i = 0; i < n && !why[0]; i++) {
+        int r = hcr_msg_link(slot, &m[i], &msg);
+        if (r == HCR_LINK_NONE) {
+            if (m != mbuf) free(m);
+            meta->hcr_dropped++;
+            atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
+            if (n == 1) hcr_report_drop(conn, seq, "old message format: migrate_msg returned None");
+            else {
+                snprintf(why, sizeof why,
+                         "old message format: migrate_msg returned None (link %d of %d)", i + 1, n);
+                hcr_report_drop(conn, seq, why);
             }
-            march_dispatch_leave_unit(slot, v);
+            return HCR_CONSUMED;
+        }
+        if (r == HCR_LINK_GONE) {
+            if (n == 1) snprintf(why, sizeof why, "old message format: no migrate_msg for it");
+            else snprintf(why, sizeof why,
+                          "old message format: no migrate_msg for it (link %d of %d is no longer loaded)",
+                          i + 1, n);
         }
     }
-    /* No migrate_msg (or two message-type changes in between, which one
-     * conversion cannot bridge): drop and count. */
-    march_actor_msg_dispose(*msgp);
+    if (m != mbuf) free(m);
+    if (!why[0]) {
+        *msgp = msg;
+        /* One converted message, however many links it took. */
+        atomic_fetch_add_explicit(&g_hcr_converted, 1, memory_order_relaxed);
+        return HCR_DISPATCH;
+    }
+    /* A missing or unloaded link: drop what we still own (the original, or
+     * the last link's output) and count it. */
+    march_actor_msg_dispose(msg);
     meta->hcr_dropped++;
     atomic_fetch_add_explicit(&g_hcr_drain_dropped, 1, memory_order_relaxed);
-    hcr_report_drop(conn, seq, "old message format: no migrate_msg for it");
+    hcr_report_drop(conn, seq, why);
     return HCR_CONSUMED;
 }
 
@@ -9349,11 +9435,12 @@ static void march_thunk_trampoline(void *arg) {
         if (!cancelled) {
             int64_t raw = (int64_t)(uintptr_t)result;
             task[3] = (raw << 1) | (int64_t)1; /* tagged result at offset 24 */
-            /* A Float box result stays the Task's (see the MARCH_TASK_TAG
-             * case of march_run_resource_dtor_slow). Decided now, while the
-             * result is still ours: published by the done store below. */
-            if (IS_HEAP_PTR(result) && ((march_hdr *)result)->tag == MARCH_FLOAT_TAG)
-                ((march_hdr *)task)->pad = MARCH_TASK_OWNS_FLOAT_BOX;
+            /* A heap result stays the Task's (see the MARCH_TASK_TAG case of
+             * march_run_resource_dtor_slow); each read takes its own
+             * reference. Decided now, while the result is still ours:
+             * published by the done store below. */
+            if (IS_HEAP_PTR(result))
+                ((march_hdr *)task)->pad = MARCH_TASK_OWNS_RESULT;
         }
         /* SEQ_CST store + SEQ_CST load: this store(task[4])-then-load(task[5])
          * is one half of a Dekker / store-buffering pair with task_wait_done's
@@ -9482,13 +9569,47 @@ void *march_task_spawn_thunk(void *clo_ptr) {
  * reading a dead proc's status here once caused a use-after-free where
  * calloc reuse zeroed the freed memory, making p->status read as
  * PROC_RUNNABLE (0) forever. */
+/* The answer to a read of a FINISHED task: Err("task cancelled"), or a fresh
+ * Ok cell holding task[3] as stored (tagged; the compiled call site untags
+ * the field, Llvm_emit_task.normalise_task_result).  The Task keeps its own
+ * reference to a heap result (MARCH_TASK_OWNS_RESULT), so the Ok cell takes
+ * one of its own: any number of reads may each release theirs. */
+static void *task_result_ok(int64_t *task) {
+    int64_t slot = task[3];
+    if (slot == MARCH_TASK_CANCELLED) return mk_err_cstr("task cancelled");
+    march_incrc((void *)(intptr_t)(slot >> 1));   /* no-op for a scalar */
+    return mk_ok((void *)(uintptr_t)slot);
+}
+
 void *march_task_await(void *task_obj) {
     if (!task_obj) return mk_err_cstr("task_await: null task");
     int64_t *task = (int64_t *)task_obj;
     task_wait_done(task);
-    if (task[3] == MARCH_TASK_CANCELLED) return mk_err_cstr("task cancelled");
-    void *result = (void *)(uintptr_t)task[3];
-    return mk_ok(result);
+    return task_result_ok(task);
+}
+
+/* Non-blocking task_await: NULL while the task is still running, else
+ * exactly what march_task_await would answer (Ok(result) or
+ * Err("task cancelled")).  NULL is Option's niche None for an
+ * Option(Result(..)) (Result is a boxed type), so the running case costs one
+ * acquire load and allocates nothing; the compiled call site re-encodes it
+ * where Option is boxed (a program that declares its own Option).
+ *
+ * Never waits, never registers as the task's waiter (word 5), never touches
+ * the proc: it reads only the done flag (word 4) and, once that is set, the
+ * result (word 3), which the trampoline wrote before its release of word 4.
+ * The Task is borrowed (lib/tir/borrow.ml), so polling every frame costs no
+ * refcount traffic.  Once done the result word does not change (except to
+ * the cancelled sentinel, see march_task_cancel_by_id), so repeated polls
+ * and a later task_await answer the same thing; each Some answer is a fresh
+ * Ok cell holding its own reference to the result, as each await's is. */
+void *march_task_poll(void *task_obj) {
+    if (!task_obj) return mk_err_cstr("task_poll: null task");
+    int64_t *task = (int64_t *)task_obj;
+    if (atomic_load_explicit((_Atomic int64_t *)&task[4],
+                             memory_order_acquire) == 0)
+        return NULL;
+    return task_result_ok(task);
 }
 
 /* Like march_task_await, but returns the tagged result value directly
@@ -10648,10 +10769,27 @@ int march_hcr_migrate_check(uint32_t slot, void *(*check)(void *), int64_t timeo
 /* ── Float builtins ──────────────────────────────────────────────────── */
 
 double march_float_abs(double f) { return fabs(f); }
-int64_t march_float_ceil(double f) { return (int64_t)ceil(f); }
-int64_t march_float_floor(double f) { return (int64_t)floor(f); }
-int64_t march_float_round(double f) { return (int64_t)round(f); }
-int64_t march_float_truncate(double f) { return (int64_t)f; }
+/* Float -> Int (float_ceil/floor/round/truncate and float_to_int).  [r] is
+ * the argument already rounded to a whole number.  A bare (int64_t) cast of
+ * NaN or of a value outside int64 is undefined behaviour in C (arm64
+ * saturates, x86-64 gives INT64_MIN), and a value in [2^62, 2^63) fits int64
+ * but not March's 63-bit Int, so it would wrap when tagged.  Both panic
+ * instead, with the interpreter's messages (eval_runtime.ml's
+ * int_of_float_checked) byte for byte.  -0x1p62 and 0x1p62 are exact
+ * doubles, so the comparison is exact; NaN fails it and is tested first. */
+static int64_t march_float_int_checked(double r, const char *op) {
+    if (r >= -0x1p62 && r < 0x1p62) return (int64_t)r;
+    char m[64];
+    snprintf(m, sizeof m, "%s: %s", op,
+             r != r ? "cannot convert NaN to Int" : "value out of Int range");
+    march_panic(march_string_lit(m, (int64_t)strlen(m)));
+    abort();  /* march_panic does not return */
+}
+
+int64_t march_float_ceil(double f) { return march_float_int_checked(ceil(f), "float_ceil"); }
+int64_t march_float_floor(double f) { return march_float_int_checked(floor(f), "float_floor"); }
+int64_t march_float_round(double f) { return march_float_int_checked(round(f), "float_round"); }
+int64_t march_float_truncate(double f) { return march_float_int_checked(trunc(f), "float_truncate"); }
 double march_int_to_float(int64_t n) { return (double)n; }
 
 /* ── Math builtins ───────────────────────────────────────────────────── */
@@ -11090,7 +11228,7 @@ int64_t march_char_is_whitespace(void *c) {
 
 /* Float/Int conversion */
 int64_t march_float_to_int(double f) {
-    return (int64_t)f;
+    return march_float_int_checked(trunc(f), "float_to_int");
 }
 
 /* Returns List(String). */
@@ -11503,13 +11641,79 @@ void *march_string_last_index_of(void *s, void *sub) {
     return make_none();
 }
 
+/* The string_to_float grammar (#1178): exactly what C99 strtod accepts in the
+ * "C" locale, with the WHOLE string consumed. The interpreter
+ * (lib/eval/eval_builtins.ml, march_float_of_string) and the JS runtime
+ * (runtime/march_runtime.mjs, march_string_to_float) implement the same
+ * grammar; test/native/string_to_float_grammar.march pins all three.
+ *
+ *   ws* [+-]? ( dec | hex | "inf" | "infinity" | "nan" ( "(" [0-9A-Za-z_]* ")" )? )
+ *   dec = ( digit+ ("." digit*)? | "." digit+ ) ( [eE] [+-]? digit+ )?
+ *   hex = "0" [xX] ( xdigit+ ("." xdigit*)? | "." xdigit+ ) ( [pP] [+-]? digit+ )?
+ *   ws  = one of " \t\n\v\f\r" (leading only; trailing whitespace is rejected)
+ *
+ * inf/infinity/nan are case-insensitive. strtod is still what computes the
+ * value; this check exists so the ACCEPTED set doesn't depend on the libc:
+ * macOS's strtod also takes "nan(1 )" (glibc and musl do not), and a plain
+ * strtod stops at an embedded NUL, so "1.5\0x" parsed as 1.5. */
+static int march_ascii_ieq(const char *p, const char *word, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (march_ascii_lower(p[i]) != word[i]) return 0;
+    return 1;
+}
+
+static int march_float_syntax_ok(const char *p, int64_t n) {
+    const char *e = p + n;
+    while (p < e && (*p == ' ' || (*p >= '\t' && *p <= '\r'))) p++;
+    if (p < e && (*p == '+' || *p == '-')) p++;
+    if (p == e) return 0;
+    if (*p == 'i' || *p == 'I') {
+        int64_t r = e - p;
+        if (r == 3) return march_ascii_ieq(p, "inf", 3);
+        if (r == 8) return march_ascii_ieq(p, "infinity", 8);
+        return 0;
+    }
+    if (*p == 'n' || *p == 'N') {
+        if (e - p < 3 || !march_ascii_ieq(p, "nan", 3)) return 0;
+        p += 3;
+        if (p == e) return 1;
+        if (*p++ != '(') return 0;
+        while (p < e && ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z')
+                         || (*p >= 'A' && *p <= 'Z') || *p == '_')) p++;
+        return p + 1 == e && *p == ')';
+    }
+    int hex = 0;
+    if (e - p >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { hex = 1; p += 2; }
+#define MARCH_FLT_DIGIT(c) (((c) >= '0' && (c) <= '9') || \
+    (hex && (((c) >= 'a' && (c) <= 'f') || ((c) >= 'A' && (c) <= 'F'))))
+    int digits = 0;
+    while (p < e && MARCH_FLT_DIGIT(*p)) { p++; digits++; }
+    if (p < e && *p == '.') {
+        p++;
+        while (p < e && MARCH_FLT_DIGIT(*p)) { p++; digits++; }
+    }
+#undef MARCH_FLT_DIGIT
+    if (digits == 0) return 0;
+    if (p < e && (hex ? (*p == 'p' || *p == 'P') : (*p == 'e' || *p == 'E'))) {
+        p++;
+        if (p < e && (*p == '+' || *p == '-')) p++;
+        int ed = 0;
+        while (p < e && *p >= '0' && *p <= '9') { p++; ed++; }
+        if (ed == 0) return 0;
+    }
+    return p == e;
+}
+
 /* Returns Option(Float). Option(Float) stays BOXED (0.0 == raw 0, not niche-safe).
  * None is a heap cell with tag=0; cannot use make_none() which returns raw 0. */
 void *march_string_to_float(void *s) {
     march_string *str = (march_string *)s;
     char *end;
+    if (!march_float_syntax_ok(str->data, str->len)) {
+        return march_alloc(16);  /* boxed None: tag stays 0 */
+    }
     double f = strtod(str->data, &end);
-    if (end == str->data || *end != '\0') {
+    if (end != str->data + str->len) {
         return march_alloc(16);  /* boxed None: tag stays 0 */
     }
     /* Some(f): tag=1, one ptr field at offset 16 holding a march_alloc_float
@@ -11599,15 +11803,12 @@ static void *mk_err_errno(void) {
 }
 
 /* FileError tags (must match stdlib/file.march ptype declaration order):
-   NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4.
+   NotFound=0, Permission=1, IsDirectory=2, NotEmpty=3, IoError=4, Closed=5,
+   Escapes=6.
    Build a real FileError ctor cell (not a bare string) so compiled code
    matching e.g. Err(NotFound(path)) reads a well-formed tagged cell instead
    of misinterpreting a march_string header as one. */
-#define FILEERR_NOT_FOUND    0
-#define FILEERR_PERMISSION   1
-#define FILEERR_IS_DIRECTORY 2
-#define FILEERR_NOT_EMPTY    3
-#define FILEERR_IO_ERROR     4
+/* FILEERR_* tags: march_runtime.h (march_file_beneath.c builds them too). */
 
 /* File.FileError's header type id (see the march_hdr comment in
  * march_runtime.h).  Cells the C runtime builds carry no type id by default,
@@ -12012,6 +12213,45 @@ void *march_file_read_chunk(void *handle_ptr, int64_t size) {
     return s;                                              /* Some(chunk) */
 }
 
+/* file_open_write(path, mode) : Result(Int, FileError).  Mode 0 truncates,
+ * 1 appends; the file is created (0644, less the umask) when missing.  The
+ * stream goes into the same handle table as file_open, so file_close and the
+ * File.Handle box's FILE release (march_handle.c) close it. */
+void *march_file_open_write(void *path_ptr, int64_t mode) {
+    march_string *ps = (march_string *)path_ptr;
+    FILE *f = fopen(ps->data, mode == 1 ? "ab" : "wb");
+    if (!f) return mk_err_errno_file_rw(ps->data);
+    int64_t h = fh_open(f, 0, 0);
+    if (h == 0) { fclose(f); errno = EMFILE; return mk_err_errno_file_rw(ps->data); }
+    return mk_ok((void *)(intptr_t)h);
+}
+
+/* file_write_handle(handle, data) : Result((), FileError).  Buffered: the
+ * bytes reach the file by the time the stream is closed (fclose flushes),
+ * whether by file_close or by the handle box's release. */
+void *march_file_write_handle(int64_t handle, void *data_ptr) {
+    march_string *ds = (march_string *)data_ptr;
+    FILE *f = fh_lookup((void *)(intptr_t)handle, NULL, NULL);
+    if (!f) return mk_err_file_cstr(FILEERR_IO_ERROR, "write to a closed file");
+    size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
+    if ((int64_t)w != ds->len) return mk_err_errno_io();
+    return mk_ok_unit();
+}
+
+/* file_seek(handle, offset) : Result(Int, FileError).  Seeks to an absolute
+ * offset and returns the new offset. */
+void *march_file_seek(int64_t handle, int64_t offset) {
+    FILE *f = fh_lookup((void *)(intptr_t)handle, NULL, NULL);
+    if (!f) return mk_err_file_cstr(FILEERR_IO_ERROR, "seek on a closed file");
+    if (fseeko(f, (off_t)offset, SEEK_SET) != 0) return mk_err_errno_io();
+    off_t pos = ftello(f);
+    if (pos < 0) return mk_err_errno_io();
+    /* An Int in a Result payload is tagged (n<<1)|1, as tcp_connect's fd
+     * is (march_http.c): the compiled read untags it.  The file handles
+     * above need no tag only because they are even (see fh_encode). */
+    return mk_ok((void *)(intptr_t)(((int64_t)pos << 1) | 1));
+}
+
 /* ── Directory builtins ─────────────────────────────────────────────── */
 
 void *march_dir_list(void *path_ptr) {
@@ -12035,6 +12275,17 @@ void *march_dir_list(void *path_ptr) {
     for (int i = 0; i < n; i++) free(names[i]);
     free(names);
     return mk_ok(lst);
+}
+
+/* Exported for runtime/march_file_beneath.c (File.Dir), which builds its
+ * Results through the same cells as the file family above. */
+int64_t march_fh_register(void *f) { return fh_open((FILE *)f, 0, 0); }
+void *march_file_ok(void *value) { return mk_ok(value); }
+void *march_file_err(int64_t tag, const char *payload, int64_t len) {
+    return mk_err_file((int)tag, march_string_lit(payload, len));
+}
+void *march_file_string_list(char **names, int64_t n) {
+    return build_string_list(names, (int)n);
 }
 
 static int mkdir_p(const char *path) {
@@ -12429,7 +12680,10 @@ static void *spawn_err(const char *cmd, int err) {
 /* process_spawn_sync(command, args) → Result(ProcessResult, String)
    ProcessResult = ProcessResult(Int, String, String) (exit_code, stdout, stderr)
    Err when the pipes cannot be made or the command cannot be executed. */
+static void live_proc_reap_sweep(void);
+
 void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
+    live_proc_reap_sweep();
     char **argv = spawn_argv_build((march_string *)cmd_obj, args_list);
     int stdout_pipe[2], stderr_pipe[2];
     if (spawn_pipe_cloexec(stdout_pipe) != 0) {
@@ -12595,6 +12849,7 @@ static int64_t live_proc_register(pid_t pid, FILE *fp, FILE *write_fp) {
 /* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String)
    Err when the pipes cannot be made or the command cannot be executed. */
 void *march_process_spawn_async(void *cmd_obj, void *args_list) {
+    live_proc_reap_sweep();
     char **argv = spawn_argv_build((march_string *)cmd_obj, args_list);
     /* Pipes for stdin (write) and stdout (read).  Both ends are
        close-on-exec from creation: the parent's ends must not leak into
@@ -12679,27 +12934,126 @@ int64_t march_process_write(void *lp_obj, void *data_obj) {
 }
 
 /* process_kill_proc(lp) → () */
+/* Signal only while the slot is live and not closing, under live_proc_mu:
+   wait_proc marks the slot closing before it reaps, so a kill racing a
+   wait_proc on another task can never reach a reaped (and possibly reused)
+   pid (final review M5 of ocap phase 2b). */
 int64_t march_process_kill_proc(void *lp_obj) {
     int64_t pid = MARCH_FIELD(lp_obj, 0);
-    kill((pid_t)pid, SIGTERM);
-    return 0;
-}
-
-/* process_wait_proc(lp) → Int (exit code).  Closes the streams (a stream a
-   reader or writer is still inside is closed when it leaves) and releases
-   the slot; the handle is stale afterwards. */
-int64_t march_process_wait_proc(void *lp_obj) {
-    int64_t pid    = MARCH_FIELD(lp_obj, 0);
     int64_t handle = MARCH_FIELD(lp_obj, 1);
     pthread_mutex_lock(&live_proc_mu);
     live_proc_slot *s = live_proc_lookup_locked(handle);
+    if (s && (int64_t)s->pid == pid) kill((pid_t)pid, SIGTERM);
+    pthread_mutex_unlock(&live_proc_mu);
+    return 0;
+}
+
+/* Mark the slot a handle names closing and settle it: its streams close now
+   (or when the reader/writer inside one leaves) and the slot is freed once
+   both are.  Returns the slot's pid, or -1 for a stale or already-released
+   handle (a no-op).  Neither waits for nor signals the child: the callers
+   (process_wait_proc, march_process_release_handle) decide that. */
+static pid_t live_proc_close_slot(int64_t handle) {
+    pid_t pid = -1;
+    pthread_mutex_lock(&live_proc_mu);
+    live_proc_slot *s = live_proc_lookup_locked(handle);
     if (s) {
+        pid = s->pid;
         s->closing = 1;
         live_proc_settle_locked(s);
     }
     pthread_mutex_unlock(&live_proc_mu);
+    return pid;
+}
+
+void march_process_release_slot(int64_t handle) {
+    (void)live_proc_close_slot(handle);
+}
+
+/* True once [pid] is reaped (or is not our child any more); false while it
+   is still running.  waitpid WNOHANG, retried on EINTR (as the sweep keeps
+   an interrupted pid), so an interrupted call never counts as "exited". */
+static int live_proc_reaped_nohang(pid_t pid) {
+    for (;;) {
+        pid_t r = waitpid(pid, NULL, WNOHANG);
+        if (r == 0) return 0;
+        if (r < 0 && errno == EINTR) continue;
+        return 1;
+    }
+}
+
+/* Children whose Process box was dropped (or closed) without wait_proc and
+   that had not exited by then.  A child is ours to reap until we reap it, so
+   its pid cannot be reused meanwhile; the next spawn or release reaps the
+   ones that have exited since (waitpid WNOHANG, never blocking), so a dropped
+   child does not stay a zombie for the life of the program.  Its own lock:
+   the sweep never runs under live_proc_mu. */
+static pthread_mutex_t live_proc_reap_mu = PTHREAD_MUTEX_INITIALIZER;
+static pid_t          *live_proc_reap = NULL;
+static int             live_proc_reap_len = 0;
+static int             live_proc_reap_cap = 0;
+
+static void live_proc_reap_sweep(void) {
+    pthread_mutex_lock(&live_proc_reap_mu);
+    int keep = 0;
+    for (int k = 0; k < live_proc_reap_len; k++) {
+        pid_t r = waitpid(live_proc_reap[k], NULL, WNOHANG);
+        if (r == 0 || (r < 0 && errno == EINTR))
+            live_proc_reap[keep++] = live_proc_reap[k];   /* still running */
+    }
+    live_proc_reap_len = keep;
+    pthread_mutex_unlock(&live_proc_reap_mu);
+}
+
+static void live_proc_reap_later(pid_t pid) {
+    pthread_mutex_lock(&live_proc_reap_mu);
+    if (live_proc_reap_len == live_proc_reap_cap) {
+        int ncap = live_proc_reap_cap ? live_proc_reap_cap * 2 : 16;
+        pid_t *n = (pid_t *)realloc(live_proc_reap, (size_t)ncap * sizeof(*n));
+        if (!n) { pthread_mutex_unlock(&live_proc_reap_mu); return; }  /* stays a zombie */
+        live_proc_reap = n;
+        live_proc_reap_cap = ncap;
+    }
+    live_proc_reap[live_proc_reap_len++] = pid;
+    pthread_mutex_unlock(&live_proc_reap_mu);
+}
+
+/* The release of a Process handle box (march_handle.c, kind PROCESS) whose
+   child was never waited on: close its streams as wait_proc does, then make
+   sure the child neither keeps running nor stays a zombie, without blocking.
+   A child still running is sent SIGTERM (as process_kill_proc) and, if it is
+   still running right after, SIGKILL; one that has not exited even then is
+   reaped by a later sweep (the next spawn or release).  A handle wait_proc
+   already released names no live slot: nothing to do (its pid may since
+   belong to another process, so it is never signalled). */
+void march_process_release_handle(int64_t handle) {
+    pid_t pid = live_proc_close_slot(handle);
+    if (pid > 0 && !live_proc_reaped_nohang(pid)) {
+        kill(pid, SIGTERM);
+        if (!live_proc_reaped_nohang(pid)) {
+            kill(pid, SIGKILL);
+            if (!live_proc_reaped_nohang(pid)) live_proc_reap_later(pid);
+        }
+    }
+    live_proc_reap_sweep();
+}
+
+/* process_wait_proc(lp) → Int.  Closes the streams (a stream a reader or
+   writer is still inside is closed when it leaves) and releases the slot;
+   the handle is stale afterwards.  Returns the exit status (0..255), -1 for
+   a child that did not exit normally (killed by a signal), or
+   MARCH_PROCESS_NO_CHILD (-1000, outside both ranges) when waitpid fails:
+   the child was already reaped, by a wait_proc that raced this one.
+   Process.wait_proc maps that to Err(Closed). */
+#define MARCH_PROCESS_NO_CHILD (-1000)
+int64_t march_process_wait_proc(void *lp_obj) {
+    int64_t pid    = MARCH_FIELD(lp_obj, 0);
+    int64_t handle = MARCH_FIELD(lp_obj, 1);
+    (void)live_proc_close_slot(handle);
     int status = 0;
-    waitpid((pid_t)pid, &status, 0);
+    pid_t r;
+    do { r = waitpid((pid_t)pid, &status, 0); } while (r < 0 && errno == EINTR);
+    if (r < 0) return MARCH_PROCESS_NO_CHILD;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
@@ -13812,6 +14166,15 @@ void *march_value_to_string_mode(void *v, int repr) {
     /* Boxed SIMD vector in an erased slot: render lane-for-lane like
        impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
     if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
+    /* A handle box (march_handle.c) in an erased slot: its type by kind, and
+     * whether it is closed -- never the descriptor number. */
+    if (tag == MARCH_HANDLE_TAG) {
+        char buf[64];
+        int n = snprintf(buf, sizeof(buf), "#<%s%s>",
+                         march_handle_kind_name(march_handle_kind(v)),
+                         march_handle_is_closed(v) ? " closed" : "");
+        return march_string_lit(buf, n);
+    }
     /* Check if this pointer is an actor (live, or dead with its record
      * still held) → display as Pid(n).  A live meta not yet spawned prints
      * Pid(0), as it always did. */
@@ -16618,6 +16981,7 @@ static void logger_v2_pop_one(void) {
  * string_of_float, i.e. "%.12g" plus a trailing "." when the result would
  * otherwise read as an integer ("2." not "2", "1.5", "1e+20", "inf"). */
 static void logger_float_str(double f, char *buf, size_t cap) {
+    if (isnan(f)) { snprintf(buf, cap, "nan"); return; }  /* never "-nan": see march_format_float_ocaml */
     snprintf(buf, cap, "%.12g", f);
     for (const char *c = buf; *c; c++)
         if (!(*c == '-' || (*c >= '0' && *c <= '9'))) return;

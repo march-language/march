@@ -556,7 +556,7 @@ references inside interface method signatures and impl headers are not tracked
 
 ## 5. Stdlib Manifest
 
-137 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
+140 stdlib modules are loaded by `bin/main.ml`. The most commonly used are listed
 below (use `forge search` to discover the rest):
 
 ### Auto-imported (Prelude)
@@ -644,7 +644,7 @@ Functions always in scope without `use`:
 
 ### IO / Files
 
-**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`
+**File** — `read`, `read_lines`, `exists`, `stat`, `write`, `append`, `delete`, `copy`, `rename`, `with_lines`, `with_chunks`; handles (`File.Handle`, use after `close` is `Err(Closed)`): `open`, `open_write(path, Truncate | Append)`, `read_line`, `read_chunk`, `write_to`, `seek`, `close`, `with_open`, `with_open_write`; directories (`File.Dir`, refuses a path that leaves it with `Escapes(rel)`; macOS refuses every symlink beneath it): `open_dir`, `open_dir_write`, `open_in`, `open_write_in`, `list_in(d, "")`, `close_dir`
 
 **Dir** — `list`, `list_full`, `mkdir`, `mkdir_p`, `rmdir`, `rm_rf`, `exists`
 
@@ -668,9 +668,13 @@ Functions always in scope without `use`:
 
 **WebSocket** — `new`, `send`, `receive`, `close`, `is_open`
 
+**Socket** — handles `Socket` (connection) and `Listener`; a use after `close` is `Err(Closed)`, closing wakes a task parked in `recv`/`accept`: `connect`, `connect_timeout`, `write`, `recv`, `recv_timeout`, `recv_deadline`, `set_recv_timeout`, `peer_addr`, `close`, `with_connection`, `listen(port)` (0 = any free port), `accept`, `accept_timeout`, `local_port`, `close_listener`. `Tls.connect(s, ctx, host)` / `Tls.accept(s, ctx)` take the `Socket` over on success (`Tls.close` closes both)
+
 **Udp** — `open`, `open_with`, `open_sharded`, `defaults`, `resolve`, `connect`, `send_to`, `send`, `send_batch`, `send_batch_connected`, `send_many`, `recv`, `recv_batch`, `local_addr`, `local_port`, `addr_to_string`, `addr_port`, `stats`, `close`. Packets are `String`; types are `UdpSocket`/`UdpAddr`/`UdpOptions`/`UdpStats` (global type namespace)
 
 **Session.Theory** — `project`, `project_bs`, `dual`, `erase`, `same`, `merge`, `informed`, `binary`; lemmas `dual_dual`, `project_dual`, `same_eq`. Types `SessionGlobal`/`SessionGBranches`/`SessionLocal`/`SessionLBranches` over `Int` ids. The spec the compiler's protocol projectors are validated against (`--validate-projections`)
+
+**Actor.Theory** — mailbox model: `qcat`, `qenq`, `from_sender`, `replay`, `call_reply`, `without_reply`, `downs`, `bounded_enq`, `death_q`, `payloads`; lemmas `enq_self`, `enq_other`, `replay_order`, `call_keeps_others`, `stale_reply_ignored`, `call_reply_cat`, `down_never_dropped`, `down_at_most_once`. Types `ActorEnv` (`EnvMsg`/`EnvDown`/`EnvReply`), `ActorQueue` (`QEnd`/`QThen`), `ActorMons`
 
 ### Actors / Concurrency
 
@@ -955,10 +959,10 @@ Directly callable without module qualification (built into the evaluator).
 
 | Builtin | Description |
 |---------|-------------|
-| `float_to_int(f)` | Truncate to Int |
+| `float_to_int(f)` | Truncate to Int; panics on NaN, ±inf and outside Int's range |
 | `float_to_string(f)` | To String |
 | `float_abs(f)` | Absolute value |
-| `float_floor(f)` / `float_ceil` / `float_round` / `float_truncate` | Rounding |
+| `float_floor(f)` / `float_ceil` / `float_round` / `float_truncate` | Rounding to Int; same panics as `float_to_int` |
 | `float_is_nan(f)` / `float_is_infinite(f)` | Checks |
 | `float_infinity` / `float_neg_infinity` / `float_nan` / `float_epsilon` | Constants |
 | `float_from_string(s)` / `string_to_float(s)` | Parse |
@@ -997,6 +1001,7 @@ Directly callable without module qualification (built into the evaluator).
 | `string_pad_left(s, w, fill)` / `string_pad_right` | Padding |
 | `string_grapheme_count(s)` | Unicode graphemes |
 | `string_to_int(s)` | Parse → Option(Int) |
+| `string_to_float(s)` | Parse → Option(Float); C `strtod` grammar, whole string, every backend (`inf`, `nan`, `0x1p3`; no `_`, no blank) |
 | `bool_to_string(b)` | Bool to string |
 
 ### Char
@@ -1021,10 +1026,20 @@ Directly callable without module qualification (built into the evaluator).
 
 | Builtin | Description |
 |---------|-------------|
-| `print(x)` / `println(x)` | Print |
+| `print(x)` / `println(x)` | Print; `println` returns `Result((), CapError)` |
 | `print_int(n)` / `print_float(f)` | Typed print |
 | `read_line()` | Read from stdin |
 | `tap(x)` | Print and return |
+
+**Capability operations return `Result(T, CapError)`** (ocap phase 1): console,
+clock (`System.now`, `System.now_ms`, `DateTime.now`), random, `Process.env` and
+friends, spawns (`Task.async`), table opens (`Vault.new/open/whereis`), signals,
+files (`File.read : Result(Result(String, FileError), CapError)`, nested),
+`Socket.connect`, `Dns.resolve`. A call on its own line needs nothing (the
+result is discarded). In a `: ()` function ending in `println(...)`, add a line
+`()`; where the value is needed write `Authority.must(e)` (panics on a refusal)
+or match it. The diagnostic is `cap_result_unhandled`; `forge fix` applies the
+fix. Using a handle (`Vault.set`, socket send/recv) is not an operation.
 
 ### Map (hash map)
 
@@ -1034,6 +1049,18 @@ Directly callable without module qualification (built into the evaluator).
 | `record_has_key(m, key)` | Key check |
 | `record_keys(m)` / `record_values(m)` / `record_entries(m)` | Iteration |
 | `record_from_list(pairs)` | Create from list |
+
+### Handles (files, sockets, processes)
+
+A `File.Handle`, `File.Dir`, `Socket`, `Listener`, `Udp.UdpSocket`, `Tls.TlsConn`,
+`WebSocket.WsSocket` or `Process` is an unforgeable, reference-counted box, not an `Int`.
+Only a checked open makes one (`File.open`, `Socket.connect`, `Socket.listen`,
+`Process.spawn_async`, ... each returns `Result(Result(Handle, E), CapError)`), and using one
+you hold needs no capability (a `needs ()` function may read a `File.Handle`). A use after
+`close` is `Err(Closed)`; `==` on handles is a type error. `File.Dir` refuses a path that
+leaves it (`Escapes`). A handle never leaves its node: a message type holding one is refused
+(`handle_not_sendable`). `IO.Mut` and `IO.Registry` take name scopes
+(`needs IO.Mut("cache")`, `needs IO.Registry(prefix("worker."))`).
 
 ### Actors / Process
 
@@ -1058,21 +1085,23 @@ Directly callable without module qualification (built into the evaluator).
 | `task_spawn(f)` | Spawn task |
 | `task_await(t)` | Await result |
 | `task_await_unwrap(t)` | Await and unwrap |
+| `task_poll(t)` | Non-blocking: `None` while running, else `Some(task_await(t))` (`Task.poll`) |
 | `task_yield()` | Yield scheduler |
 | `task_spawn_steal(f)` | Work-stealing spawn |
 | `task_spawn_link(f)` | Linked task spawn |
 
 ### Network / TLS
 
-| Builtin | Description |
-|---------|-------------|
-| `tcp_connect(host, port)` | Connect |
-| `tcp_send_all(fd, data)` / `tcp_recv_all(fd)` | Send/receive |
-| `tcp_recv_exact(fd, n)` | Receive n bytes |
-| `tcp_close(fd)` | Close |
-| `tls_connect(fd, ctx, host)` | TLS connect |
-| `tls_read(conn, n)` / `tls_write(conn, data)` | TLS IO |
-| `tls_close(conn)` | TLS close |
+The raw descriptor builtins (`tcp_*`, `udp_*`, `tls_*`, `file_open`, `process_spawn_async`,
+`http_server_*`, `ws_*`, ...) are internal to the stdlib: user code calling one gets
+`stdlib_internal` ("use `Socket.connect(host, port)`"). Use the handle modules:
+
+| Need | Use |
+|------|-----|
+| Connect / send / receive / close | `Socket.connect`, `Socket.write`, `Socket.recv`, `Socket.recv_exact`, `Socket.close` |
+| Listen / accept | `Socket.listen`, `Socket.accept`, `Listener` |
+| TLS | `Tls.connect(s, ctx, host)`, `Tls.read`, `Tls.write`, `Tls.close` |
+| UDP | `Udp.open`, `Udp.send_to`, `Udp.recv` |
 
 ### Crypto
 
@@ -1243,7 +1272,7 @@ lib/tir/                    typed IR (lower/mono/defun/perceus/borrow/fusion/llv
 lib/jit/                    REPL JIT
 lib/errors/errors.ml        diagnostics
 lib/search/search.ml        Hoogle-style search
-stdlib/                     137 March stdlib modules
+stdlib/                     140 March stdlib modules
 runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
 forge/                      build tool
 lsp/                        LSP server

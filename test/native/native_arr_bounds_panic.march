@@ -21,7 +21,7 @@ mod Main do
   needs IO.Process
 
   fn selector() : String do
-    match System.argv() do
+    match Authority.must(System.argv()) do
       Cons(_exe, Cons(w, _)) -> w
       _ -> "missing-selector"
     end
@@ -42,5 +42,6 @@ mod Main do
       "u8_set"    -> println(int_to_string(NativeArray.get_u8(NativeArray.set_u8(NativeArray.make_u8(4, 7), i, 1), 0)))
       _           -> println("unknown selector")
     end
+    ()
   end
 end

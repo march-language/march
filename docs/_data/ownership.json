@@ -18,7 +18,7 @@
       "allocs": {
         "inc_leaves": 5
       },
-      "excerpt": "fn main(_c : Cap(IO.Console)) : Unit do\n  let t = Node(Leaf(1), Node(Leaf(2), Leaf(3)))\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\nend\n",
+      "excerpt": "fn main(_c : Cap(IO.Console)) : Unit do\n  let t = Node(Leaf(1), Node(Leaf(2), Leaf(3)))\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\n  ()\nend\n",
       "exit": 0,
       "tree_cells": 5
     },
@@ -37,10 +37,10 @@
     }
   },
   "generated": {
-    "commit": "87553b42a",
+    "commit": "4230f741d",
     "compiler": "march 0.7.0",
-    "date": "2026-11-06",
-    "inputs_sha256": "e6110c69218fdd46bca07adae256c8c86fe63c913b07294bde6c07dcf6a71eb3"
+    "date": "2026-11-11",
+    "inputs_sha256": "6b8bbe83b2b010d7540bacfb1eb80d6abfacb015b78f009a5c8abdd4da94809c"
   },
   "linear": {
     "affine_ok": {
@@ -142,12 +142,12 @@
       "allocs": {
         "build": 31,
         "inc_leaves": 0,
-        "main": 0,
+        "main": 2,
         "plumbing": 0,
         "tasks": 0,
-        "total": 32
+        "total": 38
       },
-      "excerpt": "fn inc_leaves(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))\n  end\nend\n\nfn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\nend\n",
+      "excerpt": "fn inc_leaves(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))\n  end\nend\n\nfn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\n  ()\nend\n",
       "exit": 0,
       "headline": "No copies found: every value passed to a function that reuses it in place is its last use.",
       "incs": {
@@ -162,10 +162,10 @@
       "allocs": {
         "build": 31,
         "inc_leaves": 0,
-        "main": 0,
-        "plumbing": 11,
+        "main": 1,
+        "plumbing": 13,
         "tasks": 2,
-        "total": 45
+        "total": 52
       },
       "excerpt": "fn inc_parallel(t : Tree) : Tree do\n  match t do\n  Leaf(n)    -> Leaf(n + 1)\n  Node(l, r) ->\n    match List.pmap_n([l, r], fn half -> inc_leaves(half), 2) do\n    [left, right] -> Node(left, right)\n    _ -> panic(\"two halves\")\n    end\n  end\nend\n",
       "exit": 0,
@@ -182,12 +182,12 @@
       "allocs": {
         "build": 31,
         "inc_leaves": 31,
-        "main": 0,
+        "main": 2,
         "plumbing": 0,
         "tasks": 0,
-        "total": 63
+        "total": 69
       },
-      "excerpt": "fn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\nend\n",
+      "excerpt": "fn main(_c : Cap(IO.Console)) : Unit do\n  let t = build(4, 1)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2) - sum_leaves(t)))\n  ()\nend\n",
       "exit": 0,
       "headline": "`inc_leaves` builds a new copy instead of reusing `t` in place, because `t` is used again afterwards. [copy_shared]",
       "incs": {
@@ -202,18 +202,18 @@
       "allocs": {
         "build": 31,
         "inc_leaves": 31,
-        "main": 0,
-        "plumbing": 0,
+        "main": 1,
+        "plumbing": 2,
         "tasks": 0,
-        "total": 68
+        "total": 76
       },
-      "excerpt": "fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) : Unit do\n  let t = build(4, 1)\n  let kept = Vault.new(\"trees\")\n  Vault.set(kept, \"before\", t)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\nend\n",
+      "excerpt": "fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) : Unit do\n  let t = build(4, 1)\n  let kept = Authority.must(Vault.new(\"trees\"))\n  Vault.set(kept, \"before\", t)\n  let t2 = inc_leaves(t)\n  println(int_to_string(sum_leaves(t2)))\n  ()\nend\n",
       "exit": 0,
       "headline": "No copies found: every value passed to a function that reuses it in place is its last use.",
       "incs": {
         "build": 0,
         "inc_leaves": 30,
-        "main": 3
+        "main": 4
       },
       "output": "392",
       "why_copies": "No copies found: every value passed to a function that reuses it in place is its last use.\n"

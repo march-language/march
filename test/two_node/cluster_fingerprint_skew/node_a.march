@@ -47,14 +47,14 @@ mod ClusterFpSkewA do
   end
 
   pfn wait_peer_done(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(10)
       wait_peer_done(path)
     end
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "fp-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "fp-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -76,7 +76,7 @@ mod ClusterFpSkewA do
         end
         -- The refusal is queued to node-b, not acknowledged by our local
         -- result. Keep the link alive until the harness observes B finish.
-        wait_peer_done(Env.require("CLUSTER_FP_PEER_DONE"))
+        wait_peer_done(Authority.must(Env.require("CLUSTER_FP_PEER_DONE")))
         ClusterNode.stop(h)
     end
   end

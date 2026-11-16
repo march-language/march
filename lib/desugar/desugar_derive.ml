@@ -28,6 +28,15 @@ let collect_type_defs (decls : decl list) : (string * (name list * type_def)) li
     | _ -> None
   ) decls
 
+(** The first resource-handle type in a declaration body (see
+    [Cap_surface_ty.handle_type_spellings]). *)
+let handle_in_type_def ?(shadowed = []) (td : type_def) : (string * name) option =
+  let go = March_caps.Cap_surface_ty.handle_in_ty ~shadowed in
+  match td with
+  | TDRecord fields -> List.find_map (fun (f : field) -> go f.fld_ty) fields
+  | TDVariant variants -> List.find_map (fun (v : variant) -> List.find_map go v.var_args) variants
+  | TDAlias (t, _) -> go t
+
 (** Make a name with a dummy span. *)
 let mk_name txt = { txt; span = dummy_span }
 
@@ -193,6 +202,7 @@ and respan_expr (e : expr) : expr =
   | ELetQ (p, e1, e2, _) -> ELetQ (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
   | ELetStar (p, e1, e2, _) -> ELetStar (respan_pat p, respan_expr e1, respan_expr e2, fresh_synthetic_span ())
   | EAssert (e, _)       -> EAssert (respan_expr e, fresh_synthetic_span ())
+  | EProof (p, _)        -> EProof (map_proof respan_expr p, fresh_synthetic_span ())
   | ESigil (s, e, _)     -> ESigil (s, respan_expr e, fresh_synthetic_span ())
   | ERefineMsg (e, s, _)     -> ERefineMsg (respan_expr e, s, fresh_synthetic_span ())
 
@@ -256,8 +266,10 @@ let respan_derived_decl (d : decl) : decl =
     Returns a list of [decl] — usually one [DImpl], but [Json] produces
     two standalone [DFn] declarations (to_json / from_json).
     [iface_span] is the span of the interface name in the source, used for
-    error reporting when the interface is unknown. *)
-let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
+    error reporting when the interface is unknown.  [local_types] are the
+    type names the module declares itself: one spelled like a handle type
+    (a user's own [Process]) is that declaration, not the handle. *)
+let derive_impl ?(local_types = []) (errors : Err.ctx) (type_name : name) (sp : span)
     (iface : string) (iface_span : span) (tparams : name list) (td : type_def) : decl list =
   (* Type annotation for the type being implemented *)
   let self_ty : ty =
@@ -367,7 +379,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
               let pats = List.map (fun s -> PatVar (mk_name s)) arg_names in
               (* "Ctor(" ++ show(a0) ++ ", " ++ show(a1) ++ ... ++ ")" *)
               let parts = List.mapi (fun i s ->
-                  let show_e = EApp (EVar (mk_name "show"), [EVar (mk_name s)], dummy_span) in
+                  let show_e = EApp (EVar (mk_name "Show.show"), [EVar (mk_name s)], dummy_span) in
                   if i = 0 then show_e
                   else EApp (EVar (mk_name "++"),
                              [ELit (LitString ", ", dummy_span); show_e],
@@ -393,7 +405,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         (* "TypeName { f1 = " ++ show(x.f1) ++ ", f2 = " ++ show(x.f2) ++ " }" *)
         let field_strs = List.mapi (fun i f ->
             let prefix = if i = 0 then f.fld_name.txt ^ " = " else ", " ^ f.fld_name.txt ^ " = " in
-            let show_e = EApp (EVar (mk_name "show"),
+            let show_e = EApp (EVar (mk_name "Show.show"),
                                [EField (EVar (mk_name "x"), f.fld_name, dummy_span)],
                                dummy_span)
             in
@@ -409,7 +421,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         in
         EApp (EVar (mk_name "++"), [mid; ELit (LitString " }", dummy_span)], dummy_span)
       | TDAlias _ ->
-        EApp (EVar (mk_name "show"), [EVar (mk_name "x")], dummy_span)
+        EApp (EVar (mk_name "Show.show"), [EVar (mk_name "x")], dummy_span)
     in
     [impl_one "show" ["x"] body]
 
@@ -439,7 +451,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
              (* Use the polymorphic hash for each field's value.
                 Note: field values may be any type — hash is safe here since
                 it's called on field values, not on x: Color. *)
-             EApp (EVar (mk_name "hash"),
+             EApp (EVar (mk_name "Hash.hash"),
                    [EField (EVar (mk_name "x"), fld.fld_name, dummy_span)],
                    dummy_span)
            in
@@ -454,7 +466,7 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                         dummy_span)
                 ) (hash_field f) rest))
       | TDAlias _ ->
-        EApp (EVar (mk_name "hash"), [EVar (mk_name "x")], dummy_span)
+        EApp (EVar (mk_name "Hash.hash"), [EVar (mk_name "x")], dummy_span)
     in
     [impl_one "hash" ["x"] body]
 
@@ -493,14 +505,14 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
         (match fields with
          | [] -> ELit (LitInt 0, dummy_span)
          | [f] ->
-           EApp (EVar (mk_name "compare"),
+           EApp (EVar (mk_name "Ord.compare"),
                  [EField (EVar (mk_name "a"), f.fld_name, dummy_span);
                   EField (EVar (mk_name "b"), f.fld_name, dummy_span)],
                  dummy_span)
          | fields ->
            let stmts = List.mapi (fun i f ->
                let cmp_e =
-                 EApp (EVar (mk_name "compare"),
+                 EApp (EVar (mk_name "Ord.compare"),
                        [EField (EVar (mk_name "a"), f.fld_name, dummy_span);
                         EField (EVar (mk_name "b"), f.fld_name, dummy_span)],
                        dummy_span)
@@ -510,46 +522,23 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                        bind_lin = Unrestricted; bind_expr = cmp_e }, dummy_span)
              ) fields
            in
-           let final_cmp name i =
-             if i = List.length fields - 1 then EVar (mk_name name)
-             else
-               EIf (EApp (EVar (mk_name "!="),
-                          [EVar (mk_name name); ELit (LitInt 0, dummy_span)],
-                          dummy_span),
-                    EVar (mk_name name),
-                    EVar (mk_name (Printf.sprintf "_cmp%d" (i + 1))),
-                    dummy_span)
-           in
-           let last_name = Printf.sprintf "_cmp%d" (List.length fields - 1) in
-           let result =
-             List.fold_right (fun (i, f) acc ->
-                 ignore f;
-                 let cname = Printf.sprintf "_cmp%d" i in
-                 if i = List.length fields - 1 then EVar (mk_name last_name)
-                 else
-                   EIf (EApp (EVar (mk_name "!="),
-                              [EVar (mk_name cname); ELit (LitInt 0, dummy_span)],
-                              dummy_span),
-                        EVar (mk_name cname),
-                        acc,
-                        dummy_span)
-               ) (List.mapi (fun i f -> (i, f)) fields |> List.rev |> List.tl |> List.rev)
-               (EVar (mk_name last_name))
-           in
-           ignore result;
-           ignore final_cmp;
+           (* Lexicographic in declaration order: the FIRST field's test is
+              the outermost `if`, the last field the innermost fallback.  The
+              fold used to run over the reversed list, which made the last
+              field outermost and returned only its comparison. *)
+           let last = List.length fields - 1 in
            EBlock (stmts @ [
              List.fold_right (fun (i, _f) acc ->
                  let cname = Printf.sprintf "_cmp%d" i in
-                 if i = List.length fields - 1 then EVar (mk_name cname)
+                 if i = last then EVar (mk_name cname)
                  else EIf (EApp (EVar (mk_name "!="),
                                  [EVar (mk_name cname); ELit (LitInt 0, dummy_span)],
                                  dummy_span),
                            EVar (mk_name cname), acc, dummy_span)
-               ) (List.mapi (fun i f -> (i, f)) fields |> List.rev) (ELit (LitInt 0, dummy_span))
+               ) (List.mapi (fun i f -> (i, f)) fields) (ELit (LitInt 0, dummy_span))
            ], dummy_span))
       | TDAlias _ ->
-        EApp (EVar (mk_name "compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
+        EApp (EVar (mk_name "Ord.compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
     in
     [impl_one "compare" ["a"; "b"] body]
 
@@ -626,6 +615,47 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
                     "Carry a `GlobalPid.Pid` (node id, local pid, creation) in `%s` \
                      instead; it is a plain record and derives Json." type_name.txt ];
         code = Err.Code.pid_serialize; fix = None };
+    []
+
+  | "Json" when handle_in_type_def ~shadowed:local_types td <> None ->
+    (* A resource handle (ocap phase 2b: [File.Handle], [Socket], [Process],
+       ...; the list is [Cap_surface_ty.handle_type_spellings]) is a box over
+       a descriptor of THIS node's process.  Encoded and decoded anywhere else
+       it names nothing, or a different descriptor with the same number, so
+       no codec over it is generated.  Without this arm the encoder fell
+       through to a generic [to_json] on the box and the derive was accepted;
+       `Node.send` (whose codec contract `derive Json` is) then had a message
+       it could not honestly send.  The send site gets the same headline from
+       [Typecheck_caps.check_node_send_sites]. *)
+    let handle, written = Option.get (handle_in_type_def ~shadowed:local_types td) in
+    let holds t = March_caps.Cap_surface_ty.handle_in_ty ~shadowed:local_types t <> None in
+    let holder = match td with
+      | TDRecord fields ->
+        List.find_map (fun (f : field) ->
+            if holds f.fld_ty then Some (Printf.sprintf "its field `%s`" f.fld_name.txt) else None)
+          fields
+      | TDVariant variants ->
+        List.find_map (fun (v : variant) ->
+            if List.exists holds v.var_args
+            then Some (Printf.sprintf "its constructor `%s`" v.var_name.txt) else None)
+          variants
+      | TDAlias _ -> None in
+    let what = match holder with Some w -> w | None -> "it" in
+    Err.report errors
+      { Err.severity = Err.Error; span = iface_span;
+        message = Printf.sprintf
+            "`%s` cannot be sent to another node: a handle names a resource on this node.\n\
+             `%s` cannot derive Json, because %s holds a `%s`."
+            handle type_name.txt what handle;
+        labels = (if written.span.start_line > 0 then
+                    [ { Err.lbl_span = written.span;
+                        lbl_message = Printf.sprintf "`%s` is a handle" handle } ]
+                  else []);
+        notes = [ Printf.sprintf
+                    "Keep the `%s` on this node and send what the other node needs to \
+                     know instead: a path, an address, or a `GlobalPid.Pid` of an actor \
+                     here that owns the resource." handle ];
+        code = Err.Code.handle_not_sendable; fix = None };
     []
 
   | "Json" ->
@@ -1251,8 +1281,15 @@ let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
     []
 
 (** Expand a [DDeriving] into zero or more [DImpl] blocks.
-    Emits an error for unknown interfaces and for unknown target types. *)
+    Emits an error for unknown interfaces and for unknown target types.
+    [program_types] are the short names of every type the program declares,
+    in any of its modules: a handle spelling among them may be written for
+    the program's own type (reached through `import`, or qualified by a
+    user module named like the stdlib's), so the `derive Json` handle
+    refusal, which reads spellings, leaves it to the typed send's check,
+    which judges identities ([Typecheck_caps.handle_in_message]). *)
 let expand_derive
+    ?(program_types = [])
     (errors : Err.ctx)
     (type_defs : (string * (name list * type_def)) list)
     (type_name : name)
@@ -1268,7 +1305,8 @@ let expand_derive
     []
   | Some (tparams, td) ->
     List.concat_map (fun (iface_name : name) ->
-        derive_impl errors type_name sp iface_name.txt iface_name.span tparams td
+        derive_impl ~local_types:(program_types @ List.map fst type_defs)
+          errors type_name sp iface_name.txt iface_name.span tparams td
         |> List.map respan_derived_decl
       ) ifaces
 

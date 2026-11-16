@@ -173,94 +173,81 @@ let rec rename_params env (e : expr) : expr =
   | EApp (f, args, sp) -> EApp (f, List.map (rename_params env) args, sp)
   | e -> e
 
-let guard_suffix = "_migrate_msg__guard"
 let msg_wrapper_suffix = "_migrate_msg__hcr"
 
-(* [fn <actor>_migrate_msg__guard(x : <new msg type>) : Bool]: whether [x]
-   meets its handler's evaluable parameter conjuncts.  A function of its own,
-   not a match nested in the wrapper's [Some] arm: that shape, with the
-   qualified [<Actor>.<Msg>] pattern, miscompiles (todo
-   specs/todos/2026-11-05-nested-match-qualified-actor-msg-pattern-miscompile.md). *)
-let guard_fn ~fns ~(actor : string) ~(name : string) (a : actor_def) (msg_ty : ty) (sp : span)
-  : decl option =
+(* The arms of the guard over a converted message: one per handler with an
+   evaluable parameter conjunct, `<Actor>.<Msg>(p0, ...) -> if <conjuncts> do
+   <keep> else <dropped> end`.  The pattern is qualified by the actor's name
+   so that a message constructor another type also declares still means this
+   actor's. *)
+let guard_arms ~fns ~(actor : string) (a : actor_def) ~(keep : expr) ~(dropped : expr)
+    (sp : span) : branch list =
   let n s = { txt = s; span = sp } in
-  let arms =
-    List.filter_map
-      (fun (h : actor_handler) ->
-        let pos = List.mapi (fun i (p : param) -> (p.param_name.txt, Printf.sprintf "p%d" i)) h.ah_params in
-        let conj =
-          List.concat (List.mapi
-            (fun i (p : param) ->
-              match Option.bind p.param_ty refinement with
-              | None -> []
-              | Some (b, pred) ->
-                let own = Printf.sprintf "p%d" i in
-                let env = (Option.value ~default:"_" b, own) :: pos in
-                List.map (rename_params env) (conjuncts pred))
-            h.ah_params)
-          |> List.filter (evaluable ~fns ~vars:(List.map snd pos))
-        in
-        match conj with
-        | [] -> None
-        | c :: cs ->
-          let body =
-            List.fold_left
-              (fun acc c -> EApp (EVar (n "&&"), [ acc; c ], sp)) c cs in
-          Some
-            { branch_pat = PatCon (n (actor ^ "." ^ h.ah_msg.txt),
-                                   List.map (fun (_, v) -> PatVar (n v)) pos);
-              branch_guard = None; branch_body = body })
-      a.actor_handlers
-  in
-  if arms = [] then None
-  else
-    let body =
-      EMatch (EVar (n "x"),
-              arms @ [ { branch_pat = PatWild sp; branch_guard = None;
-                         branch_body = ELit (LitBool true, sp) } ], sp) in
-    Some
-      (DFn
-         ( { fn_name = n name; fn_vis = Private; fn_doc = None; fn_attrs = [];
-             fn_ret_ty = Some (TyCon (n "Bool", []));
-             fn_clauses =
-               [ { fc_params = [ FPNamed { param_name = n "x"; param_ty = Some msg_ty;
-                                           param_lin = Unrestricted } ];
-                   fc_guard = None; fc_body = body; fc_span = sp; fc_params_span = sp } ];
-             fn_bounds = []; fn_attr_args = []; fn_needs = None },
-           sp ))
+  List.filter_map
+    (fun (h : actor_handler) ->
+      let pos = List.mapi (fun i (p : param) -> (p.param_name.txt, Printf.sprintf "p%d" i)) h.ah_params in
+      let conj =
+        List.concat (List.mapi
+          (fun i (p : param) ->
+            match Option.bind p.param_ty refinement with
+            | None -> []
+            | Some (b, pred) ->
+              let own = Printf.sprintf "p%d" i in
+              let env = (Option.value ~default:"_" b, own) :: pos in
+              List.map (rename_params env) (conjuncts pred))
+          h.ah_params)
+        |> List.filter (evaluable ~fns ~vars:(List.map snd pos))
+      in
+      match conj with
+      | [] -> None
+      | c :: cs ->
+        let test =
+          List.fold_left
+            (fun acc c -> EApp (EVar (n "&&"), [ acc; c ], sp)) c cs in
+        Some
+          { branch_pat = PatCon (n (actor ^ "." ^ h.ah_msg.txt),
+                                 List.map (fun (_, v) -> PatVar (n v)) pos);
+            branch_guard = None; branch_body = EIf (test, keep, dropped, sp) })
+    a.actor_handlers
 
 (* The message half of M10: in a `--hot-reload` build, the
    `<actor>_migrate_msg__hcr` wrapper (Desugar_migrate) returns [none], the
    runtime's "dropped", for a converted message that fails the new handler's
    parameter refinements, instead of handing it to a handler whose contract
    it breaks.  Only the evaluable conjuncts are tested (see [evaluable]); a
-   handler with none keeps every converted message.  [Some decls]: the
-   guard, then the rewritten wrapper. *)
+   handler with none keeps every converted message.  The wrapper's `Some(x)`
+   arm becomes a match on [x] ([guard_arms], then `_ -> x`).  [Some decls]:
+   the rewritten wrapper. *)
 let guard_msg_wrapper ~fns actors (def : fn_def) (sp : span) : decl list option =
   let name = def.fn_name.txt in
   let actor = String.sub name 0 (String.length name - String.length msg_wrapper_suffix) in
-  match List.find_opt (fun (lower, _, _) -> lower = actor) actors, def.fn_ret_ty with
-  | Some (_, spelled, a), Some msg_ty ->
-    let gname = actor ^ guard_suffix in
-    (match guard_fn ~fns ~actor:spelled ~name:gname a msg_ty sp with
-     | None -> None
-     | Some g ->
-       let rewrite (c : fn_clause) =
-         match c.fc_body with
-         | EMatch (scrut,
-                   [ ({ branch_pat = PatCon ({ txt = "Some"; _ }, [ PatVar xv ]); _ } as some); nb ],
-                   msp) ->
-           let x = EVar xv in
+  match List.find_opt (fun (lower, _, _) -> lower = actor) actors with
+  | Some (_, spelled, a) ->
+    let rewrite (c : fn_clause) =
+      match c.fc_body with
+      | EMatch (scrut,
+                [ ({ branch_pat = PatCon ({ txt = "Some"; _ }, [ PatVar xv ]); _ } as some); nb ],
+                msp) ->
+        let keep = some.branch_body in
+        (match guard_arms ~fns ~actor:spelled a ~keep
+                 ~dropped:(EVar { txt = "none"; span = sp }) sp with
+         | [] -> None
+         | arms ->
            let guarded =
-             EIf (EApp (EVar { txt = gname; span = sp }, [ x ], sp), some.branch_body,
-                  EVar { txt = "none"; span = sp }, sp) in
-           { c with fc_body = EMatch (scrut, [ { some with branch_body = guarded }; nb ], msp) }
-         | _ -> c
-       in
-       let def' = { def with fn_clauses = List.map rewrite def.fn_clauses } in
-       Some [ Desugar_derive.respan_derived_decl g;
-              Desugar_derive.respan_derived_decl (DFn (def', sp)) ])
-  | _ -> None
+             EMatch (EVar xv,
+                     arms @ [ { branch_pat = PatWild sp; branch_guard = None;
+                                branch_body = keep } ], sp) in
+           Some { c with fc_body = EMatch (scrut, [ { some with branch_body = guarded }; nb ], msp) })
+      | _ -> None
+    in
+    let rewritten = List.map rewrite def.fn_clauses in
+    if List.for_all Option.is_none rewritten then None
+    else
+      let clauses =
+        List.map2 (fun c r -> Option.value ~default:c r) def.fn_clauses rewritten in
+      Some [ Desugar_derive.respan_derived_decl
+               (DFn ({ def with fn_clauses = clauses }, sp)) ]
+  | None -> None
 
 (** [decls] with a check after every `<actor>_migrate_state` whose actor is
     declared in the same list and has a state contract, recursing into

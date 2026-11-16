@@ -64,6 +64,16 @@ type value =
   | VVaultHandle of int
   | VRingBuf of value ring
   | VResource of int64
+  | VHandle of handle_cell
+and handle_cell =
+  Eval_types.handle_cell = {
+  h_kind : int;
+  h_raw : value;
+  h_aux : value;
+  mutable h_closed : bool;
+  mutable h_released : bool;
+  h_release : unit -> unit;
+}
 and chan_endpoint =
   Eval_types.chan_endpoint = {
   ce_id : int;
@@ -231,6 +241,7 @@ val pmap_threshold_value : int ref
 val http_fetch_hook :
   (string -> string -> string -> string -> (string, string) result) option
   ref
+val call_return_hook : (unit -> unit) ref
 val ring_drop_newest : 'a ring -> int -> unit
 type actor_inst_snapshot = {
   ais_name : string;

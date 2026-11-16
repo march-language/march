@@ -29,16 +29,16 @@ mod ClusterStallA do
   end
 
   fn main(c : Cap(IO)) do
-    let port = Env.require_int("MARCH_PORT_A")
+    let port = Authority.must(Env.require_int("MARCH_PORT_A"))
     let cfg = ClusterNode.config("node-a", port, "", Nil, "stall-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        let flags = Vault.new("scenario_flags")
+        let flags = Authority.must(Vault.new("scenario_flags"))
         let _ = ClusterNode.subscribe(h, fn ev ->
           match ev do
-            ClusterNode.NodeUp(i) -> if i.name == "node-b" do println("node-a: node-b up") else () end
-            ClusterNode.NodeSuspect(i) -> if i.name == "node-b" do println("node-a: node-b suspect") else () end
+            ClusterNode.NodeUp(i) -> if i.name == "node-b" do Authority.ignore(println("node-a: node-b up")) else () end
+            ClusterNode.NodeSuspect(i) -> if i.name == "node-b" do Authority.ignore(println("node-a: node-b suspect")) else () end
             ClusterNode.NodeDead(i, why) ->
               if i.name == "node-b" do
                 println("node-a: node-b dead: " ++ why)
@@ -51,7 +51,7 @@ mod ClusterStallA do
               else () end
           end)
         println("node-a: up")
-        if wait_for(flags, "rejoined", 60000) do () else println("node-a: never saw rejoined") end
+        if wait_for(flags, "rejoined", 60000) do () else Authority.ignore(println("node-a: never saw rejoined")) end
         ClusterNode.stop(h)
         println("node-a: done")
     end

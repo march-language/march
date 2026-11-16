@@ -127,6 +127,18 @@ let finish_ptr_merge ctx ~arm_tys ~loaded =
     sign-truncating shift pair in between.  A wrong i64 prediction is
     still well-typed: the store coerces through the conditional untag.
 
+    And `double` when every reaching arm's tail is syntactically a Float: a
+    Float literal, a Float variable, `+. -. *. /.` (or an overloaded
+    operator on a Float operand), or a call of a builtin or top-level
+    function returning Float.  Without it a Float-valued `if` paid a
+    [march_alloc_float] in each arm and an unbox plus [march_decrc_local]
+    at the merge, a malloc and a free per evaluation
+    (specs/progress/2026-11-12-float-valued-case-join-slot.md).  A wrong
+    `double` prediction is also well-typed, and no worse for ownership than
+    the `ptr` slot was: an arm that turns out to hold a boxed Float is
+    unboxed by the store and its box stays with whoever owned it, which is
+    what the mixed-arm `ptr` merge did with it too.
+
     Safety if the prediction were ever wrong: every store goes through
     [Llvm_ctx.coerce] to the struct type, whose ptr->struct arm unboxes a
     boxed cell of that same type, so a mismatch is still well-typed IR. *)
@@ -154,7 +166,8 @@ and predicted_unboxed_tail ctx (e : Tir.expr) : string option =
        @ Option.to_list d)
   | Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt _ | March_ast.Ast.LitBool _)) ->
     Some "i64"
-  | Tir.EAtom (Tir.AVar v) when scalar_i64_ty v.Tir.v_ty -> Some "i64"
+  | Tir.EAtom (Tir.ALit (March_ast.Ast.LitFloat _)) -> Some "double"
+  | Tir.EAtom (Tir.AVar v) -> scalar_reg_ty v.Tir.v_ty
   (* The overloaded arithmetic operators carry no useful return type in
      [v_ty] (they are Int-or-Float); the operand says which.  A comparison
      or boolean connective is a Bool whatever its operands. *)
@@ -163,24 +176,31 @@ and predicted_unboxed_tail ctx (e : Tir.expr) : string option =
     (match a with
      | Tir.ALit (March_ast.Ast.LitInt _) -> Some "i64"
      | Tir.AVar v when v.Tir.v_ty = Tir.TInt -> Some "i64"
+     | Tir.ALit (March_ast.Ast.LitFloat _) -> Some "double"
+     | Tir.AVar v when v.Tir.v_ty = Tir.TFloat -> Some "double"
      | _ -> None)
+  | Tir.EApp (f, _) when List.mem f.Tir.v_name ["+."; "-."; "*."; "/."] ->
+    Some "double"
   | Tir.EApp (f, _)
     when List.mem f.Tir.v_name ["=="; "!="; "<"; "<="; ">"; ">="; "&&"; "||"] ->
     Some "i64"
   | Tir.EApp (f, _)
-    when (match f.Tir.v_ty with
-          | Tir.TFn (_, r) -> scalar_i64_ty r
-          | _ -> false)
-      && (Llvm_builtins.is_builtin_fn f.Tir.v_name
+    when (Llvm_builtins.is_builtin_fn f.Tir.v_name
           || Hashtbl.mem ctx.Llvm_ctx.top_fns f.Tir.v_name)
       && not (Hashtbl.mem ctx.Llvm_ctx.var_slot
                 (Llvm_ctx.llvm_name f.Tir.v_name)) ->
-    Some "i64"
+    (match f.Tir.v_ty with
+     | Tir.TFn (_, r) -> scalar_reg_ty r
+     | _ -> None)
   | _ -> None
 
-(** A TIR type whose register representation is a bare i64 scalar. *)
-and scalar_i64_ty (t : Tir.ty) : bool =
-  match t with Tir.TInt | Tir.TBool -> true | _ -> false
+(** The register type of a TIR type that is a bare scalar: `i64` for
+    Int/Bool, `double` for Float. *)
+and scalar_reg_ty (t : Tir.ty) : string option =
+  match t with
+  | Tir.TInt | Tir.TBool -> Some "i64"
+  | Tir.TFloat -> Some "double"
+  | _ -> None
 
 let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
   let (scrut_ty, scrut_val) = emit_atom ctx scrut_atom in
@@ -785,7 +805,8 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      constant must have integer type"). *)
   let coerce_arm (body : Tir.expr) (ty : string) (v : string) =
     if arm_diverges body && ty <> slot_ty
-       && Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table slot_ty <> None
+       && (slot_ty = "double"
+           || Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table slot_ty <> None)
     then "poison"
     else Llvm_ctx.coerce ctx ty v slot_ty
   in
@@ -1196,25 +1217,63 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
         let fboxes = !boxed_float_field_vals in
         (match strip_scrut_decrc sn br.Tir.br_body with
          | Some (_scrut_v, rest) ->
-           (* Emit: march_decrc_freed(scrut); if not freed, incrc each heap field *)
+           (* Take the fields out of the cell and release it.  The ORDER on the
+              shared path is the point (march-language/march#1266): the fields
+              are IncRC'd BEFORE the cell is released, never after.  Releasing
+              first and incrementing afterwards is only sound on one thread.
+              When another thread holds the other reference (a list captured
+              by a task_spawn closure and still walked by the spawner), it can
+              release the cell between our decrement and our increments, see
+              the count reach 0, take the fields over without an increment and
+              free them; our increments then land on freed memory.
+
+              So: load the count first.  rc == 1 means this frame holds the
+              only reference and nobody can race it (no other holder exists to
+              increment or release it; a stale read can only show a count
+              above 1, which takes the always-correct shared path, so a
+              monotonic load is enough: march_decrc_freed's acq_rel RMW does
+              the synchronising before the free).  Then release the cell
+              (march_decrc_freed frees the shell) and the fields' references
+              pass to the binders, as before.  Otherwise IncRC each field while
+              the cell still keeps them alive, then release the cell; if that
+              release turns out to free it after all (the other holder let go
+              in between), the cell's references to the fields came to us as
+              well, so give the extra ones back. *)
+           let rc = Llvm_ctx.fresh ctx "scrut_rc" in
+           Llvm_ctx.emit ctx (Printf.sprintf
+             "%s = load atomic i64, ptr %s monotonic, align 8" rc scrut_val);
+           let uniq = Llvm_ctx.fresh ctx "scrut_uniq" in
+           Llvm_ctx.emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" uniq rc);
+           let unique_lbl = Llvm_ctx.fresh_block ctx "br_unique" in
+           let shared_lbl = Llvm_ctx.fresh_block ctx "br_shared" in
+           let late_lbl   = Llvm_ctx.fresh_block ctx "br_shared_freed" in
+           let body_lbl   = Llvm_ctx.fresh_block ctx "br_body" in
+           Llvm_ctx.emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                            uniq unique_lbl shared_lbl);
+           (* Shared path: IncRC each extracted heap field, then release the
+              cell.  Erased-slot Float boxes are absent from the increments:
+              the binder holds a COPY of the double (see [is_boxed_float]
+              above), so it aliases nothing to account for; the cell keeps
+              owning the box unless the release below frees it. *)
+           Llvm_ctx.emit_label ctx shared_lbl;
+           List.iter (fun fv ->
+             Llvm_ctx.emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv)
+           ) fields;
            let freed = Llvm_ctx.fresh ctx "freed" in
            Llvm_ctx.emit ctx (Printf.sprintf "%s = call i64 @march_decrc_freed(ptr %s)"
                        freed scrut_val);
            let freed_bool = Llvm_ctx.fresh ctx "freed_b" in
            Llvm_ctx.emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" freed_bool freed);
-           let unique_lbl = Llvm_ctx.fresh_block ctx "br_unique" in
-           let shared_lbl = Llvm_ctx.fresh_block ctx "br_shared" in
-           let body_lbl   = Llvm_ctx.fresh_block ctx "br_body" in
            Llvm_ctx.emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
-                            freed_bool unique_lbl shared_lbl);
-           (* Shared path: IncRC each extracted heap field.  Erased-slot Float
-              boxes are deliberately absent: the cell survives and keeps owning
-              them, and the binder holds a COPY of the double (see
-              [is_boxed_float] above), so it aliases nothing to account for. *)
-           Llvm_ctx.emit_label ctx shared_lbl;
+                            freed_bool late_lbl body_lbl);
+           (* The release freed the cell after all: its references to the
+              fields are ours now on top of the increments above (drop one of
+              each; we still hold the other, so none of these frees), and its
+              Float boxes have no owner left, as on the unique path. *)
+           Llvm_ctx.emit_label ctx late_lbl;
            List.iter (fun fv ->
-             Llvm_ctx.emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv)
-           ) fields;
+             Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" fv)
+           ) (fields @ fboxes);
            Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
            (* Unique path: the cell has just been freed, so each ordinary heap
               field's reference transfers to its binder and Perceus will drop
@@ -1225,6 +1284,9 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
               release it.  It is emitted on the FREED path only, which is
               exactly the proof that nobody else still holds the box. *)
            Llvm_ctx.emit_label ctx unique_lbl;
+           let ufreed = Llvm_ctx.fresh ctx "freed" in
+           Llvm_ctx.emit ctx (Printf.sprintf "%s = call i64 @march_decrc_freed(ptr %s)"
+                       ufreed scrut_val);
            List.iter (fun fv ->
              Llvm_ctx.emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" fv)
            ) fboxes;

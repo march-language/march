@@ -24,10 +24,12 @@ info() { printf '%s\n' "$*" >&2; }
 # --- dependencies ---------------------------------------------------------
 command -v curl >/dev/null 2>&1 || err "curl is required"
 command -v tar  >/dev/null 2>&1 || err "tar is required"
+# The trailing `-` names stdin explicitly: Apple's /sbin/sha256sum (on the
+# default macOS PATH) prints usage for `-c` with no file operand (#1182).
 if command -v sha256sum >/dev/null 2>&1; then
-  SHACHECK="sha256sum -c --ignore-missing"
+  SHACHECK="sha256sum -c --ignore-missing -"
 elif command -v shasum >/dev/null 2>&1; then
-  SHACHECK="shasum -a 256 -c --ignore-missing"
+  SHACHECK="shasum -a 256 -c --ignore-missing -"
 else
   err "need sha256sum or shasum to verify downloads"
 fi

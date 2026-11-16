@@ -161,7 +161,7 @@ let pp_local () =
       "{ " ^ String.concat ", " (List.map (fun (f, t) -> f ^ " : " ^ pp t) fs) ^ " }"
     | TLin (Ast.Linear, t) -> "linear " ^ pp ~parens:true t
     | TLin (Ast.Affine, t) -> "affine " ^ pp ~parens:true t
-    | TLin (Ast.Unrestricted, t) -> pp ~parens t
+    | TLin ((Ast.Unrestricted | Ast.Ghost), t) -> pp ~parens t
     | TNat n -> string_of_int n
     | TNatOp _ | TChan _ | TRefine _ -> "_"
   in

@@ -19,6 +19,7 @@ mod Main do
 
   fn greet(name : String) : () do
     println("hello " ++ name)
+    ()
   end
 
   fn main(cap : Cap(IO.Console)) : () do

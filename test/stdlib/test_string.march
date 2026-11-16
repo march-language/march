@@ -2,6 +2,8 @@
 -- Run with: dune exec march -- test test/stdlib/test_string.march
 
 mod TestString do
+  needs IO.Clock
+  needs IO.Process
 
 describe "byte_size" do
   test "byte_size of empty string is zero" do

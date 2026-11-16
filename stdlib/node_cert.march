@@ -63,7 +63,10 @@ mod NodeCert do
   -- ── keys ────────────────────────────────────────────────────────────────
 
   doc "A fresh, random ed25519 secret key (64 bytes: seed || public key), from a 32-byte random seed."
-  fn keypair() : Bytes do ed25519_seed_keypair(Crypto.random_bytes(32)) end
+  fn keypair() : Result(Bytes, CapError) do
+    let? seed = Crypto.random_bytes(32)
+    Ok(ed25519_seed_keypair(seed))
+  end
 
   doc """
   The 64-byte ed25519 secret key (seed || public key) a 32-byte [seed]

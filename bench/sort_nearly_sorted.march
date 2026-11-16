@@ -36,6 +36,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let ms  = Sort.mergesort_by(build_pairs(4999, Nil), cmp)
   println(int_to_string(head(ts)))
   println(int_to_string(head(ms)))
+  ()
 end
 
 end

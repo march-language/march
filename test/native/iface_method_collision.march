@@ -15,5 +15,6 @@ mod Test do
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(int_to_string(show(mk())))   -- user's show resolves by type -> 7
     println("ok")                         -- builtin show(String) -> ok
+    ()
   end
 end

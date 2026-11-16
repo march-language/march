@@ -16,7 +16,7 @@ mod RemoteEpochA do
   needs ClusterNode.Live
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
@@ -35,22 +35,22 @@ mod RemoteEpochA do
 
   pfn send_note(h : Cap(ClusterNode.Live), to : GlobalPid.Pid, payload : List(Int), what : String) : () do
     match ClusterNode.send_msg(h, to, "Note", payload, NodeQueue.DropNew) do
-      Ok(_) -> println("node-a: sent " ++ what)
-      Err(_) -> println("node-a: could not send " ++ what)
+      Ok(_) -> Authority.ignore(println("node-a: sent " ++ what))
+      Err(_) -> Authority.ignore(println("node-a: could not send " ++ what))
     end
   end
 
   fn main(c : Cap(IO)) do
-    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_B"))
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Cons(seed, Nil), "epoch-secret", 1)
+    let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_B")))
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Cons(seed, Nil), "epoch-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let to = sink(h, 30000)
         send_note(h, to, [1], "1 in the version-1 format")
-        wait_file(Env.require("DEPLOYED_FILE"))
+        wait_file(Authority.must(Env.require("DEPLOYED_FILE")))
         send_note(h, to, [7, 2], "7 in the version-2 format")
-        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         ClusterNode.stop(h)
     end
   end

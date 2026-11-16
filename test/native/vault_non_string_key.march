@@ -20,7 +20,7 @@ mod Main do
   needs IO
 
   fn main(cap: Cap(IO)) do
-    let t = Vault.new("vk")
+    let t = Authority.must(Vault.new("vk"))
     Vault.set(t, 7, "odd")
     Vault.set(t, 8, "even")
     Vault.set(t, -3, "negative")
@@ -41,11 +41,11 @@ mod Main do
     println(Vault.put_new(t, 11, "put_new"))
     println(Vault.get(t, 11))
 
-    let c = Vault.new("vk_c")
+    let c = Authority.must(Vault.new("vk_c"))
     println(Vault.incr(c, 7, 3))
     println(Vault.incr(c, 7, 4))
 
-    let u = Vault.new("vk_u")
+    let u = Authority.must(Vault.new("vk_u"))
     Vault.set(u, 13, 1)
     Vault.update(u, 13, fn x -> x + 41)
     println(Vault.get(u, 13))

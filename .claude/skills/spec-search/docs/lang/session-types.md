@@ -656,6 +656,15 @@ For the typing side (protocol declaration, projection, duality, per-operation ch
 
 ---
 
+## Errors you'll see
+
+The [Error Messages tour]({{ site.baseurl }}/docs/error-messages/) shows what the compiler prints when a channel strays from its protocol, each with a program you can edit and re-check in the browser:
+
+- [A send or receive out of the order the protocol fixes]({{ site.baseurl }}/docs/error-messages/#channel-wrong-step)
+- [An `offer` that leaves one of the peer's choices unhandled]({{ site.baseurl }}/docs/error-messages/#offer-not-exhaustive)
+
+---
+
 ## See also
 
 - [Actors]({{ site.baseurl }}/docs/actors/): mailboxes, `spawn`/`send`, and the scheduler these channels run on.

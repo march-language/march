@@ -319,6 +319,7 @@ let unboxed_vec3_src = {|mod UB do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(vx(forward(1.0, 2.0))))
+    ()
   end
 end|}
 
@@ -461,6 +462,7 @@ let module_vec3_src = {|mod UB do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(Geo.vx(Geo.forward(1.0, 2.0))))
+    ()
   end
 end|}
 
@@ -542,6 +544,7 @@ let unboxed_branch_join_src = {|mod UBJoin do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(spin(10, 0.0)))
+    ()
   end
 end|}
 
@@ -567,6 +570,7 @@ let unboxed_mixed_join_src = {|mod UBMixed do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(float_to_string(spin(10, 0.0)))
+    ()
   end
 end|}
 
@@ -597,6 +601,7 @@ let unboxed_multi_join_src = {|mod UBMulti do
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(int_to_string(spin(10, 0)))
+    ()
   end
 end|}
 
@@ -868,6 +873,7 @@ let test_nested_bool_lit_pattern_no_tag_switch () =
       println(classify(Ok(true)))
       println(classify(Ok(false)))
       println(classify(Err("x")))
+      ()
     end
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
@@ -892,6 +898,7 @@ let test_nested_int_lit_pattern_tagged_switch () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do
       println(classify(Ok(1)))
+      ()
     end
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
@@ -915,6 +922,7 @@ let test_nested_atom_lit_pattern_no_tag_switch () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do
       println(classify(Ok(:red)))
+      ()
     end
   end|} in
   Alcotest.(check int) "exactly one i32 ctor-tag switch (outer Ok/Err)" 1
@@ -1008,6 +1016,72 @@ let test_actor_msg_tags_stable_across_builds () =
      Alcotest.(check int) "the old type's Legacy carries v1's Tally.Legacy tag" legacy1 legacy_old;
      Alcotest.(check int) "the old type's Add carries v1's Tally.Add tag" add1 add_old
    | _ -> Alcotest.fail "unexpected ctor counts")
+
+(** H7 (specs/2026-11-04-lemmas-hcr-actors-choreography-design.md §3.4): the
+    tag function ignores declaration order. The deploy gate compares the
+    tags two builds recorded (Schema_diff.tag_check), which is only sound if
+    a reordering alone never moves one. Two builds here declare the same
+    actors with their types and their handlers in a different order, the
+    second with an unrelated extra actor and ordinary variants in between,
+    and include a pair of constructor names whose hashes land in ONE slot:
+    the case where a tag depends on the other keys in the build. Every
+    shared key gets the same tag. The colliding pair also shows the move the
+    gate exists for: the later-sorted name alone takes its hash slot, and
+    next to the other it probes to the next one. *)
+let test_actor_msg_tags_ignore_declaration_order () =
+  let module T = March_tir.Tir in
+  let module L = March_tir.Llvm_toplevel in
+  let module B = March_tir.Llvm_builtins in
+  let range = B.actor_message_tag_limit - B.actor_message_tag_base in
+  let slot key =
+    let d = Digest.string key in
+    ((Char.code d.[0] lsl 16) lor (Char.code d.[1] lsl 8) lor Char.code d.[2]) mod range in
+  (* A birthday search: ~5000 names for one shared 24-bit slot. *)
+  let seen = Hashtbl.create 8192 in
+  let rec find i =
+    let c = Printf.sprintf "C%d" i in
+    let s = slot ("Clash_Msg." ^ c) in
+    match Hashtbl.find_opt seen s with
+    | Some c0 -> (c0, c)
+    | None -> Hashtbl.add seen s c; find (i + 1) in
+  let c_a, c_b = find 0 in
+  let first, second =
+    if compare ("Clash_Msg." ^ c_a) ("Clash_Msg." ^ c_b) < 0 then (c_a, c_b) else (c_b, c_a) in
+  let v name ctors = T.TDVariant (name, List.map (fun c -> (c, [ T.TInt ])) ctors) in
+  let build_a =
+    [ v "Tally_Msg" [ "Add"; "Reset"; "Show" ]; v "Other_Msg" [ "Poke"; "Stop" ];
+      v "Clash_Msg" [ first; second ]; v "Color" [ "Red"; "Green" ] ] in
+  let build_b =
+    [ v "Extra_Msg" [ "Ping" ]; v "Clash_Msg" [ second; first ]; v "Color" [ "Green"; "Red" ];
+      v "Other_Msg" [ "Stop"; "Poke" ]; v "Tally_Msg" [ "Show"; "Reset"; "Add" ] ] in
+  let ta = L.actor_msg_tag_table ~pins:[] build_a in
+  let tb = L.actor_msg_tag_table ~pins:[] build_b in
+  let keys = List.sort compare (Hashtbl.fold (fun k _ acc -> k :: acc) ta []) in
+  Alcotest.(check int) "build A has every actor-message key" 7 (List.length keys);
+  List.iter (fun k ->
+      Alcotest.(check (option int)) (k ^ " keeps its tag across the reordering")
+        (Hashtbl.find_opt ta k) (Hashtbl.find_opt tb k)) keys;
+  (* The heap tags codegen installs ([variant_ctor_tags], per declaration
+     position) name the same constructor with the same tag. *)
+  let by_name types =
+    let tbl = L.variant_ctor_tags ~pins:[] ~collision_set:(Hashtbl.create 1) types in
+    List.concat_map (function
+        | T.TDVariant (n, ctors) when March_tir.Tir_names.is_actor_msg_name n ->
+          List.map2 (fun (c, _) t -> (n ^ "." ^ c, t)) ctors (Hashtbl.find tbl n)
+        | _ -> []) types
+    |> List.filter (fun (k, _) -> not (String.length k > 10 && String.sub k 0 10 = "Extra_Msg."))
+    |> List.sort compare in
+  Alcotest.(check (list (pair string int))) "installed heap tags agree by constructor name"
+    (by_name build_a) (by_name build_b);
+  (* The collision: what the deploy gate catches. *)
+  let alone = L.actor_msg_tag_table ~pins:[] [ v "Clash_Msg" [ second ] ] in
+  let s = slot ("Clash_Msg." ^ second) in
+  Alcotest.(check int) (second ^ " alone takes its hash slot")
+    (B.actor_message_tag_base + s) (Hashtbl.find alone ("Clash_Msg." ^ second));
+  Alcotest.(check int) (second ^ " next to " ^ first ^ " probes to the next slot")
+    (B.actor_message_tag_base + ((s + 1) mod range)) (Hashtbl.find ta ("Clash_Msg." ^ second));
+  Alcotest.(check int) (first ^ " keeps its hash slot")
+    (B.actor_message_tag_base + s) (Hashtbl.find ta ("Clash_Msg." ^ first))
 
 
 (** Finding 20 (compiled actor-struct state-write race, fixed): a genuine
@@ -1108,6 +1182,7 @@ let test_actor_suffix_named_user_type_not_treated_as_actor () =
       let shared = original
       let bumped = bump(original)
       println(int_to_string(bumped_val(bumped) + shared_val(shared)))
+      ()
     end
     fn bumped_val(t : Tree_Actor) : Int do
       match t do
@@ -1138,7 +1213,7 @@ let test_tco_factorial_has_loop () =
       if n == 0 do acc
       else factorial(n - 1, n * acc) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(factorial(10, 1))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(factorial(10, 1)))) end
   end|} in
   (* The tco_loop label and back-edge branch are the unique markers of TCO. *)
   Alcotest.(check bool) "TCO factorial: tco_loop block emitted" true
@@ -1158,7 +1233,7 @@ let test_tco_fold_has_loop () =
       Cons(h, t) -> fold(t, acc + h)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0)))) end
   end|} in
   Alcotest.(check bool) "TCO fold: tco_loop block emitted" true
     (ir_contains ir "tco_loop");
@@ -1174,7 +1249,7 @@ let test_tco_nontail_fib_no_loop () =
       if n < 2 do n
       else fib(n - 1) + fib(n - 2) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fib(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
   Alcotest.(check bool) "non-tail fib: no TCO loop" false
     (ir_contains ir "tco_loop");
@@ -1190,7 +1265,7 @@ let test_tco_countdown_has_loop () =
       if n == 0 do 0
       else count(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(count(100))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(count(100)))) end
   end|} in
   Alcotest.(check bool) "TCO countdown: tco_loop block emitted" true
     (ir_contains ir "tco_loop");
@@ -1210,7 +1285,7 @@ let test_mutual_tco_even_odd_loop_emitted () =
     fn odd(n : Int) : Bool do
       if n == 0 do false else even(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(to_string(even(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(even(1000000)))) end
   end|} in
   Alcotest.(check bool) "mutual TCO even/odd: mutual_loop block emitted" true
     (ir_contains ir "mutual_loop");
@@ -1240,7 +1315,7 @@ let test_mutual_tco_three_way () =
     fn fc(n : Int) : Int do
       if n == 0 do 0 else fa(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fa(99))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fa(99)))) end
   end|} in
   Alcotest.(check bool) "three-way mutual TCO: mutual_loop emitted" true
     (ir_contains ir "mutual_loop");
@@ -1261,7 +1336,7 @@ let test_mutual_tco_state_machine () =
     fn state_b(n : Int) : Int do
       if n <= 0 do 2 else state_a(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(state_a(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(state_a(1000000)))) end
   end|} in
   Alcotest.(check bool) "state machine mutual TCO: mutual_loop emitted" true
     (ir_contains ir "mutual_loop");
@@ -1281,7 +1356,7 @@ let test_mutual_tco_non_tail_no_loop () =
     fn count_g(n : Int) : Int do
       if n == 0 do 1 else count_f(n - 1) + 1 end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(count_f(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(count_f(10)))) end
   end|} in
   Alcotest.(check bool) "non-tail mutual recursion: no mutual_loop" false
     (ir_contains ir "mutual_loop")
@@ -1296,7 +1371,7 @@ let test_mutual_tco_self_tco_unaffected () =
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(countdown(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(countdown(10)))) end
   end|} in
   Alcotest.(check bool) "self TCO still works: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1351,7 +1426,7 @@ let test_mutual_tco_borrowed_arg_decref_on_live_path () =
         build_loop(s, n - 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(build_loop("z", 1000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(build_loop("z", 1000)))) end
   end|} in
   Alcotest.(check bool)
     "mutual-tco borrowed-arg: the group is flattened (mutual_loop emitted)"
@@ -1406,7 +1481,7 @@ let test_tco_self_fresh_arg_release_deferred () =
         str_to_int(String.join(rest, ""), acc * 10 + String.byte_size(c))
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(str_to_int("9000", 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(str_to_int("9000", 0)))) end
   end|} in
   let fn_ir =
     let start = Str.search_forward (Str.regexp "define [^\n]*@str_to_int(") ir 0 in
@@ -1440,7 +1515,7 @@ let test_mutual_tco_safe_group_still_flattened () =
     fn od(n : Int) : Bool do
       if n == 0 do false else ev(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(to_string(ev(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(ev(1000000)))) end
   end|} in
   Alcotest.(check bool) "safe mutual group (ints): mutual_loop emitted" true
     (ir_contains ir_ints "mutual_loop");
@@ -1459,7 +1534,7 @@ let test_mutual_tco_safe_group_still_flattened () =
     fn step(x : String, rest : List(String), seen : Int) : Int do
       if String.starts_with(x, "no") do walk(rest, seen + 1) else walk(rest, seen) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(walk(["no-a", "b"], 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(walk(["no-a", "b"], 0)))) end
   end|} in
   Alcotest.(check bool) "safe mutual group (owned list walk): mutual_loop emitted" true
     (ir_contains ir_list "mutual_loop");
@@ -1507,7 +1582,7 @@ let test_tco_self_dup_arg_decref_on_live_path () =
       Cons(_, t) -> walk(t, acc + 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(walk(["a", "b"], 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(walk(["a", "b"], 0)))) end
   end|} in
   Alcotest.(check bool) "self-tco dup-arg: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1577,7 +1652,7 @@ let test_deep_drop_of_borrowed_container () =
         go(buf, i + 1, n, acc + consume(parts))
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(go("a,b,c", 0, 2, 0))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(go("a,b,c", 0, 2, 0)))) end
   end|} in
   Alcotest.(check bool)
     "deep drop: the owner's drop of the split result calls a generated deep drop, not a bare decrc"
@@ -1627,6 +1702,7 @@ let test_drop_glue_name_is_structural () =
   end
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(int_to_string(List.length(outer(5))))
+    ()
   end
 end|} in
   let drop_syms ir =
@@ -1699,7 +1775,7 @@ let test_mutual_tco_non_tail_dec_chain_wrapped_no_loop () =
         build_loop(s, n - 1)
       end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(build_loop("z", 5))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(build_loop("z", 5)))) end
   end|} in
   Alcotest.(check bool)
     "non-tail dec-chain-wrapped group call: no mutual_loop formed for this pair"
@@ -1724,7 +1800,7 @@ let test_mutual_tco_has_reduction_check () =
     fn is_odd(n : Int) : Bool do
       if n == 0 do false else is_even(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(to_string(is_even(1000000))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(to_string(is_even(1000000)))) end
   end|} in
   Alcotest.(check bool) "mutual TCO is_even/is_odd: mutual_loop block emitted" true
     (ir_contains ir "mutual_loop");
@@ -1758,7 +1834,7 @@ let test_phase4_nonleaf_has_reduction_check () =
       if n <= 1 do n
       else fib(n - 1) + fib(n - 2) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(fib(10))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
   (* Must match the LOAD, not the preamble declaration: @march_tls_reductions
      and @march_preempt_request are both declared in every native preamble, so
@@ -1778,13 +1854,17 @@ let test_phase4_nonleaf_has_reduction_check () =
 
 (** All-leaf module (only builtin calls): NO reduction check anywhere.
     - square(n) = n * n        → only builtin `*`  → leaf
-    - main()    = println(42)  → only builtins      → leaf
-    Neither function should emit the icmp/br reduction check. *)
+    - main()    = int_to_string(42), then () → only builtins → leaf
+    Neither function should emit the icmp/br reduction check.  (Not
+    `println`: since capability operations return Result(T, CapError) it is
+    a Prelude function, and a call to it makes the caller non-leaf.) *)
 let test_phase4_leaf_fn_no_reduction_check () =
   let ir = emit_tco_ir {|mod Test do
-  needs IO.Console
     fn square(n : Int) : Int do n * n end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(42)) end
+    fn main() : Unit do
+      let _s = int_to_string(42)
+      ()
+    end
   end|} in
   (* No non-leaf functions → no preemption check IR anywhere in the output.
      Assert on the LOAD: the preamble declares @march_preempt_request
@@ -1800,7 +1880,7 @@ let test_phase4_tco_fn_reduction_in_loop () =
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
     end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(countdown(100))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(countdown(100)))) end
   end|} in
   Alcotest.(check bool) "TCO countdown: tco_loop emitted" true
     (ir_contains ir "tco_loop");
@@ -1816,7 +1896,7 @@ let test_phase4_nonrecursive_caller_has_check () =
   needs IO.Console
     fn double(n : Int) : Int do n + n end
     fn apply_double(n : Int) : Int do double(n) end
-    fn main(_cap_console : Cap(IO.Console)) : Unit do println(int_to_string(apply_double(3))) end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(apply_double(3)))) end
   end|} in
   (* apply_double calls double (non-builtin) → non-leaf → check emitted. *)
   Alcotest.(check bool) "apply_double: preemption check present" true
@@ -4094,6 +4174,23 @@ let test_fold_int_div_by_zero () =
   let _ = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "not changed" false !changed
 
+(* #1169: `/.` by 0.0 or -0.0 must stay a run-time division, which stops with
+   "division by zero"; a nonzero divisor still folds. *)
+let test_fold_float_div_by_zero () =
+  List.iter (fun z ->
+      let changed = ref false in
+      let m = mk_module [mk_fn "f" (fapp "/." [flit 1.0; flit z])] in
+      let _ = March_tir.Fold.run ~changed m in
+      Alcotest.(check bool) (Printf.sprintf "1.0 /. %g not folded" z) false !changed)
+    [0.0; -0.0];
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (fapp "/." [flit 1.0; flit 240.0])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "1.0 /. 240.0 folded" true !changed;
+  Alcotest.(check string) "1.0 /. 240.0"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (flit (1.0 /. 240.0))))
+    (March_tir.Tir.show_expr (first_body m'))
+
 let test_fold_float_add () =
   let changed = ref false in
   let m = mk_module [mk_fn "f" (fapp "+." [flit 1.5; flit 2.5])] in
@@ -4367,17 +4464,38 @@ let test_simplify_strength_reduce () =
      Alcotest.(check string) "x * 2 stays a multiply" "*" f.March_tir.Tir.v_name
    | _ -> Alcotest.fail "expected EApp(*)")
 
-let test_simplify_float_add_zero () =
+(* #1185: signed zeros. `x +. 0.0` must NOT simplify (-0.0 +. 0.0 = +0.0);
+   the true additive identity is -0.0. Dually `x -. 0.0` simplifies but
+   `x -. -0.0` must not. *)
+let float_simplify_case op args =
   let changed = ref false in
-  let x = avar "x" March_tir.Tir.TFloat in
   let fapp' op args =
     March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)), args) in
-  let m = mk_module [mk_fn "f" (fapp' "+." [x; flit 0.0])] in
+  let m = mk_module [mk_fn "f" (fapp' op args)] in
   let m' = March_tir.Simplify.run ~changed m in
-  Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "x+.0.0=x"
-    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
-    (March_tir.Tir.show_expr (first_body m'))
+  (!changed, first_body m')
+
+let test_simplify_float_add_zero () =
+  let x = avar "x" March_tir.Tir.TFloat in
+  let check_kept name op args =
+    let (changed, body) = float_simplify_case op args in
+    Alcotest.(check bool) (name ^ ": unchanged") false changed;
+    (match body with
+     | March_tir.Tir.EApp (f, _) ->
+       Alcotest.(check string) (name ^ ": stays " ^ op) op f.March_tir.Tir.v_name
+     | _ -> Alcotest.fail (name ^ ": expected EApp")) in
+  let check_folded name op args =
+    let (changed, body) = float_simplify_case op args in
+    Alcotest.(check bool) (name ^ ": changed") true changed;
+    Alcotest.(check string) (name ^ ": = x")
+      (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+      (March_tir.Tir.show_expr body) in
+  check_kept   "x+.0.0"    "+." [x; flit 0.0];
+  check_kept   "0.0+.x"    "+." [flit 0.0; x];
+  check_folded "x+.-0.0"   "+." [x; flit (-0.0)];
+  check_folded "-0.0+.x"   "+." [flit (-0.0); x];
+  check_folded "x-.0.0"    "-." [x; flit 0.0];
+  check_kept   "x-.-0.0"   "-." [x; flit (-0.0)]
 
 let test_simplify_bool_and_true () =
   let changed = ref false in
@@ -9102,7 +9220,7 @@ let test_http_serialize_request () =
       http_serialize_request("GET", "example.com", "/path", None, Nil, "")
     end
   end|} in
-  let raw = vstr (call_fn env "f" []) in
+  let raw = vstr (List.hd (vcon "Ok" (call_fn env "f" []))) in
   Alcotest.(check bool) "starts with GET /path"
     true (String.length raw > 0 && String.sub raw 0 14 = "GET /path HTTP")
 
@@ -9113,7 +9231,7 @@ let test_http_serialize_request_with_body () =
         Cons(Header("Content-Type", "text/plain"), Nil), "hello")
     end
   end|} in
-  let raw = vstr (call_fn env "f" []) in
+  let raw = vstr (List.hd (vcon "Ok" (call_fn env "f" []))) in
   Alcotest.(check bool) "contains body" true (
     let lines = String.split_on_char '\n' raw in
     List.exists (fun l -> String.trim l = "hello") lines)
@@ -10204,7 +10322,7 @@ let test_ffi_extern_explicit_symbol_ir () =
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int = "crc32_compute"
     end
-    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do println(int_to_string(crc32(255))) end
+    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do Authority.ignore(println(int_to_string(crc32(255)))) end
   end|} in
   Alcotest.(check bool) "calls the explicit C symbol" true
     (ir_contains ir "@crc32_compute");
@@ -10219,7 +10337,7 @@ let test_ffi_extern_default_symbol_ir () =
     extern "crc" : Cap(Ffi) do
       fn crc32(n: Int): Int
     end
-    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do println(int_to_string(crc32(255))) end
+    fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do Authority.ignore(println(int_to_string(crc32(255)))) end
   end|} in
   Alcotest.(check bool) "falls back to <lib>_<fn> when no symbol given" true
     (ir_contains ir "@crc_crc32")
@@ -10396,6 +10514,7 @@ let test_opt_without_perceus () =
     fn main(_cap_console : Cap(IO.Console)) : Unit do
       let t = Node(Node(Leaf, 1, Leaf), 2, Node(Leaf, 3, Leaf))
       println(int_to_string(sum(t)))
+      ()
     end
   end|} in
   let m = parse_and_desugar src in
@@ -10479,7 +10598,7 @@ let hcr_chain_src (leaf_body : string) : string =
   Printf.sprintf {|mod App do
     fn leaf(n : Int) : Int do %s end
     fn mid(n : Int) : Int do leaf(n) + 1 end
-    fn main() : Unit do println(int_to_string(mid(3))) end
+    fn main() : Unit do Authority.ignore(println(int_to_string(mid(3)))) end
   end|} leaf_body
 
 let hget tbl k = Hashtbl.find_opt tbl k
@@ -10723,6 +10842,531 @@ let write_march_source ~name src_text =
   output_string oc src_text;
   close_out oc;
   (project_root, main_exe, src, tmp)
+
+(* ── HTTP request-line / header injection (2026-11-09 todo, P1) ──────────
+   `http_serialize_request` used to copy the method, host, path, query and
+   headers into the request verbatim, so a CR/LF/space in any of them
+   smuggled a pipelined second request.  Both serializers (the interpreter's
+   in lib/eval/eval_builtins.ml and runtime/march_http.c) now return
+   Err(reason) instead, with the same message, and the compiled one emits the
+   headers it used to drop.  Run the same program interpreted and compiled
+   and require byte-identical output, plus the expected verdicts. *)
+let http_inject_src = {|mod HttpInject do
+  fn report(label, r) do
+    match r do
+    Ok(s) -> println(label ++ " OK[" ++ s ++ "]")
+    Err(e) -> println(label ++ " ERR " ++ e)
+    end
+  end
+
+  needs IO.Console
+
+  fn main(_console : Cap(IO.Console)) do
+    let accept = Cons(Header("Accept", "text/plain"), Nil)
+    report("plain", http_serialize_request("GET", "example.com", "/a%20b/c%2Fd", Some("x=1&y=%2F&z=a+b"), accept, ""))
+    report("body", http_serialize_request("POST", "example.com", "/api", None, accept, "hello"))
+    report("path", http_serialize_request("GET", "h", "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin", None, Nil, ""))
+    report("space", http_serialize_request("GET", "h", "/a b", None, Nil, ""))
+    report("pct", http_serialize_request("GET", "h", "/100%", None, Nil, ""))
+    report("hash", http_serialize_request("GET", "h", "/a#frag", None, Nil, ""))
+    report("query", http_serialize_request("GET", "h", "/", Some("a=1\r\nX-Evil: 1"), Nil, ""))
+    report("hval", http_serialize_request("GET", "h", "/", None, Cons(Header("X-Ok", "v\r\nX-Evil: 1"), Nil), ""))
+    report("hname", http_serialize_request("GET", "h", "/", None, Cons(Header("X-Evil\r\nFoo", "v"), Nil), ""))
+    report("hspace", http_serialize_request("GET", "h", "/", None, Cons(Header("Bad Name", "v"), Nil), ""))
+    report("method", http_serialize_request("GET /evil HTTP/1.1\r\n", "h", "/", None, Nil, ""))
+    report("host", http_serialize_request("GET", "h\r\nX-Evil: 1", "/", None, Nil, ""))
+  end
+end
+|}
+
+let test_http_serialize_injection_parity () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_inject" http_inject_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  let expect_line out label prefix =
+    let lines = String.split_on_char '\n' out in
+    let want = label ^ " " ^ prefix in
+    if not (List.exists (fun l ->
+        String.length l >= String.length want
+        && String.sub l 0 (String.length want) = want) lines)
+    then Alcotest.failf "expected a line starting %S in:\n%s" want out
+  in
+  let check_verdicts which out =
+    ignore which;
+    (* The ordinary request still goes out, %-escapes and query intact, with
+       its header. *)
+    Alcotest.(check bool) "plain request line kept verbatim" true
+      (contains "plain OK[GET /a%20b/c%2Fd?x=1&y=%2F&z=a+b HTTP/1.1\r\nHost: example.com\r\nAccept: text/plain\r\n\r\n]" out);
+    Alcotest.(check bool) "body + Content-Length" true
+      (contains "Accept: text/plain\r\nContent-Length: 5\r\n\r\nhello]" out);
+    expect_line out "path" "ERR http request rejected: path contains byte 0x20 at offset 2";
+    expect_line out "space" "ERR http request rejected: path contains byte 0x20 at offset 2";
+    expect_line out "pct" "ERR http request rejected: path has a malformed %-escape at offset 4";
+    expect_line out "hash" "ERR http request rejected: path contains byte 0x23 at offset 2";
+    expect_line out "query" "ERR http request rejected: query contains byte 0x0d at offset 3";
+    expect_line out "hval" "ERR http request rejected: header value contains byte 0x0d at offset 1";
+    expect_line out "hname" "ERR http request rejected: header name contains byte 0x0d at offset 6";
+    expect_line out "hspace" "ERR http request rejected: header name contains byte 0x20 at offset 3";
+    expect_line out "method" "ERR http request rejected: method contains byte 0x20 at offset 3";
+    expect_line out "host" "ERR http request rejected: host contains byte 0x0d at offset 1";
+    Alcotest.(check bool) "nothing smuggled" false (contains "DELETE /admin HTTP" out || contains "OK[GET /x" out)
+  in
+  check_verdicts "interpreter" interp_out;
+  let bin = Filename.concat tmp "http_inject_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let compiled_out = read_cmd_output (Filename.quote bin ^ " 2>&1") in
+    check_verdicts "compiled" compiled_out;
+    Alcotest.(check string) "interpreter and compiled serializers agree" interp_out compiled_out
+
+(* ── Compiled HTTP response parsing (2026-11-11 todo, P1) ─────────────────
+   `march_http_parse_response` (runtime/march_http.c) stored the status as a
+   raw integer where compiled code reads a tagged Int, so every odd status
+   read as (n - 1) / 2 (401 as 200, which let `step_raise_on_error` pass it);
+   it always returned an empty header list; and it never returned Err, so a
+   connection closed before a byte arrived parsed as a 200.  The interpreter
+   (lib/eval/eval_builtins.ml) was right.  Run one program both ways and
+   require the interpreter's verdicts and byte-identical output. *)
+let http_parse_src = {|mod HttpParse do
+  needs IO.Console
+
+  fn hdrs(acc, hs) do
+    match hs do
+      Nil -> acc
+      Cons(Header(n, v), rest) -> hdrs(acc ++ "[" ++ n ++ "=" ++ v ++ "]", rest)
+    end
+  end
+
+  fn report(label, raw) do
+    match http_parse_response(raw) do
+      Ok((code, hs, body)) ->
+        let cls = if code >= 400 do "error" else "ok" end
+        println(label ++ " " ++ int_to_string(code) ++ " " ++ cls ++ " " ++ hdrs("", hs) ++ " body<" ++ body ++ ">")
+      Err(e) -> println(label ++ " ERR " ++ e)
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    report("s200", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+    report("s201", "HTTP/1.1 201 Created\r\n\r\n")
+    report("s401", "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic\r\n\r\nno")
+    report("s503", "HTTP/1.1 503 Service Unavailable\r\n\r\n")
+    report("hdrs", "HTTP/1.1 307 X\r\nLocation:  /next \r\nno colon here\r\nX-A: 1:2\r\n\r\n")
+    report("nobody", "HTTP/1.1 204 No Content\r\nX-B: b")
+    report("crlf_in_body", "HTTP/1.1 200 OK\r\n\r\na\r\n\r\nb")
+    report("empty", "")
+    report("noline", "garbage")
+    report("badcode", "HTTP/1.1 abc OK\r\n\r\n")
+  end
+end
+|}
+
+let test_http_parse_response_parity () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_parse" http_parse_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  let check_verdicts which out =
+    let want l =
+      if not (contains l out) then Alcotest.failf "%s: expected %S in:\n%s" which l out in
+    want "s200 200 ok [Content-Length=2] body<hi>";
+    want "s201 201 ok  body<>";
+    want "s401 401 error [WWW-Authenticate=Basic] body<no>";
+    want "s503 503 error  body<>";
+    want "hdrs 307 ok [Location=/next][X-A=1:2] body<>";
+    want "nobody 204 ok [X-B=b] body<>";
+    want "crlf_in_body 200 ok  body<a\r\n\r\nb>";
+    want "empty ERR bad status line: \n";
+    want "noline ERR bad status line: garbage";
+    want "badcode ERR bad status code: abc"
+  in
+  check_verdicts "interpreter" interp_out;
+  let bin = Filename.concat tmp "http_parse_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let compiled_out = read_cmd_output (Filename.quote bin ^ " 2>&1") in
+    check_verdicts "compiled" compiled_out;
+    Alcotest.(check string) "interpreter and compiled parsers agree" interp_out compiled_out
+
+(* ── `&&` / `||` short-circuit (GAPS S17, 2026-11-11) ─────────────────────
+   `a && b` and `a || b` used to be strict builtins: both operands were
+   always evaluated, interpreted and compiled.  The refinement and
+   division-safety checkers reason as if they short-circuit (a `d != 0`
+   left of `&&` guards `n / d` on its right), so `d != 0 && 10 / d > 1`
+   passed `--check` and then divided by zero at run time, and an index
+   guard chain ending in `NativeArray.get_u8(a, i)` read out of bounds.
+   Both backends must now skip the right operand when the left decides the
+   result, and agree byte for byte. *)
+let short_circuit_src = {|mod ShortCircuit do
+  needs IO.Console
+
+  type Win = Win(Int, NativeU8Arr)
+
+  fn side(_c : Cap(IO.Console), tag : String, v : Bool) : Bool do
+    println("ran " ++ tag)
+    v
+  end
+
+  fn ratio_ok(d : Int) : Bool do d != 0 && 10 / d > 1 end
+
+  fn ratio_or(d : Int) : Bool do d == 0 || 10 / d > 1 end
+
+  fn solid(w : Win, i : Int) : Bool do
+    match w do
+      Win(n, a) -> i >= 0 && i < n && NativeArray.get_u8(a, i) == 1
+    end
+  end
+
+  fn named(s : String, xs : List(Int)) : Bool do
+    s == "x" && List.length(xs) > 0
+  end
+
+  fn verdict(label : String, b : Bool) : String do
+    label ++ "=" ++ bool_to_string(b)
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    println(verdict("f&&", false && side(c, "A", true)))
+    println(verdict("t||", true || side(c, "B", false)))
+    println(verdict("t&&", true && side(c, "C", false)))
+    println(verdict("f||", false || side(c, "D", true)))
+    println(verdict("chain", 1 > 2 && side(c, "E", true) && side(c, "F", true)))
+    println(verdict("mixed", (1 > 2 && side(c, "G", true)) || side(c, "H", true)))
+    println(verdict("div0", ratio_ok(0)))
+    println(verdict("div2", ratio_ok(2)))
+    println(verdict("or0", ratio_or(0)))
+    let w = Win(4, NativeArray.make_u8(4, 1))
+    println(verdict("in", solid(w, 3)))
+    println(verdict("neg", solid(w, -11)))
+    println(verdict("past", solid(w, 9)))
+    println(verdict("named", named("y", Cons(1, Nil))))
+    println(verdict("named2", named("x", Cons(1, Nil))))
+    let r = if 0 > 1 && side(c, "I", true) do "yes" else "no" end
+    println("if=" ++ r)
+  end
+end
+|}
+
+let short_circuit_expected = String.concat "\n" [
+  "f&&=false";
+  "t||=true";
+  "ran C";
+  "t&&=false";
+  "ran D";
+  "f||=true";
+  "chain=false";
+  "ran H";
+  "mixed=true";
+  "div0=false";
+  "div2=true";
+  "or0=true";
+  "in=true";
+  "neg=false";
+  "past=false";
+  "named=false";
+  "named2=true";
+  "if=no";
+]
+
+let test_and_or_short_circuit_parity () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"short_circuit" short_circuit_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter short-circuits" short_circuit_expected interp_out;
+  let bin = Filename.concat tmp "short_circuit_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let compiled_out = read_cmd_output (Filename.quote bin ^ " 2>&1") in
+    Alcotest.(check string) "compiled short-circuits" short_circuit_expected compiled_out
+
+(* Lowering keeps the strict `&&` builtin (one `and`) when the right operand
+   is eager-safe -- a scalar comparison that cannot fail or have an effect --
+   and branches on the left operand otherwise (a call, or `/` by a variable). *)
+let test_and_or_lowering_shape () =
+  let m = lower_module_typed {|mod ScShape do
+  fn pos(i : Int) : Bool do i > 0 end
+  fn guard(i : Int, n : Int) : Bool do i >= 0 && i < n end
+  fn rem_lit(i : Int) : Bool do i >= 0 || i % 7 == 3 end
+  fn call_rhs(i : Int) : Bool do i >= 0 && pos(i) end
+  fn div_rhs(d : Int) : Bool do d != 0 && 10 / d > 1 end
+end|} in
+  let body name =
+    let f = List.find (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name = name || String.ends_with ~suffix:("." ^ name) f.fn_name)
+        m.March_tir.Tir.tm_fns in
+    f.March_tir.Tir.fn_body in
+  Alcotest.(check bool) "scalar guard stays a strict &&" true (expr_calls "&&" (body "guard"));
+  Alcotest.(check bool) "literal-divisor % stays a strict ||" true (expr_calls "||" (body "rem_lit"));
+  Alcotest.(check bool) "a call on the right branches" false (expr_calls "&&" (body "call_rhs"));
+  Alcotest.(check bool) "a variable divisor on the right branches" false (expr_calls "&&" (body "div_rhs"))
+
+(* ── Inline NativeArray get/set (lib/tir/llvm_emit_narr.ml, 2026-11-11) ──
+   `NativeArray.get_<w>` / `set_<w>` used to be out-of-line calls into the C
+   runtime on every element.  They are now a bounds check plus a load/store
+   inline, with the runtime helper called only on the failing branch (out of
+   bounds, or a shared array that needs copy-on-write).  The program covers
+   every width (int, float, f32, i32, u8), narrowing on store and widening on
+   load, copy-on-write of a shared array, and the `||` guard from Strata's
+   fluid hash table (an out-of-bounds read if the right operand ran).  The
+   compiled output must match the interpreter's, a negative index must still
+   die with the runtime's message, and in the emitted IR the runtime helper
+   may appear only inside the failing block. *)
+let narr_inline_src = {|mod NarrInline do
+  needs IO.Console
+  needs IO.Process
+
+  pfn probe(slots : NativeIntArr, d : NativeIntArr, key : Int, s : Int) : Int do
+    let id1 = NativeArray.get_int(slots, s)
+    if id1 == 0 || NativeArray.get_int(d, 12 * (id1 - 1)) == key do s else probe(slots, d, key, s + 1) end
+  end
+
+  pfn fill(a : NativeIntArr, i : Int, n : Int) : NativeIntArr do
+    if i >= n do a else fill(NativeArray.set_int(a, i, i * i), i + 1, n) end
+  end
+
+  pfn sum(a : NativeIntArr, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else sum(a, i + 1, n, acc + NativeArray.get_int(a, i)) end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    match Authority.must(System.argv()) do
+      Cons(_, Cons("neg_get", _)) ->
+        println(int_to_string(NativeArray.get_int(NativeArray.make_int(4, 0), 0 - 12)))
+      Cons(_, Cons("neg_set", _)) ->
+        println(int_to_string(NativeArray.get_u8(NativeArray.set_u8(NativeArray.make_u8(4, 0), 0 - 1, 9), 0)))
+      _ ->
+        println(int_to_string(probe(NativeArray.make_int(8, 0), NativeArray.make_int(96, 0), 5, 0)))
+        let a = fill(NativeArray.make_int(10, 0), 0, 10)
+        println(int_to_string(sum(a, 0, 10, 0)))
+        -- shared: b and a alias; set must copy, leaving a unchanged
+        let b = a
+        let b2 = NativeArray.set_int(b, 3, 1000)
+        println(int_to_string(NativeArray.get_int(a, 3)) ++ " " ++ int_to_string(NativeArray.get_int(b2, 3)))
+        let f = NativeArray.set_float(NativeArray.make_float(3, 1.5), 2, 2.25)
+        println(float_to_string(NativeArray.get_float(f, 0)) ++ " " ++ float_to_string(NativeArray.get_float(f, 2)))
+        let g = NativeArray.set_f32(NativeArray.make_f32(3, 0.0), 1, 0.1)
+        println(float_to_string(NativeArray.get_f32(g, 1)))
+        let h = NativeArray.set_i32(NativeArray.make_i32(3, 0), 0, 4294967295 + 2147483648)
+        println(int_to_string(NativeArray.get_i32(h, 0)))
+        let h2 = NativeArray.set_i32(h, 1, 0 - 7)
+        println(int_to_string(NativeArray.get_i32(h2, 1)))
+        let u = NativeArray.set_u8(NativeArray.make_u8(3, 0), 2, 0 - 1)
+        let u2 = NativeArray.set_u8(u, 1, 300)
+        println(int_to_string(NativeArray.get_u8(u2, 2)) ++ " " ++ int_to_string(NativeArray.get_u8(u2, 1)))
+        let shared = NativeArray.make_u8(2, 5)
+        let s2 = NativeArray.set_u8(shared, 0, 6)
+        println(int_to_string(NativeArray.get_u8(shared, 0)) ++ " " ++ int_to_string(NativeArray.get_u8(s2, 0)))
+    end
+  end
+end
+|}
+
+let narr_inline_expected = String.concat "\n" [
+  "0"; "285"; "9 1000"; "1.5 2.25"; "0.10000000149"; "2147483647"; "-7";
+  "255 44"; "5 6";
+]
+
+let test_native_arr_inline_get_set () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"narr_inline" narr_inline_src in
+  let in_root = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+  let interp_out = read_cmd_output (Printf.sprintf "%s%s %s 2>&1"
+    in_root (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter" narr_inline_expected interp_out;
+  let bin = Filename.concat tmp "narr_inline_bin" in
+  (match compile_march_or_skip ~cmd_prefix:in_root ~main_exe ~bin ~src () with
+   | None -> ()
+   | Some bin ->
+     Alcotest.(check string) "compiled = interpreter" narr_inline_expected
+       (read_cmd_output (Filename.quote bin ^ " 2>&1"));
+     Alcotest.(check string) "negative get index panics as before"
+       "march: runtime error: native_int_arr_get: index -12 out of bounds (len=4)"
+       (read_cmd_output (Filename.quote bin ^ " neg_get 2>&1"));
+     Alcotest.(check string) "negative set index panics as before"
+       "march: runtime error: native_u8_arr_set: index -1 out of bounds (len=4)"
+       (read_cmd_output (Filename.quote bin ^ " neg_set 2>&1")));
+  (* IR shape: the runtime accessor is called only from the block the inline
+     check branches to on failure. *)
+  ignore (read_cmd_output (Printf.sprintf "cd %s && %s --emit-llvm %s 2>&1"
+    (Filename.quote tmp) (Filename.quote main_exe) (Filename.quote src)));
+  let ll = Filename.remove_extension src ^ ".ll" in
+  let lines = In_channel.with_open_text ll In_channel.input_all
+              |> String.split_on_char '\n' in
+  let label = ref "" and helper_calls = ref 0 and misplaced = ref [] in
+  List.iter (fun l ->
+      let t = String.trim l in
+      if String.length t > 1 && t.[String.length t - 1] = ':'
+         && not (String.contains t ' ') then label := t
+      else
+        List.iter (fun (w, block) ->
+            if ir_contains t (Printf.sprintf "@native_%s_arr_%s(" w
+                                (if block = "naget_oob" then "get" else "set"))
+               && ir_contains t "call " then begin
+              incr helper_calls;
+              if not (String.starts_with ~prefix:block !label) then
+                misplaced := t :: !misplaced
+            end)
+          [ ("int", "naget_oob"); ("int", "naset_slow"); ("u8", "naget_oob");
+            ("u8", "naset_slow"); ("float", "naset_slow"); ("i32", "naset_slow") ])
+    lines;
+  Alcotest.(check bool) "the runtime helpers are still the slow path" true
+    (!helper_calls > 0);
+  Alcotest.(check (list string)) "no runtime get/set call outside its slow block" []
+    (List.rev !misplaced)
+
+(* End to end through HttpTransport.request: an injected path is refused
+   before the connection is even opened, so a local listener sees no bytes
+   (interpreted and compiled). *)
+let test_http_transport_refuses_injected_path () =
+  let listen = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> try Unix.close listen with _ -> ()) @@ fun () ->
+  Unix.setsockopt listen Unix.SO_REUSEADDR true;
+  Unix.bind listen (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  Unix.listen listen 8;
+  let port = match Unix.getsockname listen with
+    | Unix.ADDR_INET (_, p) -> p | _ -> assert false in
+  let src_text = Printf.sprintf {|mod HttpInjectE2e do
+  needs IO.NetConnect
+  needs IO.Console
+
+  fn main(_net : Cap(IO.NetConnect), _console : Cap(IO.Console)) do
+    match Http.get("http://127.0.0.1:%d/ok") do
+    Err(_) -> println("URL")
+    Ok(req) ->
+      let bad = Http.set_header(Http.set_path(Http.set_body(req, ""), "/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"), "X-A", "b")
+      match HttpTransport.request(bad) do
+      Ok(_) -> println("SENT")
+      Err(HttpTransport.Refused(m)) -> println("REFUSED " ++ m)
+      Err(_) -> println("OTHER")
+      end
+    end
+  end
+end
+|} port in
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_inject_e2e" src_text in
+  (* Whatever reached the listener: no connection, or one with zero bytes. *)
+  let drain_listener () =
+    let got = Buffer.create 64 in
+    let rec loop () =
+      match Unix.select [listen] [] [] 0.2 with
+      | [], _, _ -> ()
+      | _ ->
+        let (c, _) = Unix.accept listen in
+        let b = Bytes.create 4096 in
+        (match Unix.select [c] [] [] 0.5 with
+         | [], _, _ -> ()
+         | _ -> let n = (try Unix.read c b 0 4096 with _ -> 0) in
+           Buffer.add_subbytes got b 0 n);
+        Unix.close c;
+        loop ()
+    in
+    loop ();
+    Buffer.contents got
+  in
+  let check which out =
+    Alcotest.(check string) (which ^ ": transport refuses the request")
+      "REFUSED http request rejected: path contains byte 0x20 at offset 2" out;
+    Alcotest.(check string) (which ^ ": listener received nothing") "" (drain_listener ())
+  in
+  check "interpreter" (read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+  let bin = Filename.concat tmp "http_inject_e2e_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin -> check "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
+
+(* File.Dir on Linux (ocap phase 2, Task 7): open_in resolves through
+   openat2(RESOLVE_BENEATH), which follows a symlink that stays inside the
+   directory (root/in -> sub) and refuses one that leaves it (root/out ->
+   /etc).  macOS refuses every symlink beneath a directory handle (the
+   documented difference; test/stdlib/test_file_dir.march covers the refusal
+   on both), so this case is Linux only.  Interpreted and compiled. *)
+let test_dir_beneath_symlink_linux () =
+  let os = String.trim (read_cmd_output "uname -s 2>/dev/null") in
+  if os <> "Linux" then
+    Printf.printf "[skip] dir_beneath_symlink_linux: %s is not Linux; macOS refuses \
+                   every symlink beneath a File.Dir, so an in-tree symlink cannot open there\n%!"
+      (if os = "" then "this OS" else os)
+  else begin
+    let root = Filename.temp_file "march_dir_beneath" "" in
+    Sys.remove root;
+    Unix.mkdir root 0o755;
+    Unix.mkdir (Filename.concat root "sub") 0o755;
+    let oc = open_out (Filename.concat root "sub/b.txt") in
+    output_string oc "B\n";
+    close_out oc;
+    Unix.symlink "sub" (Filename.concat root "in");
+    Unix.symlink "/etc" (Filename.concat root "out");
+    let src_text = Printf.sprintf {|mod DirBeneathLinux do
+  needs IO.FileRead
+  needs IO.Console
+
+  fn main(_r : Cap(IO.FileRead), _c : Cap(IO.Console)) do
+    match Authority.must(File.open_dir("%s")) do
+    Err(e) -> println("OPEN_DIR " ++ to_string(e))
+    Ok(d) ->
+      match File.open_in(d, "in/b.txt") do
+      Ok(h) ->
+        match File.read_line(h) do
+        Ok(Some(l)) -> println("IN " ++ l)
+        _ -> println("IN EMPTY")
+        end
+      Err(e) -> println("IN ERR " ++ to_string(e))
+      end
+      match File.open_in(d, "out/passwd") do
+      Ok(_) -> println("OUT OPENED")
+      Err(File.Escapes(_)) -> println("OUT ESCAPES")
+      Err(e) -> println("OUT ERR " ++ to_string(e))
+      end
+    end
+  end
+end
+|} root in
+    let (project_root, main_exe, src, tmp) =
+      write_march_source ~name:"dir_beneath_linux" src_text in
+    let expect which out =
+      Alcotest.(check string) (which ^ ": in-tree symlink opens, escaping one is refused")
+        "IN B\nOUT ESCAPES" out
+    in
+    expect "interpreter" (read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+    let bin = Filename.concat tmp "dir_beneath_linux_bin" in
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+            ~main_exe ~bin ~src () with
+    | None -> ()
+    | Some bin -> expect "compiled" (read_cmd_output (Filename.quote bin ^ " 2>&1"))
+  end
+
+(* A function used only as a value must remain reachable through mono. *)
+let test_other_module_function_value_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_module_fn_value" {|mod Main do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let k = List.length
+    println(int_to_string(k([1, 2])))
+    println(int_to_string(k(["a", "b", "c"])))
+  end
+end
+|} in
+  let bin = Filename.concat tmp "module_fn_value_bin" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string) "polymorphic module function bound as a value"
+      "2\n3" (read_cmd_output (Filename.quote bin))
 
 (* ── A nested module's call to an ENCLOSING module's fn ────────────────────
    specs/progress/2026-09-25-nested-module-parent-call.md.  `mod Outer do pfn
@@ -11240,6 +11884,7 @@ let borrowed_field_owner_src = {|mod Main do
     let base = live_allocs()
     let t = churn(2000, 0)
     println("leaked " ++ int_to_string(live_allocs() - base) ++ ", total " ++ int_to_string(t))
+    ()
   end
 end
 |}
@@ -11527,35 +12172,37 @@ let test_float_lit_no_wildcard_panics_compiled () =
    count (one immortal cell per site is the intended, and permanent, cost). *)
 let test_string_literal_operand_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_strlitleak"
-    "mod StrLitLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn concat_loop(buf : String, i : Int, n : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      let s = buf ++ \"xyz\"\n\
-    \      concat_loop(buf, i + 1, n, acc + String.byte_size(s))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-     -- Warm the literal site first, so its one permanent cell is already\n\
-     -- allocated when the baseline is sampled and only per-iteration growth\n\
-     -- can move the gauge.\n\
-    \    let warm = concat_loop(\"abc\", 0, 100, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = concat_loop(\"abc\", 0, 20000, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod StrLitLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn concat_loop(buf : String, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      let s = buf ++ "xyz"
+      concat_loop(buf, i + 1, n, acc + String.byte_size(s))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+-- Warm the literal site first, so its one permanent cell is already
+-- allocated when the baseline is sampled and only per-iteration growth
+-- can move the gauge.
+    let warm = concat_loop("abc", 0, 100, 0)
+    let base = live_allocs()
+    let bulk = concat_loop("abc", 0, 20000, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "strlitleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11583,45 +12230,47 @@ let test_string_literal_operand_no_leak_compiled () =
    prints "GREW 20000". *)
 let test_unboxed_aggregate_zero_live_allocs_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_ubgauge"
-    "mod UbGauge do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  type Vec3 = Vec3(Float, Float, Float)\n\
-    \  fn forward(yaw : Float, pitch : Float) : Vec3 do\n\
-    \    let cp = Math.cos(pitch)\n\
-    \    Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)\n\
-    \  end\n\
-    \  fn dot(a : Vec3, b : Vec3) : Float do\n\
-    \    match a do\n\
-    \      Vec3(ax, ay, az) ->\n\
-    \        match b do\n\
-    \          Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz\n\
-    \        end\n\
-    \    end\n\
-    \  end\n\
-    \  pfn spin(i : Int, n : Int, acc : Float) : Float do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      let v = forward(int_to_float(i) *. 0.001, 0.25)\n\
-    \      spin(i + 1, n, acc +. dot(v, v))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = spin(0, 100, 0.0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = spin(0, 20000, 0.0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm +. bulk > 0.0 && grew == 0 do\n\
-    \      println(\"ZERO\")\n\
-    \    else\n\
-    \      println(\"GREW \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod UbGauge do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  type Vec3 = Vec3(Float, Float, Float)
+  fn forward(yaw : Float, pitch : Float) : Vec3 do
+    let cp = Math.cos(pitch)
+    Vec3(0.0 -. Math.sin(yaw) *. cp, Math.sin(pitch), 0.0 -. Math.cos(yaw) *. cp)
+  end
+  fn dot(a : Vec3, b : Vec3) : Float do
+    match a do
+      Vec3(ax, ay, az) ->
+        match b do
+          Vec3(bx, b2, bz) -> ax *. bx +. ay *. b2 +. az *. bz
+        end
+    end
+  end
+  pfn spin(i : Int, n : Int, acc : Float) : Float do
+    if i >= n do acc
+    else
+      let v = forward(int_to_float(i) *. 0.001, 0.25)
+      spin(i + 1, n, acc +. dot(v, v))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = spin(0, 100, 0.0)
+    let base = live_allocs()
+    let bulk = spin(0, 20000, 0.0)
+    let grew = live_allocs() - base
+    if warm +. bulk > 0.0 && grew == 0 do
+      println("ZERO")
+    else
+      println("GREW " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "ubgaugebin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11650,38 +12299,40 @@ let test_unboxed_aggregate_zero_live_allocs_compiled () =
    the loop count (measured 5 000 -> 5 001, 20 000 -> 20 001 live objects). *)
 let test_unboxed_aggregate_branch_join_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_ubjoingauge"
-    "mod UbJoinGauge do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  type P2 = P2(Float, Float)\n\
-    \  pfn psum(p : P2) : Float do\n\
-    \    match p do\n\
-    \      P2(a, c) -> a +. c\n\
-    \    end\n\
-    \  end\n\
-    \  pfn spin(i : Int, acc : Float) : Float do\n\
-    \    if i == 0 do acc\n\
-    \    else\n\
-    \      let p = if i % 2 == 0 do P2(1.0, 2.0) else P2(3.0, 4.0) end\n\
-    \      spin(i - 1, acc +. psum(p))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = spin(100, 0.0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = spin(20000, 0.0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm +. bulk > 0.0 && grew == 0 do\n\
-    \      println(\"ZERO\")\n\
-    \    else\n\
-    \      println(\"GREW \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod UbJoinGauge do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  type P2 = P2(Float, Float)
+  pfn psum(p : P2) : Float do
+    match p do
+      P2(a, c) -> a +. c
+    end
+  end
+  pfn spin(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = if i % 2 == 0 do P2(1.0, 2.0) else P2(3.0, 4.0) end
+      spin(i - 1, acc +. psum(p))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = spin(100, 0.0)
+    let base = live_allocs()
+    let bulk = spin(20000, 0.0)
+    let grew = live_allocs() - base
+    if warm +. bulk > 0.0 && grew == 0 do
+      println("ZERO")
+    else
+      println("GREW " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "ubjoingaugebin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11694,6 +12345,208 @@ let test_unboxed_aggregate_branch_join_no_leak_compiled () =
         "an aggregate built inside a branch is boxed to cross the join and freed \
          again at the merge: the runtime's live-object count must not grow with \
          the iteration count; expected ZERO, got %S\n\n\
+         --- RC trace report (--rc-trace + MARCH_TRACE_GC=1) ---\n%s"
+        run_out (rc_trace_report ~project_root ~main_exe ~src ~tmp)
+
+(* ── A Float-valued `if`/`match` joins in a `double` slot ─────────────────
+
+   [Llvm_case.predicted_unboxed_join] had no case predicting `double`, so a
+   Float-valued case took the `ptr` slot: each arm boxed its value with
+   [march_alloc_float] and the merge unboxed and freed it, a malloc and a
+   free per evaluation (22 ns against 0.7 ns on the clamp-and-max loop in
+   specs/progress/2026-11-12-float-valued-case-join-slot.md).  When every arm
+   that reaches the merge is a Float the slot is `double` and nothing boxes.
+
+   [float_join_fns] is one function per arm shape: a variable against a
+   literal, a nested `else if` chain of arithmetic, a `match` whose arms are
+   a user call, `/.`, a `let` chain and a builtin call, a native-array read,
+   a niche-encoded Option scrutinee (its own slot, [slot_ty_n]), and a
+   `panic` arm that must not spoil the prediction. *)
+let float_join_fns = {|
+  pfn half(x : Float) : Float do x *. 0.5 end
+  pfn clamp(e : Float) : Float do
+    let c = if e > 0.0 do e else 0.0 end
+    c +. 1.0
+  end
+  pfn chain(e : Float) : Float do
+    let c = if e > 2.0 do e -. 2.0 else if e > 1.0 do e *. 3.0 else if e > 0.0 do 0.0 -. e else 0.25 end end end
+    c +. 1.0
+  end
+  pfn pick(i : Int, x : Float) : Float do
+    let c = match i do
+      0 -> half(x)
+      1 -> x /. 4.0
+      2 ->
+        let y = x +. 1.0
+        let z = y *. y
+        z
+      _ -> int_to_float(i)
+    end
+    c +. 1.0
+  end
+  pfn arr(h : NativeF32Arr, k : Int) : Float do
+    let c = if k > 1 do NativeArray.get_f32(h, k) else 0.5 end
+    c +. 1.0
+  end
+  pfn niche(o : Option(String)) : Float do
+    let c = match o do
+      Some(s) -> int_to_float(String.byte_size(s)) *. 1.5
+      None -> 0.0 -. 1.0
+    end
+    c +. 1.0
+  end
+  pfn diverge(i : Int, x : Float) : Float do
+    let c = match i do
+      0 -> x
+      1 -> x *. 2.0
+      _ -> panic("FloatJoin.diverge: bad selector")
+    end
+    c +. 1.0
+  end
+  pfn total(i : Int, n : Int, h : NativeF32Arr, acc : Float) : Float do
+    if i >= n do acc
+    else
+      let x = int_to_float(i % 7) *. 0.5 -. 1.0
+      let o = if i % 2 == 0 do Some("abc") else None end
+      let s = clamp(x) +. chain(x) +. pick(i % 4, x) +. arr(h, i % 4) +. niche(o)
+              +. diverge(i % 2, x)
+      total(i + 1, n, h, acc +. s)
+    end
+  end
+  pfn table() : NativeF32Arr do
+    NativeArray.set_f32(NativeArray.set_f32(NativeArray.make_f32(4, 0.0), 2, 2.5), 3, 0.0 -. 3.5)
+  end
+|}
+
+(* The fallback: one arm calls a closure, which the prediction does not
+   trust, so the join keeps the `ptr` slot, both arms box and
+   [Llvm_case.finish_ptr_merge] frees the box. *)
+let float_join_mixed_fns = {|
+  pfn mixed(f : Float -> Float, x : Float) : Float do
+    let c = if x > 1.0 do f(x) else 0.5 end
+    c +. 1.0
+  end
+  pfn mtotal(i : Int, n : Int, acc : Float) : Float do
+    if i >= n do acc
+    else
+      let x = int_to_float(i % 7) *. 0.5 -. 1.0
+      mtotal(i + 1, n, acc +. mixed(fn v -> v *. x, x))
+    end
+  end
+|}
+
+let float_join_print_main = {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(total(0, 50, table(), 0.0)))
+    println(float_to_string(mtotal(0, 50, 0.0)))
+    ()
+  end
+|}
+
+(* Same loops under the runtime's live-object gauge: warm once, then the
+   count must not move over a run 200 times longer.  Each run builds and
+   drops its own table, so the table does not move the gauge either. *)
+let float_join_gauge_main = {|
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = total(0, 100, table(), 0.0) +. mtotal(0, 100, 0.0)
+    let base = live_allocs()
+    let bulk = total(0, 20000, table(), 0.0) +. mtotal(0, 20000, 0.0)
+    let grew = live_allocs() - base
+    if warm +. bulk > 0.0 && grew == 0 do
+      println("ZERO")
+    else
+      println("GREW " ++ int_to_string(grew))
+    end
+    ()
+  end
+|}
+
+let float_join_src ~name ~needs fns main =
+  Printf.sprintf "mod %s do\n  needs IO.Console\n%s%s%s\nend\n" name needs fns main
+
+(* The `.ll` `march --emit-llvm` writes for [src] (next to the source). *)
+let float_join_cli_ir ~project_root ~main_exe ~src =
+  let ll = Filename.remove_extension src ^ ".ll" in
+  ignore (read_cmd_output (Printf.sprintf "cd %s && %s --emit-llvm %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)));
+  if Sys.file_exists ll then read_file_contents ll
+  else Alcotest.failf "march --emit-llvm wrote no %s" ll
+
+let test_float_case_join_slot_is_double () =
+  let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_floatjoin_ir"
+    (float_join_src ~name:"FloatJoinIr" ~needs:"" float_join_fns
+       {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(total(0, 50, table(), 0.0)))
+    ()
+  end
+|})
+  in
+  let ir = float_join_cli_ir ~project_root ~main_exe ~src in
+  Alcotest.(check bool) "the module has Float-valued joins at all" true
+    (ir_count ir "= alloca double" >= 6);
+  Alcotest.(check int) "no arm of a Float-valued if/match boxes its value" 0
+    (ir_count ir "call ptr @march_alloc_float(");
+  Alcotest.(check int) "so no merge unboxes one" 0
+    (ir_count ir "call double @march_unbox_float(")
+
+let test_float_case_join_mixed_arms_keep_ptr_slot () =
+  let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_floatjoin_mixed_ir"
+    (float_join_src ~name:"FloatJoinMixedIr" ~needs:"" float_join_mixed_fns
+       {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(float_to_string(mtotal(0, 50, 0.0)))
+    ()
+  end
+|})
+  in
+  let fn_ir = ir_define (float_join_cli_ir ~project_root ~main_exe ~src) "mtotal" in
+  Alcotest.(check bool) "the loop function is present in the IR" true (fn_ir <> "");
+  Alcotest.(check int) "both arms box to cross the ptr join" 2
+    (ir_count fn_ir "call ptr @march_alloc_float(");
+  (* The merge's own box: unboxed, then released by the same merge. *)
+  let re = Str.regexp
+      "\\(%case_r[0-9]+\\) = load ptr, ptr %res_slot[0-9]+\n[^\n]*call double @march_unbox_float(ptr \\1)\n[^\n]*call void @[_a-z]*march[_a-z]*decrc_local(ptr \\1)" in
+  Alcotest.(check bool) "the merge unboxes its box and frees it" true
+    (match Str.search_forward re fn_ir 0 with _ -> true | exception Not_found -> false)
+
+let test_float_case_join_matches_interpreter_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatjoin_parity"
+    (float_join_src ~name:"FloatJoinParity" ~needs:""
+       (float_join_fns ^ float_join_mixed_fns) float_join_print_main)
+  in
+  let cd = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+  let interp = read_cmd_output (Printf.sprintf "%s%s %s 2>&1" cd
+      (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "the interpreter printed two numbers" true
+    (List.length (String.split_on_char '\n' (String.trim interp)) = 2
+     && not (ir_contains interp "rror"));
+  let bin = Filename.concat tmp "floatjoinparitybin" in
+  match compile_march_or_skip ~cmd_prefix:cd ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    Alcotest.(check string) "compiled output equals the interpreter's" interp
+      (read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)))
+
+let test_float_case_join_no_leak_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatjoin_gauge"
+    (float_join_src ~name:"FloatJoinGauge" ~needs:"  needs Ffi\n  needs IO.Foreign\n"
+       (float_join_fns ^ float_join_mixed_fns) float_join_gauge_main)
+  in
+  let bin = Filename.concat tmp "floatjoingaugebin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)) in
+    if run_out <> "ZERO" then
+      Alcotest.failf
+        "Float-valued joins hold a double (and the mixed-arm join frees its \
+         box): the live-object count must not move over the loop; expected \
+         ZERO, got %S\n\n\
          --- RC trace report (--rc-trace + MARCH_TRACE_GC=1) ---\n%s"
         run_out (rc_trace_report ~project_root ~main_exe ~src ~tmp)
 
@@ -11714,36 +12567,38 @@ let test_unboxed_aggregate_branch_join_no_leak_compiled () =
    GROWTH, not an absolute count. *)
 let test_static_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_staticcloleak"
-    "mod StaticCloLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  fn double(x : Int) : Int do x * 2 end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      materialize_loop(i + 1, n, acc + apply_it(double, i))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-     -- Warm the materialization site first, so its one permanent static\n\
-     -- closure is already allocated when the baseline is sampled and only\n\
-     -- per-iteration growth can move the gauge.\n\
-    \    let warm = materialize_loop(0, 100, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 20000, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod StaticCloLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  fn double(x : Int) : Int do x * 2 end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      materialize_loop(i + 1, n, acc + apply_it(double, i))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+-- Warm the materialization site first, so its one permanent static
+-- closure is already allocated when the baseline is sampled and only
+-- per-iteration growth can move the gauge.
+    let warm = materialize_loop(0, 100, 0)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 20000, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "staticcloleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11772,35 +12627,37 @@ let test_static_closure_materialization_no_leak_compiled () =
    than scaling with the iteration count. *)
 let test_lambda_static_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_lambdacloleak"
-    "mod LambdaCloLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-    \      materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-     -- Warm the materialization site first, so its one permanent static\n\
-     -- closure is already allocated when the baseline is sampled and only\n\
-     -- per-iteration growth can move the gauge.\n\
-    \    let warm = materialize_loop(0, 100, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 20000, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod LambdaCloLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  pfn materialize_loop(i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+      materialize_loop(i + 1, n, acc + apply_it(fn x -> x * 2, i))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+-- Warm the materialization site first, so its one permanent static
+-- closure is already allocated when the baseline is sampled and only
+-- per-iteration growth can move the gauge.
+    let warm = materialize_loop(0, 100, 0)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 20000, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "lambdacloleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11831,34 +12688,36 @@ let test_lambda_static_closure_materialization_no_leak_compiled () =
    leak) and equally on a build with neither. *)
 let test_capturing_closure_materialization_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_capcloleak"
-    "mod CapCloLeak do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  pfn materialize_loop(i : Int, n : Int, k : Int, acc : Int) : Int do\n\
-    \    if i >= n do acc\n\
-    \    else\n\
-     -- `fn x -> x * k` captures k, so this allocates a real closure struct\n\
-     -- every iteration; it can never be routed to a static global.\n\
-    \      materialize_loop(i + 1, n, k, acc + apply_it(fn x -> x * k, i))\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = materialize_loop(0, 100, 2, 0)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 20000, 2, 0)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod CapCloLeak do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  pfn materialize_loop(i : Int, n : Int, k : Int, acc : Int) : Int do
+    if i >= n do acc
+    else
+-- `fn x -> x * k` captures k, so this allocates a real closure struct
+-- every iteration; it can never be routed to a static global.
+      materialize_loop(i + 1, n, k, acc + apply_it(fn x -> x * k, i))
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = materialize_loop(0, 100, 2, 0)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 20000, 2, 0)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "capcloleakbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11903,36 +12762,38 @@ let test_capturing_closure_materialization_no_leak_compiled () =
    not a leak. *)
 let test_self_recursive_capturing_closure_no_leak_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccap"
-    "mod SelfRecCap do\n\
-    \  needs IO.Console\n\
-    \  needs Ffi\n\
-    \  needs IO.Foreign\n\
-    \  extern \"m\" : Cap(Ffi) do\n\
-    \    fn live_allocs(): Int = \"march_live_allocs\"\n\
-    \  end\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  fn outer(k : Int, n : Int) : Int do\n\
-    \    fn helper(x : Int) : Int do\n\
-    \      if x <= 0 do 0 else helper(x - 1) + k end\n\
-    \    end\n\
-    \    apply_it(helper, n)\n\
-    \  end\n\
-    \  pfn materialize_loop(i : Int, acc : Int, k : Int) : Int do\n\
-    \    if i >= 20000 do acc\n\
-    \    else materialize_loop(i + 1, acc + outer(k, 5), k) end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do\n\
-    \    let warm = materialize_loop(0, 0, 2)\n\
-    \    let base = live_allocs()\n\
-    \    let bulk = materialize_loop(0, 0, 2)\n\
-    \    let grew = live_allocs() - base\n\
-    \    if warm + bulk > 0 && grew <= 8 do\n\
-    \      println(\"BOUNDED\")\n\
-    \    else\n\
-    \      println(\"LEAKED \" ++ int_to_string(grew))\n\
-    \    end\n\
-    \  end\n\
-     end\n"
+    {|mod SelfRecCap do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+  extern "m" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  fn outer(k : Int, n : Int) : Int do
+    fn helper(x : Int) : Int do
+      if x <= 0 do 0 else helper(x - 1) + k end
+    end
+    apply_it(helper, n)
+  end
+  pfn materialize_loop(i : Int, acc : Int, k : Int) : Int do
+    if i >= 20000 do acc
+    else materialize_loop(i + 1, acc + outer(k, 5), k) end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
+    let warm = materialize_loop(0, 0, 2)
+    let base = live_allocs()
+    let bulk = materialize_loop(0, 0, 2)
+    let grew = live_allocs() - base
+    if warm + bulk > 0 && grew <= 8 do
+      println("BOUNDED")
+    else
+      println("LEAKED " ++ int_to_string(grew))
+    end
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "selfreccapbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -11954,28 +12815,33 @@ let test_self_recursive_capturing_closure_no_leak_compiled () =
    crash rather than as unbounded growth. *)
 let test_self_recursive_capturing_closure_correct_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_selfreccapcorrect"
-    "mod SelfRecCapCorrect do\n\
-    \  needs IO.Console\n\
-    \  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end\n\
-    \  fn outer(k : Int, n : Int) : Int do\n\
-    \    fn helper(x : Int) : Int do\n\
-    \      if x <= 0 do k\n\
-    \      else if x == 1 do helper(x - 1) * 2\n\
-    \      else helper(x - 1) + helper(x - 2) end\n\
-    \      end\n\
-    \    end\n\
-    \    apply_it(helper, n)\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    println(int_to_string(outer(1, 0)))\n\
-    \    println(int_to_string(outer(1, 1)))\n\
-    \    println(int_to_string(outer(1, 6)))\n\
-    \    println(int_to_string(outer(-3, 10)))\n\
-    \  end\n\
-     end\n"
+    {|mod SelfRecCapCorrect do
+  needs IO.Console
+  pfn apply_it(f : Int -> Int, n : Int) : Int do f(n) end
+  fn outer(k : Int, n : Int) : Int do
+    fn helper(x : Int) : Int do
+      if x <= 0 do k
+      else if x == 1 do helper(x - 1) * 2
+      else helper(x - 1) + helper(x - 2) end
+      end
+    end
+    apply_it(helper, n)
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    println(int_to_string(outer(1, 0)))
+    println(int_to_string(outer(1, 1)))
+    println(int_to_string(outer(1, 6)))
+    println(int_to_string(outer(-3, 10)))
+    ()
+  end
+end
+|}
   in
+  (* stderr dropped: `helper` is deliberately double-recursive (fib-shaped), so
+     the checker's non-tail-recursion warning for local functions now fires. It
+     is not what this test pins; the values are. *)
   let interp_out = read_cmd_output (Printf.sprintf
-    "cd %s && %s %s 2>&1"
+    "cd %s && %s %s 2>/dev/null"
     (Filename.quote project_root)
     (Filename.quote main_exe) (Filename.quote src)) in
   Alcotest.(check string) "interpreted self-recursive capturing closure"
@@ -12031,6 +12897,7 @@ let test_try_call_single_capture_no_double_free_compiled () =
     \    Ok(_) -> println(\"ok\")\n\
     \    Err(e) -> println(\"err: \" ++ e)\n\
     \    end\n\
+    \    ()\n\
     \  end\n\
      end\n"
   in
@@ -12058,6 +12925,7 @@ let test_try_call_val_single_capture_no_double_free_compiled () =
     \    Ok(v) -> println(\"ok: \" ++ v)\n\
     \    Err(e) -> println(\"err: \" ++ e)\n\
     \    end\n\
+    \    ()\n\
     \  end\n\
      end\n"
   in
@@ -12087,6 +12955,7 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
     \    Ok(_) -> println(\"ok\")\n\
     \    Err(e) -> println(\"err: \" ++ e)\n\
     \    end\n\
+    \    ()\n\
     \  end\n\
      end\n"
   in
@@ -12123,20 +12992,22 @@ let test_try_call_panic_with_capture_no_double_free_compiled () =
    untag, 42 would come back as 85 ((42<<1)|1) compiled-only. *)
 let test_try_finally_value_and_order_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfin"
-    "mod TryFin do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let k = 40\n\
-    \    let n = try_finally(\n\
-    \      fn _ ->\n\
-    \        let _ = println(\"action\")\n\
-    \        k + 2,\n\
-    \      fn _ -> println(\"cleanup\"))\n\
-    \    println(int_to_string(n))\n\
-    \    let s = try_finally(fn _ -> \"he\" ++ \"ap\", fn _ -> ())\n\
-    \    println(s)\n\
-    \  end\n\
-     end\n"
+    {|mod TryFin do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let k = 40
+    let n = try_finally(
+      fn _ ->
+        let _ = println("action")
+        k + 2,
+      fn _ -> println("cleanup"))
+    println(int_to_string(n))
+    let s = try_finally(fn _ -> "he" ++ "ap", fn _ -> ())
+    println(s)
+    ()
+  end
+end
+|}
   in
   let expected = "action\ncleanup\n42\nheap" in
   let interp_out = read_cmd_output (Printf.sprintf
@@ -12161,18 +13032,20 @@ let test_try_finally_value_and_order_compiled () =
    enforced by construction inside march_try_finally. *)
 let test_try_finally_cleanup_runs_on_panic_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_tryfinpanic"
-    "mod TryFinPanic do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let label = \"kaboom\"\n\
-    \    let _ = try_finally(\n\
-    \      fn _ ->\n\
-    \        let _ = panic(label)\n\
-    \        0,\n\
-    \      fn _ -> println(\"cleanup-ran\"))\n\
-    \    println(\"unreachable\")\n\
-    \  end\n\
-     end\n"
+    {|mod TryFinPanic do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let label = "kaboom"
+    let _ = try_finally(
+      fn _ ->
+        let _ = panic(label)
+        0,
+      fn _ -> println("cleanup-ran"))
+    println("unreachable")
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "tryfinpanicbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12211,24 +13084,26 @@ let test_file_with_lines_streaming_compiled () =
   close_out oc;
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_withlines"
     (Printf.sprintf
-    "mod WithLines do\n\
-    \  needs IO.Console\n\
-    \  needs IO.FileRead\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : Unit do\n\
-    \    let path = \"%s\"\n\
-    \    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do\n\
-    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
-    \    Ok(first3) -> do\n\
-    \      println(int_to_string(List.length(first3)))\n\
-    \      println(List.fold_left(first3, \"\", fn(acc, line) -> acc ++ line ++ \"|\"))\n\
-    \    end\n\
-    \    end\n\
-    \    match File.with_lines(path, fn(lines) -> Seq.to_list(lines)) do\n\
-    \    Err(e) -> println(\"Error: \" ++ to_string(e))\n\
-    \    Ok(all) -> println(int_to_string(List.length(all)))\n\
-    \    end\n\
-    \  end\n\
-     end\n" input_path)
+    {|mod WithLines do
+  needs IO.Console
+  needs IO.FileRead
+  fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : Unit do
+    let path = "%s"
+    match Authority.must(File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3)))) do
+    Err(e) -> println("Error: " ++ to_string(e))
+    Ok(first3) -> do
+      println(int_to_string(List.length(first3)))
+      println(List.fold_left(first3, "", fn(acc, line) -> acc ++ line ++ "|"))
+    end
+    end
+    match Authority.must(File.with_lines(path, fn(lines) -> Seq.to_list(lines))) do
+    Err(e) -> println("Error: " ++ to_string(e))
+    Ok(all) -> println(int_to_string(List.length(all)))
+    end
+    ()
+  end
+end
+|} input_path)
   in
   let expected = "3\nalpha|beta|gamma|\n5" in
   let interp_out = read_cmd_output (Printf.sprintf
@@ -12279,17 +13154,19 @@ let test_file_with_lines_streaming_compiled () =
    call site, not a last-use consume. *)
 let test_native_array_map_reused_capturing_closure_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrmapcap"
-    "mod ArrMapCap do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let k = 7\n\
-    \    let closure = fn x -> x + k\n\
-    \    let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))\n\
-    \    let a2 = NativeArray.map_int(a1, closure)\n\
-    \    println(NativeArray.to_list_int(a2))\n\
-    \    println(int_to_string(closure(100)))\n\
-    \  end\n\
-     end\n"
+    {|mod ArrMapCap do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let k = 7
+    let closure = fn x -> x + k
+    let a1 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
+    let a2 = NativeArray.map_int(a1, closure)
+    println(NativeArray.to_list_int(a2))
+    println(int_to_string(closure(100)))
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "arrmapcapbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12325,16 +13202,18 @@ let test_native_array_map_reused_capturing_closure_compiled () =
    MUST be preserved — the alias must observe the ORIGINAL, not the mutation. *)
 let test_native_array_set_int_alias_cow_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setalias"
-    "mod SetAlias do\n\
-    \  needs IO.Console\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let a = NativeArray.make_int(4, 0)\n\
-    \    let b = NativeArray.set_int(a, 0, 99)\n\
-    \    -- a is read AFTER set_int -> aliased (rc>1) -> must be unchanged.\n\
-    \    println(int_to_string(NativeArray.get_int(a, 0)))\n\
-    \    println(int_to_string(NativeArray.get_int(b, 0)))\n\
-    \  end\n\
-     end\n"
+    {|mod SetAlias do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let a = NativeArray.make_int(4, 0)
+    let b = NativeArray.set_int(a, 0, 99)
+    -- a is read AFTER set_int -> aliased (rc>1) -> must be unchanged.
+    println(int_to_string(NativeArray.get_int(a, 0)))
+    println(int_to_string(NativeArray.get_int(b, 0)))
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "setaliasbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12354,21 +13233,23 @@ let test_native_array_set_int_alias_cow_compiled () =
    the value is the sum of the 8 last writes per position. *)
 let test_native_array_set_int_inplace_churn_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_setchurn"
-    "mod SetChurn do\n\
-    \  needs IO.Console\n\
-    \  fn go(arr, i : Int, n : Int) : Int do\n\
-    \    if i >= n do\n\
-    \      NativeArray.sum_int(arr)\n\
-    \    else\n\
-    \      let arr2 = NativeArray.set_int(arr, i % 8, i)\n\
-    \      go(arr2, i + 1, n)\n\
-    \    end\n\
-    \  end\n\
-    \  fn main(_cap_console : Cap(IO.Console)) : Unit do\n\
-    \    let arr = NativeArray.make_int(8, 0)\n\
-    \    println(int_to_string(go(arr, 0, 2000000)))\n\
-    \  end\n\
-     end\n"
+    {|mod SetChurn do
+  needs IO.Console
+  fn go(arr, i : Int, n : Int) : Int do
+    if i >= n do
+      NativeArray.sum_int(arr)
+    else
+      let arr2 = NativeArray.set_int(arr, i % 8, i)
+      go(arr2, i + 1, n)
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let arr = NativeArray.make_int(8, 0)
+    println(int_to_string(go(arr, 0, 2000000)))
+    ()
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "setchurnbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12455,18 +13336,35 @@ let test_blocking_ffi_pool_reuses_threads_compiled () =
    fix, every run below is clean after it. *)
 let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_sigwatchcap"
-    "mod SigWatchCap do\n\
-    \  needs IO.Console\n\
-    \  needs IO.Signal\n\
-    \  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal)) do\n\
-    \    let k = 99\n\
-    \    Signal.watch(Signal.Usr2, fn -> println(\"caught \" ++ int_to_string(k)))\n\
-    \    Signal.raise(Signal.Usr2)\n\
-    \    Signal.raise(Signal.Usr2)\n\
-    \    Signal.raise(Signal.Usr2)\n\
-    \    println(\"done\")\n\
-    \  end\n\
-     end\n"
+    {|mod SigWatchCap do
+  needs IO.Console
+  needs IO.Signal
+  needs IO.Mut
+  needs IO.Clock
+  pfn delivered(seen : Vault(Int), n : Int, left : Int) : () do
+    if Vault.get_or(seen, "n", 0) >= n do ()
+    else if left <= 0 do panic("delivery " ++ int_to_string(n) ++ " never ran") else
+      sleep_ms(1)
+      delivered(seen, n, left - 1)
+    end end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_signal : Cap(IO.Signal), _cap_mut : Cap(IO.Mut), _cap_clock : Cap(IO.Clock)) do
+    let k = 99
+    let seen : Vault(Int) = Authority.must(Vault.new("sigwatchcap_seen"))
+    Signal.watch(Signal.Usr2, fn ->
+      let _ = println("caught " ++ int_to_string(k))
+      let _ = Vault.incr(seen, "n", 1)
+      ())
+    Signal.raise(Signal.Usr2)
+    delivered(seen, 1, 30000)
+    Signal.raise(Signal.Usr2)
+    delivered(seen, 2, 30000)
+    Signal.raise(Signal.Usr2)
+    delivered(seen, 3, 30000)
+    println("done")
+  end
+end
+|}
   in
   let bin = Filename.concat tmp "sigwatchcapbin" in
   match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
@@ -12474,9 +13372,31 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
   | None -> ()  (* legitimate, counted skip: no clang on PATH *)
   | Some bin ->
     let cmd = Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin) in
+    (* Each raise is ACKNOWLEDGED before the next one: the watcher counts its
+       own runs in a Vault and main waits for that count after every raise.
+       A watched signal is one pending flag that the scheduler drain claims
+       (march_signal_drain's atomic_exchange), so raises sent back to back
+       coalesce. Measured 2026-11-11 on the old program (three raises in a
+       row, then "done"), 2000 runs: the handler ran once in 1800, twice in
+       184 and three times in 16. The regression this test guards crashes on
+       delivery TWO, so nine runs in ten could not have caught it, and a
+       delivery still in flight when main returned raced the process's exit.
+       With the acknowledgement every run makes exactly three deliveries, each
+       finished before the next raise and before "done"; the count is asserted
+       so the test can never go back to passing on one. *)
+    let count_of out sub =
+      let n = String.length sub in
+      let rec go i acc =
+        if i + n > String.length out then acc
+        else if String.sub out i n = sub then go (i + n) (acc + 1)
+        else go (i + 1) acc
+      in
+      go 0 0
+    in
     let ok out =
       ir_contains out "done" && ir_contains out "EXIT:0"
       && not (ir_contains out "RC underflow")
+      && count_of out "caught 99" = 3
     in
     (* Retry a failing iteration ONCE before failing the suite, and report what
        was actually captured when it fails twice.
@@ -12507,9 +13427,10 @@ let test_signal_watch_capturing_handler_repeated_delivery_compiled () =
         let retry_out = read_cmd_output cmd in
         if not (ok retry_out) then
           Alcotest.failf
-            "a capturing Signal.watch handler delivered 3 times must not be \
-             freed after the first delivery (long-lived, unbounded-repeat \
-             call site) - iteration %d failed twice. first attempt: %S retry: %S"
+            "a capturing Signal.watch handler must run once per acknowledged \
+             raise (3) and not be freed after the first delivery (long-lived, \
+             unbounded-repeat call site) - iteration %d failed twice. first \
+             attempt: %S retry: %S"
             i run_out retry_out
       end
     done
@@ -12715,6 +13636,519 @@ let test_nested_tuple_let_deep_wildcard_compiled () =
       "compiled deep nested-tuple `let` (3-level nesting, wildcard element, \
        interior nested tuple) matches the interpreter"
       "15" run_out
+
+(* ── task_poll: the non-blocking counterpart of task_await ─────────────────
+   task_poll(t) : Option(Result(a, String)) answers None at once while t runs
+   and Some(r) once it has finished, r being exactly task_await(t)'s answer.
+   It borrows the Task (no RC traffic per poll) and never waits, so a frame
+   loop can poll hundreds of tasks.  The interpreter runs a task eagerly at
+   spawn, so there every poll answers Some; the "still running" half is
+   covered by the compiled program below. *)
+
+let test_eval_task_poll_finished () =
+  let src = {|mod Test do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 42)
+      match task_poll(t) do
+        Some(Ok(v)) -> v
+        Some(Err(_)) -> -1
+        None -> -2
+      end
+    end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check int) "finished task polls Some(Ok(42))" 42
+    (vint (call_fn env "main" []))
+
+let test_eval_task_poll_cancelled () =
+  let src = {|mod Test do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 42)
+      task_cancel_by_id(t)
+      match task_poll(t) do
+        Some(Ok(_)) -> 0
+        Some(Err(_)) -> 1
+        None -> 2
+      end
+    end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check int) "cancelled task polls Some(Err(_))" 1
+    (vint (call_fn env "main" []))
+
+let test_eval_task_poll_then_await () =
+  let src = {|mod Test do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 7)
+      let a = match task_poll(t) do
+        Some(Ok(v)) -> v
+        _ -> -1
+      end
+      let b = match task_poll(t) do
+        Some(Ok(v)) -> v
+        _ -> -1
+      end
+      let c = match task_await(t) do
+        Ok(v) -> v
+        Err(_) -> -1
+      end
+      a * 100 + b * 10 + c
+    end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check int) "poll, poll again and await agree" 777
+    (vint (call_fn env "main" []))
+
+let test_compile_task_poll_in_ir () =
+  let ir = emit_actor_ir {|mod TaskPollTest do
+  needs IO.Spawn
+    fn main() do
+      let t = task_spawn(fn _ -> 42)
+      task_poll(t)
+    end
+  end|} in
+  Alcotest.(check bool) "uses march_task_poll" true
+    (ir_contains ir "call ptr @march_task_poll");
+  Alcotest.(check bool) "never waits (no march_task_await call)" false
+    (ir_contains ir "call ptr @march_task_await")
+
+(* Backend-neutral: every poll is made after the task has finished, so the
+   interpreter and the compiled binary must print the same thing. *)
+let task_poll_neutral_src = {|mod TaskPollNeutral do
+  needs IO
+
+  pfn poll_until(t, nones) do
+    match task_poll(t) do
+      Some(r) -> (r, nones)
+      None ->
+        task_yield()
+        poll_until(t, nones + 1)
+    end
+  end
+
+  pfn show_int(r : Result(Int, String)) : String do
+    match r do
+      Ok(v) -> "Ok(" ++ int_to_string(v) ++ ")"
+      Err(_) -> "Err"
+    end
+  end
+
+  pfn show_poll(p : Option(Result(Int, String))) : String do
+    match p do
+      None -> "None"
+      Some(r) -> "Some(" ++ show_int(r) ++ ")"
+    end
+  end
+
+  pfn spawn_many(n : Int, acc : List(Task(Int))) : List(Task(Int)) do
+    if n <= 0 do acc
+    else spawn_many(n - 1, Cons(task_spawn(fn _ -> n * 10), acc))
+    end
+  end
+
+  pfn sweep(ts : List(Task(Int)), pending : List(Task(Int)), sum : Int) do
+    match ts do
+      Nil -> (pending, sum)
+      Cons(t, rest) ->
+        match task_poll(t) do
+          None -> sweep(rest, Cons(t, pending), sum)
+          Some(Ok(v)) -> sweep(rest, pending, sum + v)
+          Some(Err(_)) -> sweep(rest, pending, sum - 1000000)
+        end
+    end
+  end
+
+  pfn drain(ts : List(Task(Int)), sum : Int) : Int do
+    match ts do
+      Nil -> sum
+      _ ->
+        let (pending, s2) = sweep(ts, Nil, sum)
+        task_yield()
+        drain(pending, s2)
+    end
+  end
+
+  fn main(_cap : Cap(IO)) do
+    let t = task_spawn(fn _ -> 6 * 7)
+    let (r, _n) = poll_until(t, 0)
+    println("finished: " ++ show_int(r))
+    println("again: " ++ show_poll(task_poll(t)))
+    println("await: " ++ show_int(task_await(t)))
+    println("poll after await: " ++ show_poll(task_poll(t)))
+
+    let doomed = task_spawn(fn _ -> 7)
+    let (r2, _n2) = poll_until(doomed, 0)
+    println("before cancel: " ++ show_int(r2))
+    task_cancel_by_id(doomed)
+    println("cancelled: " ++ show_poll(task_poll(doomed)))
+    println("cancelled await: " ++ show_int(task_await(doomed)))
+
+    let ft = task_spawn(fn _ -> 2.5)
+    let (fr, _n3) = poll_until(ft, 0)
+    let f1 = match fr do
+      Ok(f) -> float_to_string(f)
+      Err(_) -> "Err"
+    end
+    let f2 = match task_poll(ft) do
+      Some(Ok(f)) -> float_to_string(f)
+      _ -> "?"
+    end
+    let f3 = match task_await(ft) do
+      Ok(f) -> float_to_string(f)
+      Err(_) -> "Err"
+    end
+    println("float: " ++ f1 ++ " " ++ f2 ++ " " ++ f3)
+
+    let st = task_spawn(fn _ -> "s" ++ int_to_string(5))
+    let (sr, _n4) = poll_until(st, 0)
+    let s1 = match sr do
+      Ok(s) -> s
+      Err(_) -> "Err"
+    end
+    let s2 = match task_poll(st) do
+      Some(Ok(s)) -> s
+      _ -> "?"
+    end
+    println("string: " ++ s1 ++ " " ++ s2)
+
+    let many = spawn_many(200, Nil)
+    println("many: " ++ int_to_string(drain(many, 0)))
+  end
+end
+|}
+
+let task_poll_neutral_expected =
+  "finished: Ok(42)\nagain: Some(Ok(42))\nawait: Ok(42)\n\
+   poll after await: Some(Ok(42))\nbefore cancel: Ok(7)\n\
+   cancelled: Some(Err)\ncancelled await: Err\n\
+   float: 2.5 2.5 2.5\nstring: s5 s5\nmany: 201000"
+
+(* Compiled only: the task waits on a Vault gate main opens later, so main
+   sees it still running.  The interpreter would run the gated task at spawn.
+   The gate times out after 5 s (answer 41, not 42), so a poll that blocked
+   until the task finished fails "prompt" instead of hanging the suite. *)
+let task_poll_pending_src = {|mod TaskPollPending do
+  needs IO
+
+  pfn wait_gate(g : Vault(Int), deadline : Int) : Int do
+    match Vault.get(g, "go") do
+      Some(v) -> v
+      None ->
+        if unix_time_ms() >= deadline do 0
+        else
+          sleep_ms(1)
+          wait_gate(g, deadline)
+        end
+    end
+  end
+
+  pfn count_nones(t : Task(Int), n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      match task_poll(t) do
+        None -> count_nones(t, n - 1, acc + 1)
+        Some(_) -> count_nones(t, n - 1, acc)
+      end
+    end
+  end
+
+  pfn poll_until(t : Task(Int), nones : Int) do
+    match task_poll(t) do
+      Some(r) -> (r, nones)
+      None ->
+        task_yield()
+        poll_until(t, nones + 1)
+    end
+  end
+
+  pfn show_int(r : Result(Int, String)) : String do
+    match r do
+      Ok(v) -> "Ok(" ++ int_to_string(v) ++ ")"
+      Err(e) -> "Err(" ++ e ++ ")"
+    end
+  end
+
+  pfn poll_any(t, nones) do
+    match task_poll(t) do
+      Some(r) -> (r, nones)
+      None ->
+        task_yield()
+        poll_any(t, nones + 1)
+    end
+  end
+
+  -- Each task's heap result is read four ways; the Task keeps one reference
+  -- and every read takes its own, so nothing may be left over.
+  pfn str_leg(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> "v" ++ int_to_string(n))
+      let (r, _k) = poll_any(t, 0)
+      let a = match r do
+        Ok(s) -> string_byte_length(s)
+        Err(_) -> 0
+      end
+      let b = match task_poll(t) do
+        Some(Ok(s)) -> string_byte_length(s)
+        _ -> 0
+      end
+      let c = match task_await(t) do
+        Ok(s) -> string_byte_length(s)
+        Err(_) -> 0
+      end
+      let d = string_byte_length(task_await_unwrap(t))
+      str_leg(n - 1, acc + a + b + c + d)
+    end
+  end
+
+  pfn float_leg(n : Int, acc : Float) : Float do
+    if n <= 0 do acc
+    else
+      let t = task_spawn(fn _ -> int_to_float(n) +. 0.5)
+      let (r, _k) = poll_any(t, 0)
+      let a = match r do
+        Ok(f) -> f
+        Err(_) -> 0.0
+      end
+      let b = match task_poll(t) do
+        Some(Ok(f)) -> f
+        _ -> 0.0
+      end
+      float_leg(n - 1, acc +. a +. b +. task_await_unwrap(t))
+    end
+  end
+
+  -- live_allocs once the last task's trampoline has dropped its hold.
+  pfn settled_allocs() : Int do
+    sleep_ms(50)
+    live_allocs()
+  end
+
+  fn main(_cap : Cap(IO)) do
+    let g = Authority.must(Vault.new("task_poll_pending_gate"))
+    let deadline = unix_time_ms() + 5000
+    let slow = task_spawn(fn _ -> wait_gate(g, deadline) + 41)
+    let t0 = unix_time_ms()
+    let first = match task_poll(slow) do
+      None -> "None"
+      Some(_) -> "Some"
+    end
+    let nones = count_nones(slow, 1000, 0)
+    let took = unix_time_ms() - t0
+    println("pending: " ++ first)
+    println("polls while pending: " ++ int_to_string(nones) ++ " None")
+    println("prompt: " ++ bool_to_string(took < 1000))
+    Vault.set(g, "go", 1)
+    let (r, _n) = poll_until(slow, 0)
+    println("finished: " ++ show_int(r))
+    println("await: " ++ show_int(task_await(slow)))
+    let _warm = str_leg(4, 0) + float_to_int(float_leg(4, 0.0))
+    let b0 = settled_allocs()
+    let sl = str_leg(1000, 0)
+    let b1 = settled_allocs()
+    let fl = float_leg(1000, 0.0)
+    let b2 = settled_allocs()
+    println("string reads: " ++ int_to_string(sl) ++ " leaked " ++ int_to_string(b1 - b0))
+    println("float reads: " ++ float_to_string(fl) ++ " leaked " ++ int_to_string(b2 - b1))
+  end
+end
+|}
+
+let task_poll_pending_expected =
+  "pending: None\npolls while pending: 1000 None\nprompt: true\n\
+   finished: Ok(42)\nawait: Ok(42)\n\
+   string reads: 15572 leaked 0\nfloat reads: 1503000. leaked 0"
+
+let test_task_poll_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_task_poll_neutral" task_poll_neutral_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter" task_poll_neutral_expected interp_out;
+  let (_, _, psrc, ptmp) =
+    write_march_source ~name:"march_task_poll_pending" task_poll_pending_src in
+  let run label bin expected =
+    List.iter (fun env ->
+        let out = read_cmd_output
+            (Printf.sprintf "%s %s 2>&1; echo EXIT:$?" env (Filename.quote bin)) in
+        Alcotest.(check string) (Printf.sprintf "%s [%s]" label env)
+          (expected ^ "\nEXIT:0") out)
+      [ "MARCH_NUM_SCHEDULERS=1"; "env" ] in
+  List.iter (fun opt ->
+      let extra_args = Printf.sprintf "--opt %d" opt in
+      let cmd_prefix = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+      (match compile_march_or_skip ~cmd_prefix ~extra_args ~main_exe
+               ~bin:(Filename.concat tmp (Printf.sprintf "poll_neutral_o%d" opt)) ~src () with
+       | None -> ()
+       | Some bin ->
+         run (Printf.sprintf "--opt %d: finished/cancelled/many tasks" opt)
+           bin task_poll_neutral_expected);
+      (match compile_march_or_skip ~cmd_prefix ~extra_args ~main_exe
+               ~bin:(Filename.concat ptmp (Printf.sprintf "poll_pending_o%d" opt)) ~src:psrc () with
+       | None -> ()
+       | Some bin ->
+         run (Printf.sprintf "--opt %d: a running task polls None at once" opt)
+           bin task_poll_pending_expected))
+    [0; 2]
+
+(* ── Issue #1173: a generalized `let x = None` used at a niche-UNSAFE type ──
+   `let x = None` is generalized (no value restriction), so its RHS lowered at
+   the scheme's residual type, `alloc Option.None('a)()`, which codegen
+   encodes under the erased Option(TVar) niche convention: raw null.  At
+   Option(Float), Option(()) and Option(Option(_)) the payload fails
+   [Kind.niche_payload_ok], so the use decodes Boxed and loads the tag from
+   ptr+8 on the null: SIGSEGV at 0x8 (a record field holding the None crashed
+   in its drop instead).  The interpreter and the JS backend were right.
+   Lowering now types the binding at the one type its uses instantiate it at.
+   Covers every shape in the issue plus a `let y = x` chain and a capture,
+   at --opt 0..3. *)
+let poly_let_none_src =
+  {|mod Main do
+  needs IO.Console
+
+  fn opt_float() : Option(Float) do
+    let x = None
+    x
+  end
+
+  fn opt_unit() : Option(()) do
+    let x = None
+    x
+  end
+
+  fn opt_opt() : Option(Option(Int)) do
+    let x = None
+    x
+  end
+
+  fn rec_field(s : Int) : { n : Int, o : Option(Float) } do
+    let blank = { n: s, o: None }
+    blank
+  end
+
+  fn chain() : Option(Float) do
+    let x = None
+    let y = x
+    y
+  end
+
+  fn pick(o : Option(Float)) : String do
+    match o do
+    | None -> "none"
+    | Some(f) -> float_to_string(f)
+    end
+  end
+
+  fn captured() : String do
+    let x = None
+    let f = fn _u -> pick(x)
+    f(1)
+  end
+
+  fn main(_c : Cap(IO.Console)) : () do
+    println(pick(opt_float()))
+    match opt_unit() do
+    | None -> println("unit none")
+    | Some(_) -> println("unit some")
+    end
+    match opt_opt() do
+    | None -> println("opt none")
+    | Some(_) -> println("opt some")
+    end
+    let r = rec_field(7)
+    println(int_to_string(r.n))
+    match r.o do
+    | None -> println("field none")
+    | Some(_) -> println("field some")
+    end
+    println(pick(chain()))
+    println(captured())
+    let z = None
+    let w : Option(Float) = Some(2.5)
+    println(pick(if r.n > 3 do w else z end))
+    println(pick(z))
+    ()
+  end
+end
+|}
+
+let poly_let_none_expected =
+  "none\nunit none\nopt none\n7\nfield none\nnone\nnone\n2.5\nnone"
+
+let test_poly_let_none_niche_unsafe_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_poly_let_none" poly_let_none_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" poly_let_none_expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "polyletnone_o%d" opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string)
+          (Printf.sprintf "--opt %d: generalized `let x = None` at Option(Float) / \
+                           Option(()) / Option(Option(Int)) / a record field \
+                           matches the interpreter (not SIGSEGV at 0x8)" opt)
+          (poly_let_none_expected ^ "\nEXIT:0") run_out)
+    [0; 1; 2; 3]
+
+(* ── An interface method passed as a value (`compare`, `hash`) ─────────────
+   `OrderedMap.from_list(xs, compare)` lowered to `let cmp : (Int, Int) -> Int
+   = compare`.  Mono resolves `compare` to `Ord$Int.compare` only at a CALL
+   site, so the value kept the bare name and codegen wrapped it in a
+   `compare$clo_wrap` calling an undefined `@compare` (clang: "use of
+   undefined value").  The value must resolve to the impl for its concrete
+   parameter type, exactly like a call.
+   (specs/progress/2026-11-11-compiled-builtin-passed-as-value-undefined-symbol.md) *)
+let iface_method_as_value_src = {|mod Main do
+  needs IO.Console
+
+  fn apply2(f, a, b) do
+    f(a, b)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let m = OrderedMap.from_list([(2, "b"), (1, "a"), (3, "c")], compare)
+    println(to_string(OrderedMap.to_list(m)))
+    let s = OrderedMap.from_list([("y", 1), ("x", 2)], compare)
+    println(to_string(OrderedMap.to_list(s)))
+    println(int_to_string(apply2(compare, 5, 3)))
+    let h = Hamt.insert(Hamt.empty(), 7, "seven", fn k -> hash(k), fn (a, b) -> a == b)
+    println(to_string(Hamt.get(h, 7, fn k -> hash(k), fn (a, b) -> a == b)))
+    let hs = List.map([1, 2, 3], hash)
+    println(to_string(hs == List.map([1, 2, 3], fn x -> hash(x))))
+  end
+end
+|}
+
+let iface_method_as_value_expected =
+  "[(1, a), (2, b), (3, c)]\n[(x, 2), (y, 1)]\n1\nSome(seven)\ntrue"
+
+let test_iface_method_as_value_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_iface_value" iface_method_as_value_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" iface_method_as_value_expected interp_out;
+  let bin = Filename.concat tmp "iface_value" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output
+        (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "compare/hash passed as values link and match the interpreter"
+      (iface_method_as_value_expected ^ "\nEXIT:0") run_out
 
 (* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
    A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
@@ -12999,6 +14433,44 @@ let assert_compiled_interp_parity ~name ~src ~expected () =
       (ir_contains run_out (expected ^ "\nEXIT:0")
        || run_out = expected ^ "\nEXIT:0")
 
+(** A NaN prints "nan" whatever its sign bit.  libc's `%.12g` (which the
+    interpreter's `string_of_float` and the native runtime both defer to)
+    prints a sign-bit-set NaN as "-nan" on glibc and plain "nan" on macOS, and
+    x86's default NaN (from `inf -. inf`) has the sign bit set where arm64's
+    does not, so the same program printed "-nan" on Linux CI and "nan" on a
+    Mac.  The negative NaNs here are built independent of the CPU: `-x` flips
+    the sign bit (fneg), and `string_to_float("-nan")` applies the sign
+    itself.  The JS runtime always printed "nan".  Linux is where the sign
+    half can go red; on macOS libc the unfixed code also prints "nan".  The
+    `show` lines pin the other divergence: the interpreter's `show` appended
+    ".0" to anything without a '.' or 'e', which only `nan`/`inf`/`-inf` ever
+    lacked, so it printed "nan.0"/"inf.0" where native and JS print "nan"/"inf". *)
+let test_nan_prints_without_sign_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_nan_sign"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn parse(s : String) : Float do
+    match string_to_float(s) do
+      Some(v) -> v
+      None -> 0.0
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    let n = parse("nan")
+    println(float_to_string(n))
+    println(float_to_string(-n))
+    println(float_to_string(parse("-nan")))
+    println(show(-n))
+    println(show(parse("inf")))
+    println(show(parse("-inf")))
+    ()
+  end
+end
+|}
+    ~expected:"nan\nnan\nnan\nnan\ninf\n-inf"
+    ()
+
 (** `--compile --no-opt` must still prune unreachable top-level functions.
     Reachability pruning (Dce.prune_unreachable) is a LINKABILITY requirement,
     not an optimization: the injected prelude/http stack references
@@ -13059,38 +14531,43 @@ let test_main_adapter_zero_caps () =
 let test_main_adapter_one_cap () =
   assert_compiled_interp_parity
     ~name:"march_staged_adapter1"
-    ~src:"mod Main do\n\
-         \  needs IO.Console\n\
-         \  fn main(_cap_console : Cap(IO.Console)) : () do println(\"a1\") end\n\
-          end\n"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn main(_cap_console : Cap(IO.Console)) : () do Authority.ignore(println("a1")) end
+end
+|}
     ~expected:"a1" ()
 
 let test_main_adapter_two_caps () =
   assert_compiled_interp_parity
     ~name:"march_staged_adapter2"
-    ~src:"mod Main do\n\
-         \  needs IO.Console\n\
-         \  needs IO.Clock\n\
-         \  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do\n\
-         \    let _t = unix_time()\n\
-         \    println(\"a2\")\n\
-         \  end\n\
-          end\n"
+    ~src:{|mod Main do
+  needs IO.Console
+  needs IO.Clock
+  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock)) : () do
+    let _t = unix_time()
+    println("a2")
+    ()
+  end
+end
+|}
     ~expected:"a2" ()
 
 let test_main_adapter_three_caps () =
   assert_compiled_interp_parity
     ~name:"march_staged_adapter3"
-    ~src:"mod Main do\n\
-         \  needs IO.Console\n\
-         \  needs IO.Clock\n\
-         \  needs IO.Random\n\
-         \  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do\n\
-         \    let _t = unix_time()\n\
-         \    let _b = random_bytes(4)\n\
-         \    println(\"a3\")\n\
-         \  end\n\
-          end\n"
+    ~src:{|mod Main do
+  needs IO.Console
+  needs IO.Clock
+  needs IO.Random
+  fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do
+    let _t = unix_time()
+    let _b = random_bytes(4)
+    println("a3")
+    ()
+  end
+end
+|}
     ~expected:"a3" ()
 
 let test_compiled_no_opt_prunes_unreachable () =
@@ -13448,6 +14925,396 @@ let test_js_int_subset_parity () =
             && ir_contains tail "EXIT:1")
   end
 
+(** `--target js` Float literals are the same double as native, bit for bit
+    (#1169).  js_emit printed a literal with [string_of_float] (12 significant
+    digits), so `3.141592653589793`, `Math.pi()`, `Math.tau()` and folded
+    values like `1.0 /. 240.0` ran as a different double, and a folded
+    infinity or NaN came out as `inf.0` / `nan.0`, a SyntaxError.  The program
+    prints each value's bits (sign, 53-bit mantissa, exponent, found by exact
+    halving/doubling; -0 told from +0 by atan2), not its printed form, which
+    float_to_string's 12 digits would hide.  The overflows use a literal of 1
+    followed by 308 zeros (the lexer has no exponent form) times 10.0, which
+    opt.fold turns into an infinity without a division by zero; a 309-zero
+    literal is infinite at lex time, and also reaches a float pattern
+    (literal_tag_js).  Interpreter, native and node must all print
+    [expected].  The JS half is skipped when node is absent. *)
+let test_js_float_literal_bits () =
+  let name = "march_js_float_bits" in
+  let e308 = "1" ^ String.make 308 '0' ^ ".0" in
+  let e309 = "1" ^ String.make 309 '0' ^ ".0" in
+  let src = Printf.sprintf
+    "mod JsFloatBits do\n\
+    \  needs IO.Console\n\
+    \  pfn norm(m : Float, e : Int) : String do\n\
+    \    if m >= 9007199254740992.0 do norm(m *. 0.5, e + 1)\n\
+    \    else if m < 4503599627370496.0 do norm(m *. 2.0, e - 1)\n\
+    \    else int_to_string(float_to_int(m)) ++ \"p\" ++ int_to_string(e) end end\n\
+    \  end\n\
+    \  pfn bits(x : Float) : String do\n\
+    \    if float_is_nan(x) do \"nan\"\n\
+    \    else if x == 0.0 do (if Math.atan2(0.0, x) > 0.0 do \"-0\" else \"+0\" end)\n\
+    \    else if x == x +. x do (if x > 0.0 do \"+inf\" else \"-inf\" end)\n\
+    \    else if x < 0.0 do \"-\" ++ norm(0.0 -. x, 0)\n\
+    \    else \"+\" ++ norm(x, 0) end end end end\n\
+    \  end\n\
+    \  pfn tag(x : Float) : String do\n\
+    \    match x do\n\
+    \      3.141592653589793 -> \"pi\"\n\
+    \      %s -> \"inf\"\n\
+    \      _ -> \"other\"\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let big = %s *. 10.0\n\
+    \    println(\"literal \" ++ bits(3.141592653589793))\n\
+    \    println(\"literal \" ++ bits(0.30000000000000004))\n\
+    \    println(\"pi \" ++ bits(Math.pi()))\n\
+    \    println(\"tau \" ++ bits(Math.tau()))\n\
+    \    println(\"e \" ++ bits(Math.e()))\n\
+    \    println(\"folded div \" ++ bits(1.0 /. 240.0))\n\
+    \    println(\"folded sum \" ++ bits(0.1 +. 0.2))\n\
+    \    println(\"folded inf \" ++ bits(big))\n\
+    \    println(\"folded -inf \" ++ bits(0.0 -. big))\n\
+    \    println(\"folded nan \" ++ bits(big -. big))\n\
+    \    println(\"literal inf \" ++ bits(%s))\n\
+    \    println(\"literal -0.0 \" ++ bits(-0.0))\n\
+    \    println(\"folded -0.0 \" ++ bits(0.0 *. -1.0))\n\
+    \    println(\"folded +0.0 \" ++ bits(0.0 -. 0.0))\n\
+    \    println(\"pattern \" ++ tag(Math.pi()) ++ \" \" ++ tag(big) ++ \" \" ++ tag(1.0))\n\
+    \  end\n\
+     end\n" e309 e308 e309 in
+  let expected =
+    "literal +7074237752028440p-51\n\
+     literal +5404319552844596p-54\n\
+     pi +7074237752028440p-51\n\
+     tau +7074237752028440p-50\n\
+     e +6121026514868073p-51\n\
+     folded div +4803839602528529p-60\n\
+     folded sum +5404319552844596p-54\n\
+     folded inf +inf\n\
+     folded -inf -inf\n\
+     folded nan nan\n\
+     literal inf +inf\n\
+     literal -0.0 -0\n\
+     folded -0.0 -0\n\
+     folded +0.0 +0\n\
+     pattern pi inf other" in
+  assert_compiled_interp_parity ~name ~src ~expected ();
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Float literal bits)"
+  else begin
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    Alcotest.(check string) (name ^ ": node output (bits) equals native")
+      (expected ^ "\nEXIT:0") (String.trim js_out)
+  end
+
+(** The Diagnostics module on `--target js` (the diag_* builtins, and the
+    try_finally its with_context is built on, had no JS mapping: the first
+    failed the compile, the second a ReferenceError at run time).  The JS
+    program's stdout must equal the interpreter's: the context while scopes
+    are open and after they close, an unobserved observer that never runs,
+    the report's kind, message, context (inner scope first, captured at the
+    panic though try_finally has unwound it by the time main's wrapper
+    reports) and location, an observer's own panic swallowed, and the next
+    observer still called.  Then the error goes on: Node exits 1 with it on
+    stderr.  Skipped when node is absent. *)
+let test_js_diagnostics_observers () =
+  let name = "march_js_diag" in
+  let src =
+    {|mod JsDiag do
+  needs IO.Console
+  pfn keys(ctx : List((String, Diagnostics.DiagnosticValue))) : String do
+    String.join(List.map(ctx, fn p -> match p do (k, _) -> k end), ",")
+  end
+  pfn loc(l : Option(Diagnostics.SourceLocation)) : String do
+    match l do
+      Some(s) -> "line " ++ int_to_string(s.line)
+      None -> "none"
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console)) do
+    println("outside: " ++ keys(Diagnostics.current_context()))
+    let v = Diagnostics.with_context([("a", Diagnostics.DStr("x"))], fn ->
+      Diagnostics.with_context([("b", Diagnostics.DBool(true))], fn ->
+        keys(Diagnostics.current_context())))
+    println("inside: " ++ v)
+    println("after: " ++ keys(Diagnostics.current_context()))
+    let gone = Diagnostics.observe_crashes(fn _ -> Authority.ignore(println("removed observer ran")))
+    Diagnostics.unobserve(gone)
+    Diagnostics.unobserve(gone)
+    let _h = Diagnostics.observe_crashes(fn r ->
+      Authority.ignore(println(Diagnostics.kind_to_string(r.kind) ++ ": " ++ r.message ++ " ctx=" ++ keys(r.context)
+              ++ " pid=" ++ int_to_string(r.process.pid) ++ " " ++ loc(r.location))))
+    let _h2 = Diagnostics.observe_crashes(fn _ -> panic("observer panics"))
+    let _h3 = Diagnostics.observe_crashes(fn _ -> Authority.ignore(println("third observer ran")))
+    Diagnostics.with_context([("request_id", Diagnostics.DStr("r1"))], fn ->
+      Diagnostics.with_context([("job", Diagnostics.DInt(7))], fn ->
+        panic("boom")))
+  end
+end
+|} in
+  let expected =
+    "outside: \n\
+     inside: b,a\n\
+     after: \n\
+     panic: boom ctx=job,request_id pid=-1 line 29\n\
+     third observer ran\n" in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>/dev/null"
+      (Filename.quote project_root) (Filename.quote main_exe)
+      (Filename.quote src_path)) in
+  Alcotest.(check string) (name ^ ": interpreter output")
+    (String.trim expected) (String.trim interp_out);
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Diagnostics observers)"
+  else begin
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>/dev/null; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    Alcotest.(check string) (name ^ ": JS stdout and exit status")
+      (expected ^ "EXIT:1") (String.trim js_out);
+    let (_, js_err) = run_capture (Printf.sprintf "node %s 2>&1 >/dev/null"
+        (Filename.quote mjs)) in
+    Alcotest.(check bool)
+      (name ^ ": the panic still reaches Node after the observers (got: " ^ js_err ^ ")")
+      true (ir_contains js_err "Error: boom");
+    (* ...pointing at the program's throw, not at the runtime helper that
+       built the Error. *)
+    Alcotest.(check bool)
+      (name ^ ": the stack starts at the program, not march_panic_err (got: " ^ js_err ^ ")")
+      false (ir_contains js_err "march_panic_err (")
+  end
+
+(** Issue #1181: an unwritable `-o` path is a filesystem error, not a compiler
+    crash.  `--target js -o dist/x.mjs` with no `dist/` hit an unguarded
+    [open_out] whose [Sys_error] reached the catch-all handler: "internal
+    compiler error", a backtrace, exit 3.  Now a missing parent directory is
+    created (for `--compile -o` too, which a cache HIT already did and a miss
+    left to fail in the linker), and a path that still cannot be written (a
+    directory, a parent that is a file) is a plain `error:` naming the path,
+    exit 1. *)
+let test_output_path_errors () =
+  let name = "out_path_1181" in
+  let src =
+    {|mod OutPath do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : () do
+    println("hello")
+    ()
+  end
+end
+|} in
+  let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+  let compile args =
+    run_capture (Printf.sprintf "cd %s && %s %s %s 2>&1"
+                   (Filename.quote project_root) (Filename.quote main_exe)
+                   args (Filename.quote src_path)) in
+  let no_ice what out =
+    Alcotest.(check bool) (what ^ ": not reported as a compiler bug (got: " ^ out ^ ")")
+      false (ir_contains out "internal compiler error" || ir_contains out "compiler bug") in
+  (* A missing parent (two levels deep) is created: JS. *)
+  let mjs = Filename.concat tmp "dist/sub/x.mjs" in
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote mjs) in
+  no_ice "js, missing dir" out;
+  Alcotest.(check int) ("js, missing dir: exit 0 (got: " ^ out ^ ")") 0 rc;
+  Alcotest.(check bool) "js, missing dir: output written" true (Sys.file_exists mjs);
+  Alcotest.(check bool) "js, missing dir: source map written beside it" true
+    (Sys.file_exists (mjs ^ ".map"));
+  if Sys.command "command -v node >/dev/null 2>&1" = 0 then begin
+    let (_, js_out) = run_capture ("node " ^ Filename.quote mjs) in
+    Alcotest.(check string) "js, missing dir: the output runs" "hello\n" js_out
+  end;
+  (* A parent that is a regular file: a user error naming the path, exit 1. *)
+  let afile = Filename.concat tmp "afile" in
+  let oc = open_out afile in output_string oc "x"; close_out oc;
+  let bad = Filename.concat afile "x.mjs" in
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote bad) in
+  no_ice "js, parent is a file" out;
+  Alcotest.(check int) ("js, parent is a file: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("js, parent is a file: names the path (got: " ^ out ^ ")")
+    true (ir_contains out "error:" && ir_contains out afile);
+  (* The output path is an existing directory. *)
+  let adir = Filename.concat tmp "adir" in
+  Unix.mkdir adir 0o755;
+  let (rc, out) = compile ("--target js -o " ^ Filename.quote adir) in
+  no_ice "js, output is a directory" out;
+  Alcotest.(check int) ("js, output is a directory: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("js, output is a directory: names the path (got: " ^ out ^ ")")
+    true (ir_contains out "error:" && ir_contains out adir);
+  (* Native: a missing parent is created the same way, and the binary runs. *)
+  let bin = Filename.concat tmp "out/sub/x" in
+  let (rc, out) = compile ("--compile -o " ^ Filename.quote bin) in
+  no_ice "native, missing dir" out;
+  Alcotest.(check int) ("native, missing dir: exit 0 (got: " ^ out ^ ")") 0 rc;
+  let (_, nat_out) = run_capture (Filename.quote bin) in
+  Alcotest.(check string) "native, missing dir: the binary runs" "hello\n" nat_out;
+  (* Native, parent is a file: exit 1 and no ICE. *)
+  let (rc, out) = compile ("--compile -o " ^ Filename.quote (Filename.concat afile "x")) in
+  no_ice "native, parent is a file" out;
+  Alcotest.(check int) ("native, parent is a file: exit 1 (got: " ^ out ^ ")") 1 rc;
+  Alcotest.(check bool) ("native, parent is a file: names the path (got: " ^ out ^ ")")
+    true (ir_contains out afile)
+
+(** Issue #1176: `--target js --test` compiled the test blocks and never ran
+    them (node exited 0 with no output); with a `main` the tests were pruned
+    away and `main` ran instead; and a program that prints did not build at
+    all, because `--test` turns capability mocking on and `cap_dict` had no
+    JS implementation.  The JS output now runs the tests as the native test
+    binary does: the same report, byte for byte, the same `--filter=` /
+    `--verbose` flags, exit 1 on a failure.  The report text itself is pinned
+    for every target by test/run_test_reports.ml. *)
+let test_js_test_runner () =
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS test runner)"
+  else begin
+    let name = "js_test_runner_1176" in
+    let src =
+      {|mod JsTestRunner do
+  needs IO.Console
+  fn double(n : Int) : Int do n * 2 end
+  fn main(_c : Cap(IO.Console)) : () do
+    println("main ran")
+    ()
+  end
+  test "doubles" do
+    println("printed from a test")
+    assert (double(2) == 4)
+  end
+  test "must fail" do
+    assert (double(1) == 3)
+  end
+end
+|} in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let bin = Filename.concat tmp name in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js --test build failed (rc=%d):\n%s" name crc cout;
+    let (nrc, nout) = run_capture (Printf.sprintf "cd %s && %s --compile --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote bin) (Filename.quote src_path)) in
+    if nrc <> 0 then Alcotest.failf "%s: --compile --test build failed (rc=%d):\n%s" name nrc nout;
+    let run cmd = run_capture (cmd ^ "; echo EXIT:$?") in
+    let (_, js_out) = run ("node " ^ Filename.quote mjs) in
+    let (_, native_out) = run (Filename.quote bin) in
+    Alcotest.(check bool) (name ^ ": the tests ran, not main (got: " ^ js_out ^ ")") true
+      (ir_contains js_out "Finished: 2 tests, 1 failure"
+       && ir_contains js_out "printed from a test"
+       && not (ir_contains js_out "main ran"));
+    Alcotest.(check bool) (name ^ ": a failure exits 1 (got: " ^ js_out ^ ")") true
+      (ir_contains js_out "EXIT:1");
+    Alcotest.(check string) (name ^ ": the JS run prints what the native test binary prints")
+      native_out js_out;
+    let (_, js_filtered) = run ("node " ^ Filename.quote mjs ^ " --filter=doubles") in
+    let (_, native_filtered) = run (Filename.quote bin ^ " --filter=doubles") in
+    Alcotest.(check bool) (name ^ ": all passing exits 0 (got: " ^ js_filtered ^ ")") true
+      (ir_contains js_filtered "Finished: 1 test, 0 failures" && ir_contains js_filtered "EXIT:0");
+    Alcotest.(check string) (name ^ ": --filter= agrees with native") native_filtered js_filtered;
+    let (_, js_verbose) = run ("node " ^ Filename.quote mjs ^ " --verbose") in
+    let (_, native_verbose) = run (Filename.quote bin ^ " --verbose") in
+    Alcotest.(check string) (name ^ ": --verbose agrees with native") native_verbose js_verbose
+  end
+
+(** The JS gaps that kept test bodies native-only
+    (specs/progress/2026-11-07-js-test-runner-gaps.md): `to_string` on a value
+    with no `Show` impl (a record, a variant) had no JS mapping and failed the
+    build; `__try_call` (Check.try_prop) and `process_env` were unmapped, so no
+    `Check.all` property built; `process_cwd` / `process_pid` were unmapped,
+    so a value-typed capability mock did not build.  The JS run must print
+    exactly what the native test binary prints, panics caught with their
+    "panic: " / "todo: " prefixes and `%` by zero included. *)
+let test_js_test_runner_gaps () =
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS test runner gaps)"
+  else begin
+    let name = "js_test_runner_gaps" in
+    let src = {|mod JsGaps do
+  needs IO.Console
+  needs IO.Process
+
+  type Shape = Dot | Box(Float, String)
+  type Pt = { x : Int, label : String }
+
+  pfn show_r(r : Result(Bool, String)) : String do
+    match r do
+      Ok(b) -> "Ok(" ++ to_string(b) ++ ")"
+      Err(e) -> "Err(" ++ e ++ ")"
+    end
+  end
+
+  pfn where_am_i() : String do
+    Authority.must(Process.cwd())
+  end
+
+  test "to_string without Show" do
+    let p : Pt = { x: -3, label: "q\"t\n" }
+    println(to_string(p))
+    println(to_string(Box(2.0, "s")))
+    println(to_string({ b: [Dot, Box(0.5, "")], a: (1, true, ()) }))
+    ()
+  end
+
+  test "try_call" do
+    println(show_r(Check.try_prop(fn x -> 10 / x > 0, 0)))
+    println(show_r(Check.try_prop(fn x -> 10 % x > 0, 0)))
+    println(show_r(Check.try_prop(fn x -> if x > 0 do panic("boom") else true end, 1)))
+    println(show_r(Check.try_prop(fn x -> if x > 0 do todo("later") else true end, 1)))
+    println(show_r(Check.try_prop(fn x -> x > 0, 1)))
+    ()
+  end
+
+  test "process env and value-typed capability mocks" do
+    println(to_string(process_env("MARCH_JS_GAPS_VAR")))
+    println(to_string(process_env("MARCH_JS_GAPS_UNSET")))
+    let c : Cap(IO.Process) = cap_narrow(root_cap)
+    let before = where_am_i()
+    let mock = cap_impl(c, { cap_ops_empty(c) with
+      process_cwd: Some("/mocked"),
+      process_pid: Some(42) })
+    println(with_cap(mock, fn _ -> where_am_i()))
+    println(to_string(with_cap(mock, fn _ -> Process.pid())))
+    println(to_string(before == where_am_i() && before != "/mocked"))
+    ()
+  end
+end
+|} in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let bin = Filename.concat tmp name in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js --test build failed (rc=%d):\n%s" name crc cout;
+    let (nrc, nout) = run_capture (Printf.sprintf "cd %s && %s --compile --test -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote bin) (Filename.quote src_path)) in
+    if nrc <> 0 then Alcotest.failf "%s: --compile --test build failed (rc=%d):\n%s" name nrc nout;
+    let run cmd =
+      snd (run_capture ("MARCH_JS_GAPS_VAR=hi " ^ cmd ^ " --verbose 2>&1; echo EXIT:$?")) in
+    let js_out = run ("node " ^ Filename.quote mjs) in
+    let native_out = run (Filename.quote bin) in
+    Alcotest.(check bool) (name ^ ": native passes (got: " ^ native_out ^ ")") true
+      (ir_contains native_out "Finished: 3 tests, 0 failures"
+       && ir_contains native_out "{ label: \"q\\\"t\\n\", x: -3 }"
+       && ir_contains native_out "Err(modulo by zero)"
+       && ir_contains native_out "Err(panic: boom)");
+    Alcotest.(check string) (name ^ ": the JS run prints what the native test binary prints")
+      native_out js_out
+  end
+
 (** TRMC's EAllocHole on the FRESH-allocation path, after the allocator's free
     lists have been filled with freed cons cells.  march_alloc is a plain
     malloc (2026-10-02; it was a calloc), so a fresh hole cell's slot holds
@@ -13705,8 +15572,9 @@ let test_int_divmod_inline_ir () =
         (has b ("dz_trap[0-9]*:\n *%[a-z0-9_]+ = call i64 @" ^ helper ^ "(i64 %[^,]*, i64 0)\n *unreachable")))
     [ ("q", "sdiv", "march_checked_div_op"); ("r", "srem", "march_checked_mod_op") ]
 
-(** An overflow nobody catches ends the program like any panic, with its
-    message, on all three backends: the interpreter, compiled code (stderr
+(** An overflow (or an Int division by zero, or an out-of-range Float -> Int
+    conversion) nobody catches ends the
+    program like any panic, with its message, on all three backends: the interpreter, compiled code (stderr
     "... run-time error: ..."), and --target js (an uncaught Error).  The JS operands are
     powers of two, exact in a double, so the 63-bit boundary is reachable
     there (2^61 + 2^61 = 2^62).  The JS half is skipped when node is absent. *)
@@ -13753,7 +15621,150 @@ let test_int_overflow_uncaught_panic () =
     end)
     [ ("march_ovf_add", "h + h", "attempt to add with overflow");
       ("march_ovf_mul", "h * 2", "attempt to multiply with overflow");
-      ("march_ovf_neg", "-(0 - h - h)", "attempt to negate with overflow") ]
+      ("march_ovf_neg", "-(0 - h - h)", "attempt to negate with overflow");
+      (* Int `/` and `%` by zero: on JS they were NaN (js_emit inlined the
+         quotient with no zero test), so the program printed "NaN" and went
+         on instead of panicking. *)
+      ("march_divz", "h / (h - h)", "division by zero");
+      ("march_modz", "h % (h - h)", "modulo by zero");
+      (* Float -> Int out of range (#1230): 2^122 printed -1 natively and
+         5.316911983139664e+36 on JS, and the program went on. *)
+      ("march_f2i_range", "float_floor(int_to_float(h) *. int_to_float(h))",
+       "float_floor: value out of Int range") ]
+
+(** Float -> Int conversions panic on NaN, the infinities and a result
+    outside [-2^62, 2^62) (#1230), with the same message on the interpreter,
+    compiled code and --target js.  Before the fix the interpreter and native
+    code returned what the host's conversion gave (`-1` for 1e20 and +inf, `0`
+    for NaN, -2^62 for 2^62: a C `(int64_t)` cast is undefined there and arm64
+    saturates), and JS returned the double itself (`1e20`, `NaN`).  Inputs are
+    parsed at run time so no folder sees them, except two literal rows: the
+    folder must leave an out-of-range literal to panic at run time and still
+    fold an in-range one.  The first-class rows (`rows(float_floor, xs)`)
+    reach the JS closure wrappers, the direct rows the inlined calls.  The
+    edge rows are the largest in-range doubles each side (2^62 - 1024 and
+    -2^62).  The Math and Json rows are the stdlib callers that round-trip
+    through Int: they must keep returning NaN, infinities and 1e20 as Floats
+    rather than panic. *)
+let test_float_to_int_range_panics () =
+  let name = "march_float_to_int_range" in
+  let src =
+    "mod FloatToIntRange do\n\
+    \  needs IO.Console\n\
+    \  fn show(r) : String do\n\
+    \    match r do\n\
+    \      Ok(v) -> int_to_string(v)\n\
+    \      Err(e) -> e\n\
+    \    end\n\
+    \  end\n\
+    \  fn fits(r) : String do\n\
+    \    match r do\n\
+    \      Ok(_) -> \"ok\"\n\
+    \      Err(e) -> e\n\
+    \    end\n\
+    \  end\n\
+    \  fn parse(s : String) : Float do\n\
+    \    match string_to_float(s) do\n\
+    \      Some(v) -> v\n\
+    \      None -> 0.0\n\
+    \    end\n\
+    \  end\n\
+    \  fn rows(conv, xs) do\n\
+    \    match xs do\n\
+    \      Nil -> ()\n\
+    \      Cons(x, rest) ->\n\
+    \        println(fits(__try_call_val(fn _ -> conv(x))))\n\
+    \        rows(conv, rest)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let inf = parse(\"Infinity\")\n\
+    \    let nan_v = parse(\"nan\")\n\
+    \    let xs = [nan_v, inf, 0.0 -. inf, parse(\"1e20\"), parse(\"-1e20\"),\n\
+    \              parse(\"4611686018427387904\"), parse(\"-4611686018427388928\"),\n\
+    \              parse(\"4611686018427386880\"), parse(\"-4611686018427387904\")]\n\
+    \    rows(float_to_int, xs)\n\
+    \    rows(float_truncate, xs)\n\
+    \    rows(float_floor, xs)\n\
+    \    rows(float_ceil, xs)\n\
+    \    rows(float_round, xs)\n\
+    \    println(show(__try_call_val(fn _ -> float_to_int(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_floor(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_ceil(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_round(parse(\"-2.5\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_to_int(parse(\"1e20\")))))\n\
+    \    println(show(__try_call_val(fn _ -> float_round(nan_v))))\n\
+    \    println(show(__try_call_val(fn _ -> float_floor(100000000000000000000.0))))\n\
+    \    println(show(__try_call_val(fn _ -> float_ceil(2.5))))\n\
+    \    println(float_to_string(Math.floor(parse(\"1e20\"))))\n\
+    \    println(float_to_string(Math.round(nan_v)))\n\
+    \    println(float_to_string(Math.truncate(0.0 -. inf)))\n\
+    \    println(float_to_string(Math.ceil(parse(\"-2.5\"))))\n\
+    \    println(Json.to_string(Json.Number(parse(\"1e20\"))))\n\
+    \    println(Json.to_string(Json.Number(nan_v)))\n\
+    \    println(Json.to_string(Json.Number(parse(\"42\"))))\n\
+    \  end\n\
+     end\n" in
+  let convs = [ "float_to_int"; "float_truncate"; "float_floor"; "float_ceil"; "float_round" ] in
+  let matrix = String.concat "" (List.map (fun op ->
+      op ^ ": cannot convert NaN to Int\n"
+      ^ String.concat "" (List.init 6 (fun _ -> op ^ ": value out of Int range\n"))
+      ^ "ok\nok\n") convs) in
+  let expected = matrix ^
+    "-2\n-3\n-2\n-3\n\
+     float_to_int: value out of Int range\n\
+     float_round: cannot convert NaN to Int\n\
+     float_floor: value out of Int range\n\
+     3\n\
+     1e+20\nnan\n-inf\n-2.\n\
+     1e+20\nnan\n42" in
+  assert_compiled_interp_parity ~name ~src ~expected ();
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS Float -> Int range)"
+  else begin
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name:(name ^ "_js") src in
+    let mjs = Filename.concat tmp (name ^ ".mjs") in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src_path)) in
+    if crc <> 0 then Alcotest.failf "%s: --target js compile failed (rc=%d):\n%s" name crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1" (Filename.quote mjs)) in
+    Alcotest.(check string) (name ^ ": JS output") expected (String.trim js_out)
+  end
+
+(** `1.0 /. 0.0` written with two literals stops with "division by zero" in a
+    default (opt.fold on) native build, as in the interpreter
+    (specs/lang/core-march.md, δ-Div-0F).  opt.fold used to compute it, so the
+    build printed `inf` / `-inf` and exited 0 while a --disable-pass opt.fold
+    build stopped (#1169).  The JS run-time `/.` does not check its divisor
+    (specs/todos/2026-11-09-js-float-div-by-zero.md), so there is no JS half. *)
+let test_compiled_float_div_zero_literal () =
+  List.iter (fun (name, expr) ->
+    let src = Printf.sprintf
+      "mod FloatDivZero do\n\
+      \  needs IO.Console\n\
+      \  fn main(_cap_console : Cap(IO.Console)) do\n\
+      \    println(\"before\")\n\
+      \    println(float_to_string(%s))\n\
+      \    println(\"after\")\n\
+      \  end\n\
+       end\n" expr in
+    let (project_root, main_exe, src_path, tmp) = write_march_source ~name src in
+    let ok out = ir_contains out "before" && ir_contains out "division by zero"
+                 && not (ir_contains out "after") && ir_contains out "EXIT:1" in
+    let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1; echo EXIT:$?"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src_path)) in
+    Alcotest.(check bool) (name ^ ": interpreter stops (got: " ^ interp_out ^ ")")
+      true (ok interp_out);
+    let bin = Filename.concat tmp (name ^ "bin") in
+    match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+            ~main_exe ~bin ~src:src_path () with
+    | None -> ()
+    | Some bin ->
+      let run_out = read_cmd_output (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+      Alcotest.(check bool) (name ^ ": compiled (opt.fold on) stops (got: " ^ run_out ^ ")")
+        true (ok run_out && ir_contains run_out "runtime error: division by zero"))
+    [ ("march_fdivz_pos", "1.0 /. 0.0"); ("march_fdivz_neg", "1.0 /. -0.0") ]
 
 (** A shift count outside [0, 62] (and a negative int_pow exponent) panics
     on both backends with the interpreter's message.  Compiled, a non-literal
@@ -14611,6 +16622,90 @@ let test_handwritten_impl_nested_match_newtype_compiled () =
    (march_string_eq for String, recursive `ensure_adt_eq_fn` for a nested
    heap ADT/tuple/record, scalar `icmp`/`fcmp` otherwise). *)
 
+(* Distinct record shapes must never reuse an equality helper: loading an Int
+   field with a String comparator used to crash the native program. *)
+let test_record_eq_distinct_shapes_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_record_eq_shapes"
+    ~src:{|mod RecordEq do
+  needs IO.Console
+  type User = { name : String, tags : List(Int) }
+  type Point = { x : Int, y : Int }
+  derive Eq for User
+  derive Eq for Point
+  fn main(_cap_console : Cap(IO.Console)) do
+    let user : User = { name: "ann", tags: [1, 2] }
+    let point : Point = { x: 1, y: 2 }
+    println(bool_to_string(user == { name: "ann", tags: [1, 2] }))
+    println(bool_to_string(user != { name: "bob", tags: [1, 2] }))
+    println(bool_to_string(point == { x: 1, y: 2 }))
+    println(bool_to_string(point == { x: 1, y: 3 }))
+    println(bool_to_string(point != { x: 1, y: 3 }))
+  end
+end
+|}
+    ~expected:"true\ntrue\ntrue\nfalse\ntrue"
+    ()
+
+let test_record_eq_nested_generic_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_record_eq_nested_generic"
+    ~src:{|mod NestedRecordEq do
+  needs IO.Console
+  type Label = { text : String }
+  type Count = { value : Int }
+  type Named = { payload : Label, valid : Bool }
+  type Numbered = { payload : Count, valid : Bool }
+  derive Eq for Label
+  derive Eq for Count
+  derive Eq for Named
+  derive Eq for Numbered
+  type Cell(a) = { item : a }
+  derive Eq for Cell
+  fn main(_cap_console : Cap(IO.Console)) do
+    let a : Named = { payload: { text: "ann" }, valid: true }
+    let b : Numbered = { payload: { value: 1 }, valid: true }
+    println(bool_to_string(a == { payload: { text: "ann" }, valid: true }))
+    println(bool_to_string(a == { payload: { text: "bob" }, valid: true }))
+    println(bool_to_string(b == { payload: { value: 1 }, valid: true }))
+    println(bool_to_string(b != { payload: { value: 2 }, valid: true }))
+    let a : Cell(String) = { item: "ann" }
+    let b : Cell(String) = { item: "bob" }
+    let c : Cell(Int) = { item: 1 }
+    let d : Cell(Int) = { item: 2 }
+    println(bool_to_string(a == { item: "ann" }))
+    println(bool_to_string(a == b))
+    println(bool_to_string(c == { item: 1 }))
+    println(bool_to_string(c != d))
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue"
+    ()
+
+(* These pairs collide under unframed concatenation or lossy type-name
+   sanitization. Each record needs its own structural helper identity. *)
+let test_record_eq_structural_keys () =
+  let open March_tir.Tir in
+  let records = [
+    TRecord [];
+    TRecord ["x", TInt];
+    TRecord ["y", TInt];
+    TRecord ["x", TString];
+    TRecord ["x", TRecord ["y", TInt]];
+    TRecord ["x", TCon ("A.B", [])];
+    TRecord ["x", TCon ("A_B", [])];
+    TRecord ["x", TCon ("A", [TCon ("B", [TInt]); TString])];
+    TRecord ["x", TCon ("A", [TCon ("B", [TInt; TString])])];
+    TRecord ["x", TTuple [TTuple [TInt]; TString]];
+    TRecord ["x", TTuple [TInt; TTuple [TString]]];
+    TRecord ["x_Int_y", TString];
+    TRecord ["x", TInt; "y", TString];
+  ] in
+  let names = List.map March_tir.Llvm_eq.mangle_ty_for_eq records in
+  Alcotest.(check int) "distinct structural types have distinct helper keys"
+    (List.length records) (List.length (List.sort_uniq String.compare names))
+
 (** Core bug: `==`/`!=` on a String-payload Newtype. Pre-fix, compiled
     `WrapS("a") == WrapS("a")` returned FALSE (garbage tag/field offsets into
     the raw string cell); the interpreter was always correct. *)
@@ -14697,6 +16792,466 @@ let test_newtype_eq_operator_generic_payload_compiled () =
     ~expected:"true\nfalse\ntrue\nfalse"
     ()
 
+(* ── #1171: one structural-eq helper per record / tuple SHAPE ──────────
+   [Llvm_eq.mangle_ty_for_eq] had no [TRecord] case, so every record type
+   mangled to "Ptr" and shared ONE [__march_eq_Ptr], generated for whichever
+   record's [==] was emitted first ([ensure_adt_eq_fn] returns a memoized
+   helper by name).  Tuples were mangled but not injectively: a 3-tuple whose
+   first element is a pair and a 2-tuple whose first element is a triple both
+   mangled to [Tup_Tup_Int_x_Int_x_Int_x_Int].  The interpreter was right in
+   every case; compiled code gave wrong answers, over-read, or SIGSEGVed. *)
+
+(** `not p(n)` is `!p(n)`: it used to parse as two block statements, a
+    discarded `not` and the value `p(n)`, so the `else` branch returned
+    `p(n)` un-negated on both backends
+    (specs/progress/2026-10-29-not-at-block-start-parses-as-two-statements.md). *)
+let test_not_before_operand_is_prefix_not () =
+  assert_compiled_interp_parity
+    ~name:"march_not_before_operand"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn p(n : Int) : Bool do n > 5 end
+  fn branch(n : Int) : Bool do
+    if n >= 0 do false else not p(n) end
+  end
+  fn arms(n : Int) : Bool do
+    match n do
+      0 -> not true
+      _ -> not not p(n)
+    end
+  end
+  fn main(_cap : Cap(IO.Console)) : () do
+    println(bool_to_string(branch(-1)))
+    println(bool_to_string(branch(-9)))
+    println(bool_to_string(arms(0)) ++ " " ++ bool_to_string(arms(9)))
+    println(bool_to_string(not(true)))
+    ()
+  end
+end
+|}
+    ~expected:"true\ntrue\nfalse true\nfalse"
+    ()
+
+(** A newtype over a GENERIC named record ([Wrap(Cell(a))]): the payload
+    reached the eq generator as [TCon ("Cell", [TString])], which names a
+    record, not a variant, so no helper was found and the newtype's helper
+    fell back to [march_poly_eq], a pointer comparison for records: equal
+    payloads compared unequal compiled.  The two-parameter record's fields
+    are declared in the opposite order to its parameters, so the parameter
+    substitution must come from the declaration
+    (specs/progress/2026-11-06-compiled-generic-record-newtype-equality.md). *)
+let test_newtype_over_generic_record_eq_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_newtype_generic_record_eq"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Cell(a) = { value : a }
+  type Wrap(a) = Wrap(Cell(a))
+  type Pair(a, b) = { y : a, x : b }
+  type WP(a, b) = WP(Pair(a, b))
+  derive Eq for Cell
+  derive Eq for Wrap
+  derive Eq for Pair
+  derive Eq for WP
+  fn main(_cap : Cap(IO.Console)) : () do
+    let a : Cell(String) = { value: "ann" }
+    let b : Cell(String) = { value: "bob" }
+    let c : Cell(Int) = { value: 1 }
+    let d : Cell(Int) = { value: 2 }
+    println(to_string(Wrap(a) == Wrap({ value: "ann" })))
+    println(to_string(Wrap(a) == Wrap(b)))
+    println(to_string(Wrap(c) == Wrap({ value: 1 })))
+    println(to_string(Wrap(c) != Wrap(d)))
+    let p : Pair(String, Int) = { y: "s", x: 3 }
+    println(to_string(WP(p) == WP({ y: "s", x: 3 })))
+    println(to_string(WP(p) == WP({ y: "s", x: 4 })))
+    println(to_string(WP(p) == WP({ y: "t", x: 3 })))
+    ()
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue\ntrue\ntrue\nfalse\nfalse"
+    ()
+
+(** A module's own function shadows a bulk import wherever the `use`
+    sits: `fn sum_int` declared before `use List.*` is still the module's
+    own.  The interpreter let the later `use` rebind it and printed 3; the
+    typechecker and the compiled build use the local definition (102)
+    (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md). *)
+let test_local_fn_shadows_later_bulk_use_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_local_fn_shadows_later_use"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn sum_int(xs : List(Int)) : Int do 100 + List.length(xs) end
+  use List.*
+  fn main(_cap : Cap(IO.Console)) : () do
+    println(int_to_string(sum_int(append([1], [2]))))
+    ()
+  end
+end
+|}
+    ~expected:"102"
+    ()
+
+(* ── User names that are also stdlib / interface names ─────────────────────
+   A user fn named like an interface method (`show`, `eq`, `compare`, `hash`)
+   or a fn in a user module named like a stdlib module (`mod List`) used to
+   share one TIR symbol with the stdlib's meaning, so mono / the linker picked
+   one for every caller.  Lowering now gives the user's definition its own
+   name ([Tir_names.builtin_shadow_name]).
+   specs/progress/2026-11-10-user-stdlib-name-collisions.md *)
+
+(** A generic user `fn show(r)` lost to `Show$Result.show` in mono. *)
+let test_user_generic_show_vs_show_iface_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_generic_show"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn show(r) do
+    match r do
+      Ok(s) -> s
+      Err(e) -> e
+    end
+  end
+  fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(mk(1)))
+    println(mk(2))
+  end
+end
+|}
+    ~expected:"pos\nOk(pos)"
+    ()
+
+(** The converse: an annotated user `show` of the very type `println`'s
+    internal `show(x)` sees captured the prelude's call. *)
+let test_user_typed_show_does_not_capture_println_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_typed_show"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn show(r : Result(String, String)) : String do
+    match r do
+      Ok(s) -> s
+      Err(e) -> e
+    end
+  end
+  fn mk(x : Int) : Result(String, String) do if x > 0 do Ok("pos") else Err("neg") end end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(mk(1)))
+    println(mk(2))
+    println(to_string(mk(3)))
+  end
+end
+|}
+    ~expected:"pos\nOk(pos)\nOk(pos)"
+    ()
+
+(** A user `show` of a type with its own `Show` impl: `println` uses the impl. *)
+let test_user_show_vs_own_show_impl_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_show_vs_impl"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Box = Box(Int)
+  fn show(_b : Box) : String do "user-show" end
+  impl Show(Box) do
+    fn show(b) do match b do Box(n) -> "Box " ++ int_to_string(n) end end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(show(Box(1)))
+    println(Box(2))
+  end
+end
+|}
+    ~expected:"user-show\nBox 2"
+    ()
+
+(** User `compare` / `hash`: the user's call runs the user's fn, the
+    prelude's `<` / `==` keep the interface. *)
+let test_user_compare_hash_vs_iface_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_compare_hash"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn compare(_a, _b) do 99 end
+  fn hash(_x) do 7 end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(compare(1, 2)))
+    println(int_to_string(hash("x")))
+    println(to_string((1, 2) < (1, 3)))
+    println(to_string(Some(1) == Some(1)))
+  end
+end
+|}
+    ~expected:"99\n7\ntrue\ntrue"
+    ()
+
+(** A nested user module's fn named like an interface method. *)
+let test_nested_module_fn_named_like_iface_method_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_nested_util_eq"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Util do
+    fn eq(a, b) do a != b end
+    fn both(a, b) do eq(a, b) && eq(b, a) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(to_string(Util.eq(1, 1)))
+    println(to_string(Util.eq("a", "b")))
+    println(to_string(Util.both(1, 2)))
+  end
+end
+|}
+    ~expected:"false\ntrue\ntrue"
+    ()
+
+(* ── A derived impl's body vs a user fn named like the method ──────────────
+   `derive Show/Eq/Ord/Hash` bodies call their fields' methods as
+   `Show.show(field)` etc., so a user `fn show` next to the derive cannot
+   capture them.  The qualified spelling is the type-directed method on both
+   backends, primitives included.
+   specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+
+(** Entry-level: variant and record, all four interfaces. *)
+let test_derived_impl_not_captured_by_user_method_fn_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_vs_user_method_fn"
+    ~src:{|mod Main do
+  needs IO.Console
+  type P = P(Int, String)
+  type R = { a : Int, b : String }
+  derive Show, Eq, Ord, Hash for P
+  derive Show, Eq, Ord, Hash for R
+  fn show(_x : Int) : String do "U" end
+  fn eq(_a : Int, _b : Int) : Bool do false end
+  fn compare(_a : Int, _b : Int) : Int do 0 end
+  fn hash(_x : Int) : Int do 7 end
+  fn main(_c : Cap(IO.Console)) do
+    println(P(1, "a"))
+    println(to_string(P(1, "a") == P(1, "a")))
+    println({ a: 1, b: "x" })
+    println(to_string({ a: 1, b: "x" } < { a: 2, b: "x" }))
+    println(to_string({ a: 1, b: "x" } == { a: 1, b: "x" }))
+    println(to_string(Hash.hash({ a: 1, b: "x" }) == Hash.hash({ a: 2, b: "x" })))
+    println(show(3))
+  end
+end
+|}
+    ~expected:"P(1, a)\ntrue\nR { a = 1, b = x }\ntrue\ntrue\nfalse\nU"
+    ()
+
+(** Inside a nested module that defines the same-named fns, with a generic
+    type (the field's method is only known after monomorphisation). *)
+let test_derived_impl_not_captured_in_nested_module_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_derive_vs_user_method_fn_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Shapes do
+    type Box(a) = Box(a)
+    type Pt = { x : Int, tag : String }
+    derive Show, Eq, Hash for Box
+    derive Show, Eq, Ord, Hash for Pt
+    fn show(_x : Int) : String do "U" end
+    fn compare(_a : Int, _b : Int) : Int do 0 end
+    fn hash(_x : Int) : Int do 7 end
+    fn mk(n : Int) : Pt do { x: n, tag: "t" } end
+  end
+  fn show(_x : Int) : String do "V" end
+  fn main(_c : Cap(IO.Console)) do
+    println(Shapes.Box(3))
+    println(Shapes.Box(Shapes.mk(4)))
+    println(to_string(Shapes.mk(1) < Shapes.mk(2)))
+    println(to_string(Hash.hash(Shapes.mk(1)) == Hash.hash(Shapes.mk(2))))
+    println(show(5) ++ Shapes.show(5))
+  end
+end
+|}
+    ~expected:"Box(3)\nBox(Pt { x = 4, tag = t })\ntrue\nfalse\nVU"
+    ()
+
+(** The qualified method written by hand: on a primitive (compiled: "no `Ord`
+    implementation for type `Int`"), and on one of two types implementing
+    the interface (interpreted: the last impl evaluated ran for both). *)
+let test_qualified_builtin_iface_method_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_builtin_iface_method"
+    ~src:{|mod Main do
+  needs IO.Console
+  type P = P(Int, String)
+  type R = { a : Int, b : String }
+  derive Show, Hash for P
+  derive Show, Hash for R
+  fn show(_x : Int) : String do "U" end
+  fn main(_c : Cap(IO.Console)) do
+    println(Show.show(5) ++ show(5))
+    println(to_string(Ord.compare(1, 2)))
+    println(to_string(Eq.eq("a", "a")))
+    println(to_string(Hash.hash(1) == Hash.hash(1)))
+    println(Show.show(P(1, "a")) ++ Show.show({ a: 1, b: "x" }))
+    println(to_string(Hash.hash(P(1, "a")) == Hash.hash(P(2, "b"))))
+  end
+end
+|}
+    ~expected:"5U\n-1\ntrue\ntrue\nP(1, a)R { a = 1, b = x }\ntrue"
+    ()
+
+(** An entry-level `mod List` whose fn has the stdlib's exact signature:
+    one symbol `List.sum_int`, the stdlib's won.  The rest of the stdlib
+    `List` stays reachable. *)
+let test_user_module_named_like_stdlib_module_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_user_mod_list"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod List do
+    fn sum_int(_xs : List(Int)) : Int do 42 end
+    fn twice(xs : List(Int)) : Int do sum_int(xs) + sum_int(xs) end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(List.sum_int([1, 2])))
+    println(int_to_string(List.twice([1, 2])))
+    println(int_to_string(List.length([1, 2, 3])))
+    println(int_to_string(Enum.sum([1, 2, 3])))
+  end
+end
+|}
+    ~expected:"42\n84\n3\n6"
+    ()
+
+(** Pair first: Triple's [==]/[!=] ran Pair's helper and never read [e]. *)
+let test_record_eq_pair_then_triple_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_pair_triple"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Triple = { c : Int, d : Int, e : Int }
+  derive Eq for Triple
+  fn main(_cap : Cap(IO.Console)) : () do
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    let t1 : Triple = { c: 1, d: 2, e: 3 }
+    let t2 : Triple = { c: 1, d: 2, e: 4 }
+    println(to_string(p1 == p2))
+    println(to_string(t1 == t2))
+    println(to_string(t1 != t2))
+    ()
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue"
+    ()
+
+(** Triple first: equal Pairs ran Triple's helper, which loaded offset 32
+    from a 32-byte cell and answered [false]. *)
+let test_record_eq_triple_then_pair_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_triple_pair"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Triple = { c : Int, d : Int, e : Int }
+  derive Eq for Triple
+  fn main(_cap : Cap(IO.Console)) : () do
+    let t1 : Triple = { c: 1, d: 2, e: 3 }
+    let t2 : Triple = { c: 1, d: 2, e: 3 }
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    println(to_string(t1 == t2))
+    println(to_string(p1 == p2))
+    ()
+  end
+end
+|}
+    ~expected:"true\ntrue"
+    ()
+
+(** Record of Strings first: the Int record ran [march_string_eq] on a
+    tagged Int and SIGSEGVed (addr 0x11, exit 139). *)
+let test_record_eq_strings_then_ints_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_str_int"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Name = { first : String, last : String }
+  derive Eq for Name
+  type Point = { x : Int, y : Int }
+  derive Eq for Point
+  fn main(_cap : Cap(IO.Console)) : () do
+    let n1 : Name = { first: "a", last: "b" }
+    let n2 : Name = { first: "a", last: "b" }
+    let q1 : Point = { x: 1, y: 2 }
+    let q2 : Point = { x: 1, y: 2 }
+    println(to_string(n1 == n2))
+    println(to_string(q1 == q2))
+    ()
+  end
+end
+|}
+    ~expected:"true\ntrue"
+    ()
+
+(** [eq()] reaches the helper through nesting: [derive Eq] compares each
+    field with [==], and [impl Eq(List(a))] compares elements with [==]. *)
+let test_record_eq_nested_and_list_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_rec_eq_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  type Pair = { a : Int, b : Int }
+  derive Eq for Pair
+  type Inner = { x : Int, y : Int, z : Int }
+  derive Eq for Inner
+  type Outer = { inner : Inner, tag : Int }
+  derive Eq for Outer
+  fn main(_cap : Cap(IO.Console)) : () do
+    let p1 : Pair = { a: 1, b: 2 }
+    let p2 : Pair = { a: 1, b: 2 }
+    println(to_string(p1 == p2))
+    let o1 : Outer = { inner: { x: 1, y: 2, z: 3 }, tag: 0 }
+    let o2 : Outer = { inner: { x: 1, y: 2, z: 4 }, tag: 0 }
+    println(to_string(eq(o1, o2)))
+    let l1 : List(Inner) = [{ x: 1, y: 2, z: 3 }]
+    let l2 : List(Inner) = [{ x: 1, y: 2, z: 9 }]
+    println(to_string(eq(l1, l2)))
+    ()
+  end
+end
+|}
+    ~expected:"true\nfalse\nfalse"
+    ()
+
+(** Tuples: [((Int, Int, Int), Int)] and [((Int, Int), Int, Int)] mangled to
+    the same name.  [ip] is shared so the over-read of the pair's missing
+    third slot reads the same word on both sides and the wrong answer is
+    deterministic: the 2-field helper never reaches the differing [4]/[5]. *)
+let test_tuple_eq_nested_shape_collision_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_tup_eq_shapes"
+    ~src:{|mod Main do
+  needs IO.Console
+  fn main(_cap : Cap(IO.Console)) : () do
+    let b1 = ((1, 2, 3), 4)
+    let b2 = ((1, 2, 3), 4)
+    let ip = (1, 2)
+    let a1 = (ip, 3, 4)
+    let a2 = (ip, 3, 5)
+    println(to_string(b1 == b2))
+    println(to_string(a1 == a2))
+    println(to_string(a1 != a2))
+    ()
+  end
+end
+|}
+    ~expected:"true\nfalse\ntrue"
+    ()
+
 (** Bug: a variant field typed as an OPAQUE builtin type constructor (no
     March-level `type` declaration exists for it — e.g. `Task(a)`) makes
     [ensure_adt_eq_fn] return [None] for that field's own type. The `==`
@@ -14721,6 +17276,7 @@ let test_eq_operator_opaque_ctor_field_uses_poly_eq () =
   fn main() : Unit do
     let t = task_spawn(fn n -> n)
     println(bool_to_string(HA(t) == HA(t)))
+    ()
   end
 end|} in
   Alcotest.(check bool)
@@ -14864,6 +17420,187 @@ let test_module_qualified_pattern_qualifier_is_stdlib_type_compiled () =
          \  end\n\
           end\n"
     ~expected:"6\n1000\n12\n99\n5"
+    ()
+
+(* ── A qualified constructor pattern whose arm returns the scrutinee ───────
+   Perceus' scrutinee-escape rewrite ([Perceus_scrut]) rebuilds the matched
+   constructor where an arm returns the scrutinee in tail position.  It named
+   that constructor "<scrutinee type>.<branch tag>", and a pattern written
+   qualified already has a qualifier in its tag ("Shape.Shape.Square",
+   "Counter_Msg.Counter.Bump"): no such constructor, so codegen fell back to
+   tag 0 and the arm returned the type's FIRST constructor.
+   specs/progress/2026-11-05-nested-match-qualified-actor-msg-pattern-miscompile.md *)
+
+(** Module-qualified, type-qualified and stdlib-module-qualified patterns. *)
+let test_qualified_pattern_arm_returns_scrutinee_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_pattern_returns_scrutinee"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod Shapes do
+    type Shape = Circle(Int) | Square(Int) | Dot
+  end
+  type Tree = Leaf(Int) | Node(Int, Int)
+
+  fn keep(s : Shapes.Shape, d : Shapes.Shape) : Shapes.Shape do
+    match s do
+      Shapes.Square(n) -> if n > 3 do s else d end
+      _ -> s
+    end
+  end
+  fn keep2(s : Shapes.Shape, d : Shapes.Shape) : Shapes.Shape do
+    match s do
+      Shape.Square(n) -> if n > 3 do s else d end
+      _ -> s
+    end
+  end
+  fn keep3(t : Tree, d : Tree) : Tree do
+    match t do
+      Tree.Node(a, b) -> if a > b do t else d end
+      _ -> t
+    end
+  end
+  fn keep4(v : Json.JsonValue, d : Json.JsonValue) : Json.JsonValue do
+    match v do
+      Json.Str(s) -> if string_length(s) > 1 do v else d end
+      _ -> v
+    end
+  end
+  fn name(s : Shapes.Shape) : String do
+    match s do
+      Shapes.Circle(n) -> "Circle " ++ int_to_string(n)
+      Shapes.Square(n) -> "Square " ++ int_to_string(n)
+      Shapes.Dot -> "Dot"
+    end
+  end
+  fn tname(t : Tree) : String do
+    match t do
+      Leaf(n) -> "Leaf " ++ int_to_string(n)
+      Node(a, b) -> "Node " ++ int_to_string(a) ++ " " ++ int_to_string(b)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(name(keep(Shapes.Square(5), Shapes.Dot)))
+    println(name(keep(Shapes.Square(1), Shapes.Dot)))
+    println(name(keep2(Shapes.Square(5), Shapes.Dot)))
+    println(tname(keep3(Node(2, 1), Leaf(0))))
+    println(tname(keep3(Node(1, 2), Leaf(0))))
+    println(Json.to_string(keep4(Json.Str("abc"), Json.Null)))
+  end
+end
+|}
+    ~expected:"Square 5\nDot\nSquare 5\nNode 2 1\nLeaf 0\n\"abc\""
+    ()
+
+(** The shape the bug was found in: an actor's message constructor qualified
+    by the actor's name, matched inside a `Some` arm. *)
+let test_qualified_actor_msg_pattern_in_some_arm_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_actor_msg_pattern_nested"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod V1 do
+    type Msg = OldBump(Int)
+  end
+  actor Counter do
+    state { total : Int }
+    init  { total: 0 }
+    on Reset() do { total: 0 } end
+    on Bump(n : Int) do { total: state.total + n } end
+  end
+  fn counter_migrate_msg(m : V1.Msg) : Option(Counter.Msg) do
+    match m do
+      V1.OldBump(n) -> if n < 0 do None else Some(Bump(n)) end
+    end
+  end
+  fn not_137(n : Int) : Bool do n != 137 end
+  fn w(m : V1.Msg, none : Counter.Msg) : Counter.Msg do
+    match counter_migrate_msg(m) do
+      Some(x) ->
+        match x do
+          Counter.Bump(p0) -> if not_137(p0) do x else none end
+          _ -> x
+        end
+      None -> none
+    end
+  end
+  fn tag(m : Counter.Msg) : String do
+    match m do
+      Bump(n) -> "Bump " ++ int_to_string(n)
+      Reset -> "Reset"
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(tag(w(V1.OldBump(5), Reset)))
+    println(tag(w(V1.OldBump(137), Reset)))
+    println(tag(w(V1.OldBump(-1), Reset)))
+  end
+end
+|}
+    ~expected:"Bump 5\nReset\nReset"
+    ()
+
+(** Two modules declaring a same-named type that share a constructor name:
+    the tag may carry the declaring module, and the rebuild must still name
+    the right type's constructor. *)
+let test_qualified_pattern_returns_scrutinee_colliding_types_compiled () =
+  assert_compiled_interp_parity
+    ~name:"march_qualified_pattern_returns_scrutinee_collision"
+    ~src:{|mod Main do
+  needs IO.Console
+  mod DcA do
+    type Thing = Other(Int) | Shared(Int)
+    fn keep(t : Thing, d : Thing) : Thing do
+      match t do
+        Shared(n) -> if n > 3 do t else d end
+        _ -> t
+      end
+    end
+    fn name(t : Thing) : String do
+      match t do
+        Other(n) -> "A.Other " ++ int_to_string(n)
+        Shared(n) -> "A.Shared " ++ int_to_string(n)
+      end
+    end
+  end
+  mod DcB do
+    type Thing = Shared(Int) | Extra(Int)
+    fn keep(t : Thing, d : Thing) : Thing do
+      match t do
+        Shared(n) -> if n > 3 do t else d end
+        _ -> t
+      end
+    end
+    fn name(t : Thing) : String do
+      match t do
+        Shared(n) -> "B.Shared " ++ int_to_string(n)
+        Extra(n) -> "B.Extra " ++ int_to_string(n)
+      end
+    end
+  end
+  fn keep_a(t : DcA.Thing, d : DcA.Thing) : DcA.Thing do
+    match t do
+      DcA.Shared(n) -> if n > 3 do t else d end
+      _ -> t
+    end
+  end
+  fn keep_b(t : DcB.Thing, d : DcB.Thing) : DcB.Thing do
+    match t do
+      DcB.Shared(n) -> if n > 3 do t else d end
+      _ -> t
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(DcA.name(DcA.keep(DcA.Shared(5), DcA.Other(0))))
+    println(DcB.name(DcB.keep(DcB.Shared(5), DcB.Extra(0))))
+    println(DcA.name(keep_a(DcA.Shared(5), DcA.Other(0))))
+    println(DcA.name(keep_a(DcA.Shared(1), DcA.Other(0))))
+    println(DcB.name(keep_b(DcB.Shared(5), DcB.Extra(0))))
+    println(DcB.name(keep_b(DcB.Shared(1), DcB.Extra(0))))
+  end
+end
+|}
+    ~expected:"A.Shared 5\nB.Shared 5\nA.Shared 5\nA.Other 0\nB.Shared 5\nB.Extra 0"
     ()
 
 (** [W3C2.4 / HAZARD H2] Golden preamble byte-diff test.
@@ -15209,6 +17946,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare ptr  @march_task_await_value(ptr %task)
+declare ptr  @march_task_poll(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_actor_recv()
 declare ptr  @march_cancel_token_new()
@@ -15256,6 +17994,11 @@ declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_time
 declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
 declare void @march_http_server_wait(i64 %handle)
 declare void @march_http_server_bind_host(ptr %host)
+declare ptr  @march_http_server_tls_configure(i64 %kind, ptr %a, ptr %b, i64 %poll_secs, i64 %wait_for_cert)
+declare void @march_http_server_set_timeouts(i64 %handshake_secs, i64 %header_secs, i64 %progress_secs)
+declare ptr  @march_http_server_reload_tls(i64 %kind, ptr %a, ptr %b)
+declare void @march_http_server_plain_listener(i64 %port, ptr %pipeline)
+declare i64  @march_http_conn_is_tls(i64 %fd)
 declare void @march_ws_handshake(i64 %fd, ptr %key)
 declare ptr  @march_ws_recv(i64 %fd)
 declare void @march_ws_send(i64 %fd, ptr %frame)
@@ -15268,6 +18011,13 @@ declare i64  @march_file_close(ptr %handle)
 declare ptr  @march_file_read(ptr %path)
 declare ptr  @march_file_read_line(ptr %handle)
 declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
+declare ptr  @march_file_open_write(ptr %path, i64 %mode)
+declare ptr  @march_file_write_handle(i64 %handle, ptr %data)
+declare ptr  @march_file_seek(i64 %handle, i64 %offset)
+declare ptr  @march_dir_open(ptr %path)
+declare ptr  @march_dir_open_write(ptr %path)
+declare ptr  @march_file_open_at(i64 %dirfd, ptr %rel, i64 %flags)
+declare ptr  @march_dir_list_at(i64 %dirfd, ptr %rel)
 declare ptr  @march_file_write(ptr %path, ptr %data)
 declare ptr  @march_file_append(ptr %path, ptr %data)
 declare ptr  @march_file_delete(ptr %path)
@@ -15424,6 +18174,8 @@ declare ptr    @ring_buf_drop(ptr %rb)
 ; Time builtins
 declare double @march_unix_time()
 declare i64    @march_unix_time_ms()
+declare i64    @march_cap_check_raw(ptr %kind, ptr %target)
+declare ptr    @march_cap_launch_text()
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
 declare i64  @march_vault_live_tables()
@@ -15493,6 +18245,14 @@ declare void @march_actor_inspect_store(ptr %s)
 declare ptr  @march_actor_inspect(ptr %actor, i64 %timeout_ms)
 declare i64  @march_pid_index_of(ptr %actor)
 declare ptr  @march_value_to_string(ptr %v)
+; Handle-box builtins (ocap phase 2)
+declare ptr  @march_handle_new(i64 %kind, i64 %raw, i64 %aux)
+declare i64  @march_handle_enter(ptr %h, i64 %kind)
+declare void @march_handle_leave(ptr %h)
+declare i64  @march_handle_close(ptr %h)
+declare i64  @march_handle_detach(ptr %h)
+declare i64  @march_handle_is_closed(ptr %h)
+declare i64  @march_handle_aux(ptr %h)
 ; Session-typed channel builtins (binary)
 declare ptr  @march_chan_new(ptr %proto_name)
 declare ptr  @march_chan_send(ptr %ep, ptr %val)
@@ -15515,6 +18275,7 @@ declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 declare ptr  @march_task_await(ptr %task)
 declare ptr  @march_task_await_value(ptr %task)
+declare ptr  @march_task_poll(ptr %task)
 declare void @march_sched_yield()
 declare ptr  @march_actor_recv()
 declare ptr  @march_cancel_token_new()
@@ -15598,7 +18359,7 @@ let test_builtin_group_total () =
          March_tir.Builtin_name.all)
   in
   Alcotest.(check int) "arith" 27 (count March_tir.Llvm_emit.Bg_arith);
-  Alcotest.(check int) "task" 24 (count March_tir.Llvm_emit.Bg_task);
+  Alcotest.(check int) "task" 25 (count March_tir.Llvm_emit.Bg_task);
   Alcotest.(check int) "record" 18 (count March_tir.Llvm_emit.Bg_record)
 
 let test_builtin_name_roundtrip () =
@@ -15612,7 +18373,7 @@ let test_builtin_name_roundtrip () =
         Alcotest.failf "builtin %S round-tripped to a different constructor" s
       | None -> Alcotest.failf "builtin %S has no of_string entry" s)
     March_tir.Builtin_name.all;
-  Alcotest.(check int) "constructor count" 70
+  Alcotest.(check int) "constructor count" 71
     (List.length March_tir.Builtin_name.all);
   (* Distinct names: two constructors mapping to one string would make the
      Hashtbl silently drop one direction of the round trip. *)
@@ -16132,8 +18893,9 @@ let test_cross_tls_gzip_linux_amd64_elf () =
   | Some _sysroot ->
     let main_exe = find_main_exe () in
     let project_root = march_project_root () in
-    (* The TLS calls are guarded by a RUNTIME length (never actually huge) so the
-       optimizer can't dead-code-strip them — otherwise the DT_NEEDED for
+    (* The TLS call (Tls.client_ctx: the raw tls_* builtins are stdlib-only
+       since ocap phase 2) is guarded by a RUNTIME length (never actually huge) so the
+       optimizer can't dead-code-strip it — otherwise the DT_NEEDED for
        libssl/libcrypto would be dropped and the assertion below would be a
        false negative.  The gzip calls are unconditional. *)
     let src_text =
@@ -16151,8 +18913,8 @@ let test_cross_tls_gzip_linux_amd64_elf () =
       \      Err(_) -> gz\n\
       \    end\n\
       \    if Bytes.length(restored) > 1000000000 do\n\
-      \      let _ = tls_write(0, \"ping\")\n\
-      \      tls_close(0)\n\
+      \      let _ = Tls.client_ctx(Tls.default_client_config())\n\
+      \      ()\n\
       \    else\n\
       \      ()\n\
       \    end\n\
@@ -16270,6 +19032,7 @@ let vectorize_source_inlined_reuse_fail = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let out = scale(arr, 2.0)
     println(native_float_arr_get(out, 0))
+    ()
   end
 end|}
 
@@ -16292,6 +19055,7 @@ let vectorize_check_fail_src = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16328,6 +19092,7 @@ let vectorize_source_ok = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16372,6 +19137,7 @@ let vectorize_source_warn_ok = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16385,6 +19151,7 @@ let vectorize_source_ok_int = {|mod Main do
     let arr = native_int_arr_make(4, 1)
     let doubled = double_all(arr)
     println(native_int_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16400,6 +19167,7 @@ let vectorize_source_reuse_fail = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16415,6 +19183,7 @@ let vectorize_source_reuse_warn = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16429,6 +19198,7 @@ let vectorize_source_ok_map2 = {|mod Main do
     let b = native_float_arr_make(4, 2.0)
     let summed = combine(a, b)
     println(native_float_arr_get(summed, 0))
+    ()
   end
 end|}
 
@@ -16445,6 +19215,7 @@ let vectorize_source_reuse_fail_map2 = {|mod Main do
     let b = native_float_arr_make(4, 2.0)
     let summed = combine(a, b)
     println(native_float_arr_get(summed, 0))
+    ()
   end
 end|}
 
@@ -16458,6 +19229,7 @@ let vectorize_source_misuse = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16471,6 +19243,7 @@ let vectorize_source_misuse_warn = {|mod Main do
     let arr = native_float_arr_make(4, 1.0)
     let doubled = scale(arr)
     println(native_float_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -16520,6 +19293,7 @@ let vectorize_source_reuse_fail_int = {|mod Main do
     let arr = native_int_arr_make(4, 1)
     let doubled = double_all(arr)
     println(native_int_arr_get(doubled, 0))
+    ()
   end
 end|}
 
@@ -17527,8 +20301,322 @@ let test_string_alloc_uses_march_allocator () =
   Alcotest.(check bool) "march_string_alloc routes through march_obj_malloc" true
     (Test_helpers.contains "march_string *s = march_obj_malloc" source)
 
+(* ocap phase 2, Task 2: the handle primitives, compiled. The fixtures are
+   shared with the other backend's suite (Test_helpers.handle_*_src). *)
+let test_handle_primitive_roundtrip () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:true ~name:"handle_roundtrip" handle_roundtrip_src in
+  if rc <> 0 then Alcotest.failf "handle roundtrip exited %d:\n%s" rc out;
+  let last =
+    match List.rev (List.filter (fun l -> String.trim l <> "")
+                      (String.split_on_char '\n' out)) with
+    | l :: _ -> String.trim l
+    | [] -> ""
+  in
+  Alcotest.(check string) "raw, first close, enter after close, second close"
+    handle_roundtrip_expected last
+
+let test_handle_in_generic_containers () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:true ~name:"handle_containers" handle_containers_src in
+  if rc <> 0 then Alcotest.failf "handle containers exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("prints #<Socket>:\n" ^ out) true (contains "#<Socket>" out);
+  Alcotest.(check bool) ("prints #<Socket closed> after close:\n" ^ out) true
+    (contains "#<Socket closed>" out);
+  Alcotest.(check bool) ("never prints the raw descriptor as a field:\n" ^ out) false
+    (contains "Socket(7" out)
+
+(* R7: a user `App.Process` variant and a builtin `Process` box in one
+   compiled program; the TIR lowers the builtin to `$Handle`, so Perceus
+   never drops the box as the user's P(Int, Int). Output must equal the
+   interpreter's. *)
+let test_handle_vs_user_type_named_process () =
+  let (rc, compiled) =
+    run_handle_fixture ~compiled:true ~name:"handle_vs_user" handle_vs_user_type_src in
+  if rc <> 0 then Alcotest.failf "compiled handle-vs-user-type exited %d:\n%s" rc compiled;
+  let (irc, interp) =
+    run_handle_fixture ~compiled:false ~name:"handle_vs_user_i" handle_vs_user_type_src in
+  if irc <> 0 then Alcotest.failf "interpreted handle-vs-user-type exited %d:\n%s" irc interp;
+  let program_lines out =
+    let ls = List.map String.trim (String.split_on_char '\n' out) in
+    let rec drop_to = function
+      | l :: rest when l = "3,4" -> l :: rest
+      | _ :: rest -> drop_to rest
+      | [] -> []
+    in
+    List.filter (( <> ) "") (drop_to ls)
+  in
+  Alcotest.(check (list string)) "compiled output = interpreted output"
+    (program_lines interp) (program_lines compiled);
+  Alcotest.(check (list string)) "the program's output"
+    [ "3,4"; "[#<Socket>, #<Socket>]"; "[P(3, 4), P(5, 6)]"; "#<Socket closed>" ]
+    (program_lines compiled)
+
+(* Review fix round 1: a user RECORD named `Socket` (no nominal identity:
+   records are structural) inside a variant, beside a builtin handle box.
+   Compiled output must equal the interpreter's. *)
+let test_handle_vs_user_record_named_socket () =
+  let (rc, compiled) =
+    run_handle_fixture ~compiled:true ~name:"handle_vs_rec" handle_vs_user_record_src in
+  if rc <> 0 then Alcotest.failf "compiled handle-vs-user-record exited %d:\n%s" rc compiled;
+  let (irc, interp) =
+    run_handle_fixture ~compiled:false ~name:"handle_vs_rec_i" handle_vs_user_record_src in
+  if irc <> 0 then Alcotest.failf "interpreted handle-vs-user-record exited %d:\n%s" irc interp;
+  let program_lines out =
+    let ls = List.map String.trim (String.split_on_char '\n' out) in
+    let rec drop_to = function
+      | l :: rest when l = "42" -> l :: rest
+      | _ :: rest -> drop_to rest
+      | [] -> []
+    in
+    List.filter (( <> ) "") (drop_to ls)
+  in
+  Alcotest.(check (list string)) "compiled output = interpreted output"
+    (program_lines interp) (program_lines compiled);
+  Alcotest.(check (list string)) "the program's output"
+    [ "42"; "x42"; "[W({ fd: 42, name: \"x\" }), W({ fd: 1, name: \"y\" })]"; "[#<Socket>]" ]
+    (program_lines compiled)
+
+(* ocap phase 2b, Task 8 (R4): a Process released without wait_proc, by
+   close or by dropping its last reference, leaves no zombie
+   (Test_helpers.process_reap_src). The interpreter runs the close variant
+   (test_eval); only the compiled box releases a dropped handle at a known
+   point. *)
+let test_process_release_reaps_child () =
+  List.iter (fun (trap, drop, name) ->
+      let (rc, out) =
+        run_handle_fixture ~compiled:true ~name (process_reap_src ~trap ~drop ()) in
+      if rc <> 0 then Alcotest.failf "%s exited %d:\n%s" name rc out;
+      Alcotest.(check bool) (name ^ ": child reaped:\n" ^ out) true
+        (contains process_reap_expected out))
+    (* trap: the child ignores SIGTERM, so only the release's SIGKILL ends it *)
+    [ (false, false, "process_reap_close"); (false, true, "process_reap_drop");
+      (true, true, "process_reap_trap_drop") ]
+
+(* Fix round 1: racing wait_procs, compiled (Test_helpers.process_wait_race_src):
+   the loser of the waitpid race is Err(Closed), not Ok(0). *)
+let test_process_wait_race () =
+  let (rc, out) =
+    run_handle_fixture ~compiled:true ~name:"process_wait_race" process_wait_race_src in
+  if rc <> 0 then Alcotest.failf "wait race exited %d:\n%s" rc out;
+  Alcotest.(check bool) ("one Ok, one Closed:\n" ^ out) true
+    (contains process_wait_race_expected out)
+
+(* A closure that matches a CAPTURED value and hands the pattern's fields to a
+   borrowing builtin in tail position must not release the capture before the
+   call (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md).
+   [Drop.rewrite_apply_clo_drop] asked whether the tail USES a capture by the
+   capture's own name, so a tail naming only `a`/`b` (fields of `src`) got the
+   environment's deep release in front of it: `__drop$Pair(src)` freed the
+   strings, then `string_concat(a, b)` read them (ASAN: heap-use-after-free in
+   HttpServer.tls's http_server_tls_configure call).  Asserted on post-Drop TIR:
+   along every path of each apply fn, no `__drop$` call precedes the call to
+   the builtin that reads the fields. *)
+let closure_field_tail_src = {|
+mod M do
+  type Pair = Pair(String, String) | Solo(String)
+  type Nest = Nest(Pair, String)
+
+  fn joiner(src : Pair) : ((Int, Int)) -> String do
+    fn pw ->
+      match pw do
+      (x, y) ->
+        match src do
+        Pair(a, b) -> string_concat(a, b)
+        Solo(a) -> string_concat(a, int_to_string(x + y))
+        end
+      end
+  end
+
+  fn nested(n : Nest) : (Int) -> Int do
+    fn _ ->
+      match n do
+      Nest(p, s) ->
+        match p do
+        Pair(a, _) -> string_byte_length(a) + string_byte_length(s)
+        Solo(a) -> string_byte_length(a)
+        end
+      end
+  end
+
+  fn main() do
+    let f = joiner(Pair(int_to_string(1), int_to_string(2)))
+    let h = nested(Nest(Pair(int_to_string(3), "b"), int_to_string(4)))
+    string_byte_length(f((1, 2))) + h(0)
+  end
+end
+|}
+
+let test_closure_field_tail_not_released_first () =
+  let open March_tir.Tir in
+  let m = parse_and_desugar closure_field_tail_src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let k_table = March_tir.Kind.of_module tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let is_drop (f : var) =
+    String.starts_with ~prefix:March_tir.Tir_names.drop_fn_prefix f.v_name in
+  let rec has_drop = function
+    | EApp (f, _) -> is_drop f
+    | ELet (_, a, b) | ESeq (a, b) -> has_drop a || has_drop b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> has_drop br.br_body) brs
+      || (match d with Some e -> has_drop e | None -> false)
+    | _ -> false
+  in
+  (* [bad seen e]: a call to one of [readers] reached on a path where a deep
+     release already ran ([seen]). *)
+  let readers = [ "string_concat"; "string_byte_length" ] in
+  let rec bad seen = function
+    | EApp (f, _) when List.mem f.v_name readers -> seen
+    | ELet (_, a, b) | ESeq (a, b) -> bad seen a || bad (seen || has_drop a) b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> bad seen br.br_body) brs
+      || (match d with Some e -> bad seen e | None -> false)
+    | _ -> false
+  in
+  let applies = List.filter (fun f ->
+      March_tir.Tir_names.is_apply_fn f.fn_name
+      && (String.ends_with ~suffix:"_joiner" f.fn_name
+          || String.ends_with ~suffix:"_nested" f.fn_name)) tir.tm_fns in
+  Alcotest.(check int) "both apply fns found" 2 (List.length applies);
+  List.iter (fun f ->
+      (* Control: the release is still there (on the freeing path), only after
+         the read.  Without it this test would pass on a leak. *)
+      Alcotest.(check bool) (f.fn_name ^ " still releases its capture") true
+        (has_drop f.fn_body);
+      Alcotest.(check bool)
+        (f.fn_name ^ ": no deep release before the builtin reads a field") false
+        (bad false f.fn_body))
+    applies
+
+(* An apply function must hold its environment until its last read of a
+   capture (specs/progress/2026-11-12-apply-fn-release-before-capture-read.md).
+   The captures are BORROWED from the environment, and [Drop.rewrite_apply_clo_drop]
+   used to leave the environment's release ([march_decrc_freed($clo)]) where
+   Perceus spliced it, straight after the capture loads.  When two workers call
+   one closure (Parallel.pmap), worker A's release does not free the
+   environment, worker B's does and drops the captured list at its tail, and A
+   is still reading it: the intermittent SIGSEGV in
+   test/native/native_arr_pmap_capture.march.  Asserted on post-Drop TIR for
+   the three tail shapes: a non-tail read (`List.length(xs) * i`), a tail call
+   to a module function that borrows the capture (`weigh(ys, i)`), and a tail
+   call to a builtin (`string_byte_length(s)`): along every path, no release of
+   [$clo] precedes a call that reads a capture. *)
+let apply_release_src = {|
+mod M do
+  fn weigh(xs : List(Int), i : Int) : Int do
+    List.length(xs) * i
+  end
+
+  fn counter(xs : List(Int)) : (Int) -> Int do
+    fn i -> List.length(xs) * i
+  end
+
+  fn weigher(ys : List(Int)) : (Int) -> Int do
+    fn i -> weigh(ys, i)
+  end
+
+  fn sizer(s : String) : (Int) -> Int do
+    fn _ -> string_byte_length(s)
+  end
+
+  fn main() do
+    let a = counter([1, 2, 3])
+    let b = weigher([4, 5])
+    let c = sizer(int_to_string(42))
+    a(2) + b(3) + c(0)
+  end
+end
+|}
+
+let test_apply_fn_holds_env_until_last_capture_read () =
+  let open March_tir.Tir in
+  let m = parse_and_desugar apply_release_src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let k_table = March_tir.Kind.of_module tir in
+  let tir = March_tir.Perceus.perceus ~k_table tir in
+  let tir = March_tir.Drop.run ~k_table tir in
+  let clo = March_tir.Tir_names.clo_param_name in
+  let releases_env = function
+    | EApp (f, [ AVar v ]) ->
+      String.equal f.v_name "march_decrc_freed" && String.equal v.v_name clo
+    | EDecRC (AVar v) -> String.equal v.v_name clo
+    | _ -> false
+  in
+  let rec has_release e =
+    releases_env e ||
+    match e with
+    | ELet (_, a, b) | ESeq (a, b) -> has_release a || has_release b
+    | ECase (_, brs, d) ->
+      List.exists (fun br -> has_release br.br_body) brs
+      || (match d with Some e -> has_release e | None -> false)
+    | _ -> false
+  in
+  let applies = List.filter (fun f ->
+      March_tir.Tir_names.is_apply_fn f.fn_name
+      && (String.ends_with ~suffix:"_counter" f.fn_name
+          || String.ends_with ~suffix:"_weigher" f.fn_name
+          || String.ends_with ~suffix:"_sizer" f.fn_name)) tir.tm_fns in
+  Alcotest.(check int) "all three apply fns found" 3 (List.length applies);
+  List.iter (fun f ->
+      (* The capture locals: [let c = $clo.$fvN]. *)
+      let caps = ref [] in
+      let rec collect = function
+        | ELet (v, EField (AVar c, _), b) when String.equal c.v_name clo ->
+          caps := v.v_name :: !caps; collect b
+        | ELet (_, a, b) | ESeq (a, b) -> collect a; collect b
+        | ECase (_, brs, d) ->
+          List.iter (fun br -> collect br.br_body) brs; Option.iter collect d
+        | _ -> ()
+      in
+      collect f.fn_body;
+      let reads_cap args =
+        List.exists (function AVar v -> List.mem v.v_name !caps | _ -> false) args in
+      (* [bad seen e]: a call reading a capture on a path where the
+         environment's release already ran ([seen]).  The guarded drops of the
+         captures on the freeing path come after the release by design and are
+         not reads. *)
+      let is_drop (g : var) =
+        String.starts_with ~prefix:March_tir.Tir_names.drop_fn_prefix g.v_name
+        || String.equal g.v_name "march_clo_release" in
+      let rec bad seen = function
+        | EApp (g, args) when not (is_drop g) && reads_cap args -> seen
+        | ECallPtr (AVar g, args) -> seen && reads_cap (AVar g :: args)
+        | ELet (_, a, b) | ESeq (a, b) -> bad seen a || bad (seen || has_release a) b
+        | ECase (_, brs, d) ->
+          List.exists (fun br -> bad seen br.br_body) brs
+          || (match d with Some e -> bad seen e | None -> false)
+        | _ -> false
+      in
+      Alcotest.(check bool) (f.fn_name ^ " loads a capture") true (!caps <> []);
+      (* Control: the release is still there.  Without it this test would
+         pass on a leak. *)
+      Alcotest.(check bool) (f.fn_name ^ " still releases its environment") true
+        (has_release f.fn_body);
+      Alcotest.(check bool)
+        (f.fn_name ^ ": no environment release before a capture is read") false
+        (bad false f.fn_body))
+    applies
+
 let codegen_suites =
   [
+      ( "handle primitives", [
+          Alcotest.test_case "handle_primitive_roundtrip" `Quick test_handle_primitive_roundtrip;
+          Alcotest.test_case "handle_in_generic_containers" `Quick test_handle_in_generic_containers;
+          Alcotest.test_case "handle_vs_user_type_named_process" `Quick
+            test_handle_vs_user_type_named_process;
+          Alcotest.test_case "handle_vs_user_record_named_socket" `Quick
+            test_handle_vs_user_record_named_socket;
+          Alcotest.test_case "process_release_reaps_child" `Quick
+            test_process_release_reaps_child;
+          Alcotest.test_case "process_wait_race" `Quick test_process_wait_race ] );
       ( "string_allocator", [
           Alcotest.test_case "strings use the March object allocator" `Quick
             test_string_alloc_uses_march_allocator;
@@ -17623,6 +20711,12 @@ let codegen_suites =
           Alcotest.test_case "map+filter+fold fused fn is FnFused" `Quick test_fnfused_map_filter_fold_tagged;
           Alcotest.test_case "no FnFused when nothing fuses"       `Quick test_fnfused_absent_when_not_fused;
         ] );
+      ( "closure_field_tail", [
+          Alcotest.test_case "capture not released before a tail reading its fields" `Quick
+            test_closure_field_tail_not_released_first;
+          Alcotest.test_case "apply fn holds its environment until the last capture read" `Quick
+            test_apply_fn_holds_env_until_last_capture_read;
+        ] );
       ( "unboxed_aggregates", [
           Alcotest.test_case "identified struct type declared"        `Quick test_unboxed_aggregate_declared_as_struct;
           Alcotest.test_case "built/destructured without march_alloc" `Quick test_unboxed_aggregate_built_without_alloc;
@@ -17640,9 +20734,21 @@ let codegen_suites =
             test_unboxed_aggregate_multi_arm_joins_are_struct;
           Alcotest.test_case "compiled branch-built aggregate loop does not leak" `Slow
             test_unboxed_aggregate_branch_join_no_leak_compiled;
+          Alcotest.test_case "Float-valued if/match joins in a double slot, no box" `Quick
+            test_float_case_join_slot_is_double;
+          Alcotest.test_case "Float join with an unpredicted arm keeps the ptr slot and frees its box" `Quick
+            test_float_case_join_mixed_arms_keep_ptr_slot;
+          Alcotest.test_case "compiled Float-valued joins equal the interpreter" `Slow
+            test_float_case_join_matches_interpreter_compiled;
+          Alcotest.test_case "compiled Float-valued join loop does not leak" `Slow
+            test_float_case_join_no_leak_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
           Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
           Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;
+        ] );
+      ( "module_function_values", [
+          Alcotest.test_case "stdlib function bound as a value" `Slow
+            test_other_module_function_value_compiled;
         ] );
       ( "nested_lit_pattern_codegen", [
           Alcotest.test_case "nested bool lit: no tag switch"   `Quick test_nested_bool_lit_pattern_no_tag_switch;
@@ -17654,6 +20760,8 @@ let codegen_suites =
             `Quick test_actor_foreign_msg_drop_boxed_dispatch;
           Alcotest.test_case "actor-message tags are stable across builds; migrate_msg's old type takes them" `Quick
             test_actor_msg_tags_stable_across_builds;
+          Alcotest.test_case "H7: actor-message tags ignore declaration order (with a colliding pair)" `Quick
+            test_actor_msg_tags_ignore_declaration_order;
           Alcotest.test_case "finding-20: actor-struct state EReuse is unconditional (no RC race)"
             `Quick test_actor_struct_ereuse_unconditional;
           Alcotest.test_case "finding-20 follow-up: a `_Actor`-suffixed user type is NOT treated as an actor struct"
@@ -17799,6 +20907,7 @@ let codegen_suites =
         Alcotest.test_case "int_mul"                 `Quick test_fold_int_mul;
         Alcotest.test_case "int_div_by_zero"         `Quick test_fold_int_div_by_zero;
         Alcotest.test_case "float_add"               `Quick test_fold_float_add;
+        Alcotest.test_case "float_div_by_zero"       `Quick test_fold_float_div_by_zero;
         Alcotest.test_case "bool_not"                `Quick test_fold_bool_not;
         Alcotest.test_case "and_shortcircuit_pure"   `Quick test_fold_and_shortcircuit_pure;
         Alcotest.test_case "and_shortcircuit_impure" `Quick test_fold_and_shortcircuit_impure;
@@ -18154,11 +21263,24 @@ let codegen_suites =
         Alcotest.test_case "encode_query"        `Quick test_http_encode_query;
         Alcotest.test_case "response helpers"    `Quick test_http_response_helpers;
       ]);
+      ("short-circuit bool ops", [
+        Alcotest.test_case "&& / || skip the decided operand (interp = compiled)" `Quick test_and_or_short_circuit_parity;
+        Alcotest.test_case "eager-safe rhs stays strict, others branch" `Quick test_and_or_lowering_shape;
+      ]);
+      ("native array inline access", [
+        Alcotest.test_case "get/set inline, runtime only on the failing branch" `Quick test_native_arr_inline_get_set;
+      ]);
       ("http builtins", [
         Alcotest.test_case "serialize request"       `Quick test_http_serialize_request;
         Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
+        Alcotest.test_case "serialize rejects injection (interp = compiled)" `Quick test_http_serialize_injection_parity;
+        Alcotest.test_case "transport refuses injected path, sends nothing" `Quick test_http_transport_refuses_injected_path;
         Alcotest.test_case "parse response"          `Quick test_http_parse_response;
         Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
+        Alcotest.test_case "parse response (interp = compiled)" `Quick test_http_parse_response_parity;
+      ]);
+      ("file handles", [
+        Alcotest.test_case "dir_beneath_symlink_linux" `Quick test_dir_beneath_symlink_linux;
       ]);
       ("http client", [
         Alcotest.test_case "new client"              `Quick test_http_client_new;
@@ -18206,6 +21328,12 @@ let codegen_suites =
             (with_reset test_compile_task_reductions_reads_tls);
           Alcotest.test_case "task_await uses march_task_await"    `Quick
             (with_reset test_compile_task_await_in_ir);
+          Alcotest.test_case "task_poll uses march_task_poll"      `Quick
+            (with_reset test_compile_task_poll_in_ir);
+          Alcotest.test_case "task_poll finished task"   `Quick (with_reset test_eval_task_poll_finished);
+          Alcotest.test_case "task_poll cancelled task"  `Quick (with_reset test_eval_task_poll_cancelled);
+          Alcotest.test_case "task_poll then await agree" `Quick (with_reset test_eval_task_poll_then_await);
+          Alcotest.test_case "task_poll interp + compiled (--opt 0, 2)" `Quick test_task_poll_compiled;
           Alcotest.test_case "cancel token IR correctness"         `Quick
             (with_reset test_compile_cancel_token_ir);
           (* Phase 5B: cancel tokens *)
@@ -18392,6 +21520,12 @@ let codegen_suites =
           Alcotest.test_case "compiled deep nested-tuple `let` (nesting + wildcard)" `Quick
             test_nested_tuple_let_deep_wildcard_compiled;
         ] );
+      ( "poly_let_none_codegen", [
+          Alcotest.test_case "generalized `let x = None` at a niche-unsafe Option (#1173)" `Quick
+            test_poly_let_none_niche_unsafe_compiled;
+          Alcotest.test_case "interface method passed as a value" `Quick
+            test_iface_method_as_value_compiled;
+        ] );
       ( "nested_fn_name_collision_codegen", [
           Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick
             test_nested_fn_name_shadows_toplevel_compiled;
@@ -18439,10 +21573,26 @@ let codegen_suites =
             test_compiled_int_divmod_trap_parity;
           Alcotest.test_case "Int / and % emit an inline zero test and sdiv/srem" `Quick
             test_int_divmod_inline_ir;
-          Alcotest.test_case "uncaught Int overflow panics with its message, exit 1 (interp, compiled, JS)" `Quick
+          Alcotest.test_case "uncaught Int overflow / div by zero panics with its message, exit 1 (interp, compiled, JS)" `Quick
             test_int_overflow_uncaught_panic;
+          Alcotest.test_case "Float -> Int panics on NaN, infinities and out of range (#1230; interp, compiled, JS)" `Quick
+            test_float_to_int_range_panics;
+          Alcotest.test_case "Float /. by a literal zero is not folded: compiled stops like the interpreter (#1169)" `Quick
+            test_compiled_float_div_zero_literal;
           Alcotest.test_case "--target js Int is the documented 53-bit subset (interp parity in range)" `Quick
             test_js_int_subset_parity;
+          Alcotest.test_case "--target js Float literals are native's double, bit for bit (#1169)" `Quick
+            test_js_float_literal_bits;
+          Alcotest.test_case "a NaN prints \"nan\" whatever its sign bit (interp = compiled)" `Quick
+            test_nan_prints_without_sign_compiled;
+          Alcotest.test_case "--target js Diagnostics: observers, context, location match the interpreter" `Quick
+            test_js_diagnostics_observers;
+          Alcotest.test_case "unwritable -o path: dirs created, plain error, no ICE (#1181)" `Quick
+            test_output_path_errors;
+          Alcotest.test_case "--target js --test runs the tests like the native runner (#1176)" `Quick
+            test_js_test_runner;
+          Alcotest.test_case "--target js --test: to_string without Show, __try_call, process_env/cwd/pid" `Quick
+            test_js_test_runner_gaps;
           Alcotest.test_case "compiled Int lazy 63-bit normalisation: every observation point (overflow parity)" `Quick
             test_compiled_int_overflow_lazy_norm_parity;
           Alcotest.test_case "compiled TRMC hole fresh path after heap churn (march_alloc is malloc)" `Quick
@@ -18496,6 +21646,14 @@ let codegen_suites =
           Alcotest.test_case "no double dec_rc on scrutinee re-matched in sibling sub-path (P0)" `Quick
             test_scrutinee_borrowed_cross_branch_no_double_dec;
         ] );
+      ( "record_equality", [
+          Alcotest.test_case "distinct record shapes compare natively" `Quick
+            test_record_eq_distinct_shapes_compiled;
+          Alcotest.test_case "nested and generic records compare natively" `Quick
+            test_record_eq_nested_generic_compiled;
+          Alcotest.test_case "record helper keys preserve structural boundaries" `Quick
+            test_record_eq_structural_keys;
+        ] );
       ( "newtype_derived_method_crash", [
           Alcotest.test_case "derived Eq: == operator vs named eq() parity (P1)" `Quick
             test_newtype_derived_eq_operator_vs_named_parity;
@@ -18523,6 +21681,40 @@ let codegen_suites =
             test_newtype_eq_operator_generic_payload_compiled;
           Alcotest.test_case "== operator on opaque (undeclared) ctor field falls back to march_poly_eq" `Quick
             test_eq_operator_opaque_ctor_field_uses_poly_eq;
+          Alcotest.test_case "`not p(n)` at a block start is `!p(n)`" `Quick
+            test_not_before_operand_is_prefix_not;
+          Alcotest.test_case "== on a newtype over a generic named record is structural" `Quick
+            test_newtype_over_generic_record_eq_compiled;
+          Alcotest.test_case "a local fn shadows a later `use M.*` on both backends" `Quick
+            test_local_fn_shadows_later_bulk_use_compiled;
+          Alcotest.test_case "user generic `fn show` vs the Show method" `Quick
+            test_user_generic_show_vs_show_iface_compiled;
+          Alcotest.test_case "user typed `fn show` does not capture println's show" `Quick
+            test_user_typed_show_does_not_capture_println_compiled;
+          Alcotest.test_case "user `fn show` vs the type's own Show impl" `Quick
+            test_user_show_vs_own_show_impl_compiled;
+          Alcotest.test_case "user `fn compare`/`fn hash` vs the interfaces" `Quick
+            test_user_compare_hash_vs_iface_compiled;
+          Alcotest.test_case "nested module fn named like an interface method" `Quick
+            test_nested_module_fn_named_like_iface_method_compiled;
+          Alcotest.test_case "entry `mod List` vs the stdlib List" `Quick
+            test_user_module_named_like_stdlib_module_compiled;
+          Alcotest.test_case "derived impl body vs a user fn named like the method" `Quick
+            test_derived_impl_not_captured_by_user_method_fn_compiled;
+          Alcotest.test_case "derived impl body vs same-named fns in a nested module" `Quick
+            test_derived_impl_not_captured_in_nested_module_compiled;
+          Alcotest.test_case "qualified Show.show / Eq.eq / Ord.compare / Hash.hash" `Quick
+            test_qualified_builtin_iface_method_compiled;
+          Alcotest.test_case "#1171 record ==: Pair helper not reused for Triple" `Quick
+            test_record_eq_pair_then_triple_compiled;
+          Alcotest.test_case "#1171 record ==: Triple helper not reused for Pair" `Quick
+            test_record_eq_triple_then_pair_compiled;
+          Alcotest.test_case "#1171 record ==: String-record helper not reused for Int record" `Quick
+            test_record_eq_strings_then_ints_compiled;
+          Alcotest.test_case "#1171 eq() on nested record field and List of records" `Quick
+            test_record_eq_nested_and_list_compiled;
+          Alcotest.test_case "#1171 tuple ==: nested tuple shapes get distinct helpers" `Quick
+            test_tuple_eq_nested_shape_collision_compiled;
         ] );
       ( "cross_module_ctor_resolution", [
           Alcotest.test_case "Msgpack vs Json ambiguous ctor: encode/decode parity" `Quick
@@ -18531,6 +21723,12 @@ let codegen_suites =
             test_module_qualified_colliding_ctor_pattern_compiled;
           Alcotest.test_case "module-qualified pattern whose qualifier is a stdlib type name" `Quick
             test_module_qualified_pattern_qualifier_is_stdlib_type_compiled;
+          Alcotest.test_case "qualified pattern whose arm returns the scrutinee" `Quick
+            test_qualified_pattern_arm_returns_scrutinee_compiled;
+          Alcotest.test_case "qualified actor-message pattern nested in a Some arm" `Quick
+            test_qualified_actor_msg_pattern_in_some_arm_compiled;
+          Alcotest.test_case "qualified pattern returning the scrutinee, colliding type names" `Quick
+            test_qualified_pattern_returns_scrutinee_colliding_types_compiled;
         ] );
       ( "string_codepoint", [
           Alcotest.test_case "String.from_codepoint/to_codepoints usable compiled (pure-March codec)" `Quick

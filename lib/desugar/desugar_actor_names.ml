@@ -235,6 +235,7 @@ let rename_expr tbl ~root cur =
     | EDbg (Some x, sp) -> EDbg (Some (ex x), sp)
     | ESend (c, m, sp) -> ESend (ex c, ex m, sp)
     | EAssert (x, sp) -> EAssert (ex x, sp)
+    | EProof (p, sp) -> EProof (map_proof ex p, sp)
     | EAtom (a, args, sp) -> EAtom (a, List.map ex args, sp)
     | ESigil (s, x, sp) -> ESigil (s, ex x, sp)
     | ERefineMsg (x, s, sp) -> ERefineMsg (ex x, s, sp)
@@ -261,12 +262,13 @@ let rec rename_decls tbl ~root cur (decls : decl list) : decl list =
   let fn_def = rename_fn_def ex ty param in
   let field (f : field) = { f with fld_ty = ty f.fld_ty } in
   let type_def = function
-    | TDAlias t -> TDAlias (ty t)
+    | TDAlias (t, vs) -> TDAlias (ty t, List.map (fun (n, s) -> (n, ty s)) vs)
     | TDVariant vs ->
       TDVariant (List.map (fun v -> { v with var_args = List.map ty v.var_args }) vs)
     | TDRecord fs -> TDRecord (List.map field fs) in
   let handler (h : actor_handler) =
-    { h with ah_params = List.map param h.ah_params; ah_body = ex h.ah_body } in
+    { h with ah_params = List.map param h.ah_params; ah_body = ex h.ah_body;
+             ah_ensures = Option.map ex h.ah_ensures } in
   let child_ty t = match t with
     | TyCon (n, args) ->
       (match resolve tbl ~root cur n.txt with

@@ -1,0 +1,12 @@
+exit: 1
+-- CONTRACT ------ errors/deterministic_violation_3.march
+
+`mod Sim` (declared `cap deterministic`) declares `needs IO.Clock`, which admits the clock, a nondeterminism source, directly or through a stdlib wrapper such as `DateTime.now`. [deterministic_violation]
+
+Declare only capabilities that are neither the clock nor an RNG (`IO.Console`, `IO.FileRead`, ...), and move the code that reads the clock or an RNG to a module without `cap deterministic`.
+
+12 |     needs IO.Clock
+         ^^^^^^^^^^^^^^
+
+
+

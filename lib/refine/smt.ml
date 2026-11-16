@@ -62,6 +62,8 @@ let rec instantiate (args : sort list) (s : sort) : sort =
   | SInt | SBool | SFloat -> s
 
 type term =
+  | Quant of bool * string * sort * term * term
+      (* universal?, fresh binder, sort, domain guard, body *)
   | Const of string          (* a declared symbol: "_", "i", or a measure-applied const *)
   | App of string * term list (* uninterpreted-fn application *)
   (* A datatype constructor application at a known datatype instance.  The
@@ -141,6 +143,12 @@ type term =
   | FpLe of term * term
   | FpGt of term * term
   | FpGe of term * term
+  (* An IEEE-754 class test of a Float term, Bool-valued: [FpNaN] is
+     `fp.isNaN`, [FpInf] is `fp.isInfinite` (either sign).  The predicate
+     words `is_nan`/`is_infinite`/`is_finite` and the program builtins
+     `float_is_nan`/`float_is_infinite` reflect to these. *)
+  | FpNaN of term
+  | FpInf of term
   (* ── Finite sets (specs/2026-09-13-set-refinements-design.md §4.2) ─────
      [SetEmpty]/[SetSng] carry the ELEMENT sort, because `(as const …)` needs
      the full array sort spelled out; [SetMem] and [SetSub] are Bool-valued,
@@ -169,10 +177,11 @@ type vc = {
 (* A term's immediate subterms. *)
 let children (t : term) : term list =
   match t with
+  | Quant (_, _, _, guard, body) -> [guard; body]
   | Const _ | IntLit _ | BoolLit _ | FloatLit _ | SetEmpty _ -> []
   | App (_, args) | Ctor (_, _, args) -> args
   | IsCtor (_, a) | IsCtorAt (_, _, _, a) | MulLit (_, a) | DivLit (a, _) | ModLit (a, _)
-  | Neg a | Not a | SetSng (_, a) | SetCard (_, a) -> [ a ]
+  | Neg a | Not a | SetSng (_, a) | SetCard (_, a) | FpNaN a | FpInf a -> [ a ]
   | Ite (c, a, b) -> [ c; a; b ]
   | Add (a, b) | Sub (a, b) | Mul (a, b) | Div (a, b) | Mod (a, b) | And (a, b) | Or (a, b) | Implies (a, b) | Eq (a, b)
   | Ne (a, b) | Lt (a, b) | Le (a, b) | Gt (a, b) | Ge (a, b) | FpEq (a, b) | FpLt (a, b)
@@ -277,6 +286,26 @@ let tester_at (c : string) (s : sort) (n : int) (t : string) : string =
       (String.concat " " (List.init n (fun i -> Printf.sprintf "(%s_%d %s)" c i t)))
 
 let rec render = function
+  | Quant (universal, name, sort, guard, body) ->
+    let rec mentions = function
+      | Const n -> n = name
+      | Quant (_, n, _, g, b) -> mentions g || (n <> name && mentions b)
+      | t -> List.exists mentions (children t)
+    in
+    let rec pattern t =
+      match t with
+      | Quant _ -> None
+      | App (_, _) | SetMem _ when mentions t -> Some t
+      | _ -> List.find_map pattern (children t)
+    in
+    let formula = if universal then Implies (guard, body) else And (guard, body) in
+    let text = render formula in
+    let text = match (if universal then pattern formula else None) with
+      | None -> text
+      | Some p -> Printf.sprintf "(! %s :pattern (%s))" text (render p) in
+    Printf.sprintf "(%s ((%s %s)) %s)"
+      (if universal then "forall" else "exists") name (string_of_sort sort) text
+
   | Const s -> s
   | App (f, []) -> f
   | App (f, args) -> Printf.sprintf "(%s %s)" f (String.concat " " (List.map render args))
@@ -325,6 +354,8 @@ let rec render = function
   | FpLe (a, b) -> Printf.sprintf "(fp.leq %s %s)" (render a) (render b)
   | FpGt (a, b) -> Printf.sprintf "(fp.gt %s %s)" (render a) (render b)
   | FpGe (a, b) -> Printf.sprintf "(fp.geq %s %s)" (render a) (render b)
+  | FpNaN a -> Printf.sprintf "(fp.isNaN %s)" (render a)
+  | FpInf a -> Printf.sprintf "(fp.isInfinite %s)" (render a)
   | SetEmpty e ->
     Printf.sprintf "((as const %s) false)" (string_of_sort (SSet (render_elem_sort e)))
   | SetSng (e, x) ->
@@ -337,6 +368,48 @@ let rec render = function
     Printf.sprintf "((_ map and) %s ((_ map not) %s))" (render a) (render b)
   | SetSub (a, b) -> Printf.sprintf "(= ((_ map or) %s %s) %s)" (render a) (render b) (render b)
   | SetCard (e, a) -> Printf.sprintf "(%s %s)" (card_fn (render_elem_sort e)) (render a)
+
+(* The opaque String sort and its one function (reflection D9).  Defined here,
+   below every builder of a query, so the declaration lines a builder emits
+   and the ones [hoist_string_decls] looks for are the same text. *)
+let str_sort = "$Str"
+let strlen_fn = "$strlen"
+let str_sort_decl = Printf.sprintf "(declare-sort %s 0)" str_sort
+let strlen_decl = Printf.sprintf "(declare-fun %s (%s) Int)" strlen_fn str_sort
+let strlen_axiom =
+  Printf.sprintf "(assert (forall ((s %s)) (! (>= (%s s) 0) :pattern ((%s s)))))" str_sort strlen_fn strlen_fn
+let string_preamble = str_sort_decl ^ "\n" ^ strlen_decl ^ "\n" ^ strlen_axiom ^ "\n"
+
+(* A query that mentions `$Str` gets [string_preamble] once, FIRST.  The
+   query builders assemble a preamble from several sources (datatype
+   declarations, measure axioms, set definitions, the string sort), each in
+   its own order, and a datatype with a String field (since 2026-11-09)
+   names `$Str` in its `declare-datatypes`: declared after that, z3 rejects
+   the query.  Rather than teach every builder the order, every copy of the
+   three declarations is dropped and one is put at the top.  A query without `$Str`
+   is returned unchanged. *)
+let hoist_string_decls (body : string) : string =
+  let find_from hay needle i =
+    let n = String.length needle and h = String.length hay in
+    let rec go i = if i + n > h then None else if String.sub hay i n = needle then Some i else go (i + 1) in
+    go i
+  in
+  (* Every occurrence, wherever it sits: a builder may end a datatype
+     declaration with no newline before the next piece, so a copy is not
+     always a line of its own. *)
+  let remove_all needle s =
+    let b = Buffer.create (String.length s) in
+    let rec go i =
+      match find_from s needle i with
+      | Some j -> Buffer.add_string b (String.sub s i (j - i)); go (j + String.length needle)
+      | None -> Buffer.add_string b (String.sub s i (String.length s - i))
+    in
+    go 0;
+    Buffer.contents b
+  in
+  if find_from body str_sort 0 = None then body
+  else
+    string_preamble ^ (body |> remove_all strlen_axiom |> remove_all strlen_decl |> remove_all str_sort_decl)
 
 (* The canonical assertion block for a VC: declare every free symbol, assert the
    hypotheses, and assert the NEGATED goal.  Sent to z3 between push/pop and also
@@ -355,3 +428,71 @@ let assertion_block (vc : vc) : string =
     vc.assumptions;
   Buffer.add_string buf (Printf.sprintf "(assert %s)\n" (render (Not vc.goal)));
   Buffer.contents buf
+
+let map_term (f : term -> term) (t : term) : term =
+  match t with
+  | Quant (q, n, sort, g, b) -> Quant (q, n, sort, f g, f b)
+  | Const _ | IntLit _ | BoolLit _ | FloatLit _ | SetEmpty _ -> t
+  | App (g, xs) -> App (g, List.map f xs)
+  | Ctor (c, s, xs) -> Ctor (c, s, List.map f xs)
+  | IsCtor (c, a) -> IsCtor (c, f a)
+  | IsCtorAt (c, s, n, a) -> IsCtorAt (c, s, n, f a)
+  | MulLit (k, a) -> MulLit (k, f a)
+  | DivLit (a, k) -> DivLit (f a, k)
+  | ModLit (a, k) -> ModLit (f a, k)
+  | Neg a -> Neg (f a)
+  | Not a -> Not (f a)
+  | SetSng (e, a) -> SetSng (e, f a)
+  | SetCard (e, a) -> SetCard (e, f a)
+  | Ite (c, a, b) -> Ite (f c, f a, f b)
+  | Add (a, b) -> Add (f a, f b)
+  | Sub (a, b) -> Sub (f a, f b)
+  | Mul (a, b) -> Mul (f a, f b)
+  | Div (a, b) -> Div (f a, f b)
+  | Mod (a, b) -> Mod (f a, f b)
+  | And (a, b) -> And (f a, f b)
+  | Or (a, b) -> Or (f a, f b)
+  | Implies (a, b) -> Implies (f a, f b)
+  | Eq (a, b) -> Eq (f a, f b)
+  | Ne (a, b) -> Ne (f a, f b)
+  | Lt (a, b) -> Lt (f a, f b)
+  | Le (a, b) -> Le (f a, f b)
+  | Gt (a, b) -> Gt (f a, f b)
+  | Ge (a, b) -> Ge (f a, f b)
+  | FpEq (a, b) -> FpEq (f a, f b)
+  | FpLt (a, b) -> FpLt (f a, f b)
+  | FpLe (a, b) -> FpLe (f a, f b)
+  | FpGt (a, b) -> FpGt (f a, f b)
+  | FpGe (a, b) -> FpGe (f a, f b)
+  | FpNaN a -> FpNaN (f a)
+  | FpInf a -> FpInf (f a)
+  | SetMem (a, b) -> SetMem (f a, f b)
+  | SetUnion (a, b) -> SetUnion (f a, f b)
+  | SetInter (a, b) -> SetInter (f a, f b)
+  | SetDiff (a, b) -> SetDiff (f a, f b)
+  | SetSub (a, b) -> SetSub (f a, f b)
+
+
+let rec free_names = function
+  | Const n -> [n]
+  | Quant (_, n, _, g, b) -> List.filter ((<>) n) (free_names g @ free_names b)
+  | t -> List.concat_map free_names (children t)
+
+let rec all_names = function
+  | Const n -> [n]
+  | Quant (_, n, _, g, b) -> n :: (all_names g @ all_names b)
+  | t -> List.concat_map all_names (children t)
+
+let rec substitute name value t =
+  match t with
+  | Const n when n = name -> value
+  | Quant (_, n, _, _, _) when n = name -> t
+  | Quant (q, n, sort, g, b) when List.mem n (free_names value) ->
+    let used = all_names t @ all_names value in
+    let rec fresh i =
+      let candidate = "$alpha$" ^ string_of_int i in
+      if List.mem candidate used then fresh (i + 1) else candidate in
+    let n' = fresh 0 in
+    let rename = substitute n (Const n') in
+    Quant (q, n', sort, substitute name value (rename g), substitute name value (rename b))
+  | t -> map_term (substitute name value) t

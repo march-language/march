@@ -13,5 +13,6 @@ mod Own do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println(int_to_string(width(7)))
+    ()
   end
 end

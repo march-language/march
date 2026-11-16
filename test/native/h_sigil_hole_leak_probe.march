@@ -82,6 +82,7 @@ mod Main do
     let allowed = if leg == 4 do 10000 + 100 else 100 end
     println(name(leg) ++ ": " ++ render(leg, 7) ++ " bytes=" ++ int_to_string(bytes)
             ++ " flat: " ++ bool_to_string(delta < allowed))
+    ()
   end
 
   pfn all(leg : Int) : Unit do

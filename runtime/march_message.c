@@ -53,6 +53,12 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * [rc][tag][pad][len@16][cap@24][slots@32], each slot a tagged immediate or a
  * heap value, copied recursively. Kept in sync manually, as above. */
 #define MARCH_TYPED_ARR_TAG  (-8)
+/* Handle-box sentinel (must match march_runtime.h MARCH_HANDLE_TAG): a
+ * handle (march_handle.c) owns a descriptor, so a byte copy would give two
+ * boxes that each release it.  A message copy SHARES the box (spec §6:
+ * "within a node, sending a handle in a message shares it"). */
+#define MARCH_HANDLE_TAG     (-10)
+extern void march_incrc(void *p);
 #define TYPED_ARR_HDR_SZ     32u
 /* elem_kind at byte 24: 0=i64, 1=f64, 2=f32, 3=i32, 4=u8. */
 static size_t native_elem_size(unsigned kind) {
@@ -217,6 +223,14 @@ static void *copy_value(march_heap_t *dst_heap, void *value, fwd_table *fwd) {
         ((msg_hdr *)nv)->rc = 1;
         fwd_insert(fwd, value, nv);
         return nv;
+    }
+
+    /* Shared, not copied: one reference per occurrence, so no forwarding
+     * entry (a second occurrence must take its own reference too).  A box
+     * holds no pointer fields, so there is nothing to recurse into. */
+    if (h->tag == MARCH_HANDLE_TAG) {
+        march_incrc(value);
+        return value;
     }
 
     if (h->tag == MARCH_NATIVE_ARR_TAG) {

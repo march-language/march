@@ -31,18 +31,18 @@ mod ClusterTakeoverA do
   end
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "takeover-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "takeover-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        let flags = Vault.new("scenario_flags")
+        let flags = Authority.must(Vault.new("scenario_flags"))
         let _ = ClusterNode.subscribe(h, fn ev ->
           match ev do
             ClusterNode.NodeRejoined(i) ->
@@ -64,17 +64,17 @@ mod ClusterTakeoverA do
             ClusterNode.Unbound(_) ->
               println("node-a: leader unbound")
               Vault.set(flags, "unbound", 1)
-            ClusterNode.Lost(_, _) -> println("node-a: leader lost")
+            ClusterNode.Lost(_, _) -> Authority.ignore(println("node-a: leader lost"))
           end)
         println("node-a: up")
         if wait_flag(flags, "unbound", 60000) do
           let holder = spawn(Holder)
           match ClusterNode.register(h, "leader", holder) do
             Ok(_) -> ()
-            Err(_) -> println("node-a: register refused")
+            Err(_) -> Authority.ignore(println("node-a: register refused"))
           end
-        else println("node-a: leader never unbound") end
-        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        else Authority.ignore(println("node-a: leader never unbound")) end
+        wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         ClusterNode.stop(h)
         println("node-a: done")
     end

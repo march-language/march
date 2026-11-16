@@ -64,7 +64,26 @@ val file_is_stdlib : string -> bool
     each as a declarant of its name: a user type of the same short name is
     conflated with it). *)
 val builtin_type_names : string list
+
+(** True iff [s] is the bare name some built-in type is spelled with at a use:
+    a user variant type of that name gets its own identity
+    ([Typecheck_nominal.compute]). *)
+val is_base_type_short_name : string -> bool
+
+(** Every built-in type of the base environment with its arity (the number of
+    type arguments it takes). The refinement checker counts a built-in as a
+    declarant of its short name only at that arity: the typechecker does not
+    unify a user type of another arity with it. *)
+val builtin_types : (string * int) list
 val span_is_stdlib : Ast.span -> bool
+
+(** The control plane's generated-wiring file tag; equals
+    [Hot_reload.control_wiring_file] (pinned by test_stdlib_only). *)
+val control_wiring_file : string
+
+(** [span_is_stdlib], or the generated control wiring: who may name a
+    [@[stdlib_internal]] function. *)
+val span_may_name_internal : Ast.span -> bool
 
 (** Builtins only the standard library may reference, with the suggestion
     shown to user code instead: the reference-forging actor builtins, reached

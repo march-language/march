@@ -40,8 +40,8 @@ mod TestNativeArraySend do
 
     test "a task captures a native array and keeps its own result" do
       let arr = NativeArray.make_int(4, 0)
-      let t1 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, 5), 0))
-      let t2 = Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, 9), 0))
+      let t1 = Authority.must(Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, 5), 0)))
+      let t2 = Authority.must(Task.async(fn () -> NativeArray.get_int(NativeArray.set_int(arr, 0, 9), 0)))
       assert (Task.await(t1) == Ok(5))
       assert (Task.await(t2) == Ok(9))
       assert (NativeArray.get_int(arr, 0) == 0)

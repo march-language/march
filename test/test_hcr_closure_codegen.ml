@@ -31,6 +31,7 @@ let source = {|mod ClosureEpoch do
       if n == 0 do acc else plain(n - 1, acc + 1) end
     end
     println("plain=" ++ int_to_string(plain(200000, 0)))
+    ()
   end
 end
 |}

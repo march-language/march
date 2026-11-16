@@ -15,15 +15,16 @@ mod CtlApp do
     let me = Topology.node_name(node)
     let _ = ClusterNode.subscribe(node, fn ev ->
       match ev do
-        ClusterNode.NodeDead(i, why) -> println("app " ++ me ++ ": " ++ i.name ++ " dead: " ++ why)
+        ClusterNode.NodeDead(i, why) -> Authority.ignore(println("app " ++ me ++ ": " ++ i.name ++ " dead: " ++ why))
         _ -> ()
       end)
     let _ = ClusterNode.on_security_event(node, fn ev ->
       match ev do
-        ClusterNode.CertReplaced(id, serial) -> println("app " ++ me ++ ": certificate replaced: " ++ id ++ " serial " ++ serial)
-        ClusterNode.CertRefused(id, why) -> println("app " ++ me ++ ": certificate refused: " ++ id ++ ": " ++ why)
+        ClusterNode.CertReplaced(id, serial) -> Authority.ignore(println("app " ++ me ++ ": certificate replaced: " ++ id ++ " serial " ++ serial))
+        ClusterNode.CertRefused(id, why) -> Authority.ignore(println("app " ++ me ++ ": certificate refused: " ++ id ++ ": " ++ why))
         _ -> ()
       end)
     println("app " ++ me ++ ": up")
+    ()
   end
 end

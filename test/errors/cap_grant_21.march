@@ -16,8 +16,8 @@ mod Main do
 
   fn main() : () do
     match file_write("/tmp/t176_out", "d") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end

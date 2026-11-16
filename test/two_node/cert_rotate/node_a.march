@@ -32,18 +32,19 @@ mod CertRotateA do
   pfn other() : String do "node-b" end
 
   pfn flags() : Vault(Int) do
-    match Vault.whereis("cert_rotate_flags") do
+    match Authority.must(Vault.whereis("cert_rotate_flags")) do
       Some(v) -> v
-      None -> Vault.new("cert_rotate_flags")
+      None -> Authority.must(Vault.new("cert_rotate_flags"))
     end
   end
 
   pfn once(key : String, line : String) : () do
-    if Vault.incr(flags(), key, 1) == 1 do println(me() ++ ": " ++ line) else () end
+    if Vault.incr(flags(), key, 1) == 1 do Authority.ignore(println(me() ++ ": " ++ line)) else () end
+    ()
   end
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
@@ -57,7 +58,7 @@ mod CertRotateA do
       if old > 0 && unix_time_ms() / 1000 > old + 1 do
         once("outlived", "session still running after " ++ other() ++ "'s old certificate expired")
       else () end
-      if File.exists(stop) do Order_Shop.close(s, Order_Shop.choose_done(s, st1, n))
+      if Authority.must(File.exists(stop)) do Order_Shop.close(s, Order_Shop.choose_done(s, st1, n))
       else shop(s, Order_Shop.choose_more(s, st1, n), stop) end)
   end
 
@@ -75,10 +76,10 @@ mod CertRotateA do
   end
 
   fn main(c : Cap(IO)) do
-    let pki = Env.require("PKI")
+    let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me())
-    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_A")))
-    Process.set_env("MARCH_CLUSTER_NODES", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_B")))
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))))
+    Process.set_env("MARCH_CLUSTER_NODES", "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_B"))))
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
     Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
@@ -95,16 +96,16 @@ mod CertRotateA do
             ClusterNode.HandshakeRejected(_, why) ->
               if String.contains(why, "certificate expired") do once("refused", "refused a handshake: certificate expired") else () end
             ClusterNode.CertReplaced(id, _) -> if id == b do once("replaced", other() ++ "'s certificate replaced") else () end
-            ClusterNode.CertRefused(id, why) -> println(me() ++ ": update from " ++ id ++ " refused: " ++ why)
+            ClusterNode.CertRefused(id, why) -> Authority.ignore(println(me() ++ ": update from " ++ id ++ " refused: " ++ why))
             _ -> ()
           end)
-        let stop = Env.require("CLUSTER_STOP_FILE")
+        let stop = Authority.must(Env.require("CLUSTER_STOP_FILE"))
         -- A death before the stop file is the failure this scenario looks
         -- for; after it, node-b stopping first is the teardown.
         let _ = ClusterNode.subscribe(h, fn ev ->
           match ev do
             ClusterNode.NodeDead(i, why) ->
-              if File.exists(stop) do () else println(me() ++ ": " ++ i.name ++ " dead: " ++ why) end
+              if Authority.must(File.exists(stop)) do () else Authority.ignore(println(me() ++ ": " ++ i.name ++ " dead: " ++ why)) end
             _ -> ()
           end)
         println(me() ++ ": up")

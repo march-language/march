@@ -63,6 +63,7 @@ mod ActorCapLeakProbe do
     let total = times(200, f, 0)
     println(name ++ ": total " ++ int_to_string(total) ++ ", released "
             ++ bool_to_string(settle(a0, 250) < 5))
+    ()
   end
 
   fn main(_io : Cap(IO)) : () do

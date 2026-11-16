@@ -16,5 +16,6 @@ mod Test do
   fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(int_to_string(apply1(fn n -> n * 2, 21)))
     println(int_to_string(count_matching(fn n -> n % 2 == 0, 10)))
+    ()
   end
 end

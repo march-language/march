@@ -31,7 +31,11 @@
  ; (specs/progress/2026-10-14-browser-repl-stack-depth.md). In CPS mode
  ; js_of_ocaml keeps the continuation on the heap and bounces off the stack
  ; when it gets deep, so recursion depth is limited by memory, not the JS
- ; stack (1,000,000 tail calls and 100,000 non-tail ones run). Measured
+ ; stack (1,000,000 tail calls and 100,000 non-tail ones run). The bounce
+ ; happens only at a CPS call, so the RETURN path of a deep recursion needs
+ ; one too: march_browser.ml installs Eval.call_return_hook for that, since
+ ; js_of_ocaml 6.5 made the call that used to provide it direct-style
+ ; (specs/progress/2026-11-07-js-of-ocaml-6-5-browser-repl-stack-overflow.md). Measured
  ; 2026-10-14: ~25-40% slower on call-heavy code (fib(20): 285 -> 360 ms),
  ; same startup, and a SMALLER bundle (1.87 MB -> 1.69 MB, 410 -> 363 KB gzip).
  ; It also gives the evaluator's effect handlers (the WS fiber parking in

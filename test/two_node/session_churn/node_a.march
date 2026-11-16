@@ -33,7 +33,7 @@ mod SessionChurnA do
         Err(e) ->
           -- Only every third session is meant to fail (B leaves it): say why
           -- any other did (stderr, beside the logged split).
-          if i % 3 != 2 do IO.warn("A: cluster session " ++ int_to_string(i) ++ " failed: " ++ Echo_Run.error_message(e)) else () end
+          if i % 3 != 2 do Authority.ignore(IO.warn("A: cluster session " ++ int_to_string(i) ++ " failed: " ++ Echo_Run.error_message(e))) else () end
           cluster_runs(c, h, i + 1, stop, ok, bad + 1)
       end
     end
@@ -44,27 +44,28 @@ mod SessionChurnA do
       match Echo_Run.run_A(c, "node-a", "churn-secret", Echo_Run.addrs_from_env(), fn (s, st) -> role_a(s, st, i)) do
         Ok(_) -> direct_runs(c, i + 1, stop, ok + 1)
         Err(e) ->
-          IO.warn("A: direct session " ++ int_to_string(i) ++ ": " ++ Echo_Run.error_message(e))
+          Authority.ignore(IO.warn("A: direct session " ++ int_to_string(i) ++ ": " ++ Echo_Run.error_message(e)))
           direct_runs(c, i + 1, stop, ok)
       end
     end
   end
 
   pfn report(what : String, tables : Int, objects : Int, n : Int) : () do
-    IO.warn("A: " ++ what ++ ": tables " ++ int_to_string(tables) ++ ", objects " ++ int_to_string(objects))
+    Authority.ignore(IO.warn("A: " ++ what ++ ": tables " ++ int_to_string(tables) ++ ", objects " ++ int_to_string(objects)))
     println("A: " ++ what ++ ": tables flat " ++ (if tables <= 2 do "true" else "false (" ++ int_to_string(tables) ++ " over)" end))
+    ()
   end
 
   fn main(c : Cap(IO)) do
     -- The default SWIM timeouts, except under AddressSanitizer, where
     -- scenario.sh sets CHURN_SUSPECT_MS: see there.
-    let base = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "churn-secret", 1)
-    let suspect_ms = Env.get_int("CHURN_SUSPECT_MS", 0)
+    let base = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "churn-secret", 1)
+    let suspect_ms = Authority.must(Env.get_int("CHURN_SUSPECT_MS", 0))
     let cfg = if suspect_ms > 0 do { base with swim: Swim.config(500, suspect_ms, 2) } else base end
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        println("node-a: up")
+        Authority.ignore(println("node-a: up"))
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
         let n = 60
         let _ = cluster_runs(c, h, 0, 6, 0, 0)

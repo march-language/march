@@ -14,6 +14,7 @@ The capability system lets you express resource requirements in function types. 
 
 `needs` lists the capabilities a function requires:
 
+<!-- repl:skip -->
 ```march
 needs IO
 fn write_log(msg : String) : Result((), String) do

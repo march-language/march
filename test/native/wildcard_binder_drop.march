@@ -36,5 +36,6 @@ mod Main do
     let a0 = live_allocs()
     let _ = times(100, 0)
     println("wildcard-bound Deque dropped, balanced: " ++ bool_to_string(live_allocs() - a0 == 0))
+    ()
   end
 end

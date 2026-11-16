@@ -97,6 +97,7 @@ let uses_of_decls ~filename (decls : Ast.decl list) : ws_use list =
     | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> we c; we b) arms
     | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> we a; we b
     | Ast.EAssert (e, _) -> we e
+    | Ast.EProof (p, _) -> List.iter we (Ast.proof_children p)
     | Ast.ESigil (_, c, _) -> we c
     | Ast.ERefineMsg (c, _, _) -> we c
     | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> we r; we c

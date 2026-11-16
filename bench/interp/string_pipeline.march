@@ -19,5 +19,6 @@ mod StringPipeline do
     let ys = List.map(xs, double_str)
     let joined = string_join(ys, ",")
     println("checksum=" ++ int_to_string(string_byte_length(joined)))
+    ()
   end
 end

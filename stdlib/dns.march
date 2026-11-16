@@ -47,18 +47,23 @@ mod Dns do
   a network lookup, so there is no runnable example.
 
       match Dns.resolve("example.com") do
-      Ok(ips)  -> List.head_opt(ips)
-      Err(e)   -> panic(Dns.error_message(e))
+      Ok(Ok(ips))  -> List.head_opt(ips)
+      Ok(Err(e))   -> panic(Dns.error_message(e))
+      Err(refused) -> panic(Authority.describe(refused))
       end
+
+  A lookup is a capability operation (IO.Network on the host): the outer
+  `Err(CapError(...))` is a refused one.
   """
-  fn resolve(host : String) : Result(List(String), DnsError) do
+  fn resolve(host : String) : Result(Result(List(String), DnsError), CapError) do
+    let? _ = Authority.check("IO.Network", host)
     match dns_resolve(host) do
-    Ok(ips)  -> Ok(ips)
+    Ok(ips)  -> Ok(Ok(ips))
     Err(msg) ->
       if string_contains(msg, "cannot resolve") do
-        Err(NotFound(host))
+        Ok(Err(NotFound(host)))
       else
-        Err(ResolveError(msg))
+        Ok(Err(ResolveError(msg)))
       end
     end
   end
@@ -69,18 +74,19 @@ mod Dns do
   the same Err as `resolve`.  Performs a network lookup, so there is no
   runnable example.
 
-      match Dns.resolve_one("example.com") do
+      match Authority.must(Dns.resolve_one("example.com")) do
       Ok(ip) -> ip
       Err(e) -> panic(Dns.error_message(e))
       end
   """
-  fn resolve_one(host : String) : Result(String, DnsError) do
-    match resolve(host) do
-    Err(e) -> Err(e)
+  fn resolve_one(host : String) : Result(Result(String, DnsError), CapError) do
+    let? r = resolve(host)
+    match r do
+    Err(e) -> Ok(Err(e))
     Ok(ips) ->
       match List.head_opt(ips) do
-      None    -> Err(NotFound(host))
-      Some(ip) -> Ok(ip)
+      None    -> Ok(Err(NotFound(host)))
+      Some(ip) -> Ok(Ok(ip))
       end
     end
   end

@@ -1,0 +1,34 @@
+-- Golden failure reports through the runner's own paths
+-- (test/run_test_reports.ml): a test that panics after a `setup` and a
+-- `setup_all` ran, and a plain (non-comparison) `assert`.  Every test here
+-- FAILS on purpose.  Kept free of what the JS target cannot run yet, so the
+-- JS test runner (issue #1176) is pinned against the same golden.
+mod Runner do
+  pfn check_widget(n : Int) : Int do
+    if n > 2 do panic("the widget is broken") else n end
+  end
+
+  setup_all do
+    ()
+  end
+
+  setup do
+    ()
+  end
+
+  describe "runner" do
+    test "a panic after setup" do
+      let n = check_widget(3)
+      assert (n == 3)
+    end
+
+    test "a plain assert" do
+      let xs = [1, 2, 3]
+      assert (List.length(xs) == 3 && List.is_empty(xs))
+    end
+
+    test "assert !=" do
+      assert ([1, 2] != [1, 2])
+    end
+  end
+end

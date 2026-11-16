@@ -257,6 +257,7 @@ let rec expr_applies_to_free (name : string) (subject : string) (e : A.expr) : b
   | A.EPipe (a, b, _) | A.ESend (a, b, _) -> free a || free b
   | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
   | A.EDbg (Some e, _) -> free e
+  | A.EProof (p, _) -> List.exists free (A.proof_children p)
 
 (* ── Attributing a skip to a withdrawn alias ───────────────────────────────
    A withdrawn alias is only ONE of the reasons an obligation can go
@@ -547,6 +548,7 @@ let alias_withdrawal_cause ~(pred : A.expr) ~(subject : A.expr option)
       | A.EPipe (a, b, _) | A.ESend (a, b, _) -> recur a || recur b
       | A.EAnnot (e, _, _) | A.ESpawn (e, _) | A.EAssert (e, _) | A.ESigil (_, e, _) | A.ERefineMsg (e, _, _)
       | A.EDbg (Some e, _) -> recur e
+      | A.EProof (p, _) -> List.exists recur (A.proof_children p)
     in
     (* [pred] itself may be a top-level conjunction (`len(_) >= 0 && len(_) >
        0`), which is exactly the shape [Partial_conjunct] names: one conjunct
@@ -815,6 +817,9 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
   (* Destructured to the names the body has always used: this is a signature
      change, not a rewrite of 1,361 lines. *)
   let { root; errctx; postcond; path; lets; sc; re; binds; demand = _ } = cx in
+  let quantified = March_ast.Bounded_pred.contains rp.pred
+    || List.exists (fun (_, (_, q, _)) -> March_ast.Bounded_pred.contains q) sc
+    || List.exists (fun (q, _) -> March_ast.Bounded_pred.contains q) path in
   scope_fact_dropped := false;
   (* A lemma body's pattern links (§4.3), read by stage 2 only; the `$link:`
      facts themselves translate to nothing, so stage 1 is unchanged. *)
@@ -1218,10 +1223,13 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
                       callee callee (pred_str rp.pred) where old ret);
                notes =
                  [ Printf.sprintf
-                     "the state only gained fields, so the compiler derived `%s`: it keeps \
-                      every old field and gives each new one its `init` value"
+                     "the compiler derived `%s` from the deployed state: it keeps every old \
+                      field, takes each field a `migrate` clause gives from it, and gives each \
+                      other new field its `init` value"
                      short;
-                   Printf.sprintf "write `%s` yourself to convert the old values" short ] }
+                   Printf.sprintf
+                     "change the `migrate` clause, or write `%s` yourself, to convert the old values"
+                     short ] }
          | None ->
         Err.error ~code:Err.Code.refinement_violated errctx ~span
           (display_measures
@@ -1749,7 +1757,24 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        and it additionally keeps the `>= 0` assumption from being asserted
        twice.) *)
     let measure_var_cache : (string, Smt.term option) Hashtbl.t = Hashtbl.create 8 in
+    let quantified_element = function Smt.SInt | Smt.SBool -> true | _ -> false in
+    let quantified_set_sort m x =
+      match caller_sort_of x with
+      | Some (Smt.SData (adt, element :: _))
+        when (m = "keys" && adt = adt_sort_name ~arity:2 "Map")
+          || (m = elts_measure && (adt = list_adt || adt = adt_sort_name ~arity:1 "Set")) ->
+        if quantified_element element then Some element else None
+      | _ -> None in
     let measure_of_var m x =
+      if quantified && x = "_" then None else
+      if quantified && is_builtin_set_measure m && quantified_set_sort m x = None then None else
+      if quantified && m = "len" && caller_dt x = Some list_adt
+         && quantified_set_sort elts_measure x = None then None else
+      if quantified && (m = "len" || m = elts_measure) && caller_dt x = Some list_adt then begin
+        let sort = Option.value (caller_sort_of x) ~default:(adt_sort list_adt) in
+        decls := (x, sort) :: !decls;
+        Some (Smt.App ((if m = "len" then list_len_measure else list_elts_measure), [Smt.Const x]))
+      end else
       let nm = m ^ "$" ^ x in
       match Hashtbl.find_opt measure_var_cache nm with
       | Some cached -> cached
@@ -1759,7 +1784,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            ([resolve_set_sorts] settles it per VC); every other measure is
            an Int. *)
         if is_builtin_set_measure m || is_set_measure m then
-          decls := (nm, Smt.SSet Smt.set_unknown_elem) :: !decls
+          decls := (nm, Smt.SSet (if quantified && is_builtin_set_measure m then
+            Option.get (quantified_set_sort m x) else Smt.set_unknown_elem)) :: !decls
         else decls := (nm, Smt.SInt) :: !decls;
         (* `len` is known non-negative; user measures get no axiom in v1 (sound;
            guarded uses still discharge via the path context). *)
@@ -1793,6 +1819,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        inside the loader stops a cycle of facts naming each other. *)
     let load_name_fact_ref : (string -> unit) ref = ref (fun _ -> ()) in
     let foreign_var name =
+      if quantified && name = "_" then None else begin
       !load_name_fact_ref name;
       if Hashtbl.mem str_names name then None
       (* A caller `String` (design B3): pinned into the `Str` sort like any
@@ -1808,6 +1835,7 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
           Some (Smt.Const name, (name, adt_sort adt))
         | None -> Some (Smt.Const name, (name, caller_scalar_of name))
+      end
     in
     (* Route measures through the SAME memo the goal side uses, so a promise
        about `len(xs)` and a goal about `len(xs)` land on the one `len$xs`
@@ -2000,7 +2028,43 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          | _ -> ());
       t
     in
+    (* A proved list-valued call carries a quantified contract as one typed
+       value. Its indexing and length reads must share this constant; reducing
+       the recursive function's body instead loses its induction theorem. *)
+    let list_contract = function
+      | A.EApp (A.EVar {A.txt = f; _}, args, _) ->
+        (let result = postcond f args in
+         match result with
+         | Some (b, q, Some marker) when marker = list_adt || marker = meas_sort_prefix ^ list_adt -> Some (b, q)
+         | _ -> None)
+      | _ -> None in
+    let reflect_actual sort actual =
+      match quantified, sort, (if quantified then list_contract actual else None) with
+      | true, Smt.SData (adt, args), _ when adt = list_adt
+          && (match args with [elem] -> not (quantified_element elem) | _ -> true) -> None
+      | true, Smt.SData (adt, _), Some (b, q) when adt = list_adt ->
+        incr ret_ctr;
+        let nm = Printf.sprintf "$quant_result%d" !ret_ctr in
+        let value = Smt.Const nm in
+        let extra = ref [] in
+        let rv n =
+          if n = b || n = "_" then Some value
+          else Option.map (fun (t, d) -> extra := d :: !extra; t) (foreign_var n) in
+        let rm m n =
+          if n = b || n = "_" then
+            if m = "len" then Some (Smt.App (list_len_measure, [value]))
+            else if m = elts_measure then Some (Smt.App (list_elts_measure, [value]))
+            else None
+          else foreign_measure m n in
+        let facts = match smt_of ~resolve_var:rv ~resolve_measure:rm q with Some t -> [t] | None -> [] in
+        Some (value, (nm, sort) :: !extra, facts)
+      | _ -> reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
+          ~foreign_field:arg_resolve_field ~foreign_len ~sort sc actual in
     let resolve_var name =
+      if quantified then
+        (match (if is_self name then Some self_actual else actual_of_name name) with
+         | Some (A.EVar {A.txt = x; _}) -> !load_scope_measure_facts_ref x
+         | _ -> ());
       (* A String-typed subject reflects into the `Str` sort, never `Int`.  The
          choice is driven by a DECLARED type (the refinement's own base type for
          the binder, the callee's parameter type otherwise), never inferred from
@@ -2020,19 +2084,21 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
            the named spelling below already is, so `okz(_)` meets a reflected
            call over the actual exactly as `okz(g)` does (todo
            2026-11-04-lemma-hypothesis-reflected-call-not-assumed). *)
+        (* A tuple has no scalar reading at all (S3 tuples): its datatype
+           sort in both stages, or a path fact over it (`if p == q`) declares
+           the same name at `$Tup2` beside the stage-1 `Int`. *)
         let sort =
-          if not !Reflect_state.arm_on then self_scalar
-          else
-            match List.nth_opt sg.param_tys rp.idx with
-            | Some (Some ty) -> (match instance_sort_of_ty ty with Smt.SData (n, _) as s when n <> "Elem" -> s | _ -> self_scalar)
-            | _ -> self_scalar
+          match List.nth_opt sg.param_tys rp.idx with
+          | Some (Some ty) -> (
+            match instance_sort_of_ty ty with
+            | Smt.SData (n, _) as s when n <> "Elem" && (!Reflect_state.arm_on || quantified || is_tuple_adt n) -> s
+            | _ -> self_scalar)
+          | _ -> self_scalar
         in
         mark_self name
           (absorb
              (reflect_cached "$self" (fun () ->
-                  reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                    ~foreign_field:arg_resolve_field ~foreign_len
-                    ~sort sc self_actual)))
+                  reflect_actual sort self_actual)))
       else if callee_record_sort name <> None then callee_record_term name
       else
         match actual_of_name name with
@@ -2041,17 +2107,16 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              sort, so it can meet a reflected call over the same value (the
              Int default below is what stage 1 has always used). *)
           let sort =
-            if not !Reflect_state.arm_on then scalar_of_name name
-            else
-              match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
-              | Some (Some ty) -> (match instance_sort_of_ty ty with Smt.SData (n, _) as s when n <> "Elem" -> s | _ -> scalar_of_name name)
-              | _ -> scalar_of_name name
+            match Option.bind (List.assoc_opt name name_pos) (fun i -> List.nth_opt sg.param_tys i) with
+            | Some (Some ty) -> (
+              match instance_sort_of_ty ty with
+              | Smt.SData (n, _) as s when n <> "Elem" && (!Reflect_state.arm_on || quantified || is_tuple_adt n) -> s
+              | _ -> scalar_of_name name)
+            | _ -> scalar_of_name name
           in
           absorb
             (reflect_cached name (fun () ->
-                 reflect_scalar ~postcond ~foreign_var ~foreign_measure ~foreign_measure_call:rmc_scalar
-                   ~foreign_field:arg_resolve_field ~foreign_len
-                   ~sort sc a))
+                 reflect_actual sort a))
         | None ->
           (* a caller-scope variable from the path context *)
           if Hashtbl.mem str_names name then Some (Smt.Const name)
@@ -2152,7 +2217,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
              substitution) and reflects through the caller's own resolver,
              the same way [rm] below treats a measure over a foreign name. *)
           let rv n =
-            if is_self_spelling n then None
+            if is_self_spelling n then
+              if quantified && caller_dt x = Some list_adt then begin
+                let sort = Option.value (caller_sort_of x) ~default:(adt_sort list_adt) in
+                decls := (x, sort) :: !decls;
+                Some (Smt.Const x)
+              end else None
             else match foreign_var n with Some (t, d) -> decls := d :: !decls; Some t | None -> None
           in
           (* ── A RELATIONAL carried predicate's OTHER names ───────────────────
@@ -2248,7 +2318,8 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
           let rmc m f cargs = if is_call_measure m then set_of_call m f cargs else None in
           (match smt_of ~resolve_var:rv ~resolve_measure:rm ~resolve_str_lit:str_lit_const
                    ~resolve_measure_call:rmc q with
-           | Some qa -> push_user qa
+           | Some qa ->
+             push_user qa
            | None -> ())
         | _ -> ()
       end
@@ -2564,6 +2635,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
          | None -> None)
     in
     let resolve_measure m name =
+      let actual = if is_self name then Some self_actual else actual_of_name name in
+      if quantified && (m = "len" || m = elts_measure)
+         && Option.bind actual list_contract <> None then
+        Option.map (fun t -> Smt.App ((if m = "len" then list_len_measure else list_elts_measure), [t]))
+          (resolve_var name)
+      else
       (* `len` OVERLOAD RESOLUTION.  The string meaning is taken only when the
          subject's DECLARED base type is String — the refinement's own base type
          for the binder, the callee's parameter type for a cross-argument name.
@@ -2870,7 +2947,15 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
         List.iter
           (fun c -> Option.iter (fun k -> load_scope_tester_facts adt k name) (ctor_of_adt adt c))
           goal_ctors;
-        match reflect_dt adt (A.EVar { A.txt = name; A.span }) with
+        (* A tuple at its instance (S3): the goal declares a tuple-typed
+           parameter at `$Tup2(Int, Int)`, so the guard's copy of the same
+           name must not be the bare `$Tup2`. *)
+        let args =
+          match caller_sort_of name with
+          | Some (Smt.SData (a, args)) when is_tuple_adt a -> Some args
+          | _ -> None
+        in
+        match reflect_dt ?args adt (A.EVar { A.txt = name; A.span }) with
         | Some t ->
           if not (List.mem adt !adt_sorts) then adt_sorts := adt :: !adt_sorts;
           Some t
@@ -3358,6 +3443,12 @@ let check_call_stage (cx : call_ctx) ~span ~(callee : string) ?(subject = Argume
        | Some (decls, goal, assumptions, measure_instances) ->
        let assumptions = card_facts decls goal assumptions in
        let sort_of n = List.assoc_opt n decls in
+       (* Rejected speculative scope facts must not leave an anonymous
+          placeholder declaration in a quantified query. `_` is not a legal
+          SMT constant name, and has no free occurrence in the surviving VC. *)
+       let decls =
+         if quantified && not (List.exists (fun t -> List.mem "_" (Smt.free_names t)) (goal :: assumptions))
+         then List.filter (fun (n, _) -> n <> "_") decls else decls in
        let vc = { Smt.decls; assumptions; goal } in
        (* [user_assumptions]: the SAME two-step filter (sort-wellsortedness,
           then float-rewrite-and-wellsortedness) applied to [user_assume]

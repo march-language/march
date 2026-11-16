@@ -81,7 +81,7 @@ mod M do
     end
 
     -- named stores stay isolated from the global table and each other
-    let s = Config.new_store("cfg_parity_store")
+    let s = Authority.must(Config.new_store("cfg_parity_store"))
     Config.store_put(s, port, 5432)
     println("store port: " ++ show_opt_int(Config.store_get(s, port)))
     println("global port: " ++ show_opt_int(Config.get(port)))

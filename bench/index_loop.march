@@ -37,6 +37,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let arr = fill(native_int_arr_make(n, 0), 0, n)
   let b = repeat(arr, 200, n, 0)
   println(int_to_string(a + b))
+  ()
 end
 
 end

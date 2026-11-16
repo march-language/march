@@ -50,16 +50,16 @@ mod ProtocolSplit do
   end
 
   pfn offers() : Vault(SessionNode.Offer) do
-    match Vault.whereis("split_offers") do
+    match Authority.must(Vault.whereis("split_offers")) do
       Some(v) -> v
-      None -> Vault.new("split_offers")
+      None -> Authority.must(Vault.new("split_offers"))
     end
   end
 
   -- Publish whole session starts, not endpoint-typed bodies: the protocol
   -- changes across builds, but this callback's wire/session ABI is stable.
   pfn starts() : Vault(String -> (Int -> Bool) -> Result(Session.Outcome, SessionNode.RunError)) do
-    Vault.open("split_session_starts")
+    Authority.must(Vault.open("split_session_starts"))
   end
 
   fn start_session(c : Cap(IO), h : Cap(ClusterNode.Live), sid : String, abandoned : Int -> Bool)
@@ -101,8 +101,8 @@ mod ProtocolSplit do
             Ok(o2) ->
               Vault.set(v, "cur", o2)
               SessionNode.close_offer(o)
-              println("node-a: Shop re-offered in phase " ++ int_to_string(shop_phase()) ++ "; the old offer drains")
-            Err(e) -> println("node-a: could not re-offer: " ++ SessionNode.run_error_message(e))
+              Authority.ignore(println("node-a: Shop re-offered in phase " ++ int_to_string(shop_phase()) ++ "; the old offer drains"))
+            Err(e) -> Authority.ignore(println("node-a: could not re-offer: " ++ SessionNode.run_error_message(e)))
           end
         end
       None ->
@@ -137,9 +137,9 @@ mod ProtocolSplit do
   -- ── the Buyer (node-b): a receiver ────────────────────────────────────
 
   pfn tally() : Vault(Int) do
-    match Vault.whereis("split_tally") do
+    match Authority.must(Vault.whereis("split_tally")) do
       Some(t) -> t
-      None -> Vault.new("split_tally")
+      None -> Authority.must(Vault.new("split_tally"))
     end
   end
 
@@ -171,10 +171,12 @@ mod ProtocolSplit do
         count("returned", k)
       Err(SessionNode.NoOffer(_, why)) ->
         count("refused", 1)
-        println("node-b: refused at formation: " ++ why)
+        Authority.ignore(println("node-b: refused at formation: " ++ why))
+        ()
       Err(e) ->
         count("failed", 1)
-        println("node-b: session failed: " ++ Order_Run.error_message(e))
+        Authority.ignore(println("node-b: session failed: " ++ Order_Run.error_message(e)))
+        ()
     end
     count("ended", 1)
   end
@@ -211,16 +213,17 @@ mod ProtocolSplit do
 
   fn summary() : () do
     let t = tally()
-    println("node-b: sessions lost: " ++ int_to_string(Vault.get_or(t, "failed", 0)))
-    println("node-b: sessions refused at formation: " ++ int_to_string(Vault.get_or(t, "refused", 0)))
-    println("node-b: every session Finished or Drained: "
-      ++ bool_to_string(Vault.get_or(t, "finished", 0) + Vault.get_or(t, "drained", 0) == Vault.get_or(t, "started", 0)))
-    println("node-b: v1 Buyer with a v1 Shop: " ++ seen("pair:1/1"))
-    println("node-b: v2 Buyer with an expand Shop: " ++ seen("pair:2/2"))
-    println("node-b: v2 Buyer with a contract Shop: " ++ seen("pair:2/3"))
-    println("node-b: v1 Buyer with a contract Shop: " ++ seen("pair:1/3"))
-    println("node-b: later from a contract Shop: " ++ seen("later:3"))
-    println("node-b: later from an expand Shop: " ++ seen("later:2"))
+    Authority.ignore(println("node-b: sessions lost: " ++ int_to_string(Vault.get_or(t, "failed", 0))))
+    Authority.ignore(println("node-b: sessions refused at formation: " ++ int_to_string(Vault.get_or(t, "refused", 0))))
+    Authority.ignore(println("node-b: every session Finished or Drained: "
+      ++ bool_to_string(Vault.get_or(t, "finished", 0) + Vault.get_or(t, "drained", 0) == Vault.get_or(t, "started", 0))))
+    Authority.ignore(println("node-b: v1 Buyer with a v1 Shop: " ++ seen("pair:1/1")))
+    Authority.ignore(println("node-b: v2 Buyer with an expand Shop: " ++ seen("pair:2/2")))
+    Authority.ignore(println("node-b: v2 Buyer with a contract Shop: " ++ seen("pair:2/3")))
+    Authority.ignore(println("node-b: v1 Buyer with a contract Shop: " ++ seen("pair:1/3")))
+    Authority.ignore(println("node-b: later from a contract Shop: " ++ seen("later:3")))
+    Authority.ignore(println("node-b: later from an expand Shop: " ++ seen("later:2")))
+    ()
   end
 
   -- ── the two nodes ─────────────────────────────────────────────────────
@@ -245,7 +248,7 @@ mod ProtocolSplit do
 
   pfn settle(left : Int) : () do
     if settled() do ()
-    else if left <= 0 do println("node-b: sessions still running at the end") else
+    else if left <= 0 do Authority.ignore(println("node-b: sessions still running at the end")) else
       sleep_ms(50)
       settle(left - 50)
     end end
@@ -262,29 +265,29 @@ mod ProtocolSplit do
   -- A 15 s suspect timeout, not the default 3 s: a node stalls while its
   -- deploy is verified and activated (protocol_evolve's reason).
   pfn node_a(c : Cap(IO)) : () do
-    let cfg = { ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "split-secret", 1) with swim: Swim.config(500, 15000, 2) }
+    let cfg = { ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "split-secret", 1) with swim: Swim.config(500, 15000, 2) }
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         let host = start_host()
         tick(host, c, h)
         sleep_ms(300)
-        println("node-a: offering")
+        Authority.ignore(println("node-a: offering"))
         run(host, c, h)
     end
   end
 
   pfn node_b(c : Cap(IO)) : () do
-    let seed = "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A"))
-    let cfg = { ClusterNode.config("node-b", Env.require_int("MARCH_PORT_B"), "", Cons(seed, Nil), "split-secret", 1) with swim: Swim.config(500, 15000, 2) }
+    let seed = "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A")))
+    let cfg = { ClusterNode.config("node-b", Authority.must(Env.require_int("MARCH_PORT_B")), "", Cons(seed, Nil), "split-secret", 1) with swim: Swim.config(500, 15000, 2) }
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 60000) do () else panic("node-b: never joined") end
         if offered(h, 60000) do () else panic("node-b: never saw the Shop offer") end
         let d = start_driver()
-        println("node-b: driving")
-        drive(d, c, h, unix_time_ms() + Env.get_int("SPLIT_DRIVE_MS", 18000))
+        Authority.ignore(println("node-b: driving"))
+        drive(d, c, h, unix_time_ms() + Authority.must(Env.get_int("SPLIT_DRIVE_MS", 18000)))
         settle(30000)
         summary()
         -- Linger so the scenario can read this node's reload counters.
@@ -294,6 +297,6 @@ mod ProtocolSplit do
   end
 
   fn main(c : Cap(IO)) do
-    if Env.get("SPLIT_NODE", "a") == "b" do node_b(c) else node_a(c) end
+    if Authority.must(Env.get("SPLIT_NODE", "a")) == "b" do node_b(c) else node_a(c) end
   end
 end

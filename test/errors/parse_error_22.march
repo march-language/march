@@ -1,0 +1,4 @@
+-- EXPECT-ERROR: not `def`
+mod M do
+  def f() do 0 end
+end

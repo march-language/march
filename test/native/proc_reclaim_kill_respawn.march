@@ -178,13 +178,13 @@ mod ProcReclaimKillRespawn do
       Actor.set_queue_limit(w, 4, 3)
       let _ = Actor.register(w, "w" ++ int_to_string(i))
       let _ = monitor(watcher, w)
-      let t_send = Task.async(fn -> hammer(w, 256))
+      let t_send = Authority.must(Task.async(fn -> hammer(w, 256)))
       let req = if i % 10 == 0 do SlowReq else GetReq end
-      let t_call = Task.async(fn -> caller(w, req, 3, 0))
-      let t_wait = Task.async(fn ->
+      let t_call = Authority.must(Task.async(fn -> caller(w, req, 3, 0)))
+      let t_wait = Authority.must(Task.async(fn ->
         let _ = Task.await(t_send)
-        1)
-      let t_cap = Task.async(fn -> use_cap(w))
+        1))
+      let t_cap = Authority.must(Task.async(fn -> use_cap(w)))
       let _ = Actor.send_after(w, Tick(1), 1)
       let _ = poison_child(intro, boss)
       if i % 16 == 0 do

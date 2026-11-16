@@ -16,6 +16,9 @@
  *   offset 16: char     data[]   (null-terminated)
  */
 #include "march_http.h"
+#include "march_https.h"
+#define MARCH_TLS_VIA_OPS     /* TLS through g_march_tls_ops: see march_tls_ops.h */
+#include "march_tls_ops.h"
 #include "march_http_internal.h"
 #include "march_http_io.h"
 #include "march_preempt.h"
@@ -1607,6 +1610,7 @@ int march_http_send_file(int client_fd, const char *path) {
 typedef struct {
     void *pipeline;       /* compiled March function: Conn -> Conn */
     int   client_fd;
+    int   is_tls;         /* accepted on the HTTPS listener */
 } conn_thread_arg_t;
 
 /* See march_http_internal.h: the compiled `Conn -> Unit` deep drop the
@@ -1733,18 +1737,49 @@ static void *make_int(int64_t value) {
     return i;
 }
 
+/* The Socket every Conn of one connection shares (HttpServer.Conn's first
+ * field): a TCP_BORROWED handle box over [fd], made once per connection.
+ * The server owns the fd; the box never closes it. */
+void *march_http_conn_sock(int fd) {
+    return march_handle_new(MARCH_HANDLE_TCP_BORROWED, (int64_t)fd, 1);  /* aux 1: borrowed (Socket.borrow) */
+}
+
+/* The connection is over: close its box, so a Conn a handler kept (sent to
+ * a task, stored) reaches no descriptor, and drop the server's reference.
+ * Call it before the fd is closed, so the number cannot be reused under a
+ * box that still names it: the close drains, waking and waiting out a use
+ * still in flight (a task parked in Socket.recv on a kept Conn), which would
+ * otherwise go on with the number after the server closes it and the next
+ * accept reuses it. NULL (no request was ever built) is a no-op. */
+#define MARCH_BORROWED_DRAIN_MS 2000
+void march_http_conn_sock_done(void *sock) {
+    if (!sock) return;
+    (void)march_handle_close_drain(sock, MARCH_BORROWED_DRAIN_MS);
+    march_decrc(sock);
+}
+
+/* The connection's fd moves on (to a WebSocket thread) instead of closing:
+ * close its Conns' box without draining or shutting the fd down. */
+void march_http_conn_sock_handoff(void *sock) {
+    if (!sock) return;
+    (void)march_handle_close(sock);
+    march_decrc(sock);
+}
+
 /* Build a full 13-field Conn heap object.
  * Conn is a single-constructor ADT: tag=0, 13 fields at offsets 16..112.
  * Total size: 16 (header) + 13*8 (fields) = 120 bytes.
+ * Field 0 is the connection's Socket, a TCP_BORROWED handle box; the Conn
+ * owns the reference passed in [sock].
  * Field 1 (method) is now an i64 atom hash (not a Method ADT pointer). */
-static void *make_conn(int64_t fd, int64_t method, void *path, void *path_info,
+static void *make_conn(void *sock, int64_t method, void *path, void *path_info,
                         void *query_string, void *req_headers, void *req_body,
                         int64_t resp_status, void *resp_headers, void *resp_body,
                         void *halted, void *assigns, void *upgrade) {
     void *c = march_alloc(16 + 13 * 8);
     /* tag = 0 (single constructor), set by march_alloc's header init */
     char *base = (char *)c;
-    *(int64_t *)(base + 16)  = fd;             /* field 0: fd */
+    *(void **)(base + 16)    = sock;           /* field 0: Socket (borrowed box) */
     *(int64_t *)(base + 24)  = method;         /* field 1: method (atom i64) */
     *(void **)(base + 32)    = path;           /* field 2: path */
     *(void **)(base + 40)    = path_info;      /* field 3: path_info */
@@ -1897,7 +1932,7 @@ int march_detect_keep_alive_simd(const march_http_request_t *req) {
  * march_http_parse_request() path uses. */
 void *march_conn_from_parsed(const march_http_request_t *req,
                               const char *buf, size_t buf_len,
-                              int fd) {
+                              void *sock) {
     /* Method string → atom i64 hash (e.g. "GET" → hash(:GET)) */
     int64_t method = method_string_to_atom(req->method, req->method_len);
 
@@ -1936,8 +1971,9 @@ void *march_conn_from_parsed(const march_http_request_t *req,
         ? march_string_lit(req->body, (int64_t)req->body_len)
         : march_string_lit("", 0);
 
+    march_incrc(sock);                    /* the Conn's own reference */
     return make_conn(
-        (int64_t)fd, method, path_str, path_info, query_str,
+        sock, method, path_str, path_info, query_str,
         headers, req_body,
         0, make_nil(), march_string_lit("", 0),
         make_bool(0), make_nil(), make_no_upgrade()
@@ -1946,11 +1982,11 @@ void *march_conn_from_parsed(const march_http_request_t *req,
 
 /* Process a single parsed request through the March pipeline and send
  * the response.  Returns: 1 = keep going, 0 = close connection, -1 = error. */
-int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
+int march_process_one_request(int fd, void *sock, void *pipeline, closure_fn_t fn,
                                const march_http_request_t *req,
                                const char *buf, size_t buf_len) {
     int keep_alive = march_detect_keep_alive_simd(req);
-    void *conn = march_conn_from_parsed(req, buf, buf_len, fd);
+    void *conn = march_conn_from_parsed(req, buf, buf_len, sock);
 
     /* Call the pipeline.  The compiled apply-fn CONSUMES one reference to the
      * closure (its body opens with march_decrc_local($clo)), so the caller must
@@ -1977,12 +2013,13 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
         void *ws_key     = find_ws_key_header(*(void **)(rc + 56));
         if (ws_key) {
             march_ws_handshake((int64_t)fd, ws_key);
-            void *ws_sock = march_alloc(16 + 8);
-            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+            void *ws_box;
+            void *ws_sock = march_ws_sock_new((int64_t)fd, &ws_box);
             /* The handler call consumes one closure reference; the result
              * Conn's `upgrade` field still owns another, released below. */
             march_incrc(ws_closure);
             call_closure1(ws_closure, ws_sock);
+            march_ws_sock_done(ws_box);
         }
         march_http_release_conn(result_conn);
         return -1;  /* WebSocket took over — close HTTP loop */
@@ -2016,6 +2053,166 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
  * are accepted instead of being rejected at the initial 64KB. */
 #define MAX_REQ_SIZE (32 * 1024 * 1024)
 
+/* macOS TCP_NOPUSH around pipelined batches is OFF. Darwin does not push
+ * queued data when TCP_NOPUSH is cleared, so a batch smaller than one
+ * segment can sit in the send queue with nothing in flight to trigger
+ * output: measured, a 50-request pipelined burst's 7200 response bytes
+ * stayed queued indefinitely once the socket became O_NONBLOCK for its
+ * deadlines. The batch is already gathered into one iovec and sent with one
+ * writev, so the cork bought nothing on macOS. Linux keeps TCP_CORK, whose
+ * clearing does flush. */
+#define MARCH_HTTP_POOL_NOPUSH 0
+
+/* ── Deadline-aware socket I/O for connection_thread ─────────────────── */
+/*
+ * The pool and sequential servers time each connection by phase, like the
+ * event loop (design: specs/2026-11-05-https-server-design.md, "Timeouts"):
+ * idle (keep-alive, no request bytes), headers (from the request's first
+ * byte), body and write (from the last progress). Every wait goes through
+ * march_sched_wait_fd with an absolute deadline: on the sequential server's
+ * green thread it parks, on a pool worker (an OS thread) it is a poll().
+ * SO_RCVTIMEO is not used: preemption's SA_RESTART signals defeat it, and a
+ * single receive timeout cannot express a deadline that does not move. The
+ * socket is O_NONBLOCK while it serves HTTP (MSG_DONTWAIT alone is not
+ * enough: Darwin's sendmsg blocks on a blocking socket regardless, measured)
+ * and is switched back to blocking before a WebSocket handler gets it, so
+ * WebSocket reads block with no timeout.
+ */
+
+/* 1 when fd is ready before deadline_ms (march_now_ms clock). */
+static int conn_wait(int fd, int want_write, int64_t deadline_ms) {
+    return march_sched_wait_fd(fd, want_write, deadline_ms) == MARCH_FDWAIT_READY;
+}
+
+/* writev the whole iovec, failing if progress_secs pass without a byte
+ * accepted (a client that stopped reading). */
+static int conn_writev(int fd, struct iovec *iov, int iovcnt) {
+    int64_t step = (int64_t)g_march_https.progress_secs * 1000;
+    int64_t deadline = march_now_ms() + step;
+    while (iovcnt > 0) {
+        ssize_t n = writev(fd, iov, iovcnt);     /* fd is O_NONBLOCK */
+        if (n < 0) {
+            int e = errno;
+            if (e == EINTR) continue;
+            if (e == EAGAIN || e == EWOULDBLOCK) {
+                if (!conn_wait(fd, 1, deadline)) return -1;
+                continue;
+            }
+            return -1;
+        }
+        deadline = march_now_ms() + step;
+        while (n > 0 && iovcnt > 0) {
+            if ((size_t)n >= iov->iov_len) {
+                n -= (ssize_t)iov->iov_len;
+                iov++;
+                iovcnt--;
+            } else {
+                iov->iov_base = (char *)iov->iov_base + n;
+                iov->iov_len -= (size_t)n;
+                n = 0;
+            }
+        }
+    }
+    return 0;
+}
+
+/* ── HTTPS on the pool / sequential server ────────────────────────────── */
+/*
+ * A connection is its fd plus, for HTTPS, a march_tls_session_t driven by
+ * this thread's own socket I/O: recv -> mts_feed -> mts_read for reads,
+ * mts_write -> mts_take_out -> send for writes, every wait through conn_wait
+ * with the same phase deadlines as plain HTTP (the handshake has its own).
+ */
+typedef struct { int fd; march_tls_session_t *tls; } pconn_t;
+
+/* Send all of the session's pending ciphertext; -1 when progress_secs pass
+ * without the socket taking a byte, or on a send error. */
+static int tls_send_all(pconn_t *pc) {
+    int64_t step = (int64_t)g_march_https.progress_secs * 1000;
+    int64_t deadline = march_now_ms() + step;
+    char    out[16384];
+    size_t  off = 0, len = 0;
+    for (;;) {
+        if (off == len) {
+            len = mts_take_out(pc->tls, out, sizeof out);
+            off = 0;
+            if (len == 0) return 0;
+        }
+        ssize_t n = send(pc->fd, out + off, len - off, 0);   /* fd is O_NONBLOCK */
+        if (n < 0) {
+            int e = errno;
+            if (e == EINTR) continue;
+            if (e == EAGAIN || e == EWOULDBLOCK) {
+                if (!conn_wait(pc->fd, 1, deadline)) return -1;
+                continue;
+            }
+            return -1;
+        }
+        off += (size_t)n;
+        deadline = march_now_ms() + step;
+    }
+}
+
+/* One non-waiting attempt to send what the session holds (the close_notify
+ * on close: never worth a wait). */
+static void tls_send_once(pconn_t *pc) {
+    char out[16384];
+    size_t len = mts_take_out(pc->tls, out, sizeof out);
+    if (len > 0) (void)send(pc->fd, out, len, 0);
+}
+
+/* The TLS handshake, bounded by handshake_secs from now. 0 when done. */
+static int tls_handshake(pconn_t *pc) {
+    int64_t deadline = march_now_ms() + (int64_t)g_march_https.handshake_secs * 1000;
+    for (;;) {
+        mts_rc h = mts_handshake(pc->tls);
+        if (mts_out_len(pc->tls) > 0 && tls_send_all(pc) != 0) return -1;
+        if (h == MTS_DONE) return 0;
+        if (h == MTS_FAIL) return -1;
+        if (!conn_wait(pc->fd, 0, deadline)) return -1;
+        char tmp[16384];
+        ssize_t n = recv(pc->fd, tmp, sizeof tmp, 0);
+        if (n == 0) return -1;
+        if (n < 0) {
+            int e = errno;
+            if (e == EINTR || e == EAGAIN || e == EWOULDBLOCK) continue;
+            return -1;
+        }
+        if (mts_feed(pc->tls, tmp, (size_t)n) != 0) return -1;
+    }
+}
+
+/* Read up to cap plaintext bytes without waiting: > 0 bytes, 0 at EOF, -1
+ * with errno (EAGAIN: wait for the socket and call again). */
+static ssize_t pconn_recv(pconn_t *pc, void *buf, size_t cap) {
+    if (!pc->tls) return recv(pc->fd, buf, cap, 0);
+    for (;;) {
+        size_t k = 0;
+        mts_rc r = mts_read(pc->tls, buf, cap, &k);
+        if (k > 0) {
+            /* A read can leave session output (a TLS 1.3 key update). */
+            if (mts_out_len(pc->tls) > 0 && tls_send_all(pc) != 0) { errno = EPIPE; return -1; }
+            return (ssize_t)k;
+        }
+        if (r == MTS_EOF) return 0;
+        if (r == MTS_FAIL) { errno = EPROTO; return -1; }
+        char tmp[16384];
+        ssize_t n = recv(pc->fd, tmp, sizeof tmp, 0);
+        if (n <= 0) return n;
+        if (mts_feed(pc->tls, tmp, (size_t)n) != 0) { errno = ENOMEM; return -1; }
+    }
+}
+
+/* Write a whole response batch: plaintext connections writev it, HTTPS ones
+ * encrypt it and send the ciphertext. */
+static int pconn_writev(pconn_t *pc, struct iovec *iov, int iovcnt) {
+    if (!pc->tls) return conn_writev(pc->fd, iov, iovcnt);
+    for (int i = 0; i < iovcnt; i++)
+        if (iov[i].iov_len && mts_write(pc->tls, iov[i].iov_base, iov[i].iov_len) != 0)
+            return -1;
+    return tls_send_all(pc);
+}
+
 /* Each connection worker: keep-alive loop with HTTP pipelining support.
  * Reads into a persistent buffer, parses up to PIPELINE_BATCH requests
  * per recv(), batches all response iovecs into a single writev() call,
@@ -2024,6 +2221,7 @@ static void *connection_thread(void *arg) {
     conn_thread_arg_t *a = (conn_thread_arg_t *)arg;
     int fd = a->client_fd;
     void *pipeline = a->pipeline;
+    int is_tls = a->is_tls;
     free(a);
 
     /* This pool worker is a non-scheduler OS thread that runs compiled March
@@ -2047,11 +2245,13 @@ static void *connection_thread(void *arg) {
     }
 #endif
 
-    /* Receive timeout for idle keep-alive connections. */
-    {
-        struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
+    /* Phase clocks (march_now_ms): when the connection last went idle,
+     * when the buffered request's first byte arrived, the last read that
+     * brought bytes; and whether that request's headers are known complete
+     * (so a large body is not rescanned on every read). */
+    int64_t t_idle = march_now_ms(), t_first = 0, t_last = 0;
+    int     headers_done = 0;
+    march_set_nonblocking(fd);
 
     /* Closure apply fn — extracted once. */
     char        *clo = (char *)pipeline;
@@ -2065,8 +2265,26 @@ static void *connection_thread(void *arg) {
 
     if (!buf) { close(fd); return NULL; }
 
+    /* The Socket in every Conn this connection builds. */
+    void *sock = march_http_conn_sock(fd);
+
+    /* HTTPS: a session on the current certificate, registered by fd for
+     * HttpServer.scheme and WebSocket I/O, then the handshake. */
+    pconn_t pc = { fd, NULL };
+    int     running = 1;
+    int     ws_handed = 0;        /* the TLS session went to a WebSocket handler */
+    if (is_tls) {
+        pc.tls = mts_new_from_slot();
+        if (!pc.tls) {
+            running = 0;
+        } else {
+            mts_registry_put(fd, pc.tls);
+            if (tls_handshake(&pc) != 0) running = 0;
+            t_idle = march_now_ms();
+        }
+    }
+
     /* ── Keep-alive / pipelined request loop ──────────────────────── */
-    int running = 1;
     while (running) {
 
         /* 1. Try to parse pipelined requests already in the buffer. */
@@ -2109,7 +2327,7 @@ static void *connection_thread(void *arg) {
                 bresp.iov_count    = 0;
                 bresp.scratch_used = 0;
 
-#if defined(__APPLE__) && defined(TCP_NOPUSH)
+#if defined(__APPLE__) && defined(TCP_NOPUSH) && MARCH_HTTP_POOL_NOPUSH
                 if (do_cork) { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                           &one, sizeof(one)); }
 #elif defined(__linux__) && defined(TCP_CORK)
@@ -2120,7 +2338,7 @@ static void *connection_thread(void *arg) {
                 for (int i = 0; i < n && running; i++) {
                     int   keep_alive  = march_detect_keep_alive_simd(&reqs[i]);
                     void *conn        = march_conn_from_parsed(&reqs[i],
-                                                                buf, buf_len, fd);
+                                                                buf, buf_len, sock);
                     /* One fresh closure reference per call — the apply-fn
                      * consumes it (see march_process_one_request). */
                     march_incrc_local(pipeline);
@@ -2128,12 +2346,13 @@ static void *connection_thread(void *arg) {
 
                     if (!result_conn) {
                         if (batch_n > 0) {
-                            writev_all(fd, batch_iov, batch_n);
+                            pconn_writev(&pc, batch_iov, batch_n);
                             batch_n = 0;
                         }
                         march_http_release_conns(done_conns, &done_n);
-                        march_http_send_response(fd, 500, make_nil(),
-                            march_string_lit("Internal Server Error", 21));
+                        if (!pc.tls)
+                            march_http_send_response(fd, 500, make_nil(),
+                                march_string_lit("Internal Server Error", 21));
                         running = 0;
                         break;
                     }
@@ -2146,10 +2365,10 @@ static void *connection_thread(void *arg) {
                     if (upgrade_tag == 1) {
                         /* Flush pending batch before handing off to WS. */
                         if (batch_n > 0) {
-                            writev_all(fd, batch_iov, batch_n);
+                            pconn_writev(&pc, batch_iov, batch_n);
                             batch_n = 0;
                         }
-#if defined(__APPLE__) && defined(TCP_NOPUSH)
+#if defined(__APPLE__) && defined(TCP_NOPUSH) && MARCH_HTTP_POOL_NOPUSH
                         { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                                     &zero, sizeof(zero)); }
 #elif defined(__linux__) && defined(TCP_CORK)
@@ -2161,26 +2380,24 @@ static void *connection_thread(void *arg) {
                         void *ws_key =
                             find_ws_key_header(*(void **)(rc_p + 56));
                         if (ws_key) {
-                            /* The keep-alive SO_RCVTIMEO set at connection-thread
-                               startup (10s) still applies to this fd. Left in
-                               place, an idle WS connection's next recv() times
-                               out with EAGAIN/EWOULDBLOCK, which recv_exact()
-                               can't tell apart from a real close — the socket
-                               gets dropped with a spurious Close(1001, "going
-                               away") the moment the client goes quiet. Clear it
-                               so WS reads block indefinitely, same as the
-                               evloop server's ws_handler_thread does via
-                               fcntl(~O_NONBLOCK) before its handoff. */
-                            struct timeval ws_tv = { .tv_sec = 0, .tv_usec = 0 };
-                            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
-                                       &ws_tv, sizeof(ws_tv));
-                            march_ws_handshake((int64_t)fd, ws_key);
-                            void *ws_sock = march_alloc(16 + 8);
-                            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+                            /* Back to blocking, with no receive timeout (the
+                               deadlines above are waits, not socket options):
+                               an idle WebSocket's reads block until the peer
+                               sends or closes. */
+                            int fl = fcntl(fd, F_GETFL, 0);
+                            if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+                            /* wss://: the WsSocket names its session (see
+                             * march_ws_sock_value). */
+                            if (pc.tls) { mts_ws_begin(pc.tls); ws_handed = 1; }
+                            int64_t ws_v = march_ws_sock_value(fd, pc.tls);
+                            march_ws_handshake(ws_v, ws_key);
+                            void *ws_box;
+                            void *ws_sock = march_ws_sock_new(ws_v, &ws_box);
                             /* The call consumes one closure reference; the
                              * result's `upgrade` still owns another. */
                             march_incrc(ws_closure);
                             call_closure1(ws_closure, ws_sock);
+                            march_ws_sock_done(ws_box);
                         }
                         /* Earlier results of this batch were drained by the
                          * writev_all above; this one is done with too. */
@@ -2205,7 +2422,7 @@ static void *connection_thread(void *arg) {
                      * this never triggers; it guards against pathological
                      * responses with many headers. */
                     if (batch_n + bresp.iov_count > CONN_BATCH_IOV_MAX) {
-                        writev_all(fd, batch_iov, batch_n);
+                        pconn_writev(&pc, batch_iov, batch_n);
                         batch_n            = 0;
                         march_http_release_conns(done_conns, &done_n);
                         bresp.scratch_used = 0;
@@ -2223,11 +2440,11 @@ static void *connection_thread(void *arg) {
                 }
 
                 /* Single writev() for the entire batch. */
-                if (batch_n > 0) writev_all(fd, batch_iov, batch_n);
+                if (batch_n > 0) pconn_writev(&pc, batch_iov, batch_n);
                 march_http_release_conns(done_conns, &done_n);
 
                 /* Release TCP_NOPUSH / TCP_CORK → kernel flushes. */
-#if defined(__APPLE__) && defined(TCP_NOPUSH)
+#if defined(__APPLE__) && defined(TCP_NOPUSH) && MARCH_HTTP_POOL_NOPUSH
                 if (do_cork) { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
                                             &zero, sizeof(zero)); }
 #elif defined(__linux__) && defined(TCP_CORK)
@@ -2243,6 +2460,9 @@ static void *connection_thread(void *arg) {
             } else if (consumed >= buf_len) {
                 buf_len = 0;
             }
+            /* Requests went out: the next one's clocks start fresh. */
+            headers_done = 0;
+            t_idle = t_first = t_last = march_now_ms();
 
             if (!running) break;
         }
@@ -2257,28 +2477,76 @@ static void *connection_thread(void *arg) {
                registry tarball uploads) are accepted rather than 413'd at the
                initial 64KB.  Only a request that exceeds the cap gets a 413. */
             if (buf_cap >= MAX_REQ_SIZE) {
-                march_http_send_response(fd, 413, make_nil(),
-                                         march_string_lit("Request Too Large", 17));
+                if (!pc.tls)
+                    march_http_send_response(fd, 413, make_nil(),
+                                             march_string_lit("Request Too Large", 17));
                 break;
             }
             size_t new_cap = buf_cap * 2;
             if (new_cap > MAX_REQ_SIZE) new_cap = MAX_REQ_SIZE;
             char *nbuf = realloc(buf, new_cap);
             if (!nbuf) {
-                march_http_send_response(fd, 413, make_nil(),
-                                         march_string_lit("Request Too Large", 17));
+                if (!pc.tls)
+                    march_http_send_response(fd, 413, make_nil(),
+                                             march_string_lit("Request Too Large", 17));
                 break;
             }
             buf     = nbuf;
             buf_cap = new_cap;
             space   = buf_cap - buf_len;
         }
-        ssize_t n = recv(fd, buf + buf_len, space, 0);
-        if (n <= 0) break;  /* EOF, reset, or timeout */
+        /* Wait for bytes until this phase's deadline. */
+        if (buf_len > 0 && !headers_done)
+            headers_done = march_http_has_header_end(buf, buf_len);
+        int64_t deadline;
+        if (buf_len == 0)
+            deadline = t_idle + (int64_t)g_march_https.idle_secs * 1000;
+        else if (headers_done)
+            deadline = t_last + (int64_t)g_march_https.progress_secs * 1000;
+        else
+            deadline = t_first + (int64_t)g_march_https.header_secs * 1000;
+        /* Mid-request, read first and wait only when there is nothing, so
+         * pipelined or already-readable bytes cost no poll and a TLS
+         * session's buffered plaintext (which raises no readiness) is read
+         * at once. On an idle keep-alive connection the next request has
+         * usually not arrived yet, so wait first: one poll and one recv
+         * rather than recv, EAGAIN, poll, recv. The deadline is checked on
+         * every pass, so bytes that keep trickling in do not extend a header
+         * or body deadline. */
+        if (march_now_ms() >= deadline) break;
+        if (buf_len == 0 && !(pc.tls && mts_has_input(pc.tls)) &&
+            !conn_wait(fd, 0, deadline))
+            break;                                         /* idle deadline */
+        ssize_t n = pconn_recv(&pc, buf + buf_len, space);
+        if (n < 0) {
+            int e = errno;
+            if (e == EINTR) continue;
+            if (e == EAGAIN || e == EWOULDBLOCK) {
+                if (!conn_wait(fd, 0, deadline)) break;   /* deadline passed */
+                continue;
+            }
+            break;
+        }
+        if (n == 0) break;  /* EOF */
+        int64_t now = march_now_ms();
+        if (buf_len == 0) t_first = now;
+        t_last = now;
         buf_len += (size_t)n;
     }
 
     free(buf);
+    march_http_conn_sock_done(sock);
+    if (ws_handed) {
+        march_ws_tls_teardown(fd, pc.tls);   /* waits out other tasks' sends */
+        return NULL;
+    }
+    if (pc.tls) {
+        /* Forget the session before the fd number can be reused. */
+        mts_shutdown(pc.tls);
+        tls_send_once(&pc);
+        mts_registry_take(fd);
+        mts_free(pc.tls);
+    }
     close(fd);
     return NULL;
 }
@@ -2291,6 +2559,7 @@ static void *connection_thread(void *arg) {
 
 typedef struct {
     int             fds[MARCH_HTTP_QUEUE_CAPACITY];
+    unsigned char   plain[MARCH_HTTP_QUEUE_CAPACITY];  /* 1: accepted on the plain listener */
     size_t          head;       /* next slot to consume */
     size_t          tail;       /* next slot to produce into */
     size_t          count;      /* current occupancy */
@@ -2388,6 +2657,7 @@ static void *pool_worker(void *arg) {
             break;
         }
         int fd = g_pool.queue.fds[g_pool.queue.head];
+        int on_plain = g_pool.queue.plain[g_pool.queue.head];
         g_pool.queue.head = (g_pool.queue.head + 1) % MARCH_HTTP_QUEUE_CAPACITY;
         g_pool.queue.count--;
         pthread_cond_signal(&g_pool.queue.not_full);
@@ -2396,7 +2666,8 @@ static void *pool_worker(void *arg) {
         conn_thread_arg_t *a = malloc(sizeof(conn_thread_arg_t));
         if (a) {
             a->client_fd = fd;
-            a->pipeline  = g_pool.pipeline;
+            a->pipeline  = on_plain ? g_march_https.plain_pipeline : g_pool.pipeline;
+            a->is_tls    = on_plain ? 0 : g_march_https.tls;
             /* Count this worker busy BEFORE growing, so the grow check sees
                it occupied; connection_thread does not return until the
                connection closes or times out. */
@@ -2550,7 +2821,8 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline,
                                void *release) {
     if (!pipeline) return;
-    (void)idle_timeout;
+    if (idle_timeout > 0) g_march_https.idle_secs = (int)idle_timeout;
+    march_https_on_listen();
     /* The result releaser lives for the whole server run (see
      * march_http_internal.h); the stdlib passes HttpServer.release_conn. */
     g_march_http_release_clo = release;
@@ -2578,8 +2850,10 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
     }
 
     /* ── Fallback: thread-per-connection with work queue ─────────── */
-    int64_t listen_fd = tcp_listen_raw(port);
-    if (listen_fd < 0) {
+    /* Bootstrap mode (tls_wait_for_cert, no certificate yet): the HTTPS
+     * port is bound by the accept loop once the first pair is installed. */
+    int64_t listen_fd = march_https_awaiting_cert() ? -1 : tcp_listen_raw(port);
+    if (listen_fd < 0 && !march_https_awaiting_cert()) {
         fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
                 (long long)port, strerror(errno));
         return;
@@ -2616,12 +2890,37 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
                 (long long)port);
     }
 
+    /* The extra plain-HTTP listener (HttpServer.plain_listener). */
+    int64_t plain_fd = -1;
+    if (g_march_https.plain_port > 0 && g_march_https.plain_pipeline) {
+        plain_fd = tcp_listen_raw(g_march_https.plain_port);
+        if (plain_fd < 0)
+            fprintf(stderr, "march: plain listener on port %d failed: %s\n",
+                    g_march_https.plain_port, strerror(errno));
+        else
+            fprintf(stderr, "march: plain HTTP listener on port %d\n", g_march_https.plain_port);
+    }
+    if (g_march_https.tls)
+        fprintf(stderr, "march: HTTPS on port %lld\n", (long long)port);
+
     while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+        if (listen_fd < 0 && !march_https_awaiting_cert()) {
+            listen_fd = tcp_listen_raw(port);
+            if (listen_fd < 0) {
+                fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
+                        (long long)port, strerror(errno));
+                break;
+            }
+            fprintf(stderr, "march: https: certificate installed; HTTPS listening on port %lld\n",
+                    (long long)port);
+        }
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET((int)listen_fd, &rfds);
+        if (listen_fd >= 0) FD_SET((int)listen_fd, &rfds);
+        if (plain_fd >= 0) FD_SET((int)plain_fd, &rfds);
+        int maxfd = (int)(plain_fd > listen_fd ? plain_fd : listen_fd);
         struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
-        int r = select((int)listen_fd + 1, &rfds, NULL, NULL, &tv);
+        int r = select(maxfd + 1, &rfds, NULL, NULL, &tv);
         /* march_errno_now(): tcp_accept_raw below parks, so on a later
          * iteration of this loop a direct `errno` can be the errno of the
          * scheduler thread this green thread left (march_scheduler.h). */
@@ -2631,7 +2930,9 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         }
         if (r == 0) continue;   /* timeout — check g_http_shutdown and loop */
 
-        int64_t client_fd = tcp_accept_raw(listen_fd);
+        int on_plain = plain_fd >= 0 && FD_ISSET((int)plain_fd, &rfds)
+                       && !(listen_fd >= 0 && FD_ISSET((int)listen_fd, &rfds));
+        int64_t client_fd = tcp_accept_raw(on_plain ? plain_fd : listen_fd);
         if (client_fd < 0) continue;
 
         if (sequential) {
@@ -2639,7 +2940,8 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
             conn_thread_arg_t *a = malloc(sizeof(conn_thread_arg_t));
             if (!a) { close((int)client_fd); continue; }
             a->client_fd = (int)client_fd;
-            a->pipeline  = pipeline;
+            a->pipeline  = on_plain ? g_march_https.plain_pipeline : pipeline;
+            a->is_tls    = on_plain ? 0 : g_march_https.tls;
             connection_thread(a);   /* handles fd and frees a */
             continue;
         }
@@ -2653,6 +2955,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         }
         if (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
             g_pool.queue.fds[g_pool.queue.tail] = (int)client_fd;
+            g_pool.queue.plain[g_pool.queue.tail] = (unsigned char)on_plain;
             g_pool.queue.tail = (g_pool.queue.tail + 1) % MARCH_HTTP_QUEUE_CAPACITY;
             g_pool.queue.count++;
             pthread_cond_signal(&g_pool.queue.not_empty);
@@ -2662,7 +2965,8 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         pthread_mutex_unlock(&g_pool.queue.lock);
     }
 
-    close((int)listen_fd);
+    if (listen_fd >= 0) close((int)listen_fd);
+    if (plain_fd >= 0) close((int)plain_fd);
     if (!sequential) march_http_pool_stop();
 }
 
@@ -2745,31 +3049,12 @@ void march_http_server_wait(int64_t handle) {
 
 /* ── WebSocket builtins ───────────────────────────────────────────────── */
 
+void march_ws_send_101(int64_t v, const char *key, size_t key_len);
+
 void march_ws_handshake(int64_t fd, void *key_string) {
     if (!key_string) return;
     march_string *key = (march_string *)key_string;
-    const char *magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    size_t magic_len = 36;
-    size_t total = (size_t)key->len + magic_len;
-    char *concat = (char *)alloca(total);
-    memcpy(concat, key->data, (size_t)key->len);
-    memcpy(concat + key->len, magic, magic_len);
-
-    uint8_t hash[20];
-    sha1((const uint8_t *)concat, total, hash);
-
-    char b64[32];
-    base64_encode(hash, 20, b64, sizeof(b64));
-
-    char resp[256];
-    int n = snprintf(resp, sizeof(resp),
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: %s\r\n\r\n",
-        b64);
-    if (n > 0)
-        send((int)fd, resp, (size_t)n, 0);
+    march_ws_send_101(fd, key->data, (size_t)key->len);
 }
 
 /* recv_all_bytes: read exactly `n` bytes from fd into buf. Returns 0 on
@@ -2796,6 +3081,161 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
     return 0;
 }
 
+/* ── WebSocket I/O over TLS (wss://) ──────────────────────────────────── */
+/*
+ * A WsSocket carries one Int. For a plain connection it is the fd; for a
+ * wss:// connection it is fd | (session generation << 32), so a WebSocket
+ * names its own TLS session and a reused fd number never finds another one
+ * (march_ws_sock_value). Every operation on a wss:// socket takes a
+ * reference to the session from the registry, checks it is still a live
+ * WebSocket and counts itself as touching the fd (mts_ws_enter) for as long
+ * as it does; the server closing the connection marks the session closed,
+ * shuts the socket down and waits for those operations to finish before it
+ * closes the fd (march_ws_tls_teardown). So a task that sends after its
+ * handler returned gets an error, never a freed session or someone else's
+ * connection.
+ *
+ * Sends queue their ciphertext and one sender at a time drains the queue,
+ * holding no lock while it waits for the socket (mts_ws_send), so a parked
+ * sender never blocks another thread on a mutex and frames keep their
+ * order. Reads wait for the socket without any lock and feed/read under
+ * the session lock.
+ */
+#define WS_FD(v)   ((int)((int64_t)(v) & 0xffffffff))
+#define WS_GEN(v)  ((uint32_t)(((uint64_t)(int64_t)(v)) >> 32))
+
+int64_t march_ws_sock_value(int fd, march_tls_session_t *s) {
+    return s ? ((int64_t)fd | ((int64_t)mts_gen(s) << 32)) : (int64_t)fd;
+}
+
+/* WsSocket(box): header(16) + one field, a TCP_BORROWED handle box over [v]
+ * (stdlib/websocket.march: `opaque type WsSocket = WsSocket(Socket)`). The
+ * box is never released onto the fd: the server closes the connection. */
+void *march_ws_sock_new(int64_t v, void **box_out) {
+    void *box = march_handle_new(MARCH_HANDLE_TCP_BORROWED, v, 1);  /* aux 1: borrowed (Socket.borrow) */
+    void *ws_sock = march_alloc(16 + 8);
+    *(void **)((char *)ws_sock + 16) = box;   /* the WsSocket owns one reference */
+    march_incrc(box);                         /* ... and the caller another */
+    *box_out = box;
+    return ws_sock;
+}
+
+void march_ws_sock_done(void *box) {
+    /* The caller closes (or tears down) the fd next: drain, as for a Conn. */
+    (void)march_handle_close_drain(box, MARCH_BORROWED_DRAIN_MS);
+    march_decrc(box);
+}
+
+/* The live wss:// session [v] names, referenced and counted as touching the
+ * fd (release with ws_session_done), or NULL when it is gone. */
+static march_tls_session_t *ws_session_begin(int64_t v) {
+    march_tls_session_t *s = mts_registry_acquire(WS_FD(v), WS_GEN(v));
+    if (!s) return NULL;
+    if (!mts_ws_enter(s)) { mts_free(s); return NULL; }
+    return s;
+}
+
+static void ws_session_done(march_tls_session_t *s) {
+    mts_ws_leave(s);
+    mts_free(s);
+}
+
+static int ws_recv_exact(int64_t v, uint8_t *buf, size_t n) {
+    if (WS_GEN(v) == 0) return recv_exact(WS_FD(v), buf, n);
+    march_tls_session_t *s = ws_session_begin(v);
+    if (!s) return -1;
+    int fd = WS_FD(v), rc = 0;
+    size_t got = 0;
+    while (got < n) {
+        size_t k = 0;
+        mts_lock(s);
+        mts_rc r = mts_read(s, buf + got, n - got, &k);
+        mts_unlock(s);
+        got += k;
+        if (k > 0) continue;
+        if (r == MTS_EOF || r == MTS_FAIL) { rc = -1; break; }
+        if (march_sched_wait_fd(fd, 0, 0) < 0) { rc = -1; break; }
+        char tmp[16384];
+        sigset_t saved;
+        march_block_preempt(&saved);
+        ssize_t m = recv(fd, tmp, sizeof tmp, MSG_DONTWAIT);
+        int e = m < 0 ? march_errno_now() : 0;     /* parked above */
+        march_unblock_preempt(&saved);
+        if (m < 0 && (e == EINTR || e == EAGAIN || e == EWOULDBLOCK)) continue;
+        if (m <= 0) { rc = -1; break; }
+        mts_lock(s);
+        int f = mts_feed(s, tmp, (size_t)m);
+        mts_unlock(s);
+        if (f != 0) { rc = -1; break; }
+    }
+    ws_session_done(s);
+    return rc;
+}
+
+static int ws_send_all_cb(int fd, const void *buf, size_t n) {
+    return send_all_parked(fd, (const char *)buf, n, NULL) < 0 ? -1 : 0;
+}
+
+/* Send a then b (either may be empty) as one unit. 0 ok, -1 on failure. */
+static int ws_send_bufs(int64_t v, const void *a, size_t al, const void *b, size_t bl) {
+    int fd = WS_FD(v);
+    if (WS_GEN(v) == 0) {
+        if (al && send_all_parked(fd, (const char *)a, al, NULL) < 0) return -1;
+        if (bl && send_all_parked(fd, (const char *)b, bl, NULL) < 0) return -1;
+        return 0;
+    }
+    march_tls_session_t *s = mts_registry_acquire(fd, WS_GEN(v));
+    if (!s) return -1;
+    int rc = mts_ws_send(s, a, al, b, bl, ws_send_all_cb, fd);
+    mts_free(s);
+    return rc;
+}
+
+/* Close a wss:// connection handed to a WebSocket: no operation starts
+ * after mts_ws_close; shutdown(2) wakes any that is waiting on the socket;
+ * the fd is closed only once none is touching it (bounded wait, 5 s). The
+ * session is freed when its last reference goes. A plain connection is
+ * just closed. */
+void march_ws_tls_teardown(int fd, march_tls_session_t *s) {
+    if (s) {
+        mts_registry_take(fd);
+        mts_ws_close(s);
+        if (mts_ws_fd_busy(s)) {
+            shutdown(fd, SHUT_RDWR);
+            for (int i = 0; i < 5000 && mts_ws_fd_busy(s); i++) march_sleep_ms(1);
+        } else {
+            mts_shutdown(s);                    /* best-effort close_notify */
+            char out[4096];
+            size_t n = mts_take_out(s, out, sizeof out);
+            if (n > 0) (void)send(fd, out, n, MSG_DONTWAIT);
+        }
+        mts_free(s);
+    }
+    close(fd);
+}
+
+/* The 101 response for a WebSocket upgrade, sent on [v] (a WsSocket value). */
+void march_ws_send_101(int64_t v, const char *key, size_t key_len) {
+    const char *magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    size_t magic_len = 36;
+    if (key_len > 256) return;
+    char concat[256 + 36];
+    memcpy(concat, key, key_len);
+    memcpy(concat + key_len, magic, magic_len);
+    uint8_t hash[20];
+    sha1((const uint8_t *)concat, key_len + magic_len, hash);
+    char b64[32];
+    base64_encode(hash, 20, b64, sizeof(b64));
+    char resp[256];
+    int n = snprintf(resp, sizeof(resp),
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: %s\r\n\r\n",
+        b64);
+    if (n > 0) (void)ws_send_bufs(v, resp, (size_t)n, NULL, 0);
+}
+
 /* WsFrame tag layout (matches March declaration order):
  *   TextFrame(String)   → tag 0, field[0] = String ptr
  *   BinaryFrame(String) → tag 1, field[0] = String ptr
@@ -2805,7 +3245,7 @@ static int recv_exact(int fd, uint8_t *buf, size_t n) {
  */
 
 void *march_ws_recv(int64_t fd) {
-    int sock = (int)fd;
+    int64_t sock = fd;                  /* a WsSocket value: see WS_FD */
     uint8_t hdr2[2];
     /* Declared before any `goto closed` so the cleanup free() at the label
        never sees an uninitialized pointer — the header/length/mask read
@@ -2813,7 +3253,7 @@ void *march_ws_recv(int64_t fd) {
     uint8_t *payload = NULL;
 
     /* Read 2-byte frame header */
-    if (recv_exact(sock, hdr2, 2) < 0)
+    if (ws_recv_exact(sock, hdr2, 2) < 0)
         goto closed;
 
     int fin    = (hdr2[0] >> 7) & 1;
@@ -2825,11 +3265,11 @@ void *march_ws_recv(int64_t fd) {
     /* Extended payload length */
     if (payload_len == 126) {
         uint8_t ext[2];
-        if (recv_exact(sock, ext, 2) < 0) goto closed;
+        if (ws_recv_exact(sock, ext, 2) < 0) goto closed;
         payload_len = ((uint64_t)ext[0] << 8) | ext[1];
     } else if (payload_len == 127) {
         uint8_t ext[8];
-        if (recv_exact(sock, ext, 8) < 0) goto closed;
+        if (ws_recv_exact(sock, ext, 8) < 0) goto closed;
         payload_len = 0;
         for (int i = 0; i < 8; i++)
             payload_len = (payload_len << 8) | ext[i];
@@ -2838,7 +3278,7 @@ void *march_ws_recv(int64_t fd) {
     /* Masking key (clients always mask, servers never do) */
     uint8_t mask[4] = {0, 0, 0, 0};
     if (masked) {
-        if (recv_exact(sock, mask, 4) < 0) goto closed;
+        if (ws_recv_exact(sock, mask, 4) < 0) goto closed;
     }
 
     /* Read payload */
@@ -2846,7 +3286,7 @@ void *march_ws_recv(int64_t fd) {
         if (payload_len > 16 * 1024 * 1024) goto closed;  /* 16MB limit */
         payload = malloc(payload_len + 1);
         if (!payload) goto closed;
-        if (recv_exact(sock, payload, payload_len) < 0) {
+        if (ws_recv_exact(sock, payload, payload_len) < 0) {
             /* `closed:` frees payload — jumping straight there avoids a
                double-free (freeing here and again at the label). */
             goto closed;
@@ -2931,7 +3371,7 @@ closed:
 /* Send a WebSocket frame to fd (server→client, unmasked). */
 void march_ws_send(int64_t fd, void *frame) {
     if (!frame) return;
-    int sock = (int)fd;
+    int64_t sock = fd;                  /* a WsSocket value: see WS_FD */
 
     int32_t tag = *(int32_t *)((char *)frame + 8);
 
@@ -3002,9 +3442,7 @@ void march_ws_send(int64_t fd, void *frame) {
         hdr_len = 10;
     }
 
-    (void)send_all_parked(sock, (const char *)frame_hdr, (size_t)hdr_len, NULL);
-    if (payload_len > 0)
-        (void)send_all_parked(sock, (const char *)payload, payload_len, NULL);
+    (void)ws_send_bufs(sock, frame_hdr, (size_t)hdr_len, payload, payload_len);
 
     (void)close_hdr;
 }
@@ -3016,7 +3454,7 @@ void march_ws_send(int64_t fd, void *frame) {
  *   Timeout          → tag 2, no fields
  */
 void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
-    int ws_fd = (int)socket_fd;
+    int ws_fd = WS_FD(socket_fd);
 
     /* pipe_rd is an int64 field inside a March heap object, or NULL */
     int pipe_fd = -1;
@@ -3033,10 +3471,24 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
     int fds[2] = { ws_fd, pipe_fd >= 0 ? pipe_fd : ws_fd };
     int64_t deadline = timeout_ms > 0 ? march_now_ms() + timeout_ms : 0;
     int pipe_ready = 0, ws_ready = 0;
-    for (;;) {
+    /* wss://: bytes the session already holds raise no socket readiness, and
+     * a session that is gone reads as ready so the recv below reports the
+     * close. The session stays counted as touching the fd while we wait. */
+    march_tls_session_t *wss = NULL;
+    if (WS_GEN(socket_fd) != 0) {
+        wss = ws_session_begin(socket_fd);
+        if (!wss) ws_ready = 1;
+        else {
+            mts_lock(wss);
+            ws_ready = mts_has_input(wss);
+            mts_unlock(wss);
+        }
+    }
+    for (; !ws_ready;) {
         int w = march_sched_wait_fds(fds, pipe_fd >= 0 ? 2 : 1, deadline);
         if (w <= 0) {
             /* Timeout, or an error: both were "Timeout" before. */
+            if (wss) ws_session_done(wss);
             void *t = march_alloc(16);
             *(int32_t *)((char *)t + 8) = 2;
             return t;
@@ -3049,12 +3501,15 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
         pipe_ready = prc > 0 && pipe_fd >= 0 && pfds[1].revents != 0;
         if (ws_ready || pipe_ready) break;
         if (deadline > 0 && march_now_ms() >= deadline) {
+            if (wss) ws_session_done(wss);
             void *t = march_alloc(16);
             *(int32_t *)((char *)t + 8) = 2;
             return t;
         }
         /* stale hint: wait again */
     }
+
+    if (wss) ws_session_done(wss);
 
     /* Check actor pipe first (prioritise actor messages) */
     if (pipe_ready) {
@@ -3087,99 +3542,300 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
 
 /* ── HTTP client builtins ─────────────────────────────────────────────── */
 
-/* Serialize an HTTP request to a raw string.
- * http_serialize_request(method, host, path, query, headers, body) -> String */
+/* ── Outgoing-request field checks ─────────────────────────────────────
+ * A CR, LF, space or other control byte in the method, host, path, query or
+ * a header of an outgoing request ends the request line or a header early
+ * and smuggles a second, pipelined request.  These mirror
+ * lib/eval/http_request_check.ml byte for byte, error text included
+ * (test_http_serialize_injection_parity runs one program through both):
+ *   method, header name   a non-empty RFC 9110 token (tchar)
+ *   host                  no control byte, space or DEL
+ *   path, query           RFC 3986 characters (unreserved, sub-delims,
+ *                         ":@/?") and well-formed %HH escapes only
+ *   header value          VCHAR, obs-text, SP, HTAB (no CR/LF/NUL/CTL)
+ * Each returns NULL when the field is acceptable, else a fresh Err(msg). */
+#define MARCH_HTTP_REJECT "http request rejected: "
+
+static void *http_reject_byte(const char *field, const march_string *s, int64_t i) {
+    char msg[128];
+    snprintf(msg, sizeof msg, MARCH_HTTP_REJECT "%s contains byte 0x%02x at offset %lld",
+             field, (unsigned)(unsigned char)s->data[i], (long long)i);
+    return make_err(msg);
+}
+
+static int http_is_tchar(unsigned char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        return 1;
+    return c != 0 && strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
+
+static void *http_check_token(const char *field, const march_string *s) {
+    if (!s || s->len == 0) {
+        char msg[96];
+        snprintf(msg, sizeof msg, MARCH_HTTP_REJECT "empty %s", field);
+        return make_err(msg);
+    }
+    for (int64_t i = 0; i < s->len; i++)
+        if (!http_is_tchar((unsigned char)s->data[i])) return http_reject_byte(field, s, i);
+    return NULL;
+}
+
+static void *http_check_host(const march_string *s) {
+    if (!s) return NULL;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c <= ' ' || c == 0x7f) return http_reject_byte("host", s, i);
+    }
+    return NULL;
+}
+
+static void *http_check_header_value(const march_string *s) {
+    if (!s) return NULL;
+    for (int64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (!(c == '\t' || (c >= ' ' && c != 0x7f))) return http_reject_byte("header value", s, i);
+    }
+    return NULL;
+}
+
+static int http_is_hex(unsigned char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int http_is_target_char(unsigned char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        return 1;
+    return c != 0 && strchr("-._~!$&'()*+,;=:@/?", c) != NULL;
+}
+
+/* field is "path" or "query"; the same character set serves both. */
+static void *http_check_target(const char *field, const march_string *s) {
+    if (!s) return NULL;
+    int64_t n = s->len;
+    for (int64_t i = 0; i < n; ) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c == '%') {
+            if (i + 2 < n && http_is_hex((unsigned char)s->data[i + 1])
+                          && http_is_hex((unsigned char)s->data[i + 2])) { i += 3; continue; }
+            char msg[128];
+            snprintf(msg, sizeof msg, MARCH_HTTP_REJECT "%s has a malformed %%-escape at offset %lld",
+                     field, (long long)i);
+            return make_err(msg);
+        }
+        if (!http_is_target_char(c)) return http_reject_byte(field, s, i);
+        i++;
+    }
+    return NULL;
+}
+
+/* Serialize an HTTP request.
+ * http_serialize_request(method, host, path, query, headers, body)
+ *   -> Result(String, String)
+ * query is an Option(String), a nullable march_string* at the C ABI (NULL is
+ * None).  headers is a March List(Header), the layout
+ * march_http_serialize_response reads.  Err(reason) when a field fails the
+ * checks above; nothing is built in that case.  The output matches the
+ * interpreter's (lib/eval/eval_builtins.ml): the user's headers in order,
+ * and Content-Length only for a non-empty body. */
 void *march_http_serialize_request(void *method_ptr, void *host_ptr, void *path_ptr,
                                     void *query_ptr, void *headers_ptr, void *body_ptr) {
     march_string *method  = (march_string *)method_ptr;
     march_string *host    = (march_string *)host_ptr;
     march_string *path    = (march_string *)path_ptr;
     march_string *query   = (march_string *)query_ptr;
-    march_string *body    = body_ptr ? (march_string *)body_ptr : NULL;
-    (void)headers_ptr;
+    march_string *body    = (march_string *)body_ptr;
 
-    /* Build: "METHOD /path?query HTTP/1.1\r\nHost: host\r\n\r\nbody" */
-    const char *m   = method ? method->data : "GET";
-    const char *h   = host   ? host->data   : "";
-    const char *p   = path   ? path->data   : "/";
-    const char *q   = (query && query->len > 0) ? query->data : NULL;
-    const char *b   = (body && body->len > 0)   ? body->data  : "";
-    int64_t blen    = (body && body->len > 0)   ? body->len   : 0;
-
-    char content_len_buf[64];
-    snprintf(content_len_buf, sizeof(content_len_buf), "%lld", (long long)blen);
-
-    /* Approximate buffer size */
-    size_t sz = strlen(m) + strlen(h) + strlen(p) + (q ? strlen(q) : 0) + blen + 256;
-    char *buf = (char *)malloc(sz);
-    if (!buf) return march_string_lit("", 0);
-
-    int n;
-    if (q && *q) {
-        n = snprintf(buf, sz, "%s %s?%s HTTP/1.1\r\nHost: %s\r\nContent-Length: %s\r\n\r\n%s",
-                     m, p, q, h, content_len_buf, b);
-    } else {
-        n = snprintf(buf, sz, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %s\r\n\r\n%s",
-                     m, p, h, content_len_buf, b);
+    void *err;
+    if ((err = http_check_token("method", method))) return err;
+    if ((err = http_check_host(host))) return err;
+    if ((err = http_check_target("path", path))) return err;
+    if ((err = http_check_target("query", query))) return err;
+    for (void *cur = headers_ptr; cur && *(int32_t *)((char *)cur + 8) != 0;
+         cur = *(void **)((char *)cur + 24)) {
+        void *hdr = *(void **)((char *)cur + 16);
+        if ((err = http_check_token("header name", *(march_string **)((char *)hdr + 16)))) return err;
+        if ((err = http_check_header_value(*(march_string **)((char *)hdr + 24)))) return err;
     }
-    void *result = march_string_lit(buf, n < 0 ? 0 : (int64_t)n);
+
+    size_t cap = 256;
+    char *buf = malloc(cap);
+    if (!buf) return make_err("http_serialize_request: out of memory");
+    size_t len = 0;
+
+#define REQ_APPEND(s, n) do { \
+    size_t _n = (size_t)(n); \
+    while (len + _n + 1 > cap) { cap *= 2; char *nb = realloc(buf, cap); \
+        if (!nb) { free(buf); return make_err("http_serialize_request: out of memory"); } buf = nb; } \
+    memcpy(buf + len, (s), _n); len += _n; \
+} while (0)
+#define REQ_APPEND_MS(ms) do { if (ms) REQ_APPEND((ms)->data, (ms)->len); } while (0)
+#define REQ_APPEND_C(cs) REQ_APPEND((cs), strlen(cs))
+
+    REQ_APPEND_MS(method);
+    REQ_APPEND_C(" ");
+    REQ_APPEND_MS(path);
+    if (query && query->len > 0) { REQ_APPEND_C("?"); REQ_APPEND_MS(query); }
+    REQ_APPEND_C(" HTTP/1.1\r\nHost: ");
+    REQ_APPEND_MS(host);
+    REQ_APPEND_C("\r\n");
+    for (void *cur = headers_ptr; cur && *(int32_t *)((char *)cur + 8) != 0;
+         cur = *(void **)((char *)cur + 24)) {
+        void *hdr = *(void **)((char *)cur + 16);
+        REQ_APPEND_MS(*(march_string **)((char *)hdr + 16));
+        REQ_APPEND_C(": ");
+        REQ_APPEND_MS(*(march_string **)((char *)hdr + 24));
+        REQ_APPEND_C("\r\n");
+    }
+    if (body && body->len > 0) {
+        char cl[48];
+        int cl_len = snprintf(cl, sizeof cl, "Content-Length: %lld\r\n", (long long)body->len);
+        REQ_APPEND(cl, cl_len);
+    }
+    REQ_APPEND_C("\r\n");
+    REQ_APPEND_MS(body);
+#undef REQ_APPEND
+#undef REQ_APPEND_MS
+#undef REQ_APPEND_C
+
+    void *result = march_string_lit(buf, (int64_t)len);
     free(buf);
-    return result;
+    return make_ok(result);
+}
+
+/* OCaml's String.trim whitespace: ' ', '\f', '\n', '\r', '\t'. */
+static int http_resp_ws(char c) {
+    return c == ' ' || c == '\f' || c == '\n' || c == '\r' || c == '\t';
+}
+
+/* Trim [*b, *e) in place by the String.trim rule. */
+static void http_resp_trim(const char **b, const char **e) {
+    while (*b < *e && http_resp_ws(**b)) (*b)++;
+    while (*e > *b && http_resp_ws((*e)[-1])) (*e)--;
+}
+
+/* Err("<prefix><bytes>") without going through a NUL-terminated buffer, so a
+ * line holding a NUL byte is reported whole. */
+static void *http_resp_err(const char *prefix, const char *b, size_t n) {
+    size_t pn = strlen(prefix);
+    char *buf = malloc(pn + n + 1);
+    if (!buf) return make_err("http_parse_response: out of memory");
+    memcpy(buf, prefix, pn);
+    memcpy(buf + pn, b, n);
+    void *s = march_string_lit(buf, (int64_t)(pn + n));
+    free(buf);
+    void *r = march_alloc(16 + 8);
+    *(int32_t *)((char *)r + 8) = 1;          /* tag = 1 (Err) */
+    *(void **)((char *)r + 16) = s;
+    return r;
 }
 
 /* Parse a raw HTTP response string.
- * Returns Ok((status_code:i64, headers:List, body:String)) or Err(reason:String).
- * Tag: Ok=tag0, Err=tag1. */
+ *   http_parse_response(raw) -> Result((Int, List(Header), String), String)
+ *
+ * This must give what the interpreter gives (lib/eval/eval_builtins.ml,
+ * "http_parse_response"), byte for byte:
+ *   - the head ends at the first "\r\n\r\n" (the whole input if there is
+ *     none); the body is everything after it;
+ *   - the head is split on '\n'; the first line, trimmed and split on single
+ *     spaces, must have a second field, and that field must be a number, else
+ *     Err("bad status line: <first line>") / Err("bad status code: <field>").
+ *     An empty input is therefore an Err, so a connection closed before a
+ *     byte arrived is a parse error, not a 200;
+ *   - every later line with a ':' is a Header(name, value), both trimmed, in
+ *     order; a line without one is skipped.
+ * The status is stored as a tagged Int ((n << 1) | 1), the representation
+ * compiled code reads from a tuple field. Until 2026-11-15 it was stored raw,
+ * so every odd status read as (n - 1) / 2 (a 401 passed as a 200), the header
+ * list was always Nil and an empty response parsed as 200
+ * (specs/progress/2026-11-11-http-compiled-response-parse-status-and-headers.md). */
 void *march_http_parse_response(void *raw_ptr) {
-    if (!raw_ptr) {
-        void *s = march_string_lit("http_parse_response: null input", 31);
-        void *r = march_alloc(24);
-        ((march_hdr *)r)->tag = 1; /* Err */
-        *(void **)((char *)r + 16) = s;
-        return r;
-    }
+    if (!raw_ptr) return make_err("http_parse_response: null input");
     march_string *raw = (march_string *)raw_ptr;
     const char *data = raw->data;
+    size_t len = (size_t)raw->len;
 
-    /* Parse status line: HTTP/1.x NNN ... */
-    int status_code = 200;
-    const char *p = data;
-    if (strncmp(p, "HTTP/", 5) == 0) {
-        p += 5;
-        while (*p && *p != ' ') p++;  /* skip version */
-        while (*p == ' ') p++;
-        status_code = (int)strtol(p, NULL, 10);
+    size_t head_end = len;
+    for (size_t i = 0; i + 3 < len; i++) {
+        if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n') {
+            head_end = i;
+            break;
+        }
+    }
+    /* First line of the head. */
+    const char *line_b = data;
+    const char *head_e = data + head_end;
+    const char *line_e = memchr(line_b, '\n', head_end);
+    if (!line_e) line_e = head_e;
+
+    const char *tb = line_b, *te = line_e;
+    http_resp_trim(&tb, &te);
+    /* Second field of a split on single spaces. */
+    const char *sp = memchr(tb, ' ', (size_t)(te - tb));
+    if (!sp) {
+        return http_resp_err("bad status line: ", line_b, (size_t)(line_e - line_b));
+    }
+    const char *cb = sp + 1;
+    const char *ce = memchr(cb, ' ', (size_t)(te - cb));
+    if (!ce) ce = te;
+    /* A plain decimal number, optionally signed, that fits an Int. */
+    int64_t code = 0;
+    int ok = 0;
+    {
+        const char *q = cb;
+        int neg = 0;
+        if (q < ce && (*q == '-' || *q == '+')) { neg = (*q == '-'); q++; }
+        if (q < ce) ok = 1;
+        for (; q < ce; q++) {
+            if (*q < '0' || *q > '9' || code > (INT64_MAX / 4 - 9) / 10) { ok = 0; break; }
+            code = code * 10 + (*q - '0');
+        }
+        if (neg) code = -code;
+    }
+    if (!ok) {
+        return http_resp_err("bad status code: ", cb, (size_t)(ce - cb));
     }
 
-    /* Find header/body split at \r\n\r\n */
-    const char *body_start = strstr(data, "\r\n\r\n");
-    if (!body_start) body_start = strstr(data, "\n\n");
-    if (body_start) {
-        body_start += (body_start[0] == '\r') ? 4 : 2;
-    } else {
-        body_start = data + raw->len;
+    /* Header lines, collected in order, then consed back to front. */
+    size_t cap = 16, n = 0;
+    void **hdrs = malloc(cap * sizeof *hdrs);
+    if (!hdrs) return make_err("http_parse_response: out of memory");
+    const char *cur = line_e < head_e ? line_e + 1 : head_e;
+    while (cur < head_e) {
+        const char *le = memchr(cur, '\n', (size_t)(head_e - cur));
+        if (!le) le = head_e;
+        const char *b = cur, *e = le;
+        http_resp_trim(&b, &e);
+        const char *colon = b < e ? memchr(b, ':', (size_t)(e - b)) : NULL;
+        if (colon) {
+            const char *nb = b, *ne = colon, *vb = colon + 1, *ve = e;
+            http_resp_trim(&nb, &ne);
+            http_resp_trim(&vb, &ve);
+            if (n == cap) {
+                cap *= 2;
+                void **nh = realloc(hdrs, cap * sizeof *hdrs);
+                if (!nh) {
+                    free(hdrs);   /* out of memory: the built headers leak */
+                    return make_err("http_parse_response: out of memory");
+                }
+                hdrs = nh;
+            }
+            hdrs[n++] = make_header(march_string_lit(nb, (int64_t)(ne - nb)),
+                                    march_string_lit(vb, (int64_t)(ve - vb)));
+        }
+        cur = le < head_e ? le + 1 : head_e;
     }
+    void *list = make_nil();
+    while (n > 0) list = make_cons(hdrs[--n], list);
+    free(hdrs);
+    void *body_str = head_end + 4 <= len
+        ? march_string_lit(data + head_end + 4, (int64_t)(len - head_end - 4))
+        : march_string_lit("", 0);
 
-    /* Build body string */
-    int64_t body_len = (int64_t)(raw->len - (body_start - data));
-    void *body_str = body_len > 0 ? march_string_lit(body_start, body_len)
-                                  : march_string_lit("", 0);
-
-    /* Build empty headers list (Nil) */
-    void *headers_nil = march_alloc(16); /* Nil = tag 0, no fields */
-
-    /* Build tuple (status_code, headers_nil, body_str): 3-field heap object */
-    void *tup = march_alloc(16 + 3 * 8);
-    /* tag 0 for tuple */
-    *(int64_t *)((char *)tup + 16) = (int64_t)status_code;
-    *(void **)((char *)tup + 24)   = headers_nil;
+    void *tup = march_alloc(16 + 3 * 8);   /* tuple, tag 0 */
+    *(int64_t *)((char *)tup + 16) = (code << 1) | 1;
+    *(void **)((char *)tup + 24)   = list;
     *(void **)((char *)tup + 32)   = body_str;
-
-    /* Wrap in Ok(tup): tag=0 */
-    void *ok_obj = march_alloc(24);
-    /* tag stays 0 = Ok */
-    *(void **)((char *)ok_obj + 16) = tup;
-    return ok_obj;
+    return make_ok(tup);
 }
 
 /* http_fetch / http_fetch_available — native stubs for the JS-only fetch

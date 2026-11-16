@@ -31,21 +31,21 @@ mod Test do
 
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite)) : Unit do
     let path = "/tmp/march_native_csv_niche_row.csv"
-    match File.write(path, "name,amount\nalice,10\nbob,20\ncarol,5\n") do
+    match Authority.must(File.write(path, "name,amount\nalice,10\nbob,20\ncarol,5\n")) do
     Err(e) -> panic("write failed")
     Ok(_) -> :ok
     end
 
-    match Csv.read_all(path, ",", :rfc4180) do
-    Err(e) -> println("read_all err")
-    Ok(rows) -> println("row count: " ++ int_to_string(List.length(rows)))
+    match Authority.must(Csv.read_all(path, ",", :rfc4180)) do
+    Err(e) -> Authority.ignore(println("read_all err"))
+    Ok(rows) -> Authority.ignore(println("row count: " ++ int_to_string(List.length(rows))))
     end
 
-    match Csv.each_row_with_header(path, ",", :rfc4180, fn (header, fields) -> println("row: " ++ nth(fields, 0))) do
-    Err(e) -> println("each_row_with_header err")
-    Ok(_) -> println("each_row_with_header: ok")
+    match Authority.must(Csv.each_row_with_header(path, ",", :rfc4180, fn (header, fields) -> println("row: " ++ nth(fields, 0)))) do
+    Err(e) -> Authority.ignore(println("each_row_with_header err"))
+    Ok(_) -> Authority.ignore(println("each_row_with_header: ok"))
     end
 
-    match File.delete(path) do _ -> () end
+    match Authority.must(File.delete(path)) do _ -> () end
   end
 end

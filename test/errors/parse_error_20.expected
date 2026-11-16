@@ -1,20 +1,10 @@
 exit: 1
 -- SYNTAX ------------------- errors/parse_error_20.march
 
-Functions are declared with `fn` (`pfn` for a private one), not `def`: [parse_error]
+An attribute goes before a `fn` or `pfn`; this declaration does not take one. [parse_error]
 
-3 |   def f() do 0 end
-      ^^^
+4 |   type Old = A | B
+      ^^^^
 
-    fn name(params) do
-        body
-    end
-
-    fix (`forge fix` applies it):
-
-3 -   def f() do 0 end
-3 +   fn f() do 0 end
-
+    `@[deprecated("...")]` marks functions only for now. To deprecate a type, deprecate the functions that return or take it, and say so in its module's CHANGELOG entry.
     run `march --explain parse_error`
-
-after fix: exit 0

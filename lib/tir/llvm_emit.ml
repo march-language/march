@@ -1059,7 +1059,8 @@ let builtin_group : Builtin_name.t -> builtin_group = function
   | Builtin_name.Signal_watch | Builtin_name.Task_await
   | Builtin_name.Task_await_unwrap | Builtin_name.Task_cancel
   | Builtin_name.Task_cancel_by_id | Builtin_name.Task_cancel_token_new
-  | Builtin_name.Task_is_cancelled | Builtin_name.Task_reductions
+  | Builtin_name.Task_is_cancelled | Builtin_name.Task_poll
+  | Builtin_name.Task_reductions
   | Builtin_name.Task_spawn | Builtin_name.Task_spawn_steal
   | Builtin_name.Task_spawn_with_cancel | Builtin_name.Task_yield ->
     Bg_task
@@ -1665,6 +1666,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     Llvm_emit_task.emit_task_await_unwrap ~emit_atom ctx a
   | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_await f.Tir.v_name ->
     Llvm_emit_task.emit_task_await ~emit_atom ctx a
+  (* task_poll(task_ptr) → non-blocking await; NULL (niche None) while the
+     task runs.  Borrows the Task.  Re-encoded like vault_get's niche answer
+     where the call site decodes Option(Result(..)) as boxed. *)
+  | Tir.EApp (f, [a]) when Builtin_name.is Builtin_name.Task_poll f.Tir.v_name ->
+    let r = Llvm_emit_task.emit_task_poll ~emit_atom ctx a in
+    ("ptr", emit_vault_opt_reencode ctx r (fn_ret_tir f.Tir.v_ty))
 
   (* task_yield() → cooperative yield via march_sched_yield *)
   | Tir.EApp (f, []) when Builtin_name.is Builtin_name.Task_yield f.Tir.v_name ->
@@ -2395,6 +2402,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      uniformly. *)
   | Tir.EApp (f, args) when decode_simd_call f.Tir.v_name <> None ->
     Llvm_emit_simd.emit_simd_call ~emit_atom ctx f args
+
+  (* ── NativeArray get/set: bounds check + load/store inline, the runtime
+     helper only on the failing (out-of-bounds or shared-array) branch.
+     See [Llvm_emit_narr]. A user function or local of the same name
+     keeps the ordinary call. *)
+  | Tir.EApp (f, ([_; _] | [_; _; _] as args))
+    when (match Llvm_emit_narr.decode f.Tir.v_name with
+          | Some (_, Llvm_emit_narr.Get) -> List.length args = 2
+          | Some (_, Llvm_emit_narr.Set) -> List.length args = 3
+          | None -> false)
+      && not (Hashtbl.mem ctx.top_fns f.Tir.v_name)
+      && not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
+    Llvm_emit_narr.emit_call ~emit_atom ctx f args
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->

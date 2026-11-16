@@ -64,6 +64,7 @@ let update_mode = Sys.getenv_opt "UPDATE_SNAPSHOTS" = Some "1"
    review. *)
 let corpus = [
   "guard_match",                     "guard_match.march";
+  "discarded_call_result",           "discarded_call_result.march";
   "float_arms",                      "float_arms.march";
   "tuple_atom_string_arms",          "tuple_atom_string_arms.march";
   "no_wildcard_panic",               "no_wildcard_panic.march";

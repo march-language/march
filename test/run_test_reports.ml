@@ -1,19 +1,23 @@
 (** Golden test-failure reports (lib/errors/test_report.ml).
 
     Every [test/test_reports/<name>.march] is a test module whose tests all
-    FAIL on purpose.  It is run twice, as a user runs tests:
+    FAIL on purpose.  It is run as a user runs tests:
 
     - interpreted: [march test test_reports/<name>.march];
     - compiled: [march --compile --test --opt 0], then the binary (what
-      [forge test] does).
+      [forge test] does);
+    - JavaScript: [march --target js --test --opt 0], then [node] on the
+      output (issue #1176), unless the fixture is in [js_unsupported] or
+      [node] is not on PATH.
 
     From each run's output the failure blocks are taken (each `FAIL: "name"`
     line and the report under it, de-indented: the two runners frame them
-    differently), and both must equal [<name>.expected] byte for byte.  So
+    differently), and each must equal [<name>.expected] byte for byte.  So
     the suite pins the report text AND that the interpreter (OCaml,
-    [Test_report]) and a compiled binary (C, [march_assert_fail] in
-    runtime/march_runtime.c; March, stdlib/check.march) print the same thing.
-    Both runs use [MARCH_PROP_SEED=42].
+    [Test_report]), a compiled binary (C, [march_assert_fail] in
+    runtime/march_runtime.c; March, stdlib/check.march) and the JS output
+    (march_assert_fail in runtime/march_runtime.mjs) print the same thing.
+    Every run uses [MARCH_PROP_SEED=42].
 
     Regenerate after an intentional change (from the interpreted run; the
     compiled one must still match):
@@ -61,7 +65,18 @@ let private_home =
 
 type outputs = { interp : string; interp_code : int;
                  build : string; build_code : int;
-                 compiled : string; compiled_code : int }
+                 compiled : string; compiled_code : int;
+                 js_build : string; js_build_code : int;
+                 js : string; js_code : int }
+
+(* Fixtures the JS target cannot build yet, each with the gap that stops it.
+   Empty since the gaps of specs/progress/2026-11-07-js-test-runner-gaps.md
+   closed: every fixture's JS run must match its golden.  Add an entry (the
+   fixture's name and the gap, with a specs/todos/ item) only for a fixture
+   that needs something the JS target genuinely lacks. *)
+let js_unsupported : (string * string) list = []
+
+let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)
 
 let script ~dir ~rel =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
@@ -71,8 +86,16 @@ let script ~dir ~rel =
      %s test %s > interp.out 2>&1; echo $? > interp.code; \
      %s --compile --test --opt 0 %s -o ./prog > build.out 2>&1; echo $? > build.code; \
      if [ -x ./prog ]; then ./prog > compiled.out 2>&1; echo $? > compiled.code; \
-     else echo > compiled.out; echo -1 > compiled.code; fi; true"
+     else echo > compiled.out; echo -1 > compiled.code; fi; \
+     echo > js_build.out; echo -1 > js_build.code; echo > js.out; echo -1 > js.code; \
+     if %b; then \
+       %s --target js --test --opt 0 %s -o ./prog.mjs > js_build.out 2>&1; echo $? > js_build.code; \
+       if [ -f ./prog.mjs ]; then node ./prog.mjs > js.out 2>&1; echo $? > js.code; fi; \
+     fi; true"
     (Filename.quote dir) home exe (Filename.quote rel) exe (Filename.quote rel)
+    (Lazy.force have_node
+     && not (List.mem_assoc (Filename.remove_extension (Filename.basename rel)) js_unsupported))
+    exe (Filename.quote rel)
 
 (* Run every fixture, interpreted and compiled, in parallel. *)
 let run_all (names : string list) : (string, outputs) Hashtbl.t =
@@ -101,7 +124,9 @@ let run_all (names : string list) : (string, outputs) Hashtbl.t =
       Hashtbl.replace results name
         { interp = f "interp.out"; interp_code = code "interp.code";
           build = f "build.out"; build_code = code "build.code";
-          compiled = f "compiled.out"; compiled_code = code "compiled.code" };
+          compiled = f "compiled.out"; compiled_code = code "compiled.code";
+          js_build = f "js_build.out"; js_build_code = code "js_build.code";
+          js = f "js.out"; js_code = code "js.code" };
       (try rm_rf tmp with _ -> ())
   done;
   results
@@ -181,10 +206,25 @@ let case name =
         let expected =
           if Sys.file_exists expected_path then read_file expected_path else "" in
         Alcotest.(check string) (name ^ ".expected (compiled)") expected got);
+    Alcotest.test_case (name ^ " javascript") `Quick (fun () ->
+        match List.assoc_opt name js_unsupported with
+        | Some why -> Printf.printf "  SKIP (js_unsupported): %s\n" why
+        | None when not (Lazy.force have_node) ->
+          print_endline "  SKIP: node not on PATH"
+        | None ->
+          let r = r () in
+          if r.js_build_code <> 0 then
+            Alcotest.failf "%s did not build for JS (exit %d):\n%s" name
+              r.js_build_code r.js_build;
+          let got = failure_blocks r.js r.js_code in
+          let expected =
+            if Sys.file_exists expected_path then read_file expected_path else "" in
+          Alcotest.(check string) (name ^ ".expected (javascript)") expected got);
     Alcotest.test_case (name ^ " no colour") `Quick (fun () ->
         let r = r () in
         let blocks = failure_blocks r.interp r.interp_code
-                     ^ failure_blocks r.compiled r.compiled_code in
+                     ^ failure_blocks r.compiled r.compiled_code
+                     ^ failure_blocks r.js r.js_code in
         Alcotest.(check bool) "no ANSI escapes in a report" false (has_ansi blocks)) ]
 
 let () =

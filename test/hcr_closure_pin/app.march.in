@@ -78,7 +78,7 @@ mod App do
       -- frame must restore main's baseline v1 routing.
       let _ = if i == every do
         let baseline = Handler.mk(mk_conn(0))
-        println("baseline caller=" ++ int_to_string(baseline(1)))
+        Authority.ignore(println("baseline caller=" ++ int_to_string(baseline(1))))
       else () end
       let kept2 = if i % 97 == 0 do Cons(f, previous) else previous end
       serve(i + 1, n, every, k2, acc + v % 1000, sum2, kept2)
@@ -96,5 +96,6 @@ mod App do
     -- several per request served by a patch.
     println("live_allocs bounded=" ++ (if delta < 100 do "true" else "false delta=" ++ int_to_string(delta) end))
     println("retained images=" ++ int_to_string(hcrpin_retained()))
+    ()
   end
 end

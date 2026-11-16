@@ -16,7 +16,7 @@ mod ClusterFdRelease do
   needs IO.FileRead
 
   pfn fds() : Int do
-    match Dir.list("/dev/fd") do
+    match Authority.must(Dir.list("/dev/fd")) do
       Ok(xs) -> List.length(xs)
       Err(_) -> -1
     end
@@ -39,13 +39,13 @@ mod ClusterFdRelease do
   end
 
   fn main(c : Cap(IO)) do
-    let pa = Env.require_int("MARCH_PORT_A")
+    let pa = Authority.must(Env.require_int("MARCH_PORT_A"))
     match ClusterNode.start(c, ClusterNode.config("node-a", pa, "", Nil, "fd-secret", 1)) do
       Err(e) -> panic(e)
       Ok(ha) ->
         sleep_ms(300)
         let before = fds()
-        let joined = cycle(c, "127.0.0.1:" ++ int_to_string(pa), Env.require_int("MARCH_PORT_B"), 0, 15, 0)
+        let joined = cycle(c, "127.0.0.1:" ++ int_to_string(pa), Authority.must(Env.require_int("MARCH_PORT_B")), 0, 15, 0)
         sleep_ms(3000)
         let after = fds()
         println("node-a: joins " ++ int_to_string(joined))

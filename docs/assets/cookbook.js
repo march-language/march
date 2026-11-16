@@ -76,6 +76,25 @@
     });
   }
 
+  /* ── Display-only blocks ─────────────────────────────────────────────── */
+
+  // A ```march block whose fence follows a `<!-- repl:skip -->` comment line in
+  // the page source (a fragment, or code that needs a file system or sockets)
+  // gets a copy button but no run button. kramdown keeps the comment, as a
+  // sibling of the block's outermost wrapper; other comments may sit between.
+  // scripts/cookbook-run-blocks-check.js runs every other block (CI).
+  function displayOnly(block) {
+    for (var el = block; el && !(el.classList && el.classList.contains('d-content')); el = el.parentNode) {
+      var p = el.previousSibling;
+      while (p && (p.nodeType === 8 || (p.nodeType === 3 && !p.textContent.trim()))) {
+        if (p.nodeType === 8 && /^\s*repl:skip\s*$/.test(p.data)) return true;
+        p = p.previousSibling;
+      }
+      if (p) return false; // a real element precedes this one: no marker applies
+    }
+    return false;
+  }
+
   /* ── Inject copy/run buttons into every code block ──────────────────── */
 
   function injectButtons() {
@@ -102,7 +121,7 @@
       copyBtn.addEventListener('click', function () { copyCode(copyBtn, code); });
       wrap.appendChild(copyBtn);
 
-      if (isMarch) {
+      if (isMarch && !displayOnly(block)) {
         var runBtn = document.createElement('button');
         runBtn.className = 'ck-btn ck-btn-run';
         runBtn.textContent = 'run';

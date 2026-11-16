@@ -78,6 +78,7 @@ mod Main do
     let a0 = live_allocs()
     let _ = times(50, f, 0)
     println(name ++ ", released: " ++ bool_to_string(settle(a0, 100) < 5))
+    ()
   end
 
   fn main(_io : Cap(IO)) do

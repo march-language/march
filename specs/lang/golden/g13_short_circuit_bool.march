@@ -1,0 +1,21 @@
+mod Main do
+  needs IO.Console
+  fn side(tag) do
+    println(tag)
+    true
+  end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    -- `&&`/`||` short-circuit (core-march.md §4.4.1): the right operand runs
+    -- only when the left one does not already decide the result. The two
+    -- "skipped" tags must never print; the two "evaluated" tags must.
+    let r1 = true || side("or-rhs-skipped")
+    let r2 = false && side("and-rhs-skipped")
+    let r3 = true && side("and-rhs-evaluated")
+    let r4 = false || side("or-rhs-evaluated")
+    println(bool_to_string(r1))
+    println(bool_to_string(r2))
+    println(bool_to_string(r3))
+    println(bool_to_string(r4))
+  end
+end

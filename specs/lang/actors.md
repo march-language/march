@@ -68,6 +68,8 @@ state while it runs.
 
 - [Builtins Reference](#builtins-reference)
 - [Interpreted vs compiled](#interpreted-vs-compiled)
+- [Handler guarantees: `ensures` and `old`](#handler-guarantees-ensures-and-old)
+- [What is proved about the mailbox](#what-is-proved-about-the-mailbox)
 - [See also](#see-also)
 
 ## Choosing a concurrency primitive
@@ -976,6 +978,12 @@ actor Worker do
 end
 ```
 
+An actor may also carry a `migrate old -> { ... }` clause in the same place,
+before or after `mailbox`: it says how a hot deploy moves data between state
+fields (`migrate old -> { total: old.count }` for a rename), and the compiler
+writes the rest of the migration. See
+[Moving data: the `migrate` clause]({{ site.baseurl }}/docs/hot-code-reload/#moving-data-the-migrate-clause).
+
 `mailbox N policy` takes the policy by name (`drop_new`, `drop_old` or
 `block_sender`) and lowers to `Actor.set_queue_limit(pid, N, policy)` right
 after each `spawn(Worker)`. `block_sender` is compiled-only there too: under the
@@ -1099,6 +1107,42 @@ Tasks run on the same M:N green-thread pool as actors. Spawning 250,000+ tasks i
 
 See the [Task module docs](/docs/stdlib/Task.html) for the full API including `Task.race`, `Task.any`, `Task.scope`, and `Task.all_settled`.
 
+### Checking a task without waiting
+
+`Task.poll(t)` (the builtin `task_poll`) asks whether a task has finished
+without waiting for it. It answers `None` while the task is still running and
+`Some(r)` once it has finished, where `r` is exactly what `Task.await(t)` would
+answer: `Ok(value)`, or `Err(reason)` for a cancelled task.
+
+```march
+-- Called once per frame: collect what is ready, keep the rest for next time.
+fn collect(pending) do
+  List.filter(pending, fn t ->
+    match Task.poll(t) do
+      None -> true                -- still running: check again next frame
+      Some(Ok(mesh)) ->           -- finished: use it, drop it from the list
+        let _ = upload(mesh)
+        false
+      Some(Err(_)) -> false       -- cancelled
+    end)
+end
+```
+
+- **It never waits** and never runs the task on the caller's thread. In
+  compiled code a poll of a running task is one atomic load and allocates
+  nothing, and it borrows the handle (no reference-count traffic), so a main
+  loop can poll hundreds of tasks every frame.
+- **A finished task can be read any number of times.** Polling again, or
+  calling `Task.await`, after a poll answered `Some` gives the same answer
+  again. The task keeps its result until its last handle is dropped; each
+  read hands back its own reference to the result.
+- **The interpreter runs a task to completion when it is spawned**, so there
+  `Task.poll` always answers `Some`. Only compiled code observes `None`.
+- **Dropping a handle is enough.** A task that is never awaited or polled
+  still runs to completion, and its Task cell and result are freed when the
+  task has finished and the last handle is gone; nothing needs to be awaited
+  to avoid a leak.
+
 To run a transformation over a whole collection in parallel without wiring up tasks by hand, use the data-parallel `List` operations (`pmap`, `pmap_n`, `pfilter`, `preduce`); see [Parallel Collections]({{ site.baseurl }}/docs/parallel-collections/).
 
 ---
@@ -1211,6 +1255,7 @@ diverge or crash compiled (see [Interpreted vs compiled](#interpreted-vs-compile
 | `get_actor_field(pid, name)` | `→ Option(a)` | both | Read an actor's state field via the runtime shape registry |
 | `task_spawn(fn)` | `→ Task(a)` | both | Spawn a green-thread task (use `Task.async` instead) |
 | `task_await(t)` | `→ Result(a, String)` | both | Await a task (use `Task.await` instead) |
+| `task_poll(t)` | `→ Option(Result(a, String))` | both (the interpreter's tasks finish at spawn, so it never answers `None`) | Non-blocking await: `None` while the task runs, else `Some` of what `task_await` answers (use `Task.poll` instead); see [Checking a task without waiting](#checking-a-task-without-waiting) |
 | `Actor.set_queue_limit(pid, limit, policy)` | `→ ()` | both (policy `3` is compiled-only; interpreted treats it as unbounded) | Bound an actor's mailbox; see [Mailbox Limits and Backpressure](#mailbox-limits-and-backpressure) |
 | `Actor.send_after(pid, msg, delay_ms)` | `→ TimerRef` | both | Schedule `msg` for delivery to `pid` after `delay_ms`. Built on the same timer heap that backs `Actor.call`'s timeout and supervisor restart backoff. A pending timer does not keep `run_until_idle()` waiting. |
 | `Actor.cancel_timer(ref)` | `→ ()` | both | Cancel a pending `send_after` timer. Safe to call at any time, including after the timer already fired or was already cancelled (both are no-ops). |
@@ -1294,6 +1339,109 @@ for the scheduler and lowering internals, see the implementation reference
 (`specs/impl/index.md`).
 
 ---
+
+## Handler guarantees: `ensures` and `old`
+
+A handler can state how one message changes the state, and the compiler proves it on
+every build. Write `ensures` and a predicate between the parameters and `do`:
+
+```march
+@invariant(balance >= 0)
+actor Account do
+  state { balance : Int }
+  init { balance: 0 }
+
+  on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do
+    { balance: state.balance + n }
+  end
+
+  on Withdraw(n : Int) ensures state.balance <= old(state.balance) do
+    if n > 0 && n <= state.balance do { balance: state.balance - n } else state end
+  end
+end
+```
+
+In the predicate:
+
+- `state`, and each field's bare name (`balance`), is the state the handler **returns**;
+- `old(e)` is `e` read of the state the message **arrived with**: `old(state.balance)`,
+  `old(balance)`, or `old(state)` for the whole of it;
+- the message's parameters are in scope. A parameter named like a field means the
+  parameter; write `state.f` for the field.
+
+Each guarantee is proved for its handler alone, as the
+[`@invariant`](refinement-types.md) is: from any incoming state that satisfies the
+invariant, and any arguments that satisfy the parameters' refinements, the state the
+body returns must satisfy the guarantee. A handler that can break it is an error that
+shows both states:
+
+```
+`Account`'s handler `Steal` does not guarantee its `ensures`. [return_refinement_violated]
+
+The handler guarantees:
+
+    balance <= old(balance)
+
+A counterexample was found:
+
+    state = { balance: 0 }
+    n = 1
+
+and the handler returns:
+
+    { balance: 1 }
+```
+
+A guarantee the solver cannot decide is a recorded skip, and an error under
+`cap verified`. `march --check --guarantees` lists each one beside the invariant:
+
+```
+actor Account: proved
+  @invariant           proved: 4 sites at init and after each handler
+  ensures on Deposit   proved: 1 site across the handler's return paths
+  ensures on Withdraw  proved: 2 sites across the handler's return paths
+```
+
+What a guarantee does not cover:
+
+- **Replies and sends.** The guarantee is about the returned state. A call handler's
+  `Actor.reply(reply_to, v)` is an effect, not part of the claim; `ensures state ==
+  old(state)` on a read-only call handler is the usual use.
+- **Sequences of messages.** A guarantee is about one message; an order across messages
+  is a protocol's job.
+- **Running it.** The predicate is proof-only: it is erased, and nothing evaluates it at
+  run time.
+
+`old` has a meaning only in a handler's `ensures`. `old(…)` in an `@invariant`, a state
+field's type, a message parameter's type or a function's type is an `old_misuse` error,
+as is `old` without exactly one argument in a guarantee. Elsewhere `old` and `ensures`
+are ordinary names, and a program that defines its own function `old` can call it in
+refinements.
+
+---
+
+## What is proved about the mailbox
+
+The mailbox lives in the runtime, so no March function implements it. The standard library's
+`Actor.Theory` (`stdlib/actor_theory.march`) is a model of it: a queue of envelopes (a
+message with its sender, a monitor's `Down`, a reply to an `Actor.call`), with the laws this
+chapter promises proved about the model:
+
+| Law | Says |
+|---|---|
+| `enq_self`, `enq_other` | one sender's messages are received in the order it sent them; another sender's message does not change that |
+| `replay_order` | messages set aside during a hot deploy, or stashed, are replayed in front, in order |
+| `call_keeps_others` | an `Actor.call` waiting inside a handler takes only its reply; everything else stays, in order |
+| `stale_reply_ignored`, `call_reply_cat` | a late reply to an earlier call never answers a later one |
+| `down_never_dropped`, `down_at_most_once` | a monitor's `Down` is never dropped by a full mailbox, and is delivered at most once |
+
+A model is only as good as its match with the runtime, so the runtime is tested against it:
+the native fixture `actor_theory_conformance` has three senders message one actor
+concurrently, replays the order the actor handled them through `Actor.Theory.from_sender`,
+and checks each sender's messages arrived in order. `march --check --guarantees` reports each
+law as `proved (model) · tested (runtime)` when a fixture tests the runtime against it, and
+`proved (model)` when none does yet (`Down` delivery, today). Neither is a proof about the
+runtime itself.
 
 ## Errors you'll see
 

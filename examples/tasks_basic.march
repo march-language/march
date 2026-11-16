@@ -60,6 +60,7 @@ fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   -- Fan-out over 1..100
   let f = fan_out(100)
   println("sum of collatz(1..100) = " ++ String.from_int(f))
+  ()
 end
 
 end

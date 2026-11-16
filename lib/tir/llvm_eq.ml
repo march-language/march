@@ -23,7 +23,44 @@ let rec apply_ty_subst (subst : (string * Tir.ty) list) : Tir.ty -> Tir.ty = fun
 
 (* ── ADT structural equality generation ─────────────────────────────── *)
 
-(** Mangle a TIR type to a valid LLVM identifier fragment for equality function names. *)
+(** An injective structural encoding for record helper identities. The old
+    mangler flattens constructor/tuple boundaries and normalizes qualified
+    names, so it cannot safely encode a record's nested field types. Counted
+    lists and length-prefixed hex names retain those boundaries using only
+    LLVM identifier characters. Field order is the TIR's canonical slot order. *)
+let record_eq_key ty =
+  let name s =
+    string_of_int (String.length s) ^ "_" ^
+    String.concat "" (List.init (String.length s)
+      (fun i -> Printf.sprintf "%02x" (Char.code s.[i])))
+  in
+  let sequence encode xs =
+    string_of_int (List.length xs) ^ "_" ^ String.concat "" (List.map encode xs)
+  in
+  let rec encode = function
+    | Tir.TInt -> "i"
+    | Tir.TFloat -> "d"
+    | Tir.TBool -> "b"
+    | Tir.TString -> "s"
+    | Tir.TUnit -> "u"
+    | Tir.TTuple ts -> "t" ^ sequence encode ts
+    | Tir.TRecord fs -> "r" ^ sequence (fun (n, t) -> name n ^ encode t) fs
+    | Tir.TCon (n, args) -> "c" ^ name n ^ sequence encode args
+    | Tir.TFn (ps, r) -> "f" ^ sequence encode ps ^ encode r
+    | Tir.TPtr t -> "p" ^ encode t
+    | Tir.TVar n -> "v" ^ name n
+  in
+  "Rec$" ^ encode ty
+
+(** Mangle a TIR type to a valid LLVM identifier fragment for equality function
+    names.  [ensure_adt_eq_fn] memoizes helpers BY THIS NAME, so two types with
+    different layouts must never mangle alike.  Records use [record_eq_key]
+    (#1184).  Tuples carry their arity (#1171): without it
+    [((Int, Int), Int, Int)] and [((Int, Int, Int), Int)] both read
+    [Tup_Tup_Int_x_Int_x_Int_x_Int] and shared one helper (a wrong [true]
+    natively).  Functions and raw pointers get their own forms instead of a
+    shared "Ptr", so they stay distinct when they appear inside another
+    type's name. *)
 let rec mangle_ty_for_eq : Tir.ty -> string = function
   | Tir.TInt    -> "Int"
   | Tir.TFloat  -> "Float"
@@ -34,15 +71,50 @@ let rec mangle_ty_for_eq : Tir.ty -> string = function
   | Tir.TCon (n, args) ->
     let n' = String.concat "_" (String.split_on_char '.' n) in
     n' ^ "_" ^ String.concat "_" (List.map mangle_ty_for_eq args)
+  | Tir.TRecord _ as ty -> record_eq_key ty
   | Tir.TVar _   -> "Any"
-  | Tir.TTuple ts -> "Tup_" ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
-  | _            -> "Ptr"
+  | Tir.TTuple ts ->
+    Printf.sprintf "Tup%d_" (List.length ts)
+    ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
+  | Tir.TFn (ps, r) ->
+    Printf.sprintf "Fn%d_" (List.length ps)
+    ^ String.concat "_x_" (List.map mangle_ty_for_eq (ps @ [r]))
+  | Tir.TPtr t   -> "Ptr_" ^ mangle_ty_for_eq t
 
 (** LLVM load type for an ADT field: i64 for scalar types, double for float, ptr for heap. *)
 let field_load_llty : Tir.ty -> string = function
   | Tir.TInt | Tir.TBool | Tir.TUnit -> "i64"
   | Tir.TFloat -> "double"
   | _ -> "ptr"
+
+(** [TCon (type_name, ty_args)] as the structural [TRecord] it names, when
+    [type_name] is a nominal record of this module (or names exactly one by
+    its short name, [Kind.record_fields_short]) whose type arguments can be
+    substituted: its declared parameters are known
+    ([Lower_types.record_type_params]), or it is not generic.  [None]
+    otherwise, which keeps the caller's previous fallback. *)
+let nominal_record_ty (ctx : Llvm_ctx.ctx) (type_name : string) (ty_args : Tir.ty list)
+  : Tir.ty option =
+  let fields =
+    match Kind.record_fields ctx.Llvm_ctx.k_table type_name with
+    | Some fs -> Some fs
+    | None -> Kind.record_fields_short ctx.Llvm_ctx.k_table type_name
+  in
+  match fields with
+  | None -> None
+  | Some fs ->
+    let subst =
+      if ty_args = [] then Some []
+      else
+        match Hashtbl.find_opt Lower_types.record_type_params type_name with
+        | Some ps when List.length ps = List.length ty_args -> Some (List.combine ps ty_args)
+        | _ -> None
+    in
+    (match subst with
+     | None -> None
+     | Some subst ->
+       let fs = List.map (fun (n, t) -> (n, apply_ty_subst subst t)) fs in
+       Some (Tir.TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) fs)))
 
 (** Ensure a structural equality function for [ty] exists in [ctx.extra_fns].
     Returns Some llvm_fn_name (without @) or None if generation is not possible.
@@ -51,6 +123,13 @@ let field_load_llty : Tir.ty -> string = function
 let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
   match ty with
   | Tir.TCon ("Atom", []) -> None  (* Atoms stored as i64, not heap ptrs *)
+  | Tir.TCon (type_name, ty_args) when nominal_record_ty ctx type_name ty_args <> None ->
+    (* A nominal record named by its type (`Cell(String)`, the payload of a
+       newtype `Wrap(Cell(a))`): it is a single-layout record cell, so compare
+       it as the structural record it names.  It used to reach the variant
+       path below, find no constructors, and leave the caller with
+       [march_poly_eq], a pointer comparison for records. *)
+    ensure_adt_eq_fn ctx (Option.get (nominal_record_ty ctx type_name ty_args))
   | Tir.TCon (type_name, ty_args) ->
     let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
     if Hashtbl.mem ctx.Llvm_ctx.emitted_eq_fns fn_name then Some fn_name

@@ -160,6 +160,8 @@ type cap_mismatch_site = {
 }
 
 type env = {
+  in_logical_predicate : bool;
+  in_proof_hints : bool;
   vars : Typecheck_types.scheme StrMap.t;
   types : int StrMap.t;
   ctors : ctor_info list StrMap.t;
@@ -194,6 +196,7 @@ type env = {
   sigs : (string * Typecheck_types.Ast.sig_def) list;
   mod_needs : string list;
   mod_need_scopes : (string * string option) list;
+  module_need_scopes : (string * (string * string option) list) list;
   module_caps : (string * string list) list;
   protocols : proto_info StrMap.t;
   impls :
@@ -274,6 +277,12 @@ type env = {
   own_cap_closures : (string, string list) Hashtbl.t;
   body_cap_closures : (string, string list) Hashtbl.t;
   stdlib_fns : (string, unit) Hashtbl.t;
+  deprecated_fns : (Typecheck_types.scheme * Typecheck_types.Ast.span * string) list ref;
+  (** [@[deprecated("message")]] functions: exported scheme, declaring
+      module's span, message.  See the implementation's comment. *)
+  stdlib_internal_actors : (string, string) Hashtbl.t;
+  (** See typecheck_env.ml. *)
+  stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   fn_scopes : (string, string) Hashtbl.t;
   fn_refs : (string, string list) Hashtbl.t;
@@ -325,6 +334,9 @@ val test_build : bool ref
 val lookup_var :
   StrMap.key -> env -> Typecheck_types.scheme option
 val lookup_type : StrMap.key -> env -> int option
+(* Keys of [Typecheck_builtins.builtin_types], installed when that module
+   loads; [canon_type_name] never rewrites one. *)
+val builtin_type_keys : (string, unit) Hashtbl.t
 val canon_type_name : env -> string -> int -> string
 val canon_qualified_tcons : env -> Typecheck_types.ty -> Typecheck_types.ty
 val cap_bare_name : string -> string

@@ -21,5 +21,6 @@ mod TupleScalarFields do
     println("list=" ++ int_to_string(head_int(Cons((7, "y"), Nil))))
     let b = (true, 9)
     match b do (flag, _) -> println(if flag do "bool=true" else "bool=false" end) end
+    ()
   end
 end

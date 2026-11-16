@@ -1,0 +1,20 @@
+len q
+neg
+15
+neg
+15
+not
+true
+not
+true
+not
+true
+not
+false
+false
+len ab
+100
+xor
+1005
+xor
+1006

@@ -18,5 +18,6 @@ mod Main do
     println(to_string(true))
     println(to_string("hi"))
     println("nums=${[4, 5]}")
+    ()
   end
 end

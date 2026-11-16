@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/alias_kind_mismatch_1.march","start_line":4,"start_col":16,"end_line":4,"end_col":19,"message":"`n` of `Vec` is a value parameter: pass a value here (a number, a name, or `+`/`*` of those), not the type `Int`.","code":"alias_kind_mismatch","fix":null,"labels":[],"notes":[],"category":"TYPE"}

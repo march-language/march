@@ -460,7 +460,8 @@ end
   fn f(n : Int, x : Float) : Int do
     if x == x do n + 1 else n end
   end
-  type Bx(a) = { v : a }
+  type Bx = { v : Int }
+  type By = { v : Int }
   fn g(n : Int) : Int do
     let b = { v: n }
     b.v + 1
@@ -870,6 +871,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(B.f(B.Z)))
+    ()
   end
 end
 |}
@@ -890,6 +892,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(None)))
+    ()
   end
 end
 |}
@@ -916,6 +919,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(B.c(B.Z)))
+    ()
   end
 end
 |}
@@ -936,6 +940,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(DownReason.Killed)))
+    ()
   end
 end
 |}
@@ -973,6 +978,7 @@ let ctor_review3 =
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(mk(), 0)))
+    ()
   end
 end
 |}
@@ -999,6 +1005,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(A.f(A.mk(), 0)))
+    ()
   end
 end
 |}
@@ -1021,6 +1028,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(Membership.f(Alive, 0)))
+    ()
   end
 end
 |}
@@ -1046,6 +1054,7 @@ end
   end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(f(Inc(), 0)))
+    ()
   end
 end
 |}
@@ -1064,6 +1073,7 @@ end
   fn e() : Int do need(None) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(None)))
+    ()
   end
 end
 |}
@@ -1116,6 +1126,7 @@ let ctor_review4 =
   fn d() : Int do need(Inc(), 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(Inc())))
+    ()
   end
 end
 |}
@@ -1138,6 +1149,7 @@ end
   fn c(m : Counter.Msg) : Int do need(m, 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(Inc())))
+    ()
   end
 end
 |}
@@ -1162,6 +1174,7 @@ end
   fn f() : Int do need(5, 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(None)))
+    ()
   end
 end
 |}
@@ -1178,6 +1191,7 @@ end
   fn main(cap : Cap(IO)) : Unit do
     let t = task_cancel_token_new()
     println(int_to_string(c(t)))
+    ()
   end
 end
 |}
@@ -1208,6 +1222,7 @@ end
   fn main(cap : Cap(IO)) : Unit do
     let t = task_cancel_token_new()
     println(int_to_string(c2(Some(t))))
+    ()
   end
 end
 |}
@@ -1245,6 +1260,7 @@ end
   fn e() : Int do need(None, 1) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(None)))
+    ()
   end
 end
 |}
@@ -1263,6 +1279,7 @@ end
   fn main(cap : Cap(IO)) : Unit do
     let t = Tok(3)
     println(int_to_string(c(t)))
+    ()
   end
 end
 |}
@@ -1286,6 +1303,7 @@ end
   fn d() : Int do need(U.Zap(1)) end
   fn main(cap : Cap(IO)) : Unit do
     println(int_to_string(c(U.Zap(2))))
+    ()
   end
 end
 |}
@@ -1305,6 +1323,13 @@ end
    declarant and its constructors resolved: `is_Zap(r)` was proved for a row
    the builtin returned. *)
 let ctor_review5 =
+  (* csv_next_row is stdlib-only since ocap phase 2 (Task 10), so this program
+     also draws a [stdlib_internal] typecheck error. The case relies on the
+     refinement check still running after that error (it reports the line-14
+     row regardless); if the checker ever stops after a typecheck error,
+     [not_proved] finds no row and this fails loudly rather than passing.
+     Registering the file as stdlib is not an option: `--stdlib-source` makes
+     this `mod Csv` the stdlib's, and the verdict flips. *)
   [ gated "ctor review5 csv2: a user `CsvRow` under an entry `mod Csv` is conflated with the builtin's `Csv.CsvRow`" (fun () ->
         let out =
           run
@@ -1337,3 +1362,37 @@ let builtin_names_cover_signatures =
             if not (List.mem n names) then
               Alcotest.failf "%s (named by a builtin signature) is missing from builtin_type_names" n)
           [ "CancelToken"; "TimerRef"; "DownReason"; "Option"; "Int" ]) ]
+
+(* `uses:` when a stage-2 proof's unsat core names no unfolding (congruence
+   alone, I8): the definitions that query assumed, not every unfolding the
+   whole stage-2 run made (todo 2026-10-31-reflection-encoder-gaps, "`uses:`
+   over-approximation").  Driven at [Obligation.record], where the query's
+   core and assumptions meet. *)
+let uses_query_frontier =
+  let module O = March_refinecheck.Obligation in
+  let module R = March_refine.Refine in
+  let ob callee =
+    { O.span = March_ast.Ast.dummy_span; callee; predicate = "_ == a"; verdict = O.Proved
+    ; kind = O.Precondition; inst = None }
+  in
+  [ Alcotest.test_case "an empty core reports the query's own frontier" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [];
+            R.last_assumed := [ "|$ru_1:f|"; "|$ru_2:f|" ];
+            let o = ob "need_eq_a" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [ "f" ] (O.uses_of o)));
+    Alcotest.test_case "a core naming an unfolding still wins over the query's frontier" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [ "$ru_2:g" ];
+            R.last_assumed := [ "|$ru_1:f|"; "|$ru_2:g|" ];
+            let o = ob "need_eq_b" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [ "g" ] (O.uses_of o)));
+    Alcotest.test_case "a stage-1 proof (no assumptions) records no uses" `Quick (fun () ->
+        O.with_scratch (fun () ->
+            R.last_core := [];
+            R.last_assumed := [];
+            let o = ob "need_eq_c" in
+            O.record o;
+            Alcotest.(check (list string)) "uses" [] (O.uses_of o))) ]

@@ -1,0 +1,16 @@
+exit: 1
+-- NAMING ----------- errors/alias_shadows_module_1.march
+
+This alias names `List` as `B`, but this module also declares a module `B`. [alias_shadows_module]
+A reference like `B.f` could mean either one. Pick a different alias name, or rename the module.
+
+7 |   alias List, as: B
+                      ^
+
+
+    module `B` is declared here:
+
+ 8 |   mod B do
+       ^^^^^^^^
+
+

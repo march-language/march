@@ -110,6 +110,15 @@ toolchain_stamp() {
   } | sha256 | cut -d' ' -f1
 }
 
+# plumbing_flag <source>: the flags a node's own header asks for, a line
+# `-- compile-flags: --stdlib-source` in its first lines. Explicit per fixture:
+# a node that drives the stdlib's raw-fd cluster plumbing (NetKernel, NodeSend,
+# ... are @[stdlib_internal], ocap phase 2 task 9) by hand says so, so a new
+# fixture that names a marked function is a user-code error until it opts in.
+plumbing_flag() {
+  sed -n '1,5s/^-- compile-flags: \(--stdlib-source\)\( .*\)\{0,1\}$/\1/p' "$1" | head -1
+}
+
 # --precompile-one <dir> <scenario> <x>: one node, run by --precompile's
 # xargs. In its own directory, which is the compiler's cwd and therefore its
 # own CAS (.march/cas/ under the cwd; its object writes are not atomic, so
@@ -119,7 +128,7 @@ if [ "${1:-}" = "--precompile-one" ]; then
   out=$2/$3; n=$4
   mkdir -p "$out"
   cp "$root/test/two_node/$3/node_$n.march" "$out/node_$n.march"
-  if (cd "$out" && "$MARCH" --compile -o "$out/node_$n.tmp" "$out/node_$n.march") > "$out/compile_$n.log" 2>&1; then
+  if (cd "$out" && "$MARCH" --compile $(plumbing_flag "$out/node_$n.march") -o "$out/node_$n.tmp" "$out/node_$n.march") > "$out/compile_$n.log" 2>&1; then
     mv "$out/node_$n.tmp" "$out/node_$n"
   else
     rm -f "$out/node_$n" "$out/node_$n.tmp"
@@ -282,9 +291,32 @@ pid_a=""; pid_b=""; pid_c=""  # bash 3 (macOS): no associative arrays
 started_nodes=""             # persists after wait_exit / kill_node clear a PID
 pid_of() { eval "echo \"\$pid_$1\""; }
 
+# SIGKILL <pid> only while it is a live child of THIS harness, and log it.
+# A pid_<x> variable can outlive its process: a node that exits before the
+# scenario reaches its wait_exit / kill_node (it crashed, or finished while a
+# wait on another node runs to its timeout and `fail`) is reaped by bash on
+# SIGCHLD, so its pid is free for the OS to hand to something else while the
+# variable still names it. An
+# unconditional `kill -9` then lands on whoever holds the number now, e.g. a
+# node of another harness run on the same machine (the restart scenario's
+# node-b once exited 137 after a complete, correct trace). A recycled pid is
+# never our child, so the parent check refuses it. `$$` is the harness even
+# inside a subshell. The log is printed by `fail`, so an unexpected 137 can be
+# checked against every SIGKILL this run sent.
+own_child() {
+  [ -n "$1" ] && [ "$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')" = "$$" ]
+}
+kill9() {
+  local what=$1 p=$2 verdict
+  if own_child "$p"; then kill -9 "$p" 2>/dev/null; verdict="SIGKILL sent"
+  else verdict="not signalled: not a live child of this harness"; fi
+  { [ -d "$work" ] && echo "$what: pid $p: $verdict" >> "$work/kills.log"; } 2>/dev/null
+  return 0
+}
+
 link_dropped=0
 cleanup() {
-  for n in a b c; do p=$(pid_of "$n"); [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
+  for n in a b c; do p=$(pid_of "$n"); [ -n "$p" ] && kill9 "cleanup node-$n" "$p"; done
   [ "$link_dropped" = 1 ] && heal
   return 0
 }
@@ -297,6 +329,7 @@ fail() {
     [ -f "$work/$n.out" ] && { echo "--- node-$n stdout"; cat "$work/$n.out"; }
     [ -s "$work/$n.err" ] && { echo "--- node-$n stderr"; cat "$work/$n.err"; }
   done >&2
+  [ -s "$work/kills.log" ] && { echo "--- SIGKILLs this harness sent"; cat "$work/kills.log"; } >&2
   exit 1
 }
 
@@ -353,7 +386,7 @@ compile() {
     return
   fi
   # shellcheck disable=SC2086 # the flags are words, split on purpose
-  "$MARCH" --compile ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
+  "$MARCH" --compile $(plumbing_flag "$work/node_$n.march") ${!flags_var:-} -o "$work/node_$n" "$work/node_$n.march" > "$work/compile_$n.log" 2>&1 \
     || { cat "$work/compile_$n.log" >&2; fail "node_$n.march did not compile"; }
 }
 
@@ -448,7 +481,10 @@ start_node() {
   port_settled=1
 }
 
-kill_node() { local p; p=$(pid_of "$1"); kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; eval "pid_$1=''"; }
+# The pid is read into a local and the variable cleared before this returns,
+# so the `start_node` that follows (the restart scenario) can only ever
+# assign a fresh pid; the kill itself goes through kill9's ownership check.
+kill_node() { local p; p=$(pid_of "$1"); kill9 "kill_node $1" "$p"; wait "$p" 2>/dev/null; eval "pid_$1=''"; }
 stop_node() { kill -STOP "$(pid_of "$1")"; }
 cont_node() { kill -CONT "$(pid_of "$1")"; }
 

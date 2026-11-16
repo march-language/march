@@ -396,6 +396,7 @@ let scope_fixture ~modname ~decl ~inside ~outside =
       Ok(_) -> println("outscope=0")
       Err(_) -> println("outscope=1")
     end
+    ()
   end
 end
 |}

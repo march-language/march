@@ -35,8 +35,9 @@ a compiler-emitted function table (no dladdr, so Linux too).
    now `march_panic_handled`) are process globals, so a `try_finally` or
    `__try_call` on one scheduler thread can catch a panic raised on another.
    Pre-existing; the crash observers inherit it. Move them onto `march_proc`.
-7. **wasm / js backends.** The `diag_*` builtins exist in the native runtime
-   and the interpreter only.
+7. **wasm backend.** The `diag_*` builtins exist in the native runtime, the
+   interpreter and the JS target (done: `progress/2026-11-07-diag-builtins-js.md`),
+   not in the wasm runtime (`runtime/march_runtime_wasm.c`).
 
 Done since (`progress/2026-11-05-runtime-failure-reports.md`): the interpreter renders an
 unhandled failure and an unsupervised actor crash as a diagnostic with source excerpts (frames

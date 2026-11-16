@@ -335,18 +335,21 @@ let dispatch ~notify_back:(_notify_back : _) ~meth ~params =
             (match get_analysis uri with
              | None -> []
              | Some a ->
-               (* Don't format code that doesn't parse (format_source raises). *)
-               (try
-                  let formatted =
-                    Utf16.normalize_trailing
-                      (March_format.Format.format_source
-                         ~filename:a.Analysis.filename a.Analysis.src)
-                  in
+               (* Don't format code that doesn't parse, nor offer output
+                  that does not re-parse to the same program (a formatter
+                  bug: format-on-save would destroy code). *)
+               (match
+                  March_format.Format.format_source_checked
+                    ~filename:a.Analysis.filename a.Analysis.src
+                with
+                | exception _ -> []
+                | Error _ -> []
+                | Ok formatted ->
+                  let formatted = Utf16.normalize_trailing formatted in
                   if formatted = a.Analysis.src then []
                   else
                     let (el, ec) = Utf16.end_position a.Analysis.doc in
-                    [ (el, ec, formatted) ]
-                with _ -> []))
+                    [ (el, ec, formatted) ]))
         in
         let json = List.map (fun (el, ec, text) ->
             `Assoc [

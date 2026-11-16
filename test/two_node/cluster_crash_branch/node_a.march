@@ -50,7 +50,7 @@ mod ClusterCrashBranchA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "logging-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "logging-secret", 1)
     let h = match ClusterNode.start(c, cfg) do
       Ok(h0) -> h0
       Err(e) -> panic(e)

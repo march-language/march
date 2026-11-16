@@ -1,4 +1,9 @@
--- EXPECT-ERROR: not `def`
-mod M do
-  def f() do 0 end
+-- EXPECT-ERROR: An attribute goes before a `fn` or `pfn`
+mod Main do
+  @[deprecated("use `New` instead")]
+  type Old = A | B
+
+  fn main() : Int do
+    1
+  end
 end

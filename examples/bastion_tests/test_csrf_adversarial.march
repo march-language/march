@@ -10,7 +10,7 @@
 mod TestCSRFAdversarial do
 
 pfn make_conn(m, hdrs, body) do
-  Conn(0, m, "/", Nil, "", hdrs, body, 0, Nil, "", false, Nil, NoUpgrade)
+  HttpServer.test_conn(m, "/", hdrs, body)
 end
 
 pfn post_with_body(body) do
@@ -279,7 +279,7 @@ end
 
 describe "CSRF: pipeline integration" do
   test "ensure_token then protect passes GET through untouched" do
-    let c = Conn(0, :get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
+    let c = HttpServer.test_conn(:get, "/", Nil, "")
     let pipeline = Cons(CSRF.ensure_token,
                    Cons(CSRF.protect,
                    Nil))
@@ -288,7 +288,7 @@ describe "CSRF: pipeline integration" do
   end
 
   test "ensure_token then protect blocks POST without token" do
-    let c = Conn(0, :post, "/submit", Cons("submit", Nil), "", Nil, "name=alice", 0, Nil, "", false, Nil, NoUpgrade)
+    let c = HttpServer.test_conn(:post, "/submit", Nil, "name=alice")
     let pipeline = Cons(CSRF.ensure_token,
                    Cons(CSRF.protect,
                    Nil))
@@ -298,8 +298,7 @@ describe "CSRF: pipeline integration" do
 
   test "POST with matching token in pipeline passes" do
     let tok = "pipeline-test-token"
-    let c = Conn(0, :post, "/submit", Cons("submit", Nil), "", Nil,
-                 "_csrf_token=" ++ tok, 0, Nil, "", false, Nil, NoUpgrade)
+    let c = HttpServer.test_conn(:post, "/submit", Nil, "_csrf_token=" ++ tok)
     let c1 = HttpServer.assign(c, "_csrf_token", tok)
     let pipeline = Cons(CSRF.protect,
                    Cons(fn conn -> HttpServer.text(conn, 200, "ok"),

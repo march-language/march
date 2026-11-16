@@ -1539,7 +1539,7 @@ let deploy_connected (_conn : conn) ~signing_pubkey:_ ~sk:_ ~manifest:_
 let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest ~so_path
     ?(old_schemas_path="") ?(new_schemas_path="") ?(entry_path="")
     ?(old_manifest_path="") ?(provided_epoch=0) ?(grant_caps=([] : string list))
-    ?(no_cap_gate=false) ?(accept_unproved=([] : string list)) () =
+    ?(no_cap_gate=false) ?(accept_unproved=([] : string list)) ?(drop=([] : string list)) () =
   without_sigpipe @@ fun () ->
   let new_schemas_path = if new_schemas_path = "" then so_path ^ ".schemas.json"
     else new_schemas_path in
@@ -1948,7 +1948,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
                    `forge hot-reload migrate-msg-stub %s`)\n%!"
                   actor (String.uncapitalize_ascii actor) actor;
                 None
-              | Some f when f = oh -> None
+              | Some f when Schema_diff.same_message_type f oh -> None
               | Some _ -> Some actor) msgs_changed_actors in
           if mm_errors <> [] then begin
             List.iter (fun actor ->
@@ -1961,6 +1961,38 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
           end;
           let msgs_changed actor =
             List.exists (fun (a, _, _) -> a = actor) msgs_changed_actors in
+
+          (* H7: every constructor the running version and this build both
+             name must carry the same actor-message tag, or a message the
+             running version built is misread by the new dispatch (a
+             hash-collision probe moved it).  Checked on every deploy, not
+             only one with contracts: it is a property of the two builds. *)
+          let tag_findings =
+            List.concat_map (fun (actor, (ns : Schema_diff.actor_schema)) ->
+                match List.assoc_opt actor old_schemas with
+                | None -> []
+                | Some os ->
+                  List.map (fun f -> (actor, f)) (Schema_diff.tag_check ~old_s:os ~new_s:ns))
+              new_schemas in
+          (* Never silent: one line per reason, naming every actor it covers
+             (a baseline from an older compiler covers the stdlib's too). *)
+          let unrecorded = List.filter_map (function
+              | (a, Schema_diff.Tags_unrecorded why) -> Some (why, a) | _ -> None) tag_findings in
+          List.iter (fun why ->
+              let actors = List.filter_map (fun (w, a) -> if w = why then Some a else None)
+                  unrecorded in
+              Printf.printf "  NOTE: actor-message tags not compared for %s: %s\n%!"
+                (String.concat ", " actors) why)
+            (List.sort_uniq compare (List.map fst unrecorded));
+          let tag_moved = List.filter_map (function
+              | (actor, Schema_diff.Tag_moved { ctor; old_tag; new_tag }) ->
+                Some (Schema_diff.tag_moved_message ~actor ~ctor ~old_tag ~new_tag)
+              | _ -> None) tag_findings in
+          if tag_moved <> [] then begin
+            List.iter (Printf.eprintf "forge deploy hot: %s\n") tag_moved;
+            Unix.close fd;
+            raise (Failure "actor-message tag moved — deploy aborted")
+          end;
 
           (* Gap #3: migration VC — shell out to march --check-migration. *)
           let march_bin =
@@ -1982,6 +2014,22 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
           let needs_vc_check =
             List.exists has_contract new_schemas || List.exists has_contract old_schemas
           in
+          (* --drop: every named field must be one this build's derived
+             migration dropped by that consent, recorded in the signed
+             schemas (so the server audits it).  A --drop that drops nothing
+             is a mistake (a typo, a field that was kept), not a no-op. *)
+          (match Schema_diff.unused_drops new_schemas drop with
+           | [] -> ()
+           | missing ->
+             Unix.close fd;
+             raise (Failure (Printf.sprintf
+                               "--drop %s: the patch's derived migration does not drop it (the \
+                                field is kept, read by a migrate clause, not in that actor, or the \
+                                patch was not built with this --drop) — deploy aborted"
+                               (String.concat "," missing))));
+          if drop <> [] then
+            Printf.eprintf "warning: --drop %s: the running data in these fields is discarded; \
+                            the server's audit log records it\n%!" (String.concat "," drop);
           if needs_vc_check && old_schemas_path <> "" && new_schemas_path <> ""
              && entry_path = "" then begin
             Unix.close fd;
@@ -2483,7 +2531,7 @@ let run_status ?(env="") () : (unit, string) result =
 
 (* ─── Build step ─────────────────────────────────────────────────────────── *)
 
-let build_so_for ~(accept_unproved : string list) ~(target : string option) ~proj ~output
+let build_so_for ~(drop : string list) ~(accept_unproved : string list) ~(target : string option) ~proj ~output
   : (string * string, string) result =
   let so_path = output ^ ".so" in
   let manifest_path = output ^ ".so.hcr_manifest" in
@@ -2509,8 +2557,11 @@ let build_so_for ~(accept_unproved : string list) ~(target : string option) ~pro
     lib_env target_flag hcr_flags
     (* Built into the image's schemas, which are signed: the server's audit
        line for the activation records the override. *)
-    (if accept_unproved = [] then ""
-     else " --accept-unproved " ^ Filename.quote (String.concat "," accept_unproved))
+    ((if accept_unproved = [] then ""
+      else " --accept-unproved " ^ Filename.quote (String.concat "," accept_unproved))
+     (* --drop: likewise built into the signed schemas, so the audit line
+        records which fields a deploy dropped by consent. *)
+     ^ (if drop = [] then "" else " --hcr-drop " ^ Filename.quote (String.concat "," drop)))
     (Filename.quote so_path) ffi_flags (Filename.quote entry)
   in
   let rc = Sys.command cmd in
@@ -2521,8 +2572,8 @@ let build_so_for ~(accept_unproved : string list) ~(target : string option) ~pro
     Ok (so_path, manifest_path)
 
 (** [build_so_for] with the project's own target ([hr_target]). *)
-let build_so ~accept_unproved ~proj ~output =
-  build_so_for ~accept_unproved ~target:None ~proj ~output
+let build_so ~drop ~accept_unproved ~proj ~output =
+  build_so_for ~drop ~accept_unproved ~target:None ~proj ~output
 
 (* ─── Entry point ────────────────────────────────────────────────────────── *)
 
@@ -2540,7 +2591,7 @@ let no_pool_gate : pool_gate = fun _ ~env:_ -> Ok (fun () -> ())
     skipped).  This allows cross-compiled artifacts (e.g. built in Docker for
     a remote Linux host) to be deployed without a local rebuild. *)
 let deploy ?(output="") ?(so="") ?(old_schemas="") ?(grant_caps=([] : string list)) ?(no_cap_gate=false)
-    ?(accept_unproved=([] : string list))
+    ?(accept_unproved=([] : string list)) ?(drop=([] : string list))
     ?(pool_gate = no_pool_gate) ()
     : (unit, string) result =
   (* Load project *)
@@ -2585,7 +2636,7 @@ let deploy ?(output="") ?(so="") ?(old_schemas="") ?(grant_caps=([] : string lis
                 Ok (so_path, manifest_path)
             end else begin
               Printf.printf "Building hot-reload .so for %s...\n%!" proj.Project.name;
-              build_so ~accept_unproved ~proj ~output:(if output <> "" then output
+              build_so ~drop ~accept_unproved ~proj ~output:(if output <> "" then output
                 else Filename.concat (Filename.concat proj.Project.root ".march")
                        (proj.Project.name ^ "_hot"))
             end
@@ -2628,7 +2679,7 @@ let deploy ?(output="") ?(so="") ?(old_schemas="") ?(grant_caps=([] : string lis
                   ~old_manifest_path:prev_manifest_path
                   ~grant_caps
                   ~no_cap_gate
-                  ~accept_unproved
+                  ~accept_unproved ~drop
                   ()
               in
               (* After successful deploy, save new schemas as the baseline for next time *)
@@ -2681,7 +2732,7 @@ let ping_server ~ssh_host ~remote_socket : bool =
 let deploy_one ?(tunnel = true) ~(host : Hosts.host) ~sk ~manifest ~so_path
     ~old_schemas_path ~new_schemas_path ?(entry_path="") ?(old_manifest_path="")
     ?(provided_epoch=0) ?(grant_caps=([] : string list)) ?(no_cap_gate=false)
-    ?(accept_unproved=([] : string list)) ()
+    ?(accept_unproved=([] : string list)) ?(drop=([] : string list)) ()
     : (int, string) result =
   let label = Printf.sprintf "%s [%s]" host.Hosts.ssh host.Hosts.name in
   Printf.printf "\n── %s\n%!" label;
@@ -2694,7 +2745,7 @@ let deploy_one ?(tunnel = true) ~(host : Hosts.host) ~sk ~manifest ~so_path
     ~provided_epoch
     ~grant_caps
     ~no_cap_gate
-    ~accept_unproved
+    ~accept_unproved ~drop
     ()
 
 let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
@@ -2717,7 +2768,7 @@ let save_schemas_baseline ~new_schemas_path ~prev_schemas_path =
     - [timeout_ms]: canary health-check window in milliseconds (default 30 000). *)
 let deploy_env ?(output="") ?(so="") ?(old_schemas="") ?(env="") ?(canary=0) ?(timeout_ms=30000)
     ?(grant_caps=([] : string list)) ?(no_cap_gate=false) ?(pool_gate = no_pool_gate)
-    ?(accept_unproved=([] : string list)) ()
+    ?(accept_unproved=([] : string list)) ?(drop=([] : string list)) ()
     : (unit, string) result =
   match Project.load () with
   | Error m -> Error m
@@ -2765,7 +2816,7 @@ let deploy_env ?(output="") ?(so="") ?(old_schemas="") ?(env="") ?(canary=0) ?(t
               else Ok (so_path, manifest_path)
             end else begin
               Printf.printf "Building hot-reload .so for %s...\n%!" proj.Project.name;
-              build_so ~accept_unproved ~proj ~output:out_prefix
+              build_so ~drop ~accept_unproved ~proj ~output:out_prefix
             end
           in
           match build_result with
@@ -2810,7 +2861,7 @@ let deploy_env ?(output="") ?(so="") ?(old_schemas="") ?(env="") ?(canary=0) ?(t
                 deploy_one ~host ~sk ~manifest ~so_path:so_path2
                   ~old_schemas_path:(if old_schemas = "" then prev_schemas_path else old_schemas)
                   ~new_schemas_path ~entry_path ~old_manifest_path:prev_manifest_path
-                  ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ~accept_unproved ()
+                  ~provided_epoch:shared_epoch ~grant_caps ~no_cap_gate ~accept_unproved ~drop ()
               in
               (* Every host, each reported; one after another (Hosts.run_on). *)
               let simultaneous_deploy hosts = Hosts.run_on ~strategy:`All hosts deploy_step in

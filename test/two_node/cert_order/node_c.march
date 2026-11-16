@@ -31,9 +31,9 @@ mod CertOrderC do
 
   -- Certificate mode, from the files scenario.sh made with `forge cluster`.
   pfn config(me : String, port_var : String, seeds : String) : ClusterNode.CnConfig do
-    let pki = Env.require("PKI")
+    let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me)
-    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int(port_var)))
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int(port_var))))
     Process.set_env("MARCH_CLUSTER_NODES", seeds)
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me ++ ".key")
@@ -46,7 +46,7 @@ mod CertOrderC do
 
   pfn stock(s : Cap(Session.Live), st : Order_Stock.Entry) : Order_Stock.Yield do
     Order_Stock.recv_Want(s, st, fn (n, st1) ->
-      if n == 1 do println("stock: a session on node-c") else () end
+      if n == 1 do Authority.ignore(println("stock: a session on node-c")) else () end
       if n < 3 do
         let st2 = Order_Stock.choose_have(s, st1, "have " ++ int_to_string(n))
         stock(s, Order_Stock.send_Book(s, st2, n))
@@ -71,7 +71,7 @@ mod CertOrderC do
     on Deliver(sid : String, s : Cap(Session.Live), from : Int, msg : Bytes, ep : Int) do
       match LinearMap.take_slot(state.sessions, sid) do
         (None, slot) ->
-          println("ledger: dropped a message for session " ++ sid)
+          Authority.ignore(println("ledger: dropped a message for session " ++ sid))
           { state with sessions: LinearMap.vacate(slot) }
         (Some(parked), slot) ->
           match Order_Ledger.resume(parked, from, msg, ep) do
@@ -88,7 +88,7 @@ mod CertOrderC do
       match LinearMap.take(state.sessions, sid) do
         (None, m) -> { state with sessions: m }
         (Some(parked), m) ->
-          println("ledger: session cancelled: " ++ cause)
+          Authority.ignore(println("ledger: session cancelled: " ++ cause))
           Order_Ledger.take_closed(Order_Ledger.cancel(s, parked))
           { state with sessions: m }
       end
@@ -96,7 +96,7 @@ mod CertOrderC do
   end
 
   fn main(c : Cap(IO)) do
-    match ClusterNode.start(c, config("node-c", "MARCH_PORT_C", "127.0.0.1:" ++ int_to_string(Env.require_int("MARCH_PORT_A")))) do
+    match ClusterNode.start(c, config("node-c", "MARCH_PORT_C", "127.0.0.1:" ++ int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))))) do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-c: never joined") end
@@ -116,7 +116,7 @@ mod CertOrderC do
             match Order_Run.offer_Stock(h, 8, fn (s, st) -> stock(s, st)) do
               Err(e) -> panic(Order_Run.error_message(e))
               Ok(_) ->
-                println("node-c: offering")
+                Authority.ignore(println("node-c: offering"))
                 sleep_ms(600000)
             end
         end

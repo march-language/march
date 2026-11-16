@@ -11,5 +11,6 @@ mod SingleUseInlineRc do
     let xs = [10, 20, 30]
     let n = helper(xs)
     println(n)
+    ()
   end
 end

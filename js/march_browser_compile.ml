@@ -22,6 +22,7 @@ open Js_of_ocaml
     interpreter-backed REPL). *)
 let browser_stdlib_files = [
   "prelude.march";
+  "authority.march";
   "option.march";
   "list.march";
   "math.march";

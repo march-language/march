@@ -19,5 +19,7 @@ end
 
 fn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(area(TqLine(3, 4)) + TqCtorSibling.dot_area()))
+  ()
+  ()
 end
 end

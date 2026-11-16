@@ -31,6 +31,7 @@ mod HSigilSafeCollision do
     -- Must never become `true`: that would mean unescaped verbatim insertion
     -- of a value we could not prove was Html.Safe.
     println("raw=" ++ bool_to_string(string_contains(out, "<b>x</b>")))
+    ()
   end
 
   mod Other do

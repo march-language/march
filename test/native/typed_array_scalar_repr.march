@@ -47,5 +47,6 @@ mod Main do
     let e = typed_array_create(2, 1.5)
     println("float create/get: " ++ int_to_string(float_to_int(typed_array_get(e, 0) *. 2.0)))
     println("float fold      : " ++ int_to_string(float_to_int(typed_array_fold(e, 0.0, fn (acc, x) -> acc +. x))))
+    ()
   end
 end

@@ -12,7 +12,7 @@ mod App do
 
     fn report(home : String) : () do
       let line = "at " ++ int_to_string(unix_time_ms()) ++ "\n"
-      let _ = tcp_connect("collector.example", 4317)
+      let _ = Socket.connect("collector.example", 4317)
       let _ = File.write(home ++ "/lab-probe", line)
       ()
     end

@@ -43,5 +43,6 @@ mod Main do
     println([{ c: char_from_int(122) }])
     println(Some({ u: () }))
     println([{ k: false }])
+    ()
   end
 end

@@ -711,6 +711,16 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare void @march_http_server_wait(i64 %handle)" };
   { march_name = "http_server_bind_host"; c_name = Some "march_http_server_bind_host"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_http_server_bind_host(ptr %host)" };
+  { march_name = "http_server_tls_configure"; c_name = Some "march_http_server_tls_configure"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_server_tls_configure(i64 %kind, ptr %a, ptr %b, i64 %poll_secs, i64 %wait_for_cert)" };
+  { march_name = "http_server_set_timeouts"; c_name = Some "march_http_server_set_timeouts"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_http_server_set_timeouts(i64 %handshake_secs, i64 %header_secs, i64 %progress_secs)" };
+  { march_name = "http_server_reload_tls"; c_name = Some "march_http_server_reload_tls"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_server_reload_tls(i64 %kind, ptr %a, ptr %b)" };
+  { march_name = "http_server_plain_listener"; c_name = Some "march_http_server_plain_listener"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_http_server_plain_listener(i64 %port, ptr %pipeline)" };
+  { march_name = "http_conn_is_tls"; c_name = Some "march_http_conn_is_tls"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_http_conn_is_tls(i64 %fd)" };
   { march_name = "ws_handshake"; c_name = Some "march_ws_handshake"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = false; declare_sig = Some "declare void @march_ws_handshake(i64 %fd, ptr %key)" };
   { march_name = "ws_recv"; c_name = Some "march_ws_recv"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
@@ -733,6 +743,20 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_line(ptr %handle)" };
   { march_name = "file_read_chunk"; c_name = Some "march_file_read_chunk"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)" };
+  { march_name = "file_open_write"; c_name = Some "march_file_open_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open_write(ptr %path, i64 %mode)" };
+  { march_name = "file_write_handle"; c_name = Some "march_file_write_handle"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write_handle(i64 %handle, ptr %data)" };
+  { march_name = "file_seek"; c_name = Some "march_file_seek"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_seek(i64 %handle, i64 %offset)" };
+  { march_name = "dir_open"; c_name = Some "march_dir_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_open(ptr %path)" };
+  { march_name = "dir_open_write"; c_name = Some "march_dir_open_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_open_write(ptr %path)" };
+  { march_name = "file_open_at"; c_name = Some "march_file_open_at"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open_at(i64 %dirfd, ptr %rel, i64 %flags)" };
+  { march_name = "dir_list_at"; c_name = Some "march_dir_list_at"; ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TCon ("FileError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_dir_list_at(i64 %dirfd, ptr %rel)" };
   { march_name = "file_write"; c_name = Some "march_file_write"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_write(ptr %path, ptr %data)" };
   { march_name = "file_append"; c_name = Some "march_file_append"; ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("FileError", [])]));
@@ -1050,6 +1074,11 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare double @march_unix_time()" };
   { march_name = "unix_time_ms"; c_name = Some "march_unix_time_ms"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @march_unix_time_ms()" };
+  (* ocap phase 1 capability check point (runtime/march_extras.c). *)
+  { march_name = "cap_check_raw"; c_name = Some "march_cap_check_raw"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_check_raw(ptr %kind, ptr %target)" };
+  { march_name = "cap_launch_text"; c_name = Some "march_cap_launch_text"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_launch_text()" };
   (* peak_rss_bytes: process self-inspection, not capability-gated (see
      typecheck.ml — deliberately absent from the capability table). *)
   { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
@@ -1064,7 +1093,7 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_connect(ptr %host, i64 %port)" };
   { march_name = "tcp_connect_timeout"; c_name = Some "march_tcp_connect_timeout"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_tcp_connect_timeout(ptr %host, i64 %port, i64 %timeout_ms)" };
-  { march_name = "http_serialize_request"; c_name = Some "march_http_serialize_request"; ret_ty = Some Tir.TString;
+  { march_name = "http_serialize_request"; c_name = Some "march_http_serialize_request"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)" };
   { march_name = "http_parse_response"; c_name = Some "march_http_parse_response"; ret_ty = Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_http_parse_response(ptr %raw)" };
@@ -1227,6 +1256,24 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = None };
   { march_name = "to_string"; c_name = Some "march_value_to_string"; ret_ty = Some Tir.TString;
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_value_to_string(ptr %v)" };
+  (* Handle-box primitives (ocap phase 2, Task 2; runtime/march_handle.c).
+     Stdlib-only; the box is the caller's handle type ([TPtr] here: the
+     result is always the box pointer). Close and is_closed return the C
+     1/0 as Bool. *)
+  { march_name = "handle_new"; c_name = Some "march_handle_new"; ret_ty = Some (Tir.TPtr Tir.TUnit);
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_handle_new(i64 %kind, i64 %raw, i64 %aux)" };
+  { march_name = "handle_enter"; c_name = Some "march_handle_enter"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_enter(ptr %h, i64 %kind)" };
+  { march_name = "handle_leave"; c_name = Some "march_handle_leave"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void @march_handle_leave(ptr %h)" };
+  { march_name = "handle_close"; c_name = Some "march_handle_close"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_close(ptr %h)" };
+  { march_name = "handle_detach"; c_name = Some "march_handle_detach"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_detach(ptr %h)" };
+  { march_name = "handle_is_closed"; c_name = Some "march_handle_is_closed"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_is_closed(ptr %h)" };
+  { march_name = "handle_aux"; c_name = Some "march_handle_aux"; ret_ty = Some Tir.TInt;
+    in_is_builtin = true; declare_sig = Some "declare i64  @march_handle_aux(ptr %h)" };
   { march_name = "chan_new"; c_name = Some "march_chan_new"; ret_ty = Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);
     in_is_builtin = false; declare_sig = Some "declare ptr  @march_chan_new(ptr %proto_name)" };
   { march_name = "chan_send"; c_name = Some "march_chan_send"; ret_ty = Some (Tir.TCon ("Chan", []));
@@ -1282,6 +1329,8 @@ let builtins : builtin list = [
   { march_name = "task_await"; c_name = None; ret_ty = None;
     in_is_builtin = true; declare_sig = None };
   { march_name = "task_await_unwrap"; c_name = None; ret_ty = None;
+    in_is_builtin = true; declare_sig = None };
+  { march_name = "task_poll"; c_name = None; ret_ty = None;
     in_is_builtin = true; declare_sig = None };
   { march_name = "task_yield"; c_name = None; ret_ty = None;
     in_is_builtin = true; declare_sig = None };
@@ -1420,6 +1469,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_task_spawn_thunk", "declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)");
   ("march_task_await", "declare ptr  @march_task_await(ptr %task)");
   ("march_task_await_value", "declare ptr  @march_task_await_value(ptr %task)");
+  ("march_task_poll", "declare ptr  @march_task_poll(ptr %task)");
   ("march_sched_yield", "declare void @march_sched_yield()");
   ("march_cancel_token_new", "declare ptr  @march_cancel_token_new()");
   ("march_cancel_token_cancel", "declare void @march_cancel_token_cancel(ptr %tok)");
@@ -1801,6 +1851,7 @@ let native_actor_items : preamble_item list = [   (* native-only: actors + sched
   PDeclare "march_task_spawn_thunk";
   PDeclare "march_task_await";
   PDeclare "march_task_await_value";
+  PDeclare "march_task_poll";
   PDeclare "march_sched_yield";
   PDeclare "march_actor_recv";
   PDeclare "march_cancel_token_new";
@@ -1849,6 +1900,11 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_http_server_spawn_n";
   PDeclare "march_http_server_wait";
   PDeclare "march_http_server_bind_host";
+  PDeclare "march_http_server_tls_configure";
+  PDeclare "march_http_server_set_timeouts";
+  PDeclare "march_http_server_reload_tls";
+  PDeclare "march_http_server_plain_listener";
+  PDeclare "march_http_conn_is_tls";
   PDeclare "march_ws_handshake";
   PDeclare "march_ws_recv";
   PDeclare "march_ws_send";
@@ -1861,6 +1917,13 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_file_read";
   PDeclare "march_file_read_line";
   PDeclare "march_file_read_chunk";
+  PDeclare "march_file_open_write";
+  PDeclare "march_file_write_handle";
+  PDeclare "march_file_seek";
+  PDeclare "march_dir_open";
+  PDeclare "march_dir_open_write";
+  PDeclare "march_file_open_at";
+  PDeclare "march_dir_list_at";
   PDeclare "march_file_write";
   PDeclare "march_file_append";
   PDeclare "march_file_delete";
@@ -2017,6 +2080,8 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PComment "; Time builtins";
   PDeclare "march_unix_time";
   PDeclare "march_unix_time_ms";
+  PDeclare "march_cap_check_raw";
+  PDeclare "march_cap_launch_text";
   PDeclare "march_peak_rss_bytes";
   PDeclare "march_live_allocs";
   PDeclare "march_vault_live_tables";
@@ -2086,6 +2151,14 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_actor_inspect";
   PDeclare "march_pid_index_of";
   PDeclare "march_value_to_string";
+  PComment "; Handle-box builtins (ocap phase 2)";
+  PDeclare "march_handle_new";
+  PDeclare "march_handle_enter";
+  PDeclare "march_handle_leave";
+  PDeclare "march_handle_close";
+  PDeclare "march_handle_detach";
+  PDeclare "march_handle_is_closed";
+  PDeclare "march_handle_aux";
   PComment "; Session-typed channel builtins (binary)";
   PDeclare "march_chan_new";
   PDeclare "march_chan_send";
@@ -2109,6 +2182,7 @@ let wasm_scheduler_stub_items : preamble_item list = [   (* WASM-only: no-op sch
   PDeclare "march_task_spawn_thunk";
   PDeclare "march_task_await";
   PDeclare "march_task_await_value";
+  PDeclare "march_task_poll";
   PDeclare "march_sched_yield";
   PDeclare "march_actor_recv";
   PDeclare "march_cancel_token_new";

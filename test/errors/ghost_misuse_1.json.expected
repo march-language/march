@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/ghost_misuse_1.march","start_line":3,"start_col":16,"end_line":3,"end_col":20,"message":"`step` has ghost parameters, so it can only be called directly.","code":"ghost_misuse","fix":null,"labels":[],"notes":["Call it directly; passing it as a value would need its ghost arguments at runtime."],"category":"REFINEMENT"}

@@ -190,6 +190,13 @@ let stage2_rlimit = Solver.stage2_rlimit
 (** The literals of the last stage-2 proof ([[]] after any other discharge). *)
 let last_core : string list ref = ref []
 
+(** Every unfolding literal the last discharged query assumed (its own
+    frontier), proved or not; [[]] after a stage-1 query.  A proof whose core
+    names none of them ([last_core] empty, congruence alone) used none of their
+    definitions, and its `uses:` falls back to this query's frontier rather than
+    every unfolding the whole stage-2 run made. *)
+let last_assumed : string list ref = ref []
+
 let stage2_queries = ref 0
 
 let stage2_unknown_hits = ref 0
@@ -212,11 +219,13 @@ let well_formed : (string -> Smt.vc -> bool) ref = ref (fun _ _ -> true)
    be served to a later run that has no z3 at all. *)
 let storable () = Solver.identity () <> None
 
-let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
+let discharge_raw ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   last_core := [];
+  last_assumed := [];
   if ground_verified vc then Verified else
   if not (!well_formed preamble vc) then Unverified else
   let assume = stage2_literals vc in
+  last_assumed := assume;
   let key = Vc_cache.key_of_vc ~preamble vc in
   let neg_key =
     if assume = [] then ""
@@ -289,3 +298,11 @@ let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
   | Solver.Unsat -> Verified
   | Solver.Sat model -> Refuted model
   | Solver.Unknown | Solver.Rejected -> Unverified
+
+
+let discharge ~root ?(preamble = "") (vc : Smt.vc) : outcome =
+  let goal, changed = Bounded_witness.expand vc in
+  if not changed then discharge_raw ~root ~preamble vc
+  else match discharge_raw ~root ~preamble {vc with goal} with
+    | Verified -> Verified
+    | Refuted _ | Unverified -> Unverified

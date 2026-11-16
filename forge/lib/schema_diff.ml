@@ -12,9 +12,12 @@ type field = { name: string; ty: string; refine: string option }
 (** One message constructor: a handler of the actor, or a constructor of a
     migrate_msg's old type.  [params] are the schema type strings. *)
 type ctor = { cname: string; params: string list;
-              refines: string option list }
+              refines: string option list; tag: int option }
 (** [refines]: per parameter, its refinement over the positional names
-    [p0], [p1], ...; [] when none is refined (or an older compiler). *)
+    [p0], [p1], ...; [] when none is refined (or an older compiler).
+    [tag]: the constructor's actor-message heap tag in that build
+    ([Llvm_toplevel.actor_msg_tag_table], keyed `<Actor>_Msg.<Ctor>`);
+    [None] from a compiler that predates tag recording. *)
 
 type actor_schema = {
   compat: string;            (* "full" | "forward" | "any" *)
@@ -29,6 +32,16 @@ type actor_schema = {
   (* M11: Some fields = the compiler derived this build's migrate_state from
      the deployed schema, the listed fields taking their `init` values *)
   not_derived: string option;  (* why it could not, when the state changed *)
+  derived_drops: string list;
+  (* the fields a derived drop-only migration drops: the running version's
+     proved derived rollback, taken back by a rollback deploy *)
+  derived_clause: string list;
+  (* the fields this build's `migrate` clause gave *)
+  derived_moves: (string * string) list;
+  consented_drops: string list;
+  (* removed fields the derived migration dropped by --drop (audited) *)
+  (* (new field, running field) copied under a new name: by a `migrate`
+     clause, or by a rollback deploy that undoes one *)
 }
 
 (** The deploy changed the actor's message type (D30, plan 6.3): a handler
@@ -39,6 +52,72 @@ let messages_changed ~(old_h : ctor list) ~(new_h : ctor list) : bool =
       match List.find_opt (fun n -> n.cname = o.cname) new_h with
       | None -> true
       | Some n -> n.params <> o.params) old_h
+
+(** [migrate_msg_from] names exactly the running version's handlers [old_h]:
+    the same constructors with the same parameters (and refinements). The
+    recorded tags are left out: whether they agree is the tag check's
+    question ({!tag_check}), and a baseline from before tag recording must
+    not read as a different message type. *)
+let same_message_type (from : ctor list) (old_h : ctor list) : bool =
+  let untagged = List.map (fun c -> { c with tag = None }) in
+  untagged from = untagged old_h
+
+(** H7, tag consistency at deploy (design
+    specs/2026-11-04-lemmas-hcr-actors-choreography-design.md §3.4). A message
+    is a heap cell whose constructor tag the SENDER's build chose, and the
+    receiver's new build reads it. The tag is a stable function of the
+    qualified constructor name, except that a key whose hash slot is taken
+    probes upward, so two colliding keys can give one constructor different
+    tags in two builds (which other keys are in the build decides it). *)
+type tag_finding =
+  | Tag_moved of { ctor : string; old_tag : int; new_tag : int }
+  | Tags_unrecorded of string   (* why the tags could not be compared *)
+  | Tags_agree of int           (* this many constructors compared, all equal *)
+
+(** Compare the tags of every constructor both versions of one actor name:
+    the running version's handlers [old_s] against the new build's handlers
+    and its migrate_msg's old type (which takes the actor's tags by name).
+    A pair where either side recorded no tag is reported once, as
+    [Tags_unrecorded], never skipped silently. *)
+let tag_check ~(old_s : actor_schema) ~(new_s : actor_schema) : tag_finding list =
+  let new_ctors =
+    Option.value ~default:[] new_s.handlers @ Option.value ~default:[] new_s.migrate_msg_from in
+  match old_s.handlers with
+  | None ->
+    if new_ctors = [] then []
+    else [ Tags_unrecorded "the running version's schema predates handler recording, \
+                            so its actor-message tags are unknown" ]
+  | Some old_h ->
+    let pairs = List.filter_map (fun (o : ctor) ->
+        Option.map (fun n -> (o, n)) (List.find_opt (fun (n : ctor) -> n.cname = o.cname) new_ctors))
+        old_h in
+    let moved = List.filter_map (fun ((o : ctor), (n : ctor)) ->
+        match o.tag, n.tag with
+        | Some ot, Some nt when ot <> nt -> Some (Tag_moved { ctor = o.cname; old_tag = ot; new_tag = nt })
+        | _ -> None) pairs in
+    let old_missing = List.exists (fun ((o : ctor), _) -> o.tag = None) pairs in
+    let new_missing = List.exists (fun (_, (n : ctor)) -> n.tag = None) pairs in
+    moved
+    @ (if old_missing then
+         [ Tags_unrecorded "the running version's schema predates actor-message tag \
+                            recording, so a tag moved by a hash-collision probe cannot \
+                            be detected" ]
+       else if new_missing then
+         [ Tags_unrecorded "this build's schema records no actor-message tags" ]
+       else if moved = [] && pairs <> [] then [ Tags_agree (List.length pairs) ]
+       else [])
+
+(** The refusal text for a moved tag, the same in forge and
+    `march --check-migration`. *)
+let tag_moved_message ~(actor : string) ~ctor ~old_tag ~new_tag : string =
+  Printf.sprintf
+    "%s.%s's actor-message tag moved: the running version tags it 0x%08x, this build \
+     0x%08x. Tags are a hash of the qualified name %s_Msg.%s, and a name whose hash \
+     slot another constructor holds probes to the next free one, so a hash collision \
+     in one of the two builds moved it; a message the running version built would be \
+     read as another constructor or dropped. A restart deploys it safely; a hot \
+     deploy cannot."
+    actor ctor old_tag new_tag actor ctor
 
 (** The laws of [laws] ("Actor.law" or "Actor") that the new build's
     schemas do not carry in [accepted_unproved].  forge deploys an override
@@ -53,6 +132,19 @@ let unembedded_overrides (schemas : (string * actor_schema) list) (laws : string
       match List.assoc_opt actor schemas with
       | Some s -> not (List.mem rest s.accepted || List.mem "*" s.accepted)
       | None -> true) laws
+
+(** The `--drop Actor.field` entries the new build's schemas do not record
+    as dropped by consent: a typo, a field that was kept or moved, or a
+    pre-built patch built without that --drop. *)
+let unused_drops (schemas : (string * actor_schema) list) (drops : string list) : string list =
+  List.filter (fun d ->
+      match String.index_opt d '.' with
+      | None -> true
+      | Some i ->
+        let actor = String.sub d 0 i and f = String.sub d (i + 1) (String.length d - i - 1) in
+        (match List.assoc_opt actor schemas with
+         | Some s -> not (List.mem f s.consented_drops)
+         | None -> true)) drops
 
 type field_change =
   | FieldAdded   of field
@@ -73,7 +165,8 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
         params = c |> member "params" |> to_list |> List.map to_string;
         refines = (match member "refines" c with
             | `Null -> []
-            | v -> v |> to_list |> List.map to_string_option) }) in
+            | v -> v |> to_list |> List.map to_string_option);
+        tag = (match member "tag" c with `Int t -> Some t | _ -> None) }) in
   let flag key j = match member key j with `Bool b -> b | _ -> false in
   let optional key decode j = match member key j with
     | `Null -> None | value -> Some (decode value) in
@@ -94,7 +187,20 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
                    | `Null -> [] | v -> v |> to_list |> List.map to_string);
                derived = optional "migrate_derived"
                    (fun v -> v |> to_list |> List.map to_string) j;
-               not_derived = optional "migrate_not_derived" to_string j })
+               not_derived = optional "migrate_not_derived" to_string j;
+               derived_drops = (match member "migrate_derived_drops" j with
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string);
+               derived_clause = (match member "migrate_clause" j with
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string);
+               consented_drops = (match member "migrate_drops_consented" j with
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string);
+               derived_moves = (match member "migrate_derived_moves" j with
+                   | `Null -> []
+                   | v ->
+                     v |> to_list
+                     |> List.filter_map (fun p -> match to_list p with
+                         | [ a; b ] -> Some (to_string a, to_string b)
+                         | _ -> None)) })
 
 let parse_schemas_file path =
   if not (Sys.file_exists path) then []
@@ -152,18 +258,51 @@ let check_compat (compat : string) (changes : field_change list) : (unit, string
     did not derive one, when the new build's schema says. *)
 let not_derived_note (new_schemas : (string * actor_schema) list) (actor : string) : string =
   match List.assoc_opt actor new_schemas with
-  | Some { not_derived = Some why; _ } -> Printf.sprintf " (not derived: %s)" why
+  | Some { not_derived = Some why; _ } ->
+    let removes = "it removes " in
+    let hint =
+      if String.length why > String.length removes
+         && String.sub why 0 (String.length removes) = removes
+         && not (String.contains why '(')
+      then
+        Printf.sprintf "; to discard that data, deploy with --drop %s.<field>" actor
+      else ""
+    in
+    Printf.sprintf " (not derived: %s%s)" why hint
   | _ -> ""
 
 (** The line announcing a derived migration, when [actor]'s was. *)
 let derived_note (new_schemas : (string * actor_schema) list) (actor : string) : string option =
+  let moved ms = String.concat ", " (List.map (fun (f, g) -> Printf.sprintf "%s from %s" f g) ms) in
+  let join parts = String.concat "; " (List.filter (fun p -> p <> "") parts) in
   match List.assoc_opt actor new_schemas with
-  | Some { derived = Some added; _ } ->
+  | Some { derived = Some _; derived_clause = []; derived_drops = ds; derived_moves = ms; _ }
+    when ds <> [] || ms <> [] ->
+    Some (Printf.sprintf
+            "actor %s: migrate_state derived as the running version's proved rollback (%s)"
+            actor
+            (join
+               [ (if ms = [] then "" else "copies back " ^ moved ms);
+                 (if ds = [] then ""
+                  else "drops " ^ String.concat ", " ds ^ ", the fields that version added") ]))
+  | Some { derived = Some added; derived_clause = (_ :: _ as given); derived_moves = ms;
+           consented_drops = cd; _ } ->
+    let computed = List.filter (fun f -> not (List.mem_assoc f ms)) given in
+    Some (Printf.sprintf "actor %s: migrate_state derived from the migrate clause (%s)"
+            actor
+            (join
+               [ (if ms = [] then "" else "renames: " ^ moved ms);
+                 (if computed = [] then "" else String.concat ", " computed ^ " from the clause");
+                 (if added = [] then "" else "adds " ^ String.concat ", " added ^ " from init");
+                 (if cd = [] then "" else "drops " ^ String.concat ", " cd ^ " by --drop") ]))
+  | Some { derived = Some added; consented_drops = cd; _ } ->
     Some (Printf.sprintf "actor %s: migrate_state derived from the running version's state (%s)"
             actor
-            (match added with
-             | [] -> "every field kept"
-             | fs -> "adds " ^ String.concat ", " fs ^ " from init"))
+            (join
+               [ (match added with
+                  | [] -> if cd = [] then "every field kept" else ""
+                  | fs -> "adds " ^ String.concat ", " fs ^ " from init");
+                 (if cd = [] then "" else "drops " ^ String.concat ", " cd ^ " by --drop") ]))
   | _ -> None
 
 (** Compute diffs for all actors appearing in both old and new schemas. *)

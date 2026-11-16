@@ -182,6 +182,7 @@ let collect_call_names expr =
     | Ast.ELetFn (_, _, _, body, _) -> walk body
     | Ast.ELetQ (_, r, c, _) | Ast.ELetStar (_, r, c, _) -> walk r; walk c
     | Ast.EAssert (e, _)     -> walk e
+    | Ast.EProof (p, _)      -> List.iter walk (Ast.proof_children p)
     | Ast.ESigil (_, e, _)   -> walk e
     | Ast.ERefineMsg (e, _, _)   -> walk e
     | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()

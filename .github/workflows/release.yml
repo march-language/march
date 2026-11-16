@@ -22,7 +22,37 @@ permissions:
   contents: write
 
 jobs:
+  # A tag ships only from a commit that is green on main: ci.yml and
+  # doc-lint.yml must each have a successful run of the tag's commit (see
+  # scripts/release-gate.sh for exactly which runs count). Before this job a
+  # tag on a red commit built and published. When the commit has no verdict
+  # (its CI run was cancelled in a burst of merges), the script prints how to
+  # run CI on it; once that run is green, re-run this job.
+  #
+  # The job always runs so `build` can simply need it; on workflow_dispatch
+  # (rebuilding the archives of a release that already shipped) its steps are
+  # skipped and it passes.
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        if: github.event_name == 'push'
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/release-gate.sh
+          sparse-checkout-cone-mode: false
+      - name: Require green CI on main for the tag's commit
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-gate.sh "$GITHUB_SHA"
+
   build:
+    needs: gate
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}  # e.g. "v0.1.0"

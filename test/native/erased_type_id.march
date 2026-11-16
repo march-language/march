@@ -51,5 +51,6 @@ mod ErasedTypeId do
     println("erased_html_iolist=" ++ apply_first(cb4, ~H"<i>ok</i>"))
     let cb5 = Bx(Cons(fn x -> IOList.to_string(~H"<p>${x}</p>"), Nil))
     println("erased_html_str=" ++ apply_first(cb5, "<script>"))
+    ()
   end
 end

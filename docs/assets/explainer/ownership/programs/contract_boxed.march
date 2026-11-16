@@ -18,7 +18,7 @@ mod Own do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     match record(0.5, 0.25, 3) do
-    Hit(Vec3(x, _, _), id) -> println(float_to_string(x) ++ " " ++ int_to_string(id))
+    Hit(Vec3(x, _, _), id) -> Authority.ignore(println(float_to_string(x) ++ " " ++ int_to_string(id)))
     end
   end
 end

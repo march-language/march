@@ -82,7 +82,7 @@ end
 let program body main =
   prelude ^ body
   ^ "\nfn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign), _s : Cap(IO.Spawn)) : Unit do\n"
-  ^ main ^ "\nend\nend\n"
+  ^ main ^ "\n  ()\nend\nend\n"
 
 (* ── Rejected ────────────────────────────────────────────────────────── *)
 
@@ -150,7 +150,7 @@ let test_task_async_stream () =
   rejects "Task.async_stream"
     (program {|
 fn stream(a : Acc, xs : List(Int)) : Int do
-  List.length(Task.async_stream(xs, fn x -> acc_push(a, x)))
+  List.length(Authority.must(Task.async_stream(xs, fn x -> acc_push(a, x))))
 end|} {|  println(int_to_string(stream(acc_new(), [1, 2])))|})
     [ "to `Task.async_stream`" ]
 

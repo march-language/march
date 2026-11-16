@@ -1,0 +1,13 @@
+-- EXPECT-VIOLATED: precondition ys
+-- EXPECT-ERROR: for example, when an element is
+-- Fixed 2026-10-18 (specs/progress/2026-10-18-relational-element-refinement-scope.md,
+-- row z1). `need_lt`'s element slot `_ < n` names its own parameter `n`, which
+-- is 10 at this call. It was read against the caller's `n = 1000`, so the
+-- call was PROVED although `ys` may hold 59.
+mod S01 do
+  fn need_lt(xs : List({Int | _ < n}), n : Int) : Int do List.length(xs) end
+  fn go(ys : List({Int | _ < 60})) : Int do
+    let n = 1000
+    need_lt(ys, 10) + n
+  end
+end

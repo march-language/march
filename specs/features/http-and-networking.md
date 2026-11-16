@@ -34,21 +34,21 @@ Pure data types with no I/O. All HTTP libraries depend on this.
 
 ### Layer 2: HttpTransport Module (`stdlib/http_transport.march`)
 
-Low-level TCP and HTTP/1.1 request-response handling. Does **not** close connections; caller manages fd lifetime.
+Low-level TCP and HTTP/1.1 request-response handling. Does **not** close connections; the caller manages the `Socket`'s lifetime.
 
 **Key Types** (lines 14-20):
 - `TransportError`: ConnectionRefused | ConnTimeout | SendError | RecvError | ConnParseError | Closed
 
 **Key Functions**:
-- `connect(req)` (line 26): Open TCP connection to request host:port, returns Ok(fd) or Err
-- `request_on(fd, req)` (line 43): Send request on existing fd, receive response (for keep-alive)
-- `stream_request_on(fd, req, on_chunk)` (line 74): Stream response body with callback
+- `connect(req)`: Open TCP connection to request host:port, returns `Ok(Socket)` or Err
+- `request_on(s, req)`: Send request on an open `Socket`, receive response (for keep-alive); `Err(Closed)` once it is closed
+- `stream_request_on(s, req, on_chunk)`: Stream response body with callback
 - `request(req)` (line 129): One-shot: connect, send, receive, close automatically
 - `simple_get(url)` (line 170): Convenience wrapper for GET requests
 
 **Connection Lifecycle**:
 - Single connection: `request()` opens, sends, receives, closes
-- Keep-alive: Caller opens with `connect()`, reuses fd with `request_on()`, closes manually with `tcp_close()`
+- Keep-alive: Caller opens with `connect()`, reuses the `Socket` with `request_on()`, closes it with `Socket.close()`
 - Streaming: Use `stream_request_on()` to process body chunks without buffering
 
 ### Layer 3: HttpClient Module (`stdlib/http_client.march`)
@@ -89,7 +89,7 @@ Request-response handler with Plug-style middleware pipeline.
 **Key Types** (lines 14-35):
 - `Upgrade`: NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
 - `Conn` (lines 21-35): 13-field request-response struct
-  - Fields 0-6: Request metadata (fd, method, path, path_info, query_string, headers, body)
+  - Fields 0-6: Request metadata (socket, method, path, path_info, query_string, headers, body); the socket is a `Socket` borrowed from the server (closed when the connection ends)
   - Fields 7-9: Response (status, headers, body)
   - Fields 10-12: Halted flag, assigns, upgrade
 
@@ -98,7 +98,8 @@ Request-response handler with Plug-style middleware pipeline.
 - `req_headers`, `req_body`: Raw request
 - `status`, `resp_headers`, `resp_body`: Response components
 - `halted`, `assigns`, `conn_upgrade`: Control flags
-- `fd`: Socket file descriptor
+- `fd`: the socket's descriptor, `@[stdlib_internal]`
+- `test_conn(method, path, headers, body)`: a request `Conn` over a closed socket, for handler unit tests
 
 **Conn Transforms** (lines 120-175):
 - `put_resp_header(conn, name, value)` (line 120): Add response header
@@ -113,6 +114,84 @@ Request-response handler with Plug-style middleware pipeline.
 - `plug(server, p)` (line 200): Add middleware plug
 - `max_connections(server, n)`, `idle_timeout(server, secs)` (lines 207-217): Configure
 - `listen(server)` (line 221): Start blocking server (calls `http_server_listen` builtin)
+
+### HTTPS (`HttpServer.tls`)
+
+`HttpServer` serves HTTP/1.1 over TLS on both server implementations, with
+`wss://`, certificate rotation without a restart, and per-phase timeouts.
+Design: `specs/2026-11-05-https-server-design.md`; it needs a compiled build
+(the interpreter refuses an HTTPS `listen` with a message saying so).
+
+```march
+HttpServer.new(443)
+|> HttpServer.tls(HttpServer.TlsFiles(
+     "/etc/letsencrypt/live/example.com/fullchain.pem",
+     "/etc/letsencrypt/live/example.com/privkey.pem"))
+|> HttpServer.plain_listener(80, [HttpAcme.webroot("/var/www/acme"),
+                                  HttpServer.redirect_to_https(443)])
+|> HttpServer.plug(router)
+|> HttpServer.listen()
+```
+
+- **Certificate source**: `TlsFiles(cert_path, key_path)` (PEM files: the full
+  chain, leaf first, and its key) or `TlsPem(cert, key)` (the text itself).
+- **Startup**: a missing, unreadable or mismatched pair stops `listen` before
+  anything is bound (`HttpServer.listen: <file>: <reason>`, nonzero exit). An
+  expired certificate is served with a warning. `tls_wait_for_cert(server)`
+  is the bootstrap mode for a first certificate: missing files are not fatal,
+  the plain listener and the poller start, and the HTTPS port is bound when the
+  first valid pair is installed.
+- **Rotation**: with `TlsFiles`, the pair is re-read every `tls_poll_interval`
+  seconds (default 60, `0` = off) and installed when its content changed. A
+  pair that does not load, does not match or has expired is refused once
+  (`march: https: refused certificate …`) and the current one stays.
+  `HttpServer.reload_tls(src)` does the same on demand and returns the reason
+  as `Err`. New connections get the new certificate; open ones keep theirs.
+- **Timeouts** (both server modes): `tls_handshake_timeout` (10 s),
+  `idle_timeout` (60 s, keep-alive with no request; previously ignored by the
+  event loop and fixed at 10 s on the pool), `header_timeout` (30 s from a
+  request's first byte), `progress_timeout` (30 s without progress reading a
+  body or writing a response; a slow transfer that keeps moving is never cut).
+  An upgraded WebSocket is not subject to them.
+- **TLS settings**: TLS 1.2 minimum, OpenSSL's default ciphers, the hybrid
+  post-quantum group first (as `Tls` clients), ALPN `http/1.1`, renegotiation
+  off, no early data, one certificate (no SNI selection: a client that sends no
+  server name gets it too).
+- **`plain_listener(server, port, plugs)`**: a second, plain-HTTP port served by
+  the same `listen` with its own pipeline. `redirect_to_https(port)` (301 for
+  GET/HEAD, 308 otherwise, 400 without `Host`), `HttpAcme.webroot(dir)` (serves
+  certbot `--webroot` challenge files; tokens outside base64url are 404) and
+  `acme_responder(lookup)` (challenges from memory) are the plugs for it.
+- **`scheme(conn)`**: `"https"` for a connection that arrived over TLS.
+- **Capabilities**: serving HTTPS and `reload_tls` need `IO.NetListen`;
+  `HttpAcme.webroot` needs `IO.FileRead`. `HttpServer` declares no `needs` beyond
+  `IO.NetListen`, so modules that import it declare nothing new.
+
+Runtime: `runtime/march_tls_session.c` (one TLS session over OpenSSL memory
+BIOs, driven by each server's own socket I/O), `runtime/march_tls_server.c`
+(the certificate slot, the poller, and the fd → session registry the
+WebSocket functions use for `wss://`), `runtime/march_https.c` (the builtins
+and the process-wide configuration). One HTTPS server per process.
+
+#### Deploying with certbot
+
+1. **First certificate.** Either stop the server and run
+   `certbot certonly --standalone -d example.com` once, or start the server in
+   bootstrap mode (`tls_wait_for_cert()`, with `plain_listener(80, [HttpAcme.webroot(dir), …])`)
+   and run `certbot certonly --webroot -w <dir> -d example.com`; the HTTPS port
+   opens within one poll interval of certbot writing the files.
+2. **Renewals** need nothing: `certbot renew` (its timer) replaces the files and
+   the poller installs them. No `--deploy-hook` restart is needed.
+3. **Docker**: mount the whole `/etc/letsencrypt` directory, not the `live/`
+   files: `live/` holds symlinks into `archive/`, which must resolve inside the
+   container.
+4. **Ports 443/80** need root, `CAP_NET_BIND_SERVICE`
+   (`setcap cap_net_bind_service=+ep <binary>`), or a port mapping
+   (`-p 443:8443 -p 80:8080`) to an unprivileged port.
+5. Build with `march --compile` / `forge build`; `forge run` (the interpreter)
+   does not serve HTTPS.
+
+`examples/https_hello.march` is a complete server in this shape.
 
 ### WebSocket Module (`stdlib/websocket.march`)
 
@@ -287,7 +366,7 @@ offset 16: char     data[len+1] // null-terminated
 ```
 
 **Conn** (120 bytes):
-- Field 0 (offset 16): int64_t fd
+- Field 0 (offset 16): pointer to the connection's `Socket` (a TCP_BORROWED handle box, one per connection: `march_http_conn_sock`)
 - Field 1-9 (offsets 24-88): pointers to Method/String/List/Int objects
 - Field 10-12 (offsets 96-112): pointers to Bool/List/Upgrade objects
 
@@ -335,7 +414,7 @@ The interpreter provides pure OCaml implementations for development/testing:
 - `tcp_recv_http_headers`: Headers only with Content-Length and Transfer-Encoding detection
 - `tcp_recv_chunk`: Fixed-size receive
 - `tcp_recv_chunked_frame`: Chunked transfer encoding frame parser
-- `http_serialize_request`: Build raw HTTP request string
+- `http_serialize_request`: Build raw HTTP request string; `Err(reason)` instead when the method, host, path, query or a header would smuggle a second request (field rules in `lib/eval/http_request_check.ml`, C twin in `runtime/march_http.c`)
 - `http_parse_response`: Parse status + headers + body from response string
 
 ## Test Coverage
@@ -371,6 +450,10 @@ Performance benchmarks under `bench/`:
 - Count bytes without buffering
 - Chunked transfer encoding handling
 
+**https_hello.march**: HTTPS with a certbot certificate
+- `tls(TlsFiles(...))` in bootstrap mode, plain port 80 answering ACME challenges and redirecting
+- `POST /upload` echoes the byte count; `/ws` is a `wss://` echo that also pushes `tick <n>`
+
 **counter_server.march**: Actor + HTTP server integration
 - Spawned actor manages counter state
 - GET /count, POST /increment, POST /decrement
@@ -386,9 +469,9 @@ Performance benchmarks under `bench/`:
 - Each request is independent
 
 **Keep-Alive Requests** (Layer 2: `HttpTransport.request_on`, Layer 3: `HttpClient.with_connection`):
-- Caller manages fd lifecycle
+- Caller manages the `Socket`'s lifecycle
 - Multiple requests on same connection
-- Caller responsible for closing with `tcp_close(fd)`
+- Caller responsible for closing with `Socket.close(s)`
 
 ### Server Connection Management
 
@@ -412,7 +495,7 @@ Performance benchmarks under `bench/`:
 2. **WebSocket Frame Size**: Limited to 16MB per frame
 3. **No Trailers**: HTTP/1.1 trailers not supported
 4. **No Proxy Support**: No CONNECT method or proxy-related handling
-5. **TLS client-side focus**: `march_tls.c` provides both `march_tls_connect` (client) and `march_tls_accept` (server); the high-level stdlib surface is primarily client-oriented (`Tls.https_get` / `Tls.connect`)
+5. **HTTPS server: one certificate, one server per process**: no SNI-based certificate selection, no client certificates (mTLS), and one HTTPS `listen` per process (see "HTTPS" above)
 
 ## Future Enhancements
 

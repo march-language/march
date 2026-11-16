@@ -99,7 +99,7 @@ let small_src =
   "mod Rt do\n\
   \  needs IO.Console\n\
   \  pfn greet(n : Int) : String do \"n=\" ++ int_to_string(n) end\n\
-  \  fn main(_cap : Cap(IO.Console)) : Unit do println(greet(3)) end\n\
+  \  fn main(_cap : Cap(IO.Console)) : Unit do Authority.ignore(println(greet(3))) end\n\
    end\n"
 
 let emit_llvm ~env src =
@@ -167,7 +167,7 @@ let test_report_names_the_leaking_site () =
     Alcotest.(check bool) ("balanced_loop is not blamed for any live object:\n" ^ out) false
       (contains live_section "LIVE 0x" && contains live_section "allocated at balanced_loop#");
     Alcotest.(check bool) ("literal cells are immortal, not leaks:\n" ^ out) true
-      (contains out "immortal: 4");
+      (contains out "immortal: 8");
     Alcotest.(check bool) ("no inconsistent history:\n" ^ out) true
       (contains out "inconsistent: 0");
     Alcotest.(check bool) ("the report's exit status flags the leak:\n" ^ out) true
@@ -189,6 +189,7 @@ let clean_src =
   \  end\n\
   \  fn main(_cap : Cap(IO.Console)) : Unit do\n\
   \    println(\"total: \" ++ int_to_string(churn(200, 0)))\n\
+  \    ()\n\
   \  end\n\
    end\n"
 
@@ -209,8 +210,45 @@ let test_report_clean_program_has_no_live_objects () =
     Alcotest.(check bool) ("exit 0:\n" ^ out) true (contains out "report (rc=0;")
   end
 
+(* A discarded [Ok(())] (the [Result] [println] returns) must be released in
+   both positions that used to leak it: as the value of a [match] used as a
+   statement (each arm ends in a call), and as the right-hand side of a
+   block-final [let _ = e], whose block value is [()] per the typechecker but
+   was lowered to [e]'s value and returned uncollected from [main]. *)
+let discarded_ok_src =
+  "mod Discard do\n\
+  \  needs IO.Console\n\
+  \  pfn pick(n : Int) : Int do n * 2 end\n\
+  \  fn main(_cap : Cap(IO.Console)) : () do\n\
+  \    match pick(1) do\n\
+  \      2 -> println(\"two\")\n\
+  \      _ -> println(\"other\")\n\
+  \    end\n\
+  \    if pick(2) > 3 do println(\"big\") else println(\"small\") end\n\
+  \    let _ = println(\"last\")\n\
+  \  end\n\
+   end\n"
+
+let test_report_discarded_ok_is_released () =
+  let main_exe = find_main_exe () in
+  let project_root = march_project_root () in
+  let tmp = Filename.temp_file "march_rctrace_discard" "" in
+  Sys.remove tmp; Unix.mkdir tmp 0o755;
+  let src = Filename.concat tmp "discard.march" in
+  let oc = open_out src in output_string oc discarded_ok_src; close_out oc;
+  if Sys.command "command -v clang >/dev/null 2>&1" <> 0 then ()
+  else begin
+    let out = report_of ~project_root ~main_exe ~src ~tmp in
+    Alcotest.(check bool) ("ran:\n" ^ out) true
+      (contains out "two" && contains out "big" && contains out "last");
+    Alcotest.(check bool) ("nothing live:\n" ^ out) true (contains out "live at end: 0");
+    Alcotest.(check bool) ("exit 0:\n" ^ out) true (contains out "report (rc=0;")
+  end
+
 let suites = [
   ( "rc_trace", [
+      Alcotest.test_case "a discarded Ok(()) is released (match statement, let _ last)" `Slow
+        test_report_discarded_ok_is_released;
       Alcotest.test_case "rewrite brackets every runtime call and merges the ctor table" `Quick
         test_rewrite_brackets_runtime_calls;
       Alcotest.test_case "rewrite is the identity without runtime calls" `Quick

@@ -1,0 +1,12 @@
+-- EXPECT-VIOLATED: precondition let ys
+-- EXPECT-ERROR: bound expression does not satisfy type annotation `len(_) > 0`
+-- Fixed 2026-07-30 (specs/progress/2026-07-30-a-refined-let-annotation-is-checked-against-its-rhs-closed-2026.md).
+-- A refined `let` annotation obliged nobody: it entered scope as a fact, so
+-- `inner(ys)` was PROVED from an empty list.
+mod S05 do
+  fn inner(xs : {List(Int) | len(_) > 0}) : Int do 0 end
+  fn outer() : Int do
+    let ys : {List(Int) | len(_) > 0} = []
+    inner(ys)
+  end
+end

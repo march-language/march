@@ -36,6 +36,17 @@
 -- `CrashKind.TaskFailed` is reserved: a compiled panic in a task exits the
 -- process and is reported as `Panic`.
 --
+-- JavaScript (`--target js`).  The module works, with these differences:
+-- there is one crash context for the whole program (JS has one thread;
+-- async code interleaving at an `await` shares it); the report is made when
+-- an error escapes `main`, not at the panic, since a JS `throw` cannot know
+-- whether an outer handler catches it (a panic's context and location are
+-- recorded where it was raised, so the report carries them all the same);
+-- any error escaping `main` is reported, always as `Panic` with pid -1 and
+-- `supervised` false; and `backtrace` is empty, because the JS stack names
+-- emitted JavaScript, not March functions and lines.  After the observers
+-- run, the error goes on to Node (or the browser) as before.
+--
 -- doc: try
 mod Diagnostics do
 

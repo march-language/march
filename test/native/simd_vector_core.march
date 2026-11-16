@@ -135,5 +135,6 @@ mod Main do
     let ncmf = Simd.make_f32x4(0.0 -. 1.5, 1.5, 0.0 -. 1.5, 1.5)
     println(show(Simd.select_f32x4(ncmf, Simd.splat_f32x4(1.0), Simd.splat_f32x4(2.0))))
     println(Simd.first_set_f32x4(ncmf))
+    ()
   end
 end

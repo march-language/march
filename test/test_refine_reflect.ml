@@ -34,26 +34,26 @@ let home =
      d)
 
 (* Run the compiler with [args] on [path]; stdout and stderr together. *)
-let run_on args path =
+let run_on ?(env = "") args path =
   let out = Filename.temp_file "reflect" ".out" in
   let cmd =
-    Printf.sprintf "cd %s && HOME=%s %s %s %s > %s 2>&1"
+    Printf.sprintf "cd %s && HOME=%s %s %s %s %s > %s 2>&1"
       (Filename.quote (Filename.dirname path))
       (Filename.quote (Lazy.force home))
-      (Filename.quote (exe ())) args (Filename.quote (Filename.basename path)) (Filename.quote out)
+      env (Filename.quote (exe ())) args (Filename.quote (Filename.basename path)) (Filename.quote out)
   in
   ignore (Test_helpers.Sys.command cmd);
   let s = In_channel.with_open_bin out In_channel.input_all in
   Sys.remove out;
   s
 
-let run ?(args = "--check --reflect-report") src =
+let run ?env ?(args = "--check --reflect-report") src =
   let dir = Filename.temp_dir "reflect" "" in
   Test_helpers.seed_vc_cache dir;
   Fun.protect ~finally:(fun () -> try remove_tree dir with _ -> ()) (fun () ->
       let f = Filename.concat dir "m.march" in
       Out_channel.with_open_bin f (fun oc -> output_string oc src);
-      run_on args f)
+      run_on ?env args f)
 
 let lines s = String.split_on_char '\n' s |> List.filter (( <> ) "")
 
@@ -391,6 +391,21 @@ end
         Alcotest.(check (list string)) "ledger unchanged" (strip without) (strip with_);
         (* and R2 still sees the metric certificate *)
         expect with_ "cnt" ~verdict:"reflected" ~detail:"guard: n >= 0");
+    gated "one pass: the stdlib forces no late-certificate re-check; a user metric does" (fun () ->
+        (* The stdlib is checked with every program, so a stdlib function
+           whose metric certificate is decided late (R2) re-runs the check of
+           every program: CI's test jobs doubled when Set's branch_nodes did
+           (fixed by making it @[opaque]). *)
+        let rechecks out = List.filter (fun l -> contains l "reflect-recheck:") (lines out) in
+        let trivial = run ~env:"MARCH_REFLECT_DEBUG=1" ~args:"--check" "mod Tv do\n  fn one() : Int do 1 end\nend\n" in
+        Alcotest.(check (list string)) "no re-check for a trivial program" [] (rechecks trivial);
+        let cnt =
+          run ~env:"MARCH_REFLECT_DEBUG=1" ~args:"--check"
+            "mod Lc do\n  @[decreases(n)]\n  fn cnt(n : {Int | _ >= 0}) : Int do\n    if n == 0 do 0 else cnt(n - 1) + 1 end\n  end\nend\n"
+        in
+        match rechecks cnt with
+        | [ l ] when contains l "m.march:3:" -> ()
+        | ls -> Alcotest.failf "expected one re-check naming m.march:3, got:\n%s" (String.concat "\n" ls));
     gated "sites_all: Division obligations are listed (cap no_panic)" (fun () ->
         let out =
           run ~args:"--check --refine-report-sites=all"

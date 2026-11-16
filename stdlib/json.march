@@ -537,8 +537,12 @@ mod Json do
     Null -> "null"
     Bool(b) -> if b do "true" else "false" end
     Number(f) -> do
-      let fi = float_to_int(f)
-      if int_to_float(fi) == f do int_to_string(fi)
+      -- Guard before float_to_int, which panics on NaN, the infinities and
+      -- values outside Int's range (#1230); those print as floats.
+      if f > -4600000000000000000.0 && f < 4600000000000000000.0 do
+        let fi = float_to_int(f)
+        if int_to_float(fi) == f do int_to_string(fi)
+        else float_to_string(f) end
       else float_to_string(f) end
     end
     Str(s) -> "\"" ++ escape_str(s) ++ "\""

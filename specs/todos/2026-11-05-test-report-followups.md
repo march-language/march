@@ -14,8 +14,6 @@
 - **Custom `Show`.** The differ reads printed forms back. A custom `show` that prints
   something it can't parse is compared as one leaf: correct, but the caret marks the whole
   value.
-- **JS target.** `__assert_fail` throws the header only (the value diff is native); fine for
-  the browser REPL, worth a diff if JS tests become a thing.
 - **`--explain` pages** for `assert_failed` / `property_failed` / `test_panicked`. A page's
   pointer prints once per process, so the interpreter would print it once and a compiled binary
   under every report (its header is rendered per assert at compile time). Adding pages needs the

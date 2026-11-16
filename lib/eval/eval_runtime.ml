@@ -9,6 +9,20 @@ open March_ast.Ast
 open Eval_types
 open Eval_prim
 
+(** The interpreter's Float rendering, shadowing [Stdlib.string_of_float] for
+    this module and every module that opens it.  Stdlib's is [%.12g] through
+    the platform libc, which prints a NaN whose sign bit is set as ["-nan"]
+    (glibc, x86's default NaN from [inf -. inf]) and an unsigned one as
+    ["nan"] (arm64's default NaN).  NaN has no meaningful sign, so every
+    backend prints ["nan"]; the C runtime does the same in
+    [march_format_float_ocaml] / [logger_float_str] and the JS runtime in
+    [march_float_to_string].  [Stdlib.string_of_float] already yields a valid
+    float lexeme for every finite value (a bare integer gets a trailing dot),
+    so [show] uses it as is: [nan], [inf] and [-inf] stay bare, as in native
+    and JS, instead of gaining a [.0]. *)
+let string_of_float f =
+  if Float.is_nan f then "nan" else Stdlib.string_of_float f
+
 (** Vault: ETS-like in-memory key-value store.
     Each table is identified by an opaque integer handle.
 
@@ -98,9 +112,7 @@ let rec value_to_string v =
   match v with
   | VInt n    -> string_of_int n
   | VFloat f  ->
-    let s = string_of_float f in
-    if String.contains s '.' || String.contains s 'e' then s
-    else s ^ ".0"
+    string_of_float f
   | VString s -> "\"" ^ String.escaped s ^ "\""
   | VBool b   -> string_of_bool b
   | VAtom a   -> ":" ^ a
@@ -152,8 +164,7 @@ let rec value_to_string v =
         (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
   | VNativeFloatArr a ->
     let n = Array.length a in
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     if n <= 8 then
       "NativeFloatArr[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
     else
@@ -161,8 +172,7 @@ let rec value_to_string v =
         (String.concat ", " (List.init 4 (fun i -> fmt a.(i))))
   | VNativeF32Arr a ->
     let n = Array.length a in
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     if n <= 8 then
       "NativeF32Arr[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
     else
@@ -183,12 +193,10 @@ let rec value_to_string v =
       Printf.sprintf "NativeU8Arr(%d)[%s, ...]" n
         (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
   | VF32x4 a ->
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     "F32x4[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
   | VF64x2 a ->
-    let fmt f = let s = string_of_float f in
-                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    let fmt = string_of_float in
     "F64x2[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
   | VI32x4 a ->
     "I32x4[" ^ String.concat ", " (Array.to_list (Array.map string_of_int a)) ^ "]"
@@ -206,6 +214,7 @@ let rec value_to_string v =
   | VRingBuf r ->
     Printf.sprintf "RingBuf(size=%d, cap=%d)" r.rb_size r.rb_cap
   | VResource _ -> "#<resource>"
+  | VHandle c -> Eval_handle.to_string c
 
 
 (* ── Moved verbatim from eval.ml (Task 1.3) so that eval_builtins.ml
@@ -369,6 +378,69 @@ let dyn_sup_vpid_map   : (int, string) Hashtbl.t = Hashtbl.create 4
 let live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t = Hashtbl.create 8
 
 let live_proc_next_id : int ref = ref 0
+
+(** Children whose Process box was released (dropped or closed) without
+    wait_proc and that had not exited yet: reaped without blocking by the
+    next spawn or release, so they do not stay zombies.  The interpreter's
+    twin of runtime/march_runtime.c's live_proc_reap list. *)
+let live_proc_reap : int list ref = ref []
+
+let live_proc_reap_sweep () : unit =
+  let pending = !live_proc_reap in
+  live_proc_reap := [];
+  let running =
+    List.filter (fun pid ->
+        match Unix.waitpid [Unix.WNOHANG] pid with
+        | (0, _) -> true
+        | _ -> false
+        | exception Unix.Unix_error (Unix.EINTR, _, _) -> true
+        | exception Unix.Unix_error _ -> false)
+      pending
+  in
+  (* A finaliser may have appended while we swept. *)
+  live_proc_reap := running @ !live_proc_reap
+
+(** Close the streams of live process [id] and forget it; its pid, or
+    [None] when wait_proc (or a release) already did (live_proc_close_slot). *)
+let live_proc_close (id : int) : int option =
+  match Hashtbl.find_opt live_proc_tbl id with
+  | Some (ic, oc, pid) ->
+    (try close_in_noerr ic with _ -> ());
+    (try close_out_noerr oc with _ -> ());
+    Hashtbl.remove live_proc_tbl id;
+    Some pid
+  | None -> None
+
+(** True once [pid] is reaped (or not our child any more), false while it
+    runs; retried on EINTR, which never counts as exited. *)
+let rec live_proc_reaped_nohang (pid : int) : bool =
+  match Unix.waitpid [Unix.WNOHANG] pid with
+  | (0, _) -> false
+  | _ -> true
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> live_proc_reaped_nohang pid
+  | exception Unix.Unix_error _ -> true
+
+(** Release a Process box's child (march_process_release_handle): close its
+    streams as wait_proc does; a child still running gets SIGTERM, then
+    SIGKILL if it is still running right after; one not exited even then is
+    reaped by the next spawn or release.  An id wait_proc already removed is
+    a no-op: that child is reaped and its pid may belong to another process. *)
+let live_proc_release (id : int) : unit =
+  (match live_proc_close id with
+   | Some pid when not (live_proc_reaped_nohang pid) ->
+     (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+     if not (live_proc_reaped_nohang pid) then begin
+       (try Unix.kill pid Sys.sigkill with Unix.Unix_error _ -> ());
+       if not (live_proc_reaped_nohang pid) then
+         live_proc_reap := pid :: !live_proc_reap
+     end
+   | _ -> ());
+  live_proc_reap_sweep ()
+
+(** What process_wait_proc returns when the child was already reaped (a
+    racing wait_proc): MARCH_PROCESS_NO_CHILD, outside 0..255 and the
+    negative signal values; Process.wait_proc maps it to Err(Closed). *)
+let process_no_child = -1000
 
 (** The Err message of a Process.* spawn builtin for a [Unix_error] raised
     by function [fn].  A command that cannot be executed (not found, not
@@ -731,11 +803,19 @@ let int_wrapping_add a b = if narrow_int then int_add a b else a + b
 let int_wrapping_sub a b = if narrow_int then int_sub a b else a - b
 let int_wrapping_mul a b = if narrow_int then int_mul a b else a * b
 
-(** [Float.to_int], raising [int_overflow op] when [f] is outside the host Int
-    range on a narrow host. *)
+(** [Float.to_int] for the Float -> Int builtins ([op] is the builtin's name),
+    [f] already rounded to a whole number.  NaN, and a value outside the
+    63-bit range [-2^62, 2^62), panic (specs/lang/type-system.md, "Converting
+    a Float to an Int") instead of returning what the host's conversion
+    happens to give; the messages are the C runtime's (march_float_int_checked)
+    byte for byte.  On a narrow host an in-range value can still exceed the
+    host's own Int, which raises [int_overflow op]. *)
 let int_of_float_checked op f =
-  if narrow_int && not (Float.is_nan f)
-     && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
+  if Float.is_nan f then eval_error "%s: cannot convert NaN to Int" op
+  else if not (f >= -0x1p62 && f < 0x1p62) then
+    eval_error "%s: value out of Int range" op
+  else if narrow_int
+       && (f >= Float.of_int max_int +. 1. || f < Float.of_int min_int)
   then int_overflow op else Float.to_int f
 
 let arith_num iop fop name = VBuiltin (name, function
@@ -760,6 +840,11 @@ let type_name_of_value = function
 
 let ctor_qualified_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
 
+(** Bare constructor tags that two or more types declare (filled by
+    [register_type_ctors]); such a tag's [ctor_qualified_type_tbl] entry is
+    whichever type registered last, so [find_impl_for] ignores it. *)
+let ambiguous_ctor_tags : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 (** Like [type_name_of_value], but a colliding [VCon]'s type resolves to its
     declaring-module-qualified name (e.g. "NA.Thing") instead of the bare
     short name, so a general-interface method call routes through
@@ -772,6 +857,22 @@ let dispatch_type_name_of_value = function
      | Some qualified -> Some qualified
      | None -> type_name_of_value v)
   | v -> type_name_of_value v
+
+(** The [iface] impl for value [v] whose bare type name is [tname]: a
+    colliding type's own (declaring-module-qualified) slot first, see
+    [dispatch_type_name_of_value]; else the bare slot.  Without the qualified
+    slot, two same-short-name types' derived Show/Eq/Ord/Hash impls shared one
+    last-writer-wins key and a value of one ran the other's impl. *)
+let find_impl_for iface (v : value) (tname : string) =
+  match v with
+  | VCon (tag, _) when not (Hashtbl.mem ambiguous_ctor_tags tag) ->
+    (match Hashtbl.find_opt ctor_qualified_type_tbl tag with
+     | Some q ->
+       (match Hashtbl.find_opt impl_tbl (iface, q) with
+        | Some f -> Some f
+        | None -> Hashtbl.find_opt impl_tbl (iface, tname))
+     | None -> Hashtbl.find_opt impl_tbl (iface, tname))
+  | _ -> Hashtbl.find_opt impl_tbl (iface, tname)
 
 (** Lexicographic order of two tuples: the first component pair that
     differs decides, each compared as [compare] would (a total order on
@@ -797,7 +898,7 @@ and ord_compare_value (a : value) (b : value) : int option =
   | _ ->
     (match type_name_of_value a with
      | Some tname ->
-       (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+       (match find_impl_for "Ord" a tname with
         | Some cmp_fn ->
           (match !iface_dispatch_hook cmp_fn [a; b] with
            | VInt n -> Some n
@@ -814,7 +915,7 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
       (* For == and !=, look up the Eq impl if available. *)
       let eq_result = match type_name_of_value a with
         | Some tname ->
-          (match Hashtbl.find_opt impl_tbl ("Eq", tname) with
+          (match find_impl_for "Eq" a tname with
            | Some eq_fn -> Some (!iface_dispatch_hook eq_fn [a; b])
            | None       -> None)
         | None -> None
@@ -833,7 +934,7 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
         | _ ->
         match type_name_of_value a with
         | Some tname ->
-          (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+          (match find_impl_for "Ord" a tname with
            | Some cmp_fn -> Some (!iface_dispatch_hook cmp_fn [a; b])
            | None        -> None)
         | None -> None
@@ -1642,8 +1743,7 @@ let rec show_dispatch (v : value) : string =
   match v with
   | VInt n    -> string_of_int n
   | VFloat f  ->
-    let s = string_of_float f in
-    if String.contains s '.' || String.contains s 'e' then s else s ^ ".0"
+    string_of_float f
   | VBool b   -> string_of_bool b
   | VString s -> s
   | VAtom a   -> ":" ^ a
@@ -1660,7 +1760,7 @@ let rec show_dispatch (v : value) : string =
   | _ ->
     (match type_name_of_value v with
      | Some tname ->
-       (match Hashtbl.find_opt impl_tbl ("Show", tname) with
+       (match find_impl_for "Show" v tname with
         | Some show_fn ->
           (match !apply_hook show_fn [v] with
            | VString s -> s

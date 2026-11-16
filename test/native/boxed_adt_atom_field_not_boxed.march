@@ -29,5 +29,6 @@ mod Main do
     TagFloat(v) -> println(float_to_string(v))
     _           -> println("MISS")
     end
+    ()
   end
 end

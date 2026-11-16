@@ -10,7 +10,7 @@
 --   leave/3       — called on leave / disconnect
 --
 -- Types defined here:
---   Socket         — per-connection state (topic, assigns, pids)
+--   ChannelSocket  — per-connection state (topic, assigns, pids)
 --   HandleResult   — return type for channel callbacks
 --   ChannelMsg     — JSON wire message (topic/event/payload/ref/join_ref)
 --   ChannelRoute   — pattern → handler association used by the router
@@ -41,13 +41,13 @@ mod Channel do
 
   -- ── Core types ─────────────────────────────────────────────────────────────
 
-  -- Socket: per-connection state for one channel join.
+  -- ChannelSocket: per-connection state for one channel join.
   --   topic         — the joined topic, e.g. "room:lobby"
   --   channel_pid   — the channel process (green thread) pid
   --   transport_pid — the underlying transport (WS frame loop) pid
   --   assigns       — user key-value bag; set with Channel.assign/3
   --   join_ref      — the ref string from the original join message
-  type Socket = Socket(
+  type ChannelSocket = ChannelSocket(
     String,               -- topic
     Int,                  -- channel_pid
     Int,                  -- transport_pid
@@ -65,7 +65,7 @@ mod Channel do
       "room:lobby"
   """
   fn socket_topic(sock) do
-    match sock do | Socket(t, _, _, _, _) -> t end
+    match sock do | ChannelSocket(t, _, _, _, _) -> t end
   end
 
   doc """
@@ -78,7 +78,7 @@ mod Channel do
       10
   """
   fn socket_channel_pid(sock) do
-    match sock do | Socket(_, cp, _, _, _) -> cp end
+    match sock do | ChannelSocket(_, cp, _, _, _) -> cp end
   end
 
   doc """
@@ -91,7 +91,7 @@ mod Channel do
       11
   """
   fn socket_transport_pid(sock) do
-    match sock do | Socket(_, _, tp, _, _) -> tp end
+    match sock do | ChannelSocket(_, _, tp, _, _) -> tp end
   end
 
   doc """
@@ -108,7 +108,7 @@ mod Channel do
       [("role", "admin"), ("user", "alice")]
   """
   fn socket_assigns(sock) do
-    match sock do | Socket(_, _, _, a, _) -> a end
+    match sock do | ChannelSocket(_, _, _, a, _) -> a end
   end
 
   doc """
@@ -122,7 +122,7 @@ mod Channel do
       "0"
   """
   fn socket_join_ref(sock) do
-    match sock do | Socket(_, _, _, _, jr) -> jr end
+    match sock do | ChannelSocket(_, _, _, _, jr) -> jr end
   end
 
   doc """
@@ -165,8 +165,8 @@ mod Channel do
   """
   fn assign(sock, key, value) do
     match sock do
-    Socket(t, cp, tp, a, jr) ->
-      Socket(t, cp, tp, Cons((key, value), a), jr)
+    ChannelSocket(t, cp, tp, a, jr) ->
+      ChannelSocket(t, cp, tp, Cons((key, value), a), jr)
     end
   end
 
@@ -180,7 +180,7 @@ mod Channel do
       "room:42"
   """
   fn new_socket(topic, channel_pid, transport_pid, join_ref) do
-    Socket(topic, channel_pid, transport_pid, Nil, join_ref)
+    ChannelSocket(topic, channel_pid, transport_pid, Nil, join_ref)
   end
 
   -- ── HandleResult ───────────────────────────────────────────────────────────

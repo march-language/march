@@ -1,0 +1,82 @@
+mod Main do
+  needs IO.Console
+  -- Two nested modules each declare a variant type named `Note`, and the
+  -- entry module declares a third.  Each is its own type
+  -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md):
+  -- every reference means the innermost enclosing declaration, `A.Note` /
+  -- `Main.A.Note` name A's from outside, derived Show/Eq run each type's own
+  -- impl, and both `derive Json` codecs round-trip, `from_json` picking the
+  -- decoder by the result type.  The interpreter used to run the last-
+  -- registered same-short-name type's Show/Eq impl on all three.
+
+  type Note = Top(Int)
+  derive Eq, Show for Note
+
+  mod A do
+    type Note = NA(Int) | NB(String)
+    derive Eq, Show, Json for Note
+    type W = W(Note)
+    fn make() : Note do NA(3) end
+    fn wrap(n : Note) : W do W(n) end
+    fn describe(n : Note) : String do
+      match n do
+        NA(k) -> "NA " ++ int_to_string(k)
+        NB(s) -> "NB " ++ s
+      end
+    end
+    fn roundtrip(n : Note) : String do
+      match Json.parse(Json.to_string(to_json(n))) do
+        Ok(j) ->
+          let r : Result(Note, Json.DecodeError) = from_json(j)
+          match r do
+            Ok(m) -> "A " ++ describe(m)
+            Err(_) -> "A err"
+          end
+        Err(_) -> "A parse"
+      end
+    end
+  end
+
+  mod B do
+    type Note = NC(Bool) | ND(Int, Int)
+    derive Eq, Show, Json for Note
+    fn describe(n : Note) : String do
+      match n do
+        NC(b) -> if b do "NC true" else "NC false" end
+        ND(x, y) -> "ND " ++ int_to_string(x + y)
+      end
+    end
+    fn roundtrip(n : Note) : String do
+      match Json.parse(Json.to_string(to_json(n))) do
+        Ok(j) ->
+          let r : Result(Note, Json.DecodeError) = from_json(j)
+          match r do
+            Ok(m) -> "B " ++ describe(m)
+            Err(_) -> "B err"
+          end
+        Err(_) -> "B parse"
+      end
+    end
+  end
+
+  fn unwrap(w : A.W) : A.Note do
+    match w do
+      A.W(n) -> n
+    end
+  end
+
+  fn pick(n : Main.A.Note, m : B.Note, t : Note) : String do
+    A.describe(n) ++ " / " ++ B.describe(m) ++ " / " ++ show(t)
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    print_line(A.describe(unwrap(A.wrap(A.make()))))
+    print_line(pick(A.NB("x"), B.NC(true), Top(7)))
+    print_line(show(A.make()) ++ " " ++ show(B.ND(1, 2)) ++ " " ++ show(Top(1)))
+    print_line(if A.make() == A.NA(3) do "eq A" else "neq A" end)
+    print_line(if B.ND(1, 2) == B.ND(1, 3) do "eq B" else "neq B" end)
+    print_line(if Top(2) == Top(2) do "eq Top" else "neq Top" end)
+    print_line(A.roundtrip(A.NA(3)))
+    print_line(B.roundtrip(B.ND(1, 2)))
+  end
+end

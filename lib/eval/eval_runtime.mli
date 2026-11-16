@@ -52,12 +52,21 @@ val display_tag : string -> string
 (** A record's fields in display order: sorted by field name, the order the
     compiled backend lays them out in. *)
 val sorted_record_fields : (string * 'a) list -> (string * 'a) list
+
+(** The interpreter's Float rendering: [Stdlib.string_of_float], except that
+    any NaN is ["nan"] (libc prints a sign-bit-set one as ["-nan"]).  Exported
+    so that every module that opens [Eval_runtime] ([Eval_builtins],
+    [Eval_net]) shadows [Stdlib.string_of_float] with it, not just this file. *)
+val string_of_float : float -> string
+
 val value_to_string : value -> string
 val value_display : value -> string
 val show_dispatch : value -> string
 val type_name_of_value : value -> string option
 val ctor_qualified_type_tbl : (string, string) Hashtbl.t
+val ambiguous_ctor_tags : (string, unit) Hashtbl.t
 val dispatch_type_name_of_value : value -> string option
+val find_impl_for : string -> value -> string -> value option
 val tuple_compare : value list -> value list -> int option
 val type_tag_of : value -> string option
 
@@ -170,6 +179,22 @@ val uname_info : (string * string) option Lazy.t
 val live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t
 val live_proc_next_id : int ref
 
+(** Children a released Process box SIGTERMed that had not exited yet. *)
+val live_proc_reap : int list ref
+
+(** Reap (waitpid WNOHANG) every pending child that has exited since. *)
+val live_proc_reap_sweep : unit -> unit
+
+(** Release a Process box's child: close its streams, SIGTERM it if still
+    running, reap it without blocking (march_process_release_handle). *)
+val live_proc_release : int -> unit
+
+(** Close live process [id]'s streams and forget it; its pid if it was live. *)
+val live_proc_close : int -> int option
+
+(** process_wait_proc's result for a child already reaped (-1000). *)
+val process_no_child : int
+
 (** Err message of a Process.* spawn builtin for a [Unix_error (err, fn, _)]:
     ["cannot execute <cmd>: <strerror>"] when the command could not be
     executed, the bare message otherwise.  Matches the compiled runtime. *)
@@ -257,8 +282,10 @@ val int_wrapping_add : int -> int -> int
 val int_wrapping_sub : int -> int -> int
 val int_wrapping_mul : int -> int -> int
 
-(** [Float.to_int], raising [int_overflow op] when the float is out of the
-    host Int range on a narrow host. *)
+(** [int_of_float_checked op f]: [Float.to_int f] for the Float -> Int
+    builtin [op], with [f] already rounded.  Panics on NaN and outside
+    [-2^62, 2^62); on a narrow host, also raises [int_overflow op] outside the
+    host's own Int range. *)
 val int_of_float_checked : string -> float -> int
 
 val arith_num :

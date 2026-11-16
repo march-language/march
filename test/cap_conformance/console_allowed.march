@@ -1,0 +1,15 @@
+-- REFUSE: IO.Clock
+-- With the console allowed, every console operation prints and returns
+-- Ok(()); the refusal of another kind does not touch it.
+mod ConsoleAllowed do
+  needs IO.Console
+
+  fn main(_c : Cap(IO.Console)) do
+    let a = println("println")
+    let b = IO.puts("IO.puts")
+    let c = IO.write("IO.write\n")
+    println(a == Ok(()) && b == Ok(()) && c == Ok(()))
+    println(IO.inspect(5))
+    debug("debug")
+  end
+end

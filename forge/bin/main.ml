@@ -231,14 +231,32 @@ let fix_cmd =
   let contracts =
     Arg.(value & flag & info ["contracts"]
            ~doc:"Insert @[no_alloc] on functions the compiler verified allocation-free.                  Default scope: functions whose compiled form reuses memory in place or                  stack-allocates; widen it with `[contracts] no_alloc = [...]` globs in forge.toml") in
-  let run d c =
-    match Cmd_fix.run ~dry_run:d ~contracts:c () with
+  let paths =
+    Arg.(value & pos_all string [] & info [] ~docv:"PATH"
+           ~doc:"Fix the .march files under these files or directories instead of the \
+                 current project (no forge.toml needed). Repeats until no fix applies. \
+                 MARCH_BIN names the compiler to ask; default `march` on PATH.") in
+  let only =
+    Arg.(value & opt (list string) [] & info ["only"] ~docv:"CODE[,CODE]"
+           ~doc:"Apply only the fixes of diagnostics with these codes \
+                 (e.g. `cap_result_unhandled,stdlib_internal`). Naming a code also applies \
+                 its fixes that are only a guess, which plain `forge fix` never does: \
+                 `--only migrate_rename_suggested` adds the migrate clause the compiler \
+                 proposes for a state field that looks renamed.") in
+  let run d c only paths =
+    let result =
+      if paths = [] then
+        (if only <> [] && c then Error "--only does not combine with --contracts"
+         else Cmd_fix.run ~dry_run:d ~contracts:c ~only ())
+      else if c then Error "--contracts works on a project, not on paths"
+      else Cmd_fix.run_paths ~dry_run:d ~only paths in
+    match result with
     | Ok msg  -> Printf.printf "%s\n%!" msg
     | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "fix"
            ~doc:"Apply safe auto-fixes for compiler diagnostics (missing needs, unused params, redundant arms)")
-    Term.(const run $ dry $ contracts)
+    Term.(const run $ dry $ contracts $ only $ paths)
 
 (* ------------------------------------------------------------------- forge run *)
 
@@ -1494,21 +1512,31 @@ let deploy_hot_cmd =
                  $(b,Counter.Inc) for a handler's parameter refinements, or $(b,Counter) \
                  for all of an actor's laws. A counterexample still refuses the deploy.")
   in
-  let run o s target prefix e c t grant_caps no_cap_gate old_schemas accept_unproved =
+  let drop =
+    Arg.(value & opt_all string [] &
+         info ["drop"] ~docv:"ACTOR.FIELD"
+           ~doc:"Let the derived state migration discard this removed state field \
+                 (repeatable, or comma-separated): $(b,Counter.history). Without it, a \
+                 removed field nothing reads refuses the deploy. Built into the patch's \
+                 signed schemas, so the server's audit log records it; a $(b,--drop) the \
+                 build does not use aborts the deploy.")
+  in
+  let run o s target prefix e c t grant_caps no_cap_gate old_schemas accept_unproved drop =
     ignore target; ignore prefix;
     let accept_unproved =
       List.concat_map (fun a -> List.filter (( <> ) "") (String.split_on_char ',' a))
         accept_unproved in
+    let drop = List.concat_map (fun a -> List.filter (( <> ) "") (String.split_on_char ',' a)) drop in
     (* D26: a topology app's derived pool caps go through the same gate. *)
     let pool_gate proj ~env = Pool_caps.deploy_gate ~proj ~env ~grant_caps () in
     let result =
       if e = "" && c = 0 then
         (* Single-server fast path (backward compat) *)
         Cmd_deploy_hot.deploy ~output:o ~so:s ~old_schemas ~grant_caps ~no_cap_gate ~pool_gate
-          ~accept_unproved ()
+          ~accept_unproved ~drop ()
       else
         Cmd_deploy_hot.deploy_env ~output:o ~so:s ~old_schemas ~env:e ~canary:c ~timeout_ms:t
-          ~grant_caps ~no_cap_gate ~pool_gate ~accept_unproved ()
+          ~grant_caps ~no_cap_gate ~pool_gate ~accept_unproved ~drop ()
     in
     match result with
     | Ok () -> ()
@@ -1516,7 +1544,7 @@ let deploy_hot_cmd =
   in
   Cmd.v (Cmd.info "hot"
            ~doc:"Build and hot-deploy changed functions to a running server (or fleet)")
-  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate $ old_schemas $ accept_unproved)
+  Term.(const run $ output $ so $ target $ module_prefix $ env_name $ canary $ timeout $ grant_cap $ no_cap_gate $ old_schemas $ accept_unproved $ drop)
 
 let deploy_term =
   let env_arg =

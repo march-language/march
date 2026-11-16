@@ -49,5 +49,6 @@ mod ToStringCtorNames do
     println(Tally(0))
     let p : Pt = { x: 1, y: 2 }
     println(p)
+    ()
   end
 end

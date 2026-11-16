@@ -85,7 +85,7 @@ let cap_strict_ceiling : bool ref = ref false
 
 (** Whether source file [f] is one of the standard library's. The ONE
     predicate for "this code is the stdlib's": [span_is_stdlib] below, the
-    stdlib-only builtin gate ([Typecheck_caps.check_stdlib_only_refs]) and the
+    stdlib-only builtin gate (the resolution-time check in [Typecheck.infer_expr]'s [EVar] arm) and the
     driver's diagnostic filter (bin/main.ml, [user_diag_file]) all go through
     it, so the gate can never admit code the filter shows as the user's, or
     reject code whose error the filter then hides. *)
@@ -148,13 +148,26 @@ let file_is_stdlib (f : string) : bool =
 let span_is_stdlib (sp : Ast.span) : bool =
   file_is_stdlib sp.Ast.file
 
+(** The file tag of the control plane's generated wiring, the one generated
+    file that drives the stdlib's raw-fd cluster plumbing ([ClusterNode.handshake],
+    [NetKernel.send_frame], ...). It must equal [Hot_reload.control_wiring_file]
+    (lib/tir cannot be named from here; test_stdlib_only pins the two equal). *)
+let control_wiring_file = "<control>"
+
+(** Whether a reference at [sp] may name a [@[stdlib_internal]] function: the
+    stdlib's own code, or the compiler's generated control wiring. The driver
+    refuses an input file named like a generated-code tag (bin/main.ml,
+    [add_input]), so a user file cannot carry `<control>`. The stdlib-only BUILTIN gate keeps using [span_is_stdlib]. *)
+let span_may_name_internal (sp : Ast.span) : bool =
+  span_is_stdlib sp || String.equal sp.Ast.file control_wiring_file
+
 (** Builtins only the standard library may reference, each with the
     suggestion the error gives user code instead (e.g.
     [("pid_of_int", "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)")]).
 
     A call or value reference to one of these names from code outside the
     stdlib ([span_is_stdlib]) is a type error; the check is
-    [Typecheck_caps.check_stdlib_only_refs]. It exists for builtins that
+    the resolution-time gate in [Typecheck.infer_expr]'s [EVar] arm. It exists for builtins that
     forge authority, which user code must reach through a capability-taking
     stdlib wrapper (specs/plans/2026-09-21-distributed-authority-and-deploys-plan.md,
     II.1 and II.4.4). Search and docs are unaffected: the gate is at the
@@ -223,25 +236,43 @@ let note_stdlib_decls (decls : Ast.decl list) : unit =
 (** Maps builtin function names to the IO capability they require.
     Used by the body-scanning pass (Phase 2) to detect missing [needs] declarations. *)
 let builtin_cap_table : (string * string) list = [
+  (* ocap phase 2 (Task 10): only OPENS are charged. An operation on a handle
+     the caller already holds (a File.Handle, File.Dir, Socket, Listener,
+     Udp.UdpSocket, Tls.TlsConn/TlsCtx, WebSocket.WsSocket or Process) needs no
+     capability: the open was checked, and since this phase a handle is
+     unforgeable (its raw builtins are stdlib-only, [Typecheck_env.stdlib_only]).
+     The removed use builtins are listed in
+     specs/todos/2026-11-10-ocap-p1-handle-uses-not-capability-ops.md. *)
   (* IO.Console *)
   ("println",               "IO.Console");
   ("print",                 "IO.Console");
   ("print_line",            "IO.Console");
   ("print_stderr",          "IO.Console");
+  (* stdin reads: uncharged until ocap phase 1 (2026-11-10) *)
+  ("io_read_line",          "IO.Console");
+  ("io_read_byte",          "IO.Console");
   (* IO.FileRead *)
   ("file_exists",           "IO.FileRead");
   ("file_read",             "IO.FileRead");
   ("file_open",             "IO.FileRead");
-  ("file_read_line",        "IO.FileRead");
-  ("file_read_chunk",       "IO.FileRead");
   ("file_stat",             "IO.FileRead");
   ("dir_exists",            "IO.FileRead");
   ("dir_list",              "IO.FileRead");
+  (* dir_open opens a File.Dir (File.open_dir). The handle-taking
+     file_open_at / dir_list_at are charged nothing: the directory came from
+     a checked open (ocap phase 2). *)
+  ("dir_open",              "IO.FileRead");
   ("csv_open",              "IO.FileRead");
-  ("csv_next_row",          "IO.FileRead");
   (* IO.FileWrite *)
   ("file_write",            "IO.FileWrite");
   ("file_append",           "IO.FileWrite");
+  (* file_open_write opens a stream for writing (File.open_write). The
+     handle-taking file_write_handle / file_seek are charged nothing: the
+     handle came from a checked open (ocap phase 2). *)
+  ("file_open_write",       "IO.FileWrite");
+  (* dir_open_write is dir_open for a write-capable File.Dir
+     (File.open_dir_write): the same open, charged IO.FileWrite. *)
+  ("dir_open_write",        "IO.FileWrite");
   ("file_delete",           "IO.FileWrite");
   ("file_rename",           "IO.FileWrite");
   ("dir_mkdir",             "IO.FileWrite");
@@ -253,46 +284,28 @@ let builtin_cap_table : (string * string) list = [
   (* IO.NetConnect *)
   ("tcp_connect",           "IO.NetConnect");
   ("tcp_connect_timeout",   "IO.NetConnect");
-  ("tcp_send_all",          "IO.NetConnect");
-  ("tcp_recv_all",          "IO.NetConnect");
-  ("tcp_recv_exact",        "IO.NetConnect");
   ("dist_monitor_register", "IO.NetConnect");
   ("dist_monitor_pending",  "IO.NetConnect");
   ("dist_monitor_ack",      "IO.NetConnect");
   ("dist_monitor_forget_node", "IO.NetConnect");
-  ("tcp_recv_http",         "IO.NetConnect");
-  ("tcp_recv_http_headers", "IO.NetConnect");
-  ("tcp_recv_chunk",        "IO.NetConnect");
-  ("tcp_recv_chunk_timeout","IO.NetConnect");
-  ("tcp_set_recv_timeout",  "IO.NetConnect");
-  ("tcp_recv_chunked_frame","IO.NetConnect");
-  ("tcp_recv_timeout",      "IO.NetConnect");
-  (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect; a module that
-     only speaks WebSocket can declare `needs IO.WebSocket` instead of the
-     broader `needs IO.NetConnect`, mirroring IO.NetConnect.TLS. *)
-  ("ws_recv",               "IO.WebSocket");
-  ("ws_send",               "IO.WebSocket");
-  ("ws_select",             "IO.WebSocket");
+  (* IO.WebSocket — a least-privilege sub-cap of IO.NetConnect. Its three
+     builtins (ws_recv / ws_send / ws_select) act on a WebSocket.WsSocket the
+     HTTP server's upgrade hands over, so since ocap phase 2 they charge
+     nothing; the capability stays declarable. *)
   (* IO.Network *)
   ("dns_resolve",           "IO.Network");
   (* IO.NetListen *)
   ("tcp_listen",            "IO.NetListen");
-  ("tcp_accept",            "IO.NetListen");
-  ("tcp_accept_timeout",    "IO.NetListen");
-  ("tcp_local_port",        "IO.NetListen");
   ("udp_open",              "IO.NetConnect");
   ("udp_resolve",           "IO.NetConnect");
-  ("udp_connect",           "IO.NetConnect");
-  ("udp_close",             "IO.NetConnect");
-  ("udp_local_addr",        "IO.NetConnect");
-  ("udp_stats",             "IO.NetConnect");
-  ("udp_send_batch",        "IO.NetConnect");
-  ("udp_send_many",         "IO.NetConnect");
-  ("udp_recv_batch",        "IO.NetConnect");
   ("http_server_listen",    "IO.NetListen");
   ("http_server_spawn_n",   "IO.NetListen");
   ("http_server_wait",      "IO.NetListen");
   ("http_server_bind_host", "IO.NetListen");
+  ("http_server_plain_listener", "IO.NetListen");
+  ("http_server_set_timeouts",   "IO.NetListen");
+  ("http_server_tls_configure",  "IO.NetListen");
+  ("http_server_reload_tls",     "IO.NetListen");
   (* IO.Process *)
   ("process_env",           "IO.Process");
   ("process_set_env",       "IO.Process");
@@ -303,10 +316,6 @@ let builtin_cap_table : (string * string) list = [
   ("process_spawn_sync",    "IO.Process");
   ("process_spawn_lines",   "IO.Process");
   ("process_spawn_async",   "IO.Process");
-  ("process_read_line",     "IO.Process");
-  ("process_write",         "IO.Process");
-  ("process_kill_proc",     "IO.Process");
-  ("process_wait_proc",     "IO.Process");
   (* IO.Clock *)
   ("unix_time",             "IO.Clock");
   ("unix_time_ms",          "IO.Clock");
@@ -345,18 +354,20 @@ let builtin_cap_table : (string * string) list = [
   ("vault_whereis",         "IO.Mut");
   ("vault_reap",            "IO.Mut");
   ("vault_close",           "IO.Mut");
-  (* IO.NetConnect.TLS — encrypted transport; tls_close/tls_ctx_free are cleanup, no cap *)
+  (* IO.NetConnect.TLS — encrypted transport. Making a context is the
+     charged act; tls_connect / tls_accept run over a Socket the caller already
+     holds (its open was checked), and reads, writes and cleanup on the
+     resulting TlsConn charge nothing. *)
   ("tls_client_ctx",        "IO.NetConnect.TLS");
   ("tls_server_ctx",        "IO.NetConnect.TLS");
-  ("tls_connect",           "IO.NetConnect.TLS");
-  ("tls_accept",            "IO.NetConnect.TLS");
-  ("tls_read",              "IO.NetConnect.TLS");
-  ("tls_read_timeout",      "IO.NetConnect.TLS");
-  ("tls_write",             "IO.NetConnect.TLS");
-  ("tls_negotiated_alpn",   "IO.NetConnect.TLS");
-  ("tls_peer_cn",           "IO.NetConnect.TLS");
-  ("tls_ctx_set_groups",    "IO.NetConnect.TLS");
-  ("tls_negotiated_group",  "IO.NetConnect.TLS");
+  (* IO.Registry — naming and finding actors by name (ocap phase 2, spec §6).
+     A lookup turns a string into a Pid, which is a capability; registering a
+     name can impersonate the actor that name stands for; listing reveals
+     every name. *)
+  ("actor_register",        "IO.Registry");
+  ("actor_unregister",      "IO.Registry");
+  ("actor_whereis",         "IO.Registry");
+  ("actor_registered",      "IO.Registry");
 ]
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
@@ -841,6 +852,11 @@ let builtin_bindings : (string * scheme) list =
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
+    (* ocap phase 1: the run-time capability check point and its test hook
+       (runtime/march_extras.c). Stdlib-only; user code calls Authority.check.
+       Not capability operations themselves, so not in builtin_cap_table. *)
+    ("cap_check_raw",   Mono (TArrow (t_string, TArrow (t_string, t_int))));
+    ("cap_launch_text", Mono (TArrow (t_unit,  t_string)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,
@@ -868,7 +884,10 @@ let builtin_bindings : (string * scheme) list =
        peak_rss_bytes.  sys_uptime_ms (System.monotonic_time) stays ambient
        too: it is process-relative elapsed time, not the wall clock
        unix_time_ms reads, and gating it would break every existing timing
-       caller granted only IO.Console.  sys_os / sys_arch return a lowercase
+       caller granted only IO.Console.  Ambient for `needs` only: `cap pure`
+       and `cap deterministic` still ban it, directly and through any stdlib
+       wrapper (Typecheck_modcaps.monotonic_clock_builtins, issue #1180).
+       sys_os / sys_arch return a lowercase
        String ("macos", "aarch64", ...): the codegen row always said TString,
        and a String is what march_sys_os/march_sys_arch can build. *)
     ("sys_os",                  Mono (TArrow (t_unit, t_string)));
@@ -961,6 +980,9 @@ let builtin_bindings : (string * scheme) list =
     ("task_spawn",         poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
     ("task_await",         poly1 (fun a -> TArrow (TCon ("Task", [a]), t_result a t_string)));
     ("task_await_unwrap",  poly1 (fun a -> TArrow (TCon ("Task", [a]), a)));
+    (* Non-blocking task_await: None while the task runs, else Some of what
+       task_await would answer. *)
+    ("task_poll",          poly1 (fun a -> TArrow (TCon ("Task", [a]), t_option (t_result a t_string))));
     ("task_yield",         Mono (TArrow (t_unit, t_unit)));
     ("task_spawn_steal",   poly1 (fun a -> TArrow (TCon ("WorkPool", []), TArrow (TArrow (t_int, a), TCon ("Task", [a])))));
     ("task_reductions",    Mono (TArrow (t_unit, t_int)));
@@ -1168,6 +1190,23 @@ let builtin_bindings : (string * scheme) list =
     ("file_rename",     Mono (TArrow (t_string, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
     ("file_stat",       Mono (TArrow (t_string, t_result (TCon ("FileStat", [])) (TCon ("FileError", [])))));
     ("file_open",       Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    (* file_open_write(path, mode): mode 0 truncates, 1 appends; creates the
+       file (0644). file_write_handle(fd, data); file_seek(fd, offset) seeks
+       to an absolute offset and returns it. Raw handles: File.open_write /
+       File.write_to / File.seek wrap them in a File.Handle box. *)
+    ("file_open_write", Mono (TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
+    ("file_write_handle", Mono (TArrow (t_int, TArrow (t_string, t_result t_unit (TCon ("FileError", []))))));
+    ("file_seek",       Mono (TArrow (t_int, TArrow (t_int, t_result t_int (TCon ("FileError", []))))));
+    (* File.Dir (ocap phase 2): dir_open(path) / dir_open_write(path) open a
+       directory (O_DIRECTORY) and return its raw fd; file_open_at(dirfd, rel,
+       flags) opens rel beneath it (flags 0 read, 1 truncate, 2 append) as a
+       file handle; dir_list_at(dirfd, rel) lists rel beneath it ("" is the
+       directory itself), sorted. A path that leaves the directory is
+       Err(Escapes(rel)). runtime/march_file_beneath.c. *)
+    ("dir_open",        Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    ("dir_open_write",  Mono (TArrow (t_string, t_result t_int (TCon ("FileError", [])))));
+    ("file_open_at",    Mono (TArrow (t_int, TArrow (t_string, TArrow (t_int, t_result t_int (TCon ("FileError", [])))))));
+    ("dir_list_at",     Mono (TArrow (t_int, TArrow (t_string, t_result (t_list t_string) (TCon ("FileError", []))))));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     (* file_close returns :ok on both backends (it was declared Unit while
@@ -1203,6 +1242,20 @@ let builtin_bindings : (string * scheme) list =
     ("csv_open",     Mono (TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int (TCon ("CsvError", [])))))));
     ("csv_next_row", Mono (TArrow (t_int, TCon ("Csv.CsvRow", []))));
     ("csv_close",    Mono (TArrow (t_int, t_atom)));
+    (* Handle-box primitives (ocap phase 2, Task 2 of
+       specs/plans/2026-11-10-ocap-p2-handles-plan.md; runtime/march_handle.c).
+       Stdlib-only ([Typecheck_env.stdlib_only]): the stdlib wraps each raw
+       descriptor in a box of one of the handle types below and annotates the
+       result, so the box's type is the caller's [a]. Kinds are small ints
+       (1 FILE .. 9 PROCESS). [handle_enter] returns the raw value and counts
+       a use in flight, or -1 when the box is closed; [handle_leave] ends it. *)
+    ("handle_new",       poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, a)))));
+    ("handle_enter",     poly1 (fun a -> TArrow (a, TArrow (t_int, t_int))));
+    ("handle_leave",     poly1 (fun a -> TArrow (a, t_unit)));
+    ("handle_close",     poly1 (fun a -> TArrow (a, t_bool)));
+    ("handle_detach",    poly1 (fun a -> TArrow (a, t_int)));
+    ("handle_is_closed", poly1 (fun a -> TArrow (a, t_bool)));
+    ("handle_aux",       poly1 (fun a -> TArrow (a, t_int)));
     (* TCP/HTTP transport builtins *)
     (* tcp_listen(port): binds+listens on port, returns Ok(listen_fd) or Err(reason) *)
     ("tcp_listen",              Mono (TArrow (t_int, t_result t_int t_string)));
@@ -1260,9 +1313,11 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_recv_chunked_frame",  Mono (TArrow (t_int, t_result t_string t_string)));
     (* Ok(None) is the cap expiring: the absence of an event, not an error. *)
     ("tcp_recv_timeout",        Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result (t_option t_string) t_string)))));
-    (* http_serialize_request(method, host, path, query_opt, headers, body) -> String *)
+    (* http_serialize_request(method, host, path, query_opt, headers, body)
+         -> Result(String, String): Err when a field would smuggle a second
+       request (a CR/LF/space/control byte; lib/eval/http_request_check.ml). *)
     ("http_serialize_request",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string,
-        TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
+        TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_result t_string t_string))))))));
     ("http_parse_response",     Mono (TArrow (t_string,
         t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) t_string)));
     (* http_fetch / http_fetch_available: JS-only fetch path used by
@@ -1286,6 +1341,17 @@ let builtin_bindings : (string * scheme) list =
     ("http_server_wait",        Mono (TArrow (t_int, t_unit)));
     (* http_server_bind_host(host) -> Unit: the IPv4 address later listens bind to *)
     ("http_server_bind_host",   Mono (TArrow (t_string, t_unit)));
+    (* HTTPS (march_https.c). kind: 0 = cert/key file paths, 1 = PEM text. *)
+    (* http_server_tls_configure(kind, a, b, poll_secs, wait_for_cert) -> Result(Int, String) *)
+    ("http_server_tls_configure", Mono (TArrow (t_int, TArrow (t_string, TArrow (t_string, TArrow (t_int, TArrow (t_int, TCon ("Result", [t_int; t_string]))))))));
+    (* http_server_set_timeouts(handshake_secs, header_secs, progress_secs) -> Unit *)
+    ("http_server_set_timeouts",  Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, t_unit)))));
+    (* http_server_reload_tls(kind, a, b) -> Result(Int, String) *)
+    ("http_server_reload_tls",    Mono (TArrow (t_int, TArrow (t_string, TArrow (t_string, TCon ("Result", [t_int; t_string]))))));
+    (* http_server_plain_listener(port, pipeline_fn) -> Unit: an extra plain-HTTP port for the next listen *)
+    ("http_server_plain_listener", poly1 (fun a -> TArrow (t_int, TArrow (TArrow (a, a), t_unit))));
+    (* http_conn_is_tls(fd) -> Bool: the connection on fd runs over TLS *)
+    ("http_conn_is_tls",          Mono (TArrow (t_int, t_bool)));
     (* WebSocket builtins — WsFrame and SelectResult declared in websocket.march *)
     ("ws_recv",   Mono (TArrow (t_int, TCon ("WsFrame", []))));
     ("ws_send",   Mono (TArrow (t_int, TArrow (TCon ("WsFrame", []), t_unit))));
@@ -2064,7 +2130,7 @@ let builtin_types : (string * int) list =
     (* Alloc and Panic — future capability roots excluded from realtime contexts *)
     ("Alloc", 0); ("Panic", 0);
     (* Capability token types — used as arguments to Cap(X).
-       Mirrors the full 18-entry hierarchy in lib/caps/cap_lattice.ml. *)
+       Mirrors the full 21-entry hierarchy in lib/caps/cap_lattice.ml. *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
@@ -2072,7 +2138,7 @@ let builtin_types : (string * int) list =
     ("IO.Signal",     0);
     ("IO.Spawn",      0); ("IO.Mut",        0); ("IO.Telemetry",  0);
     ("IO.Foreign",    0); ("IO.Foreign.Blocking", 0); ("IO.NetConnect.TLS", 0);
-    ("IO.WebSocket",  0);
+    ("IO.WebSocket",  0); ("IO.Registry",   0);
     (* RingBuf — mutable fixed-capacity circular buffer (non-sendable) *)
     ("RingBuf",       1);
     (* NativeArray opaque types — flat numeric arrays (P10) *)
@@ -2085,7 +2151,18 @@ let builtin_types : (string * int) list =
        the compiled ABI; source declarations with the same exact shape (the
        native conformance fixture and, later, the actor stdlib surface) refine
        the same nominal entries rather than inventing per-module wire tags. *)
-    ("DownReason", 0); ("Down", 1); ]
+    ("DownReason", 0); ("Down", 1);
+    (* Handle types (ocap phase 2, spec §6): opaque reference-counted boxes
+       over a descriptor, made only by their module's open functions (the
+       box primitives are stdlib-only). No implementation, so no `==`. Never
+       a bare `Handle`: that name is the typestate Handle(r, s) of
+       stdlib/handle.march, which is always_linear. *)
+    ("File.Handle", 0); ("File.Dir", 0); ("Socket", 0); ("Listener", 0);
+    ("Process", 0); ]
+
+let () =
+  List.iter (fun (n, _) -> Hashtbl.replace Typecheck_env.builtin_type_keys n ())
+    builtin_types
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
@@ -2148,6 +2225,25 @@ let builtin_type_names : string list =
   List.iter (fun (_, sc) -> scheme sc) builtin_bindings;
   List.iter (fun (_, sc) -> scheme sc) builtin_interface_bindings;
   List.sort compare (Hashtbl.fold (fun n () l -> n :: l) acc [])
+
+(* The short names a user type must not share an identity with
+   ([Typecheck_nominal.compute]'s [base]): every built-in type name, and the
+   last segment of a qualified one that [canon_type_name] collapses to its
+   bare spelling at a use (`Csv.CsvRow`).  A qualified name that is itself a
+   key of [builtin_types] is never collapsed (`File.Handle`, the `IO.*`
+   capabilities), so its last segment is free. *)
+let base_type_short_names : (string, unit) Hashtbl.t =
+  let t = Hashtbl.create 128 in
+  List.iter (fun n ->
+      match String.rindex_opt n '.' with
+      | None -> Hashtbl.replace t n ()
+      | Some i ->
+        if not (List.mem_assoc n builtin_types) then
+          Hashtbl.replace t (String.sub n (i + 1) (String.length n - i - 1)) ())
+    builtin_type_names;
+  t
+
+let is_base_type_short_name (s : string) : bool = Hashtbl.mem base_type_short_names s
 
 let base_env errors type_map =
   let env = make_env errors type_map in

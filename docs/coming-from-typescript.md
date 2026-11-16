@@ -93,8 +93,10 @@ end
 March has no nullable types. A value that might be absent is `Option(a)`:
 
 ```march
+type User = { id : Int, name : String }
+
 fn find_user(id : Int) : Option(User) do
-  -- returns Some(user) or None
+  if id == 1 do Some({ id: 1, name: "Ada" }) else None end
 end
 
 match find_user(42) do
@@ -105,6 +107,7 @@ end
 
 `Option.unwrap_or` is the safe equivalent of `?? default`:
 
+<!-- repl:skip -->
 ```march
 Option.unwrap_or(find_user(42), default_user)
 ```
@@ -121,8 +124,10 @@ async function fetchUser(id: number): Promise<User> { ... }
 ```
 
 ```march
+type User = { id : Int, name : String }
+
 fn fetch_user(id : Int) : Result(User, String) do
-  -- Ok(user) or Err("not found")
+  if id == 1 do Ok({ id: 1, name: "Ada" }) else Err("not found") end
 end
 ```
 
@@ -226,6 +231,7 @@ becomes `Task.await`, and `Promise.all` becomes `Task.await_many`.
 const [a, b] = await Promise.all([fetchUser(1), fetchUser(2)]);
 ```
 
+<!-- repl:skip -->
 ```march
 -- March
 let t1 = Task.async(fn () -> fetch_user(1))

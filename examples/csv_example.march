@@ -10,12 +10,12 @@ mod Main do
 
 pfn write_demo_csv(path) do
   let content = "name,age,city\nAlice,30,\"New York\"\nBob,25,London\n\"Carol, Jr.\",42,\"Sao Paulo\"\nDave,35,Berlin"
-  File.write(path, content)
+  Authority.must(File.write(path, content))
 end
 
 pfn write_demo_tsv(path) do
   let content = "product\tprice\tqty\nApple\t1.20\t50\nBanana\t0.50\t120\nCherry\t3.00\t30"
-  File.write(path, content)
+  Authority.must(File.write(path, content))
 end
 
 -- ── Example 1: streaming with each_row ──────────────────────────────
@@ -25,10 +25,10 @@ pfn print_row(row) do
 end
 
 pfn demo_each_row(path) do
-  println("--- Example 1: each_row (streaming) ---")
-  match Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row)) do
-  Ok(_) -> println("Done.")
-  Err(e) -> println("Error: " ++ to_string(e))
+  Authority.ignore(println("--- Example 1: each_row (streaming) ---"))
+  match Authority.must(Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row))) do
+  Ok(_) -> Authority.ignore(println("Done."))
+  Err(e) -> Authority.ignore(println("Error: " ++ to_string(e)))
   end
 end
 
@@ -62,16 +62,17 @@ pfn find_oldest_loop(rows, best_name, best_age) do
 end
 
 pfn demo_read_all(path) do
-  println("--- Example 2: read_all (eager) ---")
-  match Csv.read_all(path, ",", :rfc4180) do
-  Err(e) -> println("Error: " ++ to_string(e))
+  Authority.ignore(println("--- Example 2: read_all (eager) ---"))
+  match Authority.must(Csv.read_all(path, ",", :rfc4180)) do
+  Err(e) -> Authority.ignore(println("Error: " ++ to_string(e)))
   Ok(rows) -> do
-    println("Total rows (incl. header): " ++ to_string(List.length(rows)))
+    Authority.ignore(println("Total rows (incl. header): " ++ to_string(List.length(rows))))
     match rows do
-    Nil -> println("No data.")
+    Nil -> Authority.ignore(println("No data."))
     Cons(_, data_rows) -> do
       let oldest = find_oldest_loop(data_rows, "nobody", -1)
       println("Oldest person: " ++ oldest)
+      ()
     end
     end
   end
@@ -109,16 +110,16 @@ pfn print_name_city(header, row) do
 end
 
 pfn demo_with_header(path) do
-  println("--- Example 3: each_row_with_header ---")
-  Csv.each_row_with_header(path, ",", :rfc4180, fn (header, row) ->
-    print_name_city(header, row))
+  Authority.ignore(println("--- Example 3: each_row_with_header ---"))
+  Authority.must(Csv.each_row_with_header(path, ",", :rfc4180, fn (header, row) ->
+    print_name_city(header, row)))
 end
 
 -- ── Example 4: TSV with Simple mode ──────────────────────────────────
 
 pfn demo_tsv(path) do
-  println("--- Example 4: TSV with :simple mode ---")
-  Csv.each_row(path, "\t", :simple, fn row -> println(to_string(row)))
+  Authority.ignore(println("--- Example 4: TSV with :simple mode ---"))
+  Authority.must(Csv.each_row(path, "\t", :simple, fn row -> println(to_string(row))))
 end
 
 -- ── main ──────────────────────────────────────────────────────────────

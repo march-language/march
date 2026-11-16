@@ -1,0 +1,27 @@
+-- REFUSE: IO.Process
+-- Environment reads, process facts and spawns refused: each names its target
+-- (the variable, the program). A refused read is not the same value as an
+-- unset one, and Env's defaults are not substituted for a refusal.
+mod ProcessRefused do
+  needs IO.Console
+  needs IO.Process
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    println(verdict(Process.env("HOME")))
+    println(verdict(Process.set_env("MARCH_CONF_X", "1")))
+    println(verdict(Process.cwd()))
+    println(verdict(Process.argv()))
+    println(verdict(Process.pid()))
+    println(verdict(Process.run("git", ["--version"])))
+    println(verdict(Env.get("MARCH_CONF_NEVER_SET", "default")))
+    println(verdict(System.env("HOME")))
+    println(verdict(Process.exit(3)))
+  end
+end

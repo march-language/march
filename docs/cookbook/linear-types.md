@@ -73,6 +73,7 @@ tag Open
 
 State transitions are declared with `transitions`. Each `via` function must take the handle in its `from` state and return the handle (and *only* the handle, with no `Result` wrapper and no tuple) in its `to` state:
 
+<!-- repl:skip -->
 ```march
 fn open_conn(h : FileHandle(Closed)) : FileHandle(Open) do
   ...
@@ -94,6 +95,7 @@ Two things fall out of `via`'s "handle in, bare handle out" shape:
 
 1. **Acquiring the first handle is not itself a transition.** `open_file` takes a `String`, not a `FileHandle`: the `transitions` block only covers moves between states of a value you already hold, not creating that value in the first place. It's an ordinary function, free to return `Result` for the acquisition to fail:
 
+   <!-- repl:skip -->
    ```march
    fn open_file(path : String) : Result(FileHandle(Closed), String) do
      ...
@@ -102,6 +104,7 @@ Two things fall out of `via`'s "handle in, bare handle out" shape:
 
 2. **An operation that also returns data can't be declared as a `via` transition** (its return type would be a tuple, not a bare handle), but it's still typestate-checked, for free, by its argument type. `read_chunk` only accepts a `FileHandle(Open)`, so calling it before `open_conn` is exactly as much a compile error as calling `close_file` twice would be; it just isn't *listed* under `transitions`, since it can't be:
 
+   <!-- repl:skip -->
    ```march
    fn read_chunk(h : FileHandle(Open)) : (String, FileHandle(Open)) do
      ...
@@ -157,6 +160,7 @@ Just like any other linear binding, a handle acquired through `with` is tracked 
 
 ## Complete example: safe socket lifecycle
 
+<!-- repl:skip -->
 ```march
 mod Net do
   always_linear type Socket(s) = Socket(Int)

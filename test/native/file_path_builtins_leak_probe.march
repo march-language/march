@@ -18,8 +18,8 @@ mod FilePathBuiltinsLeakProbe do
 
   pfn missing(i : Int) : Int do
     let p = base() ++ "_missing_" ++ int_to_string(i)
-    let e = if File.exists(p) do 1 else 0 end
-    let r = match File.read(p) do
+    let e = if Authority.must(File.exists(p)) do 1 else 0 end
+    let r = match Authority.must(File.read(p)) do
       Ok(_) -> 100
       Err(_) -> 1
     end
@@ -29,19 +29,19 @@ mod FilePathBuiltinsLeakProbe do
   pfn round_trip(i : Int) : Int do
     let p = base() ++ "_" ++ int_to_string(i % 4)
     let data = "line " ++ int_to_string(i)
-    let w = match File.write(p, data) do
+    let w = match Authority.must(File.write(p, data)) do
       Ok(_) -> 1
       Err(_) -> 0
     end
-    let a = match File.append(p, data) do
+    let a = match Authority.must(File.append(p, data)) do
       Ok(_) -> 1
       Err(_) -> 0
     end
-    let n = match File.read(p) do
+    let n = match Authority.must(File.read(p)) do
       Ok(s) -> string_length(s)
       Err(_) -> 0
     end
-    let d = match File.delete(p) do
+    let d = match Authority.must(File.delete(p)) do
       Ok(_) -> 1
       Err(_) -> 0
     end
@@ -50,12 +50,12 @@ mod FilePathBuiltinsLeakProbe do
 
   pfn dirs(i : Int) : Int do
     let p = base() ++ "_dir_" ++ int_to_string(i % 4)
-    let m = match Dir.mkdir_p(p) do
+    let m = match Authority.must(Dir.mkdir_p(p)) do
       Ok(_) -> 1
       Err(_) -> 0
     end
-    let e = if Dir.exists(p) do 1 else 0 end
-    let r = match Dir.rm_rf(p) do
+    let e = if Authority.must(Dir.exists(p)) do 1 else 0 end
+    let r = match Authority.must(Dir.rm_rf(p)) do
       Ok(_) -> 1
       Err(_) -> 0
     end
@@ -79,6 +79,7 @@ mod FilePathBuiltinsLeakProbe do
     let a1 = live_allocs()
     println(name ++ ": total " ++ int_to_string(total) ++ ", growth "
             ++ int_to_string(a1 - a0))
+    ()
   end
 
   fn main(_io : Cap(IO), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) : () do

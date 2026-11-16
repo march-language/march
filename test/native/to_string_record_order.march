@@ -22,5 +22,6 @@ mod Main do
     let x = { c: 3, b: 2 }
     println("x=${x}")
     println(inspect({ y: "q", x: 0 }))
+    ()
   end
 end

@@ -15,8 +15,8 @@ mod ClusterNodeVaultsUnnamed do
   -- Tail-recursive: the count of Vaults found under the old names.
   pfn scan(name : String, i : Int, stop : Int, acc : Int) : Int do
     if i >= stop do acc else
-      let meta : Option(Vault(Int)) = Vault.whereis("cluster_node_meta_" ++ name ++ "." ++ int_to_string(i))
-      let names : Option(Vault(Int)) = Vault.whereis("cluster_node_names_" ++ name ++ "." ++ int_to_string(i))
+      let meta : Option(Vault(Int)) = Authority.must(Vault.whereis("cluster_node_meta_" ++ name ++ "." ++ int_to_string(i)))
+      let names : Option(Vault(Int)) = Authority.must(Vault.whereis("cluster_node_names_" ++ name ++ "." ++ int_to_string(i)))
       let hit = (if Option.is_some(meta) do 1 else 0 end) + (if Option.is_some(names) do 1 else 0 end)
       scan(name, i + 1, stop, acc + hit)
     end

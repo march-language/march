@@ -52,5 +52,6 @@ mod HTrustedContext do
     -- An untrusted string is escaped everywhere, unchanged by any of this.
     let raw = "<b>&"
     println("plain_html  : " ++ IOList.to_string(~H"<p>${raw}</p>"))
+    ()
   end
 end

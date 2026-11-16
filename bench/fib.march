@@ -12,6 +12,7 @@ end
 
 pfn main(_cap_console : Cap(IO.Console)) : Unit do
   println(int_to_string(fib(40)))
+  ()
 end
 
 end

@@ -76,7 +76,8 @@ void *march_tcp_recv_chunked_frame(int64_t fd);
 /* ── HTTP client builtins ──────────────────────────────────────────── */
 
 /* Serialize an HTTP/1.1 request from its components.
- * Returns a march_string* with the raw request. */
+ * Returns Ok(march_string* raw request), or Err(reason) when a field would
+ * smuggle a second request (CR/LF/space/control byte; see march_http.c). */
 void *march_http_serialize_request(void *method, void *host, void *path,
                                     void *query, void *headers, void *body);
 

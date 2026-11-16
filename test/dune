@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_markers test_cap_package test_cap_scope test_cap_fn_bounds test_cap_ceiling test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple)
+ (modules test_compiler test_deprecated test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_ops test_cap_check_coverage test_cap_markers test_cap_package test_cap_scope test_host_scope test_cap_net_scope test_cap_fn_bounds test_cap_ceiling test_cap_mode_parity test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_format march_ctxesc march_modules march_resolver march_forge march_lint march_jit yojson alcotest str unix threads.posix))
 
 (library
@@ -34,7 +34,7 @@
  ; and which CI's `test` job therefore executes on both macOS and Linux.
  ; Its predecessor, test/test_http_native.sh, was wired into nothing at all,
  ; which is how a total outage of the compiled HTTP server went unnoticed.
- (modules test_stdlib_suite test_http_native test_socket_timeout test_tls_groups)
+ (modules test_stdlib_suite test_http_native test_https_native test_socket_timeout test_tls_groups)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_modules march_resolver march_forge march_lint alcotest str unix threads.posix))
 
 (library
@@ -52,7 +52,9 @@
 ; ubuntu runner), so ci.yml runs each as its own job via its per-test alias
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
-; and alias both) from `dune runtest`. Unset -- every local run -- nothing
+; and alias both) from `dune runtest`, along with run_cap_conformance,
+; run_errors and test_jit, which CI runs in the `compiler` and `forge` shards. Unset --
+; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
 ;
@@ -406,7 +408,7 @@
 (rule
  (targets test_broadcast_migrate_leak_runner)
  (deps    test_broadcast_migrate_leak.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -420,7 +422,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_broadcast_migrate_leak.c ../runtime/march_runtime.c
+               test_broadcast_migrate_leak.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -443,7 +445,7 @@
 (rule
  (targets test_hcr_migrate_order_runner)
  (deps    test_hcr_migrate_order.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -457,7 +459,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_hcr_migrate_order.c ../runtime/march_runtime.c
+               test_hcr_migrate_order.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -496,7 +498,7 @@
 (rule
  (targets test_signal_watch_runner)
  (deps    test_signal_watch.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -509,7 +511,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_signal_watch.c ../runtime/march_runtime.c
+               test_signal_watch.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -529,7 +531,7 @@
 (rule
  (targets test_free_dtor_runner)
  (deps    test_free_dtor.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -542,7 +544,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_free_dtor.c ../runtime/march_runtime.c
+               test_free_dtor.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -556,6 +558,43 @@
  (deps    (file test_free_dtor_runner))
  (action  (run ./test_free_dtor_runner)))
 
+;  The handle box (runtime/march_handle.c; ocap phase 2, task 1): enter after
+; close is refused, the descriptor is released exactly once and never while a
+; use is in flight, close wakes a parked recv, detach never releases, a kind
+; mismatch is fatal.  Same full-runtime link set as test_free_dtor, plus every
+; runtime header (the observe/registry .c files include theirs).
+(rule
+ (targets test_handle_runner)
+ (deps    test_handle.c
+          ../runtime/march_runtime.c ../runtime/march_handle.c
+          ../runtime/march_scheduler.c ../runtime/march_reclaim.c
+          ../runtime/march_heap.c ../runtime/march_gc.c ../runtime/march_message.c
+          (glob_files ../runtime/*.h)
+          ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+          ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+          ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+          ../runtime/march_remote_registry.c)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
+               -o %{targets}
+               test_handle.c ../runtime/march_runtime.c ../runtime/march_handle.c
+               ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
+               ../runtime/march_gc.c ../runtime/march_message.c
+               ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
+               ../runtime/base64.c ../runtime/sha1.c ../runtime/march_ffi.c
+               ../runtime/march_dispatch.c ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c
+               ../runtime/march_remote_registry.c
+               -lpthread -lz -lm)))
+
+(rule
+ (alias   test_handle)
+ (deps    (file test_handle_runner))
+ (action  (run ./test_handle_runner)))
+
+(alias
+ (name    runtest)
+ (deps    (alias test_handle)))
+
 ; ── Boxed-Float runtime API unit test (float-boxing design, stage 1) ──────
 ; march_alloc_float / march_unbox_float / march_poly_eq / march_poly_compare
 ; live in march_runtime.c (the god-object), so this harness links the same
@@ -563,7 +602,7 @@
 (rule
  (targets test_float_box_runner)
  (deps    test_float_box.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -577,7 +616,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_float_box.c ../runtime/march_runtime.c
+               test_float_box.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -605,7 +644,7 @@
 (rule
  (targets test_vault_concurrency_runner)
  (deps    test_vault_concurrency.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -624,7 +663,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_vault_concurrency.c ../runtime/march_runtime.c
+               test_vault_concurrency.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -674,7 +713,7 @@
 (rule
  (targets test_vault_distinct_keys_scale_runner)
  (deps    test_vault_distinct_keys_scale.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -693,7 +732,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_vault_distinct_keys_scale.c ../runtime/march_runtime.c
+               test_vault_distinct_keys_scale.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -722,7 +761,7 @@
 (rule
  (targets test_vault_write_scale_runner)
  (deps    test_vault_write_scale.c vault_lock_probe.h
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -737,7 +776,7 @@
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -include vault_lock_probe.h
                -o %{targets}
-               test_vault_write_scale.c ../runtime/march_runtime.c
+               test_vault_write_scale.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -764,7 +803,7 @@
 (rule
  (targets test_vault_hammer_runner)
  (deps    test_vault_hammer.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -783,7 +822,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_vault_hammer.c ../runtime/march_runtime.c
+               test_vault_hammer.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -805,7 +844,7 @@
 (rule
  (targets test_actor_registry_runner)
  (deps    test_actor_registry.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -824,7 +863,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_actor_registry.c ../runtime/march_runtime.c
+               test_actor_registry.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -847,7 +886,7 @@
 (rule
  (targets test_actor_caps_runner)
  (deps    test_actor_caps.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -866,7 +905,7 @@
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_actor_caps.c ../runtime/march_runtime.c
+               test_actor_caps.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -977,7 +1016,7 @@
           ../runtime/third_party/blake3/blake3_portable.c
           ../runtime/tweetnacl.c ../runtime/tweetnacl.h
           ../runtime/march_sig.c ../runtime/march_sig.h
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_message.c ../runtime/march_message.h
           ../runtime/march_heap.c ../runtime/march_heap.h
@@ -1004,7 +1043,7 @@
       ../runtime/third_party/blake3/blake3.c \
       ../runtime/third_party/blake3/blake3_dispatch.c \
       ../runtime/third_party/blake3/blake3_portable.c \
-      ../runtime/tweetnacl.c ../runtime/march_sig.c ../runtime/march_runtime.c \
+      ../runtime/tweetnacl.c ../runtime/march_sig.c ../runtime/march_runtime.c ../runtime/march_handle.c \
       ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_message.c \
       ../runtime/march_heap.c ../runtime/march_gc.c \
       ../runtime/march_monitor_registry.c ../runtime/march_observe.c ../runtime/march_observe_snapshot.c \
@@ -1122,7 +1161,7 @@
  (deps    test_ffi.c
           ../runtime/march_ffi.c
           ../runtime/march_ffi.h
-          ../runtime/march_runtime.c
+          ../runtime/march_runtime.c ../runtime/march_handle.c
           ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h
           ../runtime/march_dispatch.c
@@ -1140,7 +1179,7 @@
                -o %{targets}
                test_ffi.c
                ../runtime/march_ffi.c
-               ../runtime/march_runtime.c
+               ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c
                ../runtime/march_dispatch.c
                ../runtime/march_message.c
@@ -1161,6 +1200,7 @@
 (rule
  (targets test_heap_runner)
  (deps    test_heap.c
+          test_heap_stubs.c
           ../runtime/march_heap.c
           ../runtime/march_heap.h
           ../runtime/march_message.c
@@ -1171,6 +1211,7 @@
                -std=gnu11 -Wall -Wextra -O2 -I../runtime
                -o %{targets}
                test_heap.c
+               test_heap_stubs.c
                ../runtime/march_heap.c
                ../runtime/march_message.c
                ../runtime/march_gc.c
@@ -1225,6 +1266,38 @@
  (alias   runtest)
  (deps    (file test_http_simd_runner))
  (action  (run ./test_http_simd_runner)))
+
+; ── TLS session over memory BIOs (HTTPS server) ─────────────────────────
+; OpenSSL flags from pkg-config, falling back to bare -lssl -lcrypto.
+(rule
+ (targets test_tls_session_runner)
+ (deps    test_tls_session.c
+          ../runtime/march_tls_session.c
+          ../runtime/march_tls_session.h)
+ (action  (system "%{cc} -std=gnu11 -Wall -Wextra -I../runtime -O1 -o %{targets} test_tls_session.c ../runtime/march_tls_session.c $(pkg-config --cflags --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lpthread")))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_tls_session_runner))
+ (action  (run ./test_tls_session_runner)))
+
+; ── HTTPS certificate slot, poller and fd registry ─────────────────────
+(rule
+ (targets test_tls_server_runner)
+ (deps    test_tls_server.c
+          ../runtime/march_tls_server.c
+          ../runtime/march_tls_session.c
+          ../runtime/march_https.c
+          ../runtime/march_https.h
+          ../runtime/march_tls_ops.h
+          ../runtime/march_tls_server.h
+          ../runtime/march_tls_session.h)
+ (action  (system "%{cc} -std=gnu11 -Wall -Wextra -I../runtime -O1 -o %{targets} test_tls_server.c ../runtime/march_tls_server.c ../runtime/march_tls_session.c ../runtime/march_https.c $(pkg-config --cflags --libs openssl 2>/dev/null || echo -lssl -lcrypto) -lpthread")))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_tls_server_runner))
+ (action  (run ./test_tls_server_runner)))
 
 ; ── Zero-copy response builder tests ────────────────────────────────────
 (rule
@@ -1313,6 +1386,9 @@
 ; not shared with the developer's interactive sessions.
 (test
  (name test_jit)
+ ; Runs in CI's `forge` shard on Linux, not `rest` (with run_errors, below;
+ ; ~10 CPU-minutes). macOS still runs it: the JIT is OS-sensitive.
+ (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules test_jit)
  (libraries march_jit alcotest unix str)
  ; The session tests spawn the real compiler binary and need the staged
@@ -1404,12 +1480,14 @@
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))
- (modules test_refinecheck test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars)
+ (modules test_refinecheck test_refine_quantifier test_refine_ghost test_refine_alias test_refine_two_state test_refine_term test_refine_reflect test_refine_unfold test_refine_reflect1b test_refine_lemma test_refine_fuel test_refine_overflow test_refine_spec test_refine_stdlib_list test_refine_infer_lemma test_refine_return_facts test_refine_law_coverage test_refine_stdlib_sweep test_refine_record_vars test_refine_pred_names test_refine_proof_hints test_refine_nested_measure)
  ; march_typecheck: the `no-panic-by-proof` group runs the REAL pipeline
  ; (typecheck -> refine_check -> division_safety -> panic_surface_by_proof),
  ; because the question it asks — "does a guarded call still error?" — spans
  ; the syntactic ban in the typechecker AND the proof-based pass here.
- (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler march_test_helpers march_refactor alcotest str unix)
+ ; march_forge: the `hcr-variance` group reads the .schemas.json a build
+ ; writes with the deploy gate's own parser (Schema_diff).
+ (libraries march_lexer march_parser march_ast march_desugar march_errors march_refine march_refinecheck march_typecheck march_eval march_scheduler march_test_helpers march_refactor march_forge alcotest str unix)
  ; The `audit-flag` group shells out to the REAL compiled driver: the
  ; --refine-audit flag, its printer, and the early-CAS bypass it needs all
  ; live in bin/main.ml, which this test binary does not (and should not)
@@ -1423,7 +1501,9 @@
  ; reason (and this test group always runs relative to the repo root, not
  ; the sandbox, per its own require_repo_root check).
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib)
-   (source_tree ../test/native) (source_tree refine_audit) (source_tree refine/reflect)))
+   (source_tree ../test/native) (source_tree refine_audit) (source_tree refine/reflect) (source_tree refine/quantifiers)
+   (source_tree refine/aliases)
+   (source_tree refine/ghost)))
 
 ; An (executable), NOT a (test): deliberately OUT of the `runtest` alias.
 ;
@@ -2034,6 +2114,41 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/tuple_ord.expected native_tuple_ord.out)))
+
+; `<`/`<=`/`>`/`>=` on an ADT, record, newtype or unboxed ADT with an Ord
+; impl (derived or hand-written), and in generic `when Ord(a)` code, mean
+; `compare(a, b) <op> 0` (issue #1172): Mono routes them through the prelude's
+; `__ord_lt` & co. Before, native compared heap cells via march_poly_compare
+; (always 0), a newtype by raw payload, an unboxed ADT failed the LLVM build,
+; and JS used the JS operator on objects. Same fixture on both backends.
+(rule
+ (targets native_adt_ord_operators native_adt_ord_operators.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/adt_ord_operators.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_adt_ord_operators native/adt_ord_operators.march)
+   (with-stdout-to native_adt_ord_operators.out (system "./native_adt_ord_operators")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/adt_ord_operators.expected native_adt_ord_operators.out)))
+
+(rule
+ (targets js_adt_ord_operators.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/adt_ord_operators.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_adt_ord_operators.mjs native/adt_ord_operators.march)))
+
+(rule
+ (targets js_adt_ord_operators.out)
+ (deps js_adt_ord_operators.mjs march_runtime.mjs)
+ (action (with-stdout-to js_adt_ord_operators.out (run node js_adt_ord_operators.mjs))))
+
+(rule (alias runtest) (action (diff native/adt_ord_operators.expected js_adt_ord_operators.out)))
 
 ; An owned record handed to consumers only through dup'd uses (two calls, a
 ; closure capture, a store into another record) is still owned at the end of
@@ -2682,6 +2797,28 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/closure_capture_release_probe.expected native_closure_capture_release_probe.out)))
+
+; ── Use-after-free guard: a closure matching a captured value hands the
+; pattern's fields to a borrowing builtin in tail position. The capture's
+; release must follow the call, not precede it
+; (specs/progress/2026-11-06-closure-borrowed-tail-call-uaf.md). macOS
+; prints the right values either way; the sanitizer sweep is what sees it.
+(rule
+ (targets native_closure_borrowed_tail_call_probe native_closure_borrowed_tail_call_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/closure_borrowed_tail_call_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_closure_borrowed_tail_call_probe
+        native/closure_borrowed_tail_call_probe.march)
+   (with-stdout-to native_closure_borrowed_tail_call_probe.out
+        (system "./native_closure_borrowed_tail_call_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/closure_borrowed_tail_call_probe.expected native_closure_borrowed_tail_call_probe.out)))
 
 ; ── Leak/double-free guard: a closure capturing an unboxed aggregate releases
 ; the box its 8-byte slot holds (a guarded or-pattern's join point, a factory
@@ -4295,6 +4432,49 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/native_arr_pmap_capture.expected native_native_arr_pmap_capture.out)))
+
+;; Parallel.pmap calls one closure from several workers at once, for 1000
+;; rounds: each call must hold the shared environment until its last read of a
+;; capture.  The apply function released it right after loading the captures,
+;; so another worker's release could free the captured list mid-read (SIGSEGV
+;; in ~29 of 30 runs before the fix).  Compiled at --opt 2 like the fixture
+;; above, whose intermittent crash this pins.
+(rule
+ (targets native_pmap_shared_closure_capture native_pmap_shared_closure_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/pmap_shared_closure_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_pmap_shared_closure_capture
+        native/pmap_shared_closure_capture.march)
+   (with-stdout-to native_pmap_shared_closure_capture.out
+        (system "./native_pmap_shared_closure_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/pmap_shared_closure_capture.expected native_pmap_shared_closure_capture.out)))
+
+; A list captured by a task_spawn closure and still walked by the spawner
+; (march-language/march#1266): a consuming match released the shared cell
+; before IncRC'ing the fields it took out, racing the other thread's free.
+(rule
+ (targets native_task_shared_list_capture native_task_shared_list_capture.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/task_shared_list_capture.march)
+       (source_tree ../stdlib))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_task_shared_list_capture
+        native/task_shared_list_capture.march)
+   (with-stdout-to native_task_shared_list_capture.out
+        (system "./native_task_shared_list_capture")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/task_shared_list_capture.expected native_task_shared_list_capture.out)))
 
 ; Two tasks set the same captured native array in a 300-round loop: the
 ; copy-on-write race that C0's acquire-ordered sole-ownership test protects.
@@ -8717,6 +8897,117 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 (rule (alias runtest) (action (diff native/js_let_shadowing.expected js_let_shadowing.out)))
 
+; Regression (#1170): a module-level `let` outside the entry module (nested
+; mod, stdlib Bytes.b64_alphabet) is a zero-param fn in TIR; --target js read
+; it as its `$clo` wrapper ([object Object]) instead of calling it.
+(rule
+ (targets js_module_let_value.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_value.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_value.mjs native/module_let_value.march)))
+
+(rule
+ (targets js_module_let_value.out)
+ (deps js_module_let_value.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_value.out (run node js_module_let_value.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_value.expected js_module_let_value.out)))
+
+; Regression: a function-typed module-level `let` outside the entry module
+; (`mod Cst do let inc = fn x -> x + 1 end`) is a zero-param fn returning the
+; closure.  `Cst.inc(4)` passed 4 to it and `let g = Cst.inc` took the fn itself:
+; native printed pointers, --target js `[object Object]`.  All three diffed
+; against ONE .expected, the interpreter's.
+(rule
+ (targets native_module_let_fn native_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_module_let_fn
+        native/module_let_fn.march)
+   (with-stdout-to native_module_let_fn.out
+        (system "./native_module_let_fn")))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected native_module_let_fn.out)))
+
+(rule
+ (targets js_module_let_fn.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/module_let_fn.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_module_let_fn.mjs native/module_let_fn.march)))
+
+(rule
+ (targets js_module_let_fn.out)
+ (deps js_module_let_fn.mjs march_runtime.mjs)
+ (action (with-stdout-to js_module_let_fn.out (run node js_module_let_fn.mjs))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected js_module_let_fn.out)))
+
+(rule
+ (targets interp_module_let_fn.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/module_let_fn.march))
+ (action
+  (with-stdout-to interp_module_let_fn.out
+    (run %{exe:../bin/main.exe} native/module_let_fn.march))))
+
+(rule (alias runtest) (action (diff native/module_let_fn.expected interp_module_let_fn.out)))
+
+; Regression (#1177): an entry-module fn named like a bare-name-dispatched
+; builtin (negate, not, string_length, int_xor) must be called on --target js
+; and natively (the `not(<literal>)` fold ignored it on both).
+(rule
+ (targets js_shadowed_negate_not.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_negate_not.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_negate_not.mjs native/shadowed_negate_not.march)))
+
+(rule
+ (targets js_shadowed_negate_not.out)
+ (deps js_shadowed_negate_not.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_negate_not.out (run node js_shadowed_negate_not.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_negate_not.expected js_shadowed_negate_not.out)))
+
+(rule
+ (targets native_shadowed_negate_not native_shadowed_negate_not.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (file native/shadowed_negate_not.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadowed_negate_not
+        native/shadowed_negate_not.march)
+   (with-stdout-to native_shadowed_negate_not.out
+        (system "./native_shadowed_negate_not")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadowed_negate_not.expected native_shadowed_negate_not.out)))
+
+; The native shadowed-builtin witness on --target js: a user `fn int_mod`
+; collided with the first-class `const int_mod = {...}` builtin wrapper.
+(rule
+ (targets js_shadowed_builtin_name.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_name.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_builtin_name.mjs native/shadowed_builtin_name.march)))
+
+(rule
+ (targets js_shadowed_builtin_name.out)
+ (deps js_shadowed_builtin_name.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_builtin_name.out (run node js_shadowed_builtin_name.mjs))))
+
+(rule (alias runtest) (action (diff native/shadowed_builtin_name.expected js_shadowed_builtin_name.out)))
+
 ; js_extern_import — verifies extern "node:..." imports via ES import syntax
 (rule
  (targets js_extern_import.mjs)
@@ -8901,7 +9192,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_call_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_call_loopback
         native/node_call_loopback.march)
    (with-stdout-to native_node_call_loopback.out
         (system "./native_node_call_loopback")))))
@@ -8978,7 +9269,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_loopback
         native/node_send_loopback.march)
    (with-stdout-to native_node_send_loopback.out
         (system "./native_node_send_loopback")))))
@@ -9006,7 +9297,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_peer_reader_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_peer_reader_loopback
         native/peer_reader_loopback.march)
    (with-stdout-to native_peer_reader_loopback.out
         (system "./native_peer_reader_loopback")))))
@@ -9027,7 +9318,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_failed_msg
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_failed_msg
         native/node_send_failed_msg.march)
    (with-stdout-to native_node_send_failed_msg.out
         (system "./native_node_send_failed_msg")))))
@@ -9048,7 +9339,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_control_channel_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_control_channel_loopback
         native/control_channel_loopback.march)
    (with-stdout-to native_control_channel_loopback.out
         (system "./native_control_channel_loopback")))))
@@ -9069,7 +9360,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_net_frame_large_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_net_frame_large_loopback
         native/net_frame_large_loopback.march)
    (with-stdout-to native_net_frame_large_loopback.out
         (system "./native_net_frame_large_loopback")))))
@@ -9470,7 +9761,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_credit_backpressure_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_credit_backpressure_loopback
         native/credit_backpressure_loopback.march)
    (with-stdout-to native_credit_backpressure_loopback.out
         (system "./native_credit_backpressure_loopback")))))
@@ -9594,7 +9885,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_cluster_accept_silent_peer
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_cluster_accept_silent_peer
         native/cluster_accept_silent_peer.march)
    (with-stdout-to native_cluster_accept_silent_peer.out
         (system "./native_cluster_accept_silent_peer")))))
@@ -9613,7 +9904,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_dist_monitor_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_dist_monitor_loopback
         native/dist_monitor_loopback.march)
    (with-stdout-to native_dist_monitor_loopback.out
         (system "./native_dist_monitor_loopback")))))
@@ -9632,7 +9923,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_send_typed_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_send_typed_loopback
         native/node_send_typed_loopback.march)
    (with-stdout-to native_node_send_typed_loopback.out
         (system "./native_node_send_typed_loopback")))))
@@ -9664,7 +9955,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_session_node_fan_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_session_node_fan_loopback
         native/session_node_fan_loopback.march)
    (setenv MARCH_NUM_SCHEDULERS 1
     (with-stdout-to native_session_node_fan_loopback.out
@@ -9772,7 +10063,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_block_sender_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_block_sender_loopback
         native/block_sender_loopback.march)
    (with-stdout-to native_block_sender_loopback.out
         (system "./native_block_sender_loopback")))))
@@ -9790,7 +10081,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_after_death_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_after_death_loopback
         native/monitor_after_death_loopback.march)
    (with-stdout-to native_monitor_after_death_loopback.out
         (system "./native_monitor_after_death_loopback")))))
@@ -9809,7 +10100,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_ack_retry_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_ack_retry_loopback
         native/monitor_ack_retry_loopback.march)
    (with-stdout-to native_monitor_ack_retry_loopback.out
         (system "./native_monitor_ack_retry_loopback")))))
@@ -9827,7 +10118,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (source_tree ../stdlib))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_monitor_expiry_loopback
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_monitor_expiry_loopback
         native/monitor_expiry_loopback.march)
    (with-stdout-to native_monitor_expiry_loopback.out
         (system "./native_monitor_expiry_loopback")))))
@@ -9935,7 +10226,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/swim_driver.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_node_discovery
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_node_discovery
         native/node_discovery.march)
    (with-stdout-to native_node_discovery.out
         (system "./native_node_discovery")))))
@@ -9988,7 +10279,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file ../stdlib/net_frame.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_rpc_auto_enroll
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_rpc_auto_enroll
         native/rpc_auto_enroll.march)
    (with-stdout-to native_rpc_auto_enroll.out
         (system "./native_rpc_auto_enroll")))))
@@ -12338,6 +12629,55 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/string_to_float_option.expected native_string_to_float_option.out)))
 
+; ── #1178: string_to_float accepts ONE grammar (C strtod, whole string) on
+; every backend. The same fixture runs compiled, interpreted and as
+; --target js, and all three are diffed against ONE .expected.
+(rule
+ (targets native_string_to_float_grammar native_string_to_float_grammar.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_string_to_float_grammar
+        native/string_to_float_grammar.march)
+   (with-stdout-to native_string_to_float_grammar.out
+        (system "./native_string_to_float_grammar")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected native_string_to_float_grammar.out)))
+
+(rule
+ (targets interp_string_to_float_grammar.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march))
+ (action
+  (with-stdout-to interp_string_to_float_grammar.out
+    (run %{exe:../bin/main.exe} native/string_to_float_grammar.march))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected interp_string_to_float_grammar.out)))
+
+(rule
+ (targets js_string_to_float_grammar.mjs)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file native/string_to_float_grammar.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_string_to_float_grammar.mjs native/string_to_float_grammar.march)))
+
+(rule
+ (targets js_string_to_float_grammar.out)
+ (deps js_string_to_float_grammar.mjs march_runtime.mjs)
+ (action (with-stdout-to js_string_to_float_grammar.out (run node js_string_to_float_grammar.mjs))))
+
+(rule
+ (alias runtest)
+ (action (diff native/string_to_float_grammar.expected js_string_to_float_grammar.out)))
+
 (rule
  (targets native_html_safe_raw native_html_safe_raw.out)
  (deps (file %{exe:../bin/main.exe})
@@ -12686,7 +13026,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/close_returns_ok_atom.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile -o native_close_returns_ok_atom
+   ; --stdlib-source: the fixture pins the raw file_close / csv_close
+   ; builtins themselves, which are stdlib-only since ocap phase 2 (Task 10).
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o native_close_returns_ok_atom
         native/close_returns_ok_atom.march)
    (with-stdout-to native_close_returns_ok_atom.out
         (system "./native_close_returns_ok_atom")))))
@@ -12702,7 +13044,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/close_returns_ok_atom.march))
  (action
   (with-stdout-to native_close_returns_ok_atom.interp.out
-   (run %{exe:../bin/main.exe} native/close_returns_ok_atom.march))))
+   (run %{exe:../bin/main.exe} --stdlib-source native/close_returns_ok_atom.march))))
 
 (rule
  (alias runtest)
@@ -13213,6 +13555,35 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/mailbox_bounded.expected native_mailbox_bounded.out)))
 
+; ── Actor.Theory trace conformance (lemmas design §4.2, M8) ──────────────
+; (compiled) Three senders each send 50 numbered messages to one logger; the
+; logger's handling order, replayed through Actor.Theory.from_sender (the
+; function the proved ordering laws enq_self / enq_other are about), must
+; give each sender 1..50.  Uses List/Actor/Actor.Theory, hence ../stdlib.
+(rule
+ (targets native_actor_theory_conformance native_actor_theory_conformance.out)
+ (deps (file %{exe:../bin/main.exe})
+       (file ../runtime/march_runtime.c) (file ../runtime/march_runtime.h)
+       (file ../runtime/march_scheduler.c) (file ../runtime/march_reclaim.c) (file ../runtime/march_reclaim.h) (file ../runtime/march_scheduler.h)
+       (file ../runtime/march_heap.c) (file ../runtime/march_heap.h)
+       (file ../runtime/march_gc.c) (file ../runtime/march_gc.h)
+       (file ../runtime/march_message.c) (file ../runtime/march_message.h)
+       (file ../runtime/march_deque.h)
+       (file ../runtime/march_extras.c) (file ../runtime/march_ctx_escape.c) (file ../runtime/march_compress.c)
+       (file ../runtime/base64.c) (file ../runtime/sha1.c)
+       (source_tree ../stdlib)
+       (file native/actor_theory_conformance.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_actor_theory_conformance
+        native/actor_theory_conformance.march)
+   (with-stdout-to native_actor_theory_conformance.out
+        (system "./native_actor_theory_conformance")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/actor_theory_conformance.expected native_actor_theory_conformance.out)))
+
 ; ── Named registry (Task 4): Actor.register/whereis/unregister ───────────
 ; (compiled) ───────────────────────────────────────────────────────────
 ; Actor.register/whereis under a name, duplicate registration of a live
@@ -13618,6 +13989,126 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file.march))
  (action (run %{exe:../bin/main.exe} test stdlib/test_file.march)))
+
+; File.Handle (ocap phase 2, Task 4): the same file runs untyped under
+; stdlib_march; this rule runs it through `march test`, which typechecks it.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file_handle.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_file_handle.march)))
+
+; ... and compiled (`--compile --test`), the only CI coverage of the compiled
+; file_open_write / file_write_handle / file_seek (and of seek's tagged Ok(Int)
+; offset). The binary exits non-zero when a test fails.
+(rule
+ (targets test_file_handle_compiled_bin test_file_handle_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_file_handle.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_file_handle_compiled_bin
+        stdlib/test_file_handle.march)
+   (with-stdout-to test_file_handle_compiled.out
+    (system "./test_file_handle_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_file_handle_compiled.out)
+ (action (progn)))
+
+; File.Dir (ocap phase 2, Task 7): test_file_dir.march runs untyped under
+; stdlib_march; these rules typecheck it (`march test`) and run it compiled,
+; the only CI coverage of the compiled dir_open / file_open_at / dir_list_at
+; (runtime/march_file_beneath.c).
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_file_dir.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_file_dir.march)))
+
+(rule
+ (targets test_file_dir_compiled_bin test_file_dir_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_file_dir.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_file_dir_compiled_bin
+        stdlib/test_file_dir.march)
+   (with-stdout-to test_file_dir_compiled.out
+    (system "./test_file_dir_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_file_dir_compiled.out)
+ (action (progn)))
+
+; Process handles (ocap phase 2b, Task 8): test_process.march runs untyped
+; under stdlib_march; these rules typecheck it (`march test`) and run it
+; compiled, the CI coverage of the compiled Process box (spawn_async,
+; read_line, write, kill, wait_proc closing the handle).
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_process.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_process.march)))
+
+(rule
+ (targets test_process_compiled_bin test_process_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_process.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_process_compiled_bin
+        stdlib/test_process.march)
+   (with-stdout-to test_process_compiled.out
+    (system "./test_process_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_process_compiled.out)
+ (action (progn)))
+
+; Socket / Listener handles (ocap phase 2, Task 5): test_socket.march runs
+; untyped under stdlib_march; these rules typecheck it (`march test`) and run
+; it compiled. Its listeners bind port 0, so concurrent runners never collide.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_socket.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_socket.march)))
+
+; HTTP on handles (ocap phase 2b, Task 6): stdlib_march runs these untyped, so a
+; stale `request_on(-1, ...)` once passed there while `march test` rejected it.
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_http_transport.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_http_transport.march)))
+
+(rule
+ (alias runtest)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (file stdlib/test_http_server.march))
+ (action (run %{exe:../bin/main.exe} test stdlib/test_http_server.march)))
+
+(rule
+ (targets test_socket_compiled_bin test_socket_compiled.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib/test_socket.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --test -o test_socket_compiled_bin
+        stdlib/test_socket.march)
+   (with-stdout-to test_socket_compiled.out
+    (system "./test_socket_compiled_bin")))))
+
+(rule
+ (alias runtest)
+ (deps test_socket_compiled.out)
+ (action (progn)))
 
 (rule
  (alias runtest)
@@ -14753,10 +15244,36 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; test/run_errors.ml).
 (test
  (name run_errors)
- (enabled_if (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1))   ; see "CI sharding" above
+ ; Runs in CI's `forge` shard (ci.yml), not `rest`: ~32 CPU-minutes on a
+ ; GitHub ubuntu runner (November 2026), the longest suite in `rest`, which
+ ; left `rest` at 50-58 min against its 75 min step timeout and over it on
+ ; every slow runner. `forge` took 13-19 min.
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
  (modules run_errors)
  (libraries march_test_helpers alcotest yojson unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib) (source_tree errors))
+ (action (run %{test} -e)))
+
+; Capability refusal conformance (ocap phase 1, extended by phase 4): every
+; test/cap_conformance/*.march runs interpreted, through the JIT, compiled and
+; as JS under its `-- REFUSE:` MARCH_TEST_REFUSE value, and each backend's
+; stdout + exit code must equal <name>.expected. Regenerate with
+; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
+(test
+ (name run_cap_conformance)
+ ; Runs in CI's `compiler` shard (ci.yml), not `rest`: four backends per
+ ; fixture cost ~14 CPU-minutes there, which pushed `rest` past its timeout.
+ (enabled_if
+  (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
+       (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
+ (modules run_cap_conformance)
+ (libraries march_test_helpers alcotest unix)
+ (deps %{exe:../bin/main.exe} (source_tree ../stdlib)
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (glob_files ../runtime/*.mjs)
+       (source_tree cap_conformance))
  (action (run %{test} -e)))
 
 ; Golden test-failure reports (lib/errors/test_report.ml): every
@@ -14954,7 +15471,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
        (file native/file_handle_leak_probe.march))
  (action
   (progn
-   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_leak_probe
+   ; --stdlib-source: the probe measures the raw file_open / csv_open handle
+   ; table itself (stdlib-only builtins since ocap phase 2, Task 10).
+   (run %{exe:../bin/main.exe} --compile --opt 2 --stdlib-source -o native_file_handle_leak_probe
         native/file_handle_leak_probe.march)
    (with-stdout-to native_file_handle_leak_probe.out
         (system "./native_file_handle_leak_probe")))))
@@ -14962,6 +15481,141 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (alias runtest)
  (action (diff native/file_handle_leak_probe.expected native_file_handle_leak_probe.out)))
+
+; ── Leak guard: File.Handle boxes (ocap phase 2). 10 000 File.open + drop
+; (no close: only the box destructor can release the stream) and 10 000
+; File.open + File.close + drop (the destructor must not release twice),
+; then the count of /dev/fd entries must be unchanged.
+(rule
+ (targets native_file_handle_box_leak_probe native_file_handle_box_leak_probe.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/file_handle_box_leak_probe.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_file_handle_box_leak_probe
+        native/file_handle_box_leak_probe.march)
+   (with-stdout-to native_file_handle_box_leak_probe.out
+        (system "./native_file_handle_box_leak_probe")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/file_handle_box_leak_probe.expected native_file_handle_box_leak_probe.out)))
+
+; socket_close_while_recv (ocap phase 2, Task 5, R3): Socket.close wakes a
+; task parked in Socket.recv with Err(Closed) within 1 s, on 4 scheduler
+; threads. On macOS only the scheduler's fd-wait cancellation can wake it
+; for every socket state (shutdown() alone does not).
+(rule
+ (targets native_socket_close_while_recv native_socket_close_while_recv.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/socket_close_while_recv.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_socket_close_while_recv
+        native/socket_close_while_recv.march)
+   (with-stdout-to native_socket_close_while_recv.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_socket_close_while_recv")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/socket_close_while_recv.expected native_socket_close_while_recv.out)))
+
+; listener_close_while_accept (R3): Socket.close_listener wakes a task parked
+; in Socket.accept; on macOS shutdown() on a listening socket wakes nothing.
+(rule
+ (targets native_listener_close_while_accept native_listener_close_while_accept.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/listener_close_while_accept.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_listener_close_while_accept
+        native/listener_close_while_accept.march)
+   (with-stdout-to native_listener_close_while_accept.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_listener_close_while_accept")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/listener_close_while_accept.expected native_listener_close_while_accept.out)))
+
+; udp_close_while_recv (R3): Udp.close wakes a task parked in Udp.recv on an
+; unconnected socket, the case shutdown() alone cannot wake on macOS.
+(rule
+ (targets native_udp_close_while_recv native_udp_close_while_recv.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/udp_close_while_recv.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_udp_close_while_recv
+        native/udp_close_while_recv.march)
+   (with-stdout-to native_udp_close_while_recv.out
+        (system "MARCH_NUM_SCHEDULERS=4 ./native_udp_close_while_recv")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/udp_close_while_recv.expected native_udp_close_while_recv.out)))
+
+; tls_refuses_borrowed_socket (ruling R10): Tls.connect refuses a borrowed
+; Socket and leaves the owner's socket working. It calls the
+; @[stdlib_internal] Socket.borrow, so it runs with --stdlib-source,
+; interpreted and compiled (and lives outside test/native, whose files the
+; refine audit checks as user code).
+(rule
+ (targets tls_refuses_borrowed_socket_interp.out)
+ (deps (file %{exe:../bin/main.exe}) (source_tree ../stdlib)
+       (file stdlib_source/tls_refuses_borrowed_socket.march))
+ (action
+  (with-stdout-to tls_refuses_borrowed_socket_interp.out
+   (run %{exe:../bin/main.exe} --stdlib-source
+        stdlib_source/tls_refuses_borrowed_socket.march))))
+
+(rule
+ (alias runtest)
+ (action (diff stdlib_source/tls_refuses_borrowed_socket.expected tls_refuses_borrowed_socket_interp.out)))
+
+(rule
+ (targets tls_refuses_borrowed_socket_bin tls_refuses_borrowed_socket.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file stdlib_source/tls_refuses_borrowed_socket.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --stdlib-source -o tls_refuses_borrowed_socket_bin
+        stdlib_source/tls_refuses_borrowed_socket.march)
+   (with-stdout-to tls_refuses_borrowed_socket.out
+        (system "./tls_refuses_borrowed_socket_bin")))))
+
+(rule
+ (alias runtest)
+ (action (diff stdlib_source/tls_refuses_borrowed_socket.expected tls_refuses_borrowed_socket.out)))
+
+; socket_sent_to_local_actor: a Socket sent to a local actor is shared (the
+; message copy shares the handle box), so the actor writes to the very
+; connection the main thread accepted.
+(rule
+ (targets native_socket_sent_to_local_actor native_socket_sent_to_local_actor.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/socket_sent_to_local_actor.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_socket_sent_to_local_actor
+        native/socket_sent_to_local_actor.march)
+   (with-stdout-to native_socket_sent_to_local_actor.out
+        (system "./native_socket_sent_to_local_actor")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/socket_sent_to_local_actor.expected native_socket_sent_to_local_actor.out)))
 
 ; js_tail_loop — self tail calls (incl. the Perceus ESeq shape) run in constant stack; closures built in the loop keep each iteration's values.
 (rule
@@ -15240,7 +15894,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets test_hcr_frame_unwind_runner)
  (deps    test_hcr_frame_unwind.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -15254,7 +15908,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_hcr_frame_unwind.c ../runtime/march_runtime.c
+               test_hcr_frame_unwind.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c
@@ -15290,7 +15944,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (rule
  (targets test_hcr_closure_epoch_runner)
  (deps    test_hcr_closure_epoch.c
-          ../runtime/march_runtime.c ../runtime/march_runtime.h
+          ../runtime/march_runtime.c ../runtime/march_handle.c ../runtime/march_runtime.h
           ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_reclaim.h ../runtime/march_scheduler.h
           ../runtime/march_heap.c ../runtime/march_heap.h
           ../runtime/march_gc.c ../runtime/march_gc.h
@@ -15304,7 +15958,7 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -Wno-unused-function -I../runtime
                -o %{targets}
-               test_hcr_closure_epoch.c ../runtime/march_runtime.c
+               test_hcr_closure_epoch.c ../runtime/march_runtime.c ../runtime/march_handle.c
                ../runtime/march_scheduler.c ../runtime/march_reclaim.c ../runtime/march_heap.c
                ../runtime/march_gc.c ../runtime/march_message.c
                ../runtime/march_extras.c ../runtime/march_ctx_escape.c ../runtime/march_compress.c

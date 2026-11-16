@@ -1,0 +1,9 @@
+mod Main do
+  fn same(n : Int) : Int do
+    assert n == 0 by do
+      let n = 0
+      ()
+    end
+    n
+  end
+end

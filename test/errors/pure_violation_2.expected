@@ -1,9 +1,20 @@
 exit: 1
 -- CONTRACT --------------- errors/pure_violation_2.march
 
+`mod LeakyPure` (declared `cap pure`) declares `needs IO.Random`, but a pure module cannot hold a capability: `needs` exists only to admit side effects, directly or through a stdlib wrapper such as `File.read` or `DateTime.now`. [pure_violation]
+
+Remove the `needs` line, and move the code that needs it to a module without `cap pure`.
+
+17 |   needs IO.Random
+       ^^^^^^^^^^^^^^^
+
+
+
+-- CONTRACT --------------- errors/pure_violation_2.march
+
 `gen` in `mod LeakyPure` (declared `cap pure`) calls `random_bytes`, which has side effects. [pure_violation]
 
-Use pure functions (no IO, spawn, vault, or random ops) in a `cap pure` module.
+Use pure functions (no IO, spawn, vault, clock, or random ops) in a `cap pure` module.
 
 21 |     random_bytes(16)
          ^^^^^^^^^^^^

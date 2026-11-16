@@ -1,0 +1,19 @@
+-- EXPECT-VIOLATED: precondition need1
+-- EXPECT-ERROR: `0` can never satisfy `x == 1`
+-- Fixed 2026-11-02 (specs/progress/2026-11-02-reflection-ctor-registry-by-datatype.md,
+-- review round 3, h5). A second `type Zq` in the same module: the typechecker
+-- merges both, the registry kept the last, so `Rz`/`Sz` were taken to exhaust
+-- the type and `need1(0)` was PROVED. `f(mk())` reaches it.
+mod S04 do
+  fn need1(x : {Int | _ == 1}) : Int do x end
+  type Zq = Pz | Qz
+  fn mk() : Zq do Pz end
+  type Zq = Rz(Int) | Sz
+  fn f(t : Zq) : Int do
+    match t do
+      Rz(_) -> 1
+      Sz -> 1
+      _ -> need1(0)
+    end
+  end
+end

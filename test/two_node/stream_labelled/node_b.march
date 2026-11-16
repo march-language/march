@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (drives @[stdlib_internal] cluster plumbing over raw tcp_* descriptors, the wire layer itself; read by scripts/two-node.sh and specs/lang/golden/sanitize.sh)
 -- Two-node harness, scenario "stream_labelled": node-b hosts the Cons endpoint
 -- of the labelled Stream protocol (`item: Prod -> Cons : Int`); see
 -- node_a.march for the transport and the design pointer. This node's trace
@@ -39,7 +40,7 @@ mod StreamOverNodesB do
   end
 
   fn main(c : Cap(IO)) do
-    let listen_fd = match tcp_listen(Env.require_int("MARCH_NODE_PORT")) do
+    let listen_fd = match tcp_listen(Authority.must(Env.require_int("MARCH_NODE_PORT"))) do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
     end

@@ -31,5 +31,6 @@ mod Main do
     let arr = NativeArray.from_list_float(Cons(1.5, Cons(2.5, Cons(3.0, Nil))))
     println(float_to_string(NativeArray.sum_float(arr)))   -- 7.
     println(to_string(NativeArray.to_list_float(arr)))     -- [1.5, 2.5, 3.]
+    ()
   end
 end

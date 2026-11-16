@@ -80,7 +80,8 @@ and the **opaque-type imbalance** it intentionally preserves (`ExType`/
 referenceable cross-module even though its declaring module never marked it
 public), together with the **no-per-module-type-namespace design point**
 (types resolve by bare name only, so two sibling modules' same-named types
-are literally one nominal type, not just visually similar) and the
+are literally one nominal type, not just visually similar; superseded for
+variant types on 2026-11-09, see §2.5) and the
 `9001e4c0` qualified-type-path unification that is the flip side of the same
 design. §2.5 also files a real, precisely-traced enforcement gap found while
 verifying the imbalance live: `opaque type`'s constructor-hiding is NOT
@@ -848,14 +849,14 @@ via ordinary T-App per-argument checking, §2); verified live for `1 || 2`:
 two separate diagnostics, one per argument.
 
 **Cross-reference to the operational side:** `core-march.md` §4.4.1
-documents `&&`/`||` as **strict, not short-circuiting** at the value level
-(both operands are always evaluated); that is a RUNTIME/evaluation fact
-about `δ-And`/`δ-Or`, orthogonal to this section: on the TYPE side `&&`/`||`
-are simply fixed `Bool → Bool → Bool` functions like any other binary
-builtin, and no part of their strict evaluation order affects how they
+documents `&&`/`||` as **short-circuiting** (the right operand is
+evaluated only when the left one does not decide the result); that is a
+RUNTIME/evaluation fact, orthogonal to this section: on the TYPE side
+`&&`/`||` are simply fixed `Bool → Bool → Bool` functions like any other
+binary builtin, and their evaluation order does not affect how they
 are typed (both operands are ⇐-checked against `Bool` via ordinary left-to-
-right T-App argument checking, §2, exactly as strictness evaluates them
-left-to-right at runtime; the two properties happen to agree in direction
+right T-App argument checking, §2, and the evaluator also runs the left
+operand first; the two properties happen to agree in direction
 but are independently-stated facts, one operational and one static).
 
 ### 2.1c Conditionals without a scrutinee: `ECond` (`match do c -> b … end`)
@@ -2083,6 +2084,27 @@ not just un-flagged at check time but truly accepted end-to-end.
 > "sibling-module constructor shadowing" in `specs/todos/`; the witness now
 > uses distinct ctor names (`MkA`/`MkB`), which isolates the type-identity
 > fact this section documents.
+> **Superseded for variant types, 2026-11-09:** two user modules that each
+> declare a VARIANT type with the same short name now get two nominal types.
+> `lib/typecheck/typecheck_nominal.ml` gives each colliding declaration the
+> identity `Path.Short` (bare at entry level) and resolves every reference
+> lexically, so `take_a(B.make())` above is now rejected with
+> `` expected `A.Foo` but got `B.Foo` `` (`reject/t458`, which is the old
+> `accept/t35`; `reject/t457` is the unqualified form). Unchanged: records
+> still share one global name (`reject/t318` still guards their Json
+> collision).
+> **And for a user type named like a built-in or stdlib type, 2026-11-11:** a
+> user VARIANT whose short name is a type of the base environment
+> (`CancelToken`, `Option`, …) or a variant the stdlib declares (`Level` of
+> `Logger`) gets its own identity too, entry-qualified at the top level
+> (`Main.CancelToken`); the base type keeps the bare name. A bare name
+> written in the user's file means the user's declaration; a reference in a
+> stdlib file never does. Such an identity prints as its short name, and in
+> full only where the two would print alike (`` expected `CancelToken` but
+> got `Main.CancelToken` ``). `reject/t460`–`t462`, `accept/t463`. Still one
+> name: two stdlib types of one short name, and a type declared in the REPL
+> (a fragment is checked one declaration at a time).
+
 **This is documented here as ONE intentional design point, not logged as a
 bug:** March has no per-module type namespace; a module boundary partitions
 FUNCTION/VALUE names (via `pub_set`) but never partitions TYPE identity.
@@ -3218,9 +3240,15 @@ IO                        (root)
 ├── IO.Spawn
 ├── IO.Mut
 ├── IO.Telemetry
-└── IO.Foreign
-    └── IO.Foreign.Blocking
+├── IO.Foreign
+│   └── IO.Foreign.Blocking
+└── IO.Registry
 ```
+
+(Since ocap phase 2 the tree also holds `IO.Signal`, `IO.WebSocket` and
+`IO.Registry`, naming and finding actors by name; `lib/caps/cap_lattice.ml` is
+the authority. The counts below describe the 18-entry tree as it stood when
+this section was written.)
 
 All 18 entries share the single root `IO`: this is one tree, not a forest,
 despite the surface impression that `IO.Console`/`IO.Process`/`IO.Clock`/

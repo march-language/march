@@ -202,6 +202,9 @@ void *march_string_from_codepoint(int64_t cp);
 /* Time builtins. */
 double  march_unix_time(void);
 int64_t march_unix_time_ms(void);
+/* ocap phase 1 capability check point and its test hook (march_extras.c). */
+int64_t march_cap_check_raw(void *kind, void *target);
+void   *march_cap_launch_text(void);
 
 /* Process self-inspection: peak RSS in bytes, both platforms. */
 int64_t march_peak_rss_bytes(void);
@@ -336,13 +339,15 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
 /* The 48-byte Task object returned by march_task_spawn_thunk /
  * march_task_spawn_with_cancel_thunk. It used to carry tag 0, which made it
  * indistinguishable from an ADT cell, so no free path could release what it
- * owns. It owns the reference to a Float result's march_alloc_float box in
- * task[3] (task_await_unwrap unboxes without consuming, since a task may be
- * awaited twice); march_run_resource_dtor releases it when the Task dies. */
+ * owns. It owns the reference to a heap result in task[3] (a Float result's
+ * march_alloc_float box, a String, any heap value): every read -- task_await,
+ * task_poll, task_await_unwrap -- takes a reference of its own, since a task
+ * may be read any number of times; march_run_resource_dtor releases the
+ * Task's when the Task dies. */
 #define MARCH_TASK_TAG ((int32_t)-7)
 /* A Task's header pad: set by the task trampoline when the result it stored
- * is a Float box the Task owns (released when the Task dies). */
-#define MARCH_TASK_OWNS_FLOAT_BOX ((int32_t)1)
+ * is a heap value the Task owns (released when the Task dies). */
+#define MARCH_TASK_OWNS_RESULT ((int32_t)1)
 /* A TypedArray (typed_array_alloc in march_runtime.c): [hdr][len@16][cap@24]
  * then len 8-byte element slots, each holding a tagged immediate or ONE
  * owned reference to a heap value (a Float is a march_alloc_float box). Tag 0
@@ -354,6 +359,69 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
 void march_clo_capture_epoch(void *clo);
 void march_clo_forget_epoch(void *clo);
 void march_clo_frame_enter(void *clo);
+
+/* A handle box (runtime/march_handle.c; ocap phase 2, spec §6): a
+ * reference-counted cell holding one raw descriptor and a closed flag, the
+ * runtime form of File.Handle, File.Dir, Socket, Listener and Process.
+ *   [rc][tag=MARCH_HANDLE_TAG][pad=kind][raw@16][aux@24][state@32][pad@40]
+ * state (an _Atomic int64): bit 0 closed, bit 1 released, bits 2.. the
+ * in-flight count.  A use brackets the raw descriptor with enter/leave; the
+ * descriptor is released exactly once, by whichever of close, the last leave
+ * after a close, or the destructor finds it closed (or dying) with nothing in
+ * flight.  A message copy shares the box (rc+1), never byte-copies it. */
+#define MARCH_HANDLE_TAG ((int32_t)-10)
+#define MARCH_HANDLE_SIZE 48
+#define MARCH_HANDLE_FILE         1   /* raw: fh-table handle (march_file_open) */
+#define MARCH_HANDLE_DIR          2   /* raw: an O_DIRECTORY fd */
+#define MARCH_HANDLE_TCP          3   /* raw: a connected socket fd */
+#define MARCH_HANDLE_TCP_BORROWED 4   /* raw: an fd the HTTP event loop owns */
+#define MARCH_HANDLE_LISTENER     5   /* raw: a listening socket fd */
+#define MARCH_HANDLE_UDP          6   /* raw: a UDP socket fd */
+#define MARCH_HANDLE_TLS          7   /* raw: SSL*, aux: its TCP fd */
+#define MARCH_HANDLE_TLS_CTX      8   /* raw: SSL_CTX* */
+#define MARCH_HANDLE_PROCESS      9   /* raw: live-process slot handle */
+void   *march_handle_new(int64_t kind, int64_t raw, int64_t aux);
+/* raw with the in-flight count raised, or -1 when closed.  Fatal (the fatal
+ * hook runs, then abort) when h is not a handle or not of [kind]; a
+ * TCP_BORROWED box satisfies an expected TCP. */
+int64_t march_handle_enter(void *h, int64_t kind);
+void    march_handle_leave(void *h);
+/* 1 if this call closed the box, 0 if it was closed already.  Sockets (TCP,
+ * LISTENER, UDP) are shut down first, so a reader parked in recv wakes; the
+ * descriptor is released now, or by the last leave when a use is in flight. */
+int64_t march_handle_close(void *h);
+/* Close [h] and wait (bounded by timeout_ms, parking a green thread or
+ * sleeping an OS thread) until no use is in flight, so the caller may then
+ * close a descriptor the box only borrows (an HTTP Conn's or a ws:// socket's;
+ * a TCP_BORROWED box's release never closes it).  When a use is in flight it
+ * is woken first (shutdown + fd-wait cancel; the cancel is forgotten before
+ * this returns, so a reused number does not inherit it).  1 when nothing is
+ * in flight on return, 0 on timeout (a use is stranded, e.g. by a panic
+ * between enter and leave). */
+int64_t march_handle_close_drain(void *h, int64_t timeout_ms);
+/* Close WITHOUT releasing: ownership of raw moves to the caller (TCP -> TLS,
+ * server conn -> WebSocket).  raw, or -1 if already closed. */
+int64_t march_handle_detach(void *h);
+int64_t march_handle_is_closed(void *h);
+int64_t march_handle_aux(void *h);
+int64_t march_handle_kind(void *h);
+/* The March type a kind renders as ("File.Handle", "Socket", ...). */
+const char *march_handle_kind_name(int64_t kind);
+/* Releases the descriptor unless already released (march_run_resource_dtor). */
+void    march_handle_dtor(void *h);
+/* Per-kind release for the kinds whose closer lives in an optional runtime
+ * file (march_udp.c, march_tls.c register theirs from a constructor, so the
+ * box itself stays a core file).  An unregistered UDP release is close(raw). */
+void    march_handle_set_releaser(int64_t kind, void (*fn)(int64_t raw, int64_t aux));
+/* Test hook (test/test_handle.c): when set, replaces every release. */
+extern void (*march_handle_test_release_hook)(int64_t kind, int64_t raw, int64_t aux);
+/* Release a live-process slot the way process_wait_proc does, without
+ * waiting for or signalling the child (march_runtime.c). */
+void    march_process_release_slot(int64_t handle);
+/* Release a Process handle box's child (march_runtime.c): close its
+ * streams, SIGTERM it if still running, reap it without blocking (a child
+ * not yet exited is reaped by a later spawn or release). */
+void    march_process_release_handle(int64_t handle);
 
 
 /* send_after(pid, msg, delay_ms) : TimerRef — schedule msg for delivery to
@@ -977,6 +1045,9 @@ void    march_install_async_signal(int sig, void (*handler)(int));
 void   *march_task_spawn_thunk(void *clo_ptr);
 /* Wait for a task to complete; returns Ok(result) or Err(msg). */
 void   *march_task_await(void *task_obj);
+/* Non-blocking await: NULL (Option's niche None) while the task runs, else
+ * the Ok(result) / Err(msg) march_task_await would answer. Never waits. */
+void   *march_task_poll(void *task_obj);
 /* Spawn a thunk closure with a cancel token; yields cancel checks. */
 void   *march_task_spawn_with_cancel_thunk(void *clo_ptr, void *tok_ptr);
 /* Mark a task's green thread as DEAD (cooperative cancel). */
@@ -1051,6 +1122,31 @@ int64_t march_file_close(void *handle);
 void   *march_file_read(void *path);
 void   *march_file_read_line(void *handle);
 void   *march_file_read_chunk(void *handle, int64_t size);
+void   *march_file_open_write(void *path, int64_t mode);
+void   *march_file_write_handle(int64_t handle, void *data);
+void   *march_file_seek(int64_t handle, int64_t offset);
+/* File.Dir (runtime/march_file_beneath.c): opens beneath a directory fd. */
+void   *march_dir_open(void *path);
+void   *march_dir_open_write(void *path);
+void   *march_file_open_at(int64_t dirfd, void *rel, int64_t flags);
+void   *march_dir_list_at(int64_t dirfd, void *rel);
+int     march_beneath_open(int dirfd, const char *rel, int flags, int mode);
+/* FileError constructor tags: the declaration order of stdlib/file.march's
+ * `ptype FileError`.  Add new constructors at the end, in both places. */
+#define FILEERR_NOT_FOUND    0
+#define FILEERR_PERMISSION   1
+#define FILEERR_IS_DIRECTORY 2
+#define FILEERR_NOT_EMPTY    3
+#define FILEERR_IO_ERROR     4
+#define FILEERR_CLOSED       5
+#define FILEERR_ESCAPES      6
+/* Helpers march_runtime.c exports to march_file_beneath.c: register a FILE*
+ * in the file handle table (0 when it is full), Ok(v), Err(FileError(tag,
+ * payload)), and a List(String) from n C strings. */
+int64_t march_fh_register(void *f);
+void   *march_file_ok(void *value);
+void   *march_file_err(int64_t tag, const char *payload, int64_t len);
+void   *march_file_string_list(char **names, int64_t n);
 void   *march_file_write(void *path, void *data);
 void   *march_file_append(void *path, void *data);
 void   *march_file_delete(void *path);

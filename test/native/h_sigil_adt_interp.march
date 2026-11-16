@@ -130,5 +130,6 @@ mod HSigilAdtInterp do
     -- specs/todos/2026-08-05-boxed-adt-type-id.md.
     let cb3 = Bx(Cons(fn x -> ~H"<p>${x}</p>", Nil))
     println("poly_iolist=" ++ IOList.to_string(apply_first(cb3, ~H"<i>ok</i>")))
+    ()
   end
 end

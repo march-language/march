@@ -1,0 +1,2 @@
+{"severity":"warning","file":"errors/deprecated_2.march","start_line":21,"start_col":14,"end_line":21,"end_col":28,"message":"`Legacy.old_add` is deprecated: use `Legacy.add` instead; `old_add` goes away in 2.0.","code":"deprecated","fix":null,"labels":[],"notes":[],"category":"PROGRAM"}
+{"severity":"warning","file":"errors/deprecated_2.march","start_line":22,"start_col":16,"end_line":22,"end_col":30,"message":"`Legacy.old_add` is deprecated: use `Legacy.add` instead; `old_add` goes away in 2.0.","code":"deprecated","fix":null,"labels":[],"notes":[],"category":"PROGRAM"}

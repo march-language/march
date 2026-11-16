@@ -7,7 +7,7 @@
 mod Main do
   needs IO.Mut
   fn main(_m : Cap(IO.Mut)) : Int do
-    let t = Vault.new("bufs")
+    let t = Authority.must(Vault.new("bufs"))
     let rb = RingBuf.make(4)
     Vault.set(t, "k", rb)
     match Vault.get(t, "k") do

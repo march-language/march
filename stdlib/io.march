@@ -4,6 +4,12 @@
 -- All functions in this module operate on the standard streams (stdin,
 -- stdout, stderr) of the current OS process.
 --
+-- Every function that touches a stream is a capability operation (kind
+-- IO.Console, target "stdout", "stderr" or "stdin") and returns
+-- `Result(T, CapError)`: `Err` when the current authority refuses it
+-- (specs/2026-11-10-object-capability-design.md §15). Using one only for its
+-- effect needs nothing: a statement's result is discarded.
+--
 -- Usage:
 --   IO.puts("Hello!")              -- write to stdout with newline
 --   IO.write("no newline")         -- write to stdout, no newline
@@ -24,8 +30,10 @@ mod IO do
       IO.write("Loading... ")
       IO.puts("done")
   """
-  fn write(s : String) : Unit do
+  fn write(s : String) : Result((), CapError) do
+    let? _ = Authority.check("IO.Console", "stdout")
     print(s)
+    Ok(())
   end
 
   doc """
@@ -33,8 +41,10 @@ mod IO do
 
       IO.puts("Hello, " ++ name ++ "!")
   """
-  fn puts(s : String) : Unit do
-    println(s)
+  fn puts(s : String) : Result((), CapError) do
+    let? _ = Authority.check("IO.Console", "stdout")
+    print_line(s)
+    Ok(())
   end
 
   doc """
@@ -43,8 +53,10 @@ mod IO do
 
       IO.warn("config file not found, using defaults")
   """
-  fn warn(s : String) : Unit do
+  fn warn(s : String) : Result((), CapError) do
+    let? _ = Authority.check("IO.Console", "stderr")
     print_stderr(s ++ "\n")
+    Ok(())
   end
 
   doc """
@@ -53,11 +65,12 @@ mod IO do
   Returns empty string on EOF, so an empty line and end of input look
   the same.
 
-      let line = IO.read_line()
+      let line = Authority.must(IO.read_line())
       if line == "" do IO.puts("(nothing)") else IO.puts("got: " ++ line) end
   """
-  fn read_line() : String do
-    io_read_line()
+  fn read_line() : Result(String, CapError) do
+    let? _ = Authority.check("IO.Console", "stdin")
+    Ok(io_read_line())
   end
 
   doc """
@@ -69,10 +82,11 @@ mod IO do
   file descriptor, so bytes already buffered by a prior line read are
   invisible to it.
 
-      let b = IO.read_byte()
+      let b = Authority.must(IO.read_byte())
   """
-  fn read_byte() : Int do
-    io_read_byte()
+  fn read_byte() : Result(Int, CapError) do
+    let? _ = Authority.check("IO.Console", "stdin")
+    Ok(io_read_byte())
   end
 
   doc """
@@ -80,21 +94,26 @@ mod IO do
   (without the trailing newline; empty string on EOF, as `read_line`).
   Similar to Elixir's IO.gets/1, which keeps the newline.
 
-      let name = IO.gets("What is your name? ")
+      let name = Authority.must(IO.gets("What is your name? "))
   """
-  fn gets(prompt : String) : String do
-    print(prompt)
+  fn gets(prompt : String) : Result(String, CapError) do
+    let? _ = write(prompt)
     read_line()
   end
 
   doc """
   Print `show(value)` to stdout (with newline) and return the value unchanged.
-  Useful for mid-pipeline debugging, like Elixir's IO.inspect/2.
+  Useful for mid-pipeline debugging, like Elixir's IO.inspect/2. When the
+  console is refused it prints nothing and still returns the value: a
+  debugging pass-through must not change what the pipeline computes.
 
       some_list |> IO.inspect() |> Enum.map(fn x -> x + 1)
   """
   fn inspect(value : a) : a do
-    println(show(value))
+    match Authority.check("IO.Console", "stdout") do
+    Ok(_) -> print_line(show(value))
+    Err(_) -> ()
+    end
     value
   end
 

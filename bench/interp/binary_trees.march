@@ -22,5 +22,6 @@ mod BinaryTrees do
 
   fn main(_c : Cap(IO.Console)) : Unit do
     println("checksum=" ++ int_to_string(iter(4, 0)))
+    ()
   end
 end

@@ -1,0 +1,24 @@
+-- Task-spawn throughput: 100_000 spawn + await pairs.
+-- Measures the per-spawn cost, including the capability check that ocap
+-- phase 1 adds (specs/plans/2026-11-10-ocap-p1-result-plan.md).
+--
+-- Usage: march --compile --opt 2 bench/spawn_loop.march -o /tmp/spawn_loop
+
+mod SpawnLoop do
+  needs IO.Console
+  needs IO.Spawn
+
+pfn go(i : Int, n : Int, acc : Int) : Int do
+  if i >= n do acc
+  else do
+    let t = task_spawn(fn _ -> i % 7)
+    go(i + 1, n, acc + task_await_unwrap(t))
+  end end
+end
+
+pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+  println(int_to_string(go(0, 100000, 0)))
+  ()
+end
+
+end

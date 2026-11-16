@@ -1,0 +1,12 @@
+exit: 1
+-- CONTRACT --------------- errors/pure_violation_4.march
+
+`mod Pure` (declared `cap pure`) declares `needs IO.FileRead`, but a pure module cannot hold a capability: `needs` exists only to admit side effects, directly or through a stdlib wrapper such as `File.read` or `DateTime.now`. [pure_violation]
+
+Remove the `needs` line, and move the code that needs it to a module without `cap pure`.
+
+11 |     needs IO.FileRead
+         ^^^^^^^^^^^^^^^^^
+
+
+

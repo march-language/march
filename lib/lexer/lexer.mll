@@ -206,6 +206,7 @@ rule token = parse
   | ':'           { COLON }
   | ','           { COMMA }
   | '|'           { PIPE }
+  | ".."          { DOTDOT }
   | '.'           { DOT }
   | "++"          { PLUSPLUS }
   | "+."          { PLUSDOT }

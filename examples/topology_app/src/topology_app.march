@@ -132,7 +132,7 @@ mod TopologyApp do
     end
 
     fn echo(node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
-      let got = Vault.new("front_echo")
+      let got = Authority.must(Vault.new("front_echo"))
       match Echo_Run.initiate_Client(node, fn (s, st) ->
           Echo_Client.recv_Answer(s, Echo_Client.send_Ask(s, st, n), fn (m, st2) ->
             Vault.set(got, "v", m)
@@ -143,7 +143,7 @@ mod TopologyApp do
     end
 
     fn count(node : Cap(ClusterNode.Live), n : Int) : Option(Int) do
-      let got = Vault.new("front_count")
+      let got = Authority.must(Vault.new("front_count"))
       match Count_Run.initiate_Client(node, fn (s, st) ->
           Count_Client.recv_Total(s, Count_Client.send_Add(s, st, n), fn (m, st2) ->
             Vault.set(got, "v", m)

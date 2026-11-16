@@ -541,16 +541,62 @@ let print_build_summary ~t0 ~errors ~warnings =
   else
     Printf.printf "  %s \xe2\x80\x94 %s\n%!" (String.concat ", " parts) time_str
 
+(* Run [cmd] through the shell, returning (exit code, stdout, stderr). *)
+let run_capture cmd_body =
+  let out = Filename.temp_file "cap_probe" ".out" in
+  let err = Filename.temp_file "cap_probe" ".err" in
+  let rc =
+    Sys.command
+      (Printf.sprintf "%s > %s 2> %s" cmd_body (Filename.quote out) (Filename.quote err))
+  in
+  let o = try In_channel.with_open_bin out In_channel.input_all with Sys_error _ -> "" in
+  let e = try In_channel.with_open_bin err In_channel.input_all with Sys_error _ -> "" in
+  (try Sys.remove out with Sys_error _ -> ());
+  (try Sys.remove err with Sys_error _ -> ());
+  (rc, o, e)
+
+let resolve_march ~toolchain_prefix =
+  match run_capture (Printf.sprintf "%ssh -c 'command -v march'" toolchain_prefix) with
+  | 0, o, _ when String.trim o <> "" -> Some (String.trim o)
+  | _ -> None
+
+let realpath p = try Unix.realpath p with Unix.Unix_error _ -> p
+
+(* The compiler `march` resolves to under [toolchain_prefix], as one digest:
+   its path, real path and bytes, the active global toolchain and MARCH_STDLIB.
+   Moved here from [Cap_package] so [check_all_cache_key] can use it. *)
+let compiler_identity ~toolchain_prefix =
+  let parts =
+    match resolve_march ~toolchain_prefix with
+    | None -> [ "march-unresolved" ]
+    | Some p ->
+      let real = realpath p in
+      let digest = try Digest.to_hex (Digest.file real) with Sys_error _ -> "unreadable" in
+      [ p; real; digest ]
+  in
+  (* The executable's digest alone misses two ways the SAME binary can run a
+     different compiler: a wrapper script that execs through
+     ~/.march/current (its bytes never change when the active toolchain
+     does), and a stdlib picked up from MARCH_STDLIB. *)
+  let global = Option.value ~default:"" (try Toolchain.global_version () with _ -> None) in
+  let stdlib = Option.value ~default:"" (Sys.getenv_opt "MARCH_STDLIB") in
+  Digest.to_hex (Digest.string (String.concat "\x00" (parts @ [ global; stdlib ])))
+
 (** Digest [files]' sorted paths + contents + [lib_path_env], so any edit to
-    a checked file or a change to MARCH_LIB_PATH invalidates the cache below.
+    a checked file, a change to MARCH_LIB_PATH or a different compiler
+    ([compiler_id], {!compiler_identity}) invalidates the cache below.
 
     Known limitation: this does NOT hash the *contents* of directories on
     MARCH_LIB_PATH, only the env-var string itself.  Editing a local
     `path = "../foo"` dependency's source in place, without touching
     forge.toml/forge.lock (and thus without changing MARCH_LIB_PATH), will
     not invalidate this cache.  Delete `.forge/check-cache/` if that bites. *)
-let check_all_cache_key ~lib_path_env files =
+let check_all_cache_key ~lib_path_env ~compiler_id files =
   let buf = Buffer.create 4096 in
+  (* The compiler too: a new compiler can add checks (ocap phase 3 ran the
+     capability ceiling and host scopes under `march check`), and a marker
+     written by the old one must not skip them. *)
+  Buffer.add_string buf ("\x00compiler:" ^ compiler_id ^ "\x00");
   List.iter (fun f ->
       Buffer.add_string buf f;
       (try
@@ -578,7 +624,8 @@ let check_all_cache_key ~lib_path_env files =
 let check_all ~lib_path_env ~cache_dir files =
   if files = [] then (0, 0, 0)
   else begin
-    let key = check_all_cache_key ~lib_path_env files in
+    let compiler_id = compiler_identity ~toolchain_prefix:lib_path_env in
+    let key = check_all_cache_key ~lib_path_env ~compiler_id files in
     let marker = Filename.concat cache_dir (key ^ ".clean") in
     if Sys.file_exists marker then (0, 0, 0)
     else begin

@@ -46,5 +46,6 @@ mod ZeroArgClosureDefault do
     let conn1 = assign(conn0, "_csrf_token", "SECRET")
     let inner = fn () -> "INNER"
     println(Wrap.render(conn1, "/login", "post", "", inner))
+    ()
   end
 end

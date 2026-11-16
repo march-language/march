@@ -1,0 +1,11 @@
+exit: 1
+-- CAPABILITY -------- errors/cap_scope_violation_2.march
+
+`Actor.whereis` is given a computed name: cannot prove `"worker." ++ id` is within `IO.Registry("logger", prefix("worker."))`; the check at run time arrives with phase 4. [cap_scope_violation]
+hint: pass a literal name within the scope, or widen the scope in `needs`.
+
+9 |     Actor.whereis(c, "worker." ++ id)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+

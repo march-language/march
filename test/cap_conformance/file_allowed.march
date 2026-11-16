@@ -1,0 +1,24 @@
+-- REFUSE: IO.Clock
+-- File operations allowed: a missing file is Ok(Err(NotFound(_))), a written
+-- file reads back as Ok(Ok(text)).
+mod FileAllowed do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+
+  fn main(_c : Cap(IO.Console), _r : Cap(IO.FileRead), _w : Cap(IO.FileWrite)) do
+    match File.read("/tmp/march_conformance_no_such_file") do
+    Ok(Err(File.NotFound(_))) -> println("missing: Ok(Err(NotFound))")
+    _ -> println("unexpected")
+    end
+    match File.write("/tmp/march_conformance_rw", "hello") do
+    Ok(Ok(_)) -> println(true)
+    _ -> println(false)
+    end
+    match File.read("/tmp/march_conformance_rw") do
+    Ok(Ok(t)) -> println(t)
+    _ -> println("unexpected")
+    end
+    println(File.exists("/tmp/march_conformance_rw") == Ok(true))
+  end
+end

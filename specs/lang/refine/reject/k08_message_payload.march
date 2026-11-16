@@ -1,0 +1,18 @@
+-- EXPECT-VIOLATED: precondition Add
+-- EXPECT-ERROR: `0` can never satisfy `k > 0`
+-- Kind: message payload refinement. The sender owes the handler's parameter
+-- refinement at the `send`.
+mod K08 do
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Add(k : {Int | _ > 0}) do
+      { n: state.n + k }
+    end
+  end
+  fn go() : Int do
+    let p = spawn(Counter)
+    send(p, Add(0))
+    0
+  end
+end

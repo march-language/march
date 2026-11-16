@@ -47,7 +47,7 @@ need to drain traffic before a routine code push. Some edge cases are still open
 
 **What happens to running work**
 
-- [Actor state migration](#actor-state-migration): [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
+- [Actor state migration](#actor-state-migration): [derived migrations](#derived-migrations-adding-a-field-needs-no-migrate_state), [the `migrate` clause](#moving-data-the-migrate-clause), [`--drop`](#dropping-a-field---drop), [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
 - [Compatibility annotations](#compatibility-annotations)
 - [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
 - [What a build guarantees: `forge hot-reload check`](#what-a-build-guarantees-forge-hot-reload-check)
@@ -76,7 +76,7 @@ connections, sessions in flight, and the warm process.
 |---|---|
 | A function body, an actor handler, a nested module's function | Hot patch of just that function |
 | An actor's state shape | Hot patch plus a `migrate_state` (or a `@compat` annotation) |
-| An actor's message type | Hot patch plus a `migrate_msg`, or old-format messages are dropped and counted |
+| An actor's message type | Hot patch plus a `migrate_msg`, or old-format messages are dropped and counted; a message several such changes old goes through each deploy's `migrate_msg` in order |
 | A function's signature | Hot patch; every caller must be in the same batch, unless the server supports epoch-tagged dispatch |
 | A protocol a `choose` branch was added to | Hot patch, receivers of the choice before its chooser |
 | `main`, a topology hook, generated protocol code, the standard library, the runtime | A restart; `forge deploy` plans it for you |
@@ -140,6 +140,53 @@ changed state shape, the rollback needs an explicit reverse `migrate_state` that
 preserves newer state. Re-uploading the original artifact without that migration is
 refused. The rollback integration scenario verifies service continuity, restored
 behavior and increasing release counters; automatic rollback is not provided.
+
+You can write the reverse migration ahead of time, beside the forward one, and have the
+compiler check that rolling back loses nothing. Name it `<actor>_rollback_state`:
+
+```march
+fn counter_migrate_state(old : { count : Int, announced : Bool }) : { count : Int, announced : Bool, label : Int } do
+  { count: old.count, announced: old.announced, label: 2 }
+end
+
+fn counter_rollback_state(new : { count : Int, announced : Bool, label : Int }) : { count : Int, announced : Bool } do
+  { count: new.count, announced: new.announced }
+end
+```
+
+Every build then proves `counter_rollback_state(counter_migrate_state(old)) == old` for
+every `old` the forward migration accepts. The law is a compiler-generated lemma,
+`counter_rollback_roundtrip`; it never runs. A rollback that drops something is an
+error with the state it loses:
+
+```
+the lemma `counter_rollback_roundtrip` is false: its theorem `counter_rollback_state(counter_migrate_state(old)) == old` does not hold at old = { count: 3, announced: true } [refinement_violated]
+```
+
+`forge hot-reload check` prints a `rollback round trip` line for the actor. The rollback
+deploy itself is unchanged: its `migrate_state` is this function. The check unfolds both
+functions, so it covers what the refinement checker can reflect. The old state's
+refinements, including the ones the running version guaranteed, are assumed of `old`.
+
+When the compiler derives the forward migration (a state that only gained fields, see
+[Derived migrations](#derived-migrations-adding-a-field-needs-no-migrate_state)), it derives this reverse too, unless you wrote
+one: it copies back the fields the running version had and drops the added ones. The
+round trip is proved like a written one, and the line reads
+`rollback round trip (derived)`. The build's sidecar records the state the rollback
+returns to, so the rollback deploy needs nothing written either: redeploying the old
+source, whose state only lacks the added fields, gets its `migrate_state` derived as that
+proved rollback (`migrate_state (derived rollback)`), and forge says so:
+
+```
+actor Counter: migrate_state derived as the running version's proved rollback (drops hits, the fields that version added)
+```
+
+A rename made with a [`migrate` clause](#moving-data-the-migrate-clause) has its reverse
+derived the same way (copy `total` back into `count`), so rolling a rename back loses
+nothing either; forge then says `copies back count from total`.
+
+A removed field is otherwise never derived away: only a rollback to exactly the state the
+running version's proved rollback returns to drops data without a written migration.
 
 ## Server setup
 
@@ -501,15 +548,70 @@ actor Counter: migrate_state derived from the running version's state (adds hist
 
 A derived migration is checked like one you wrote: the same refinement and `@invariant` proofs, the same counterexample search, and the same live-data check before `ACTIVATE`. Copying a field keeps whatever the running version guaranteed of it, and a new field's `init` value is checked against its refinement. Both rules are proved once in the compiler's test suite, so with unchanged refinements there is nothing left for you to prove. If you also tightened a kept field's refinement, the build fails at that field with the running state that breaks it, and asks you to write the migration.
 
+The derived migration comes with its reverse, `<actor>_rollback_state`, and the build proves that rolling back loses nothing; see [Schema baselines and rollback](#schema-baselines-and-rollback).
+
 Nothing is derived when the change needs a decision. The deploy is then refused as before, and the refusal says why:
 
 | Change | Why it is not derived |
 |---|---|
-| A field was removed | dropping data is your call (a rename looks like a removal plus an addition; for now, write the migration) |
-| A field changed type | the old value has to be converted |
+| A field was removed | dropping data is your call: to move its value into another field, say so with a [`migrate` clause](#moving-data-the-migrate-clause); to discard it, deploy with [`--drop`](#dropping-a-field---drop) |
+| A field changed type | the old value has to be converted; give the conversion in a `migrate` clause |
 | A new field's `init` value reads an `init` parameter, or `init` is not a record literal | there is no constant to give a running actor |
 
 A `migrate_state` you write always wins: the compiler derives one only when there is none. An actor declared in a nested module is not derived yet; write its migration by hand.
+
+### Moving data: the `migrate` clause
+
+A rename, a conversion or a field computed from old ones is a decision the compiler cannot guess: `{ count }` → `{ total }` looks exactly like removing `count` and adding an empty `total`. Instead of writing the whole `migrate_state`, write only that decision, after `init`:
+
+```march
+-- running:  state { count : {Int | _ >= 0}, label : String }
+actor Counter do
+  state { total : {Int | _ >= 0}, label : String, hits : Int }
+  init  { total: 0, label: "", hits: 0 }
+  migrate old -> { total: old.count }
+  ...
+end
+-- the compiler derives
+--   fn counter_migrate_state(old) do { total: old.count, label: old.label, hits: 0 } end
+```
+
+`old` names the running version's state. Each field the clause gives takes the clause's value; every other field follows the rules above (kept fields copied, new ones from `init`). A running field the clause reads may be removed: its value moved. One that nothing reads still refuses the deploy, so no data is dropped without your saying so.
+
+A bare copy (`total: old.count`, the same type) keeps what the running version guaranteed of `count`, like a kept field, so an unchanged refinement needs no proof. Any other expression (`total: old.count * 100`, `count: int_to_string(old.count)`) is checked like a migration you wrote. When it can break the new refinement, the build fails at the clause with the running state that breaks it.
+
+When every running field comes back by a bare copy (kept fields and renames), the migration has a reverse: the compiler derives `<actor>_rollback_state` (`count: new.total`), and the build proves the round trip. Redeploying the old source then copies the value back with no clause of its own. `forge deploy hot --plan` shows what the clause did:
+
+```
+actor Counter: migrate_state derived from the migrate clause (renames: total from count; adds hits from init)
+```
+
+The clause belongs to one deploy. After that deploy it is harmless: on the next one, a clause that reads a field the running version no longer has is ignored with a warning to delete it. Without a known running version (a plain build), the clause does nothing. A malformed clause is an error in any build: its body must be a record literal of state fields, each given once.
+
+When a deploy removes exactly one field and adds exactly one of the same type, and you wrote no clause, the build warns that it may be a rename and proposes the clause as a fix:
+
+```
+`Counter` removes `count` and adds `total` of the same type; if `total` renames `count`, a migrate clause moves the running data: `migrate old -> { total: old.count }` [migrate_rename_suggested]
+
+    possible fix (a guess: check it before applying it):
+
+4 |     init  { total: 0, label: "" }
+5 +     migrate old -> { total: old.count }
+```
+
+It is only a guess (`total` may really be new and `count` really gone), so it is never applied on its own: take it from the editor's quick fixes, or run `forge fix --only migrate_rename_suggested`. The deploy's refusal carries the same suggestion.
+
+### Dropping a field: `--drop`
+
+A removed field that nothing reads refuses the deploy, because its live data would be thrown away. When that is what you want, say so for that field:
+
+```sh
+forge deploy hot --drop Counter.history
+```
+
+The derived migration then leaves `history` out (`--drop` is repeatable, or takes a comma-separated list). The consent is built into the patch's signed schemas, so the server's audit log records which fields the activation discarded (`"dropped":["history"]`), next to any `--accept-unproved`. A `--drop` the build does not use (a misspelled field, a field that is kept, or one a `migrate` clause reads) aborts the deploy rather than being ignored. The plan says `drops history by --drop`. A dropped field cannot come back, so no rollback is derived for that deploy. Outside forge, the compiler flag is `--hcr-drop Counter.history`.
+
+`forge hot-reload check` labels the line `migrate_state (derived, migrate clause)`. When a clause cannot derive the migration against the running version (it does not read a removed field, say), the build warns at the clause with the reason, rather than waiting for the deploy to refuse it.
 
 ### Messages queued during a deploy
 
@@ -544,6 +646,8 @@ end
 ```
 
 `Counter.Msg` names the actor's message type (the type its `on` handlers define). When the old type and the actor share a message name, qualify the new one by the actor: `CounterMsgV.Inc(n) -> Some(Counter.Inc(n))`. `forge hot-reload migrate-msg-stub Counter` writes this stub from the running version's handlers (add `--new <build>.so.schemas.json` to map kept handlers to themselves and removed or changed ones to `None`). The function is checked like `migrate_state`: it must be IO-free, take exactly one annotated parameter, return `Option(<Actor>.Msg)`, and match exhaustively. `forge deploy hot` refuses the deploy if its old type does not match the running version's handlers.
+
+Each deploy's `migrate_msg` converts from the build before it to its own. A message that is two or more message-type changes old (its sender is still pinned to an epoch before both deploys) is converted through each of those deploys' `migrate_msg` in turn, oldest first, and then handled. If any deploy in between has no `migrate_msg`, the message is dropped and counted without running any of them; if one returns `None` (or its result fails that build's handler refinements), the message is dropped and counted there. A drop reported to a remote sender says which link it was (`migrate_msg returned None (link 2 of 2)`, `message-type change 2 of 2 has none`). A message converted through several links counts once in the `converted` counter.
 
 ### Drains
 
@@ -651,7 +755,7 @@ For production deployments, `full` is safest: every state transition then has a 
 
 ## Verifying migration soundness with `@invariant`
 
-If your actor has a state invariant (a condition that must hold for every live actor), you can annotate it and the compiler will **prove** that your `migrate_state` function preserves it before the deploy is allowed through.
+If your actor has a state invariant (a condition that must hold for every live actor), you can annotate it. Every build checks that it holds for every state the actor can reach (see [below](#an-invariant-holds-for-every-live-actor)), and on a deploy the compiler **proves** that your `migrate_state` function preserves it before the deploy is allowed through.
 
 ```march
 -- The actor invariant: count is always non-negative
@@ -727,6 +831,105 @@ end
 
 Both satisfy `len(history) == count`. The compiler verifies this using an SMT solver; no input can slip through.
 
+### An invariant holds for every live actor
+
+Every build, not only a deploy, checks the `@invariant` as an inductive invariant:
+
+- the state `init` builds must satisfy it;
+- every handler, given a `state` that satisfies it and a message that satisfies the
+  handler's parameter refinements, must return a state that satisfies it.
+
+Together these make it true of every state a live actor can hold, which is what the
+deploy check takes it for. A handler that can break it is an error with the state and
+message that break it:
+
+```march
+mod App do
+  @invariant(count >= 0)
+  actor Counter do
+    state { count : Int }
+    init { count: 0 }
+    on Inc(n : {Int | _ > 0}) do { state with count: state.count + n } end
+    on Dec() do { state with count: state.count - 1 } end
+  end
+end
+```
+
+```
+-- REFINEMENT ----------------------------- counter.march
+
+`Counter`'s handler `Dec` does not preserve its `@invariant`. [return_refinement_violated]
+
+The invariant requires:
+
+    count >= 0
+
+A counterexample was found:
+
+    state = { count: 0 }
+
+7 |     on Dec() do { state with count: state.count - 1 } end
+           ^^^
+
+    Every handler must return a state satisfying the `@invariant`, given a `state` that satisfies it.
+```
+
+Guarding the decrement (`if state.count > 0 do ... else state end`) proves it. `Inc` proves
+only because its parameter is refined: with `n : Int`, `n = -1` breaks it.
+
+The invariant may call the program's own functions (`@invariant(not_137(count))`): the
+check unfolds them as it does in any contract, and a function it can't use there (an
+`@[opaque]` one, say) leaves the invariant `not proved`.
+
+What the check covers: the value each handler returns. A handler's sends and
+`Actor.reply` calls are other actors' business and play no part. A restart re-runs `init`,
+which is checked. A hot deploy installs the migrated state, which the deploy checks
+against the new invariant. An invariant the checker can't decide (one that calls a
+function it can't reflect, say) is not an error, except in a `cap verified` module, where
+every obligation must be discharged.
+
+---
+
+## Proving a deploy is a simulation: `@compat(simulation)`
+
+A message can be handled on either side of a deploy: queued messages run on the old code,
+later ones on the new. When the new code is meant to behave like the old (a refactor, a
+performance fix, a new field it only carries along), you can have the compiler prove that it
+doesn't matter which side handles a message: handling it on the old code and then migrating
+gives the same state as migrating first and handling it on the new code.
+
+```march
+@compat(simulation)
+actor Tally do
+  state { count : Int }
+  init  { count: 1 }
+  on Bump(n : Int) do { state with count: state.count + n } end
+end
+```
+
+`@compat(simulation)` is the `full` shape policy plus this law. A `--hot-reload` build of
+such an actor records each handler's body in its schema sidecar. The next build, checked
+against that deployed sidecar, proves for every message both versions handle
+
+```
+new_Bump(migrate_state(s), n) == migrate_state(old_Bump(s, n))
+```
+
+with `migrate_state` the identity when the state didn't change. A handler that now does
+something else fails with the state and message that tell them apart, and
+`forge hot-reload check` prints a `simulation` line, one verdict per message. A handler the
+deployed build didn't have passes: no deployed message names it.
+
+A send, a reply or a print in statement position is not part of the law: it doesn't change
+the state. A handler body is carried across builds only when it reads nothing but the state,
+its parameters, literals and `let`s, and calls only operators and standard-library modules;
+otherwise (a call of your own function, which the deployed build may define differently, or
+a `match`) that message's verdict is `not checked`, with the reason. A deploy that changes
+the message type (`migrate_msg`) is `not checked` for now.
+
+Most deploys change what a handler does on purpose, and are not simulations; leave the
+attribute off for them.
+
 ---
 
 ## What expressions are allowed in `@invariant`
@@ -761,16 +964,18 @@ check as `forge check`, against the last deploy's schema when there is one
 error, with the same exit code.
 
 ```
-actor Counter: not checked
+actor Counter: proved
   state refinements        proved: 3 sites in init and handlers
-  @invariant               not checked: init and handler results are not checked against it; a hot deploy checks it on the migrated state
+  @invariant               proved: 3 sites at init and after each handler
   handler contracts        proved: 1 site where a message is built
   migrate_state (derived)  proved: 1 site against the deployed build
-protocol Relay (2 roles): not checked
+protocol Relay (2 roles): proved (spec) · validated (compiler)
   projection        proved (spec) · validated (compiler): the endpoints and typecheck projectors agree with Session.Theory.project for every role, whose two projections are dual (Session.Theory.project_dual)
-  deadlock freedom  not checked: no proof covers this protocol yet
-runtime: assumed
-  mailbox order, Actor.call replies, DOWN delivery  assumed: the runtime is trusted; nothing here proves it
+  deadlock freedom  proved (spec) · validated (compiler): on the protocol's own schedule every role can take each step and every role finishes (Session.Theory.progress, projections_compose; synchronous delivery)
+runtime: proved (model)
+  per-sender message order  proved (model) · tested (runtime): Actor.Theory.enq_self, enq_other, replay_order, call_keeps_others; tested: actor_theory_conformance, actor_call_in_handler_keeps_messages
+  Actor.call replies        proved (model) · tested (runtime): a late reply never answers a later call (Actor.Theory.stale_reply_ignored, call_reply_cat); tested: actor_call_late_reply
+  DOWN delivery             proved (model): at most once, never dropped by a full mailbox (Actor.Theory.down_at_most_once, down_never_dropped); the runtime is not yet tested against it
 ```
 
 | Label | Meaning |
@@ -780,13 +985,16 @@ runtime: assumed
 | `not proved` | Some obligation was neither proved nor refuted; the line gives the checker's reason. |
 | `not checked` | The program states a guarantee nothing checks yet. This line is the only place it is said. |
 | `checked (compiler)` | A compile-time check that is not a proof about a model (a multiparty protocol's send/receive matching). |
+| `proved (model)` | Proved about a model of the runtime (`Actor.Theory`: the mailbox), with no test yet that the runtime matches the model. |
+| `proved (model) · tested (runtime)` | Proved about the model, and a native fixture checks the runtime against it. |
 | `proved (spec) · validated (compiler)` | The compiler's projection agrees with `Session.Theory.project`, so the laws the standard library proves about it hold (see the choreography chapter, "What is proved about a protocol"). |
-| `assumed` | The trust boundary: the runtime, and messages from other nodes to an `@[remote]` actor. |
+| `assumed` | The trust boundary: messages from other nodes to an `@[remote]` actor. |
 
-A block's header is its weakest line, `assumed` aside. Two gaps are reported as
-`not checked` today: `@invariant` is used only across a hot deploy (as the migration's goal
-and, from the deployed build, as a hypothesis), and nothing yet proves a protocol free of
-deadlock.
+A block's header is its weakest line, `assumed` aside. `@invariant` counts one site for
+`init` and one for each handler's result (a handler with two branches returning a state has
+two). A protocol's deadlock freedom is proved for the
+fragment the choreography chapter describes ("What is proved about a protocol"), and
+`not checked`, with the reason, outside it (a loop, for one).
 
 ## Contracts across versions
 
@@ -801,6 +1009,7 @@ contracts imply the new ones**:
 |---|---|---|
 | The state | old field refinements and `@invariant` imply the new ones | with a `migrate_state`: of its result, from the old state; without one and with the same fields: of the state as it is |
 | A handler's parameters | each old parameter refinement implies the new one | when the message type is unchanged (otherwise `migrate_msg` converts every old message) |
+| A message's constructor tag | each constructor both versions name keeps its actor-message tag | on every deploy, with or without contracts; a moved tag can't be accepted |
 
 Loosening a contract always passes. Tightening one is refused unless it follows from the
 old contract, or a `migrate_state` re-establishes it:
@@ -842,6 +1051,28 @@ whole actor). The server's audit line for the activation copies them:
 So the audit log answers "what was deployed without its contract proved, and who signed
 it." A patch built elsewhere (`forge deploy hot --so …`) must be built with the same
 `march --accept-unproved …`: forge refuses an override the patch doesn't carry.
+
+**Message tags must not move.** A queued message is a heap cell whose constructor tag the
+sender's build chose, and the new build's dispatch (or its `migrate_msg`) reads it. The tag
+is a hash of the qualified constructor name (`Tally_Msg.Bump`), so adding, removing or
+reordering handlers and actors leaves it alone. The one exception is a hash collision:
+when two names in a build hash to the same slot, the later one probes to the next free
+slot, so its tag depends on which other names the build has. Each `.schemas.json` records
+every handler's tag (`{"name":"Bump","params":["Int"],"tag":29449723}`, and the same for
+`migrate_msg_from`). `forge deploy hot` and `march --check-migration` compare them for every
+constructor the running version and the new build both name (a removed handler through the
+new `migrate_msg`'s old type), and refuse a moved tag:
+
+```
+migration: Tally.Bump.tag: REFUSED, Tally.Bump's actor-message tag moved: the running version tags it 0x01c15dfc, this build 0x01c15dfb. Tags are a hash of the qualified name Tally_Msg.Bump, and a name whose hash slot another constructor holds probes to the next free one, so a hash collision in one of the two builds moved it; a message the running version built would be read as another constructor or dropped. A restart deploys it safely; a hot deploy cannot.
+```
+
+`--accept-unproved` doesn't reach it, since it's a fact about the two builds, not a proof
+that failed. A running version built before tags were recorded can't be compared; the
+deploy goes ahead and says so (`Tally.tags: not compared (the running version's schema
+predates actor-message tag recording, …); not a refusal`, and a `NOTE:` line from forge).
+When all tags agree, `--check-migration` prints one summary line
+(`actor-message tags: unchanged (55 constructors of 10 actors compared)`).
 
 ### Migrations are checked on every build
 
@@ -1097,9 +1328,10 @@ mod App do
   fn main() do
     println("cap-demo server up")
     let _ = Server.handle(1)
-    match tcp_listen(9099) do
-      Err(e) -> println("listen err: " ++ e)
-      Ok(fd) -> let _ = tcp_accept(fd)  println("server shutting down")
+    match Socket.listen(9099) do
+      Err(_) -> println("listen refused")
+      Ok(Err(e)) -> println("listen err: " ++ Socket.error_message(e))
+      Ok(Ok(l)) -> let _ = Socket.accept(l)  println("server shutting down")
     end
   end
 end

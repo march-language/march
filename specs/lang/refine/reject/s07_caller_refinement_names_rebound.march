@@ -1,0 +1,12 @@
+-- EXPECT-VIOLATED: precondition at
+-- EXPECT-ERROR: for example, when `i` is
+-- Fixed 2026-08-03 (specs/progress/2026-08-03-caller-refinement-survives-mentioning-another-name.md).
+-- `i < n` is a fact about the parameter `n`. After `let n = 0` it was still
+-- read as a fact about the new `n`, so `at(n, i)` was PROVED.
+mod S07 do
+  fn at(n : Int, i : {Int | _ < n && _ >= 0}) : Int do i end
+  fn bad(n : Int, i : {Int | _ < n && _ >= 0}) : Int do
+    let n = 0
+    at(n, i)
+  end
+end

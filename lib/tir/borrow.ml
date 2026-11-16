@@ -66,6 +66,17 @@ let extern_borrow_table : (string * bool list) list = [
   ("file_read",     [true]);
   ("file_write",    [true; true]);
   ("file_append",   [true; true]);
+  (* file_open_write reads its path (fopen); file_write_handle reads its
+     data (fwrite). The Int handle / mode / offset carry no RC. *)
+  ("file_open_write",   [true; false]);
+  ("file_write_handle", [false; true]);
+  (* File.Dir: dir_open / dir_open_write read their path (open);
+     file_open_at / dir_list_at read rel (openat). The Int fd / flags carry
+     no RC. *)
+  ("dir_open",          [true]);
+  ("dir_open_write",    [true]);
+  ("file_open_at",      [false; true; false]);
+  ("dir_list_at",       [false; true]);
   ("file_delete",   [true]);
   ("file_copy",     [true; true]);
   ("file_rename",   [true; true]);
@@ -127,6 +138,15 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_kill",        [true]);
   ("actor_stop",        [true; false]);
   ("march_actor_stop",  [true; false]);
+  (* Handle-box primitives (ocap phase 2): each only reads the box; the
+     box's own count is the caller's. handle_new takes three Ints. *)
+  ("handle_new",        [false; false; false]);
+  ("handle_enter",      [true; false]);
+  ("handle_leave",      [true]);
+  ("handle_close",      [true]);
+  ("handle_detach",     [true]);
+  ("handle_is_closed",  [true]);
+  ("handle_aux",        [true]);
   ("is_alive",          [true]);
   ("march_is_alive",    [true]);
   ("actor_is_draining", [true]);
@@ -162,6 +182,11 @@ let extern_borrow_table : (string * bool list) list = [
      LSan: ~9,000 Tasks). *)
   ("task_cancel_by_id", [true]);
   ("march_task_cancel_by_id", [true]);
+  (* task_poll only reads the Task's done and result words; it is called on
+     the same handle every frame, so borrowing it keeps a poll free of
+     refcount traffic. *)
+  ("task_poll", [true]);
+  ("march_task_poll", [true]);
   ("pid_to_int",        [true]);
   ("pid_index_of",      [true]);
   ("march_pid_index_of", [true]);
@@ -191,6 +216,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("march_string_reverse",     [true]);
   (* ── 2-arg string × string ──────────────────────────────────────────────── *)
   ("march_string_contains",      [true; true]);
+  ("march_cap_check_raw",        [true; true]);
   ("march_string_starts_with",   [true; true]);
   ("march_string_ends_with",     [true; true]);
   ("march_string_split",         [true; true]);
@@ -288,6 +314,10 @@ let extern_borrow_table : (string * bool list) list = [
     (* march_http_server_bind_host copies the host's bytes into a stack
        buffer for inet_pton and keeps nothing. *)
   ("http_server_bind_host", [true]);
+  (* march_https.c copies or reads its path / PEM Strings (into C buffers or
+     an OpenSSL context) and keeps nothing. *)
+  ("http_server_tls_configure", [false; true; true; false; false]);
+  ("http_server_reload_tls",    [false; true; true]);
   (* ── Vault (march_extras.c), audited 2026-10-01: every one copies its
      table/name/key into C (vault_key_cstr) and takes its OWN reference to a
      stored value (march_incrc), never storing or releasing the caller's.
@@ -382,6 +412,7 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_trim_end",      [true]);
   ("string_reverse",       [true]);
   ("string_contains",      [true; true]);
+  ("cap_check_raw",        [true; true]);
   ("string_starts_with",   [true; true]);
   ("string_ends_with",     [true; true]);
   ("string_split",         [true; true]);
@@ -681,6 +712,8 @@ let extern_owned_builtins : string list = [
     "logger_add_context"; "logger_add_field"; "spawn";
     "spawn_supervised"; "actor_reply";
     "actor_send_after"; "actor_cancel_timer"; "http_server_spawn_n";
+    (* stores its pipeline closure for the whole server run (march_https.c) *)
+    "http_server_plain_listener";
     "file_close"; "file_read_line"; "file_read_chunk";
     "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_write";
     (* typed_array_create STORES its default value in every slot: the

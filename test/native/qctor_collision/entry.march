@@ -27,5 +27,6 @@ mod QcCollisionEntry do
     println(QcMatch.describe(d))
     println(bool_to_string(a == QcTypes.Asc))
     println(QcTypes.label(QcTypes.DescNullsLast))
+    ()
   end
 end

@@ -1,0 +1,18 @@
+-- EXPECT-ERROR: expected `Main.Option(Int)` but got `Option(Int)`
+mod Main do
+  needs IO.Console
+  -- A program may declare its own `Option`; it is then a second type, and a
+  -- prelude `Option` (here `List.find`'s result) is not accepted where the
+  -- program's own is expected
+  -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
+  type Option(a) = Some(a) | None
+  fn mine(o : Option(Int)) : Int do
+    match o do
+      Some(n) -> n
+      None -> 0
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    print_line(int_to_string(mine(List.find([1, 2], fn x -> x > 1))))
+  end
+end

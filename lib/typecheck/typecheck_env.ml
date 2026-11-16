@@ -269,6 +269,8 @@ type cap_mismatch_site = {
 }
 
 type env = {
+  in_logical_predicate : bool;
+  in_proof_hints : bool;
   vars    : scheme StrMap.t;               (** Term variable → scheme *)
   types   : int StrMap.t;                  (** Type constructor name → arity *)
   ctors   : ctor_info list StrMap.t;       (** Data constructor name → all infos (head = most recent) *)
@@ -340,6 +342,11 @@ type env = {
       capability as a plain string is disturbed.  [None] means unscoped.
       A capability declared twice contributes one entry per scope, so
       [needs IO.FileRead("/a"), IO.FileRead("/b")] permits both subtrees. *)
+  module_need_scopes : (string * (string * string option) list) list;
+  (** [mod_need_scopes] of each checked sub-module, keyed exactly like
+      [module_caps] (qualified and short name).  Read by host-scope checking
+      (specs/2026-11-09-host-scoped-network-capabilities-design.md), which
+      judges each module by its OWN scopes. *)
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement.
@@ -747,6 +754,30 @@ type env = {
       ceiling: a stdlib wrapper's body caps roll up to the user module that
       calls it, exactly as [March_tir.Cap_attrib]'s [~transparent] does on the
       `--compile` side. Keyed like [cap_closures]. *)
+  deprecated_fns : (Typecheck_types.scheme * Ast.span * string) list ref;
+  (** Every function carrying [@[deprecated("message")]] that a module exports:
+      the scheme the export step bound, the span of the declaring module, and
+      the message.  [EVar] warns ([Code.deprecated]) when the scheme a name
+      resolves to IS one of these (physical equality, so a qualified name, an
+      imported one and an alias all match, and a user's own function of the
+      same name never does) and the reference lies outside the declaring
+      module's span.  A list, not a table: a program has a handful of these,
+      and the common case is the empty list. *)
+  stdlib_internal_actors : (string, string) Hashtbl.t;
+  (** `@[stdlib_internal]` stdlib actors (ocap phase 2b): the [ci_type] of the
+      actor's name constructor (its name) and of its message constructors
+      ([actor_msg_type_name]), mapped to the actor's name for the error. A
+      constructor of one of these types may be built only where
+      [span_may_name_internal] holds, so user code can neither spawn the actor
+      nor send it a message. *)
+  stdlib_internal_fns : (string, string * Typecheck_types.scheme) Hashtbl.t;
+  (** Qualified name ([Mod.f]) of every stdlib function carrying
+      [@[stdlib_internal]], mapped to the module the error points users at and the scheme the export step
+      bound to that name. The gate fires only for a name whose resolved scheme IS
+      (physically) that one, so a user module of the same name never matches.
+      Filled when a stdlib [DMod]'s [DFn]s are checked; read by the stdlib-only
+      gate in [infer_expr]'s [EVar] arm. Shared by every copy of the env, like
+      [stdlib_fns]. *)
   ceiling_extra_roots : (string, unit) Hashtbl.t;
   (** Function-name keys that are ALWAYS-reachable ceiling roots regardless of
       whether the program has a `main` — mirroring the unconditional roots
@@ -854,6 +885,8 @@ type env = {
 }
 
 let make_env errors type_map = {
+  in_logical_predicate = false;
+  in_proof_hints = false;
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   ty_aliases = StrMap.empty;
   level = 0; lin = [];
@@ -862,7 +895,7 @@ let make_env errors type_map = {
   scheme_witnesses = Hashtbl.create 64;
   inst_witnesses = Hashtbl.create 256;
   interfaces = StrMap.empty; sigs = [];
-  mod_needs = []; mod_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
+  mod_needs = []; mod_need_scopes = []; module_need_scopes = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
   import_idx = make_import_index ();
   deferred_check4 = ref [];
@@ -920,6 +953,9 @@ let make_env errors type_map = {
   own_cap_closures = Hashtbl.create 64;
   body_cap_closures = Hashtbl.create 64;
   stdlib_fns = Hashtbl.create 64;
+  deprecated_fns = ref [];
+  stdlib_internal_actors = Hashtbl.create 8;
+  stdlib_internal_fns = Hashtbl.create 8;
   ceiling_extra_roots = Hashtbl.create 16;
   fn_scopes = Hashtbl.create 16;
   fn_refs = Hashtbl.create 64;
@@ -1231,17 +1267,34 @@ let test_build = ref false
 let lookup_var  name env = StrMap.find_opt name env.vars
 let lookup_type name env = StrMap.find_opt name env.types
 
+(** The keys of [Typecheck_builtins.builtin_types], installed by that module
+    when it loads (it depends on this one).  Read by [canon_type_name]. *)
+let builtin_type_keys : (string, unit) Hashtbl.t = Hashtbl.create 64
+
 (** The canonical spelling of a type-constructor name that denotes a type of
     [arity] parameters.  March has a single global type namespace: a type
     declared inside a module has its BARE name as its identity, so a qualified
     `Mod.T` collapses to `T` whenever `T` is a type of the same arity in scope
     (otherwise the name is returned unchanged).  Shared by [surface_ty] (a
     written annotation) and [canon_qualified_tcons] (a builtin signature typed
-    in OCaml), so the two routes can never disagree about a type's identity. *)
+    in OCaml), so the two routes can never disagree about a type's identity.
+
+    Two exceptions (ocap phase 2), both so that a builtin type keeps its own
+   identity:
+   - a qualified name that is itself a builtin type is never rewritten:
+     `IO.Process` is the capability, not the handle type `Process`, and
+     `File.Handle` is not a user's bare `Handle`;
+   - a qualified name is never rewritten INTO a reserved builtin name
+     ([Typecheck_nominal.reserved_builtin_names], the handle types, which no
+     declaration may own): a user's `App.Socket` that is not a nominal
+     identity names no type at all, rather than the handle box. *)
 let canon_type_name env name arity =
+  if Typecheck_nominal.is_identity name then name else
+  if Hashtbl.mem builtin_type_keys name then name else
   match String.rindex_opt name '.' with
   | Some i ->
     let bare = String.sub name (i + 1) (String.length name - i - 1) in
+    if Typecheck_nominal.is_reserved bare then name else
     (match lookup_type bare env with Some a when a = arity -> bare | _ -> name)
   | None -> name
 
@@ -1951,9 +2004,13 @@ let all_ctors_named (name : string) (env : env) : string list =
   | None -> []
   | Some cis ->
     let seen = Hashtbl.create 4 in
+    (* A top-level user type named like a base type shadows that type's
+       constructors in its own file, as it did while the two were one
+       [ci_type]: count the pair once ([Typecheck_nominal.display]). *)
     List.filter_map (fun ci ->
-      if Hashtbl.mem seen ci.ci_type then None
-      else begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
+      let k = Typecheck_nominal.display ci.ci_type in
+      if Hashtbl.mem seen k then None
+      else begin Hashtbl.add seen k (); Some ci.ci_type end
     ) cis
 
 (** Like [all_ctors_named], but returns (type_name, declaring_module) pairs
@@ -2308,9 +2365,103 @@ let stdlib_only : (string * string) list ref =
       ("delivery_origin_set", "remote delivery origins are stamped by `ClusterNode`");
       ("delivery_origin_clear", "remote delivery origins are stamped by `ClusterNode`");
       ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`");
+      (* ocap phase 1: the capability check point (stdlib/authority.march). *)
+      ("cap_check_raw", "use `Authority.check(kind, target)`");
+      ("cap_launch_text", "use `Authority.check(kind, target)`");
       (* DD step 12a: runs a request line through the node's own reload-socket
          dispatch; only the control plane's Agent relays operator-signed lines. *)
-      ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)") ]
+      ("reload_request", "use `Control.relay_line(line)` (the control plane's Agent)");
+      (* ocap phase 2 (Task 2): the handle-box primitives. A handle is an
+         unforgeable reference to an opened resource; user code gets one only
+         from a checked open in the stdlib. *)
+      ("handle_new", "handles are made by their module's open functions");
+      ("handle_enter", "handles are made by their module's open functions");
+      ("handle_leave", "handles are made by their module's open functions");
+      ("handle_close", "handles are made by their module's open functions");
+      ("handle_detach", "handles are made by their module's open functions");
+      ("handle_is_closed", "handles are made by their module's open functions");
+      ("handle_aux", "handles are made by their module's open functions");
+      (* ocap phase 2 (Task 4): the raw Int-descriptor file builtins added for
+         File.Handle. New, so stdlib-only from the start: a guessed raw handle
+         must not write or seek a file the program has open. *)
+      ("file_open_write", "use `File.open_write(path, mode)`");
+      ("file_write_handle", "use `File.write_to(h, data)` on a `File.Handle`");
+      ("file_seek", "use `File.seek(h, offset)` on a `File.Handle`");
+      (* ocap phase 2 (Task 7): the raw directory-fd builtins behind
+         File.Dir. A guessed Int fd must not open or list beneath a
+         directory the program holds. *)
+      ("dir_open", "use `File.open_dir(path)`");
+      ("dir_open_write", "use `File.open_dir_write(path)`");
+      ("file_open_at", "use `File.open_in(d, rel)` / `File.open_write_in(d, rel, mode)` on a `File.Dir`");
+      ("dir_list_at", "use `File.list_in(d, rel)` on a `File.Dir`");
+      (* ocap phase 2 (Task 10): every remaining raw Int-descriptor builtin
+         behind a handle type. User code reaches files, sockets, TLS, UDP,
+         WebSocket, the HTTP server and child processes through the handle
+         API; a guessed descriptor number must reach nothing the program holds.
+         The stdlib's own wrappers (and the cluster stack, whose fds are
+         trusted plumbing) still call these. *)
+      ("file_open", "use `File.open(path)`");
+      ("file_read_line", "use `File.read_line(h)` on a `File.Handle`");
+      ("file_read_chunk", "use `File.read_chunk(h, size)` on a `File.Handle`");
+      ("file_close", "use `File.close(h)` on a `File.Handle`");
+      ("csv_open", "use `Csv.each_row(path, delimiter, mode, f)` or `Csv.read_all(path, delimiter, mode)`");
+      ("csv_next_row", "use `Csv.each_row(path, delimiter, mode, f)` or `Csv.read_all(path, delimiter, mode)`");
+      ("csv_close", "use `Csv.each_row(path, delimiter, mode, f)` or `Csv.read_all(path, delimiter, mode)`");
+      ("tcp_connect", "use `Socket.connect(host, port)`");
+      ("tcp_connect_timeout", "use `Socket.connect_timeout(host, port, timeout_ms)`");
+      ("tcp_send_all", "use `Socket.write(s, data)` on a `Socket`");
+      ("tcp_recv_all", "use `Socket.recv(s, max_bytes)` on a `Socket`");
+      ("tcp_recv_exact", "use `Socket.recv_exact(s, n)` on a `Socket`");
+      ("tcp_recv_http", "use `HttpClient` (or `HttpTransport.request`)");
+      ("tcp_recv_http_headers", "use `HttpClient` (or `HttpTransport.request`)");
+      ("tcp_recv_chunked_frame", "use `HttpClient` (or `HttpTransport.request`)");
+      ("tcp_recv_chunk", "use `Socket.recv(s, max_bytes)` on a `Socket`");
+      ("tcp_recv_chunk_timeout", "use `Socket.recv_timeout(s, max_bytes, timeout_ms)` on a `Socket`");
+      ("tcp_recv_timeout", "use `Socket.recv_deadline(s, max_bytes, timeout_ms)` on a `Socket`");
+      ("tcp_set_recv_timeout", "use `Socket.set_recv_timeout(s, timeout_ms)` on a `Socket`");
+      ("tcp_peer_addr", "use `Socket.peer_addr(s)` on a `Socket`");
+      ("tcp_shutdown", "use `Socket.close(s)` on a `Socket`");
+      ("tcp_close", "use `Socket.close(s)` on a `Socket` (or `Socket.close_listener(l)`)");
+      ("tcp_listen", "use `Socket.listen(port)`");
+      ("tcp_accept", "use `Socket.accept(l)` on a `Listener`");
+      ("tcp_accept_timeout", "use `Socket.accept_timeout(l, timeout_ms)` on a `Listener`");
+      ("tcp_local_port", "use `Socket.local_port(l)` on a `Listener`");
+      ("udp_open", "use `Udp.open(host, port)` or `Udp.open_with(host, port, opts)`");
+      ("udp_resolve", "use `Udp.resolve(host, port)`");
+      ("udp_addr_to_string", "use `Udp.addr_to_string(a)`");
+      ("udp_connect", "use `Udp.connect(sock, addr)` on a `Udp.UdpSocket`");
+      ("udp_close", "use `Udp.close(sock)` on a `Udp.UdpSocket`");
+      ("udp_local_addr", "use `Udp.local_addr(sock)` on a `Udp.UdpSocket`");
+      ("udp_stats", "use `Udp.stats(sock)` on a `Udp.UdpSocket`");
+      ("udp_send_batch", "use `Udp.send_batch(sock, addr, payloads)` on a `Udp.UdpSocket`");
+      ("udp_send_many", "use `Udp.send_many(sock, pairs)` on a `Udp.UdpSocket`");
+      ("udp_recv_batch", "use `Udp.recv_batch(sock, max_msgs, max_size, timeout_ms)` on a `Udp.UdpSocket`");
+      ("tls_client_ctx", "use `Tls.client_ctx(config)`");
+      ("tls_server_ctx", "use `Tls.server_ctx(config)`");
+      ("tls_connect", "use `Tls.connect(s, ctx, hostname)` on a `Socket`");
+      ("tls_accept", "use `Tls.accept(s, ctx)` on a `Socket`");
+      ("tls_read", "use `Tls.read(conn, max_bytes)` on a `Tls.TlsConn`");
+      ("tls_read_timeout", "use `Tls.read_timeout(conn, max_bytes, timeout_ms)` on a `Tls.TlsConn`");
+      ("tls_write", "use `Tls.write(conn, data)` on a `Tls.TlsConn`");
+      ("tls_close", "use `Tls.close(conn)` on a `Tls.TlsConn`");
+      ("tls_ctx_free", "use `Tls.ctx_free(ctx)` on a `Tls.TlsCtx`");
+      ("tls_negotiated_alpn", "use `Tls.negotiated_alpn(conn)` on a `Tls.TlsConn`");
+      ("tls_peer_cn", "use `Tls.peer_cn(conn)` on a `Tls.TlsConn`");
+      ("tls_ctx_set_groups", "use `Tls.set_groups(ctx, groups)` on a `Tls.TlsCtx`");
+      ("tls_negotiated_group", "use `Tls.negotiated_group(conn)` on a `Tls.TlsConn`");
+      ("tls_pq_available", "use `Tls.post_quantum_available()`");
+      ("ws_recv", "use `WebSocket.recv(socket)` on a `WebSocket.WsSocket`");
+      ("ws_send", "use `WebSocket.send_frame(socket, frame)` on a `WebSocket.WsSocket`");
+      ("ws_select", "use `WebSocket.select(socket, timeout_ms)` on a `WebSocket.WsSocket`");
+      ("http_server_spawn_n", "use `HttpServer.spawn_n(server, n)`");
+      ("http_server_wait", "use `HttpServer.wait_for(handle)`");
+      ("http_server_plain_listener", "use `HttpServer.plain_listener(server, port, plugs)`");
+      ("http_conn_is_tls", "use `HttpServer.scheme(conn)`");
+      ("process_spawn_async", "use `Process.spawn_async(command, args)`");
+      ("process_read_line", "use `Process.read_line(p)` on a `Process`");
+      ("process_write", "use `Process.write(p, data)` on a `Process`");
+      ("process_kill_proc", "use `Process.kill(p)` on a `Process`");
+      ("process_wait_proc", "use `Process.wait_proc(p)` on a `Process`") ]
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

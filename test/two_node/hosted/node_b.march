@@ -50,7 +50,7 @@ mod HostedNodeB do
             -- Recorded, not printed: `finish` closes the session, so main's
             -- host_Cons can return and print "closed" before this handler gets
             -- here.  main prints it after, keeping the output in one order.
-            Vault.set(Vault.open("hosted_holds"), "n", Session.epoch_holds_here())
+            Vault.set(Authority.must(Vault.open("hosted_holds")), "n", Session.epoch_holds_here())
             { state with parked: parked }
           end
       end
@@ -59,7 +59,7 @@ mod HostedNodeB do
 
   -- ConsActor's holds count after it finished, once recorded (-1 until then).
   pfn holds_after_finish(left : Int) : Int do
-    let n = Vault.get_or(Vault.open("hosted_holds"), "n", -1)
+    let n = Vault.get_or(Authority.must(Vault.open("hosted_holds")), "n", -1)
     if n >= 0 do n
     else if left <= 0 do panic("ConsActor never recorded its holds") else
       sleep_ms(20)

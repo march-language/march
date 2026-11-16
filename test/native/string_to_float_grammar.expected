@@ -1,0 +1,107 @@
+[inf] -> Some(inf)
+[-inf] -> Some(-inf)
+[infinity] -> Some(inf)
+[INF] -> Some(inf)
+[nan] -> Some(nan)
+[NaN] -> Some(nan)
+[] -> None
+[ ] -> None
+[tab] -> None
+[1.5 ] -> None
+[0b11] -> None
+[0o17] -> None
+[0x1p3] -> Some(8.)
+[1_000] -> None
+[1.5] -> Some(1.5)
+[-42.5] -> Some(-42.5)
+[1e3] -> Some(1000.)
+[.5] -> Some(0.5)
+[5.] -> Some(5.)
+[0x10] -> Some(16.)
+[abc] -> None
+[Infinity] -> Some(inf)
+[-Infinity] -> Some(-inf)
+[+1.5] -> Some(1.5)
+[+inf] -> Some(inf)
+[-nan] -> Some(nan)
+[+nan] -> Some(nan)
+[INFINITY] -> Some(inf)
+[iNfInItY] -> Some(inf)
+[infinit] -> None
+[infinityx] -> None
+[inf ] -> None
+[nanx] -> None
+[nan()] -> Some(nan)
+[nan(123)] -> Some(nan)
+[nan(abc_9)] -> Some(nan)
+[nan(] -> None
+[nan(1] -> None
+[nan(1 )] -> None
+[-] -> None
+[+] -> None
+[--1] -> None
+[+-1] -> None
+[- 1] -> None
+[1e] -> None
+[e5] -> None
+[1e+] -> None
+[1e-2] -> Some(0.01)
+[1E5] -> Some(100000.)
+[1.5e+3] -> Some(1500.)
+[00012] -> Some(12.)
+[1e0005] -> Some(100000.)
+[.] -> None
+[.e1] -> None
+[1.5.5] -> None
+[1,5] -> None
+[1 .5] -> None
+[1e400] -> Some(inf)
+[-1e400] -> Some(-inf)
+[1e-400] -> Some(0.)
+[0x] -> None
+[0X1P-2] -> Some(0.25)
+[0x1.8p1] -> Some(3.)
+[0x.8] -> Some(0.5)
+[0x1.] -> Some(1.)
+[-0x10] -> Some(-16.)
+[0xff] -> Some(255.)
+[0x1p] -> None
+[0x1p+] -> None
+[0xg] -> None
+[0x.p1] -> None
+[0x1.fffffffffffff8p0] -> Some(2.)
+[0x1p1024] -> Some(inf)
+[0x1.fffffffffffff8p1023] -> Some(inf)
+0x1p-1074 * 2^1074 -> Some(1)
+0x1p-1075 * 2^1074 -> Some(0)
+0x1.0000000000001p-1075 * 2^1074 -> Some(1)
+0x1.8p-1075 * 2^1074 -> Some(1)
+0x3p-1075 * 2^1074 -> Some(2)
+0x1p-1080 * 2^1074 -> Some(0)
+0x4e9e.85bc87c31aaep-1037 * 2^1074 -> Some(2766168176785507)
+0x150d.ee1a64e2e11dd894p-1035 * 2^1074 -> Some(2963145403560305)
+(0x1.00000000000008p0 - 1) * 2^52 -> Some(0)
+(0x1.00000000000018p0 - 1) * 2^52 -> Some(2)
+(0x1.000000000000080000001p0 - 1) * 2^52 -> Some(1)
+(0x10000000000000800p-64 - 1) * 2^52 -> Some(0)
+(0x00000000000000000001.8p0 - 1.5) * 2^52 -> Some(0)
+[ 1.5] -> Some(1.5)
+[tab]-2 -> Some(-2.)
+[nl]1.5 -> Some(1.5)
+[cr]1.5 -> Some(1.5)
+[ff]1.5 -> Some(1.5)
+[vt]1.5 -> Some(1.5)
+1.5[nl] -> None
+[  inf] -> Some(inf)
+[ 0x10] -> Some(16.)
+1.5[nul] -> None
+1.5[nul]9 -> None
+float_from_string(0x1p3) -> 8.
+float_infinity -> inf
+float_neg_infinity -> -inf
+float_is_nan(float_nan) -> true
+float_is_nan(1.5) -> false
+float_is_infinite(float_neg_infinity) -> true
+float_is_infinite(float_nan) -> false
+float_epsilon -> true
+toml: { x = inf, y = -inf, z = 1500. }

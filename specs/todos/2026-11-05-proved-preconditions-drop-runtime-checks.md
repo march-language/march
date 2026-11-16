@@ -75,6 +75,9 @@ getters are also opaque runtime calls (`native_*_arr_get`), so emitting the boun
 may again be most of the win; the proof should be needed only where a remaining in-loop bounds
 test blocks vectorisation.
 
+2026-11-11: the inline bounds test for `NativeArray.get_*` / `set_*` is in
+(`specs/progress/2026-11-11-native-array-get-set-inline.md`). `Bytes` getters are still calls.
+
 ## Done when
 
 - Each slice: an `--emit-llvm` test showing the unchecked form at a proved site

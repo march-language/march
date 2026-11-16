@@ -1,0 +1,12 @@
+exit: 1
+-- REFINEMENT ----------------- errors/old_misuse_1.march
+
+`old(…)` cannot be used in an `@invariant`. [old_misuse]
+
+2 |   @invariant(count >= old(count))
+                          ^^^^^^^^^^
+
+    `old(e)` means `e` of the state a message arrived with, so it is only meaningful in a handler's `ensures`: `on Msg(…) ensures state.n >= old(state.n) do … end`.
+    run `march --explain old_misuse`
+
+

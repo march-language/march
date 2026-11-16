@@ -20,5 +20,6 @@ mod Main do
       Ok(out) -> println("Groups: " ++ int_to_string(DataFrame.row_count(out)))
       Err(e) -> println("Err: " ++ e)
     end
+    ()
   end
 end

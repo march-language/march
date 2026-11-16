@@ -1545,3 +1545,28 @@ how Int division is emitted. First measurement (minimum user time of 7 interleav
 int_divmod 0.56 s and index_loop 0.64 s; with the check inline, 0.31 s and 0.49 s. A build
 with no check at all (unsound, measurement only) was no faster than the inline one. Detail in
 `specs/progress/2026-11-06-inline-int-divmod-check.md`.
+
+## HTTPS server and phase deadlines (2026-11-06, macOS, loaded box)
+
+A spot check, not a Run: the Run 5 method (quiet Linux box, wrk `-c256`, order-swapped) is
+still owed for this change. macOS/arm64 with load average ~40 from other sessions, event-loop
+server, `Hello, World!` route, `wrk -t4 -c256 -d8s`, base (merge-base `3817a85`) and new
+interleaved; CPU is the server's user+sys over the run.
+
+| binary | req/s | CPU-µs/request |
+|---|---|---|
+| plain, base | 30,788 / 32,976 | 25.0 / 24.3 |
+| plain, new (deadline heap) | 27,551 / 31,869 | 25.0 / 25.5 |
+| HTTPS keep-alive, new | 31,760 / 30,554 | 30.7 / 30.9 |
+
+Throughput is pinned near macOS loopback's ~30k req/s either way, so CPU per request is the
+comparison: plain is within noise of base (+2%), and TLS on a keep-alive connection costs about
+6 µs per request on top. New-connection-per-request HTTPS (dominated by the handshake) was not
+measured.
+
+Thread pool (`MARCH_HTTP_EVLOOP=0`), same method with `-c64`, three runs each, load average
+~48: base 35.2 µs/request, new 36.9 µs/request (+5%). That is the price of enforced deadlines in
+this mode: the socket is non-blocking and an idle keep-alive connection waits in `poll` before
+its `recv` (two syscalls where the base made one blocking `recv`, whose fixed 10 s SO_RCVTIMEO is
+gone). Reading first on every pass instead measured +6%.
+

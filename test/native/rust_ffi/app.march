@@ -53,5 +53,6 @@ mod App do
     println(shown_opt_float(maybe_float(-1.0)))     -- none
     println(float_to_string(unwrap_float_or(maybe_float(2.5), 0.0)))   -- 2.5
     println(float_to_string(unwrap_float_or(maybe_float(-1.0), 9.9)))  -- 9.9
+    ()
   end
 end

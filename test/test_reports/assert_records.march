@@ -1,7 +1,7 @@
 -- Golden failure report for a plain (non-derived-Show) record
--- (test/run_test_reports.ml).  Its own file: with a second record type in
--- the same program, compiled `==` on two records calls the other type's
--- equality (specs/todos/2026-11-05-compiled-record-eq-helper-collision.md).
+-- (test/run_test_reports.ml): `to_string` on a record with no Show impl,
+-- which every target (JS included, since 2026-11-07) prints `{ x: 1, y: 2 }`.
+-- The #1171 helper collision is fixed.
 mod AssertRecords do
   type Point = { x : Int, y : Int }
   derive Eq for Point

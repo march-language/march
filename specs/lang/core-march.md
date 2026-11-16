@@ -794,8 +794,7 @@ select selection, over branches in order (eval.ml:7318 `go`):
   `PatWild` (`_`) catch-all arm (`eval.ml:773`, `match(PatWild, v) = ∅`, always
   succeeds) is the idiomatic way to make a `match` total; this is why no golden
   program can be a runtime-`Match_failure` witness (a nonzero interpreter exit
-  is an automatic `INTERP FAIL` under `verify.sh`, the same harness limitation
-  §4.4.1 notes for the crashing strict-`&&`/`||` witness; g26 instead exhibits
+  is an automatic `INTERP FAIL` under `verify.sh`; g26 instead exhibits
   the *complementary* fact, that a `_` catch-all keeps a `match` total and
   matching).
 
@@ -1104,9 +1103,10 @@ under-specified corner the walking skeleton flagged for `==`: the
 (δ-Neg-F)  f₋₁ [VFloat f] = VFloat (~-. f)                      eval.ml:2934
 ```
 
-**Boolean ops**: `&&`, `||`, `not` are plain strict `VBuiltin`s restricted to
-`VBool`, exactly parallel to `+`/`==` (see §4.4.1 for the critical fact
-that they do **not** short-circuit):
+**Boolean ops**: `&&`, `||`, `not` are `VBuiltin`s restricted to `VBool`,
+parallel to `+`/`==`. As written in source, `a && b` / `a || b`
+short-circuit (§4.4.1); the δ-rules below describe the builtin applied to two
+already-evaluated operands:
 
 ```
 (δ-And)  f_&& [VBool a; VBool b] = VBool (a && b)               eval.ml:2812–2814
@@ -1123,57 +1123,55 @@ that they do **not** short-circuit):
 Surface `a ++ b` is `EApp(EVar "++", [a;b])`, produced by the parser
 (`parser.mly:1147`) at the same precedence level as `+`/`-` (`expr_add`).
 
-### 4.4.1 `&&`/`||` are strict, not short-circuiting (resolved from the code)
+### 4.4.1 `&&`/`||` short-circuit
 
 **This is an operational rule, not a δ-rule**: it is a fact about *when* the
 right operand is evaluated, which the δ-rule table above cannot express
 because δ-rules apply to already-evaluated argument values.
 
-**Resolved answer: `&&` and `||` are strict.** Both operands are
-unconditionally evaluated before the operator is applied: there is no
-short-circuiting. This applies both to the `&&`/`||` symbols directly and to
-any surface spelling that reduces to them.
+**`&&` and `||` short-circuit.** The left operand is evaluated first; the
+right operand is evaluated only when the left one does not already decide the
+result:
 
-**How this was verified** (not guessed): surface `a && b` / `a || b` are
-built by the **parser**, not the desugarer, as ordinary `EApp` nodes:
-`expr_and: a AND b { EApp (EVar "&&", [a; b]) }` (`parser.mly:1132`) and
-`expr_or: a OR b { EApp (EVar "||", [a; b]) }` (`parser.mly:1128`), exactly
-the same shape as `a + b`. `AND`/`OR` are not word-keywords; the lexer maps
-the *symbols* `&&`/`||` straight to the `AND`/`OR` tokens
-(`lexer.mll:168`–`169`); grepping the keyword table (`lexer.mll:20`–~`75`)
-confirms there is no `"and"`/`"or"` word entry, so **there is no English-word
-`and`/`or` surface form in March**, only `&&`/`||`.
+```
+(E-And-F)  a ⇓ false                      ⟹  a && b ⇓ false
+(E-And-T)  a ⇓ true,   b ⇓ v              ⟹  a && b ⇓ v
+(E-Or-T)   a ⇓ true                       ⟹  a || b ⇓ true
+(E-Or-F)   a ⇓ false,  b ⇓ v              ⟹  a || b ⇓ v
+```
 
-Given `EApp(EVar "&&", [a;b])`, the single `eval_expr` arm that handles
-*every* `EApp` (`eval.ml:6957`–`6975`) evaluates the callee (`f`) and then
-does `List.map (eval_expr env) args` (`eval.ml:6967`) **before** calling
-`apply fn_val arg_vals` (`eval.ml:6972`). This map has no special case for any
-callee name; it evaluates `a` and `b` unconditionally, in order, whatever the
-result of evaluating `a` is, and only then applies the builtin closure looked
-up for `"&&"`/`"||"` (`eval.ml:2812`–`2817`, shown as δ-And/δ-Or above), which
-itself pattern-matches on two already-produced `VBool`s. Grepping `ast.ml` and
-`eval.ml` for `EAnd`/`EOr` confirms there is no dedicated short-circuiting AST
-node or evaluator arm: `&&`/`||` are ordinary named values of type
-`value list -> value`, dispatched through the generic strict-application
-path, with **no** mechanism by which `b` could be skipped.
+So `false && (1 / 0 == 0)` is `false` and `true || (1 / 0 == 0)` is `true`,
+and an index guard written to the left of a read protects it:
+`i >= 0 && i < n && NativeArray.get_u8(a, i) == 1` never reads out of range.
+The refinement and division-safety checkers already reason this way (a
+`d != 0` left of `&&` counts as the guard of an `n / d` on its right), so the
+evaluator and the checker agree.
 
-Consequence: `false && (1 / 0 == 0)` and `true || (1 / 0 == 0)` both **raise**
-`eval_error "division by zero"` in March (confirmed by direct test:
-`true || (1 / 0 == 0)` prints `division by zero` and exits 1), where a
-short-circuiting language would return `false`/`true` without evaluating the
-right operand. This exact crashing program is **not** usable as a golden
-entry, though: the committed `verify.sh` harness treats any nonzero
-interpreter exit code as an automatic `INTERP FAIL` (it does not compare
-"both sides crash the same way"), so a crashing program can never register as
-a `MATCH` regardless of whether the interpreter and compiled backend agree.
-`g13_strict_bool.march` (§5) is therefore a **non-crashing** witness with the
-same evidentiary content: it puts an observable `println` side effect on the
-operand that a short-circuiting `||`/`&&` would never evaluate (the left
-operand already determines the result) and confirms (identically,
-interpreted and compiled) that the side effect fires anyway. That is the
-golden-checked confirmation of strictness; the crashing variant above is the
-sharper illustration but is intentionally kept out of the golden corpus for
-the harness-compatibility reason just given.
+Surface `a && b` / `a || b` are still built by the **parser** as ordinary
+`EApp (EVar "&&"/"||", [a; b])` nodes (`expr_and` / `expr_or`), the same shape
+as `a + b`, so the typechecker treats them as `Bool → Bool → Bool` like any
+other binary builtin. The short-circuit is applied where the program runs:
+the interpreter's `eval_expr` has an arm for that exact shape ahead of the
+generic application arm (`lib/eval/eval.ml`), and TIR lowering turns it into
+an `ECase` on the left operand (`lib/tir/lower_expr.ml`), which the LLVM, JS
+and JIT backends all consume. Lowering keeps the strict builtin call (one
+`and`/`or`, no branch) only when the right operand is *eager-safe*: a
+variable, a literal, or an Int/Float/Bool comparison, `+ - *`, `not` or
+`&&`/`||` over those (and `/`/`%` by a non-zero integer literal). Evaluating
+such an operand early can neither fail nor have an effect, so the difference
+is unobservable (`eager_safe` in `lower_expr.ml`). The operator symbols cannot be
+rebound by a program, so the shape alone identifies them. The δ-And/δ-Or
+rules above still describe the builtin *value*; they only see two
+already-evaluated operands.
+
+`g13_short_circuit_bool.march` (§5) is the golden witness: it puts an
+observable `println` on the operand a short-circuiting `&&`/`||` must skip
+and on the one it must evaluate, and checks that interpreted and compiled
+output agree. (Until 2026-11-11 both operands were always evaluated, so the
+skipped `println` fired; GAPS S17 in the Strata project reported the
+resulting out-of-range read, and the division-safety mismatch above made it
+a soundness hole. `test/test_codegen.ml`'s
+`test_and_or_short_circuit_parity` pins both backends.)
 
 (`not` is unary and has no left-to-right evaluation-order question: `!e` /
 `not(e)` evaluate the single argument then apply `eval.ml:2818`–`2820`, same
@@ -2955,8 +2953,7 @@ non-crashing witness of "the last arm is selected exactly when every earlier
 condition is false"; the truly-all-false chain that would raise
 `non-exhaustive match do` at runtime is intentionally NOT a golden program, since
 a nonzero interpreter exit is an automatic `INTERP FAIL` under `verify.sh`, the
-same harness limitation §4.4.1 / §4.3 note for the crashing strict-`&&` and
-`Match_failure` witnesses); `g35`–`g36` are the actor-operational addition,
+same harness limitation §4.3 notes for the `Match_failure` witness); `g35`–`g36` are the actor-operational addition,
 covering the interleaving-free actor slice of §4.10 (spawn + async `send` +
 `run_until_idle` draining a single actor to a fixed point in `g35`, and a
 `receive()`-mediated follow-up on the non-blocking pop path in `g36`): the two
@@ -2998,7 +2995,7 @@ byte-identically, since neither backend inserts any runtime predicate check:
 | `g10_arithmetic.march` | `-`,`*`,`/`,`%` on `Int`, truncating-toward-zero `/`/`%` on negatives, unary `negate`, `-`/`*` on `Float` (δ-Sub-I/F, δ-Mul-I/F, δ-Div-I, δ-Mod-I, δ-Neg-I) | `5`/`42`/`3`/`2`/`-3`/`-1`/`-5`/`1.5`/`7.5` |
 | `g11_comparison.march` | `!=`,`<`,`<=`,`>`,`>=` on `Int`, plus one `Float` and one `String` case (δ-Neq/Lt/Le/Gt/Ge-*) | `true`/`false` × 12 |
 | `g12_bool_ops.march` | `&&`,`\|\|`,`!`/`not`, `++` (δ-And, δ-Or, δ-Not, δ-Concat) | `true`/`false` × 6, `ab` |
-| `g13_strict_bool.march` | `&&`/`\|\|` **strictness** witness (§4.4.1): a `println` inside the operand a short-circuiting evaluator would skip fires anyway | `or-rhs-evaluated`/`and-rhs-evaluated`/`true`/`false` |
+| `g13_short_circuit_bool.march` | `&&`/`\|\|` **short-circuit** witness (§4.4.1): the operand the left side already decides is skipped (its `println` never fires), the undecided one runs | `and-rhs-evaluated`/`or-rhs-evaluated`/`true`/`false`/`true`/`true` |
 | `g14_tuple_let.march` | `ETuple` construction, `PatTuple` destructuring in a block `let` (E-Tuple, match(PatTuple, VTuple)) | `7` |
 | `g15_tuple_match.march` | `PatTuple` destructuring as a `match` branch pattern, alongside a literal-tuple `PatTuple [PatLit 0; PatLit 0]` branch (first-match-wins over `select`) | `origin` / `3,5` |
 | `g16_tuple_nested.march` | nested `ETuple` construction (tuple-of-tuples) destructured by a nested `PatTuple` **in a `match`** (componentwise `match_list` recursion) | `10` |
@@ -3098,8 +3095,8 @@ form is "both sides now reject the program with a nonzero exit": the
 committed `verify.sh` harness (like the `@oracle` sweep) classifies any
 nonzero interpreter exit as an automatic `INTERP FAIL`, so a program that is
 supposed to error on both sides can never register as a golden `MATCH`
-regardless of backend agreement (the same harness limitation §4.4.1 notes
-for the strict-`&&`/`||` crashing witness). Instead, the convergence is
+regardless of backend agreement (the same harness limitation §4.3 notes
+for the `Match_failure` witness). Instead, the convergence is
 pinned by a dedicated unit test,
 `test/test_properties.ml`'s
 `test_record_update_missing_field_on_erased_base_converged`, which checks

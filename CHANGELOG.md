@@ -44,6 +44,248 @@ git log is authoritative for exact commits.
     produces the value, not the `let?` line.
   - the result-type mismatch that follows from a callback taking the wrong number of
     arguments is no longer reported beside the arity error.
+- **`forge deploy hot --drop Actor.field`.** Lets a hot deploy discard a removed state field
+  that nothing reads, which otherwise refuses the deploy. The consent is built into the
+  patch's signed schemas, so the server's audit log records the dropped fields; a `--drop`
+  the build does not use aborts the deploy. The compiler flag is `--hcr-drop`.
+- **A state field that looks renamed gets the `migrate` clause proposed.** When a deploy
+  removes one field and adds one of the same type, the build warns
+  (`migrate_rename_suggested`) with the clause as a fix. It is a guess, so plain
+  `forge fix` never applies it; `forge fix --only migrate_rename_suggested` (or the editor)
+  does. `forge fix --only CODE` now works in a project too, and naming a code applies that
+  code's guessed fixes.
+- **Rename or convert actor state fields in one hot deploy.** A `migrate old -> { total:
+  old.count }` clause after an actor's `init` says what moves; the compiler writes the rest of
+  `<actor>_migrate_state` (kept fields copied, new ones from `init`). A bare copy keeps the
+  running version's refinement, so an unchanged one needs no proof; any other expression is
+  checked like a written migration. A rename also gets its reverse derived and proved, so
+  redeploying the old source copies the value back. A removed field is dropped only when the
+  clause reads it.
+- **Derived rollbacks for hot deploys.** When the compiler derives a `migrate_state` because
+  an actor's state only gained fields, it now derives the reverse `<actor>_rollback_state`
+  too (copy back the old fields, drop the added ones) and proves the round trip. Rolling
+  back is then free: redeploying the old source gets its migration derived as that proved
+  rollback, where before a removed field always needed a hand-written migration.
+  `forge hot-reload check` shows `rollback round trip (derived)` and
+  `migrate_state (derived rollback)`.
+- **Laws for `Tuple`, `Duration`, `Queue` and `Deque`.** 23 proved lemmas: `Tuple.swap_swap`,
+  `Tuple.len_zip` and the `first`/`second`/`make` laws; `Duration.add_comm`, `add_assoc`,
+  `subtract_add`, `to_milliseconds_add`, `unit_steps` (a minute is 60 seconds, and so on) and
+  two `compare` laws; and `size` laws for `Queue` and `Deque` (each push adds one, `is_empty`
+  is size 0, a queue's size is the length of its list).
+- **`Math` Float functions state what they return.** `Math.min_float`, `Math.max_float` and
+  `Math.clamp_float` carry return types that hold unless an argument is NaN, so a caller
+  passing non-NaN values gets the bound without a call, and `Math` has new proved lemmas
+  `min_float_comm`, `max_float_comm`, `clamp_float_within`, `abs_idem`, `abs_nonneg` and
+  `sqrt_neg_nan`.
+- **16 more proved laws in the standard library.** `List` (`drop_last_snoc`:
+  `drop_last(append(xs, [x])) == xs`, `len_drop_last`, `is_empty_len`, `head_opt_nth_opt`,
+  `head_opt_append`), `Option` (`zip_is_some`, `is_none_not_some`, `len_to_list`,
+  `to_list_is_some`), `Result` (`is_err_not_ok`) and `Math` (`min_int_comm`,
+  `max_int_comm`, `min_plus_max`, `clamp_int_within`, `clamp_int_idem`). Call one before a contract that needs its
+  fact; like every lemma they are erased before the program runs.
+- **Float laws can be proved, and a contract can say "not NaN".** A function's Float
+  operations (`+.`, `-.`, `*.`, `/.`, `<`, `<=`, `>`, `>=`) now mean exactly what the program
+  computes (IEEE-754 binary64, round to nearest even) when the refinement checker reasons about
+  it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
+  `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
+  state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
+- **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
+  `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
+  any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:
+  a handle names a resource on this node" (`handle_not_sendable`), at the `derive Json`, at a
+  `Node.send` or `Node.enqueue`, and at an `@[remote]` handler. `derive Json` over a handle used
+  to be accepted, with an encoder that could not work; a send of such a type said only that a
+  JSON codec was missing.
+- **Name scopes on `IO.Mut` and `IO.Registry`.** `needs IO.Mut("sessions")` and
+  `needs IO.Registry("logger", prefix("worker."))` narrow a capability to some names: a
+  `Vault.new`/`Vault.open`/`Vault.whereis` or `Actor.register`/`unregister`/`whereis` call
+  with a literal name outside the scope fails to compile (`cap_scope_violation`), as does a
+  computed name in a scoped module and `Actor.registered` under a scoped `IO.Registry`.
+  `Vault.ns_*`, `Config.new_store` and calls through an `alias` are judged too, and a nested
+  module may narrow its parent's name scope but not widen it.
+  `prefix(w)`, `name(...)`, `methods("get")`, a `;` in a scope string and an empty first
+  string before more are now refused, so each scope has one spelling and `march --fmt`
+  prints it back unchanged.
+- **`needs` scopes take several names and string-valued options.** `needs IO.Mut("a", "b")`
+  and `needs IO.Registry("logger", prefix("worker."))` now parse, in the compiler, the formatter
+  and the tree-sitter grammar. No capability uses the new forms yet.
+- **`Task.poll(t)` (builtin `task_poll`) checks a task without waiting.** It answers `None`
+  while the task is still running and `Some(r)` once it has finished, `r` being exactly
+  what `Task.await(t)` answers (`Ok(value)`, or `Err(reason)` for a cancelled task). It
+  never waits and never runs the task on the caller's thread; in compiled code a poll of a
+  running task is one atomic load with no allocation and no reference-count traffic, so a
+  frame loop can poll hundreds of tasks every frame. A finished task can be polled or
+  awaited again and gives the same answer. The interpreter runs a task to completion when
+  it is spawned, so there `Task.poll` always answers `Some`.
+- **`forge search` finds a function by its qualified name, or by the builtin it wraps.**
+  `forge search Task.await` and `forge search task_await` both find `Task.await`; before,
+  only the bare name `await` matched.
+- **`@[deprecated("use X instead")]` marks a function as deprecated.** Every use of it from
+  outside the module that declares it gets a warning with the code `deprecated` and the
+  message; the program still compiles and the exit status does not change. Uses inside the
+  declaring module do not warn. The language server tags the diagnostic `Deprecated`, so
+  editors strike the name through. `march --explain deprecated` has the details. The
+  attribute marks functions only for now: on a `type` or a `mod` it is a parse error that
+  says so.
+- **`File.Handle`: open, read, write, seek and close a file through a handle.**
+  `File.open(path)` (reads, `IO.FileRead`) and `File.open_write(path, File.Truncate | File.Append)`
+  (writes, creates the file, `IO.FileWrite`) return `Result(Result(File.Handle, FileError), CapError)`;
+  `File.read_line`, `File.read_chunk`, `File.write_to`, `File.seek` and `File.close` use it.
+  The handle is a reference-counted box: every use after `close` returns the new
+  `Err(Closed)` (a second `close` too), and a handle dropped without `close` is closed
+  when its last reference goes. `File.with_open` / `File.with_open_write` close it when the
+  callback returns or panics. `FileError` now derives `Eq`. `with_lines`, `with_chunks`,
+  `each_line` and `each_chunk` keep their signatures and use a handle internally.
+- **`File.Dir`: authority over one directory's subtree.** `File.open_dir(path)`
+  (`IO.FileRead`) and `File.open_dir_write(path)` (`IO.FileWrite`) are checked capability
+  operations on `path` and return `Result(Result(File.Dir, FileError), CapError)` (wrap a
+  call in `Authority.must` to panic on a refusal); the uses of a `File.Dir` below take the
+  handle and need no capability.
+  `File.open_in(d, rel)`, `File.open_write_in(d, rel, mode)` and `File.list_in(d, rel)` open
+  and list beneath it and refuse a path that leaves it with the new `FileError`
+  `Escapes(rel)` (empty, `.`, absolute, or climbing out with `..`). `File.close_dir` closes
+  it; later uses return `Err(Closed)`, while handles already opened through it keep working.
+  Linux resolves through `openat2(RESOLVE_BENEATH)` and follows a symlink that stays
+  inside the directory. **On macOS every symlink beneath a directory handle is refused**
+  (`Escapes`), even one that stays inside: the check is best effort there.
+- **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
+  methods(get))` limits a module to a path prefix on a host, matched by whole segment
+  (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
+  counts). A path with `.`/`..` segments, `//`, a backslash or a percent-encoded `.`, `/`
+  or backslash is refused rather than normalized. Literal paths are checked at compile time;
+  every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
+  `HttpTransport.Refused`). The scope matcher is now public in `Http`
+  (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
+- **Handler guarantees: `on Msg(…) ensures P do … end`.** A handler can state how one message
+  changes the actor's state, with `old(e)` for the state the message arrived with:
+  `on Deposit(n : {Int | _ > 0}) ensures state.balance == old(state.balance) + n do`. Each
+  guarantee is proved per handler on every build (the `@invariant` assumed of the incoming state);
+  a handler that can break it is an error showing the incoming state, the arguments and the state
+  the handler returns, and `march --check --guarantees` lists each one beside the invariant.
+  `old` anywhere else in a refinement is the new `old_misuse` error; `ensures` and `old` remain
+  ordinary names outside a handler header and its guarantee.
+- **HTTPS for `HttpServer`.** `HttpServer.tls(server, TlsFiles(cert, key))` (or `TlsPem`)
+  serves HTTP/1.1 over TLS on both server modes, with `wss://` through the unchanged
+  `WebSocket` API. Certificates rotate without a restart: `TlsFiles` are re-read every
+  `tls_poll_interval` seconds (default 60) and `HttpServer.reload_tls(src)` installs a pair on
+  demand; a pair that doesn't load, doesn't match or has expired is refused and the current
+  one stays. `tls_wait_for_cert` starts without a certificate so the first one can be obtained
+  through the server itself. `plain_listener(server, port, plugs)` serves a second, plain-HTTP
+  port from the same `listen`, with `redirect_to_https`, `HttpAcme.webroot` (certbot
+  `--webroot`) and `acme_responder` as plugs for it; `scheme(conn)` says which one a request came in on.
+  New timeouts `tls_handshake_timeout`, `header_timeout` and `progress_timeout`. Needs a
+  compiled build. Deployment notes: `specs/features/http-and-networking.md`, and
+  `examples/https_hello.march`.
+
+- **Path scopes on network access.** `needs IO.NetConnect("api.example.com/v1/weather/",
+  methods(get))` limits a module to a path prefix on a host, matched by whole segment
+  (`/v1/weather/` admits `/v1/weather/today`, not `/v1/weatherman`; the query never
+  counts). A path with `.`/`..` segments, `//`, a backslash or a percent-encoded `.`, `/`
+  or backslash is refused rather than normalized. Literal paths are checked at compile time;
+  every request a scoped module sends is checked at run time (`HttpClient.PathRefused`,
+  `HttpTransport.Refused`). The scope matcher is now public in `Http`
+  (`scope_check_request`, `scope_permits_request`, `scope_path_ok`).
+- **`Set`'s `empty`, `singleton`, `insert`, `union`, `to_list` and `from_list` are proved.**
+  Their `elts` contracts are now checked against the hash trie instead of assumed; they trust one
+  law, that the comparator is a strict total order agreeing with `==`. A module can say what
+  `elts` (or `keys`) means for its own datatype with `@[abstraction(elts)]` on a `@[measure]`;
+  callers elsewhere keep proving through the contracts as before. The refinement checker also
+  learned what the proofs needed: a `Nil`/`Cons` match arm states the list's elements,
+  `if f(args)` uses `f`'s `Bool` contract, a `panic(..)` arm satisfies a return contract, a
+  `Cons(x, xs)` result in an `if` branch reflects, and mutually recursive functions get their
+  induction hypotheses.
+- **Host and method scopes on network access.** `needs IO.NetConnect("api.example.com",
+  methods(get, post))` limits a module, and everything it reaches, to the hosts and HTTP
+  methods it names; `no_redirects` refuses redirects. Checked at compile time and
+  fail-closed: a destination the compiler cannot see is refused (`cap_host_scope`,
+  `cap_host_unproven`). Redirects and request-step rewrites are checked at run time by
+  `HttpClient` (`OutOfScope`, `MethodRefused`, `RedirectRefused`). A helper that takes
+  the URL as a parameter marks it `@[net_dest(url)]`. See "Host and method scopes" in the
+  [capabilities reference](docs/capabilities.md).
+
+- **An actor's `@invariant` is checked on every build.** The state `init` builds must
+  satisfy it, and every handler must preserve it, given an incoming `state` that satisfies
+  it and the handler's parameter refinements. A handler that can break it is an error naming
+  the actor, the handler and the breaking state (`` `Counter`'s handler `Dec` does not
+  preserve its `@invariant`. ``). Before, `@invariant(count <= limit)` over
+  `init { count: 50, limit: 10 }` built with no diagnostic: the predicate was only read
+  across a hot deploy. The invariant may call the program's own functions
+  (`@invariant(not_137(count))`), unfolded as in any contract. `march --check --guarantees`
+  now reports it `proved`, `violated` or `not proved` instead of `not checked`.
+
+- **`@compat(simulation)`: prove a hot deploy doesn't care which side handles a message.**
+  A `--hot-reload` build records the actor's handler bodies in its schema sidecar; the next
+  build proves, per message, that handling on the deployed code then migrating equals
+  migrating then handling on the new code, or refuses with the state and message that tell
+  them apart. Handlers that call the program's own functions, use `match`, or a deploy that
+  changes the message type are reported `not checked`. `march --check --guarantees` adds a
+  `simulation` line.
+
+- **Rollback round trip for hot deploys.** Declare `<actor>_rollback_state` beside
+  `<actor>_migrate_state` and every build proves
+  `<actor>_rollback_state(<actor>_migrate_state(old)) == old`, or refuses the build with the
+  old state the rollback loses. `march --check --guarantees` adds a `rollback round trip`
+  line. Migration functions written over anonymous records are now usable in contracts and
+  lemmas (they reflect).
+
+- **Hot reload: an old message survives two message-type changes.** A message sent in an
+  actor's old format and received after two or more deploys that each changed the actor's
+  message type is now converted through each deploy's `migrate_msg` in turn, oldest first,
+  and handled. Before, it was dropped whenever more than one such deploy lay in between. It
+  is still dropped and counted when a deploy in between has no `migrate_msg` or one returns
+  `None`, and the drop reason a remote sender gets names which link it was.
+
+- **Hot deploys refuse a moved actor-message tag.** Each handler's constructor tag is now
+  recorded in `.schemas.json` (`"tag"`, also on `migrate_msg_from`), and `forge deploy hot`
+  and `march --check-migration` compare it with the running version's for every
+  constructor both name. Tags are a hash of the qualified constructor name, but a hash
+  collision makes one probe to the next slot, which can move it between builds; a moved
+  tag would make queued messages misread, so the deploy is refused with the actor,
+  constructor and both tags. A running version from before tags were recorded is reported
+  as not compared, never silently passed.
+
+- **Refinement aliases, with value parameters.** `type Pos = {Int | _ > 0}` and
+  `type Vec(a, n : Int) = {List(a) | len(_) == n}` name a refinement; each use (`Vec(Int, n)`,
+  `Vec(Int, 3)`, `Vec(Int, n + 1)`) is the refinement with its arguments substituted, in
+  parameters, results, element types, record fields, `let` annotations and actor messages. A
+  violation names the alias as written (`refinement violation: expected Vec(Int, n)`). A value
+  used as a type, or the reverse, is the new
+  [`alias_kind_mismatch`](docs/errors/alias_kind_mismatch.md). Before this, `type X = {T | p}`
+  was a syntax error. See "Refinement aliases" in the
+  [refinement types reference](docs/refinement-types.md).
+- **Ghost code.** `ghost s : T` parameters, `ghost let` bindings and `ghost fn` functions
+  carry values only a proof needs (a search tree's bounds, an abstraction), are checked by the
+  refinement checker, and are removed before the program runs: the compiled program is the one
+  without them. A ghost value may appear only in refinements, ghost arguments, lemma arguments,
+  proof hints and other ghost code; anything that would let the running program depend on one
+  is [`ghost_in_runtime`](docs/errors/ghost_in_runtime.md), and ghost code the compiler cannot
+  safely remove is [`ghost_misuse`](docs/errors/ghost_misuse.md). A `ghost fn` must be reflected
+  (pure, total, terminating). `ghost` stays an ordinary name everywhere else. See "Ghost code"
+  in the [lemmas guide](docs/lemmas.md).
+- **Tuples in refinement predicates.** A tuple-typed parameter can be refined
+  (`{(Int, Int) | _ == a}`), compared in a guard (`if p == q`), written as a literal in a
+  predicate (`_ == (1, 2)`) and used in a lemma (`Tuple.swap(Tuple.swap(p)) == p`). Before, a
+  tuple refinement was silently not checked, and a tuple in a predicate was an unchecked skip.
+
+- **Bounded predicates:** `forall` and `exists` over half-open integer ranges,
+  `elts` and `keys`, with logical `nth` indexing, domain-wide indexing checks,
+  and checked existential candidates. Integer insertion-sort is included as a
+  verification fixture; existing public sorting implementations are unchanged.
+
+- **Proof hints: `assert P by …`, `calc`, `reveal` and `with fuel`.** `assert P by hint` proves
+  `P` with a lemma call (or a `do … end` block of them) whose facts stay inside the hint, then
+  gives the code after it only `P`. A `calc do … end` chain proves each step on its own and
+  reports a step that does not follow by its number (`calc step 2`). `reveal f` lets the rest of a
+  block use an `@[opaque]` function's definition, and `with fuel(f, N) do … end` raises one
+  function's unfolding depth for the checks inside only. All four are checked by the compiler
+  and erased; nothing about a running program changes. `calc` and `reveal` are keywords only
+  in these statements (`calc do`, `reveal f`), so code that names something `calc` or `reveal`
+  keeps working.
+- **A warning when a predicate means the built-in, not your function.** Inside a refinement
+  predicate, `len`, `elts`, `keys` and `is_<Ctor>` always have their built-in meaning. When your
+  own function of that name is in scope, the checker now says so
+  (`predicate_vocabulary_shadowed`) instead of silently using the built-in.
 - **Every compiler fix now has a tier, and `forge fix` applies only the safe ones.** In
   `march --check-json`, a fix's `applicability` is `machine-applicable`,
   `has-placeholders` or `maybe-incorrect`. Before printing a machine-applicable fix,
@@ -64,6 +306,15 @@ git log is authoritative for exact commits.
 
   In the error corpus, 138 of 414 programs now carry a fix (up from 123), and 132 of them
   have a machine-applicable one.
+- **`Actor.Theory`: the mailbox's promises, proved on a model and tested against the
+  runtime.** A new stdlib module models an actor's mailbox and proves, once, that one sender's
+  messages arrive in the order sent (whatever other senders, a hot-deploy hold, a stash or a
+  call waiting inside a handler do), that a late reply never answers a later `Actor.call`, and
+  that a monitor's `Down` is never dropped by a full mailbox and is delivered at most once. A
+  native fixture checks the runtime's receive order against the model.
+  `march --check --guarantees` now reports the runtime's laws as `proved (model) · tested
+  (runtime)` or `proved (model)` instead of `assumed`. See the actors chapter, "What is
+  proved about the mailbox".
 - **Record-typed variables in refinement predicates.** A lemma's theorem can read its record
   parameter's fields (`px(p) == p.x + p.y` over `p : Pt`), a precondition can name another
   parameter's field (`n : {Int | _ > p.x}`), a record passed to a record-refined parameter is
@@ -80,6 +331,14 @@ git log is authoritative for exact commits.
   `minimum_int` and `maximum_int` moved to private top-level functions so the laws can name
   them; what they compute is unchanged.
 
+- **Protocols are proved deadlock-free.** `Session.Theory` now proves, once, that a
+  protocol's projections are pairwise dual for any two roles (`pairwise`), run together take
+  every step of the protocol and all finish (`projections_compose`), and can always take the next step
+  (`progress`), for loop-free, crash-free protocols whose choices tell every role that needs
+  it. `march --check --guarantees` labels such a protocol's pairwise duality and deadlock
+  freedom `proved (spec) · validated (compiler)` once its projections are validated, and says
+  why not otherwise (`a loop`, …). See the choreography chapter, "What is proved about a
+  protocol".
 - **`Session.Theory`: what a protocol means, as March code, with proved laws.** A new stdlib
   module holds protocols (`SessionGlobal`) and each role's part (`SessionLocal`), projection, duality, and
   lemmas proved once: duality is an involution, and a two-role protocol's projections are
@@ -336,8 +595,176 @@ git log is authoritative for exact commits.
   variable and the combinator (`portable_capture`). Create the handle inside
   the lambda, or use the sequential version. `task_spawn` and `Task.async`
   are unaffected.
+- **A must-reject corpus for the refinement checker.** `specs/lang/refine/reject/` holds 20
+  programs, each with one obligation that must be reported violated (one per obligation
+  kind, one per fixed false proof), and `specs/lang/refine/check_refine.sh` runs them in CI.
+  Before it, a checker that proved everything passed every refinement gate. Three fixtures
+  the checker wrongly accepts today are listed in `known-accepted.txt`, which may only
+  shrink; one is new: a refined session payload type (`Client -> Server : {Int | _ > 0}`)
+  is not checked at `Chan.send`.
 
 ### Changed
+
+- **Registering and finding actors by name needs the new `IO.Registry` capability;
+  `forge fix` adds the line.** `Actor.register`, `Actor.unregister`, `Actor.whereis` and
+  `Actor.registered` are charged `IO.Registry` (a child of `IO`, so `needs IO` still covers
+  them). The missing-capability error carries `needs IO.Registry` as a machine fix.
+
+- **The raw integer file, socket, TLS, UDP, WebSocket and process builtins are internal to
+  the standard library; use `File`, `Socket`, `Udp`, `Tls`, `WebSocket`, `Process`.**
+  Calling `tcp_send_all`, `file_read_line`, `process_wait_proc` and the rest of the
+  Int-descriptor builtins from your own code is a `stdlib_internal` error that names the
+  wrapper to use (`Socket.write(s, data)`, `File.read_line(h)`, `Process.wait_proc(p)`, ...).
+  In exchange, using a handle you hold is no longer a capability operation: only the open
+  (`File.open`, `Socket.connect`, `Socket.listen`, `Tls.client_ctx`, `Process.spawn_async`,
+  ...) is checked, so a function bounded by `needs ()` may read, write, accept on or wait on
+  a handle it was handed. `Socket.recv_exact(s, n)` is new, for reading an exact byte count.
+  `IO.WebSocket` is now declaration-only.
+- **The standard library's cluster plumbing over raw file descriptors is no longer callable
+  from user code.** `NetKernel.send_frame` / `recv_frame` / `handshake*`, `NodeSend.cast*`,
+  `NodeCall.call`, `NodeQueue.start`, `PeerReader.serve`, `ClusterConn.listen` /
+  `accept_split*` / `connect_split*`, `ClusterNode.handshake`, `SessionNode.open` and the
+  like are marked `@[stdlib_internal]`: naming one from your own code is a `stdlib_internal`
+  error. Use `ClusterNode` and the typed node and session APIs instead.
+- **A Float-valued `if` or `match` no longer allocates in compiled code.** Every
+  `if c do a else b end` whose arms are Floats used to box its value on the heap and free it
+  again at the join, a malloc and a free per evaluation; a nested `else if` chain paid once per
+  level. The value now stays in a register, like an Int-valued `if`. A clamp-and-max loop went
+  from 22 ns to 0.7 ns per element. Results do not change.
+- **Compiled `NativeArray.get_*` / `set_*` no longer call into the runtime on the
+  common path.** The bounds check and the load or store are emitted inline for every
+  element width (int, float, f32, i32, u8); a `set` on an array with one owner writes in
+  place inline. The runtime is called only for an out-of-bounds index (same message, same
+  exit) or a shared array (same copy-on-write). Strata's fluid step got faster; see
+  `specs/progress/2026-11-11-native-array-get-set-inline.md`.
+- **Capability operations return `Result(T, CapError)`** (object-capability design,
+  phase 1; breaking). Printing (`println`, `IO.puts/write/warn/read_line/read_byte/gets`),
+  the clock (`System.now`, `System.now_ms`, new; `DateTime.now`, `local_now`), randomness
+  (`Crypto.random_bytes/random_hex/hash_password`, `UUID.v4/v7`, `Random.int`, the
+  ML-KEM/ML-DSA/NodeCert key and signing functions), the environment and the process
+  (`Process.env/set_env/cwd/argv/pid/exit`, `System.*`, `Env.*`, `Config.from_env*`/`env`),
+  spawning (`Task.async`, `async_stream`), opening a table by name (`Vault.new/open/whereis`,
+  `ns_*`, `Config.new_store`), signals (`Signal.watch/raise`), files (`File.*`, `Dir.*`,
+  `Csv.*`, `Seq.from_file_*`; the handle opens `File.open`, `File.open_write`, `File.with_open`
+  and `File.with_open_write`, while the handle's own `read_line`/`write_to`/`seek`/`close` charge
+  nothing), `Socket.connect*` and `Dns.resolve*` all return a `Result`
+  whose `Err(CapError(...))` is a refusal naming the operation and the limit. Operations
+  that already returned `Result(U, E)` now return `Result(Result(U, E), CapError)`:
+  `Ok(Err(NotFound(p)))` is a missing file, `Err(CapError(...))` a refused one. A call used
+  as a statement is unaffected; code that used the value gets the new diagnostic
+  `cap_result_unhandled`, whose fix (`()` after a unit result, `Authority.ignore(...)`,
+  `Authority.must(...)`) `forge fix` applies. `forge fix PATH... [--only CODE,...]` fixes
+  files outside a project. The new `Authority` module (`check`, `describe`, `must`, `ignore`)
+  and the Prelude types `CapError`/`CapLimit` carry it. The parallel `List` helpers compute
+  sequentially when spawning is refused; `IO.inspect`, `debug` and the Logger never fail.
+  Nothing refuses yet except the test-only `MARCH_TEST_REFUSE` hook; UDP, TLS contexts,
+  `HttpClient` and `HttpServer` follow in phase 2. The REPL does not echo the `Ok(())` of a
+  console operation. Reading stdin is now charged to `IO.Console`.
+- **`forge fix` keeps a file's final newline**; it used to drop it from every file it fixed.
+- **Capability checks run however a program is checked or run (object
+  capabilities, phase 3).** The capability upper limit (each module's emitted code
+  within its own `needs`) and host scopes on `IO.NetConnect` used to run in full only
+  under `march --compile`. They now also run under `march --check`, `--check-json`,
+  `--emit-core-ast`, `march check` (what `forge check` and `forge build` run), the
+  interpreter, `--jit`, `march test`, the REPL (for a `mod` declared at the prompt;
+  it now also holds that module's functions to their `needs` bounds) and the editor.
+  A program those accepted can now be rejected the way `--compile` rejected it. A
+  program the compiler cannot build (an interpreter-only builtin) runs with one
+  `cap_unchecked` warning instead of a verdict. The interpreter caches a clean
+  verdict, so only a changed program pays for the check (about 1.3 s for a small
+  program); forge's check cache now also keys the compiler, so a compiler upgrade
+  re-checks.
+- **`Socket.connect` returns a `Socket`, not an `Int`; `Udp.UdpSocket`, `Tls.TlsConn`,
+  `Tls.TlsCtx` and `WebSocket.WsSocket` can no longer be built from an integer.**
+  Connections and listening sockets are reference-counted handles: `Socket.connect` /
+  `connect_timeout` return `Result(Result(Socket, SocketError), CapError)` (phase 1's
+  capability shape around the handle), every `Socket` function takes the
+  handle, `Socket.close` returns `Result((), SocketError)`, and the new
+  `Socket.listen(port)` / `accept` / `accept_timeout` / `local_port` / `close_listener`
+  work on a `Listener`. A use after `close` is `Err(Closed)` (new in `SocketError`,
+  `UdpError` and `TlsError`), and closing a socket another task is blocked on in `recv`,
+  `accept`, `Udp.recv` or `Tls.read` wakes it with `Err(Closed)`, on macOS as well as
+  Linux. `Tls.connect(s, ctx, host)` / `Tls.accept(s, ctx)` take the `Socket`; on success
+  the `TlsConn` owns the connection (`Tls.close` closes both), on failure `s` stays the
+  caller's. `opaque type` constructors no longer cross a module boundary (`Udp.UdpSocket(5)`
+  is now `unknown_constructor`). Standard-library internals that still need the raw
+  descriptor use `Socket.raw_fd` / `adopt` / `borrow`, marked `@[stdlib_internal]`: a user
+  program naming one gets the `stdlib_internal` error.
+- **Opening a listener, a UDP socket or a TLS context is a checked capability operation.**
+  `Socket.listen(port)` returns `Result(Result(Listener, SocketError), CapError)` (checked
+  as `IO.NetListen` on the port), `Udp.open` / `open_with` / `open_sharded` return
+  `Result(Result(UdpSocket, UdpError), CapError)` (`IO.NetConnect` on `host:port`; one check
+  covers every shard), and `Tls.client_ctx` / `server_ctx` return
+  `Result(Result(TlsCtx, TlsError), CapError)` (`IO.NetConnect.TLS`). Wrap a call in
+  `Authority.must(...)` to keep the old single `Result`. `HttpTransport`, `HttpClient` and
+  `Tls.https_get` keep their single `Result` for now: a refused connect is
+  `HttpTransport.Refused(reason)`, a refused TLS context `TlsContextError(reason)`.
+- **The HTTP client and server use `Socket` handles, not descriptor numbers.**
+  `HttpTransport.connect(req)` returns `Result(Socket, TransportError)` (same errors as
+  before); `HttpTransport.request_on`, `stream_request_on`, `stream_chunked_body`,
+  `stream_fixed_body` and `HttpClient.transport_keepalive` take the `Socket`, and a use
+  after `Socket.close` is `Err(Closed)`. `HttpClient.run_on_fd` is renamed `run_on` (it
+  had no callers outside the standard library). `HttpServer.Conn`'s first field is now
+  the connection's `Socket`, borrowed from the server: closing it never closes the
+  connection, and once the connection ends the socket is closed, so a `Conn` a handler
+  kept reaches no descriptor. `HttpServer.fd` is `@[stdlib_internal]`. Handler unit
+  tests build a request with the new `HttpServer.test_conn(method, path, headers, body)`
+  instead of the 13-field `Conn(...)` constructor: replace
+  `Conn(0, m, path, _, "", headers, body, 0, Nil, "", false, Nil, NoUpgrade)` with
+  `HttpServer.test_conn(m, path, headers, body)` (a query string goes in `path` after a `?`).
+- **`Channel.Socket` is now `Channel.ChannelSocket`** (and its constructor `Socket(...)` is
+  `ChannelSocket(...)`). `Socket` is now a builtin type, the handle box of a network
+  connection (ocap phase 2). A module's own type (variant, record or alias) named
+  `Socket`, `Listener` or `Process` is still allowed and is always a type distinct from the builtin, never
+  unified with it. Code that only goes through `Channel.new_socket` and
+  the `Channel.socket_*` accessors is unaffected; code that names the type or matches
+  on the constructor renames it.
+- **`Process.spawn_async` returns a `Process` handle, not a `LiveProcess`.** Its type is
+  `Result(Result(Process, ProcessError), CapError)`; the new
+  `ProcessError = Closed | ProcessFailed(String)` carries the old `Err(msg)` as
+  `ProcessFailed(msg)`. `Process.read_line(p)` returns `Result(Option(String), ProcessError)`,
+  `write` and `kill` return `Result((), ProcessError)` and `wait_proc` returns
+  `Result(Int, ProcessError)`; none of them needs a capability. `wait_proc` closes the handle,
+  so every later use (a second `wait_proc`, or a `kill` that could reach a reused pid) is
+  `Err(Closed)` (as is a `wait_proc` that races another one on the same handle). A `Process`
+  dropped without `wait_proc` is released when its last reference goes (compiled) or when the
+  garbage collector finalises it (interpreted): its pipes are closed, a child still running is
+  sent SIGTERM and then SIGKILL, and a child that has not exited by then is reaped at the next
+  spawn or release, so it is neither left running nor left a zombie.
+  `Process.LiveProcess` is now opaque and internal to the standard library. Migrate by
+  matching `Ok(Some(line))` where `read_line` returned `Some(line)`, `Ok(code)` for
+  `wait_proc`'s code, and `ProcessFailed(msg)` for a spawn failure.
+
+- **`float_to_int`, `float_truncate`, `float_floor`, `float_ceil` and `float_round` panic on
+  NaN, the infinities and a result outside Int's range** (#1230), with
+  `float_floor: value out of Int range` or `float_floor: cannot convert NaN to Int`, the same
+  on the interpreter, compiled code and `--target js`. They used to return whatever the host
+  gave: `float_floor(1e20)` was `-1` natively and `100000000000000000000` on JS, and
+  `float_to_int(nan)` was `0` or `NaN`. `Math.floor`/`ceil`/`round`/`truncate` now return NaN,
+  the infinities and values of magnitude 2^53 or more unchanged instead of a wrong Float, and
+  `Json.to_string`, `DataFrame`'s JSON import and group-by hash, and `Plot` guard their
+  conversions so they keep working on such values. The wasm runtime traps on them, and gains the
+  missing `march_float_to_int`. See `specs/lang/type-system.md`, "Converting a Float to an Int".
+
+- **Two variant types with the same short name in different modules are two types.** `A.Note`
+  and `B.Note` used to be one type to the typechecker, so a value of one was accepted where the
+  other was expected and the program then failed at run time. Passing one where the other is
+  expected is now a type error (`expected `B.Note` but got `A.Note``); a program that mixed them
+  needs fixing. Both may now `derive Json`, and each `from_json` decodes with its own type's codec.
+  Two same-short-name record types that both derive Json are still rejected. A user type named
+  like a built-in or stdlib type is still the same type as it (not yet fixed).
+- **`HttpServer.idle_timeout` is enforced on both server modes,** and requests have
+  deadlines. The event loop ignored `idle_timeout` and the thread pool used a fixed 10 s;
+  both now close a keep-alive connection after the configured value (60 s by default). A
+  request whose headers take longer than `header_timeout` (30 s from the first byte) is
+  closed, and so is a body upload or a response write that makes no progress for
+  `progress_timeout` (30 s); a slow transfer that keeps moving is never cut. An upgraded
+  WebSocket is not subject to them.
+
+- **`Math`, `Option` and `Result` are `cap verified`.** Every refinement contract and lemma in
+  them is proved, and a test now fails if a change leaves one unproved (the same now holds for
+  `Udp`, which already declared it). `List` is fully proved in ordinary programs but is not yet
+  marked, because of a name clash when it is checked on its own.
 
 - **Int `/` and `%` are faster in compiled code.** The zero-divisor check is now a test in
   the generated code instead of a call into the runtime, so LLVM sees the division: a literal
@@ -581,6 +1008,11 @@ git log is authoritative for exact commits.
 
 ### Documentation
 
+- **Every cookbook "run" button runs.** 54 of the 151 March blocks on the cookbook and
+  "Coming from" pages failed when run in the sidebar REPL: they used a value from an earlier
+  block, had a placeholder body, used `1_000_000` (March has no digit separators), or need a
+  file system, sockets or the DOM. Each now runs on its own, or, when it cannot run in a
+  browser, shows only a copy button. CI runs every block.
 - The Error Messages tour shows two more examples: a protocol step stranded after a `choose`
   branch that loops forever, and a division by a value from a pattern. The role-grant example
   explains its new help, and the error reference lists `protocol_invalid`,
@@ -678,11 +1110,421 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
+  compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
+  but failed to compile natively (clang: "use of undefined value '@compare'") and threw
+  `ReferenceError` under `--target js`. An interface method used as a value now resolves to the
+  implementation for its argument type, as a call does.
+
+- **A discarded `Ok(())` is released.** Compiled code leaked the `Result` cell a call such as
+  `println` returns in two places: a `match` or `if` used as a statement whose arms all end in a
+  call, and a block-final `let _ = e`, which returned `e`'s value although the block's type is
+  `()`. Both leak tools (`--rc-trace` with `scripts/gc-trace-report.py`, and LSan) reported one
+  or two such cells on most programs, hiding real leaks.
+- **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
+  `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
+  there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
+  backend.
+- **A lemma can unfold a function whose parameter has a field refinement**
+  (`fn mig(old : {Old | _.count >= 0})`). Before, such a function had no unfolding at all, so
+  the rollback round trip of any actor with a refined state field was `not proved`.
+
+- **Compiled HTTP clients read the response status, headers and errors correctly.** In
+  compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
+  251), so `HttpClient.step_raise_on_error` let a 401 or 403 through as a success; every
+  response had an empty header list, so `Http.get_header` found nothing and no redirect was
+  followed; and a server that closed the connection without answering produced a 200 with
+  an empty body. `HttpTransport` and `HttpClient` now give the same status, headers and
+  `Err` as the interpreter.
+- **A list (or other value) captured by a `task_spawn` closure and still read by the spawning
+  thread no longer crashes compiled code** (#1266). A consuming `match` on a shared cell
+  released the cell before taking its own references to the fields it pulled out, so
+  another thread could free those fields in between; the compiled program died with
+  SIGSEGV, SIGBUS or SIGABRT. The fields are now retained first.
+
+- **`Process.kill` can no longer signal a recycled pid.** A kill racing a `wait_proc` on
+  another task could reach a pid the wait had already reaped; it now signals only while
+  the process's slot is live and not being waited on.
+- **Matching `Process.ProcessError` from outside the module no longer warns of a missing
+  case.** It is a plain `type`, like `Socket.SocketError`, so `Process.Closed` and
+  `Process.ProcessFailed(_)` are seen as exhaustive.
+- **A task still using an HTTP `Conn`'s socket (or a plain ws:// socket) when the connection
+  ends can no longer read the next client's bytes.** The server closed the descriptor while
+  such a use was in flight, so the number could be reused by the next connection under it.
+  The connection's end now wakes the use and waits (up to 2 s) for it to finish before the
+  descriptor is closed.
+- **`Tls.https_get` checks the host it dials.** It connected with a raw dial that only the
+  TLS-context permission covered; it now dials through `Socket.connect`, so `IO.NetConnect`
+  on `host:port` is checked like every other connect. A refusal comes back as
+  `TlsHandshakeFailed("connect: ...")` and nothing is dialled.
+- **A dependency can no longer write to a socket it does not hold by forging a cluster
+  record.** `PeerRegistry.Peer` held its connection descriptors as plain `Int` fields, and
+  public functions write to them (`SwimDriver.dispatch`, `DistLink.resend_pending`,
+  `Node.send`), so a module with only `needs IO.Mut` could build a `Peer` around a guessed
+  descriptor number and send bytes into a connection the program held. The same was
+  possible by spawning the cluster's `NodeQueue.Writer` actor and sending it
+  `Configure(fd, ..)`, by putting a forged `SessionNode.Link` in a `Party` and calling
+  `SessionNode.finish`/`serve`, or through the `fd_for` callback of `WorkDispatch.dispatch`.
+  The descriptors of a `Peer` and a `SessionNode.Link` are now an opaque `PeerRegistry.Fd`
+  only the standard library can make, `WorkDispatch.dispatch`/`dispatch_affine` are
+  internal, and an actor marked `@[stdlib_internal]` (`NodeQueue.Writer`,
+  `ClusterNode.CtlWriter`, `ClusterNode.ClusterNodeActor`) can be neither spawned nor sent
+  a message from user code ("`NodeQueue.Configure` belongs to the actor `NodeQueue.Writer`,
+  which is internal to the standard library", `stdlib_internal`).
+- **A capability reached inside a standard-library closure is charged to the code that
+  called the standard library, not to the program's entry module.** `march check` and the
+  REPL rejected correct programs that called `Socket.write`, `Tls.read` or
+  `HttpTransport.simple_get` (``Module `LibCheck` uses `IO.NetConnect` ``), and the other
+  modes charged the capability to the entry module, so a nested module that called such a
+  function without the `needs` line was accepted whenever the entry module declared it. It
+  is now rejected there, as for a direct call.
+- **Closing a TLS connection whose peer had already reset it no longer kills the process.**
+  `Tls.close` sends close_notify; to a reset peer that write raised SIGPIPE, so a TLS server
+  that closed after its client hung up could exit with status 141. The descriptor now gets
+  `SO_NOSIGPIPE` at the handshake (macOS/BSD), and on Linux the close blocks and consumes
+  the signal.
+- **Awaiting a task twice is safe for any result type in compiled code.** A task whose
+  result is a heap value (a `String`, a list, a record) handed its only reference to the
+  first `task_await`, so a second `task_await` on the same task, or one after
+  `let _ = task_await(t)`, read freed memory and could crash. The task now keeps its
+  result until its last handle is dropped and each await takes its own reference.
+- **A closure called from several threads at once no longer frees what it captured while
+  another call is still reading it.** `Parallel.pmap` (and any closure shared between tasks)
+  could crash compiled programs intermittently with SIGSEGV: one call released the closure's
+  environment before it finished reading a captured value, so a concurrent call could free
+  the value under it. Each call now keeps the environment until its last read.
+  `test/native/native_arr_pmap_capture.march` crashed in about a third of its runs.
+
+- **A user type named like a built-in or stdlib type is its own type.** `type CancelToken =
+  Tok(Int)` used to be the built-in `CancelToken`, a user `Level` was `Logger`'s `Level`, and a
+  program's own `Option` was the prelude's: a value of one type-checked where the other was
+  expected, then took the wrong `match` arm interpreted or failed to compile (`clang failed`).
+  The two are now distinct, and mixing them is a type error
+  (``expected `CancelToken` but got `Main.CancelToken` ``). A program that declares such a type
+  and uses only its own declaration is unaffected, and messages still print the short name
+  unless the two types meet. Not covered yet: types declared at the REPL.
+- **A compiled `match` arm with a qualified constructor pattern no longer returns the wrong
+  constructor when it returns the matched value.** `match s do Shapes.Square(n) -> if n > 3 do s
+  else d end ... end` returned the type's first constructor (`Circle(11)` for `Square(5)`) in a
+  compiled program, with no error; the interpreter was right. It affected every qualified
+  pattern form (`Mod.Ctor`, `Type.Ctor`, an actor's `Counter.Bump`) whose arm returns the value
+  being matched. A bare pattern was not affected.
+- **A derived `Show`, `Ord` or `Hash` no longer calls a user fn named like the method.** With
+  `derive Show for P` and your own `fn show(_x : Int)` in the same module, `println(P(1, "a"))`
+  printed `P(U, U)`: the generated code called `show(field)` and got your fn, on both backends.
+  It now calls `Show.show`, `Ord.compare` and `Hash.hash`. Those qualified names also work
+  where they did not before: `Ord.compare(1, 2)` on a primitive failed to compile ("no `Ord`
+  implementation for type `Int`"), and under the interpreter `Hash.hash(x)` ran the wrong impl
+  when two types implemented `Hash`.
+- **`&&` and `||` now short-circuit.** The right operand runs only when the left one does not
+  already decide the result, interpreted and compiled (LLVM, JS, JIT). Both operands used to be
+  evaluated every time, so `i >= 0 && i < n && NativeArray.get_u8(a, i) == 1` read out of range
+  for a negative `i`, and `d != 0 && 10 / d > 1` passed `--check` (the division checker already
+  treated the left side as a guard) and then divided by zero at run time. A program whose right
+  operand prints or has another effect now skips that effect when the left side decides.
+- A diagnostic on a `match` now underlines it from the `match` keyword; it used to start at the scrutinee whenever the `match` was not the first expression of its block. The `match` keyword's position was lost when the parser peeked the token after it, so a fix that wraps the whole `match` was also spliced in after the keyword.
+- **A closure no longer frees a captured value before a builtin in tail position reads its fields.**
+  A compiled closure that matched a captured value and passed the pattern's fields straight to a
+  builtin as its result (`match src do Pair(a, b) -> string_concat(a, b) end`) released the
+  capture first, so the builtin read freed memory. ASAN caught it in `HttpServer.tls`; on macOS
+  the freed bytes usually survived. The release now waits until the call returns.
+- **A user fn named like `show`, `eq`, `compare` or `hash` no longer swaps places with the
+  interface method in compiled code.** A generic `fn show(r)` printed `Ok(pos)` where the
+  interpreter printed `pos`; a `fn show(r : T)` took over `println` of every `T`; `fn compare`
+  and `fn hash` returned the built-in answer; and `Util.eq(1, 1)` in a user `mod Util` ran
+  `Eq`. Each now runs the user's fn for the user's calls and the method everywhere else, on both
+  backends.
+- **A module named like a stdlib module no longer loses its functions to the stdlib's.** With
+  `mod List do fn sum_int(xs : List(Int)) : Int do 42 end end` in the program, compiled
+  `List.sum_int([1, 2])` returned the stdlib's `3`, and so did an interpreted call to `sum_int`
+  from inside the module; both now return `42`, and the rest of the stdlib `List` still works.
+- **Security: an HTTP request can no longer smuggle a second request.** The request
+  serializer copied the method, host, path, query and headers into the request verbatim, so
+  a path such as `"/x HTTP/1.1\r\nHost: h\r\n\r\nDELETE /admin"` (from user input, say)
+  sent a pipelined second request. `HttpTransport` and `HttpClient` now refuse, with
+  `Refused(reason)` and before any connection is opened, a method or header name that is not
+  an HTTP token, a host or header value with a CR, LF or other control byte, and a path or
+  query with any byte outside RFC 3986 that was not percent-encoded (a space, `#`, a bare
+  `%`, a non-ASCII byte; percent-encode values with `Uri.encode` / `Uri.encode_query`, since
+  `Http.encode_query` does not); interpreted, compiled and browser builds refuse the same
+  requests. `Tls.https_get` refuses such a host or path the same way, with
+  `TlsWriteError(reason)`.
+  The `http_serialize_request` builtin now returns `Result(String, String)`. Compiled
+  programs also send the request's headers (including `Connection: close`), which the
+  compiled serializer used to drop, and send `Content-Length` only for a non-empty body, as
+  interpreted ones always did.
+- **A NaN prints `nan` on every backend, and the interpreter's `show` no longer adds `.0`
+  to `nan`/`inf`/`-inf`.** `float_to_string` went through libc's `%.12g`, which prints a NaN with
+  the sign bit set as `-nan` on Linux and `nan` on macOS, and x86's default NaN (what
+  `inf -. inf` produces) has that bit set where arm64's does not, so the same program printed
+  `-nan` on x86 Linux and `nan` on a Mac. A NaN now prints `nan` in the interpreter and the
+  native runtime (and the logger's float fields), as `--target js` already did. Separately, the
+  interpreter's `show` of a Float printed `nan.0`, `inf.0` and `-inf.0`; it now prints `nan`,
+  `inf` and `-inf` like compiled code.
+
+- **Interpreted `show`, `==`, `compare` and `hash` on same-short-name types run the right impl.**
+  When two modules each declared a type `Note` deriving `Show` (or `Eq`, `Ord`, `Hash`), the
+  interpreter ran whichever impl registered last on both types' values; compiled code was right.
+- **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
+  was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
+  through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name
+  the actor or function you wrote (``handler `Go` of actor `Fetcher` ``), not compiler
+  names like `Fetcher_spawn` or `Fetch$B.T.fetch`, and two modules sharing a short name
+  (`P1.Inner`, `Inner`) keep their own host scopes whatever order they are declared in.
+- **A user module named like a stdlib module is charged for its own capabilities.** The
+  capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
+  `needs` to its callers; it now looks at where the module comes from, not its name.
+- **`--target js` Float literals are the same double as native** (#1169). The JS emitter
+  printed a `Float` literal with 12 significant digits, so `3.141592653589793`, `Math.pi()`,
+  `Math.tau()`, `Math.e()` and values `opt.fold` computed (`1.0 /. 240.0`) ran as a different
+  double with no warning; a folded infinity or NaN came out as `inf.0` / `nan.0` and the module
+  failed to load with a `SyntaxError`. Literals now use the fewest digits (12 to 17) that read
+  back as the same bits, and `Infinity`, `(-Infinity)` and `NaN` for the non-finite values.
+- **`1.0 /. 0.0` stops with "division by zero" in a default compiled build.** The constant
+  folder computed a `/.` whose divisor was a literal `0.0` or `-0.0`, so `--compile` printed
+  `inf` where the interpreter and an unoptimised build stop. It now leaves the division to
+  run time. (`--target js` still gives `Infinity` for any `/.` by zero.)
+- **`ClusterAuth.verify` compares HMAC proofs in constant time, and `DataFrame.to_html` escapes
+  every special character.** `verify` used `==`, whose running time leaks how much of a forged
+  shared-secret proof was right; it now uses `Crypto.secure_compare`. `to_html`'s cell and header
+  escaping replaced only the FIRST `&`, `<`, `>` and `"`, so a cell like `<b>x</b><script>` reached
+  the page with a raw `<script>` (XSS); every occurrence is now escaped, and `'` too.
+- **`Tls.server_ctx` no longer leaks its ALPN buffer** when the context is freed.
+- **The event-loop HTTP server no longer drops pipelined requests** that arrive while a large
+  response is still being written; they are served once the write finishes.
+
+- **A non-standard HTTP verb no longer passes a `methods(...)` scope.** `Other("get")`
+  was lowercased and compared as `get`, so a GET-only `IO.NetConnect` scope let it
+  through; `Other(_)` now matches no scope's method list. Host-scope diagnostics also name
+  the actor or function you wrote (``handler `Go` of actor `Fetcher` ``), not compiler
+  names like `Fetcher_spawn` or `Fetch$B.T.fetch`, and two modules sharing a short name
+  (`P1.Inner`, `Inner`) keep their own host scopes whatever order they are declared in.
+- **A user module named like a stdlib module is charged for its own capabilities.** The
+  capability ceiling saw through any module called `Yaml`, `Logger`, … and billed its
+  `needs` to its callers; it now looks at where the module comes from, not its name.
+- **Redeclaring `type DownReason` or `type Down` is an error, not a compiler crash.** These
+  names belong to the local-monitor runtime. A top-level declaration in your entry module was
+  accepted and then crashed `--compile` with an internal compiler error; it is now reported as
+  `reserved_type_name`. A nested module may still declare its own `DownReason`.
+- **Interpreter-mode FFI no longer needs `/opt/homebrew/lib/libblake3.a`.** Release binaries
+  linked the runtime library against the libblake3 found on the machine that built them, so on
+  a Mac without that file every interpreted program calling project FFI failed with "failed to
+  compile runtime .so". The runtime now uses the BLAKE3 implementation bundled with March, as
+  compiled programs already did.
+- **`not p(n)` negates.** `not` followed directly by an operand parsed as two statements, a
+  discarded `not` and the operand, so `else not p(n) end` returned `p(n)` un-negated. `not x` is now
+  the prefix `!x`; `not(x)` is unchanged.
+- **The build cache no longer serves a binary built from another path.** Compiling the same
+  source as `/a/m.march` and then `/b/m.march` reused the first binary, whose panic locations
+  and `--test` failure reports named `/a/m.march`. The entry path as written is now part of the
+  cache key.
+- **Compiled `==` on a newtype over a generic record compares the record.** For
+  `type Wrap(a) = Wrap(Cell(a))` with `Cell` a record, compiled code compared the two `Cell`
+  pointers, so equal values compared unequal; the interpreter was right.
+- **A module's own function beats a later `use M.*` in the interpreter too.** With `fn f`
+  declared before `use M.*` (where `M` also has an `f`), interpreted code called `M.f` and
+  compiled code the module's own `f`; both now call the module's own, as the docs say.
+- **`alias M, as: B` next to a declared `mod B` is a compile error** (`alias_shadows_module`).
+  `B.f` meant the declared module interpreted and the alias target compiled.
+- **Lemmas over a record or variant with a `String` or `Float` field are checked.** Every
+  predicate over such a type (`un(mk(x)) == x` for `type N = { a : Int, s : String }`) was
+  skipped as unreflectable, so an actor whose state held a String could not prove its
+  rollback round trip. The field now holds a string or float value, as a parameter does.
+- **A wildcard import no longer refuses ghost code in another file.** `use M.*` (or `import M`)
+  of a module whose names the checker cannot list counted against every ghost function in the
+  program ("`use M.*` may also bring in a `f`"), though a bare ghost call only resolves in its
+  own file. It now counts only against the ghost names of the file that writes it.
+- **A record-returning function's contract no longer reports a false counterexample** when
+  a field's value is bound by a `let` first (`let next = c + n` then `{ count: next }` was
+  refuted with `next = -1`). Simple `let`s are now inlined into a record result, and a name
+  the checker cannot connect to its definition never makes a model count as a
+  counterexample. `{ r with f: e }` and returning a refined record parameter unchanged are
+  now proved instead of skipped.
+- **Set measures over a tree and its list of children.** A `@[measure]`
+  could not recurse through a `List` of child nodes, the shape a HAMT branch
+  has: the termination checker refused a mutual pair over two types unless
+  each type contained the other. It now accepts any cycle in which every
+  call passes a strict pattern component. A set measure's body may also
+  apply `elts` to a list field. And on the command line, `empty` in a set
+  measure no longer resolves to a prelude function of that name, which made
+  every user set measure `invalid_measure`.
+
+- **Refinement reflection over records with type parameters.** A lemma or contract over a
+  parameter typed `Pr(Int)` (`type Pr(a) = { fst : a, snd : a }`) is now checked through the
+  reflected functions it calls (`sw(sw(p)) == p` is proved); it used to be skipped as
+  `unreflectable-predicate`. A stage-2 proof whose solver core names no definition lists only the
+  definitions its own query unfolded under `uses:`, not every one the module unfolded.
+
+- **Bounded quantifier bodies are scoped more strictly.** Inside `forall` / `exists`, a
+  measure over a call or a constructor tester whose argument mentions the binder (for
+  example `elts(mk(k))`) is now refused, so the predicate is skipped rather than ever
+  being encoded as one constant shared by every instance. Own abstract-predicate renaming
+  and inferred-lemma substitution now also reach quantifier bodies, and `nth` is
+  documented as reserved inside predicates.
+
+- **`derive Ord` on a record compares fields in declaration order.** With two or more
+  fields, the derived `compare` returned only the last field's comparison, so
+  `compare({ a: 1, b: 9 }, { a: 2, b: 0 })` was `1` and sorting by `<` put records out of
+  order. It is now lexicographic, as documented: the first field that differs decides. Same
+  on the interpreter, native and JS.
+- **`Diagnostics` and `try_finally` work on `--target js`.** A program using
+  `Diagnostics.observe_crashes`, `unobserve`, `with_context` or `current_context` failed to
+  compile for JavaScript, and `try_finally` (which `with_context` and `File`'s scoped helpers
+  use) threw `ReferenceError` at run time. Observers now receive a report, with its context and
+  the panic's location, when an error escapes `main`; the error then reaches Node as before.
+  The JS report has no backtrace; the `Diagnostics` module doc lists the other differences.
+- **`~H"..."` works in the browser REPL.** An HTML sigil failed with
+  `unbound variable: IOList.from_strings` unless something had already loaded IOList: the
+  REPL loads a stdlib module when the input names it, and a sigil names none. A sigil now
+  loads the module it expands to.
+- **A module-level `let` holding a function works outside the entry module.** With
+  `mod Cst do let inc = fn x -> x + 1 end`, a compiled `Cst.inc(4)` printed a pointer-sized
+  number natively and `[object Object]` on `--target js`, and `let g = Cst.inc` or
+  `List.map(xs, Cst.inc)` passed the wrong thing along (likewise `Cst.thunk()` for
+  `let thunk = fn () -> 42`). Native and JS builds now call it like the interpreter does.
+- **The in-browser REPL builds with js_of_ocaml 6.5.** Built with 6.5.0, deep non-tail
+  recursion (`List.map` over 20,000 elements, or a panic unwinding 20,000 calls) ran out of
+  JavaScript stack on the way back up, so the build was pinned to js_of_ocaml `< 6.5`. The
+  interpreter now resets the stack on return (and on exception unwind) as well as on call,
+  and the pin is gone.
+- **Scoped proof hints enforce their verification boundary.** `assert … by` now rejects impure or partial hints, requires every hint obligation to pass before exporting its goal, and reports unproved goals as errors under `cap verified`. Nested proofs, branch-tail case splits, reflection-disabled checking, and speculative proof-state isolation are covered by regressions.
+
+- **On `--target js`, Int division by zero panics, and more tests run.** `x / 0` and `x % 0`
+  gave `NaN` and the program went on; they now panic with "division by zero" / "modulo by
+  zero", as natively. `to_string` on a record or variant with no `Show` impl now builds and
+  prints what native prints (`{ x: 1, y: 2 }`), and `Check.all` property tests,
+  `Process.env`, `Process.cwd` and `Process.pid` work on JS, so `--target js --test` runs them.
+  A caught `panic` / `todo` carries its "panic: " / "todo: " prefix and `unreachable()` its
+  native message.
+- Check recursive local functions for unsafe non-tail calls inside non-recursive
+  functions and actor handlers, which previously escaped stack-safety diagnostics.
+
+- **Module functions used as values compile correctly.** A binding such as
+  `let k = List.length` now retains the function definition during compilation,
+  including when the binding is called with different element types.
+- **Type-qualified function names fail with an actionable diagnostic.**
+  `Int.to_string(5)` now explains that `Int` is a type and points to `to_string`,
+  instead of passing checking and failing or producing the wrong value at runtime.
+- **Endpoint generation merges equivalent unlabelled choice branches.** A bystander
+  receiving the same message in either branch now shares the message constructor
+  and continuation state, instead of receiving errors in generated code.
+
+- **`==` on a recursive type with `derive Eq` works in proofs.** A function comparing values of
+  such a type, and a lemma about it, can now be used in refinements. Recursion through
+  `match (xs, ys) do (Cons(_, xt), Cons(_, yt)) -> f(xt, yt)` is now recognised as terminating
+  too.
+- **Compiled `x +. 0.0` keeps the sign of zero right** (#1185). The optimizer rewrote
+  `x +. 0.0` and `0.0 +. x` to `x`, so native and JS builds returned `-0.0` for
+  `-0.0 +. 0.0`, where IEEE 754 (and the interpreter) give `+0.0`. The rewrite now fires
+  only for `-0.0`, the real additive identity; `x -. 0.0` still simplifies and
+  `x -. -0.0` no longer does.
+- **`install.sh` verifies checksums with Apple's `/sbin/sha256sum`** (#1182). With it first
+  on `PATH`, the `curl | sh` install failed at "Verifying checksum" on macOS, because
+  Apple's `sha256sum -c` prints usage when the checklist comes on stdin without a `-`
+  operand. The installer now passes `-`.
+- **Compiled `==` on tuples of different nested shapes no longer shares one helper**
+  ([#1171](https://github.com/march-language/march/issues/1171)). `((Int, Int), Int, Int)`
+  and `((Int, Int, Int), Int)` got the same native equality helper, so unequal values
+  compared `true`. (The record half of #1171 is the record-equality fix below.)
+- **A module on `MARCH_LIB_PATH` is no longer loaded just because it declares a type or
+  constructor with the same name as one your code uses from its own module.** A module
+  that used its own `type Tally` pulled in every other lib-path module declaring a
+  `Tally`, even ones nothing referenced, and an error in any of them failed the build
+  (`--check`, `--compile` and the interpreter alike). A bare name used without being
+  defined in the same module still loads the modules that define it (#1183).
+- **`<`, `<=`, `>`, `>=` on a type with an `Ord` impl now use it in compiled code**
+  (#1172). On an enum, record, payload ADT, newtype or unboxed ADT with a derived or
+  hand-written `Ord`, and in generic `when Ord(a)` code, the operators mean
+  `compare(a, b) <op> 0` on native and `--target js`, as they already did in the
+  interpreter. Before, native strict comparisons were always false and `<=`/`>=`
+  always true, a single-field newtype compared its raw payload, an all-scalar ADT
+  such as `Pair(Int, Int)` failed the native build, and JS compared the objects.
+  `compare` on `Int`, `Float` and `String` (and so a derived `Ord` over such
+  fields) now also builds on `--target js`.
+
+- **A line starting with `(` after a record, a `do ... end` block or an interpolated
+  string is now a new statement** (#1179), as it already was after an identifier, `)`,
+  `]` or a literal. Before, `let r = { x: 1 }` followed by a `(r.x + 1)` line parsed as
+  a call on the record (`not_a_function`, then `unbound_variable` for `r`), and
+  `let g = do ... end` followed by a `("x")` line silently called `g`.
+- **`march fmt` and `forge format` no longer replace code with `...`** (#1174). A `match`
+  or `match do` in a list, tuple, record, call argument, operand or string interpolation,
+  a multi-statement lambda that is not the last argument, and an `if` with a
+  multi-statement branch inside another expression were written out as `...`,
+  `match ...` or `match do ... end`. They are now printed in full.
+- **The formatter keeps the parentheses the grammar needs** (#1175). It dropped them
+  around `if`, `match`, `fn` and `|>` operands, a called `(if ...)` or `(fn ...)`, the
+  operand of `-` or `!`, and a comparison inside a comparison. The output either did
+  not parse or meant something else: `1 + (3 |> double)` became `1 + 3 |> double`.
+- **`march fmt`, `forge format` and the language server refuse output that changes the
+  program.** The formatted text is parsed again and compared with the input. If it does
+  not parse, or parses to a different program, the file is left unchanged and `march
+  fmt` exits 1 with a message. The check found more formatter bugs, now fixed: UTF-8
+  and `${` in strings, `\r` in multi-line strings, float literals with more than 12
+  digits, default argument values, `resource`, `opaque type`, `blocking` and `raises`
+  extern functions, `linear let`, `p as a as b`, an interface's `requires`, `use A`
+  (printed as `import A`), and multi-line sigils, whose content was re-indented. Actor
+  declarations with `supervise`, `mailbox`, `@compat`, `@invariant` or `@[remote]` are
+  still not printed in full, so such files are now refused instead of losing those parts.
+- **`cap pure` and `cap deterministic` now reject monotonic clock reads and stdlib
+  wrappers over IO.** `sys_uptime_ms()` and `System.monotonic_time()` passed both caps
+  (the read needs no `IO.Clock`); they are now rejected, called directly or through any
+  stdlib function that reaches them, and still need no capability elsewhere. A
+  `cap pure` module may no longer declare any `needs`, and a `cap deterministic` module
+  may not declare `needs IO.Clock`, `IO.Random` or `IO`: those lines let stdlib wrappers
+  such as `File.read` and `DateTime.now()` through. Each is a `[pure_violation]` or
+  `[deterministic_violation]` at the `needs` line (#1180).
+- **`march --target js --test` runs the tests.** The output used to define the test blocks
+  and never call them, so a failing test exited 0 with no output; with a `main` the tests
+  were dropped and `main` ran. A program that prints did not build at all with `--test`
+  (`builtin cap_dict has no JavaScript-target implementation`). The `.mjs` now runs the
+  tests and prints the same report as a native test binary, takes `--verbose` and
+  `--filter=`, and exits 1 when a test fails. Capability mocks work there too (#1176).
+- **An output path that cannot be written is no longer an internal compiler error.**
+  `march --target js -o dist/app.mjs` with no `dist/` printed "internal compiler error" and
+  exited 3. `-o` now creates missing parent directories, for `--target js` and `--compile`
+  alike. A path that still cannot be written, such as a directory, is an error naming it,
+  with exit code 1. A source map that cannot be written is now a warning instead of being
+  skipped without a word (#1181).
+- **`string_to_float` (and `String.to_float`, `float_from_string`) accepts the same
+  strings on every backend** (#1178): C `strtod`'s grammar with the whole string consumed,
+  now written down in the language reference. On `--target js`, `"inf"`, `"-inf"` and
+  `"nan"` parsed as `None` (so a TOML `x = inf` read as `0.`), blank strings as `Some(0.)`,
+  and `"1.5 "`, `"0b11"` and `"0o17"` were accepted while hex floats (`"0x1p3"`) were not.
+  The interpreter no longer accepts `_` separators (`"1_000"`), and native builds no longer
+  accept a string with an embedded NUL or depend on the C library for `nan(...)`.
+  `float_infinity`, `float_neg_infinity`, `float_nan`, `float_epsilon`, `float_is_nan`,
+  `float_is_infinite` and `float_from_string` now compile for `--target js`.
+- **A type named like a standard-library type of another arity works in predicates.** A
+  `type Tree` of your own beside the standard library's `Tree(k, v)` made every predicate over
+  it unchecked. Types of the same name and the same number of parameters still are, with a
+  message saying so that now names your function.
+- **No false "not checked" warning on a qualified predicate call that is checked.** A
+  predicate calling `Inner.dbl(n)` was proved and still warned that it enforces nothing.
+- **The editor re-checked a file nothing had changed.** A refinement's parameter whose name
+  matched a user function (a theorem's `f`, say) was read as a reference to that function,
+  which made the function's whole body part of its callers' dependency key; after an
+  unrelated edit the LSP re-checked files that did not need it.
+- Compiled record equality keeps helpers distinct for different record shapes,
+  avoiding wrong comparisons and crashes when a program uses several record types.
+- Refinement diagnostics preserve predicate grouping with parentheses, including
+  mixed Boolean operators, arithmetic and unary expressions.
+
 - Protocol `@[endpoints]` choices named `cancel` or `drain` no longer collide with
   generated failure-handler parameters; their offer functions typecheck normally.
 - The two-node test harness now fails when a started node has no expected-output
   file, instead of silently reporting success.
+- **A compiled program no longer segfaults when an unannotated `let x = None` is used as
+  `Option(Float)`, `Option(())` or `Option(Option(_))`** (#1173). This includes a
+  `None` stored in a record field, which crashed when the record was dropped. The
+  binding is now compiled at the type it is used at. The interpreter was already
+  correct.
 
+- **A lemma that relied only on another lemma proved by induction-hypothesis rounds was never
+  admitted**, although every path proved: the checker's induction rounds retried an ordinary
+  lemma only when it called a group admitted in the same round, not one proved in the round
+  before, so calls to it gave no facts (`lemma_unproved` on a lemma whose report showed every
+  path proved).
 - Functions over `Float`, `String`, records and tuples can now be used in proofs. Float
   operations stay unknown to the checker (nothing is concluded from NaN or `-0.0`); a string
   is known by its byte length, and distinct literals are distinct values; record field access,
@@ -851,9 +1693,27 @@ git log is authoritative for exact commits.
   Safari. The cache is now a `Map` keyed by the string, holding at most one string of
   each length so older V8 (which hashes long strings by length) doesn't compare them
   either.
+- **`--target js`: a module-level `let` outside the entry module reads as its value**
+  (#1170). A `let` in a nested `mod`, a `MARCH_LIB_PATH` module or the standard library
+  printed `[object Object]`, and `Bytes.encode_base64` threw
+  `TypeError: s.slice is not a function`. The interpreter and native binaries were right.
+- **A top-level `fn` named like a builtin is called on `--target js`** (#1177). A user
+  `fn negate` (also reached by prefix `-x`), `fn not` (also `!x`), `fn string_length`,
+  `fn int_mod` and the like were replaced by the builtin, or, for the names JS also
+  exposes as first-class values, made the module fail to load (`Identifier 'int_xor' has
+  already been declared`). On every backend, a user `fn not` is now also called for a
+  literal argument (`not(true)`, `!false`); the optimizer used to fold those as the
+  builtin.
 
 ### Documentation
 
+- **Capabilities: monotonic time and `extern`-backed stdlib modules.** The capabilities
+  chapter says that monotonic time (`sys_uptime_ms`, `System.monotonic_time`) is not
+  gated by `IO.Clock` but is banned under `cap pure` and `cap deterministic`, describes
+  how both caps now cover stdlib wrappers, and says that the `IO.Foreign` exclusion from
+  the capability upper limit covers first-party stdlib modules built on `extern`
+  (`Js.Dom`, `Js.Canvas`), which a module can call without declaring `needs`; function
+  `needs ()` bounds and `main`'s grant still see them (#1180).
 - **Lemmas as a contract for changes.** The refinement-types chapter and the
   `march-lang`, `march-test` and `forge-search` agent skills explain how to state a law
   as a lemma in a `cap verified` module, where an unproved lemma is a build error, so a

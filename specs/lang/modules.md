@@ -343,6 +343,9 @@ alias MyApp.Data.Repository
 
 Aliases are useful when a module name is long or conflicts with another name in scope.
 
+An alias may not take the name of a module declared in the same scope: `alias Json, as: B`
+next to `mod B do ... end` is the error `alias_shadows_module`, since `B.f` could mean either.
+
 ---
 
 ## A Full Example

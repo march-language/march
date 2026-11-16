@@ -1,0 +1,28 @@
+FAIL: "runner a panic after setup"
+-- TEST FAILURE --------------- test_reports/runner.march
+
+This test panicked: the widget is broken [test_panicked]
+
+20 |     test "a panic after setup" do
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+FAIL: "runner a plain assert"
+-- TEST FAILURE --------------- test_reports/runner.march
+
+This assertion is false. [assert_failed]
+
+27 |       assert (List.length(xs) == 3 && List.is_empty(xs))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+FAIL: "runner assert !="
+-- TEST FAILURE --------------- test_reports/runner.march
+
+The two sides of this `!=` are equal. [assert_failed]
+
+31 |       assert ([1, 2] != [1, 2])
+                   ^^^^^^^^^^^^^^^^
+
+    Both sides are:
+        [1, 2]
+
+exit 1

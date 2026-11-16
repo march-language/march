@@ -78,6 +78,7 @@ mod RemoteSchema do
   pfn report(label : String, r : Result(Bool, String)) : () do
     run_until_idle()
     println(label ++ ": " ++ outcome(r))
+    ()
   end
 
   fn main(_c : Cap(IO.Console)) do

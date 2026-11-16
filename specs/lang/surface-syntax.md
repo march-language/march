@@ -604,7 +604,7 @@ Integer arithmetic: `+`, `-`, `*`, `/`, `%`
 Float arithmetic: `+.`, `-.`, `*.`, `/.`
 String/list concat: `++`
 Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
-Logic: `&&`, `||`, `!` (prefix not), unary `-` (negate)
+Logic: `&&`, `||`, `!` (prefix not; `not x` with an operand right after it is the same `!x`, so `not p(n)` is `!p(n)`), unary `-` (negate)
 
 Each `++` allocates and copies both operands into a new string/list. A chain
 of them (`a ++ b ++ c`) is collapsed by the compiler into a single concat: two
@@ -787,6 +787,9 @@ fn length(xs) do ... end
 
 @[decreases(len(xs) - i)]   -- a termination metric (refinement-types.md)
 fn scan(xs, i) do ... end
+
+@[deprecated("use `scan` instead")]   -- every use outside this module warns (compatibility.md)
+fn old_scan(xs) do ... end
 ```
 
 An attribute name the compiler does not know is warned about
@@ -977,6 +980,20 @@ actor Worker do
   init { n: 0 }
   mailbox 1000 drop_old
   on Work() do { n: state.n + 1 } end
+end
+```
+
+A migrate clause (after `init`, with or in either order around `mailbox`): the
+part of a hot deploy's state migration the compiler cannot guess. With a
+deployed build known it derives the whole `counter_migrate_state` from it;
+otherwise it does nothing (see the Hot Code Reload guide):
+
+```march
+actor Counter do
+  state { total : Int }
+  init { total: 0 }
+  migrate old -> { total: old.count }    -- the running state's `count` moves to `total`
+  on Inc() do { total: state.total + 1 } end
 end
 ```
 
@@ -1257,9 +1274,8 @@ sees them. Statement separation inside `block_body` (the
 `block_body: nonempty_list(block_expr)` production in
 `lib/parser/parser.mly`) is therefore purely a side effect of where
 Menhir's grammar happens to close one `expr` and open the next. A line that
-*starts* with a token that can continue the prior expression, `(` (call/tuple),
-`-` (binary minus), or any infix operator (`++`, `+`, etc.), gloms onto the
-previous line instead of starting a new statement.
+*starts* with `-` (binary minus) or any infix operator (`++`, `+`, etc.)
+gloms onto the previous line instead of starting a new statement.
 
 ```march
 -- `- 1` on its own line binds to the previous let, not a new statement:
@@ -1269,30 +1285,43 @@ let b = a
 -- desugars to `let b = a - 1`  (b = 9), not two statements
 ```
 
+The fix is to make the continuation impossible: start the next line with
+something that cannot extend an expression (another `let`, a bare identifier
+call), or put the operator at the end of the previous line when a
+continuation is what you mean.
+
+**A line that starts with `(` is the exception: it is always a new statement
+(or a new match arm) when the previous line ends a complete expression.** The
+token filter retags such a `(` as `LPAREN_STMT`, which the grammar accepts
+only as a parenthesised expression, a tuple, `()` or a parenthesised/tuple
+pattern, never as a call's argument list. "Ends a complete expression" means
+the previous significant token is an identifier, a `)`, a `]`, a literal
+(Int, Float, String, Bool, atom), a `}` (record literal or update), an `end`
+(a `do ... end` block, an `if`/`match`, ...) or the end of an interpolated
+string:
+
 ```march
--- a `(...)` line is parsed as a call on the preceding expression:
 let f = identity
 (5)
--- desugars to `let f = identity(5)`  (f = 5), not `f = identity` then a bare `(5)`
+-- two statements: `f = identity`, then a discarded `(5)`
+
+let r = { x: 1 }
+(r.x + 1)
+-- two statements; the block's value is 2
+
+let g = do
+  fn s -> println(s)
+end
+("discarded")
+-- two statements; `g` is never called
 ```
 
-The sharpest trap is when the previous line's value isn't callable: the
-error surfaces far from the real mistake:
-
-```march
-let a = 5
-println("a = " ++ int_to_string(a))
-let b = 10
-(negate(b))
-println("...")
-```
-
-fails to typecheck with `This is not a function — it has type Int`, pointing
-at `let b = 10`, because `let b = 10 \n (negate(b))` glommed into
-`let b = 10(negate(b))`. The fix is to make the continuation impossible:
-start the next line with something that cannot extend an expression (another
-`let`, a bare identifier call with no leading operator/paren ambiguity), or
-parenthesize/terminate the prior expression so the next line can't attach.
+A call's `(` must therefore sit on the same line as the callee (`f(5)`); its
+arguments may continue on later lines. Before #129/#132 a `(` line after an
+identifier, `)`, `]` or literal was parsed as a call on the preceding
+expression, and before #1179 the same was true after `}`, a `do ... end`
+block and an interpolated string (for a `do ... end` that evaluated to a
+function, silently calling it).
 
 ### Derived `Ord`/`Hash` ignore constructor payloads
 

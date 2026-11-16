@@ -23,6 +23,7 @@
 
 mod Random do
   needs IO.Random
+  needs IO.Clock
 
   type Rng = { s0 : Int, s1 : Int, s2 : Int, s3 : Int }
 
@@ -216,12 +217,13 @@ mod Random do
 
   ## Examples
 
-      let n = Random.int(1, 100)
+      let n = Authority.must(Random.int(1, 100))
   """
-  fn int(lo : Int, hi : Int) : Int do
+  fn int(lo : Int, hi : Int) : Result(Int, CapError) do
+    let? _ = Authority.check("IO.Clock", "")
     let rng = seed(float_to_int(unix_time(())))
     let (n, _) = range(rng, lo, hi)
-    n
+    Ok(n)
   end
 
   -- ---- Collection operations ----

@@ -10,8 +10,8 @@ mod Main do
   needs IO.Spawn
   fn main(_s : Cap(IO.Spawn)) : Int do
     let rb = RingBuf.make(4)
-    let t1 = Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 1)))
-    let t2 = Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 2)))
+    let t1 = Authority.must(Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 1))))
+    let t2 = Authority.must(Task.async(fn () -> RingBuf.drop(RingBuf.push(rb, 2))))
     let _ = Task.await(t1)
     let _ = Task.await(t2)
     0

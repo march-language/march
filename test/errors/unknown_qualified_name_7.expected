@@ -1,0 +1,11 @@
+exit: 1
+-- NAMING --------- errors/unknown_qualified_name_7.march
+
+`Int` is a type, not a module. Write `to_string` without the type qualifier. [unknown_qualified_name]
+
+4 |     Int.to_string(5)
+        ^^^^^^^^^^^^^
+
+    run `march --explain unknown_qualified_name`
+
+

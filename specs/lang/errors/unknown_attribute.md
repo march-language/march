@@ -42,7 +42,7 @@ mod Main do
 end
 ```
 
-The function attributes are `@[assume]`, `@[decreases]`, `@[measure]`,
+The function attributes are `@[assume]`, `@[decreases]`, `@[deprecated]`, `@[measure]`,
 `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`, `@[trusted_linear]` and
 `@[vectorize]`.
 

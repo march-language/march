@@ -176,8 +176,8 @@ mod StreamActorSupervised do
 
   fn main(c : Cap(IO)) do
     let intro = Actor.introspect(c)
-    let handlers = Vault.new("stream_actor_sup_handlers")
-    let pending  = Vault.new("stream_actor_sup_pending")
+    let handlers = Authority.must(Vault.new("stream_actor_sup_handlers"))
+    let pending  = Authority.must(Vault.new("stream_actor_sup_pending"))
     let t = mailbox(handlers, pending)
     let s = Session.attach(c, t.ops)
 

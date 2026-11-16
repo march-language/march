@@ -333,6 +333,40 @@ let mutual_two_adts = {|
   end
 |}
 
+(* REJECT controls for the cross-type rule: the same Tree / List(Tree) pair,
+   but one edge passes no strict component.  [mutual_cross_param] passes the
+   matched parameter itself (`csize(Cons(t, Nil))` would loop through
+   `tsize(t)` forever); [mutual_cross_built] passes a value it builds. *)
+let mutual_cross_param = {|
+  type Tree = Node(Int, List(Tree))
+  fn tsize(t : Tree) : Int do
+    match t do
+      Node(_, cs) -> 1 + csize(cs)
+    end
+  end
+  fn csize(cs : List(Tree)) : Int do
+    match cs do
+      Nil -> 0
+      Cons(t, rest) -> tsize(t) + csize(cs)
+    end
+  end
+|}
+
+let mutual_cross_built = {|
+  type Tree = Node(Int, List(Tree))
+  fn tsize(t : Tree) : Int do
+    match t do
+      Node(_, cs) -> 1 + csize(Cons(t, cs))
+    end
+  end
+  fn csize(cs : List(Tree)) : Int do
+    match cs do
+      Nil -> 0
+      Cons(t, rest) -> tsize(t) + csize(rest)
+    end
+  end
+|}
+
 (* One mutually-defined family (each type mentions the other): certified.
    The measure group `mutual-mc` relies on exactly this shape. *)
 let mutual_family = {|
@@ -541,9 +575,14 @@ let structural_suite =
     case "mutual_nat: the multi-head spelling (unannotated __arg0)" (fun () ->
         check_cert "even" mutual_nat_heads "structural";
         check_cert "odd" mutual_nat_heads "structural");
-    case "mutual_two_adts: members matching types of different families are not certified" (fun () ->
-        check_cert "tsize" mutual_two_adts "unproved:not-same-family";
-        check_cert "csize" mutual_two_adts "unproved:not-same-family");
+    case "mutual_two_adts: a cycle through a List of children (Tree / List(Tree)) is certified" (fun () ->
+        check_cert "tsize" mutual_two_adts "structural";
+        check_cert "csize" mutual_two_adts "structural");
+    case "mutual_cross_param: a cross-type edge passing the parameter itself is not certified" (fun () ->
+        check_cert "tsize" mutual_cross_param "unproved:no-structural-arg";
+        check_cert "csize" mutual_cross_param "unproved:no-structural-arg");
+    case "mutual_cross_built: a cross-type edge passing a built value is not certified" (fun () ->
+        check_cert "tsize" mutual_cross_built "unproved:no-structural-arg");
     case "mutual_family: one mutually-defined family (RTree/RForest) is certified" (fun () ->
         check_cert "tsize" mutual_family "structural";
         check_cert "fsize" mutual_family "structural");

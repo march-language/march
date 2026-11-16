@@ -13,5 +13,6 @@ mod Test do
     println(int_to_string(dbl(21)))
     let x = 100
     println(int_to_string(dbl(x)))
+    ()
   end
 end

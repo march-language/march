@@ -48,6 +48,7 @@ silence into an error for a module that wants a guarantee.
 - [How it fits with the rest of March](#how-it-fits-with-the-rest-of-march)
 - [The Problem They Solve](#the-problem-they-solve)
 - [Syntax](#syntax)
+  - [Refinement aliases: naming a refinement, with value parameters](#refinement-aliases-naming-a-refinement-with-value-parameters)
   - [A message for each half of a contract](#a-message-for-each-half-of-a-contract)
   - [Refinements inside containers, callbacks and folds](#refinements-inside-containers-callbacks-and-folds)
 - [How Checking Works: Definite Failure](#how-checking-works-definite-failure)
@@ -111,6 +112,7 @@ the docs, and the compiler enforces it at every call.
 |---|---|
 | Reject a bad argument at the call site | A refined parameter: `i : {Int \| _ >= 0 && _ < len(xs)}` |
 | Promise something about a result | A refined return type: `: {Int | _ >= 0}` |
+| Name a refinement once and reuse it, `Vec(Int, n)` for a list of length `n` | A [refinement alias](#refinement-aliases-naming-a-refinement-with-value-parameters): `type Vec(a, n : Int) = {List(a) \| len(_) == n}` |
 | Give a broken contract a message in the caller's terms | [`else "…"` on a conjunct](#a-message-for-each-half-of-a-contract) |
 | Talk about a list's length, a record's fields, or your own data | A [measure](#measures-refining-over-data-structures) |
 | Call your own pure function inside a predicate | [Reflection](#reflection-your-functions-in-predicates): `if is_small(n) do need_small(n) …` |
@@ -211,6 +213,61 @@ and `==`/`!=` against literals. `Bool` values take the boolean operators against
 comparisons against float literals, discharged through Z3's bit-precise IEEE-754
 theory rather than reals ([Float Refinements](#float-refinements)).
 
+## Bounded quantifiers
+
+Logical predicates can quantify over a half-open integer range or collection
+membership:
+
+```march
+{List(Int) | forall i in 0..len(_), nth(_, i) >= 0}
+{List(Int) | exists x in elts(_), x == 7}
+```
+
+Write `forall i in lo..hi, P` or `exists i in lo..hi, P`. The range contains
+integers satisfying `lo <= i && i < hi`. Empty and reversed ranges make a
+universal predicate true and an existential predicate false. Negative bounds
+are legal. `elts(xs)` and `keys(m)` bound a variable by membership in the
+collection's elements or map keys. Current collection-domain support targets
+`Int` and `Bool` elements; unsupported element sorts must remain unverified.
+
+Binders are lexical: bounds use the outer scope, and the new name is in scope
+only in the body. Quantifiers may nest. Parenthesize a quantified predicate
+when combining it with another predicate using `&&` or `||`; the comma starts
+the quantifier's body. `forall` and `exists` are contextual in binder syntax;
+ordinary calls such as `forall(...)` remain identifier uses. Unbounded forms
+are unsupported. Quantifiers are allowed in refinements and proof assertions,
+not as executable expressions.
+
+`nth(xs, i)` is a logical list-indexing operation at the list's element sort.
+Every reached access must satisfy `0 <= i && i < len(xs)`. Boolean
+short-circuit guards can establish that condition. For **both** `forall` and
+`exists`, definedness is required for every domain member, even when a single
+valid existential witness would suffice for truth. For example,
+`exists i in 0..2, nth([7], i) == 7` cannot prove: index one is invalid.
+Negating the predicate does not remove this obligation.
+Like `len` and the set vocabulary, `nth` is reserved inside predicates: a
+module's own unqualified `nth` is not consulted there, so write a differently
+named helper (or `List.nth` in ordinary code) for any other indexing meaning.
+
+A sorted-list predicate can compare adjacent positions:
+
+```march
+{List(Int) | forall i in 0..len(_) - 1, nth(_, i) <= nth(_, i + 1)}
+```
+
+An existential goal requires checked candidates. The checker tries a
+deterministic bounded set of well-sorted terms from the obligation and proof
+facts (at most 32); a candidate must establish domain membership and the body.
+An unknown result or a missing candidate does not prove the predicate. Proof
+assertions can supply candidate facts; establish the candidate's bounds as
+well as its desired property. This search is incomplete, so an unproved goal
+may need a witness even when it is mathematically true.
+
+Quantified reasoning retains the usual warning-by-default policy and strict
+`cap verified` checks. Solver limits and unsupported formulas never supply
+proved facts. Bounded quantification does not make Z3 complete for quantified
+arithmetic or recursive list properties.
+
 Multiplication by a literal keeps a query in linear arithmetic, where the
 solver is complete and fast. A product of two non-constant terms is accepted
 too — `v * v > 0` is exactly `v != 0` over the integers, and refusing it only
@@ -257,6 +314,46 @@ comparisons, which is every ordinary refinement. A division in a bare
 `Int`-valued position, such as a call's argument `f(n / d)`, is translated only
 when its divisor is a non-zero literal or is syntactically positive
 (`len(xs) + 1`).
+
+### Refinement aliases: naming a refinement, with value parameters
+
+A `type` declaration whose right-hand side is a refinement type names that refinement. Its
+parameters can be types, as usual, or **values**, written with their sort:
+
+```march
+type Pos = {Int | _ > 0}
+type Vec(a, n : Int) = {List(a) | len(_) == n}
+type Matrix(r : Int, c : Int) = {List(Vec(Int, c)) | len(_) == r}
+
+fn dot(n : Int, xs : Vec(Int, n), ys : Vec(Int, n)) : Int do … end
+fn push(n : Int, x : Int, xs : Vec(Int, n)) : Vec(Int, n + 1) do Cons(x, xs) end
+```
+
+Each use is replaced by the refinement it names, with its arguments substituted: `Vec(Int, n)`
+is exactly `{List(Int) | len(_) == n}`, the contract you would have written. Nothing new reaches
+the solver. This gives most of what length-indexed vectors give in a dependently typed language,
+without dependent type checking: the length lives in a refinement, and the checker proves it.
+
+- A **value argument** is a number, a name in scope (usually an earlier parameter), or `+` / `*` of
+  those: `Vec(Int, 3)`, `Vec(Int, n)`, `Vec(Int, n + 1)`.
+- A **value parameter** may appear only in the predicate, or as a value argument of another alias
+  (`Matrix`'s `c`). Using one as a type (`{List(n) | …}`), passing a type for it, or passing a
+  value for a type parameter is [`alias_kind_mismatch`]({{ site.baseurl }}/docs/errors/alias_kind_mismatch/).
+  Only a refinement alias takes value parameters.
+- An alias works wherever a refinement does: parameters, results, element types (`List(Pos)`),
+  record fields, `let` annotations and actor messages. A refinement of an alias,
+  `{Vec(Int, 3) | len(_) > 5}`, is both.
+- A violation names the alias as written at the use, not its expansion:
+
+```
+refinement violation: expected Vec(Int, n) [refinement_violated]
+argument `ys` of `dot` does not satisfy precondition `len(_) == n`
+note: `[4, 5]` can never satisfy `len(ys) == n`; pass a value that does
+```
+
+A conjunct the alias's author gave its own [`else` message](#a-message-for-each-half-of-a-contract)
+keeps it. The full example, with a `Matrix` whose every row is checked, is
+`test/refine/aliases/vec.march`.
 
 ### A message for each half of a contract
 
@@ -1308,7 +1405,11 @@ Functions with several parameters, and functions that return a list or a
   and a `{ x, y }` pattern in a `match` or a `let` all translate. Records are
   matched to their declared type by their field names, so a function over a
   record is reflected only when exactly one declared record has those fields,
-  with those types, and that record takes no type parameters.
+  with those types, and that record takes no type parameters. A `String` or
+  `Float` field holds a string or float value as described above, in a record
+  or a variant (`type N = { a : Int, s : String }`,
+  `type Tag = Named(String, Int)`), so `un(mk(x)) == x` and `label(mk(x)) == "v2"`
+  are proved for `fn mk(x : Int) : N do { a: x, s: "v2" } end`.
 - **A tuple** works the same way: `(a, b)` builds one, and a `(a, b)` pattern in a
   `match` or a `let` takes one apart. A tuple or record literal may be passed to
   a reflected function in a predicate: `sw((5, 2)) == 3`, `px({ x: 1, y: 2 }) == 3`.
@@ -2367,11 +2468,13 @@ variable is never reported.
 
 ### The stdlib `Set` and `Map` carry assumed contracts
 
-`Set(a)` and `Map(k, v)` are hash tries no measure can see into, so their
-element sets are stated rather than proved: every public `Set` operation
-(`empty`, `singleton`, `insert`, `remove`, `union`, `intersection`,
-`difference`, `contains`, `is_subset`, `is_empty`, `eq`, `to_list`,
-`from_list`) and the key-affecting `Map` operations (`empty`, `singleton`,
+`Set(a)` and `Map(k, v)` are hash tries. Six of `Set`'s contracts are **proved**
+against the trie: `empty`, `singleton`, `insert`, `union`, `to_list` and
+`from_list` (see [proving `Set` against its trie](#proving-set-against-its-trie)).
+They trust one law, `cmp_eq`: the comparator is a strict total order that agrees
+with `==`. The rest are stated rather than proved: the other public `Set`
+operations (`remove`, `intersection`, `difference`, `contains`, `is_subset`,
+`is_empty`, `size`, `eq`) and the key-affecting `Map` operations (`empty`, `singleton`,
 `insert`, `remove`, `get`, `contains_key`, `is_empty`, `keys`, `map_values`,
 `filter`, `merge`) declare their effect on `elts`/`keys` under `@[assume]`.
 `Map.filter` also assumes an entry fact, `Map(k[p], v[p])`: every entry of its
@@ -2457,6 +2560,74 @@ contract that is not proved is still not reported unless it can never hold,
 and it does not reach call sites. `List.map` has no such contract: the
 elements of an arbitrary callback's image have no set expression.
 
+### Proving `Set` against its trie
+
+A `Set(a)` is `HamtSet(count, root)`, where a trie node is empty, a leaf, a
+collision bucket (a `List` of elements sharing a hash), or a branch holding a
+`List` of child nodes. Its contents are two measures that call each other across
+the node type and its child list, plus one over the wrapper:
+
+```march
+@[measure]
+ghost pfn sentry_elts(n : SEntry(a)) : Set(a) do
+  match n do
+  SEmpty -> empty
+  SLeaf(_, x) -> singleton(x)
+  SBranch(_, cs) -> sentries_elts(cs)
+  SCollision(_, xs) -> elts(xs)
+  end
+end
+
+@[measure]
+ghost pfn sentries_elts(cs : List(SEntry(a))) : Set(a) do … end
+
+@[measure]
+@[abstraction(elts)]
+ghost pfn set_elts(s : Set(a)) : Set(a) do
+  match s do
+  HamtSet(_, node) -> sentry_elts(node)
+  end
+end
+```
+
+The measures are `ghost`: they exist only for the proofs, and `elts` in a
+measure body has no runtime counterpart, so a set-valued measure that a
+compiled program carries should be a `ghost pfn` (never compiled).
+
+**`@[abstraction(elts)]`** says what the built-in `elts` means for the
+module's own datatype: inside the module that declares it, `elts(s)` of a
+`Set` is `set_elts(s)`, so `insert`'s public contract
+`elts(_) == union(elts(s), singleton(elem))` is checked against the trie.
+Outside the module `elts` stays opaque, and a caller proves only through the
+contracts, exactly as before. The measure must be axiomatised (a total,
+structurally recursive `@[measure]`), take one parameter of a datatype of its
+own module, and name `elts` or `keys`.
+
+The insert path is written so each step is a contract the checker proves: the
+child insert walks the child list once (`insert_child`, mutually recursive
+with `node_insert` across the two types), a collision that meets a new hash is
+placed beside the new leaf under a fresh branch (`branch_nodes`, which
+terminates by `@[decreases(7 - lvl)]`), and the out-of-range child index
+panics, a path that never returns. The rules that make this work:
+
+- a **list match arm** states the scrutinee's elements: a `Nil` arm gives
+  `elts(xs) == empty`, a `Cons(h, t)` arm `elts(xs) == union(singleton(h), elts(t))`;
+- **`if f(args) do`** reads `f`'s `Bool` contract in both branches, as
+  `let b = f(args)` then `if b do` always did;
+- a **constructor result in an `if` branch** (`Cons(x, xs)`) reflects for an
+  `elts` contract whatever its tail is;
+- a **`panic(..)`, `todo(..)`, `unreachable(..)` or `exit(..)` tail** satisfies
+  any return contract: it never returns a value (an aborting call is the panic
+  surface's business, not the contract's);
+- a call to the **other function of a certified mutual cycle** carries its
+  induction hypothesis, in a constructor field or a list element alike.
+
+A function only gets an induction hypothesis when everything it calls is
+certified to terminate. `insert` counts its elements with `node_mem`, a
+first-order walk shaped like the insert pair, because `node_contains` recurses
+through a closure and through `list_nth_safe`'s result, which the checker cannot
+certify; `union`'s walk calls `insert`, so it inherits that requirement.
+
 ### `SortedSet` is proved, not assumed
 
 `SortedSet` is an AVL tree the checker can see into, so its tree operations
@@ -2501,8 +2672,9 @@ end                                                                             
 
 A user `@[measure]` may return a set, under the same structural gate as an
 `Int` measure. Its body uses the set vocabulary, which is bound for that body
-only; such a measure is logic, and calling it in expression position is an
-error:
+only and takes precedence over a function of the same name in scope, plus
+`elts` over a list field. Such a measure is logic, and calling it in
+expression position is an error:
 
 ```march
 type Expr = Var(Int) | Lam(Int, Expr) | App(Expr, Expr)
@@ -2666,6 +2838,61 @@ negative zero, which is just as bad a divisor as a positive one. Under `fp.eq`,
 `-0.0 == 0.0` is true (so a negative-zero argument **is** reported) and `NaN`
 equals no value, itself included.
 
+### NaN, infinities and finite values: `is_nan`, `is_infinite`, `is_finite`
+
+Three predicate words test a Float's IEEE class, the way `len` measures a list:
+
+| Word | Holds when |
+|---|---|
+| `is_nan(x)` | `x` is NaN |
+| `is_infinite(x)` | `x` is `+inf` or `-inf` |
+| `is_finite(x)` | `x` is neither NaN nor an infinity |
+
+```march
+fn need_num(x : {Float | !is_nan(_)}) : Float do x end
+fn need_fin(x : {Float | is_finite(_)}) : Float do x end
+
+fn ok(y : {Float | _ >= 0.0 && _ <= 10.0}) : Float do need_fin(y) end   -- proved: a bounded value is finite
+```
+
+The program builtins `float_is_nan(x)` and `float_is_infinite(x)` mean the same thing in a
+predicate and in a function body, so a function that guards on them reflects (see
+[Float operations in a function body](#float-operations-in-a-function-body)).
+
+Most laws about Floats need one of these as a hypothesis. `min(a, b) <= a` is false when `a`
+is NaN, because every comparison with NaN is false; with `a : {Float | !is_nan(_)}` it holds.
+The standard library states its own this way: `Math.min_float`, `Math.max_float` and
+`Math.clamp_float` carry return types that hold unless an argument is NaN, and `Math` has
+proved lemmas such as `abs_nonneg` (`is_nan(x) || abs(x) >= 0.0`) and `sqrt_neg_nan`.
+
+### Float operations in a function body
+
+A reflected function's Float operations mean exactly what the running program computes:
+`+.`, `-.`, `*.` and `/.` are IEEE-754 binary64 with round-to-nearest-even, unary minus is
+negation, and `<`, `<=`, `>`, `>=` are IEEE comparisons, false whenever either side is NaN.
+The compiled code, the interpreter and the JavaScript target all compute these the same way,
+and the compiler emits no fast-math flags on them, so a proof about the definition is a proof
+about the program. So a lemma can prove facts that depend on a Float operation's value:
+
+```march
+fn min_f(a : Float, b : Float) : Float do if a < b do a else b end end
+fn twice(f : Float) : Float do f +. f end
+
+@[lemma]
+fn min_le(a : {Float | !is_nan(_)}, b : {Float | !is_nan(_)})
+  : {Unit | min_f(a, b) <= a && min_f(a, b) <= b} do () end        -- proved
+
+@[lemma]
+fn twice_small(f : {Float | _ >= 0.0 && _ <= 0.25}) : {Unit | twice(f) <= 0.5} do () end   -- proved
+```
+
+Before 2026-11-15 these operations were opaque symbols, and neither lemma could be proved.
+`==` and `!=` between Floats in a function body are still the opaque program equality, so a
+theorem that turns on whether two computed Floats are equal does not prove; compare with
+`<=` both ways instead. A query that expands Float operations is bit-precise and costs the
+solver more than integer reasoning does, so it gets the main resource limit, not the smaller
+one other function-body expansions get.
+
 ### What Float refinements do *not* do
 
 - **Arithmetic in a predicate is skipped, not guessed.** `{Float | _ +. 1.0 >
@@ -2674,11 +2901,13 @@ equals no value, itself included.
   is silently skipped, including for an argument that clearly violates it.
   Arithmetic over float **literals only** (`0.0 -. 1.0`) is different: it is
   folded to a constant before reflection and is fully checked.
-- **Float record fields and ADT payloads are opaque.** A `Float` *parameter* or
-  *return* is modelled; a `Float` inside a record or constructor is not.
-- **No special values.** There is no `is_nan` or `is_finite` vocabulary, so a
-  predicate cannot mention them. NaN is nevertheless modelled correctly inside
-  the solver, which is what keeps the encoding from reporting correct code.
+- **A `Float` inside a record or constructor is only a value.** Reflection and
+  lemmas carry it through (`unf(mkf(x)) == x`), but a record literal holding a
+  float is not built in a call-site query: the field stays an unknown value
+  there, so only the record's other fields are checked.
+- **NaN is reported only when it is certain.** A theorem false only at NaN (`abs(x) >= 0.0`
+  for an unrestricted `x`) is reported not proved rather than false: the checker reports a
+  violation only for a counterexample it can confirm. Add `!is_nan(_)` to the parameter.
 - **A literal with no exact plain-decimal form is skipped.** SMT-LIB decimals
   admit neither exponent notation nor infinities, so a magnitude that cannot be
   written out exactly is not reflected at all.
@@ -4782,11 +5011,11 @@ reported, never warned about. `cert=structural` holds for a cycle when:
   the argument;
 - a component name is trusted only if every binding of that name in the body is
   structural. `Cons(_, t)` of a *second* list reusing the outer `t` spoils it;
-- in a cycle of several functions, every member matches on a parameter of one type
-  **family**: the same type (`even`/`odd` on `Nat`), or types defined in terms of each
-  other (a `Tree` holding a `Forest` that holds `Tree`s). A tree recursing through a
-  `List(Tree)` of children is not certified yet, because `List` is not defined in terms of
-  `Tree`;
+- in a cycle of several functions, each member is measured on one of its parameters,
+  and every call in the cycle passes a component of the caller's parameter in the
+  callee's. The parameters may have different types: a `Tree` recursing through its
+  `List(Tree)` of children is certified, because a component has fewer constructors
+  than the value it came from, whatever its type;
 - no member names a member of its own cycle as a value (`apply(f, x)` inside `f`):
   the arguments of such a call are unknown;
 - no member calls a function value whose type mentions a **non-positive** type.
@@ -4805,7 +5034,7 @@ fn omega() : Int do w(Fix(w)) end    -- never returns
 `w` is listed with `cert=unproved:non-positive` although it is not recursive.
 `type T = T(Int -> Int)` is positive and blocks nothing.
 
-The reasons are `no-structural-arg`, `not-same-family`, `reference`, `non-positive` and
+The reasons are `no-structural-arg`, `reference`, `non-positive` and
 `unresolved` (a member calls a name the checker cannot resolve, above).
 `Int` recursion (`down(n - 1)`) is the job of a metric, below.
 
@@ -5113,7 +5342,7 @@ warning: Unknown attribute `@[decrease]` on `f`: it is ignored.
 note: did you mean `@[decreases]`?
 ```
 
-The function attributes are `@[assume]`, `@[decreases]`, `@[diverges]`,
+The function attributes are `@[abstraction]`, `@[assume]`, `@[decreases]`, `@[diverges]`,
 `@[measure]`, `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`,
 `@[trusted_linear]` and `@[vectorize]`.
 
@@ -5125,12 +5354,12 @@ waits for the next frame, a ticker that runs until the program stops. Mark one
 
 ```march
 @[diverges]
-fn accept_loop(listen_fd : Int) : Int do
-  match tcp_accept(listen_fd) do
+fn accept_loop(listener : Listener) : Int do
+  match Socket.accept(listener) do
     Err(_) -> 0
-    Ok(fd) ->
-      handle(fd)
-      accept_loop(listen_fd)
+    Ok(conn) ->
+      handle(conn)
+      accept_loop(listener)
   end
 end
 ```
@@ -5331,7 +5560,10 @@ The rules, in the order the report checks them:
 - **R9**: not marked `@[trusted]`, `@[assume]` or `@[opaque]`.
 - **R11**: its name is not predicate vocabulary (`len`, `elts`, `keys`, the
   set operators, `is_<Ctor>`): inside a predicate such a name always means the
-  built-in.
+  built-in. When your own `len`, `elts`, `keys` or `is_<Ctor>` is in scope where
+  a predicate uses that name, the checker warns that the predicate means the
+  built-in (`predicate_vocabulary_shadowed`); rename the function to use it in
+  a predicate.
 
 A recursive group is reflected as a whole or not at all. A reflected function
 whose parameters are refined shows the guard each use will carry, for example
@@ -5692,6 +5924,26 @@ position into a real contract, obligation and assumption together, is
   state's refined fields are obliged at `init` and at every handler's result
   (an update `{ state with ... }`, or a fresh literal at a tail), and assumed
   of the incoming `state` in every handler body.
+- (Closed 2026-11-09.) Two-state handler guarantees: `on Msg(…) ensures P do`,
+  where `state` and the bare fields in `P` are the returned state and `old(e)`
+  reads the incoming one. Proved per handler as the `@invariant` is (the
+  invariant assumed of the incoming state), a violation shows both states, and
+  each is a ledger row `<Actor>.<Msg>.ensures` listed by `--guarantees`. See
+  [Handler guarantees](actors.md#handler-guarantees-ensures-and-old).
+- (Closed 2026-11-08.) An actor's `@invariant`: an inductive invariant too,
+  over its bare field names (or `state.f`), and it may call the program's own
+  functions, unfolded as in any contract. The state `init` builds must
+  satisfy it, and each handler's result must satisfy it, given an incoming
+  `state` that does and the handler's parameter refinements (assumed exactly
+  when the body assumes them). A violation is a `return_refinement_violated`
+  error naming the actor and handler, with the breaking state and message; an
+  undecided one is a recorded skip (`<Actor>.init`, `<Actor>.<Msg>`), an error
+  under `cap verified`. A handler's sends and replies are not part of the
+  claim. Before this, the predicate was read only across a hot deploy. A
+  record-returning function benefits too: `{ r with f: e }` over a named `r`
+  reflects, `r` returned as it is no longer conflicts on sorts, a simple
+  `let` ahead of a record tail is inlined, and a binder left free in the tail
+  never turns a model into a reported counterexample.
 - (Closed 2026-09-13.) A handler's own parameter: `on Inc(n : {Int | n >
   0})` obliges every construction of `Inc(...)` in the program (`send`,
   `Actor.call`, a message bound to a `let` first), and the handler body
@@ -6636,9 +6888,13 @@ edges:
   - an accumulator parameter that *grows*: the induction is on the matched
     parameter only, so the hypothesis is universally quantified over the rest.
 
+  - **mutual recursion** whose cycle is certified to terminate: a call to the
+    *other* function of the cycle carries that function's hypothesis, in a
+    constructor field or a list element alike (`Cons(node_insert(c, x), rest)`
+    inside a child-list insert). The functions of a cycle are admitted together:
+    all prove, or none does.
+
   **What is not proved (each is a recorded skip):**
-  - **mutual recursion.** The hypothesis is created only for a call to the
-    function's *own* name, so two functions that call each other prove no property.
   - **a recursive call inside a lambda, or behind a nested `match`.** Only the
     top-level `match`'s pattern equation is supplied, so an arm with a tail that sits
     under a second `match` cannot see the inner scrutinee's shape.
@@ -6743,14 +6999,13 @@ edges:
   `{Bool | _ == true}`, `{Bool | _ != false}` and the connectives `&& || not`
   are checked; the bare-binder spelling `{Bool | not _}` is a **parse error**,
   so write `{Bool | _ == false}` instead.
-- **`Float` record fields and ADT payloads are opaque.** A `Float` *parameter*
-  or *return* is checked; a `Float` sitting inside a record or a constructor is
-  not reflected, and a record with such a field is skipped at the call site
-  rather than half-modelled.
-- **There is no special-value vocabulary.** No `is_nan`, no `is_finite`. You
-  cannot write a predicate expressing "not NaN"; see
-  [Float Refinements](#float-refinements) for why NaN nevertheless never causes
-  a false report.
+- **A `Float` inside a record or constructor is only a value.** Reflected
+  functions and lemmas carry it through; at a call site a record literal's
+  float field is an unknown value, so the record's other fields are still
+  checked but nothing is concluded about the float.
+- **Float special values have their own words.** `is_nan`, `is_infinite` and
+  `is_finite` (since 2026-11-15); see
+  [NaN, infinities and finite values](#nan-infinities-and-finite-values-is_nan-is_infinite-is_finite).
 - **An AXIOMATISED measure applied to the refined value itself is now
   enforced against the actual argument** (fixed 2026-07-29; this bullet
   previously documented the opposite as a limitation, and that limitation was a

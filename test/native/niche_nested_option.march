@@ -56,5 +56,6 @@ mod Main do
     end
     let xs = [wrap_name(true), wrap_name(false), Some(MaybeName.Named("y"))]
     println(int_to_string(List.length(List.filter(xs, fn o -> Option.is_some(o)))))
+    ()
   end
 end

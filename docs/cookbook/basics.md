@@ -120,6 +120,7 @@ Guards narrow a pattern with a `when` condition:
 
 <!-- scroll:skip -->
 ```march
+let n = 42
 match n do
   x when x > 100 -> "big"
   x when x > 0   -> "small"
@@ -131,6 +132,7 @@ end
 
 <!-- scroll:skip -->
 ```march
+let score = 85
 match do
   score >= 90 -> "A"
   score >= 80 -> "B"
@@ -145,6 +147,7 @@ end
 `let? p = e` binds the `Ok` payload and short-circuits on `Err`, returning the error from the enclosing function immediately:
 
 <!-- scroll:skip -->
+<!-- repl:skip -->
 ```march
 fn load_config(path : String) : Result(Config, String) do
   let? src  = File.read(path)

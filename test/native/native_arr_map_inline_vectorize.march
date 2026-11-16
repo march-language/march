@@ -27,5 +27,6 @@ mod Main do
     let ints3 = NativeArray.from_list_int(Cons(1, Cons(2, Cons(3, Nil))))
     let ints4 = NativeArray.map_int(ints3, fn x -> x + captured)
     println(NativeArray.to_list_int(ints4))   -- [11, 12, 13]
+    ()
   end
 end

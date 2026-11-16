@@ -7,7 +7,16 @@ Found 2026-11-04 testing depot on v0.7.0. `MARCH_TEST_INTERPRETER=1 forge test` 
 
 Two things then go wrong, neither of them the project's fault:
 
-- **Shared state across files.** One interpreter process runs every file. The `Vault.*` and
+> **Re-checked 2026-11-09 on `c3cd49c76`: the shared-state half is fixed** (most likely by
+> `066709110`, a fresh interpreter runtime per file,
+> `specs/progress/2026-11-03-march-test-fresh-runtime-per-file.md`): two test files that both
+> use `Vault.new("counters")` pass, 4808 tests across 2 files. **Still open:** the stdlib's
+> doctests (about 2,400) run in every project test file, in that file's scope. A test file
+> declaring `fn identity(a, b, c)` fails `doctest identity (1)` with "arity mismatch: expected
+> 3 args, got 1". (depot's exact `filter` shadowing is now refused earlier, as
+> `[prelude_collision]`.)
+
+- ~~**Shared state across files.**~~ (fixed, see above) One interpreter process runs every file. The `Vault.*` and
   `Config.fetch` doctests use fixed table names (`Vault.new("counters")`, `:test/:port`), so
   from the second file on they see the earlier file's writes. `Vault.incr (1)` expected 1 and
   got 5, then 9. `Config.fetch (1)` expected `Err(KeyMissing(...))` and got `Ok(8080)`. That's

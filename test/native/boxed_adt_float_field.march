@@ -23,5 +23,6 @@ mod Main do
     PFloat(f) -> println(float_to_string(f))
     _         -> println("MISS")
     end
+    ()
   end
 end

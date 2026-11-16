@@ -6,5 +6,6 @@ mod SmsEntry do
     if r == 50 do println("ok")
     else panic("same-module shadow regression: Widget.use_it(5) = " ++ int_to_string(r))
     end
+    ()
   end
 end

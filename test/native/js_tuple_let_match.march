@@ -46,5 +46,6 @@ mod JsTupleLetMatch do
       _ -> "other"
     end
     println(got)
+    ()
   end
 end

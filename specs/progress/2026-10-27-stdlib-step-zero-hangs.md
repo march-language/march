@@ -183,3 +183,15 @@ examples must stay in 32-bit range for the browser REPL.
   skipped: the `hidden_int` arguments, by design). No new violation anywhere.
 - `scripts/run-tests.sh` (full) and `scripts/check-docs.sh` pass; the TIR snapshot
   suite passes.
+
+## Todos closed (2026-11-09)
+
+PR #1030 landed s1-s4 but left their four todo files open. They were deleted
+afterwards; this file is their completed record:
+`specs/todos/2026-10-27-list-range-step-zero-loops.md` (s1),
+`2026-10-27-range-to-list-step-zero-loops.md` (s2),
+`2026-10-27-control-chunks-size-zero-loops.md` (s3) and
+`2026-10-27-duration-format-min-int-overflows.md` (s4). Re-checked on `main` at
+9f14c7358: `test/native/stdlib_step_guards` matches its golden both interpreted and
+compiled, the `stdlib_march` suite passes (84 tests), and so does the refinecheck group
+`stdlib-step-guards` (7).

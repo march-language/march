@@ -12,11 +12,11 @@ mod CapMockProcess do
 
   -- code under test: takes no capability and names none
   pfn where_am_i() : String do
-    Process.cwd()
+    Authority.must(Process.cwd())
   end
 
   pfn arg_count() : Int do
-    List.length(Process.argv())
+    List.length(Authority.must(Process.argv()))
   end
 
   test "a value-typed process op dispatches through its mock" do
@@ -26,7 +26,7 @@ mod CapMockProcess do
       process_cwd: Some("/mocked"),
       process_pid: Some(42) })
     let mocked = with_cap(mock, fn _ -> where_am_i())
-    let pid = with_cap(mock, fn _ -> Process.pid())
+    let pid = Authority.must(with_cap(mock, fn _ -> Process.pid()))
     let after = where_am_i()
     Test.assert_eq("/mocked", mocked, "inside with_cap the mock is in force")
     Test.assert_eq(42, pid, "a mocked Int-valued op")

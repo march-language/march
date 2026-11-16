@@ -347,7 +347,7 @@ let lower_actor (env : Lower_state.env) ~hot_reload (name : string) (actor : Ast
   let inspect_fns =
     let dummy_name = { Ast.txt = "$inspect"; span = Ast.dummy_span } in
     [lower_handler ~inspect:true
-       { Ast.ah_msg = dummy_name; ah_params = []; ah_body = Ast.ELit (Ast.LitAtom "unit", Ast.dummy_span) }]
+       { Ast.ah_msg = dummy_name; ah_params = []; ah_ensures = None; ah_body = Ast.ELit (Ast.LitAtom "unit", Ast.dummy_span) }]
   in
 
   (* ── 4. Dispatch function ────────────────────────────────── *)

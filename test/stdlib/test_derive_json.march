@@ -1,4 +1,5 @@
 mod TestDeriveJson do
+  needs IO.Console
 
   -- Simple enum variant (no args)
   type Color = Red | Green | Blue

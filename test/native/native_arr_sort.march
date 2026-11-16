@@ -231,5 +231,6 @@ mod NativeArrSort do
             ++ bool_to_string(NativeArray.to_list_float(fshared) == [0.5, -2.0, 1.5]))
     println("f64 alias result sorted: "
             ++ bool_to_string(NativeArray.to_list_float(fsorted) == [-2.0, 0.5, 1.5]))
+    ()
   end
 end

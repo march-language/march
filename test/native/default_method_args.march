@@ -20,5 +20,6 @@ mod Main do
     println(bool_to_string(neqx(P(1), P(2))))
     println(bool_to_string(neqx(P(3), P(3))))
     println(bool_to_string(neqx(P(5), P(9))))
+    ()
   end
 end

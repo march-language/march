@@ -65,5 +65,6 @@ mod Main do
 
     let ee = NativeArray.from_list_int([300, -1])
     println(NativeArray.to_list_int(NativeArray.u8_to_int_arr(NativeArray.int_to_u8_arr(ee))))
+    ()
   end
 end

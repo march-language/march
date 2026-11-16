@@ -61,7 +61,37 @@ let syms : (string, fsig) Hashtbl.t = Hashtbl.create 64
     of every channel: predicates, path conditions, `let` facts, subjects. *)
 let call_sym : (March_ast.Ast.span, string) Hashtbl.t = Hashtbl.create 256
 
-let resolve_site (sp : March_ast.Ast.span) : string option = Hashtbl.find_opt call_sym sp
+(** `reveal f` (todo 2026-11-06-proof-reveal-and-local-fuel): the call sites
+    of an [@[opaque]] function that would otherwise be reflected, with its
+    symbol and display name.  Filled only when the program has a `reveal`
+    statement; a site here resolves only while its function is revealed. *)
+let hidden_call_sym : (March_ast.Ast.span, string * string) Hashtbl.t = Hashtbl.create 16
+
+(** The functions a `reveal` statement in scope has revealed, as spelled. *)
+let revealed : string list ref = ref []
+
+(** `with fuel(f, N)` in scope: [f] as spelled, and its fuel. *)
+let fuel_override : (string * int) list ref = ref []
+
+(** Does a spelling (`f`, `Inner.f`) name the function displayed [display]
+    (`f`, `Inner.f`, `M.Inner.f`)? *)
+let names_fn ~(display : string) (spelled : string) : bool =
+  display = spelled || String.ends_with ~suffix:("." ^ spelled) display
+
+let resolve_site (sp : March_ast.Ast.span) : string option =
+  match Hashtbl.find_opt call_sym sp with
+  | Some s -> Some s
+  | None -> (
+    match Hashtbl.find_opt hidden_call_sym sp with
+    | Some (s, display) when List.exists (names_fn ~display) !revealed -> Some s
+    | _ -> None)
+
+(** The fuel of the function displayed [display], under any `with fuel`
+    in scope, else [default]. *)
+let fuel_for ~(display : string) (default : int) : int =
+  match List.find_opt (fun (f, _) -> names_fn ~display f) !fuel_override with
+  | Some (_, n) -> n
+  | None -> default
 
 (** Phase 5 (D10): a specialised call site -> the expressions its logic symbol
     is applied to.  A call [g(xs, fn x -> x > k)] specialised as [g$k] passes
@@ -84,20 +114,61 @@ let instances : (string, Smt.sort list * Smt.sort) Hashtbl.t = Hashtbl.create 64
     with signature [(T0, T0) -> Bool]. *)
 let eq_sym = "|r:eq|"
 
-(** §2.3 (D9): a Float operation in a reflected body is an opaque, total,
-    deterministic function, one per operator.  Never the FloatingPoint theory
-    inside a body, so NaN and signed zero are never reasoned about: the only
-    facts a proof gets are congruence (equal arguments, equal results). *)
+(** §2.3 (D9): one logic symbol per Float operator in a reflected body.
+
+    Until 2026-11-15 each was declared opaque (`declare-fun`), so a proof got
+    only congruence and no Float law could be proved.  Each is now DEFINED
+    (`define-fun`, [float_def]) by the IEEE-754 operation the program runs:
+    binary64 with round-to-nearest-even, comparisons false on NaN (`fcmp olt`
+    and friends in the compiled code, OCaml's float compare in the
+    interpreter, JavaScript's on the JS target).  The emitted code uses no
+    fast-math flag on these operators, so no contraction or reassociation can
+    make the running program differ from the definition.  A body's `==` at
+    Float is still the opaque program equality ([eq_sym], §3.5). *)
 let float_ops : (string * (Smt.sort list * Smt.sort)) list =
   let f = Smt.SFloat in
   [ ("fadd", ([ f; f ], f)); ("fsub", ([ f; f ], f)); ("fmul", ([ f; f ], f)); ("fdiv", ([ f; f ], f));
     ("fneg", ([ f ], f)); ("flt", ([ f; f ], Smt.SBool)); ("fle", ([ f; f ], Smt.SBool));
-    ("fgt", ([ f; f ], Smt.SBool)); ("fge", ([ f; f ], Smt.SBool)) ]
+    ("fgt", ([ f; f ], Smt.SBool)); ("fge", ([ f; f ], Smt.SBool)); ("fabs", ([ f ], f)); ("fsqrt", ([ f ], f)) ]
 
 let float_sym (op : string) : string = "|r:float:" ^ op ^ "|"
 
 let float_sig (f : string) : (Smt.sort list * Smt.sort) option =
   List.find_map (fun (op, s) -> if float_sym op = f then Some s else None) float_ops
+
+(** The IEEE body of a Float operator's symbol: the SMT-LIB expression over
+    the parameters [a] (and [b]). *)
+let float_body (op : string) : string option =
+  match op with
+  | "fadd" -> Some "(fp.add RNE a b)"
+  | "fsub" -> Some "(fp.sub RNE a b)"
+  | "fmul" -> Some "(fp.mul RNE a b)"
+  | "fdiv" -> Some "(fp.div RNE a b)"
+  | "fneg" -> Some "(fp.neg a)"
+  | "flt" -> Some "(fp.lt a b)"
+  | "fle" -> Some "(fp.leq a b)"
+  | "fgt" -> Some "(fp.gt a b)"
+  | "fge" -> Some "(fp.geq a b)"
+  (* `float_abs` is fabs/Math.abs/abs_float on every backend (the WASM
+     runtime's since 2026-11-15); `math_sqrt` is the correctly rounded IEEE
+     square root on every backend. *)
+  | "fabs" -> Some "(fp.abs a)"
+  | "fsqrt" -> Some "(fp.sqrt RNE a)"
+  | _ -> None
+
+(** The `define-fun` of a Float operator's symbol [f], or [None] when [f] is
+    not one. *)
+let float_def (f : string) : string option =
+  List.find_map
+    (fun (op, (ps, r)) ->
+      if float_sym op <> f then None
+      else
+        Option.map
+          (fun body ->
+            let params = List.mapi (fun i s -> Printf.sprintf "(%s %s)" (if i = 0 then "a" else "b") (Smt.string_of_sort s)) ps in
+            Printf.sprintf "(define-fun %s (%s) %s %s)\n" f (String.concat " " params) (Smt.string_of_sort r) body)
+          (float_body op))
+    float_ops
 
 (** §2.3 (D9): a string literal in a reflected body is a constant of the
     opaque [$Str] sort named by its content, so every body and every
@@ -305,6 +376,7 @@ let reset () =
   confirmed := false;
   Hashtbl.reset syms;
   Hashtbl.reset call_sym;
+  Hashtbl.reset hidden_call_sym;
   Hashtbl.reset site_args;
   Hashtbl.reset instances;
   Hashtbl.reset literal_owner;

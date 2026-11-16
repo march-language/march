@@ -38,6 +38,126 @@ let stdlib_lemma_rows out =
       | _ -> None)
     (lines out)
 
+(* The 2026-11-15 laws pass: List accessors, Option, Result and Math.  A
+   second header with its own needs, lines 1-6, so a test's first function
+   starts at 7.  Each case checks the caller gets the fact with the lemma call
+   and does not without it, so the lemma is what proves it. *)
+let needs2 =
+  {|  fn need3(xs : {List(Int) | len(_) == 3}) : Int do 0 end
+  fn need_eq(a : List(Int), b : {List(Int) | _ == a}) : Int do 0 end
+  fn need_eqi(a : Int, b : {Int | _ == a}) : Int do 0 end
+  fn need_le1(xs : {List(Int) | len(_) <= 1}) : Int do 0 end
+  fn need_some(o : {Option((Int, Int)) | is_Some(_)}) : Int do 0 end
+|}
+
+let prog2 body = "mod U do\n" ^ needs2 ^ body ^ "end\n"
+
+(* [fn_head] at line 7, [setup] lines next, then the optional lemma call, then
+   the need.  Returns the need's line with and without the lemma call. *)
+let with_and_without ?(setup = []) ~fn_head ~lemma ~need ~callee () =
+  let src calls = prog2 (String.concat "\n    " ((fn_head :: calls) @ setup @ [ need ]) ^ "\n  end\n") in
+  let need_line with_lemma = 7 + (if with_lemma then 1 else 0) + List.length setup + 1 in
+  let out = run (src [ lemma ]) in
+  expect out ~line:(need_line true) ~callee "proved";
+  let out = run (src []) in
+  U.not_proved out ~line:(need_line false) ~callee
+
+let laws_pass_tests =
+  [ gated "std_drop_last_snoc: drop_last(append(xs, [x])) == xs" (fun () ->
+        with_and_without ~fn_head:"  fn a(xs : List(Int), x : Int) : Int do"
+          ~setup:[ "let ys = List.append(xs, Cons(x, Nil))" ]
+          ~lemma:"List.drop_last_snoc(xs, x)" ~need:"need_eq(xs, List.drop_last(ys))" ~callee:"need_eq" ());
+    gated "std_len_drop_last: drop_last of a non-empty list is one shorter" (fun () ->
+        with_and_without ~fn_head:"  fn b(xs : {List(Int) | len(_) == 4}) : Int do"
+          ~lemma:"List.len_drop_last(xs)" ~need:"need3(List.drop_last(xs))" ~callee:"need3" ());
+    gated "std_option_zip_is_some: zip of two Somes is Some" (fun () ->
+        with_and_without
+          ~fn_head:"  fn c(oa : {Option(Int) | is_Some(_)}, ob : {Option(Int) | is_Some(_)}) : Int do"
+          ~lemma:"Option.zip_is_some(oa, ob)" ~need:"need_some(Option.zip(oa, ob))" ~callee:"need_some" ());
+    (* The next two hold by unfolding alone at a caller; the lemma states them as
+       laws (forge doc, --law-coverage) and its call must still be accepted. *)
+    gated "std_option_len_to_list: to_list has at most one element" (fun () ->
+        let out =
+          run (prog2 "  fn d(o : Option(Int)) : Int do\n    Option.len_to_list(o)\n    need_le1(Option.to_list(o))\n  end\n")
+        in
+        expect out ~line:9 ~callee:"need_le1" "proved");
+    gated "std_math_clamp_int_idem: clamping twice is clamping once" (fun () ->
+        let out =
+          run
+            (prog2
+               "  fn e(x : Int, lo : Int, hi : {Int | _ >= lo}) : Int do\n    Math.clamp_int_idem(x, lo, hi)\n    need_eqi(Math.clamp_int(x, lo, hi), Math.clamp_int(Math.clamp_int(x, lo, hi), lo, hi))\n  end\n")
+        in
+        expect out ~line:8 ~callee:"Math.clamp_int_idem" "proved";
+        expect out ~line:9 ~callee:"need_eqi" "proved") ]
+
+(* The Math Float contracts and laws (2026-11-15), as a caller sees them.
+   Header lines 1-4, so a test's first function starts at 5. *)
+let float_needs =
+  {|  fn need_nonneg(x : {Float | _ >= 0.0}) : Int do 0 end
+  fn need_unit(x : {Float | _ >= 0.0 && _ <= 1.0}) : Int do 0 end
+  fn need_nan(x : {Float | is_nan(_)}) : Int do 0 end
+|}
+
+let fprog body = "mod U do\n" ^ float_needs ^ body ^ "end\n"
+
+let float_laws_tests =
+  [ gated "std_min_float_contract: min of two non-negatives is non-negative, from the return type" (fun () ->
+        let out =
+          run (fprog "  fn a(x : {Float | _ >= 0.0}, y : {Float | _ >= 0.0}) : Int do need_nonneg(Math.min_float(x, y)) end\n")
+        in
+        expect out ~line:5 ~callee:"need_nonneg" "proved");
+    gated "std_clamp_float_contract: clamping a non-NaN into [0, 1] lands in [0, 1]" (fun () ->
+        let out = run (fprog "  fn b(x : {Float | !is_nan(_)}) : Int do need_unit(Math.clamp_float(x, 0.0, 1.0)) end\n") in
+        expect out ~line:5 ~callee:"need_unit" "proved");
+    gated "std_clamp_float_contract: a possibly-NaN input is not proved in range" (fun () ->
+        let out = run (fprog "  fn c(x : Float) : Int do need_unit(Math.clamp_float(x, 0.0, 1.0)) end\n") in
+        U.not_proved out ~line:5 ~callee:"need_unit");
+    (* Holds by unfolding `abs` (fp.abs) at the caller too; the lemma states
+       it as a law and its call must be accepted. *)
+    gated "std_abs_nonneg: abs of a non-NaN is non-negative" (fun () ->
+        let out =
+          run (fprog "  fn d(x : {Float | !is_nan(_)}) : Int do\n    Math.abs_nonneg(x)\n    need_nonneg(Math.abs(x))\n  end\n")
+        in
+        expect out ~line:7 ~callee:"need_nonneg" "proved");
+    gated "std_sqrt_neg_nan: sqrt of a negative is NaN" (fun () ->
+        let out =
+          run (fprog "  fn e(x : {Float | _ < 0.0}) : Int do\n    Math.sqrt_neg_nan(x)\n    need_nan(Math.sqrt(x))\n  end\n")
+        in
+        expect out ~line:7 ~callee:"need_nan" "proved") ]
+
+(* The 2026-11-16 laws for Tuple, Duration, Queue and Deque, as a caller
+   sees them.  Header lines 1-3, so a test's first function starts at 4. *)
+let wave2_needs =
+  {|  fn need_eqi(a : Int, b : {Int | _ == a}) : Int do 0 end
+  fn need_le(n : Int, xs : {List(Int) | len(_) <= n}) : Int do 0 end
+|}
+
+let w2prog body = "mod U do\n" ^ wave2_needs ^ body ^ "end\n"
+
+let wave2_laws_tests =
+  [ gated "std_queue_size_push_back: a push adds one to the size" (fun () ->
+        let src call =
+          w2prog ("  fn a(q : Queue.Queue(Int)) : Int do\n" ^ call ^ "    need_eqi(Queue.size(q) + 1, Queue.size(Queue.push_back(q, 7)))\n  end\n")
+        in
+        let out = run (src "    Queue.size_push_back(q, 7)\n") in
+        expect out ~line:6 ~callee:"need_eqi" "proved";
+        let out = run (src "") in
+        U.not_proved out ~line:5 ~callee:"need_eqi");
+    gated "std_deque_size_push_front: a push adds one to the size" (fun () ->
+        let out =
+          run
+            (w2prog
+               "  fn b(d : Deque.Deque(Int)) : Int do\n    Deque.size_push_front(d, 1)\n    need_eqi(Deque.size(d) + 1, Deque.size(Deque.push_front(d, 1)))\n  end\n")
+        in
+        expect out ~line:6 ~callee:"need_eqi" "proved");
+    gated "std_duration_to_milliseconds_add: milliseconds add up" (fun () ->
+        let out =
+          run
+            (w2prog
+               "  fn c(a : Duration.Duration, b : Duration.Duration) : Int do\n    Duration.to_milliseconds_add(a, b)\n    need_eqi(Duration.to_milliseconds(a) + Duration.to_milliseconds(b), Duration.to_milliseconds(Duration.add(a, b)))\n  end\n")
+        in
+        expect out ~line:6 ~callee:"need_eqi" "proved") ]
+
 let manifest_path () =
   Filename.concat (Filename.dirname (U.exe ())) "../stdlib/lemmas.verified"
 
@@ -89,7 +209,8 @@ let tests =
         let lemmas =
           [ "append_nil"; "append_assoc"; "len_append"; "reverse_onto_append"; "reverse_append";
             "reverse_reverse"; "len_reverse_onto"; "len_reverse"; "len_take_onto"; "len_take"; "len_drop";
-            "take_onto_drop"; "take_drop" ]
+            "take_onto_drop"; "take_drop"; "is_empty_len"; "head_opt_nth_opt"; "head_opt_append";
+            "reverse_onto_single"; "drop_last_snoc"; "len_drop_last" ]
         in
         List.iter
           (fun l ->

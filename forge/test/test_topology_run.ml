@@ -175,7 +175,15 @@ let test_export_caps_from_compiler () =
 
 (* ── forge deploy's protocol steps against the real compiler (D21) ─────── *)
 
+(* The [needs] lines are what the generated endpoints use: every mode runs the
+   module ceiling (ocap phase 3), so the [--check] below rejects the program
+   without them, as [--compile] always did. *)
 let order_src ~later = Printf.sprintf {|mod App do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.NetConnect
+  needs IO.Process
+  needs IO.Spawn
   @[endpoints]
   protocol Order do
     loop do

@@ -51,5 +51,6 @@ mod Main do
     let a2 = NativeArray.map_int(a1, closure)
     println(NativeArray.to_list_int(a2))   -- [8, 9, 10]
     println(closure(100))   -- 107
+    ()
   end
 end

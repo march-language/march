@@ -1,0 +1,18 @@
+-- EXPECT-VIOLATED: precondition Chan.send
+-- EXPECT-ERROR: refinement violation
+-- KNOWN ACCEPTED (specs/todos/2026-11-11-session-payload-refinement-unchecked.md).
+-- Kind: protocol payload refinement. The protocol's payload type is
+-- `{Int | _ > 0}` and the client sends 0. No obligation is filed at
+-- `Chan.send`, and nothing checks it at run time either.
+mod A03 do
+  cap verified
+  type Client = Client
+  type Server = Server
+  protocol Ping do
+    Client -> Server : {Int | _ > 0}
+  end
+  fn client(c : Chan(Client, Ping)) : Unit do
+    let c2 = Chan.send(c, 0)
+    Chan.close(c2)
+  end
+end

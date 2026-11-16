@@ -1,4 +1,4 @@
-(** Task codegen: the bodies of [Llvm_emit.emit_expr]'s three non-trivial
+(** Task codegen: the bodies of [Llvm_emit.emit_expr]'s four non-trivial
     task/distribution builtin arms.
 
     Phase 2b of specs/plans/2026-08-19-compiler-file-decomposition.md, the
@@ -44,6 +44,11 @@ let emit_task_await_unwrap ~emit_atom ctx (a : Tir.atom) : string * string =
     let r = if inner_ty = "ptr" then begin
       let p = fresh ctx "r" in
       emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" p r_i64);
+      (* The Task keeps its own reference to a heap result (runtime
+         MARCH_TASK_OWNS_RESULT) and releases it when it dies, which may be
+         the march_decrc just below; the caller gets a reference of its own,
+         taken first.  A no-op for a scalar in an erased slot. *)
+      emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" p);
       p
     end else if inner_ty = "i64" then
       emit_untag_scalar ctx ~and_pfx:"cv" ~ashr_pfx:"cv" ~icmp_pfx:"cv" ~sel_pfx:"r" r_i64
@@ -70,11 +75,10 @@ let emit_task_await_unwrap ~emit_atom ctx (a : Tir.atom) : string * string =
        trampoline) and the trampoline drops only its own hold, leaving the
        48-byte Task immortal.  Atomic march_decrc, not the _local variant: the
        trampoline's own drop runs on a scheduler thread and can race this one.
-       The read of task[3] above is complete by now, and the free is shallow,
-       so a ptr payload the caller now owns is unaffected.  (A Float payload's
-       box is still aliased from task[3] and still leaks — that is the
-       remaining half of specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md,
-       which needs a tag-guarded release in the task's free path.) *)
+       The read of task[3] above is complete by now, and a heap payload the
+       caller keeps has its own reference (taken above); if this is the last
+       handle the Task's destructor releases the Task's reference to the
+       result. *)
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" task_ptr);
     (inner_ty, r)
 
@@ -118,12 +122,11 @@ let emit_task_await_unwrap ~emit_atom ctx (a : Tir.atom) : string * string =
      task_await_unwrap's "double" branch, which DOES unbox — correctly, because
      it yields the scalar as its expression value rather than an ADT field. *)
 
-(** Body of the `task_await` arm: delegate to the [march_task_await] C
-    runtime and normalise the Ok payload. *)
-let emit_task_await ~emit_atom ctx (a : Tir.atom) : string * string =
-    let (_, tp) = emit_atom ctx a in
-    let r = fresh ctx "tawait" in
-    emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
+(** Normalise, in place, the Result cell [r] that [march_task_await] or
+    [march_task_poll] built from a Task's result word (see the long comment
+    above): under the Ok tag, untag the payload once.  Leaves the builder in a
+    fresh block after the normalisation. *)
+let normalise_task_result ctx (r : string) : unit =
     (* A cancelled task (a hard drain deadline, or task_cancel) comes back as
        Err("task cancelled"), whose field is a string, not a tagged result:
        normalise the payload only under the Ok tag (i32 at +8). *)
@@ -143,36 +146,23 @@ let emit_task_await ~emit_atom ctx (a : Tir.atom) : string * string =
     let v2 = fresh ctx "tawv" in
     emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" v2 v);
     emit ctx (Printf.sprintf "store i64 %s, ptr %s, align 8" v2 fp);
-    (* A Float payload is a march_float_box smuggled through task[3], and
-       march_task_await's mk_ok stored that SAME pointer into this fresh Ok
-       cell without taking a reference for it.  task[3] keeps aliasing the box
-       for the life of the Task — double-await is legal and hands a second Ok
-       cell the identical pointer — so the Ok cell must own a reference of its
-       own, or whoever releases the field first frees it under the other
-       holder.  That "whoever" is now real: the Ok(v) destructure releases an
-       erased-slot Float box on its unique path (Llvm_case), and without this
-       +1 the second `match task_await(t)` on one Float task read freed memory
-       (measured: r2 printed 0, then SIGTRAP).
-
-       Only the "double" arm takes the +1.  A ptr payload's Ok(v) destructure
-       binds a heap variable and Perceus drops it, which consumes task[3]'s
-       one reference exactly as it does today; adding a +1 there would convert
-       today's balance into a per-await leak, so that arm is left alone.  The
-       residual here is that task[3]'s own reference to the box is still never
-       released — the Task's free is shallow — i.e. the unchanged remainder of
-       specs/todos/2026-08-12-float-boxing-task-trampoline-leak.md, which wants
-       a tag-guarded release in the task free path.  This +1 does not add to
-       that: it is balanced by the destructure's release. *)
-    (match a with
-     | Tir.AVar av when (match av.Tir.v_ty with
-                         | Tir.TCon ("Task", [inner]) -> llvm_ty ctx inner = "double"
-                         | _ -> false) ->
-       let bp = fresh ctx "tawbox" in
-       emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" bp v2);
-       emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" bp)
-     | _ -> ());
+    (* No reference is taken here: the Ok cell already holds its own.  The
+       Task owns its heap result (a Float box, a String, any heap value) and
+       march_task_await / march_task_poll take a reference for every Ok cell
+       they build (task_result_ok in runtime/march_runtime.c), so any number
+       of reads may each release theirs.  This arm used to take the Float
+       box's reference itself, while a ptr payload's one reference went to
+       the first reader and a second await read freed memory. *)
     emit ctx (Printf.sprintf "br label %%%s" lbl_done);
-    emit_label ctx lbl_done;
+    emit_label ctx lbl_done
+
+(** Body of the `task_await` arm: delegate to the [march_task_await] C
+    runtime and normalise the Ok payload. *)
+let emit_task_await ~emit_atom ctx (a : Tir.atom) : string * string =
+    let (_, tp) = emit_atom ctx a in
+    let r = fresh ctx "tawait" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_await(ptr %s)" r tp);
+    normalise_task_result ctx r;
     (* Release the caller's Task handle — same ownership argument as
        task_await_unwrap above (consuming builtin, Perceus dups for every
        earlier use, nothing else ever dropped the handle).  Emitted after the
@@ -180,6 +170,27 @@ let emit_task_await ~emit_atom ctx (a : Tir.atom) : string * string =
        payload the Ok cell now carries is untouched. *)
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" tp);
     ("ptr", r)
+
+(** Body of the `task_poll` arm: [march_task_poll] answers NULL while the
+    task runs (Option's niche None for an Option(Result(..)), so a pending
+    poll allocates nothing) or the same Ok/Err cell [march_task_await] builds,
+    normalised the same way.  Unlike the await arms this does NOT release the
+    Task: task_poll borrows its argument (lib/tir/borrow.ml), since a frame
+    loop polls one handle many times.  The caller re-encodes the answer when
+    the call site decodes Option as boxed. *)
+let emit_task_poll ~emit_atom ctx (a : Tir.atom) : string =
+    let (_, tp) = emit_atom ctx a in
+    let r = fresh ctx "tpoll" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_poll(ptr %s)" r tp);
+    let isnull = fresh ctx "tpollnull" in
+    emit ctx (Printf.sprintf "%s = icmp eq ptr %s, null" isnull r);
+    let lbl_some = fresh_block ctx "tpoll_some" and lbl_done = fresh_block ctx "tpoll_done" in
+    emit ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" isnull lbl_done lbl_some);
+    emit_label ctx lbl_some;
+    normalise_task_result ctx r;
+    emit ctx (Printf.sprintf "br label %%%s" lbl_done);
+    emit_label ctx lbl_done;
+    r
 
 (** Body of the `remote_ref_hashes` arm: constant-fold (sig_hash,
     impl_hash) for a remote function reference. *)

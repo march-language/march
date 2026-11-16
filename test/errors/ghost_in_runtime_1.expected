@@ -1,0 +1,22 @@
+exit: 1
+-- REFINEMENT ----------- errors/ghost_in_runtime_1.march
+
+`limit` is ghost, so the running program cannot use it. [ghost_in_runtime]
+
+3 |     if x > limit do limit else x end
+               ^^^^^
+
+    Ghost values exist only for proofs and are erased before the program runs. Use them in refinements, lemma arguments, ghost arguments, `ghost let` and proof hints.
+    run `march --explain ghost_in_runtime`
+
+
+-- REFINEMENT ----------- errors/ghost_in_runtime_1.march
+
+`limit` is ghost, so the running program cannot use it. [ghost_in_runtime]
+
+3 |     if x > limit do limit else x end
+                        ^^^^^
+
+    Ghost values exist only for proofs and are erased before the program runs. Use them in refinements, lemma arguments, ghost arguments, `ghost let` and proof hints.
+
+

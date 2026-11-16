@@ -1,0 +1,11 @@
+exit: 0
+-- WARNING: REFINEMENT -- errors/predicate_vocabulary_shadowed_1.march
+
+In a refinement predicate `len` means the built-in length measure, not your function `Shadow.len` (line 3): a predicate cannot call a function whose name is predicate vocabulary. Rename your function to use it in a predicate. [predicate_vocabulary_shadowed]
+
+5 |   fn need(_xs : {List(Int) | len(_) == 1}) : Int do 0 end
+                                 ^^^^^^
+
+    run `march --explain predicate_vocabulary_shadowed`
+
+

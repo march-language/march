@@ -765,24 +765,24 @@ mod Session do
   `drained <ep> waiting on role <role>`. A test asserts on the failure paths
   through it.
 
-      let lines = Vault.new("trace")
+      let lines = Authority.must(Vault.new("trace"))
       let t = Session.in_process_with(fn line -> Vault.set(lines, line, 1))
   """
   fn in_process_with(trace : String -> ()) : InProcess do
-    let tag = int_to_string(Vault.incr(Vault.open("session_in_process_ids"), "n", 1))
+    let tag = int_to_string(Vault.incr(Authority.must(Vault.open("session_in_process_ids")), "n", 1))
     let st = {
-      handlers: Vault.new("session_in_process_handlers_" ++ tag),
-      waiting: Vault.new("session_in_process_waiting_" ++ tag),
-      cancel_hs: Vault.new("session_in_process_cancel_" ++ tag),
-      crash_hs: Vault.new("session_in_process_crash_" ++ tag),
-      drain_hs: Vault.new("session_in_process_drain_" ++ tag),
-      boundary: Vault.new("session_in_process_boundary_" ++ tag),
-      draining: Vault.new("session_in_process_draining_" ++ tag),
-      undeliv: Vault.new("session_in_process_undeliv_" ++ tag),
-      gone: Vault.new("session_in_process_gone_" ++ tag),
-      meta: Vault.new("session_in_process_meta_" ++ tag),
-      roles: Vault.new("session_in_process_roles_" ++ tag),
-      queue: Vault.new("session_in_process_queue_" ++ tag),
+      handlers: Authority.must(Vault.new("session_in_process_handlers_" ++ tag)),
+      waiting: Authority.must(Vault.new("session_in_process_waiting_" ++ tag)),
+      cancel_hs: Authority.must(Vault.new("session_in_process_cancel_" ++ tag)),
+      crash_hs: Authority.must(Vault.new("session_in_process_crash_" ++ tag)),
+      drain_hs: Authority.must(Vault.new("session_in_process_drain_" ++ tag)),
+      boundary: Authority.must(Vault.new("session_in_process_boundary_" ++ tag)),
+      draining: Authority.must(Vault.new("session_in_process_draining_" ++ tag)),
+      undeliv: Authority.must(Vault.new("session_in_process_undeliv_" ++ tag)),
+      gone: Authority.must(Vault.new("session_in_process_gone_" ++ tag)),
+      meta: Authority.must(Vault.new("session_in_process_meta_" ++ tag)),
+      roles: Authority.must(Vault.new("session_in_process_roles_" ++ tag)),
+      queue: Authority.must(Vault.new("session_in_process_queue_" ++ tag)),
       trace: trace
     }
     Vault.set(st.roles, "r", Nil)

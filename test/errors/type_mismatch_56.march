@@ -1,0 +1,16 @@
+-- EXPECT-ERROR: expected `Main.CancelToken` but got `CancelToken`
+mod Main do
+  needs IO.Console
+  -- A user type named like a built-in type is its own type: the two print
+  -- alike, so the message names the user's in full
+  -- (specs/progress/2026-11-02-typecheck-conflates-same-short-named-types.md).
+  type CancelToken = Tok(Int)
+  fn id_of(t : CancelToken) : Int do
+    match t do
+      Tok(n) -> n
+    end
+  end
+  fn main(c : Cap(IO.Console)) do
+    print_line(int_to_string(id_of(task_cancel_token_new())))
+  end
+end

@@ -34,7 +34,7 @@ mod Main do
     -- Numeric IPv4: exactly one entry, whatever the socket-type fan-out.
     println(to_string(dns_resolve("127.0.0.1")))
     println(to_string(dns_resolve("10.1.2.3")))
-    println(to_string(Dns.resolve_one("127.0.0.1")))
+    println(to_string(Authority.must(Dns.resolve_one("127.0.0.1"))))
 
     -- Numeric IPv6: no IPv4 address, so no answer (compiled said Ok([::1])).
     let v6 = match dns_resolve("::1") do

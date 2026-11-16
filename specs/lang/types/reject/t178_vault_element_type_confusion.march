@@ -12,7 +12,7 @@ mod M do
   needs IO.Mut
 
   fn main(_m : Cap(IO.Mut)) : Bool do
-    let t = Vault.new("confusion")
+    let t = Authority.must(Vault.new("confusion"))
     Vault.set(t, "k", 42)
     match Vault.get(t, "k") do
       Some(p) -> is_alive(p)

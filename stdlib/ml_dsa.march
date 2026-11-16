@@ -38,14 +38,16 @@ mod MlDsa do
   end
 
   doc """
-  A fresh key pair from 32 random bytes.
+  A fresh key pair from 32 random bytes. `Err(CapError(...))` when drawing
+  random bytes (IO.Random) is refused.
 
-      let kp = MlDsa.keypair()
+      let kp = Authority.must(MlDsa.keypair())
       -- kp.public_key: 1952 bytes, kp.secret_key: 4032 bytes
   """
-  fn keypair() : KeyPair do
-    match keypair_from_seed(Crypto.random_bytes(32)) do
-      Ok(kp) -> kp
+  fn keypair() : Result(KeyPair, CapError) do
+    let? seed = Crypto.random_bytes(32)
+    match keypair_from_seed(seed) do
+      Ok(kp) -> Ok(kp)
       Err(e) -> panic(e)
     end
   end
@@ -62,15 +64,17 @@ mod MlDsa do
 
   doc """
   Sign [msg] with [secret_key] (hedged: 32 fresh random bytes are mixed in, so
-  two signatures of one message differ). Err for a wrong-length key.
+  two signatures of one message differ). Err for a wrong-length key; the
+  outer `Err(CapError(...))` is a refused IO.Random.
 
-      match MlDsa.sign(kp.secret_key, Bytes.from_string("hello")) do
+      match Authority.must(MlDsa.sign(kp.secret_key, Bytes.from_string("hello"))) do
         Ok(s) -> MlDsa.verify(kp.public_key, Bytes.from_string("hello"), s)  -- true
         Err(e) -> ...
       end
   """
-  fn sign(secret_key : Bytes, msg : Bytes) : Result(Bytes, String) do
-    sign_rnd(secret_key, msg, Crypto.random_bytes(32))
+  fn sign(secret_key : Bytes, msg : Bytes) : Result(Result(Bytes, String), CapError) do
+    let? rnd = Crypto.random_bytes(32)
+    Ok(sign_rnd(secret_key, msg, rnd))
   end
 
   doc """

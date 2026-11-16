@@ -32,14 +32,14 @@ mod ClusterFanLateCrashA do
   end
 
   pfn wait_for(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_for(path)
     end
   end
 
   pfn role_a(s : Cap(Session.Live), st : Fan_A.S_send_Msg_A_C_1) : Fan_A.Yield do
-    wait_for(Env.require("FAN_GO_FILE"))
+    wait_for(Authority.must(Env.require("FAN_GO_FILE")))
     println("A: sends 7")
     let st1 = Fan_A.send_Msg_A_C_1(s, st, 7)
     Fan_A.recv_Msg_C_A_1(s, st1, fn (ok, st2) ->
@@ -48,7 +48,7 @@ mod ClusterFanLateCrashA do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "fan-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "fan-secret", 1)
     let h = match ClusterNode.start(c, cfg) do
       Ok(h0) -> h0
       Err(e) -> panic(e)

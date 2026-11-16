@@ -67,7 +67,8 @@ expected `String` but got `Int`. [type_mismatch]              ← the message, a
     part to fill in, such as the missing `match` arm whose body is `todo("handle None")`.
   - `maybe-incorrect` ("possible fix (a guess: check it before applying it)"): one
     plausible repair among several, such as a field name with another field spelled just
-    as close. It is offered and never applied unasked.
+    as close. It is offered and never applied unasked; `forge fix --only <code>` applies
+    one when you name its diagnostic's code.
 
 ---
 
@@ -887,7 +888,7 @@ The linear value `t` is consumed on some branches but not others. [linear_mixed_
 On a branch that doesn't consume it, the value is dropped. Consume it on every branch, or end that branch with `panic(…)` if it never returns.
 
 12 |     let n = match 2 do
-                       ^^^^
+                 ^^^^^^^^^^
 
 
     `t` is consumed on this branch:
@@ -1318,7 +1319,7 @@ This `match` doesn't handle every branch the peer can choose — missing: :err. 
 The protocol's `offer` branches are: :ok, :err.
 
 17 |     match label do
-               ^^^^^^^^
+         ^^^^^^^^^^^^^^
 
     run `march --explain session_offer_nonexhaustive`
 ```

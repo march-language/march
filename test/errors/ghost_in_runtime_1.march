@@ -1,0 +1,5 @@
+mod Main do
+  fn clamp(x : Int, ghost limit : Int) : Int do
+    if x > limit do limit else x end
+  end
+end

@@ -18,12 +18,19 @@ let run ~check ~stdin =
     (try while true do Buffer.add_char buf (input_char Stdlib.stdin) done
      with End_of_file -> ());
     let src = Buffer.contents buf in
-    let formatted =
-      try March_format.Format.format_source ~filename:"<stdin>" src
-      with _ -> src
-    in
-    print_string formatted;
-    Ok ()
+    (* Unparseable input is echoed unchanged.  Output that fails the
+       round-trip check (it does not re-parse to the same program) is a
+       formatter bug: echo the input, so nothing is lost, and fail. *)
+    match March_format.Format.format_source_result ~filename:"<stdin>" src with
+    | exception _ | Error _ -> print_string src; Ok ()
+    | Ok formatted ->
+      match March_format.Format.verify_format ~filename:"<stdin>" ~src formatted with
+      | Ok () -> print_string formatted; Ok ()
+      | Error why ->
+        print_string src;
+        Error (Printf.sprintf
+                 "not formatted: %s. This is a formatter bug; the input is \
+                  printed unchanged." why)
   end else
   match Project.load () with
   | Error msg -> Error msg

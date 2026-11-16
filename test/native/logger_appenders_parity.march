@@ -76,18 +76,18 @@ mod Main do
     -- A capturing appender: the registry must keep its closure (and what
     -- it captured) alive after this binding goes out of scope.
     let prefix = "A"
-    Logger.add_appender(Logger.Appender("a", fn e -> println(show_entry(prefix, e))))
+    Logger.add_appender(Logger.Appender("a", fn e -> Authority.ignore(println(show_entry(prefix, e)))))
     println("after add a: " ++ names())
     Logger.info("hello")
     Logger.log_in("Db", Logger.Error, "boom", [Logger.LogField("code", Logger.i(500)),
                                                Logger.LogField("kind", Logger.LAtom(:timeout))])
 
-    Logger.add_appender(Logger.Appender("b", fn e -> println(show_entry("B", e))))
+    Logger.add_appender(Logger.Appender("b", fn e -> Authority.ignore(println(show_entry("B", e)))))
     println("after add b: " ++ names())
     Logger.warn("to both")
 
     -- Same name replaces (and moves to the front), as the interpreter does.
-    Logger.add_appender(Logger.Appender("a", fn e -> println(show_entry("A2", e))))
+    Logger.add_appender(Logger.Appender("a", fn e -> Authority.ignore(println(show_entry("A2", e)))))
     println("after re-add a: " ++ names())
     Logger.warn("replaced")
 

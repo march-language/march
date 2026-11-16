@@ -54,6 +54,14 @@ mod Config do
   needs IO.Mut
   needs IO.Process
 
+  -- The environment read every function here makes: IO.Process on the
+  -- variable. Read directly, not through Process.env, so the module needs no
+  -- other module loaded (the browser REPL loads stdlib modules on demand).
+  pfn read_env(name : String) : Result(Option(String), CapError) do
+    let? _ = Authority.check("IO.Process", name)
+    Ok(process_env(name))
+  end
+
   -- ── Types ─────────────────────────────────────────────────────────────────
 
   -- A stored configuration value. This closed, tagged sum is what the config
@@ -119,10 +127,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_int_demo")
+      march> let s = Authority.must(Config.new_store("codec_int_demo"))
       march> let k = Config.key(:myapp, :workers, Config.int())
       march> Config.store_put(s, k, 4)
-      march> let s = Config.new_store("codec_int_demo")
+      march> let s = Authority.must(Config.new_store("codec_int_demo"))
       march> let k = Config.key(:myapp, :workers, Config.int())
       march> Config.store_get(s, k)
       Some(4)
@@ -134,10 +142,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_float_demo")
+      march> let s = Authority.must(Config.new_store("codec_float_demo"))
       march> let k = Config.key(:myapp, :ratio, Config.float())
       march> Config.store_put(s, k, 0.5)
-      march> let s = Config.new_store("codec_float_demo")
+      march> let s = Authority.must(Config.new_store("codec_float_demo"))
       march> let k = Config.key(:myapp, :ratio, Config.float())
       march> Config.store_get(s, k)
       Some(0.5)
@@ -149,10 +157,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_string_demo")
+      march> let s = Authority.must(Config.new_store("codec_string_demo"))
       march> let k = Config.key(:myapp, :name, Config.string())
       march> Config.store_put(s, k, "demo")
-      march> let s = Config.new_store("codec_string_demo")
+      march> let s = Authority.must(Config.new_store("codec_string_demo"))
       march> let k = Config.key(:myapp, :name, Config.string())
       march> Config.store_get(s, k)
       Some("demo")
@@ -164,10 +172,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_bool_demo")
+      march> let s = Authority.must(Config.new_store("codec_bool_demo"))
       march> let k = Config.key(:myapp, :debug, Config.bool())
       march> Config.store_put(s, k, true)
-      march> let s = Config.new_store("codec_bool_demo")
+      march> let s = Authority.must(Config.new_store("codec_bool_demo"))
       march> let k = Config.key(:myapp, :debug, Config.bool())
       march> Config.store_get(s, k)
       Some(true)
@@ -179,10 +187,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_atom_demo")
+      march> let s = Authority.must(Config.new_store("codec_atom_demo"))
       march> let k = Config.key(:myapp, :mode, Config.atom())
       march> Config.store_put(s, k, :fast)
-      march> let s = Config.new_store("codec_atom_demo")
+      march> let s = Authority.must(Config.new_store("codec_atom_demo"))
       march> let k = Config.key(:myapp, :mode, Config.atom())
       march> Config.store_get(s, k)
       Some(:fast)
@@ -206,10 +214,10 @@ mod Config do
 
   ## Examples
 
-      march> let s = Config.new_store("codec_list_demo")
+      march> let s = Authority.must(Config.new_store("codec_list_demo"))
       march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
       march> Config.store_put(s, k, [:a, :b])
-      march> let s = Config.new_store("codec_list_demo")
+      march> let s = Authority.must(Config.new_store("codec_list_demo"))
       march> let k = Config.key(:myapp, :tags, Config.list(Config.atom()))
       march> Config.store_get(s, k)
       Some([:a, :b])
@@ -492,24 +500,26 @@ mod Config do
   Load a String value from an environment variable and store it under `key`.
   Uses `default_val` if the env var is not set (a set-but-empty variable
   stores `""`). Always stores, overwriting any previous value; returns the
-  value stored.
+  value stored, or `Err(CapError(...))` (storing nothing) when reading the
+  variable is refused.
 
   ## Examples
 
       march> let secret = Config.key(:myapp, :secret, Config.string())
       march> Config.from_env(secret, "MARCH_DOCTEST_NEVER_SET", "dev-secret")
-      "dev-secret"
+      Ok("dev-secret")
       march> let secret = Config.key(:myapp, :secret, Config.string())
       march> Config.get_with_default(secret, "")
       "dev-secret"
   """
-  fn from_env(k : Key(String), env_var : String, default_val : String) : String do
-    let value = match process_env(env_var) do
-      Some(v) -> v
+  fn from_env(k : Key(String), env_var : String, default_val : String) : Result(String, CapError) do
+    let? v = read_env(env_var)
+    let value = match v do
+      Some(s) -> s
       None    -> default_val
     end
     put(k, value)
-    value
+    Ok(value)
   end
 
   doc """
@@ -520,10 +530,11 @@ mod Config do
   ## Examples
 
       march> Config.from_env_int(Config.key(:myapp, :workers, Config.int()), "MARCH_DOCTEST_NEVER_SET", 4)
-      4
+      Ok(4)
   """
-  fn from_env_int(k : Key(Int), env_var : String, default_val : Int) : Int do
-    let value = match process_env(env_var) do
+  fn from_env_int(k : Key(Int), env_var : String, default_val : Int) : Result(Int, CapError) do
+    let? v = read_env(env_var)
+    let value = match v do
       Some(s) ->
         match string_to_int(s) do
           Some(n) -> n
@@ -532,7 +543,7 @@ mod Config do
       None -> default_val
     end
     put(k, value)
-    value
+    Ok(value)
   end
 
   doc """
@@ -544,15 +555,16 @@ mod Config do
   ## Examples
 
       march> Config.from_env_bool(Config.key(:myapp, :verbose, Config.bool()), "MARCH_DOCTEST_NEVER_SET", true)
-      true
+      Ok(true)
   """
-  fn from_env_bool(k : Key(Bool), env_var : String, default_val : Bool) : Bool do
-    let value = match process_env(env_var) do
+  fn from_env_bool(k : Key(Bool), env_var : String, default_val : Bool) : Result(Bool, CapError) do
+    let? v = read_env(env_var)
+    let value = match v do
       Some(s) -> s == "true" || s == "1" || s == "yes"
       None    -> default_val
     end
     put(k, value)
-    value
+    Ok(value)
   end
 
   -- ── Environment detection ─────────────────────────────────────────────────
@@ -563,43 +575,39 @@ mod Config do
   gives :test, and anything else (including unset) gives :dev.
 
       match Config.env() do
-        :prod -> enable_caching()
-        _     -> ()
+        Ok(:prod) -> enable_caching()
+        _         -> ()
       end
+
+  `Err(CapError(...))` when reading MARCH_ENV is refused; so for the three
+  predicates below.
   """
-  fn env() do
-    match process_env("MARCH_ENV") do
-    Some("prod") -> :prod
-    Some("test") -> :test
-    Some("dev")  -> :dev
-    Some(_)      -> :dev
-    None         -> :dev
+  fn env() : Result(Atom, CapError) do
+    let? v = read_env("MARCH_ENV")
+    match v do
+    Some("prod") -> Ok(:prod)
+    Some("test") -> Ok(:test)
+    Some(_)      -> Ok(:dev)
+    None         -> Ok(:dev)
     end
   end
 
   doc "True unless MARCH_ENV is \"prod\" or \"test\" (so an unset or unrecognised MARCH_ENV counts as :dev)."
-  fn is_dev() do
-    match process_env("MARCH_ENV") do
-    Some("prod") -> false
-    Some("test") -> false
-    _            -> true
-    end
+  fn is_dev() : Result(Bool, CapError) do
+    let? e = env()
+    Ok(e == :dev)
   end
 
   doc "True if MARCH_ENV is exactly \"test\"."
-  fn is_test() do
-    match process_env("MARCH_ENV") do
-    Some("test") -> true
-    _            -> false
-    end
+  fn is_test() : Result(Bool, CapError) do
+    let? e = env()
+    Ok(e == :test)
   end
 
   doc "True if MARCH_ENV is exactly \"prod\"."
-  fn is_prod() do
-    match process_env("MARCH_ENV") do
-    Some("prod") -> true
-    _            -> false
-    end
+  fn is_prod() : Result(Bool, CapError) do
+    let? e = env()
+    Ok(e == :prod)
   end
 
   -- ── Validation ────────────────────────────────────────────────────────────
@@ -730,24 +738,22 @@ mod Config do
   Returns a store handle holding tagged `Value`s; use it with `store_put`,
   `store_get` and `store_fetch` and the same typed keys as the global table.
   Calling it again with the same name returns the same store, contents
-  included.
+  included. `Err(CapError(...))` when opening a table by that name (IO.Mut)
+  is refused.
 
   ## Examples
 
       march> let port = Config.key(:myapp, :port, Config.int())
       march> let k = Config.key(:myapp, :port, Config.int())
-      march> let store = Config.new_store("new_store_demo")
+      march> let store = Authority.must(Config.new_store("new_store_demo"))
       march> Config.store_put(store, k, 1)
       march> let k = Config.key(:myapp, :port, Config.int())
       march> let port = Config.key(:myapp, :port, Config.int())
-      march> Option.unwrap_or(Config.store_get(Config.new_store("new_store_demo"), k), 0)
+      march> Option.unwrap_or(Config.store_get(Authority.must(Config.new_store("new_store_demo")), k), 0)
       1
   """
-  fn new_store(name : String) : Vault(Value) do
-    match vault_whereis(name) do
-      Some(tbl) -> tbl
-      None      -> vault_new(name)
-    end
+  fn new_store(name : String) : Result(Vault(Value), CapError) do
+    Vault.open(name)
   end
 
   doc """
@@ -757,10 +763,10 @@ mod Config do
   ## Examples
 
       march> let k = Config.key(:myapp, :retries, Config.int())
-      march> let store = Config.new_store("store_put_demo")
+      march> let store = Authority.must(Config.new_store("store_put_demo"))
       march> Config.store_put(store, k, 3)
       march> let k = Config.key(:myapp, :retries, Config.int())
-      march> let store = Config.new_store("store_put_demo")
+      march> let store = Authority.must(Config.new_store("store_put_demo"))
       march> Option.unwrap_or(Config.store_get(store, k), 0)
       3
       march> let k = Config.key(:myapp, :retries, Config.int())
@@ -777,7 +783,7 @@ mod Config do
 
   ## Examples
 
-      march> let store = Config.new_store("store_get_demo")
+      march> let store = Authority.must(Config.new_store("store_get_demo"))
       march> Config.store_get(store, Config.key(:myapp, :limit, Config.int()))
       None
   """
@@ -791,7 +797,7 @@ mod Config do
   ## Examples
 
       march> let host = Config.key(:myapp, :host, Config.string())
-      march> let store = Config.new_store("store_fetch_demo")
+      march> let store = Authority.must(Config.new_store("store_fetch_demo"))
       march> Config.store_fetch(store, Config.key(:test, :host, Config.string()))
       Err(KeyMissing(":test/:host"))
   """

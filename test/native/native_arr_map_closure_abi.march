@@ -26,5 +26,6 @@ mod Main do
     let floats = NativeArray.make_float(4, 1.5)
     let floats2 = NativeArray.map_float(floats, fn x -> x *. 2.0)
     println(float_to_string(NativeArray.sum_float(floats2)))   -- 12.
+    ()
   end
 end

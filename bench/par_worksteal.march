@@ -47,6 +47,7 @@ pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   let pool = get_work_pool
   let result = par_fib(pool, 40, 20)
   println(int_to_string(result))
+  ()
 end
 
 end

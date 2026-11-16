@@ -1,0 +1,25 @@
+-- EXPECT-ERROR: expected `A.Foo` but got `B.Foo`
+-- Formerly accept/t35, which pinned the no-per-module-type-namespace design
+-- point: two sibling modules `A` and `B` each declare their own `type Foo`,
+-- and `take_a(_x : A.Foo)` used to accept a `B.Foo` value because both were
+-- the one nominal `TCon("Foo", [])`. Since 2026-11-09 each colliding variant
+-- declaration has its own identity (`A.Foo`, `B.Foo`;
+-- lib/typecheck/typecheck_nominal.ml), so the call is a type mismatch.
+-- See core-march-types.md §2.5. reject/t457 is the unqualified twin.
+mod Main do
+  needs IO.Console
+  mod A do
+    type Foo = MkA(Int)
+    fn make() : Foo do MkA(1) end
+  end
+  mod B do
+    type Foo = MkB(String)
+    fn make() : Foo do MkB("x") end
+  end
+
+  fn take_a(_x : A.Foo) : Int do 7 end
+
+  fn main(_cap_console : Cap(IO.Console)) do
+    println(int_to_string(take_a(B.make())))
+  end
+end

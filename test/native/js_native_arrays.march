@@ -21,5 +21,6 @@ mod JsNativeArrays do
     println(String.join(List.map(Bytes.to_list(b), int_to_string), ","))
     let e = NativeArray.make_i32(0, 1)
     println(int_to_string(NativeArray.length_i32(e)))
+    ()
   end
 end

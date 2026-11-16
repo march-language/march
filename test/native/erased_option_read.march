@@ -25,5 +25,6 @@ mod Main do
     let a0 = live_allocs()
     let _ = times(200, 0)
     println("erased Option read and shown, balanced: " ++ bool_to_string(live_allocs() - a0 == 0))
+    ()
   end
 end

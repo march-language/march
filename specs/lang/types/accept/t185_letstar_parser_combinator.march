@@ -27,8 +27,8 @@ mod Main do
 
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     match Parser.run_all(counted(), "3xxx") do
-      Ok(xs) -> println(int_to_string(List.length(xs)))
-      Err(e) -> println(Parser.render("3xxx", e))
+      Ok(xs) -> Authority.ignore(println(int_to_string(List.length(xs))))
+      Err(e) -> Authority.ignore(println(Parser.render("3xxx", e)))
     end
   end
 end

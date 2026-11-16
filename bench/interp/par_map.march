@@ -95,6 +95,7 @@ pfn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
   let xs = range(1, n)
   let total = par_map_sum(xs, chunk_size)
   println("checksum=" ++ int_to_string(total))
+  ()
 end
 
 end

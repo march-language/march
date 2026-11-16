@@ -100,5 +100,6 @@ mod UnboxedAggregate do
     println(to_string(f(a)))
     let vs = [a, b, mk(0.0, 0.0, 1.0)]
     println(float_to_string(List.fold_left(List.map(vs, fn v -> vx(v)), 0.0, fn (acc, x) -> acc +. x)))
+    ()
   end
 end

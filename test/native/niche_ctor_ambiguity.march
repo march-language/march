@@ -34,5 +34,6 @@ mod Main do
   fn main(_cap_console : Cap(IO.Console)) : () do
     let rows = List.map(List.range(0, 2), fn i -> Inner.mkrow(i))
     println("len=" ++ int_to_string(Inner.consume(rows)))
+    ()
   end
 end

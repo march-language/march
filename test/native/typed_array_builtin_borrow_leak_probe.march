@@ -23,6 +23,7 @@ mod Main do
   pfn flat(label : String, before : Int, r : String) : () do
     let grew = live_allocs() - before
     println(label ++ " = " ++ r ++ ", flat: " ++ bool_to_string(grew < 30))
+    ()
   end
 
   pfn ints(n : Int) : List(Int) do Cons(n, Cons(n + 1, Cons(2, Nil))) end
@@ -120,5 +121,6 @@ mod Main do
     let j = live_allocs()
     flat("slice", j, int_to_string(slice_leg(n, 0)))
     println("string values: " ++ str_values(n, ""))
+    ()
   end
 end

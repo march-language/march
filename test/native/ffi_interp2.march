@@ -75,5 +75,6 @@ mod Test do
     -- raises fdiv
     println(show_res_float(raise_fdiv(10.0, 4.0)))
     println(show_res_float(raise_fdiv(1.0, 0.0)))
+    ()
   end
 end

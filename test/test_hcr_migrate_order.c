@@ -22,7 +22,10 @@
  * while the first drains is accepted and the actor applies both migrations
  * in order; a held proc defers its marker and newer-format messages; a
  * sender that already advanced keeps FIFO through the early advance (D30);
- * migrate_msg converts old-format messages sent after the advance; a
+ * migrate_msg converts old-format messages sent after the advance; a v1
+ * message two message-type changes old is converted through v2's and v3's
+ * migrate_msg in turn, and dropped and counted when a link answers None or
+ * is missing (H6, specs/progress/2026-11-08-hcr-chained-migrate-msg.md); a
  * DROP_NEW actor with a full mailbox at deploy time still runs its
  * pre-deploy messages on the old version (the #564 gap); the hard deadline
  * kills an actor pinned to the drained epoch; the counters report all of it;
@@ -195,7 +198,8 @@ static void wait_pins_zero(uint32_t epoch, long timeout_ms) {
 enum { SLOT_ORDER = 1, SLOT_MANY, SLOT_DRAIN, SLOT_DRAIN_FMT, SLOT_BUSY,
        SLOT_HOLD, SLOT_EARLY, SLOT_CONVERT, SLOT_FULL, SLOT_HARD, SLOT_DEATH,
        SLOT_TASKS, SLOT_ORIGIN, SLOT_CHILD, SLOT_SPAWNER,
-       SLOT_NESTED, SLOT_SPAWNOLD, SLOT_PLAINDEPLOY, SLOT_STOP, SLOT_STOP_CALLBACK, N_SLOTS };
+       SLOT_NESTED, SLOT_SPAWNOLD, SLOT_PLAINDEPLOY, SLOT_STOP, SLOT_STOP_CALLBACK,
+       SLOT_CHAIN, SLOT_CHAIN_GAP, N_SLOTS };
 #define N_MANY 2100   /* > the old 2048-entry snapshot cap */
 
 static void reset(void) {
@@ -525,6 +529,194 @@ static void test_migrate_msg_converts(void) {
     march_decrc(march_hcr_test_send_stamped(sender, MSG_RELEASE, old_e));
 }
 
+/* ── H6 / M7: two message-type changes compose ────────────────────────────
+ * A message sent in the v1 format and dequeued after the actor has moved
+ * past TWO message-type changes (v1 -> v2 -> v3) is converted through each
+ * deploy's migrate_msg, oldest first.  These messages are heap cells (the
+ * immediates above cannot show a leak): [rc][tag 0][format][payload].  Each
+ * link consumes its input; the test keeps one extra reference to every
+ * message it sends and to every link output, and at the end each must be
+ * back to exactly that reference (rc 1): consumed once, never leaked, never
+ * released twice (a second release would hit the RC-underflow abort). */
+#define FMT1 101
+#define FMT2 102
+#define FMT3 103
+#define POISON_LINK1 666   /* payload migrate_msg_12 answers None for */
+#define POISON_LINK2 777   /* payload migrate_msg_23 answers None for */
+#define N_KEPT 32
+static _Atomic long g_link12_calls, g_link23_calls, g_v3_handled, g_v3_fmt_mismatch;
+static _Atomic int64_t g_v3_sum;
+static void *g_kept[N_KEPT];
+static _Atomic int g_nkept;
+
+static int is_fmt(void *m, int64_t fmt) {
+    return (uintptr_t)m >= 4096 && ((uintptr_t)m & 7) == 0 && ((int64_t *)m)[2] == fmt;
+}
+static int64_t *mk_msg(int64_t fmt, int64_t payload) {
+    int64_t *m = (int64_t *)march_alloc(32);
+    m[2] = fmt; m[3] = payload;
+    return m;
+}
+/* Keep one reference of our own to [m], to check its count at the end. */
+static void keep(void *m) {
+    int i = atomic_fetch_add(&g_nkept, 1);
+    if (i < N_KEPT) { march_incrc(m); g_kept[i] = m; }
+}
+static void *link_step(void *msg, void *none, int64_t from, int64_t to,
+                       int64_t poison) {
+    if (!is_fmt(msg, from)) { march_decrc(msg); return none; }
+    int64_t p = ((int64_t *)msg)[3];
+    march_decrc(msg);                       /* the link consumes its input */
+    if (p == poison) return none;
+    int64_t *out = mk_msg(to, p);
+    keep(out);
+    return out;
+}
+static void *migrate_msg_12(void *msg, void *none) {
+    atomic_fetch_add(&g_link12_calls, 1);
+    return link_step(msg, none, FMT1, FMT2, POISON_LINK1);
+}
+static void *migrate_msg_23(void *msg, void *none) {
+    atomic_fetch_add(&g_link23_calls, 1);
+    return link_step(msg, none, FMT2, FMT3, POISON_LINK2);
+}
+static void v3_dispatch(void *actor, void *msg) {
+    if (control_msg(msg)) return;
+    int64_t *s = state_of(actor);
+    if (s[1] != 2) { atomic_fetch_add(&g_v2_mismatch, 1); march_decrc(msg); return; }
+    if (!is_fmt(msg, FMT3)) {
+        atomic_fetch_add(&g_v3_fmt_mismatch, 1);
+        march_decrc(msg);
+        return;
+    }
+    s[3] += ((int64_t *)msg)[3];
+    atomic_fetch_add(&g_v3_sum, ((int64_t *)msg)[3]);
+    march_decrc(msg);                       /* the handler consumes it */
+    atomic_fetch_add(&g_v3_handled, 1);
+}
+
+/* A delivery-failed hook: a C closure, as march_delivery_failed_watch
+ * expects one (16-byte header, apply at +16). */
+typedef struct { int64_t rc; int32_t tag, pad;
+                 void *(*apply)(void *, int64_t, int64_t, void *); } c_hook;
+
+/* The drop reasons the delivery-failed hook hears, by seq (connection 9). */
+#define CHAIN_CONN 9
+#define CHAIN_SEQ0 100
+static char g_chain_reason[8][192];
+static void *chain_hook(void *clo, int64_t conn, int64_t seq, void *reason) {
+    (void)clo;
+    march_string *r = (march_string *)reason;
+    if (conn == CHAIN_CONN && seq >= CHAIN_SEQ0 && seq < CHAIN_SEQ0 + 8 && r) {
+        size_t n = (size_t)r->len < 191 ? (size_t)r->len : 191;
+        memcpy(g_chain_reason[seq - CHAIN_SEQ0], r->data, n);
+        g_chain_reason[seq - CHAIN_SEQ0][n] = 0;
+    }
+    march_decrc(reason);
+    return NULL;
+}
+static c_hook g_chain_hook = { MARCH_RC_IMMORTAL, 0, 0, chain_hook };
+
+static void send_old(void *actor, void *msg, uint32_t epoch, int64_t seq) {
+    keep(msg);
+    march_sched_delivery_origin_set(CHAIN_CONN, seq);
+    march_decrc(march_hcr_test_send_stamped(actor, msg, epoch));
+    march_sched_delivery_origin_clear();
+}
+
+static void test_migrate_msg_chains(void) {
+    printf("-- migrate_msg chains across two message-type changes (H6) --\n");
+    reset();
+    atomic_store(&g_gate_open, 1);
+    atomic_store(&g_link12_calls, 0); atomic_store(&g_link23_calls, 0);
+    atomic_store(&g_v3_handled, 0); atomic_store(&g_v3_fmt_mismatch, 0);
+    atomic_store(&g_v3_sum, 0); atomic_store(&g_nkept, 0);
+    memset(g_chain_reason, 0, sizeof g_chain_reason);
+    march_delivery_failed_watch(&g_chain_hook);
+    march_hcr_counters c0; march_hcr_counters_get(&c0);
+    void *a = new_actor(SLOT_CHAIN);        /* v1 -> v2 -> v3, every link */
+    void *b = new_actor(SLOT_CHAIN_GAP);    /* v1 -> v2 -> v3, v3 has no migrate_msg */
+    uint32_t e0 = march_epoch_current();
+    /* The old sender, as in test_migrate_msg_converts: held at e0. */
+    void *sender = new_actor(SLOT_HOLD);
+    send(sender, MSG_HOLD);
+    sleep_ms(20);
+    int e1 = activate_ex(SLOT_CHAIN, (void *)v2_dispatch, migrate_v1_v2, 1,
+                         migrate_msg_12, 0, 0);
+    int e2 = activate_ex(SLOT_CHAIN, (void *)v3_dispatch, migrate_v2_v2, 1,
+                         migrate_msg_23, 0, 0);
+    int g1 = activate_ex(SLOT_CHAIN_GAP, (void *)v2_dispatch, migrate_v1_v2, 1,
+                         migrate_msg_12, 0, 0);
+    int g2 = activate_ex(SLOT_CHAIN_GAP, (void *)v3_dispatch, migrate_v2_v2, 1,
+                         NULL, 0, 0);
+    CHECK(e1 > (int)e0 && e2 > e1 && g1 > e2 && g2 > g1,
+          "two message-type-changing deploys on each slot");
+    wait_until(&g_migrations, 4, 5000);
+    CHECK(atomic_load(&g_migrations) == 4, "both actors moved to v3 (two state migrations each)");
+    CHECK(march_epoch_pins(e0) >= 1, "the held sender keeps e0 pinned");
+
+    /* 1. v1-format messages, two changes old: converted through both links. */
+    send_old(a, mk_msg(FMT1, 1), e0, CHAIN_SEQ0 + 0);
+    send_old(a, mk_msg(FMT1, 2), e0, CHAIN_SEQ0 + 1);
+    send_old(a, mk_msg(FMT1, 4), e0, CHAIN_SEQ0 + 2);
+    /* 2. The second link answers None: dropped on purpose, counted. */
+    send_old(a, mk_msg(FMT1, POISON_LINK2), e0, CHAIN_SEQ0 + 3);
+    /* 3. The first link answers None: the second never runs. */
+    send_old(a, mk_msg(FMT1, POISON_LINK1), e0, CHAIN_SEQ0 + 4);
+    /* 4. A v2-format message, one change old: the one-link path. */
+    send_old(a, mk_msg(FMT2, 8), (uint32_t)e1, CHAIN_SEQ0 + 5);
+    /* 5. A chain with a missing link (b's v3 has no migrate_msg): dropped,
+     *    counted, and the link that does exist is not run for nothing. */
+    send_old(b, mk_msg(FMT1, 16), e0, CHAIN_SEQ0 + 6);
+
+    long end = now_ms() + 5000;
+    march_hcr_counters c1;
+    do { march_sched_yield(); march_hcr_counters_get(&c1); }
+    while ((atomic_load(&g_v3_handled) < 4 || c1.dropped - c0.dropped < 3)
+           && now_ms() < end);
+    sleep_ms(20);
+    march_hcr_counters_get(&c1);
+    int64_t *s = state_of(a);
+    printf("     converted=%lld dropped=%lld v3 handled=%ld sum=%lld fmt mismatch=%ld "
+           "link12=%ld link23=%ld\n",
+           (long long)(c1.converted - c0.converted), (long long)(c1.dropped - c0.dropped),
+           atomic_load(&g_v3_handled), (long long)atomic_load(&g_v3_sum),
+           atomic_load(&g_v3_fmt_mismatch), atomic_load(&g_link12_calls),
+           atomic_load(&g_link23_calls));
+    for (int i = 0; i < 7; i++)
+        if (g_chain_reason[i][0]) printf("     seq %d: %s\n", CHAIN_SEQ0 + i, g_chain_reason[i]);
+    CHECK(atomic_load(&g_v3_handled) == 4 && s[3] == 1 + 2 + 4 + 8,
+          "the three v1-format messages and the v2-format one ran on v3, converted");
+    CHECK(atomic_load(&g_v3_fmt_mismatch) == 0, "v3 never saw an old-format message");
+    CHECK(c1.converted - c0.converted == 4, "a chained conversion counts once");
+    CHECK(c1.dropped - c0.dropped == 3, "the two None answers and the gap were dropped and counted");
+    CHECK(atomic_load(&g_link12_calls) == 5,
+          "link v1->v2 ran once per v1-format message to the full chain, never for the gap");
+    CHECK(atomic_load(&g_link23_calls) == 5,
+          "link v2->v3 ran for every message link 1 passed on, and the v2-format one");
+    CHECK(strstr(g_chain_reason[3], "migrate_msg returned None (link 2 of 2)") != NULL,
+          "the None from the second link is reported as such");
+    CHECK(strstr(g_chain_reason[4], "migrate_msg returned None (link 1 of 2)") != NULL,
+          "the None from the first link is reported as such");
+    CHECK(strstr(g_chain_reason[6], "no migrate_msg for it (message-type change 2 of 2 has none)") != NULL,
+          "the gap is reported with the change that has no migrate_msg");
+    CHECK(!g_chain_reason[0][0] && !g_chain_reason[1][0] && !g_chain_reason[2][0]
+          && !g_chain_reason[5][0], "converted messages report nothing");
+    int nk = atomic_load(&g_nkept), bad = 0;
+    CHECK(nk <= N_KEPT, "every message and link output was tracked");
+    for (int i = 0; i < nk && i < N_KEPT; i++) {
+        int64_t rc = ((int64_t *)g_kept[i])[0];
+        if (rc != 1) { printf("     kept[%d] fmt=%lld rc=%lld\n", i,
+                              (long long)((int64_t *)g_kept[i])[2], (long long)rc); bad++; }
+        march_decrc(g_kept[i]);
+    }
+    printf("     tracked %d messages (sent + link outputs)\n", nk);
+    CHECK(nk == 7 + 4 + 4 && bad == 0,
+          "every message, original and intermediate, was released exactly once");
+    march_delivery_failed_watch(NULL);
+    march_decrc(march_hcr_test_send_stamped(sender, MSG_RELEASE, e0));
+}
+
 static void test_full_drop_new_mailbox(void) {
     printf("-- DROP_NEW actor whose mailbox is full at deploy time --\n");
     reset();
@@ -660,9 +852,8 @@ static void test_hard_deadline_cancels_tasks(void) {
  * The cluster node stamps (connection, seq) on every remote delivery it
  * routes (march_sched_delivery_origin_set around the route); the actor
  * loop's drop of an old-format message calls the hook the node installed
- * with them.  Here the hook is a C closure counting what it is told. */
-typedef struct { int64_t rc; int32_t tag, pad;
-                 void *(*apply)(void *, int64_t, int64_t, void *); } c_hook;
+ * with them.  Here the hook is a C closure (c_hook, above) counting what it
+ * is told. */
 static _Atomic long g_hook_calls, g_hook_bad;
 static void *origin_hook(void *clo, int64_t conn, int64_t seq, void *reason) {
     (void)clo;
@@ -860,6 +1051,7 @@ static void test_main(void) {
     test_held_proc_defers_marker();
     test_early_advance_keeps_fifo();
     test_migrate_msg_converts();
+    test_migrate_msg_chains();
     test_full_drop_new_mailbox();
     test_hard_deadline_kills();
     test_hard_deadline_cancels_tasks();
@@ -917,7 +1109,8 @@ static void register_slots(void) {
         "DrainFmt_dispatch", "Busy_dispatch", "Hold_dispatch",
         "Early_dispatch", "Convert_dispatch", "Full_dispatch",
         "Hard_dispatch", "Death_dispatch", "Tasks_dispatch", "Origin_dispatch", "Child_dispatch", "Spawner_dispatch",
-        "Nested_dispatch", "SpawnOld_dispatch", "PlainDeploy_dispatch", "Stop_dispatch", "Stop_on_stop" };
+        "Nested_dispatch", "SpawnOld_dispatch", "PlainDeploy_dispatch", "Stop_dispatch", "Stop_on_stop",
+        "Chain_dispatch", "ChainGap_dispatch" };
     march_dispatch_init(N_SLOTS);
     for (uint32_t i = 1; i < N_SLOTS; i++) {
         march_dispatch_register_name(i, names[i]);

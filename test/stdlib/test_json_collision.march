@@ -1,15 +1,13 @@
 -- Two types that share a short name in two modules, where only ONE of them
--- derives Json (specs/todos/2026-10-03-derive-json-same-short-name-two-modules.md).
+-- derives Json (specs/progress/2026-10-03-derive-json-same-short-name-two-modules.md).
 -- Run: dune exec march -- test test/stdlib/test_json_collision.march
 --
--- When BOTH derive Json the program is now a compile error
--- (`json_derive_name_collision`, owner decision 2026-10-11; pinned by
--- specs/lang/types/reject/t318_derive_json_same_short_name.march and
--- test/errors/json_derive_name_collision_1.march): `from_json` picks its codec by the
--- result type's short name and decoded with the wrong one. With only one
--- codec in the program there is nothing to confuse, so this shape must keep
--- working: A's Note round-trips through to_json/from_json while B's Note,
--- which derives nothing, is used alongside it.
+-- Both deriving Json is covered by test/stdlib/test_same_short_name_types.march
+-- (two variant types; accepted since each has its own identity) and
+-- specs/lang/types/reject/t318_derive_json_same_short_name.march (two record
+-- types; still a compile error). This shape must keep working: A's Note
+-- round-trips through to_json/from_json while B's Note, which derives
+-- nothing, is used alongside it.
 
 mod TestJsonCollision do
 

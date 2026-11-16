@@ -6,6 +6,7 @@ mod Main do
 
   fn greet(con : Cap(IO.Console), name : String) : () do
     println("hello " ++ name)
+    ()
   end
 
   fn main(cap : Cap(IO)) do

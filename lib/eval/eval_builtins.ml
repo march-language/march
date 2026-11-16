@@ -24,6 +24,116 @@ let strip_trailing_cr s =
   let n = String.length s in
   if n > 0 && s.[n - 1] = '\r' then String.sub s 0 (n - 1) else s
 
+(* string_to_float / float_from_string (#1178): exactly what C strtod accepts in
+   the "C" locale with the WHOLE string consumed, which is the native runtime's
+   grammar (march_float_syntax_ok in runtime/march_runtime.c states it; the JS
+   runtime matches too, and test/native/string_to_float_grammar.march pins all
+   three backends). Leading C whitespace is skipped, trailing is not; inf,
+   infinity and nan (optionally nan(chars)) are case-insensitive; hex floats are
+   accepted. OCaml's [float_of_string] is not that grammar on its own: it also
+   takes `_` separators ("1_000") and hands nan(...) to the host libc. So the
+   shape is checked here and [float_of_string] only computes a decimal value.
+   Hex goes through [hex_float] below: OCaml's own hex reader rounds twice in
+   the subnormal range (0x4e9e.85bc87c31aaep-1037 came out one ulp high). *)
+
+(* [digits] (hex, no point) times 2^[e], correctly rounded: to nearest, ties to
+   even, with gradual underflow, as strtod rounds it. The first 57+ bits are
+   kept exactly in [m]; any nonzero digit past them only sets [sticky], which
+   is all a rounding decision needs. *)
+let hex_float (digits : string) (e : int) : float =
+  let m = ref 0 and extra = ref 0 and sticky = ref false in
+  String.iter (fun c ->
+      let d = match c with
+        | '0' .. '9' -> Char.code c - Char.code '0'
+        | 'a' .. 'f' -> Char.code c - Char.code 'a' + 10
+        | _ -> Char.code c - Char.code 'A' + 10 in
+      if !m lsr 56 = 0 then m := (!m lsl 4) lor d
+      else begin extra := !extra + 4; if d <> 0 then sticky := true end)
+    digits;
+  if !m = 0 then 0.0
+  else begin
+    let e = e + !extra in
+    let rec bits n acc = if n = 0 then acc else bits (n lsr 1) (acc + 1) in
+    let bl = bits !m 0 in
+    let top = bl + e in                (* m * 2^e lies in [2^(top-1), 2^top) *)
+    if top > 1025 then Float.infinity
+    else if top < -1075 then 0.0
+    else begin
+      let keep = min 53 (top + 1074) in  (* bits a double keeps here *)
+      let shift = bl - keep in
+      if shift <= 0 then Float.ldexp (float_of_int !m) e
+      else begin
+        let q = !m lsr shift in
+        let rem = !m land ((1 lsl shift) - 1) in
+        let half = 1 lsl (shift - 1) in
+        let up = rem > half || (rem = half && (!sticky || q land 1 = 1)) in
+        let q = if up then q + 1 else q in
+        Float.ldexp (float_of_int q) (e + shift)
+      end
+    end
+  end
+
+let march_float_of_string (s : string) : float option =
+  let n = String.length s in
+  let i = ref 0 in
+  while !i < n && (s.[!i] = ' ' || (s.[!i] >= '\t' && s.[!i] <= '\r')) do incr i done;
+  let neg = !i < n && s.[!i] = '-' in
+  if !i < n && (s.[!i] = '+' || s.[!i] = '-') then incr i;
+  let body = String.sub s !i (n - !i) in
+  let len = String.length body in
+  let lower = String.lowercase_ascii body in
+  let is_dec c = c >= '0' && c <= '9' in
+  let is_hex c = is_dec c || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') in
+  let numeric () : float option =
+    (* [digits ("." digits?)? | "." digits] then an optional exponent *)
+    let hex = len >= 2 && body.[0] = '0' && (body.[1] = 'x' || body.[1] = 'X') in
+    let dig = if hex then is_hex else is_dec in
+    let buf = Buffer.create len in       (* the digits, point dropped *)
+    let nfrac = ref 0 in
+    let p = ref (if hex then 2 else 0) in
+    while !p < len && dig body.[!p] do Buffer.add_char buf body.[!p]; incr p done;
+    if !p < len && body.[!p] = '.' then begin
+      incr p;
+      while !p < len && dig body.[!p] do
+        Buffer.add_char buf body.[!p]; incr p; incr nfrac
+      done
+    end;
+    let exp_ok, pexp =
+      if !p < len
+         && (if hex then body.[!p] = 'p' || body.[!p] = 'P'
+             else body.[!p] = 'e' || body.[!p] = 'E') then begin
+        incr p;
+        let eneg = !p < len && body.[!p] = '-' in
+        if !p < len && (body.[!p] = '+' || body.[!p] = '-') then incr p;
+        let ne = ref 0 and v = ref 0 in
+        while !p < len && is_dec body.[!p] do
+          (* saturate: anything this large is already inf or 0 *)
+          if !v < 100_000_000 then
+            v := !v * 10 + (Char.code body.[!p] - Char.code '0');
+          incr p; incr ne
+        done;
+        (!ne > 0, if eneg then - !v else !v)
+      end else (true, 0)
+    in
+    if Buffer.length buf = 0 || not exp_ok || !p <> len then None
+    else if hex then Some (hex_float (Buffer.contents buf) (pexp - 4 * !nfrac))
+    else
+      (* A validated decimal body (no sign, no `_`, no whitespace) is a
+         subset of what [float_of_string] reads; it is strtod underneath. *)
+      float_of_string_opt body
+  in
+  let nan_chars c = is_dec c || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_' in
+  let is_nan () =
+    lower = "nan"
+    || (len >= 5 && String.sub lower 0 4 = "nan(" && body.[len - 1] = ')'
+        && String.for_all nan_chars (String.sub body 4 (len - 5)))
+  in
+  let sign f = if neg then -. f else f in
+  if len = 0 then None
+  else if lower = "inf" || lower = "infinity" then Some (sign Float.infinity)
+  else if is_nan () then Some (sign Float.nan)
+  else Option.map sign (numeric ())
+
 (* __try_call / __try_call_val: run the thunk (a 1-arg lambda whose argument
    is ignored) and reflect any runtime failure as Err.  The failure is handled
    here, so the frames a panic leaves on the March stack for a backtrace are
@@ -47,6 +157,47 @@ let try_call_thunk (thunk : value) : value =
 (* The IPv4 address HTTP servers and tcp_listen bind to: any address until
    http_server_bind_host sets it (mirrors march_http_bind_addr in the C runtime). *)
 let http_bind_addr = ref Unix.inet_addr_any
+
+(* ocap phase 1: the TEST-ONLY refusal hook read by [cap_check_raw] and
+   [cap_launch_text] below. MARCH_TEST_REFUSE is a comma-separated list of
+   capability kinds the launch refuses, matched exactly; read once. The
+   compiled twin is runtime/march_extras.c, the JS one march_runtime.mjs. *)
+let cap_test_refuse_text =
+  lazy (String.trim (Option.value (Sys.getenv_opt "MARCH_TEST_REFUSE") ~default:""))
+let cap_test_refuse_kinds =
+  lazy (String.split_on_char ',' (Lazy.force cap_test_refuse_text)
+        |> List.map String.trim |> List.filter (fun k -> k <> ""))
+
+(* Write streams opened by file_open_write.  The interpreter's file handles
+   are channels passed around as the Int [Obj.magic chan] (file_open), and a
+   channel does not say which way it points, so this table remembers the
+   ones that write: file_seek must use seek_out on them, file_close must
+   flush them (close_out), and the read builtins must not read them.  The
+   table holds the channel itself, so the handle stays reachable until it is
+   closed. *)
+let write_chans : (int, out_channel) Hashtbl.t = Hashtbl.create 8
+
+(* File.Dir (ocap phase 2): lib/eval/eval_beneath_stubs.c, which compiles
+   runtime/march_file_beneath.c's core, so a path beneath a directory is
+   refused and resolved by the same C as in a compiled binary.  Each returns
+   an fd (or 0 / names) or a negative errno. *)
+external beneath_dir_open : string -> int = "march_eval_dir_open"
+external beneath_open : int -> string -> int -> int = "march_eval_beneath_open"
+external beneath_list : int -> string -> int * string array = "march_eval_beneath_list"
+external beneath_errinfo : int -> int * string = "march_eval_beneath_errinfo"
+
+(* The FileError for errno [e] on [rel]: march_file_beneath.c's beneath_err
+   ([listing]: ENOTDIR is IsDirectory, as dir_list reports it; [dir_open]: a
+   plain open of a path, where ELOOP/EXDEV are an IoError, not Escapes). *)
+let beneath_error ?(dir_open = false) ~(listing : bool) (rel : string) (e : int) : value =
+  let (kind, msg) = beneath_errinfo e in
+  match kind with
+  | 0 when not dir_open -> VCon ("Escapes", [VString rel])
+  | 1 -> VCon ("NotFound", [VString rel])
+  | 2 -> VCon ("Permission", [VString rel])
+  | 3 -> VCon ("IsDirectory", [VString rel])
+  | 4 when listing -> VCon ("IsDirectory", [VString rel])
+  | _ -> VCon ("IoError", [VString (Printf.sprintf "%s: %s" rel msg)])
 
 let base_env : env =
   (* δ-rules — core-march.md §4.4. These bindings ARE the primitive operators;
@@ -845,7 +996,7 @@ let base_env : env =
         | [a; b] ->
           (match type_name_of_value a with
            | Some tname ->
-             (match Hashtbl.find_opt impl_tbl ("Eq", tname) with
+             (match find_impl_for "Eq" a tname with
               | Some eq_fn -> !apply_hook eq_fn [a; b]
               | None       -> VBool (a = b))
            | None -> VBool (a = b))
@@ -865,7 +1016,7 @@ let base_env : env =
         | [a; b] ->
           (match type_name_of_value a with
            | Some tname ->
-             (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+             (match find_impl_for "Ord" a tname with
               | Some cmp_fn -> !apply_hook cmp_fn [a; b]
               | None        -> VInt (compare a b))
            | None -> VInt (compare a b))
@@ -887,7 +1038,7 @@ let base_env : env =
         | [v] ->
           (match type_name_of_value v with
            | Some tname ->
-             (match Hashtbl.find_opt impl_tbl ("Hash", tname) with
+             (match find_impl_for "Hash" v tname with
               | Some hash_fn -> !apply_hook hash_fn [v]
               | None         -> VInt (Hashtbl.hash v))
            | None -> VInt (Hashtbl.hash v))
@@ -1098,13 +1249,13 @@ let base_env : env =
         | [VFloat f] -> VFloat (abs_float f)
         | _ -> eval_error "float_abs: expected float"))
   ; ("float_floor", VBuiltin ("float_floor", function
-        | [VFloat f] -> VInt (int_of_float (floor f))
+        | [VFloat f] -> VInt (int_of_float_checked "float_floor" (floor f))
         | _ -> eval_error "float_floor: expected float"))
   ; ("float_ceil", VBuiltin ("float_ceil", function
-        | [VFloat f] -> VInt (int_of_float (ceil f))
+        | [VFloat f] -> VInt (int_of_float_checked "float_ceil" (ceil f))
         | _ -> eval_error "float_ceil: expected float"))
   ; ("float_round", VBuiltin ("float_round", function
-        | [VFloat f] -> VInt (Float.to_int (Float.round f))
+        | [VFloat f] -> VInt (int_of_float_checked "float_round" (Float.round f))
         | _ -> eval_error "float_round: expected float"))
   ; ("float_truncate", VBuiltin ("float_truncate", function
         | [VFloat f] -> VInt (int_of_float_checked "float_truncate" f)
@@ -1132,13 +1283,15 @@ let base_env : env =
         | _ -> eval_error "float_epsilon: no arguments"))
   ; ("float_from_string", VBuiltin ("float_from_string", function
         | [VString s] ->
-          (try VCon ("Some", [VFloat (float_of_string s)])
-           with Failure _ -> VCon ("None", []))
+          (match march_float_of_string s with
+           | Some f -> VCon ("Some", [VFloat f])
+           | None -> VCon ("None", []))
         | _ -> eval_error "float_from_string: expected string"))
   ; ("string_to_float", VBuiltin ("string_to_float", function
         | [VString s] ->
-          (try VCon ("Some", [VFloat (float_of_string s)])
-           with Failure _ -> VCon ("None", []))
+          (match march_float_of_string s with
+           | Some f -> VCon ("Some", [VFloat f])
+           | None -> VCon ("None", []))
         | _ -> eval_error "string_to_float: expected string"))
   ; ("float_to_string", VBuiltin ("float_to_string", function
         | [VFloat f] -> VString (string_of_float f)
@@ -1770,7 +1923,88 @@ let base_env : env =
            VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
       | _ -> eval_error "file_open(path)"))
 
+  ; ("file_open_write", VBuiltin ("file_open_write", function
+      | [VString path; VInt mode] ->
+        (try
+           let flags = Unix.[O_WRONLY; O_CREAT; if mode = 1 then O_APPEND else O_TRUNC] in
+           let fd = Unix.openfile path flags 0o644 in
+           let oc = Unix.out_channel_of_descr fd in
+           let h = (Obj.magic oc : int) in
+           Hashtbl.replace write_chans h oc;
+           VCon ("Ok", [VInt h])
+         with Unix.Unix_error (e, _, _) -> VCon ("Err", [file_error_of_unix path e]))
+      | _ -> eval_error "file_open_write(path, mode)"))
+
+  ; ("file_write_handle", VBuiltin ("file_write_handle", function
+      | [VInt h; VString data] ->
+        (match Hashtbl.find_opt write_chans h with
+         | None -> VCon ("Err", [VCon ("IoError", [VString "write to a closed or read-only file"])])
+         | Some oc ->
+           (try output_string oc data; VCon ("Ok", [VUnit])
+            with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])])))
+      | _ -> eval_error "file_write_handle(fd, data)"))
+
+  ; ("file_seek", VBuiltin ("file_seek", function
+      | [VInt h; VInt off] ->
+        (try
+           match Hashtbl.find_opt write_chans h with
+           | Some oc -> seek_out oc off; VCon ("Ok", [VInt (pos_out oc)])
+           | None ->
+             let ic : in_channel = Obj.magic h in
+             seek_in ic off; VCon ("Ok", [VInt (pos_in ic)])
+         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_seek(fd, offset)"))
+
+  (* dir_open / dir_open_write: the same open (O_DIRECTORY); the two exist so
+     each is charged its own capability.  The Int is the raw fd, which the
+     File.Dir box (kind DIR) closes with tcp_close's bare close. *)
+  ; ("dir_open", VBuiltin ("dir_open", function
+      | [VString path] ->
+        let fd = beneath_dir_open path in
+        if fd < 0 then VCon ("Err", [beneath_error ~dir_open:true ~listing:true path (-fd)])
+        else VCon ("Ok", [VInt fd])
+      | _ -> eval_error "dir_open(path)"))
+
+  ; ("dir_open_write", VBuiltin ("dir_open_write", function
+      | [VString path] ->
+        let fd = beneath_dir_open path in
+        if fd < 0 then VCon ("Err", [beneath_error ~dir_open:true ~listing:true path (-fd)])
+        else VCon ("Ok", [VInt fd])
+      | _ -> eval_error "dir_open_write(path)"))
+
+  (* file_open_at(dirfd, rel, flags): flags 0 read, 1 truncate, 2 append.
+     The stream is a channel, as file_open's / file_open_write's are. *)
+  ; ("file_open_at", VBuiltin ("file_open_at", function
+      | [VInt dirfd; VString rel; VInt flags] when flags >= 0 && flags <= 2 ->
+        let fd = beneath_open dirfd rel flags in
+        if fd < 0 then VCon ("Err", [beneath_error ~listing:false rel (-fd)])
+        else begin
+          let ufd : Unix.file_descr = Obj.magic fd in
+          if flags = 0 then
+            VCon ("Ok", [VInt (Obj.magic (Unix.in_channel_of_descr ufd) : int)])
+          else begin
+            let oc = Unix.out_channel_of_descr ufd in
+            let h = (Obj.magic oc : int) in
+            Hashtbl.replace write_chans h oc;
+            VCon ("Ok", [VInt h])
+          end
+        end
+      | [VInt _; VString _; VInt _] ->
+        VCon ("Err", [VCon ("IoError", [VString "file_open_at: bad flags"])])
+      | _ -> eval_error "file_open_at(dirfd, rel, flags)"))
+
+  ; ("dir_list_at", VBuiltin ("dir_list_at", function
+      | [VInt dirfd; VString rel] ->
+        let (err, names) = beneath_list dirfd rel in
+        if err <> 0 then VCon ("Err", [beneath_error ~listing:true rel err])
+        else
+          VCon ("Ok", [Array.fold_right
+                         (fun e acc -> VCon ("Cons", [VString e; acc]))
+                         names (VCon ("Nil", []))])
+      | _ -> eval_error "dir_list_at(dirfd, rel)"))
+
   ; ("file_read_line", VBuiltin ("file_read_line", function
+      | [VInt ic_int] when Hashtbl.mem write_chans ic_int -> VCon ("None", [])
       | [VInt ic_int] ->
         let ic : in_channel = Obj.magic ic_int in
         (try VCon ("Some", [VString (input_line ic)])
@@ -1778,6 +2012,7 @@ let base_env : env =
       | _ -> eval_error "file_read_line(fd)"))
 
   ; ("file_read_chunk", VBuiltin ("file_read_chunk", function
+      | [VInt ic_int; VInt _] when Hashtbl.mem write_chans ic_int -> VCon ("None", [])
       | [VInt ic_int; VInt size] ->
         let ic : in_channel = Obj.magic ic_int in
         let buf = Bytes.create size in
@@ -1789,6 +2024,11 @@ let base_env : env =
       | _ -> eval_error "file_read_chunk(fd, size)"))
 
   ; ("file_close", VBuiltin ("file_close", function
+      | [VInt h] when Hashtbl.mem write_chans h ->
+        let oc = Hashtbl.find write_chans h in
+        Hashtbl.remove write_chans h;
+        (try close_out oc with _ -> ());
+        VAtom "ok"
       | [VInt ic_int] ->
         let ic : in_channel = Obj.magic ic_int in
         (try close_in ic with _ -> ());
@@ -2638,6 +2878,15 @@ let base_env : env =
         | args when args = [] || args = [VUnit] ->
           VInt (int_of_float (Unix.gettimeofday () *. 1000.0))
         | _ -> eval_error "unix_time_ms: takes no arguments"))
+    (* ---- ocap phase 1 capability check point (runtime/march_extras.c has the
+       compiled twin; the rule must match it exactly) ---- *)
+  ; ("cap_check_raw", VBuiltin ("cap_check_raw", function
+        | [VString kind; VString _target] ->
+          VInt (if List.mem kind (Lazy.force cap_test_refuse_kinds) then 1 else 0)
+        | _ -> eval_error "cap_check_raw: expected (String, String)"))
+  ; ("cap_launch_text", VBuiltin ("cap_launch_text", function
+        | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_test_refuse_text)
+        | _ -> eval_error "cap_launch_text: takes no arguments"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:
@@ -2939,38 +3188,64 @@ let base_env : env =
     (* ---- HTTP serialization builtins ---- *)
   ; ("http_serialize_request", VBuiltin ("http_serialize_request", function
         | [VString meth; VString host; VString path; query_opt; header_list; VString body] ->
-          let buf = Buffer.create 256 in
-          let query_str = match query_opt with
-            | VCon ("Some", [VString q]) -> "?" ^ q
-            | _ -> ""
+          (* Every field is checked before anything is written: a CR, LF,
+             space or other control byte in the method, host, path, query or a
+             header would otherwise smuggle a second, pipelined request.  The
+             C twin is march_http_serialize_request (runtime/march_http.c);
+             the two must accept the same inputs and word the error the same
+             (test_http_serialize_injection_parity). *)
+          let query = match query_opt with
+            | VCon ("Some", [VString q]) -> Some q
+            | _ -> None
           in
-          Buffer.add_string buf meth;
-          Buffer.add_char buf ' ';
-          Buffer.add_string buf path;
-          Buffer.add_string buf query_str;
-          Buffer.add_string buf " HTTP/1.1\r\n";
-          Buffer.add_string buf "Host: ";
-          Buffer.add_string buf host;
-          Buffer.add_string buf "\r\n";
-          let rec add_headers = function
-            | VCon ("Nil", []) -> ()
+          let rec headers acc = function
             | VCon ("Cons", [VCon ("Header", [VString n; VString v]); rest]) ->
-              Buffer.add_string buf n;
-              Buffer.add_string buf ": ";
-              Buffer.add_string buf v;
-              Buffer.add_string buf "\r\n";
-              add_headers rest
-            | _ -> ()
+              headers ((n, v) :: acc) rest
+            | _ -> List.rev acc
           in
-          add_headers header_list;
-          if body <> "" then begin
-            Buffer.add_string buf "Content-Length: ";
-            Buffer.add_string buf (string_of_int (String.length body));
-            Buffer.add_string buf "\r\n"
-          end;
-          Buffer.add_string buf "\r\n";
-          Buffer.add_string buf body;
-          VString (Buffer.contents buf)
+          let headers = headers [] header_list in
+          let check =
+            let ( >>= ) r f = match r with Ok () -> f () | Error _ as e -> e in
+            Http_request_check.check_method meth >>= fun () ->
+            Http_request_check.check_host host >>= fun () ->
+            Http_request_check.check_target "path" path >>= fun () ->
+            (match query with
+             | Some q -> Http_request_check.check_target "query" q
+             | None -> Ok ()) >>= fun () ->
+            List.fold_left (fun acc (n, v) ->
+                acc >>= fun () ->
+                Http_request_check.check_header_name n >>= fun () ->
+                Http_request_check.check_header_value v)
+              (Ok ()) headers
+          in
+          (match check with
+           | Error msg -> VCon ("Err", [VString msg])
+           | Ok () ->
+             let buf = Buffer.create 256 in
+             Buffer.add_string buf meth;
+             Buffer.add_char buf ' ';
+             Buffer.add_string buf path;
+             (match query with
+              | Some q when q <> "" -> Buffer.add_char buf '?'; Buffer.add_string buf q
+              | _ -> ());
+             Buffer.add_string buf " HTTP/1.1\r\n";
+             Buffer.add_string buf "Host: ";
+             Buffer.add_string buf host;
+             Buffer.add_string buf "\r\n";
+             List.iter (fun (n, v) ->
+                 Buffer.add_string buf n;
+                 Buffer.add_string buf ": ";
+                 Buffer.add_string buf v;
+                 Buffer.add_string buf "\r\n")
+               headers;
+             if body <> "" then begin
+               Buffer.add_string buf "Content-Length: ";
+               Buffer.add_string buf (string_of_int (String.length body));
+               Buffer.add_string buf "\r\n"
+             end;
+             Buffer.add_string buf "\r\n";
+             Buffer.add_string buf body;
+             VCon ("Ok", [VString (Buffer.contents buf)]))
         | _ -> eval_error "http_serialize_request(method, host, path, query_opt, headers, body)"))
   ; ("http_parse_response", VBuiltin ("http_parse_response", function
         | [VString raw] ->
@@ -3119,6 +3394,28 @@ let base_env : env =
         http_bind_addr := a;
         VUnit
       | _ -> eval_error "http_server_bind_host(host)"))
+  (* HTTPS is compiled-only: the interpreter's HTTP server (eval_net.ml) has
+     no TLS, and a TLS configuration must never quietly serve plain HTTP.
+     The plain listener is not implemented here either, so it fails the same
+     loud way; the timeouts stay advisory under the interpreter. *)
+  ; ("http_server_tls_configure", VBuiltin ("http_server_tls_configure", function
+      | [VInt _; VString _; VString _; VInt _; VInt _] ->
+        eval_error "HttpServer: HTTPS and plain_listener need a compiled build (march --compile / forge build)"
+      | _ -> eval_error "http_server_tls_configure(kind, a, b, poll_secs, wait_for_cert)"))
+  ; ("http_server_plain_listener", VBuiltin ("http_server_plain_listener", function
+      | [VInt _; _] ->
+        eval_error "HttpServer: HTTPS and plain_listener need a compiled build (march --compile / forge build)"
+      | _ -> eval_error "http_server_plain_listener(port, pipeline)"))
+  ; ("http_server_set_timeouts", VBuiltin ("http_server_set_timeouts", function
+      | [VInt _; VInt _; VInt _] -> VUnit
+      | _ -> eval_error "http_server_set_timeouts(handshake_secs, header_secs, progress_secs)"))
+  ; ("http_server_reload_tls", VBuiltin ("http_server_reload_tls", function
+      | [VInt _; VString _; VString _] ->
+        VCon ("Err", [VString "reload_tls: no TLS server is configured"])
+      | _ -> eval_error "http_server_reload_tls(kind, a, b)"))
+  ; ("http_conn_is_tls", VBuiltin ("http_conn_is_tls", function
+      | [VInt _] -> VBool false
+      | _ -> eval_error "http_conn_is_tls(fd)"))
   ; ("http_server_wait", VBuiltin ("http_server_wait", function
       | [VInt pid] ->
         (try ignore (Unix.waitpid [] pid) with _ -> ());
@@ -3746,6 +4043,7 @@ let base_env : env =
      or Err(msg) on OS error.  Stderr is captured separately. *)
   ; ("process_spawn_sync", VBuiltin ("process_spawn_sync", function
         | [VString cmd; lst] ->
+          live_proc_reap_sweep ();
           let rec args_of_list = function
             | VCon ("Nil", []) -> []
             | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
@@ -3781,6 +4079,7 @@ let base_env : env =
      type lives in the stdlib and not in a builtin's payload. *)
   ; ("process_spawn_lines", VBuiltin ("process_spawn_lines", function
         | [VString cmd; lst] ->
+          live_proc_reap_sweep ();
           let rec args_of_list = function
             | VCon ("Nil", []) -> []
             | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
@@ -3803,6 +4102,7 @@ let base_env : env =
      Returns Ok(LiveProcess(pid, stream_id)) or Err(String). *)
   ; ("process_spawn_async", VBuiltin ("process_spawn_async", function
         | [VString cmd; lst] ->
+          live_proc_reap_sweep ();
           let rec args_of_list = function
             | VCon ("Nil", []) -> []
             | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
@@ -3867,19 +4167,18 @@ let base_env : env =
   (* Wait for the process to finish; close the channel. Returns exit code. *)
   ; ("process_wait_proc", VBuiltin ("process_wait_proc", function
         | [VCon ("LiveProcess", [VInt pid; VInt id])] ->
-          (match Hashtbl.find_opt live_proc_tbl id with
-           | Some (ic, oc, _) ->
-             (try close_in_noerr ic with _ -> ());
-             (try close_out_noerr oc with _ -> ());
-             Hashtbl.remove live_proc_tbl id
-           | None -> ());
-          (try
-            let (_, status) = Unix.waitpid [] pid in
-            match status with
-            | Unix.WEXITED  n -> VInt n
-            | Unix.WSIGNALED n -> VInt (- n)
-            | Unix.WSTOPPED  n -> VInt (- n)
-          with Unix.Unix_error _ -> VInt (-1))
+          ignore (live_proc_close id);
+          let rec wait () =
+            match Unix.waitpid [] pid with
+            | (_, Unix.WEXITED n) -> VInt n
+            | (_, Unix.WSIGNALED n) -> VInt (- n)
+            | (_, Unix.WSTOPPED n) -> VInt (- n)
+            | exception Unix.Unix_error (Unix.EINTR, _, _) -> wait ()
+            (* Already reaped (a racing wait_proc): march_process_wait_proc's
+               MARCH_PROCESS_NO_CHILD. *)
+            | exception Unix.Unix_error _ -> VInt process_no_child
+          in
+          wait ()
         | _ -> eval_error "process_wait_proc: expected LiveProcess"))
 
   (* ---- Logger builtins ----
@@ -5927,3 +6226,55 @@ let base_env : env =
   ]
   (* UDP datagrams: lib/eval/eval_udp.ml mirrors runtime/march_udp.c. *)
   @ Eval_udp.builtins
+
+(* Handle boxes (lib/eval/eval_handle.ml): each kind's release runs the raw
+   closer the stdlib used before boxes existed, looked up in the table above,
+   so the box and the raw builtin can never disagree on how a resource is
+   freed.  Mirrors runtime/march_handle.c's release_kind:
+   - DIR closes its fd as TCP does ([tcp_close] is a bare close);
+   - TLS closes the session, then its socket (the aux word);
+   - PROCESS closes the child's streams, SIGTERMs a child still running
+     and reaps it without blocking ([live_proc_release], as
+     march_process_release_handle), so a dropped Process leaves no zombie;
+   - TCP_BORROWED releases nothing. *)
+let () =
+  let raw_closer name =
+    match List.assoc_opt name base_env with
+    | Some (VBuiltin (_, f)) -> (fun v -> ignore (f [v]))
+    | _ -> failwith ("Eval_builtins: handle releaser needs builtin " ^ name)
+  in
+  let file_close = raw_closer "file_close"
+  and tcp_close = raw_closer "tcp_close"
+  and udp_close = raw_closer "udp_close"
+  and tls_close = raw_closer "tls_close"
+  and tls_ctx_free = raw_closer "tls_ctx_free" in
+  let open Eval_handle in
+  set_releaser kind_file (fun raw _ -> file_close raw);
+  set_releaser kind_dir (fun raw _ -> tcp_close raw);
+  set_releaser kind_tcp (fun raw _ -> tcp_close raw);
+  set_releaser kind_listener (fun raw _ -> tcp_close raw);
+  set_releaser kind_udp (fun raw _ -> udp_close raw);
+  set_releaser kind_tls (fun raw aux -> tls_close raw; tcp_close aux);
+  set_releaser kind_tls_ctx (fun raw _ -> tls_ctx_free raw);
+  set_releaser kind_process (fun raw _ ->
+      match raw with
+      | VInt id -> live_proc_release id
+      | _ -> ())
+
+let base_env : env = base_env @ Eval_handle.builtins
+
+(* The qualified spelling of the four built-in interface methods names the
+   same type-directed dispatcher as the bare one.  Bound HERE, in the builtin
+   tail, so that it is the dispatcher itself and not whatever the program
+   bound `show` to: a derived impl's body calls `Show.show(field)`, which a
+   user's top-level `fn show` must not capture, and `module_registry`'s
+   "Show.show" slot holds only the LAST impl evaluated.
+   specs/progress/2026-11-10-derived-impl-calls-user-fn-named-like-method.md *)
+let qualified_iface_methods : (string * string) list =
+  [ ("Show.show", "show"); ("Eq.eq", "eq"); ("Ord.compare", "compare"); ("Hash.hash", "hash") ]
+
+let base_env : env =
+  base_env
+  @ List.filter_map (fun (q, bare) ->
+        Option.map (fun v -> (q, v)) (List.assoc_opt bare base_env))
+      qualified_iface_methods

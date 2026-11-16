@@ -25,7 +25,7 @@ mod CertRawSendDeniedA do
   end
 
   pfn wait_file(path : String) : () do
-    if File.exists(path) do () else
+    if Authority.must(File.exists(path)) do () else
       sleep_ms(50)
       wait_file(path)
     end
@@ -64,9 +64,9 @@ mod CertRawSendDeniedA do
   end
 
   fn main(c : Cap(IO)) do
-    let pki = Env.require("PKI")
+    let pki = Authority.must(Env.require("PKI"))
     Process.set_env("MARCH_NODE_NAME", me())
-    Process.set_env("MARCH_NODE_PORT", int_to_string(Env.require_int("MARCH_PORT_A")))
+    Process.set_env("MARCH_NODE_PORT", int_to_string(Authority.must(Env.require_int("MARCH_PORT_A"))))
     Process.set_env("MARCH_NODE_CERT", pki ++ "/" ++ me() ++ ".cert")
     Process.set_env("MARCH_NODE_KEY", pki ++ "/" ++ me() ++ ".key")
     Process.set_env("MARCH_CLUSTER_OPERATOR_PUBKEY", pki ++ "/operator.pub")
@@ -77,10 +77,10 @@ mod CertRawSendDeniedA do
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
-        let got = Vault.new("raw_denied_got")
+        let got = Authority.must(Vault.new("raw_denied_got"))
         let _ = ClusterNode.on_security_event(h, fn ev ->
           match ev do
-            ClusterNode.RawSendRefused(_, what) -> println(me() ++ ": refused " ++ what)
+            ClusterNode.RawSendRefused(_, what) -> Authority.ignore(println(me() ++ ": refused " ++ what))
             _ -> ()
           end)
         let raw = spawn(Sink)
@@ -97,7 +97,7 @@ mod CertRawSendDeniedA do
           println(me() ++ ": session route got " ++ d.type_tag)
           Ok(())
         end)
-        let _ = File.write(Env.require("PIDS_FILE"),
+        let _ = File.write(Authority.must(Env.require("PIDS_FILE")),
                            int_to_string(pid_to_int(raw)) ++ " " ++ int_to_string(pid_to_int(sess)) ++ " "
                            ++ int_to_string(ClusterNode.creation(h)))
         let _ = ClusterNode.register(h, "raw.a", raw)
@@ -116,7 +116,7 @@ mod CertRawSendDeniedA do
         end
         let _ = wait_registrant(h, "raw.a", 60000)
         println(me() ++ ": raw.a (its own) lookup " ++ shown(h, "raw.a"))
-        wait_file(Env.require("CLUSTER_STOP_FILE"))
+        wait_file(Authority.must(Env.require("CLUSTER_STOP_FILE")))
         println(me() ++ ": raw deliveries: " ++ int_to_string(List.length(Vault.keys(got))))
         println(me() ++ ": raw sends refused: " ++ int_to_string(ClusterNode.raw_refused(h)))
         ClusterNode.stop(h)

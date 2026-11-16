@@ -85,6 +85,12 @@ key path; `Json.get_at(jv, i)` indexes into an array. Both return
 
 <!-- scroll:skip -->
 ```march
+let jv =
+  match Json.parse("{\"main\": {\"temp\": 21.5}}") do
+    Ok(v)  -> v
+    Err(e) -> panic(e)
+  end
+
 match Json.get_in(jv, ["main", "temp"]) do
   Some(JsonValue.Number(t)) -> Ok(t)
   _                         -> Err("no main.temp")

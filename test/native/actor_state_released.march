@@ -109,6 +109,7 @@ mod Main do
     let a0 = live_allocs()
     let _ = times(50, f, 0)
     println(name ++ " released: " ++ bool_to_string(settle(a0, 250) < 5))
+    ()
   end
 
   fn main(_io : Cap(IO)) : () do
@@ -117,5 +118,6 @@ mod Main do
     probe("stopped, on_stop ran", fn i -> stopped(i))
     let _ = times(20, fn i -> messy(i), 0)
     println("stopped with a panicking on_stop, still running: true")
+    ()
   end
 end

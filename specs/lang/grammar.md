@@ -398,6 +398,42 @@ All four `NL`s vanish, `DO` pushes a plain `Block` context
 this paren depth), and every `NL` while `Block` is on top is swallowed by
 the `else next lexbuf` branch (`token_filter.ml:392–393`).
 
+**The one thing a swallowed `NL` still decides: a line-initial `(` becomes
+`LPAREN_STMT`.** Deleting the newline would make `let _ = a`⏎`()` and
+`let _ = a()` token-identical, and the call rule (`expr_field LPAREN …
+RPAREN`) would glue the `(` line onto the previous expression. So the
+filter's emit step remembers whether an `NL` passed since the previous
+significant token, and when it is about to emit an `LPAREN` that follows a
+newline AND a token that can end an expression (`ends_expression` in
+`token_filter.ml`), it emits `LPAREN_STMT` instead. The expression-ending
+tokens are: `LOWER_IDENT`, `UPPER_IDENT`, `RPAREN`, `RBRACKET`; the literals
+`INT`, `FLOAT`, `STRING`, `BOOL`, `ATOM`; and `RBRACE` (record literal or
+update), `END` (a `do … end` block, `if`, `match`, …) and `INTERP_END`
+(an interpolated string). `LPAREN_STMT` is accepted only by `expr_atom`'s
+group/tuple/unit alternatives and `simple_pattern`'s parenthesised/tuple
+alternatives (a match arm may open a fresh line with a tuple pattern),
+never by the call rule, so the `(` line always starts a new statement or arm:
+
+```
+source:
+  let r = { x: 1 }
+  (r.x + 1)
+
+after filter:   LET LOWER_IDENT("r") EQUALS LBRACE … RBRACE
+                LPAREN_STMT LOWER_IDENT("r") DOT LOWER_IDENT("x") PLUS INT(1) RPAREN
+```
+
+After the tokens that can never be followed by a call (`END` of an `if`,
+`match` or local `fn`; a type's `}`), the retag changes nothing: a `(` there
+already had to start a new statement. The rule landed in three steps: #129
+(identifiers, `)`, `]`; witness
+[`parse/p33`](grammar/parse/p33_paren_stmt_after_bare_ident.march)), #132
+(literals; [`parse/p34`](grammar/parse/p34_paren_stmt_after_literal.march))
+and #1179 (`}`, `end`, interpolated strings;
+[`parse/p46`](grammar/parse/p46_paren_stmt_after_brace_end_interp.march)).
+Only `(` is special: a line starting with `-` or an infix operator still
+continues the previous expression.
+
 **Inside a `Match` context, it's the opposite default (`NL` is kept by
 default) but with three suppression rules layered on top**, because a
 `match` body's arms can themselves contain multi-expression bodies that
@@ -606,7 +642,7 @@ which has no row here because it never parses at all).
 | 1 (tightest) | `expr_atom` | literals, identifiers, constructors, `(…)`, tuples, records, lists, list comprehensions, `if`/`match`/`cond`/`with` (via `expr`, see note below), lambdas, `do…end` | n/a | atomic, never itself recurses through a lower stratum except via explicit `(…)` |
 | 2 | `expr_field` | `.` (field/module access, plus the contextual field names `send`/`choose`/`offer`) | left | `expr_field DOT lower_name/upper_name/SEND/CHOOSE/OFFER` |
 | 3 | `expr_app` | function application `f(a, b, …)`, constructor application `Con(a, b, …)` | n/a (application is not itself a binary operator; chained direct calls like `f(1)(2)` do **not** parse at all, see §4.7) | `expr_field LPAREN … RPAREN`; falls through to `expr_field %prec prec_app` otherwise |
-| 4 | `expr_unary` | unary `-` (`negate`), `!` (`not`) | right (prefix; self-recursive on the right) | `MINUS expr_unary` / `BANG expr_unary` |
+| 4 | `expr_unary` | unary `-` (`negate`), `!` (`not`); the word `not` directly followed by an operand on the same line (`not p(n)`, `not x`, `not true`) is the token filter's `BANG` too, while `not(…)`, `not` before `,`/`)` and `not` at a line end stay the name `not` (p47) | right (prefix; self-recursive on the right) | `MINUS expr_unary` / `BANG expr_unary` |
 | 5 | `expr_mul` | `* / % *. /.`  | left | `expr_mul OP expr_unary` |
 | 6 | `expr_add` | `+ - ++ +. -.` | left | `expr_add OP expr_mul` |
 | 7 | `expr_cmp` | `== != < > <= >=` | **non-assoc** (chained comparisons do not parse, §4.4 below) | `expr_add OP expr_add`, both operands one stratum down |
@@ -690,8 +726,8 @@ expr_and ::= expr_and "&&" expr_cmp
 
 (`parser.mly:1127–1133`.) Both left-recursive/left-associative, both
 desugared immediately into ordinary calls (`EApp (EVar "||"/"&&", …)`,
-**not** special AST nodes), so short-circuit evaluation, if any, is a
-property of how `eval`/codegen treat the `||`/`&&` builtins, not of the
+**not** special AST nodes), so their short-circuit evaluation
+(core-march.md §4.4.1) is applied by `eval` and TIR lowering, not by the
 parse tree shape. `&&` binds tighter than `||` (it sits one level below in
 the stratification, mirroring the conventional arithmetic-like precedence
 of the two connectives), and both bind looser than comparisons: confirmed
@@ -2128,11 +2164,15 @@ source wins, but no construct below is left as a shape-only sketch.
 actor_decl ::= "actor" upper_name "do"
                  "state" "{" field ("," field)* "}"
                  "init" expr
+                 actor_clause*
                  supervise_block?
                  actor_handler*
                "end"
 
-actor_handler ::= "on" upper_name "(" param,* ")" "do" block_body "end"
+actor_clause ::= "mailbox" INT lower_name               (* at most once *)
+               | "migrate" soft_lower_name "->" expr    (* at most once *)
+
+actor_handler ::= "on" upper_name "(" param,* ")" ("ensures" expr)? "do" block_body "end"
 ```
 
 (`actor_decl` at `parser.mly:490–505`; `actor_handler` at
@@ -2153,7 +2193,15 @@ end` message handlers, each pattern-matching on one message constructor
 via `param,*`'s reuse of `soft_lower_name` for parameter names, so a
 handler parameter may legally be named `state`, `on`, `loop`, etc. (the
 same soft-keyword set patterns/`let`-bindings elsewhere in the grammar
-already draw from). `actor_decl` also has its own missing-`do` error
+already draw from). Between `init` and the
+`supervise` block come the `actor_clause`s (p48): a `mailbox N policy` bound
+and a `migrate old -> { … }` clause (the non-mechanical part of a hot deploy's
+state migration, see the Hot Code Reload guide), in either order, each at most
+once (a second is `An actor can declare only one ... clause`). `mailbox` and
+`migrate` are contextual words, not keywords, so both rules start with
+`lower_name` and share one `list(actor_clause)`: two `option(...)`s in a row
+would be an LR(1) conflict on that word, and the token after it (`INT` or a
+name) tells them apart. `actor_decl` also has its own missing-`do` error
 alternative (`parser.mly:491–495`): `` I was expecting `do` after the
 actor name here: ``.
 
@@ -2557,3 +2605,26 @@ of claim through 2026-07-23; both became reachable 2026-07-24 and are no
 longer in this category, see §6.3.) The `f(1)(2)` entry in
 `specs/todos/`'s "Grammar / lint contradictions (2026-07-03)" section is
 now closed (moved to Done, 2026-07-06), see §7.3 for the fix.
+
+
+## Bounded predicate syntax
+
+The expression entry points `expr` and `expr_no_bare_lambda` accept the
+following additional form; type checking restricts it to logical predicate
+positions, including proof assertions:
+
+```ebnf
+bounded_pred   ::= quantifier_kind LOWER_IDENT "in" bounded_domain "," expr
+quantifier_kind ::= "forall" | "exists"
+bounded_domain ::= expr_add ".." expr_add | expr_add
+```
+
+The single-expression domain must be `elts(e)` or `keys(e)` with one argument.
+`forall` and `exists` are promoted to binder tokens when followed by a lower
+identifier; ordinary identifier calls retain their usual spelling. `..` is a
+lexer token distinct from `.`. Arithmetic range endpoints use `expr_add`,
+and the comma introduces the full predicate body. Parentheses delimit a
+quantified predicate used as an operand. An unbounded binder is rejected with
+a diagnostic directing the author to bounded forms. The binder is scoped only
+over its body, not the domain. See [Bounded quantifiers]({{ site.baseurl }}/docs/refinement-types/#bounded-quantifiers)
+for semantics and current solver limits.

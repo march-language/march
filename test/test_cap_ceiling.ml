@@ -202,8 +202,8 @@ mod CeilDirect do
   needs IO.Console
   fn main() : () do
     match file_write("/tmp/x", "d") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -223,8 +223,8 @@ mod CeilStdlib do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/x", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -253,8 +253,8 @@ mod CeilSpanned do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/x", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -300,8 +300,8 @@ mod CeilValue do
     end
     fn go() : () do
       match apply1(file_read, "/etc/hosts") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -333,6 +333,7 @@ mod CeilApp do
   end
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
     println(Dep.greet("world"))
+    ()
   end
 end
 |}
@@ -347,8 +348,8 @@ mod CeilOkay do
   needs IO.FileWrite
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     match File.write("/tmp/x", "d") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -362,8 +363,8 @@ mod CeilParent do
   needs IO.FileSystem
   fn main(_cap_console : Cap(IO.Console), _cap_filesystem : Cap(IO.FileSystem)) : () do
     match File.write("/tmp/x", "d") do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -396,6 +397,7 @@ mod CeilDeepOkay do
   end
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
     if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
+    ()
   end
 end
 |}
@@ -421,6 +423,7 @@ mod CeilDeepBad do
   end
   fn main() : () do
     if Innocent.DeeplyNested.write_it("d") do println("ok") else println("no") end
+    ()
   end
 end
 |}
@@ -467,11 +470,13 @@ mod NqNarrow do
 end
 |}
 
-(* ...and the fix must not have loosened anything: a program whose [main] is
-   NOT granted `IO.NetConnect` is still rejected for reaching it through
-   NodeQueue's socket writes, and the reason is the program's grant, not a
-   stdlib module's missing `needs`. *)
-let test_nodequeue_without_netconnect_grant_is_rejected () =
+(* ...and without an `IO.NetConnect` grant. This was rejected for reaching
+   `IO.NetConnect` through NodeQueue's socket writes until ocap phase 2 Task
+   10 made writing to an already-open connection a handle use, which charges
+   nothing: `start_local` opens no connection, so the program now compiles.
+   Whatever the verdict, it must never blame stdlib `Socket` (the 2026-09-30
+   bug this test was written for). *)
+let test_nodequeue_without_netconnect_grant_compiles () =
   let src = {|
 mod NqNoNet do
   needs IO.Console
@@ -483,8 +488,7 @@ mod NqNoNet do
   end
 end
 |} in
-  rejects_at_typecheck "NodeQueue.start_local without an IO.NetConnect grant"
-    ~expect:"the program reaches `IO.NetConnect`" src;
+  accepts "NodeQueue.start_local without an IO.NetConnect grant (socket writes are uses)" src;
   let _, out = compile_strict src in
   match Str.search_forward (Str.regexp_string "module `Socket`") out 0 with
   | _ -> Alcotest.failf "the rejection blamed stdlib Socket:\n%s" out
@@ -519,6 +523,7 @@ let test_console_use_without_needs_is_still_caught () =
 mod CeilConsoleUndeclared do
   fn main() : () do
     println("hi")
+    ()
   end
 end
 |}
@@ -577,8 +582,8 @@ mod CeilNoMainUses do
   needs IO.Console
   fn save(p : String, d : String) : () do
     match File.write(p, d) do
-      Ok(_)  -> println("ok")
-      Err(_) -> println("e")
+      Ok(_)  -> Authority.ignore(println("ok"))
+      Err(_) -> Authority.ignore(println("e"))
     end
   end
 end
@@ -659,8 +664,8 @@ mod CeilOptOut do
     needs IO.Console
     fn go() : () do
       match File.write("/tmp/cap_ceiling_optout", "d") do
-        Ok(_)  -> println("ok")
-        Err(_) -> println("e")
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
       end
     end
   end
@@ -911,9 +916,36 @@ end
    | exception Not_found ->
      Alcotest.failf "not reported as a ceiling violation:\n%s" out)
 
+(* A user module named like a stdlib module (`Yaml`) is user code: its own
+   undeclared FileWrite is charged to IT, not seen through and credited to the
+   caller (which here declares FileWrite and so would cover it).  Transparency
+   is decided by where the declaration comes from, never by its name. *)
+let test_user_module_named_like_stdlib_is_not_transparent () =
+  rejects_naming "user module named Yaml" ~expect:"Yaml"
+    {|
+mod YamlApp do
+  needs IO.Console
+  needs IO.FileWrite
+  mod Yaml do
+    needs IO.Console
+    fn go() : () do
+      match File.write("/tmp/cap_ceiling_yaml", "d") do
+        Ok(_)  -> Authority.ignore(println("ok"))
+        Err(_) -> Authority.ignore(println("e"))
+      end
+    end
+  end
+  fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+    Yaml.go()
+  end
+end
+|}
+
 let tests =
   unit_tests
   @ [
+      Alcotest.test_case "user module named like a stdlib module is not transparent" `Slow
+        test_user_module_named_like_stdlib_is_not_transparent;
       Alcotest.test_case
         "MARCH_LIB_PATH dependency with no needs does not crash" `Slow
         test_lib_path_dependency_with_no_needs_does_not_crash;
@@ -963,6 +995,6 @@ let tests =
         test_user_nodequeue_start_local_compiles;
       Alcotest.test_case "user NodeQueue.start_local, narrow grant" `Slow
         test_user_nodequeue_start_local_narrow_grant_compiles;
-      Alcotest.test_case "NodeQueue without IO.NetConnect grant rejected" `Slow
-        test_nodequeue_without_netconnect_grant_is_rejected;
+      Alcotest.test_case "NodeQueue without IO.NetConnect grant: socket writes are uses" `Slow
+        test_nodequeue_without_netconnect_grant_compiles;
     ]

@@ -786,3 +786,96 @@ end
           guard: (comparison_expression
             left: (identifier)
             right: (integer)))))))
+
+================================================================================
+@[deprecated("...")] carries a string payload
+================================================================================
+
+mod Temperature do
+  doc "Converts Celsius to Fahrenheit."
+  @[deprecated("use `Temperature.to_fahrenheit` instead")]
+  fn c_to_f(c : Int) : Int do
+    c
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (doc_annotation
+      content: (string)
+      (attribute
+        (identifier)
+        (string))
+      decl: (function_def
+        name: (identifier)
+        (fn_param
+          (named_param
+            name: (identifier)
+            type: (type_constructor
+              (type_constructor))))
+        return_type: (type_constructor
+          (type_constructor))
+        body: (block_body
+          (identifier))))))
+
+================================================================================
+Actor migrate clause
+================================================================================
+
+mod M do
+  actor Counter do
+    state { total : Int }
+    init { total: 0 }
+    migrate old -> { total: old.count }
+    mailbox 100 drop_old
+    on Inc() do
+      { state with total: state.total + 1 }
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (actor_def
+      name: (type_identifier)
+      (actor_state
+        (record_type_field
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      (actor_init
+        (record_expression
+          (record_field
+            name: (identifier)
+            value: (integer))))
+      (migrate_clause
+        old: (identifier)
+        body: (record_expression
+          (record_field
+            name: (identifier)
+            value: (field_expression
+              object: (identifier)
+              field: (identifier)))))
+      (mailbox_clause
+        (integer)
+        (identifier))
+      (actor_handler
+        name: (type_identifier)
+        (block_body
+          (record_update
+            base: (identifier)
+            (record_field
+              name: (identifier)
+              value: (additive_expression
+                left: (field_expression
+                  object: (identifier)
+                  field: (identifier))
+                right: (integer)))))))))

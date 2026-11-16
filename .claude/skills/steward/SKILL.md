@@ -40,6 +40,12 @@ green.**
   failures (native goldens, snapshots) show up as `File "…expected", line 1`
   followed by a `git diff` of expected vs actual: **`grep -n 'File "' job.log`**
   finds them. Alcotest failures: `grep -n '\[FAIL\]' job.log`.
+- A failed `test`, `two-node` or `sanitize-gate` job uploads an
+  `evidence-<job>-<shard>` artifact, kept 7 days: the step's full log, Linux
+  cores with backtraces and the crashing binaries, macOS crash reports, the work
+  directories of failed two-node scenarios (`scripts/ci-evidence.sh`). For a
+  flake, download it before the re-run (`gh run download <run-id> -n <name>`) and
+  attach what matters to the todo: a sighting without its evidence is lost.
 - A CONFLICTING PR gets no CI run at all; resolve the conflict first.
 - Wait for CI by run id, not the PR's status rollup (it can show one entry while
   others are still queued).
@@ -64,6 +70,30 @@ green.**
 - **A new `test/native` fixture** needs the refine audit baseline regenerated in
   the same commit.
 - Stage files by name: never `git add -A`, `git add .` or `git commit -a`.
+
+## Cutting a release
+
+`scripts/bump-version.sh X.Y.Z` builds, tests, finalizes the CHANGELOG, commits
+`release: X.Y.Z` and tags it locally. It does not push. Then:
+
+1. `git push origin main`, and wait for **CI** and **Doc lint** to finish on the
+   release commit itself. Hold other merges until they do: a merge that lands
+   while the release commit's CI run is still queued cancels it (pushes to
+   `main` share one concurrency group).
+2. `scripts/release-gate.sh <release commit sha>`. It exits 0 only if the commit
+   is on `main` and `ci.yml` and `doc-lint.yml` each have a successful run of
+   that exact commit. On a red commit it says so: fix `main` and cut again. On a
+   commit with no verdict it prints the commands that run CI on it
+   (`gh workflow run ci.yml --ref ...`); run them, wait, check again.
+3. `git push origin vX.Y.Z` only after the gate is green. `release.yml`'s `gate`
+   job runs the same script on the tag's commit and `build` needs it, so a tag
+   pushed early fails there and publishes nothing; get the commit green, then
+   re-run the failed `gate` job (`gh run rerun <run-id> --failed`).
+
+Never delete and re-push a tag to get past the gate, and never tag a different
+commit than the one `bump-version.sh` committed (`check-version-tag.sh` compares
+the tag with the version compiled in). `gh workflow run release.yml -f tag=vX.Y.Z`
+rebuilds the archives of a release that already shipped and skips the gate.
 
 ## Attribution footers
 

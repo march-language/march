@@ -34,6 +34,30 @@ type env = Lower_state.env = {
 
 let ty_of_span = Lower_state.ty_of_span
 let ty_of_expr = Lower_state.ty_of_expr
+
+(** [e] can be evaluated ahead of time without any observable difference:
+    it cannot fail, loop or have an effect.  Used to keep `a && e` /
+    `a || e` as the strict builtin (one `and`/`or`) instead of a branch.
+    Comparisons and `+ - *` count only on Int/Float/Bool operands, whose
+    builtins are total (Int arithmetic wraps); on any other type `==` may
+    run a user `Eq` impl.  `/` and `%` can trap, so they count only with a
+    non-zero integer-literal divisor; no call ever counts. *)
+let rec eager_safe env (e : Ast.expr) : bool =
+  let scalar x = match ty_of_expr env x with
+    | Tir.TInt | Tir.TFloat | Tir.TBool -> true
+    | _ -> false in
+  match e with
+  | Ast.EVar _ | Ast.ELit _ -> true
+  | Ast.EApp (Ast.EVar { txt = ("<" | "<=" | ">" | ">=" | "==" | "!="
+                               | "+" | "-" | "*" | "&&" | "||"); _ }, [x; y], _) ->
+    scalar x && scalar y && eager_safe env x && eager_safe env y
+  | Ast.EApp (Ast.EVar { txt = ("/" | "%"); _ }, [x; Ast.ELit (Ast.LitInt k, _)], _)
+    when k <> 0 ->
+    scalar x && eager_safe env x
+  | Ast.EApp (Ast.EVar { txt = ("not" | "!" | "negate"); _ }, [x], _) ->
+    scalar x && eager_safe env x
+  | _ -> false
+
 let unknown_ty = Lower_types.unknown_ty
 let lower_ty = Lower_types.lower_ty
 let lower_linearity = Lower_types.lower_linearity
@@ -102,6 +126,121 @@ let _default_dispatch = Lower_state._default_dispatch
 let resolve_iface_method = Lower_state.resolve_iface_method
 let lower_fn_def = Lower_decls.lower_fn_def
 
+(* ── Poly let-bound values: type the binding at its use site (#1173) ─── *)
+
+(** A let binder's type is tracked in [Lower_state._poly_let_uses] when it
+    still holds a real type variable.  Function-typed binders are left out:
+    a generalized lambda is specialised by [Mono] through its call sites, a
+    separate mechanism this must not second-guess. *)
+let poly_let_candidate (t : Tir.ty) : bool =
+  let rec has_fn = function
+    | Tir.TFn _ -> true
+    | Tir.TTuple ts | Tir.TCon (_, ts) -> List.exists has_fn ts
+    | Tir.TRecord fs -> List.exists (fun (_, t) -> has_fn t) fs
+    | Tir.TPtr t -> has_fn t
+    | _ -> false
+  in
+  Mono.has_tvar t && not (has_fn t)
+
+(** True when [e] BUILDS its value in a representation its static type
+    decides: constructors, record and tuple literals, literals, over leaves
+    that are literals, variables whose type holds no type variable, or another
+    tracked poly let binding (a `let y = x` chain).  Only such a binding may
+    be retyped at its use site.  A call is never one: a builtin that returns
+    a type variable hands back a value whose layout the RUNTIME fixed
+    (`record_from_list` builds a dynamic record the update lowering must keep
+    treating as erased), and a generic fn is specialised by [Mono] from its
+    arguments, not from here. *)
+let rec poly_let_rhs_ok (env : env) (e : Ast.expr) : bool =
+  match e with
+  | Ast.ELit _ -> true
+  | Ast.ECon (_, args, _) | Ast.ETuple (args, _) -> List.for_all (poly_let_rhs_ok env) args
+  | Ast.ERecord (fields, _) -> List.for_all (fun (_, fe) -> poly_let_rhs_ok env fe) fields
+  | Ast.EAnnot (inner, _, _) -> poly_let_rhs_ok env inner
+  | Ast.EVar { txt; span; _ } ->
+    Hashtbl.mem Lower_state._poly_let_uses txt
+    || (match Hashtbl.find_opt _fn_param_types txt with
+        | Some t -> not (Mono.has_tvar t)
+        | None -> not (Mono.has_tvar (ty_of_span env span)))
+  | _ -> false
+
+(** The substitution that specialises an unannotated poly let binding
+    (binder type [bty], [_fn_param_types] type [installed]) to the single type
+    every recorded use instantiates it at, or [None] to leave it as it is.
+
+    [None] when the uses disagree (the binding is used at two types, which
+    one value cannot serve), when a use's type is the lowering's unknown
+    placeholder, when no type variable actually moves, or when the
+    substituted binder type is not exactly the use type (the use is not an
+    instance of the binding, e.g. a stale type_map entry).  Every [None]
+    keeps the lowering as it was before #1173. *)
+let poly_let_specialisation (bty : Tir.ty) (installed : Tir.ty)
+    (uses : Tir.ty list) : (Mono.ty_subst * Tir.ty) option =
+  let rec has_placeholder = function
+    | Tir.TVar "_" -> true
+    | Tir.TTuple ts | Tir.TCon (_, ts) -> List.exists has_placeholder ts
+    | Tir.TRecord fs -> List.exists (fun (_, t) -> has_placeholder t) fs
+    | Tir.TFn (ps, r) -> List.exists has_placeholder (r :: ps)
+    | Tir.TPtr t -> has_placeholder t
+    | _ -> false
+  in
+  match List.sort_uniq compare uses with
+  | [use_ty] when not (has_placeholder use_ty) ->
+    let s = Mono.match_ty installed use_ty (Mono.match_ty bty use_ty []) in
+    let s = List.filter (fun (n, t) -> t <> Tir.TVar n) s in
+    if s <> [] && Mono.subst_ty s bty = use_ty then Some (s, use_ty) else None
+  | _ -> None
+
+(** Give every occurrence of the variable [name] in [body] the type [ty],
+    stopping where an inner binder ([ELet], a fn name or parameter, a case
+    branch variable) shadows [name].  Used to retype the uses of a poly let
+    binding after [poly_let_specialisation] concretized the binder. *)
+let retype_var_uses (name : string) (ty : Tir.ty) (body : Tir.expr) : Tir.expr =
+  let rv (v : Tir.var) =
+    if String.equal v.Tir.v_name name then { v with Tir.v_ty = ty } else v in
+  let ra = function Tir.AVar v -> Tir.AVar (rv v) | a -> a in
+  let ral = List.map ra in
+  let rfs = List.map (fun (n, a) -> (n, ra a)) in
+  let rec go = function
+    | Tir.EAtom a -> Tir.EAtom (ra a)
+    | Tir.EApp (f, args) -> Tir.EApp (rv f, ral args)
+    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (ra f, ral args)
+    | Tir.ELet (v, e1, e2) ->
+      Tir.ELet (v, go e1, if String.equal v.Tir.v_name name then e2 else go e2)
+    | Tir.ELetRec (fns, cont) as e ->
+      if List.exists (fun fn -> String.equal fn.Tir.fn_name name) fns then e
+      else
+        let fns' = List.map (fun fn ->
+            if List.exists (fun p -> String.equal p.Tir.v_name name) fn.Tir.fn_params
+            then fn
+            else { fn with Tir.fn_body = go fn.Tir.fn_body }) fns in
+        Tir.ELetRec (fns', go cont)
+    | Tir.ECase (a, brs, def) ->
+      Tir.ECase (ra a,
+                 List.map (fun br ->
+                     if List.exists (fun v -> String.equal v.Tir.v_name name) br.Tir.br_vars
+                     then br
+                     else { br with Tir.br_body = go br.Tir.br_body }) brs,
+                 Option.map go def)
+    | Tir.ETuple atoms -> Tir.ETuple (ral atoms)
+    | Tir.ERecord fs -> Tir.ERecord (rfs fs)
+    | Tir.EField (a, n) -> Tir.EField (ra a, n)
+    | Tir.EUpdate (a, fs) -> Tir.EUpdate (ra a, rfs fs)
+    | Tir.EAlloc (t, args) -> Tir.EAlloc (t, ral args)
+    | Tir.EStackAlloc (t, args) -> Tir.EStackAlloc (t, ral args)
+    | Tir.EFree a -> Tir.EFree (ra a)
+    | Tir.EIncRC a -> Tir.EIncRC (ra a)
+    | Tir.EDecRC a -> Tir.EDecRC (ra a)
+    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (ra a)
+    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (ra a)
+    | Tir.EReuse (a, t, args) -> Tir.EReuse (ra a, t, ral args)
+    | Tir.EAllocHole (tok, t, args, hole) ->
+      Tir.EAllocHole (Option.map ra tok, t, ral args, hole)
+    | Tir.ESetField (o, i, v) -> Tir.ESetField (ra o, i, ra v)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (go e1, go e2)
+  in
+  go body
+
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
 (** Lower an expression, ensuring the result is an atom.
@@ -130,6 +269,7 @@ let rec lower_to_atom_k (env : env) (e : Ast.expr) (k : Tir.atom -> Tir.expr) : 
      | Some i -> !_ensure_module_lowered env (String.sub name 0 i)
      | None -> ());
     let ty = ty_of_span env span in
+    Lower_state.note_poly_let_use name ty;
     (* Use the parameter's declared type (from _fn_param_types) when available,
        rather than ty_of_span.  The type_map is shared across the whole program
        and ty_of_span may return a stale or spurious type for a parameter
@@ -227,6 +367,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     (match String.index_opt name '.' with
      | Some i -> !_ensure_module_lowered env (String.sub name 0 i)
      | None -> ());
+    if Hashtbl.mem Lower_state._poly_let_uses name then
+      Lower_state.note_poly_let_use name (ty_of_span env span);
     let ty = match Hashtbl.find_opt _fn_param_types name with
       | Some param_ty -> param_ty
       | None -> ty_of_span env span
@@ -234,12 +376,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
 
   (* --- Let bindings --- *)
-  | Ast.ELet (b, _) ->
-    lower_expr env b.bind_expr
+  (* A [let] in value position (the last expression of a block) has type [()]
+     (typecheck's [infer_block]), not the type of its right-hand side.  It
+     used to lower to the RHS's value, so [let _ = println(..)] as the last
+     line of [main] returned the [Ok(())] cell to a caller expecting [()]
+     and nothing released it.  Lower it as a block statement followed by
+     [()] instead: the binding is dead, and Perceus releases it. *)
+  | Ast.ELet (_, sp) ->
+    lower_expr env (Ast.EBlock ([e], sp))
 
   (* --- Blocks → right-nested ELet --- *)
   | Ast.EBlock ([], _) -> Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))
-  | Ast.EBlock ([e], _) -> lower_expr env e
+  | Ast.EBlock ([e], _) when (match e with Ast.ELet _ -> false | _ -> true) ->
+    lower_expr env e
   | Ast.EBlock (Ast.ELet (b, _) :: rest, sp) ->
     let rhs = lower_expr env b.bind_expr in
     (* Register the let-bound pattern names in _fn_param_types for the
@@ -256,9 +405,39 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         | Some ty -> Some (name, ty)
         | None -> None) pat_names
     in
-    List.iter (fun (name, sp) ->
-      Hashtbl.replace _fn_param_types name (ty_of_span env sp)) pat_names;
-    let body = lower_expr env (Ast.EBlock (rest, sp)) in
+    let installed = List.map (fun (name, sp) ->
+        let t = ty_of_span env sp in
+        Hashtbl.replace _fn_param_types name t;
+        (name, t)) pat_names in
+    (* #1173: an unannotated `let x = e` whose type still holds a type
+       variable is GENERALIZED (no value restriction), so [rhs] was lowered at
+       the scheme's residual type: `let x = None` is `alloc None('a)()`,
+       which codegen encodes under the erased Option(TVar) niche convention
+       (None = raw null).  A use at a concrete type whose representation
+       differs (Option(Float), Option(()), Option(Option(_)): Boxed) then
+       decodes the null as a heap cell and faults at 0x8.  Record the types
+       the rest of the block uses [x] at, and when they all agree, lower the
+       binding at that type instead (see [poly_let_specialisation]). *)
+    let poly_track = match b.bind_pat, b.bind_ty with
+      | Ast.PatVar n, None ->
+        (match List.assoc_opt n.txt installed with
+         | Some t when poly_let_candidate t && poly_let_rhs_ok env b.bind_expr ->
+           let saved = Hashtbl.find_opt Lower_state._poly_let_uses n.txt in
+           let uses = ref [] in
+           Hashtbl.replace Lower_state._poly_let_uses n.txt (t, uses);
+           Some (n.txt, t, saved, uses)
+         | _ -> None)
+      | _ -> None
+    in
+    let body =
+      Fun.protect
+        ~finally:(fun () -> match poly_track with
+          | Some (name, _, Some prev, _) ->
+            Hashtbl.replace Lower_state._poly_let_uses name prev
+          | Some (name, _, None, _) -> Hashtbl.remove Lower_state._poly_let_uses name
+          | None -> ())
+        (fun () -> lower_expr env (Ast.EBlock (rest, sp)))
+    in
     List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
     List.iter (fun (name, ty) -> Hashtbl.replace _fn_param_types name ty) saved_shadowed;
     (match b.bind_pat with
@@ -268,7 +447,21 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
          v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr env b.bind_expr);
          v_lin = lower_linearity b.bind_lin;
        } in
-       Tir.ELet (v, rhs, body)
+       (match poly_track with
+        | Some (_, installed_ty, _, uses) ->
+          (match poly_let_specialisation v.v_ty installed_ty !uses with
+           | Some (s, use_ty) ->
+             (* An enclosing poly binding used only through this one
+                (`let x = None; let y = x; y`) recorded its use at THIS
+                binding's type variable; now that it is known, pass it on so
+                the enclosing binding specialises too. *)
+             Hashtbl.iter (fun _ (_, outer_uses) ->
+                 outer_uses := List.map (Mono.subst_ty s) !outer_uses)
+               Lower_state._poly_let_uses;
+             Tir.ELet ({ v with v_ty = use_ty }, Mono.subst_expr s rhs,
+                       retype_var_uses n.txt use_ty body)
+           | None -> Tir.ELet (v, rhs, body))
+        | None -> Tir.ELet (v, rhs, body))
      | Ast.PatTuple (_, _) | Ast.PatRecord (_, _) ->
        (* This arm now also carries the record case (`let { x, y } = r`) via
           bind_subpat's PatRecord case below; the local names ($p, rhs_tuple_ty)
@@ -453,6 +646,25 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
       Tir.ECase (cond_atom,
         [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = then' }],
         Some else'))
+
+  (* --- `a && b` / `a || b` → ECase on [a], so [b] runs only when [a] does
+     not decide the result (core-march.md §4.4.1; the interpreter does the
+     same in eval.ml).  A right operand that cannot fail and has no effect
+     ([eager_safe]: a variable, a literal, or a scalar comparison / `+ - *`
+     / `!` / `&&` / `||` over those) keeps the strict builtin, which emits
+     one `and`/`or` instead of a branch; evaluating it early is
+     unobservable, and a tight guard chain (`i >= 0 && i < n && …`) stays
+     branch-free. --- *)
+  | Ast.EApp (Ast.EVar { txt = ("&&" | "||") as op; _ }, [a; b], _)
+    when not (eager_safe env b) ->
+    let bool_lit v = Tir.EAtom (Tir.ALit (Ast.LitBool v)) in
+    lower_to_atom_k env a (fun a_atom ->
+      let b' = lower_expr env b in
+      let on_true, on_false =
+        if op = "&&" then (b', bool_lit false) else (bool_lit true, b') in
+      Tir.ECase (a_atom,
+        [{ br_tag = Tir_names.synthetic_true_tag; br_vars = []; br_body = on_true }],
+        Some on_false))
 
   (* --- match do cond_arm* end → nested ECase on bools --- *)
   | Ast.ECond (arms, _) ->
@@ -748,7 +960,12 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
            (match args with
             | first_arg :: _
               when not (Hashtbl.mem !_current_module_fns name)
-                && not (Lower_state.is_local_binding name) ->
+                && not (Lower_state.is_local_binding name)
+                (* A user module's fn named like an interface method
+                   (`Util.eq`): the qualified call is the user's fn, never
+                   the method [resolve_iface_method] finds by stripping the
+                   module prefix.  See [Lower_state._entry_builtin_shadows]. *)
+                && not (Hashtbl.mem !Lower_state._builtin_shadows name) ->
               (* `to_string` is a universal formatter that is SEMANTICALLY
                  identical to `show` on any type with a Show impl (verified: the
                  interpreter's `to_string` and `show` produce byte-identical
@@ -1234,6 +1451,10 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
         dsp)
     in
     lower_expr env flat_map_call
+
+  (* --- Proof hints: erased before lowering ([Lemma_erase]); kept total. --- *)
+  | Ast.EProof (Ast.PWithFuel (_, _, body), sp) -> lower_expr env (Ast.EBlock (body, sp))
+  | Ast.EProof (_, sp) -> lower_expr env (Ast.ETuple ([], sp))
 
   (* --- Assert: a failed assertion panics with a rendered report --- *)
   | Ast.EAssert (inner, _) ->

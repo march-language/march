@@ -24,7 +24,7 @@ mod Witness do
   needs IO.FileRead
 
   fn slurp(path : String) : String do
-    match File.read(path) do
+    match Authority.must(File.read(path)) do
       Ok(s) -> s
       Err(_) -> ""
     end
@@ -32,5 +32,6 @@ mod Witness do
 
   fn main(cap : Cap(IO.Console)) : () do
     println(slurp("/etc/passwd"))
+    ()
   end
 end

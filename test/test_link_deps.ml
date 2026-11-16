@@ -50,35 +50,57 @@ let with_dir f =
 
 let programs = [
   "hello",
-  "mod Hello do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n    println(\"hi\")\n  end\nend\n",
+  {|mod Hello do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    println("hi")
+    ()
+  end
+end
+|},
   "hi";
   "tlsp",
-  "mod Tlsp do\n  needs IO.Console\n  needs IO.NetConnect.TLS\n\
-  \  fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do\n\
-  \    match Tls.client_ctx(Tls.default_client_config()) do\n\
-  \      Ok(_) -> println(\"tls ctx ok\")\n\
-  \      Err(e) -> println(\"tls err \" ++ Tls.error_to_string(e))\n\
-  \    end\n  end\nend\n",
+  {|mod Tlsp do
+  needs IO.Console
+  needs IO.NetConnect.TLS
+  fn main(_c : Cap(IO.Console), _t : Cap(IO.NetConnect.TLS)) : Unit do
+    match Authority.must(Tls.client_ctx(Tls.default_client_config())) do
+      Ok(_) -> Authority.ignore(println("tls ctx ok"))
+      Err(e) -> Authority.ignore(println("tls err " ++ Tls.error_to_string(e)))
+    end
+  end
+end
+|},
   "tls ctx ok";
   "gz",
-  "mod Gz do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n\
-  \    match Compress.Gzip.encode(Bytes.from_string(\"hello hello\")) do\n\
-  \      Ok(z) -> match Compress.Gzip.decode(z) do\n\
-  \        Ok(x) -> println(\"gz \" ++ Bytes.to_string(x))\n\
-  \        Err(_) -> println(\"gz decode err\")\n\
-  \      end\n\
-  \      Err(_) -> println(\"gz encode err\")\n\
-  \    end\n  end\nend\n",
+  {|mod Gz do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    match Compress.Gzip.encode(Bytes.from_string("hello hello")) do
+      Ok(z) -> match Compress.Gzip.decode(z) do
+        Ok(x) -> Authority.ignore(println("gz " ++ Bytes.to_string(x)))
+        Err(_) -> Authority.ignore(println("gz decode err"))
+      end
+      Err(_) -> Authority.ignore(println("gz encode err"))
+    end
+  end
+end
+|},
   "gz hello hello";
   "zs",
-  "mod Zs do\n  needs IO.Console\n  fn main(_c : Cap(IO.Console)) : Unit do\n\
-  \    match Compress.Zstd.encode(Bytes.from_string(\"zstd zstd\")) do\n\
-  \      Ok(z) -> match Compress.Zstd.decode(z) do\n\
-  \        Ok(x) -> println(\"zs \" ++ Bytes.to_string(x))\n\
-  \        Err(_) -> println(\"zs decode err\")\n\
-  \      end\n\
-  \      Err(_) -> println(\"zs encode err\")\n\
-  \    end\n  end\nend\n",
+  {|mod Zs do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) : Unit do
+    match Compress.Zstd.encode(Bytes.from_string("zstd zstd")) do
+      Ok(z) -> match Compress.Zstd.decode(z) do
+        Ok(x) -> Authority.ignore(println("zs " ++ Bytes.to_string(x)))
+        Err(_) -> Authority.ignore(println("zs decode err"))
+      end
+      Err(_) -> Authority.ignore(println("zs encode err"))
+    end
+  end
+end
+|},
   "zs zstd zstd";
 ]
 
@@ -200,8 +222,34 @@ let test_missing_codec_refused () =
   Alcotest.(check bool) ("before any C is compiled or linked\n" ^ out) false
     (has "undefined" || has "error:")
 
+(* HttpServer reaches TLS only through HttpServer.tls: a plain-HTTP server
+   links no OpenSSL (the always-linked HTTP runtime calls the TLS code
+   through runtime/march_tls_ops.h's table, and listen calls the configure
+   builtin only through a closure tls() builds), an HTTPS one does.  Compiled
+   only: a server does not exit. *)
+let http_server_src ~tls =
+  Printf.sprintf
+    "mod Srv do\n  needs IO.NetListen\n\
+     \  fn main(_l : Cap(IO.NetListen)) : Unit do\n\
+     \    HttpServer.new(18099)\n\
+     %s\
+     \    |> HttpServer.plug(fn c -> HttpServer.text(c, 200, \"ok\"))\n\
+     \    |> HttpServer.listen()\n  end\nend\n"
+    (if tls then "    |> HttpServer.tls(HttpServer.TlsFiles(\"c.pem\", \"k.pem\"))\n" else "")
+
+let test_http_server_tls_only_when_used () =
+  if not (is_macos || is_linux) then Alcotest.skip ();
+  with_dir @@ fun dir ->
+  let plain = deps (compile ~dir "httpplain" (http_server_src ~tls:false)) in
+  Alcotest.(check bool) ("a plain HTTP server loads no OpenSSL " ^ show plain) false
+    (List.mem "ssl" plain || List.mem "crypto" plain);
+  let https = deps (compile ~dir "httpstls" (http_server_src ~tls:true)) in
+  Alcotest.(check bool) ("an HTTPS server loads OpenSSL " ^ show https) true
+    (List.mem "ssl" https && List.mem "crypto" https)
+
 let tests = [
   Alcotest.test_case "a codec this host lacks is a compile error naming the package" `Slow test_missing_codec_refused;
+  Alcotest.test_case "an HTTP server loads OpenSSL only when it serves HTTPS" `Slow test_http_server_tls_only_when_used;
   Alcotest.test_case "dependency set follows what the program reaches" `Slow test_deps_follow_reach;
   Alcotest.test_case "every member loose (old link): hello loads OpenSSL" `Slow test_loose_members_load_everything;
   Alcotest.test_case "--hot-reload keeps the whole runtime" `Slow test_hot_reload_keeps_runtime;

@@ -1,0 +1,20 @@
+exit: 1
+-- CAPABILITY ------- errors/cap_result_unhandled_2.march
+
+This capability operation returns `Result((), CapError)`, which says whether it was permitted, but `()` is expected here. [cap_result_unhandled]
+
+9 |     Some(v) -> println(v)
+                   ^^^^^^^^^^
+
+    Handle the refusal (`match`, `let?`), or discard the result: a call on a line of its own needs nothing, and `Authority.ignore(...)` discards it anywhere else.
+
+    fix (`forge fix` applies it):
+
+9 -     Some(v) -> println(v)
+9 +     Some(v) -> Authority.ignore(println(v))
+
+    run `march --explain cap_result_unhandled`
+
+
+
+after fix: exit 0

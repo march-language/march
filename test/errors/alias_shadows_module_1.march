@@ -1,0 +1,14 @@
+-- EXPECT-ERROR: but this module also declares a module `B`
+mod Main do
+  needs IO.Console
+  -- `alias List, as: B` and a declared `mod B`: `B.length` could mean either.
+  -- The interpreter used the declared module and the compiled build the alias
+  -- target (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md).
+  alias List, as: B
+  mod B do
+    fn length(_xs : List(Int)) : Int do 50 end
+  end
+  fn main(c : Cap(IO.Console)) do
+    print_line(int_to_string(B.length([1])))
+  end
+end

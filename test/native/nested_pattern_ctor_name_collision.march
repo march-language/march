@@ -110,5 +110,6 @@ mod Main do
     println(int_to_string(opt_case(Some(make(1)))))
     println(int_to_string(opt_case(Some(make(2)))))
     println(int_to_string(opt_case(None)))
+    ()
   end
 end

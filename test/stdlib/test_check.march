@@ -2,6 +2,8 @@
 -- Run with: forge test test/stdlib/test_check.march
 
 mod TestCheck do
+  needs IO.Clock
+  needs IO.Process
 
   -- ---- Simple passing properties ----
 

@@ -24,10 +24,7 @@
   (qcheck-core (>= 0.91))
   (qcheck-alcotest (>= 0.91))
   (uutf (>= 1.0))   ; for vendor/notty
-  ; < 6.5: 6.5.0 (2026-10-22) overflows the JS stack on a 20000-element
-  ; List.map in the in-browser REPL (browser-repl smoke test); see
-  ; specs/todos/2026-11-02-js-of-ocaml-6-5-browser-repl-stack-overflow.md.
-  (js_of_ocaml (and (>= 5.0) (< 6.5))))
+  (js_of_ocaml (>= 5.0)))
 )
 
 (package

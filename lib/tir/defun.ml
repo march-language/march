@@ -28,7 +28,7 @@ let builtin_names : StringSet.t =
       "to_string"; "kill"; "is_alive";
       "actor_stop"; "actor_is_draining"; "actor_pid_indices";
       "send"; "spawn"; "actor_get_int";
-      "task_spawn"; "task_await"; "task_await_unwrap";
+      "task_spawn"; "task_await"; "task_await_unwrap"; "task_poll";
       "task_yield"; "task_spawn_steal"; "task_reductions";
       (* Cancellation/race builtins — each has a dedicated codegen arm in
          llvm_emit (task_cancel_by_id/task_cancel/task_is_cancelled/
@@ -69,6 +69,8 @@ let builtin_names : StringSet.t =
       (* File/Dir builtins *)
       "file_exists"; "dir_exists";
       "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
+      "file_open_write"; "file_write_handle"; "file_seek";
+      "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at";
       "file_write"; "file_append"; "file_delete"; "file_copy"; "file_rename"; "file_stat";
       "file_create_dir"; "file_create_dir_all";
       "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list";
@@ -103,6 +105,10 @@ let builtin_names : StringSet.t =
       "delivery_origin_set"; "delivery_origin_clear"; "delivery_failed_watch";
       "send_checked"; "revoke_cap"; "is_cap_valid";
       "pid_of_int"; "pid_to_int"; "get_actor_field";
+      (* Handle-box primitives (ocap phase 2): direct calls, so the borrow
+         table applies (an indirect call would own every argument). *)
+      "handle_new"; "handle_enter"; "handle_leave"; "handle_close";
+      "handle_detach"; "handle_is_closed"; "handle_aux";
       (* The supervise-block spawn glue's registration calls (lower_actor.ml).
          Their TFn-typed vars used to fall into the indirect-call rewrite, and
          an ECallPtr never consults Borrow's extern table, so Perceus dup'd
@@ -126,6 +132,8 @@ let builtin_names : StringSet.t =
       "iolist_hash_fnv1a";
       (* HTTP server spawn/wait builtins *)
       "http_server_spawn_n"; "http_server_wait"; "http_server_bind_host";
+      "http_server_tls_configure"; "http_server_set_timeouts"; "http_server_reload_tls";
+      "http_server_plain_listener"; "http_conn_is_tls";
       (* Char/byte conversion builtins *)
       "byte_to_char"; "char_is_alphanumeric"; "char_is_whitespace";
       (* Char builtins *)
@@ -172,6 +180,8 @@ let builtin_names : StringSet.t =
       "string_to_codepoints"; "string_from_codepoint";
       (* Unix/time builtins *)
       "unix_time"; "unix_time_ms";
+      (* ocap phase 1 capability check point *)
+      "cap_check_raw"; "cap_launch_text";
       (* Process self-inspection builtins *)
       "peak_rss_bytes"; "live_allocs";
       (* Comparison / hash builtins *)

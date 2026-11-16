@@ -40,6 +40,7 @@ mod LlRaceProbe do
   fn main(_c : Cap(IO.Console)) : Unit do
     let xs = List.map(List.range(0, 40), fn x -> x * 3)
     println("ll-race " ++ int_to_string(List.length(xs)))
+    ()
   end
 end
 |}

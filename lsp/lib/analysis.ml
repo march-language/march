@@ -214,11 +214,17 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
       ) d.labels in
       if infos = [] then None else Some infos
     in
+    (* A use of a `@[deprecated("...")]` function: the Deprecated tag
+       (DiagnosticTag 2) is what makes an editor strike the name through. *)
+    let tags =
+      if March_errors.Code.slug_of d.code = March_errors.Code.deprecated
+      then Some [ Lsp.Types.DiagnosticTag.Deprecated ] else None in
     Some (Lsp.Types.Diagnostic.create
       ~range
       ~severity:(severity_to_lsp d.severity)
       ~message:(`String message)
       ~source:"march"
+      ?tags
       ?code
       ?codeDescription
       ?relatedInformation
@@ -407,6 +413,8 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
 
   | Ast.EAssert (e, _) ->
     collect_expr ~def_map ~use_map ~calls e
+  | Ast.EProof (p, _) ->
+    List.iter (collect_expr ~def_map ~use_map ~calls) (Ast.proof_children p)
 
   | Ast.ESigil (_, content, _) ->
     collect_expr ~def_map ~use_map ~calls content
@@ -566,6 +574,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
       List.iter (fun (ce, be) -> walk scope ce; walk scope be) arms
     | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2
     | Ast.EAssert (e, _) -> walk scope e
+    | Ast.EProof (p, _) -> List.iter (walk scope) (Ast.proof_children p)
     | Ast.ESigil (_, content, _) -> walk scope content
     | Ast.ERefineMsg (content, _, _) -> walk scope content
     | Ast.ELetQ (p, r, c, _) | Ast.ELetStar (p, r, c, _) ->
@@ -739,7 +748,7 @@ let build_linearity_map (decls : Ast.decl list) (always_linear : string list)
   let resolve (lin : Ast.linearity) (ty : Ast.ty option) : Ast.linearity option =
     match lin with
     | Ast.Linear | Ast.Affine -> Some lin
-    | Ast.Unrestricted -> (match ty with Some t -> lin_of_ty t | None -> None)
+    | Ast.Unrestricted | Ast.Ghost -> (match ty with Some t -> lin_of_ty t | None -> None)
   in
   let record name lin = result := (name, lin) :: !result in
   let rec pat_names (p : Ast.pattern) acc =
@@ -2473,6 +2482,7 @@ let analyse ~filename ~src : t =
       demorgan_sites    = [];
       perf_insights     = [];
       consume_modes     = [];
+      cap_program       = None;
       tir_fn_insights   = [];
       code_lens_items   = [];
       decls             = [];
@@ -3371,6 +3381,10 @@ let analyse ~filename ~src : t =
       perf_insights;
       consume_modes    = [];
       no_alloc_candidates = [];
+      cap_program      =
+        Some ({ desugared with
+                Ast.mod_decls = stdlib_decls @ extra_decls @ desugared.Ast.mod_decls },
+              final_env);
       tir_fn_insights  = [];
       code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
@@ -3538,6 +3552,32 @@ let run_tir_pass (a : t) : t =
       let contract_diags =
         List.filter_map (diag_to_lsp ~filename:a.filename)
           pipe.March_tir.Contract_pipeline.contract_diags in
+      (* The capability ceiling and host scopes (ocap phase 3), over the whole
+         program [analyse] kept, exactly as `march --check` runs them.  A
+         finding the edit-time subset already published is not repeated; one
+         with no span (a [Bare] finding) has nothing to point at and is not
+         published. *)
+      let cap_diags =
+        match a.cap_program with
+        | None -> []
+        | Some (program, tc_env) ->
+          let input = {
+            March_driver.Cap_static.desugared = program;
+            stdlib_decls = Stdlib_cache.load (); tc_env; type_map = a.type_map;
+            src = a.src; filename = a.filename;
+            read_file = (fun f -> In_channel.with_open_bin f In_channel.input_all);
+            cap_strict = true } in
+          (match March_driver.Cap_static.check_program ~opt:true ~is_js:false input with
+           | March_driver.Cap_static.Unchecked _ -> []
+           | March_driver.Cap_static.Checked fs ->
+             List.filter_map (function
+                 | March_driver.Cap_static.Diag d -> diag_to_lsp ~filename:a.filename d
+                 | March_driver.Cap_static.Bare _ -> None) fs
+             |> List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+                 not (List.exists (fun (e : Lsp.Types.Diagnostic.t) ->
+                     e.range = d.range && e.message = d.message) a.diagnostics)))
+      in
+      let contract_diags = contract_diags @ cap_diags in
       let contract_decls = March_tir.Alloc_contract.collect desugared in
       let no_alloc_holds =
         let failing =
@@ -4597,6 +4637,8 @@ let inlay_hints_for ?(perf_annotations = true) ?(param_names = true)
       "csv_open",          "IO.FileRead";  "csv_next_row",      "IO.FileRead";
       "file_write",        "IO.FileWrite"; "file_append",       "IO.FileWrite";
       "file_delete",       "IO.FileWrite"; "file_rename",       "IO.FileWrite";
+      "file_open_write",   "IO.FileWrite"; "dir_open_write",    "IO.FileWrite";
+      "dir_open",          "IO.FileRead";
       "dir_mkdir",         "IO.FileWrite"; "dir_mkdir_p",       "IO.FileWrite";
       "dir_rmdir",         "IO.FileWrite"; "dir_rm_rf",         "IO.FileWrite";
       "file_copy",         "IO.FileSystem";

@@ -16,5 +16,6 @@ mod Test do
   fn main(_cap_console : Cap(IO.Console), _cap_foreign : Cap(IO.Foreign)) : Unit do
     println(shown(parse("7")))    -- Ok(7)   -> 7
     println(shown(parse("zz")))   -- Err     -> nan
+    ()
   end
 end

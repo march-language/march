@@ -639,10 +639,10 @@ describe "JsonStream" do
     -- a mutable ref captured in the each_value callback.
     test "each_value over an ndjson file" do
       let path = "/tmp/march_jsonstream_ndjson_test.jsonl"
-      match File.write(path, "{\"n\": 1}\n{\"n\": 2}\n{\"n\": 3}\n") do
+      match Authority.must(File.write(path, "{\"n\": 1}\n{\"n\": 2}\n{\"n\": 3}\n")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        match JsonStream.each_value(path, fn v -> ()) do
+        match Authority.must(JsonStream.each_value(path, fn v -> ())) do
         Err(_) -> assert (false)
         Ok(_) -> assert (true)
         end
@@ -652,10 +652,10 @@ describe "JsonStream" do
     end
     test "each_value errors on malformed ndjson" do
       let path = "/tmp/march_jsonstream_ndjson_bad_test.jsonl"
-      match File.write(path, "{\"n\": 1}\nnot json\n") do
+      match Authority.must(File.write(path, "{\"n\": 1}\nnot json\n")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        match JsonStream.each_value(path, fn v -> ()) do
+        match Authority.must(JsonStream.each_value(path, fn v -> ())) do
         Err(_) -> assert (true)
         Ok(_) -> assert (false)
         end
@@ -665,10 +665,10 @@ describe "JsonStream" do
     end
     test "fold-based count over file contents (Ref unavailable)" do
       let path = "/tmp/march_jsonstream_fold_count_test.json"
-      match File.write(path, "[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}]") do
+      match Authority.must(File.write(path, "[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}]")) do
       Err(_) -> assert (false)
       Ok(_) -> do
-        match File.read(path) do
+        match Authority.must(File.read(path)) do
         Err(_) -> assert (false)
         Ok(contents) ->
           match JsonStream.fold(Seq.from_list(Cons(contents, Nil)), 0, fn (n, e) -> n + 1) do

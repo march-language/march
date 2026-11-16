@@ -1,0 +1,12 @@
+exit: 0
+-- WARNING: CAPABILITY ----- errors/cap_unchecked_1.march
+
+The capability ceiling and host scopes were not checked: the compiler cannot build this program (`App.stop` stops the supervision tree of an `app` declaration, which only the interpreter runs (a compiled program ignores `app`). A compiled program ends when `main` returns, or exits early with `process_exit(code)`). [cap_unchecked]
+help: `march --compile` rejects it for that reason; every other capability check ran.
+
+1 | mod Main do
+        ^^^^
+
+    run `march --explain cap_unchecked`
+
+

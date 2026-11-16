@@ -23,7 +23,7 @@ mod Main do
   mod Config do
     needs IO.Console
     fn motd() : String do
-      match File.read("/etc/motd") do
+      match Authority.must(File.read("/etc/motd")) do
         Ok(s) -> s
         Err(_) -> ""
       end

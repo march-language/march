@@ -22,5 +22,6 @@ mod Main do
         println(int_to_string(List.length(rest)))
       Nil -> println("empty")
     end
+    ()
   end
 end

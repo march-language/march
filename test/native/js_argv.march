@@ -6,5 +6,6 @@ mod JsArgv do
 
   fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) : Unit do
     println(String.join(process_argv(), ","))
+    ()
   end
 end

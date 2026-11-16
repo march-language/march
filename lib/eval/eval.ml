@@ -169,6 +169,22 @@ let is_type_dispatched_iface = function
   | _ -> false
 
 
+(** The functions each module being evaluated declares itself, innermost
+    module first.  A bulk import (`use M.*`, `use M` except ...) never rebinds
+    one of them, wherever the `use` sits: a module's own definition shadows a
+    bulk import, the rule the typechecker applies ([env.local_fns]) and that
+    lowering follows.  The interpreter used to let a `use` placed after the
+    definition win (specs/progress/2026-10-30-interpreter-compiler-name-resolution-diverge.md). *)
+let local_def_scopes : string list list ref = ref []
+
+let local_fn_names (decls : decl list) : string list =
+  List.filter_map (function DFn (d, _) -> Some d.fn_name.txt | _ -> None) decls
+
+let defined_locally (short : string) : bool =
+  match !local_def_scopes with
+  | names :: _ -> List.mem short names
+  | [] -> false
+
 (** Same-short-name type collision set — the interpreter's counterpart to
     [Collision_set] in lib/tir (native/TIR backend, Task 0 of
     specs/plans/2026-07-20-fqn-impl-dispatch-identity.md). The interpreter
@@ -183,6 +199,11 @@ let is_type_dispatched_iface = function
     (before any [DType]/[DImpl] is evaluated) since eval order alone can't
     tell a first same-short-name declaration from the only one. *)
 let type_collision_set : (string, unit) Hashtbl.t = Hashtbl.create 16
+
+(** [impl_tbl] bare (iface, type) slots written by an impl whose type is NOT
+    module-qualified for dispatch (see the DImpl arm): a colliding nested
+    type's impl leaves them alone. *)
+let bare_slot_exact : (string * string, unit) Hashtbl.t = Hashtbl.create 16
 
 let is_colliding_type_name (short_name : string) : bool =
   Hashtbl.mem type_collision_set short_name
@@ -655,6 +676,7 @@ let pmap_threshold_value : int ref = ref 1024
    working for existing call sites (the js_of_ocaml build installs it).
    Aliasing a [ref] shares the same mutable cell. *)
 let http_fetch_hook = Eval_prim.http_fetch_hook
+let call_return_hook = Eval_prim.call_return_hook
 
 
 
@@ -1187,6 +1209,13 @@ and match_list (pats : pattern list) (vs : value list) : (string * value) list o
     between them. *)
 let register_type_ctors (name_txt : string) (variants : variant list) : unit =
   List.iter (fun (v : variant) ->
+      (* A constructor name two types declare cannot tell the interpreter
+         which type a bare-tagged value belongs to: [find_impl_for] must not
+         trust its qualified type. *)
+      (match Hashtbl.find_opt ctor_type_tbl v.var_name.txt with
+       | Some prev when prev <> name_txt ->
+         Hashtbl.replace ambiguous_ctor_tags v.var_name.txt ()
+       | _ -> ());
       Hashtbl.replace ctor_type_tbl v.var_name.txt name_txt;
       Hashtbl.replace variant_ctor_names v.var_name.txt ();
       if is_colliding_type_name name_txt then begin
@@ -1874,6 +1903,7 @@ let span_of_expr (e : expr) : span =
   | EAssert (_, sp) -> sp
   | ESigil (_, _, sp) -> sp
   | ERefineMsg (_, _, sp) -> sp
+  | EProof (_, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -1942,8 +1972,13 @@ and apply_inner (fn_val : value) (args : value list) : value =
        this hot path. *)
     let saved = !closure_prefix_override in
     closure_prefix_override := Some defn_prefix;
+    (* [call_return_hook] is a no-op natively; in the browser REPL it is the
+       stack bounce on the return path (see [Eval_prim.call_return_hook]).
+       It runs in [~finally] so an exception unwinding a deep recursion (a
+       March panic 20000 calls down) is bounced too, not only a normal
+       return. *)
     Fun.protect
-      ~finally:(fun () -> closure_prefix_override := saved)
+      ~finally:(fun () -> closure_prefix_override := saved; !call_return_hook ())
       (fun () -> eval_expr env' body)
 
   | VBuiltin (name, f) ->
@@ -2079,6 +2114,21 @@ and eval_expr_inner (env : env) (e : expr) : value =
              unchecked run -- a receiver then compares the tag alone. *)
           apply send ([dst; to_; VString tag; VString (March_ast.Json_dispatch.find_schema sp); json] @ rest))
      | _ -> assert false)
+
+  (* `a && b` / `a || b` short-circuit: [b] is evaluated only when [a] does
+     not already decide the result (E-And / E-Or, core-march.md §4.4.1).  The
+     parser builds both as an ordinary [EApp] of the builtin, and no program
+     can rebind the operator symbols, so the name alone identifies them.
+     TIR lowering does the same (lower_expr.ml). *)
+  | EApp (EVar { txt = ("&&" | "||") as op; _ }, [a; b], _) ->
+    (match op, eval_expr env a with
+     | "&&", VBool false -> VBool false
+     | "||", VBool true -> VBool true
+     | _, VBool _ ->
+       (match eval_expr env b with
+        | VBool _ as v -> v
+        | _ -> eval_error "%s: right operand must be a boolean" op)
+     | _ -> eval_error "%s: left operand must be a boolean" op)
 
   | EApp (f, args, sp) ->
     (* E-App-Clo / E-App-Prim — core-march.md §4.2 (dispatch on fn_val's shape
@@ -2562,6 +2612,11 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     apply flat_map_fn [v; k]
 
+  (* Proof hints are erased before anything runs ([Lemma_erase]); a tree that
+     reaches the interpreter unerased (a REPL fragment) treats them the same
+     way: a `with fuel` body runs, the rest is unit. *)
+  | EProof (PWithFuel (_, _, body), _) -> eval_block env body
+  | EProof (_, _) -> VUnit
   | EAssert (inner, _) ->
     (* A failed assertion raises a rendered report
        (lib/errors/test_report.ml): the header with the asserted expression
@@ -2725,6 +2780,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset ambiguous_ctor_tags;
+  Hashtbl.reset bare_slot_exact;
   Hashtbl.reset type_collision_set;
   Hashtbl.reset colliding_ctor_type_by_module;
   closure_prefix_override := None;
@@ -3030,6 +3087,20 @@ let task_builtins : env =
             | None -> VCon ("Err", [VString "task not completed"]))
          | None -> VCon ("Err", [VString (Printf.sprintf "unknown task %d" tid)]))
       | _ -> eval_error "task_await: expected 1 argument (a Task)"))
+
+  (* Non-blocking task_await.  The interpreter runs a task to completion at
+     spawn, so a poll always finds it finished and answers Some of exactly
+     what task_await answers; the compiled runtime answers None while the
+     task is still running. *)
+  ; ("task_poll", VBuiltin ("task_poll", function
+      | [VTask tid] ->
+        (match Hashtbl.find_opt task_registry tid with
+         | Some entry when entry.te_cancelled ->
+           VCon ("Some", [VCon ("Err", [VString "cancelled"])])
+         | Some { te_result = Some v; _ } -> VCon ("Some", [VCon ("Ok", [v])])
+         | Some { te_result = None; _ } -> VCon ("None", [])
+         | None -> VCon ("Some", [VCon ("Err", [VString (Printf.sprintf "unknown task %d" tid)])]))
+      | _ -> eval_error "task_poll: expected 1 argument (a Task)"))
 
   ; ("task_await_unwrap", VBuiltin ("task_await_unwrap", function
       | [VTask tid] ->
@@ -3675,8 +3746,16 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DMod (name, _, decls, _) ->
     (* Evaluate nested module; bindings are prefixed with "ModName." *)
     module_stack := name.txt :: !module_stack;
+    local_def_scopes := local_fn_names decls :: !local_def_scopes;
     (* Two-pass evaluation for inner decls so recursive/mutual fns work *)
     let inner_ref = ref env in
+    (* One scan per module, not per fn: does the env already bind any name
+       under this module's path (a same-named stdlib module evaluated
+       earlier)?  Only then can a desugar-qualified sibling call reach the
+       other module's fn (see the rebind below). *)
+    let path_prebound =
+      let pre = current_doc_prefix () in
+      pre <> "" && List.exists (fun (k, _) -> String.starts_with ~prefix:pre k) env in
     List.iter (function
       | DFn (def, _) ->
         let stub = forward_stub inner_ref def.fn_name.txt in
@@ -3747,6 +3826,21 @@ let rec eval_decl (env : env) (d : decl) : env =
              | None -> e')
           | _ -> e'
         in
+        (* Desugar qualifies a bare call to a sibling fn with the module's
+           path ([Desugar.qualify_module_refs]: `sum_int` inside an entry
+           `mod List` becomes `List.sum_int`), and [lookup] reads the lexical
+           env before the module registry.  When the env already binds that
+           qualified name -- a stdlib module of the same name, evaluated
+           earlier -- the sibling call reached the OTHER module's fn.  Bind
+           the qualified name to this module's own fn as well, so it wins
+           inside the module exactly as the bare name does.
+           specs/progress/2026-11-10-user-stdlib-name-collisions.md *)
+        let e'' =
+          let q = current_doc_prefix () ^ def.fn_name.txt in
+          if path_prebound && q <> def.fn_name.txt && List.mem_assoc q e'' then
+            (q, combined) :: List.remove_assoc q e''
+          else e''
+        in
         inner_ref := e'';
         eval_mod_decls rest e''
       | d :: rest ->
@@ -3760,8 +3854,12 @@ let rec eval_decl (env : env) (d : decl) : env =
          witness harness, the test drivers -- would otherwise evaluate
          everything after it under this module's stale prefix. *)
       try eval_mod_decls decls !inner_ref
-      with e -> module_stack := List.tl !module_stack; raise e
+      with e ->
+        module_stack := List.tl !module_stack;
+        local_def_scopes := List.tl !local_def_scopes;
+        raise e
     in
+    local_def_scopes := List.tl !local_def_scopes;
     (* An actor declared in this module was registered with the env as it
        stood at ITS declaration -- pass-1 stubs for every fn declared after
        it -- and nothing re-pointed it, so a handler calling such a fn died
@@ -3970,8 +4068,23 @@ let rec eval_decl (env : env) (d : decl) : env =
                may claim the shared (iface, type) key; extra methods (e.g. Eq's
                default `neq`) must not clobber it, or builtin dispatch invokes
                the wrong method and recurses forever (neq → eq → neq). *)
-            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then
-              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            (* A colliding type's Show/Eq/Ord/Hash impl also claims its
+               qualified slot, which [find_impl_for] reads first: the bare
+               slot is shared by every same-short-name type, last writer
+               wins. *)
+            if is_dispatched && dispatch_type_name <> type_name then
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, dispatch_type_name) fn_val;
+            if (not (is_type_dispatched_iface idef.impl_iface.txt)) || is_dispatched then begin
+              let key = (idef.impl_iface.txt, type_name) in
+              (* The bare slot IS the qualified slot of a colliding type
+                 declared at the entry level (empty module prefix): a nested
+                 same-short-name type must not take it over. *)
+              if dispatch_type_name = type_name then begin
+                Hashtbl.replace bare_slot_exact key ();
+                Hashtbl.replace impl_tbl key fn_val
+              end else if not (Hashtbl.mem bare_slot_exact key) then
+                Hashtbl.replace impl_tbl key fn_val
+            end;
             (* A Json codec of a same-short-name type also claims its
                qualified slot, which the `to_json` builtin consults first via
                [dispatch_type_name_of_value]: the bare slot above is
@@ -3987,7 +4100,17 @@ let rec eval_decl (env : env) (d : decl) : env =
               Hashtbl.replace iface_method_tbl
                 (idef.impl_iface.txt, mname.txt, dispatch_type_name) fn_val;
             let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
-            Hashtbl.replace module_registry iface_qualified fn_val
+            (* `Show.show` and its three siblings are the type-directed
+               builtin (Eval_builtins.qualified_iface_methods), not this one
+               impl: the slot is shared by every impl of the interface. *)
+            let reg_val =
+              if is_dispatched then
+                (match List.assoc_opt iface_qualified Eval_builtins.base_env with
+                 | Some dispatcher -> dispatcher
+                 | None -> fn_val)
+              else fn_val
+            in
+            Hashtbl.replace module_registry iface_qualified reg_val
           | None -> ()
         end;
         (* For Json derive: to_json only registers in impl_tbl (so the
@@ -4091,7 +4214,8 @@ let rec eval_decl (env : env) (d : decl) : env =
        let plen = String.length prefix in
        let additions = List.filter_map (fun (k, v) ->
            if String.length k > plen && String.sub k 0 plen = prefix then
-             Some (String.sub k plen (String.length k - plen), v)
+             let short = String.sub k plen (String.length k - plen) in
+             if defined_locally short then None else Some (short, v)
            else None) env in
        additions @ env
      | UseNames names ->
@@ -4105,7 +4229,7 @@ let rec eval_decl (env : env) (d : decl) : env =
        let additions = List.filter_map (fun (k, v) ->
            if String.length k > plen && String.sub k 0 plen = prefix then
              let short = String.sub k plen (String.length k - plen) in
-             if List.mem short excl_set then None
+             if List.mem short excl_set || defined_locally short then None
              else Some (short, v)
            else None) env in
        additions @ env)
@@ -4194,6 +4318,8 @@ let eval_module_env (m : module_) : env =
   Hashtbl.reset iface_method_tbl;
   Hashtbl.reset ctor_type_tbl;
   Hashtbl.reset ctor_qualified_type_tbl;
+  Hashtbl.reset ambiguous_ctor_tags;
+  Hashtbl.reset bare_slot_exact;
   List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
     [ "Ok", "Result"; "Err", "Result"
     ; "Some", "Option"; "None", "Option"
@@ -4378,7 +4504,10 @@ let eval_module_env (m : module_) : env =
     List.fold_left (fun (acc, env) run ->
         let scope_ref = ref env in
         scope_ref := install_stubs scope_ref run env;
-        let run_env = make_recursive_env scope_ref run !scope_ref in
+        local_def_scopes := local_fn_names run :: !local_def_scopes;
+        let run_env =
+          Fun.protect ~finally:(fun () -> local_def_scopes := List.tl !local_def_scopes)
+            (fun () -> make_recursive_env scope_ref run !scope_ref) in
         scope_ref := run_env;
         (run_env :: acc, run_env))
       ([], task_builtins @ base_env) (top_level_file_runs m.mod_decls)

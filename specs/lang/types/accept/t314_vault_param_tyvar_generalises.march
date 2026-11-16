@@ -23,7 +23,7 @@ mod M do
   end
 
   fn keep(mk : () -> Pid(a), open : Pid(a) -> Int) : Int do
-    let spare = Vault.new("spare")
+    let spare = Authority.must(Vault.new("spare"))
     let host = match Vault.get(spare, "h") do
       Some(h) -> h
       None -> mk()
@@ -33,7 +33,7 @@ mod M do
   end
 
   fn keep_value(x : a) : Int do
-    let t = Vault.new("value")
+    let t = Authority.must(Vault.new("value"))
     Vault.set(t, "k", x)
     Vault.size(t)
   end

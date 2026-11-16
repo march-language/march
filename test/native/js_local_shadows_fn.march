@@ -17,5 +17,6 @@ mod JsLocalShadowsFn do
     let p = moved({ x: 3, y: 4 }, false)
     let q = moved({ x: 3, y: 4 }, true)
     println(int_to_string(p.x) ++ " " ++ int_to_string(q.x) ++ " " ++ int_to_string(px(2) + px(0)))
+    ()
   end
 end

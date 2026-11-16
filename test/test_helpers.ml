@@ -167,8 +167,14 @@ let load_stdlib_file_for_test name =
                         March_ast.Ast.dummy_span)
 
 (** Evaluate a module source with the given stdlib DMod declarations prepended. *)
+(* Authority (Authority.must/ignore/check) wraps every capability call since
+   capability operations return Result(T, CapError); load it for every
+   partial-stdlib eval so a migrated program resolves it. *)
+let authority_decl_for_eval = lazy (load_stdlib_file_for_test "authority.march")
+
 let eval_with_stdlib decls src =
   let m = parse_and_desugar src in
+  let decls = Lazy.force authority_decl_for_eval :: decls in
   let m = { m with March_ast.Ast.mod_decls = decls @ m.March_ast.Ast.mod_decls } in
   March_eval.Eval.eval_module_env m
 
@@ -905,7 +911,7 @@ let setup_jit_runtime () =
     let extra_src_list = List.filter_map opt_path [
       "march_scheduler.c"; "march_reclaim.c"; "march_message.c"; "march_heap.c";
       "march_gc.c"; "sha1.c"; "march_extras.c"; "march_ctx_escape.c";
-      "base64.c"; "march_ffi.c";
+      "march_handle.c"; "march_file_beneath.c"; "base64.c"; "march_ffi.c";
       "march_dispatch.c"; "march_reload.c"; "march_remote_registry.c";
       "march_monitor_registry.c"; "march_observe.c"; "march_observe_snapshot.c"; "march_observe_debug.c"; "march_trace.c"; "march_sig.c"; "tweetnacl.c"; "march_nacl.c";
       "pqc.c"; "march_pqc.c";
@@ -1496,7 +1502,7 @@ let dummy_actor_def = March_ast.Ast.{
   actor_init      = ELit (LitInt 0, dummy_span);
   actor_handlers  = [];
   actor_supervise = None;
-  actor_mailbox = None; actor_remote = false; actor_on_stop = None;
+  actor_mailbox = None; actor_remote = false; actor_on_stop = None; actor_internal = false; actor_migrate = None;
   actor_compat    = "full";
   actor_invariant = None;
 }
@@ -2688,3 +2694,222 @@ let run_groups name (groups : (string * unit Alcotest.test_case list) list) =
            (String.concat "\n" (List.map (fun (g, why) -> Printf.sprintf "  %s (%s)" g why) fs)));
       exit (if !failed = [] then 0 else 1)
     end
+
+(* ── ocap phase 2, Task 2: handle-primitive fixtures ─────────────────────
+   Shared by test_eval.ml (interpreted) and test_codegen.ml (compiled), so
+   both backends run the very same program and must print the same thing.
+   The primitives are stdlib-only; the tests run each fixture with
+   `--stdlib-source`. Kind 4 is TCP_BORROWED, whose release is a no-op, so
+   the raw value 7 is never really closed. *)
+let handle_roundtrip_src = {|mod HandleRoundtrip do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let h : Socket = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    let raw = handle_enter(h, 3) -- kind TCP
+    handle_leave(h)
+    let first = handle_close(h)
+    let after = handle_enter(h, 3) -- kind TCP
+    let second = handle_close(h)
+    println("[" ++ int_to_string(raw) ++ ", " ++ bool_to_string(first) ++ ", "
+            ++ int_to_string(after) ++ ", " ++ bool_to_string(second) ++ "]")
+  end
+end
+|}
+
+let handle_roundtrip_expected = "[7, true, -1, false]"
+
+let handle_containers_src = {|mod HandleContainers do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do
+    let h : Socket = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    let xs : List(Socket) = [h, h]
+    let m : Map(String, Socket) = Map.singleton("a", h)
+    let r = { sock: h, n: 1 }
+    println(inspect(xs))
+    println(inspect(m))
+    println(inspect(r))
+    let _ = handle_close(h)
+    println(inspect(h))
+    println(int_to_string(List.length(xs)))
+  end
+end
+|}
+
+(* A user module VARIANT type named like a handle type (`App.Process`), next to a
+   builtin `Process` box: the TIR must keep the two apart (R7). *)
+let handle_vs_user_type_src = {|mod Main do
+  needs IO.Console
+  mod App do
+    type Process = P(Int, Int)
+    fn mk(a : Int, b : Int) : Process do P(a, b) end
+    fn show(p : Process) : String do
+      match p do
+        P(a, b) -> int_to_string(a) ++ "," ++ int_to_string(b)
+      end
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let p = App.mk(3, 4)
+    let h : Process = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    let hs : List(Process) = [h, h]
+    let ps = [p, App.mk(5, 6)]
+    println(App.show(p))
+    println(inspect(hs))
+    println(inspect(ps))
+    let _ = handle_close(h)
+    println(inspect(h))
+  end
+end
+|}
+
+(* A user RECORD named `Socket` inside a variant, next to a builtin handle
+   box (review fix round 1): the record must lower as the record. *)
+let handle_vs_user_record_src = {|mod App do
+  needs IO.Console
+  type Socket = { fd : Int, name : String }
+  type Wrap = W(Socket)
+  fn f(s : Socket) : Int do s.fd end
+  fn g(w : Wrap) : String do
+    match w do
+      W(s) -> s.name ++ int_to_string(f(s))
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let s : Socket = { fd: 42, name: "x" }
+    let h : Listener = handle_new(4, 7, 0) -- kind TCP_BORROWED
+    println(int_to_string(f(s)))
+    println(g(W(s)))
+    let ws = [W(s), W({ fd: 1, name: "y" })]
+    println(to_string(ws))
+    println(inspect([h]))
+  end
+end
+|}
+
+(* ocap phase 2b, Task 8 (ruling R4): a Process box released without
+   wait_proc reaps its child: closes its pipes, SIGTERMs it if it is still
+   running and reaps it without blocking (a child that has not exited yet is
+   reaped by the next spawn or release, which the `ps` polls below are).
+   The child is `sh` exec'ing `sleep 30`, so before the fix it outlived the
+   box ("running"); a release that only signalled it would leave a zombie.
+   `close` releases through `handle_close` (stdlib-only: run with
+   `--stdlib-source`), at a known point on both backends; `drop` lets the
+   last reference go, which only the compiled box releases at a known point
+   (the interpreter's box waits for the OCaml GC), so it runs compiled only. *)
+let process_reap_src ?(trap = false) ~drop () = Printf.sprintf {|mod ProcessReap do
+  needs IO.Console
+  needs IO.Process
+
+  -- A shell that prints its pid, then becomes `sleep 30` (same pid); with
+  -- the trap, one that ignores SIGTERM (exec keeps SIG_IGN), so only the
+  -- release's SIGKILL ends it.
+  pfn spawn_sleeper() : Process do
+    match Authority.must(Process.spawn_async("sh", ["-c", "%s"])) do
+      Ok(p) -> p
+      Err(e) -> panic("spawn failed: " ++ to_string(e))
+    end
+  end
+
+  pfn pid_of(p : Process) : String do
+    match Process.read_line(p) do
+      Ok(Some(s)) -> s
+      _ -> panic("no pid line")
+    end
+  end
+
+  -- `ps` prints nothing for a pid that names no process (reaped).
+  pfn ps_state(pid : String) : String do
+    match Authority.must(Process.run("ps", ["-o", "stat=", "-p", pid])) do
+      Ok(r) ->
+        let st = String.trim(Process.stdout(r))
+        if st == "" do "gone"
+        else if String.starts_with(st, "Z") do "zombie" else "running" end end
+      Err(e) -> "ps failed: " ++ e
+    end
+  end
+
+  pfn settle(pid : String, n : Int) : String do
+    let st = ps_state(pid)
+    if st == "gone" || n == 0 do st
+    else
+      sleep_ms(20)
+      settle(pid, n - 1)
+    end
+  end
+
+  -- The Process's last reference goes when this returns.
+  pfn dropped() : String do
+    pid_of(spawn_sleeper())
+  end
+
+  pfn closed() : String do
+    let p = spawn_sleeper()
+    let pid = pid_of(p)
+    let _ = handle_close(p)
+    pid
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process)) do
+    let pid = %s
+    println("child after release: " ++ settle(pid, 250))
+  end
+end
+|} (if trap then "echo $$; trap '' TERM; exec sleep 30" else "echo $$; exec sleep 30")
+  (if drop then "dropped()" else "closed()")
+
+let process_reap_expected = "child after release: gone"
+
+(* Fix round 1 (finding 3): two wait_proc calls racing on one Process. Both
+   can pass handle_enter before either closes the handle; the loser's waitpid
+   then fails (ECHILD) and must be Err(Closed), never an exit code (it used to
+   be Ok(0) compiled, Ok(-1) interpreted). Each round, exactly one Ok. *)
+let process_wait_race_src = {|mod WaitRace do
+  needs IO.Console
+  needs IO.Process
+  needs IO.Spawn
+
+  pfn one_round() : Int do
+    match Authority.must(Process.spawn_async("sh", ["-c", "sleep 0.2"])) do
+      Err(e) -> panic("spawn failed: " ++ to_string(e))
+      Ok(p) ->
+        let a = task_spawn(fn _ -> Process.wait_proc(p))
+        let b = task_spawn(fn _ -> Process.wait_proc(p))
+        let ra = task_await_unwrap(a)
+        let rb = task_await_unwrap(b)
+        let oks = (if Result.is_ok(ra) do 1 else 0 end) + (if Result.is_ok(rb) do 1 else 0 end)
+        let closed = (if ra == Err(Process.Closed) do 1 else 0 end) + (if rb == Err(Process.Closed) do 1 else 0 end)
+        if oks == 1 && closed == 1 do 1 else 0 end
+    end
+  end
+
+  pfn rounds(i : Int, n : Int, good : Int) : Int do
+    if i == n do good else rounds(i + 1, n, good + one_round()) end
+  end
+
+  fn main(_c : Cap(IO.Console), _p : Cap(IO.Process), _s : Cap(IO.Spawn)) do
+    println("rounds with one Ok and one Closed: " ++ int_to_string(rounds(0, 6, 0)) ++ "/6")
+  end
+end
+|}
+
+let process_wait_race_expected = "rounds with one Ok and one Closed: 6/6"
+
+(** Run [src] (written to a fresh temp dir as [name].march) with the
+    compiler under a private HOME, as a stdlib source; [compiled] builds it
+    with `--compile` first. Returns (exit code, combined output). *)
+let run_handle_fixture ~compiled ~name src =
+  let main_exe = find_main_exe () in
+  let dir = Filename.temp_dir ("march_" ^ name) "" in
+  let file = Filename.concat dir (name ^ ".march") in
+  Out_channel.with_open_bin file (fun oc -> output_string oc src);
+  let q = Filename.quote in
+  let cmd =
+    if compiled then
+      Printf.sprintf "cd %s && HOME=%s %s --compile --stdlib-source -o %s %s && %s"
+        (q dir) (q dir) (q main_exe) (q (Filename.concat dir "prog")) (q file)
+        (q (Filename.concat dir "prog"))
+    else
+      Printf.sprintf "cd %s && HOME=%s %s --stdlib-source %s"
+        (q dir) (q dir) (q main_exe) (q file)
+  in
+  run_capture cmd

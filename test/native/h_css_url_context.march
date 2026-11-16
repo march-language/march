@@ -44,5 +44,6 @@ mod CssUrl do
     -- uppercase URL( must enter the same context
     let i = "javascript:alert(1)"
     println("upper    : " ++ IOList.to_string(~H"<div style=\"background:URL(${i})\">x</div>"))
+    ()
   end
 end

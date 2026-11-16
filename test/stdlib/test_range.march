@@ -47,7 +47,7 @@ end
 
 describe "each" do
   test "visits every element in order" do
-    let v = Vault.new("test_range_each_visits")
+    let v = Authority.must(Vault.new("test_range_each_visits"))
     Range.each(Range.new_step(5, 0, -2), fn i ->
       Vault.set(v, "seen", Vault.get_or(v, "seen", "") ++ int_to_string(i)))
     assert (Vault.get_or(v, "seen", "") == "531")

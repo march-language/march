@@ -39,7 +39,7 @@ mod ClusterStopLoopback do
   end
 
   -- NodeQueue's local sinks, process-wide: one per live loopback link.
-  pfn sinks() : Int do List.length(Vault.keys(Vault.open("node_queue_sinks"))) end
+  pfn sinks() : Int do List.length(Vault.keys(Authority.must(Vault.open("node_queue_sinks")))) end
 
   -- The loopback writer drops its sink in its own turn, after stop returns.
   pfn wait_sinks(n : Int, left : Int) : Int do
@@ -50,7 +50,7 @@ mod ClusterStopLoopback do
   end
 
   fn main(c : Cap(IO)) do
-    let cfg = ClusterNode.config("node-a", Env.require_int("MARCH_PORT_A"), "", Nil, "local-secret", 1)
+    let cfg = ClusterNode.config("node-a", Authority.must(Env.require_int("MARCH_PORT_A")), "", Nil, "local-secret", 1)
     match ClusterNode.start(c, cfg) do
       Err(e) -> panic(e)
       Ok(h) ->
@@ -69,7 +69,7 @@ mod ClusterStopLoopback do
             -- session party is told its peers on this node are gone (a party
             -- left waiting for frames the closed loopback refused kept the
             -- process alive; specs/progress/2026-10-07-cluster-stop-loopback-exit-hang.md).
-            let told = Vault.new("stop_told")
+            let told = Authority.must(Vault.new("stop_told"))
             let closer = ClusterNode.on_peer_closed(h, fn (nid, why) ->
               if nid == own do Vault.set(told, "own", why) else () end)
             ClusterNode.stop(h)

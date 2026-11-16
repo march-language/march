@@ -45,6 +45,7 @@ mod Main do
   pfn flat(label : String, before : Int, result : Int) : () do
     let grew = live_allocs() - before
     println(label ++ " = " ++ int_to_string(result) ++ ", flat: " ++ bool_to_string(grew < 100))
+    ()
   end
 
   fn main(_c : Cap(IO.Console)) do

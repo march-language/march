@@ -79,6 +79,7 @@ fn main(_cap_console : Cap(IO.Console)) : Unit do
   -- Collatz-like: start from 27 (known long sequence)
   let r3 = step_even(27, 0)
   println("collatz steps from 27: " ++ int_to_string(r3))
+  ()
 end
 
 end

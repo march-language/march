@@ -26,3 +26,6 @@ mod H9 do
   end
 end
 ```
+
+Pinned as wrongly accepted by `specs/lang/refine/reject/a01_callback_param_element_demand.march`, listed in
+`specs/lang/refine/known-accepted.txt` (2026-11-11). The fix removes that line.

@@ -29,6 +29,7 @@ pfn main(_cap_console : Cap(IO.Console)) : Unit do
   let table = build_rows(50000, IOList.empty())
   let s     = IOList.to_string(table)
   println(int_to_string(string_byte_length(s)))
+  ()
 end
 
 end

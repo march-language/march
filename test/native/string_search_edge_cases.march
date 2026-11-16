@@ -77,5 +77,6 @@ mod Main do
     -- Needle longer than haystack at every entry point.
     println(show_opt(String.index_of("short", "much longer needle"))) -- None
     println(String.contains("short", "much longer needle"))    -- false
+    ()
   end
 end

@@ -1,0 +1,14 @@
+mod Q do
+  fn insert(lo : Int, x : {Int | _ >= lo}, xs : {List(Int) | (forall i in 0..len(_), nth(_, i) >= lo) && (forall i in 0..len(_), forall j in i..len(_), nth(_, i) <= nth(_, j))}) : {List(Int) | (forall i in 0..len(_), nth(_, i) >= lo) && (forall i in 0..len(_), forall j in i..len(_), nth(_, i) <= nth(_, j))} do
+    match xs do
+      Nil -> Cons(x, Nil)
+      Cons(h, t) -> if x <= h do Cons(x, xs) else Cons(h, insert(h, x, t)) end
+    end
+  end
+  fn sort(lo : Int, xs : {List(Int) | forall i in 0..len(_), nth(_, i) >= lo}) : {List(Int) | (forall i in 0..len(_), nth(_, i) >= lo) && (forall i in 0..len(_), forall j in i..len(_), nth(_, i) <= nth(_, j))} do
+    match xs do
+      Nil -> Nil
+      Cons(h, t) -> insert(lo, h, sort(lo, t))
+    end
+  end
+end

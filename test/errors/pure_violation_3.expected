@@ -1,0 +1,23 @@
+exit: 1
+-- CONTRACT --------------- errors/pure_violation_3.march
+
+`direct` in `mod Pure` (declared `cap pure`) calls `sys_uptime_ms`, which has side effects. [pure_violation]
+
+Use pure functions (no IO, spawn, vault, clock, or random ops) in a `cap pure` module.
+
+14 |       sys_uptime_ms()
+           ^^^^^^^^^^^^^
+
+
+
+-- CONTRACT --------------- errors/pure_violation_3.march
+
+`wrapped` in `mod Pure` (declared `cap pure`) calls `System.monotonic_time`, which has side effects: it reaches `sys_uptime_ms`. [pure_violation]
+
+Use pure functions (no IO, spawn, vault, clock, or random ops) in a `cap pure` module.
+
+17 |       System.monotonic_time()
+           ^^^^^^^^^^^^^^^^^^^^^
+
+
+

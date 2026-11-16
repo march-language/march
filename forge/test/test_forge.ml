@@ -1989,7 +1989,7 @@ let test_schema_handlers_and_message_diff () =
     (List.map show (Option.get s.Schema_diff.migrate_msg_from));
   Alcotest.(check (list string)) "state fields still parsed" ["n"]
     (List.map (fun (f : Schema_diff.field) -> f.name) s.Schema_diff.state_fields);
-  let c n ps = { Schema_diff.cname = n; params = ps; refines = [] } in
+  let c n ps = { Schema_diff.cname = n; params = ps; refines = []; tag = None } in
   let old_h = [ c "Add" ["Int"]; c "Show" [] ] in
   Alcotest.(check bool) "adding a handler is not a message change" false
     (Schema_diff.messages_changed ~old_h ~new_h:(old_h @ [ c "Reset" [] ]));
@@ -1998,8 +1998,144 @@ let test_schema_handlers_and_message_diff () =
   Alcotest.(check bool) "changing a parameter type is" true
     (Schema_diff.messages_changed ~old_h ~new_h:[ c "Add" ["String"]; c "Show" [] ])
 
+(* H7: the deploy gate compares each constructor's actor-message tag
+   between the running version's schema and the new build's
+   (Schema_diff.tag_check). A tag moves between builds only when a hash
+   collision made one key probe; nothing compared them before. *)
+(* A derived drop-only migration (todo 2026-11-08-hcr-derive-rollback-state):
+   the sidecar names the dropped fields, and the deploy note says the
+   migration is the running version's proved rollback, not "every field
+   kept". *)
+let test_derived_drops_note () =
+  let schemas drops =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string (Printf.sprintf {|{
+      "Counter": {"compat": "full", "migrate_derived": []%s,
+                  "state_fields": [{"name": "count", "ty": "Int"}]}}|} drops)) in
+  let note s = Option.value ~default:"" (Schema_diff.derived_note s "Counter") in
+  let s = schemas {|, "migrate_derived_drops": ["hits"]|} in
+  Alcotest.(check (list string)) "parsed" [ "hits" ] (List.assoc "Counter" s).Schema_diff.derived_drops;
+  Alcotest.(check bool) "names the rollback" true
+    (contains (note s) "derived as the running version's proved rollback (drops hits");
+  Alcotest.(check bool) "an add-only derivation keeps its wording" true
+    (contains (note (schemas "")) "every field kept")
+
+(* Migrate clauses (todo 2026-11-06-hcr-derive-field-rename): the plan says
+   which fields the clause renamed or computed, and a rollback deploy that
+   undoes a rename says it copies the value back. *)
+let test_derived_clause_note () =
+  let schemas extra =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string (Printf.sprintf {|{
+      "Counter": {"compat": "full", "migrate_derived": ["hits"]%s,
+                  "state_fields": [{"name": "total", "ty": "Int"}]}}|} extra)) in
+  let note s = Option.value ~default:"" (Schema_diff.derived_note s "Counter") in
+  let s =
+    schemas {|, "migrate_clause": ["total", "scaled"], "migrate_derived_moves": [["total", "count"]]|} in
+  Alcotest.(check (list (pair string string))) "moves parsed" [ ("total", "count") ]
+    (List.assoc "Counter" s).Schema_diff.derived_moves;
+  Alcotest.(check string) "clause note"
+    "actor Counter: migrate_state derived from the migrate clause (renames: total from count; \
+     scaled from the clause; adds hits from init)"
+    (note s);
+  let back =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string {|{
+      "Counter": {"compat": "full", "migrate_derived": [], "migrate_derived_drops": [],
+                  "migrate_derived_moves": [["count", "total"]],
+                  "state_fields": [{"name": "count", "ty": "Int"}]}}|}) in
+  Alcotest.(check string) "rollback that undoes a rename"
+    "actor Counter: migrate_state derived as the running version's proved rollback \
+     (copies back count from total)"
+    (note back)
+
+(* forge deploy hot --drop (todo 2026-11-15-hcr-deploy-drop-consent): a
+   --drop the build's schemas do not record as dropped is reported, the plan
+   names drops by consent, and a removed-field refusal says --drop exists. *)
+let test_drop_consent () =
+  let schemas extra =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string (Printf.sprintf {|{
+      "Counter": {"compat": "full"%s,
+                  "state_fields": [{"name": "count", "ty": "Int"}]}}|} extra)) in
+  let s = schemas {|, "migrate_derived": [], "migrate_drops_consented": ["history"]|} in
+  Alcotest.(check (list string)) "a recorded drop is used" []
+    (Schema_diff.unused_drops s [ "Counter.history" ]);
+  Alcotest.(check (list string)) "unrecorded, other actor, malformed"
+    [ "Counter.count"; "Other.history"; "history" ]
+    (Schema_diff.unused_drops s [ "Counter.count"; "Other.history"; "history" ]);
+  Alcotest.(check string) "plan names the drop"
+    "actor Counter: migrate_state derived from the running version's state (drops history by --drop)"
+    (Option.value ~default:"" (Schema_diff.derived_note s "Counter"));
+  let refused = schemas {|, "migrate_not_derived": "it removes history"|} in
+  Alcotest.(check string) "a removal refusal mentions --drop"
+    " (not derived: it removes history; to discard that data, deploy with --drop Counter.<field>)"
+    (Schema_diff.not_derived_note refused "Counter");
+  let suggested =
+    schemas {|, "migrate_not_derived": "it removes count (if `total` renames it, add `migrate old -> { total: old.count }` to the actor)"|} in
+  Alcotest.(check bool) "a rename suggestion is not followed by the --drop hint" false
+    (contains (Schema_diff.not_derived_note suggested "Counter") "--drop")
+
+(* forge fix --only CODE opts into that code's fixes whatever their tier
+   (todo 2026-11-15-hcr-migrate-clause-suggestion); plain forge fix never
+   applies a guess. *)
+let test_fix_only_opts_into_guesses () =
+  let line =
+    {|{"severity":"warning","file":"m.march","start_line":2,"start_col":8,"end_line":2,"end_col":15,"message":"rename?","code":"migrate_rename_suggested","fix":{"kind":"insert","after_line":4,"text":"    migrate old -> { total: old.count }","applicability":"maybe-incorrect"}}|} in
+  Alcotest.(check int) "a guess is not applied unasked" 0 (List.length (Cmd_fix.parse_fix_line line));
+  Alcotest.(check int) "naming its code applies it" 1
+    (List.length (Cmd_fix.parse_fix_line ~opt_in:[ "migrate_rename_suggested" ] line));
+  Alcotest.(check int) "naming another code does not" 0
+    (List.length (Cmd_fix.parse_fix_line ~opt_in:[ "unused_binding" ] line))
+
+let test_schema_tag_check () =
+  let parse s = List.assoc "Tally" (Schema_diff.parse_schemas_json (Yojson.Safe.from_string s)) in
+  let schema ?(mm = "") handlers =
+    parse (Printf.sprintf {|{"Tally": {"compat": "full", "handlers": [%s],%s "state_fields": []}}|}
+             handlers (if mm = "" then "" else Printf.sprintf {| "migrate_msg_from": [%s],|} mm)) in
+  let bump t = Printf.sprintf {|{"name":"Bump","params":["Int"],"tag":%d}|} t in
+  let reset t = Printf.sprintf {|{"name":"Reset","params":[],"tag":%d}|} t in
+  let show = function
+    | Schema_diff.Tag_moved { ctor; old_tag; new_tag } ->
+      Printf.sprintf "moved %s %d->%d" ctor old_tag new_tag
+    | Schema_diff.Tags_unrecorded why -> "unrecorded: " ^ why
+    | Schema_diff.Tags_agree n -> Printf.sprintf "agree %d" n in
+  let check name expect old_s new_s =
+    Alcotest.(check (list string)) name expect
+      (List.map show (Schema_diff.tag_check ~old_s ~new_s)) in
+  let v1 = schema (String.concat ", " [ bump 100; reset 200 ]) in
+  Alcotest.(check (option int)) "the tag field is parsed" (Some 100)
+    (List.hd (Option.get v1.Schema_diff.handlers)).Schema_diff.tag;
+  check "equal tags agree" [ "agree 2" ] v1 (schema (String.concat ", " [ reset 200; bump 100 ]));
+  check "a new handler is not compared" [ "agree 2" ] v1
+    (schema (String.concat ", " [ bump 100; reset 200; {|{"name":"New","params":[],"tag":300}|} ]));
+  check "a moved tag is found" [ "moved Bump 100->101" ] v1
+    (schema (String.concat ", " [ bump 101; reset 200 ]));
+  (* A removed handler is compared through migrate_msg's old type, which
+     takes the actor's tags by constructor name. *)
+  check "a removed handler, through migrate_msg_from" [ "moved Reset 200->201" ] v1
+    (schema ~mm:(String.concat ", " [ bump 100; reset 201 ]) (bump 100));
+  check "migrate_msg_from agreeing" [ "agree 2" ] v1
+    (schema ~mm:(String.concat ", " [ bump 100; reset 200 ]) (bump 100));
+  let untagged = schema {|{"name":"Bump","params":["Int"]}, {"name":"Reset","params":[]}|} in
+  (match Schema_diff.tag_check ~old_s:untagged ~new_s:v1 with
+   | [ Schema_diff.Tags_unrecorded why ] ->
+     Alcotest.(check bool) ("why names the baseline: " ^ why) true
+       (String.length why > 40 && String.sub why 0 40 = "the running version's schema predates ac")
+   | fs -> Alcotest.failf "untagged baseline: %s" (String.concat "; " (List.map show fs)));
+  check "an untagged new build is reported too"
+    [ "unrecorded: this build's schema records no actor-message tags" ] v1 untagged;
+  let msg = Schema_diff.tag_moved_message ~actor:"Tally" ~ctor:"Bump" ~old_tag:0x01000010
+      ~new_tag:0x01000011 in
+  List.iter (fun frag ->
+      let hl = String.length msg and nl = String.length frag in
+      let rec go i = i + nl <= hl && (String.sub msg i nl = frag || go (i + 1)) in
+      if not (go 0) then Alcotest.failf "refusal lacks %S: %s" frag msg)
+    [ "Tally.Bump's actor-message tag moved"; "0x01000010"; "0x01000011"; "hash collision" ];
+  (* A baseline without tags is still the same message type as a tagged
+     migrate_msg_from: the tag is the tag check's business. *)
+  Alcotest.(check bool) "same_message_type ignores the recorded tags" true
+    (Schema_diff.same_message_type (Option.get v1.Schema_diff.handlers)
+       (Option.get untagged.Schema_diff.handlers))
+
 let test_migrate_msg_stub () =
-  let c n ps = { Schema_diff.cname = n; params = ps; refines = [] } in
+  let c n ps ={ Schema_diff.cname = n; params = ps; refines = []; tag = None } in
   let stub = Cmd_deploy_hot.migrate_msg_stub ~actor:"Counter"
       ~old_h:[ c "Add" ["Int"]; c "Show" [] ]
       ~new_h:[ c "Add" ["Int"]; c "Reset" [] ] () in
@@ -2626,6 +2762,7 @@ let test_compiled_run_end_to_end () =
          "";
          "  fn main(_cap : Cap(IO.Console)) : () do";
          "    println(\"forge-run-e2e-ok\")";
+         "    ()";
          "  end";
          "end";
          "" ]);
@@ -2770,7 +2907,8 @@ let test_interpreted_file_run_argv_excludes_compiler () =
          "  needs IO";
          "";
          "  fn main(_cap : Cap(IO)) : () do";
-         "    println(to_string(List.length(System.argv())))";
+         "    println(to_string(List.length(Authority.must(System.argv()))))";
+         "    ()";
          "  end";
          "end";
          "" ]);
@@ -2902,6 +3040,7 @@ let test_js_entrypoint_selects_js_main () =
         "  needs IO.Console";
         "  fn main(_c : Cap(IO.Console)) : Unit do";
         "    println(\"" ^ text ^ "\")";
+        "    ()";
         "  end";
         "end";
         "" ] in
@@ -2963,6 +3102,7 @@ let test_bench_links_ffi_sources () =
          "";
          "  fn main(_c : Cap(IO.Console), _f : Cap(IO.Foreign)) : Unit do";
          "    println(\"answer=\" ++ int_to_string(answer()))";
+         "    ()";
          "  end";
          "end";
          "" ]);
@@ -3520,6 +3660,15 @@ let () =
       Alcotest.test_case "compact server schema baseline" `Quick test_compact_schema_baseline;
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "schemas: --accept-unproved must be built into the patch" `Quick test_overrides_must_be_built_in;
+      Alcotest.test_case "schemas: actor-message tags compared at deploy (H7)" `Quick test_schema_tag_check;
+      Alcotest.test_case "schemas: a derived drop-only migration is named as the rollback" `Quick
+        test_derived_drops_note;
+      Alcotest.test_case "derived note: a migrate clause and the rename it undoes" `Quick
+        test_derived_clause_note;
+      Alcotest.test_case "deploy --drop: unused drops, the plan note, the refusal hint" `Quick
+        test_drop_consent;
+      Alcotest.test_case "fix --only opts into a code's guessed fixes" `Quick
+        test_fix_only_opts_into_guesses;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;

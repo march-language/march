@@ -7,5 +7,6 @@ mod JsUnmappedBuiltin do
   needs IO.Console
   fn main(_cap_console : Cap(IO.Console)) : Unit do
     println(int_to_string(int_max_value(())))
+    ()
   end
 end

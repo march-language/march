@@ -121,7 +121,7 @@ mod Main do
   fn dump(log) do
     match Actor.call(log, GetLog, 5000) do
       Ok(ls) -> List.each(ls, fn l -> println("  log: " ++ l))
-      Err(e) -> println("  log error: " ++ e)
+      Err(e) -> Authority.ignore(println("  log error: " ++ e))
     end
   end
 

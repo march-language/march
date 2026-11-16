@@ -311,7 +311,10 @@ let ensure ~(cc : string) ~(cflags : string) ~(sources : string list)
     the per-object publish above.  [Error] rather than raise: the caller
     falls back to linking the members as loose objects. *)
 let archived_members =
-  [ "march_tls.o"; "march_compress.o"; "march_compress_zstd.o"; "march_compress_brotli.o" ]
+  [ "march_tls.o"; "march_compress.o"; "march_compress_zstd.o"; "march_compress_brotli.o";
+    (* the HTTPS server's OpenSSL side; the always-linked HTTP runtime reaches
+       it only through runtime/march_tls_ops.h's table *)
+    "march_tls_session.o"; "march_tls_server.o"; "march_https_tls.o" ]
 
 let ensure_opt_archive ~(objs : string list) : (string, string) result =
   match objs with

@@ -28,3 +28,6 @@ declared domain when refined), and check every refined parameter against them; t
 refine oracle and the stdlib sweep, since stdlib code passing a two-parameter named function
 with refined parameters to a fold becomes obliged (expected violations or skips there are
 real findings, not regressions).
+
+Pinned as wrongly accepted by `specs/lang/refine/reject/a02_multi_param_callable_domain.march`, listed in
+`specs/lang/refine/known-accepted.txt` (2026-11-11). The fix removes that line.

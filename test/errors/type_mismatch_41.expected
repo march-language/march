@@ -4,7 +4,7 @@ exit: 1
 Non-exhaustive pattern match — missing case: None. [non_exhaustive_match]
 
 7 |     match parse(n) do
-              ^^^^^^^^^^^
+        ^^^^^^^^^^^^^^^^^
 
     Add a branch for this case, or use `_ -> ...` as a catch-all.
 

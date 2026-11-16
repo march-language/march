@@ -1,0 +1,93 @@
+-- Ghost code, worked example (specs/lang/lemmas.md, "Ghost code").
+--
+-- A binary search tree's order is a property of every key at once: stated on
+-- the tree alone it needs a quantifier.  With two ghost bounds it is a
+-- recursive Boolean function, `bst(t, lo, hi)`, which the refinement checker
+-- unfolds.  The bounds exist only for the proof: `contains` takes them as
+-- ghost parameters, its callers pass ghost arguments, and the compiled
+-- program has neither (it is the same program as without them).
+mod Bst do
+  needs IO.Console
+
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  -- Membership by walking every node.  Logic only: never compiled.
+  ghost fn mem(t : Tree, x : Int) : Bool do
+    match t do
+    Leaf -> false
+    Node(l, v, r) -> x == v || mem(l, x) || mem(r, x)
+    end
+  end
+
+  -- Every key lies strictly between lo and hi, recursively.
+  @[reflect(fuel: 4)]
+  ghost fn bst(t : Tree, lo : Int, hi : Int) : Bool do
+    match t do
+    Leaf -> true
+    Node(l, v, r) -> lo < v && v < hi && bst(l, lo, v) && bst(r, v, hi)
+    end
+  end
+
+  -- A node's order gives its children's, with the node's key as the new bound.
+  @[lemma]
+  fn split(l : Tree, v : Int, r : Tree, lo : Int, hi : Int)
+      : {Unit | !bst(Node(l, v, r), lo, hi) || (lo < v && v < hi && bst(l, lo, v) && bst(r, v, hi))} do
+    ()
+  end
+
+  -- A key outside the bounds is not in an ordered tree (induction on t).
+  @[lemma]
+  fn outside(t : Tree, lo : Int, hi : Int, x : Int)
+      : {Unit | !bst(t, lo, hi) || (lo < x && x < hi) || !mem(t, x)} do
+    match t do
+    Leaf -> ()
+    Node(l, v, r) ->
+      outside(l, lo, v, x)
+      outside(r, v, hi, x)
+    end
+  end
+
+  -- Search one side only.  Each recursive call must show the subtree is
+  -- ordered between the narrowed ghost bounds, from the ghost precondition.
+  fn contains(ghost lo : Int, ghost hi : Int, t : {Tree | bst(_, lo, hi)}, x : Int) : Bool do
+    match t do
+    Leaf -> false
+    Node(l, v, r) ->
+      split(l, v, r, lo, hi)
+      if x < v do
+        outside(r, v, hi, x)
+        contains(lo, v, l, x)
+      else
+        if x > v do
+          outside(l, lo, v, x)
+          contains(v, hi, r, x)
+        else true end
+      end
+    end
+  end
+
+  -- A caller passes ghost arguments the same way, here from its own ghost
+  -- parameters, and may name intermediate ghost values with `ghost let`.
+  fn count_in(ghost lo : Int, ghost hi : Int, t : {Tree | bst(_, lo, hi)}, xs : List(Int), acc : Int) : Int do
+    match xs do
+    Nil -> acc
+    Cons(x, rest) ->
+      ghost let top = hi
+      let here = if contains(lo, top, t, x) do 1 else 0 end
+      count_in(lo, hi, t, rest, acc + here)
+    end
+  end
+
+  -- A closure may pass ghost arguments too.  It captures `t`, and after
+  -- erasure nothing else: the ghost bounds were never runtime values.
+  fn hits(ghost lo : Int, ghost hi : Int, t : {Tree | bst(_, lo, hi)}, xs : List(Int)) : List(Bool) do
+    List.map(xs, fn x -> contains(lo, hi, t, x))
+  end
+
+  fn main(cap : Cap(IO.Console)) do
+    let n = count_in(0, 10, Node(Node(Leaf, 1, Leaf), 5, Node(Leaf, 9, Leaf)), [1, 4, 5, 9, 12], 0)
+    println(int_to_string(n))
+    let found = hits(0, 10, Node(Node(Leaf, 1, Leaf), 5, Node(Leaf, 9, Leaf)), [5, 6])
+    println(if List.length(found) == 2 do "two" else "?" end)
+  end
+end

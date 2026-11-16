@@ -393,14 +393,21 @@ mod DataFrame do
 
   doc """
   A hash of a value used for group-by / join keys: the Int itself, the
-  Float scaled by 1e6 and truncated, djb2 over a string's characters,
-  0/1 for Bool and 0 for Null. Equal values hash equally; not a
-  cryptographic hash.
+  Float scaled by 1e6 and truncated (or, when that does not fit an Int or
+  the Float is NaN, the hash of its `float_to_string`), djb2 over a
+  string's characters, 0/1 for Bool and 0 for Null. Equal values hash
+  equally; not a cryptographic hash.
   """
   fn value_hash(v : Value) : Int do
     match v do
     IntVal(n)   -> n
-    FloatVal(f) -> float_to_int(f * 1000000.0)
+    FloatVal(f) -> do
+      -- float_to_int panics outside Int's range and on NaN (#1230).
+      let scaled = f * 1000000.0
+      if scaled > -4600000000000000000.0 && scaled < 4600000000000000000.0 do
+        float_to_int(scaled)
+      else value_hash(StrVal(float_to_string(f))) end
+      end
     StrVal(s)   -> do
       -- djb2 hash
       let chars = string_chars(s)
@@ -2238,8 +2245,12 @@ mod DataFrame do
     Null      -> NullVal
     Bool(b)   -> BoolVal(b)
     Number(f) -> do
-      let i = float_to_int(f)
-      if int_to_float(i) == f do IntVal(i) else FloatVal(f) end
+      -- float_to_int panics on NaN, infinities and values outside Int's
+      -- range (#1230); those stay Floats.
+      if f > -4600000000000000000.0 && f < 4600000000000000000.0 do
+        let i = float_to_int(f)
+        if int_to_float(i) == f do IntVal(i) else FloatVal(f) end
+      else FloatVal(f) end
       end
     JsonValue.Str(s) -> StrVal(s)
     _                -> StrVal(Json.to_string(jv))
@@ -3945,16 +3956,23 @@ mod DataFrame do
 
   -- ── Utilities ──────────────────────────────────────────────────────────────
 
+  -- Escape every occurrence of the HTML-special characters (`&` first, so the
+  -- entities the later passes introduce are not escaped again). Each pass must
+  -- be `string_replace_all`: `string_replace` replaces only the first match,
+  -- which left later `<`s raw (an XSS through `to_html`).
   pfn html_esc(s : String) : String do
-    string_replace(string_replace(string_replace(string_replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;")
+    let s1 = string_replace_all(s,  "&", "&amp;")
+    let s2 = string_replace_all(s1, "<", "&lt;")
+    let s3 = string_replace_all(s2, ">", "&gt;")
+    let s4 = string_replace_all(s3, "\"", "&quot;")
+    string_replace_all(s4, "'", "&#39;")
   end
 
   doc """
   Render a DataFrame as an HTML table string: a `<caption>` with the
   dimensions ("N rows x M cols"), a header row of column names and one
-  `<tr>` per row (cells via `value_to_string`). Note: header and cell text
-  is only partially escaped; just the first occurrence of each of `&`,
-  `<`, `>` and `"` is replaced, so do not feed it untrusted text.
+  `<tr>` per row (cells via `value_to_string`). Header and cell text is
+  HTML-escaped: every `&`, `<`, `>`, `"` and `'` becomes an entity.
   The output is detected automatically by the March notebook and displayed
   as a styled table rather than raw text.
   """
@@ -3997,6 +4015,7 @@ mod DataFrame do
         let cells = List.map(pairs, fn pair ->
           match pair do (_, v) -> value_to_string(v) end)
         println(string_join(cells, " | "))
+        ()
       end
       end)
   end

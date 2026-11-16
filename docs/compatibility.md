@@ -128,19 +128,37 @@ which ones.
 
 ## How something is deprecated
 
-**Planned:** a `@[deprecated("use X instead")]` attribute. It doesn't exist yet; the parser
-does not accept it today. Once it does:
+A function is deprecated with the `@[deprecated("...")]` attribute. The string is the message
+its callers see, so it names the replacement:
 
-1. A deprecated function, type or module still works, and every use of it gets a warning
-   naming the replacement. `forge fix` applies the replacement when it can.
+```march
+mod Temperature do
+  @[deprecated("use `Temperature.to_fahrenheit` instead")]
+  fn c_to_f(c : Int) : Int do
+    to_fahrenheit(c)
+  end
+
+  fn to_fahrenheit(c : Int) : Int do
+    c * 9 / 5 + 32
+  end
+end
+```
+
+1. A deprecated function still works. Every use of it from outside the module that declares
+   it gets a warning (`deprecated`) carrying the message; see
+   [`deprecated`]({{ site.baseurl }}/docs/errors/deprecated/). A warning does not change the
+   exit status. Uses inside the declaring module do not warn.
 2. The deprecation is listed under `### Deprecated` in the CHANGELOG for the release that
    makes it.
 3. A deprecated part of the **stable** tier is removed only in the next major version
    (2.0). A deprecated part of the **experimental** tier may be removed in any later minor
    release, but not in the same release that deprecates it.
 
-Until the attribute exists, a deprecation is announced only in the CHANGELOG and the
-upgrading guide for that release.
+**Not built yet:** the attribute marks functions only. A type or a module cannot carry it
+(the parser rejects it there), so deprecating one is announced in the CHANGELOG and the
+upgrading guide for that release, and by deprecating its functions. `forge fix` does not
+rewrite a deprecated call to its replacement, and the generated API reference does not show
+the message on the function.
 
 ## Stability tiers
 
