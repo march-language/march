@@ -928,7 +928,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      | None -> ty_of_expr env b.bind_expr);
              v_lin = lower_linearity b.bind_lin;
            } in
-           top_lets := (v, rhs) :: !top_lets
+           top_lets := (v, rhs) :: !top_lets;
+           Lower_state._module_init_binders := v :: !Lower_state._module_init_binders
          | _ -> ())
       | Ast.DActor (_, name, actor_def, span) ->
         let (new_types, new_fns) = Lower_actor.lower_actor env ~hot_reload name.txt actor_def in

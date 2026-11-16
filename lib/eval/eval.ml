@@ -572,6 +572,59 @@ let effective_module_prefix () =
   | Some p -> p
   | None -> current_doc_prefix ()
 
+(** Ocap phase 4, capture (lib/tir/auth_rt.ml [captures] is the compiled
+    twin): a function value runs under the authority it was made under.
+    [module_init] is true while a module-level declaration's initialiser
+    runs (not inside a function it calls: [apply_inner] clears it), where a
+    function value captures nothing (design §21). *)
+let module_init : bool ref = ref false
+
+let in_module_init (k : unit -> 'a) : 'a =
+  let saved = !module_init in
+  module_init := true;
+  Fun.protect ~finally:(fun () -> module_init := saved) k
+
+(** The authority a function value made here captures. *)
+let current_capture () : value option =
+  if !module_init then None else Some !Eval_builtins.cap_slot
+
+(** Run [k] under the authority [a] (no write when it is already in force). *)
+let with_authority (a : value) (k : unit -> 'a) : 'a =
+  if a == !Eval_builtins.cap_slot then k ()
+  else begin
+    let saved = !Eval_builtins.cap_slot in
+    Eval_builtins.cap_slot := a;
+    Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved) k
+  end
+
+(** [v], the value of the variable [name] read outside callee position:
+    when it is a named fn ([<rec:NAME/ARITY>], the closure every [DFn]
+    binds) or a builtin read by its own name, a copy that runs under the
+    authority in force here.  Anything else as it is: a lambda captured
+    when it was made, a module-level value captures nothing. *)
+let capture_named_value (name : string) (v : value) : value =
+  match v with
+  | VBuiltin (bname, f) when not !module_init ->
+    let named =
+      if String.starts_with ~prefix:"<rec:" bname then
+        match String.rindex_opt bname '/' with
+        | Some slash ->
+          let fname = String.sub bname 5 (slash - 5) in
+          name = fname || String.ends_with ~suffix:("." ^ fname) name
+        | None -> false
+      else bname = name
+    in
+    if not named then v
+    else
+      let a = !Eval_builtins.cap_slot in
+      VBuiltin (bname, fun args -> with_authority a (fun () -> f args))
+  | _ -> v
+
+(** Set by [EApp] just before it evaluates an [EVar] callee, so the [EVar]
+    arm reads it bare (a direct call runs under the caller's authority);
+    consumed at once. *)
+let callee_var : bool ref = ref false
+
 (* =================================================================
    §2  Tap bus — thread-safe value inspector (Clojure tap> model)
    ================================================================= *)
@@ -1938,9 +1991,10 @@ let rec eval_block (env : env) (es : expr list) : value =
     (* Captured NOW (this ELetFn's own construction point), not inside the
        `fun args -> …` below — see [VClosure]'s doc comment. *)
     let defn_prefix = effective_module_prefix () in
+    let cap = current_capture () in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
-      apply (VClosure (call_env, param_names, body, defn_prefix)) args) in
+      apply (VClosure (call_env, param_names, body, defn_prefix, cap)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     eval_block env' rest
@@ -1951,7 +2005,7 @@ let rec eval_block (env : env) (es : expr list) : value =
 (** Apply a callable value to a list of argument values. *)
 and apply_inner (fn_val : value) (args : value list) : value =
   match fn_val with
-  | VClosure (closure_env, params, body, defn_prefix) ->
+  | VClosure (closure_env, params, body, defn_prefix, cap) ->
     if List.length params <> List.length args then
       eval_error "arity mismatch: expected %d args, got %d"
         (List.length params) (List.length args);
@@ -1972,13 +2026,31 @@ and apply_inner (fn_val : value) (args : value list) : value =
        this hot path. *)
     let saved = !closure_prefix_override in
     closure_prefix_override := Some defn_prefix;
+    (* A function body is not module-initialiser code, even when a module
+       let's initialiser called it ([module_init]). *)
+    let saved_init = !module_init in
+    if saved_init then module_init := false;
+    (* The authority the closure was made under, around its body; [None]
+       runs under the caller's ([VClosure]'s doc comment). *)
+    let saved_cap =
+      match cap with
+      | Some a when a != !Eval_builtins.cap_slot ->
+        let s = !Eval_builtins.cap_slot in
+        Eval_builtins.cap_slot := a;
+        Some s
+      | _ -> None
+    in
     (* [call_return_hook] is a no-op natively; in the browser REPL it is the
        stack bounce on the return path (see [Eval_prim.call_return_hook]).
        It runs in [~finally] so an exception unwinding a deep recursion (a
        March panic 20000 calls down) is bounced too, not only a normal
        return. *)
     Fun.protect
-      ~finally:(fun () -> closure_prefix_override := saved; !call_return_hook ())
+      ~finally:(fun () ->
+          closure_prefix_override := saved;
+          if saved_init then module_init := true;
+          (match saved_cap with Some s -> Eval_builtins.cap_slot := s | None -> ());
+          !call_return_hook ())
       (fun () -> eval_expr env' body)
 
   | VBuiltin (name, f) ->
@@ -2042,7 +2114,9 @@ and eval_expr_inner (env : env) (e : expr) : value =
   | ELit (LitBool b, _)   -> VBool b    (* E-Lit — core-march.md §4.2 *)
   | ELit (LitAtom a, _)   -> VAtom a    (* E-Lit — core-march.md §4.2 *)
 
-  | EVar n -> lookup n.txt env  (* E-Var — core-march.md §4.2 *)
+  | EVar n ->  (* E-Var — core-march.md §4.2 *)
+    let v = lookup n.txt env in
+    if !callee_var then (callee_var := false; v) else capture_named_value n.txt v
 
   | EHole (name, _) ->
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
@@ -2173,7 +2247,12 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     let fn_val = match dispatched with
       | Some v -> v
-      | None -> eval_expr env f
+      | None ->
+        (match f with
+         | EVar _ ->
+           callee_var := true;
+           Fun.protect ~finally:(fun () -> callee_var := false) (fun () -> eval_expr env f)
+         | _ -> eval_expr env f)
     in
     let arg_vals = List.map (eval_expr env) args in
     march_stack_push fn_name sp;
@@ -2240,7 +2319,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | ELam (params, body, _) ->  (* E-Lam — core-march.md §4.2 *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
-    VClosure (env, param_names, body, effective_module_prefix ())
+    VClosure (env, param_names, body, effective_module_prefix (), current_capture ())
 
   | EBlock (es, _) -> eval_block env es
     (* E-Blk-Last / E-Blk-Let / E-LetFn / E-Blk-Seq — core-march.md §4.2, see eval_block below *)
@@ -2567,9 +2646,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let param_names = List.map (fun p -> p.param_name.txt) params in
     let env_ref = ref env in
     let defn_prefix = effective_module_prefix () in
+    let cap = current_capture () in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
-      apply (VClosure (call_env, param_names, body, defn_prefix)) args) in
+      apply (VClosure (call_env, param_names, body, defn_prefix, cap)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     rec_v
@@ -2888,7 +2968,7 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
         | Some handler ->
           (try
              ignore (match handler with
-               | VClosure (_, [], _, _) -> apply handler []
+               | VClosure (_, [], _, _, _) -> apply handler []
                | _                   -> apply handler [VUnit])
            with exn ->
              Printf.eprintf "signal watcher (code %d) raised: %s\n%!"
@@ -3724,7 +3804,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     let rec_closure = VBuiltin (rec_name,
                                 framed_call def defn_prefix env_ref (fun args ->
                                   let call_env = !env_ref in
-                                  let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
+                                  let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
                                   apply fn_v args)) in
     let env' = (def.fn_name.txt, rec_closure)
                :: List.remove_assoc def.fn_name.txt env in
@@ -3732,7 +3812,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     env'
 
   | DLet (_, b, _) ->
-    let v = eval_expr env b.bind_expr in
+    let v = in_module_init (fun () -> eval_expr env b.bind_expr) in
     (match match_pattern v b.bind_pat with
      | Some bs -> bs @ env
      | None    -> eval_error "top-level let binding pattern failed")
@@ -3812,7 +3892,7 @@ let rec eval_decl (env : env) (d : decl) : env =
         let rec_closure = VBuiltin (rec_name,
                                     framed_call def defn_prefix inner_ref (fun args ->
                                       let call_env = !inner_ref in
-                                      let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
+                                      let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
                                       apply fn_v args)) in
         let parse_rec_arity n =
           match String.rindex_opt n '/' with
@@ -4074,14 +4154,14 @@ let rec eval_decl (env : env) (d : decl) : env =
             (* Plain closure: method name in body → builtin dispatch, not self. *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
-            let clo = VClosure (env, params, clause.fc_body, effective_module_prefix ()) in
+            let clo = VClosure (env, params, clause.fc_body, effective_module_prefix (), None) in
             (mname.txt, clo) :: env
           | _ when is_general_iface ->
             (* Plain closure over [env_for_body]: method name in body →
                dispatcher, not self (see comment above). *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
-            let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix ()) in
+            let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix (), None) in
             (mname.txt, clo) :: env
           | _ ->
             eval_decl env (DFn (fn_def, sp))
@@ -4426,7 +4506,7 @@ let eval_module_env ?launch (m : module_) : env =
       let rec_closure = VBuiltin (rec_name,
                                   framed_call def defn_prefix env_ref (fun args ->
                                     let call_env = !env_ref in
-                                    let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
+                                    let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
                                     apply fn_v args)) in
       (* Support default-arg overloading: if a same-named fn already has a real
          closure (VMultiarity or a previous single-arity VBuiltin), combine into
@@ -4477,7 +4557,7 @@ let eval_module_env ?launch (m : module_) : env =
       make_recursive_env env_ref rest env''
 
     | DLet (_, b, _) :: rest ->
-      let v = eval_expr env b.bind_expr in
+      let v = in_module_init (fun () -> eval_expr env b.bind_expr) in
       let env' = match match_pattern v b.bind_pat with
         | Some bs -> bs @ env
         | None    -> eval_error "top-level let pattern failed"
@@ -4621,7 +4701,7 @@ let eval_stdlib_decls (decls : decl list) : unit =
           let rec_clo = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
             framed_call def defn_prefix inner_ref (fun args ->
               let call_env = !inner_ref in
-              let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
+              let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
               apply fn_v args)) in
           let e' = (def.fn_name.txt, rec_clo) :: List.remove_assoc def.fn_name.txt e in
           inner_ref := e';

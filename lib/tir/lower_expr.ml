@@ -1179,6 +1179,8 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     let fn_name =
       Lower_state.fresh_nested_name
         ~host:(Lower_state.current_host ~mod_prefix:env.mod_prefix ()) "lam" in
+    if Lower_state.at_module_level () then
+      Hashtbl.replace Lower_state._module_init_lambdas fn_name ();
     Provenance.note_span fn_name lam_span;
     (* Extract param types from the lambda's inferred type when no annotation. *)
     let lam_ty = ty_of_span env lam_span in

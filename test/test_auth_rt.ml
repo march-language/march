@@ -270,6 +270,184 @@ let test_lambda_calls_wrapper () =
   Alcotest.(check bool) "and never targets the unframed body" false
     (List.mem "mk$auth" (callees body.Tir.fn_body))
 
+(* ── Task 5: function values capture the authority they were made under ── *)
+
+let captures ?(repl = false) src =
+  let tir, needs = lower src in
+  let framed, has_frames = Auth_rt.frames tir ~needs in
+  (framed, Auth_rt.captures framed ~has_frames ~repl, has_frames)
+
+(* Whether [fd]'s body starts by entering a captured authority. *)
+let enters (fd : Tir.fn_def) =
+  match fd.Tir.fn_body with
+  | Tir.ELet (_, Tir.EApp ({ Tir.v_name = "cap_enter"; _ }, _), _) -> true
+  | _ -> false
+
+(* The lambda [e] makes, if it makes one: [Some (fd, captured)]. *)
+let lambda_of (e : Tir.expr) : (Tir.fn_def * bool) option =
+  match e with
+  | Tir.ELetRec ([ fd ], Tir.EAtom (Tir.AVar v)) when v.Tir.v_name = fd.Tir.fn_name ->
+    Some (fd, enters fd)
+  | _ -> None
+
+(* Whether [f]'s body starts by saving the authority its values capture. *)
+let saves (f : Tir.fn_def) =
+  match f.Tir.fn_body with
+  | Tir.ELet (v, Tir.EApp ({ Tir.v_name = "cap_save"; _ }, []), _) ->
+    v.Tir.v_ty = Tir.TCon ("CapAuthRef", [])
+  | _ -> false
+
+(* The right-hand side of the first [let name = ...] in [e]. *)
+let rec rhs_of name (e : Tir.expr) : Tir.expr option =
+  match e with
+  | Tir.ELet (v, a, b) ->
+    if v.Tir.v_name = name then Some a
+    else (match rhs_of name a with Some r -> Some r | None -> rhs_of name b)
+  | Tir.ESeq (a, b) -> (match rhs_of name a with Some r -> Some r | None -> rhs_of name b)
+  | Tir.ELetRec (fns, b) ->
+    (match List.find_map (fun (f : Tir.fn_def) -> rhs_of name f.Tir.fn_body) fns with
+     | Some r -> Some r
+     | None -> rhs_of name b)
+  | Tir.ECase (_, brs, d) ->
+    (match List.find_map (fun (br : Tir.branch) -> rhs_of name br.Tir.br_body) brs with
+     | Some r -> Some r
+     | None -> Option.bind d (rhs_of name))
+  | _ -> None
+
+let rhs_exn name (f : Tir.fn_def) =
+  match rhs_of name f.Tir.fn_body with
+  | Some r -> r
+  | None -> Alcotest.failf "no let %s in %s" name f.Tir.fn_name
+
+(* Every lambda [e] makes, anywhere in it. *)
+let rec lambdas (e : Tir.expr) : (Tir.fn_def * bool) list =
+  let here = match lambda_of e with Some l -> [ l ] | None -> [] in
+  here
+  @
+  match e with
+  | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> lambdas a @ lambdas b
+  | Tir.ELetRec (fns, b) ->
+    List.concat_map (fun (f : Tir.fn_def) -> lambdas f.Tir.fn_body) fns @ lambdas b
+  | Tir.ECase (_, brs, d) ->
+    List.concat_map (fun (br : Tir.branch) -> lambdas br.Tir.br_body) brs
+    @ (match d with Some d -> lambdas d | None -> [])
+  | _ -> []
+
+(* A captured lambda's body enters the saved authority and restores it. *)
+let check_enters what (fd : Tir.fn_def) =
+  let cs = callees fd.Tir.fn_body in
+  Alcotest.(check bool) (what ^ ": the body enters the captured authority") true
+    (List.mem "cap_enter" cs && List.mem "cap_restore" cs)
+
+let rec atom_names (e : Tir.expr) : string list =
+  let av = List.filter_map (function Tir.AVar v -> Some v.Tir.v_name | _ -> None) in
+  match e with
+  | Tir.EApp (_, args) -> av args
+  | Tir.ECallPtr (f, args) -> av (f :: args)
+  | Tir.EAtom a -> av [ a ]
+  | Tir.ELet (_, a, b) | Tir.ESeq (a, b) -> atom_names a @ atom_names b
+  | Tir.ELetRec (fns, b) ->
+    List.concat_map (fun (f : Tir.fn_def) -> atom_names f.Tir.fn_body) fns @ atom_names b
+  | _ -> []
+
+let capture_src = {|mod K do
+  needs IO.Console
+  needs IO.FileRead
+  let top = fn x -> println(x)
+  let rd = File.read
+  fn read_in(p : String) : String needs IO.FileRead("/a/") do
+    p
+  end
+  fn main() needs IO.Console, IO.FileRead("/a/") do
+    let xs = ["/a/x"]
+    let f = fn x -> println(x)
+    let g = fn x -> x + 1
+    let ys = List.map(xs, File.read)
+    let e = fn p -> File.read(p)
+    f(read_in("/a/x"))
+    top(int_to_string(g(List.length(ys))))
+    let _r = rd("/a/y")
+    let _s = e("/a/z")
+    ()
+  end
+end
+|}
+
+let no_frames_src = {|mod K0 do
+  needs IO.Console
+  needs IO.FileRead
+  fn main() needs IO.Console, IO.FileRead do
+    let f = fn x -> println(x)
+    let ys = List.map(["/a"], File.read)
+    f(int_to_string(List.length(ys)))
+  end
+end
+|}
+
+let test_capture_no_frames_identity () =
+  let framed, out, has = captures no_frames_src in
+  Alcotest.(check bool) "has_frames" false has;
+  Alcotest.(check bool) "without frames the module is returned physically unchanged" true
+    (out == framed)
+
+let test_capture_lambda () =
+  let _, out, has = captures capture_src in
+  Alcotest.(check bool) "has_frames" true has;
+  let main = fn_exn "main" out in
+  Alcotest.(check bool) "main saves the authority its values capture, once, on entry" true
+    (saves main);
+  (match lambda_of (rhs_exn "f" main) with
+   | Some (fd, true) -> check_enters "fn x -> println(x)" fd
+   | Some (_, false) -> Alcotest.fail "a lambda calling println is not captured"
+   | None -> Alcotest.fail "f is not bound to a lambda");
+  (match lambda_of (rhs_exn "g" main) with
+   | Some (fd, false) ->
+     Alcotest.(check bool) "fn x -> x + 1 never enters an authority" false
+       (List.mem "cap_enter" (callees fd.Tir.fn_body))
+   | Some (_, true) -> Alcotest.fail "fn x -> x + 1 is captured"
+   | None -> Alcotest.fail "g is not bound to a lambda")
+
+let test_capture_named_value () =
+  let _, out, _ = captures capture_src in
+  let rhs = rhs_exn "ys" (fn_exn "main" out) in
+  Alcotest.(check bool) "File.read is no longer passed bare" false
+    (List.mem "File.read" (atom_names rhs));
+  match List.filter (fun (_, c) -> c) (lambdas rhs) with
+  | [ (fd, true) ] ->
+    check_enters "the eta lambda over File.read" fd;
+    Alcotest.(check bool) "the eta lambda calls File.read" true
+      (List.mem "File.read" (callees fd.Tir.fn_body))
+  | ls -> Alcotest.failf "expected one capturing eta lambda, found %d" (List.length ls)
+
+(* March has no partial application (the typechecker rejects a call that
+   supplies too few arguments), so its nearest form, the explicit eta
+   lambda [fn p -> File.read(p)], is what must capture. *)
+let test_capture_eta_lambda () =
+  let _, out, _ = captures capture_src in
+  match lambda_of (rhs_exn "e" (fn_exn "main" out)) with
+  | Some (fd, true) -> check_enters "fn p -> File.read(p)" fd
+  | _ -> Alcotest.fail "fn p -> File.read(p) is not captured"
+
+let test_capture_not_module_level () =
+  let _, out, _ = captures capture_src in
+  let main = fn_exn "main" out in
+  (match lambda_of (rhs_exn "top" main) with
+   | Some (_, false) -> ()
+   | Some (_, true) -> Alcotest.fail "a lambda in a top-level let is captured"
+   | None -> Alcotest.fail "top is not bound to a lambda");
+  match rhs_exn "rd" main with
+  | Tir.EAtom (Tir.AVar v) ->
+    Alcotest.(check string) "a fn named in a top-level let stays bare" "File.read" v.Tir.v_name
+  | _ -> Alcotest.fail "a fn named in a top-level let was wrapped"
+
+let test_capture_repl_without_frames () =
+  let framed, out, has = captures ~repl:true no_frames_src in
+  Alcotest.(check bool) "has_frames" false has;
+  Alcotest.(check bool) "the REPL captures even without frames" false (out == framed);
+  match lambda_of (rhs_exn "f" (fn_exn "main" out)) with
+  | Some (_, true) -> ()
+  | _ -> Alcotest.fail "the REPL left fn x -> println(x) uncaptured"
+
 (* ── every runtime ─────────────────────────────────────────────────── *)
 
 let frame_src = {|mod FrameFixture do
@@ -362,23 +540,73 @@ let test_escaping_lambda_every_runtime () =
 end
 |})
 
-(* A function value called inside an unscoped-needs fn runs under that fn's
-   authority. *)
+(* A function value made by module-level code captures nothing: called inside
+   an unscoped-needs fn, it runs under that fn's authority.  (A named fn
+   passed from [main] would instead carry [main]'s authority: Task 5.) *)
 let test_fn_value_every_runtime () =
   same_everywhere
-    ~want:"IO.FileRead(\"/etc/passwd\") refused by function apply_it's needs (IO.Console)\nok\n"
+    ~want:"IO.FileRead(\"/etc/passwd\") refused by function apply_it's needs (IO.Console)\n\
+           IO.FileRead(\"/etc/passwd\") refused by function apply_it's needs (IO.Console)\nok\n"
     ({|mod Hof do
   needs IO.Console
   needs IO.FileRead
 |} ^ show_fn ^ {|  fn probe(p : String) : String do
     show(Authority.check("IO.FileRead", p))
   end
+  let probe_v = probe
+  let probe_l = fn p -> show(Authority.check("IO.FileRead", p))
   fn apply_it(h : String -> String, p : String) : String needs IO.Console do
     h(p)
   end
   fn main() do
-    println(apply_it(probe, "/etc/passwd"))
+    println(apply_it(probe_v, "/etc/passwd"))
+    println(apply_it(probe_l, "/etc/passwd"))
     println(probe("/etc/passwd"))
+  end
+end
+|})
+
+(* Task 5: a function value runs under the authority it was made under,
+   wherever it is called; the caller's plays no part. *)
+let test_capture_every_runtime () =
+  same_everywhere
+    ~want:
+      (String.concat "\n"
+         [ "ok";
+           "ok";
+           "IO.FileRead(\"/etc/x\") refused by function mk's needs (IO.FileRead(\"/srv/\"))";
+           "ok";
+           "IO.FileRead(\"/etc/x\") refused by function mk_named's needs (IO.FileRead(\"/srv/\"))";
+           "IO.FileRead(\"/etc/x\") refused by function apply_it's needs (IO.FileRead(\"/srv/\"))";
+           "0";
+           "" ])
+    ({|mod Capture do
+  needs IO.Console
+  needs IO.FileRead
+|} ^ show_fn ^ {|  fn probe(p : String) : String do
+    show(Authority.check("IO.FileRead", p))
+  end
+  let probe_l = fn p -> show(Authority.check("IO.FileRead", p))
+  fn apply_it(h : String -> String, p : String) : String needs IO.FileRead("/srv/") do
+    h(p)
+  end
+  fn mk() : String -> String needs IO.FileRead("/srv/") do
+    fn p -> show(Authority.check("IO.FileRead", p))
+  end
+  fn mk_named() : String -> String needs IO.FileRead("/srv/") do
+    probe
+  end
+  fn main() do
+    let mine = fn p -> show(Authority.check("IO.FileRead", p))
+    println(apply_it(mine, "/etc/x"))
+    println(apply_it(probe, "/etc/x"))
+    let m = mk()
+    println(m("/etc/x"))
+    println(m("/srv/a"))
+    let n = mk_named()
+    println(n("/etc/x"))
+    println(apply_it(probe_l, "/etc/x"))
+    println(int_to_string(List.length(cap_layers())))
   end
 end
 |})
@@ -398,10 +626,25 @@ let tests =
           test_spawn_via_value_framed;
         Alcotest.test_case "a lambda's self call keeps the frame" `Quick
           test_lambda_calls_wrapper ] );
+    ( "auth_rt_capture",
+      [ Alcotest.test_case "without frames captures is the identity" `Quick
+          test_capture_no_frames_identity;
+        Alcotest.test_case "a lambda reaching an op captures; a pure one does not" `Quick
+          test_capture_lambda;
+        Alcotest.test_case "a named fn passed as a value becomes a capturing eta lambda" `Quick
+          test_capture_named_value;
+        Alcotest.test_case "an eta lambda over a capability op captures" `Quick
+          test_capture_eta_lambda;
+        Alcotest.test_case "module-level function values capture nothing" `Quick
+          test_capture_not_module_level;
+        Alcotest.test_case "the REPL captures without frames" `Quick
+          test_capture_repl_without_frames ] );
     ( "auth_rt_runtime",
       [ Alcotest.test_case "frames enforce the clause in every runtime" `Quick
           test_frames_every_runtime;
         Alcotest.test_case "an escaping lambda enters the frame in every runtime" `Quick
           test_escaping_lambda_every_runtime;
         Alcotest.test_case "a function value runs under its caller's frame in every runtime"
-          `Quick test_fn_value_every_runtime ] ) ]
+          `Quick test_fn_value_every_runtime;
+        Alcotest.test_case "a function value runs under the authority it was made under" `Quick
+          test_capture_every_runtime ] ) ]

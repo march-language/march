@@ -4899,9 +4899,11 @@ let compile filename =
        a scope or reach an actor spawn (lib/tir/auth_rt.ml).  After the
        passes above, which key on a fn's source name and body, and before
        Mono.  A program with no such clause comes back physically unchanged.
-       [has_frames] is consumed by the closure-capture pass (Task 5). *)
-    let tir, _has_frames =
+       Then function values capture the authority they are made under
+       (Task 5); with no frame that is the identity too. *)
+    let tir, has_frames =
       March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+    let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:false in
     (* Ocap phase 4, Task 4b: a native binary judges capability operations
        with the C runtime's copy of the Authority policy
        (runtime/march_authority.c), so it links no March matcher or parser

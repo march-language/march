@@ -36,7 +36,7 @@ type value =
   | VTuple of value list
   | VRecord of (string * value) list
   | VCon of string * value list
-  | VClosure of env * string list * March_ast.Ast.expr * string
+  | VClosure of env * string list * March_ast.Ast.expr * string * value option
   | VBuiltin of string * (value list -> value)
   | VPid of int
   | VTask of int

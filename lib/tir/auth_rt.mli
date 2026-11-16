@@ -17,3 +17,21 @@ val reaches_indirect_call : Tir.tir_module -> Set.Make(String).t
     (physically). *)
 val frames :
   Tir.tir_module -> needs:(string, Lower_state.fn_needs) Hashtbl.t -> Tir.tir_module * bool
+
+(** [captures m ~has_frames ~repl]: a function value runs under the
+    authority it was made under, not its caller's (design §5).  Runs right
+    after [frames].  The identity (physically [m]) when [not has_frames &&
+    not repl]: with no frame every slot holds the launch authority, so a
+    capture would change nothing.  Otherwise:
+    - a lambda whose body reaches a capability operation, an actor spawn or
+      a call of a function value enters the
+      authority saved by [cap_save()] at the top of the body that makes it
+      ([cap_enter] / [cap_restore] around its body; a self-recursive lambda
+      keeps its self tail call by moving its body to an uncaptured lambda);
+    - a named fn used as a value (an [AVar] of such a fn of [m], or of a
+      capability builtin, outside callee position) becomes such a lambda,
+      an eta expansion;
+    - nothing made by module-initialiser code (a module-level let's
+      initialiser) captures: it runs under its caller's authority
+      (design §21). *)
+val captures : Tir.tir_module -> has_frames:bool -> repl:bool -> Tir.tir_module

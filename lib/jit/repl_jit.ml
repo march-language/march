@@ -542,7 +542,15 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
       (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false ~launch m) in
   (* Run-time frames for function `needs` clauses, as the native pipeline
      (bin/main.ml) adds them right after lowering. *)
-  let tir, _has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  let tir, has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  (* Function values capture the authority they are made under (Task 5).
+     A REPL fragment always runs the pass: its lambda can be called by a
+     later fragment's framed fn, which this fragment's [has_frames] cannot
+     see.  The precompiled stdlib ([~fragment:false]) only when it has a
+     frame itself: its shared object registers no closure drops, so a
+     captured self-recursive helper's environment would leak there
+     (specs/todos/2026-11-16-ocap-p4-capture-gaps.md). *)
+  let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:fragment in
   (* ...and judges capability operations with the C runtime's policy
      (lib/tir/auth_native.ml), as a native binary does. *)
   let tir = March_tir.Auth_native.retarget tir in
