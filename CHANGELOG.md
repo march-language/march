@@ -28,7 +28,12 @@ git log is authoritative for exact commits.
   rollback, where before a removed field always needed a hand-written migration.
   `forge hot-reload check` shows `rollback round trip (derived)` and
   `migrate_state (derived rollback)`.
-
+- **Float laws can be proved, and a contract can say "not NaN".** A function's Float
+  operations (`+.`, `-.`, `*.`, `/.`, `<`, `<=`, `>`, `>=`) now mean exactly what the program
+  computes (IEEE-754 binary64, round to nearest even) when the refinement checker reasons about
+  it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
+  `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
+  state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
 - **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
   `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
   any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:

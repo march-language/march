@@ -526,9 +526,23 @@ let env_file (name : string) : string option =
 let string_of_verdict = function
   | Unsat -> "unsat" | Sat _ -> "sat" | Unknown -> "unknown" | Rejected -> "rejected"
 
+(* Does a preamble define a reflected Float operator by its IEEE meaning
+   (Reflect_state.float_def)?  Bit-precise `fp.add`/`fp.lt`/… is bit-blasted,
+   which costs z3 far more steps than the integer and datatype reasoning the
+   stage-2 limit was measured on: `dbl(a) <= 5.0` from `a <= 1.0` needs about
+   500k steps (30 ms), ten times [base_stage2_rlimit], and a comparison-only
+   `min(a, b) <= b` runs out at 50k too.  Such a query gets the main limit. *)
+let uses_fp_ops (preamble : string) : bool =
+  let needle = "(define-fun |r:float:" in
+  let n = String.length needle and h = String.length preamble in
+  let rec at i = i + n <= h && (String.sub preamble i n = needle || at (i + 1)) in
+  at 0
+
 let check ?(preamble = "") ?(assume : string list = []) ?rlimit (t : t) (vc : Smt.vc) : result =
   let rlimit =
-    match rlimit with Some n -> n | None -> if assume = [] then !default_rlimit else !stage2_rlimit
+    match rlimit with
+    | Some n -> n
+    | None -> if assume = [] || uses_fp_ops preamble then !default_rlimit else !stage2_rlimit
   in
   last_core := [];
   let b = Buffer.create 1024 in

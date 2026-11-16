@@ -446,6 +446,18 @@ let rec smt_of_r_marked ?(logical_binders = []) ?(vocab = true) ?(nonneg = []) ?
      literal `empty`.  A set term's ELEMENT sort is left as the placeholder and
      unified per VC by [resolve_set_sorts], so no resolver here needs to know
      what a list holds. *)
+  (* ── IEEE class tests (2026-11-15) ──
+     `is_nan(x)`, `is_infinite(x)` and `is_finite(x)` are predicate words like
+     `len`; the program builtins `float_is_nan(x)` and `float_is_infinite(x)`
+     mean the same in a predicate and in program text.  `is_finite` is neither
+     NaN nor an infinity, so `{Float | is_finite(_)}` rules out every value
+     that compares false against itself or overflows. *)
+  | A.EApp (A.EVar { A.txt = "is_nan"; _ }, [ x ], _) when vocab -> Result.map (fun t -> Smt.FpNaN t) (r x)
+  | A.EApp (A.EVar { A.txt = "is_infinite"; _ }, [ x ], _) when vocab -> Result.map (fun t -> Smt.FpInf t) (r x)
+  | A.EApp (A.EVar { A.txt = "is_finite"; _ }, [ x ], _) when vocab ->
+    Result.map (fun t -> Smt.And (Smt.Not (Smt.FpNaN t), Smt.Not (Smt.FpInf t))) (r x)
+  | A.EApp (A.EVar { A.txt = "float_is_nan"; _ }, [ x ], _) -> Result.map (fun t -> Smt.FpNaN t) (r x)
+  | A.EApp (A.EVar { A.txt = "float_is_infinite"; _ }, [ x ], _) -> Result.map (fun t -> Smt.FpInf t) (r x)
   | A.EApp (A.EVar { A.txt = "nth"; _ }, [xs; i], _) when vocab ->
     b2 (fun xs i -> Smt.App (list_nth_measure, [xs; i])) xs i
   | A.EApp (A.EVar { A.txt = "member"; _ }, [ x; st ], _) when vocab -> b2 (fun x s -> Smt.SetMem (x, s)) x st
