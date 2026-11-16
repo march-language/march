@@ -125,6 +125,39 @@ let float_laws_tests =
         in
         expect out ~line:7 ~callee:"need_nan" "proved") ]
 
+(* The 2026-11-16 laws for Tuple, Duration, Queue and Deque, as a caller
+   sees them.  Header lines 1-3, so a test's first function starts at 4. *)
+let wave2_needs =
+  {|  fn need_eqi(a : Int, b : {Int | _ == a}) : Int do 0 end
+  fn need_le(n : Int, xs : {List(Int) | len(_) <= n}) : Int do 0 end
+|}
+
+let w2prog body = "mod U do\n" ^ wave2_needs ^ body ^ "end\n"
+
+let wave2_laws_tests =
+  [ gated "std_queue_size_push_back: a push adds one to the size" (fun () ->
+        let src call =
+          w2prog ("  fn a(q : Queue.Queue(Int)) : Int do\n" ^ call ^ "    need_eqi(Queue.size(q) + 1, Queue.size(Queue.push_back(q, 7)))\n  end\n")
+        in
+        let out = run (src "    Queue.size_push_back(q, 7)\n") in
+        expect out ~line:6 ~callee:"need_eqi" "proved";
+        let out = run (src "") in
+        U.not_proved out ~line:5 ~callee:"need_eqi");
+    gated "std_deque_size_push_front: a push adds one to the size" (fun () ->
+        let out =
+          run
+            (w2prog
+               "  fn b(d : Deque.Deque(Int)) : Int do\n    Deque.size_push_front(d, 1)\n    need_eqi(Deque.size(d) + 1, Deque.size(Deque.push_front(d, 1)))\n  end\n")
+        in
+        expect out ~line:6 ~callee:"need_eqi" "proved");
+    gated "std_duration_to_milliseconds_add: milliseconds add up" (fun () ->
+        let out =
+          run
+            (w2prog
+               "  fn c(a : Duration.Duration, b : Duration.Duration) : Int do\n    Duration.to_milliseconds_add(a, b)\n    need_eqi(Duration.to_milliseconds(a) + Duration.to_milliseconds(b), Duration.to_milliseconds(Duration.add(a, b)))\n  end\n")
+        in
+        expect out ~line:6 ~callee:"need_eqi" "proved") ]
+
 let manifest_path () =
   Filename.concat (Filename.dirname (U.exe ())) "../stdlib/lemmas.verified"
 

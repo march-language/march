@@ -27,6 +27,11 @@ git log is authoritative for exact commits.
   it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
   `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
   state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
+- **Laws for `Tuple`, `Duration`, `Queue` and `Deque`.** 23 proved lemmas: `Tuple.swap_swap`,
+  `Tuple.len_zip` and the `first`/`second`/`make` laws; `Duration.add_comm`, `add_assoc`,
+  `subtract_add`, `to_milliseconds_add`, `unit_steps` (a minute is 60 seconds, and so on) and
+  two `compare` laws; and `size` laws for `Queue` and `Deque` (each push adds one, `is_empty`
+  is size 0, a queue's size is the length of its list).
 - **`Math` Float functions state what they return.** `Math.min_float`, `Math.max_float` and
   `Math.clamp_float` carry return types that hold unless an argument is NaN, so a caller
   passing non-NaN values gets the bound without a call, and `Math` has new proved lemmas

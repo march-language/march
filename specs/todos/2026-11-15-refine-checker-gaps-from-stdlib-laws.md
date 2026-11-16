@@ -47,5 +47,13 @@ fact is simple; none makes it wrong, so they are P3.
     (`(= (sq x) (fp.sqrt RNE x))` with `sq` declared) stays `unknown` at 3M and 30M steps.
     `Math.sqrt_nonneg` was dropped for this; `sqrt_neg_nan` proves.
 
+11. **A stdlib function named like predicate vocabulary is never reflected** (R11):
+    `Deque.singleton` is set vocabulary, so `size(singleton(x)) == 1` cannot even be stated.
+    The rule protects predicates from a user `singleton`; it should not stop a qualified
+    stdlib function from reflecting.
+12. **A call returning a list of tuples is `unreflectable-subject` at a call site**, directly
+    or through a `let`: `Tuple.zip(xs, ys)` passed to `{List((Int, Int)) | len(_) <= n}`.
+    `Tuple.len_zip` proves inside `Tuple` but gives a caller nothing yet.
+
 Repro for 1 and 2: the probes `need_eqb(true, List.is_empty(xs))` and the nested
 `drop_last(append(...))` above, checked with `march --check --refine-report-sites=all`.
