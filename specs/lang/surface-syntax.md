@@ -983,6 +983,20 @@ actor Worker do
 end
 ```
 
+A migrate clause (after `init`, with or in either order around `mailbox`): the
+part of a hot deploy's state migration the compiler cannot guess. With a
+deployed build known it derives the whole `counter_migrate_state` from it;
+otherwise it does nothing (see the Hot Code Reload guide):
+
+```march
+actor Counter do
+  state { total : Int }
+  init { total: 0 }
+  migrate old -> { total: old.count }    -- the running state's `count` moves to `total`
+  on Inc() do { total: state.total + 1 } end
+end
+```
+
 A terminate callback, run once on a graceful `Actor.stop` (after the drain,
 never on `kill`); `state` and `self` are in scope, its value is discarded. At
 most one per actor, anywhere among the handlers (`on_stop` is the keyword the

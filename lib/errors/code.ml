@@ -111,6 +111,7 @@ let main_and_app = "main_and_app"
 let main_signature = "main_signature"
 let measure_scalar_field = "measure_scalar_field"
 let migrate_msg_shape = "migrate_msg_shape"
+let migrate_clause_invalid = "migrate_clause_invalid"
 let mint_cap_invalid = "mint_cap_invalid"
 let missing_impl = "missing_impl"
 let missing_method = "missing_method"
@@ -333,6 +334,7 @@ let all = [
   main_signature;
   measure_scalar_field;
   migrate_msg_shape;
+  migrate_clause_invalid;
   mint_cap_invalid;
   missing_impl;
   missing_method;
@@ -525,7 +527,7 @@ let category_table : (string * string list) list = [
     portable_capture; trusted_linear_invalid; trusted_linear_reserved ];
   "ACTOR", [
     actor_handler_state_type; actor_init_arity; codec_missing;
-    duplicate_actor; duplicate_handler; island_missing_fn; migrate_msg_shape;
+    duplicate_actor; duplicate_handler; island_missing_fn; migrate_msg_shape; migrate_clause_invalid;
     handle_not_sendable; pid_serialize; remote_actor_unroutable; send_wrong_actor;
     spawn_computed_actor; spawn_not_actor; supervise_field_missing ];
   "PROTOCOL", [

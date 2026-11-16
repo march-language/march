@@ -14100,6 +14100,56 @@ let test_poly_let_none_niche_unsafe_compiled () =
           (poly_let_none_expected ^ "\nEXIT:0") run_out)
     [0; 1; 2; 3]
 
+(* ── An interface method passed as a value (`compare`, `hash`) ─────────────
+   `OrderedMap.from_list(xs, compare)` lowered to `let cmp : (Int, Int) -> Int
+   = compare`.  Mono resolves `compare` to `Ord$Int.compare` only at a CALL
+   site, so the value kept the bare name and codegen wrapped it in a
+   `compare$clo_wrap` calling an undefined `@compare` (clang: "use of
+   undefined value").  The value must resolve to the impl for its concrete
+   parameter type, exactly like a call.
+   (specs/progress/2026-11-11-compiled-builtin-passed-as-value-undefined-symbol.md) *)
+let iface_method_as_value_src = {|mod Main do
+  needs IO.Console
+
+  fn apply2(f, a, b) do
+    f(a, b)
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let m = OrderedMap.from_list([(2, "b"), (1, "a"), (3, "c")], compare)
+    println(to_string(OrderedMap.to_list(m)))
+    let s = OrderedMap.from_list([("y", 1), ("x", 2)], compare)
+    println(to_string(OrderedMap.to_list(s)))
+    println(int_to_string(apply2(compare, 5, 3)))
+    let h = Hamt.insert(Hamt.empty(), 7, "seven", fn k -> hash(k), fn (a, b) -> a == b)
+    println(to_string(Hamt.get(h, 7, fn k -> hash(k), fn (a, b) -> a == b)))
+    let hs = List.map([1, 2, 3], hash)
+    println(to_string(hs == List.map([1, 2, 3], fn x -> hash(x))))
+  end
+end
+|}
+
+let iface_method_as_value_expected =
+  "[(1, a), (2, b), (3, c)]\n[(x, 2), (y, 1)]\n1\nSome(seven)\ntrue"
+
+let test_iface_method_as_value_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_iface_value" iface_method_as_value_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" iface_method_as_value_expected interp_out;
+  let bin = Filename.concat tmp "iface_value" in
+  match compile_march_or_skip
+          ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    let run_out = read_cmd_output
+        (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+    Alcotest.(check string)
+      "compare/hash passed as values link and match the interpreter"
+      (iface_method_as_value_expected ^ "\nEXIT:0") run_out
+
 (* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
    A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
    with the MANY stdlib helpers that use a conventionally-named nested
@@ -21473,6 +21523,8 @@ let codegen_suites =
       ( "poly_let_none_codegen", [
           Alcotest.test_case "generalized `let x = None` at a niche-unsafe Option (#1173)" `Quick
             test_poly_let_none_niche_unsafe_compiled;
+          Alcotest.test_case "interface method passed as a value" `Quick
+            test_iface_method_as_value_compiled;
         ] );
       ( "nested_fn_name_collision_codegen", [
           Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick

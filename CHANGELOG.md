@@ -21,6 +21,13 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Rename or convert actor state fields in one hot deploy.** A `migrate old -> { total:
+  old.count }` clause after an actor's `init` says what moves; the compiler writes the rest of
+  `<actor>_migrate_state` (kept fields copied, new ones from `init`). A bare copy keeps the
+  running version's refinement, so an unchanged one needs no proof; any other expression is
+  checked like a written migration. A rename also gets its reverse derived and proved, so
+  redeploying the old source copies the value back. A removed field is dropped only when the
+  clause reads it.
 - **Derived rollbacks for hot deploys.** When the compiler derives a `migrate_state` because
   an actor's state only gained fields, it now derives the reverse `<actor>_rollback_state`
   too (copy back the old fields, drop the added ones) and proves the round trip. Rolling
@@ -1076,6 +1083,17 @@ git log is authoritative for exact commits.
   `by` or a `let opaque = …` used to be a bare "I got stuck here". Float literals also take an
   exponent now (`1.0e-12`, `2.5E3`), which was a confusing "expecting `do`" error.
 
+- **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
+  compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
+  but failed to compile natively (clang: "use of undefined value '@compare'") and threw
+  `ReferenceError` under `--target js`. An interface method used as a value now resolves to the
+  implementation for its argument type, as a call does.
+
+- **A discarded `Ok(())` is released.** Compiled code leaked the `Result` cell a call such as
+  `println` returns in two places: a `match` or `if` used as a statement whose arms all end in a
+  call, and a block-final `let _ = e`, which returned `e`'s value although the block's type is
+  `()`. Both leak tools (`--rc-trace` with `scripts/gc-trace-report.py`, and LSan) reported one
+  or two such cells on most programs, hiding real leaks.
 - **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
   `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
   there and `+inf` everywhere else); it now uses the IEEE absolute value like every other

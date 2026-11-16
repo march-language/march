@@ -217,6 +217,8 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
       let what =
         if List.mem_assoc name !March_desugar.Desugar_migrate_derive.drops then
           "migrate_state (derived rollback)"
+        else if derived && List.mem_assoc name !March_desugar.Desugar_migrate_derive.clause_fields then
+          "migrate_state (derived, migrate clause)"
         else if derived then "migrate_state (derived)"
         else "migrate_state" in
       (match summarise ~where:deployed_note migrate_state with

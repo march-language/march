@@ -1,0 +1,32 @@
+mod P48ActorMigrateClause do
+  -- §9.1 — after `init`, an actor body may carry a `mailbox N policy` bound
+  -- and a `migrate old -> { ... }` clause, in either order, each at most
+  -- once. Both start with a contextual lower-case word, so the parser reads
+  -- them as one list (`actor_clause*`): two `option(...)`s in a row would be
+  -- an LR(1) conflict on that word. `migrate` stays an ordinary name
+  -- elsewhere (`fn migrate` below). With no deployed build the clause is
+  -- inert; it is checked only for shape (a record literal of state fields).
+  actor Counter do
+    state { total : Int }
+    init { total: 0 }
+    migrate old -> { total: old.count }
+    mailbox 100 drop_old
+    on Inc() do
+      { total: state.total + 1 }
+    end
+  end
+
+  actor Gauge do
+    state { level : Int }
+    init { level: 0 }
+    mailbox 10 drop_new
+    migrate prev -> { level: prev.reading }
+    on Set(n : Int) do
+      { level: n }
+    end
+  end
+
+  fn migrate(x : Int) : Int do x end
+
+  fn main() : Int do migrate(0) end
+end

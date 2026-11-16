@@ -47,7 +47,7 @@ need to drain traffic before a routine code push. Some edge cases are still open
 
 **What happens to running work**
 
-- [Actor state migration](#actor-state-migration): [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
+- [Actor state migration](#actor-state-migration): [derived migrations](#derived-migrations-adding-a-field-needs-no-migrate_state), [the `migrate` clause](#moving-data-the-migrate-clause), [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
 - [Compatibility annotations](#compatibility-annotations)
 - [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
 - [What a build guarantees: `forge hot-reload check`](#what-a-build-guarantees-forge-hot-reload-check)
@@ -180,6 +180,10 @@ proved rollback (`migrate_state (derived rollback)`), and forge says so:
 ```
 actor Counter: migrate_state derived as the running version's proved rollback (drops hits, the fields that version added)
 ```
+
+A rename made with a [`migrate` clause](#moving-data-the-migrate-clause) has its reverse
+derived the same way (copy `total` back into `count`), so rolling a rename back loses
+nothing either; forge then says `copies back count from total`.
 
 A removed field is otherwise never derived away: only a rollback to exactly the state the
 running version's proved rollback returns to drops data without a written migration.
@@ -550,11 +554,41 @@ Nothing is derived when the change needs a decision. The deploy is then refused 
 
 | Change | Why it is not derived |
 |---|---|
-| A field was removed | dropping data is your call (a rename looks like a removal plus an addition; for now, write the migration) |
-| A field changed type | the old value has to be converted |
+| A field was removed | dropping data is your call; to move its value into another field, say so with a [`migrate` clause](#moving-data-the-migrate-clause) |
+| A field changed type | the old value has to be converted; give the conversion in a `migrate` clause |
 | A new field's `init` value reads an `init` parameter, or `init` is not a record literal | there is no constant to give a running actor |
 
 A `migrate_state` you write always wins: the compiler derives one only when there is none. An actor declared in a nested module is not derived yet; write its migration by hand.
+
+### Moving data: the `migrate` clause
+
+A rename, a conversion or a field computed from old ones is a decision the compiler cannot guess: `{ count }` → `{ total }` looks exactly like removing `count` and adding an empty `total`. Instead of writing the whole `migrate_state`, write only that decision, after `init`:
+
+```march
+-- running:  state { count : {Int | _ >= 0}, label : String }
+actor Counter do
+  state { total : {Int | _ >= 0}, label : String, hits : Int }
+  init  { total: 0, label: "", hits: 0 }
+  migrate old -> { total: old.count }
+  ...
+end
+-- the compiler derives
+--   fn counter_migrate_state(old) do { total: old.count, label: old.label, hits: 0 } end
+```
+
+`old` names the running version's state. Each field the clause gives takes the clause's value; every other field follows the rules above (kept fields copied, new ones from `init`). A running field the clause reads may be removed: its value moved. One that nothing reads still refuses the deploy, so no data is dropped without your saying so.
+
+A bare copy (`total: old.count`, the same type) keeps what the running version guaranteed of `count`, like a kept field, so an unchanged refinement needs no proof. Any other expression (`total: old.count * 100`, `count: int_to_string(old.count)`) is checked like a migration you wrote. When it can break the new refinement, the build fails at the clause with the running state that breaks it.
+
+When every running field comes back by a bare copy (kept fields and renames), the migration has a reverse: the compiler derives `<actor>_rollback_state` (`count: new.total`), and the build proves the round trip. Redeploying the old source then copies the value back with no clause of its own. `forge deploy hot --plan` shows what the clause did:
+
+```
+actor Counter: migrate_state derived from the migrate clause (renames: total from count; adds hits from init)
+```
+
+The clause belongs to one deploy. After that deploy it is harmless: on the next one, a clause that reads a field the running version no longer has is ignored with a warning to delete it. Without a known running version (a plain build), the clause does nothing. A malformed clause is an error in any build: its body must be a record literal of state fields, each given once.
+
+`forge hot-reload check` labels the line `migrate_state (derived, migrate clause)`. When a clause cannot derive the migration against the running version (it does not read a removed field, say), the build warns at the clause with the reason, rather than waiting for the deploy to refuse it.
 
 ### Messages queued during a deploy
 
