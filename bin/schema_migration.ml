@@ -597,6 +597,43 @@ let load_simulation_baseline (path : string option) : unit =
                     ))
         with _ -> []))
 
+(** The deployed build's derived rollbacks (`"rollback_derived"`): per actor,
+    the fields it returns to and the parsed types of the fields it drops.  An
+    actor whose dropped field's type does not parse is left out: its rollback
+    deploy then needs a written migration, as before. *)
+let load_rollback_baseline (path : string option) : unit =
+  let module D = March_desugar.Desugar_migrate_derive in
+  D.rollback_baseline :=
+    (match path with
+     | None -> []
+     | Some file ->
+       (try
+          let open Yojson.Safe.Util in
+          Yojson.Safe.from_file file |> to_assoc
+          |> List.filter_map (fun (actor, j) ->
+              match member "rollback_derived" j with
+              | `Null -> None
+              | keeps ->
+                let keeps = keeps |> to_list |> List.map to_string in
+                let dropped =
+                  member "state_fields" j |> to_list
+                  |> List.filter_map (fun f ->
+                      let name = f |> member "name" |> to_string in
+                      if List.mem name keeps then None
+                      else
+                        Some
+                          ( name,
+                            try Some (March_parser.Parse.ty_of_lexbuf
+                                        (Lexing.from_string (f |> member "ty" |> to_string)))
+                            with _ -> None ))
+                in
+                if List.exists (fun (_, t) -> t = None) dropped then None
+                else
+                  Some
+                    ( actor,
+                      { D.keeps; drops_tys = List.map (fun (n, t) -> (n, Option.get t)) dropped } ))
+        with _ -> []))
+
 (** The deployed state layouts, for the derived migrations
     (Desugar_migrate_derive, M11).  Called before desugar; an unreadable
     baseline derives nothing, and the deploy gate then asks for a written
@@ -605,8 +642,11 @@ let load_derive_baseline ~(filename : string) : unit =
   let module Sd = March_forge.Schema_diff in
   let module D = March_desugar.Desugar_migrate_derive in
   load_simulation_baseline (find_baseline ~filename);
+  load_rollback_baseline (find_baseline ~filename);
   D.report := [];
   D.origins := [];
+  D.rollbacks := [];
+  D.drops := [];
   D.baseline :=
     (match find_baseline ~filename with
      | None -> []
