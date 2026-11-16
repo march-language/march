@@ -1,0 +1,13 @@
+-- A discarded owned call result is released in both positions that used to
+-- leak it: a `match` used as a statement whose arms all end in a call, and a
+-- block-final `let _ = e` (the block's value is (), not e's).
+mod DiscardedCallResult do
+  pfn wrap(n : Int) : Result(Int, String) do Ok(n) end
+  fn run(n : Int) : () do
+    match n do
+      0 -> wrap(1)
+      _ -> wrap(2)
+    end
+    let _ = wrap(3)
+  end
+end

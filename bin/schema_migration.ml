@@ -631,7 +631,16 @@ let load_rollback_baseline (path : string option) : unit =
                 else
                   Some
                     ( actor,
-                      { D.keeps; drops_tys = List.map (fun (n, t) -> (n, Option.get t)) dropped } ))
+                      { D.keeps; drops_tys = List.map (fun (n, t) -> (n, Option.get t)) dropped;
+                        moves =
+                          (match member "rollback_derived_moves" j with
+                           | `Null -> []
+                           | ms ->
+                             ms |> to_list
+                             |> List.map (fun p ->
+                                 match to_list p with
+                                 | [ a; b ] -> (to_string a, to_string b)
+                                 | _ -> raise Exit)) } ))
         with _ -> []))
 
 (** The deployed state layouts, for the derived migrations
@@ -645,8 +654,12 @@ let load_derive_baseline ~(filename : string) : unit =
   load_rollback_baseline (find_baseline ~filename);
   D.report := [];
   D.origins := [];
+  D.baseline_tys := [];
   D.rollbacks := [];
   D.drops := [];
+  D.rollback_moves := [];
+  D.clause_fields := [];
+  D.moves := [];
   D.baseline :=
     (match find_baseline ~filename with
      | None -> []
@@ -654,6 +667,18 @@ let load_derive_baseline ~(filename : string) : unit =
        (match Sd.parse_schemas_file path with
         | exception _ -> []
         | schemas ->
+          (* The deployed field types, parsed, for a migrate clause that
+             removes or converts a field (desugar cannot parse). *)
+          D.baseline_tys :=
+            List.map
+              (fun (name, (s : Sd.actor_schema)) ->
+                ( name,
+                  List.filter_map
+                    (fun (f : Sd.field) ->
+                      try Some (f.Sd.name, March_parser.Parse.ty_of_lexbuf (Lexing.from_string f.Sd.ty))
+                      with _ -> None)
+                    s.Sd.state_fields ))
+              schemas;
           List.map
             (fun (name, (s : Sd.actor_schema)) ->
               (name, List.map (fun (f : Sd.field) -> (f.Sd.name, f.Sd.ty)) s.Sd.state_fields))

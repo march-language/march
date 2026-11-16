@@ -1,0 +1,16 @@
+-- types (0) --
+-- fns (2) --
+## run
+fn run(n : Int) : () =
+  let $rc_1 : Result(Int, String) = case n of
+  0() -> wrap(1)
+  _ -> wrap(2) in
+dec_rc $rc_1;
+let $p3 : Result(Int, String) = wrap(3) in
+dec_rc $p3;
+:unit
+
+## wrap
+fn wrap(n : Int) : Result(Int, String) =
+  alloc Result.Ok(n)
+
