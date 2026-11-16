@@ -35,6 +35,11 @@ type actor_schema = {
   derived_drops: string list;
   (* the fields a derived drop-only migration drops: the running version's
      proved derived rollback, taken back by a rollback deploy *)
+  derived_clause: string list;
+  (* the fields this build's `migrate` clause gave *)
+  derived_moves: (string * string) list;
+  (* (new field, running field) copied under a new name: by a `migrate`
+     clause, or by a rollback deploy that undoes one *)
 }
 
 (** The deploy changed the actor's message type (D30, plan 6.3): a handler
@@ -169,7 +174,16 @@ let parse_schemas_json (json : Yojson.Safe.t) : (string * actor_schema) list =
                    (fun v -> v |> to_list |> List.map to_string) j;
                not_derived = optional "migrate_not_derived" to_string j;
                derived_drops = (match member "migrate_derived_drops" j with
-                   | `Null -> [] | v -> v |> to_list |> List.map to_string) })
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string);
+               derived_clause = (match member "migrate_clause" j with
+                   | `Null -> [] | v -> v |> to_list |> List.map to_string);
+               derived_moves = (match member "migrate_derived_moves" j with
+                   | `Null -> []
+                   | v ->
+                     v |> to_list
+                     |> List.filter_map (fun p -> match to_list p with
+                         | [ a; b ] -> Some (to_string a, to_string b)
+                         | _ -> None)) })
 
 let parse_schemas_file path =
   if not (Sys.file_exists path) then []
@@ -232,12 +246,26 @@ let not_derived_note (new_schemas : (string * actor_schema) list) (actor : strin
 
 (** The line announcing a derived migration, when [actor]'s was. *)
 let derived_note (new_schemas : (string * actor_schema) list) (actor : string) : string option =
+  let moved ms = String.concat ", " (List.map (fun (f, g) -> Printf.sprintf "%s from %s" f g) ms) in
+  let join parts = String.concat "; " (List.filter (fun p -> p <> "") parts) in
   match List.assoc_opt actor new_schemas with
-  | Some { derived = Some _; derived_drops = (_ :: _ as ds); _ } ->
+  | Some { derived = Some _; derived_clause = []; derived_drops = ds; derived_moves = ms; _ }
+    when ds <> [] || ms <> [] ->
     Some (Printf.sprintf
-            "actor %s: migrate_state derived as the running version's proved rollback (drops %s, \
-             the fields that version added)"
-            actor (String.concat ", " ds))
+            "actor %s: migrate_state derived as the running version's proved rollback (%s)"
+            actor
+            (join
+               [ (if ms = [] then "" else "copies back " ^ moved ms);
+                 (if ds = [] then ""
+                  else "drops " ^ String.concat ", " ds ^ ", the fields that version added") ]))
+  | Some { derived = Some added; derived_clause = (_ :: _ as given); derived_moves = ms; _ } ->
+    let computed = List.filter (fun f -> not (List.mem_assoc f ms)) given in
+    Some (Printf.sprintf "actor %s: migrate_state derived from the migrate clause (%s)"
+            actor
+            (join
+               [ (if ms = [] then "" else "renames: " ^ moved ms);
+                 (if computed = [] then "" else String.concat ", " computed ^ " from the clause");
+                 (if added = [] then "" else "adds " ^ String.concat ", " added ^ " from init") ]))
   | Some { derived = Some added; _ } ->
     Some (Printf.sprintf "actor %s: migrate_state derived from the running version's state (%s)"
             actor

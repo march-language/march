@@ -376,12 +376,19 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
 
   (* --- Let bindings --- *)
-  | Ast.ELet (b, _) ->
-    lower_expr env b.bind_expr
+  (* A [let] in value position (the last expression of a block) has type [()]
+     (typecheck's [infer_block]), not the type of its right-hand side.  It
+     used to lower to the RHS's value, so [let _ = println(..)] as the last
+     line of [main] returned the [Ok(())] cell to a caller expecting [()]
+     and nothing released it.  Lower it as a block statement followed by
+     [()] instead: the binding is dead, and Perceus releases it. *)
+  | Ast.ELet (_, sp) ->
+    lower_expr env (Ast.EBlock ([e], sp))
 
   (* --- Blocks → right-nested ELet --- *)
   | Ast.EBlock ([], _) -> Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))
-  | Ast.EBlock ([e], _) -> lower_expr env e
+  | Ast.EBlock ([e], _) when (match e with Ast.ELet _ -> false | _ -> true) ->
+    lower_expr env e
   | Ast.EBlock (Ast.ELet (b, _) :: rest, sp) ->
     let rhs = lower_expr env b.bind_expr in
     (* Register the let-bound pattern names in _fn_param_types for the

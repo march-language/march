@@ -1467,6 +1467,9 @@ and emit_decl ctx = function
                      (String.concat ", " (List.map fmt_param actor.actor_init_params))));
       indented ctx (fun () -> emit_body ctx actor.actor_init);
       line ctx "end";
+      Option.iter (fun ((old : name), body) ->
+        line ctx (Printf.sprintf "migrate %s -> %s" old.txt (render ctx.indent lv_expr body))
+      ) actor.actor_migrate;
       List.iter (fun h ->
         nl ctx;
         let ps = String.concat ", " (List.map fmt_param h.ah_params) in
