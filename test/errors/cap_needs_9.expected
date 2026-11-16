@@ -4,8 +4,7 @@ exit: 1
 The `Inc` handler of actor `Counter` prints, but module `Main` declares no `needs IO.Console`, and `main` is granted nothing. [cap_needs]
 hint: add this to the module body —
         needs IO.Console
-and give `main` the grant —
-        fn main(_cap_console : Cap(IO.Console)) : ()
+`main` declares no grant of its own, so the module's `needs` line is its grant.
 
 11 |       println("bump")
            ^^^^^^^
@@ -18,10 +17,8 @@ and give `main` the grant —
 
     fix (`forge fix` applies it):
 
- 6 | mod Main do
- 7 +   needs IO.Console
-16 -   fn main() do
-16 +   fn main(_cap_console : Cap(IO.Console)) do
+6 | mod Main do
+7 +   needs IO.Console
 
     run `march --explain cap_needs`
 

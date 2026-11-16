@@ -22,8 +22,7 @@ help: add `needs IO.Console` to the module body.
 hint: add these to the module body —
         needs IO.Console
         needs IO.FileWrite
-and give `main` the grant —
-        fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : ()
+`main` declares no grant of its own, so the module's `needs` line is its grant.
 
 15 |     match file_write("/tmp/t176_out", "d") do
                ^^^^^^^^^^
@@ -41,11 +40,9 @@ and give `main` the grant —
 
     fix (`forge fix` applies it):
 
- 2 | mod Main do
- 3 +   needs IO.Console
- 4 +   needs IO.FileWrite
-14 -   fn main() : () do
-14 +   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
+2 | mod Main do
+3 +   needs IO.Console
+4 +   needs IO.FileWrite
 
     run `march --explain cap_needs`
 

@@ -10026,6 +10026,18 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
              Printf.sprintf "its own `needs %s`" shown )
        in
        let covered c = List.exists (fun b -> cap_subsumes b c) bound in
+       (* `fn main() needs ()` that performs IO: [check_main_grant] (run just
+          before this) already reported it as [cap_grant], naming the same
+          capabilities with a fix that replaces this very clause, so a second
+          [cap_bound] at the clause would only repeat it. *)
+       let reported_as_grant =
+         bound = [] && fb_origin = Fn_decl
+         && List.exists (fun (d : Err.diagnostic) ->
+                d.Err.severity = Err.Error
+                && Err.Code.slug_of d.Err.code = Err.Code.cap_grant
+                && span_within fb_span d.Err.span) env.errors.Err.diagnostics
+       in
+       if not reported_as_grant then begin
        if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
          Err.error ~code:Err.Code.cap_bound env.errors ~span
            (Printf.sprintf
@@ -10065,7 +10077,8 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
               Err.error ~code:Err.Code.cap_bound env.errors ~span
                 (Printf.sprintf "%s is bounded by %s, but reaches `%s`%s.\n%s"
                    who by c via help))
-         (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
+         (List.sort_uniq String.compare row.March_caps.Cap_rows.caps)
+       end)
     env.fn_bound_points
 
 let span_within (inner : Ast.span) (outer : Ast.span) =
@@ -10476,9 +10489,38 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             the body. That is why `fn_clause` grew the field. *)
          let grant_fix =
            Err.FReplace { span = params_span; text = Printf.sprintf "(%s)" suggested } in
+         (* `main`'s own `needs` clause, when it has one: with an empty
+            request that can only be `needs ()`. *)
+         let main_needs_span =
+           List.find_map
+             (function
+               | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
+                 Option.map snd def.Ast.fn_needs
+               | _ -> None)
+             decls
+         in
+         match main_needs_span with
+         | Some needs_span ->
+           (* `fn main() needs ()`: the clause is the request (decision 3),
+              and it requests nothing.  The narrowest fix rewrites the clause
+              to name what the program reaches. *)
+           let needs_text = String.concat ", " named in
+           Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
+             ~fix:(Err.FReplace { span = needs_span;
+                                  text = Printf.sprintf "needs %s" needs_text })
+             (Printf.sprintf
+                "`main` performs IO but its grant is empty. The program reaches \
+                 %s; `main` is bounded by `needs ()`, which grants nothing.\n\
+                 help: name what `main` needs —\n\
+                \        fn main() needs %s\n\
+                 `forge fix` can apply this."
+                show_caps needs_text)
+         | None ->
          (* §X3: a module missing `needs X` for code `main` reaches, with
-            `main` granted nothing, is one missing authority: fold the grant
-            into that error (its label, its sentence, its hunk). *)
+            `main` declaring no grant of its own, is one missing authority.
+            The module's `needs` line is then `main`'s request (decision 3),
+            so adding it, as that error's hint and fix already do, is the
+            whole remedy: only say that `main` is granted nothing. *)
          match cap_diag_find env.errors (fun d ->
              is_use_needs_diag d
              && List.exists (fun c -> List.mem c named) (cap_code_caps d.Err.code)) with
@@ -10488,19 +10530,19 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
              { d with
                Err.message =
                  Printf.sprintf "%s, and `main` is granted nothing.%s\n\
-                                 and give `main` the grant —\n\
-                                \        fn main(%s) : ()"
-                   head rest suggested;
+                                 `main` declares no grant of its own, so the \
+                                 module's `needs` line is its grant."
+                   head rest;
                labels = d.Err.labels
                         @ [ { Err.lbl_span = params_span;
-                              lbl_message = "`main` is granted nothing here" } ];
-               fix = Err.merge_fixes [ d.Err.fix; Some (Err.fix grant_fix) ] }
+                              lbl_message = "`main` is granted nothing here" } ] }
          | None ->
          Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
            ~fix:grant_fix
            (Printf.sprintf
               "`main` performs IO but declares no grant. The program reaches \
-               %s; a `main` with no capability parameter is granted nothing.\n\
+               %s; a `main` with no capability parameter, no `needs` clause \
+               and no module `needs` line is granted nothing.\n\
                help: declare the grant `main` actually needs —\n\
               \        fn main(%s) : ()\n\
                or grant everything with `fn main(cap : Cap(IO))`.\n\

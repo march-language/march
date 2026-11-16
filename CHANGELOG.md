@@ -565,6 +565,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A program that prints without any `needs` line is fixed by adding the `needs` line
+  alone.** `main` with no `needs` clause and no `Cap` parameter is granted the module's
+  `needs` line, so the missing-`needs` error's hint and `forge fix` no longer also give
+  `main` a `Cap(...)` parameter. A `main` bounded by `needs ()` that performs IO is
+  reported once, as `cap_grant`, with a fix that rewrites the clause to name what the
+  program reaches (for example `needs IO.Console`), instead of a `cap_bound` error plus a
+  `cap_grant` fix that added a `Cap` parameter and left the empty bound in place.
+
 - **Registering and finding actors by name needs the new `IO.Registry` capability;
   `forge fix` adds the line.** `Actor.register`, `Actor.unregister`, `Actor.whereis` and
   `Actor.registered` are charged `IO.Registry` (a child of `IO`, so `needs IO` still covers

@@ -30,3 +30,18 @@ Plan: specs/plans/2026-11-15-ocap-p4-runtime-plan.md, Task 4.
   0.63 -> 0.45 / 1.00 -> 0.80 µs; frame enter+leave 1.29 µs -> 37 ns.
 - Tests: `test/test_auth_rt.ml` (run_compiler groups `auth_rt`,
   `auth_rt_runtime`), TIR snapshot `auth_frame`, stdlib `test_authority.march`.
+
+## Launch-request diagnostics (CI fix 1)
+
+- Under decision 3 a `main` with no `needs` clause and no `Cap` parameter requests
+  the module's `needs` line, so the missing-`needs` error that folds in "and `main`
+  is granted nothing" (`check_main_grant`, §X3) no longer adds a `Cap` parameter to
+  its hint or its machine fix: the `needs` line alone is the remedy.
+- `fn main() needs ()` that performs IO is reported as `cap_grant` only, with a fix
+  that rewrites the clause to `needs <what main reaches>`; `check_fn_bounds` skips
+  `main`'s own `cap_bound` at that clause. `cap_grant`'s message for the remaining
+  case (no clause, no parameter, no module `needs` line, nothing to fold into) names
+  all three.
+- The error tour's `14-main-no-grant` example is now `fn main() needs ()`;
+  `specs/lang/errors/cap_grant.md` and the threat model describe the grant as
+  `main`'s request.
