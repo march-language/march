@@ -5765,6 +5765,12 @@ let compile filename =
                   ^ (match List.assoc_opt actor_name !March_desugar.Desugar_migrate_derive.drops with
                      | Some ds -> Printf.sprintf "    \"migrate_derived_drops\": [%s],\n" (names_json ds)
                      | None -> "")
+                  (* --hcr-drop: removed fields the derived migration drops by
+                     consent.  In the signed image, so the server's audit line
+                     for the activation records it. *)
+                  ^ (match List.assoc_opt actor_name !March_desugar.Desugar_migrate_derive.consented with
+                     | Some ds -> Printf.sprintf "    \"migrate_drops_consented\": [%s],\n" (names_json ds)
+                     | None -> "")
                   (* Migrate clauses (todo 2026-11-06-hcr-derive-field-rename):
                      the fields the clause gave, the renames (new field <-
                      deployed field), and the renames a derived rollback
@@ -8220,6 +8226,11 @@ let () =
      Arg.String (fun s ->
          accept_unproved := !accept_unproved @ List.filter (( <> ) "") (String.split_on_char ',' s)),
      "<Actor.law,...>  Let --check-migration pass these deploy-gate laws unproved (a counterexample still fails)");
+    ("--hcr-drop",
+     Arg.String (fun s ->
+         let module D = March_desugar.Desugar_migrate_derive in
+         D.consented_drops := !D.consented_drops @ List.filter (( <> ) "") (String.split_on_char ',' s)),
+     "<Actor.field,...>  Let a derived migrate_state drop these removed state fields (forge deploy hot --drop); recorded in the image's schemas, which the server audits");
     ("--emit-core-ast", Arg.String (fun f -> emit_core_ast_file := Some f),
      " <file.march>  Emit desugared core AST + verdict + diagnostics as JSON to stdout");
   ] in

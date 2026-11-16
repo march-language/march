@@ -42,7 +42,7 @@ let schema ?(compat = "full") ?handlers ?migrate_msg_from fields =
   { Schema_diff.compat; invariant = None;
     state_fields = List.map (fun (name, ty) -> { Schema_diff.name; ty; refine = None }) fields; handlers; migrate_msg_from;
     contracts = true; unsupported = false; accepted = []; derived = None; not_derived = None;
-    derived_drops = []; derived_clause = []; derived_moves = [] }
+    derived_drops = []; derived_clause = []; derived_moves = []; consented_drops = [] }
 
 let ctor cname params = { Schema_diff.cname; params; refines = []; tag = None }
 
