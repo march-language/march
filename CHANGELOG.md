@@ -28,6 +28,12 @@ git log is authoritative for exact commits.
   rollback, where before a removed field always needed a hand-written migration.
   `forge hot-reload check` shows `rollback round trip (derived)` and
   `migrate_state (derived rollback)`.
+- **16 more proved laws in the standard library.** `List` (`drop_last_snoc`:
+  `drop_last(append(xs, [x])) == xs`, `len_drop_last`, `is_empty_len`, `head_opt_nth_opt`,
+  `head_opt_append`), `Option` (`zip_is_some`, `is_none_not_some`, `len_to_list`,
+  `to_list_is_some`), `Result` (`is_err_not_ok`) and `Math` (`min_int_comm`,
+  `max_int_comm`, `min_plus_max`, `clamp_int_within`, `clamp_int_idem`). Call one before a contract that needs its
+  fact; like every lemma they are erased before the program runs.
 - **Float laws can be proved, and a contract can say "not NaN".** A function's Float
   operations (`+.`, `-.`, `*.`, `/.`, `<`, `<=`, `>`, `>=`) now mean exactly what the program
   computes (IEEE-754 binary64, round to nearest even) when the refinement checker reasons about
