@@ -10922,6 +10922,77 @@ let test_http_serialize_injection_parity () =
     check_verdicts "compiled" compiled_out;
     Alcotest.(check string) "interpreter and compiled serializers agree" interp_out compiled_out
 
+(* ── Compiled HTTP response parsing (2026-11-11 todo, P1) ─────────────────
+   `march_http_parse_response` (runtime/march_http.c) stored the status as a
+   raw integer where compiled code reads a tagged Int, so every odd status
+   read as (n - 1) / 2 (401 as 200, which let `step_raise_on_error` pass it);
+   it always returned an empty header list; and it never returned Err, so a
+   connection closed before a byte arrived parsed as a 200.  The interpreter
+   (lib/eval/eval_builtins.ml) was right.  Run one program both ways and
+   require the interpreter's verdicts and byte-identical output. *)
+let http_parse_src = {|mod HttpParse do
+  needs IO.Console
+
+  fn hdrs(acc, hs) do
+    match hs do
+      Nil -> acc
+      Cons(Header(n, v), rest) -> hdrs(acc ++ "[" ++ n ++ "=" ++ v ++ "]", rest)
+    end
+  end
+
+  fn report(label, raw) do
+    match http_parse_response(raw) do
+      Ok((code, hs, body)) ->
+        let cls = if code >= 400 do "error" else "ok" end
+        println(label ++ " " ++ int_to_string(code) ++ " " ++ cls ++ " " ++ hdrs("", hs) ++ " body<" ++ body ++ ">")
+      Err(e) -> println(label ++ " ERR " ++ e)
+    end
+  end
+
+  fn main(_console : Cap(IO.Console)) do
+    report("s200", "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+    report("s201", "HTTP/1.1 201 Created\r\n\r\n")
+    report("s401", "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic\r\n\r\nno")
+    report("s503", "HTTP/1.1 503 Service Unavailable\r\n\r\n")
+    report("hdrs", "HTTP/1.1 307 X\r\nLocation:  /next \r\nno colon here\r\nX-A: 1:2\r\n\r\n")
+    report("nobody", "HTTP/1.1 204 No Content\r\nX-B: b")
+    report("crlf_in_body", "HTTP/1.1 200 OK\r\n\r\na\r\n\r\nb")
+    report("empty", "")
+    report("noline", "garbage")
+    report("badcode", "HTTP/1.1 abc OK\r\n\r\n")
+  end
+end
+|}
+
+let test_http_parse_response_parity () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"http_parse" http_parse_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  let check_verdicts which out =
+    let want l =
+      if not (contains l out) then Alcotest.failf "%s: expected %S in:\n%s" which l out in
+    want "s200 200 ok [Content-Length=2] body<hi>";
+    want "s201 201 ok  body<>";
+    want "s401 401 error [WWW-Authenticate=Basic] body<no>";
+    want "s503 503 error  body<>";
+    want "hdrs 307 ok [Location=/next][X-A=1:2] body<>";
+    want "nobody 204 ok [X-B=b] body<>";
+    want "crlf_in_body 200 ok  body<a\r\n\r\nb>";
+    want "empty ERR bad status line: \n";
+    want "noline ERR bad status line: garbage";
+    want "badcode ERR bad status code: abc"
+  in
+  check_verdicts "interpreter" interp_out;
+  let bin = Filename.concat tmp "http_parse_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    let compiled_out = read_cmd_output (Filename.quote bin ^ " 2>&1") in
+    check_verdicts "compiled" compiled_out;
+    Alcotest.(check string) "interpreter and compiled parsers agree" interp_out compiled_out
+
 (* ── `&&` / `||` short-circuit (GAPS S17, 2026-11-11) ─────────────────────
    `a && b` and `a || b` used to be strict builtins: both operands were
    always evaluated, interpreted and compiled.  The refinement and
@@ -21156,6 +21227,7 @@ let codegen_suites =
         Alcotest.test_case "transport refuses injected path, sends nothing" `Quick test_http_transport_refuses_injected_path;
         Alcotest.test_case "parse response"          `Quick test_http_parse_response;
         Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
+        Alcotest.test_case "parse response (interp = compiled)" `Quick test_http_parse_response_parity;
       ]);
       ("file handles", [
         Alcotest.test_case "dir_beneath_symlink_linux" `Quick test_dir_beneath_symlink_linux;

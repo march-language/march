@@ -3702,59 +3702,140 @@ void *march_http_serialize_request(void *method_ptr, void *host_ptr, void *path_
     return make_ok(result);
 }
 
+/* OCaml's String.trim whitespace: ' ', '\f', '\n', '\r', '\t'. */
+static int http_resp_ws(char c) {
+    return c == ' ' || c == '\f' || c == '\n' || c == '\r' || c == '\t';
+}
+
+/* Trim [*b, *e) in place by the String.trim rule. */
+static void http_resp_trim(const char **b, const char **e) {
+    while (*b < *e && http_resp_ws(**b)) (*b)++;
+    while (*e > *b && http_resp_ws((*e)[-1])) (*e)--;
+}
+
+/* Err("<prefix><bytes>") without going through a NUL-terminated buffer, so a
+ * line holding a NUL byte is reported whole. */
+static void *http_resp_err(const char *prefix, const char *b, size_t n) {
+    size_t pn = strlen(prefix);
+    char *buf = malloc(pn + n + 1);
+    if (!buf) return make_err("http_parse_response: out of memory");
+    memcpy(buf, prefix, pn);
+    memcpy(buf + pn, b, n);
+    void *s = march_string_lit(buf, (int64_t)(pn + n));
+    free(buf);
+    void *r = march_alloc(16 + 8);
+    *(int32_t *)((char *)r + 8) = 1;          /* tag = 1 (Err) */
+    *(void **)((char *)r + 16) = s;
+    return r;
+}
+
 /* Parse a raw HTTP response string.
- * Returns Ok((status_code:i64, headers:List, body:String)) or Err(reason:String).
- * Tag: Ok=tag0, Err=tag1. */
+ *   http_parse_response(raw) -> Result((Int, List(Header), String), String)
+ *
+ * This must give what the interpreter gives (lib/eval/eval_builtins.ml,
+ * "http_parse_response"), byte for byte:
+ *   - the head ends at the first "\r\n\r\n" (the whole input if there is
+ *     none); the body is everything after it;
+ *   - the head is split on '\n'; the first line, trimmed and split on single
+ *     spaces, must have a second field, and that field must be a number, else
+ *     Err("bad status line: <first line>") / Err("bad status code: <field>").
+ *     An empty input is therefore an Err, so a connection closed before a
+ *     byte arrived is a parse error, not a 200;
+ *   - every later line with a ':' is a Header(name, value), both trimmed, in
+ *     order; a line without one is skipped.
+ * The status is stored as a tagged Int ((n << 1) | 1), the representation
+ * compiled code reads from a tuple field. Until 2026-11-15 it was stored raw,
+ * so every odd status read as (n - 1) / 2 (a 401 passed as a 200), the header
+ * list was always Nil and an empty response parsed as 200
+ * (specs/progress/2026-11-11-http-compiled-response-parse-status-and-headers.md). */
 void *march_http_parse_response(void *raw_ptr) {
-    if (!raw_ptr) {
-        void *s = march_string_lit("http_parse_response: null input", 31);
-        void *r = march_alloc(24);
-        ((march_hdr *)r)->tag = 1; /* Err */
-        *(void **)((char *)r + 16) = s;
-        return r;
-    }
+    if (!raw_ptr) return make_err("http_parse_response: null input");
     march_string *raw = (march_string *)raw_ptr;
     const char *data = raw->data;
+    size_t len = (size_t)raw->len;
 
-    /* Parse status line: HTTP/1.x NNN ... */
-    int status_code = 200;
-    const char *p = data;
-    if (strncmp(p, "HTTP/", 5) == 0) {
-        p += 5;
-        while (*p && *p != ' ') p++;  /* skip version */
-        while (*p == ' ') p++;
-        status_code = (int)strtol(p, NULL, 10);
+    size_t head_end = len;
+    for (size_t i = 0; i + 3 < len; i++) {
+        if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n') {
+            head_end = i;
+            break;
+        }
+    }
+    /* First line of the head. */
+    const char *line_b = data;
+    const char *head_e = data + head_end;
+    const char *line_e = memchr(line_b, '\n', head_end);
+    if (!line_e) line_e = head_e;
+
+    const char *tb = line_b, *te = line_e;
+    http_resp_trim(&tb, &te);
+    /* Second field of a split on single spaces. */
+    const char *sp = memchr(tb, ' ', (size_t)(te - tb));
+    if (!sp) {
+        return http_resp_err("bad status line: ", line_b, (size_t)(line_e - line_b));
+    }
+    const char *cb = sp + 1;
+    const char *ce = memchr(cb, ' ', (size_t)(te - cb));
+    if (!ce) ce = te;
+    /* A plain decimal number, optionally signed, that fits an Int. */
+    int64_t code = 0;
+    int ok = 0;
+    {
+        const char *q = cb;
+        int neg = 0;
+        if (q < ce && (*q == '-' || *q == '+')) { neg = (*q == '-'); q++; }
+        if (q < ce) ok = 1;
+        for (; q < ce; q++) {
+            if (*q < '0' || *q > '9' || code > (INT64_MAX / 4 - 9) / 10) { ok = 0; break; }
+            code = code * 10 + (*q - '0');
+        }
+        if (neg) code = -code;
+    }
+    if (!ok) {
+        return http_resp_err("bad status code: ", cb, (size_t)(ce - cb));
     }
 
-    /* Find header/body split at \r\n\r\n */
-    const char *body_start = strstr(data, "\r\n\r\n");
-    if (!body_start) body_start = strstr(data, "\n\n");
-    if (body_start) {
-        body_start += (body_start[0] == '\r') ? 4 : 2;
-    } else {
-        body_start = data + raw->len;
+    /* Header lines, collected in order, then consed back to front. */
+    size_t cap = 16, n = 0;
+    void **hdrs = malloc(cap * sizeof *hdrs);
+    if (!hdrs) return make_err("http_parse_response: out of memory");
+    const char *cur = line_e < head_e ? line_e + 1 : head_e;
+    while (cur < head_e) {
+        const char *le = memchr(cur, '\n', (size_t)(head_e - cur));
+        if (!le) le = head_e;
+        const char *b = cur, *e = le;
+        http_resp_trim(&b, &e);
+        const char *colon = b < e ? memchr(b, ':', (size_t)(e - b)) : NULL;
+        if (colon) {
+            const char *nb = b, *ne = colon, *vb = colon + 1, *ve = e;
+            http_resp_trim(&nb, &ne);
+            http_resp_trim(&vb, &ve);
+            if (n == cap) {
+                cap *= 2;
+                void **nh = realloc(hdrs, cap * sizeof *hdrs);
+                if (!nh) {
+                    free(hdrs);   /* out of memory: the built headers leak */
+                    return make_err("http_parse_response: out of memory");
+                }
+                hdrs = nh;
+            }
+            hdrs[n++] = make_header(march_string_lit(nb, (int64_t)(ne - nb)),
+                                    march_string_lit(vb, (int64_t)(ve - vb)));
+        }
+        cur = le < head_e ? le + 1 : head_e;
     }
+    void *list = make_nil();
+    while (n > 0) list = make_cons(hdrs[--n], list);
+    free(hdrs);
+    void *body_str = head_end + 4 <= len
+        ? march_string_lit(data + head_end + 4, (int64_t)(len - head_end - 4))
+        : march_string_lit("", 0);
 
-    /* Build body string */
-    int64_t body_len = (int64_t)(raw->len - (body_start - data));
-    void *body_str = body_len > 0 ? march_string_lit(body_start, body_len)
-                                  : march_string_lit("", 0);
-
-    /* Build empty headers list (Nil) */
-    void *headers_nil = march_alloc(16); /* Nil = tag 0, no fields */
-
-    /* Build tuple (status_code, headers_nil, body_str): 3-field heap object */
-    void *tup = march_alloc(16 + 3 * 8);
-    /* tag 0 for tuple */
-    *(int64_t *)((char *)tup + 16) = (int64_t)status_code;
-    *(void **)((char *)tup + 24)   = headers_nil;
+    void *tup = march_alloc(16 + 3 * 8);   /* tuple, tag 0 */
+    *(int64_t *)((char *)tup + 16) = (code << 1) | 1;
+    *(void **)((char *)tup + 24)   = list;
     *(void **)((char *)tup + 32)   = body_str;
-
-    /* Wrap in Ok(tup): tag=0 */
-    void *ok_obj = march_alloc(24);
-    /* tag stays 0 = Ok */
-    *(void **)((char *)ok_obj + 16) = tup;
-    return ok_obj;
+    return make_ok(tup);
 }
 
 /* http_fetch / http_fetch_available — native stubs for the JS-only fetch

@@ -1177,9 +1177,13 @@ build checks it, so a reviewer doesn't have to.
   apart, so a function over it isn't used in a theorem (the warning says so). Rename the type.
   A user function or constructor named like a stdlib one (`fn unwrap`, a `Reply`
   constructor) is fine: the call resolves to your own.
-- **`String`, `Bytes` and `Float` theorems are limited.** The logic treats `String` and
-  `Bytes` contents as opaque, so a round-trip law such as `decode(encode(s)) == s` can't be
-  proved yet. `forge test` can't generate `String` or `Float` inputs for a lemma either.
+- **`String` and `Bytes` theorems are limited, and `Float` ones need a NaN hypothesis.** The
+  logic treats `String` and `Bytes` contents as opaque, so a round-trip law such as
+  `decode(encode(s)) == s` can't be proved yet. Float operations in a body are their IEEE
+  meaning, so a Float law proves once its parameters rule out NaN (`{Float | !is_nan(_)}`;
+  see [Float Refinements]({{ site.baseurl }}/docs/refinement-types/#float-refinements));
+  arithmetic inside a predicate (`{Float | _ +. 1.0 > 0.0}`) is still skipped. `forge test`
+  can't generate `String` or `Float` inputs for a lemma either.
 - **A hand-written `==` is not used.** `==` in a theorem is structural equality. A type
   with its own `Eq` (as `List` has) gets a `predicate_eq_structural` warning; for laws over
   a custom equality, write the equality as a reflected function.

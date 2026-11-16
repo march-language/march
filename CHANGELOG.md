@@ -27,6 +27,12 @@ git log is authoritative for exact commits.
   `to_list_is_some`), `Result` (`is_err_not_ok`) and `Math` (`min_int_comm`,
   `max_int_comm`, `min_plus_max`, `clamp_int_within`, `clamp_int_idem`). Call one before a contract that needs its
   fact; like every lemma they are erased before the program runs.
+- **Float laws can be proved, and a contract can say "not NaN".** A function's Float
+  operations (`+.`, `-.`, `*.`, `/.`, `<`, `<=`, `>`, `>=`) now mean exactly what the program
+  computes (IEEE-754 binary64, round to nearest even) when the refinement checker reasons about
+  it, so a lemma such as `min_f(a, b) <= a` proves. New predicate words `is_nan(x)`,
+  `is_infinite(x)` and `is_finite(x)` (and the builtins `float_is_nan`/`float_is_infinite`)
+  state the hypothesis most Float laws need: `fn f(x : {Float | !is_nan(_)})`.
 - **Handles do not cross nodes.** A message type that holds a resource handle (`File.Handle`,
   `File.Dir`, `Socket`, `Listener`, `Process`, `UdpSocket`, `TlsConn`, `TlsCtx`, `WsSocket`) at
   any depth is a compile-time error naming the handle: "`Socket` cannot be sent to another node:
@@ -1046,6 +1052,19 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **Compiled HTTP clients read the response status, headers and errors correctly.** In
+  compiled code every odd status code came back halved (201 as 100, 401 as 200, 503 as
+  251), so `HttpClient.step_raise_on_error` let a 401 or 403 through as a success; every
+  response had an empty header list, so `Http.get_header` found nothing and no redirect was
+  followed; and a server that closed the connection without answering produced a 200 with
+  an empty body. `HttpTransport` and `HttpClient` now give the same status, headers and
+  `Err` as the interpreter.
+- **A list (or other value) captured by a `task_spawn` closure and still read by the spawning
+  thread no longer crashes compiled code** (#1266). A consuming `match` on a shared cell
+  released the cell before taking its own references to the fields it pulled out, so
+  another thread could free those fields in between; the compiled program died with
+  SIGSEGV, SIGBUS or SIGABRT. The fields are now retained first.
 
 - **`Process.kill` can no longer signal a recycled pid.** A kill racing a `wait_proc` on
   another task could reach a pid the wait had already reaped; it now signals only while
