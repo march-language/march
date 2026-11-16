@@ -10,5 +10,9 @@ Laws worth having: `len(zip(xs, ys)) == min(len(xs), len(ys))`, `len(enumerate(x
 len(xs)`, `split_at(xs, n) == (take(xs, n), drop(xs, n))`, `len(concat(xss))` as the sum of
 the lengths, and `unzip(zip(xs, ys))` when the lengths agree.
 
+The same holds for `Enum.count`, `Enum.sum`, `Enum.product`, `Enum.with_index`,
+`Sort.reverse_list` and `Sort.append_list` (found by the 2026-11-16 coverage sweep): each loops
+in a nested `go`.
+
 Lifting changes the compiled code's shape, so run `bench/list_ops.march` before and after.
 Follow-up to `progress/2026-11-15-stdlib-laws-pass.md`.

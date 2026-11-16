@@ -97,7 +97,8 @@ mod Math do
       march> Math.min_float(1.5, 2.0)
       1.5
   """
-  fn min_float(a : Float, b : Float) : Float do
+  fn min_float(a : Float, b : Float)
+    : {Float | is_nan(a) || is_nan(b) || (_ <= a && _ <= b && (_ == a || _ == b))} do
     if a < b do a else b end
   end
 
@@ -110,7 +111,8 @@ mod Math do
       march> (Math.max_float(1.5, 2.0)) == 2.0
       true
   """
-  fn max_float(a : Float, b : Float) : Float do
+  fn max_float(a : Float, b : Float)
+    : {Float | is_nan(a) || is_nan(b) || (_ >= a && _ >= b && (_ == a || _ == b))} do
     if a > b do a else b end
   end
 
@@ -144,7 +146,8 @@ mod Math do
       march> Math.clamp_float(0.25, 0.0, 1.0)
       0.25
   """
-  fn clamp_float(x : Float, low : Float, high : Float) : Float do
+  fn clamp_float(x : Float, low : Float, high : Float)
+    : {Float | is_nan(x) || is_nan(low) || is_nan(high) || high < low || (_ >= low && _ <= high)} do
     if x < low do low else if x > high do high else x end end
   end
 
@@ -536,5 +539,32 @@ mod Math do
   @[lemma]
   fn clamp_int_idem(x : Int, low : Int, high : {Int | _ >= low})
     : {Unit | clamp_int(clamp_int(x, low, high), low, high) == clamp_int(x, low, high)} do () end
+
+  doc "`min_float` does not depend on the order of its arguments, when neither is NaN."
+  @[lemma]
+  fn min_float_comm(a : {Float | !is_nan(_)}, b : {Float | !is_nan(_)})
+    : {Unit | min_float(a, b) == min_float(b, a)} do () end
+
+  doc "`max_float` does not depend on the order of its arguments, when neither is NaN."
+  @[lemma]
+  fn max_float_comm(a : {Float | !is_nan(_)}, b : {Float | !is_nan(_)})
+    : {Unit | max_float(a, b) == max_float(b, a)} do () end
+
+  doc "A value already within `[low, high]` is unchanged by `clamp_float`."
+  @[lemma]
+  fn clamp_float_within(x : Float, low : Float, high : Float)
+    : {Unit | !(x >= low && x <= high) || clamp_float(x, low, high) == x} do () end
+
+  doc "`abs` of `abs` is `abs`."
+  @[lemma]
+  fn abs_idem(x : Float) : {Unit | is_nan(x) || abs(abs(x)) == abs(x)} do () end
+
+  doc "`abs` is never negative, unless its argument is NaN."
+  @[lemma]
+  fn abs_nonneg(x : Float) : {Unit | is_nan(x) || abs(x) >= 0.0} do () end
+
+  doc "`sqrt` of a NaN or a negative number is NaN."
+  @[lemma]
+  fn sqrt_neg_nan(x : {Float | is_nan(_) || _ < 0.0}) : {Unit | is_nan(sqrt(x))} do () end
 
 end

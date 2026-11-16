@@ -254,4 +254,85 @@ mod Queue do
     go(xs, empty())
   end
 
+  -- ---- Laws (2026-11-16) ----
+
+  doc "`rev` onto an accumulator keeps every element."
+  @[lemma]
+  fn len_rev(xs : List(a), acc : List(a)) : {Unit | len(rev(xs, acc)) == len(xs) + len(acc)} do
+    match xs do
+    Nil -> ()
+    Cons(h, t) -> len_rev(t, Cons(h, acc))
+    end
+  end
+
+  doc "`list_len` counts onto its accumulator."
+  @[lemma]
+  fn list_len_len(xs : List(a), acc : Int) : {Unit | list_len(xs, acc) == len(xs) + acc} do
+    match xs do
+    Nil -> ()
+    Cons(_, t) -> list_len_len(t, acc + 1)
+    end
+  end
+
+  doc "The length of `list_append(xs, ys)` is the sum of the lengths."
+  @[lemma]
+  fn len_list_append(xs : List(a), ys : List(a)) : {Unit | len(list_append(xs, ys)) == len(xs) + len(ys)} do
+    match xs do
+    Nil -> ()
+    Cons(_, t) -> len_list_append(t, ys)
+    end
+  end
+
+  doc "`size` is the length of `to_list`."
+  @[lemma]
+  fn size_to_list(q : Queue(a)) : {Unit | size(q) == len(to_list(q))} do
+    match q do
+    Queue(front, back) ->
+      list_len_len(front, 0)
+      list_len_len(back, 0)
+      len_rev(back, Nil)
+      len_list_append(front, rev(back, Nil))
+    end
+  end
+
+  doc "Pushing at the back adds one element."
+  @[lemma]
+  fn size_push_back(q : Queue(a), x : a) : {Unit | size(push_back(q, x)) == size(q) + 1} do
+    match q do
+    Queue(front, back) ->
+      list_len_len(front, 0)
+      list_len_len(back, 0)
+      list_len_len(Cons(x, back), 0)
+    end
+  end
+
+  doc "Pushing at the front adds one element."
+  @[lemma]
+  fn size_push_front(q : Queue(a), x : a) : {Unit | size(push_front(q, x)) == size(q) + 1} do
+    match q do
+    Queue(front, back) ->
+      list_len_len(front, 0)
+      list_len_len(back, 0)
+      list_len_len(Cons(x, front), 0)
+    end
+  end
+
+  doc "A queue is empty exactly when its size is 0."
+  @[lemma]
+  fn is_empty_size(q : Queue(a)) : {Unit | is_empty(q) == (size(q) == 0)} do
+    match q do
+    Queue(front, back) ->
+      list_len_len(front, 0)
+      list_len_len(back, 0)
+      match front do
+      Nil ->
+        match back do
+        Nil -> ()
+        Cons(_, _) -> ()
+        end
+      Cons(_, _) -> ()
+      end
+    end
+  end
+
 end

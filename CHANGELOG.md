@@ -28,6 +28,16 @@ git log is authoritative for exact commits.
   rollback, where before a removed field always needed a hand-written migration.
   `forge hot-reload check` shows `rollback round trip (derived)` and
   `migrate_state (derived rollback)`.
+- **Laws for `Tuple`, `Duration`, `Queue` and `Deque`.** 23 proved lemmas: `Tuple.swap_swap`,
+  `Tuple.len_zip` and the `first`/`second`/`make` laws; `Duration.add_comm`, `add_assoc`,
+  `subtract_add`, `to_milliseconds_add`, `unit_steps` (a minute is 60 seconds, and so on) and
+  two `compare` laws; and `size` laws for `Queue` and `Deque` (each push adds one, `is_empty`
+  is size 0, a queue's size is the length of its list).
+- **`Math` Float functions state what they return.** `Math.min_float`, `Math.max_float` and
+  `Math.clamp_float` carry return types that hold unless an argument is NaN, so a caller
+  passing non-NaN values gets the bound without a call, and `Math` has new proved lemmas
+  `min_float_comm`, `max_float_comm`, `clamp_float_within`, `abs_idem`, `abs_nonneg` and
+  `sqrt_neg_nan`.
 - **16 more proved laws in the standard library.** `List` (`drop_last_snoc`:
   `drop_last(append(xs, [x])) == xs`, `len_drop_last`, `is_empty_len`, `head_opt_nth_opt`,
   `head_opt_append`), `Option` (`zip_is_some`, `is_none_not_some`, `len_to_list`,
@@ -1060,6 +1070,10 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
+  `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
+  there and `+inf` everywhere else); it now uses the IEEE absolute value like every other
+  backend.
 - **A lemma can unfold a function whose parameter has a field refinement**
   (`fn mig(old : {Old | _.count >= 0})`). Before, such a function had no unfolding at all, so
   the rollback round trip of any actor with a refined state field was `not proved`.

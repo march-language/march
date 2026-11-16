@@ -511,7 +511,10 @@ int64_t march_hash_bool(int64_t b) { return b ? 1 : 0; }
 /* ── Float builtins ─────────────────────────────────────────────────── */
 
 /* WASM has native f64 instructions for most of these */
-double march_float_abs(double f) { return f < 0 ? -f : f; }
+/* IEEE abs, as fabs on native: `f < 0 ? -f : f` returned -0.0 for -0.0 (and
+   kept a NaN's sign), so `1.0 /. abs(-0.0)` was -inf here and +inf everywhere
+   else, and the refinement checker models float_abs as fp.abs. */
+double march_float_abs(double f) { return __builtin_fabs(f); }
 /* Float -> Int: NaN, or a rounded value outside March's 63-bit Int range,
  * panics as in march_runtime.c's march_float_int_checked (a bare cast is
  * undefined there).  A panic traps the instance on wasm (march_panic below),

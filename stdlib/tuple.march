@@ -186,4 +186,39 @@ mod Tuple do
     go(pairs, Nil, Nil)
   end
 
+  -- ---- Laws (2026-11-16) ----
+
+  doc "Swapping twice gives back the pair."
+  @[lemma]
+  fn swap_swap(t : (a, b)) : {Unit | swap(swap(t)) == t} do () end
+
+  doc "The first element of a swapped pair is the original second."
+  @[lemma]
+  fn first_swap(t : (a, b)) : {Unit | first(swap(t)) == second(t)} do () end
+
+  doc "The second element of a swapped pair is the original first."
+  @[lemma]
+  fn second_swap(t : (a, b)) : {Unit | second(swap(t)) == first(t)} do () end
+
+  doc "`first` and `second` take apart what `make` builds."
+  @[lemma]
+  fn first_second_make(x : a, y : b) : {Unit | first(make(x, y)) == x && second(make(x, y)) == y} do () end
+
+  doc "`to_list` has two elements."
+  @[lemma]
+  fn len_to_list(t : (a, a)) : {Unit | len(to_list(t)) == 2} do () end
+
+  doc "`zip` is no longer than either list."
+  @[lemma]
+  fn len_zip(xs : List(a), ys : List(b)) : {Unit | len(zip(xs, ys)) <= len(xs) && len(zip(xs, ys)) <= len(ys)} do
+    match xs do
+    Nil -> ()
+    Cons(_, xt) ->
+      match ys do
+      Nil -> ()
+      Cons(_, yt) -> len_zip(xt, yt)
+      end
+    end
+  end
+
 end
