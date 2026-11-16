@@ -2002,6 +2002,23 @@ let test_schema_handlers_and_message_diff () =
    between the running version's schema and the new build's
    (Schema_diff.tag_check). A tag moves between builds only when a hash
    collision made one key probe; nothing compared them before. *)
+(* A derived drop-only migration (todo 2026-11-08-hcr-derive-rollback-state):
+   the sidecar names the dropped fields, and the deploy note says the
+   migration is the running version's proved rollback, not "every field
+   kept". *)
+let test_derived_drops_note () =
+  let schemas drops =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string (Printf.sprintf {|{
+      "Counter": {"compat": "full", "migrate_derived": []%s,
+                  "state_fields": [{"name": "count", "ty": "Int"}]}}|} drops)) in
+  let note s = Option.value ~default:"" (Schema_diff.derived_note s "Counter") in
+  let s = schemas {|, "migrate_derived_drops": ["hits"]|} in
+  Alcotest.(check (list string)) "parsed" [ "hits" ] (List.assoc "Counter" s).Schema_diff.derived_drops;
+  Alcotest.(check bool) "names the rollback" true
+    (contains (note s) "derived as the running version's proved rollback (drops hits");
+  Alcotest.(check bool) "an add-only derivation keeps its wording" true
+    (contains (note (schemas "")) "every field kept")
+
 let test_schema_tag_check () =
   let parse s = List.assoc "Tally" (Schema_diff.parse_schemas_json (Yojson.Safe.from_string s)) in
   let schema ?(mm = "") handlers =
@@ -3579,6 +3596,8 @@ let () =
       Alcotest.test_case "schemas: handlers, migrate_msg_from, message diff" `Quick test_schema_handlers_and_message_diff;
       Alcotest.test_case "schemas: --accept-unproved must be built into the patch" `Quick test_overrides_must_be_built_in;
       Alcotest.test_case "schemas: actor-message tags compared at deploy (H7)" `Quick test_schema_tag_check;
+      Alcotest.test_case "schemas: a derived drop-only migration is named as the rollback" `Quick
+        test_derived_drops_note;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;

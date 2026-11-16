@@ -63,7 +63,11 @@ let actor_of_migration (fn_name : string) : actor option =
       Some (String.sub fn_name 0 (String.length fn_name - String.length sfx))
     else None
   in
-  match strip "_migrate_state", strip "_migrate_msg" with
+  (* `_rollback_roundtrip`: H5's generated lemma ranges over the same deployed
+     states as the migration it unfolds, so its parameter gets the same
+     hypotheses ([strengthen_fn]); without them the migration's strengthened
+     (guarded) unfolding never fired and the round trip was a skip. *)
+  match strip "_migrate_state", (match strip "_migrate_msg" with Some p -> Some p | None -> strip "_rollback_roundtrip") with
   | Some p, _ | None, Some p ->
     let p = last_segment p in
     List.find_map
@@ -113,7 +117,8 @@ let field_facts (a : actor) : (string * A.expr) list =
     names
 
 let strengthen_fn (fd : A.fn_def) : A.fn_def =
-  if not (ends_with ~suffix:"_migrate_state" fd.A.fn_name.A.txt) then fd
+  if not (ends_with ~suffix:"_migrate_state" fd.A.fn_name.A.txt
+          || ends_with ~suffix:"_rollback_roundtrip" fd.A.fn_name.A.txt) then fd
   else
     match actor_of_migration fd.A.fn_name.A.txt with
     | None -> fd

@@ -214,7 +214,11 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
     match fn_span "_migrate_state" with
     | None -> []
     | Some _ ->
-      let what = if derived then "migrate_state (derived)" else "migrate_state" in
+      let what =
+        if List.mem_assoc name !March_desugar.Desugar_migrate_derive.drops then
+          "migrate_state (derived rollback)"
+        else if derived then "migrate_state (derived)"
+        else "migrate_state" in
       (match summarise ~where:deployed_note migrate_state with
        | Some (Not_proved, d) ->
          [ line what
@@ -243,6 +247,10 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
     | None -> []
     | Some _ ->
       let rt = low ^ "_rollback_roundtrip" in
+      let rb_what =
+        if List.mem_assoc name !March_desugar.Desugar_migrate_derive.rollbacks then
+          "rollback round trip (derived)"
+        else "rollback round trip" in
       (* A refuted lemma keeps its stage-1 skip in the ledger; the refutation
          itself is [Refine_call.lemma_refuted] (the build's error). *)
       let refuted =
@@ -254,7 +262,7 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
       in
       match refuted with
       | Some at ->
-        [ line "rollback round trip"
+        [ line rb_what
             (Violated, Printf.sprintf "rolling back loses part of the old state at %s" at) ]
       | None ->
       (match
@@ -262,10 +270,10 @@ let actor_lines ~(user : A.span -> bool) ~(fns : (string * A.span) list)
            (List.filter (fun (o : O.t) -> o.O.kind = O.Postcondition && o.O.callee = rt) obs)
        with
        | Some (l, _) when l = Proved ->
-         [ line "rollback round trip" (Proved, "rollback_state(migrate_state(old)) == old for every old state") ]
-       | Some s -> [ line "rollback round trip" s ]
+         [ line rb_what (Proved, "rollback_state(migrate_state(old)) == old for every old state") ]
+       | Some s -> [ line rb_what s ]
        | None ->
-         [ line "rollback round trip"
+         [ line rb_what
              (Not_checked, "no migrate_state to pair rollback_state with") ])
   in
   (* H3 (Desugar_simulation): per message, migrating commutes with handling,
