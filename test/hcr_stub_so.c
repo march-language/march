@@ -33,8 +33,9 @@ int64_t test_fn_digest(void) { return 42; }
 #endif
 
 /* Counter was built with --accept-unproved Counter.state (spaced as a
- * hand-written sidecar might be): its activation's audit line records it. */
-const char __march_hcr_schemas[] = "{\"Counter\":{\"compat\":\"full\",\"accepted_unproved\": [ \"state\",\n \"Bump\" ],\"state_fields\":[{\"name\":\"n\",\"ty\":\"Int\"}]},\"Other\":{\"compat\":\"any\",\"state_fields\":[]}}";
+ * hand-written sidecar might be) and --drop Counter.history: its activation's
+ * audit line records both. */
+const char __march_hcr_schemas[] = "{\"Counter\":{\"compat\":\"full\",\"accepted_unproved\": [ \"state\",\n \"Bump\" ],\"migrate_drops_consented\": [\"history\"],\"state_fields\":[{\"name\":\"n\",\"ty\":\"Int\"}]},\"Other\":{\"compat\":\"any\",\"state_fields\":[]}}";
 const char __march_hcr_manifest[] = "patch manifest\n";
 int64_t Counter_dispatch(void) { return 42; }
 

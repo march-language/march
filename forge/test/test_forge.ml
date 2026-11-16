@@ -2046,6 +2046,44 @@ let test_derived_clause_note () =
      (copies back count from total)"
     (note back)
 
+(* forge deploy hot --drop (todo 2026-11-15-hcr-deploy-drop-consent): a
+   --drop the build's schemas do not record as dropped is reported, the plan
+   names drops by consent, and a removed-field refusal says --drop exists. *)
+let test_drop_consent () =
+  let schemas extra =
+    Schema_diff.parse_schemas_json (Yojson.Safe.from_string (Printf.sprintf {|{
+      "Counter": {"compat": "full"%s,
+                  "state_fields": [{"name": "count", "ty": "Int"}]}}|} extra)) in
+  let s = schemas {|, "migrate_derived": [], "migrate_drops_consented": ["history"]|} in
+  Alcotest.(check (list string)) "a recorded drop is used" []
+    (Schema_diff.unused_drops s [ "Counter.history" ]);
+  Alcotest.(check (list string)) "unrecorded, other actor, malformed"
+    [ "Counter.count"; "Other.history"; "history" ]
+    (Schema_diff.unused_drops s [ "Counter.count"; "Other.history"; "history" ]);
+  Alcotest.(check string) "plan names the drop"
+    "actor Counter: migrate_state derived from the running version's state (drops history by --drop)"
+    (Option.value ~default:"" (Schema_diff.derived_note s "Counter"));
+  let refused = schemas {|, "migrate_not_derived": "it removes history"|} in
+  Alcotest.(check string) "a removal refusal mentions --drop"
+    " (not derived: it removes history; to discard that data, deploy with --drop Counter.<field>)"
+    (Schema_diff.not_derived_note refused "Counter");
+  let suggested =
+    schemas {|, "migrate_not_derived": "it removes count (if `total` renames it, add `migrate old -> { total: old.count }` to the actor)"|} in
+  Alcotest.(check bool) "a rename suggestion is not followed by the --drop hint" false
+    (contains (Schema_diff.not_derived_note suggested "Counter") "--drop")
+
+(* forge fix --only CODE opts into that code's fixes whatever their tier
+   (todo 2026-11-15-hcr-migrate-clause-suggestion); plain forge fix never
+   applies a guess. *)
+let test_fix_only_opts_into_guesses () =
+  let line =
+    {|{"severity":"warning","file":"m.march","start_line":2,"start_col":8,"end_line":2,"end_col":15,"message":"rename?","code":"migrate_rename_suggested","fix":{"kind":"insert","after_line":4,"text":"    migrate old -> { total: old.count }","applicability":"maybe-incorrect"}}|} in
+  Alcotest.(check int) "a guess is not applied unasked" 0 (List.length (Cmd_fix.parse_fix_line line));
+  Alcotest.(check int) "naming its code applies it" 1
+    (List.length (Cmd_fix.parse_fix_line ~opt_in:[ "migrate_rename_suggested" ] line));
+  Alcotest.(check int) "naming another code does not" 0
+    (List.length (Cmd_fix.parse_fix_line ~opt_in:[ "unused_binding" ] line))
+
 let test_schema_tag_check () =
   let parse s = List.assoc "Tally" (Schema_diff.parse_schemas_json (Yojson.Safe.from_string s)) in
   let schema ?(mm = "") handlers =
@@ -3627,6 +3665,10 @@ let () =
         test_derived_drops_note;
       Alcotest.test_case "derived note: a migrate clause and the rename it undoes" `Quick
         test_derived_clause_note;
+      Alcotest.test_case "deploy --drop: unused drops, the plan note, the refusal hint" `Quick
+        test_drop_consent;
+      Alcotest.test_case "fix --only opts into a code's guessed fixes" `Quick
+        test_fix_only_opts_into_guesses;
       Alcotest.test_case "migrate_msg stub from handler signatures" `Quick test_migrate_msg_stub;
       Alcotest.test_case "ACTIVATE4: caps csv is sorted own caps per function" `Quick test_activate4_caps_csv_is_sorted_own_caps_per_function;
       Alcotest.test_case "branch: caps present, no flag -> ACTIVATE4" `Quick test_branch_caps_present_no_flag_selects_activate4;

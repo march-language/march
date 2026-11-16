@@ -21,6 +21,16 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **`forge deploy hot --drop Actor.field`.** Lets a hot deploy discard a removed state field
+  that nothing reads, which otherwise refuses the deploy. The consent is built into the
+  patch's signed schemas, so the server's audit log records the dropped fields; a `--drop`
+  the build does not use aborts the deploy. The compiler flag is `--hcr-drop`.
+- **A state field that looks renamed gets the `migrate` clause proposed.** When a deploy
+  removes one field and adds one of the same type, the build warns
+  (`migrate_rename_suggested`) with the clause as a fix. It is a guess, so plain
+  `forge fix` never applies it; `forge fix --only migrate_rename_suggested` (or the editor)
+  does. `forge fix --only CODE` now works in a project too, and naming a code applies that
+  code's guessed fixes.
 - **Rename or convert actor state fields in one hot deploy.** A `migrate old -> { total:
   old.count }` clause after an actor's `init` says what moves; the compiler writes the rest of
   `<actor>_migrate_state` (kept fields copied, new ones from `init`). A bare copy keeps the
@@ -1083,6 +1093,17 @@ git log is authoritative for exact commits.
   generic, while the caller expected a different layout. Such a function is now specialised
   for each return type it is used at.
 
+- **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
+  compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
+  but failed to compile natively (clang: "use of undefined value '@compare'") and threw
+  `ReferenceError` under `--target js`. An interface method used as a value now resolves to the
+  implementation for its argument type, as a call does.
+
+- **A discarded `Ok(())` is released.** Compiled code leaked the `Result` cell a call such as
+  `println` returns in two places: a `match` or `if` used as a statement whose arms all end in a
+  call, and a block-final `let _ = e`, which returned `e`'s value although the block's type is
+  `()`. Both leak tools (`--rc-trace` with `scripts/gc-trace-report.py`, and LSan) reported one
+  or two such cells on most programs, hiding real leaks.
 - **`abs(-0.0)` is `+0.0` on the WASM target.** The WASM runtime computed `float_abs` as
   `f < 0 ? -f : f`, which kept the sign of `-0.0` (so `1.0 /. Math.abs(-0.0)` was `-inf`
   there and `+inf` everywhere else); it now uses the IEEE absolute value like every other

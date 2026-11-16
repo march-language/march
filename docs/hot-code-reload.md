@@ -47,7 +47,7 @@ need to drain traffic before a routine code push. Some edge cases are still open
 
 **What happens to running work**
 
-- [Actor state migration](#actor-state-migration): [derived migrations](#derived-migrations-adding-a-field-needs-no-migrate_state), [the `migrate` clause](#moving-data-the-migrate-clause), [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
+- [Actor state migration](#actor-state-migration): [derived migrations](#derived-migrations-adding-a-field-needs-no-migrate_state), [the `migrate` clause](#moving-data-the-migrate-clause), [`--drop`](#dropping-a-field---drop), [queued messages](#messages-queued-during-a-deploy), [`migrate_msg`](#message-type-changes-and-migrate_msg), [drains](#drains), [when a deploy has to wait](#when-a-deploy-has-to-wait), [protocol changes](#protocol-changes)
 - [Compatibility annotations](#compatibility-annotations)
 - [Verifying migration soundness with `@invariant`](#verifying-migration-soundness-with-invariant) and [what `@invariant` accepts](#what-expressions-are-allowed-in-invariant)
 - [What a build guarantees: `forge hot-reload check`](#what-a-build-guarantees-forge-hot-reload-check)
@@ -554,7 +554,7 @@ Nothing is derived when the change needs a decision. The deploy is then refused 
 
 | Change | Why it is not derived |
 |---|---|
-| A field was removed | dropping data is your call; to move its value into another field, say so with a [`migrate` clause](#moving-data-the-migrate-clause) |
+| A field was removed | dropping data is your call: to move its value into another field, say so with a [`migrate` clause](#moving-data-the-migrate-clause); to discard it, deploy with [`--drop`](#dropping-a-field---drop) |
 | A field changed type | the old value has to be converted; give the conversion in a `migrate` clause |
 | A new field's `init` value reads an `init` parameter, or `init` is not a record literal | there is no constant to give a running actor |
 
@@ -587,6 +587,29 @@ actor Counter: migrate_state derived from the migrate clause (renames: total fro
 ```
 
 The clause belongs to one deploy. After that deploy it is harmless: on the next one, a clause that reads a field the running version no longer has is ignored with a warning to delete it. Without a known running version (a plain build), the clause does nothing. A malformed clause is an error in any build: its body must be a record literal of state fields, each given once.
+
+When a deploy removes exactly one field and adds exactly one of the same type, and you wrote no clause, the build warns that it may be a rename and proposes the clause as a fix:
+
+```
+`Counter` removes `count` and adds `total` of the same type; if `total` renames `count`, a migrate clause moves the running data: `migrate old -> { total: old.count }` [migrate_rename_suggested]
+
+    possible fix (a guess: check it before applying it):
+
+4 |     init  { total: 0, label: "" }
+5 +     migrate old -> { total: old.count }
+```
+
+It is only a guess (`total` may really be new and `count` really gone), so it is never applied on its own: take it from the editor's quick fixes, or run `forge fix --only migrate_rename_suggested`. The deploy's refusal carries the same suggestion.
+
+### Dropping a field: `--drop`
+
+A removed field that nothing reads refuses the deploy, because its live data would be thrown away. When that is what you want, say so for that field:
+
+```sh
+forge deploy hot --drop Counter.history
+```
+
+The derived migration then leaves `history` out (`--drop` is repeatable, or takes a comma-separated list). The consent is built into the patch's signed schemas, so the server's audit log records which fields the activation discarded (`"dropped":["history"]`), next to any `--accept-unproved`. A `--drop` the build does not use (a misspelled field, a field that is kept, or one a `migrate` clause reads) aborts the deploy rather than being ignored. The plan says `drops history by --drop`. A dropped field cannot come back, so no rollback is derived for that deploy. Outside forge, the compiler flag is `--hcr-drop Counter.history`.
 
 `forge hot-reload check` labels the line `migrate_state (derived, migrate clause)`. When a clause cannot derive the migration against the running version (it does not read a removed field, say), the build warns at the clause with the reason, rather than waiting for the deploy to refuse it.
 
