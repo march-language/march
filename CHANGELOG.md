@@ -1060,6 +1060,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A discarded `Ok(())` is released.** Compiled code leaked the `Result` cell a call such as
+  `println` returns in two places: a `match` or `if` used as a statement whose arms all end in a
+  call, and a block-final `let _ = e`, which returned `e`'s value although the block's type is
+  `()`. Both leak tools (`--rc-trace` with `scripts/gc-trace-report.py`, and LSan) reported one
+  or two such cells on most programs, hiding real leaks.
 - **A lemma can unfold a function whose parameter has a field refinement**
   (`fn mig(old : {Old | _.count >= 0})`). Before, such a function had no unfolding at all, so
   the rollback round trip of any actor with a refined state field was `not proved`.

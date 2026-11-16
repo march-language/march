@@ -594,8 +594,22 @@ let discarded_call_result_ty (env : env) (e : Tir.expr) : Tir.ty option =
     | Tir.ELet (_, _, body) | Tir.ESeq (_, body) -> tail body
     | x -> x
   in
+  (* A [match]/[if] used as a statement whose every arm ends in a call
+     ([match n do 2 -> println("two") _ -> println("other") end]) discards
+     an owned result on every path just like a bare call does.  Only arms
+     that all end in a call qualify: an arm ending in an atom or a field
+     read may hand back a borrowed value that is not ours to release. *)
+  let rec ends_in_call x =
+    match tail x with
+    | Tir.EApp _ -> true
+    | Tir.ECase (_, brs, def) ->
+      brs <> []
+      && List.for_all (fun (br : Tir.branch) -> ends_in_call br.Tir.br_body) brs
+      && (match def with Some d -> ends_in_call d | None -> true)
+    | _ -> false
+  in
   match tail e with
-  | Tir.EApp _ ->
+  | (Tir.EApp _ | Tir.ECase _) when ends_in_call e ->
     (match tir_expr_ty e with
      (* Unit is sometimes typed as the empty tuple, which [needs_rc] counts as
         an aggregate; a unit-returning statement ([println(s)]) has nothing to
