@@ -1352,6 +1352,10 @@ let collision_tag_findings ~collision_set ~(ctors : string -> string list option
   Hashtbl.iter (fun short names ->
       let seen = Hashtbl.create 16 in
       List.iter (fun name ->
+          (* The builtin Option/Result/List keep their runtime-fixed tags even
+             when a user type shares the short name: they are not colliding
+             ([Collision_set.is_colliding]); the user's type is. *)
+          if Collision_set.is_colliding collision_set name then
           match ctors name with
           | None -> ()
           | Some cs ->

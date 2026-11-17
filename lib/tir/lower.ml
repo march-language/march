@@ -167,7 +167,9 @@ let rec collect_type_names ~prefix acc decls =
   List.fold_left (fun acc d -> match d with
       | Ast.DType (_, name, _, _, _)
       | Ast.DAlwaysLinearType (_, name, _, _, _) ->
-        Tir.TDVariant (prefix ^ name.txt, []) :: acc
+        let tname = match Lower_types.shadowing_tir_name name with
+          | Some id -> id | None -> prefix ^ name.txt in
+        Tir.TDVariant (tname, []) :: acc
       | Ast.DActor (_, name, _, _) ->
         (* BARE, ignoring ~prefix — see doc comment above. *)
         Tir.TDVariant (name.txt ^ Tir_names.actor_msg_suffix, [])
@@ -638,6 +640,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             ) idef.iface_methods
         | Ast.DImpl (idef, impl_sp) ->
           let type_name = match idef.impl_ty with
+            | Ast.TyCon (n, _) when Lower_types.shadowing_tir_name n <> None ->
+              Option.get (Lower_types.shadowing_tir_name n)
             | Ast.TyCon ({ txt = name; _ }, _) -> name
             (* Tuples dispatch by ARITY ("$Tuple2", "$Tuple3", …) so a distinct
                `impl Show((a,b))` vs `impl Show((a,b,c))` each resolve to their
@@ -660,7 +664,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
              functions (ensure_adt_eq_fn &c.), never consulting this mangled
              symbol table — qualifying their entries too is harmless. *)
           let declaring_qualified_type_name =
-            if mod_prefix <> "" && Collision_set.is_colliding collision_set type_name then
+            if Lower_types.shadows_builtin_adt type_name then type_name
+            else if mod_prefix <> "" && Collision_set.is_colliding collision_set type_name then
               (* mod_prefix already ends in "." (see the DMod recursion below) *)
               String.sub mod_prefix 0 (String.length mod_prefix - 1) ^ "." ^ type_name
             else type_name
@@ -929,6 +934,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         end
       | Ast.DType (_, name, params, td, _)
       | Ast.DAlwaysLinearType (_, name, params, td, _) ->
+        let name = match Lower_types.shadowing_tir_name name with
+          | Some id -> { name with txt = id } | None -> name in
         (match Lower_decls.lower_type_def name params td with
          | Some td' -> types := td' :: !types
          | None -> ())
@@ -1020,7 +1027,9 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 fns := fn :: !fns
               | Ast.DType (_, tname, params, td, _)
               | Ast.DAlwaysLinearType (_, tname, params, td, _) ->
-                let qtname = { tname with txt = prefix ^ tname.txt } in
+                let qtname = match Lower_types.shadowing_tir_name tname with
+                  | Some id -> { tname with txt = id }
+                  | None -> { tname with txt = prefix ^ tname.txt } in
                 (match Lower_decls.lower_type_def qtname params td with
                  | Some td' -> types := td' :: !types
                  | None -> ())

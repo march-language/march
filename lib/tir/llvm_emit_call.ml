@@ -728,6 +728,16 @@ let emit_callptr_closure ~emit_atom ctx (fn_atom : Tir.atom)
       | Tir.AVar v ->
         (match v.Tir.v_ty with
          | Tir.TFn (ps, ret) when List.length ps = nargs -> ret
+         (* A zero-argument call of a `() -> R` value: the typechecker's
+            arrow for `fn -> e` converts to TFn([TTuple []], R) (or a TUnit
+            parameter), but the lambda's
+            apply fn takes no argument and the call passes none.  Seen where a
+            binding's type comes from the typechecker rather than the lambda
+            (a REPL `let f = fn -> 1` read back from its slot); without this
+            arm the return fell through to [ctx.ret_ty] below and a REPL
+            fragment's `()` made `f()` a void call returning 0
+            (specs/progress/2026-11-11-repl-zero-arg-closure-returns-zero.md). *)
+         | Tir.TFn ([ (Tir.TUnit | Tir.TTuple []) ], ret) when nargs = 0 -> ret
          | Tir.TFn _ as ty ->
            (* Uncurry the TFn chain: TFn([a], TFn([b], R)) with 2 args → R.
               Defun flattens curried apply functions but keeps the original

@@ -573,7 +573,9 @@ let compute_shared_ctor_collisions (decls : Ast.decl list) : unit =
               List.map (fun (v : Ast.variant) -> v.Ast.var_name.txt) variants
             | _ -> []
           in
-          add_qualified prefix (prefix ^ name.txt) vis ctor_names
+          let qualified = match Lower_types.shadowing_tir_name name with
+            | Some id -> id | None -> prefix ^ name.txt in
+          add_qualified prefix qualified vis ctor_names
         | Ast.DImpl (idef, _) ->
           let impl_short = match idef.Ast.impl_ty with
             | Ast.TyCon (n, _) -> n.txt

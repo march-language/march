@@ -200,7 +200,11 @@ let declared_layout_types = [ "CsvRow" ]
    by [build]; C-built ones are excluded by [c_boxed_types]. *)
 let canonical_name (t : table) (name : string) : string =
   let s = Collision_set.short_name name in
-  if List.mem s declared_layout_types then
+  (* `Main.Option` is the user's own type: folding it to `Option` named the
+     builtin, so allocation chose the builtin's niche layout while [repr_of]
+     (which sees the qualified name, a colliding one) chose Boxed. *)
+  if Collision_set.shadows_builtin_adt name then name
+  else if List.mem s declared_layout_types then
     match List.filter_map (function
         | Tir.TDVariant (q, _) when String.equal (Collision_set.short_name q) s -> Some q
         | _ -> None) t.k_type_defs with
