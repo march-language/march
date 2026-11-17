@@ -1,0 +1,13 @@
+exit: 0
+-- WARNING: CONCURRENCY -- errors/parallel_output_order_1.march
+
+This prints from inside a parallel call, so the output order is not fixed. [parallel_output_order]
+
+6 |     let _ = List.pmap([1, 2, 3], fn x -> println("item " ++ int_to_string(x)))
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `List.pmap` runs this function on many elements at once, so the lines come out in whatever order the calls happen to run, and differ from run to run.
+    Return the text from the function and print the results after the parallel call: they come back in input order.
+    run `march --explain parallel_output_order`
+
+

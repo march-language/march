@@ -1,0 +1,16 @@
+exit: 1
+-- SYNTAX ------------------- errors/syntax_error_8.march
+
+A type's variants are listed without a leading `|`: [syntax_error]
+
+3 |   type Color = | Red | Green
+                   ^
+
+    type Color = Red | Green
+
+    fix (`forge fix` applies it):
+
+3 -   type Color = | Red | Green
+3 +   type Color = Red | Green
+
+after fix: exit 0

@@ -6,7 +6,7 @@ expected `Pid(a)` but got `Int`. [type_mismatch]
 18 |       Some(p) -> is_alive(p)
                                ^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `is_alive`.
 
     the expected type comes from here:
 

@@ -6,7 +6,7 @@ expected `{ ports : List(String), … }` but got `{ ports : List(Int), … }`. [
 12 |     use_it(c)
                 ^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `use_it`, its parameter `_c`.
     The types differ here:
         { ports : List(Int), … }
                        ^^^ expected `String`

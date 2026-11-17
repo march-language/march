@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: the value piped into `double`
+mod Main do
+  fn double(x : Int) : Int do x * 2 end
+  fn main() : String do
+    "5" |> double()
+  end
+end

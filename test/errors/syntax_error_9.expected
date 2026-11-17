@@ -1,0 +1,9 @@
+exit: 1
+-- SYNTAX ------------------- errors/syntax_error_9.march
+
+`+` has nothing on its right: the expression stops here. [syntax_error]
+
+4 |     x +
+          ^
+
+    Finish the expression after `+`, or remove the `+`.

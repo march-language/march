@@ -1,0 +1,20 @@
+exit: 1
+-- SYNTAX ------------------- errors/parse_error_22.march
+
+Functions are declared with `fn` (`pfn` for a private one), not `def`: [parse_error]
+
+3 |   def f() do 0 end
+      ^^^
+
+    fn name(params) do
+        body
+    end
+
+    fix (`forge fix` applies it):
+
+3 -   def f() do 0 end
+3 +   fn f() do 0 end
+
+    run `march --explain parse_error`
+
+after fix: exit 0

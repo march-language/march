@@ -6,7 +6,7 @@ expected `Int` but got `String`. [type_mismatch]
 39 |         println(int_to_string(s))
                                    ^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `int_to_string`.
 
     the expected type comes from here:
 

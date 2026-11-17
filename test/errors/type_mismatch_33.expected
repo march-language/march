@@ -6,7 +6,7 @@ expected `Int -> String -> Bool` but got `Int -> Int -> Bool`. [type_mismatch]
 7 |     apply(check, 1)
               ^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `apply`, its parameter `f`.
     The types differ here:
         Int -> Int -> Bool
                ^^^ expected `String`

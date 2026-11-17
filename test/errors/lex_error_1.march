@@ -1,0 +1,7 @@
+-- EXPECT-ERROR: This string is never closed
+mod M do
+  fn f(x : Int) : Int do
+    let s = "unterminated
+    0
+  end
+end

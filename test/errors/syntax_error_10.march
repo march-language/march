@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: has nothing after it
+mod M do
+  fn f(x : Int) : Int do
+    foo(x, )
+  end
+end

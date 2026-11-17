@@ -6,7 +6,7 @@ expected `Box(Int)` but got `Box(String)`. [type_mismatch]
 24 |     fn attack() : Int do unbox_int(id(Box("hi"))) end
                                         ^^^^^^^^^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `App.unbox_int`.
     The types differ here:
         Box(String)
             ^^^^^^ expected `Int`

@@ -1,0 +1,8 @@
+-- EXPECT-ERROR: expected `Result(String, String)`
+mod Main do
+  fn get() : Result(Int, String) do Ok(1) end
+  fn run() : Result(String, String) do
+    let? n = get()
+    Ok(n)
+  end
+end

@@ -5343,7 +5343,7 @@ note: did you mean `@[decreases]`?
 ```
 
 The function attributes are `@[abstraction]`, `@[assume]`, `@[decreases]`, `@[diverges]`,
-`@[measure]`, `@[no_alloc]`, `@[no_warn_recursion]`, `@[trusted]`,
+`@[measure]`, `@[no_alloc]`, `@[no_warn_race]`, `@[no_warn_recursion]`, `@[trusted]`,
 `@[trusted_linear]` and `@[vectorize]`.
 
 ### Functions meant to run for ever: `@[diverges]`

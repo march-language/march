@@ -1,0 +1,1 @@
+{"severity":"error","file":"errors/syntax_error_11.march","start_line":4,"start_col":4,"end_line":4,"end_col":5,"message":"This `(` is never closed.","code":"syntax_error","fix":{"kind":"replace","start_line":4,"start_col":10,"end_line":4,"end_col":10,"text":")","applicability":"machine-applicable"},"labels":[],"notes":["I only noticed at line 5."],"category":"SYNTAX"}

@@ -1,0 +1,16 @@
+exit: 1
+-- SYNTAX ------------------ errors/syntax_error_10.march
+
+This `,` has nothing after it: the last argument is not followed by a comma. [syntax_error]
+
+4 |     foo(x, )
+             ^
+
+
+    fix (`forge fix` applies it):
+
+4 -     foo(x, )
+4 +     foo(x)
+
+after fix: exit 1
+I cannot find `foo`. [unbound_variable]
