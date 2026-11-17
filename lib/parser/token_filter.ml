@@ -60,7 +60,10 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     let orig = base_lexer in
     let pending : (Parser.token * Lexing.position * Lexing.position) option ref =
       ref None in
-    fun lexbuf ->
+    (* The two tokens most recently handed on, for the soft keywords below
+       whose keyword use is also told apart by what comes BEFORE them. *)
+    let prev1 = ref Parser.EOF and prev2 = ref Parser.EOF in
+    let step lexbuf =
       let (tok, sp, cp) =
         match !pending with
         | Some saved -> pending := None; saved
@@ -78,6 +81,8 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
         restore ();
         if keep_when nxt then tok else Parser.LOWER_IDENT ident
       in
+      let after_cond_head () =
+        match !prev1 with Parser.IF | Parser.MATCH -> true | _ -> false in
       let after_string = function Parser.STRING _ -> true | _ -> false in
       let after_do = function Parser.DO -> true | _ -> false in
       (* `restart` is a SOFT keyword: it only introduces a supervise-child
@@ -226,7 +231,38 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       | Parser.RESTART   -> demote "restart"   ~keep_when:after_restart_type
       | Parser.BACKOFF   -> demote "backoff"   ~keep_when:after_lower_ident
       | Parser.SHUTDOWN  -> demote "shutdown"  ~keep_when:after_shutdown_arg
+      (* `on`, `loop`, `by` and `opaque` are keywords only where they are
+         written as one; everywhere else they are ordinary names, so a
+         parameter `on`, a function `loop`, a pattern variable `by` or a
+         `let opaque = …` parse (Strata GAPS S1/S2/S4/S7).
+         - `on Msg(…)`: an actor handler. A name is never followed by an
+           upper-case name in an expression (calls take parentheses).
+         - `loop do` / `loop label do`: a protocol loop.
+         - `choose by Chooser:`, `assert P by lemma(…)`, `assert P by do`:
+           a proof hint is one lemma call or a `do` block (lemmas.md), so a
+           name or `do` follows.  `by(…)` is therefore a call.
+         - `opaque type T` and the `@[opaque]` attribute.
+         `if loop do …` / `match by do …` put the NAME before `do`, so after
+         `if`/`match` both stay names. *)
+      | Parser.ON        -> demote "on"        ~keep_when:after_upper_ident
+      | Parser.LOOP      -> demote "loop"      ~keep_when:(function
+          | (Parser.DO | Parser.LOWER_IDENT _) -> not (after_cond_head ())
+          | _ -> false)
+      | Parser.BY        -> demote "by"        ~keep_when:(function
+          | Parser.LOWER_IDENT _ | Parser.UPPER_IDENT _ -> true
+          | Parser.DO -> not (after_cond_head ())
+          | _ -> false)
+      | Parser.OPAQUE    -> demote "opaque"    ~keep_when:(function
+          | Parser.TYPE -> true
+          | Parser.RBRACKET -> !prev1 = Parser.LBRACKET && !prev2 = Parser.AT
+          | _ -> false)
       | _ -> restore (); tok
+    in
+    fun lexbuf ->
+      let t = step lexbuf in
+      prev2 := !prev1;
+      prev1 := t;
+      t
   in
   let stack : context Stack.t = Stack.create () in
   let pending_match_depths : int Stack.t = Stack.create () in
