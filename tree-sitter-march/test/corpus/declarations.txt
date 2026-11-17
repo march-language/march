@@ -377,3 +377,27 @@ end
           (variable_pattern)))
       (block_body
         (unit_expression)))))
+
+================================================================================
+Soft keywords loop and by as names
+================================================================================
+mod Foo do pfn loop(by : Int) : Int do loop(by) end end
+--------------------------------------------------------------------------------
+
+(source_file
+  (module_def
+    name: (module_path
+      (type_identifier))
+    (function_def
+      name: (identifier)
+      (fn_param
+        (named_param
+          name: (identifier)
+          type: (type_constructor
+            (type_constructor))))
+      return_type: (type_constructor
+        (type_constructor))
+      body: (block_body
+        (call_expression
+          function: (identifier)
+          (identifier))))))

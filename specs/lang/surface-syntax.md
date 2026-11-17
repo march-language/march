@@ -1396,7 +1396,7 @@ end
 ### Reserved soft-keyword imbalance: bindable but not referenceable
 
 A handful of identifiers double as keywords elsewhere in the grammar
-(`init`, `loop`, `on`, `state`, `protocol`, `app`, `as`, `with`, `when`, `use`,
+(`init`, `state`, `protocol`, `app`, `as`, `with`, `when`, `use`,
 `in`, `for`) and are listed in the `soft_lower_name` production
 (`lib/parser/parser.mly`) so they can be used in *binding* positions:
 function params, patterns, and `let` bindings. They are **not** listed in
@@ -1422,6 +1422,27 @@ dot-access, record fields) and the primary-expression variable-reference
 rule, so `let tag = 3` followed by `tag + 1` works end-to-end. The other
 soft keywords above have not received the same treatment; the imbalance is
 current behavior, not a stale finding.
+
+`on`, `loop`, `by` and `opaque` are full names everywhere except where written
+as a keyword (since 2026-11-16). The token filter
+(`lib/parser/token_filter.ml`) keeps each one a keyword only in its keyword
+position and hands the parser an ordinary identifier otherwise, so they work
+as parameters, pattern variables, `let` names, function names and in
+expressions:
+
+```march
+fn on_off(d : Int, on : Bool) : Int do if on do d else 0 end end   -- param + use
+pfn loop(n : Int) : Int do if n == 0 do 0 else loop(n - 1) end end  -- fn name
+let opaque = x * 2                                                   -- let + use
+match p do (bx, by) -> bx + by end                                   -- pattern var
+```
+
+The keyword positions: `on Msg(…)` (an actor handler), `loop do` /
+`loop label do` (a protocol loop), `choose by Chooser:` and
+`assert P by lemma(…)` / `assert P by do … end` (a proof hint is a lemma call or
+a `do` block, so `by(x)` is an ordinary call), and `opaque type` / `@[opaque]`.
+Directly after `if` or `match`, `loop do` and `by do` read the word as the
+condition or scrutinee.
 
 ---
 
