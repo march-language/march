@@ -1087,6 +1087,12 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A generic function whose type variable is only in its return type no longer crashes
+  compiled.** `fn make_none() : Option(a) do None end` used as an `Option(Float)`,
+  `Option(())` or `Option(Option(Int))` died with SIGSEGV at address 0x8: it was compiled once,
+  generic, while the caller expected a different layout. Such a function is now specialised
+  for each return type it is used at.
+
 - **`on`, `loop`, `by` and `opaque` work as ordinary names.** They stay keywords only where
   written as one (`on Msg(…)`, a protocol `loop do`, `choose by` / `assert P by hint`,
   `opaque type` / `@[opaque]`); elsewhere a parameter `on`, a `pfn loop(…)`, a pattern variable

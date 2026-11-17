@@ -367,6 +367,39 @@ let rec match_ty (poly : Tir.ty) (conc : Tir.ty) (acc : ty_subst) : ty_subst =
     [fn_table] — see the shadowing guard in [rewrite_calls]. *)
 module SSet = Set.Make (String)
 
+(** Bindings for type variables that occur only in [orig_fn]'s RETURN type,
+    taken from the call site's concrete return type ([f_var]'s [TFn] result).
+    [build_subst] matches parameters only, so `fn make_none() : Option(a)` was
+    emitted once, generic: its `None` niche-encoded (raw null) under the
+    `Option(TVar)` convention while an `Option(Float)` caller (Boxed) read the
+    tag at `ptr + 8` -- SIGSEGV at 0x8
+    (specs/progress/2026-11-07-return-only-poly-fn-niche-unsafe-option.md).
+    Variables [subst] already binds are left out; a caller return type that
+    still has a type variable gives nothing. *)
+let ret_only_subst ~(orig_fn : Tir.fn_def) ~(f_var : Tir.var) (subst : ty_subst)
+  : ty_subst =
+  (* A zero-argument call's callee variable is typed at the RESULT, not at a
+     [TFn] (`make_none : Option(Float)`). *)
+  let caller_ret = match f_var.Tir.v_ty with
+    | Tir.TFn (_, r) -> Some r
+    | t when orig_fn.Tir.fn_params = [] -> Some t
+    | _ -> None in
+  match caller_ret with
+  | Some caller_ret when not (has_tvar caller_ret) ->
+    let callee_ret = subst_ty subst orig_fn.Tir.fn_ret_ty in
+    (match callee_ret with
+     (* A bare type variable no parameter mentions (`panic : a`, `todo`,
+        `unreachable`) can only diverge: the callee never builds a value
+        whose layout depends on it, so there is nothing to specialise, and
+        codegen and the RC passes recognise these by their unmangled name
+        (the `panic` builtin row, the diverging-call lists). *)
+     | Tir.TVar _ -> []
+     | _ when not (has_tvar callee_ret) -> []
+     | _ ->
+       List.filter (fun (n, _) -> not (List.mem_assoc n subst))
+         (match_ty callee_ret caller_ret []))
+  | _ -> []
+
 (** Derive the type substitution for calling [fn_def] with arguments
     of types [arg_tys]. Matches each parameter's type against the
     corresponding argument type to collect TVar bindings. *)
@@ -1072,10 +1105,23 @@ let rec rewrite_calls
          (match v.Tir.v_ty with Tir.TVar "_" -> true | _ -> false)
        ) orig_fn.Tir.fn_params) ->
        (* Callee params are monomorphic but it may not have been seeded
-          (e.g. return type has TVar).  Ensure it's enqueued. *)
-       if not (Hashtbl.mem done_set orig_name) then
-         Queue.add (orig_name, orig_fn, []) worklist;
-       expr
+          (e.g. return type has TVar).  Ensure it's enqueued.  A type
+          variable only in the return type is bound by the call site's
+          return type ([ret_only_subst]); then the body is specialised per
+          return type, named by it. *)
+       (match ret_only_subst ~orig_fn ~f_var [] with
+        | [] ->
+          if not (Hashtbl.mem done_set orig_name) then
+            Queue.add (orig_name, orig_fn, []) worklist;
+          expr
+        | extra ->
+          let param_tys = List.map (fun v -> subst_ty extra v.Tir.v_ty)
+              orig_fn.Tir.fn_params in
+          let mangled = mangle_name orig_name
+              (param_tys @ [subst_ty extra orig_fn.Tir.fn_ret_ty]) in
+          if not (Hashtbl.mem done_set mangled) then
+            Queue.add (mangled, orig_fn, extra) worklist;
+          Tir.EApp ({ f_var with Tir.v_name = mangled }, args))
      | Some orig_fn ->
        let lit_ty = function
          | March_ast.Ast.LitInt _    -> Tir.TInt
@@ -1094,6 +1140,8 @@ let rec rewrite_calls
           bare-`None` link failure and the 512-specialization mono-limit blowup
           (each dangling id counts as a new specialization of the same fn). *)
        let subst = default_residual_in_subst (build_subst orig_fn arg_tys) in
+       let ret_extra = ret_only_subst ~orig_fn ~f_var subst in
+       let subst = subst @ ret_extra in
        let self_spec =
          match !current_spec with
          | Some (o, target, (_ :: _ as sub)) when subst = [] && o = orig_name -> Some (target, sub)
@@ -1115,7 +1163,11 @@ let rec rewrite_calls
        else begin
          let param_tys_concrete = List.map (fun v -> subst_ty subst v.Tir.v_ty)
              orig_fn.Tir.fn_params in
-         let mangled = mangle_name orig_name param_tys_concrete in
+         (* A return-only binding must name the specialisation too, or two
+            return types would share one symbol. *)
+         let mangled = mangle_name orig_name
+             (if ret_extra = [] then param_tys_concrete
+              else param_tys_concrete @ [subst_ty subst orig_fn.Tir.fn_ret_ty]) in
          if not (Hashtbl.mem done_set mangled) then
            Queue.add (mangled, orig_fn, subst) worklist;
          let f_var' = { f_var with Tir.v_name = mangled;
