@@ -21,6 +21,45 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Warnings for logical races.** March has no memory-level data races, but two kinds
+  of race survive above the memory model, and the checker now names them:
+  - `vault_check_then_act`: a function reads a Vault key and then writes it based on
+    what it read (`let n = Vault.get_or(t, k, 0)` then `Vault.set(t, k, n + 1)`, or
+    `if Vault.has(t, k) do ... else Vault.set(t, k, v) end`). Another writer can change
+    the key in between, and its update is lost. The warning points at the write, labels
+    the read, and names the atomic form: `Vault.incr`, `Vault.put_new` or
+    `Vault.push_capped`, or an actor. `@[no_warn_race]` on a function silences it.
+  - `parallel_shared_write`: a function passed to `List.pmap`, `Parallel.pmap` or the
+    rest of the parallel family writes the same Vault key on every call.
+  - `parallel_output_order`: such a function prints, so its lines come out in whatever
+    order the calls ran.
+  - Both parallel checks follow calls into helpers in the same module. Other I/O inside
+    a parallel call (an HTTP request per element) draws nothing.
+  - `Vault.update`'s documentation now says it is not atomic: it reads, runs the function
+    without the lock, then writes.
+- **Syntax mistakes from other languages get their own messages, most with a fix:**
+  - braces for a block (`fn f() {`): replaced with `do` ... `end`;
+  - a leading `|` before a type's first variant: removed;
+  - `-> Int` for a return type: replaced with `: Int`;
+  - `def` / `defp` / `function` / `func` / `fun`: replaced with `fn` (or `pfn`);
+  - a trailing comma in a call or list: removed;
+  - an operator with nothing on its right, reported at the operator rather than at the
+    next line's `end`;
+  - an unclosed `(` or `[`, reported where it opens, with a fix that closes it at the end
+    of that line when that balances it;
+  - an unterminated string, reported where it starts rather than at the end of the file.
+    The suggested close-quote is offered as a guess, since a string may span lines.
+  - `return x`: March has no `return`; the fix deletes the word.
+  - `"total: " + n`: a note says strings are joined with `++`, and the follow-on operand
+    mismatch is no longer reported.
+- **Errors point at the code you wrote, not the desugared form:**
+  - "argument #N of a function call" now names the callee and its parameter:
+    "argument #2 of `Option.unwrap_or`, its parameter `default`". A piped value is
+    "the value piped into `f`", and the other arguments are numbered as written.
+  - a `let?` block whose value has the wrong type is reported at the expression that
+    produces the value, not the `let?` line.
+  - the result-type mismatch that follows from a callback taking the wrong number of
+    arguments is no longer reported beside the arity error.
 - **`forge deploy hot --drop Actor.field`.** Lets a hot deploy discard a removed state field
   that nothing reads, which otherwise refuses the deploy. The consent is built into the
   patch's signed schemas, so the server's audit log records the dropped fields; a `--drop`
@@ -1102,6 +1141,12 @@ git log is authoritative for exact commits.
   function instead: `Topology.labels_of`, `VectorClock.compare` and others returned wrong
   results, and on `--target js` the capability policy ran it at every launch. The interpreter
   was already right.
+- **A generic function whose type variable is only in its return type no longer crashes
+  compiled.** `fn make_none() : Option(a) do None end` used as an `Option(Float)`,
+  `Option(())` or `Option(Option(Int))` died with SIGSEGV at address 0x8: it was compiled once,
+  generic, while the caller expected a different layout. Such a function is now specialised
+  for each return type it is used at.
+
 - **`on`, `loop`, `by` and `opaque` work as ordinary names.** They stay keywords only where
   written as one (`on Msg(…)`, a protocol `loop do`, `choose by` / `assert P by hint`,
   `opaque type` / `@[opaque]`); elsewhere a parameter `on`, a `pfn loop(…)`, a pattern variable

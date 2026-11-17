@@ -43,6 +43,13 @@ val check_json_cap_sites : env -> unit
     `derive Json` codec for its message type; records the minted type tag in
     [March_ast.Json_dispatch].  Fails closed on an unresolved type. *)
 val check_node_send_sites : entry:string -> env -> unit
+
+(** Every expression a module's own declarations evaluate: function bodies
+    and guards, top-level lets, actor init and handlers, impl and interface
+    default methods, app hooks, tests and setup blocks.  Nested modules are
+    not entered. *)
+val module_own_exprs : March_ast.Ast.decl list -> March_ast.Ast.expr list
+
 val check_cap_dict_decls : env -> unit
 val check_cap_impl_sites : env -> unit
 val check_mint_cap_sites : env -> unit

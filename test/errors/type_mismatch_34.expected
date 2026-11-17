@@ -6,7 +6,7 @@ expected `(List(String), Map(String, Float))` but got `(List(Int), Map(String, I
 7 |     show(stats())
              ^^^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `show`, its parameter `_p`.
     The types differ here:
         (List(Int), Map(String, Int))
               ^^^ expected `String`

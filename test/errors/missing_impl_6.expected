@@ -1,0 +1,12 @@
+exit: 1
+-- INTERFACE ---------------- errors/missing_impl_6.march
+
+String does not implement Num (only Int and Float do). [missing_impl]
+`+` needs it here.
+
+4 |     "value: " + x
+        ^^^^^^^^^^^^^
+
+    March joins strings with `++`, not `+`. To put a number in a string, convert it first: `"total: " ++ int_to_string(n)`.
+
+

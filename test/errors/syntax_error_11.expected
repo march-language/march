@@ -1,0 +1,16 @@
+exit: 1
+-- SYNTAX ------------------ errors/syntax_error_11.march
+
+This `(` is never closed. [syntax_error]
+
+4 |     (x + 1
+        ^
+
+    I only noticed at line 5.
+
+    fix (`forge fix` applies it):
+
+4 -     (x + 1
+4 +     (x + 1)
+
+after fix: exit 0

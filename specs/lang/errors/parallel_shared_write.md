@@ -1,0 +1,64 @@
+---
+layout: docs
+title: "parallel_shared_write"
+permalink: /docs/errors/parallel_shared_write/
+---
+
+# `parallel_shared_write`: every call of a parallel function writes the same Vault key
+
+`List.pmap`, `Parallel.pmap` and the rest of the parallel family call your
+function on many elements at the same time. When every call writes the same
+Vault key (a key built only from literals and names captured from outside the
+function, not from the element), the writes race: they finish in no fixed
+order, so the value left in the table is whichever call happened to finish
+last, and a read-then-write of the key loses updates.
+
+The warning also fires when the function calls a helper in the same module
+that does such a write, and when the function passed is a named function of
+this module.
+
+The combinators checked, with the argument that runs per element:
+`List.pmap`, `List.pmap_n`, `List.pfilter`, `List.preduce`, `Parallel.pmap`,
+`Parallel.pmap_n`, `Parallel.preduce`, `Parallel.preduce_n`,
+`Parallel.pcount`, `Parallel.pany`, `Parallel.pall`, `Task.async_stream`,
+`Task.async_stream_n`.
+
+## A program that triggers it
+
+```march
+mod Main do
+  needs IO.Console
+  needs IO.Mut
+  needs IO.Spawn
+
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut), _s : Cap(IO.Spawn)) do
+    let best = Authority.must(Vault.new("best"))
+    let _ = List.pmap([3, 9, 4], fn x -> Vault.set(best, "max", x * x))
+    println(int_to_string(Vault.get_or(best, "max", 0)))
+  end
+end
+```
+
+This meant to keep the largest square, but every call overwrites `"max"`, so
+it prints whichever square was written last (one run printed `16`), not `81`.
+
+## The fix
+
+Return the values from the function and combine them after the parallel call.
+The results come back in input order:
+
+```march
+mod Main do
+  needs IO.Console
+  needs IO.Spawn
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let squares = List.pmap([3, 9, 4], fn x -> x * x)
+    println(int_to_string(List.fold_left(squares, 0, fn (m, y) -> if y > m do y else m end)))
+  end
+end
+```
+
+If each call should store its own entry, build the key from the element
+(`Vault.set(t, int_to_string(x), v)`). For a shared counter, use
+`Vault.incr(t, key, 1)`: it adds under one lock, so no increment is lost.

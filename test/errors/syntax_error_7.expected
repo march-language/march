@@ -1,0 +1,20 @@
+exit: 1
+-- SYNTAX ------------------- errors/syntax_error_7.march
+
+March blocks are written `do ... end`, not with braces: [syntax_error]
+
+3 |   fn f(x : Int) : Int {
+                          ^
+
+    fn name(params) do
+        body
+    end
+
+    fix (`forge fix` applies it):
+
+3 -   fn f(x : Int) : Int {
+3 +   fn f(x : Int) : Int do
+5 -   }
+5 +   end
+
+after fix: exit 0

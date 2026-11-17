@@ -6,7 +6,7 @@ expected `List(a)` but got `Int -> Int`. [type_mismatch]
 9 |     let ys = List.map(fn x -> x * 2, xs)
                           ^^^^^^^^^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `List.map`, its parameter `xs`.
     This value is a function. Did you forget to apply it to its arguments?
     The two arguments are the other way round: `List.map(xs, fn x -> x * 2)` fits.
 
@@ -30,7 +30,7 @@ expected `a -> b` but got `List(Int)`. [type_mismatch]
 9 |     let ys = List.map(fn x -> x * 2, xs)
                                          ^^
 
-    This is argument #2 of a function call.
+    This is argument #2 of `List.map`, its parameter `f`.
     A function was expected here.
     Did you mean to pass this as a callback?
 

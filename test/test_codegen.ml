@@ -14134,6 +14134,101 @@ let test_poly_let_none_niche_unsafe_compiled () =
           (poly_let_none_expected ^ "\nEXIT:0") run_out)
     [0; 1; 2; 3]
 
+(* ── A generic fn whose type variable is only in its RETURN type ─────────
+   `fn make_none() : Option(a)` has no type variable in its parameters, so
+   Mono emitted it once, generic: its `None` was niche-encoded (raw null)
+   under the `Option(TVar)` convention, while a caller holding an
+   `Option(Float)` (Boxed) loaded the tag from `ptr + 8` -- SIGSEGV at 0x8.
+   The call site's return type must drive specialisation too.
+   (specs/progress/2026-11-07-return-only-poly-fn-niche-unsafe-option.md) *)
+let return_only_poly_src = {|mod Main do
+  needs IO.Console
+
+  fn make_none() : Option(a) do
+    None
+  end
+
+  fn none_after(n : Int) : Option(a) do
+    if n > 0 do None else None end
+  end
+
+  fn fail(msg : String) : Result(a, String) do
+    Err(msg)
+  end
+
+  fn pick(o : Option(Float)) : String do
+    match o do
+    | None -> "none"
+    | Some(f) -> float_to_string(f)
+    end
+  end
+
+  fn pick_unit(o : Option(())) : String do
+    match o do
+    | None -> "unit none"
+    | Some(_) -> "unit some"
+    end
+  end
+
+  fn pick_opt(o : Option(Option(Int))) : String do
+    match o do
+    | None -> "opt none"
+    | Some(None) -> "opt some none"
+    | Some(Some(n)) -> int_to_string(n)
+    end
+  end
+
+  fn pick_int(o : Option(Int)) : String do
+    match o do
+    | None -> "int none"
+    | Some(n) -> int_to_string(n)
+    end
+  end
+
+  fn res(r : Result(Float, String)) : String do
+    match r do
+    | Ok(f) -> float_to_string(f)
+    | Err(e) -> "err " ++ e
+    end
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let x : Option(Float) = make_none()
+    println(pick(x))
+    println(pick(make_none()))
+    println(pick_unit(make_none()))
+    println(pick_opt(make_none()))
+    println(pick_int(make_none()))
+    println(pick(none_after(3)))
+    println(res(fail("boom")))
+  end
+end
+|}
+
+let return_only_poly_expected =
+  "none\nnone\nunit none\nopt none\nint none\nnone\nerr boom"
+
+let test_return_only_poly_niche_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_return_only_poly" return_only_poly_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" return_only_poly_expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "retonlypoly_o%d" opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string)
+          (Printf.sprintf "--opt %d: a return-only type variable is specialised \
+                           per call site (not SIGSEGV at 0x8)" opt)
+          (return_only_poly_expected ^ "\nEXIT:0") run_out)
+    [0; 1; 2; 3]
+
 (* ── An interface method passed as a value (`compare`, `hash`) ─────────────
    `OrderedMap.from_list(xs, compare)` lowered to `let cmp : (Int, Int) -> Int
    = compare`.  Mono resolves `compare` to `Ord$Int.compare` only at a CALL
@@ -21574,6 +21669,8 @@ let codegen_suites =
       ( "poly_let_none_codegen", [
           Alcotest.test_case "generalized `let x = None` at a niche-unsafe Option (#1173)" `Quick
             test_poly_let_none_niche_unsafe_compiled;
+          Alcotest.test_case "return-only type variable specialised per call site" `Quick
+            test_return_only_poly_niche_compiled;
           Alcotest.test_case "interface method passed as a value" `Quick
             test_iface_method_as_value_compiled;
         ] );

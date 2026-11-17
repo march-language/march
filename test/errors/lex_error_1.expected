@@ -1,0 +1,14 @@
+exit: 1
+-- SYNTAX ---------------------- errors/lex_error_1.march
+
+This string is never closed: I reached the end of the file inside it. [lex_error]
+
+4 |     let s = "unterminated
+                ^
+
+    Close it where it should end.
+
+    possible fix (a guess: check it before applying it):
+
+4 -     let s = "unterminated
+4 +     let s = "unterminated"

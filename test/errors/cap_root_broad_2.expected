@@ -15,7 +15,7 @@ expected `Cap(IO)` but got `ActorCap(a)`. [type_mismatch]
 44 |       Some(c) -> println(int_to_string(wants_root(c)))
                                                        ^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `wants_root`, its parameter `r`.
 
     the expected type comes from here:
 

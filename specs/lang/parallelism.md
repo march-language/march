@@ -304,6 +304,18 @@ Whether to parallelize is a judgment call that depends on data size and per-elem
 - Compiled and interpreted runs produce the **same output**; only wall-clock time differs.
 - Below `pmap_threshold()`, every parallel function is exactly its sequential equivalent.
 
+"Safe to run concurrently" excludes two things the compiler warns about. A function
+whose every call writes the **same Vault key** races: the calls finish in no fixed
+order, so the value left behind is whichever finished last
+([`parallel_shared_write`]({{ site.baseurl }}/docs/errors/parallel_shared_write/)).
+A function that **prints** produces its lines in the order the calls ran, which
+changes from run to run
+([`parallel_output_order`]({{ site.baseurl }}/docs/errors/parallel_output_order/)).
+Both checks follow calls into helpers defined in the same module. Return the values
+instead and combine or print them after the call: the results come back in input
+order. Other I/O per element, such as an HTTP request, is what `pmap_n` is for and
+draws no warning.
+
 **Conformance status (widening slice 9):** this guarantee is a mechanically
 tested part of the language reference: `core-march.md` §4.14 and
 `core-march-types.md` §2.11 (data parallelism adds no new typing rules).

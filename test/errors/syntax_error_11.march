@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: is never closed
+mod M do
+  fn f(x : Int) : Int do
+    (x + 1
+  end
+end

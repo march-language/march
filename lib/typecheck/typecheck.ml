@@ -1762,6 +1762,40 @@ let check_callback_arities env (f : Ast.expr) (args : Ast.expr list) =
         | _ -> ()) ps args
   | Some _ -> ()
 
+(** The reason an argument of a call to [fname] is checked against its
+    parameter type, said the way the call was written: "argument #2 of `f`,
+    its parameter `pred`", or "the value piped into `f`".  A pipe
+    `xs |> f(p)` is desugared to `f(xs, p)` with the pipe's span, which
+    starts at [xs]: that is how a piped call is told apart, and why its
+    written arguments are numbered from the second.  [None] (the plain
+    "argument #i of a function call") when nothing is known of [fname]. *)
+let call_arg_payload env (fname : string) (args : Ast.expr list) (sp : Ast.span) =
+  let piped = match args with
+    | a0 :: _ ->
+      let s0 = span_of_expr a0 in
+      s0.Ast.start_line = sp.Ast.start_line && s0.Ast.start_col = sp.Ast.start_col
+    | [] -> false in
+  let pnames = match callee_call_arities env fname with
+    | Some ps when List.length ps = List.length args -> Some (List.map fst ps)
+    | _ -> None in
+  fun idx ->
+    let param = match pnames with
+      | Some ps when idx < List.length ps ->
+        let p = List.nth ps idx in
+        if p = "" || p.[0] = '$' then None else Some p
+      | _ -> None in
+    let text =
+      if piped && idx = 0 then
+        (match param with
+         | Some p -> Printf.sprintf "This is the value piped into `%s`, its parameter `%s`." fname p
+         | None -> Printf.sprintf "This is the value piped into `%s`." fname)
+      else
+        let n = if piped then idx else idx + 1 in
+        (match param with
+         | Some p -> Printf.sprintf "This is argument #%d of `%s`, its parameter `%s`." n fname p
+         | None -> Printf.sprintf "This is argument #%d of `%s`." n fname) in
+    Some (RBecause (RFnArg (sp, idx), text))
+
 (** What the expression being inferred is expected to be, for did-you-mean
     ranking only (X8 tier 1; [Typecheck_env.suggest_need]).  [infer_expr] has
     no expected type, so a caller that knows one ([check_expr]'s fallback to
@@ -2619,6 +2653,33 @@ let rec branch_leaf (e : Ast.expr) =
   | Ast.EBlock ((_ :: _ as es), _) -> branch_leaf (List.nth es (List.length es - 1))
   | e -> e
 
+(** A `let?` / `let*` checked against a known type is desugared code: its
+    value is its continuation's, so a mismatch found on the whole binding
+    (`let? n = get()` underlined for `Ok(n)`'s type two lines down) moves to
+    the continuation's last expression, the code that produced the value. *)
+let rec letq_value_leaf (e : Ast.expr) =
+  match branch_leaf e with
+  | Ast.ELetQ (_, _, k, _) | Ast.ELetStar (_, _, k, _) -> letq_value_leaf k
+  | leaf -> leaf
+
+let relocate_letq_mismatch env ~mark (e : Ast.expr) sp =
+  let value_leaf = letq_value_leaf in
+  match e with
+  | Ast.ELetQ (_, _, k, _) | Ast.ELetStar (_, _, k, _) ->
+    (match k with
+     | Ast.EBlock ([], _) -> ()
+     | _ ->
+       let leaf_sp = span_of_expr (value_leaf k) in
+       if leaf_sp <> sp && leaf_sp.Ast.start_line > 0 then begin
+         let added = errors_since env ~mark in
+         env.errors.Err.diagnostics <- List.map (fun (d : Err.diagnostic) ->
+             if List.memq d added && d.Err.span = sp
+                && Err.slug_of_code d.Err.code = Err.Code.type_mismatch
+             then { d with Err.span = leaf_sp }
+             else d) env.errors.Err.diagnostics
+       end)
+  | _ -> ()
+
 (** Report [provided] where [required] was needed, as [unify] would (with a
     §X2 diff when they differ below the root), without unifying. *)
 let report_pair env ~span ~reason ~provided prov req =
@@ -3070,6 +3131,16 @@ let rec infer_expr env (e : Ast.expr) : ty =
               (* The one name the message suggests is the fix; `--check-json`
                  re-checks it before calling it machine-applicable. *)
               (match guess with
+               | _ when name.txt = "return" ->
+                 (* The habit from languages with statements: March has
+                    none, so the fix deletes the word and its space. *)
+                 Err.error_with_fix ~code env.errors ~span:name.span
+                   ~fix:(Err.FReplace { span = { name.span with
+                                                 Ast.end_col = name.span.Ast.end_col + 1 };
+                                        text = "" })
+                   "March has no `return`: a function's value is its last expression.\n\
+                    Write the value on its own as the block's last line. To leave a \
+                    function early, use `if ... do ... else ... end` or `match`."
                | Some g ->
                  Err.error_with_fix ~code env.errors ~span:name.span
                    ~fix:(Err.FReplace { span = name.span; text = g }) msg
@@ -4193,7 +4264,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
                                      i.ps_proto i.ps_role i.ps_doing)))
               | _ when List.mem name.txt binary_operators && List.length args = 2 ->
                 Some (operand_reason env name.txt f_ty args)
-              | _ -> None)
+              | _ -> Some (call_arg_payload env name.txt args sp))
            | _ -> None in
          let mark_args = env.errors.Err.diagnostics in
          let cap_op = match f, args with
@@ -4962,7 +5033,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
                | None -> ())
            before_cont;
          let t_r = fresh_var env.level in
-         unify env ~span:sp
+         (* At the expression that produces the continuation's value: the
+            check is about it, not the `let?` line. *)
+         let leaf_sp =
+           let l = span_of_expr (letq_value_leaf body) in
+           if l.Ast.start_line > 0 then l else sp in
+         unify env ~span:leaf_sp
            ~reason:(Some (RBuiltin
              "The code after `let?` must produce a Result with the same error type."))
            body_ty (t_result t_r t_err);
@@ -5242,8 +5318,13 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     let provided_e = match repr inferred with
       | TCon ("Result", [ _; err ]) when is_cap_error_ty err -> branch_leaf e
       | _ -> e in
+    (* Only the expected-type check below may be moved onto a `let?`'s
+       continuation: an error inferring the binding itself (`let? x = 42`)
+       is about the binding. *)
+    let mark_check = env.errors.Err.diagnostics in
     unify env ~span:sp ~reason ~provided:(provided_of_expr provided_e inferred) inferred expected;
     relocate_literal_mismatch env ~mark ~reason e sp expected;
+    relocate_letq_mismatch env ~mark:mark_check e sp;
     relocate_callback_mismatch env ~mark e sp inferred expected;
     relocate_branch_mismatch env ~mark ~reason e sp expected;
     explain_concat_result env ~mark e sp
@@ -7282,10 +7363,19 @@ let discharge_constraints env span =
            (match c with
             | COrd _ -> ()   (* String is Ord *)
             | _ ->
-              Err.error ~code:Err.Code.missing_impl env.errors ~span
-                (match missing_impl_use_line site with
-                 | "" -> "String does not implement Num (only Int and Float do)."
-                 | l -> "String does not implement Num (only Int and Float do).\n" ^ l))
+              let msg = match missing_impl_use_line site with
+                | "" -> "String does not implement Num (only Int and Float do)."
+                | l -> "String does not implement Num (only Int and Float do).\n" ^ l in
+              (* `"total: " + n`: the habit from languages where `+` joins
+                 strings. *)
+              let notes = match site with
+                | Some { cs_name = "+"; _ } ->
+                  [ "March joins strings with `++`, not `+`. To put a number in a \
+                     string, convert it first: `\"total: \" ++ int_to_string(n)`." ]
+                | _ -> [] in
+              Err.report env.errors
+                { Err.severity = Err.Error; span; message = msg; labels = []; notes;
+                  code = Err.Code.missing_impl; fix = None })
          | TVar r ->
            (match c with
             | CNum _ -> r := Link (TCon ("Int", []))  (* numeric defaulting: unresolved Num → Int *)
@@ -12580,6 +12670,10 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_cap_impl_sites final_env;
   check_json_cap_sites final_env;
   check_node_send_sites ~entry:m.Ast.mod_name.txt final_env;
+  (* Logical races: Vault check-then-act, and parallel lambdas that write a
+     shared key or print (specs/progress/2026-11-16-race-warnings.md). *)
+  Typecheck_races.check_module ~iter_expr
+    ~own_exprs:Typecheck_caps.module_own_exprs final_env.errors m.Ast.mod_decls;
   check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:

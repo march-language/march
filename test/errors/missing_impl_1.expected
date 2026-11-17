@@ -7,5 +7,6 @@ String does not implement Num (only Int and Float do). [missing_impl]
 7 |     println(x + y)
                 ^^^^^
 
+    March joins strings with `++`, not `+`. To put a number in a string, convert it first: `"total: " ++ int_to_string(n)`.
 
 
