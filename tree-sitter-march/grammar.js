@@ -70,7 +70,9 @@ module.exports = grammar({
       'if', 'else',
       'spawn',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
-      'for', 'loop', 'doc',
+      // `loop` is not reserved: outside a protocol it is an ordinary name
+      // (a `pfn loop(…)`), as in the compiler's token filter.
+      'for', 'doc',
       'assert',
     ],
   },
@@ -862,7 +864,7 @@ module.exports = grammar({
     ),
 
     // Literals
-    float: _ => /[0-9]+\.[0-9]+/,
+    float: _ => /[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?/,
     boolean: _ => choice('true', 'false'),
 
     // Wrapped in token() so the entire string is lexed as one atomic unit.

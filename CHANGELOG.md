@@ -1102,6 +1102,11 @@ git log is authoritative for exact commits.
   function instead: `Topology.labels_of`, `VectorClock.compare` and others returned wrong
   results, and on `--target js` the capability policy ran it at every launch. The interpreter
   was already right.
+- **`on`, `loop`, `by` and `opaque` work as ordinary names.** They stay keywords only where
+  written as one (`on Msg(…)`, a protocol `loop do`, `choose by` / `assert P by hint`,
+  `opaque type` / `@[opaque]`); elsewhere a parameter `on`, a `pfn loop(…)`, a pattern variable
+  `by` or a `let opaque = …` used to be a bare "I got stuck here". Float literals also take an
+  exponent now (`1.0e-12`, `2.5E3`), which was a confusing "expecting `do`" error.
 
 - **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
   compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
