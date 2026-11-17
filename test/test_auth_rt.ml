@@ -611,6 +611,54 @@ let test_capture_every_runtime () =
 end
 |})
 
+(* Task 4's deferred agreement case, closed by Task 6's per-actor authority:
+   an actor spawned only through a function value (a named fn read as a
+   value inside a framed fn, called by [List.map]) runs under that fn's
+   frame, in the interpreter as compiled.  The JS target has no actors. *)
+let test_spawn_via_value_every_runtime () =
+  let want =
+    "IO.FileRead(\"/etc/x\") refused by function start_all's needs \
+     (IO.Console, IO.FileRead(\"/srv/\"), IO.Spawn)\n\
+     IO.FileRead(\"/etc/x\") refused by function start_all's needs \
+     (IO.Console, IO.FileRead(\"/srv/\"), IO.Spawn)\nok\n" in
+  List.iter
+    (fun (mode, outs) ->
+       if mode <> "js" then
+         List.iter (fun out -> Alcotest.(check string) mode want out) outs)
+    (Test_authority_differential.run_modes ~envs:[ "" ]
+       ~src:({|mod SpawnVal do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+  type ProbeReq = ProbeReq
+|} ^ show_fn ^ {|  actor Worker do
+    state { n : Int }
+    init  { n: 0 }
+    on Probe(reply_to) do
+      Actor.reply(reply_to, show(Authority.check("IO.FileRead", "/etc/x")))
+      state
+    end
+  end
+  fn spawner(_i : Int) do
+    spawn(Worker)
+  end
+  fn start_all(xs : List(Int)) needs IO.Console, IO.FileRead("/srv/"), IO.Spawn do
+    List.map(xs, spawner)
+  end
+  fn ask(p) : String do
+    match Actor.call(p, ProbeReq, 5000) do
+    Ok(s) -> s
+    Err(e) -> "call failed: " ++ e
+    end
+  end
+  fn main() do
+    let ws = start_all([1, 2])
+    List.each(ws, fn w -> println(ask(w)))
+    println(ask(spawner(3)))
+  end
+end
+|}))
+
 let tests =
   [ ( "auth_rt",
       [ Alcotest.test_case "an unscoped needs clause that reaches no spawn gets no frame" `Quick
@@ -647,4 +695,6 @@ let tests =
         Alcotest.test_case "a function value runs under its caller's frame in every runtime"
           `Quick test_fn_value_every_runtime;
         Alcotest.test_case "a function value runs under the authority it was made under" `Quick
-          test_capture_every_runtime ] ) ]
+          test_capture_every_runtime;
+        Alcotest.test_case "an actor spawned through a function value runs under the frame, interp = compiled"
+          `Quick test_spawn_via_value_every_runtime ] ) ]

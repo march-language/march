@@ -305,6 +305,27 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
     let defined : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 256 in
     List.iter (fun (f : Tir.fn_def) -> Hashtbl.replace defined f.Tir.fn_name f) m.Tir.tm_fns;
     let reach = reaches_authority m in
+    (* An actor's glue fns that the runtime holds and calls itself (its
+       dispatch, on_stop and inspect, stored by [A_spawn]; [A_spawn] itself,
+       a supervisor child's respawn thunk).  They are never wrapped: they run
+       on the actor's own green thread, whose slot already holds the
+       authority the actor was spawned under (Task 6), and the runtime calls
+       them through borrowing trampolines ([Llvm_emit.clo_wrap_borrowed])
+       without handing over a reference, so a capturing eta closure in their
+       place was released once per message and underflowed. *)
+    let actor_glue =
+      List.fold_left
+        (fun acc td ->
+           match td with
+           | Tir.TDRecord (n, _) when Tir_names.is_actor_struct_name n ->
+             let a =
+               String.sub n 0 (String.length n - String.length Tir_names.actor_struct_suffix) in
+             List.fold_left (fun s sfx -> SSet.add (a ^ sfx) s) acc
+               [ Tir_names.actor_dispatch_suffix; Tir_names.actor_on_stop_suffix;
+                 Tir_names.actor_inspect_suffix; Tir_names.actor_spawn_suffix ]
+           | _ -> acc)
+        SSet.empty m.Tir.tm_types
+    in
     let counter = ref 0 in
     let fresh prefix ty =
       incr counter;
@@ -416,7 +437,7 @@ let captures (m : Tir.tir_module) ~(has_frames : bool) ~(repl : bool) : Tir.tir_
        is one that must capture (a fn of [m] that depends on the authority,
        or a capability builtin). *)
     let named_value bound (v : Tir.var) : (Tir.ty list * Tir.ty) option =
-      if SSet.mem v.Tir.v_name bound then None
+      if SSet.mem v.Tir.v_name bound || SSet.mem v.Tir.v_name actor_glue then None
       else
         let of_ty = match v.Tir.v_ty with
           | Tir.TFn ((_ :: _ as ps), r) -> Some (ps, r)

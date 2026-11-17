@@ -1,0 +1,85 @@
+-- A supervisor restart restores the authority of the child's FIRST spawn
+-- (design §7), whatever is in force where the restart runs: the child of a
+-- supervisor spawned inside a framed fn stays restricted after it crashes
+-- inside a narrower frame (the crash leaves that frame unrestored), and
+-- after main, which holds the launch authority, kills it.
+mod ActorRestartKeepsAuthority do
+  needs IO
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+  needs Actor.Introspect
+
+  type ProbeReq = ProbeReq
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn crash_inside(p : String) : Unit needs IO.FileRead("/srv/inner/") do
+    panic("crashed reading " ++ p)
+  end
+
+  actor Fragile do
+    state { n : Int }
+    init  { n: 0 }
+    on Probe(reply_to) do
+      Actor.reply(reply_to,
+        verdict(File.exists("/etc/hosts")) ++ " / " ++ verdict(File.exists("/srv/x")))
+      state
+    end
+    on Poison() do
+      crash_inside("/srv/inner/y")
+      state
+    end
+  end
+
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      Fragile child
+    end
+  end
+
+  fn start() needs IO.Console, IO.FileRead("/srv/"), IO.Spawn do
+    spawn(Boss)
+  end
+
+  fn child_of(boss) : Int do
+    match get_actor_field(boss, "child") do
+    None -> -1
+    Some(n) -> n
+    end
+  end
+
+  fn ask(p) : String do
+    match Actor.call(p, ProbeReq, 5000) do
+    Ok(s) -> s
+    Err(e) -> "call failed: " ++ e
+    end
+  end
+
+  fn main(io : Cap(IO)) do
+    let intro = Actor.introspect(io)
+    let boss = start()
+    let c1 = child_of(boss)
+    println("first: " ++ ask(Actor.pid_from_int(intro, c1)))
+    send(Actor.pid_from_int(intro, c1), Poison())
+    run_until_idle()
+    let c2 = child_of(boss)
+    println("restarted: " ++ bool_to_string(c2 != c1))
+    println("after crash: " ++ ask(Actor.pid_from_int(intro, c2)))
+    kill(Actor.pid_from_int(intro, c2))
+    run_until_idle()
+    let c3 = child_of(boss)
+    println("restarted again: " ++ bool_to_string(c3 != c2))
+    println("after kill: " ++ ask(Actor.pid_from_int(intro, c3)))
+    println("main: " ++ verdict(File.exists("/etc/hosts")))
+  end
+end

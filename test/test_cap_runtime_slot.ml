@@ -216,10 +216,145 @@ end
 let test_compiled_drop () =
   check_all ~skip:[ "js" ] ~name:"compiled_drop" ~src:drop_src [ ("", "flat\n") ]
 
+(* ocap phase 4, Task 6: actors and tasks spawned under a frame hold their
+   own reference to the authority they were spawned under (the actor meta's
+   [auth], a supervisor slot's [first_auth], a task proc's slot), and every
+   one is released when the actor, slot or task dies.  10,000 spawn/exit
+   cycles under a frame (an actor spawned and killed, a task spawned and
+   awaited, and every tenth cycle a supervisor with one child, spawned and
+   killed), compiled with [--rc-trace] and run with [MARCH_TRACE_GC=1].
+
+   The verdict is computed from the trace per ADDRESS, not by
+   scripts/gc-trace-report.py's per-object fold: every scheduler thread
+   writes its own event buffer, so the file is not in event order and the
+   fold, which replays it in file order, reports phantom live objects
+   whenever a reused address's free lands after its next allocation (the
+   report says "allocated before tracing").  Per address, allocs + increments
+   - decrements - frees is the final count of whatever lives there, in any
+   order.  Every non-immortal address an authority site touched
+   ([march_cap_*]) must balance; a handful may still be held by the last
+   killed actors when main returns (their metas are reclaimed lazily), so
+   the bound is 16.  Dropping the meta's release (march_runtime.c,
+   meta_free) unbalances about 20,000. *)
+let spawn_leak_src = {|mod CapSpawnLeak do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+  actor W do
+    state { n : Int }
+    init  { n: 0 }
+    on Ping() do
+      { n: state.n + 1 }
+    end
+  end
+  actor Boss do
+    state { child : Int }
+    init  { child: 0 }
+    supervise do
+      strategy one_for_one
+      max_restarts 10 within 60
+      W child
+    end
+  end
+  fn cycle(i : Int) : Int needs IO.FileRead("/srv/"), IO.Spawn do
+    let w = spawn(W)
+    send(w, Ping())
+    kill(w)
+    if i % 10 == 0 do
+      let b = spawn(Boss)
+      kill(b)
+    else ()
+    end
+    match Task.async(fn () -> i + 1) do
+    Ok(t) ->
+      match Task.await(t) do
+      Ok(n) -> n
+      Err(_) -> 0
+      end
+    Err(_) -> 0
+    end
+  end
+  fn spin(i : Int, n : Int, acc : Int) : Int do
+    if i == n do acc else spin(i + 1, n, acc + cycle(i) - i) end
+  end
+  fn main() do
+    let k = spin(0, 10000, 0)
+    run_until_idle()
+    println(int_to_string(k))
+  end
+end
+|}
+
+(* (authority-touched non-immortal addresses, those that do not balance). *)
+let unbalanced_cap_addresses (trace_dir : string) : int * (string * int) list =
+  let sites =
+    match Yojson.Safe.from_file (Filename.concat trace_dir "sites.json") with
+    | `List l -> Array.of_list (List.map (function `String s -> s | _ -> "") l)
+    | _ -> [||] in
+  let is_cap sid =
+    sid >= 0 && sid < Array.length sites
+    && (let s = sites.(sid) in
+        let p = ":march_cap_" in
+        let n = String.length s and m = String.length p in
+        let rec at i = i + m <= n && (String.sub s i m = p || at (i + 1)) in
+        at 0) in
+  let bal : (string, int) Hashtbl.t = Hashtbl.create 4096 in
+  let touched : (string, unit) Hashtbl.t = Hashtbl.create 4096 in
+  let immortal : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let ic = open_in_bin (Filename.concat trace_dir "gc.jsonl") in
+  (try
+     while true do
+       let line = input_line ic in
+       if String.trim line <> "" then
+         match Yojson.Safe.from_string line with
+         | `Assoc kv ->
+           let str k = match List.assoc_opt k kv with Some (`String s) -> s | _ -> "" in
+           let int k = match List.assoc_opt k kv with Some (`Int i) -> i | _ -> -1 in
+           let addr = str "addr" in
+           if is_cap (int "site") then Hashtbl.replace touched addr ();
+           let d = match str "event" with
+             | "alloc" | "inc_ref" -> 1
+             | "dec_ref" | "free" -> -1
+             | "immortal" -> Hashtbl.replace immortal addr (); 0
+             | _ -> 0 in
+           Hashtbl.replace bal addr (d + Option.value ~default:0 (Hashtbl.find_opt bal addr))
+         | _ -> ()
+     done
+   with End_of_file -> ());
+  close_in ic;
+  Hashtbl.fold
+    (fun addr () (n, bad) ->
+       if Hashtbl.mem immortal addr then (n, bad)
+       else
+         let b = Option.value ~default:0 (Hashtbl.find_opt bal addr) in
+         (n + 1, if b <> 0 then (addr, b) :: bad else bad))
+    touched (0, [])
+
+let test_spawn_cycles_no_leak () =
+  let exe = Filename.quote (Test_helpers.find_main_exe ()) in
+  let dir = Filename.temp_dir "march-cap-spawn-leak" "" in
+  Fun.protect ~finally:(fun () -> try rm_rf dir with _ -> ()) (fun () ->
+      write_file (Filename.concat dir "leak.march") spawn_leak_src;
+      let b = sh ~dir (exe ^ " --compile --opt 0 --rc-trace leak.march -o ./prog") in
+      if not (Sys.file_exists (Filename.concat dir "prog")) then
+        Alcotest.failf "build failed:\n%s" b;
+      Alcotest.(check string) "the program ran" "10000\n"
+        (sh ~dir ~env:"export MARCH_TRACE_GC=1;" "./prog");
+      let n, bad = unbalanced_cap_addresses (Filename.concat dir "trace/gc") in
+      Alcotest.(check bool) "the trace saw the authority's cells" true (n > 1000);
+      if List.length bad > 16 then
+        Alcotest.failf "%d of %d authority-touched addresses still hold a reference \
+                        (e.g. %s)" (List.length bad) n
+          (String.concat ", "
+             (List.map (fun (a, b) -> Printf.sprintf "%s:%+d" a b)
+                (List.filteri (fun i _ -> i < 5) bad))))
+
 let tests =
   [ ( "cap_runtime_slot",
       [ Alcotest.test_case "save/push/enter/restore around cap_check_raw" `Quick test_slot;
         Alcotest.test_case "cap_grant_text reads MARCH_GRANT, trimmed" `Quick test_grant_text;
         Alcotest.test_case "push/restore leaves nothing live" `Quick test_no_leak;
         Alcotest.test_case "compiled code dropping the last CapAuthRef releases it" `Quick
-          test_compiled_drop ] ) ]
+          test_compiled_drop;
+        Alcotest.test_case "10,000 spawn/exit cycles under a frame release every authority"
+          `Quick test_spawn_cycles_no_leak ] ) ]

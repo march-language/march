@@ -74,10 +74,19 @@ val type_tag_of : value -> string option
 
 type monitor_down_reason = Normal | Killed | Crash of string
 
+(** ocap phase 4: the interpreter's run-time authority slot (a
+    [List(Authority.Layer)], [Nil] when empty), re-exported by
+    [Eval_builtins], and [k ()] run with it set to an actor's authority,
+    restored afterwards. *)
+val cap_nil : value
+val cap_slot : value ref
+val with_actor_authority : value -> (unit -> 'a) -> 'a
+
 type actor_inst = {
   ai_name : string;
   ai_def : March_ast.Ast.actor_def;
   ai_env_ref : env ref;
+  ai_authority : value;
   ai_init_args : value list;
   mutable ai_state : value;
   mutable ai_alive : bool;

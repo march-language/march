@@ -1511,6 +1511,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_name          = name;
   ai_def           = dummy_actor_def;
   ai_env_ref       = ref [];
+  ai_authority     = March_eval.Eval_runtime.cap_nil;
   ai_init_args     = [];
   ai_state         = st;
   ai_alive         = alive;

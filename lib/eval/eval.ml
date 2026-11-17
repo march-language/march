@@ -844,6 +844,10 @@ let restore_actors (snap : actor_state_snapshot) : unit =
         let inst = { ai_name     = s.ais_name;
                      ai_def      = def;
                      ai_env_ref  = env_r;
+                     (* Nor its authority: a restored instance runs under
+                        the launch authority, as every actor did before
+                        ocap phase 4. *)
+                     ai_authority = Eval_runtime.cap_nil;
                      (* A snapshot does not carry init arguments (D24): a
                         restored instance restarts under its supervisor with
                         none, which is the pre-D24 behaviour for every actor
@@ -2538,13 +2542,16 @@ and eval_expr_inner (env : env) (e : expr) : value =
                   evaluated once here and kept on the instance so a restart
                   re-supplies them. *)
                let child_args = List.map (eval_expr init_env) sf.sf_init_args in
+               (* Spawned here, by the supervisor's spawn: under the
+                  authority in force at it, which every restart restores. *)
                let child_init_state =
                  eval_actor_init_state child_env_ref child_def child_actor_name child_args in
                let child_pid = !next_pid in
                next_pid := child_pid + 1;
                let child_inst = {
                  ai_name = child_actor_name; ai_def = child_def;
-                 ai_env_ref = child_env_ref; ai_init_args = child_args;
+                 ai_env_ref = child_env_ref; ai_authority = !Eval_builtins.cap_slot;
+                 ai_init_args = child_args;
                  ai_state = child_init_state; ai_alive = true;
                  ai_terminal_reason = Normal;
                  ai_monitors = []; ai_mailbox = Queue.create ();
@@ -2580,6 +2587,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
               base_state)
        in
        let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
+                    (* ocap phase 4: the spawner's authority, for life. *)
+                    ai_authority = !Eval_builtins.cap_slot;
                     ai_init_args = init_args;
                     ai_state    = init_state; ai_alive = true;
                     ai_terminal_reason = Normal;
@@ -3082,7 +3091,11 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                let stack_base = List.length (get_march_stack ()) in
                (match Fun.protect
                         ~finally:(fun () -> Hashtbl.remove busy_actors pid)
-                        (fun () -> !eval_expr_hook handler_env handler.ah_body)
+                        (fun () ->
+                           (* Under the actor's own authority, not the
+                              pass's caller's (ocap phase 4, design §7). *)
+                           Eval_runtime.with_actor_authority inst.ai_authority
+                             (fun () -> !eval_expr_hook handler_env handler.ah_body))
                 with
                 | new_state ->
                   inst.ai_state <- new_state;
@@ -3640,7 +3653,8 @@ let shutdown_actor_pid (pid : int) : unit =
               [("state", inst.ai_state)] @ param_bindings
               @ [("self", VPid pid)] @ !(inst.ai_env_ref)
             in
-            (match !eval_expr_hook handler_env handler.ah_body with
+            (match Eval_runtime.with_actor_authority inst.ai_authority
+                     (fun () -> !eval_expr_hook handler_env handler.ah_body) with
              | new_state -> inst.ai_state <- new_state
              | exception _ -> ());
             current_pid := prev_pid
@@ -3700,6 +3714,7 @@ let spawn_from_spec (spec : value) : unit =
               let init_state = eval_actor_init_state env_ref def actor_name [] in
               let inst = {
                 ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
+                ai_authority = !Eval_builtins.cap_slot;
                 ai_init_args = [];
                 ai_state = init_state; ai_alive = true;
                 ai_terminal_reason = Normal;

@@ -1,9 +1,13 @@
 (** Capability refusal conformance: every backend refuses the same way.
 
-    Every [test/cap_conformance/<name>.march] is a program whose first line is
-    [-- REFUSE: <kinds>]; the text after the colon is passed as
-    [MARCH_TEST_REFUSE] (the ocap phase 1 test hook: a comma-separated list of
-    capability kinds the launch refuses, matched exactly). The program is run
+    Every [test/cap_conformance/<name>.march] is a program that may open with
+    header lines, each on its own line at the top:
+    - [-- GRANT: <scopes>]: exported as [MARCH_GRANT] (the launch grant);
+    - [-- REFUSE: <kinds>]: exported as [MARCH_TEST_REFUSE] (the ocap phase 1
+      test hook: a comma-separated list of capability kinds the launch
+      refuses, matched exactly; phase 4's Task 7 migrates these to GRANT).
+    Neither is required: a fixture without them runs under its own request.
+    The program is run
 
     - interpreted: [march <file>];
     - through the ORC JIT: [march --jit <file>];
@@ -71,30 +75,46 @@ let js_unsupported : (string * string) list = [
   ("file_refused", "the JS target has no `dir_list` or `dir_mkdir_p`");
   ("file_allowed", "the JS target has no `file_exists`");
   ("tls_https_get_refused", "the JS target has no TLS (`tls_client_ctx`)");
+  ("actor_under_frame_restricted", "the JS target has no tasks");
+  ("actor_restart_keeps_authority", "the JS target has no tasks");
+  ("task_inherits_capture", "the JS target has no tasks");
 ]
 
 let have_node = lazy (Sys.command "command -v node >/dev/null 2>&1" = 0)
 
-(* The [-- REFUSE:] header's value, trimmed. *)
-let refuse_of (src : string) : string =
-  let first = match String.index_opt src '\n' with
-    | Some i -> String.sub src 0 i | None -> src in
-  let prefix = "-- REFUSE:" in
-  if String.starts_with ~prefix first then
-    String.trim (String.sub first (String.length prefix)
-                   (String.length first - String.length prefix))
-  else failwith "fixture must start with a `-- REFUSE:` line"
+(* The value of the header line [-- <key>:] among the fixture's leading
+   [-- KEY: value] lines, trimmed; "" when it has none. *)
+let header (src : string) (key : string) : string =
+  let prefix = "-- " ^ key ^ ":" in
+  let rec scan = function
+    | line :: rest ->
+      if String.starts_with ~prefix line then
+        String.trim (String.sub line (String.length prefix)
+                       (String.length line - String.length prefix))
+      else if String.length line > 3 && String.starts_with ~prefix:"-- " line
+              && (match String.index_opt line ':' with
+                  | Some i -> String.for_all (fun c -> (c >= 'A' && c <= 'Z') || c = '-')
+                                (String.sub line 3 (i - 3))
+                  | None -> false)
+      then scan rest
+      else ""
+    | [] -> ""
+  in
+  scan (String.split_on_char '\n' src)
 
 let backends = [ "interp"; "jit"; "compiled"; "js" ]
 
-let script ~dir ~name ~refuse =
+let script ~dir ~name ~refuse ~grant =
   let exe = Filename.quote (Test_helpers.find_main_exe ()) in
   let home = Filename.quote (Lazy.force private_home) in
   let f = Filename.quote (name ^ ".march") in
   let js_ok =
     Lazy.force have_node && not (List.mem_assoc name js_unsupported) in
+  let grant_env =
+    if grant = "" then "unset MARCH_GRANT;"
+    else Printf.sprintf "export MARCH_GRANT=%s;" (Filename.quote grant) in
   Printf.sprintf
-    "cd %s && export HOME=%s MARCH_TEST_REFUSE=%s; \
+    "cd %s && export HOME=%s MARCH_TEST_REFUSE=%s; %s \
      %s %s > interp.out 2>interp.err; echo $? > interp.code; \
      %s --jit %s > jit.out 2>jit.err; echo $? > jit.code; \
      %s --compile --opt 0 %s -o ./prog > build.out 2>&1; \
@@ -106,7 +126,7 @@ let script ~dir ~name ~refuse =
        if [ -f ./prog.mjs ]; then node ./prog.mjs > js.out 2>>js.err; echo $? > js.code; \
        else echo -1 > js.code; fi; \
      fi; true"
-    (Filename.quote dir) home (Filename.quote refuse)
+    (Filename.quote dir) home (Filename.quote refuse) grant_env
     exe f exe f exe f js_ok exe f
 
 type run = { out : string; err : string; code : int }
@@ -118,10 +138,10 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
       let tmp = Filename.temp_dir "march-cap-conformance" "" in
       let src = read_file (Filename.concat (fixtures_dir ()) (name ^ ".march")) in
       write_file (Filename.concat tmp (name ^ ".march")) src;
-      let refuse = refuse_of src in
+      let refuse = header src "REFUSE" and grant = header src "GRANT" in
       let pid =
         Unix.create_process "/bin/sh"
-          [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~refuse |]
+          [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~refuse ~grant |]
           Unix.stdin Unix.stdout Unix.stderr in
       Hashtbl.replace running pid (name, tmp))
     names;

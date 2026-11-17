@@ -1,0 +1,5 @@
+in frame: IO.FileRead("/etc/hosts") refused by function in_frame's needs (IO.FileRead("/srv/"), IO.Spawn) / IO.FileRead("/etc/hosts") refused by function in_frame's needs (IO.FileRead("/srv/"), IO.Spawn)
+made in frame: IO.FileRead("/etc/hosts") refused by function mk's needs (IO.FileRead("/srv/"), IO.Spawn) / allowed
+made in frame: IO.FileRead("/etc/hosts") refused by function mk's needs (IO.FileRead("/srv/"), IO.Spawn) / IO.FileRead("/etc/hosts") refused by function mk's needs (IO.FileRead("/srv/"), IO.Spawn)
+main: allowed
+exit 0

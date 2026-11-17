@@ -15350,7 +15350,8 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 
 ; Capability refusal conformance (ocap phase 1, extended by phase 4): every
 ; test/cap_conformance/*.march runs interpreted, through the JIT, compiled and
-; as JS under its `-- REFUSE:` MARCH_TEST_REFUSE value, and each backend's
+; as JS under its optional `-- GRANT:` (MARCH_GRANT) and `-- REFUSE:`
+; (MARCH_TEST_REFUSE) header values, and each backend's
 ; stdout + exit code must equal <name>.expected. Regenerate with
 ; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
 (test

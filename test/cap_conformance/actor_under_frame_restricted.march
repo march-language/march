@@ -1,0 +1,49 @@
+-- An actor spawned inside a framed fn runs under that fn's authority for
+-- life (design §7): its handlers are refused what the frame refuses, even
+-- when the message comes from main, which holds the launch authority.  An
+-- actor main spawns itself is not restricted, and main's own authority is
+-- untouched by the frame having been entered and left.
+mod ActorUnderFrame do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Spawn
+
+  type ProbeReq = ProbeReq
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  actor Reader do
+    state { n : Int }
+    init  { n: 0 }
+    on Probe(reply_to) do
+      Actor.reply(reply_to,
+        verdict(File.exists("/etc/hosts")) ++ " / " ++ verdict(File.exists("/srv/x")))
+      state
+    end
+  end
+
+  fn start() needs IO.Console, IO.FileRead("/srv/"), IO.Spawn do
+    spawn(Reader)
+  end
+
+  fn ask(p) : String do
+    match Actor.call(p, ProbeReq, 5000) do
+    Ok(s) -> s
+    Err(e) -> "call failed: " ++ e
+    end
+  end
+
+  fn main() do
+    let free = spawn(Reader)
+    let held = start()
+    println("main's actor: " ++ ask(free))
+    println("start's actor: " ++ ask(held))
+    println("start's actor again: " ++ ask(held))
+    println("main: " ++ verdict(File.exists("/etc/hosts")))
+  end
+end

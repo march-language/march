@@ -173,8 +173,8 @@ let cap_test_refuse_kinds =
    green thread's slot (a [List(Authority.Layer)], [Nil] when empty);
    [cap_launch] the launch layers, written once. A CapAuthRef is the list
    value itself. *)
-let cap_nil = VCon ("Nil", [])
-let cap_slot : value ref = ref cap_nil
+let cap_nil = Eval_runtime.cap_nil
+let cap_slot : value ref = Eval_runtime.cap_slot
 let cap_launch : value option ref = ref None
 let cap_is_empty = function VCon ("Nil", []) -> true | _ -> false
 let cap_layers_now () =

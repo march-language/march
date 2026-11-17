@@ -4224,6 +4224,16 @@ typedef struct {
     char  **pending_names;
     int     pending_name_count;
     void   *pending_spawn_cap;
+    /* ocap phase 4: the run-time authority of this slot's FIRST spawn (the
+     * child's meta->auth at registration), an owned reference released with
+     * the supervisor's meta (meta_free).  Every restart of the slot runs its
+     * spawn thunk, and so the replacement, under it (design §7: a restart
+     * restores the authority of the child's first spawn), never under
+     * whatever happens to be in force where the restart runs: a crash
+     * longjmp leaves the dying handler's innermost frame in its proc's slot,
+     * a kill runs the restart on the killer's thread, and a delayed restart
+     * on a timer.  NULL is the launch authority. */
+    void   *first_auth;
 } march_sup_child;
 
 /* A supervisor compiled with --hot-reload keeps its state in a separate
@@ -4375,6 +4385,17 @@ typedef struct march_actor_meta {
      * ambient path. _Atomic for the same reason as green_thread: written on
      * the spawning thread, read on the actor's own. */
     _Atomic(void *)             spawn_cap;
+    /* ocap phase 4: the run-time authority this actor was spawned under (the
+     * spawner's slot at march_spawn_common, or a restart's first-spawn
+     * authority), an owned reference released by meta_free.  Installed on
+     * the actor's own green thread before its first handler
+     * (actor_install_auth) and again before its on_stop runs after a stop
+     * trap, so every handler runs under it (design §7: a worker spawned
+     * under a limit is limited for life).  NULL is the launch authority.
+     * Written before the actor is activated, read only on its own thread and
+     * by its supervisor's registration (both after the activation's
+     * publication), so it needs no atomics. */
+    void                       *auth;
     /* Phase 5: non-zero for actors compiled with --hot-reload.
      * Holds the dispatch-table NAME_ID of the actor's _dispatch function.
      * Used by actor_green_thread for dispatch-table lookup (enabling function
@@ -5262,8 +5283,10 @@ static void meta_free(void *p) {
         free(c->pending_names);
         /* The slot's owned reference (march_actor_register_child). */
         march_decrc(c->spawn_clo);
+        march_cap_release(c->first_auth);
     }
     free(m->sup_children);
+    march_cap_release(m->auth);
     free(m->sup_restart_ts);
     /* Both lists are detached at the death claim; a meta that never died (a
      * C-test stand-in) has nothing here that anything else still owns. */
@@ -6780,6 +6803,23 @@ static int actor_run_on_stop(march_proc *self, void *actor, void *clo,
 static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
                                  void *actor, void *request);
 
+/* ocap phase 4: put the authority [meta] was spawned under in the running
+ * green thread's slot (the actor's own proc), releasing whatever was there.
+ * The proc inherits its activator's slot (sched_spawn_common), which is the
+ * spawner's for an ordinary spawn but not for a supervised child, activated
+ * by its supervisor's registration or by a restart on another thread; and a
+ * stop trap's longjmp out of a handler skips the frames' restores. */
+static void actor_install_auth(march_actor_meta *meta) {
+    void **slot = march_sched_auth_slot();
+    void *old = *slot;
+    if (old == meta->auth) return;
+    /* A non-NULL authority was made by a frame push, so the fast path's
+     * "frames ever" flag is already set. */
+    march_incrc(meta->auth);
+    *slot = meta->auth;
+    march_cap_release(old);
+}
+
 static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
@@ -6796,6 +6836,7 @@ static void actor_green_thread(void *arg) {
     /* Publish the actor this proc is running, so `self` in a handler body can
      * find it (march_self, in march_scheduler.c). */
     if (self) self->actor = actor;
+    actor_install_auth(meta);
     /* [meta] is this thread's own: activate_actor_green_thread took the
      * reference it holds, released by the meta_put on each exit below. */
     jmp_buf crash_jmp;
@@ -7171,6 +7212,7 @@ static void actor_green_thread(void *arg) {
                  * callback's next receive, never lost. */
                 atomic_store_explicit(&self->stop_requested, 0,
                                       memory_order_seq_cst);
+                actor_install_auth(meta);
                 if (actor_alive_load(actor)
                         && actor_run_on_stop(self, actor, cb, bare_stop))
                     stopped_in_handler = 1;
@@ -7428,8 +7470,15 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
      * thunk, D24 — and in a --test build when the child is itself a
      * supervisor whose spawn glue carries capabilities; see cap_passing.ml.) */
     march_incrc(child->spawn_clo);
+    /* ocap phase 4: the replacement's `init` and its whole life run under
+     * the slot's FIRST spawn's authority (march_sup_child.first_auth), not
+     * under whatever is in force on this thread.  The thunk is March code
+     * that can switch green threads; the slot belongs to this proc, so the
+     * accessor in march_cap_enter/restore finds it again wherever it runs. */
+    void *auth_saved = march_cap_enter(child->first_auth);
     void *raw = fn_ptr(child->spawn_clo);
     void *new_child = march_spawn_supervised(raw);
+    march_cap_restore(auth_saved);
 
     /* Take what the dead incarnation stashed on this slot (its names and its
      * spawn-site capability; stash_child_for_restart). */
@@ -8773,6 +8822,17 @@ static void *march_spawn_common(void *actor, int defer_activation) {
      * ubuntu leg, test/native/actor_enumeration). A pid is a handle to a
      * running actor; the actor's lifetime is its own. */
     march_incrc(actor);
+    /* ocap phase 4: the authority the actor runs under for life — the
+     * spawner's (a restart enters the slot's first-spawn authority around
+     * this call; march_respawn_child).  Before the activation, which
+     * publishes the meta to the actor's own thread. */
+    {
+        void *auth = *march_sched_auth_slot();
+        march_incrc(auth);
+        void *old = meta->auth;
+        meta->auth = auth;
+        march_cap_release(old);
+    }
     if (!defer_activation) activate_actor_green_thread(meta);
     march_reclaim_exit();
     /* Start the scheduler in a background thread so actor green threads run
@@ -13641,6 +13701,8 @@ void march_actor_register_child(void *supervisor, void *child,
     sup_meta->sup_children[idx].pending_names = NULL;
     sup_meta->sup_children[idx].pending_name_count = 0;
     sup_meta->sup_children[idx].pending_spawn_cap = NULL;
+    march_incrc(child_meta->auth);
+    sup_meta->sup_children[idx].first_auth = child_meta->auth;
     __atomic_store_n(&sup_meta->sup_num_children, idx + 1, __ATOMIC_RELAXED);
     sup_slot_unlock(sup_meta);
     activate_actor_green_thread(child_meta);
