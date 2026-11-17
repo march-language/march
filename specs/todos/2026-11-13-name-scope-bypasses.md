@@ -57,3 +57,11 @@ scoped one, the scoped module's call is not judged. Phase 4 closes this.
 - **Over-eager machine fix.** The `prefix(w)` → `prefix("w")` fix is also offered
   for other identifier-valued options such as `no_redirects(w)`, where quoting does
   not make the scope valid. Offer it only for `prefix(...)`.
+
+## Note, 2026-11-17 (ocap phase 4 landed)
+
+Phase 4's run-time check judges a name against `main`'s request (narrowed by `MARCH_GRANT`)
+and against each scoped function `needs` clause in force, not against a module's own `needs`
+line. So the routes above close at run time only when the scope is also on `main`'s request
+or on a function clause around the call; a scope written only on a module's `needs` line is
+still checked at compile time alone, and these bypasses stay open for it.

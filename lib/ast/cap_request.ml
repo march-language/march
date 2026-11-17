@@ -167,7 +167,8 @@ let request_of_main (def : fn_def) (module_needs : (name list * string option) l
 
 (** `main`'s launch request (decision 3) as source text, and whether any
     entry carries a scope: [request_of_main] of the [entry_main].  With no
-    `main`, the module's `needs` line. *)
+    `main`, the module's `needs` line.  Not used for a test file (see
+    [test_request]). *)
 let launch_request (m : module_) : string * bool =
   match entry_main m with
   | Some (_, def, module_needs) -> request_of_main def module_needs

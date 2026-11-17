@@ -3,7 +3,8 @@
 Implement the static layer of the ocap design: capture sets on function types and on
 values that hold function values or scoped handles, inferred everywhere except public
 signatures; scoped-handle escape checking; the public-signature rule with the stdlib
-migration and `forge fix`. Waits on phase 4 (run-time authority).
+migration and `forge fix`. Unblocked: phase 4 (run-time authority) landed 2026-11-17
+(`specs/progress/2026-11-15-ocap-p4-runtime.md`).
 
 Design: `specs/2026-11-11-ocap-capture-checking-design.md` (approved 2026-11-12). It ships
 in three steps, 8a (inference and display, no new errors), 8b (`scoped` parameters and

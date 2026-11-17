@@ -13,8 +13,12 @@ A capability is a compile-time record of what a piece of code may do to the worl
 print, read a file, open a socket, spawn a task, call C. In March every module
 declares the capabilities it uses with `needs`, the compiler traces every call graph
 to check that the declarations are true and complete, and `main`'s parameter bounds
-what the whole program may reach. None of this costs anything at runtime: a `Cap(X)`
-is a null pointer unless you attach a test dictionary to it.
+what the whole program may reach. The checks cost nothing at run time: a `Cap(X)`
+is a null pointer unless you attach a test dictionary to it. What a run may do is
+also limited while it runs: each capability operation is checked against the
+[run-time authority](#run-time-authority), which `--grant` or `MARCH_GRANT` can
+narrow at launch and a scoped function `needs` clause narrows inside the function.
+A program that uses neither pays two global loads per operation.
 
 Three checks do the work. The **manifest** check makes every module declare what it
 touches. The **upper limit** makes the build fail if any module's emitted code, your
@@ -57,6 +61,7 @@ callers never have to satisfy. See [The grant](#grant).
 - [The grant: `main`'s parameter bounds the whole program](#grant)
 - [Host and method scopes on IO.NetConnect](#host-scopes)
 - [Refusals: capability operations return `Result`](#refusals)
+- [Run-time authority: `--grant`, `MARCH_GRANT` and scoped function `needs`](#run-time-authority)
 - [When not to use IO caps](#when-not-to-use-io-caps)
 - [Specific IO capabilities](#specific-io-capabilities): [IO.Mut](#iomut-shared-mutable-state), [IO.Registry](#ioregistry-naming-and-finding-actors), [name scopes](#name-scopes), [IO.NetConnect.TLS](#ionetconnecttls-encrypted-transport-only), [IO.Telemetry](#iotelemetry-observability-annotation), [IO.Foreign](#ioforeign--calling-unverified-c)
 
@@ -91,6 +96,8 @@ callers never have to satisfy. See [The grant](#grant).
 | Guarantee a function is completely pure | Declare no `needs`; the compiler verifies it |
 | Let a plugin only read the clock | `cap_narrow` to `Cap(IO.Clock)` at the call site |
 | Bound what the whole program may do | The grant: `main`'s capability parameter |
+| Narrow what one run of a program may do | `--grant` / `MARCH_GRANT` at launch ([run-time authority](#run-time-authority)) |
+| Limit a function to some paths, hosts or names | A scoped function `needs` clause, checked at run time |
 | Prove integer division and arithmetic can never panic, and rule out non-exhaustive matches | `cap no_panic` + Int refinements on divisors and operands |
 | Guarantee zero heap allocation (realtime/embedded) | `cap no_alloc` for a whole module, `@[no_alloc]` for one function (the same check) |
 | Keep a module free of C/FFI | `cap no_extern` |
@@ -567,17 +574,19 @@ Three signatures, three meanings:
 
 | `main` signature | grant |
 |---|---|
-| `fn main()` | **empty**: a build error the moment the program's closure reaches any capability; only a program that truly touches no IO compiles with it |
+| `fn main()` | the module's `needs` line; with no `needs` line, **empty** |
+| `fn main() needs ()` | **empty**: a build error the moment the program's closure reaches any capability; only a program that truly touches no IO compiles with it |
+| `fn main() needs IO.Console, IO.FileRead("/srv/")` | the clause, scopes included: the scopes are checked at run time ([Run-time authority](#run-time-authority)) |
 | `fn main(cap : Cap(IO))` | full IO: the established entry-point convention |
 | `fn main(cap : Cap(IO.Console))` | narrow: the closure must sit under it |
 | `fn main(a : Cap(IO.Console), b : Cap(IO.Spawn))` | union of the parameters: for when the program needs two narrow grants without widening to `Cap(IO)` |
 
-A parameterless `main` used to be ambient (any pre-grant program kept
-compiling under it); since the grant shipped it means the opposite:
-`fn main() : () do file_write(...) end` is a compile error naming the exact
-grant to add (`` `main` performs IO but declares no grant. The program
-reaches `IO.FileWrite`... ``), and `forge fix` writes the missing parameter
-for you.
+`main`'s request is its `needs` clause together with the kinds of its `Cap(...)`
+parameters. With neither, it is the module's `needs` line, so a program that prints
+needs only `needs IO.Console` in its module; `needs ()` on `main` requests nothing.
+A program that reaches more than its request is a compile error naming the exact
+capability to add (`` `main` performs IO but declares no grant. The program reaches
+`IO.FileWrite`... ``), and `forge fix` writes it for you.
 
 Two intentional edges:
 
@@ -654,8 +663,10 @@ are worth knowing:
 The bound may sit on any one clause of a multi-clause function, and covers all of them;
 two clauses declaring different bounds is a syntax error. Impl methods take bounds the
 same way. Local functions inside a body do not: their reach already counts toward the
-function that contains them. Path scopes (`IO.FileRead("/etc")`) are not accepted in a
-function bound.
+function that contains them. A function bound may carry scopes
+(`needs IO.FileRead("/etc/myapp/")`); the compiler checks its kinds as above, and the
+scopes are checked at run time only, against the target each operation is given
+([Run-time authority](#run-time-authority)).
 
 **Interface methods** take a bound too, after the method's type, and it holds every impl
 of that method (and the interface's default body) to it, including impls written in other
@@ -864,11 +875,112 @@ end
 
 An operation is refused at run time when it lies outside the current
 authority: `main`'s request, narrowed by `--grant` or `MARCH_GRANT` at launch
-and by each function `needs` clause it runs under (ocap phase 4). UDP sockets and TLS contexts are handles opened by a
+and by each function `needs` clause it runs under; see
+[Run-time authority](#run-time-authority). UDP sockets and TLS contexts are handles opened by a
 checked open (`Udp.open`, `Tls.client_ctx`). `HttpClient`, `HttpServer`,
 `Tls.https_get` and `Udp.resolve` still return their old types and move with
 run-time authority (ocap phase 4); `HttpClient` and `Tls.https_get` already
 dial through `Socket.connect`, so their target is checked like any connect.
+
+<a id="run-time-authority"></a>
+### Run-time authority: `--grant`, `MARCH_GRANT` and scoped function `needs`
+
+The checks above prove, before the program runs, which capability *kinds* each piece of
+code may reach. Some things they cannot see: a path or host computed at run time, a
+launch narrowed by whoever starts the program, a function value called far from where it
+was made. So every running program also has a **current authority**, and each capability
+operation is checked against it. It works the same in the interpreter, `--jit`, the
+REPL, a compiled binary and `--target js` (the JS target has no tasks or actors);
+`test/cap_conformance/` runs every rule below in all five.
+
+**The launch.** A program starts with `main`'s request (see [The grant](#grant)): its
+`needs` clause and `Cap(...)` parameters, or the module's `needs` line when it has
+neither. Whoever runs the program can narrow it, never widen it:
+
+```bash
+MARCH_GRANT='IO.Console, IO.FileRead("/srv/")' ./server
+march --grant 'IO.Console' report.march         # interpreter, --jit
+march repl --grant 'IO.Console' lib.march       # the REPL
+forge run --grant 'IO.Console'                  # sets MARCH_GRANT for the run
+```
+
+The grant is a scope list in `needs` syntax; `()` grants nothing, and an empty
+`MARCH_GRANT` counts as unset. Each entry must lie within the request. A grant that does
+not parse, or that grants something `main` does not request, is a **launch error**: one
+line on stderr and exit status 2, before any of the program's code runs, module-level
+`let`s included.
+
+```
+march: MARCH_GRANT is not a scope list: unexpected `;`
+march: MARCH_GRANT grants IO.FileRead, which main does not request (main requests: IO.Console)
+```
+
+**Scoped function `needs`.** A function bound may carry scopes. While the function runs,
+its clause is a further limit around everything it reaches by direct calls, and the
+scopes are checked against the target each operation is actually given:
+
+```march
+mod Conf do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn read_conf(name : String) : String needs IO.FileRead("/etc/myapp/") do
+    match File.read("/etc/myapp/" ++ name) do
+    Ok(Ok(text)) -> text
+    Ok(Err(_)) -> ""
+    Err(e) -> Authority.describe(e)
+    end
+  end
+end
+```
+
+`read_conf("../passwd")` is refused: `File.read` returns `Err`, which `Authority.describe`
+renders as `IO.FileRead("/etc/myapp/../passwd") refused by function read_conf's needs
+(IO.FileRead("/etc/myapp/"))`. Limits nest: inside a function called by
+another scoped function, under a narrowed launch, all three are in force (their
+intersection), checked from the innermost out, and a refusal names the innermost limit that
+refused (`ByFnNeeds(f)` with `f`'s clause, or `ByLaunch` with the grant text). A function
+already running under its own frame (its self-recursive calls) enters nothing again, so a
+self tail call stays a loop. When the function returns, the caller's authority is back.
+
+Path scopes compare whole segments lexically: a relative target is resolved against the
+current directory, `.` and `..` are folded, and `/srvx/y` is not inside `/srv/`. Symlinks
+are not resolved (`specs/todos/2026-11-17-ocap-path-scope-realpath.md`). Host scopes
+compare the host (and port, and path prefix) a connection is opened to; name scopes the
+`Vault` or registry name.
+
+**Function values keep the authority they were made under.** A lambda, or a named function
+used as a value, runs under the authority in force where it was created, however far it
+travels: one made inside a scoped function and called from `main` still runs under that
+function's clause, and one made in `main` and handed to a scoped function runs under
+`main`'s authority, not the callee's. The caller's authority plays no part. A value
+made by module-level code (a top-level `let`'s initialiser) captures nothing and runs
+under its caller's authority.
+
+**Actors and tasks keep their spawner's authority for life.** A worker spawned inside a
+scoped function stays limited by that function's clause after the function returns. A
+supervisor that restarts a child restarts it under the authority of the child's first
+spawn, whoever triggered the restart.
+
+**The REPL and tests.** The REPL runs with the full authority of the person at the
+terminal; `--grant` narrows it. A test file runs under its module's `needs` line, whatever
+`main` it declares; `march test`'s doctests run as the REPL does, with the full authority
+narrowed by a grant.
+
+**Cost.** A program with no scopes, no grant and no scoped function pays two global loads
+per capability operation and one call at launch, and compiles to the same code otherwise.
+A check that walks the layers (under a grant, a scoped request, or inside a frame) costs
+well under a microsecond; entering a frame is a few tens of nanoseconds. Function values
+that reach a capability operation, a spawn or another function value carry one more word,
+but only in a program that has at least one frame.
+
+**Not yet enforced at run time.** A direct call of a raw builtin (`file_read(p)`) bypasses
+the run-time check, though not the compile-time one; the network opens of `HttpServer`
+and `Udp.resolve` are not checked yet. Authority does not travel with a remote child
+started on another node: the receiving node runs it under its own launch authority
+(`specs/todos/2026-11-17-ocap-cross-node-authority.md`). A module's own scoped `needs`
+line is checked at compile time only, except as the program's request when it is the
+entry module's and `main` has none.
 
 ### When *not* to use IO caps
 
@@ -956,7 +1068,8 @@ module's code (functions, actors, impl methods, tests and setup blocks) and thro
 
 - with a literal name outside the scope is a `cap_scope_violation` naming the scope;
 - with a computed name (`"worker." ++ id`) is refused too: the compiler cannot prove it is
-  within the scope, and the check at run time arrives with phase 4;
+  within the scope (a name scope on `main`'s request or on a function `needs` clause is
+  checked at run time instead, see [Run-time authority](#run-time-authority));
 - a name-taking function used as a value (`let f = Actor.register`) is refused for the
   same reason.
 
@@ -964,7 +1077,8 @@ module's code (functions, actors, impl methods, tests and setup blocks) and thro
 unscoped `IO.Registry`. A nested module may narrow its parent's name scope but never widen
 it: under a parent's `needs IO.Registry("logger")`, a nested `needs IO.Registry` (or
 `needs IO`) is a `cap_scope_violation`. Not yet checked: a name passed through a function
-written in another module (`Reg.put(pid, "other")`); the run-time check of phase 4 closes it
+written in another module (`Reg.put(pid, "other")`). The run-time check closes it only
+under a scoped request or function clause, not for a module's own `needs` line
 (`specs/todos/2026-11-13-name-scope-bypasses.md`). A lookup by name is an open: `Vault.whereis("tokens")` under
 `needs IO.Mut("sessions")` is refused.
 
@@ -1294,7 +1408,7 @@ end
 
 ## Runtime behaviour
 
-A `Cap(X)` is a **nullable pointer**. By default it is null, compiling to `null` in LLVM IR and `VUnit` in the interpreter, with no allocation, no indirection and no overhead; that is what every capability is unless something explicitly attaches a [runtime dictionary](#runtime-dictionaries-swapping-what-a-capability-does) to it. Enforcement of the capability *types* is purely at compile time, but a compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup, and a running node can gate hot deploys against it. Both live on their own page: see [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) (OS-level sandboxing via `forge cap run` / `--cap-sandbox`, and node-local hot-deploy admission control).
+A `Cap(X)` is a **nullable pointer**. By default it is null, compiling to `null` in LLVM IR and `VUnit` in the interpreter, with no allocation, no indirection and no overhead; that is what every capability is unless something explicitly attaches a [runtime dictionary](#runtime-dictionaries-swapping-what-a-capability-does) to it. Enforcement of the capability *types* is at compile time; what a run may do is also checked at each capability operation against the [run-time authority](#run-time-authority), at the cost of two global loads when no grant, scope or frame is in play. A compiled binary can additionally turn its declared set into a kernel-enforced sandbox at startup, and a running node can gate hot deploys against it. Both live on their own page: see [Capability Enforcement]({{ site.baseurl }}/docs/capability-enforcement/) (OS-level sandboxing via `forge cap run` / `--cap-sandbox`, and node-local hot-deploy admission control).
 
 ---
 

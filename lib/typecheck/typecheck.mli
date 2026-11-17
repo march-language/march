@@ -364,8 +364,10 @@ val dump_role_authority : bool ref
     hands it to [Authority.launch_init]: the canonical text (`main`'s `Cap`
     parameter kinds, then its `needs` entries, each printed as written,
     joined by [", "]; with neither, the module's `needs` line) and whether
-    any entry carries a scope.  A module with no `main` (a test file) asks
-    for its `needs` line. *)
+    any entry carries a scope.  A module with no `main` asks for its
+    `needs` line.  A test file does not use this: its request is
+    [March_ast.Cap_request.test_request], its `needs` line whatever `main`
+    it declares. *)
 val launch_request : Ast.module_ -> string * bool
 
 (** Per-role FULL capability closures for the hot-deploy manifest's
