@@ -148,7 +148,7 @@ rule token = parse
   | newline       { Lexing.new_line lexbuf; NL }
   | "--"          { line_comment lexbuf }
   | "{-"          { block_comment 0 lexbuf }
-  | digit+ '.' digit+ as f { FLOAT (float_of_string f) }
+  | digit+ '.' digit+ (['e' 'E'] ['+' '-']? digit+)? as f { FLOAT (float_of_string f) }
   | digit+ as n   {
       (* March integers are 63-bit (OCaml int).  An out-of-range literal would
          crash int_of_string with an uncaught Failure; raise a positioned
