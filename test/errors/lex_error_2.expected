@@ -1,0 +1,14 @@
+exit: 1
+-- SYNTAX ---------------------- errors/lex_error_2.march
+
+This string is never closed: I reached the end of the file inside it. [lex_error]
+
+4 |     let a = "one
+                ^
+
+    A string can span lines, so a missing `"` makes the strings after it swap inside and out. This is the first one that runs past its line; close it where it should end.
+
+    possible fix (a guess: check it before applying it):
+
+4 -     let a = "one
+4 +     let a = "one"

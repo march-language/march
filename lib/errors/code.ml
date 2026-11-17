@@ -233,6 +233,9 @@ let unused_binding = "unused_binding"
 let unused_import = "unused_import"
 let unused_needs = "unused_needs"
 let vectorize_failed = "vectorize_failed"
+let vault_check_then_act = "vault_check_then_act"
+let parallel_shared_write = "parallel_shared_write"
+let parallel_output_order = "parallel_output_order"
 let copy_shared = "copy_shared"
 (* Run-time failures the interpreter reports in the compile-error style. *)
 let panic = "panic"
@@ -358,6 +361,8 @@ let all = [
   old_misuse;
   or_pattern_binding;
   overlapping_impl;
+  parallel_output_order;
+  parallel_shared_write;
   parse_error;
   pid_serialize;
   pipe_into_match;
@@ -456,6 +461,7 @@ let all = [
   unused_binding;
   unused_import;
   unused_needs;
+  vault_check_then_act;
   vectorize_failed;
   copy_shared;
   panic;
@@ -563,6 +569,7 @@ let category_table : (string * string list) list = [
     deterministic_violation; no_alloc; no_alloc_candidate; no_alloc_policy;
     no_alloc_transient; no_alloc_unchecked; no_extern_violation;
     no_panic_violation; pure_violation; realtime_mixed; vectorize_failed ];
+  "CONCURRENCY", [ parallel_output_order; parallel_shared_write; vault_check_then_act ];
   "COPY", [ copy_shared ];
   "RUNTIME", [ panic; runtime_error; actor_crashed ];
   "UNUSED", [ unused_binding; unused_import ];

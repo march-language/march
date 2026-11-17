@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: March has no `return`
+mod M do
+  fn f(x : Int) : Int do
+    return x + 1
+  end
+end

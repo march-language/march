@@ -6,7 +6,7 @@ expected `List(Int)` but got `List(String)`. [type_mismatch]
 9 |     println(int_to_string(count(names)))
                                     ^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `count`, its parameter `xs`.
     The types differ here:
         List(String)
              ^^^^^^ expected `Int`

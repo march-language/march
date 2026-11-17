@@ -298,6 +298,10 @@ mod Vault do
   Apply `f` to the current value stored at `key` and replace it with the result.
   No-op if the key is absent or expired.
 
+  Not atomic: the value is read, `f` runs without holding the table's lock,
+  and the result is written, so a concurrent writer's update in between is
+  lost. For a counter use `incr`; to insert only when absent, `put_new`.
+
   `f` must be `(v) -> v` for a `Vault(v)` — an update cannot change the
   table's element type.
 

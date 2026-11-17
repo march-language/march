@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: String does not implement Num
+mod Main do
+  fn main() : Int do
+    List.fold_left([1, 2], "", fn (acc, x) -> acc + x)
+  end
+end

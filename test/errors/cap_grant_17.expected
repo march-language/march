@@ -24,7 +24,7 @@ expected `Int` but got `Bool`. [type_mismatch]
 5 |     println(int_to_string(1 && true))
                               ^^^^^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `int_to_string`.
 
     the expected type comes from here:
 

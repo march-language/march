@@ -1,0 +1,5 @@
+-- EXPECT-ERROR: without a leading `|`
+mod M do
+  type Color = | Red | Green
+  fn f() : Int do 0 end
+end

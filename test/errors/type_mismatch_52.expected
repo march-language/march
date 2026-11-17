@@ -6,7 +6,7 @@ expected `Fahrenheit` but got `Celsius`. [type_mismatch]
 24 |     println(show(boiling))
                       ^^^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `show`, its parameter `f`.
     Use `celsius_to_fahrenheit(x)` to convert a `Celsius` to a `Fahrenheit`.
 
     the expected type comes from here:

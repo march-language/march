@@ -486,7 +486,7 @@ expected `List(Int)` but got `List(String)`. [type_mismatch]
 10 |     println(int_to_string(count(names)))
                                      ^^^^^
 
-    This is argument #1 of a function call.
+    This is argument #1 of `count`, its parameter `xs`.
     The types differ here:
         List(String)
              ^^^^^^ expected `Int`
@@ -571,8 +571,8 @@ end
 
 expected `Result(Int, String)` but got `Int`. [type_mismatch]
 
-5 |     let? x = parse()
-        ^^^^^^^^^^^^^^^^
+6 |     x + 1
+        ^^^^^
 
     This is the declared return type of `next`.
     The code after `let?` must produce a Result with the same error type.

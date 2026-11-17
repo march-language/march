@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: has nothing on its right
+mod M do
+  fn f(x : Int) : Int do
+    x +
+  end
+end

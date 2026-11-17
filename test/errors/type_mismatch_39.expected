@@ -7,7 +7,7 @@ expected `Int` but got `String`. [type_mismatch]
                                       ^^^
 
     In a list element.
-    This is argument #2 of a function call.
+    This is argument #2 of `List.append`, its parameter `ys`.
 
     the expected type comes from here:
 

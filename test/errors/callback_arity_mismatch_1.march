@@ -1,0 +1,6 @@
+-- EXPECT-ERROR: calls its parameter `f` with 1 argument
+mod Main do
+  fn main() : List(Int) do
+    List.map([1, 2], fn (a, b) -> a + b)
+  end
+end
