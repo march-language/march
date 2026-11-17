@@ -14254,6 +14254,10 @@ let test_iface_method_as_value_compiled () =
    short name `Option` colliding, which forced the BUILTIN `Option` Boxed and
    globally tagged, so matching `string_to_int`'s runtime-built (niche)
    `Option(Int)` read a raw pointer as a tagged cell: SIGSEGV.
+   The compile runs with the TIR verifier on (MARCH_VERIFY_TIR=1, as the
+   oracle does): `Kind.canonical_name` folded `Shapes.Option` back to the
+   builtin `Option`, so its allocation took the niche layout while `repr_of`
+   said Boxed, which only the verifier's repr checks report.
    (specs/progress/2026-11-11-compiled-derive-on-user-type-named-like-prelude-type.md) *)
 let builtin_named_user_type_src = {|mod Main do
   needs IO.Console
@@ -14302,7 +14306,7 @@ let test_builtin_named_user_type_compiled () =
   List.iter (fun opt ->
       let bin = Filename.concat tmp (Printf.sprintf "builtin_named_o%d" opt) in
       match compile_march_or_skip
-              ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+              ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_VERIFY_TIR=1 " (Filename.quote project_root))
               ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
       | None -> ()  (* legitimate, counted skip: no clang on PATH *)
       | Some bin ->

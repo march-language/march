@@ -56,3 +56,10 @@ let builtin_adt_names = [ "Option"; "Result"; "List" ]
 
 let is_colliding (cs : (string, string list) Hashtbl.t) (name : string) : bool =
   not (List.mem name builtin_adt_names) && Hashtbl.mem cs (short_name name)
+
+(** A user type that shares its short name with a builtin ADT
+    (`Main.Option`, `Shapes.Result`): qualified, short name in
+    [builtin_adt_names].  Such a name must never be folded to its short form,
+    which would name the builtin and its fixed layout. *)
+let shadows_builtin_adt (name : string) : bool =
+  String.contains name '.' && List.mem (short_name name) builtin_adt_names

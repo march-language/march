@@ -55,3 +55,17 @@ Not fixed here, filed separately (all reproduce before this change):
 `todos/2026-11-16-nested-type-named-like-builtin-leaks-to-parent-scope.md`,
 `todos/2026-11-16-toplevel-type-list-breaks-generated-code.md` and
 `todos/2026-11-16-interp-user-option-show-captures-builtin.md`.
+
+### Follow-up: the layout split the TIR verifier caught (2026-11-16)
+
+CI's `cross-linux-oracle` compiles with `MARCH_VERIFY_TIR=1`. It failed on
+`specs/lang/golden/g49_user_type_named_like_base_type.march`, a top-level `type Option(a) = Some(a) | None`,
+with exit 3. `Kind.canonical_name` folded `Main.Option` to its short name `Option`. Once the builtin
+`Option` stopped being colliding, that name pointed at the builtin, so allocation (`is_niche_shaped`)
+chose the niche layout. `Kind.repr_of` sees the qualified, colliding name and chose Boxed. The program
+still printed the right answer, but encode and decode decided the layout separately, which the
+verifier's repr checks forbid.
+
+`canonical_name` now leaves a name that shadows a builtin ADT unchanged (`Collision_set.shadows_builtin_adt`).
+The verifier's collision-tag check skips the exempt builtins, which keep their runtime-fixed tags. The
+regression test compiles with the verifier on; it fails without the `canonical_name` change.
