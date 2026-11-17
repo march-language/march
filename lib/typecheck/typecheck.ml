@@ -12651,6 +12651,10 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
   check_cap_impl_sites final_env;
   check_json_cap_sites final_env;
   check_node_send_sites ~entry:m.Ast.mod_name.txt final_env;
+  (* Logical races: Vault check-then-act, and parallel lambdas that write a
+     shared key or print (specs/progress/2026-11-16-race-warnings.md). *)
+  Typecheck_races.check_module ~iter_expr
+    ~own_exprs:Typecheck_caps.module_own_exprs final_env.errors m.Ast.mod_decls;
   check_cap_narrow_sites final_env;
   (* Validate capability declarations for the top-level module *)
   (* The entry module's own name is NOT a prefix segment for cap-closure keys:

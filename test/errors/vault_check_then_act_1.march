@@ -1,0 +1,15 @@
+mod Main do
+  needs IO.Console
+  needs IO.Mut
+
+  fn record_visit(hits : Vault(Int), page : String) do
+    let n = Vault.get_or(hits, page, 0)
+    Vault.set(hits, page, n + 1)
+  end
+
+  fn main(_c : Cap(IO.Console), _m : Cap(IO.Mut)) do
+    let hits = Authority.must(Vault.new("hits"))
+    record_visit(hits, "/")
+    println(int_to_string(Vault.get_or(hits, "/", 0)))
+  end
+end

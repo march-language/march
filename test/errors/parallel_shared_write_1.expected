@@ -1,0 +1,13 @@
+exit: 0
+-- WARNING: CONCURRENCY -- errors/parallel_shared_write_1.march
+
+Every parallel call writes the same Vault key `"max"`. [parallel_shared_write]
+
+8 |     let _ = List.pmap([3, 9, 4], fn x -> Vault.set(best, "max", x * x))
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `List.pmap` runs this function on many elements at once, and every call writes the same key `"max"`. The calls finish in no fixed order, so which value is left is a race, and a read-then-write of the key loses updates.
+    Return the values from the function and combine the results after the parallel call, or key each write by the element. For a shared counter use `Vault.incr`, which adds under one lock.
+    run `march --explain parallel_shared_write`
+
+

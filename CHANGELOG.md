@@ -21,6 +21,22 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Warnings for logical races.** March has no memory-level data races, but two kinds
+  of race survive above the memory model, and the checker now names them:
+  - `vault_check_then_act`: a function reads a Vault key and then writes it based on
+    what it read (`let n = Vault.get_or(t, k, 0)` then `Vault.set(t, k, n + 1)`, or
+    `if Vault.has(t, k) do ... else Vault.set(t, k, v) end`). Another writer can change
+    the key in between, and its update is lost. The warning points at the write, labels
+    the read, and names the atomic form: `Vault.incr`, `Vault.put_new` or
+    `Vault.push_capped`, or an actor. `@[no_warn_race]` on a function silences it.
+  - `parallel_shared_write`: a function passed to `List.pmap`, `Parallel.pmap` or the
+    rest of the parallel family writes the same Vault key on every call.
+  - `parallel_output_order`: such a function prints, so its lines come out in whatever
+    order the calls ran.
+  - Both parallel checks follow calls into helpers in the same module. Other I/O inside
+    a parallel call (an HTTP request per element) draws nothing.
+  - `Vault.update`'s documentation now says it is not atomic: it reads, runs the function
+    without the lock, then writes.
 - **Syntax mistakes from other languages get their own messages, most with a fix:**
   - braces for a block (`fn f() {`): replaced with `do` ... `end`;
   - a leading `|` before a type's first variant: removed;

@@ -1,0 +1,19 @@
+exit: 0
+-- WARNING: CONCURRENCY -- errors/vault_check_then_act_1.march
+
+This writes `page` in `hits` based on a value read from it earlier, and another writer can change it in between. [vault_check_then_act]
+
+7 |     Vault.set(hits, page, n + 1)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    `Vault.get_or` and `Vault.set` each take the table's lock, but nothing holds it between them. If another task or actor writes `page` in that window, this write replaces its value and that update is lost.
+    For a counter, `Vault.incr(table, key, delta)` adds and returns the new value under one lock, so concurrent increments are never lost.
+    If only one task ever writes this table, mark the function `@[no_warn_race]`.
+
+    `page` read here:
+
+6 |     let n = Vault.get_or(hits, page, 0)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    run `march --explain vault_check_then_act`
+
+
