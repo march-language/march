@@ -643,9 +643,11 @@ export function march_panic_error(prefix, msg) {
  * that is async (it awaits a JS-module extern) is not supported: its panic
  * would reject a Promise this cannot wait for. */
 export function march_try_call(thunk) {
+  const capMark = marchCapSlot;
   try {
     return { $: "Ok", _0: thunk._0(thunk, true) };
   } catch (e) {
+    marchCapUnwind(capMark);
     let msg;
     if (e instanceof RangeError && /call stack/i.test(e.message)) msg = "stack overflow";
     else if (e instanceof Error) msg = (e.marchPanicPrefix || "") + e.message;
@@ -786,6 +788,11 @@ export function march_cap_set_launch(l) {
 }
 
 export function march_cap_save() { return marchCapSlot; }
+
+/* After a caught panic: the slot the catcher was entered under, in force
+ * again (the throw skipped the restores of the frames it left; the native
+ * twin is march_cap_unwind, the interpreter's a Fun.protect). */
+function marchCapUnwind(mark) { marchCapSlot = mark; }
 
 export function march_cap_restore(r) { marchCapSlot = marchCapEmpty(r) ? null : r; }
 
@@ -1050,10 +1057,12 @@ export function march_panic_err(msg) {
  * march_runtime.c).  Both closures take one ignored argument.  An action
  * that returns a promise (an async closure) is cleaned up when it settles. */
 export function march_try_finally(action, cleanup) {
+  const capMark = marchCapSlot;
   let r;
   try {
     r = action._0(action, undefined);
   } catch (e) {
+    marchCapUnwind(capMark);
     cleanup._0(cleanup, undefined);
     throw e;
   }
@@ -1078,7 +1087,8 @@ export async function march_diag_unhandled(e) {
     for (const [, cb] of snapshot) {
       const report = { $: "DiagCrash", _0: 0, _1: msg, _2: { $: "Nil" }, _3: -1, _4: 0,
                        _5: ctx, _6: site[0], _7: site[1] };
-      try { await cb._0(cb, report); } catch (_) { /* swallowed */ }
+      const capMark = marchCapSlot;
+      try { await cb._0(cb, report); } catch (_) { marchCapUnwind(capMark); /* swallowed */ }
     }
   } finally {
     march_diag_dispatching = false;
@@ -1144,7 +1154,8 @@ export async function march_test_run(fn, name, setup) {
   if (setup) await setup();
   march_test_cur_header = null;
   let err = null, failed = false;
-  try { await fn(); } catch (e) { err = e; failed = true; }
+  const capMark = marchCapSlot;
+  try { await fn(); } catch (e) { err = e; failed = true; marchCapUnwind(capMark); }
   if (!failed) {
     march_test_out(march_test_verbose ? `  ✓ ${name}\n` : ".");
   } else {

@@ -58,12 +58,20 @@ The full tables, load averages and the IR-oracle classification are in the PR de
   code) costs about 60 ns: `Authority.enter_fn` reads the slot (`cap_layers`), compares the
   top layer's name and text, and `cap_push`es a new cons cell; `cap_restore` swaps it back
   and releases it. The layer itself is built once per program (`march_cap_layer_once`), so
-  nothing is parsed per entry. Not optimised here.
+  nothing is parsed per entry. Task 10b: about 15 ns (the pushed cell for an entry from the
+  launch authority is cached and immortal, "no layers" is one shared immortal Nil).
 - `cap_capture_closures`: +60–70% cpu over the same file with its one frame removed, from
   `cap_enter` / `cap_restore` around each captured closure call: about 9–10 ns per call
   over 4,666,666 captured calls (1M + 1M + 333,333 filter survivors, per pipeline, two
   pipelines). No
-  budget gates it; only programs with a frame pay it.
+  budget gates it; only programs with a frame pay it. Task 10b: about 3.5 ns per call
+  (an entry under the authority already in force touches no count and writes nothing; the
+  same run measured the old runtime at 6.5 ns).
+- Task 10b also made the native and JS runtimes put the authority back when a panic is
+  caught (`__try_call`, `__try_call_val`, `try_finally`, the test runner, crash observers,
+  actor inspect/migrate checks): before, the authority of the frame or captured value that
+  panicked stayed in force after the catch, which could widen it. The interpreter already did
+  this. Pinned by `test/cap_conformance/panic_caught_restores_authority.march`.
 - Hello world (macOS arm64): 252,904 B → 271,800 B; `__TEXT` grows by one 16 KB page.
 
 ## Left open

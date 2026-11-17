@@ -1556,6 +1556,13 @@ cpu): about 9–10 ns per captured call, over 4,666,666 of them (per pipeline, 1
 the composed map and filter functions and 333,333 of the fold's, the filter's survivors). Detail and the A/B against the merge base in
 `specs/progress/2026-11-15-ocap-p4-runtime.md`.
 
+After Task 10b (2026-11-17; same box, load about 9, 31 interleaved runs against the runtime
+before it, emitted IR unchanged): a captured call of a value under the authority it was made
+under no longer touches a count or writes the slot, and a frame entered from the launch
+authority pushes a cached, immortal cell instead of allocating one. `cap_capture_closures`
+74 → 59 ms cpu against 43 ms with its frame removed: about 6.5 → 3.5 ns per captured call;
+frame entry and leave about 47 → 15 ns; `cap_check_slow` and `list_ops` unchanged.
+
 ## bench/int_divmod.march — Int `/` and `%` zero-divisor check (2026-11-06)
 
 Three loops with an Int `/` and `%` in each iteration: digit sums (a literal divisor, 10),

@@ -216,6 +216,120 @@ end
 let test_compiled_drop () =
   check_all ~skip:[ "js" ] ~name:"compiled_drop" ~src:drop_src [ ("", "flat\n") ]
 
+(* Task 10b: cap_enter of the authority already in force changes nothing
+   and touches no count (natively it returns a tagged word that cap_restore
+   treats as "nothing to undo").  Pinned in every runtime: the launch
+   authority entered under itself, a frame's authority under that frame, a
+   different authority inside a same-authority entry and the same one again
+   inside that, and the frame's authority entered from outside it.  Each
+   number is the length of the layers in force at that point. *)
+let enter_same_src = {|mod CapEnterSame do
+  needs IO.Console
+  fn n() : Int do
+    List.length(cap_layers())
+  end
+  fn show(xs : List(Int)) : String do
+    match xs do
+    Nil -> ""
+    Cons(x, Nil) -> int_to_string(x)
+    Cons(x, rest) -> int_to_string(x) ++ " " ++ show(rest)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let s0 = cap_save()
+    let e0 = cap_enter(s0)
+    let a = n()
+    cap_restore(e0)
+    let b = n()
+    let old = cap_push(Authority.Layer(ByFnNeeds("f"), "IO.Console", Nil))
+    let inner = cap_save()
+    let e1 = cap_enter(inner)
+    let c = n()
+    let e2 = cap_enter(s0)
+    let d = n()
+    let e3 = cap_enter(s0)
+    let d2 = n()
+    cap_restore(e3)
+    let d3 = n()
+    cap_restore(e2)
+    let e = n()
+    cap_restore(e1)
+    let f = n()
+    cap_restore(old)
+    let g = n()
+    let e4 = cap_enter(inner)
+    let h = n()
+    let r = cap_check_raw("IO.Console", "")
+    cap_restore(e4)
+    let i = n()
+    println(show([a, b, c, d, d2, d3, e, f, g, h, i]))
+    println("raw " ++ int_to_string(r) ++ " then " ++ int_to_string(cap_check_raw("IO.Console", "")))
+  end
+end
+|}
+
+let test_enter_same () =
+  check_all ~name:"enter_same" ~src:enter_same_src
+    [ ("", "0 0 1 0 0 0 1 1 0 1 0\nraw 1 then 0\n") ]
+
+(* The Task 10b fast paths leave nothing live (compiled and JIT): a
+   same-authority cap_enter/cap_restore, nested inside different ones; a
+   compiled frame entered from the launch authority (its pushed cell is
+   cached, immortal) and from inside another frame (allocated, as before);
+   a captured function value called under the authority it was made under;
+   and a panic caught inside a frame (the catch puts the authority back). *)
+let fast_leak_src = {|mod CapFastLeak do
+  needs IO.Console
+  needs IO.FileRead
+  fn outer(x : Int) : Int needs IO.Console, IO.FileRead("/srv/") do
+    inner(x) + 1
+  end
+  fn inner(x : Int) : Int needs IO.Console, IO.FileRead("/srv/a/") do
+    x + 1
+  end
+  fn boom(x : Int) : Int needs IO.Console, IO.FileRead("/srv/") do
+    if x >= 0 do panic("boom") else x end
+  end
+  fn compose(f : Int -> Int, g : Int -> Int) : Int -> Int do
+    fn x -> g(f(x))
+  end
+  fn spin(n : Int, h : Int -> Int) : () do
+    if n == 0 do ()
+    else
+      let s0 = cap_save()
+      let old = cap_push(Authority.Layer(ByFnNeeds("f"), "IO.Console", Nil))
+      let mid = cap_save()
+      let e1 = cap_enter(mid)
+      let e2 = cap_enter(s0)
+      let e3 = cap_enter(mid)
+      cap_restore(e3)
+      cap_restore(e2)
+      cap_restore(e1)
+      cap_restore(old)
+      let a = outer(n)
+      let b = inner(a)
+      let c = h(b)
+      let d = match __try_call_val(fn _ -> boom(c)) do
+        Ok(v) -> v
+        Err(_) -> 0
+      end
+      spin(n - 1 + d, h)
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let h = compose(fn x -> x + 1, fn x -> x * 2)
+    spin(10, h)
+    let before = live_allocs()
+    spin(1000, h)
+    let after = live_allocs()
+    println(if after - before <= 0 do "flat" else "leak " ++ int_to_string(after - before) end)
+  end
+end
+|}
+
+let test_fast_paths_no_leak () =
+  check_all ~skip:[ "js" ] ~name:"fast_paths_no_leak" ~src:fast_leak_src [ ("", "flat\n") ]
+
 (* ocap phase 4, Task 6: actors and tasks spawned under a frame hold their
    own reference to the authority they were spawned under (the actor meta's
    [auth], a supervisor slot's [first_auth], a task proc's slot), and every
@@ -359,5 +473,9 @@ let tests =
         Alcotest.test_case "push/restore leaves nothing live" `Quick test_no_leak;
         Alcotest.test_case "compiled code dropping the last CapAuthRef releases it" `Quick
           test_compiled_drop;
+        Alcotest.test_case "cap_enter of the authority in force changes nothing" `Quick
+          test_enter_same;
+        Alcotest.test_case "the Task 10b fast paths leave nothing live" `Quick
+          test_fast_paths_no_leak;
         Alcotest.test_case "10,000 spawn/exit cycles under a frame release every authority"
           `Quick test_spawn_cycles_no_leak ] ) ]

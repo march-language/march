@@ -212,6 +212,8 @@ void   *march_cap_save(void);
 void    march_cap_restore(void *saved);
 void   *march_cap_push(void *layer);
 void   *march_cap_enter(void *auth);
+void   *march_cap_mark(void);
+void    march_cap_unwind(void *mark);
 void   *march_cap_grant_text(void);
 void   *march_cap_cwd(void);
 void    march_cap_launch_fail(void *text);

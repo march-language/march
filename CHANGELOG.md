@@ -30,7 +30,10 @@ git log is authoritative for exact commits.
   An actor or task keeps its spawner's authority for life, and a supervisor restarts a child
   under the authority of its first spawn. A program with no grant, no scoped request and no
   scoped function pays two global loads per operation and one call at launch; a check that
-  walks the layers costs well under a microsecond. Not yet covered: direct calls of raw
+  walks the layers costs well under a microsecond; in a program with scoped functions, a
+  captured call costs a few nanoseconds and entering a scoped function about 15 ns. A panic
+  caught by `try_finally`, a property or a test puts back the authority that was in force
+  where it was caught. Not yet covered: direct calls of raw
   builtins, the `HttpServer` and `Udp.resolve` opens, and authority across nodes. See
   [Capabilities](docs/capabilities.md#run-time-authority).
 - **`--grant` / `MARCH_GRANT` narrow what one run may do.** `MARCH_GRANT='IO.Console,
