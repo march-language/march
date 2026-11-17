@@ -33,5 +33,10 @@ val frames :
       an eta expansion;
     - nothing made by module-initialiser code (a module-level let's
       initialiser) captures: it runs under its caller's authority
-      (design §21). *)
+      (design §21).
+
+    It tells module-initialiser code apart through the [Lower_state] tables
+    ([is_module_init_lambda], [is_module_init_binder], [is_module_init_fn])
+    that the most recent [Lower.lower_module] left, reset by the next one:
+    call it on that module, with no other lowering in between. *)
 val captures : Tir.tir_module -> has_frames:bool -> repl:bool -> Tir.tir_module

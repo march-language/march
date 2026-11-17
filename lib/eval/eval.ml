@@ -2031,7 +2031,9 @@ and apply_inner (fn_val : value) (args : value list) : value =
     let saved_init = !module_init in
     if saved_init then module_init := false;
     (* The authority the closure was made under, around its body; [None]
-       runs under the caller's ([VClosure]'s doc comment). *)
+       runs under the caller's ([VClosure]'s doc comment).  Allocates (the
+       [Some]) only when it swaps: nothing for [None] or for an authority
+       physically already in force. *)
     let saved_cap =
       match cap with
       | Some a when a != !Eval_builtins.cap_slot ->
@@ -2116,7 +2118,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EVar n ->  (* E-Var — core-march.md §4.2 *)
     let v = lookup n.txt env in
-    if !callee_var then (callee_var := false; v) else capture_named_value n.txt v
+    if !callee_var then (callee_var := false; v)
+    else (match v with VBuiltin _ -> capture_named_value n.txt v | _ -> v)
 
   | EHole (name, _) ->
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
@@ -2250,8 +2253,13 @@ and eval_expr_inner (env : env) (e : expr) : value =
       | None ->
         (match f with
          | EVar _ ->
+           (* The [EVar] arm clears the flag as it reads it; an exception on
+              the way (an unbound name) must not leave it set.  No closure:
+              this is the interpreter's hottest path. *)
            callee_var := true;
-           Fun.protect ~finally:(fun () -> callee_var := false) (fun () -> eval_expr env f)
+           (match eval_expr env f with
+            | v -> v
+            | exception e -> callee_var := false; raise e)
          | _ -> eval_expr env f)
     in
     let arg_vals = List.map (eval_expr env) args in

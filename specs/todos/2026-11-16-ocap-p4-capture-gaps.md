@@ -1,7 +1,8 @@
 # ocap p4: known gaps in function-value capture
 
 Logged with Task 5 of specs/plans/2026-11-15-ocap-p4-runtime-plan.md
-(specs/progress/2026-11-16-ocap-p4-function-value-capture.md). None widens authority.
+(specs/progress/2026-11-16-ocap-p4-function-value-capture.md). In each, a function value
+can run under a wider caller authority than it was made under.
 
 - **REPL JIT, the precompiled stdlib.** `lib/jit/repl_jit.ml` runs the capture pass
   on the stdlib shared object (`~fragment:false`) only when that module has a frame
@@ -31,3 +32,9 @@ Logged with Task 5 of specs/plans/2026-11-15-ocap-p4-runtime-plan.md
   written directly in the initialiser capture nothing in both.
 - **Interpreter REPL `let`.** Not yet compared with the JIT REPL under frames (Task 7
   adds the REPL conformance mode).
+- **Interpreter: a default-argument fn read as a value.** Such a fn is bound as a
+  `VMultiarity` (arity-dispatched closures), which `Eval.capture_named_value` does not
+  wrap, so passed as a value it runs under its caller's authority.
+- **Interpreter: a `use`/alias spelling read as a value.** `capture_named_value` wraps
+  a named fn only when the variable's text is the fn's name (or ends in `.NAME`), so a
+  fn read through an alias runs under its caller's authority.
