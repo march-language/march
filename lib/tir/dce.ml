@@ -218,7 +218,7 @@ let scalar_aggregate_literal (rhs : Tir.expr) : bool =
     | Tir.ALit _ -> true
     | Tir.AVar w ->
       (match w.Tir.v_ty with
-       | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) -> true
+       | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit -> true
        | _ -> false)
     | _ -> false
   in

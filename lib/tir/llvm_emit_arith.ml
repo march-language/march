@@ -149,7 +149,72 @@ let emit_int_cmp ~emit_atom ctx (f : Tir.var) (a : Tir.atom) (b : Tir.atom)
       && List.mem f.Tir.v_name ["<"; "<="; ">"; ">="]
       && (atom_is_string a || atom_is_string b)
     in
-    if is_string_eq then begin
+    (* Atom equality.  A nullary atom is an odd hash, but a payload atom
+       ([:ok(7)]) is a cell pointer, so two equal payload atoms are distinct
+       bits: march_atom_eq compares structurally (Tir_names.atom_cell_ctor).
+       Only the native runtime has it; the WASM runtime keeps the hash
+       compare (it has no payload-atom support beyond construction). *)
+    let atom_is_atom = function
+      | Tir.AVar v -> (match v.Tir.v_ty with Tir.TCon ("Atom", []) -> true | _ -> false)
+      | Tir.ALit (March_ast.Ast.LitAtom _) -> true
+      | _ -> false
+    in
+    let is_atom_eq =
+      (f.Tir.v_name = "==" || f.Tir.v_name = "!=")
+      && (atom_is_atom a || atom_is_atom b)
+    in
+    if is_atom_eq then begin
+      (* An Atom is a ptr whose bits are the atom (Kind): never coerce it
+         through i64, which would untag an odd hash. *)
+      let pa = coerce ctx ty_a va "ptr" and pb = coerce ctx ty_b vb "ptr" in
+      let ia = fresh ctx "aeqa" and ib = fresh ctx "aeqb" in
+      emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" ia pa);
+      emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" ib pb);
+      let same = fresh ctx "aeqs" in
+      emit ctx (Printf.sprintf "%s = icmp eq i64 %s, %s" same ia ib);
+      let r =
+        if not ctx.Llvm_ctx.shape_meta then begin
+          let z = fresh ctx "aeq" in
+          emit ctx (Printf.sprintf "%s = zext i1 %s to i64" z same); z
+        end else begin
+          (* Equal bits are equal atoms, and unequal bits with either side odd
+             (a nullary atom) are unequal ones; only two payload-atom cells need
+             the runtime's structural compare. *)
+          let slot = fresh ctx "aeqslot" in
+          emit ctx (Printf.sprintf "%s = alloca i64" slot);
+          let samez = fresh ctx "aeqz" in
+          emit ctx (Printf.sprintf "%s = zext i1 %s to i64" samez same);
+          emit ctx (Printf.sprintf "store i64 %s, ptr %s" samez slot);
+          let ored = fresh ctx "aeqor" in
+          emit ctx (Printf.sprintf "%s = or i64 %s, %s" ored ia ib);
+          let anyodd = fresh ctx "aeqodd" in
+          emit ctx (Printf.sprintf "%s = and i64 %s, 1" anyodd ored);
+          let fast = fresh ctx "aeqfast" in
+          emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" fast anyodd);
+          let decided = fresh ctx "aeqdec" in
+          emit ctx (Printf.sprintf "%s = or i1 %s, %s" decided same fast);
+          let slow_lbl = fresh_block ctx "aeq_cells" in
+          let done_lbl = fresh_block ctx "aeq_done" in
+          emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                           decided done_lbl slow_lbl);
+          emit_label ctx slow_lbl;
+          let sr = fresh ctx "aeqcall" in
+          emit ctx (Printf.sprintf "%s = call i64 @march_atom_eq(ptr %s, ptr %s)" sr pa pb);
+          emit ctx (Printf.sprintf "store i64 %s, ptr %s" sr slot);
+          emit_term ctx (Printf.sprintf "br label %%%s" done_lbl);
+          emit_label ctx done_lbl;
+          let r = fresh ctx "aeq" in
+          emit ctx (Printf.sprintf "%s = load i64, ptr %s" r slot);
+          r
+        end
+      in
+      if f.Tir.v_name = "!=" then begin
+        let nr = fresh ctx "ar" in
+        emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
+        ("i64", nr)
+      end else
+        ("i64", r)
+    end else if is_string_eq then begin
       (* String equality: call march_string_eq which returns i64 (0 or 1).
          Coerce both operands to ptr — vb may be an i64 literal (e.g. "0" for
          false/unit) which is invalid as a bare ptr argument in LLVM IR. *)

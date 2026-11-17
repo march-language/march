@@ -495,13 +495,10 @@ and repr_of (t : table) (ty0 : Tir.ty) : repr =
 and payload_needs_tag (t : table) (ty : Tir.ty) : bool =
   match ty with
   | Tir.TInt | Tir.TBool -> true
-  (* An atom is an i64 hash, and [Llvm_ctx.coerce] tags it on its way into a
-     ptr slot like any i64.  Until 2026-10-14 this fell to the TCon arm below
-     ([repr_of] says Boxed for a name with no variant) and answered false, so
-     an Option(Atom) niche decoded with tagged=false: `Some(x)` bound the
-     TAGGED word, `x == :a` was false compiled, `to_string` printed
-     `Some(:<atom>)`, and the REPL printer read the word as a heap cell. *)
-  | Tir.TCon ("Atom", []) -> true
+  (* An atom is a ptr-typed value (an odd name hash or an even payload-atom
+     cell pointer, see [llvm_ty_of]) and sits in a ptr slot RAW, like a
+     String: no tag.  It falls to the TCon arm below ([repr_of] says Boxed for
+     a name with no variant), which answers false. *)
   | Tir.TCon _ ->
     (match repr_of t ty with
      | Newtype inner -> payload_needs_tag t inner
@@ -585,7 +582,7 @@ let niche_repr_of_concrete (t : table) (name0 : string) : repr option =
 
     {v
       constructor          needs_rc   borrow_eligible
-      TCon ("Atom", [])    false      false            (atoms are i64 scalars)
+      TCon ("Atom", [])    true       true             (odd hash or payload cell)
       TCon <unboxed>       false      false            (inline struct, no cell)
       TCon _               true       true
       TString              true       true
@@ -684,8 +681,11 @@ let niche_repr_of_concrete (t : table) (name0 : string) : repr option =
 
     ── Shared arms (kept in sync by construction now) ──
 
-    TCon ("Atom", []): atoms are i64 scalars, not heap-allocated — no RC,
-    no borrow. TVar "_": lower.ml's placeholder for ECase br_vars / closure
+    TCon ("Atom", []): an atom is a ptr whose bits are either a nullary
+    atom's odd name hash (an immediate: every RC entry point skips an odd
+    value) or a payload atom's heap cell (Tir_names.atom_cell_ctor) — the
+    same mix of immediate and heap encodings a String has.  RC'd and
+    borrowable like a String, by the plain TCon arm. TVar "_": lower.ml's placeholder for ECase br_vars / closure
     params; conservatively heap-carrying. llvm_emit guards all RC calls
     with [if ty = "ptr" then …], so emitting EIncRC/EDecRC for a scalar
     TVar "_" is safe — the guard prevents the actual C call from firing.
@@ -733,7 +733,6 @@ let niche_repr_of_concrete (t : table) (name0 : string) : repr option =
     — see the module doc before changing ANY arm. *)
 let needs_rc_of (t : table) : Tir.ty -> bool = fun ty ->
   match canonical_ty t ty with
-  | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon (n, _) when Hashtbl.mem t.k_unboxed n -> false
     (* inline struct value: no cell, no header, nothing to count — module doc *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
@@ -755,7 +754,6 @@ let needs_rc_of (t : table) : Tir.ty -> bool = fun ty ->
     before changing ANY arm. *)
 let borrowable_of (t : table) : Tir.ty -> bool = fun ty ->
   match canonical_ty t ty with
-  | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon (n, _) when Hashtbl.mem t.k_unboxed n -> false
     (* copied at every boundary; no reference, so no ownership — module doc *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
@@ -797,7 +795,9 @@ let llvm_ty_of (t : table) : Tir.ty -> string = fun ty ->
   | Tir.TBool   -> "i64"   (* booleans as i64 for uniform field layout *)
   | Tir.TUnit   -> "i64"   (* unit = i64 0 *)
   | Tir.TString -> "ptr"
-  | Tir.TCon ("Atom", []) -> "i64"  (* atoms are interned i64 hashes, not heap ptrs *)
+  (* An atom is a ptr: a nullary atom's odd name hash, or a payload atom's
+     (even) cell pointer — see Tir_names.atom_cell_ctor.  It falls to the
+     TCon arm. *)
   (* Milestone 3: a small scalar-only single-ctor variant is an LLVM struct
      VALUE — [{ double, double, double }] for [Vec3(Float, Float, Float)] —
      passed and returned in registers, never a cell.  The identified struct
@@ -830,7 +830,6 @@ let simd_tag_of_name (name : string) : int option =
 let layout_of (t : table) : Tir.ty -> layout = fun ty ->
   match canonical_ty t ty with
   | Tir.TInt | Tir.TBool | Tir.TUnit -> Imm
-  | Tir.TCon ("Atom", []) -> Imm
   | Tir.TFloat -> Flt
   | Tir.TCon (name, _) when Hashtbl.mem t.k_unboxed name -> Agg (unboxed_llvm_name name)
   | Tir.TCon (name, _) when simd_tag_of_name name <> None ->

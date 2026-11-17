@@ -681,10 +681,9 @@ let builtin_retains (name : string) : bool =
    result is dropped — would fail. *)
 
 (* A value of this type cannot contain a heap value, so it can never carry a
-   retained allocation.  Note [Tir.TCon ("Atom", [])] is an interned i64. *)
+   retained allocation.  Not Atom: a payload atom (`:ok(s)`) is a cell. *)
 let scalar_result : Tir.ty -> bool = function
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit -> true
-  | Tir.TCon ("Atom", []) -> true
   | _ -> false
 
 let rec returns_fresh_expr ~m ~k_table ~fns ~returns_fresh ~carries_arg

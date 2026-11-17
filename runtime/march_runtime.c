@@ -627,6 +627,13 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         /* A handle box releases its descriptor unless closed-and-released
          * or detached already (runtime/march_handle.c). */
         march_handle_dtor(p);
+    } else if (tag == MARCH_ATOM_TAG) {
+        /* A payload atom (`:ok(7)`, march_runtime.h): the cell owns one
+         * reference to each payload slot; march_decrc ignores an immediate
+         * (a tagged Int/Bool, a nullary atom's odd hash). */
+        int64_t *f = (int64_t *)((char *)p + 16);
+        int64_t n = f[1] & 0xFF;
+        for (int64_t i = 0; i < n; i++) march_decrc((void *)(intptr_t)f[2 + i]);
     } else if (tag == MARCH_TYPED_ARR_TAG) {
         /* Every slot owns one reference (each typed_array_ producer takes its
          * own); march_decrc ignores a tagged immediate. */
@@ -1702,7 +1709,32 @@ int64_t march_poly_eq(void *a, void *b) {
      * for the exact lane-compare semantics (NaN != NaN, +0.0 == -0.0). */
     if (ta == MARCH_SIMD_TAG && tb == MARCH_SIMD_TAG)
         return march_simd_eq(a, b);
+    /* Two payload atoms (`:ok(7)`) reached through an erased slot. */
+    if (ta == MARCH_ATOM_TAG && tb == MARCH_ATOM_TAG)
+        return march_atom_eq(a, b);
     return 0;
+}
+
+/* Structural == on two Atom values (see march_runtime.h's payload-atom
+ * block).  Two nullary atoms are equal iff their hashes are; a nullary atom
+ * never equals a payload atom; two payload atoms are equal iff they have the
+ * same name, the same payload count and pairwise-equal payloads.  Payloads go
+ * through march_poly_eq (identical bits, strings by content, floats by value,
+ * atom cells back through here). */
+int64_t march_atom_eq(void *ap, void *bp) {
+    int64_t a = (int64_t)(intptr_t)ap, b = (int64_t)(intptr_t)bp;
+    if (a == b) return 1;
+    if (!march_atom_is_cell(a) || !march_atom_is_cell(b)) return 0;
+    int64_t *fa = march_atom_cell_slots(a), *fb = march_atom_cell_slots(b);
+    if (fa[0] != fb[0]) return 0;
+    int64_t n = fa[1] & 0xFF;
+    if (n != (fb[1] & 0xFF)) return 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t va = fa[2 + i], vb = fb[2 + i];
+        if (va == vb) continue;
+        if (!march_poly_eq((void *)(intptr_t)va, (void *)(intptr_t)vb)) return 0;
+    }
+    return 1;
 }
 
 /* Ordered generic compare for erased-slot operands (-1/0/1). See the header
@@ -13565,7 +13597,9 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
 
 /* Intern an atom name to its i64 value: FNV-1a 64-bit of the (colon-less)
  * name, with bit63 forced equal to bit62 so the value survives generic-slot
- * tag round-trips.  MUST match the compiler's Llvm_ctx.atom_hash exactly —
+ * tag round-trips, and bit0 forced to 1 so a nullary atom is always odd (a
+ * payload atom is an even heap-cell pointer of the same type; see
+ * march_atom_eq).  MUST match the compiler's Llvm_ctx.atom_hash exactly —
  * runtime-produced atoms (:ok / :error from the capability plane) compare
  * equal to the same atom literals in March source only through this hash. */
 static int64_t march_atom_of_name(const char *name) {
@@ -13575,7 +13609,7 @@ static int64_t march_atom_of_name(const char *name) {
         h *= UINT64_C(1099511628211);
     }
     uint64_t bit62 = (h >> 62) & 1;
-    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63);
+    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63) | UINT64_C(1);
     return (int64_t)h;
 }
 
@@ -14166,6 +14200,8 @@ void *march_value_to_string_mode(void *v, int repr) {
     /* Boxed SIMD vector in an erased slot: render lane-for-lane like
        impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
     if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
+    /* A payload atom (`:ok(7)`) in an erased slot. */
+    if (tag == MARCH_ATOM_TAG) return march_atom_value_to_string(v);
     /* A handle box (march_handle.c) in an erased slot: its type by kind, and
      * whether it is closed -- never the descriptor number. */
     if (tag == MARCH_HANDLE_TAG) {

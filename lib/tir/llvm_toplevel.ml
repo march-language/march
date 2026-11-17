@@ -795,8 +795,17 @@ let emit_atom_show_table ?(jit = false) ctx =
     if jit && ctx.Llvm_ctx.shape_meta then
       Buffer.add_string b
         "declare ptr @march_atom_name_registered(i64)\n\
-         define internal ptr @march_atom_to_string(i64 %h) {\n\
+         declare ptr @march_atom_value_to_string(ptr)\n\
+         define internal ptr @march_atom_to_string(ptr %hp) {\n\
          entry:\n\
+        \  %h = ptrtoint ptr %hp to i64\n\
+        \  %low = and i64 %h, 1\n\
+        \  %cell = icmp eq i64 %low, 0\n\
+        \  br i1 %cell, label %atom_cell, label %atom_imm\n\
+         atom_cell:\n\
+        \  %c = call ptr @march_atom_value_to_string(ptr %hp)\n\
+        \  ret ptr %c\n\
+         atom_imm:\n\
         \  %s = call ptr @march_atom_name_or_null(i64 %h)\n\
         \  %known = icmp ne ptr %s, null\n\
         \  br i1 %known, label %atom_known, label %atom_other\n\
@@ -812,10 +821,36 @@ let emit_atom_show_table ?(jit = false) ctx =
         \  %u = call ptr @march_string_lit(ptr @.atomname_unknown, i64 7)\n\
         \  ret ptr %u\n\
          }\n"
+    else if ctx.Llvm_ctx.shape_meta then
+      (* Native: an even value is a payload-atom cell
+         (Tir_names.atom_cell_ctor), rendered by the runtime through the
+         registered name tables, this module's included (registered below). *)
+      Buffer.add_string b
+        "declare ptr @march_atom_value_to_string(ptr)\n\
+         define internal ptr @march_atom_to_string(ptr %hp) {\n\
+         entry:\n\
+        \  %h = ptrtoint ptr %hp to i64\n\
+        \  %low = and i64 %h, 1\n\
+        \  %cell = icmp eq i64 %low, 0\n\
+        \  br i1 %cell, label %atom_cell, label %atom_imm\n\
+         atom_cell:\n\
+        \  %c = call ptr @march_atom_value_to_string(ptr %hp)\n\
+        \  ret ptr %c\n\
+         atom_imm:\n\
+        \  %s = call ptr @march_atom_name_or_null(i64 %h)\n\
+        \  %known = icmp ne ptr %s, null\n\
+        \  br i1 %known, label %atom_known, label %atom_unknown\n\
+         atom_known:\n\
+        \  ret ptr %s\n\
+         atom_unknown:\n\
+        \  %u = call ptr @march_string_lit(ptr @.atomname_unknown, i64 7)\n\
+        \  ret ptr %u\n\
+         }\n"
     else
     Buffer.add_string b
-      "define internal ptr @march_atom_to_string(i64 %h) {\n\
+      "define internal ptr @march_atom_to_string(ptr %hp) {\n\
        entry:\n\
+      \  %h = ptrtoint ptr %hp to i64\n\
       \  %s = call ptr @march_atom_name_or_null(i64 %h)\n\
       \  %known = icmp ne ptr %s, null\n\
       \  br i1 %known, label %atom_known, label %atom_unknown\n\
