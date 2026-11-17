@@ -99,6 +99,11 @@ let gated : (string * string * compare_mode) list = [
   (* ocap phase 1 per-operation cost benches: deterministic counts. *)
   "clock_loop",       "10000000",     Exact;
   "spawn_loop",       "299995",       Exact;
+  (* ocap phase 4 run-time authority benches: 1M checks inside a scoped
+     frame under a scoped launch (every one passes), and list_ops with
+     capturing function values in a program with a frame. *)
+  "cap_check_slow",   "1000000",      Exact;
+  "cap_capture_closures", "333333666666\n333333666666", Exact;
   (* checked Int `+ - *` in counted loops: the cost the 2026-10-30
      overflow trap adds per iteration. *)
   "index_loop",       "548550000003", Exact;
