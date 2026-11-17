@@ -366,7 +366,7 @@ let pat_tag_and_subs (env : Lower_state.env) (scrut : Tir.atom) (pat : Ast.patte
      constructor patterns (:Tag(x)).  PatLit(LitAtom) is never generated
      by the parser; it would only appear if constructed directly in tests. *)
   | Ast.PatAtom (a, [], _)   -> Some (":" ^ a, [])
-  | Ast.PatAtom (a, subs, _) -> Some (a, subs)
+  | Ast.PatAtom (a, subs, _) -> Some (Tir_names.atom_payload_tag a, subs)
   (* Records carry no tag — they are expanded into per-field columns by
      [expand_record_column] before tag dispatch is ever reached, so
      [pat_tag_and_subs] never sees one. Or-patterns are split into one row

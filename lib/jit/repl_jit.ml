@@ -888,8 +888,8 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
      the recursive calls re-entering here cost only a hash hit. *)
   let ty = qualify_ty ~type_defs ty in
   match ty with
-  (* An atom is the raw (untagged) i64 hash, not a cell — see [pp_word]. *)
-  | TCon ("Atom", []) -> atom_name (Int64.of_nativeint ptr)
+  (* An atom is a raw word: a nullary atom's hash, or a payload-atom cell. *)
+  | TCon ("Atom", []) -> pp_atom ~depth ~type_defs ~ctor_tags ptr
   (* Niche / newtype types are NOT heap cells: [ptr] is the raw payload word
      (or 0 for a niche's nullary ctor), so these must be decoded before the
      null guard and before any tag read. *)
@@ -1043,13 +1043,9 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
   | TUnit -> "()"
   | TFloat -> pp_float_word ~erased:tagged w
   | TCon ("Atom", []) ->
-    (* An atom is an i64 hash, never a heap cell (until 2026-10-14 this fell
-       through to [pp_heap_value], which read a "tag" at the hash: Err(:x)
-       segfaulted the REPL).  In an erased slot it is low-bit tagged; the
-       ARITHMETIC shift restores bit 63, which [atom_hash] mints equal to
-       bit 62 precisely so the hash survives that round trip. *)
-    let h = Int64.of_nativeint w in
-    atom_name (if tagged then Int64.shift_right h 1 else h)
+    (* An atom is a ptr-typed word stored raw in every slot, erased or not
+       (Kind): a nullary atom's odd hash or a payload atom's cell. *)
+    pp_atom ~depth ~type_defs ~ctor_tags w
   | TVar _ ->
     (* Erased slot: a scalar is low-bit tagged, a heap value is an aligned
        pointer.  Decide from the word itself — dereferencing a tagged scalar
@@ -1066,6 +1062,53 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
     (match pp_heap_value ~depth:(depth + 1) ~type_defs ~ctor_tags ty w with
      | "#<null>" -> "null"
      | s -> s)
+
+(** An Atom word: a nullary atom (odd, its name hash) prints `:name`; a
+    payload atom (an even cell, [Tir_names.atom_cell_ctor]) prints
+    `name(p, ...)` as the interpreter does, each payload slot read by the kind
+    the cell's metadata word records (MARCH_ATOM_FIELD_* in march_runtime.h). *)
+and pp_atom ?(depth=0) ~type_defs ~ctor_tags (w : nativeint) : string =
+  if Nativeint.logand w 1n = 1n || w = Nativeint.zero then
+    atom_name (Int64.of_nativeint w)
+  else if depth > 64 then "#<...>"
+  else begin
+    let name =
+      let s = atom_name (Jit.read_i64_at w 16) in
+      if String.length s > 1 && s.[0] = ':' then String.sub s 1 (String.length s - 1)
+      else s in
+    let meta = Jit.read_i64_at w 24 in
+    let n = Int64.to_int (Int64.logand meta 0xFFL) in
+    let field i =
+      let raw = Jit.read_ptr_at w (32 + i * 8) in
+      let kind =
+        if i < 14 then Int64.to_int (Int64.logand (Int64.shift_right_logical meta (8 + 4 * i)) 0xFL)
+        else 0 in
+      let open March_tir.Tir in
+      match kind with
+      | 1 -> pp_word ~depth:(depth + 1) ~type_defs ~ctor_tags ~tagged:true TInt raw
+      | 2 -> pp_word ~depth:(depth + 1) ~type_defs ~ctor_tags ~tagged:true TBool raw
+      | 3 -> pp_atom ~depth:(depth + 1) ~type_defs ~ctor_tags raw
+      | _ ->
+        (* No static kind: classify the word the way the runtime's renderer
+           does.  An inline string (bit 63 set, bit 0 clear) packs its length
+           in bits 59..62 and its bytes from bit 3 up; a heap string or a
+           nested payload atom names itself by its header tag. *)
+        let even = Nativeint.logand raw 1n = 0n in
+        if even && Nativeint.compare raw 0n < 0 then begin
+          let bits = Int64.of_nativeint raw in
+          let len = Int64.to_int (Int64.logand (Int64.shift_right_logical bits 59) 0xFL) in
+          let body = Int64.shift_right_logical bits 3 in
+          let s = String.init len (fun i ->
+              Char.chr (Int64.to_int (Int64.logand (Int64.shift_right_logical body (8 * i)) 0xFFL))) in
+          Printf.sprintf "%S" s
+        end else if even && Nativeint.compare raw 4096n >= 0 && heap_tag raw = -1 then
+          Printf.sprintf "%S" (Jit.read_march_string raw)
+        else if even && Nativeint.compare raw 4096n >= 0 && heap_tag raw = -11 then
+          pp_atom ~depth:(depth + 1) ~type_defs ~ctor_tags raw
+        else pp_word ~depth:(depth + 1) ~type_defs ~ctor_tags ~tagged:true (TVar "_") raw
+    in
+    name ^ "(" ^ String.concat ", " (List.init n field) ^ ")"
+  end
 
 (** True when a value of [ty] is NOT a heap pointer but the raw payload word
     of a niche/newtype representation — the two cases where the "small word =
@@ -1471,7 +1514,8 @@ let run_expr ctx ~tc_env m =
       Jit.call_void_to_void fptr;
       "()"
     | March_tir.Tir.TCon ("Atom", []) ->
-      atom_name (Jit.call_void_to_int fptr)
+      pp_atom ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx)
+        (Jit.call_void_to_ptr fptr)
     | March_tir.Tir.TVar _ ->
       (* Unresolved type var — try to recover the actual type.  Walk the fn body
          into the tail position, recursing through ELet, ESeq, and ECase branches.

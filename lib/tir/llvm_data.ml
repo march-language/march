@@ -259,7 +259,7 @@ let atom_tir_ty : Tir.atom -> Tir.ty = Tir_names.atom_ty
     in-slot representation (must match runtime/march_extras.c):
     'i' raw i64 scalar, 'f' raw double bits, 'p' heap pointer, 'g' unknown. *)
 let shape_kind_char : Tir.ty -> char = function
-  | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) -> 'i'
+  | Tir.TInt | Tir.TBool | Tir.TUnit -> 'i'
   | Tir.TFloat -> 'f'
   | Tir.TVar _ -> 'g'
   | _ -> 'p'

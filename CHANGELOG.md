@@ -1126,6 +1126,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Payload atoms (`:ok(7)`) work compiled.** Matching one that arrived through a function
+  parameter (`fn describe(t) do match t do :ok(n) -> n ... end end`) was an internal compiler
+  error. `to_string(:ok(7))` printed `:<atom>` and `:ok(7) == :ok(7)` was `false`. All three now
+  agree with the interpreter. The match also works with `--target js`, where it had matched
+  nothing. Payload atoms are freed when their last use ends; `Atom` is now reference counted like
+  `String`. A nullary atom's compiled value changes (bit 0 is now always set).
+
 - **`Map.int_cmp` and `Map.str_cmp` work as values in `march repl`.** `Map.get(m, 1, Map.int_cmp)`
   killed the REPL (bus error or SIGSEGV) whenever the key was present. A curried stdlib function
   passed as a value was called with the wrong number of arguments. Interpreted and compiled code

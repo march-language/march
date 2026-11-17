@@ -41,6 +41,52 @@
    own doc comment cross-referencing llvm_emit's [emit_case] decoder), so
    there is no llvm_emit consumer to convert for this one. *)
 
+(* ── Payload-atom cells ──────────────────────────────────────────────────
+   Every atom has the one type [Atom].  A nullary atom ([:none]) is an
+   immediate: its FNV hash with bit 0 forced to 1 ([Llvm_ctx.atom_hash]), so it
+   is always odd.  A payload atom ([:ok(7)]) is a heap cell, so its value is an
+   even pointer; any consumer of an [Atom] tells the two apart by bit 0, the
+   same test the uniform-slot law uses for immediates vs pointers.
+
+   [lower_expr] builds a payload atom as
+   [EAlloc (TCon (atom_cell_ctor, []), LitAtom name :: LitInt n :: payload)],
+   so the TIR argument count IS the cell's slot count:
+     slot 0  the atom's hash (raw, odd)
+     slot 1  metadata: [n] in the low 8 bits, then 4 bits per payload field
+             naming its static kind for show/== (the [LitInt n] placeholder is
+             rewritten by codegen, which knows the post-mono types)
+     slot 2… the payload, in uniform (erased-slot) representation.
+   The header tag is the runtime's MARCH_ATOM_TAG.  A pattern [:ok(n)] keeps
+   the atom's name as its branch tag (lowercase, so it never collides with a
+   constructor or tuple tag) and binds payload slot i to field i+2.
+
+   [Atom] is reference counted like [String]: a nullary atom is odd, so every
+   RC entry point skips it, and a payload cell is freed by its last release
+   (the runtime destructor releases its payload slots).  FBIP reuse and TRMC
+   skip [atom_cell_ctor] allocations, whose layout is not a constructor's. *)
+let atom_cell_ctor = "$Atom"
+
+(** True if [tcon_name] is the payload-atom cell constructor. *)
+let is_atom_cell (tcon_name : string) : bool = String.equal tcon_name atom_cell_ctor
+
+(** Slot index of payload field [i] in a payload-atom cell. *)
+let atom_cell_payload_slot (i : int) : int = i + 2
+
+(** Branch tag of a payload-atom pattern [:name(p, ...)]: ["$Atom.name"].  The
+    prefix keeps it apart from a constructor of the same spelling ([:Tag(x)]
+    vs [Tag(x)]), and its last dot-segment is still the atom's name for
+    consumers that strip a qualifier (the JS backend's [bare_ctor]).  A nullary
+    atom pattern keeps its [":name"] literal tag. *)
+let atom_payload_tag_prefix = "$Atom."
+let atom_payload_tag (name : string) : string = atom_payload_tag_prefix ^ name
+
+(** [Some name] if [tag] is a payload-atom branch tag. *)
+let atom_payload_tag_name (tag : string) : string option =
+  let pl = String.length atom_payload_tag_prefix in
+  if String.length tag > pl && String.sub tag 0 pl = atom_payload_tag_prefix
+  then Some (String.sub tag pl (String.length tag - pl))
+  else None
+
 (** Branch tag for an N-element tuple pattern, e.g. [tuple_tag 2 = "$Tuple2"]. *)
 let tuple_tag (arity : int) : string = Printf.sprintf "$Tuple%d" arity
 

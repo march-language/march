@@ -627,6 +627,13 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         /* A handle box releases its descriptor unless closed-and-released
          * or detached already (runtime/march_handle.c). */
         march_handle_dtor(p);
+    } else if (tag == MARCH_ATOM_TAG) {
+        /* A payload atom (`:ok(7)`, march_runtime.h): the cell owns one
+         * reference to each payload slot; march_decrc ignores an immediate
+         * (a tagged Int/Bool, a nullary atom's odd hash). */
+        int64_t *f = (int64_t *)((char *)p + 16);
+        int64_t n = f[1] & 0xFF;
+        for (int64_t i = 0; i < n; i++) march_decrc((void *)(intptr_t)f[2 + i]);
     } else if (tag == MARCH_TYPED_ARR_TAG) {
         /* Every slot owns one reference (each typed_array_ producer takes its
          * own); march_decrc ignores a tagged immediate. */
@@ -1702,7 +1709,32 @@ int64_t march_poly_eq(void *a, void *b) {
      * for the exact lane-compare semantics (NaN != NaN, +0.0 == -0.0). */
     if (ta == MARCH_SIMD_TAG && tb == MARCH_SIMD_TAG)
         return march_simd_eq(a, b);
+    /* Two payload atoms (`:ok(7)`) reached through an erased slot. */
+    if (ta == MARCH_ATOM_TAG && tb == MARCH_ATOM_TAG)
+        return march_atom_eq(a, b);
     return 0;
+}
+
+/* Structural == on two Atom values (see march_runtime.h's payload-atom
+ * block).  Two nullary atoms are equal iff their hashes are; a nullary atom
+ * never equals a payload atom; two payload atoms are equal iff they have the
+ * same name, the same payload count and pairwise-equal payloads.  Payloads go
+ * through march_poly_eq (identical bits, strings by content, floats by value,
+ * atom cells back through here). */
+int64_t march_atom_eq(void *ap, void *bp) {
+    int64_t a = (int64_t)(intptr_t)ap, b = (int64_t)(intptr_t)bp;
+    if (a == b) return 1;
+    if (!march_atom_is_cell(a) || !march_atom_is_cell(b)) return 0;
+    int64_t *fa = march_atom_cell_slots(a), *fb = march_atom_cell_slots(b);
+    if (fa[0] != fb[0]) return 0;
+    int64_t n = fa[1] & 0xFF;
+    if (n != (fb[1] & 0xFF)) return 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t va = fa[2 + i], vb = fb[2 + i];
+        if (va == vb) continue;
+        if (!march_poly_eq((void *)(intptr_t)va, (void *)(intptr_t)vb)) return 0;
+    }
+    return 1;
 }
 
 /* Ordered generic compare for erased-slot operands (-1/0/1). See the header
@@ -12169,9 +12201,9 @@ void *march_file_open(void *path_ptr) {
  * fclose. */
 static int64_t march_atom_of_name(const char *name);
 
-int64_t march_file_close(void *handle_ptr) {
+void *march_file_close(void *handle_ptr) {
     fh_close(handle_ptr);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* file_read_line / file_read_chunk : Int -> Option(String).
@@ -13142,9 +13174,9 @@ void *march_csv_open(void *path_ptr, void *delim_ptr, void *mode_ptr) {
     return mk_ok((void *)(intptr_t)h);
 }
 
-int64_t march_csv_close(void *handle_ptr) {
+void *march_csv_close(void *handle_ptr) {
     fh_close(handle_ptr);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* Returns Row(List(String)) or :eof (null) */
@@ -13565,7 +13597,9 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
 
 /* Intern an atom name to its i64 value: FNV-1a 64-bit of the (colon-less)
  * name, with bit63 forced equal to bit62 so the value survives generic-slot
- * tag round-trips.  MUST match the compiler's Llvm_ctx.atom_hash exactly —
+ * tag round-trips, and bit0 forced to 1 so a nullary atom is always odd (a
+ * payload atom is an even heap-cell pointer of the same type; see
+ * march_atom_eq).  MUST match the compiler's Llvm_ctx.atom_hash exactly —
  * runtime-produced atoms (:ok / :error from the capability plane) compare
  * equal to the same atom literals in March source only through this hash. */
 static int64_t march_atom_of_name(const char *name) {
@@ -13575,7 +13609,7 @@ static int64_t march_atom_of_name(const char *name) {
         h *= UINT64_C(1099511628211);
     }
     uint64_t bit62 = (h >> 62) & 1;
-    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63);
+    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63) | UINT64_C(1);
     return (int64_t)h;
 }
 
@@ -13658,11 +13692,11 @@ static void revoc_add(int64_t pid_index, int64_t epoch) {
  * (layout documented at march_get_cap) and returns the :ok atom, matching the
  * interpreter's `revoke_cap : Cap(a) -> Atom`.  A null/non-heap cap (e.g. the
  * root_cap null sentinel) is a no-op returning :error. */
-int64_t march_revoke_cap(void *cap) {
-    if (!cap || !IS_HEAP_PTR(cap)) return march_atom_of_name("error");
+void *march_revoke_cap(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return (void *)(intptr_t)march_atom_of_name("error");
     int64_t *w = (int64_t *)cap;
     revoc_add(w[3], w[4]);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* Resolve a cap's (pid_index, epoch) to the meta of the incarnation it names,
@@ -13724,17 +13758,17 @@ int64_t march_is_cap_valid(void *cap) {
  * validation and the send act on the same record: under g_tbl_mu we take our
  * own reference on the live actor, so it cannot be freed before march_send
  * reads it. */
-int64_t march_send_checked(void *cap, void *msg) {
+void *march_send_checked(void *cap, void *msg) {
     if (!cap || !IS_HEAP_PTR(cap)) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     int64_t *cap_words = (int64_t *)cap;
     int64_t  pidx      = cap_words[3];
     int64_t  epoch     = cap_words[4];
     if (revoc_contains(pidx, epoch)) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     pthread_mutex_lock(&g_tbl_mu);
     march_actor_meta *meta = cap_live_meta_locked(pidx, epoch);
@@ -13743,7 +13777,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     pthread_mutex_unlock(&g_tbl_mu);
     if (!actor) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     /* march_send returns Option(Unit) as a boxed cell: Some(()) carries tag 1
      * at offset 8, None is a bare tag-0 header.  It consumes msg either way. */
@@ -13751,7 +13785,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     int delivered = ((int32_t *)((char *)result + 8))[0] == 1;
     march_decrc(result);
     march_decrc(actor);
-    return march_atom_of_name(delivered ? "ok" : "error");
+    return (void *)(intptr_t)march_atom_of_name(delivered ? "ok" : "error");
 }
 
 /* march_pid_of_int(n) is an escape hatch: March code that stores a child's
@@ -14166,6 +14200,8 @@ void *march_value_to_string_mode(void *v, int repr) {
     /* Boxed SIMD vector in an erased slot: render lane-for-lane like
        impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
     if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
+    /* A payload atom (`:ok(7)`) in an erased slot. */
+    if (tag == MARCH_ATOM_TAG) return march_atom_value_to_string(v);
     /* A handle box (march_handle.c) in an erased slot: its type by kind, and
      * whether it is closed -- never the descriptor number. */
     if (tag == MARCH_HANDLE_TAG) {

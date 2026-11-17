@@ -3953,6 +3953,7 @@ static void cb_put_escaped(ctor_buf *b, const char *d, int64_t n) {
 #define CTOR_MAX_DEPTH 24
 
 static void ctor_render(ctor_buf *b, void *v, int32_t type_id, int depth, int repr);
+static void atom_render(ctor_buf *b, int64_t a, int depth);
 
 /* A nested String under the current convention: QUOTED and escaped in repr
  * form (the interpreter's value_to_string), verbatim in show form (the
@@ -3999,6 +4000,9 @@ static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int 
             break;
         }
         case 'A': ctor_render(b, (void *)(uintptr_t)raw, f.type_id, depth + 1, repr); break;
+        /* An Atom field: a nullary atom's odd hash or a payload-atom cell,
+         * named through the registered atom tables. */
+        case 'a': atom_render(b, raw, depth + 1); break;
         default: {
             /* Generic slot: the field's declared type was a type VARIABLE
              * (`Ok(a)`, `Cons(a, List(a))`), so the descriptor cannot say what
@@ -4027,6 +4031,58 @@ static void ctor_render_field(ctor_buf *b, int64_t raw, march_ctor_field f, int 
             break;
         }
     }
+}
+
+/* Render an Atom value the way the interpreter prints it: ":name" for a
+ * nullary atom, "name(p1, p2)" (no colon, payload in repr form) for a payload
+ * atom.  Names come from the registered per-module tables
+ * (march_atom_name_registered); a payload field's kind is the one the compiler
+ * recorded in the cell's metadata slot (march_runtime.h, MARCH_ATOM_TAG). */
+static void atom_render(ctor_buf *b, int64_t a, int depth) {
+    if (depth >= CTOR_MAX_DEPTH) { cb_putz(b, "..."); return; }
+    if (!march_atom_is_cell(a)) {
+        void *nm = march_atom_name_registered(a);
+        if (nm) cb_put_march_string(b, nm, 1);
+        else cb_putz(b, ":<atom>");
+        return;
+    }
+    int64_t *f = march_atom_cell_slots(a);
+    void *nm = march_atom_name_registered(f[0]);
+    if (nm) {
+        char scratch[24];
+        const char *d = march_str_data(nm, scratch);
+        int64_t n = march_str_len(nm);
+        if (d && n > 1 && d[0] == ':') cb_puts(b, d + 1, (size_t)(n - 1));
+        else if (d && n > 0) cb_puts(b, d, (size_t)n);
+        march_decrc(nm);
+    } else {
+        cb_putz(b, "<atom>");
+    }
+    cb_putc(b, '(');
+    int64_t n = f[1] & 0xFF;
+    for (int64_t i = 0; i < n; i++) {
+        if (i > 0) cb_putz(b, ", ");
+        int64_t raw = f[2 + i];
+        march_ctor_field fld = { 0, 0 };
+        switch (march_atom_field_kind(f[1], i)) {
+            case MARCH_ATOM_FIELD_INT:  fld.kind = 'I'; break;
+            case MARCH_ATOM_FIELD_BOOL: fld.kind = 'B'; break;
+            case MARCH_ATOM_FIELD_ATOM:
+                atom_render(b, raw, depth + 1);   /* an Atom is stored raw */
+                continue;
+            default: break;
+        }
+        ctor_render_field(b, raw, fld, depth + 1, 1);
+    }
+    cb_putc(b, ')');
+}
+
+void *march_atom_value_to_string(void *a) {
+    ctor_buf b = { NULL, 0, 0 };
+    atom_render(&b, (int64_t)(intptr_t)a, 0);
+    void *s = march_string_lit(b.p ? b.p : "", (int64_t)b.len);
+    free(b.p);
+    return s;
 }
 
 static int64_t ctor_slot(void *v, int32_t i) {

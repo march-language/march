@@ -68,8 +68,16 @@ let static_closure_alloc (ty : Tir.ty) (args : Tir.atom list) : bool =
   | Tir.TCon (name, _), [_] -> Tir_names.is_clo_struct name
   | _ -> false
 
+(** A payload-atom cell (see [Tir_names.atom_cell_ctor]) carries a hash and
+    kind word ahead of its payload and a reserved header tag, so it is never
+    a reuse target for, or reused by, a constructor allocation. *)
+let atom_cell_alloc (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TCon (name, _) -> Tir_names.is_atom_cell name
+  | _ -> false
+
 let reusable_alloc (ty : Tir.ty) (args : Tir.atom list) : bool =
-  args <> [] && not (static_closure_alloc ty args)
+  args <> [] && not (static_closure_alloc ty args) && not (atom_cell_alloc ty)
 
 (** True iff [dec_v]'s name appears as an AVar in any of [args].
     Prevents the self-referential FBIP bug: if the reuse atom IS one of the

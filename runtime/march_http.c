@@ -1628,8 +1628,10 @@ void march_http_release_conn(void *conn) {
     (void)fn(clo, conn);
 }
 
-/* FNV-1a 64-bit hash — must match the OCaml fnv1a_64 in llvm_emit.ml.
- * Used to intern atom names as stable i64 values for pattern matching. */
+/* An atom's i64 value — must match the compiler's Llvm_ctx.atom_hash (and
+ * march_atom_of_name in march_runtime.c) bit for bit: FNV-1a 64-bit of the
+ * name, bit63 forced equal to bit62, bit0 forced to 1.  Used to intern atom
+ * names as stable i64 values for pattern matching. */
 static int64_t fnv1a_64_str(const char *s, size_t len) {
     uint64_t h = UINT64_C(0xcbf29ce484222325);
     const uint64_t prime = UINT64_C(0x100000001b3);
@@ -1637,6 +1639,8 @@ static int64_t fnv1a_64_str(const char *s, size_t len) {
         h ^= (uint8_t)s[i];
         h *= prime;
     }
+    uint64_t bit62 = (h >> 62) & 1;
+    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63) | UINT64_C(1);
     return (int64_t)h;
 }
 

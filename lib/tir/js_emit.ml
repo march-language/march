@@ -753,6 +753,14 @@ let rec is_rc_noop_only = function
     its `name$clo` wrapper, which is itself an object, not a callable. Free
     variable slots (_1+) are ordinary atoms. *)
 let emit_tagged_alloc ctx ty args =
+  (* A payload atom keeps its JS shape `{ $: "name", _0: payload, ... }`: the
+     TIR's leading name and count arguments (Tir_names.atom_cell_ctor) are
+     native-layout bookkeeping. *)
+  let ty, args = match ty, args with
+    | Tir.TCon (t, _), Tir.ALit (March_ast.Ast.LitAtom name) :: _ :: payload
+      when Tir_names.is_atom_cell t -> (Tir.TCon (name, []), payload)
+    | _ -> (ty, args)
+  in
   let tag = bare_ctor (match ty with Tir.TCon (t, _) -> t | _ -> "_") in
   let is_clo = String.length tag >= 4 && String.sub tag 0 4 = "$Clo" in
   emit ctx (Printf.sprintf "{ $: %S" tag);
@@ -1490,15 +1498,31 @@ and emit_case_impl ctx result_var expr =
         t = "true" || t = "false" || int_of_string_opt t <> None
         (* atom, string (`"s"`, e.g. a tuple field matched against string
            literals) and float (`#hex`) tags: never a constructor's *)
-        || (String.length t > 0 && (t.[0] = ':' || t.[0] = '"' || t.[0] = '#'))) branches
+        || (String.length t > 0 && (t.[0] = ':' || t.[0] = '"' || t.[0] = '#'))
+        || Tir_names.atom_payload_tag_name t <> None) branches
     in
     if is_literal_scrutinee_ty s_ty || all_imm_lit_tags then begin
       (* Literal/bool: if/else chain *)
       List.iteri (fun i br ->
         if i = 0 then (emit_indent ctx; emit ctx "if (")
         else (emit_indent ctx; emit ctx "} else if (");
-        emit_atom ctx scrutinee;
-        emit ctx (" === " ^ literal_tag_js br.Tir.br_tag ^ ") {\n");
+        (match Tir_names.atom_payload_tag_name br.Tir.br_tag with
+         | Some name ->
+           (* A payload atom is the object `{ $: "name", _0: … }`
+              (emit_tagged_alloc); a nullary atom is the string ":name". *)
+           emit ctx "(typeof ";
+           emit_atom ctx scrutinee;
+           emit ctx " === \"object\" && ";
+           emit_atom ctx scrutinee;
+           emit ctx " !== null && ";
+           emit_atom ctx scrutinee;
+           emit ctx (Printf.sprintf ".$ === %s && " (js_string_lit name));
+           emit_atom ctx scrutinee;
+           emit ctx (Printf.sprintf "._%d !== undefined)) {\n"
+                       (max 0 (List.length br.Tir.br_vars - 1)))
+         | None ->
+           emit_atom ctx scrutinee;
+           emit ctx (" === " ^ literal_tag_js br.Tir.br_tag ^ ") {\n"));
         with_indent ctx (fun () ->
           (* bind branch vars (rare for literal patterns, but possible) *)
           let scrut_name = match scrutinee with

@@ -40,10 +40,10 @@ let rc_truth_table : (string * Tir.ty * bool * bool) list =
     "TTuple [String]",     TTuple [TString],            true,  false; (* diverges *)
     "TRecord []",          TRecord [],                  true,  false; (* diverges *)
     "TRecord [(f,Int)]",   TRecord [("f", TInt)],       true,  false; (* diverges *)
-    "TCon (Atom,[])",      TCon ("Atom", []),           false, false;
+    "TCon (Atom,[])",      TCon ("Atom", []),           true,  true;   (* odd hash or payload cell *)
     "TCon (Foo,[])",       TCon ("Foo", []),            true,  true;
     "TCon (List,[Int])",   TCon ("List", [TInt]),       true,  true;
-    "TCon (Atom,[Int])",   TCon ("Atom", [TInt]),       true,  true;   (* only nullary Atom is scalar *)
+    "TCon (Atom,[Int])",   TCon ("Atom", [TInt]),       true,  true;
     "TFn ([],Int)",        TFn ([], TInt),              true,  false;  (* diverges *)
     "TFn ([Int],Int)",     TFn ([TInt], TInt),          true,  false;  (* diverges *)
     "TPtr Int",            TPtr TInt,                   true,  true;
@@ -208,7 +208,7 @@ let test_llvm_ty_spelling () =
   Alcotest.(check string) "Float" "double" (l TFloat);
   Alcotest.(check string) "Bool" "i64" (l TBool);
   Alcotest.(check string) "Unit" "i64" (l TUnit);
-  Alcotest.(check string) "Atom" "i64" (l (TCon ("Atom", [])));
+  Alcotest.(check string) "Atom" "ptr" (l (TCon ("Atom", [])));
   Alcotest.(check string) "String" "ptr" (l TString);
   Alcotest.(check string) "boxed TCon" "ptr" (l (TCon ("Color", [])));
   Alcotest.(check string) "Vec3 struct" "%ub.Vec3" (l (TCon ("Vec3", [])));

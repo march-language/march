@@ -648,10 +648,13 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
           e (Printf.sprintf "%s = load %s, ptr %s, align 8" fvb llt fgpb);
           let ok = frsh "ok" in
           (match fty with
-           | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
+           | Tir.TInt | Tir.TBool | Tir.TUnit ->
              let c = frsh "c" in
              e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
              e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+           | Tir.TCon ("Atom", []) when ctx.Llvm_ctx.shape_meta ->
+             (* An atom field: a nullary hash or a payload-atom cell. *)
+             e (Printf.sprintf "%s = call i64 @march_atom_eq(ptr %s, ptr %s)" ok fva fvb)
            | Tir.TFloat when boxed_float ->
              let da = frsh "da" in let db = frsh "db" in
              e (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" da fva);

@@ -429,13 +429,14 @@ let emit_atom_raw ctx (atom : Tir.atom) : string * string =
     ("double", Printf.sprintf "0x%016LX" bits)
   | Tir.ALit (March_ast.Ast.LitBool b)  -> ("i64",    if b then "1" else "0")
   | Tir.ALit (March_ast.Ast.LitAtom name) ->
-    (* Atoms are interned as FNV-1a 64-bit hashes (bit63 forced == bit62 so
-       they survive generic-slot tag round-trips — see atom_hash). *)
+    (* A nullary atom is its interned FNV-1a hash ([atom_hash]: odd, bit63 ==
+       bit62) as a ptr-typed value: an Atom is a ptr (Kind.llvm_ty_of), whose
+       even values are payload-atom cells (Tir_names.atom_cell_ctor). *)
     let h = atom_hash name in
     (* Record hash -> name so `Show$Atom.show` (emitted at end-of-module) can
        reverse this otherwise-nameless value back to `:name`. *)
     Hashtbl.replace ctx.atom_names h name;
-    ("i64", Int64.to_string h)
+    ("ptr", Printf.sprintf "inttoptr (i64 %Ld to ptr)" h)
   | Tir.ALit (March_ast.Ast.LitString s) ->
     (* One immortal string per literal SITE, not one per evaluation: a
        literal is RC-free in TIR (see [intern_string_site]), so a fresh
@@ -812,7 +813,7 @@ let atom_needs_norm (atom : Tir.atom) : bool =
   match atom with
   | Tir.AVar v ->
     (match v.Tir.v_ty with
-     | Tir.TBool | Tir.TCon ("Atom", []) -> false
+     | Tir.TBool -> false
      | _ -> true)
   | Tir.ALit _ | Tir.ADefRef _ -> false
 
