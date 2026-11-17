@@ -310,12 +310,22 @@ let emit_repl_expr ~emit_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
       Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys fn.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) fns;
-  (* Register pre-compiled extern functions so EApp generates direct calls *)
+  (* Register pre-compiled extern functions so EApp generates direct calls.
+     [top_fn_param_tys] matters for a function passed as a VALUE: its
+     [$clo_wrap] trampoline must follow the definition's arity, not the
+     uncurried use-site type (`Map.int_cmp` takes one Int and returns a
+     closure, used as `Int -> Int -> Bool`); without it a lookup that
+     called the comparator crashed (specs/progress/2026-11-11-repl-map-
+     named-comparator-crash.md). *)
   List.iter (fun fn ->
       Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys fn.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (Llvm_toplevel.emit_fn ~emit_expr ctx) fns;
   let ret_llty = Llvm_ctx.llvm_ty ctx ret_ty in
@@ -393,11 +403,15 @@ let emit_repl_decl ~emit_expr ?(fast_math=false) ~(n : int) ~(name : string)
       Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys fn.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   List.iter (fun fn ->
       Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys fn.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (Llvm_toplevel.emit_fn ~emit_expr ctx) fns;
   let llty = Llvm_ctx.llvm_ty ctx val_ty in
@@ -437,11 +451,15 @@ let emit_repl_fn ~emit_expr ?(fast_math=false) ~(n : int)
   Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
   Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
+  Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys fn.Tir.fn_name
+    (List.map (fun (p : Tir.var) -> p.Tir.v_ty) fn.Tir.fn_params);
   if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true;
   List.iter (fun f ->
       Hashtbl.replace ctx.Llvm_ctx.top_fns f.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys f.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   emit_slot_loader_fns ctx prev_slots;
   Llvm_toplevel.emit_fn ~emit_expr ctx fn;
@@ -488,6 +506,8 @@ let emit_repl_fn_with_closure_slot ~emit_expr ?(fast_math=false) ~(n : int)
       Hashtbl.replace ctx.Llvm_ctx.top_fns f.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys f.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns f.Tir.fn_name true)
     ((fn :: helper_fns) @ extern_fns);
   emit_slot_loader_fns ctx prev_slots;
@@ -576,11 +596,15 @@ let emit_fns_fragment
       Hashtbl.replace ctx.Llvm_ctx.top_fns f.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys f.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   List.iter (fun fn ->
       Hashtbl.replace ctx.Llvm_ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
       Hashtbl.replace ctx.Llvm_ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
+      Hashtbl.replace ctx.Llvm_ctx.top_fn_param_tys fn.Tir.fn_name
+        (List.map (fun (p : Tir.var) -> p.Tir.v_ty) fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.Llvm_ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   (* Mutual-TCO groups, exactly as [Llvm_toplevel.emit_module] handles them.
      A group of mutually TAIL-recursive functions is emitted as one combined

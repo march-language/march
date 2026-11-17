@@ -1087,6 +1087,14 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Map.int_cmp` and `Map.str_cmp` work as values in `march repl`.** `Map.get(m, 1, Map.int_cmp)`
+  killed the REPL (bus error or SIGSEGV) whenever the key was present. A curried stdlib function
+  passed as a value was called with the wrong number of arguments. Interpreted and compiled code
+  were already correct.
+
+- **A zero-argument lambda bound with `let` in `march repl` returns its value.** `let f = fn -> 1`
+  then `f()` printed `= 0`, and `fn () -> "hi"` printed `= 1`.
+
 - **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
   compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
   but failed to compile natively (clang: "use of undefined value '@compare'") and threw
