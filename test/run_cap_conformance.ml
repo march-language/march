@@ -16,13 +16,17 @@
     - as JavaScript: [march --target js --opt 0], then [node] on the output,
       unless the fixture is in [js_unsupported] or [node] is not on PATH;
     - in the REPL: [march repl --grant G <file>], which loads the file's
-      declarations, with the lines of `main`'s body typed at the prompt,
+      declarations except `main`, with the lines of `main`'s body typed at
+      the prompt,
       unless the fixture is in [repl_unsupported]. The REPL has no `main`, and
       its own request is the full authority (design §21), so it is launched
       with the authority the program's launch holds: G is the header's grant,
       else `main`'s request when that carries a scope (the launch layer is
       then the same), else none. Its prompts and echoes (`val x = ...`,
       `= v`, `loaded <file>`) are not program output and are dropped.
+      The REPL reports a failed prompt line on stderr and still exits 0, so
+      a REPL run also fails when its stderr reports an error (unless the
+      fixture is [-- EXIT-ONLY]).
 
     Each run's stdout plus [exit <code>] (with [-- EXIT-ONLY]: stderr's first
     line plus [exit <code>]) must equal [<name>.expected] byte for byte. This
@@ -131,6 +135,22 @@ let main_body (src : string) : string list =
   in
   skip (String.split_on_char '\n' src)
 
+(* The fixture without its `main` (the `  fn main(` line through the first
+   `  end` line), blank lines in its place so spans keep their lines: the file
+   the REPL mode preloads.  `main` is never called there (its body is typed
+   at the prompt), and the REPL typechecks a preloaded declaration on its
+   own, which can report errors (e.g. no `Eq` for a `Result` compared with
+   `==`) that the prompt lines, typed one at a time, do not. *)
+let without_main (src : string) : string =
+  let rec go acc in_main = function
+    | [] -> List.rev acc
+    | l :: rest when not in_main && String.starts_with ~prefix:"  fn main(" l -> go ("" :: acc) true rest
+    | "  end" :: rest when in_main -> go ("" :: acc) false rest
+    | _ :: rest when in_main -> go ("" :: acc) true rest
+    | l :: rest -> go (l :: acc) false rest
+  in
+  String.concat "\n" (go [] false (String.split_on_char '\n' src))
+
 (* The grant the REPL mode launches with (see the header comment). *)
 let repl_grant (src : string) (grant : string option) : string option =
   match grant with
@@ -171,7 +191,7 @@ let script ~dir ~name ~grant ~repl_grant =
      fi; \
      echo > repl.out; echo > repl.err; echo -2 > repl.code; \
      if %b; then \
-       (unset MARCH_GRANT; MARCH_REPL_INTERP=1 %s repl %s %s < repl.in > repl.out 2>repl.err; \
+       (unset MARCH_GRANT; MARCH_REPL_INTERP=1 %s repl %s repl/%s < repl.in > repl.out 2>repl.err; \
         echo $? > repl.code); \
      fi; true"
     (Filename.quote dir) home grant_env
@@ -212,6 +232,17 @@ let repl_program_output (raw : string) : string =
   |> List.map (fun l -> l ^ "\n")
   |> String.concat ""
 
+(* A line of REPL stderr that reports a failed prompt line: an evaluation
+   error, a JIT error, or the header of a rendered diagnostic
+   (`-- NAMING ------`, `-- TYPE MISMATCH ---`). *)
+let repl_error_line (l : string) : bool =
+  let starts p = String.starts_with ~prefix:p l in
+  starts "runtime error:" || starts "match failure:" || starts "error:"
+  || starts "jit error:" || starts "internal error"
+  || (starts "-- " && String.length l > 4
+      && String.for_all (fun c -> (c >= 'A' && c <= 'Z') || c = ' ' || c = '-')
+           (String.sub l 3 (String.length l - 3)))
+
 let not_timing l = not (String.starts_with ~prefix:"[timing]" l)
 
 let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
@@ -232,8 +263,11 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
       let repl_grant =
         if List.mem_assoc name repl_unsupported then None else repl_grant src grant in
       if not (List.mem_assoc name repl_unsupported) then
-        write_file (Filename.concat tmp "repl.in")
-          (String.concat "" (List.map (fun l -> l ^ "\n") (main_body src)));
+        (write_file (Filename.concat tmp "repl.in")
+           (String.concat "" (List.map (fun l -> l ^ "\n") (main_body src)));
+         Unix.mkdir (Filename.concat tmp "repl") 0o755;
+         write_file (Filename.concat tmp (Filename.concat "repl" (name ^ ".march")))
+           (without_main src));
       let pid =
         Unix.create_process "/bin/sh"
           [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~grant ~repl_grant |]
@@ -296,7 +330,18 @@ let case name =
               if Sys.file_exists expected_path then read_file expected_path else "" in
             if got <> expected then
               Alcotest.failf "%s (%s): expected\n%s\ngot\n%s\nstderr:\n%s"
-                name m expected got r.err
+                name m expected got r.err;
+            (* The REPL reports a failed prompt line on stderr and goes on
+               to exit 0 at end of input, so where the expected stdout is
+               empty (or a line was silently dropped) stdout alone would
+               pass whatever happened.  A REPL run passes only if its stderr
+               holds no error.  [-- EXIT-ONLY] fixtures read stderr. *)
+            if m = "repl" && not exit_only then
+              match List.find_opt repl_error_line (String.split_on_char '\n' r.err) with
+              | Some l ->
+                Alcotest.failf "%s (repl): the REPL reported an error: %s\nstderr:\n%s"
+                  name l r.err
+              | None -> ()
           end))
     modes
 
