@@ -735,9 +735,8 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_dir_exists(ptr %s)" };
   { march_name = "file_open"; c_name = Some "march_file_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open(ptr %path)" };
-  (* The four Atom-returning builtins below return a C int64_t atom hash; an
-     Atom is a ptr-typed value (Kind), so they are declared returning ptr,
-     which is the same register under every supported ABI. *)
+  (* The four Atom-returning builtins below return an Atom, which is a
+     ptr-typed value (Kind): the C side returns the odd hash as a void *. *)
   { march_name = "file_close"; c_name = Some "march_file_close"; ret_ty = Some (Tir.TCon ("Atom", []));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_close(ptr %handle)" };
   { march_name = "file_read"; c_name = Some "march_file_read"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TCon ("FileError", [])]));

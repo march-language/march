@@ -12201,9 +12201,9 @@ void *march_file_open(void *path_ptr) {
  * fclose. */
 static int64_t march_atom_of_name(const char *name);
 
-int64_t march_file_close(void *handle_ptr) {
+void *march_file_close(void *handle_ptr) {
     fh_close(handle_ptr);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* file_read_line / file_read_chunk : Int -> Option(String).
@@ -13174,9 +13174,9 @@ void *march_csv_open(void *path_ptr, void *delim_ptr, void *mode_ptr) {
     return mk_ok((void *)(intptr_t)h);
 }
 
-int64_t march_csv_close(void *handle_ptr) {
+void *march_csv_close(void *handle_ptr) {
     fh_close(handle_ptr);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* Returns Row(List(String)) or :eof (null) */
@@ -13692,11 +13692,11 @@ static void revoc_add(int64_t pid_index, int64_t epoch) {
  * (layout documented at march_get_cap) and returns the :ok atom, matching the
  * interpreter's `revoke_cap : Cap(a) -> Atom`.  A null/non-heap cap (e.g. the
  * root_cap null sentinel) is a no-op returning :error. */
-int64_t march_revoke_cap(void *cap) {
-    if (!cap || !IS_HEAP_PTR(cap)) return march_atom_of_name("error");
+void *march_revoke_cap(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return (void *)(intptr_t)march_atom_of_name("error");
     int64_t *w = (int64_t *)cap;
     revoc_add(w[3], w[4]);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* Resolve a cap's (pid_index, epoch) to the meta of the incarnation it names,
@@ -13758,17 +13758,17 @@ int64_t march_is_cap_valid(void *cap) {
  * validation and the send act on the same record: under g_tbl_mu we take our
  * own reference on the live actor, so it cannot be freed before march_send
  * reads it. */
-int64_t march_send_checked(void *cap, void *msg) {
+void *march_send_checked(void *cap, void *msg) {
     if (!cap || !IS_HEAP_PTR(cap)) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     int64_t *cap_words = (int64_t *)cap;
     int64_t  pidx      = cap_words[3];
     int64_t  epoch     = cap_words[4];
     if (revoc_contains(pidx, epoch)) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     pthread_mutex_lock(&g_tbl_mu);
     march_actor_meta *meta = cap_live_meta_locked(pidx, epoch);
@@ -13777,7 +13777,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     pthread_mutex_unlock(&g_tbl_mu);
     if (!actor) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     /* march_send returns Option(Unit) as a boxed cell: Some(()) carries tag 1
      * at offset 8, None is a bare tag-0 header.  It consumes msg either way. */
@@ -13785,7 +13785,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     int delivered = ((int32_t *)((char *)result + 8))[0] == 1;
     march_decrc(result);
     march_decrc(actor);
-    return march_atom_of_name(delivered ? "ok" : "error");
+    return (void *)(intptr_t)march_atom_of_name(delivered ? "ok" : "error");
 }
 
 /* march_pid_of_int(n) is an escape hatch: March code that stores a child's

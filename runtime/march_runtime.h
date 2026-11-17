@@ -1151,7 +1151,8 @@ void *march_list_sort_by_int_key(void *lst, void *key);
 int64_t march_file_exists(void *s);
 int64_t march_dir_exists(void *s);
 void   *march_file_open(void *path);
-int64_t march_file_close(void *handle);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_file_close(void *handle);
 void   *march_file_read(void *path);
 void   *march_file_read_line(void *handle);
 void   *march_file_read_chunk(void *handle, int64_t size);
@@ -1190,7 +1191,8 @@ void   *march_file_stat(void *path);
 /* CSV builtins. */
 void   *march_csv_open(void *path, void *delim, void *mode);
 void   *march_csv_next_row(void *handle);
-int64_t march_csv_close(void *handle);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_csv_close(void *handle);
 
 /* Resource ownership. */
 void    march_own(void *pid, void *value);
@@ -1201,13 +1203,15 @@ void    march_own(void *pid, void *value);
 /* Explicitly revoke a capability.  After this call, march_send_checked and
  * march_is_cap_valid reject the cap.  Idempotent.  Returns the :ok atom
  * (:error for a null/non-heap cap such as the root_cap sentinel). */
-int64_t march_revoke_cap(void *cap);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_revoke_cap(void *cap);
 /* Check whether cap is still valid:
  * returns 1 if valid (actor alive, epoch matches, not revoked), 0 otherwise. */
 int64_t march_is_cap_valid(void *cap);
 /* Capability-checked send: validates liveness, epoch, and revocation before
  * enqueuing msg.  Returns the :ok atom on delivery, :error otherwise. */
-int64_t march_send_checked(void *cap, void *msg);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_send_checked(void *cap, void *msg);
 
 /* Value pretty-printing.  Two conventions, differing ONLY in how a string
  * NESTED inside a rendered constructor is printed (a top-level String is
