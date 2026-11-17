@@ -31,3 +31,19 @@ Actual (REPL): `= 0` and `= 1`.
 Actual (interpreted / compiled): `1` / `1`.
 
 Source: let-bound closure slots in lib/jit/repl_jit.ml. Found by the 2026-10-18 doc sweep; re-verified 2026-11-11 on a7110f95f.
+
+## Fixed 2026-11-16
+
+The binding's slot type is the typechecker's: `fn -> 1` is `() -> Int`, which converts to
+`TFn([TTuple []], Int)`, one empty-tuple parameter. The lambda's apply fn takes no argument
+and `f()` passes none, so `emit_callptr_closure` (`lib/tir/llvm_emit_call.ml`) matched no
+arity, its uncurrying gave up, and the self-recursive-closure fallback took the REPL
+fragment's own return type, `()`: a `call void` whose "result" was the constant 0 (or 1 for a
+heap-typed body, read as an untagged unit). A zero-argument call of a
+`TFn([TTuple []], R)` or `TFn([TUnit], R)` value now returns `R`. Compiled programs type the
+variable from the lambda (`TFn([], R)`), so the arm only fires where the type came from the
+typechecker.
+
+Regression: `test/test_jit.ml` "clang: zero-arg let-bound closure returns its value" and
+"orc: …" (`fn -> 41 + 1`, `fn () -> "hi"`, `fn -> 2.5`). RED before: `= 0`.
+

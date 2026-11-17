@@ -274,6 +274,59 @@ let test_orc_fn_calls_let_lambda () =
   check_session "orc fn calls let-bound lambda"
     fn_calls_let_lambda_session fn_calls_let_lambda_expected
 
+(* A zero-argument lambda bound with `let` and called: `f()` returned 0 and
+   `h()` returned 1.  The binding's slot type comes from the typechecker,
+   `Unit -> Int` = TFn([TUnit], Int), while the call passes no argument and
+   the lambda's apply fn takes none.  [emit_callptr_closure] matched no arity,
+   fell back to the fragment's own `()` return and emitted a void call.
+   (specs/progress/2026-11-11-repl-zero-arg-closure-returns-zero.md) *)
+let zero_arg_closure_session =
+  [ "let f = fn -> 41 + 1";
+    "f()";
+    "let h = fn () -> \"hi\"";
+    "h()";
+    "let d = fn -> 2.5";
+    "d()";
+    ":quit" ]
+let zero_arg_closure_expected =
+  [ "val f = <fn>"; "= 42"; "val h = <fn>"; "= \"hi\""; "val d = <fn>"; "= 2.5" ]
+
+let test_clang_zero_arg_closure () =
+  check_session ~backend:"clang" "clang zero-arg let-bound closure"
+    zero_arg_closure_session zero_arg_closure_expected
+
+let test_orc_zero_arg_closure () =
+  check_session "orc zero-arg let-bound closure"
+    zero_arg_closure_session zero_arg_closure_expected
+
+(* A curried named function from the precompiled stdlib passed as a value:
+   `Map.int_cmp` is `fn int_cmp(a) do fn b -> a < b end`, one parameter
+   returning a closure.  The fragment knew only its use-site type
+   `Int -> Int -> Bool`, which [convert_ty] uncurries to two parameters, so
+   its `$clo_wrap` trampoline called `@Map.int_cmp` with two arguments and
+   returned the closure pointer as a Bool; the first comparison (a lookup
+   hit) died with SIGBUS/SIGSEGV.  The compiled path builds the trampoline
+   from the definition's signature; the REPL never registered it for
+   precompiled functions.
+   (specs/progress/2026-11-11-repl-map-named-comparator-crash.md) *)
+let named_comparator_session =
+  [ "let m = Map.insert(Map.empty(), 1, \"a\", Map.int_cmp)";
+    "Map.get(m, 1, Map.int_cmp)";
+    "let s = Map.insert(Map.empty(), \"k\", 2, Map.str_cmp)";
+    "Map.get(s, \"k\", Map.str_cmp)";
+    ":quit" ]
+let named_comparator_expected =
+  [ "val m = HamtMap(HLeaf(269157861, 1, \"a\"))"; "= Some(\"a\")";
+    "val s = HamtMap(HLeaf(100793738, \"k\", 2))"; "= Some(2)" ]
+
+let test_clang_named_comparator () =
+  check_session ~backend:"clang" "clang curried stdlib fn as a value"
+    named_comparator_session named_comparator_expected
+
+let test_orc_named_comparator () =
+  check_session "orc curried stdlib fn as a value"
+    named_comparator_session named_comparator_expected
+
 (* ── REPL session subprocess harness ──────────────────────────────────
    Runs the real `march` binary end-to-end with a scripted stdin session.
    A subprocess (rather than in-process Repl_jit calls) for two reasons:
@@ -1456,6 +1509,14 @@ let () =
       Alcotest.test_case
         "march --jit flushes host diagnostics before JIT'd code exits"
         `Slow test_jit_file_flushes_diagnostics;
+      Alcotest.test_case "clang: zero-arg let-bound closure returns its value" `Quick
+        test_clang_zero_arg_closure;
+      Alcotest.test_case "orc: zero-arg let-bound closure returns its value" `Quick
+        test_orc_zero_arg_closure;
+      Alcotest.test_case "clang: curried stdlib fn passed as a value" `Quick
+        test_clang_named_comparator;
+      Alcotest.test_case "orc: curried stdlib fn passed as a value" `Quick
+        test_orc_named_comparator;
       Alcotest.test_case "march --jit on a file with no main is silent, exit 0"
         `Slow test_jit_file_no_main;
       Alcotest.test_case
