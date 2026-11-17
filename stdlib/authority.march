@@ -131,15 +131,15 @@ mod Authority do
     if r == 0 do Ok(()) else check_slow(kind, target, r) end
   end
 
-  -- `check` once the runtime has not answered at once (`r` is 1, or 2 for
-  -- the test hook's refusal).  A native or JIT program calls the C
-  -- runtime's copy of this and of `parse`, `admits`, `subset`,
-  -- `frame_layer`, `launch_init` and `check_layers` instead
-  -- (runtime/march_authority.c, retargeted by lib/tir/auth_native.ml), so
-  -- it links none of the policy below; the interpreter and JS run it.
-  pfn check_slow(kind : String, target : String, r : Int) : Result((), CapError) do
-    if r == 2 do Err(CapError(kind, target, ByLaunch, cap_launch_text()))
-    else check_layers(kind, target, cap_layers()) end
+  -- `check` once the runtime has not answered at once (`r` is 1: the
+  -- current layers decide; `r` is kept for the C twin's signature).  A
+  -- native or JIT program calls the C runtime's copy of this and of
+  -- `parse`, `admits`, `subset`, `frame_layer`, `launch_init` and
+  -- `check_layers` instead (runtime/march_authority.c, retargeted by
+  -- lib/tir/auth_native.ml), so it links none of the policy below; the
+  -- interpreter and JS run it.
+  pfn check_slow(kind : String, target : String, _r : Int) : Result((), CapError) do
+    check_layers(kind, target, cap_layers())
   end
 
   doc """

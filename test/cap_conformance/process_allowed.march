@@ -1,4 +1,4 @@
--- REFUSE: IO.Clock
+-- GRANT: IO.Console, IO.Process
 -- Environment reads allowed: an unset variable is Ok(None), a set one
 -- Ok(Some(v)); Env's default applies only to unset; a program that cannot
 -- start is Ok(Err(_)), not a refusal.

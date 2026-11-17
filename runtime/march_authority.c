@@ -1319,17 +1319,10 @@ void *march_cap_rt_check_layers(void *kind, void *target, void *layers) {
     return r ? r : mk_ok_unit();
 }
 
-/* Authority.check's slow path, after cap_check_raw answered [r] != 0:
- * 2 is the test hook's refusal, otherwise the current layers decide. */
+/* Authority.check's slow path, after cap_check_raw answered [r] != 0: the
+ * current layers decide. */
 void *march_cap_rt_check_slow(void *kind, void *target, int64_t r) {
-    if (r == 2) {
-        void *limit = mk_by_launch();
-        void *text = march_cap_launch_text();
-        void *res = mk_refusal(kind, target, limit, text);
-        march_decrc(limit);
-        march_decrc(text);
-        return res;
-    }
+    (void)r;
     /* The slot (or the launch layers) stays alive for the whole call: this
      * green thread holds it, and the launch layers are never freed. */
     void *cur = *march_sched_auth_slot();

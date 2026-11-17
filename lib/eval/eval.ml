@@ -4431,6 +4431,21 @@ let top_level_file_runs (decls : decl list) : decl list list =
   in
   go [] None [] decls
 
+(** A declaration typed at the REPL prompt.  A prompt `let` is not
+    module-level code: it runs with the authority of the person at the
+    terminal (design §21), so a function value it makes captures that
+    authority, as one made in `main`'s body does.  A module's own top-level
+    lets (a preloaded or `:load`ed file) go through [eval_decl] and capture
+    nothing. *)
+let eval_prompt_decl (env : env) (d : decl) : env =
+  match d with
+  | DLet (_, b, _) ->
+    let v = eval_expr env b.bind_expr in
+    (match match_pattern v b.bind_pat with
+     | Some bs -> bs @ env
+     | None    -> eval_error "top-level let binding pattern failed")
+  | _ -> eval_decl env d
+
 (* Ocap phase 4: a program launch.  [Authority.launch_init(text, scoped)]
    sets the launch authority (or, for an unscoped request with MARCH_GRANT
    unset, returns at once); a malformed or too-wide MARCH_GRANT exits 2 from

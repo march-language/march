@@ -1,0 +1,32 @@
+-- A partial application captures where it is formed (design §5). March has
+-- no partial application syntax (the type checker rejects a call with too
+-- few arguments), so the fixture writes the equivalent eta-lambda,
+-- `fn p -> Authority.check("IO.FileRead", p)`: `check` with its kind fixed.
+-- Formed inside a framed function, it stays narrowed when main calls it;
+-- formed in main and called inside the frame, it is not.
+mod CapturePartialApplication do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn verdict(r : Result((), CapError), p : String) : String do
+    match r do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn formed_inside() : String -> Result((), CapError) needs IO.FileRead("/srv/") do
+    fn p -> Authority.check("IO.FileRead", p)
+  end
+
+  fn call_inside(f : String -> Result((), CapError), p : String) : String needs IO.FileRead("/srv/") do
+    verdict(f(p), p)
+  end
+
+  fn main() do
+    let narrow = formed_inside()
+    println(verdict(narrow("/srv/x"), "/srv/x"))
+    println(verdict(narrow("/etc/hosts"), "/etc/hosts"))
+    println(call_inside(fn p -> Authority.check("IO.FileRead", p), "/etc/hosts"))
+  end
+end

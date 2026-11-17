@@ -1642,7 +1642,13 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
         f.fn_name = emit_name) user_fns with
       | Some f -> f
-      | None -> List.hd user_fns
+      | None ->
+        (* No body under the declared name: a polymorphic fn the fragment
+           never instantiates (specs/todos/2026-11-11-repl-nested-fn-decl-jit-error-hd.md).
+           Fail rather than bind another fn to the name: the fragment also
+           carries lifted stdlib lambdas (the Authority policy's, since ocap
+           phase 4), and binding the first of them crashed the first call. *)
+        failwith (Printf.sprintf "no compiled body for `%s`" bind_name)
     in
     let helper_fns = List.filter
       (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> primary_fn.fn_name)

@@ -1,0 +1,6 @@
+allowed /srv/x
+IO.FileRead("/etc/hosts") refused by function value_inside's needs (IO.FileRead("/srv/"))
+allowed /etc/hosts
+allowed /etc/hosts
+IO.FileRead("/srv/x") refused by function etc_only's needs (IO.FileRead("/etc/"))
+exit 0

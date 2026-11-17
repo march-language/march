@@ -32,7 +32,7 @@ let impure_builtins = [
   "unix_time"; "unix_time_ms"; "sys_uptime_ms";
   (* ocap phase 1: two checks must never be merged; the authority they read
      changes between them from phase 4 on. *)
-  "cap_check_raw"; "cap_launch_text";
+  "cap_check_raw";
   (* ocap phase 4: the authority slot is mutable state; every read and write
      is ordered against the others and against the checks. *)
   "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push";

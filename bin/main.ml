@@ -7951,7 +7951,7 @@ let () =
     exit 0
   end;
   if Array.length argv >= 2 && argv.(1) = "repl" then begin
-    (* `march repl [file.march] [--ffi-c C] [--ffi-link FLAG] [--ffi-so SO]`.
+    (* `march repl [file.march] [--grant SCOPES] [--ffi-c C] [--ffi-link FLAG] [--ffi-so SO]`.
        This branch runs before Arg.parse, so the FFI flags are peeled off here
        the same way the `test` subcommand does it; the first non-flag argument
        is the preload file.  Without this, a REPL preloading a project whose
@@ -7963,6 +7963,9 @@ let () =
       | "--ffi-c" :: v :: rest -> ffi_c_files := v :: !ffi_c_files; parse_repl_args rest
       | "--ffi-link" :: v :: rest -> ffi_link_flags := v :: !ffi_link_flags; parse_repl_args rest
       | "--ffi-so" :: v :: rest -> March_eval.Eval.ffi_shim_so := Some v; parse_repl_args rest
+      (* --grant narrows the REPL's launch authority, as MARCH_GRANT does
+         (ocap phase 4, design §21). *)
+      | "--grant" :: v :: rest -> Unix.putenv "MARCH_GRANT" v; parse_repl_args rest
       | a :: rest ->
         if !preload_file = None then preload_file := Some a;
         parse_repl_args rest

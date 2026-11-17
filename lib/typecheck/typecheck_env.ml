@@ -2391,7 +2391,6 @@ let stdlib_only : (string * string) list ref =
       ("delivery_failed_watch", "the DELIVERY_FAILED hook is installed by `ClusterNode`");
       (* ocap phase 1: the capability check point (stdlib/authority.march). *)
       ("cap_check_raw", "use `Authority.check(kind, target)`");
-      ("cap_launch_text", "use `Authority.check(kind, target)`");
       ("cap_layers", "use `Authority.check(kind, target)`");
       ("cap_set_launch", "use `Authority.check(kind, target)`");
       ("cap_save", "use `Authority.check(kind, target)`");

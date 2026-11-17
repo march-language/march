@@ -754,20 +754,6 @@ export function march_unix_time() {
   return Date.now() / 1000;
 }
 
-/* ocap phase 1 capability check point; runtime/march_extras.c has the native
- * twin and test/run_cap_conformance.ml pins that they agree. Nothing refuses
- * except the TEST-ONLY hook MARCH_TEST_REFUSE (comma-separated kinds, matched
- * exactly), read once; a page with no `process` allows everything. */
-let marchCapHook = null;
-function marchCapHookInit() {
-  if (marchCapHook !== null) return marchCapHook;
-  const raw = (typeof process !== "undefined" && process.env && process.env.MARCH_TEST_REFUSE) || "";
-  const text = raw.trim();
-  const kinds = text.split(",").map((k) => k.trim()).filter((k) => k !== "");
-  marchCapHook = { text, kinds };
-  return marchCapHook;
-}
-
 /* ocap phase 4: the run-time authority. The JS target has one thread of
  * control and no tasks, so the slot is one module variable. Empty is `null`;
  * a CapAuthRef is the slot's list value itself. */
@@ -777,10 +763,11 @@ let marchCapLaunchSet = false;
 const marchCapNil = () => ({ $: "Nil" });
 const marchCapEmpty = (l) => l === null || l === undefined || l.$ === "Nil";
 
-/** 2 when the TEST-ONLY hook refuses `kind`; 0 when nothing is in force (an
- * empty launch and an empty slot); else 1 (Authority.check walks the layers). */
-export function march_cap_check_raw(kind, _target) {
-  if (marchCapHookInit().kinds.includes(kind)) return 2;
+/** The capability check point; runtime/march_extras.c has the native twin
+ * and test/run_cap_conformance.ml pins that they agree. 0 when nothing is in
+ * force (an empty launch and an empty slot); else 1 (Authority.check walks
+ * the layers). */
+export function march_cap_check_raw(_kind, _target) {
   return marchCapEmpty(marchCapSlot) && marchCapEmpty(marchCapLaunch) ? 0 : 1;
 }
 
@@ -843,11 +830,6 @@ export function march_cap_launch_fail(text) {
     process.exit(2);
   }
   throw new Error(text);
-}
-
-/** The test hook's trimmed value, the refusing limit's scope text. */
-export function march_cap_launch_text() {
-  return marchCapHookInit().text;
 }
 
 /** Milliseconds since the Unix epoch as an Int (mirrors `unix_time_ms`). */

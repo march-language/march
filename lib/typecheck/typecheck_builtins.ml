@@ -852,11 +852,10 @@ let builtin_bindings : (string * scheme) list =
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
-    (* ocap phase 1: the run-time capability check point and its test hook
+    (* ocap phase 1: the run-time capability check point
        (runtime/march_extras.c). Stdlib-only; user code calls Authority.check.
        Not capability operations themselves, so not in builtin_cap_table. *)
     ("cap_check_raw",   Mono (TArrow (t_string, TArrow (t_string, t_int))));
-    ("cap_launch_text", Mono (TArrow (t_unit,  t_string)));
     (* ocap phase 4: the per-green-thread authority slot and the launch
        layers (runtime/march_runtime.c; stdlib/authority.march declares
        Layer). A CapAuthRef is a saved slot value: an erased pointer to the

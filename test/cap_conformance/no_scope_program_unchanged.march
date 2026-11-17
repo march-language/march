@@ -1,0 +1,31 @@
+-- A program with no scope, no grant and no scoped needs clause behaves as
+-- before run-time authority (design §18 "No-scope programs"): nothing is
+-- refused, an unscoped function needs clause changes nothing, and function
+-- values, stored or passed to the stdlib, run as plain closures.
+mod NoScopeProgramUnchanged do
+  needs IO.Console
+  needs IO.Process
+
+  fn greet(name : String) : String needs IO.Console do
+    match println("hello, " ++ name) do
+    Ok(_) -> "printed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn env_or(name : String, d : String) : String needs IO.Process do
+    match Process.env(name) do
+    Ok(Some(v)) -> v
+    Ok(None) -> d
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    println(greet("world"))
+    println(env_or("MARCH_CONFORMANCE_NEVER_SET", "unset"))
+    let adders = List.map([1, 2, 3], fn n -> fn x -> x + n)
+    println(List.map(adders, fn f -> f(10)))
+    println(Authority.check("IO.Console", "stdout") == Ok(()))
+  end
+end

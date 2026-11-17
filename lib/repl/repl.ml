@@ -1088,7 +1088,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m
                          with Failure _ -> ());
                         (* Always update interpreter env (source of truth for value display) *)
-                        env := March_eval.Eval.eval_decl !env d';
+                        env := March_eval.Eval.eval_prompt_decl !env d';
                         March_eval.Eval.install_global_tail !env;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1098,7 +1098,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         in
                         if not scroll_mode then Printf.printf "val %s = %s\n%!" bind_name vstr
                       | _ ->
-                        env := March_eval.Eval.eval_decl !env d';
+                        env := March_eval.Eval.eval_prompt_decl !env d';
                         March_eval.Eval.install_global_tail !env;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1690,7 +1690,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              let m = wrap_expr_as_module bind_expr in
              (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m
               with Failure _ -> ());
-             env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             env := capture_stdout (fun () -> March_eval.Eval.eval_prompt_decl !env d');
              March_eval.Eval.install_global_tail !env;
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1700,7 +1700,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              in
              add_line Notty.A.empty (Printf.sprintf "val %s = %s" bind_name vstr)
            | _ ->
-             env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             env := capture_stdout (fun () -> March_eval.Eval.eval_prompt_decl !env d');
              March_eval.Eval.install_global_tail !env;
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };

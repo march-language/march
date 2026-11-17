@@ -354,6 +354,11 @@ val eval_with_reduction_tracking : value -> value * int
 type stub = { mutable sv : value; }
 val eval_decl : env -> March_ast.Ast.decl -> env
 
+(** A declaration typed at the REPL prompt: as [eval_decl], except that a
+    `let` is not module-level code, so a function value it makes captures
+    the current authority (ocap phase 4, design §21). *)
+val eval_prompt_decl : env -> March_ast.Ast.decl -> env
+
 (** [launch_authority env (text, scoped)]: a program launch (ocap phase 4):
     reset the run-time authority, then run [Authority.launch_init] from
     [env].  Fails closed ([Failure]) when [env] holds the [Authority] module

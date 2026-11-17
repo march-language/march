@@ -30,8 +30,10 @@ can run under a wider caller authority than it was made under.
   that uses it, so a value made by a function the initialiser calls captures that fn's
   authority; the interpreter evaluates the let once, under the launch authority. Values
   written directly in the initialiser capture nothing in both.
-- **Interpreter REPL `let`.** Not yet compared with the JIT REPL under frames (Task 7
-  adds the REPL conformance mode).
+- **REPL JIT.** The conformance suite's REPL mode runs the interpreter engine only
+  (specs/todos/2026-11-17-repl-jit-runs-no-conformance-fixture.md), so none of the
+  REPL JIT items above is pinned by it. (The interpreter REPL's prompt `let` captured
+  nothing, as module-level code does; Task 7 fixed it: `Eval.eval_prompt_decl`.)
 - **Interpreter: a default-argument fn read as a value.** Such a fn is bound as a
   `VMultiarity` (arity-dispatched closures), which `Eval.capture_named_value` does not
   wrap, so passed as a value it runs under its caller's authority.

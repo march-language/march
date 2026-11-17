@@ -15349,20 +15349,21 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (run %{test} -e)))
 
 ; Capability refusal conformance (ocap phase 1, extended by phase 4): every
-; test/cap_conformance/*.march runs interpreted, through the JIT, compiled and
-; as JS under its optional `-- GRANT:` (MARCH_GRANT) and `-- REFUSE:`
-; (MARCH_TEST_REFUSE) header values, and each backend's
-; stdout + exit code must equal <name>.expected. Regenerate with
+; test/cap_conformance/*.march runs interpreted, through the JIT, compiled, as
+; JS and in the REPL under its optional `-- GRANT:` (MARCH_GRANT) header, and
+; each runtime's stdout + exit code (with `-- EXIT-ONLY`: stderr's first line
+; + exit code) must equal <name>.expected. Regenerate with
 ; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
 (test
  (name run_cap_conformance)
- ; Runs in CI's `compiler` shard (ci.yml), not `rest`: four backends per
- ; fixture cost ~14 CPU-minutes there, which pushed `rest` past its timeout.
+ ; Runs in CI's `compiler` shard (ci.yml), not `rest`: the runtimes per
+ ; fixture cost ~14 CPU-minutes there (four of them, before the REPL mode),
+ ; which pushed `rest` past its timeout.
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
  (modules run_cap_conformance)
- (libraries march_test_helpers alcotest unix)
+ (libraries march_test_helpers march_parser march_ast alcotest unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib)
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (glob_files ../runtime/*.mjs)

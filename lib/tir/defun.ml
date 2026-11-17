@@ -181,7 +181,7 @@ let builtin_names : StringSet.t =
       (* Unix/time builtins *)
       "unix_time"; "unix_time_ms";
       (* ocap phase 1 capability check point *)
-      "cap_check_raw"; "cap_launch_text";
+      "cap_check_raw";
       (* ocap phase 4 authority slot *)
       "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push";
       "cap_enter"; "cap_grant_text"; "cap_cwd"; "cap_launch_fail";

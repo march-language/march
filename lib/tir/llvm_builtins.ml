@@ -1077,8 +1077,6 @@ let builtins : builtin list = [
   (* ocap phase 1 capability check point (runtime/march_extras.c). *)
   { march_name = "cap_check_raw"; c_name = Some "march_cap_check_raw"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_check_raw(ptr %kind, ptr %target)" };
-  { march_name = "cap_launch_text"; c_name = Some "march_cap_launch_text"; ret_ty = Some Tir.TString;
-    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_launch_text()" };
   (* ocap phase 4: the per-green-thread authority slot and the launch layers
      (runtime/march_runtime.c). A CapAuthRef is the slot's list pointer,
      NULL when empty. *)
@@ -2130,7 +2128,6 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_unix_time";
   PDeclare "march_unix_time_ms";
   PDeclare "march_cap_check_raw";
-  PDeclare "march_cap_launch_text";
   PDeclare "march_cap_layers";
   PDeclare "march_cap_set_launch";
   PDeclare "march_cap_save";

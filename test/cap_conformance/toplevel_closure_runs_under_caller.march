@@ -1,0 +1,27 @@
+-- A function value made by module-level code captures nothing and runs
+-- under its caller's authority (design §21): called inside a framed
+-- function it is refused outside the frame's scope; called from main it is
+-- allowed.
+mod ToplevelClosureRunsUnderCaller do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  let reader = fn p -> probe("IO.FileRead", p)
+
+  fn in_frame(p : String) : String needs IO.FileRead("/srv/") do
+    reader(p)
+  end
+
+  fn main() do
+    println(in_frame("/srv/x"))
+    println(in_frame("/etc/hosts"))
+    println(reader("/etc/hosts"))
+  end
+end

@@ -1184,9 +1184,6 @@ and emit_val_impl ctx expr =
       | "cap_check_raw", [k; t] ->
         use_runtime ctx "march_cap_check_raw";
         emit ctx "march_cap_check_raw("; emit_atom ctx k; emit ctx ", "; emit_atom ctx t; emit ctx ")"
-      | "cap_launch_text", _ ->
-        use_runtime ctx "march_cap_launch_text";
-        emit ctx "march_cap_launch_text()"
       (* ocap phase 4 authority slot; zero-arg ones take March's Unit *)
       | ("cap_layers" | "cap_save" | "cap_grant_text" | "cap_cwd"), _ ->
         let f = "march_" ^ name in
