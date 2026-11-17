@@ -1087,6 +1087,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A user type named `Result` or `Option` works compiled.** `type Result = Won(Int) | Lost` with
+  `derive Show` failed to compile ("ambiguous interface-method call to `show`"), and declaring a
+  `type Option(a)` in a nested module made matching the builtin `Option` that `string_to_int`
+  returns crash with SIGSEGV. The user type now stays separate from the builtin of the same name.
+
 - **`compare` and `hash` can be passed as values in compiled code.** `OrderedMap.from_list(xs,
   compare)` (the form every `OrderedMap` example uses) and `List.map(xs, hash)` ran interpreted
   but failed to compile natively (clang: "use of undefined value '@compare'") and threw

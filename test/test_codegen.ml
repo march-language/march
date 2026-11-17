@@ -14150,6 +14150,75 @@ let test_iface_method_as_value_compiled () =
       "compare/hash passed as values link and match the interpreter"
       (iface_method_as_value_expected ^ "\nEXIT:0") run_out
 
+(* ── A user type named like a builtin ADT (`Result`, `Option`) ─────────────
+   The typechecker gives a user `type Result = Won(Int) | Beaten` its own
+   identity, but the TIR named it back to the bare `Result`: at the entry's
+   top level its `derive Show` was deduplicated against the builtin
+   `Show$Result.show` and the call failed to compile ("ambiguous
+   interface-method call to `show`").  A nested `type Option(a)` made the
+   short name `Option` colliding, which forced the BUILTIN `Option` Boxed and
+   globally tagged, so matching `string_to_int`'s runtime-built (niche)
+   `Option(Int)` read a raw pointer as a tagged cell: SIGSEGV.
+   (specs/progress/2026-11-11-compiled-derive-on-user-type-named-like-prelude-type.md) *)
+let builtin_named_user_type_src = {|mod Main do
+  needs IO.Console
+
+  type Result = Won(Int) | Beaten
+  derive Show, Eq for Result
+
+  mod Shapes do
+    type Option(a) = Only(a) | Neither
+    derive Show for Option
+    fn wrap(x) do Only(x) end
+  end
+
+  fn score(r : Result) : Int do
+    match r do
+      Won(n) -> n
+      Beaten -> 0
+    end
+  end
+
+  fn main(c : Cap(IO.Console)) do
+    print_line(to_string(Won(3)))
+    print_line(to_string(Beaten))
+    print_line(to_string(Won(3) == Won(3)))
+    print_line(int_to_string(score(Won(7)) + score(Beaten)))
+    print_line(to_string(Shapes.wrap(5)))
+    print_line(to_string(List.head_opt([1, 2])))
+    match string_to_int("42") do
+      Some(n) -> print_line(int_to_string(n))
+      None -> print_line("none")
+    end
+    print_line(to_string(string_to_int("x")))
+  end
+end
+|}
+
+let builtin_named_user_type_expected =
+  "Won(3)\nBeaten\ntrue\n7\nOnly(5)\nSome(1)\n42\nNone"
+
+let test_builtin_named_user_type_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_builtin_named_type" builtin_named_user_type_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" builtin_named_user_type_expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "builtin_named_o%d" opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string)
+          (Printf.sprintf "--opt %d: user Result/Option keep their own identity \
+                           beside the builtins" opt)
+          (builtin_named_user_type_expected ^ "\nEXIT:0") run_out)
+    [0; 2]
+
 (* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
    A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
    with the MANY stdlib helpers that use a conventionally-named nested
@@ -21529,6 +21598,10 @@ let codegen_suites =
       ( "nested_fn_name_collision_codegen", [
           Alcotest.test_case "nested `fn go` shadows a same-named top-level fn in mono" `Quick
             test_nested_fn_name_shadows_toplevel_compiled;
+        ] );
+      ( "builtin_named_user_type_codegen", [
+          Alcotest.test_case "user type named like a builtin ADT keeps its identity" `Quick
+            test_builtin_named_user_type_compiled;
         ] );
       ( "nonentry_newtype_repr_codegen", [
           Alcotest.test_case "non-entry single-field ADT: construct/destructure repr agree (tuple-nested)" `Quick

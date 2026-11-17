@@ -41,5 +41,18 @@ let compute (type_defs : Tir.type_def list) : (string, string list) Hashtbl.t =
     by_short;
   result
 
+(** The builtin ADTs ([Lower.builtin_type_defs]), by their exact bare TIR
+    name.  The C runtime builds and reads their values (`string_to_int`'s
+    niche-encoded `Option(Int)`, a builtin's `List`), so their layout and
+    constructor tags are fixed and a same-short-name user type
+    ([Lower_types.builtin_adt_names]: `Inner.Option`, `Main.Result`) never
+    makes them colliding.  Forcing the builtin `Option` Boxed and globally
+    tagged beside a user `type Option(a)` read `string_to_int`'s raw pointer
+    as a tagged cell: SIGSEGV
+    (specs/progress/2026-11-11-compiled-derive-on-user-type-named-like-prelude-type.md).
+    The user type itself still collides, so it is Boxed and globally tagged
+    everywhere. *)
+let builtin_adt_names = [ "Option"; "Result"; "List" ]
+
 let is_colliding (cs : (string, string list) Hashtbl.t) (name : string) : bool =
-  Hashtbl.mem cs (short_name name)
+  not (List.mem name builtin_adt_names) && Hashtbl.mem cs (short_name name)
