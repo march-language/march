@@ -60,7 +60,9 @@ The full tables, load averages and the IR-oracle classification are in the PR de
   and releases it. The layer itself is built once per program (`march_cap_layer_once`), so
   nothing is parsed per entry. Not optimised here.
 - `cap_capture_closures`: +60–70% cpu over the same file with its one frame removed, from
-  `cap_enter` / `cap_restore` around each of three captured closure calls per element. No
+  `cap_enter` / `cap_restore` around each captured closure call: about 9–10 ns per call
+  over 4,666,666 captured calls (1M + 1M + 333,333 filter survivors, per pipeline, two
+  pipelines). No
   budget gates it; only programs with a frame pay it.
 - Hello world (macOS arm64): 252,904 B → 271,800 B; `__TEXT` grows by one 16 KB page.
 

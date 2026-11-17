@@ -891,7 +891,8 @@ launch narrowed by whoever starts the program, a function value called far from 
 was made. So every running program also has a **current authority**, and each capability
 operation is checked against it. It works the same in the interpreter, `--jit`, the
 REPL, a compiled binary and `--target js` (the JS target has no tasks or actors);
-`test/cap_conformance/` runs every rule below in all five.
+`test/cap_conformance/` runs every rule below in each of the five where it applies (the
+JS target skips those that need tasks or actors).
 
 **The launch.** A program starts with `main`'s request (see [The grant](#grant)): its
 `needs` clause and `Cap(...)` parameters, or the module's `needs` line when it has

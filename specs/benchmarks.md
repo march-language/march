@@ -1552,7 +1552,8 @@ First measurement (macOS arm64, 14 cores, load average about 10, 21 interleaved 
 on the fast path (no scope, no frame: 27 ms); entering and leaving a frame from unframed code
 about 60 ns (a 10M-call loop of a scoped function against the same function unscoped: 640 ms
 against 27 ms); `cap_capture_closures` 112 ms against 71 ms with its frame removed (+60–70%
-cpu, three captured closure calls per element). Detail and the A/B against the merge base in
+cpu): about 9–10 ns per captured call, over 4,666,666 of them (per pipeline, 1M calls each of
+the composed map and filter functions and 333,333 of the fold's, the filter's survivors). Detail and the A/B against the merge base in
 `specs/progress/2026-11-15-ocap-p4-runtime.md`.
 
 ## bench/int_divmod.march — Int `/` and `%` zero-divisor check (2026-11-06)
