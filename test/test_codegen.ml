@@ -4009,6 +4009,36 @@ let test_actor_snapshot () =
   Alcotest.(check int) "restore_actors leaves registry empty" 0
     (Hashtbl.length March_eval.Eval.actor_registry)
 
+(* ocap phase 4, Task 6: a debugger snapshot/restore keeps an actor's
+   spawn-time authority; restoring it as the launch authority would widen an
+   actor spawned under a frame. *)
+let test_actor_snapshot_keeps_authority () =
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  Hashtbl.reset March_eval.Eval.actor_defs_tbl;
+  March_eval.Eval.next_pid := 1;
+  let auth =
+    March_eval.Eval_types.VCon ("Cons",
+      [ March_eval.Eval_types.VCon ("Layer",
+          [ March_eval.Eval_types.VCon ("ByFnNeeds", [ March_eval.Eval_types.VString "start" ]);
+            March_eval.Eval_types.VString "IO.FileRead(\"/srv/\")";
+            March_eval.Eval_types.VCon ("Nil", []) ]);
+        March_eval.Eval_types.VCon ("Nil", []) ]) in
+  Hashtbl.replace March_eval.Eval.actor_defs_tbl "W" (Test_helpers.dummy_actor_def, ref []);
+  let inst = { (Test_helpers.mk_actor_inst "W" true March_eval.Eval_types.VUnit)
+               with March_eval.Eval.ai_authority = auth } in
+  Hashtbl.replace March_eval.Eval.actor_registry 0 inst;
+  let snap = March_eval.Eval.snapshot_actors () in
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  March_eval.Eval.restore_actors snap;
+  (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
+   | Some r ->
+     Alcotest.(check bool) "the restored actor keeps its spawn-time authority" true
+       (r.March_eval.Eval.ai_authority == auth)
+   | None -> Alcotest.fail "the actor was not restored");
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  Hashtbl.reset March_eval.Eval.actor_defs_tbl;
+  March_eval.Eval.next_pid := 0
+
 (* ── Docstring tests ──────────────────────────────────────────────────────── *)
 
 let test_doc_parse_fn () =
@@ -20899,6 +20929,7 @@ let codegen_suites =
         Alcotest.test_case "debug continue"         `Quick test_debug_continue;
         Alcotest.test_case "trace overflow"         `Quick test_trace_overflow;
         Alcotest.test_case "actor snapshot"         `Quick test_actor_snapshot;
+        Alcotest.test_case "actor snapshot keeps its authority" `Quick test_actor_snapshot_keeps_authority;
       ];
       "docstrings", [
         Alcotest.test_case "parse fn doc"         `Quick test_doc_parse_fn;

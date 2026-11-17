@@ -759,6 +759,9 @@ type actor_inst_snapshot = {
   ais_state : value;
   ais_alive : bool;
   ais_terminal_reason : monitor_down_reason;
+  ais_authority : value;
+  (** ocap phase 4: the instance's [ai_authority], so a restored actor keeps
+      the authority it was spawned under (nothing ever widens). *)
 }
 
 type actor_state_snapshot = {
@@ -825,7 +828,8 @@ let snapshot_actors () : actor_state_snapshot =
       let snap = { ais_name  = inst.ai_name;
                    ais_state = inst.ai_state;
                    ais_alive = inst.ai_alive;
-                   ais_terminal_reason = inst.ai_terminal_reason } in
+                   ais_terminal_reason = inst.ai_terminal_reason;
+                   ais_authority = inst.ai_authority } in
       (pid, snap) :: acc
     ) actor_registry [] in
   { ass_defs = defs; ass_instances = instances; ass_next_pid = !next_pid }
@@ -844,10 +848,9 @@ let restore_actors (snap : actor_state_snapshot) : unit =
         let inst = { ai_name     = s.ais_name;
                      ai_def      = def;
                      ai_env_ref  = env_r;
-                     (* Nor its authority: a restored instance runs under
-                        the launch authority, as every actor did before
-                        ocap phase 4. *)
-                     ai_authority = Eval_runtime.cap_nil;
+                     (* The authority it was spawned under, never the
+                        launch's: a restore must not widen it. *)
+                     ai_authority = s.ais_authority;
                      (* A snapshot does not carry init arguments (D24): a
                         restored instance restarts under its supervisor with
                         none, which is the pre-D24 behaviour for every actor

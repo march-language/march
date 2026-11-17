@@ -249,6 +249,7 @@ type actor_inst_snapshot = {
   ais_state : value;
   ais_alive : bool;
   ais_terminal_reason : monitor_down_reason;
+  ais_authority : value;
 }
 type actor_state_snapshot = {
   ass_defs : (string * (March_ast.Ast.actor_def * env ref)) list;

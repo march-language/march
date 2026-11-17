@@ -7474,7 +7474,17 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
      * the slot's FIRST spawn's authority (march_sup_child.first_auth), not
      * under whatever is in force on this thread.  The thunk is March code
      * that can switch green threads; the slot belongs to this proc, so the
-     * accessor in march_cap_enter/restore finds it again wherever it runs. */
+     * accessor in march_cap_enter/restore finds it again wherever it runs.
+     *
+     * A panic in the replacement's `init` skips the restore, deliberately
+     * left so: march_panic either exits the process (no crash trap: the
+     * dying child's own trap is already disarmed, as is main's) or longjmps
+     * to the trap of the supervised actor that ran this restart (a kill from
+     * its handler), which then dies.  Either way the proc whose slot holds
+     * first_auth never runs March code again: its reap releases the slot,
+     * and only [auth_saved]'s one reference leaks, once per such double
+     * fault.  A replacement of that actor installs its own meta->auth
+     * (actor_install_auth), so nothing runs under the stale slot. */
     void *auth_saved = march_cap_enter(child->first_auth);
     void *raw = fn_ptr(child->spawn_clo);
     void *new_child = march_spawn_supervised(raw);

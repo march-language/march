@@ -234,7 +234,10 @@ let test_compiled_drop () =
    order.  Every non-immortal address an authority site touched
    ([march_cap_*]) must balance; a handful may still be held by the last
    killed actors when main returns (their metas are reclaimed lazily), so
-   the bound is 16.  Dropping the meta's release (march_runtime.c,
+   the bound is 16.  Measured: 1 per run, constant in the cycle count, not
+   traced to its holder (that it is a lazily reclaimed meta is a guess; see
+   specs/todos/2026-11-16-gc-trace-report-multithread-file-order.md).
+   Dropping the meta's release (march_runtime.c,
    meta_free) unbalances about 20,000. *)
 let spawn_leak_src = {|mod CapSpawnLeak do
   needs IO.Console

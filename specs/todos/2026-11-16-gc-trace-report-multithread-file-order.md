@@ -17,3 +17,9 @@ events from different threads still interleave wrongly. Options:
 
 `test/test_cap_runtime_slot.ml` (`test_spawn_cycles_no_leak`) uses the per-address
 balance for this reason.
+
+That per-address balance still leaves about 1 unbalanced authority-touched address per
+10,000-cycle run (bound 16 in the test). It is unexplained: most likely a slot list still
+held by the last killed actor's meta or proc, which are reclaimed lazily (deferred
+`march_reclaim_retire` and the reap) after main returns. It does not grow with the cycle
+count. The candidates were not traced one by one, so this is a guess.
