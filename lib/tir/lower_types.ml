@@ -50,6 +50,30 @@ let handle_type_names =
 
 let is_handle_type_name (n : string) : bool = List.mem n handle_type_names
 
+(** The ADTs the backends build in ([Lower.builtin_type_defs]) and key by
+    their bare name: their constructor tags, niche layout and impls are the
+    builtin's.  A user variant with one of these short names has a qualified
+    typecheck identity ([Typecheck_nominal]: `Main.Result` at the entry's top
+    level, `Inner.Result` in a nested module), and the TIR keeps that identity
+    as the type's name instead of mapping it back to the bare one, so the
+    program's `type Result = Won(Int) | Lost` and its `derive Show` are not
+    taken for the builtin `Result(a, b)` and its `Show$Result` impl
+    (specs/progress/2026-11-11-compiled-derive-on-user-type-named-like-prelude-type.md). *)
+let builtin_adt_names = [ "Option"; "Result"; "List" ]
+
+(** True iff the typecheck identity [id] is a user type shadowing a builtin
+    ADT: it is qualified and its short name is in [builtin_adt_names]. *)
+let shadows_builtin_adt (id : string) : bool =
+  let short = March_typecheck.Typecheck_nominal.short_of id in
+  short <> id && List.mem short builtin_adt_names
+
+(** The TIR name of the user type the name written or declared at [n] means,
+    when that type shadows a builtin ADT ([shadows_builtin_adt]). *)
+let shadowing_tir_name (n : Ast.name) : string option =
+  match March_typecheck.Typecheck_nominal.ref_identity n with
+  | Some id when shadows_builtin_adt id -> Some id
+  | _ -> None
+
 (** Convert surface types to TIR types.
     Pre-monomorphization, type variables become [TVar].
 
@@ -68,6 +92,8 @@ let rec lower_ty (t : Ast.ty) : Tir.ty =
       && not (March_typecheck.Typecheck_nominal.refers_to_user_decl n) ->
     (* the builtin handle type, not a user type of that short name *)
     Tir.TCon (handle_tir_name, [])
+  | Ast.TyCon (n, args) when shadowing_tir_name n <> None ->
+    Tir.TCon (Option.get (shadowing_tir_name n), List.map lower_ty args)
   | Ast.TyCon ({ txt = name; _ }, args)   ->
     Tir.TCon (name, List.map lower_ty args)
   | Ast.TyVar { txt = name; _ }          -> Tir.TVar name
@@ -107,6 +133,10 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
     (* A user type of that short name has a qualified identity, so an exact
        handle name here is always the builtin ([handle_tir_name]). *)
     Tir.TCon (handle_tir_name, [])
+  | Typecheck.TCon (name, args) when shadows_builtin_adt name ->
+    (* A user type named like a builtin ADT keeps its identity
+       ([builtin_adt_names]). *)
+    Tir.TCon (name, List.map convert_ty args)
   | Typecheck.TCon (name, args)   ->
     (* A colliding variant's typecheck identity (`A.Note`) is the bare name
        to every backend (see [March_typecheck.Typecheck_nominal]). *)

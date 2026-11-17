@@ -1126,6 +1126,11 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A user type named `Result` or `Option` works compiled.** `type Result = Won(Int) | Lost` with
+  `derive Show` failed to compile ("ambiguous interface-method call to `show`"), and declaring a
+  `type Option(a)` in a nested module made matching the builtin `Option` that `string_to_int`
+  returns crash with SIGSEGV. The user type now stays separate from the builtin of the same name.
+
 - **A generic function whose type variable is only in its return type no longer crashes
   compiled.** `fn make_none() : Option(a) do None end` used as an `Option(Float)`,
   `Option(())` or `Option(Option(Int))` died with SIGSEGV at address 0x8: it was compiled once,

@@ -282,7 +282,8 @@ let find_variant_by_suffix (env : env) (name : string)
    a leak; a destructuring drop against the wrong layout would be worse). *)
 let colliding_union (env : env) (name : string) (ty_args : Tir.ty list)
   : (string * Tir.ty list) list option =
-  if String.contains name '.' then None
+  if String.contains name '.' || not (Collision_set.is_colliding env.collision_set name)
+  then None
   else
     match Hashtbl.find_opt env.collision_set name with
     | None -> None
@@ -418,7 +419,7 @@ let droppable_ctors (env : env) (ty : Tir.ty)
         every such tree (test/native/aggregate_drop_erased_fields). *)
      | Kind.Boxed ->
        let union () =
-         if not (String.contains name '.') && Hashtbl.mem env.collision_set name
+         if not (String.contains name '.') && Collision_set.is_colliding env.collision_set name
          then colliding_union env name ty_args else None in
        let exact () =
          match (match Kind.find_variant env.k_table name with
