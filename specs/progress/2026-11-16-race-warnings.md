@@ -7,6 +7,12 @@ now warns about both. It runs at the end of `check_module_core`, beside the othe
 end-of-module sweeps, over `Typecheck_caps.module_own_exprs` of each module (nested
 modules included), using the typechecker's exhaustive `iter_expr`.
 
+The stdlib's own code is skipped (`Typecheck_builtins.span_is_stdlib`), including a
+stdlib module checked as the entry: `test/dune`'s `cluster_node_check` and
+`session_node_check` rules require that check to print no warning, and the stdlib's
+Vault use (session_node's pending queues, cluster_node's meta counters) is concurrency
+code reviewed where it is written, not something a user can change.
+
 ## `vault_check_then_act`
 
 Each `Vault` call takes the table's lock for that call only. A read followed by a write

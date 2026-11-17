@@ -63,6 +63,11 @@ let call_of (e : Ast.expr) : (string * Ast.expr list * Ast.span) option =
    read and a write can be compared as written.  [None] for anything that
    is not a name, literal, field, constructor, tuple or call of those: two
    such expressions are not assumed to be the same value. *)
+let is_operator name =
+  name <> "" && not (Char.equal name.[0] '_')
+  && String.for_all (fun c -> not (Char.equal c '_' || ('a' <= c && c <= 'z')
+                                   || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') || c = '.')) name
+
 let rec key_of (e : Ast.expr) : string option =
   let all es =
     let ks = List.filter_map key_of es in
@@ -78,6 +83,10 @@ let rec key_of (e : Ast.expr) : string option =
   | Ast.ETuple (es, _) -> Option.map (fun k -> "(" ^ k ^ ")") (all es)
   | Ast.ECon (c, [], _) -> Some c.Ast.txt
   | Ast.ECon (c, es, _) -> Option.map (fun k -> c.Ast.txt ^ "(" ^ k ^ ")") (all es)
+  | Ast.EApp (Ast.EVar op, [ a; b ], _) when is_operator op.Ast.txt ->
+    (match key_of a, key_of b with
+     | Some a, Some b -> Some (a ^ " " ^ op.Ast.txt ^ " " ^ b)
+     | _ -> None)
   | Ast.EApp (f, args, _) ->
     (match key_of f, all args with
      | Some f, Some a -> Some (f ^ "(" ^ a ^ ")")
@@ -420,7 +429,10 @@ let rec check_module ~iter_expr ~(own_exprs : Ast.decl list -> Ast.expr list)
   let checked = List.filter (function
       | Ast.DFn (def, _) -> not (List.mem "no_warn_race" def.Ast.fn_attrs)
       | _ -> true) decls in
-  let roots = own_exprs checked in
+  (* The stdlib's own code is not the user's to change, and its self-check
+     runs must stay clean; its Vault use is reviewed where it is written. *)
+  let roots = List.filter (fun e -> not (Typecheck_builtins.span_is_stdlib (span_of e)))
+      (own_exprs checked) in
   List.iter (check_then_act ~iter_expr errors) roots;
   let fns = module_fns decls in
   let effs = lazy (fn_effects ~iter_expr fns) in
