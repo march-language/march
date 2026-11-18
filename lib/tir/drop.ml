@@ -667,18 +667,33 @@ let rec drop_fn_for (env : env) (ty : Tir.ty) : string option =
 
 and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
   : Tir.fn_def =
-  (* Mirrors [build_drop_fn]'s body exactly, with EField projections standing in
-     for the ECase destructuring a variant gets:
+  (* The release comes FIRST and the field loads sit behind it, on the path
+     where it was the last reference:
 
-       fn __drop$R(x) = let f1 = x.a in let f2 = x.b in
-                        let freed = march_decrc_freed(x) in
-                        case freed of True -> drop f1; drop f2 | _ -> ()
+       fn __drop$R(x) = let last = march_decrc_last(x) in
+                        case last of
+                          True -> let f1 = x.a in let f2 = x.b in
+                                  march_free_last(x); drop f1; drop f2
+                          _    -> ()
 
-     Field loads are emitted BEFORE march_decrc_freed, so they read the cell
-     while it is still alive; the free is shallow and does not disturb the
-     children, so the loaded references stay valid for the drops below.  The
-     freed-guard is what keeps a SHARED aggregate from having its children
-     released out from under the surviving reference. *)
+     [march_decrc_last] reports the last reference WITHOUT freeing the cell,
+     so on that path this function is the cell's sole owner (the count is zero
+     and no other thread holds a reference to take a new one from): it loads
+     the owning fields, frees the shell with [march_free_last], and only then
+     releases the children.  The free is shallow and does not disturb them, so
+     the loaded references stay valid; freeing before the child drops keeps
+     the last of those in tail position.
+
+     A SHARED release therefore reads nothing but the header.  This function
+     used to mirror [build_drop_fn] (load every field, then
+     [march_decrc_freed], which frees the shell itself and so forces the loads
+     ahead of it): a 105-field record with 75 heap fields paid 75 loads and
+     spills on every shared release, a third of the main thread's samples in
+     the program that showed it
+     (specs/progress/2026-11-17-wide-record-shared-drop-fast-path.md).  The
+     last-reference guard is still what keeps a shared aggregate from having
+     its children released out from under the surviving reference.  An
+     immortal or non-heap [x] answers "not last", so nothing is read. *)
   let x = { Tir.v_name = fresh env "dx"; v_ty = ty; v_lin = Tir.Unr } in
   let unit_expr = Tir.ETuple [] in
   (* One binder per field that owns something: a heap field by its accessor,
@@ -701,21 +716,25 @@ and build_aggregate_drop_fn env fname ty (fields : (string * Tir.ty) list)
     | [last] -> last
     | op :: rest -> Tir.ESeq (op, chain rest)
   in
-  let freed = { Tir.v_name = fresh env "dfree"; v_ty = Tir.TBool;
-                v_lin = Tir.Unr } in
-  let decrc_freed =
-    { Tir.v_name = "march_decrc_freed";
+  let last = { Tir.v_name = fresh env "dlast"; v_ty = Tir.TBool;
+               v_lin = Tir.Unr } in
+  let decrc_last =
+    { Tir.v_name = "march_decrc_last";
       v_ty = Tir.TFn ([ty], Tir.TBool); v_lin = Tir.Unr } in
-  let guarded =
-    Tir.ELet (freed, Tir.EApp (decrc_freed, [Tir.AVar x]),
-      Tir.ECase (Tir.AVar freed,
-        [ { Tir.br_tag = "True"; br_vars = []; br_body = chain ops } ],
-        Some unit_expr))
-  in
-  let body =
+  let free_last =
+    { Tir.v_name = "march_free_last";
+      v_ty = Tir.TFn ([ty], Tir.TUnit); v_lin = Tir.Unr } in
+  let owned =
     List.fold_right (fun (accessor, v) acc ->
         Tir.ELet (v, Tir.EField (Tir.AVar x, accessor), acc))
-      binders guarded
+      binders
+      (Tir.ESeq (Tir.EApp (free_last, [Tir.AVar x]), chain ops))
+  in
+  let body =
+    Tir.ELet (last, Tir.EApp (decrc_last, [Tir.AVar x]),
+      Tir.ECase (Tir.AVar last,
+        [ { Tir.br_tag = "True"; br_vars = []; br_body = owned } ],
+        Some unit_expr))
   in
   { Tir.fn_name = fname;
     fn_params = [x];

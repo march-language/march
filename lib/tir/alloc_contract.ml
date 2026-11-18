@@ -257,9 +257,12 @@ let scalar_builtins = [
      never returns.  __test_header stores a literal's address. *)
   "__assert_fail"; "__test_header";
   (* Reference counting and freeing, not allocating: [Drop.run] synthesizes a
-     call to [march_decrc_freed] inside every generated __drop$T helper, so
+     call to [march_decrc_freed] (or, for a record or tuple, the
+     [march_decrc_last] / [march_free_last] pair) inside every generated
+     __drop$T helper, so
      without this entry any function that drops an owned value fails. *)
   "march_decrc_freed"; "march_decrc_local_freed";
+  "march_decrc_last"; "march_free_last";
   "march_incrc"; "march_decrc"; "march_free";
   "native_int_arr_get"; "native_int_arr_length"; "native_int_arr_set"; "native_int_arr_sum";
   "native_int_arr_sort"; "native_float_arr_sort";
