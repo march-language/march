@@ -404,6 +404,7 @@ val proof_based_panic_surface : bool ref
 val panic_surface_suggestion : string -> string
 val check_no_panic_module : Err.ctx -> env -> Ast.decl list -> unit
 val check_decl : env -> Ast.decl -> env
+val register_impl_shape : ?decl_module:string -> env -> Ast.impl_def -> env
 val render_cap_chain : string list -> string
 val last_nonexhaustive_match_spans : Ast.span list ref
 val check_module_core :

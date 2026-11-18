@@ -57,7 +57,8 @@ let emit_dispatch_fn (ctx : Llvm_ctx.ctx) ~(fn_name : string)
     String.concat ", " (List.map (fun (ty, nm) -> ty ^ " " ^ nm) params) in
   let params_fwd = params_decl in
   Buffer.add_string buf
-    (Printf.sprintf "\ndefine %s @%s(%s) {\n" ret_ty fn_name params_decl);
+    (Printf.sprintf "\ndefine %s%s @%s(%s) {\n"
+       (Llvm_ctx.session_helper_linkage ctx) ret_ty fn_name params_decl);
   Buffer.add_string buf "entry:\n";
   (* Read the runtime ctor tag from the Boxed header (offset 8). arg0 is
      guaranteed ptr for a colliding (forced-Boxed) type. *)
