@@ -22,11 +22,13 @@ panic("non-exhaustive pattern match")
 fn main(_cap_console : Cap(IO.Console)) : () =
   let $t16 : String = let $t15 : (Int, Int) = (0, 0) in
 describe($t15) in
-let $rc_2 : () = println($t16) in
+let $rc_3 : () = println($t16) in
 dec_rc $t16;
-$rc_2;
+$rc_3;
 let $t18 : String = let $t17 : Atom = :ok in
-tag_name($t17) in
+let $rc_2 : String = tag_name($t17) in
+dec_rc $t17;
+$rc_2 in
 let $rc_1 : () = println($t18) in
 dec_rc $t18;
 $rc_1;

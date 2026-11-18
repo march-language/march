@@ -542,15 +542,20 @@ let fnv1a_64 (s : string) : int64 =
     lossless only when bit63 == bit62 (a sign-extended 63-bit integer); a raw
     64-bit hash with bit63 <> bit62 is corrupted on extract — e.g. :put / :post
     came back as garbage, breaking Router method matching.  Forcing
-    bit63 := bit62 makes every atom survive generic-slot transit while keeping
-    63 bits of entropy.  BOTH atom-emission sites (literal + switch-arm tag)
-    must use this. *)
+    bit63 := bit62 makes every atom survive generic-slot transit.
+    Bit 0 is forced to 1: a nullary atom is always ODD, so it can never be
+    mistaken for a payload atom, which is an (even) heap-cell pointer under
+    the same [Atom] type (see [Tir_names.atom_cell_ctor]).  62 bits of entropy
+    remain.  BOTH atom-emission sites (literal + switch-arm tag) must use this,
+    and the runtime's [march_atom_of_name] must agree bit for bit. *)
 let atom_hash (name : string) : int64 =
   let h = fnv1a_64 name in
   let bit62 = Int64.logand (Int64.shift_right_logical h 62) 1L in
   Int64.logor
-    (Int64.logand h 0x7FFFFFFFFFFFFFFFL)   (* clear bit63 *)
-    (Int64.shift_left bit62 63)            (* set bit63 := bit62 *)
+    (Int64.logor
+       (Int64.logand h 0x7FFFFFFFFFFFFFFFL)   (* clear bit63 *)
+       (Int64.shift_left bit62 63))           (* set bit63 := bit62 *)
+    1L                                       (* set bit0: always odd *)
 
 (* ── Type mapping ─────────────────────────────────────────────────────── *)
 
@@ -611,7 +616,9 @@ let llvm_param_ty ?(k_table : Kind.table option) (ty : Tir.ty) : string =
      the missing niche exemption there is a safe attribute omission. *)
   let t = match k_table with Some t -> t | None -> Kind.empty in
   match ty with
-  | Tir.TCon ("Atom", []) -> "i64"
+  (* An atom is a ptr, but a nullary atom's value is its name hash, which no
+     load may touch: plain ptr, no dereferenceable. *)
+  | Tir.TCon ("Atom", []) -> "ptr"
   (* Unboxed aggregate: a struct value, so none of the pointer alias
      attributes below apply.  Delegate to the table's spelling. *)
   | Tir.TCon (name, _) when Kind.unboxed_of_type_name t name <> None -> Kind.llvm_ty_of t ty

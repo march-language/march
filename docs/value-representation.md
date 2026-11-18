@@ -335,7 +335,7 @@ the double-untag is not just present but correct. (Probe:
 
 ---
 
-## 6. Atom hashing: `bit63 == bit62`
+## 6. Atom hashing: `bit63 == bit62`, odd, and payload-atom cells
 
 **Governing text:** `lib/tir/llvm_ctx.ml`'s `atom_hash` doc comment.
 
@@ -348,9 +348,27 @@ that may flow through a GENERIC (`ptr`) slot exactly like any other scalar
 effectively a sign-extended 63-bit integer, i.e. `bit63 == bit62`. A raw
 64-bit hash without that property is corrupted on extract (the doc comment
 cites `:put` / `:post` breaking Router method matching as the historical
-symptom). Forcing `bit63 := bit62` preserves 63 bits of entropy while making
-every atom safe for generic-slot transit; both atom-emission sites (literal
-atoms and switch-arm tags) must go through this one function.
+symptom). Forcing `bit63 := bit62` makes every atom safe for generic-slot
+transit; both atom-emission sites (literal atoms and switch-arm tags) must go
+through this one function, and the runtime's `march_atom_of_name` (and
+`march_http.c`'s method atoms) must agree with it bit for bit.
+
+**Bit 0 is forced to 1 as well (2026-11-17): a nullary atom is always odd.**
+A *payload* atom (`:ok(7)`) has the same type, `Atom`, but is a heap cell, so
+its value is an even pointer; every consumer of an `Atom` (a `match`, `==`,
+`show`) tells the two apart by bit 0, the uniform-slot law's own
+immediate-vs-pointer test. The cell (`Tir_names.atom_cell_ctor`, runtime tag
+`MARCH_ATOM_TAG`) holds the name's hash, a metadata word (payload count, then
+4 bits of static kind per field for `show`/`==`), and the payload in uniform
+form.
+
+**An `Atom` is a `ptr`, reference counted like a `String` (2026-11-17).** A
+nullary atom is its odd hash as a pointer-sized word, which every RC entry
+point skips, as it skips an inline string. A payload atom is a refcounted cell
+whose destructor releases its payload. In a generic slot an atom is stored
+raw, not tagged. The remaining hash entropy is 62 bits. The claims below
+predate both changes: their printed constants have bit 0 as FNV produced it,
+and they show the old `i64` switch.
 
 **Claim 9: verified (IR + arithmetic).** `match a do :put -> ... :post ->
 ... end` embeds the interned hash constants directly as `switch` operands:

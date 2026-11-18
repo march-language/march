@@ -1278,8 +1278,13 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
   (* --- Atoms (the :tag syntax) --- *)
   | Ast.EAtom (a, [], _) -> Tir.EAtom (Tir.ALit (Ast.LitAtom a))
   | Ast.EAtom (a, args, _) ->
+    (* A payload atom is a heap cell: see [Tir_names.atom_cell_ctor] for its
+       layout (name hash, metadata, then the payload). *)
     lower_atoms_k env args (fun arg_atoms ->
-      Tir.EAlloc (Tir.TCon (a, []), arg_atoms))
+      Tir.EAlloc (Tir.TCon (Tir_names.atom_cell_ctor, []),
+                  Tir.ALit (Ast.LitAtom a)
+                  :: Tir.ALit (Ast.LitInt (List.length arg_atoms))
+                  :: arg_atoms))
 
   (* --- Holes --- *)
   | Ast.EHole (name, _) ->

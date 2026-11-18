@@ -735,8 +735,10 @@ let builtins : builtin list = [
     in_is_builtin = true; declare_sig = Some "declare i64  @march_dir_exists(ptr %s)" };
   { march_name = "file_open"; c_name = Some "march_file_open"; ret_ty = Some (Tir.TCon ("Result", [Tir.TInt; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_open(ptr %path)" };
+  (* The four Atom-returning builtins below return an Atom, which is a
+     ptr-typed value (Kind): the C side returns the odd hash as a void *. *)
   { march_name = "file_close"; c_name = Some "march_file_close"; ret_ty = Some (Tir.TCon ("Atom", []));
-    in_is_builtin = true; declare_sig = Some "declare i64  @march_file_close(ptr %handle)" };
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_close(ptr %handle)" };
   { march_name = "file_read"; c_name = Some "march_file_read"; ret_ty = Some (Tir.TCon ("Result", [Tir.TString; Tir.TCon ("FileError", [])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_file_read(ptr %path)" };
   { march_name = "file_read_line"; c_name = Some "march_file_read_line"; ret_ty = Some (Tir.TCon ("Option", [Tir.TString]));
@@ -1158,7 +1160,7 @@ let builtins : builtin list = [
   { march_name = "csv_next_row"; c_name = Some "march_csv_next_row"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("List", [Tir.TString])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_csv_next_row(ptr %handle)" };
   { march_name = "csv_close"; c_name = Some "march_csv_close"; ret_ty = Some (Tir.TCon ("Atom", []));
-    in_is_builtin = true; declare_sig = Some "declare i64  @march_csv_close(ptr %handle)" };
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_csv_close(ptr %handle)" };
   { march_name = "own"; c_name = Some "march_own"; ret_ty = Some Tir.TUnit;
     in_is_builtin = true; declare_sig = Some "declare void @march_own(ptr %pid, ptr %value)" };
   { march_name = "cap_narrow"; c_name = Some "march_cap_narrow"; ret_ty = Some (Tir.TCon ("Cap", [Tir.TVar "a"]));
@@ -1262,9 +1264,9 @@ let builtins : builtin list = [
   { march_name = "get_cap"; c_name = Some "march_get_cap"; ret_ty = Some (Tir.TCon ("Option", [Tir.TCon ("ActorCap", [Tir.TVar "a"])]));
     in_is_builtin = true; declare_sig = Some "declare ptr  @march_get_cap(ptr %pid)" };
   { march_name = "send_checked"; c_name = Some "march_send_checked"; ret_ty = Some (Tir.TCon ("Atom", []));
-    in_is_builtin = true; declare_sig = Some "declare i64  @march_send_checked(ptr %cap, ptr %msg)" };
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_send_checked(ptr %cap, ptr %msg)" };
   { march_name = "revoke_cap"; c_name = Some "march_revoke_cap"; ret_ty = Some (Tir.TCon ("Atom", []));
-    in_is_builtin = true; declare_sig = Some "declare i64  @march_revoke_cap(ptr %cap)" };
+    in_is_builtin = true; declare_sig = Some "declare ptr  @march_revoke_cap(ptr %cap)" };
   { march_name = "is_cap_valid"; c_name = Some "march_is_cap_valid"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64  @march_is_cap_valid(ptr %cap)" };
   (* `self` inside an actor handler.  The typechecker shadows the global
@@ -1500,6 +1502,7 @@ let runtime_only_declares : (string * string) list = [
   ("march_checked_shl", "declare i64    @march_checked_shl(i64 %a, i64 %n)");
   ("march_checked_shr", "declare i64    @march_checked_shr(i64 %a, i64 %n)");
   ("march_poly_eq", "declare i64  @march_poly_eq(ptr %a, ptr %b)");
+  ("march_atom_eq", "declare i64  @march_atom_eq(ptr %a, ptr %b)");
   ("march_remote_init", "declare void @march_remote_init()");
   ("march_int_pow", "declare i64  @march_int_pow(i64 %base, i64 %exp)");
   ("march_int_overflow", "declare void @march_int_overflow(i64 %op, ptr %file, i64 %line) cold noreturn");
@@ -1672,6 +1675,7 @@ let core_items : preamble_item list = [    (* always emitted, all targets *)
   PDeclare "march_string_concat";
   PDeclare "march_string_eq";
   PDeclare "march_poly_eq";
+  PDeclare "march_atom_eq";
   PComment "; Ord / Hash builtins";
   PDeclare "march_compare_int";
   PDeclare "march_compare_float";

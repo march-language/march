@@ -104,6 +104,10 @@ let sole_atom_index (name : string) (atoms : Tir.atom list) : int option =
     rewrite would have to reorder effects around the hole. *)
 let rec modulo_cons_target (v : string) (k : Tir.expr) : (string * int) option =
   match k with
+  (* A payload-atom cell (Tir_names.atom_cell_ctor) is built by its own
+     emitter, which computes its metadata slot from the payload's types, and
+     the hole-allocation path does not: never make it a destination. *)
+  | Tir.EAlloc (Tir.TCon (ctor, _), _) when Tir_names.is_atom_cell ctor -> None
   | Tir.EAlloc (Tir.TCon (ctor, _), atoms) ->
     Option.map (fun i -> (ctor, i)) (sole_atom_index v atoms)
   | Tir.ELet (bv, rhs, body)
@@ -408,6 +412,7 @@ let fresh_var (ty : Tir.ty) : Tir.var =
 let modcons_alloc (v : string) (k : Tir.expr)
     : (Tir.ty * Tir.atom list * int) option =
   match k with
+  | Tir.EAlloc (Tir.TCon (ctor, _), _) when Tir_names.is_atom_cell ctor -> None
   | Tir.EAlloc ((Tir.TCon _) as ty, atoms) ->
     (match sole_atom_index v atoms with
      | Some i ->
