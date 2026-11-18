@@ -537,9 +537,24 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
   end
 
 (* Reorder both function runs (by call dependency) and module runs (by module
-   dependency) within [decls], leaving every other declaration in place. *)
+   dependency) within [decls], leaving every other declaration in place.
+
+   A type declaration does not end a function run: types are registered
+   before any function is checked (a function may use a type declared below
+   it), so a [DType] between two functions orders nothing.  Ending the run
+   there checked a caller above the type against the pass-1 placeholder of a
+   callee below it, and the caller was generalized over that placeholder: in
+   stdlib/presence.march, [entry_count] (above [type PresenceState]) calling
+   [list_len_pr] (below it) got the type [PresenceEntry -> b], so
+   [let s : String = Presence.entry_count(e)] type-checked and the REPL
+   printed its Int result as a tagged word.  The run's type declarations are
+   moved to its front, in their own order, and its functions follow in
+   dependency order. *)
 let reorder_decls (decls : Ast.decl list) : Ast.decl list =
   let is_dfn = function Ast.DFn _ -> true | _ -> false in
+  let is_dtype = function
+    | Ast.DType _ | Ast.DAlwaysLinearType _ -> true
+    | _ -> false in
   let is_dmod = function Ast.DMod _ -> true | _ -> false in
   let take pred ds =
     let rec go acc = function
@@ -551,8 +566,18 @@ let reorder_decls (decls : Ast.decl list) : Ast.decl list =
   let rec go = function
     | [] -> []
     | d :: _ as ds when is_dfn d ->
-      let run, rest = take is_dfn ds in
-      dependency_order_dfn_run run @ go rest
+      let run, rest = take (fun d -> is_dfn d || is_dtype d) ds in
+      (* Trailing types belong to whatever follows, not to this run. *)
+      let rec drop_trailing_types = function
+        | [] -> ([], [])
+        | x :: xs ->
+          let (kept, trail) = drop_trailing_types xs in
+          if kept = [] && is_dtype x then ([], x :: trail) else (x :: kept, trail)
+      in
+      let run, trail = drop_trailing_types run in
+      let types = List.filter is_dtype run in
+      let fns = List.filter is_dfn run in
+      types @ dependency_order_dfn_run fns @ go (trail @ rest)
     | d :: _ as ds when is_dmod d ->
       let run, rest = take is_dmod ds in
       dependency_order_dmod_run run @ go rest
