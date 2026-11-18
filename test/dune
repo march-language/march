@@ -16082,3 +16082,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (alias
  (name runtest)
  (deps (alias hcr-metadata)))
+
+; ── A record's deep drop releases the record first and reads its fields only
+; when that was the last reference (march_decrc_last / march_free_last).
+; Shared releases, final releases, a shared-then-final pair, and releases
+; racing across scheduler threads: every leg must leave live_allocs() where it
+; found it and the surviving reference readable.
+; specs/progress/2026-11-17-wide-record-shared-drop-fast-path.md
+(rule
+ (targets native_record_shared_release native_record_shared_release.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_shared_release.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_shared_release
+        native/record_shared_release.march)
+   (with-stdout-to native_record_shared_release.out
+        (system "./native_record_shared_release")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_shared_release.expected native_record_shared_release.out)))

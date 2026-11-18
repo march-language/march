@@ -126,6 +126,8 @@ let gated : (string * string * compare_mode) list = [
 
   (* ── the three that were silently broken (see header) ── *)
   "tree_transform",  "104857600",   Exact;  (* FBIP showcase *)
+  (* 30M shared releases of a 48-field record, then its one final drop. *)
+  "wide_record_shared_drop", "450000225000000\n42", Exact;
   "iolist_template", "2092654",     Exact;  (* was SIGBUS *)
   "string_pipeline", "644449",      Exact;  (* was SIGBUS *)
   "deque_ops",       "20001000000", Exact;  (* was a non-terminating drain loop *)

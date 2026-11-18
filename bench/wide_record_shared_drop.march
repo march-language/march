@@ -1,0 +1,77 @@
+-- Wide-record shared-release benchmark.
+--
+-- A 48-field record (36 heap fields) is held by `main` for the whole run
+-- while a loop stores it in a short-lived `Holder` cell and drops that cell.
+-- Every iteration therefore releases a NON-final reference to the record:
+-- `__drop$Wide` runs with the count above one and must not touch the fields.
+-- The final release at the end of `main` is the one drop that owns them.
+
+mod WideRecordSharedDrop do
+  needs IO.Console
+
+type Wide = {
+  s00 : String, s01 : String, s02 : String, s03 : String, s04 : String, s05 : String,
+  s06 : String, s07 : String, s08 : String, s09 : String, s10 : String, s11 : String,
+  s12 : String, s13 : String, s14 : String, s15 : String, s16 : String, s17 : String,
+  s18 : String, s19 : String, s20 : String, s21 : String, s22 : String, s23 : String,
+  s24 : String, s25 : String, s26 : String, s27 : String, s28 : String, s29 : String,
+  s30 : String, s31 : String, s32 : String, s33 : String, s34 : String, s35 : String,
+  n00 : Int, n01 : Int, n02 : Int, n03 : Int, n04 : Int, n05 : Int, n06 : Int, n07 : Int,
+  n08 : Int, n09 : Int, n10 : Int, n11 : Int
+}
+
+type Holder = Holder(Wide, Int)
+
+fn make(seed : Int) : Wide do
+  {
+    s00: int_to_string(seed + 0), s01: int_to_string(seed + 1),
+    s02: int_to_string(seed + 2), s03: int_to_string(seed + 3),
+    s04: int_to_string(seed + 4), s05: int_to_string(seed + 5),
+    s06: int_to_string(seed + 6), s07: int_to_string(seed + 7),
+    s08: int_to_string(seed + 8), s09: int_to_string(seed + 9),
+    s10: int_to_string(seed + 10), s11: int_to_string(seed + 11),
+    s12: int_to_string(seed + 12), s13: int_to_string(seed + 13),
+    s14: int_to_string(seed + 14), s15: int_to_string(seed + 15),
+    s16: int_to_string(seed + 16), s17: int_to_string(seed + 17),
+    s18: int_to_string(seed + 18), s19: int_to_string(seed + 19),
+    s20: int_to_string(seed + 20), s21: int_to_string(seed + 21),
+    s22: int_to_string(seed + 22), s23: int_to_string(seed + 23),
+    s24: int_to_string(seed + 24), s25: int_to_string(seed + 25),
+    s26: int_to_string(seed + 26), s27: int_to_string(seed + 27),
+    s28: int_to_string(seed + 28), s29: int_to_string(seed + 29),
+    s30: int_to_string(seed + 30), s31: int_to_string(seed + 31),
+    s32: int_to_string(seed + 32), s33: int_to_string(seed + 33),
+    s34: int_to_string(seed + 34), s35: int_to_string(seed + 35), n00: seed + 0,
+    n01: seed + 1, n02: seed + 2, n03: seed + 3, n04: seed + 4, n05: seed + 5,
+    n06: seed + 6, n07: seed + 7, n08: seed + 8, n09: seed + 9, n10: seed + 10,
+    n11: seed + 11
+  }
+end
+
+fn hold(w : Wide, i : Int) : Holder do
+  Holder(w, i)
+end
+
+fn peek(h : Holder) : Int do
+  match h do
+    Holder(w, i) -> i + w.n00
+  end
+end
+
+fn churn(w : Wide, i : Int, acc : Int) : Int do
+  if i == 0 do
+    acc
+  else
+    churn(w, i - 1, acc + peek(hold(w, i)))
+  end
+end
+
+fn main(_cap_console : Cap(IO.Console)) : Unit do
+  let w = make(7)
+  let total = churn(w, 30000000, 0)
+  println(int_to_string(total))
+  println(w.s35)
+  ()
+end
+
+end

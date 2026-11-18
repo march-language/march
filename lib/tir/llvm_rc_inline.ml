@@ -3,7 +3,7 @@
     Every refcount operation in compiled code used to be an out-of-line call
     into the separately compiled runtime, which LLVM can neither inline nor
     elide. This pass rewrites a finished LLVM module so that each call to one
-    of the six runtime refcount entry points goes to an [internal alwaysinline]
+    of the seven runtime refcount entry points goes to an [internal alwaysinline]
     twin defined in the same module:
 
     {v
@@ -13,6 +13,7 @@
     march_decrc_local        -> __march_rc_decrc_local
     march_decrc_freed        -> __march_rc_decrc_freed
     march_decrc_local_freed  -> __march_rc_decrc_local_freed
+    march_decrc_last         -> __march_rc_decrc_last
     v}
 
     It works on the module TEXT, after emission, because these calls are
@@ -36,6 +37,11 @@
       the count and called the original instead, which cost one more atomic and
       a second decrement per free: binary_trees, which frees heavily, measured
       about 6% slower that way.
+    - [march_decrc_last] is the exception: at the last reference its twin
+      returns 1 and frees NOTHING, because its caller (a record's or tuple's
+      synthesized drop, lib/tir/drop.ml) still has the fields to read and frees
+      the cell itself with [march_free_last]. An underflow goes to
+      [march_rc_last_atomic], which reports it and aborts.
 
     The fast path is always atomic. The [_local] originals are atomic whenever
     they run on a scheduler worker, which includes compiled [main]; an atomic
@@ -64,6 +70,7 @@ type kind =
   | Inc
   | Dec of string                (* last-reference helper *)
   | DecFreed of string * string  (* value returned for a non-heap ptr, helper *)
+  | DecLast of string            (* underflow helper; the last reference frees nothing *)
 
 (* (runtime name, twin name, kind). The DecFreed literal is each original's
    non-heap return: march_decrc_freed returns 1, march_decrc_local_freed 0. *)
@@ -74,6 +81,7 @@ let entries = [
   "march_decrc_local",       "__march_rc_decrc_local",       Dec "march_rc_last_local";
   "march_decrc_freed",       "__march_rc_decrc_freed",       DecFreed ("1", "march_rc_last_atomic");
   "march_decrc_local_freed", "__march_rc_decrc_local_freed", DecFreed ("0", "march_rc_last_local");
+  "march_decrc_last",        "__march_rc_decrc_last",        DecLast "march_rc_last_atomic";
 ]
 
 let heap_check = {|  %i = ptrtoint ptr %p to i64
@@ -151,11 +159,40 @@ nonheap:
   ret i64 %s
 }
 |} twin heap_check immortal helper orig nonheap_val
+  | DecLast helper ->
+    (* [last] returns 1 with the cell intact. [prev] < 1 is an underflow: the
+       helper reports it and aborts, so the [ret] after it is never reached. *)
+    Printf.sprintf {|define internal i64 @%s(ptr %%p) alwaysinline nounwind {
+entry:
+%sfast:
+  %%rc = load atomic i64, ptr %%p monotonic, align 8
+  %%hi = ashr i64 %%rc, %s
+  %%imm = icmp sgt i64 %%hi, 0
+  br i1 %%imm, label %%nonheap, label %%dec
+dec:
+  %%prev = atomicrmw sub ptr %%p, i64 1 acq_rel, align 8
+  %%live = icmp sgt i64 %%prev, 1
+  br i1 %%live, label %%nonheap, label %%last
+last:
+  %%one = icmp eq i64 %%prev, 1
+  br i1 %%one, label %%own, label %%under
+own:
+  ret i64 1
+under:
+  call void @%s(ptr %%p, i64 %%prev)
+  ret i64 0
+slow:
+  %%r2 = call i64 @%s(ptr %%p)
+  ret i64 %%r2
+nonheap:
+  ret i64 0
+}
+|} twin heap_check immortal helper orig
 
 let declaration (orig, _, kind) =
   match kind with
   | Inc | Dec _ -> Printf.sprintf "declare void @%s(ptr)" orig
-  | DecFreed _ -> Printf.sprintf "declare i64 @%s(ptr)" orig
+  | DecFreed _ | DecLast _ -> Printf.sprintf "declare i64 @%s(ptr)" orig
 
 (* These scan every line of the module, so they allocate nothing on a line
    with no match: a hot-reload build's module is large enough that a

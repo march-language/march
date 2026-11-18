@@ -96,6 +96,17 @@ void march_decrc(void *p);
 int64_t march_decrc_freed(void *p);
 ```
 
+#### `march_decrc_last(void *p)` and `march_free_last(void *p)`
+- **Purpose**: `march_decrc_last` decrements RC and returns 1 if the caller held the last reference, WITHOUT freeing the object; `march_free_last` then frees it
+- **Returns**: 1 (last reference, object still allocated and solely owned by the caller) or 0 (still shared, immortal, or not a heap pointer)
+- **Use case**: The synthesized deep drop of a record or tuple (`lib/tir/drop.ml`): it reads the owning fields only on the last-reference path, so a shared release touches only the header
+- **Thread-safe**: Yes
+
+```c
+int64_t march_decrc_last(void *p);
+void    march_free_last(void *p);
+```
+
 #### `march_free(void *p)`: Lines 42-44
 - **Purpose**: Direct free (bypass reference counting)
 - **Rarely used**: Most deallocation goes through `march_decrc()`

@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **Releasing a shared record no longer reads its fields.** A compiled record or tuple
+  that owns heap values is released by a generated helper. That helper used to load
+  every heap field before it decremented the reference count, even when other
+  references remained and the fields were not needed. It now decrements first and
+  reads the fields only when it held the last reference. On a 48-field record
+  released 30 million times while still shared, the run takes about 25% less CPU
+  time (`bench/wide_record_shared_drop.march`). Programs behave the same.
+
 ### Added
 
 - **Run-time authority (object capabilities, phase 4).** Every capability operation is now
@@ -1186,6 +1196,13 @@ git log is authoritative for exact commits.
   results, and on `--target js` the capability policy ran it at every launch. The interpreter
   was already right.
 
+- **`Crypto.verify_password` no longer crashes on a stored hash with an iteration count of
+  zero or below.** A compiled program panicked ("no pattern of this match matched") where the
+  interpreter returned `false`; both now return `false`, so one bad row in a password table
+  cannot crash the login path. The `pbkdf2_sha256` builtin now returns the same
+  `Err("pbkdf2_sha256: invalid parameters")` on both backends for an iteration count of zero or
+  below, or an output length outside 1 to 1024 bytes; the interpreter used to run one iteration
+  and return `Ok`.
 - **A function calling a helper defined below a `type` declaration got the wrong type.**
   The type checker orders a module's functions callee-first, but a `type` declaration
   between a caller and its helper ended that ordering, and the caller's result type was left

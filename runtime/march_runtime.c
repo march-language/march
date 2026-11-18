@@ -1254,6 +1254,63 @@ void march_rc_last_local(void *p, int64_t prev) {
     free(p);
 }
 
+/* Release one reference and report whether it was the LAST one, WITHOUT
+ * freeing the cell.  Returns 1 when the caller held the only reference: the
+ * count is now zero, no other thread can reach the cell, and the caller owns
+ * its storage outright.  It must read whatever it needs from the cell and then
+ * hand it to march_free_last.  Returns 0 when other references remain (the
+ * caller must not touch the cell again), for an immortal cell, and for a value
+ * that is not a heap pointer.
+ *
+ * This is what a synthesized deep drop (lib/tir/drop.ml) releases a record or
+ * tuple with.  march_decrc_freed frees the shell at the last decrement, so a
+ * drop built on it has to load every child field BEFORE it decrements, on the
+ * shared path too, where they are thrown away: a 105-field record paid 75
+ * loads and spills per shared release.  Deferring the free moves the loads
+ * behind the "was last" branch; the shared path is the header test and one
+ * atomic subtract.
+ *
+ * Unconditionally atomic, like march_decrc_freed, which it replaces at those
+ * sites: the count is decremented the same way at every site that touches the
+ * object (see march_decrc_local_freed above for what mixing policies costs).
+ * The trace event is the one march_decrc_freed emits ("free" at the last
+ * reference), so a gc trace is unchanged; march_free_last emits nothing. */
+int64_t march_decrc_last(void *p) {
+    if (!IS_HEAP_PTR(p)) return 0;
+    if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return 0;
+    int32_t tag  = ((march_hdr *)p)->tag;
+    int64_t prev = atomic_fetch_sub_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (gc_trace_on())
+        gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
+    if (prev == 1) return 1;
+    if (prev < 1) {
+        fprintf(stderr,
+                "march: RC underflow in march_decrc_last (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
+        march_abort(__func__);
+    }
+    return 0;
+}
+
+/* Free a cell whose count march_decrc_last just took to zero: the tail of a
+ * last-reference release (destructor / string stats for a reserved cell kind,
+ * the live gauge, the free), with no decrement and no trace event. */
+void march_free_last(void *p) {
+#ifdef MARCH_RC_CHECKS
+    /* Sanitizer builds: the count must be exactly zero here.  Anything else
+     * means the cell was resurrected or this is not the march_decrc_last
+     * owner, and the free below would pull it out from under a live holder. */
+    if (march_rc_peek(p) != 0) {
+        fprintf(stderr,
+                "march: march_free_last of a cell at %p whose count is %lld, not 0 — aborting\n",
+                p, (long long)march_rc_peek(p));
+        march_abort(__func__);
+    }
+#endif
+    march_rc_last_atomic(p, 1);
+}
+
 /* ── IOList hash ─────────────────────────────────────────────────────── */
 
 /* IOList variant tags (must match iolist.march stdlib):
