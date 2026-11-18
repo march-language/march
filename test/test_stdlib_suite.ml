@@ -12969,6 +12969,71 @@ let test_compress_decode_error_structured_both_backends () =
   | None -> ()
   | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
 
+(* A stored hash is data from a database, so verify_password must be total:
+   every malformed hash returns false, on both backends, and never panics.
+   Until 2026-11-18 an iteration field of 0 or below made the compiled
+   runtime's pbkdf2_sha256 return Err, which verify_password's Ok-only match
+   did not cover (panic "no pattern of this match matched"), while the
+   interpreter's pbkdf2_sha256 silently ran one iteration and returned Ok.
+   Both builtins now reject iterations <= 0 (and dklen outside 1..1024) with
+   the same Err, which the last lines pin. Iteration counts are kept small. *)
+let test_crypto_verify_password_malformed_both_backends () =
+  let src =
+    "mod VerifyMalformed do\n\
+    \  needs IO.Console\n\
+    \  pfn report(label, stored) do\n\
+    \    println(label ++ \" \" ++ to_string(Crypto.verify_password(\"hunter2\", stored)))\n\
+    \  end\n\
+    \  pfn run_kdf(label, iters, dklen) do\n\
+    \    match pbkdf2_sha256(\"pw\", Bytes.from_string(\"salt\"), iters, dklen) do\n\
+    \    Ok(b) -> println(label ++ \" ok \" ++ int_to_string(Bytes.length(b)))\n\
+    \    Err(e) -> println(label ++ \" err \" ++ e)\n\
+    \    end\n\
+    \  end\n\
+    \  fn main(_cap_console : Cap(IO.Console)) do\n\
+    \    let salt = \"30313233343536373839616263646566\"\n\
+    \    let dig = \"a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768\"\n\
+    \    report(\"good\", \"pbkdf2:sha256:1000:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"wrong_iters\", \"pbkdf2:sha256:999:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"zero\", \"pbkdf2:sha256:0:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"one\", \"pbkdf2:sha256:1:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"negative\", \"pbkdf2:sha256:-5:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"non_numeric\", \"pbkdf2:sha256:abc:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"empty_iters\", \"pbkdf2:sha256::\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"overflow\", \"pbkdf2:sha256:99999999999999999999999:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"bad_salt\", \"pbkdf2:sha256:1000:zz:\" ++ dig)\n\
+    \    report(\"odd_salt\", \"pbkdf2:sha256:1000:303:\" ++ dig)\n\
+    \    report(\"bad_hash\", \"pbkdf2:sha256:1000:\" ++ salt ++ \":nothex\")\n\
+    \    report(\"few_fields\", \"pbkdf2:sha256:1000:\" ++ salt)\n\
+    \    report(\"extra_field\", \"pbkdf2:sha256:1000:\" ++ salt ++ \":\" ++ dig ++ \":x\")\n\
+    \    report(\"wrong_algo\", \"pbkdf2:sha512:1000:\" ++ salt ++ \":\" ++ dig)\n\
+    \    report(\"empty\", \"\")\n\
+    \    run_kdf(\"iters0\", 0, 32)\n\
+    \    run_kdf(\"iters_neg\", -3, 32)\n\
+    \    run_kdf(\"dklen0\", 1, 0)\n\
+    \    run_kdf(\"dklen_big\", 1, 2000)\n\
+    \    run_kdf(\"valid\", 1, 32)\n\
+    \  end\n\
+     end\n"
+  in
+  let expected =
+    "good true\nwrong_iters false\nzero false\none false\nnegative false\n\
+     non_numeric false\nempty_iters false\noverflow false\nbad_salt false\n\
+     odd_salt false\nbad_hash false\nfew_fields false\nextra_field false\n\
+     wrong_algo false\nempty false\n\
+     iters0 err pbkdf2_sha256: invalid parameters\n\
+     iters_neg err pbkdf2_sha256: invalid parameters\n\
+     dklen0 err pbkdf2_sha256: invalid parameters\n\
+     dklen_big err pbkdf2_sha256: invalid parameters\n\
+     valid ok 32" in
+  let (interpreted, compiled) =
+    compiled_and_interpreted_stdout ~tag:"march_verifypw" ~src_text:src
+  in
+  Alcotest.(check string) "interpreted: malformed hashes verify false" expected interpreted;
+  match compiled with
+  | None -> ()
+  | Some out -> Alcotest.(check string) "compiled matches interpreted" expected out
+
 (* Is this machine's ASAN runtime able to run ANY sanitized binary?  Compiles
    and runs a C hello-world with no March code in it; [true] means even that
    hangs, so a March binary hanging under ASAN says nothing about March.  Used
@@ -15454,6 +15519,8 @@ let stdlib_suites =
         Alcotest.test_case "base64 round-trip"          `Quick test_crypto_stdlib_base64_roundtrip;
         Alcotest.test_case "hash_password/verify"       `Quick test_crypto_password_hash_verify;
         Alcotest.test_case "verify rejects wrong"       `Quick test_crypto_password_wrong;
+        Alcotest.test_case "verify malformed hash is false, compiled + interpreted" `Slow
+          test_crypto_verify_password_malformed_both_backends;
       ]);
       ("compress stdlib", [
         Alcotest.test_case "parse"                              `Quick test_compress_parse_ok;

@@ -1136,6 +1136,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **`Crypto.verify_password` no longer crashes on a stored hash with an iteration count of
+  zero or below.** A compiled program panicked ("no pattern of this match matched") where the
+  interpreter returned `false`; both now return `false`, so one bad row in a password table
+  cannot crash the login path. The `pbkdf2_sha256` builtin now returns the same
+  `Err("pbkdf2_sha256: invalid parameters")` on both backends for an iteration count of zero or
+  below, or an output length outside 1 to 1024 bytes; the interpreter used to run one iteration
+  and return `Ok`.
 - **A function calling a helper defined below a `type` declaration got the wrong type.**
   The type checker orders a module's functions callee-first, but a `type` declaration
   between a caller and its helper ended that ordering, and the caller's result type was left
