@@ -1156,6 +1156,31 @@ let test_repl_floats_jit () =
     check_float_session ~label:"JIT"
       (run_repl_session ~env_prefix:"" float_session)
 
+(* ── A stdlib Int result printed tagged (2026-11-11) ──────────────────
+   specs/progress/2026-11-11-repl-int-result-printed-tagged.md.
+   [Presence.entry_count] calls [list_len_pr], defined below a [type]
+   declaration, and the checker gave it the type [PresenceEntry -> b]: the
+   REPL then printed its Int result as the tagged word (5 for 2), and
+   [let k = ...] followed by [k] segfaulted. *)
+let stdlib_int_result_session =
+  [ {|Presence.entry_count(Presence.make_entry([Presence.make_meta(1, "{}"), Presence.make_meta(2, "{}")]))|};
+    {|let k = Presence.entry_count(Presence.make_entry([]))|};
+    "k + 40" ]
+
+let test_repl_stdlib_int_result_jit () =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    let (out, code) = run_repl_session ~env_prefix:"" stdlib_int_result_session in
+    Alcotest.(check int)
+      (Printf.sprintf "REPL exit code (output: %s)" out) 0 code;
+    List.iter (fun (needle, what) ->
+      if not (contains ~needle out) then
+        Alcotest.failf "expected %s (%s) in session output, got:\n%s" needle what out)
+      [ "= 2\n", "entry_count of two metas, untagged";
+        "val k = 0", "the let binding";
+        "= 40", "k read back from its slot" ]
+  end
+
 (* ── Local REPL fragment leaks (2026-10-11) ───────────────────────────
    specs/progress/2026-10-08-repl-jit-fragment-leaks.md.  The local REPL's
    fragments ran Perceus without [Drop.run], so a [dec_rc] of a list the
@@ -1473,6 +1498,8 @@ let () =
         test_repl_stdlib_ctor_tags_interp;
       Alcotest.test_case "Floats print and survive the v slot (JIT)" `Slow
         test_repl_floats_jit;
+      Alcotest.test_case "stdlib Int result prints untagged and binds (JIT)" `Slow
+        test_repl_stdlib_int_result_jit;
       Alcotest.test_case "REPL fragments leak nothing per input (JIT)" `Slow
         test_repl_fragment_leaks_jit;
       Alcotest.test_case "Floats print and survive the v slot (interpreter)"
