@@ -53,7 +53,7 @@
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
 ; and alias both) from `dune runtest`, along with run_cap_conformance,
-; run_errors and test_jit, which CI runs in the `compiler` and `forge` shards. Unset --
+; run_errors and test_jit, which CI runs in the `forge` shard. Unset --
 ; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
@@ -15356,9 +15356,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
 (test
  (name run_cap_conformance)
- ; Runs in CI's `compiler` shard (ci.yml), not `rest`: the runtimes per
- ; fixture cost ~14 CPU-minutes there (four of them, before the REPL mode),
- ; which pushed `rest` past its timeout.
+ ; Runs in CI's `forge` shard (ci.yml), not `rest` or `compiler`: its five
+ ; runtimes per fixture (~8 min there) pushed `rest`, then `compiler`
+ ; (beside run_compiler), past the 75-minute step timeout.
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above

@@ -193,7 +193,9 @@ jobs:
             # children print whole, then one summary line with the slowest
             # groups. Not a new shard: no extra runner from the 20-slot pool.
             refinecheck) MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-test_refinecheck ;;
-            compiler)    dune build @test/runtest-run_compiler @test/runtest-run_cap_conformance ;;
+            # run_cap_conformance (~8 min on this runner) runs in `forge`:
+            # beside run_compiler (~60 min) it took this step past 75.
+            compiler)    dune build @test/runtest-run_compiler ;;
             rest)
               # `dune runtest` minus forge/ (the `forge` shard). A dune file
               # declaring tests outside test/, lsp/ and forge/ would run in
@@ -210,7 +212,7 @@ jobs:
             # step's 75 and timed out on every slow runner (November 2026);
             # `forge` ran 13-19 min. With run_errors alone moved, `rest` took
             # 47 and `forge` 40 (PR #1271).
-            forge)       dune build @forge/runtest @test/runtest-run_errors @test/runtest-test_jit ;;
+            forge)       dune build @forge/runtest @test/runtest-run_errors @test/runtest-test_jit @test/runtest-run_cap_conformance ;;
             # macOS skips the suites whose answer does not depend on the OS
             # (refinecheck, golden diagnostics, LSP; see "CI sharding" in
             # test/dune), and runs only the OS-sensitive groups listed in
