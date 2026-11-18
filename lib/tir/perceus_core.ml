@@ -634,8 +634,9 @@ let discarded_call_result_ty (env : env) (e : Tir.expr) : Tir.ty option =
     means for the rest of the pass, this predicate states the requirement
     directly and conservatively: anything that is not an EField source
     disqualifies the drop. *)
-let rec used_only_as_field_source ?(releases_ok = false) (name : string) (e : Tir.expr) : bool =
-  let recur = used_only_as_field_source ~releases_ok in
+let rec used_only_as_field_source ?(releases_ok = false)
+    ?(borrowed : (string -> int -> bool) option) (name : string) (e : Tir.expr) : bool =
+  let recur = used_only_as_field_source ~releases_ok ?borrowed in
   let atom_hits = function
     | Tir.AVar w -> String.equal w.Tir.v_name name
     | _ -> false
@@ -646,7 +647,18 @@ let rec used_only_as_field_source ?(releases_ok = false) (name : string) (e : Ti
   | Tir.EField (Tir.AVar w, _) when String.equal w.Tir.v_name name -> true
   | Tir.EField (a, _) -> not (atom_hits a)
   | Tir.EAtom a -> not (atom_hits a)
-  | Tir.EApp (f, args) -> not (String.equal f.Tir.v_name name) && atoms_ok args
+  (* [~borrowed]: an argument at a BORROWED position of a known callee is a
+     read too -- the callee neither keeps nor releases it.  Only for a caller
+     that also tracks releases per path: when the call is the record's last
+     use Perceus releases it right after ([post_dec_vars]), and that release,
+     not the call, is what ends the record's life. *)
+  | Tir.EApp (f, args) ->
+    not (String.equal f.Tir.v_name name)
+    && (match borrowed with
+        | Some is_b ->
+          not (List.exists (fun (i, a) -> atom_hits a && not (is_b f.Tir.v_name i))
+                 (List.mapi (fun i a -> (i, a)) args))
+        | None -> atoms_ok args)
   | Tir.ECallPtr (a, args) -> atoms_ok (a :: args)
   | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     atoms_ok atoms
@@ -733,7 +745,8 @@ let rec releases_var (name : string) (e : Tir.expr) : bool =
     last-use transfer has no inc, so it still counts as taken.  [None]-like
     answers (an alias of [name], a match on it, a capture, too many paths)
     are [false]: the conservative verdict, a leak, never a double release. *)
-let path_counts (name : string) (e : Tir.expr) : (int * int) list option =
+let path_counts ?(borrowed : (string -> int -> bool) option)
+    (name : string) (e : Tir.expr) : (int * int) list option =
   let exception Unknown in
   let hits = function Tir.AVar w -> String.equal w.Tir.v_name name | _ -> false in
   let count atoms = List.length (List.filter hits atoms) in
@@ -749,7 +762,16 @@ let path_counts (name : string) (e : Tir.expr) : (int * int) list option =
     | Tir.EField _ -> [ (0, 0) ]
     | Tir.EUpdate (_, fields) -> [ (count (List.map snd fields), 0) ]
     | Tir.EAtom a -> [ (count [ a ], 0) ]
-    | Tir.EApp (_, args) -> [ (count args, 0) ]
+    (* An argument at a BORROWED position of a known callee is not a
+       consuming use: the callee hands nothing over and releases nothing.
+       Counting it as one made a record passed to a read-only helper and read
+       again afterwards look "handed over", so no path dropped it. *)
+    | Tir.EApp (f, args) ->
+      (match borrowed with
+       | Some is_b ->
+         [ (List.length (List.filteri (fun i a ->
+               hits a && not (is_b f.Tir.v_name i)) args), 0) ]
+       | None -> [ (count args, 0) ])
     | Tir.ECallPtr (a, args) -> [ (count (a :: args), 0) ]
     | Tir.ETuple atoms | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) -> [ (count atoms, 0) ]
     | Tir.ERecord fields -> [ (count (List.map snd fields), 0) ]
@@ -776,8 +798,8 @@ let path_counts (name : string) (e : Tir.expr) : (int * int) list option =
 (** [path_counts]: for each path through [e], the number of consuming uses of
     [name] and of [inc_rc]s of it, or [None] when [e] aliases, matches on or
     captures [name] (or has too many paths to list). *)
-let covered_by_incs (name : string) (e : Tir.expr) : bool =
-  match path_counts name e with
+let covered_by_incs ?borrowed (name : string) (e : Tir.expr) : bool =
+  match path_counts ?borrowed name e with
   | Some paths -> List.exists (fun (c, _) -> c > 0) paths
                   && List.for_all (fun (c, i) -> c <= i) paths
   | None -> false
@@ -981,6 +1003,11 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
     | Tir.EApp (f, args) ->
       not (String.equal f.Tir.v_name name)
       && not (reads_borrowed_projection f.Tir.v_name args)
+      (* [v] itself at a borrowed position, with no release after the call
+         (one would have been found above): the call still reads it. *)
+      && not (List.exists (function
+          | Tir.AVar w -> Hashtbl.mem owners w.Tir.v_name
+          | _ -> false) args)
     | Tir.ECallPtr (Tir.AVar f, args) ->
       (* Indirect calls consume their arguments, except an extern, whose
          parameter ownership comes from the borrow map. *)
@@ -1006,7 +1033,7 @@ let drop_agg_at_tails (env : env) (v : Tir.var) (e : Tir.expr) : Tir.expr option
      paths disagree, or that aliases or captures [v], leaves the rest of the
      path alone: a leak at worst. *)
   let delta (x : Tir.expr) : int option =
-    match path_counts name x with
+    match path_counts ~borrowed:(Borrow.is_borrowed env.borrow_map) name x with
     | Some ((c, i) :: rest) when List.for_all (fun (c', i') -> i' - c' = i - c) rest -> Some (i - c)
     | Some [] -> Some 0
     | _ -> None

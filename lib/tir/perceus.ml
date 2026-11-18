@@ -630,12 +630,16 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
        non-tail subexpression ([e1] of a let or seq, possibly under a case)
        still counts for the whole rest of the path: conservative, a leak on
        the paths that did not take it, never a double release. *)
+    (* An argument at a borrowed position of a known callee is a read, like a
+       field projection: see [used_only_as_field_source]'s [~borrowed]. *)
+    let is_b = Borrow.is_borrowed env.borrow_map in
     let not_taken_in e live =
       List.filter (fun p ->
           not (releases_var p.Tir.v_name e
-               || not (used_only_as_field_source ~releases_ok:true p.Tir.v_name e
+               || not (used_only_as_field_source ~releases_ok:true ~borrowed:is_b
+                         p.Tir.v_name e
                        (* consumed only through dups: still ours *)
-                       || covered_by_incs p.Tir.v_name e)))
+                       || covered_by_incs ~borrowed:is_b p.Tir.v_name e)))
         live
     in
     (* [aliases] holds the heap values on the current path that still point
