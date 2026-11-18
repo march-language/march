@@ -1186,6 +1186,12 @@ git log is authoritative for exact commits.
   results, and on `--target js` the capability policy ran it at every launch. The interpreter
   was already right.
 
+- **A function calling a helper defined below a `type` declaration got the wrong type.**
+  The type checker orders a module's functions callee-first, but a `type` declaration
+  between a caller and its helper ended that ordering, and the caller's result type was left
+  free. `let s : String = count(xs)` was accepted when `count` returns an `Int`. In the stdlib
+  this hit `Presence.entry_count`: the REPL printed its result as the tagged word (`5` for 2),
+  and reading a `let` of it crashed the REPL.
 - **Payload atoms (`:ok(7)`) work compiled.** Matching one that arrived through a function
   parameter (`fn describe(t) do match t do :ok(n) -> n ... end end`) was an internal compiler
   error. `to_string(:ok(7))` printed `:<atom>` and `:ok(7) == :ok(7)` was `false`. All three now
