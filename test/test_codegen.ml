@@ -1716,6 +1716,8 @@ let test_record_drop_releases_before_loading_fields () =
   in
   let pos pat = try Some (Str.search_forward (Str.regexp_string pat) drop_ir 0)
     with Not_found -> None in
+  let re_pos re = try Some (Str.search_forward (Str.regexp re) drop_ir 0)
+    with Not_found -> None in
   let last_pos pat = try Some (Str.search_backward (Str.regexp_string pat) drop_ir
                                  (String.length drop_ir - 1))
     with Not_found -> None in
@@ -1728,7 +1730,7 @@ let test_record_drop_releases_before_loading_fields () =
     true (before (last_pos "getelementptr") (pos "@march_free_last("));
   Alcotest.(check bool)
     "record drop: the children are released after the shell is freed"
-    true (before (pos "@march_free_last(") (pos "@march_decrc("));
+    true (before (pos "@march_free_last(") (re_pos "call void @\\(march_decrc\\|__drop\\)"));
   Alcotest.(check bool)
     "record drop: does not use march_decrc_freed, which frees the shell before the fields are read"
     false (ir_contains drop_ir "@march_decrc_freed")
@@ -18053,6 +18055,8 @@ declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
 declare i64  @march_decrc_freed(ptr %p)
+declare i64  @march_decrc_last(ptr %p)
+declare void @march_free_last(ptr %p)
 declare void @march_incrc_local(ptr %p)
 declare void @march_decrc_local(ptr %p)
 declare i64  @march_decrc_local_freed(ptr %p)
