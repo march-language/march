@@ -69,7 +69,7 @@ mod Task do
       let t = Authority.must(Task.async_cancellable(fn () -> 42, tok))
       task_await(t)
   """
-  fn async_cancellable(f, token : CancelToken) do
+  fn async_cancellable(f, token) do
     let? _ = Authority.check("IO.Spawn", "")
     Ok(task_spawn_with_cancel(fn _ -> f(), token))
   end
