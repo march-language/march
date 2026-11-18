@@ -1422,7 +1422,19 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
           Tir.ESeq (acc, decrc_for env v (Tir.AVar v))
         ) e' post_dec_vars
       | _ ->
+        (* A function that returns a closure carries an UNCURRIED type:
+           [fn mk(c : R) : Int -> Int] is [TFn ([R; Int], Int)] and is called
+           with one argument.  The result of that call is the remaining
+           [TFn ([Int], Int)], not [Int]: typing the temp [Int] made codegen
+           treat the closure pointer as a scalar (SIGSEGV on the first
+           call through it). *)
+        let n_args = match e with
+          | Tir.EApp (_, args) -> List.length args
+          | _ -> max_int
+        in
         let call_ret_ty = match f.Tir.v_ty with
+          | Tir.TFn (ps, r) when List.length ps > n_args ->
+            Tir.TFn (List.filteri (fun i _ -> i >= n_args) ps, r)
           | Tir.TFn (_, r) -> r
           | _ -> Tir.TVar "_"
         in

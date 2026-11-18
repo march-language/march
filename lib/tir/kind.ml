@@ -314,13 +314,44 @@ let record_fields_short (k_table : table) (n : string)
        (ASAN: __drop$CnState then __drop$HEntry_String_Entry on one cell).
        The structural record a use site carries spells them bare, so do the
        same here. *)
+    (* Two or more types (records or variants) end in [short]: the bare name
+       is ambiguous and resolves to nothing. *)
+    let short_name_shared (short : string) : bool =
+      let sfx = "." ^ short in
+      let sl = String.length sfx in
+      let ends q =
+        let ql = String.length q in
+        String.equal q short
+        || (ql > sl && String.equal (String.sub q (ql - sl) sl) sfx) in
+      List.length (List.filter (function
+          | Tir.TDRecord (q, _) | Tir.TDVariant (q, _) -> ends q
+          | _ -> false) defs) > 1 in
     let rec bare (t : Tir.ty) : Tir.ty =
       match t with
       | Tir.TCon (q, args) ->
         let short = match String.rindex_opt q '.' with
           | Some i -> String.sub q (i + 1) (String.length q - i - 1)
           | None -> q in
-        Tir.TCon (short, List.map bare args)
+        (* A field that is another module's RECORD whose short name several
+           types share ([driver : SwimDriver.State], with Swim.State and
+           DistSupervisor.State also declared): the bare [State] resolves to
+           nothing, so the field was released shallowly and everything the
+           inner record owned leaked (ClusterNode's old SWIM driver, one per
+           tick, once the actor handler rather than an owning callee dropped
+           the state).  A record has one layout under either spelling, so
+           name it by its structure, which is also what a use site carries. *)
+        let ambiguous_record =
+          if args <> [] || String.equal short q then None
+          else match record_fields k_table q with
+            | Some fs when record_fields k_table short = None
+                           && short_name_shared short -> Some fs
+            | _ -> None in
+        (match ambiguous_record with
+         | Some fs ->
+           Tir.TRecord
+             (List.sort (fun (x, _) (y, _) -> String.compare x y)
+                (List.map (fun (k, v) -> (k, bare v)) fs))
+         | None -> Tir.TCon (short, List.map bare args))
       | Tir.TFn (ps, r) -> Tir.TFn (List.map bare ps, bare r)
       | Tir.TTuple ts -> Tir.TTuple (List.map bare ts)
       | Tir.TRecord fs -> Tir.TRecord (List.map (fun (k, v) -> (k, bare v)) fs)

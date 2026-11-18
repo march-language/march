@@ -13,4 +13,5 @@ mutual = 5000, flat: true
 relay = 10000, flat: true
 reread = 97788, flat: true
 moved = 25043894, flat: true
+closure = 68894, flat: true
 kept: 5 2 12

@@ -28,6 +28,13 @@ git log is authoritative for exact commits.
   reads the fields only when it held the last reference. On a 48-field record
   released 30 million times while still shared, the run takes about 25% less CPU
   time (`bench/wide_record_shared_drop.march`). Programs behave the same.
+- **A function that only reads a record parameter no longer counts a reference to it.**
+  In compiled code every record parameter used to be owned: the caller added a
+  reference before the call and the function released it on return. A record
+  parameter the function only reads is now borrowed, so neither happens. A function
+  that keeps the record (returns it, stores it, captures it in a closure) or a
+  recursive loop that builds a new record each iteration still owns it. Tuple
+  parameters are unchanged. Programs behave the same.
 
 ### Added
 

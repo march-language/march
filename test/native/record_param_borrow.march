@@ -26,6 +26,9 @@
 --              on every iteration and still released once
 --   reread     a local record is lent to a borrowing helper, then read again
 --   moved      one arm returns the record itself, so the parameter is owned
+--   closure    a borrowing helper returns a closure over a scalar field and
+--              another over heap fields; the temporary record is released
+--              after the call and the closure is still callable
 --
 -- `result` is printed so no loop is dead-code eliminated.
 mod Main do
@@ -203,6 +206,24 @@ mod Main do
     end
   end
 
+  -- closure
+  pfn scalar_clo(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Int -> Int do
+    let t = st.total
+    fn x -> x + t
+  end
+  pfn heap_clo(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Int -> Int do
+    let nm = st.name
+    let xs = st.items
+    fn x -> x + string_length(nm) + List.length(xs)
+  end
+  pfn leg_closure(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = scalar_clo(fresh(n))
+      let g = heap_clo(fresh(n))
+      leg_closure(n - 1, acc + f(1) - n + g(0))
+    end
+  end
+
   pfn flat(label : String, before : Int, result : Int) : () do
     let grew = live_allocs() - before
     println(label ++ " = " ++ int_to_string(result) ++ ", flat: " ++ bool_to_string(grew < 100 && grew > 0 - 100))
@@ -257,6 +278,9 @@ mod Main do
     let q = live_allocs()
     let r_q = leg_moved(n, 0)
     flat("moved", q, r_q)
+    let u = live_allocs()
+    let r_u = leg_closure(n, 0)
+    flat("closure", u, r_u)
     -- The record handed to the read loop is still whole.
     println("kept: " ++ keep.name ++ " " ++ int_to_string(List.length(keep.items)) ++ " " ++ tag_of(keep))
   end

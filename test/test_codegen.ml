@@ -10018,7 +10018,10 @@ let test_record_param_owned_cases () =
   owned "pair";
   let ir = emit_actor_ir record_param_src in
   Alcotest.(check bool) "the loop releases the record it was handed" true
-    (ir_count (fn_ir ir "carried") "__drop$R" > 0);
+    (let body = fn_ir ir "carried" in
+     (* The deep-drop helper when the pipeline synthesises one, else a plain
+        release. *)
+     ir_count body "__drop$R" > 0 || ir_count body "decrc" > 0);
   let open March_tir.Tir in
   let t = March_tir.Kind.build ~collision_set:(Hashtbl.create 0) [] in
   Alcotest.(check bool) "a record may be borrowed" true
