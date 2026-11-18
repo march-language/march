@@ -195,6 +195,9 @@ jobs:
             refinecheck) MARCH_TEST_PROCS=$(nproc) dune build @test/runtest-test_refinecheck ;;
             # run_cap_conformance (~8 min on this runner) runs in `forge`:
             # beside run_compiler (~60 min) it took this step past 75.
+            # The run-time authority suites are their own runner
+            # (run_authority), an ordinary stanza the `rest` shard runs:
+            # in run_compiler they took this step past 75 min too.
             compiler)    dune build @test/runtest-run_compiler ;;
             rest)
               # `dune runtest` minus forge/ (the `forge` shard). A dune file
