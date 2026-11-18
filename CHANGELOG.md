@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **Releasing a shared record no longer reads its fields.** A compiled record or tuple
+  that owns heap values is released by a generated helper. That helper used to load
+  every heap field before it decremented the reference count, even when other
+  references remained and the fields were not needed. It now decrements first and
+  reads the fields only when it held the last reference. On a 48-field record
+  released 30 million times while still shared, the run takes about 25% less CPU
+  time (`bench/wide_record_shared_drop.march`). Programs behave the same.
+
 ### Added
 
 - **Warnings for logical races.** March has no memory-level data races, but two kinds

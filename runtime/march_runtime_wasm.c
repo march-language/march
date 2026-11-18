@@ -90,6 +90,8 @@ void *march_alloc(int64_t sz) {
 void  march_incrc(void *p) { (void)p; }
 void  march_decrc(void *p) { (void)p; }
 int64_t march_decrc_freed(void *p) { (void)p; return 0; }
+int64_t march_decrc_last(void *p) { (void)p; return 0; }
+void    march_free_last(void *p) { (void)p; }
 void  march_incrc_local(void *p) { (void)p; }
 void  march_decrc_local(void *p) { (void)p; }
 void  march_clo_param_own(void *p) { (void)p; }

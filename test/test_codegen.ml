@@ -1673,6 +1673,66 @@ let test_deep_drop_of_borrowed_container () =
     "deep drop: walks the spine as a TCO loop, not C-stack recursion (a 150K-element list must not overflow)"
     true (ir_contains drop_ir "br label %tco_loop")
 
+(** A record's deep drop releases the record FIRST and loads its fields only
+    on the path where that was the last reference.  It used to load every heap
+    field and then call [march_decrc_freed] (which frees the shell, so the
+    loads had to come first): a shared release of a 105-field record read and
+    spilled 75 fields it then threw away, a third of the main thread's samples
+    in the program that showed it
+    (specs/progress/2026-11-17-wide-record-shared-drop-fast-path.md).
+
+    Pinned on the emitted helper: [march_decrc_last] precedes every field
+    load, the shell is freed with [march_free_last] after the last load and
+    before the first child release, and [march_decrc_freed] is gone (it would
+    free the shell ahead of the loads). *)
+let test_record_drop_releases_before_loading_fields () =
+  let ir = emit_tco_opt_ir {|mod Test do
+  needs IO.Console
+    type Wide = { a : String, b : String, c : List(String), n : Int }
+    type Holder = Holder(Wide, Int)
+    fn make(i : Int) : Wide do
+      { a: int_to_string(i), b: int_to_string(i + 1), c: Cons(int_to_string(i), Nil), n: i }
+    end
+    fn peek(h : Holder) : Int do
+      match h do
+        Holder(w, i) -> i + w.n
+      end
+    end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do
+      let w = make(3)
+      let x = peek(Holder(w, 1))
+      Authority.ignore(println(int_to_string(x + string_length(w.a))))
+    end
+  end|} in
+  let drop_ir =
+    let rec find from =
+      let start = Str.search_forward (Str.regexp "define [^\n]*@__drop\\$[^\n]*{") ir from in
+      let stop = Str.search_forward (Str.regexp "\n}") ir start in
+      let body = String.sub ir start (stop - start) in
+      if ir_contains body "@march_decrc_last(" then body else find stop
+    in
+    try find 0 with Not_found ->
+      Alcotest.fail "no synthesized record drop calls march_decrc_last"
+  in
+  let pos pat = try Some (Str.search_forward (Str.regexp_string pat) drop_ir 0)
+    with Not_found -> None in
+  let last_pos pat = try Some (Str.search_backward (Str.regexp_string pat) drop_ir
+                                 (String.length drop_ir - 1))
+    with Not_found -> None in
+  let before a b = match a, b with Some a, Some b -> a < b | _ -> false in
+  Alcotest.(check bool)
+    "record drop: the release precedes every field load (a shared release reads only the header)"
+    true (before (pos "@march_decrc_last(") (pos "getelementptr"));
+  Alcotest.(check bool)
+    "record drop: the shell is freed after the last field load"
+    true (before (last_pos "getelementptr") (pos "@march_free_last("));
+  Alcotest.(check bool)
+    "record drop: the children are released after the shell is freed"
+    true (before (pos "@march_free_last(") (pos "@march_decrc("));
+  Alcotest.(check bool)
+    "record drop: does not use march_decrc_freed, which frees the shell before the fields are read"
+    false (ir_contains drop_ir "@march_decrc_freed")
+
 (** Drop glue for a type with a residual type variable is named by the
     variable's POSITION ([__drop$List_V0]), not by its typechecker id
     ([__drop$List_V_53272]).  The id comes from a global fresh-variable
@@ -21143,6 +21203,8 @@ let codegen_suites =
             `Quick test_tco_self_dup_arg_decref_on_live_path;
           Alcotest.test_case "deep drop: never-destructured container releases its children"
             `Quick test_deep_drop_of_borrowed_container;
+          Alcotest.test_case "deep drop: a record is released before its fields are loaded"
+            `Quick test_record_drop_releases_before_loading_fields;
           Alcotest.test_case "drop glue: name spells a residual type variable by position"
             `Quick test_drop_glue_name_is_structural;
           Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"

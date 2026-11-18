@@ -124,6 +124,10 @@ void  march_decrc(void *p);
 /* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
    Used when pattern-matching to conditionally IncRC extracted child pointers. */
 int64_t march_decrc_freed(void *p);
+/* Release one reference; 1 iff it was the last, with the cell NOT freed: the
+ * caller reads what it needs and then calls march_free_last. */
+int64_t march_decrc_last(void *p);
+void    march_free_last(void *p);
 /* Release a closure value; when this frees it, first release its captures
    through the drop registered for its apply function (march_runtime.c). */
 void march_clo_release(void *p);
