@@ -32,6 +32,10 @@ module StringMap = Map.Make (String)
 
 let _rc_fresh_ctr = ref 0
 
+(** Declared return type of every top-level function of the module being
+    processed; filled by [Perceus.perceus] next to the counter reset. *)
+let fn_ret_tys : (string, Tir.ty) Hashtbl.t = Hashtbl.create 64
+
 let fresh_rc_var (ty : Tir.ty) : Tir.var =
   incr _rc_fresh_ctr;
   { Tir.v_name = Printf.sprintf "$rc_%d" !_rc_fresh_ctr;
@@ -1427,15 +1431,24 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            with one argument.  The result of that call is the remaining
            [TFn ([Int], Int)], not [Int]: typing the temp [Int] made codegen
            treat the closure pointer as a scalar (SIGSEGV on the first
-           call through it). *)
-        let n_args = match e with
-          | Tir.EApp (_, args) -> List.length args
-          | _ -> max_int
-        in
-        let call_ret_ty = match f.Tir.v_ty with
-          | Tir.TFn (ps, r) when List.length ps > n_args ->
-            Tir.TFn (List.filteri (fun i _ -> i >= n_args) ps, r)
-          | Tir.TFn (_, r) -> r
+           call through it).  So ask the callee's definition for its return
+           type.  Counting the call's arguments against the type's parameters
+           does not work: a function with ghost parameters keeps them in its
+           type and is called without them. *)
+        let call_ret_ty =
+          match f.Tir.v_ty with
+          | Tir.TFn (ps, r) ->
+            (* Only the uncurried shape: the definition returns a function
+               whose parameters are the tail of [ps] and whose result is [r].
+               Anything else (a local that shadows the name) keeps [r]. *)
+            (match Hashtbl.find_opt fn_ret_tys f.Tir.v_name with
+             | Some (Tir.TFn (ps', r') as clo)
+               when r' = r
+                    && List.length ps' < List.length ps
+                    && List.filteri
+                         (fun i _ -> i >= List.length ps - List.length ps') ps
+                       = ps' -> clo
+             | _ -> r)
           | _ -> Tir.TVar "_"
         in
         (match call_ret_ty with

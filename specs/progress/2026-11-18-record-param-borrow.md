@@ -41,10 +41,10 @@ returns has no such problem.
   at a borrowed position as a read. `call_is_safe` refuses a tail call that
   receives the value itself.
 
-## Two latent bugs the change exposed
+## Three latent bugs the change exposed
 
-Both were found by CI on the first push (`sanitize-gate`, `two-node`), not by
-the fixture, and both predate this change.
+All three were found by CI (`sanitize-gate`, `two-node`, the native fixture
+rules), not by the new fixture, and all predate this change.
 
 **A closure-returning call was given a scalar result type.** A function that
 returns a closure carries an uncurried type: `fn mk(c : R) : Int -> Int` is
@@ -55,8 +55,12 @@ final result, `Int`, so codegen treated the closure pointer as a scalar and the
 first call through it crashed. Nothing reached that path while the record
 argument was owned, because an owned argument has no release after the call.
 `test/hcr_closure_pin` (`Handler.mk(mk_conn(i))`) segfaulted. Fixed in
-`Perceus_core`: the temporary's type is the remaining `TFn` when the call
-supplies fewer arguments than the type has parameters. Fixture leg `closure`.
+`Perceus_core`: the temporary takes the callee definition's declared return
+type (`fn_ret_tys`, filled per module) when that is the uncurried tail of the
+callee's type. Counting the call's arguments against the type's parameters,
+the first attempt, is wrong: a function with ghost parameters keeps them in
+its type and is called without them, and the `ghost` erasure test (same IR as
+the hand-erased twin) caught it. Fixture leg `closure`.
 
 **A nominal record's drop released an ambiguous record field shallowly.**
 `ClusterNode.CnState` has a field `driver : SwimDriver.State`.
@@ -73,6 +77,20 @@ every node. Fixed in `Kind.record_fields_short`: a qualified field type that
 names a record whose short name two or more types share is rewritten to that
 record's structural type, which has the same layout and is what use sites
 carry. The scenario is back to 0 objects.
+
+**Copy propagation erased a newtype cast.** For a newtype field
+(`type Bag = Bag(Map(String, Int))`) the drop pass writes
+`let $dp : Map(..) = bag in __drop$Map($dp)`: one pointer viewed under its
+payload type. `Cprop` treated that as a plain copy and replaced `$dp` with
+`bag`, and once the map's drop was inlined the result was
+`case bag of HamtMap(n)` with a `Bag`-typed scrutinee. Codegen destructures by
+the scrutinee's static type, took the newtype path, bound `n` to the map cell
+itself, and released that cell twice. It only fires when the record's drop
+holds the last reference to the map; before, the owning callee's own (correctly
+typed) match always freed it first. `test/native/perceus_three_deep_field_borrow`
+segfaulted on Linux and is a heap-use-after-free under ASAN. Fixed in
+`Cprop`: a `let` between two different nominal types is a cast and is not
+propagated (`retypes_nominal`).
 
 Unchanged, and why it is sound:
 
@@ -99,8 +117,9 @@ Unchanged, and why it is sound:
   its record to a borrowing helper; a local lent and then read again; a
   function that returns the record on one arm; and a borrowing helper that
   returns a closure over the record's fields.
-- `test/hcr_closure_pin` and `two-node[control_leaderless_flat]` cover the two
-  latent bugs above; both fail without their fix.
+- `test/hcr_closure_pin`, `two-node[control_leaderless_flat]` and
+  `test/native/perceus_three_deep_field_borrow` (under `MARCH_SANITIZE=1`)
+  cover the three latent bugs above; each fails without its fix.
 - `test/test_codegen.ml`: "record param: read-only is borrowed, no RC",
   "record param: escaping field is retained", "record param: loop-carried,
   captured and tuple stay owned".

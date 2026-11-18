@@ -1143,6 +1143,15 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Three compiled-code memory bugs in dropping records and closures.** A record
+  field that is a single-constructor wrapper around a heap value
+  (`type Bag = Bag(Map(String, Int))`) could be released twice when the record was
+  the last holder, crashing the program. A named record with a field that is another
+  module's record sharing its short name with other types (`SwimDriver.State`) freed
+  that field without releasing what it owned, a leak. A call to a function that
+  returns a closure, with a record argument released after the call, crashed on the
+  first use of the closure.
+
 - **A function calling a helper defined below a `type` declaration got the wrong type.**
   The type checker orders a module's functions callee-first, but a `type` declaration
   between a caller and its helper ended that ordering, and the caller's result type was left

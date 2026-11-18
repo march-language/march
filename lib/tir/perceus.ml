@@ -1099,6 +1099,9 @@ and perceus_owned ~(owned_calls : bool) ?(repl : bool = false)
      remains a ref rather than becoming an [env] field (Wave 3 Task 4 — see
      the plan's guidance on accumulator- vs scope-shaped refs). *)
   _rc_fresh_ctr := 0;
+  Hashtbl.reset fn_ret_tys;
+  List.iter (fun (fn : Tir.fn_def) ->
+      Hashtbl.replace fn_ret_tys fn.Tir.fn_name fn.Tir.fn_ret_ty) m.Tir.tm_fns;
   (* Phase 0: borrow inference.  [?borrow_map] lets the driver compute this
      ONCE and hand the same answer to [Escape], whose stack-promotion verdict
      must be taken against the map this pass placed its RC ops against — see
