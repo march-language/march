@@ -94,7 +94,7 @@ mod TwoNodeSkewB do
 
   pfn me() : String do "node-b" end
 
-  pfn now() : Int do unix_time_ms() + Authority.must(Env.get_int("MARCH_CLOCK_SKEW_MS", 0)) end
+  pfn now() : Int do Authority.must(System.now_ms()) + Authority.must(Env.get_int("MARCH_CLOCK_SKEW_MS", 0)) end
 
   -- Fixed metrics: the scenario is about the stamp, not the numbers.
   pfn report() : SwimDriver.WireMsg do

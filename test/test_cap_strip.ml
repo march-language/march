@@ -105,7 +105,7 @@ mod ClosureStripApp do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
-    match apply1(fn p -> file_read(p), "/etc/hosts") do
+    match Authority.must(apply1(fn p -> File.read(p), "/etc/hosts")) do
       Ok(_)  -> Authority.ignore(println("ok"))
       Err(_) -> Authority.ignore(println("err"))
     end

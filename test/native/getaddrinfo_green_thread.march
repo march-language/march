@@ -57,8 +57,8 @@ mod GetaddrinfoGreenThread do
     end
     let _ = Socket.close_listener(l)
     println("main: " ++ int_to_string(dial(port)) ++ "/1")
-    let tasks = List.map(List.range(0, 160), fn d -> task_spawn(fn _ -> at_depth(List.range(0, d), port)))
-    let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(t))
+    let tasks = List.map(List.range(0, 160), fn d -> Task.async(fn () -> at_depth(List.range(0, d), port)))
+    let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(Authority.must(t)))
     println("tasks: " ++ int_to_string(total) ++ "/160")
   end
 end

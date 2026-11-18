@@ -19,7 +19,7 @@ mod Main do
   -- Uses IO.Clock, which the session's shell policy does not list: an input
   -- calling it is refused, though the input names no capability itself.
   fn nap() : Int do
-    if unix_time_ms() > 0 do 7 else 0 end
+    if Authority.must(System.now_ms()) > 0 do 7 else 0 end
   end
 
   -- test/native/shell_node_skew.march declares these constructors in the

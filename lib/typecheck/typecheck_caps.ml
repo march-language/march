@@ -305,12 +305,10 @@ let fn_transitive_capability_closures_tbl (env : env)
    gets no path check here: since ocap phase 2 a handle is unforgeable, so
    user code holds a File.Handle or File.Dir only from an open (the raw
    Int-descriptor builtins are stdlib-only), and [File.open_in] refuses a
-   relative path that leaves the directory.  What this does NOT give: the
-   scope itself is enforced only at a DIRECT call of one of these builtins
-   with a literal path.  The stdlib wrappers user code now calls (File.open,
-   File.read, Csv.read_all, ...) pass the path as a variable, so neither this
-   check nor any run-time check applies a path scope to them yet
-   (specs/todos/2026-11-12-path-scope-not-checked-at-wrappers.md). *)
+   relative path that leaves the directory.  The check is on a literal path
+   only, at a call of one of these builtins or of its stdlib entry point
+   ([path_arg_entries]: File.read, File.open, Csv.read_all, ...); a computed
+   path is left to the run-time check. *)
 let path_arg_builtins : (string * int list) list = [
   ("file_read", [0]); ("file_open", [0]); ("file_exists", [0]);
   ("file_stat", [0]); ("dir_list", [0]); ("dir_exists", [0]);
@@ -326,6 +324,22 @@ let path_arg_builtins : (string * int list) list = [
   ("file_rename", [0; 1]); ("file_copy", [0; 1]);
 ]
 
+(* The stdlib entry points of those builtins ([Cap_ops] entries: `File.read`
+   for [file_read], `Csv.read_all` for [csv_open], ...), each keyed to its
+   builtin so the capability and the scope are looked up exactly as for a
+   direct call.  Every entry takes its path(s) at the builtin's indices
+   (`File.rename(src, dest)`, `File.open_write(path, mode)`,
+   `Csv.each_row(path, delimiter, mode, f)`).  Since ocap phase 4 (Task 8)
+   user code may not call the raw builtins at all, so these are where a
+   literal path is seen. *)
+let path_arg_entries : (string * (string * int list)) list =
+  List.concat_map (fun (builtin, idxs) ->
+      match March_caps.Cap_ops.classify builtin with
+      | Some (March_caps.Cap_ops.Checked { entry; _ }) ->
+        List.map (fun e -> (e, (builtin, idxs))) entry
+      | _ -> [])
+    path_arg_builtins
+
 (* Literal path arguments at capability-builtin call sites.
    Deliberately only LITERALS: a computed path is left to runtime enforcement
    rather than guessed at.  Reporting only definite violations matches the
@@ -333,16 +347,24 @@ let path_arg_builtins : (string * int list) list = [
    theory, which refine_check.ml explicitly stays clear of. *)
 let rec literal_path_uses (acc : (string * string * Ast.span) list)
     (e : Ast.expr) : (string * string * Ast.span) list =
+  let callee = function
+    | Ast.EVar fn ->
+      (match List.assoc_opt fn.Ast.txt path_arg_builtins with
+       | Some idxs -> Some (fn.Ast.txt, idxs)
+       | None -> List.assoc_opt fn.Ast.txt path_arg_entries)
+    | Ast.EField (Ast.EVar m, fn, _) | Ast.EField (Ast.ECon (m, [], _), fn, _) ->
+      List.assoc_opt (m.Ast.txt ^ "." ^ fn.Ast.txt) path_arg_entries
+    | _ -> None in
   let acc =
     match e with
-    | Ast.EApp (Ast.EVar fn, args, _) ->
-      (match List.assoc_opt fn.Ast.txt path_arg_builtins with
+    | Ast.EApp (f, args, _) ->
+      (match callee f with
        | None -> acc
-       | Some idxs ->
+       | Some (builtin, idxs) ->
          List.fold_left (fun a i ->
              match List.nth_opt args i with
              | Some (Ast.ELit (Ast.LitString path, sp)) ->
-               (fn.Ast.txt, path, sp) :: a
+               (builtin, path, sp) :: a
              | _ -> a)
            acc idxs)
     | _ -> acc
@@ -1151,6 +1173,19 @@ let check_module_needs (env : env) (mod_name : Ast.name)
       (fun (call_name, _) -> cap_of_builtin_call call_name)
       (March_ast.Calls.builtin_candidate_calls ~bound e)
   in
+  (* ocap phase 4 (Task 8): a call of a gated builtin's stdlib entry point
+     (`File.write`, [entry_cap_table]) is charged to the CLOSURE of the code
+     that makes it, as the builtin was, now that user code can call only the
+     entry point.  Without it the closures held nothing for such code
+     (signature caps aside), so `march caps`, the hot-reload manifest's
+     per-function `caps=` and the --cap-sandbox profile under-reported it.
+     The diagnostic body scan ([body_cap_uses], [record_body_caps]) is left
+     as it was. *)
+  let entry_caps_of_expr ?(bound = []) (e : Ast.expr) : string list =
+    List.filter_map
+      (fun (call_name, _) -> List.assoc_opt call_name entry_cap_table)
+      (March_ast.Calls.builtin_candidate_calls ~bound e)
+  in
   let default_param_exprs (c : Ast.fn_clause) : Ast.expr list =
     List.filter_map (function Ast.FPDefault (_, e) -> Some e | _ -> None)
       c.Ast.fc_params
@@ -1161,7 +1196,7 @@ let check_module_needs (env : env) (mod_name : Ast.name)
   let record_expr_owner ?(sp = Ast.dummy_span) (qname : string) (bound : string list)
       (es : Ast.expr list) =
     let body_caps = List.concat_map (builtin_caps_of_expr ~bound) es in
-    record_fn_caps qname body_caps;
+    record_fn_caps qname (body_caps @ List.concat_map (entry_caps_of_expr ~bound) es);
     record_body_caps qname sp body_caps;
     record_fn_refs qname (List.map (fun e -> (bound, e)) es)
   in
@@ -1471,7 +1506,8 @@ let check_module_needs (env : env) (mod_name : Ast.name)
             ) (March_ast.Calls.builtin_candidate_calls
                  ~bound:(List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params)
                  h.Ast.ah_body) in
-          record_fn_caps fn_qname body_caps;
+          let hbound = List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params in
+          record_fn_caps fn_qname (body_caps @ entry_caps_of_expr ~bound:hbound h.Ast.ah_body);
           record_body_caps fn_qname sp body_caps;
           record_fn_refs fn_qname
             [ (List.map (fun (p : Ast.param) -> p.param_name.txt) h.Ast.ah_params,
@@ -1742,14 +1778,16 @@ let check_module_needs (env : env) (mod_name : Ast.name)
                  @ default_param_exprs c))
             def.fn_clauses
         in
-        record_fn_caps qname own_caps;
+        let closure_caps =
+          own_caps @ List.concat_map (fun (bound, e) -> entry_caps_of_expr ~bound e) own_refs in
+        record_fn_caps qname closure_caps;
         record_body_caps qname dfn_sp own_caps;
         record_fn_refs qname own_refs;
         (match arity_mangled_base def.fn_name.txt with
          | None -> ()
          | Some base ->
            let base_qname = cap_qname base in
-           record_fn_caps base_qname own_caps;
+           record_fn_caps base_qname closure_caps;
            record_body_caps base_qname dfn_sp own_caps;
            record_fn_refs base_qname own_refs);
         List.concat per_clause

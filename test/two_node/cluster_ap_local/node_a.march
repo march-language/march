@@ -175,13 +175,13 @@ mod ClusterApLocal do
         end
         -- The one-session runner too: both roles under one agreed session
         -- id, on this node.
-        let server = task_spawn(fn _ ->
+        let server = Authority.must(Task.async(fn () ->
           match Echo_Run.cluster_Server(h, "local-pair", fn (s, st) -> serve_one(s, st)) do
             Ok(_) -> 1
             Err(e) ->
               println("Server: " ++ Echo_Run.error_message(e))
               0
-          end)
+          end))
         match Echo_Run.cluster_Client(h, "local-pair", fn (s, st) -> ask(s, st, 3)) do
           Ok(_) -> println("Client: pair session done")
           Err(e) -> println("Client: " ++ Echo_Run.error_message(e))

@@ -11,7 +11,7 @@ describe "Env.get" do
   end
 
   test "returns value when variable is set" do
-    process_set_env("MARCH_TEST_ENV_GET_1", "hello")
+    Process.set_env("MARCH_TEST_ENV_GET_1", "hello")
     let result = Authority.must(Env.get("MARCH_TEST_ENV_GET_1", "default"))
     assert (result == "hello")
   end
@@ -22,7 +22,7 @@ describe "Env.get" do
   end
 
   test "prefers set value over non-empty default" do
-    process_set_env("MARCH_TEST_ENV_PREF_1", "from_env")
+    Process.set_env("MARCH_TEST_ENV_PREF_1", "from_env")
     let result = Authority.must(Env.get("MARCH_TEST_ENV_PREF_1", "the_default"))
     assert (result == "from_env")
   end
@@ -32,13 +32,13 @@ end
 describe "Env.require" do
 
   test "returns value when variable is set" do
-    process_set_env("MARCH_TEST_FETCH_1", "world")
+    Process.set_env("MARCH_TEST_FETCH_1", "world")
     let result = Authority.must(Env.require("MARCH_TEST_FETCH_1"))
     assert (result == "world")
   end
 
   test "returns correct value for various content" do
-    process_set_env("MARCH_TEST_FETCH_2", "some-secret-key-base-value")
+    Process.set_env("MARCH_TEST_FETCH_2", "some-secret-key-base-value")
     let result = Authority.must(Env.require("MARCH_TEST_FETCH_2"))
     assert (result == "some-secret-key-base-value")
   end
@@ -48,7 +48,7 @@ end
 describe "Env.get_int" do
 
   test "parses integer from env var" do
-    process_set_env("MARCH_TEST_INT_1", "42")
+    Process.set_env("MARCH_TEST_INT_1", "42")
     let result = Authority.must(Env.get_int("MARCH_TEST_INT_1", 0))
     assert (result == 42)
   end
@@ -59,25 +59,25 @@ describe "Env.get_int" do
   end
 
   test "returns default when value is not a valid integer" do
-    process_set_env("MARCH_TEST_BAD_INT_1", "not-a-number")
+    Process.set_env("MARCH_TEST_BAD_INT_1", "not-a-number")
     let result = Authority.must(Env.get_int("MARCH_TEST_BAD_INT_1", 7))
     assert (result == 7)
   end
 
   test "parses negative integers" do
-    process_set_env("MARCH_TEST_NEG_INT_1", "-5")
+    Process.set_env("MARCH_TEST_NEG_INT_1", "-5")
     let result = Authority.must(Env.get_int("MARCH_TEST_NEG_INT_1", 0))
     assert (result == -5)
   end
 
   test "parses port numbers" do
-    process_set_env("MARCH_TEST_PORT_1", "4000")
+    Process.set_env("MARCH_TEST_PORT_1", "4000")
     let result = Authority.must(Env.get_int("MARCH_TEST_PORT_1", 3000))
     assert (result == 4000)
   end
 
   test "parses zero" do
-    process_set_env("MARCH_TEST_ZERO_INT_1", "0")
+    Process.set_env("MARCH_TEST_ZERO_INT_1", "0")
     let result = Authority.must(Env.get_int("MARCH_TEST_ZERO_INT_1", 1))
     assert (result == 0)
   end
@@ -87,27 +87,27 @@ end
 describe "Env.get_bool" do
 
   test "returns true for string 'true'" do
-    process_set_env("MARCH_TEST_BOOL_T1", "true")
+    Process.set_env("MARCH_TEST_BOOL_T1", "true")
     assert (Authority.must(Env.get_bool("MARCH_TEST_BOOL_T1", false)))
   end
 
   test "returns true for string '1'" do
-    process_set_env("MARCH_TEST_BOOL_ONE_1", "1")
+    Process.set_env("MARCH_TEST_BOOL_ONE_1", "1")
     assert (Authority.must(Env.get_bool("MARCH_TEST_BOOL_ONE_1", false)))
   end
 
   test "returns true for string 'yes'" do
-    process_set_env("MARCH_TEST_BOOL_YES_1", "yes")
+    Process.set_env("MARCH_TEST_BOOL_YES_1", "yes")
     assert (Authority.must(Env.get_bool("MARCH_TEST_BOOL_YES_1", false)))
   end
 
   test "returns false for string 'false'" do
-    process_set_env("MARCH_TEST_BOOL_F1", "false")
+    Process.set_env("MARCH_TEST_BOOL_F1", "false")
     assert not(Authority.must(Env.get_bool("MARCH_TEST_BOOL_F1", true)))
   end
 
   test "returns false for string '0'" do
-    process_set_env("MARCH_TEST_BOOL_ZERO_1", "0")
+    Process.set_env("MARCH_TEST_BOOL_ZERO_1", "0")
     assert not(Authority.must(Env.get_bool("MARCH_TEST_BOOL_ZERO_1", true)))
   end
 
@@ -124,7 +124,7 @@ end
 describe "Env.is_set" do
 
   test "returns true when variable is set" do
-    process_set_env("MARCH_TEST_IS_SET_1", "anything")
+    Process.set_env("MARCH_TEST_IS_SET_1", "anything")
     assert (Authority.must(Env.is_set("MARCH_TEST_IS_SET_1")))
   end
 
@@ -133,7 +133,7 @@ describe "Env.is_set" do
   end
 
   test "returns true even for empty string value" do
-    process_set_env("MARCH_TEST_EMPTY_SET_1", "")
+    Process.set_env("MARCH_TEST_EMPTY_SET_1", "")
     assert (Authority.must(Env.is_set("MARCH_TEST_EMPTY_SET_1")))
   end
 
@@ -142,13 +142,13 @@ end
 describe "Env.require_int" do
 
   test "parses and returns integer value" do
-    process_set_env("MARCH_TEST_FETCH_INT_1", "1234")
+    Process.set_env("MARCH_TEST_FETCH_INT_1", "1234")
     let result = Authority.must(Env.require_int("MARCH_TEST_FETCH_INT_1"))
     assert (result == 1234)
   end
 
   test "parses large integers" do
-    process_set_env("MARCH_TEST_FETCH_INT_2", "65535")
+    Process.set_env("MARCH_TEST_FETCH_INT_2", "65535")
     let result = Authority.must(Env.require_int("MARCH_TEST_FETCH_INT_2"))
     assert (result == 65535)
   end

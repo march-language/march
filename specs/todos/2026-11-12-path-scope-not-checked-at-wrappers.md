@@ -30,3 +30,12 @@ What to do: check a literal path argument at the wrapper entry points (map each 
 `Csv.*` / `File.open_dir*` entry to its path argument, as `path_arg_builtins` does for the
 builtins), and/or check the path against the module's scope in `Authority.check` at run time
 (phase 4). Add the repro above as a reject fixture.
+
+## Update (2026-11-17, ocap phase 4 Task 8)
+
+The compile-time half is done: `path_arg_entries` (lib/typecheck/typecheck_caps.ml)
+maps each path builtin's stdlib entry points (`File.read`, `File.open`,
+`File.open_dir`, `Csv.read_all`, `Dir.list`, ...) to it, so the repro above is now
+a `cap_scope_violation` at `"/etc/hosts"`. Still open here: whether the run-time
+`Authority.check` judges the path against the module's scope, and the reject
+fixture.

@@ -36,15 +36,15 @@ mod PreemptStarvation do
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
-    let a = task_spawn(fn _ ->
+    let a = Authority.must(Task.async(fn () ->
       let r = burn(100000000, 0)
       println("A done")
       r
-    )
-    let b = task_spawn(fn _ ->
+    ))
+    let b = Authority.must(Task.async(fn () ->
       println("B done")
       1
-    )
+    ))
     let _ = task_await_unwrap(a)
     let _ = task_await_unwrap(b)
     ()

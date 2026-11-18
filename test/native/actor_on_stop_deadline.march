@@ -97,9 +97,9 @@ mod Main do
     let w = spawn(Stuck)
     send(w, StuckLog(log))
     send(w, Work(9))
-    let t0 = unix_time_ms()
+    let t0 = Authority.must(System.now_ms())
     println("stop: " ++ bool_to_string(Actor.stop(w, 200)))
-    let took = unix_time_ms() - t0
+    let took = Authority.must(System.now_ms()) - t0
     -- Waited out the budget (it did not give up on the callback early), and
     -- no longer (it did not wait for a callback that can never finish).
     println("waited for the deadline: " ++ bool_to_string(took >= 190))

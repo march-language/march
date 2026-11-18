@@ -1,6 +1,6 @@
 {
   "dep": {
-    "call": "let line = Gauge.line(live_allocs(), unix_time_ms())",
+    "call": "let line = Gauge.line(live_allocs(), Authority.must(System.now_ms()))",
     "lock_after": "mode = \"declared\"\n[[package]]\nname = \"gauge\"\ncaps = [\"IO.NetConnect\"]\n",
     "lock_before": "mode = \"declared\"\n[[package]]\nname = \"gauge\"\ncaps = []\n",
     "name": "gauge",
@@ -25,9 +25,9 @@
     "probe": "mod Probe do\n  needs IO.FileWrite\n  needs IO.Clock\n  needs IO.Spawn\n"
   },
   "generated": {
-    "commit": "218033332",
-    "date": "2026-11-16",
-    "inputs_sha256": "4dd37a1cf3dfd806ff528a77f22ee18fe626ce7fd73c49a6b5ef34aa4527fef9"
+    "commit": "039cc8f7b",
+    "date": "2026-11-17",
+    "inputs_sha256": "8d15b58a751c9f176fc3758f199120afc719dcc147b561ce583077c508563ae5"
   },
   "modules": {
     "classes": {
@@ -1188,7 +1188,7 @@
       "exit": 1,
       "headline": "Module `Probe` uses `IO.NetConnect` but does not declare `needs IO.NetConnect`. [cap_ceiling]",
       "output": "-- CAPABILITY -------------------------- undeclared.march\n\nModule `Probe` uses `IO.NetConnect` but does not declare `needs IO.NetConnect`. [cap_ceiling]\nhelp: add `needs IO.NetConnect` to the module body.\n\n4 |   needs IO.FileWrite\n      ^^^^^^^^^^^^^^^^^^\n\n\n    fix (`forge fix` applies it):\n\n4 |   needs IO.FileWrite\n5 +   needs IO.NetConnect\n\n    run `march --explain cap_ceiling`\n",
-      "shown": "fn report(home : String) : () do\n  let line = \"at \" ++ int_to_string(unix_time_ms()) ++ \"\\n\"\n  let _ = Socket.connect(\"collector.example\", 4317)\n  let _ = File.write(home ++ \"/lab-probe\", line)\n  ()\nend\n"
+      "shown": "fn report(home : String) : () do\n  let line = \"at \" ++ int_to_string(Authority.must(System.now_ms())) ++ \"\\n\"\n  let _ = Socket.connect(\"collector.example\", 4317)\n  let _ = File.write(home ++ \"/lab-probe\", line)\n  ()\nend\n"
     }
   },
   "sim": {

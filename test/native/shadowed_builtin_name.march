@@ -32,11 +32,11 @@ mod ShadowedBuiltinName do
   end
 
   fn main(cap : Cap(IO)) do
-    print(int_to_string(int_mod(17, 5)))
-    print(" ")
-    print(int_to_string(int_not(5)))
-    print(" ")
-    print(int_to_string(int_and(12, 10)))
-    print("\n")
+    IO.write(int_to_string(int_mod(17, 5)))
+    IO.write(" ")
+    IO.write(int_to_string(int_not(5)))
+    IO.write(" ")
+    IO.write(int_to_string(int_and(12, 10)))
+    IO.write("\n")
   end
 end

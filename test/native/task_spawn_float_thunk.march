@@ -39,7 +39,7 @@ mod TaskSpawnFloatThunk do
 
   fn main(_cap_console : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
     -- Capture-free Float thunk: the primary repro.  2.5 * 2 = 5.
-    let tf = task_spawn(fn _ -> 2.5)
+    let tf = Authority.must(Task.async(fn () -> 2.5))
     match task_await(tf) do
       Ok(v)  -> println("float=" ++ int_to_string(float_to_int(v *. 2.0)))
       Err(_) -> println("float_err")
@@ -48,14 +48,14 @@ mod TaskSpawnFloatThunk do
     -- Capturing Float thunk: heap closure, apply fn releases its own $clo.
     -- 1.25 * 4 = 5.0 -> 500.
     let base = 1.25
-    let tfc = task_spawn(fn _ -> base *. 4.0)
+    let tfc = Authority.must(Task.async(fn () -> base *. 4.0))
     match task_await(tfc) do
       Ok(v)  -> println("float_capture=" ++ int_to_string(float_to_int(v *. 100.0)))
       Err(_) -> println("float_capture_err")
     end
 
     -- Int control, capture-free: same path, tagged-scalar payload.
-    let ti = task_spawn(fn _ -> 6 * 7)
+    let ti = Authority.must(Task.async(fn () -> 6 * 7))
     match task_await(ti) do
       Ok(n)  -> println("int=" ++ int_to_string(n))
       Err(_) -> println("int_err")
@@ -63,7 +63,7 @@ mod TaskSpawnFloatThunk do
 
     -- Int control, capturing.
     let k = 21
-    let tic = task_spawn(fn _ -> k * 2)
+    let tic = Authority.must(Task.async(fn () -> k * 2))
     match task_await(tic) do
       Ok(n)  -> println("int_capture=" ++ int_to_string(n))
       Err(_) -> println("int_capture_err")

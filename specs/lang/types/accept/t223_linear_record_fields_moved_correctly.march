@@ -16,7 +16,7 @@ mod Main do
     on Bump() do { state with st: bump(state.st) } end
     on Tally() do { state with n: state.n + 1 } end
     on Peek() do
-      print_line(int_to_string(state.n))
+      IO.puts(int_to_string(state.n))
       state
     end
     on Reset() do

@@ -43,7 +43,7 @@ mod UpgradeApp do
       -- Version 1 runs the task (so it holds the same authority as later
       -- versions: a hot deploy may not add any) but answers without it;
       -- only a NEW body can produce 1111 for an Ask of 1000.
-      let extra = if n >= 1000 do task_await_unwrap(task_spawn(fn _ -> nested(env, n))) else 0 end
+      let extra = if n >= 1000 do task_await_unwrap(Authority.must(Task.async(fn () -> nested(env, n)))) else 0 end
       let _ = extra
       Echo_Server.recv_Ask2(s, Echo_Server.send_Answer(s, st1, n + 1), fn (k, st2) ->
         Echo_Server.close(s, Echo_Server.send_Answer2(s, st2, k + 1))))
@@ -75,7 +75,7 @@ mod UpgradeApp do
   -- `start` as changed although its code is not.
   fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Env do
     let t = spawn(Tally)
-    let _ = task_spawn(fn _ -> feed(t, 0))
+    let _ = Task.async(fn () -> feed(t, 0))
     -- Named state the OLD version creates: a later version's code must find
     -- it (a hot patch used to carry its own vault registry and could not).
     let st = Authority.must(Vault.new("upgrade_state"))

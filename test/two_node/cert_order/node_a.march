@@ -69,7 +69,7 @@ mod CertOrderA do
         else if left <= 0 do panic("node-a: " ++ msg) else
           match e do
             SessionNode.NoOffer(_, _) -> ()
-            _ -> print_stderr("node-a: retrying a failed session: " ++ msg ++ "\n")
+            _ -> Authority.ignore(IO.warn("node-a: retrying a failed session: " ++ msg))
           end
           sleep_ms(500)
           attempt(c, h, left - 500)
@@ -86,7 +86,7 @@ mod CertOrderA do
   pfn round(c : Cap(IO), h : Cap(ClusterNode.Live), done : Vault(Int), r : Int) : () do
     if r > 3 do () else
       let _ = List.map(List.range(0, 4), fn _ ->
-        task_spawn(fn _ -> do
+        Task.async(fn () -> do
           attempt(c, h, 30000)
           let _ = Vault.incr(done, "n", 1)
           0

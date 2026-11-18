@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (calls raw capability builtins on purpose; test/dune passes it, test_ir_verify.ml reads it)
 -- Leak guard: the Process builtins only READ their heap arguments, so a
 -- spawn/read/write/wait cycle must leave live_allocs() where it found it.
 --
@@ -12,6 +13,8 @@
 -- spawn/read/wait cycle, 3 per spawn/write/kill/wait cycle, 3 per `run`
 -- and 2 per set_env + env pair.
 -- specs/progress/2026-09-29-process-spawn-async-leaks-live-process.md
+-- It calls the raw builtins, so the dune rule builds it as a stdlib-spanned
+-- program (`--stdlib-source`); user code reaches them only through `Process`.
 --
 -- SIGNAL: live_allocs() deltas, printed as booleans against a bound well
 -- below one object per iteration, so the golden is deterministic. Each

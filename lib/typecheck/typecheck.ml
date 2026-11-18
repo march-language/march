@@ -2908,10 +2908,83 @@ let warn_if_deprecated env (name : Ast.name) sch =
        end
      | _ -> ())
 
+(* The [stdlib_internal] fix for a call of a gated capability builtin (ocap
+   phase 4, Task 8): the call rewritten to the row's first entry point
+   ([Cap_ops.gated]), wrapped so it keeps the call's type —
+   `file_read(p)` -> `Authority.must(File.read(p))`, `print(s)` ->
+   `Authority.ignore(IO.write(s))` — since the entry point returns the
+   operation's [Result(T, CapError)].  Offered only when the entry point is a
+   drop-in: the same parameters, and a [T] that is the builtin's own result
+   type ([Cap_ops.rename_differs] lists the rows whose types line up but whose
+   meaning does not).  None for a builtin called with `()` (`unix_time(())`:
+   the entry point takes no argument), for a value reference (`process_cwd`,
+   `let f = file_read`), and when the entry point's module cannot be loaded.
+   [stdlib_only_call_spans] maps a callee's span to its call's, recorded by
+   [infer_expr] on the way into the call. *)
+let stdlib_only_call_spans : (Ast.span, Ast.span) Hashtbl.t = Hashtbl.create 16
+
+let stdlib_only_fix name (name_span : Ast.span) env : Err.fix_kind option =
+  let body = function Mono t | Poly (_, _, t) -> t in
+  let rec arrows n t =
+    if n = 0 then Some ([], t)
+    else match repr t with
+      | TArrow (a, r) ->
+        Option.map (fun (ps, ret) -> (a :: ps, ret)) (arrows (n - 1) r)
+      | _ -> None in
+  let rec arity t =
+    match repr t with TArrow (_, r) -> 1 + arity r | _ -> 0 in
+  let unit_first t =
+    match repr t with
+    | TArrow (a, _) -> (match repr a with TTuple [] -> true | _ -> false)
+    | _ -> true in
+  let rec rebuild ps ret = match ps with [] -> ret | p :: rest -> TArrow (p, rebuild rest ret) in
+  if List.mem_assoc name March_caps.Cap_ops.rename_differs then None
+  else
+    match List.assoc_opt name March_caps.Cap_ops.gated,
+          List.assoc_opt name builtin_bindings,
+          Hashtbl.find_opt stdlib_only_call_spans name_span with
+    | Some (entry :: _), Some bsch, Some call_span ->
+      let bty = body bsch in
+      let n = arity bty in
+      if n = 0 || unit_first bty then None
+      else
+        let esch =
+          match lookup_var entry env with
+          | Some sch -> Some sch
+          | None -> snd (resolve_qualified_var entry env) in
+        (match Option.map body esch with
+         | None -> None
+         | Some ety ->
+           match arrows n ety, arrows n bty with
+           | Some (eps, eret), Some (_, bret) ->
+             (match repr eret with
+              | TCon ("Result", [ payload; err ]) when is_cap_error_ty err ->
+                let tr = Typecheck_suggest.new_trial () in
+                if not (Typecheck_suggest.try_unify tr bty (rebuild eps payload)) then None
+                else
+                  let wrap =
+                    match repr bret with
+                    | TTuple [] -> "Authority.ignore("
+                    | _ -> "Authority.must(" in
+                  (match cap_fix_text call_span with
+                   | Some text when String.starts_with ~prefix:name text ->
+                     let rest = String.sub text (String.length name)
+                         (String.length text - String.length name) in
+                     Some (Err.FReplace { span = call_span;
+                                          text = wrap ^ entry ^ rest ^ ")" })
+                   | _ -> None)
+              | _ -> None)
+           | _ -> None)
+    | _ -> None
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
   let errors_mark = env.errors.Err.diagnostics in
+  (match e with
+   | Ast.EApp (Ast.EVar n, _, sp) when List.mem_assoc n.Ast.txt !stdlib_only ->
+     Hashtbl.replace stdlib_only_call_spans n.Ast.span sp
+   | _ -> ());
   let result =
     match e with
     (* ── Literals ─────────────────────────────────────────────────── *)
@@ -2942,7 +3015,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
          and the 2026-09-24 bypass fixes): the gate sits at resolution, on the
          reference itself. A name in [stdlib_only] that still resolves to the
          builtin (no user binding has rebound it, [env.gated_shadowed]) may be
-         named only from a span the stdlib loader owns ([span_is_stdlib]). A
+         named only from a span the stdlib loader owns, or from the compiler's
+         generated control wiring ([span_may_name_internal]: since ocap phase
+         4 the wiring's clock reads and task spawns are gated builtins). A
          value reference counts as much as a call (`let f = pid_of_int`, and
          `let pid_of_int = pid_of_int`, whose right-hand side is checked before
          the new binding exists), and every declaration kind that types an
@@ -2951,9 +3026,14 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (match List.assoc_opt name.txt !stdlib_only with
        | Some hint
          when not (StringSet.mem name.txt env.gated_shadowed)
-           && not (span_is_stdlib name.span) ->
-         Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span
-           (Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint)
+           && not (span_may_name_internal name.span) ->
+         let msg =
+           Printf.sprintf "`%s` is internal to the standard library; %s." name.txt hint in
+         (match stdlib_only_fix name.txt name.span env with
+          | Some fix ->
+            Err.error_with_fix ~code:Err.Code.stdlib_internal env.errors ~span:name.span
+              ~fix msg
+          | None -> Err.error ~code:Err.Code.stdlib_internal env.errors ~span:name.span msg)
        | _ -> ());
       (* [@[stdlib_internal]] stdlib functions (ocap phase 2): the same gate,
          for a function instead of a builtin. [env.stdlib_internal_fns] is

@@ -18,7 +18,7 @@ mod Main do
   end
 
   fn spin(until_ms : Int, k : Int) : Int do
-    if k % 4096 == 0 && unix_time_ms() >= until_ms do
+    if k % 4096 == 0 && Authority.must(System.now_ms()) >= until_ms do
       k
     else
       spin(until_ms, k + 1)
@@ -38,7 +38,7 @@ mod Main do
   fn main(_io : Cap(IO)) do
     println("ready")
     sleep_ms(3000)
-    start(4, unix_time_ms() + 4000)
+    start(4, Authority.must(System.now_ms()) + 4000)
     println("busy")
     sleep_ms(120000)
   end

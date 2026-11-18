@@ -57,7 +57,7 @@ let entry_src ?(back = "") ?(extra = "") ?(needs = "") () =
     needs Session.Live
     needs ClusterNode.Live
     fn start(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do
-      let _ = task_spawn(fn _ -> buy(io, node))
+      let _ = Task.async(fn () -> buy(io, node))
       0
     end
     fn buy(io : Cap(IO), node : Cap(ClusterNode.Live)) : Int do

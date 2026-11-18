@@ -19,6 +19,6 @@ mod Main do
     derive Json for Note
   end
   fn main(c : Cap(IO.Console)) do
-    print_line(Json.to_string(to_json(A.make())))
+    IO.puts(Json.to_string(to_json(A.make())))
   end
 end

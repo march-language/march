@@ -60,9 +60,9 @@ end
 
 pfn bench_sum_list(lst : List(Float)) : Unit do
   banner("Sum floats — List fold")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let s  = list_sum_float(lst)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   println("result: " ++ float_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
   ()
@@ -70,9 +70,9 @@ end
 
 pfn bench_sum_native(arr) : Unit do
   banner("Sum floats — NativeFloatArr (tight loop)")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let s  = native_float_arr_sum(arr)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   println("result: " ++ float_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
   ()
@@ -99,9 +99,9 @@ end
 
 pfn bench_map_list(lst : List(Float)) : Unit do
   banner("Map (*2.0) floats — List map")
-  let t0   = unix_time(())
+  let t0   = Authority.must(System.now())
   let lst2 = list_map_double(lst)
-  let t1   = unix_time(())
+  let t1   = Authority.must(System.now())
   let s    = list_sum_float(lst2)
   println("checksum: " ++ float_to_string(s))
   println("time:     " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
@@ -110,9 +110,9 @@ end
 
 pfn bench_map_native(arr) : Unit do
   banner("Map (*2.0) floats — NativeFloatArr map (tight loop)")
-  let t0   = unix_time(())
+  let t0   = Authority.must(System.now())
   let arr2 = native_float_arr_map(arr, fn x -> x *. 2.0)
-  let t1   = unix_time(())
+  let t1   = Authority.must(System.now())
   let s    = native_float_arr_sum(arr2)
   println("checksum: " ++ float_to_string(s))
   println("time:     " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
@@ -123,7 +123,7 @@ end
 
 pfn bench_fold_list(lst : List(Int)) : Unit do
   banner("Fold (+) ints — List fold")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   fn go(xs : List(Int), acc : Int) : Int do
     match xs do
     Nil -> acc
@@ -131,7 +131,7 @@ pfn bench_fold_list(lst : List(Int)) : Unit do
     end
   end
   let s  = go(lst, 0)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   println("result: " ++ int_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
   ()
@@ -139,9 +139,9 @@ end
 
 pfn bench_fold_native(arr) : Unit do
   banner("Sum ints — NativeIntArr sum (tight loop)")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let s  = native_int_arr_sum(arr)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   println("result: " ++ int_to_string(s))
   println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
   ()

@@ -25,7 +25,7 @@ mod Main do
   needs IO.FileWrite
 
   fn save(msg : String) : () do
-    match file_write("/tmp/t174_out", msg) do
+    match Authority.must(File.write("/tmp/t174_out", msg)) do
       Ok(_)  -> ()
       Err(_) -> ()
     end

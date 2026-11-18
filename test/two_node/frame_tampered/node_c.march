@@ -63,12 +63,12 @@ mod FrameTamperedC do
             -- to stderr so the sorted stdout golden does not depend on the
             -- teardown order.
             Err(e) ->
-              print_stderr("node-c: upstream: " ++ Socket.error_message(e) ++ "\n")
+              Authority.ignore(IO.warn("node-c: upstream: " ++ Socket.error_message(e)))
               let _ = Socket.close(fd)
               serve(listen_fd, conn, stop)
             Ok(up) ->
-              let _ = task_spawn(fn _ -> pump(fd, up, conn, true, 0))
-              let _ = task_spawn(fn _ -> pump(up, fd, conn, false, 0))
+              let _ = Task.async(fn () -> pump(fd, up, conn, true, 0))
+              let _ = Task.async(fn () -> pump(up, fd, conn, false, 0))
               serve(listen_fd, conn + 1, stop)
           end
       end

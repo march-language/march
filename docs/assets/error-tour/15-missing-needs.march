@@ -2,7 +2,7 @@ mod Main do
   needs IO.Console
 
   fn save(n : Int) : () do
-    let _ = file_write("/tmp/n", int_to_string(n))
+    let _ = File.write("/tmp/n", int_to_string(n))
     ()
   end
 

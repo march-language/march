@@ -15,6 +15,6 @@ mod Main do
     let a = S(1)
     let x = get(a)
     let y = get(a)
-    print_line(int_to_string(x + y))
+    IO.puts(int_to_string(x + y))
   end
 end

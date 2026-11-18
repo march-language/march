@@ -24,7 +24,7 @@ mod CapMockIfaceGeneric do
 
   impl Storage(Fake) do
     fn event_append(self, wf, seq, payload) do
-      let t = unix_time(())
+      let t = Authority.must(System.now())
       match self do
         Fake(name) ->
           name ++ ":" ++ wf ++ ":" ++ int_to_string(seq) ++ ":" ++ payload

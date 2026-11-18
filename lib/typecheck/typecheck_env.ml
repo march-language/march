@@ -2363,8 +2363,7 @@ let unknown_ctor_hint ?need (name : string) (env : env) : string =
 (** The stdlib-only builtin table. Documented and re-exported as
     [Typecheck_builtins.stdlib_only]; it lives here because [bind_var] below
     consults it and [Typecheck_builtins] depends on this module. *)
-let stdlib_only : (string * string) list ref =
-  ref
+let stdlib_only_hand_written : (string * string) list =
     [ ("pid_of_int",
        "use `Actor.pid_from_int(cap, n)` (see `Actor.introspect`)");
       ("actor_pid_indices", "use `Actor.list(cap)` (see `Actor.introspect`)");
@@ -2494,6 +2493,20 @@ let stdlib_only : (string * string) list ref =
       ("process_write", "use `Process.write(p, data)` on a `Process`");
       ("process_kill_proc", "use `Process.kill(p)` on a `Process`");
       ("process_wait_proc", "use `Process.wait_proc(p)` on a `Process`") ]
+
+let stdlib_only : (string * string) list ref =
+  (* ocap phase 4 (Task 8): every gated capability operation
+     ([Cap_ops.gated]) is stdlib-only too. Its stdlib entry point runs
+     [Authority.check] before the raw builtin, which a direct call would
+     skip. [Cap_ops.shadowed_by_stdlib] are left alone, and a row already in
+     the hand-written list keeps its hint. *)
+  ref (stdlib_only_hand_written
+       @ List.filter_map (fun (n, _) ->
+           if List.mem n March_caps.Cap_ops.shadowed_by_stdlib
+              || List.mem_assoc n stdlib_only_hand_written
+           then None
+           else Option.map (fun h -> (n, h)) (March_caps.Cap_ops.stdlib_only_hint n))
+         March_caps.Cap_ops.gated)
 
 
 (* [gated_shadowed] bookkeeping shared by every binding funnel: a rebinding

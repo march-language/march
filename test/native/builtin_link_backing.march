@@ -31,8 +31,8 @@ mod Main do
   needs IO
 
   fn main(cap: Cap(IO)) do
-    let t0 = unix_time_ms(())
-    let secs = unix_time(())
+    let t0 = Authority.must(System.now_ms())
+    let secs = Authority.must(System.now())
 
     -- 2023-11-14T22:13:20Z, comfortably in the past on any real clock
     println(t0 > 1700000000000)
@@ -42,7 +42,7 @@ mod Main do
     let drift = t0 - float_to_int(secs *. 1000.0)
     println(drift > -1000 && drift < 1000)
 
-    let t1 = unix_time_ms(())
+    let t1 = Authority.must(System.now_ms())
     println(t1 >= t0)
     println(t1 - t0 < 60000)
 

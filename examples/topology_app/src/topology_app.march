@@ -105,7 +105,7 @@ mod TopologyApp do
     -- The front hook starts its work in a task and returns at once: offers
     -- open only after every hook has returned.
     fn start(node : Cap(ClusterNode.Live)) : Env do
-      let _ = task_spawn(fn _ -> run(node))
+      let _ = Task.async(fn () -> run(node))
       { started: true }
     end
 

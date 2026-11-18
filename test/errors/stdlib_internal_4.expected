@@ -1,0 +1,17 @@
+exit: 1
+-- PROGRAM --------------- errors/stdlib_internal_4.march
+
+`print` is internal to the standard library; use `IO.write`. [stdlib_internal]
+
+13 |     print("no newline")
+         ^^^^^
+
+
+    fix (`forge fix` applies it):
+
+13 -     print("no newline")
+13 +     Authority.ignore(IO.write("no newline"))
+
+
+
+after fix: exit 0

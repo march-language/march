@@ -125,6 +125,6 @@ mod TopologyPlacement do
     Authority.ignore(println("a peer sees eligible ids: [" ++ String.join(List.sort_by(Topology.marked("Echo.Server", Vault.keys(fk.names)), fn (a, b) -> a < b), ", ") ++ "]"))
     -- Placement's own task is still asleep (a long tick); a fake node has
     -- no `stop`, so end the program here.
-    process_exit(0)
+    Process.exit(0)
   end
 end

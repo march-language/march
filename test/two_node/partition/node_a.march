@@ -110,7 +110,7 @@ mod TwoNodePartitionA do
       (buf1, false) ->
         match drain(fd, buf1, Nil, false, reg, false) do
           (buf2, events, acked, reg2, synced) ->
-            match SwimDriver.step(s, unix_time_ms(), events) do
+            match SwimDriver.step(s, Authority.must(System.now_ms()), events) do
               (s2, acts) ->
                 perform(fd, acts)
                 { s: s2, buf: buf2, acked: acked, closed: false, reg: reg2, synced: synced }

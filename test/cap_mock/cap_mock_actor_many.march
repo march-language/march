@@ -42,7 +42,7 @@ mod CapMockActorMany do
   test "a capturing actor survives many messages to its cap-free handlers" do
     let p = spawn(Logger)
     bump_n(p, 50)
-    let t = task_spawn(fn _ -> actor_call(p, Count(0), 5000))
+    let t = Authority.must(Task.async(fn () -> actor_call(p, Count(0), 5000)))
     match task_await_unwrap(t) do
       Ok(n)  -> Test.assert_true(n == 50, "all 50 bumps handled")
       Err(e) -> Test.assert_true(false, e)

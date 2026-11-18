@@ -48,7 +48,7 @@ mod DrainInitiatedB do
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
         Topology.drain_on_signal(h, 10000, 30000)
-        let _ = task_spawn(fn _ -> session(c, h))
+        let _ = Task.async(fn () -> session(c, h))
         -- The drain exits the process.
         idle()
     end

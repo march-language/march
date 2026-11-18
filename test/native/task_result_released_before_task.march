@@ -25,9 +25,9 @@ mod TaskResultReleasedBeforeTask do
   pfn tuple_leg(n : Int, acc : Int) : Int do
     if n <= 0 do acc
     else
-      let ts = List.map(List.range(0, 8), fn i -> task_spawn(fn _ -> pair_of(i + n)))
+      let ts = List.map(List.range(0, 8), fn i -> Task.async(fn () -> pair_of(i + n)))
       let s = List.fold_left(ts, 0, fn (a, t) ->
-        let (x, y) = task_await_unwrap(t)
+        let (x, y) = task_await_unwrap(Authority.must(t))
         a + x + y)
       tuple_leg(n - 1, acc + s)
     end
@@ -36,7 +36,7 @@ mod TaskResultReleasedBeforeTask do
   pfn float_leg(n : Int, acc : Float) : Float do
     if n <= 0 do acc
     else
-      let t = task_spawn(fn _ -> int_to_float(n) *. 0.5)
+      let t = Authority.must(Task.async(fn () -> int_to_float(n) *. 0.5))
       float_leg(n - 1, acc +. task_await_unwrap(t))
     end
   end

@@ -129,7 +129,7 @@ mod UdpFloodBench do
     (tx, rx, dst) ->
       let pkts = batch(size, b)
       let t0 = System.monotonic_time()
-      let r = task_spawn(fn _ -> count_all(rx, total, 0))
+      let r = Authority.must(Task.async(fn () -> count_all(rx, total, 0)))
       blast(tx, dst, pkts, total / b)
       let sent_ms = System.monotonic_time() - t0
       let got = task_await_unwrap(r)

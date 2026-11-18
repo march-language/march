@@ -3,6 +3,10 @@
 -- `main` is granted only the console.  One report at the `file_write`, with
 -- `main`'s grant as a label and both edits (the `needs` line and a
 -- `Cap(IO.FileWrite)` parameter on `main`) as one fix.
+--
+-- Since ocap phase 4 `file_write` is stdlib-only, so this program also draws
+-- `stdlib_internal`; it pins the merged report, which today only a direct
+-- builtin call reaches (specs/todos/2026-11-17-ocap-merged-needs-report-at-entry-points.md).
 mod Main do
   needs IO.Console
 

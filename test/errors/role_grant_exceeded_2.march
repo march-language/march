@@ -27,7 +27,7 @@ mod Main do
   end
 
   pfn wipe(n : Int) : () do
-    let _ = file_delete("/tmp/n" ++ int_to_string(n))
+    let _ = File.delete("/tmp/n" ++ int_to_string(n))
     ()
   end
 

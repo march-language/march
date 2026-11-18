@@ -83,8 +83,8 @@ let table : (string * cls) list = [
   (* IO.Spawn *)
   ("task_spawn",             c ["Task.async"]);
   ("task_spawn_link",        c ["Task.async"]);
-  ("task_spawn_steal",       c ["Task.async"]);
-  ("task_spawn_with_cancel", c ["Task.async"]);
+  ("task_spawn_steal",       c ["Task.async_steal"]);
+  ("task_spawn_with_cancel", c ["Task.async_cancellable"]);
   ("get_work_pool",          Use);
   (* IO.Mut: opening a table by name is checked; using it is not *)
   ("vault_new",              c ["Vault.new"]);
@@ -119,3 +119,21 @@ let gated =
       | (n, Checked { entry; gated = true }) -> Some (n, entry)
       | _ -> None)
     table
+
+let shadowed_by_stdlib = [ "println"; "random_bytes" ]
+
+let rename_differs = [
+  ("print_stderr", "`IO.warn` adds a newline");
+  ("task_spawn", "`Task.async` takes a zero-argument function");
+  ("task_spawn_link", "`Task.async` takes a zero-argument function and links nothing");
+  ("task_spawn_steal", "`Task.async_steal` takes a zero-argument function");
+  ("task_spawn_with_cancel", "`Task.async_cancellable` takes a zero-argument function");
+]
+
+let stdlib_only_hint name =
+  match List.assoc_opt name gated with
+  | None | Some [] -> None
+  | Some [ e ] -> Some (Printf.sprintf "use `%s`" e)
+  | Some (e :: rest) ->
+    Some (Printf.sprintf "use `%s` (or %s)" e
+            (String.concat ", " (List.map (Printf.sprintf "`%s`") rest)))

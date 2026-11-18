@@ -58,17 +58,20 @@ let contains hay needle =
 
 (* A helper module used by the entry file: the entry alone cannot be analyzed,
    which is exactly why per-file analysis under-reports. *)
-(* The helper calls a capability BUILTIN directly: `march caps` reads each
-   function's own capability closure, which does not follow a stdlib wrapper
-   (specs/todos/2026-11-12-march-caps-misses-stdlib-mediated-caps.md). It
-   used `tcp_connect` until ocap phase 2 Task 10 made the raw socket builtins
-   stdlib-only; `file_read` is still charged and callable. *)
+(* The helper reaches a capability through a stdlib entry point
+   (`File.read`): `march caps` reads each function's own capability closure,
+   which charges a call of a gated builtin's entry point as it charges the
+   builtin (ocap phase 4, Task 8; other stdlib wrappers are still not
+   followed: specs/todos/2026-11-12-march-caps-misses-stdlib-mediated-caps.md).
+   It used `tcp_connect` until ocap phase 2 Task 10 made the raw socket
+   builtins stdlib-only, then `file_read` until phase 4 did the same for the
+   raw capability operations. *)
 let helper_src =
   {|
 mod PkgHelper do
   needs IO.FileRead
   fn fetch(path : String) : Bool do
-    match file_read(path) do
+    match Authority.must(File.read(path)) do
       Ok(_)  -> true
       Err(_) -> false
     end

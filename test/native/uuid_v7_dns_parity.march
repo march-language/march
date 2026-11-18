@@ -1,3 +1,4 @@
+-- compile-flags: --stdlib-source (calls raw capability builtins on purpose; test/dune passes it, test_ir_verify.ml reads it)
 -- Compiled-vs-interpreted parity for the builtins whose C functions were
 -- UNPREFIXED until 2026-09-25: `uuid_v7`, `uuid_v7_at` and `dns_resolve`.
 -- (specs/progress/2026-09-25-runtime-symbol-naming-and-uncompiled-caps.md)
@@ -9,7 +10,9 @@
 -- audit read ANY symbol spelled `dns_resolve` as IO.Network.  They are now
 -- `march_uuid_v7` / `march_uuid_v7_at` / `march_dns_resolve` with explicit
 -- rows, and this fixture holds the renamed lowering to the interpreter.  The
--- dune rule runs it BOTH ways against the one golden.
+-- dune rule runs it BOTH ways against the one golden, as a stdlib-spanned
+-- program (`--stdlib-source`): it pins the builtins themselves, which user
+-- code reaches only through `UUID.v7` and `Dns.resolve` since ocap phase 4.
 --
 -- A UUID v7 is random apart from its timestamp, so the checks are on its
 -- SHAPE (RFC 9562: 8-4-4-4-12 lowercase hex, version nibble 7, variant 10xx),

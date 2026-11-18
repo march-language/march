@@ -69,11 +69,11 @@ end
 
 pfn bench_filter(df : DataFrame) : Unit do
   banner("Filter 1K rows (value > 50.0)")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let lf = DataFrame.lazy(df)
   let filtered = DataFrame.filter(lf, Gt(Col("value"), LitFloat(50.0)))
   let result = DataFrame.collect(filtered)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   let ms = elapsed_ms(t0, t1)
   match result do
   Err(e)  -> Authority.ignore(println("Error: " ++ e))
@@ -84,11 +84,11 @@ end
 
 pfn bench_sort(df : DataFrame) : Unit do
   banner("Sort 1K rows by value desc")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let lf = DataFrame.lazy(df)
   let sorted = DataFrame.sort_by(lf, Cons(("value", Desc), Nil))
   let result = DataFrame.collect(sorted)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   let ms = elapsed_ms(t0, t1)
   match result do
   Err(e)  -> Authority.ignore(println("Error: " ++ e))
@@ -99,10 +99,10 @@ end
 
 pfn bench_groupby(df : DataFrame) : Unit do
   banner("GroupBy category + agg(count, mean(value)) on 1K rows")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let grouped = DataFrame.group_by(df, Cons("category", Nil))
   let result = DataFrame.agg(grouped, Cons(Count, Cons(Mean("value"), Nil)))
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   let ms = elapsed_ms(t0, t1)
   match result do
   Err(e)  -> Authority.ignore(println("Error: " ++ e))
@@ -116,10 +116,10 @@ end
 
 pfn bench_inner_join(left : DataFrame, right : DataFrame) : Unit do
   banner("Inner join two 200-row frames on key")
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let lf = DataFrame.inner_join(DataFrame.lazy(left), right, Cons("key", Nil))
   let result = DataFrame.collect(lf)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   let ms = elapsed_ms(t0, t1)
   match result do
   Err(e)  -> Authority.ignore(println("Error: " ++ e))
@@ -144,14 +144,14 @@ pfn bench_agg_overhead(n : Int) : Unit do
   let arr = native_float_arr_from_list(gen(n - 1, Nil))
   let df = DataFrame.make_df(Cons(FloatCol("y", arr), Nil))
 
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let direct = NativeArray.sum_float(arr)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   let direct_ms = elapsed_ms(t0, t1)
 
-  let t2 = unix_time(())
+  let t2 = Authority.must(System.now())
   let agg = DataFrame.eval_agg(df, DataFrame.Sum("y"), "s")
-  let t3 = unix_time(())
+  let t3 = Authority.must(System.now())
   let agg_ms = elapsed_ms(t2, t3)
 
   println("Direct NativeArray.sum_float: " ++ int_to_string(direct_ms) ++ " ms (sum=" ++ float_to_string(direct) ++ ")")

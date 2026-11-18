@@ -182,7 +182,7 @@ mod ScopeViol do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
-    match file_read("/etc/shadow") do
+    match Authority.must(File.read("/etc/shadow")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
     end
@@ -197,7 +197,7 @@ mod ScopeOkay do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
-    match file_read("/etc/myapp/db.conf") do
+    match Authority.must(File.read("/etc/myapp/db.conf")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
     end
@@ -214,7 +214,7 @@ mod ScopeEscape do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
-    match file_read("/etc/myapp/../shadow") do
+    match Authority.must(File.read("/etc/myapp/../shadow")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
     end
@@ -232,7 +232,7 @@ mod ScopeDyn do
   needs IO.Console
   needs IO.FileRead("/etc/myapp")
   fn load(p : String) : String do
-    match file_read(p) do
+    match Authority.must(File.read(p)) do
       Ok(s) -> s
       Err(_) -> ""
     end
@@ -253,7 +253,7 @@ mod ScopeUnscoped do
   needs IO.Console
   needs IO.FileRead
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
-    match file_read("/etc/shadow") do
+    match Authority.must(File.read("/etc/shadow")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
     end
@@ -268,7 +268,7 @@ mod ScopeUnion do
   needs IO.Console
   needs IO.FileRead("/etc/app"), IO.FileRead("/usr/share/app")
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
-    match file_read("/usr/share/app/x") do
+    match Authority.must(File.read("/usr/share/app/x")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
     end
@@ -286,7 +286,7 @@ mod ScopeParent do
   needs IO.FileSystem("/srv")
   needs IO.FileRead
   fn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead)) : () do
-    match file_read("/srv/data/x") do
+    match Authority.must(File.read("/srv/data/x")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
     end
@@ -303,7 +303,7 @@ mod ScopeTwoPath do
   needs IO.Console
   needs IO.FileWrite("/var/tmp")
   fn main(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) : () do
-    match file_rename("/var/tmp/a", "/etc/passwd") do
+    match Authority.must(File.rename("/var/tmp/a", "/etc/passwd")) do
       Ok(_) -> Authority.ignore(println("o"))
       Err(_) -> Authority.ignore(println("e"))
     end

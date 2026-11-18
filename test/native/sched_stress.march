@@ -16,7 +16,7 @@ mod SchedStress do
     if count <= 0 do
       ()
     else
-      let _ = task_spawn(fn _ -> fib(start % 12 + 8))
+      let _ = Task.async(fn () -> fib(start % 12 + 8))
       spawn_workers(start + 1, count - 1)
     end
   end
@@ -27,7 +27,7 @@ mod SchedStress do
       ()
     else
       let start = batch * batch_size
-      let _ = task_spawn(fn _ -> spawn_workers(start, batch_size))
+      let _ = Task.async(fn () -> spawn_workers(start, batch_size))
       spawn_batches(batch + 1, n_batches, batch_size)
     end
   end

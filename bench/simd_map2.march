@@ -30,9 +30,9 @@ fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   let n = 5000000
   let a = NativeArray.from_list_float(make_float_list(n, 0.0))
   let b = NativeArray.from_list_float(make_float_list(n, 1.0))
-  let t0 = unix_time(())
+  let t0 = Authority.must(System.now())
   let combined = NativeArray.map2_float(a, b, fn (x, y) -> x +. y)
-  let t1 = unix_time(())
+  let t1 = Authority.must(System.now())
   let s = NativeArray.sum_float(combined)
   println("RESULT " ++ float_to_string(s))
   println("TIME_MS " ++ float_to_string(elapsed_ms(t0, t1)))

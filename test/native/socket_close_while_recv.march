@@ -52,7 +52,7 @@ mod SocketCloseWhileRecv do
       Err(e) -> panic("accept: " ++ Socket.error_message(e))
     end
     let t0 = sys_uptime_ms()
-    let _reader = task_spawn(fn _ ->
+    let _reader = Task.async(fn () ->
       let r = Socket.recv(s, 16)
       let took = sys_uptime_ms() - t0
       let what = match r do

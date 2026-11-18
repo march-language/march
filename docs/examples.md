@@ -141,8 +141,8 @@ Lightweight tasks: spawn, await, chained results, and fan-out patterns using the
 ```march
 -- Two independent tasks, combined on await
 fn two_tasks() : Int do
-  let t1 = task_spawn(fn x -> collatz(27, 0))
-  let t2 = task_spawn(fn x -> collatz(871, 0))
+  let t1 = Authority.must(Task.async(fn () -> collatz(27, 0)))
+  let t2 = Authority.must(Task.async(fn () -> collatz(871, 0)))
   task_await_unwrap(t1) + task_await_unwrap(t2)
 end
 ```
@@ -158,8 +158,8 @@ fn par_sum(lo : Int, hi : Int, threshold : Int) : Int do
   if hi - lo <= threshold do sum_range(lo, hi)
   else do
     let mid   = lo + (hi - lo) / 2
-    let left  = task_spawn(fn x -> par_sum(lo, mid, threshold))
-    let right = task_spawn(fn x -> par_sum(mid + 1, hi, threshold))
+    let left  = Authority.must(Task.async(fn () -> par_sum(lo, mid, threshold)))
+    let right = Authority.must(Task.async(fn () -> par_sum(mid + 1, hi, threshold)))
     task_await_unwrap(left) + task_await_unwrap(right)
   end
   end

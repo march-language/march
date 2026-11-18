@@ -17,52 +17,52 @@ fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect)) do
     HttpClient.step_default_headers)
 
   -- Pattern 1: Print chunks as they arrive
-  print("=== Pattern 1: Print chunks ===")
-  print("Streaming 5 JSON objects from httpbin.org/stream/5...")
-  print("")
+  IO.write("=== Pattern 1: Print chunks ===")
+  IO.write("Streaming 5 JSON objects from httpbin.org/stream/5...")
+  IO.write("")
 
   fn print_chunk(chunk) do
-    print("[chunk " ++ String.from_int(String.byte_size(chunk)) ++ " bytes]")
-    print(chunk)
+    IO.write("[chunk " ++ String.from_int(String.byte_size(chunk)) ++ " bytes]")
+    IO.write(chunk)
   end
 
   match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) do
   Ok((status, _, _)) ->
-    print("Status: " ++ String.from_int(status))
+    IO.write("Status: " ++ String.from_int(status))
   Err(_) ->
-    print("Error!")
+    IO.write("Error!")
   end
 
   -- Pattern 2: Count bytes without keeping body in memory
-  print("")
-  print("=== Pattern 2: Byte counting ===")
-  print("Counting bytes from httpbin.org/bytes/8192...")
+  IO.write("")
+  IO.write("=== Pattern 2: Byte counting ===")
+  IO.write("Counting bytes from httpbin.org/bytes/8192...")
 
   fn count_bytes(chunk) do
-    print("  received " ++ String.from_int(String.byte_size(chunk)) ++ " bytes")
+    IO.write("  received " ++ String.from_int(String.byte_size(chunk)) ++ " bytes")
   end
 
   match HttpClient.stream_get(client, "http://httpbin.org/bytes/8192", count_bytes) do
   Ok((status, _, _)) ->
-    print("Status: " ++ String.from_int(status))
+    IO.write("Status: " ++ String.from_int(status))
   Err(_) ->
-    print("Error!")
+    IO.write("Error!")
   end
 
   -- Pattern 3: Stream larger chunked response
-  print("")
-  print("=== Pattern 3: Chunked transfer (20 objects) ===")
+  IO.write("")
+  IO.write("=== Pattern 3: Chunked transfer (20 objects) ===")
 
   fn show_chunk(chunk) do
-    print("  chunk: " ++ String.from_int(String.byte_size(chunk)) ++ " bytes")
+    IO.write("  chunk: " ++ String.from_int(String.byte_size(chunk)) ++ " bytes")
   end
 
   match HttpClient.stream_get(client, "http://httpbin.org/stream/20", show_chunk) do
   Ok((status, _, _)) ->
-    print("Status: " ++ String.from_int(status))
-    print("Done!")
+    IO.write("Status: " ++ String.from_int(status))
+    IO.write("Done!")
   Err(_) ->
-    print("Error!")
+    IO.write("Error!")
   end
 end
 

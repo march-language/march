@@ -199,7 +199,7 @@ mod SocketTimeoutProbe do
   needs IO.Process
 
   fn port_from_env(name) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) ->
       match string_to_int(s) do
       Some(n) -> n
@@ -289,7 +289,7 @@ mod TlsTimeoutProbe do
   needs IO.Process
 
   fn port_from_env(name) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) ->
       match string_to_int(s) do
       Some(n) -> n

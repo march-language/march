@@ -6,7 +6,7 @@ mod Main do
   needs IO.Clock
 
   fn stamp_div(a : Int, b : {Int | _ != 0}) : Int do
-    let t = float_to_int(unix_time())
+    let t = float_to_int(Authority.must(System.now()))
     a / b + t - t
   end
 

@@ -63,18 +63,18 @@ mod Main do
 
   fn main(c : Cap(IO.Console)) do
     let b = task_cancel_token_new()
-    print_line(show_tok(Tok(7)))
-    print_line(show_tok(Other("x")))
-    print_line(to_string(Tok(1)) ++ " " ++ to_string(Tok(1) == Tok(1)) ++ " " ++ to_string(Tok(1) == Other("a")))
-    print_line(to_string(task_is_cancelled(b)))
-    print_line(int_to_string(mine(wrap(4)) + mine(wrap(0))))
+    IO.puts(show_tok(Tok(7)))
+    IO.puts(show_tok(Other("x")))
+    IO.puts(to_string(Tok(1)) ++ " " ++ to_string(Tok(1) == Tok(1)) ++ " " ++ to_string(Tok(1) == Other("a")))
+    IO.puts(to_string(task_is_cancelled(b)))
+    IO.puts(int_to_string(mine(wrap(4)) + mine(wrap(0))))
     match List.find([1, 2, 3], fn x -> x > 1) do
-      Some(h) -> print_line("found " ++ int_to_string(h))
-      None -> print_line("none")
+      Some(h) -> IO.puts("found " ++ int_to_string(h))
+      None -> IO.puts("none")
     end
-    print_line(int_to_string(score(Won(3)) + score(Lost)))
-    print_line(parse(12) ++ ", " ++ parse(0))
+    IO.puts(int_to_string(score(Won(3)) + score(Lost)))
+    IO.puts(parse(12) ++ ", " ++ parse(0))
     Logger.set_module_level("m", Logger.Warn)
-    print_line(to_string(High) ++ " " ++ int_to_string(rank(High)) ++ " " ++ to_string(Low == High))
+    IO.puts(to_string(High) ++ " " ++ int_to_string(rank(High)) ++ " " ++ to_string(Low == High))
   end
 end

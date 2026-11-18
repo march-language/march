@@ -68,7 +68,7 @@ mod TaskLifetimeLeakProbe do
   pfn unwrap_leg(n : Int, acc : Int) : Int do
     if n <= 0 do acc
     else
-      let t = task_spawn(fn _ -> 2)
+      let t = Authority.must(Task.async(fn () -> 2))
       unwrap_leg(n - 1, acc + task_await_unwrap(t))
     end
   end
@@ -77,7 +77,7 @@ mod TaskLifetimeLeakProbe do
   pfn result_leg(n : Int, acc : Int) : Int do
     if n <= 0 do acc
     else
-      let t = task_spawn(fn _ -> 3)
+      let t = Authority.must(Task.async(fn () -> 3))
       let v = match task_await(t) do
         Ok(x) -> x
         Err(_) -> 0
@@ -94,7 +94,7 @@ mod TaskLifetimeLeakProbe do
   pfn float_unwrap_leg(n : Int, acc : Float) : Float do
     if n <= 0 do acc
     else
-      let t = task_spawn(fn _ -> 2.5)
+      let t = Authority.must(Task.async(fn () -> 2.5))
       float_unwrap_leg(n - 1, acc +. task_await_unwrap(t))
     end
   end
@@ -104,7 +104,7 @@ mod TaskLifetimeLeakProbe do
   pfn float_result_leg(n : Int, acc : Float) : Float do
     if n <= 0 do acc
     else
-      let t = task_spawn(fn _ -> 1.25)
+      let t = Authority.must(Task.async(fn () -> 1.25))
       let v = match task_await(t) do
         Ok(x) -> x
         Err(_) -> 0.0
@@ -116,16 +116,16 @@ mod TaskLifetimeLeakProbe do
   -- DOUBLE-AWAIT WITNESS (see header). Not a leak leg: it exists to print a
   -- wrong number, or crash, if the release is keyed to the wrong event.
   pfn double_witness() : String do
-    let ti = task_spawn(fn _ -> 42)
+    let ti = Authority.must(Task.async(fn () -> 42))
     let i1 = task_await_unwrap(ti)
     let i2 = task_await_unwrap(ti)
-    let tf = task_spawn(fn _ -> 2.5)
+    let tf = Authority.must(Task.async(fn () -> 2.5))
     let f1 = task_await_unwrap(tf)
     let f2 = task_await_unwrap(tf)
-    let ts = task_spawn(fn _ -> "he" ++ "llo")
+    let ts = Authority.must(Task.async(fn () -> "he" ++ "llo"))
     let s1 = task_await_unwrap(ts)
     let s2 = task_await_unwrap(ts)
-    let tr = task_spawn(fn _ -> 3.25)
+    let tr = Authority.must(Task.async(fn () -> 3.25))
     let r1 = match task_await(tr) do
       Ok(v) -> v
       Err(_) -> 0.0

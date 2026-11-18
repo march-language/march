@@ -62,7 +62,7 @@ mod DrainInitKilledB do
         Topology.place(h, [ Topology.offer_role("Order.Ledger", Topology.everywhere(), 32,
                               fn cap -> Order_Run.offer_Ledger(h, cap, fn (s, st) -> ledger(s, st))) ])
         Topology.drain_on_signal(h, 1000, 4000)
-        let _ = task_spawn(fn _ -> watch_c(h))
+        let _ = Task.async(fn () -> watch_c(h))
         Topology.supervise_offers(h)
     end
   end

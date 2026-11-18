@@ -17,8 +17,8 @@ end
 
 -- Spawn two independent tasks and combine results.
 fn two_tasks() : Int do
-  let t1 = task_spawn(fn x -> collatz(27, 0))
-  let t2 = task_spawn(fn x -> collatz(871, 0))
+  let t1 = Authority.must(Task.async(fn () -> collatz(27, 0)))
+  let t2 = Authority.must(Task.async(fn () -> collatz(871, 0)))
   let r1 = task_await_unwrap(t1)
   let r2 = task_await_unwrap(t2)
   r1 + r2
@@ -26,9 +26,9 @@ end
 
 -- Chain tasks: result of one feeds into the next.
 fn chained_tasks() : Int do
-  let t1 = task_spawn(fn x -> 10 + 20)
+  let t1 = Authority.must(Task.async(fn () -> 10 + 20))
   let v1 = task_await_unwrap(t1)
-  let t2 = task_spawn(fn x -> v1 * 3)
+  let t2 = Authority.must(Task.async(fn () -> v1 * 3))
   task_await_unwrap(t2)
 end
 
@@ -36,7 +36,7 @@ end
 fn fan_out_inner(n : Int, acc : Int) : Int do
   if n == 0 do acc
   else do
-    let t = task_spawn(fn x -> collatz(n, 0))
+    let t = Authority.must(Task.async(fn () -> collatz(n, 0)))
     let r = task_await_unwrap(t)
     fan_out_inner(n - 1, acc + r) end
   end

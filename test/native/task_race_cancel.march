@@ -25,7 +25,7 @@ mod Main do
       Err(es) -> Authority.ignore(println("any_failed=" ++ int_to_string(List.length(es))))
     end
     let tok = task_cancel_token_new()
-    let _t = task_spawn_with_cancel(fn _ -> 99, tok)
+    let _t = Task.async_cancellable(fn () -> 99, tok)
     task_cancel(tok)
     println("cancelled=" ++ bool_to_string(task_is_cancelled(tok)))
     ()

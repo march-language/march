@@ -50,8 +50,8 @@ mod ClusterSessionsA do
         println("node-a: up")
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-a: never joined") end
         let out = Authority.must(Vault.new("echo_out"))
-        let t1 = task_spawn(fn _ -> session(c, h, "s1", 10, out))
-        let t2 = task_spawn(fn _ -> session(c, h, "s2", 20, out))
+        let t1 = Authority.must(Task.async(fn () -> session(c, h, "s1", 10, out)))
+        let t2 = Authority.must(Task.async(fn () -> session(c, h, "s2", 20, out)))
         let ok = task_await_unwrap(t1) + task_await_unwrap(t2)
         println("A: sessions completed " ++ int_to_string(ok))
         println("A: s1 got " ++ int_to_string(Vault.get_or(out, "s1", -1)))

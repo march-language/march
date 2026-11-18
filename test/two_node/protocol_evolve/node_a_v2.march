@@ -149,7 +149,7 @@ mod ProtocolEvolveA do
     init  { started: 0 }
     on Go(c : Cap(IO), h : Cap(ClusterNode.Live)) do
       note(2)
-      let _ = task_spawn(fn _ -> do
+      let _ = Task.async(fn () -> do
         session(c, h)
         0
       end)

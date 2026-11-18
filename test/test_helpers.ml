@@ -105,6 +105,20 @@ let typecheck src =
 
 let has_errors ctx = March_errors.Errors.has_errors ctx
 
+(** Run [f] with the ocap phase 4 stdlib-only gate lifted for the gated
+    capability builtins ([March_caps.Cap_ops.gated]). For tests that pin how a
+    capability CHECK treats a direct builtin call (the body scan, the bounds,
+    the scopes): that is a property of the check, not of the gate, and
+    registering the source as stdlib instead would switch the capability
+    checks off with it (test_compiler's [with_raw_builtins] does the same for
+    the phase 2 handle builtins). *)
+let with_raw_capability_builtins f =
+  let module TB = March_typecheck.Typecheck_builtins in
+  let gated = List.map fst March_caps.Cap_ops.gated in
+  let saved = !TB.stdlib_only in
+  TB.stdlib_only := List.filter (fun (n, _) -> not (List.mem n gated)) saved;
+  Fun.protect f ~finally:(fun () -> TB.stdlib_only := saved)
+
 (** True iff DESUGARING [src] produces any error diagnostic. Mirrors the CLI
     (bin/main.ml threads a shared [errors] ctx through [desugar_module] and
     exits 1 if it has errors) — needed because the plain [typecheck] helper

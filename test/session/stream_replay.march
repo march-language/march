@@ -106,10 +106,10 @@ mod StreamReplay do
           Vault.set(handlers, int_to_string(ep), handler)
           ep
         end,
-        close: fn ep -> print_line("close " ++ int_to_string(ep)),
+        close: fn ep -> Authority.ignore(IO.puts("close " ++ int_to_string(ep))),
         fail: fn (_ep, why) -> panic(why),
         on_cancel: fn (ep, _h) -> ep,
-        leave: fn (ep, why) -> print_line("leave " ++ int_to_string(ep) ++ ": " ++ why),
+        leave: fn (ep, why) -> Authority.ignore(IO.puts("leave " ++ int_to_string(ep) ++ ": " ++ why)),
         on_crash: fn (ep, _r, _h) -> ep,
         -- D27: this transport never drains, so a loop-head receive is a
         -- plain suspend and a drain handler is never called.
@@ -125,14 +125,14 @@ mod StreamReplay do
 
   -- ── role Prod:  Rec X. Send(Int, Offer{more: Recv(Bool,X), done: Recv(Bool,End)})
   pfn prod_send(s : Cap(Session.Live), ep : Int, next : Int) : Int do
-    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    IO.puts("Prod sends Item(" ++ int_to_string(next) ++ ")")
     let ep1 = Session.emit(s, ep, cons(), enc_item(next))
     Session.suspend(s, ep1, 0, fn (_from, msg, ep2) ->
       if tag(msg) == "M" do
-        print_line("Prod got More")
+        IO.puts("Prod got More")
         prod_send(s, ep2, next + 1)
       else
-        print_line("Prod got Done")
+        IO.puts("Prod got Done")
         Session.close(s, ep2)
         ep2
       end)
@@ -142,7 +142,7 @@ mod StreamReplay do
   pfn cons_wait(s : Cap(Session.Live), ep : Int, budget : Int) : Int do
     Session.suspend(s, ep, 0, fn (_from, msg, ep1) ->
       let n = item_of(msg)
-      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      IO.puts("Cons got Item(" ++ int_to_string(n) ++ ")")
       if budget > 1 do
         let _ = cons_wait(s, ep1, budget - 1)
         Session.emit(s, ep1, prod(), enc_more())

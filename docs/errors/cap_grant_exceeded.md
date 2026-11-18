@@ -62,3 +62,7 @@ The grant on `main` is what the person running the program agrees to. Reading
 writes files must say so there, however deep the write is.
 
 See also: [the language reference](../capabilities.md).
+
+## See it in the error tour
+
+- [Writing a file without saying so]({{ site.baseurl }}/docs/error-messages/#missing-needs)

@@ -157,10 +157,10 @@ mod TestSocket do
     test "listen accept roundtrip" do
       let l = listen_ok()
       let port = port_ok(l)
-      let client = task_spawn(fn _ ->
+      let client = Authority.must(Task.async(fn () ->
         let c = connect_ok(port)
         let _ = Socket.write(c, "ping")
-        c)
+        c))
       let s = accept_ok(l)
       let got = Socket.recv(s, 16)
       let c = task_await_unwrap(client)

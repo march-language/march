@@ -26,7 +26,7 @@ mod TaskCancelByIdLeakProbe do
   pfn cancel_leg(n : Int, acc : Int) : Int do
     if n <= 0 do acc
     else
-      let t = task_spawn(fn _ -> n + 1)
+      let t = Authority.must(Task.async(fn () -> n + 1))
       let k = await_int(t)
       task_cancel_by_id(t)
       cancel_leg(n - 1, acc + k)
@@ -36,7 +36,7 @@ mod TaskCancelByIdLeakProbe do
   pfn again_leg(n : Int, acc : Int) : Int do
     if n <= 0 do acc
     else
-      let t = task_spawn(fn _ -> n * 2)
+      let t = Authority.must(Task.async(fn () -> n * 2))
       let a = await_int(t)
       task_cancel_by_id(t)
       let b = await_int(t)

@@ -32,6 +32,6 @@ mod ClusterNodeVaultsUnnamed do
     ClusterNode.stop(h)
     println("done")
     -- The node's tasks outlive main; end the process here.
-    process_exit(0)
+    Process.exit(0)
   end
 end

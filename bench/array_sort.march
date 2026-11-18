@@ -50,9 +50,9 @@ mod ArraySort do
   -- rather than showing up as an impossibly good number.
   pfn bench_native(label : String, xs : List(Int)) : Unit do
     let arr = native_int_arr_from_list(xs)
-    let t0 = unix_time(())
+    let t0 = Authority.must(System.now())
     let sorted = NativeArray.sort_int(arr)
-    let t1 = unix_time(())
+    let t1 = Authority.must(System.now())
     let head_val = NativeArray.get_int(sorted, 0)
     println("  native " ++ label ++ ": " ++ int_to_string(elapsed_us(t0, t1))
             ++ " us  (first=" ++ int_to_string(head_val) ++ ")")
@@ -60,9 +60,9 @@ mod ArraySort do
   end
 
   pfn bench_list(label : String, xs : List(Int)) : Unit do
-    let t0 = unix_time(())
+    let t0 = Authority.must(System.now())
     let sorted = List.sort_by(xs, fn (a, b) -> a <= b)
-    let t1 = unix_time(())
+    let t1 = Authority.must(System.now())
     let head_val = match sorted do
       Cons(h, _) -> h
       Nil -> 0

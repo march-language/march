@@ -691,7 +691,7 @@ mod Main do
   needs IO.Console
 
   fn save(n : Int) : () do
-    let _ = file_write("/tmp/n", int_to_string(n))
+    let _ = File.write("/tmp/n", int_to_string(n))
     ()
   end
 
@@ -705,39 +705,41 @@ end
 ```text
 -- CAPABILITY ----------------------- missing-needs.march
 
-`save` writes a file, but module `Main` declares no `needs IO.FileWrite`, and `main` is granted only `Cap(IO.Console)`. [cap_needs]
-hint: add this to the module body —
-        needs IO.FileWrite
-and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`.
+Module `Main` uses `IO.FileWrite` but does not declare `needs IO.FileWrite`. [cap_ceiling]
+help: add `needs IO.FileWrite` to the module body.
 
-5 |     let _ = file_write("/tmp/n", int_to_string(n))
-                ^^^^^^^^^^
+2 |   needs IO.Console
+      ^^^^^^^^^^^^^^^^
 
-
-    `main` calls `save` here:
-
-10 |     save(1)
-         ^^^^
-
-    `main` is granted only `Cap(IO.Console)` here:
-
-9 |   fn main(c : Cap(IO.Console)) do
-             ^^^^^^^^^^^^^^^^^^^^^
 
     fix (`forge fix` applies it):
 
-1 | mod Main do
-2 +   needs IO.FileWrite
+2 |   needs IO.Console
+3 +   needs IO.FileWrite
+
+    run `march --explain cap_ceiling`
+
+
+-- CAPABILITY ----------------------- missing-needs.march
+
+`main` is granted `Cap(IO.Console)`, but the program reaches `IO.FileWrite` (reached from `main`: main → save). The grant is a ceiling on the WHOLE program — declaring `needs IO.FileWrite` does not raise it. [cap_grant_exceeded]
+help: add a `Cap(IO.FileWrite)` parameter to `main` (e.g. `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`), or widen the whole grant to `Cap(IO)`, or remove the use.
+
+ 9 |   fn main(c : Cap(IO.Console)) do
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
 9 -   fn main(c : Cap(IO.Console)) do
 9 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
 
-    run `march --explain cap_needs`
+    run `march --explain cap_grant_exceeded`
 ```
 <!-- /error-tour -->
 
 Two things are missing: the module's `needs IO.FileWrite` line, and a grant on `main`.
-They are reported as one error, with the call chain from `main` and both edits in the
-hint.
+Each is reported with its own fix, and the second traces the call chain from `main`.
 <button class="ep-try" data-error-example="15-missing-needs">Try it</button>
 
 <a id="wrong-capability"></a>
@@ -1648,7 +1650,7 @@ mod Main do
   end
 
   pfn save(n : Int) : () do
-    let _ = file_write("/tmp/n", int_to_string(n))
+    let _ = File.write("/tmp/n", int_to_string(n))
     ()
   end
 
@@ -1669,39 +1671,19 @@ end
 ```text
 -- CAPABILITY -------------------------- role-grant.march
 
-The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)` (`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
+Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
 help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
-
-21 |     let _ = file_write("/tmp/n", int_to_string(n))
-                 ^^^^^^^^^^
-
-
-    the body calls `cons` here:
-
-33 |       fn (s, con, st) -> cons(s, con, st))
-                              ^^^^
-
-    `cons` calls `save` here:
-
-27 |       save(n)
-           ^^^^
-
-    the body of role `Cons`, passed to `Stream_Run.run_Cons`:
 
 33 |       fn (s, con, st) -> cons(s, con, st))
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-    role `Cons` is granted only `Cap(IO.Console)` here:
-
-9 |     role Cons needs IO.Console
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^
     run `march --explain role_grant_exceeded`
 ```
 <!-- /error-tour -->
 
 A role can carry its own capability grant. The file write is two calls deep, and the
-error traces the path from the role's body to `file_write`, then shows the grant it
-breaks. The help writes out the widened `role Cons needs` line. It also gives the body's
+error traces the path from the role's body to the function that writes, and names the
+grant it breaks. The help writes out the widened `role Cons needs` line. It also gives the body's
 new parameter list: the body takes one `Cap` for each capability in the grant, so
 widening the grant adds a parameter too.
 

@@ -46,6 +46,35 @@ mod Task do
   end
 
   doc """
+  Spawn f (a zero-argument function) on the work-stealing pool `pool`, the
+  `WorkPool` the runtime hands out (`get_work_pool`). Like `Task.async`, it
+  returns the Task handle, or `Err(CapError(...))` when spawning (IO.Spawn)
+  is refused.
+
+      let t = Authority.must(Task.async_steal(get_work_pool, fn () -> fib(30)))
+      task_await_unwrap(t)
+  """
+  fn async_steal(pool : WorkPool, f) do
+    let? _ = Authority.check("IO.Spawn", "")
+    Ok(task_spawn_steal(pool, fn _ -> f()))
+  end
+
+  doc """
+  Spawn f (a zero-argument function) as a task that `token` can cancel:
+  after `task_cancel(token)`, awaiting it returns `Err("cancelled")` if it
+  had not finished. Returns the Task handle, or `Err(CapError(...))` when
+  spawning (IO.Spawn) is refused.
+
+      let tok = task_cancel_token_new()
+      let t = Authority.must(Task.async_cancellable(fn () -> 42, tok))
+      task_await(t)
+  """
+  fn async_cancellable(f, token : CancelToken) do
+    let? _ = Authority.check("IO.Spawn", "")
+    Ok(task_spawn_with_cancel(fn _ -> f(), token))
+  end
+
+  doc """
   Await the result of a task with a default 5-second timeout.
   Returns Ok(result) or Err(reason).
 

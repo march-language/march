@@ -32,24 +32,24 @@ mod Main do
 
   fn main(_cap_console : Cap(IO.Console), _cap_net : Cap(IO.Network)) do
     -- Numeric IPv4: exactly one entry, whatever the socket-type fan-out.
-    println(to_string(dns_resolve("127.0.0.1")))
-    println(to_string(dns_resolve("10.1.2.3")))
+    println(to_string(Authority.must(Dns.resolve("127.0.0.1"))))
+    println(to_string(Authority.must(Dns.resolve("10.1.2.3"))))
     println(to_string(Authority.must(Dns.resolve_one("127.0.0.1"))))
 
     -- Numeric IPv6: no IPv4 address, so no answer (compiled said Ok([::1])).
-    let v6 = match dns_resolve("::1") do
+    let v6 = match Authority.must(Dns.resolve("::1")) do
       Ok(_) -> false
       Err(_) -> true
     end
     println("::1 has no IPv4 answer: " ++ to_string(v6))
 
     -- localhost: properties only, the exact list is /etc/hosts' business.
-    match dns_resolve("localhost") do
+    match Authority.must(Dns.resolve("localhost")) do
       Ok(ips) ->
         println("localhost no duplicates: " ++ to_string(!has_dup(ips)))
         println("localhost all IPv4: " ++ to_string(all_ipv4(ips)))
         println("localhost has 127.0.0.1: " ++ to_string(List.member(ips, "127.0.0.1")))
-      Err(msg) -> println("localhost failed: " ++ msg)
+      Err(e) -> println("localhost failed: " ++ Dns.error_message(e))
     end
   end
 end

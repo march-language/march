@@ -47,14 +47,14 @@ mod StreamEndpoints do
   -- ── role Prod, against Stream_Prod ──────────────────────────────────────
   -- At the loop head Prod must send; after sending it must offer more/done.
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.S_send_Msg_Prod_Cons_1, next : Int) : Stream_Prod.Yield do
-    print_line("Prod sends Item(" ++ int_to_string(next) ++ ")")
+    IO.puts("Prod sends Item(" ++ int_to_string(next) ++ ")")
     let st1 = Stream_Prod.send_Msg_Prod_Cons_1(s, st, next)
     Stream_Prod.offer_more_done(s, st1,
       fn (_b, st2) ->
-        print_line("Prod got More")
+        IO.puts("Prod got More")
         prod(s, st2, next + 1),
       fn (_b, st2) ->
-        print_line("Prod got Done")
+        IO.puts("Prod got Done")
         Stream_Prod.close(s, st2))
   end
 
@@ -62,7 +62,7 @@ mod StreamEndpoints do
   -- At the loop head Cons must receive; then it chooses more or done.
   pfn cons(s : Cap(Session.Live), st : Stream_Cons.S_recv_Msg_Prod_Cons_1, budget : Int) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
-      print_line("Cons got Item(" ++ int_to_string(n) ++ ")")
+      IO.puts("Cons got Item(" ++ int_to_string(n) ++ ")")
       if budget > 1 do
         let st2 = Stream_Cons.choose_more(s, st1, true)
         cons(s, st2, budget - 1)
@@ -74,7 +74,7 @@ mod StreamEndpoints do
 
   fn main(c : Cap(IO)) do
     -- The stdlib's in-process transport; it prints its own `close` lines.
-    let t = Session.in_process_with(fn line -> print_line(line))
+    let t = Session.in_process_with(fn line -> Authority.ignore(IO.puts(line)))
     let s = Session.attach(c, t.ops)
     let cons_st = Stream_Cons.register(s, 0)
     let prod_st = Stream_Prod.register(s, 0)

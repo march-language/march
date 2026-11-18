@@ -90,7 +90,7 @@ mod TwoNodeStallB do
         let d = drain(fd, buf1, Nil, false)
         match d do
           (buf2, events, acked) ->
-            match SwimDriver.step(s, unix_time_ms(), events) do
+            match SwimDriver.step(s, Authority.must(System.now_ms()), events) do
               (s2, acts) ->
                 perform(fd, acts)
                 (s2, buf2, acked, false)

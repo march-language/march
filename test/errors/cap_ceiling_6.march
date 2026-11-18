@@ -6,7 +6,7 @@ mod Main do
       f(p)
     end
     fn go() : () do
-      match apply1(file_read, "/etc/hosts") do
+      match apply1(File.read, "/etc/hosts") do
         Ok(_)  -> Authority.ignore(println("ok"))
         Err(_) -> Authority.ignore(println("e"))
       end

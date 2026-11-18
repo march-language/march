@@ -15,10 +15,10 @@ mod HttpExample do
   fn print_result(label, result) do
     match result do
     Ok(resp) ->
-      print(label ++ ": OK (status " ++ String.from_int(Http.response_status_code(resp)) ++ ")")
-      print("  body: " ++ Http.response_body(resp))
+      IO.write(label ++ ": OK (status " ++ String.from_int(Http.response_status_code(resp)) ++ ")")
+      IO.write("  body: " ++ Http.response_body(resp))
     Err(_) ->
-      print(label ++ ": ERROR")
+      IO.write(label ++ ": ERROR")
     end
   end
 
@@ -27,11 +27,11 @@ mod HttpExample do
   -- -----------------------------------------------------------------------
 
   fn demo_transport() do
-    print("=== Layer 2: HttpTransport ===")
-    print("Making a raw GET request via TCP...")
+    IO.write("=== Layer 2: HttpTransport ===")
+    IO.write("Making a raw GET request via TCP...")
     let result = HttpTransport.simple_get("http://httpbin.org/get")
     print_result("GET httpbin.org/get", result)
-    print("")
+    IO.write("")
   end
 
   -- -----------------------------------------------------------------------
@@ -39,7 +39,7 @@ mod HttpExample do
   -- -----------------------------------------------------------------------
 
   fn demo_client() do
-    print("=== Layer 3: HttpClient ===")
+    IO.write("=== Layer 3: HttpClient ===")
 
     -- Build a client with a request step
     let client = HttpClient.new_client()
@@ -51,37 +51,37 @@ mod HttpExample do
       match xs do
       Nil -> "done"
       Cons(h, t) ->
-        print("  - " ++ h)
+        IO.write("  - " ++ h)
         show_steps(t)
       end
     end
-    print("Configured steps:")
+    IO.write("Configured steps:")
     show_steps(HttpClient.list_steps(client))
 
     -- GET request through client pipeline
-    print("")
-    print("Making GET request through client pipeline...")
+    IO.write("")
+    IO.write("Making GET request through client pipeline...")
     let result = HttpClient.get(client, "http://httpbin.org/get")
     print_result("GET httpbin.org/get", result)
-    print("")
+    IO.write("")
 
     -- POST request
-    print("Making POST request...")
+    IO.write("Making POST request...")
     dbg()
     let result = HttpClient.post(client, "http://httpbin.org/post", "hello from march")
     print_result("POST httpbin.org/post", result)
-    print("")
+    IO.write("")
   end
 
   fn main(_cap_console : Cap(IO.Console), _cap_netconnect : Cap(IO.NetConnect)) do
-    print("March HTTP Library Demo")
-    print("=======================")
-    print("")
+    IO.write("March HTTP Library Demo")
+    IO.write("=======================")
+    IO.write("")
 
     demo_transport()
     demo_client()
 
-    print("Done!")
+    IO.write("Done!")
   end
 
 end

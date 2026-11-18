@@ -77,7 +77,7 @@ mod SupervisorRespawnNamesBeforeActivation do
     match found do
       Some(p) -> Some(p)
       None ->
-        if unix_time_ms() >= deadline do None
+        if Authority.must(System.now_ms()) >= deadline do None
         else
           task_yield()
           resolve(intro, name, prev, deadline)
@@ -97,7 +97,7 @@ mod SupervisorRespawnNamesBeforeActivation do
     if i == total do
       (i, refused, failed, short)
     else
-      match resolve(intro, name, prev, unix_time_ms() + 20000) do
+      match resolve(intro, name, prev, Authority.must(System.now_ms()) + 20000) do
         None -> (i, refused, failed, short)
         Some(p) ->
           let ok = accepted(send(p, Inc())) + accepted(send(p, Inc())) + accepted(send(p, Inc()))
@@ -136,8 +136,8 @@ mod SupervisorRespawnNamesBeforeActivation do
     println("registered: " ++ bool_to_string(Actor.register(a, "worker_a")
                                             && Actor.register(b, "worker_b")))
     let total = 300
-    let ta = task_spawn(fn _ -> rounds(intro, "worker_a", -1, 0, total, 0, 0, 0))
-    let tb = task_spawn(fn _ -> rounds(intro, "worker_b", -1, 0, total, 0, 0, 0))
+    let ta = Authority.must(Task.async(fn () -> rounds(intro, "worker_a", -1, 0, total, 0, 0, 0)))
+    let tb = Authority.must(Task.async(fn () -> rounds(intro, "worker_b", -1, 0, total, 0, 0, 0)))
     report("worker_a", total, ta)
     report("worker_b", total, tb)
   end

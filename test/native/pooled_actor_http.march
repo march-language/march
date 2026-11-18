@@ -53,7 +53,7 @@ mod PooledActorHttp do
   -- Mirrors depot Pool.checkout: actor_call on a fresh green thread, the
   -- caller (an HTTP pthread) only touches task_spawn/task_await.
   pfn checkout(pool) do
-    let t = task_spawn(fn _ ->
+    let t = Authority.must(Task.async(fn () ->
       match actor_call(pool, Checkout(0), 5000) do
       Err(e) -> Err("pool actor: " ++ e)
       Ok(maybe) ->
@@ -61,7 +61,7 @@ mod PooledActorHttp do
         None    -> Err("no connection available")
         Some(c) -> Ok(c)
         end
-      end)
+      end))
     task_await_unwrap(t)
   end
 
@@ -89,7 +89,7 @@ mod PooledActorHttp do
   end
 
   pfn port_from_env() do
-    match process_env("MARCH_TEST_HTTP_PORT") do
+    match Authority.must(Process.env("MARCH_TEST_HTTP_PORT")) do
     Some(s) ->
       match string_to_int(s) do
       Some(n) -> n
@@ -102,7 +102,7 @@ mod PooledActorHttp do
   fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process), _cap_spawn : Cap(IO.Spawn)) do
     let port = port_from_env()
     if port == 0 do
-      process_exit(2)
+      Authority.ignore(Process.exit(2))
     else
       let pool = spawn(Pool)
       -- 64 >= the harness's 32 concurrent clients: checkouts are serialized

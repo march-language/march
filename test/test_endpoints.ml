@@ -1843,7 +1843,7 @@ mod GOk do
   end
   pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), fw : Cap(IO.FileWrite), st : Stream_Cons.Entry) : Stream_Cons.Yield do
     Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
-      print_line(int_to_string(n))
+      println(int_to_string(n))
       Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))
   end
   pfn prod(s : Cap(Session.Live), st : Stream_Prod.Entry) : Stream_Prod.Yield do
@@ -1903,7 +1903,7 @@ mod GBad do
     end
   end
   pfn save(n : Int) : () do
-    let _ = file_write("/tmp/n", int_to_string(n))
+    let _ = File.write("/tmp/n", int_to_string(n))
     ()
   end
   pfn cons(s : Cap(Session.Live), con : Cap(IO.Console), st : Stream_Cons.Entry) : Stream_Cons.Yield do
@@ -1924,11 +1924,15 @@ let cli_role_grant_violation =
        let rc, out = check_cli violation_src in
        Alcotest.(check int) "exit code" 1 rc;
        Alcotest.(check bool) ("names the role, the cap and the chain (output: " ^ out ^ ")") true
-         (* Diagnostics plan F1: the chain is a span trace now (the use,
-            then a label per call), not prose. *)
-         (contains_text out "The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`"
-          && contains_text out "the body calls `cons` here"
-          && contains_text out "`cons` calls `save` here"))
+         (* `save` writes through `File.write` (the raw `file_write` is
+            stdlib-only since ocap phase 4), so the chain is the closure
+            path's prose rather than diagnostics plan F1's span trace for a
+            direct builtin call
+            (specs/todos/2026-11-17-ocap-merged-needs-report-at-entry-points.md;
+            test/errors/role_grant_exceeded_1 pins the span trace). *)
+         (contains_text out "Role `Stream.Cons` is granted `Cap(IO.Console)`"
+          && contains_text out
+               "reaches `IO.FileWrite` (reached from the body: body → cons → save)"))
 
 (* The same walk from the fronts over a cluster node.  The hosted ones pin
    where the callbacks sit now that the grant's parameters come before them:
@@ -1954,7 +1958,7 @@ let cli_role_grant_cluster_fronts =
             let rc, out = check_cli (with_call call) in
             Alcotest.(check int) (front ^ ": exit code (output: " ^ out ^ ")") 1 rc;
             Alcotest.(check bool) (front ^ ": names the grant (output: " ^ out ^ ")") true
-              (contains_text out "the role is granted only `Cap(IO.Console)`");
+              (contains_text out "is granted `Cap(IO.Console)` (`role Cons needs IO.Console`)");
             (* widening the grant here is three edits, not two: the call
                takes the grant as arguments, and the help says so *)
             Alcotest.(check bool) (front ^ ": the help names the call's new argument (output: " ^ out ^ ")") true
@@ -2036,7 +2040,7 @@ mod GHost do
     state { n : Int }
     init { n: 0 }
     on Start(s : Cap(Session.Live), con : Cap(IO.Console)) do
-      let _ = file_write("/tmp/n", "0")
+      let _ = File.write("/tmp/n", "0")
       state
     end
   end
@@ -2099,7 +2103,7 @@ mod GLet do
     end
   end
   pfn wipe(n : Int) : () do
-    let _ = file_delete("/tmp/n" ++ int_to_string(n))
+    let _ = File.delete("/tmp/n" ++ int_to_string(n))
     ()
   end
   fn main(c : Cap(IO)) do
@@ -2214,7 +2218,7 @@ let cli_role_grant_direct_builtin =
   Alcotest.test_case "CLI: a body lambda calling a capability builtin directly is refused" `Quick (fun () ->
       let src = replace_all ~needle:"fn (s, con, st) -> cons(s, con, st)" ~by:{|fn (s, con, st) ->
       Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
-        let _ = file_write("/tmp/n", int_to_string(n))
+        let _ = File.write("/tmp/n", int_to_string(n))
         Stream_Cons.close(s, Stream_Cons.choose_done(s, st1, true)))|} violation_src in
       let rc, out = check_cli src in
       Alcotest.(check int) ("exit code (output: " ^ out ^ ")") 1 rc;
@@ -2281,7 +2285,7 @@ let cli_dump_role_authority_local_closures =
     state { n : Int }
     init { n: 0 }
     on Tick() do
-      let _ = file_write(\"/tmp/k\", \"1\")
+      let _ = File.write(\"/tmp/k\", \"1\")
       state
     end
   end
@@ -2355,7 +2359,7 @@ mod FP do
     end
   end
   fn main(c : Cap(IO)) do
-    print_line(Stream_Msg.fingerprint())
+    println(Stream_Msg.fingerprint())
   end
 end
 |} grant in
@@ -2708,7 +2712,7 @@ let shared_bystander_native =
   end
   pfn c(s : Cap(Session.Live), st : Three_C.S_recv_Msg_B_C_1) : Three_C.Yield do
     Three_C.recv_Msg_B_C_1(s, st, fn (n, next) ->
-      print_line(int_to_string(n))
+      println(int_to_string(n))
       Three_C.close(s, next))
   end
   fn main(io : Cap(IO)) do

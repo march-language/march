@@ -34,7 +34,7 @@ mod HttpsHello do
   needs IO.FileRead
 
   pfn env_or(name, dflt) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) -> s
     None -> dflt
     end

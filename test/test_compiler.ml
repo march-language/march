@@ -2051,8 +2051,10 @@ let test_show_user_impl () =
 
 let test_println_polymorphic_typecheck () =
   (* Verify that a user-defined fn println(x) using show can accept any Show type,
-     matching the behaviour of the prelude's polymorphic println. *)
-  let ctx = typecheck {|mod Test do
+     matching the behaviour of the prelude's polymorphic println.  The raw
+     `print` is stdlib-only since ocap phase 4; this is about println's
+     typing, so the gate is lifted around it. *)
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Test do
   needs IO.Console
     fn println(x) do
       print(show(x))
@@ -2062,7 +2064,7 @@ let test_println_polymorphic_typecheck () =
       println(42)
       println(true)
     end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "polymorphic println accepts Show types" false (has_errors ctx)
 
 let test_hash_builtin_int () =

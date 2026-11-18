@@ -54,8 +54,8 @@ val stdlib_span_files : Ast.decl list -> string list
     point can reject the stdlib's own calls to a [stdlib_only] builtin. *)
 val note_stdlib_decls : Ast.decl list -> unit
 
-(** The one "is this a stdlib file?" predicate: [span_is_stdlib], the
-    stdlib-only builtin gate and the driver's diagnostic filter all use it. *)
+(** The one "is this a stdlib file?" predicate: [span_is_stdlib] (and so the
+    stdlib-only gates) and the driver's diagnostic filter all use it. *)
 val file_is_stdlib : string -> bool
 
 (** The names of every built-in type of the base environment
@@ -82,7 +82,7 @@ val span_is_stdlib : Ast.span -> bool
 val control_wiring_file : string
 
 (** [span_is_stdlib], or the generated control wiring: who may name a
-    [@[stdlib_internal]] function. *)
+    [@[stdlib_internal]] function or a [stdlib_only] builtin. *)
 val span_may_name_internal : Ast.span -> bool
 
 (** Builtins only the standard library may reference, with the suggestion
@@ -98,6 +98,11 @@ val stdlib_only : (string * string) list ref
 
 val cap_strict_ceiling : bool ref
 val builtin_cap_table : (string * string) list
+
+(** The qualified stdlib entry points of the gated rows ([Cap_ops.gated]),
+    each with its builtin's [builtin_cap_table] capability: charged by the
+    per-function capability closures, not by the diagnostic body scan. *)
+val entry_cap_table : (string * string) list
 
 (** [cap_subsumes broad narrow] — whether a grant of [broad] covers [narrow]. *)
 val cap_subsumes : string -> string -> bool

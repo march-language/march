@@ -510,8 +510,8 @@ Arms separated by newlines. Multi-statement arms need no wrapper:
 match result do
   Ok(v)  ->
     let s = to_string(v)
-    print(s)
-  Err(e) -> print(e)
+    println(s)
+  Err(e) -> println(e)
 end
 ```
 
@@ -578,9 +578,9 @@ Both branches can be multi-statement:
 ```march
 if x > 0 do
   let msg = "positive"
-  print(msg)
+  println(msg)
 else
-  print("non-positive")
+  println("non-positive")
 end
 ```
 
@@ -1099,7 +1099,7 @@ Cancellation tokens:
 let tok = task_cancel_token_new()
 task_is_cancelled(tok)                          -- false
 
-let t = task_spawn_with_cancel(fn _ -> work(), tok)
+let t = Authority.must(Task.async_cancellable(fn () -> work(), tok))
 task_cancel(tok)                                -- mark cancelled
 Task.await(t)                                   -- Err("cancelled")
 
@@ -1465,7 +1465,7 @@ end
 fn main() do
   let shapes = [Circle(1.0), Rect(2.0, 3.0)]
   let areas  = shapes |> map(fn s -> area(s))
-  print(to_string(areas))
+  println(to_string(areas))
 end
 
 end

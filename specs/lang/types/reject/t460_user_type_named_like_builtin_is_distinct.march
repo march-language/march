@@ -11,8 +11,8 @@ mod Main do
   type CancelToken = Tok(Int)
   fn main(c : Cap(IO.Console)) do
     match Some(task_cancel_token_new()) do
-      Some(Tok(_)) -> print_line("tok")
-      None -> print_line("none")
+      Some(Tok(_)) -> IO.puts("tok")
+      None -> IO.puts("none")
     end
   end
 end

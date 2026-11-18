@@ -31,3 +31,20 @@ val classify : string -> cls option
 
 val gated : (string * string list) list
 (** The [Checked { gated = true }] rows: builtin name and entry points. *)
+
+val shadowed_by_stdlib : string list
+(** The [gated] rows the stdlib-only gate leaves alone
+    (specs/progress/2026-11-10-ocap-p1-gate-raw-capability-builtins.md).
+    [println]: [Prelude.println] shadows the builtin, so a user call already
+    reaches the checked stdlib function.  [random_bytes]: the todo counted it
+    as shadowed too, but a bare user call still resolves to the raw builtin;
+    see specs/todos/2026-11-17-ocap-raw-random-bytes-ungated.md. *)
+
+val rename_differs : (string * string) list
+(** The [gated] rows whose first entry point lines up in type but is not a
+    drop-in replacement, each with why: the [stdlib_internal] diagnostic
+    offers no fix for these ([Typecheck.stdlib_only_fix]). *)
+
+val stdlib_only_hint : string -> string option
+(** For a [gated] row, the stdlib-only gate's suggestion: [use `E1`], or
+    [use `E1` (or `E2`, ...)] when the row lists several entry points. *)

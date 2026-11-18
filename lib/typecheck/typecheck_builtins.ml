@@ -157,7 +157,9 @@ let control_wiring_file = "<control>"
 (** Whether a reference at [sp] may name a [@[stdlib_internal]] function: the
     stdlib's own code, or the compiler's generated control wiring. The driver
     refuses an input file named like a generated-code tag (bin/main.ml,
-    [add_input]), so a user file cannot carry `<control>`. The stdlib-only BUILTIN gate keeps using [span_is_stdlib]. *)
+    [add_input]), so a user file cannot carry `<control>`. The stdlib-only
+    builtin gate uses it too: the wiring reads the clock and spawns tasks
+    with the raw builtins, which ocap phase 4 gated. *)
 let span_may_name_internal (sp : Ast.span) : bool =
   span_is_stdlib sp || String.equal sp.Ast.file control_wiring_file
 
@@ -369,6 +371,21 @@ let builtin_cap_table : (string * string) list = [
   ("actor_whereis",         "IO.Registry");
   ("actor_registered",      "IO.Registry");
 ]
+
+(** The qualified stdlib entry points of the gated rows ([Cap_ops.gated]:
+    `File.write`, `System.now_ms`, `Task.async`, ...), each with its builtin's
+    capability.  Since ocap phase 4 (Task 8) user code reaches those builtins
+    only through these, so the per-function capability closures charge a call
+    of one as they charge the builtin ([Typecheck_caps]: the closure tables
+    only, never the diagnostic body scan). *)
+let entry_cap_table : (string * string) list =
+  List.concat_map (fun (builtin, entry) ->
+      match List.assoc_opt builtin builtin_cap_table with
+      | Some cap ->
+        List.filter_map (fun e ->
+            if String.contains e '.' then Some (e, cap) else None) entry
+      | None -> [])
+    March_caps.Cap_ops.gated
 
 (** The names a module DECLARES directly (bare [DFn]s and top-level [DLet]
     [PatVar]s) — exactly the set that wins real name resolution over a global

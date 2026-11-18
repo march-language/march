@@ -1,8 +1,8 @@
 exit: 1
 -- CAPABILITY ----------------- errors/cap_grant_21.march
 
-Module `Main` uses `IO.Console` but does not declare `needs IO.Console`. [cap_ceiling]
-help: add `needs IO.Console` to the module body.
+Module `Main` uses `IO.FileWrite` but does not declare `needs IO.FileWrite`. [cap_ceiling]
+help: add `needs IO.FileWrite` to the module body.
 
 2 | mod Main do
         ^^^^
@@ -11,27 +11,21 @@ help: add `needs IO.Console` to the module body.
     fix (`forge fix` applies it):
 
 2 | mod Main do
-3 +     needs IO.Console
+3 +     needs IO.FileWrite
 
     run `march --explain cap_ceiling`
 
 
 -- CAPABILITY ----------------- errors/cap_grant_21.march
 
-`main` writes a file, but module `Main` declares no `needs IO.FileWrite`; its code also reaches `Cap(IO.Console)`, and `main` is granted nothing. [cap_needs]
-hint: add these to the module body —
+`main` prints, but module `Main` declares no `needs IO.Console`, and `main` is granted nothing. [cap_needs]
+hint: add this to the module body —
         needs IO.Console
-        needs IO.FileWrite
 `main` declares no grant of its own, so the module's `needs` line is its grant.
-
-15 |     match file_write("/tmp/t176_out", "d") do
-               ^^^^^^^^^^
-
-
-    `main` prints here (`needs IO.Console`):
 
 16 |       Ok(_)  -> Authority.ignore(println("ok"))
                                       ^^^^^^^
+
 
     `main` is granted nothing here:
 
@@ -42,7 +36,6 @@ hint: add these to the module body —
 
 2 | mod Main do
 3 +   needs IO.Console
-4 +   needs IO.FileWrite
 
     run `march --explain cap_needs`
 

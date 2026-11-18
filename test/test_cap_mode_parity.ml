@@ -91,7 +91,7 @@ let ceiling_value needs =
       f(p)
     end
     fn go() : () do
-      match apply1(file_read, "/nonexistent/cap_parity") do
+      match Authority.must(apply1(fn p -> File.read(p), "/nonexistent/cap_parity")) do
         Ok(_)  -> Authority.ignore(println("ok"))
         Err(_) -> Authority.ignore(println("e"))
       end
@@ -129,7 +129,7 @@ let main_grant grant =
   needs IO.Console
   needs IO.FileWrite
   fn greet(name : String) : () do
-    match file_write("/nonexistent/cap_parity", name) do
+    match Authority.must(File.write("/nonexistent/cap_parity", name)) do
       Ok(_)  -> Authority.ignore(println("hello " ++ name))
       Err(_) -> Authority.ignore(println("hello anyway"))
     end
@@ -146,7 +146,7 @@ let path_scope path =
     {|mod Main do
   needs IO.Console, IO.FileRead("/nonexistent/cap_parity/")
   fn r() : String do
-    match file_read("%s") do
+    match Authority.must(File.read("%s")) do
       Ok(s) -> s
       Err(_) -> "none"
     end
@@ -161,7 +161,7 @@ let path_scope_repl path =
     {|mod R do
   needs IO.FileRead("/nonexistent/cap_parity/")
   fn r() : String do
-    match file_read("%s") do
+    match Authority.must(File.read("%s")) do
       Ok(s) -> s
       Err(_) -> "none"
     end

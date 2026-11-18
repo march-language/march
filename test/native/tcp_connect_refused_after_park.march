@@ -46,8 +46,8 @@ mod TcpConnectRefusedAfterPark do
       Err(e) -> panic("port: " ++ Socket.error_message(e))
     end
     let _ = Socket.close_listener(l)
-    let tasks = List.map(List.range(0, 8), fn _ -> task_spawn(fn _ -> refusals(port, 40, 0)))
-    let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(t))
+    let tasks = List.map(List.range(0, 8), fn _ -> Task.async(fn () -> refusals(port, 40, 0)))
+    let total = List.fold_left(tasks, 0, fn (acc, t) -> acc + task_await_unwrap(Authority.must(t)))
     println("refused: " ++ int_to_string(total) ++ "/320")
   end
 end

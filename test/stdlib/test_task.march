@@ -34,7 +34,7 @@ describe "task_spawn_with_cancel" do
 
   test "runs normally when token is active" do
     let tok = task_cancel_token_new()
-    let t = task_spawn_with_cancel(fn _ -> 42, tok)
+    let t = Authority.must(Task.async_cancellable(fn () -> 42, tok))
     let r = task_await(t)
     assert (r == Ok(42))
   end
@@ -42,7 +42,7 @@ describe "task_spawn_with_cancel" do
   test "skips execution when token is pre-cancelled" do
     let tok = task_cancel_token_new()
     task_cancel(tok)
-    let t = task_spawn_with_cancel(fn _ -> 99, tok)
+    let t = Authority.must(Task.async_cancellable(fn () -> 99, tok))
     let r = task_await(t)
     assert (r == Err("cancelled"))
   end
@@ -52,7 +52,7 @@ describe "task_spawn_with_cancel" do
     -- Verify by checking the await result rather than a side effect.
     let tok = task_cancel_token_new()
     task_cancel(tok)
-    let t = task_spawn_with_cancel(fn _ -> 999, tok)
+    let t = Authority.must(Task.async_cancellable(fn () -> 999, tok))
     let r = task_await(t)
     assert (r == Err("cancelled"))
   end

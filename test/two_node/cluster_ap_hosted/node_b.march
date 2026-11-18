@@ -48,9 +48,9 @@ mod ClusterApHostedB do
       Err(e) -> panic(e)
       Ok(h) ->
         if ClusterNode.await_members(h, 1, 120000) do () else panic("node-b: never joined") end
-        let t1 = task_spawn(fn _ -> session(c, h, 1))
-        let t2 = task_spawn(fn _ -> session(c, h, 2))
-        let t3 = task_spawn(fn _ -> session(c, h, 3))
+        let t1 = Authority.must(Task.async(fn () -> session(c, h, 1)))
+        let t2 = Authority.must(Task.async(fn () -> session(c, h, 2)))
+        let t3 = Authority.must(Task.async(fn () -> session(c, h, 3)))
         let ok = task_await_unwrap(t1) + task_await_unwrap(t2) + task_await_unwrap(t3)
         println("Client: concurrent sessions completed " ++ int_to_string(ok))
         let _ = session(c, h, 4)

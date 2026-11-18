@@ -373,7 +373,8 @@ hint: add these to the module body —
 
 The error above is easy to over-read. What it covers:
 
-- It catches a **direct** call to a capability builtin: `file_read(p)`.
+- It catches a **direct** call to a capability builtin: `file_read(p)` (since ocap phase 4
+  only stdlib code can make one; a user program's direct call is a `stdlib_internal` error).
 - It does **not** catch, on its own, the same operation routed through a stdlib
   wrapper: `File.read(p)`. That call is invisible to *this* check. It is caught
   by the **capability upper limit** instead.
@@ -975,9 +976,14 @@ well under a microsecond; entering a frame is a few tens of nanoseconds. Functio
 that reach a capability operation, a spawn or another function value carry one more word,
 but only in a program that has at least one frame.
 
-**Not yet enforced at run time.** A direct call of a raw builtin (`file_read(p)`) bypasses
-the run-time check, though not the compile-time one; the network opens of `HttpServer`
-and `Udp.resolve` are not checked yet. Authority does not travel with a remote child
+**Raw builtins are stdlib-only.** A program cannot call a raw capability builtin
+(`file_read(p)`, `unix_time_ms(())`, `task_spawn(f)`) directly: the reference is a
+`stdlib_internal` error that names the stdlib entry point to call instead (`File.read`,
+`System.now_ms`, `Task.async`), which runs the run-time check first. Where the entry point
+takes the same arguments, the error carries the rename as its fix.
+
+**Not yet enforced at run time.** The network opens of `HttpServer` and `Udp.resolve` are
+not checked yet. Authority does not travel with a remote child
 started on another node: the receiving node runs it under its own launch authority
 (`specs/todos/2026-11-17-ocap-cross-node-authority.md`). A module's own scoped `needs`
 line is checked at compile time only, except as the program's request when it is the
@@ -1673,7 +1679,7 @@ that is `None` when not overridden. `march --emit-io-ops` prints the shapes.
 ```march
 fn main(c : Cap(IO.Console)) do
   let mock = cap_impl(c, { cap_ops_empty(c) with
-    print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+    print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
   with_cap(mock, fn _ -> code_under_test())
 end
 ```

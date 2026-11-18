@@ -24,17 +24,17 @@ fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
 
   -- sum_f32
   let sum_arr = NativeArray.make_f32(n, 1.0)
-  let t0s = unix_time(())
+  let t0s = Authority.must(System.now())
   let s = NativeArray.sum_f32(sum_arr)
-  let t1s = unix_time(())
+  let t1s = Authority.must(System.now())
   println("SUM_RESULT " ++ float_to_string(s))
   println("SUM_TIME_MS " ++ float_to_string(elapsed_ms(t0s, t1s)))
 
   -- map_f32
   let map_arr = NativeArray.make_f32(n, 1.0)
-  let t0m = unix_time(())
+  let t0m = Authority.must(System.now())
   let mapped = NativeArray.map_f32(map_arr, fn x -> x *. 2.0 +. 1.0)
-  let t1m = unix_time(())
+  let t1m = Authority.must(System.now())
   let sm = NativeArray.sum_f32(mapped)
   println("MAP_RESULT " ++ float_to_string(sm))
   println("MAP_TIME_MS " ++ float_to_string(elapsed_ms(t0m, t1m)))
@@ -42,9 +42,9 @@ fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
   -- map2_f32
   let a = NativeArray.make_f32(n, 1.0)
   let b = NativeArray.make_f32(n, 2.0)
-  let t0c = unix_time(())
+  let t0c = Authority.must(System.now())
   let combined = NativeArray.map2_f32(a, b, fn (x, y) -> x +. y)
-  let t1c = unix_time(())
+  let t1c = Authority.must(System.now())
   let sc = NativeArray.sum_f32(combined)
   println("MAP2_RESULT " ++ float_to_string(sc))
   println("MAP2_TIME_MS " ++ float_to_string(elapsed_ms(t0c, t1c)))

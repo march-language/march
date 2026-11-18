@@ -1,4 +1,18 @@
 exit: 1
+-- PROGRAM -------------------- errors/cap_needs_10.march
+
+`file_write` is internal to the standard library; use `File.write`. [stdlib_internal]
+
+14 |     let _ = file_write("/tmp/n", int_to_string(n))
+                 ^^^^^^^^^^
+
+
+    fix (`forge fix` applies it):
+
+14 -     let _ = file_write("/tmp/n", int_to_string(n))
+14 +     let _ = Authority.must(File.write("/tmp/n", int_to_string(n)))
+
+
 -- CAPABILITY ----------------- errors/cap_needs_10.march
 
 `save` writes a file, but module `Main` declares no `needs IO.FileWrite`, and `main` is granted only `Cap(IO.Console)`. [cap_needs]
@@ -6,26 +20,26 @@ hint: add this to the module body —
         needs IO.FileWrite
 and give `main` a `Cap(IO.FileWrite)` parameter: `fn main(…, _cap_filewrite : Cap(IO.FileWrite))`.
 
-10 |     let _ = file_write("/tmp/n", int_to_string(n))
+14 |     let _ = file_write("/tmp/n", int_to_string(n))
                  ^^^^^^^^^^
 
 
     `main` calls `save` here:
 
-15 |     save(1)
+19 |     save(1)
          ^^^^
 
     `main` is granted only `Cap(IO.Console)` here:
 
-14 |   fn main(c : Cap(IO.Console)) do
+18 |   fn main(c : Cap(IO.Console)) do
               ^^^^^^^^^^^^^^^^^^^^^
 
     fix (`forge fix` applies it):
 
- 6 | mod Main do
- 7 +   needs IO.FileWrite
-14 -   fn main(c : Cap(IO.Console)) do
-14 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
+10 | mod Main do
+11 +   needs IO.FileWrite
+18 -   fn main(c : Cap(IO.Console)) do
+18 +   fn main(c : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite)) do
 
     run `march --explain cap_needs`
 

@@ -63,7 +63,7 @@ mod UnboxedAggregateBoundaries do
     println(to_string(List.map(ps, fn p -> match p do P(x, _) -> x end)))
 
     -- a task boundary (aggregate through a green thread's erased slot)
-    let h = task_spawn(fn _ -> sumv(mkv(10.0)))
+    let h = Authority.must(Task.async(fn () -> sumv(mkv(10.0))))
     println(float_to_string(task_await_unwrap(h)))
 
     -- result / option wrapping

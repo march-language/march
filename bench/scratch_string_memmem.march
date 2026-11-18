@@ -30,9 +30,9 @@ mod ScratchStringMemmem do
   fn main(_cap_clock : Cap(IO.Clock), _cap_console : Cap(IO.Console)) : Unit do
     -- 32MB haystack, needle absent (worst case: every byte examined).
     let buf = String.repeat("abcdefghij", 3200000)
-    let t0 = unix_time(())
+    let t0 = Authority.must(System.now())
     let absent = scan_n(buf, "ZZZZZZZZZZ", 0, 20, 0)
-    let t1 = unix_time(())
+    let t1 = Authority.must(System.now())
     println("ABSENT_RESULT " ++ String.from_int(absent))
     println("ABSENT_TIME_MS " ++ float_to_string(elapsed_ms(t0, t1)))
 
@@ -40,9 +40,9 @@ mod ScratchStringMemmem do
     let cut = (String.byte_size(buf) * 99) / 100
     let marked = String.slice(buf, 0, cut) ++ "QQMARKERQQ"
                  ++ String.slice(buf, cut, String.byte_size(buf) - cut)
-    let t2 = unix_time(())
+    let t2 = Authority.must(System.now())
     let late = scan_n(marked, "QQMARKERQQ", 0, 20, 0)
-    let t3 = unix_time(())
+    let t3 = Authority.must(System.now())
     println("LATE_RESULT " ++ String.from_int(late))
     println("LATE_TIME_MS " ++ float_to_string(elapsed_ms(t2, t3)))
     ()

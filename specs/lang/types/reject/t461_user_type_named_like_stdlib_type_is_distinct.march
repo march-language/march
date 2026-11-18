@@ -8,6 +8,6 @@ mod Main do
   type Level = Low | High
   fn main(c : Cap(IO.Console)) do
     Logger.set_module_level("m", Low)
-    print_line("set")
+    IO.puts("set")
   end
 end

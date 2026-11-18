@@ -32,9 +32,9 @@ mod CapMockActorTwo do
     state { n : Int }
     init  { n: 0 }
     on Say(s : String) do
-      let t = unix_time_ms()
+      let t = Authority.must(System.now_ms())
       let shown = if t == 1234 do "1234" else "real" end
-      print_line(s ++ "@" ++ shown)
+      IO.puts(s ++ "@" ++ shown)
       { state with n: state.n + 1 }
     end
   end
@@ -44,7 +44,7 @@ mod CapMockActorTwo do
     let clock : Cap(IO.Clock) = cap_narrow(io)
     let outside = spawn(Stamper)
     let mock_console = cap_impl(console, { cap_ops_empty(console) with
-      print_line: Some(fn s -> print("MOCK[" ++ s ++ "]\n")) })
+      print_line: Some(fn s -> Authority.ignore(IO.write("MOCK[" ++ s ++ "]\n"))) })
     let mock_clock = cap_impl(clock, { cap_ops_empty(clock) with
       unix_time_ms: Some(fn _ -> 1234) })
     with_cap(mock_clock, fn _ -> do

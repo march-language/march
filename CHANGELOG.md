@@ -651,6 +651,34 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **The raw capability builtins are stdlib-only.** A program can no longer call
+  `print`, `print_line`, `print_stderr`, `io_read_line`, `file_read`, `file_write` and
+  the other file and directory builtins, `dns_resolve`, the `process_*` operations,
+  `unix_time`, `unix_time_ms`, `uuid_v4`, `uuid_v7`, the signal operations, `task_spawn`
+  (and its `_link`, `_steal`, `_with_cancel` forms) or `vault_new` and the other Vault
+  opens directly: a direct call skipped the capability check its stdlib entry point
+  runs. The call is a `stdlib_internal` error naming what to call instead: `IO.write`,
+  `IO.puts`, `IO.warn`, `IO.read_line`, `File.read`, `File.write`, `Dir.list`,
+  `Dns.resolve`, `Process.env`, `Process.exit`, `System.now`, `System.now_ms`,
+  `UUID.v4`, `UUID.v7`, `Signal.watch`, `Task.async`, `Vault.new`, ... Each returns the
+  operation's `Result(T, CapError)`. Where the entry point is a drop-in the error
+  carries the rewritten call as a fix that `forge fix` applies: `file_read(p)` becomes
+  `Authority.must(File.read(p))` (which panics if the operation is refused) and
+  `print(s)` becomes `Authority.ignore(IO.write(s))`. A clock read like
+  `unix_time_ms(())` becomes `Authority.must(System.now_ms())`, and
+  `task_spawn(fn _ -> e)` becomes `Authority.must(Task.async(fn () -> e))`. `println`
+  and `random_bytes` are unchanged.
+- **New `Task.async_steal(pool, f)` and `Task.async_cancellable(f, token)`**, the checked
+  forms of `task_spawn_steal` and `task_spawn_with_cancel`; like `Task.async` they take
+  a zero-argument function.
+- **`march caps`, the hot-reload manifest and the `--cap-sandbox` profile count a call of
+  a capability operation's stdlib entry point** (`File.write`, `System.now_ms`,
+  `Task.async`, ...) as they counted the raw builtin, so code moved off the raw builtins
+  keeps its reported capabilities.
+- **A literal path outside a scoped `needs IO.FileRead(...)` is now reported at the
+  stdlib entry point** (`File.read("/etc/hosts")`, `File.open`, `Dir.list`,
+  `Csv.read_all`, ...), not only at a direct call of the raw builtin.
+
 - **A program that prints without any `needs` line is fixed by adding the `needs` line
   alone.** `main` with no `needs` clause and no `Cap` parameter is granted the module's
   `needs` line, so the missing-`needs` error's hint and `forge fix` no longer also give

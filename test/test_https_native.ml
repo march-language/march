@@ -139,7 +139,7 @@ let bad_cert_src = {|mod HttpsBadCert do
   needs IO.NetConnect.TLS
 
   fn env_int(name) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) ->
       match string_to_int(s) do
       Some(n) -> n
@@ -184,7 +184,7 @@ let deadline_server_src = {|mod HttpsDeadlines do
   needs IO.NetListen
 
   fn env_int(name) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) ->
       match string_to_int(s) do
       Some(n) -> n
@@ -513,7 +513,7 @@ let https_server_src = {|mod HttpsE2e do
   needs IO.Spawn
 
   fn env_str(name) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) -> s
     None -> ""
     end
@@ -1055,7 +1055,7 @@ let rotate_server_src = {|mod HttpsRotate do
   needs IO.Spawn
 
   fn env_str(name) do
-    match process_env(name) do
+    match Authority.must(Process.env(name)) do
     Some(s) -> s
     None -> ""
     end

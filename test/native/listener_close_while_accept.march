@@ -32,7 +32,7 @@ mod ListenerCloseWhileAccept do
       Err(e) -> panic("listen: " ++ Socket.error_message(e))
     end
     let t0 = sys_uptime_ms()
-    let _acceptor = task_spawn(fn _ ->
+    let _acceptor = Task.async(fn () ->
       let r = Socket.accept(l)
       let took = sys_uptime_ms() - t0
       let what = match r do

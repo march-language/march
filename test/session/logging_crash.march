@@ -33,43 +33,43 @@ mod LoggingCrash do
 
   -- ── the roles ───────────────────────────────────────────────────────────
   pfn role_l(s : Cap(Session.Live), st : Logging_L.S_send_Msg_L_I_1) : Logging_L.Yield do
-    print_line("L sends Trigger")
+    IO.puts("L sends Trigger")
     let st1 = Logging_L.send_Msg_L_I_1(s, st, 1)
     Logging_L.offer_Msg_I_L_2_Msg_I_L_1(s, st1,
       fn (read, st2) ->
-        print_line("L got Read(" ++ read ++ ")")
+        IO.puts("L got Read(" ++ read ++ ")")
         Logging_L.close(s, Logging_L.send_Msg_L_I_2(s, st2, true)),
       fn (fatal, st2) ->
-        print_line("L got Fatal(" ++ fatal ++ ")")
+        IO.puts("L got Fatal(" ++ fatal ++ ")")
         Logging_L.close(s, st2))
   end
 
   pfn role_i(s : Cap(Session.Live), st : Logging_I.S_recv_Msg_L_I_1) : Logging_I.Yield do
     Logging_I.recv_Msg_L_I_1(s, st, fn (_trigger, st1) ->
-      print_line("I got Trigger")
+      IO.puts("I got Trigger")
       Logging_I.recv_Msg_C_I_1(s, st1,
         fn (read, st2) ->
-          print_line("I got Read(" ++ read ++ ")")
+          IO.puts("I got Read(" ++ read ++ ")")
           let st3 = Logging_I.send_Msg_I_L_2(s, st2, read)
           Logging_I.recv_Msg_L_I_2(s, st3, fn (report, st4) ->
-            print_line("I got Report(" ++ bool_to_string(report) ++ ")")
+            IO.puts("I got Report(" ++ bool_to_string(report) ++ ")")
             Logging_I.close(s, Logging_I.send_Msg_I_C_1(s, st4, report))),
         fn (crashed, st2) ->
-          print_line("I: role " ++ int_to_string(crashed.role) ++ " crashed: " ++ crashed.cause)
+          IO.puts("I: role " ++ int_to_string(crashed.role) ++ " crashed: " ++ crashed.cause)
           Logging_I.close(s, Logging_I.send_Msg_I_L_1(s, st2, "C is gone"))))
   end
 
   pfn role_c(s : Cap(Session.Live), st : Logging_C.S_send_Msg_C_I_1) : Logging_C.Yield do
-    print_line("C sends Read")
+    IO.puts("C sends Read")
     let st1 = Logging_C.send_Msg_C_I_1(s, st, "disk 42%")
     Logging_C.recv_Msg_I_C_1(s, st1, fn (report, st2) ->
-      print_line("C got Report(" ++ bool_to_string(report) ++ ")")
+      IO.puts("C got Report(" ++ bool_to_string(report) ++ ")")
       Logging_C.close(s, st2))
   end
 
   fn main(c : Cap(IO)) do
-    print_line("-- round 1: C is alive")
-    let t1 = Session.in_process_with(fn line -> print_line("transport: " ++ line))
+    IO.puts("-- round 1: C is alive")
+    let t1 = Session.in_process_with(fn line -> Authority.ignore(IO.puts("transport: " ++ line)))
     let s1 = Session.attach(c, t1.ops)
     let i1 = Logging_I.register(s1, 0)
     let c1 = Logging_C.register(s1, 0)
@@ -78,8 +78,8 @@ mod LoggingCrash do
     let _ = role_i(s1, i1)
     let _ = role_c(s1, c1)
     t1.drain(())
-    print_line("-- round 2: C has crashed")
-    let t2 = Session.in_process_with(fn line -> print_line("transport: " ++ line))
+    IO.puts("-- round 2: C has crashed")
+    let t2 = Session.in_process_with(fn line -> Authority.ignore(IO.puts("transport: " ++ line)))
     let s2 = Session.attach(c, t2.ops)
     let i2 = Logging_I.register(s2, 0)
     let l2 = Logging_L.register(s2, 0)

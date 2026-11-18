@@ -2,7 +2,7 @@ mod MinHttp do
   needs IO.Process
   needs IO.NetListen
   fn port_from_env() do
-    match process_env("MARCH_TEST_HTTP_PORT") do
+    match Authority.must(Process.env("MARCH_TEST_HTTP_PORT")) do
     Some(s) -> match string_to_int(s) do Some(n) -> n | None -> 0 end
     None -> 0
     end
