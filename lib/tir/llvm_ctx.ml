@@ -1203,6 +1203,24 @@ let wrap_emit_kind ctx (wrap_name : string) : [ `Skip | `Define | `Declare ] =
     | None -> `Define
   end
 
+(** Linkage prefix for a structural helper a fragment generates on demand and
+    names by its TYPE alone (`__march_eq_<ty>`, a collision dispatch fn), so
+    two fragments of one REPL/JIT session can each define the same symbol.
+
+    Natively each is defined once per module, so the AOT path (no session
+    table) keeps plain external linkage and its IR is unchanged.  Under the
+    JIT every fragment lands in ONE symbol namespace, and ORC's JITDylib
+    rejects a second strong definition ("Duplicate definition of symbol"):
+    the second `Some(1) == x` of a session failed to compile, and the REPL
+    silently re-ran the input in the INTERPRETER, whose world (Vault tables,
+    actors) is not the JIT's, so the answer changed (2026-11-18,
+    specs/progress/2026-11-18-native-repl-quirks.md).  [linkonce_odr] makes
+    the later copies weak: ORC discards them and binds to the first, and the
+    clang backend's per-fragment .so tolerates them as before.  The bodies
+    are identical by construction — the name encodes the whole type. *)
+let session_helper_linkage ctx =
+  match ctx.session_wraps with Some _ -> "linkonce_odr " | None -> ""
+
 (* ── Repr-consistency audit (MARCH_REPR_AUDIT=1) ─────────────────────────
    Every site that COMMITS to a value representation (EAlloc, EReuse,
    emit_case, ensure_adt_eq_fn) records its decision here, keyed by

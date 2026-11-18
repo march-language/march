@@ -1237,6 +1237,121 @@ let test_repl_floats_interp () =
   check_float_session ~label:"interpreter mode"
     (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" float_session)
 
+(* ── Native-REPL quirks found by the doc-example checks (2026-11-18) ────
+   specs/progress/2026-11-18-native-repl-quirks.md.  Each session below
+   failed on main before its fix.
+
+   [check_quirk_session] requires every [present] needle and no [absent]
+   one.  Under ORC the session runs only when libLLVM loads. *)
+let check_quirk_session ~label ~present ~absent (out, code) =
+  Alcotest.(check int)
+    (Printf.sprintf "%s: REPL exit code (output: %s)" label out) 0 code;
+  List.iter (fun (needle, what) ->
+      if not (contains ~needle out) then
+        Alcotest.failf "%s: expected %S (%s) in session output, got:\n%s"
+          label needle what out) present;
+  List.iter (fun (needle, what) ->
+      if contains ~needle out then
+        Alcotest.failf "%s: did not expect %S (%s) in session output, got:\n%s"
+          label needle what out) absent
+
+let run_quirk_session ~label ~env_prefix ~present ~absent lines =
+  if not (clang_available ()) then ()  (* skip: stdlib precompile needs clang *)
+  else begin
+    let (out, code) = run_repl_session ~env_prefix lines in
+    if env_prefix = "MARCH_JIT_BACKEND=orc" && contains ~needle:"libLLVM not found" out
+    then ()
+    else check_quirk_session ~label ~present ~absent (out, code)
+  end
+
+(* Unit was lowered as the empty tuple, which the result printer's
+   small-word fallback showed as its tagged word: `= 1`. *)
+let test_repl_unit_prints_unit () =
+  run_quirk_session ~label:"unit" ~env_prefix:""
+    ~present:[ "= ()\n", "a unit result" ]
+    ~absent:[ "= 1\n", "unit printed as its tagged word" ]
+    [ "()"; "let u = ()"; "u" ]
+
+(* Two causes, one symptom: (1) the REPL registered no stdlib [impl], so
+   `Some(1) == Some(1)` did not typecheck at all; (2) every `==` fragment
+   defined `__march_eq_<ty>` again, ORC rejected the duplicate, and the
+   REPL silently re-ran the input in the interpreter, whose Vault tables are
+   not the JIT's: the second `Vault.get(c, "h") == Some(1)` was false.  The
+   list-then-option pair is the record-list shape of the original report
+   (its helper for the element type is defined twice too). *)
+let vault_eq_session =
+  [ {|let c = Authority.must(Vault.new("quirks"))|};
+    {|Vault.set(c, "h", 1)|};
+    {|Vault.get(c, "h") == Some(1)|};
+    {|Vault.get(c, "h") == Some(1)|};
+    {|[Vault.get(c, "h")] == [Some(1)]|};
+    {|Vault.get(c, "h") == Some(1)|};
+    {|Vault.get(c, "h") == Some(2)|};
+    "[1, 2] == [1, 2]" ]
+
+let vault_eq_expect ~label ~env_prefix =
+  run_quirk_session ~label ~env_prefix
+    ~present:[ "= true\n", "an equal comparison";
+               "= false\n", "the unequal Some(2)" ]
+    ~absent:[ "does not implement interface", "a stdlib Eq impl unknown to the REPL";
+              "jit error", "a fragment that failed to compile" ]
+    vault_eq_session
+
+let test_repl_vault_eq_orc () =
+  vault_eq_expect ~label:"orc" ~env_prefix:"MARCH_JIT_BACKEND=orc"
+
+let test_repl_vault_eq_clang () =
+  vault_eq_expect ~label:"clang" ~env_prefix:"MARCH_JIT_BACKEND=clang"
+
+(* The four `true`s and two `false`s in order: [vault_eq_expect]'s
+   needles cannot see that the fourth comparison stayed true. *)
+let test_repl_vault_eq_order () =
+  if not (clang_available ()) then ()
+  else begin
+    let (out, _) = run_repl_session ~env_prefix:"" vault_eq_session in
+    let answers = List.filter_map (fun l ->
+        let l = String.trim l in
+        match String.index_opt l '=' with
+        | Some i when String.length l > i + 2 ->
+          let v = String.trim (String.sub l (i + 1) (String.length l - i - 1)) in
+          if v = "true" || v = "false" then Some v else None
+        | _ -> None) (String.split_on_char '\n' out) in
+    Alcotest.(check (list string)) ("== answers in order; output:\n" ^ out)
+      [ "true"; "true"; "true"; "true"; "false"; "true" ] answers
+  end
+
+(* OCaml's [%S] spelled every byte >= 0x80 as a decimal escape, in both
+   REPLs: "café" printed as "caf\195\169". *)
+let non_ascii_session = [ {|"café"|}; {|["naïve", "a\tb"]|} ]
+let non_ascii_present =
+  [ {|= "café"|}, "a UTF-8 String result";
+    {|= ["naïve", "a\tb"]|}, "UTF-8 in a list, a tab still escaped" ]
+
+let test_repl_non_ascii_jit () =
+  run_quirk_session ~label:"JIT" ~env_prefix:""
+    ~present:non_ascii_present ~absent:[ "\\195", "a decimal byte escape" ]
+    non_ascii_session
+
+let test_repl_non_ascii_interp () =
+  check_quirk_session ~label:"interpreter mode"
+    ~present:non_ascii_present ~absent:[ "\\195", "a decimal byte escape" ]
+    (run_repl_session ~env_prefix:"MARCH_REPL_INTERP=1" non_ascii_session)
+
+(* A panic went to the runtime's unhandled path: report, exit(1), and the
+   rest of the session was never read.  Now it is reported like the
+   interpreter REPL's and the session goes on; a panicking `let` binds
+   nothing. *)
+let test_repl_panic_continues () =
+  run_quirk_session ~label:"panic" ~env_prefix:""
+    ~present:[ "runtime error: panic: boom", "the panic, reported";
+               "= 2\n", "the input after the panic";
+               "runtime error: panic: in let", "a panicking let";
+               "val q = 7", "a let after it";
+               "= 8\n", "q read back" ]
+    ~absent:[ "The program panicked", "the runtime's exit report" ]
+    [ {|panic("boom")|}; "1 + 1"; {|let p = panic("in let")|};
+      "let q = 7"; "q + 1" ]
+
 (* ── Negative Ints in a tagged slot (2026-10-14) ───────────────────────
    specs/progress/2026-10-14-repl-jit-negative-tagged-int.md.
 
@@ -1504,6 +1619,19 @@ let () =
         test_repl_fragment_leaks_jit;
       Alcotest.test_case "Floats print and survive the v slot (interpreter)"
         `Quick test_repl_floats_interp;
+      Alcotest.test_case "unit prints as () (JIT)" `Slow test_repl_unit_prints_unit;
+      Alcotest.test_case "Vault values compare equal every time (ORC JIT)" `Slow
+        test_repl_vault_eq_orc;
+      Alcotest.test_case "Vault values compare equal every time (clang JIT)" `Slow
+        test_repl_vault_eq_clang;
+      Alcotest.test_case "== answers stay right across a session (JIT)" `Slow
+        test_repl_vault_eq_order;
+      Alcotest.test_case "non-ASCII strings print as text (JIT)" `Slow
+        test_repl_non_ascii_jit;
+      Alcotest.test_case "non-ASCII strings print as text (interpreter)" `Quick
+        test_repl_non_ascii_interp;
+      Alcotest.test_case "a panic does not end the session (JIT)" `Slow
+        test_repl_panic_continues;
       Alcotest.test_case "negative Ints in List/Option/tuple slots print (JIT)"
         `Slow test_repl_negative_ints_jit;
       Alcotest.test_case "negative Ints in List/Option/tuple slots print (interpreter)"

@@ -113,7 +113,10 @@ let rec value_to_string v =
   | VInt n    -> string_of_int n
   | VFloat f  ->
     string_of_float f
-  | VString s -> "\"" ^ String.escaped s ^ "\""
+  (* Not [String.escaped], which spelled every byte >= 0x80 as a decimal
+     escape ("caf\195\169"): the test report's quoting, which leaves UTF-8
+     text readable and escapes only quotes, backslashes and control bytes. *)
+  | VString s -> March_errors.Test_report.quote s
   | VBool b   -> string_of_bool b
   | VAtom a   -> ":" ^ a
   | VUnit     -> "()"

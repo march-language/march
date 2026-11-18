@@ -147,7 +147,27 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
       | _ -> env
     ) env decls
   in
-  add_from tc_env stdlib_decls
+  (* Every stdlib [impl], registered up front as [check_module]'s pass 1 does
+     for a whole program.  The REPL folds [check_decl] over the stdlib one
+     module at a time, and a [DMod]'s own impls stay in that module's inner
+     env ([check_decl] exports its names, types and ctors, not its impls), so
+     without this the REPL knew no stdlib impl at all: `Some(1) == Some(1)`,
+     `[1] == [1]` and `Ok(1) == Ok(1)` were "does not implement interface
+     `Eq`" (2026-11-18, specs/progress/2026-11-18-native-repl-quirks.md).
+     After the types, which [register_impl_shape] consults to name an impl
+     head's declaring module. *)
+  let rec add_impls env decls =
+    List.fold_left (fun env d ->
+      match d with
+      | DMod (mname, _, inner, _) ->
+        let env = List.fold_left (fun e d -> match d with
+            | DImpl (idef, _) -> register_impl_shape e idef ~decl_module:mname.txt
+            | _ -> e) env inner in
+        add_impls env (List.filter (function DMod _ -> true | _ -> false) inner)
+      | _ -> env
+    ) env decls
+  in
+  add_impls (add_from tc_env stdlib_decls) stdlib_decls
 
 let load_decls_into_env env tc_env decls =
   let (env_final, tc_final) = List.fold_left (fun (e, tc) decl ->
@@ -1100,6 +1120,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | March_eval.Eval.Match_failure msg ->
                       March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "match failure: %s\n%!" msg
+                    | March_jit.Repl_jit.Fragment_panicked msg ->
+                      Printf.eprintf "runtime error: %s\n%!" msg
                     | Failure msg ->
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
@@ -1186,6 +1208,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | March_eval.Eval.Match_failure msg ->
                       March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "match failure: %s\n%!" msg
+                    | March_jit.Repl_jit.Fragment_panicked msg ->
+                      Printf.eprintf "runtime error: %s\n%!" msg
                     | Failure msg ->
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->

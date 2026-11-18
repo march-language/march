@@ -1136,6 +1136,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **Several `march repl` bugs fixed:**
+  - `==` on a stdlib type (`Some(1) == Some(1)`, `[1] == [1]`, `Ok(1) == Ok(1)`) works again
+    in both REPLs. It was rejected with "does not implement interface `Eq`".
+  - The native REPL no longer gives a different answer the second time a session compares
+    values of the same type. `Vault.get(c, "h") == Some(1)` was `true` once, then `false`.
+  - Strings with non-ASCII text print as text: `"café"`, not `"caf\195\169"`. This applies
+    to the interpreter REPL too.
+  - A unit result prints `()`, not `1`.
+  - A panic is reported as `runtime error: panic: ...` and the session goes on. It used to
+    end the native REPL.
 - **`Crypto.verify_password` no longer crashes on a stored hash with an iteration count of
   zero or below.** A compiled program panicked ("no pattern of this match matched") where the
   interpreter returned `false`; both now return `false`, so one bad row in a password table
