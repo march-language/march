@@ -472,8 +472,8 @@ let test_spawn_cycles_no_leak () =
          with glibc). *)
       Alcotest.(check bool) "the trace saw the authority's cells" true (n > 10000);
       if List.length bad > 16 then
-        Alcotest.failf "%d of %d authority-touched addresses still hold a reference \
-                        (e.g. %s)" (List.length bad) n
+        Alcotest.failf "%d authority-touched addresses (%d events) still hold a \
+                        reference (e.g. %s)" (List.length bad) n
           (String.concat ", "
              (List.map (fun (a, b) -> Printf.sprintf "%s:%+d" a b)
                 (List.filteri (fun i _ -> i < 5) bad))))
