@@ -1,7 +1,8 @@
 # Design: lemmas for hot code reload, actors and choreography
 
-Status: **plan only, nothing built.** Filed 2026-11-04 on `b86c86a63`. Todo:
-`specs/todos/2026-11-04-lemmas-hcr-actors-choreography.md`.
+Status: **phases A0 to F built** (2026-11-04 to 2026-11-16); the plan below is as filed
+2026-11-04 on `b86c86a63`. Record: `specs/progress/2026-11-04-lemmas-hcr-actors-choreography.md`,
+which lists the four todos that carry the open residuals.
 
 Builds on `specs/2026-10-29-refinement-reflection-design.md` (phases 0 to 6 built; phase 7,
 `--refine-infer` proposing lemma calls, in progress) and on the language chapters
