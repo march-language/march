@@ -4029,6 +4029,78 @@ void *march_try_call(void *thunk) {
 /* Strong counterpart to dispatch-only harnesses' weak cleanup hook. */
 void march_frame_drop_closure(void *closure) { march_clo_release(closure); }
 
+/* ── REPL/JIT: run one fragment entry with its panic caught ─────────────
+ *
+ * The native REPL (lib/jit/repl_jit.ml) calls each compiled input's entry
+ * point directly.  A panic there used to reach march_panic's unhandled path,
+ * which prints the report and exit(1)s: the whole session ended, where the
+ * interpreter REPL prints "runtime error: panic: ..." and reads the next
+ * input.  These run the entry under the same longjmp channel march_try_call
+ * uses (saved and restored, so they nest), and answer 1 if it panicked.
+ *
+ * Three entry ABIs, one per runner: a word (i64 / ptr) result, a double
+ * result, no result.  The result word (a double's bits) is read back with
+ * march_repl_guard_result, the "panic: <msg>" string with
+ * march_repl_guard_message (a fresh march_string the caller owns).
+ * Whatever the fragment allocated before it panicked is not released, as
+ * with any caught panic. */
+static int64_t march_repl_guard_word = 0;
+static void   *march_repl_guard_msg  = NULL;
+
+static int64_t march_repl_guarded(void *fptr, int kind) {
+    void *frame_mark = march_frame_mark();
+    jmp_buf saved_jmp;
+    char    saved_fail[sizeof(march_test_fail_buf)];
+    int     saved_in_test = march_test_in_test;
+    memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
+    memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
+    const char *saved_prefix = PANIC_PREFIX_GET();
+    int saved_handled = march_panic_handled;
+    march_test_fail_buf[0] = '\0';
+    march_test_in_test     = 1;
+    march_panic_handled    = 1;   /* the REPL's message is the handling */
+    PANIC_PREFIX_SET(NULL);
+
+    volatile int panicked = 0;
+    march_repl_guard_word = 0;
+    if (setjmp(march_test_jmp_buf) == 0) {
+        if (kind == 1) {
+            double d = ((double (*)(void))fptr)();
+            int64_t bits;
+            memcpy(&bits, &d, sizeof bits);
+            march_repl_guard_word = bits;
+        } else if (kind == 2) {
+            ((void (*)(void))fptr)();
+        } else {
+            march_repl_guard_word = ((int64_t (*)(void))fptr)();
+        }
+    } else {
+        march_frame_unwind(frame_mark);
+        panicked = 1;
+    }
+    if (panicked) {
+        if (march_repl_guard_msg) march_decrc(march_repl_guard_msg);
+        march_repl_guard_msg = march_caught_panic_message("panic");
+    }
+
+    memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
+    memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
+    march_test_in_test = saved_in_test;
+    march_panic_handled = saved_handled;
+    PANIC_PREFIX_SET(saved_prefix);
+    return panicked;
+}
+
+int64_t march_repl_guarded_word(void *fptr)  { return march_repl_guarded(fptr, 0); }
+int64_t march_repl_guarded_float(void *fptr) { return march_repl_guarded(fptr, 1); }
+int64_t march_repl_guarded_void(void *fptr)  { return march_repl_guarded(fptr, 2); }
+int64_t march_repl_guard_result(void) { return march_repl_guard_word; }
+void *march_repl_guard_message(void) {
+    void *m = march_repl_guard_msg;
+    march_repl_guard_msg = NULL;
+    return m;
+}
+
 /* ── __try_call_val (C: march_try_call_val) ─────────────────────────────── */
 /*
  * __try_call_val : (Bool -> a) -> Result(a, String)

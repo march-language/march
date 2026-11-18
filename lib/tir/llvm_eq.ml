@@ -202,7 +202,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
         let frsh pfx = incr ctr; Printf.sprintf "%%%s%d" pfx !ctr in
         let e ln = Buffer.add_string buf ("  " ^ ln ^ "\n") in
         Buffer.add_string buf
-          (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+          (Printf.sprintf "\ndefine %si64 @%s(ptr %%a, ptr %%b) {\n" (Llvm_ctx.session_helper_linkage ctx) fn_name);
         Buffer.add_string buf "entry:\n";
         let ok = frsh "ok" in
         (match payload_ty with
@@ -262,7 +262,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
         let lbl_both_nonnull = flbl "nq_both" in
         let lbl_not_eq       = flbl "nq_neq" in
         let lbl_eq           = flbl "nq_eq" in
-        Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+        Buffer.add_string buf (Printf.sprintf "\ndefine %si64 @%s(ptr %%a, ptr %%b) {\n" (Llvm_ctx.session_helper_linkage ctx) fn_name);
         Buffer.add_string buf "entry:\n";
         let anc = frsh "anc" in
         e (Printf.sprintf "%s = icmp eq ptr %%a, null" anc);
@@ -421,7 +421,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
         let lbl_eq     = flbl "is_eq" in
         let lbl_not_eq = flbl "not_eq" in
         let lbl_same   = flbl "same_tag" in
-        Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+        Buffer.add_string buf (Printf.sprintf "\ndefine %si64 @%s(ptr %%a, ptr %%b) {\n" (Llvm_ctx.session_helper_linkage ctx) fn_name);
         Buffer.add_string buf "entry:\n";
         (* Degenerate-value guard.  A value of this type may arrive in the
            ERASED niche encoding (None = null, Some(x) = x raw / low-bit
@@ -622,7 +622,7 @@ let rec ensure_adt_eq_fn (ctx : Llvm_ctx.ctx) (ty : Tir.ty) : string option =
       let lbl l = Buffer.add_string buf (l ^ ":\n") in
       let lbl_eq     = flbl "is_eq" in
       let lbl_not_eq = flbl "not_eq" in
-      Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+      Buffer.add_string buf (Printf.sprintf "\ndefine %si64 @%s(ptr %%a, ptr %%b) {\n" (Llvm_ctx.session_helper_linkage ctx) fn_name);
       Buffer.add_string buf "entry:\n";
       let nf = List.length flds in
       if nf = 0 then
