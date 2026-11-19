@@ -136,9 +136,9 @@ end
 
 pfn main(_cap_console : Cap(IO.Console), _cap_fileread : Cap(IO.FileRead), _cap_filewrite : Cap(IO.FileWrite), _cap_netlisten : Cap(IO.NetListen)) do
   Authority.ignore(println("CSV server starting on port 9876 ..."))
-  HttpServer.new(9876)
+  Authority.must(HttpServer.new(9876)
   |> HttpServer.plug(router)
-  |> HttpServer.listen()
+  |> HttpServer.listen())
 end
 
 end

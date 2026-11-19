@@ -688,6 +688,16 @@ git log is authoritative for exact commits.
 - **A literal path outside a scoped `needs IO.FileRead(...)` is now reported at the
   stdlib entry point** (`File.read("/etc/hosts")`, `File.open`, `Dir.list`,
   `Csv.read_all`, ...), not only at a direct call of the raw builtin.
+- **`HttpServer.listen`, `spawn_n`, `bind_host` and `Udp.resolve` are checked capability
+  operations, and return a `Result`.** `listen` and `spawn_n` check `IO.NetListen` on
+  their port (and on a `plain_listener` port) before configuring or binding anything,
+  `bind_host` checks it on the address, and `Udp.resolve` checks `IO.NetConnect` on its
+  host before looking it up. A refusal is a value, not a crash: `listen` and `bind_host`
+  now return `Result((), CapError)`, `spawn_n` returns `Result(Int, CapError)`, and
+  `Udp.resolve` returns the nested `Result(Result(UdpAddr, UdpError), CapError)`. Write
+  `Authority.must(server |> HttpServer.listen())` to keep the old behaviour (a refusal
+  panics with its reason). The raw `http_server_listen` and `http_server_bind_host`
+  builtins are now stdlib-only, like the other HTTP server opens.
 
 - **A program that prints without any `needs` line is fixed by adding the `needs` line
   alone.** `main` with no `needs` clause and no `Cap` parameter is granted the module's

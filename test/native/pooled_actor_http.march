@@ -110,9 +110,9 @@ mod PooledActorHttp do
       -- Checkouts, so a pool smaller than the concurrency legitimately
       -- answers 503 "no connection available" mid-burst (seen at 4).
       let _ = send(pool, PoolInit(64))
-      HttpServer.new(port)
+      Authority.must(HttpServer.new(port)
       |> HttpServer.plug(fn conn -> router(pool, conn))
-      |> HttpServer.listen()
+      |> HttpServer.listen())
     end
   end
 end

@@ -87,6 +87,7 @@ let js_unsupported : (string * string) list = [
   ("file_refused", "the JS target has no `dir_list` or `dir_mkdir_p`");
   ("file_allowed", "the JS target has no `file_exists`");
   ("tls_https_get_refused", "the JS target has no TLS (`tls_client_ctx`)");
+  ("listen_refused", "the JS target has no HTTP server (`http_server_listen`) or UDP (`udp_resolve`)");
   ("capture_stored_in_record_list_vault", "the JS target has no tables (`vault_new`, `vault_get`)");
   ("spawn_mut_allowed", "the JS target has no tasks");
   ("actor_under_frame_restricted", "the JS target has no tasks");

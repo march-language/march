@@ -8,8 +8,8 @@ mod MinHttp do
     end
   end
   fn main(_cap_netlisten : Cap(IO.NetListen), _cap_process : Cap(IO.Process)) do
-    HttpServer.new(port_from_env())
+    Authority.must(HttpServer.new(port_from_env())
     |> HttpServer.plug(fn conn -> conn |> HttpServer.text(200, "ok"))
-    |> HttpServer.listen()
+    |> HttpServer.listen())
   end
 end

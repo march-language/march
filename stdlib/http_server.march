@@ -606,7 +606,8 @@ mod HttpServer do
   doc """
   Also serve plain HTTP on `port`, with its own `plugs`, from the same
   `listen`. Typical use on an HTTPS server: answer ACME challenges and
-  redirect everything else.
+  redirect everything else. This only records the port: `listen` (or
+  `spawn_n`) checks it as `IO.NetListen` before binding anything.
 
   ## Examples
 
@@ -773,11 +774,14 @@ mod HttpServer do
   end
 
   -- Hand the HTTPS, timeout and plain-listener settings to the runtime
-  -- before the listen builtin reads them. A certificate that cannot be used
-  -- stops the program here, before anything is bound.
-  pfn configure_runtime(o) do
+  -- before the listen builtin reads them. The plain listener's port is
+  -- checked (IO.NetListen) first: a refusal is the Err and nothing is
+  -- configured. A certificate that cannot be used stops the program here,
+  -- before anything is bound.
+  pfn configure_runtime(o) : Result((), CapError) do
     match o do
     ServerOpts(t, hs, poll, wait, hdr, prog, pp, pplugs) -> do
+      let? _ = if pp > 0 do Authority.check("IO.NetListen", int_to_string(pp)) else Ok(()) end
       match t do
       None -> ()
       Some(configure) ->
@@ -794,6 +798,7 @@ mod HttpServer do
       else
         ()
       end
+      Ok(())
     end
     end
   end
@@ -811,12 +816,21 @@ mod HttpServer do
   pipeline (via the runtime's `http_server_listen`). Each request becomes a
   `Conn`; the pipeline's result is written back as the response, or handed
   to the WebSocket handler if `conn_upgrade` is a `WebSocketUpgrade`.
-  Does not return in normal operation. Requires `IO.NetListen`.
+  Does not return in normal operation. A capability operation: the port,
+  then a `plain_listener` port, is checked as `IO.NetListen`, and a refusal
+  is `Err(CapError(...))`, returned before anything is configured or bound.
+
+  ## Examples
+
+      Authority.must(HttpServer.new(4000)
+        |> HttpServer.plug(fn conn -> HttpServer.text(conn, 200, "ok"))
+        |> HttpServer.listen())
   """
-  fn listen(server) do
+  fn listen(server) : Result((), CapError) do
     match server do
     Server(port, plugs, mc, it, o) -> do
-      configure_runtime(o)
+      let? _ = Authority.check("IO.NetListen", int_to_string(port))
+      let? _ = configure_runtime(o)
       -- Build a server config heap object for the C runtime:
       -- The C runtime expects (port, max_conns, idle_timeout) at fields 0,1,2.
       -- The pipeline is passed separately.
@@ -828,6 +842,7 @@ mod HttpServer do
       -- the strings/lists it owns leaked once per request until this
       -- existed; the compiled body of release_conn is the deep drop.
       http_server_listen(port, mc, it, pipeline_fn, release_conn)
+      Ok(())
     end
     end
   end
@@ -836,22 +851,25 @@ mod HttpServer do
   Start the server in a forked subprocess that handles exactly `n` requests
   and then exits. Returns a handle (the child PID) for `wait_for`. A
   readiness pipe makes the call return only after the child has bound the
-  port, so the caller can connect immediately. Intended for tests.
+  port, so the caller can connect immediately. Intended for tests. Checked
+  like `listen` (IO.NetListen on the port, then a `plain_listener` port): a
+  refusal is `Err(CapError(...))` and forks nothing.
 
   ## Examples
 
-      let h = HttpServer.new(18080)
+      let h = Authority.must(HttpServer.new(18080)
         |> HttpServer.plug(fn conn -> HttpServer.text(conn, 200, "pong"))
-        |> HttpServer.spawn_n(1)
+        |> HttpServer.spawn_n(1))
       let resp = HttpClient.get(HttpClient.new_client(), "http://127.0.0.1:18080/")
       HttpServer.wait_for(h)
   """
-  fn spawn_n(server, n) do
+  fn spawn_n(server, n) : Result(Int, CapError) do
     match server do
     Server(port, plugs, mc, it, o) -> do
-      configure_runtime(o)
+      let? _ = Authority.check("IO.NetListen", int_to_string(port))
+      let? _ = configure_runtime(o)
       let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
-      http_server_spawn_n(port, n, mc, it, pipeline_fn)
+      Ok(http_server_spawn_n(port, n, mc, it, pipeline_fn))
     end
     end
   end
@@ -859,10 +877,14 @@ mod HttpServer do
   doc """
   Bind later servers to `host`, a dotted IPv4 address such as "127.0.0.1",
   instead of every interface. Call it before `listen` or `spawn_n`; it panics
-  on anything that isn't an IPv4 address.
+  on anything that isn't an IPv4 address. A capability operation: `host`
+  is checked as `IO.NetListen` (target `host:0`), and a refusal is
+  `Err(CapError(...))` with the bind address left as it was.
   """
-  fn bind_host(host : String) : Unit do
+  fn bind_host(host : String) : Result((), CapError) do
+    let? _ = Authority.check("IO.NetListen", host ++ ":0")
     http_server_bind_host(host)
+    Ok(())
   end
 
   doc "Block until the server subprocess started by `spawn_n` (given its handle) exits."

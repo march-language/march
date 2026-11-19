@@ -251,9 +251,9 @@ fn router(conn) do
 end
 
 fn main() do
-  HttpServer.new(8080)
+  Authority.must(HttpServer.new(8080)
   |> HttpServer.plug(router)
-  |> HttpServer.listen()
+  |> HttpServer.listen())
 end
 ```
 

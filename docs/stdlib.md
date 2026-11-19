@@ -869,9 +869,9 @@ kernel transit) and opt-in GRO; on other platforms a nonblocking drain loop.
 Waits park the calling task, not an OS thread.
 
 ```march
-let? rx  = Udp.open("0.0.0.0", 9000)
-let? tx  = Udp.open("0.0.0.0", 0)
-let? dst = Udp.resolve("127.0.0.1", 9000)       -- resolve once, reuse
+let? rx  = Authority.must(Udp.open("0.0.0.0", 9000))
+let? tx  = Authority.must(Udp.open("0.0.0.0", 0))
+let? dst = Authority.must(Udp.resolve("127.0.0.1", 9000))  -- resolve once, reuse
 let? n   = Udp.send_batch(tx, dst, payloads)    -- Result(Int, UdpError)
 let? ds  = Udp.recv_batch(rx, 256, 2048, 100)   -- List((UdpAddr, String)); Ok([]) on timeout
 Udp.stats(rx).rx_dropped                        -- kernel drops (Linux; -1 elsewhere)

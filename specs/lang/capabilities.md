@@ -878,10 +878,13 @@ An operation is refused at run time when it lies outside the current
 authority: `main`'s request, narrowed by `--grant` or `MARCH_GRANT` at launch
 and by each function `needs` clause it runs under; see
 [Run-time authority](#run-time-authority). UDP sockets and TLS contexts are handles opened by a
-checked open (`Udp.open`, `Tls.client_ctx`). `HttpClient`, `HttpServer`,
-`Tls.https_get` and `Udp.resolve` still return their old types and move with
-run-time authority (ocap phase 4); `HttpClient` and `Tls.https_get` already
-dial through `Socket.connect`, so their target is checked like any connect.
+checked open (`Udp.open`, `Tls.client_ctx`). `HttpServer.listen`, `spawn_n` and
+`bind_host` check `IO.NetListen` (on the port, a `plain_listener` port, the bind
+address) and return `Result((), CapError)` / `Result(Int, CapError)`;
+`Udp.resolve` checks `IO.NetConnect` on its host and returns
+`Result(Result(UdpAddr, UdpError), CapError)`. `HttpClient` and `Tls.https_get`
+still return their old types, but dial through `Socket.connect`, so their
+target is checked like any connect and a refusal is folded into their error.
 
 <a id="run-time-authority"></a>
 ### Run-time authority: `--grant`, `MARCH_GRANT` and scoped function `needs`
@@ -982,8 +985,7 @@ but only in a program that has at least one frame.
 `System.now_ms`, `Task.async`), which runs the run-time check first. Where the entry point
 takes the same arguments, the error carries the rename as its fix.
 
-**Not yet enforced at run time.** The network opens of `HttpServer` and `Udp.resolve` are
-not checked yet. Authority does not travel with a remote child
+**Not yet enforced at run time.** Authority does not travel with a remote child
 started on another node: the receiving node runs it under its own launch authority
 (`specs/todos/2026-11-17-ocap-cross-node-authority.md`). A module's own scoped `needs`
 line is checked at compile time only, except as the program's request when it is the

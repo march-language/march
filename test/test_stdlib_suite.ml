@@ -13830,9 +13830,9 @@ let test_interp_http_server_idle_client_does_not_block_others () =
       \    conn |> HttpServer.text(200, \"hello\")\n\
       \  end\n\
       \  fn main(_cap_netlisten : Cap(IO.NetListen)) do\n\
-      \    HttpServer.new(%d)\n\
+      \    Authority.must(HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
-      \    |> HttpServer.listen()\n\
+      \    |> HttpServer.listen())\n\
       \  end\n\
        end\n" port);
     close_out oc;
@@ -13975,9 +13975,9 @@ let test_interp_http_server_idle_websocket_does_not_block_others () =
       \    end\n\
       \  end\n\
       \  fn main(_cap_netlisten : Cap(IO.NetListen), _cap_websocket : Cap(IO.WebSocket)) do\n\
-      \    HttpServer.new(%d)\n\
+      \    Authority.must(HttpServer.new(%d)\n\
       \    |> HttpServer.plug(router)\n\
-      \    |> HttpServer.listen()\n\
+      \    |> HttpServer.listen())\n\
       \  end\n\
        end\n" port);
     close_out oc;

@@ -112,9 +112,9 @@ let server_src = {|mod HttpNativeE2e do
     if port == 0 do
       Authority.ignore(Process.exit(2))
     else
-      HttpServer.new(port)
+      Authority.must(HttpServer.new(port)
       |> HttpServer.plug(router)
-      |> HttpServer.listen()
+      |> HttpServer.listen())
     end
   end
 

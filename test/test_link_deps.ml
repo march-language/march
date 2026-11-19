@@ -231,10 +231,10 @@ let http_server_src ~tls =
   Printf.sprintf
     "mod Srv do\n  needs IO.NetListen\n\
      \  fn main(_l : Cap(IO.NetListen)) : Unit do\n\
-     \    HttpServer.new(18099)\n\
+     \    Authority.must(HttpServer.new(18099)\n\
      %s\
      \    |> HttpServer.plug(fn c -> HttpServer.text(c, 200, \"ok\"))\n\
-     \    |> HttpServer.listen()\n  end\nend\n"
+     \    |> HttpServer.listen())\n  end\nend\n"
     (if tls then "    |> HttpServer.tls(HttpServer.TlsFiles(\"c.pem\", \"k.pem\"))\n" else "")
 
 let test_http_server_tls_only_when_used () =

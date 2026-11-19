@@ -182,7 +182,7 @@ mod UdpLoopback do
     let st = Udp.stats(tx)
     Authority.ignore(println("send stalls counted: " ++ bool_to_string(st.tx_stalls >= 0)))
     Authority.ignore(println(Udp.error_message(ResolveFailed("nope"))))
-    match Udp.resolve("", 9) do
+    match Authority.must(Udp.resolve("", 9)) do
       Err(ResolveFailed(_)) -> Authority.ignore(println("empty host: ResolveFailed"))
       _ -> Authority.ignore(println("empty host: unexpected"))
     end

@@ -150,10 +150,10 @@ let bad_cert_src = {|mod HttpsBadCert do
   end
 
   fn main(_l : Cap(IO.NetListen), _t : Cap(IO.NetConnect.TLS), _p : Cap(IO.Process)) do
-    HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
+    Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.tls(HttpServer.TlsFiles("/nonexistent/march-cert.pem", "/nonexistent/march-key.pem"))
     |> HttpServer.plug(fn c -> HttpServer.text(c, 200, "should never serve"))
-    |> HttpServer.listen()
+    |> HttpServer.listen())
   end
 end
 |}
@@ -209,12 +209,12 @@ let deadline_server_src = {|mod HttpsDeadlines do
   end
 
   fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process)) do
-    HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
+    Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.idle_timeout(2)
     |> HttpServer.header_timeout(2)
     |> HttpServer.progress_timeout(2)
     |> HttpServer.plug(router)
-    |> HttpServer.listen()
+    |> HttpServer.listen())
   end
 end
 |}
@@ -620,13 +620,13 @@ let https_server_src = {|mod HttpsE2e do
   end
 
   fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _w : Cap(IO.WebSocket), _s : Cap(IO.Spawn)) do
-    HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
+    Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.tls(HttpServer.TlsFiles(env_str("MARCH_TEST_CERT"), env_str("MARCH_TEST_KEY")))
     |> HttpServer.tls_handshake_timeout(2)
     |> HttpServer.idle_timeout(2)
     |> HttpServer.plain_listener(env_int("MARCH_TEST_PLAIN_PORT"), [plain])
     |> HttpServer.plug(router)
-    |> HttpServer.listen()
+    |> HttpServer.listen())
   end
 end
 |}
@@ -1114,13 +1114,13 @@ let rotate_server_src = {|mod HttpsRotate do
 
   fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _t : Cap(IO.NetConnect.TLS),
           _f : Cap(IO.FileRead), _s : Cap(IO.Spawn)) do
-    HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
+    Authority.must(HttpServer.new(env_int("MARCH_TEST_HTTP_PORT"))
     |> HttpServer.tls(HttpServer.TlsFiles(env_str("MARCH_TEST_CERT"), env_str("MARCH_TEST_KEY")))
     |> HttpServer.tls_poll_interval(1)
     |> configure()
     |> HttpServer.plain_listener(env_int("MARCH_TEST_PLAIN_PORT"), [fn c -> HttpServer.text(c, 200, "plain")])
     |> HttpServer.plug(router)
-    |> HttpServer.listen()
+    |> HttpServer.listen())
   end
 end
 |}

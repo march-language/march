@@ -2492,7 +2492,11 @@ let stdlib_only_hand_written : (string * string) list =
       ("process_read_line", "use `Process.read_line(p)` on a `Process`");
       ("process_write", "use `Process.write(p, data)` on a `Process`");
       ("process_kill_proc", "use `Process.kill(p)` on a `Process`");
-      ("process_wait_proc", "use `Process.wait_proc(p)` on a `Process`") ]
+      ("process_wait_proc", "use `Process.wait_proc(p)` on a `Process`");
+      (* ocap phase 4 (Task 9): the last HttpServer opens, now that their
+         wrappers run Authority.check before the raw builtin. *)
+      ("http_server_listen", "use `HttpServer.listen(server)`");
+      ("http_server_bind_host", "use `HttpServer.bind_host(host)`") ]
 
 let stdlib_only : (string * string) list ref =
   (* ocap phase 4 (Task 8): every gated capability operation

@@ -73,7 +73,7 @@ mod UdpFloodBench do
       Ok(p) -> p
       Err(e) -> panic(Udp.error_message(e))
     end
-    let dst = match Udp.resolve("127.0.0.1", port) do
+    let dst = match Authority.must(Udp.resolve("127.0.0.1", port)) do
       Ok(a) -> a
       Err(e) -> panic(Udp.error_message(e))
     end

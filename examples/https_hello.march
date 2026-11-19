@@ -97,7 +97,7 @@ mod HttpsHello do
   fn main(_l : Cap(IO.NetListen), _p : Cap(IO.Process), _w : Cap(IO.WebSocket),
           _s : Cap(IO.Spawn), _f : Cap(IO.FileRead)) do
     let https_port = env_int("HTTPS_PORT", 443)
-    HttpServer.new(https_port)
+    Authority.must(HttpServer.new(https_port)
     |> HttpServer.tls(HttpServer.TlsFiles(
          env_or("CERT", "/etc/letsencrypt/live/example.com/fullchain.pem"),
          env_or("KEY", "/etc/letsencrypt/live/example.com/privkey.pem")))
@@ -107,6 +107,6 @@ mod HttpsHello do
          HttpServer.redirect_to_https(https_port)
        ])
     |> HttpServer.plug(router)
-    |> HttpServer.listen()
+    |> HttpServer.listen())
   end
 end

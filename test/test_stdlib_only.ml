@@ -357,6 +357,10 @@ let task10_raw_builtins = [
     "http_server_plain_listener"; "http_conn_is_tls"; "process_spawn_async";
     "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc" ]
 
+(* ocap phase 4 (Task 9): the HttpServer opens that became checked
+   operations, appended after the Task 10 rows. *)
+let task9_raw_builtins = [ "http_server_listen"; "http_server_bind_host" ]
+
 (* ocap phase 4 (Task 8): the gated capability operations ([Cap_ops.gated]
    less [Cap_ops.shadowed_by_stdlib] and the two actor rows above), appended
    to the shipped table in [Cap_ops] table order. *)
@@ -392,7 +396,7 @@ let test_shipped_table () =
       "handle_is_closed"; "handle_aux";
       "file_open_write"; "file_write_handle"; "file_seek";
       "dir_open"; "dir_open_write"; "file_open_at"; "dir_list_at" ] @ task10_raw_builtins
-     @ task8_raw_builtins)
+     @ task9_raw_builtins @ task8_raw_builtins)
     gated;
   List.iter (fun (name, hint) ->
       Alcotest.(check bool) (name ^ " suggestion names Actor.introspect") true
@@ -407,6 +411,7 @@ let test_shipped_table () =
                                                      "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push"; "cap_enter"; "cap_grant_text";
                                                      "cap_cwd"; "cap_launch_fail" ])
                              && not (List.mem name task10_raw_builtins)
+                             && not (List.mem name task9_raw_builtins)
                              && not (List.mem name task8_raw_builtins))
        !TB.stdlib_only);
   List.iter (fun name ->
@@ -599,7 +604,7 @@ end|} call) in
       "tls_negotiated_group"; "tls_pq_available";
       "ws_recv"; "ws_send"; "ws_select";
       "http_server_spawn_n"; "http_server_wait"; "http_server_plain_listener";
-      "http_conn_is_tls";
+      "http_server_listen"; "http_server_bind_host"; "http_conn_is_tls";
       "process_spawn_async"; "process_read_line"; "process_write";
       "process_kill_proc"; "process_wait_proc" ]
 
