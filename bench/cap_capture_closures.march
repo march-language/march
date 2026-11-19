@@ -1,0 +1,106 @@
+-- Function-value capture cost: the list_ops workload (map -> filter -> fold
+-- over 1_000_000 integers) in a program that has one run-time frame, so the
+-- capture pass is on (ocap phase 4, lib/tir/auth_rt.ml `captures`).
+--
+-- A lambda is captured when its body reaches a capability operation, a spawn
+-- or a call of a function value. Every function value handed to the
+-- pipeline here calls another function value (a composition, as
+-- higher-order code builds), so each per-element call enters and restores
+-- its captured authority. A second line runs the same shape through the
+-- standard library's `List.map` / `List.filter` / `List.fold_left`.
+--
+-- `report`'s `needs` clause carries a scope: that is the program's one frame.
+-- Compare against the same file with that clause unscoped (no frame, so no
+-- capture) to read the capture delta; specs/benchmarks.md.
+--
+-- Usage: march --compile --opt 2 bench/cap_capture_closures.march -o /tmp/cap_capture_closures
+--        /tmp/cap_capture_closures
+
+mod CapCaptureClosures do
+  needs IO.Console
+  needs IO.FileRead
+
+ptype IntList = INil | ICons(Int, IntList)
+
+pfn irev(xs : IntList, acc : IntList) : IntList do
+  match xs do
+  INil        -> acc
+  ICons(h, t) -> irev(t, ICons(h, acc))
+  end
+end
+
+pfn irange_acc(lo : Int, hi : Int, acc : IntList) : IntList do
+  if lo > hi do acc
+  else irange_acc(lo + 1, hi, ICons(lo, acc)) end
+end
+
+pfn irange(lo : Int, hi : Int) : IntList do
+  irev(irange_acc(lo, hi, INil), INil)
+end
+
+pfn imap_acc(xs : IntList, f : Int -> Int, acc : IntList) : IntList do
+  match xs do
+  INil        -> acc
+  ICons(h, t) -> imap_acc(t, f, ICons(f(h), acc))
+  end
+end
+
+pfn imap(xs : IntList, f : Int -> Int) : IntList do
+  irev(imap_acc(xs, f, INil), INil)
+end
+
+pfn ifilter_acc(xs : IntList, pred : Int -> Bool, acc : IntList) : IntList do
+  match xs do
+  INil        -> acc
+  ICons(h, t) ->
+    if pred(h) do ifilter_acc(t, pred, ICons(h, acc))
+    else ifilter_acc(t, pred, acc) end
+  end
+end
+
+pfn ifilter(xs : IntList, pred : Int -> Bool) : IntList do
+  irev(ifilter_acc(xs, pred, INil), INil)
+end
+
+pfn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+  match xs do
+  INil        -> acc
+  ICons(h, t) -> ifold(t, f(acc, h), f)
+  end
+end
+
+-- Each of these returns a lambda that calls a function value: captured.
+pfn compose(f : Int -> Int, g : Int -> Int) : Int -> Int do
+  fn x -> g(f(x))
+end
+
+pfn negate_pred(p : Int -> Bool) : Int -> Bool do
+  fn x -> not(p(x))
+end
+
+pfn flip(f : Int -> Int -> Int) : Int -> Int -> Int do
+  fn (a, b) -> f(b, a)
+end
+
+-- The program's one frame (a scoped clause).
+pfn report(total : Int) : Unit needs IO.Console, IO.FileRead("/srv/") do
+  println(int_to_string(total))
+  ()
+end
+
+fn main() do
+  let n     = 1000000
+  let double = compose(fn x -> x, fn x -> x * 2)
+  let not3   = negate_pred(fn x -> x % 3 != 0)
+  let add    = flip(fn (a, b) -> a + b)
+  let xs    = irange(1, n)
+  let ys    = imap(xs, double)
+  let zs    = ifilter(ys, not3)
+  let total = ifold(zs, 0, add)
+  report(total)
+  let ws = List.range(1, n + 1)
+  let total2 = List.fold_left(List.filter(List.map(ws, double), not3), 0, add)
+  report(total2)
+end
+
+end

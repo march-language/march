@@ -1,0 +1,25 @@
+-- With no grant, the launch holds main's request (design §11). When that
+-- request carries a scope, a target computed at run time is checked against
+-- it (design §8: a computed target is checked at run time only): a path
+-- built outside the scope is refused by the launch, naming the request; one
+-- built inside it is allowed.
+mod RequestScopedComputedPathRefused do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn path_of(dir : String, file : String) : String do
+    dir ++ "/" ++ file
+  end
+
+  fn main() needs IO.Console, IO.FileRead("/srv/") do
+    println(probe("IO.FileRead", path_of("/srv", "data.txt")))
+    println(probe("IO.FileRead", path_of("/etc", "hosts")))
+  end
+end

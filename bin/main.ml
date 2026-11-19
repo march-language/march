@@ -2985,6 +2985,9 @@ let run_test_cmd args =
     | "--ffi-c" :: v :: rest -> ffi_c_files := v :: !ffi_c_files; parse_args rest
     | "--ffi-link" :: v :: rest -> ffi_link_flags := v :: !ffi_link_flags; parse_args rest
     | "--ffi-so" :: v :: rest -> March_eval.Eval.ffi_shim_so := Some v; parse_args rest
+    (* --grant SCOPES narrows each test file's launch authority, as
+       MARCH_GRANT does (ocap phase 4). *)
+    | "--grant" :: v :: rest -> Unix.putenv "MARCH_GRANT" v; parse_args rest
     | a :: rest -> targets := a :: !targets; parse_args rest
   in
   parse_args args;
@@ -4802,7 +4805,7 @@ let compile filename =
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir =
-      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) desugared
+      try March_tir.Lower.lower_module ~type_map ~test_mode:!do_test ~hot_reload:(Option.is_some !hot_reload_prefix) ~launch:true desugared
       with
       | March_errors.Errors.Diagnostic_exn d ->
         (* A positioned rejection of something the compiled backend does not
@@ -4892,6 +4895,23 @@ let compile filename =
       ) typecheck_env.March_typecheck.Typecheck.module_caps
     in
     let tir = { tir with March_tir.Tir.tm_io_fns = io_modules } in
+    (* Ocap phase 4: run-time frames for function `needs` clauses that carry
+       a scope or reach an actor spawn (lib/tir/auth_rt.ml).  After the
+       passes above, which key on a fn's source name and body, and before
+       Mono.  A program with no such clause comes back physically unchanged.
+       Then function values capture the authority they are made under
+       (Task 5); with no frame that is the identity too. *)
+    let tir, has_frames =
+      March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+    let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:false in
+    (* Ocap phase 4, Task 4b: a native binary judges capability operations
+       with the C runtime's copy of the Authority policy
+       (runtime/march_authority.c), so it links no March matcher or parser
+       (lib/tir/auth_native.ml).  JS and wasm keep the March policy. *)
+    let tir =
+      let t = parse_target !target_str in
+      if t = March_tir.Llvm_emit.Js || March_tir.Llvm_emit.is_wasm_target t then tir
+      else March_tir.Auth_native.retarget tir in
     snap_tir "tir-lower" tir;
     (* A6: the same per-pass counts Contract_pipeline puts on its stamps. *)
     stamp (if !do_timings
@@ -5885,10 +5905,12 @@ let compile filename =
                         @ [ March_tir.Tir_names.setup_fn_name;
                             March_tir.Tir_names.setup_all_fn_name ])
                 tir_for_js
-            else if List.exists (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name = "main")
-                 tir_for_js.March_tir.Tir.tm_fns
-            then March_tir.Dce.prune_unreachable ~roots:[ "main" ] tir_for_js
-            else tir_for_js in
+            else
+              match March_tir.Tir_names.entry_main_of_names
+                      (List.map (fun (fn : March_tir.Tir.fn_def) -> fn.fn_name)
+                         tir_for_js.March_tir.Tir.tm_fns) with
+              | Some entry -> March_tir.Dce.prune_unreachable ~roots:[ entry ] tir_for_js
+              | None -> tir_for_js in
           (* Collect source lines from user AST for source map generation.
              user_ast = desugared before stdlib injection, so only user functions. *)
           let rec collect_fn_lines prefix = function
@@ -6374,6 +6396,7 @@ let compile filename =
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe_snapshot.c")) (* observe verbs *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_observe_debug.c")) (* signed debug verbs *)
               ^ (opt_file2 (Filename.concat runtime_dir "march_sig.c")) (* deploy-key signatures, nonces, audit log *)
+              ^ (opt_file2 (Filename.concat runtime_dir "march_authority.c")) (* the run-time authority's policy (ocap p4) *)
               ^ (if hcr_identity_flags <> "" then opt_file2 hcr_identity_c2 else "")
               ^ (opt_file2 (Filename.concat runtime_dir "march_reclaim.c"))  (* epoch reclamation of dead procs; referenced by march_scheduler.c *)
             in
@@ -7928,7 +7951,7 @@ let () =
     exit 0
   end;
   if Array.length argv >= 2 && argv.(1) = "repl" then begin
-    (* `march repl [file.march] [--ffi-c C] [--ffi-link FLAG] [--ffi-so SO]`.
+    (* `march repl [file.march] [--grant SCOPES] [--ffi-c C] [--ffi-link FLAG] [--ffi-so SO]`.
        This branch runs before Arg.parse, so the FFI flags are peeled off here
        the same way the `test` subcommand does it; the first non-flag argument
        is the preload file.  Without this, a REPL preloading a project whose
@@ -7940,6 +7963,9 @@ let () =
       | "--ffi-c" :: v :: rest -> ffi_c_files := v :: !ffi_c_files; parse_repl_args rest
       | "--ffi-link" :: v :: rest -> ffi_link_flags := v :: !ffi_link_flags; parse_repl_args rest
       | "--ffi-so" :: v :: rest -> March_eval.Eval.ffi_shim_so := Some v; parse_repl_args rest
+      (* --grant narrows the REPL's launch authority, as MARCH_GRANT does
+         (ocap phase 4, design §21). *)
+      | "--grant" :: v :: rest -> Unix.putenv "MARCH_GRANT" v; parse_repl_args rest
       | a :: rest ->
         if !preload_file = None then preload_file := Some a;
         parse_repl_args rest
@@ -8058,6 +8084,8 @@ let () =
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("--jit",        Arg.Set jit_mode,
      " Run the program through the in-process ORC JIT instead of the interpreter (experimental)");
+    ("--grant",      Arg.String (fun g -> Unix.putenv "MARCH_GRANT" g),
+     "<scopes>  Narrow the program's launch authority for this run, as MARCH_GRANT does (interpreter, --jit, REPL); e.g. --grant 'IO.Console, IO.FileRead(\"/srv/\")'");
     ("--compile-so", Arg.Set compile_so,
      " Compile as a shared library for hot reload patching (no @main, no dispatch init)");
     ("--hot-reload", Arg.String (fun p -> hot_reload_prefix := Some p),

@@ -1,0 +1,27 @@
+-- Entering a frame already in force pushes nothing (ocap p4 decision 6), so
+-- a framed function's self tail call stays a tail call: a 100000-deep self
+-- recursion under its own scoped needs completes in every runtime, its last
+-- call is still refused outside the scope by that one function's needs, and
+-- main's authority is unchanged after it returns.
+mod FrameReenterNoop do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn countdown(n : Int, p : String) : String needs IO.FileRead("/srv/") do
+    if n == 0 do probe("IO.FileRead", p)
+    else countdown(n - 1, p) end
+  end
+
+  fn main() do
+    println(countdown(100000, "/srv/x"))
+    println(countdown(100000, "/etc/hosts"))
+    println(probe("IO.FileRead", "/etc/hosts"))
+  end
+end

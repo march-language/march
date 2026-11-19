@@ -1,0 +1,47 @@
+# ocap phase 4: run-time frames for function `needs` clauses
+
+Plan: specs/plans/2026-11-15-ocap-p4-runtime-plan.md, Task 4.
+
+- `lib/tir/auth_rt.ml` (`Auth_rt.frames`) runs right after lowering in every
+  compiled pipeline (bin/main.ml native and JS, `lib/jit/repl_jit.ml`,
+  `lib/driver/js_pipeline.ml`). A fn whose `needs` clause carries a scope, or
+  that reaches an actor spawn or a call of a function value (an `ECallPtr` or
+  an `EApp` of a local binding) through direct calls, becomes a wrapper that
+  enters the frame around `f$auth` (the original body; its own self calls
+  retargeted, so a self tail call stays a loop; a lambda it makes keeps
+  calling the wrapper, since it may escape the frame). The entry `main` is never framed. With
+  nothing to frame the module is returned physically unchanged.
+- The frame's layer comes from `f$auth_layer()` =
+  `Authority.frame_layer(name, text)`: the LLVM emitter turns its call into
+  `march_cap_layer_once(cell, fn)` (parsed on first entry, made immortal,
+  shared), the JS emitter memoises it, and the inliners never inline it
+  (`Inline.never_inline`). `Authority.enter_fn(layer)` no longer parses; its
+  re-entry check is two string compares (decision 6).
+- `Lower.fn_needs_tbl` carries each fn's clause (canonical text via
+  `Cap_request.request_of_entries`, scoped flag, and the module-qualified
+  source name the frame reports, the same name the interpreter uses).
+- The interpreter frames every fn with a `needs` clause except `main`
+  (`Eval.framed_call`), parsing the layer once per definition.
+- Slow-path perf: `Arg` gained `HostAt` (host pattern decoded at parse time)
+  and `PathsAt` (paths normalized at parse time, matched by string compare);
+  the lattice chain of the checked kind is walked once per check. The C
+  release walk handles tags 4 and 5. Microbench (--opt 2): host check
+  1.16 µs -> 0.36 µs (1 layer), 1.89 µs -> 0.60 µs (2 layers); path check
+  0.63 -> 0.45 / 1.00 -> 0.80 µs; frame enter+leave 1.29 µs -> 37 ns.
+- Tests: `test/test_auth_rt.ml` (run_compiler groups `auth_rt`,
+  `auth_rt_runtime`), TIR snapshot `auth_frame`, stdlib `test_authority.march`.
+
+## Launch-request diagnostics (CI fix 1)
+
+- Under decision 3 a `main` with no `needs` clause and no `Cap` parameter requests
+  the module's `needs` line, so the missing-`needs` error that folds in "and `main`
+  is granted nothing" (`check_main_grant`, §X3) no longer adds a `Cap` parameter to
+  its hint or its machine fix: the `needs` line alone is the remedy.
+- `fn main() needs ()` that performs IO is reported as `cap_grant` only, with a fix
+  that rewrites the clause to `needs <what main reaches>`; `check_fn_bounds` skips
+  `main`'s own `cap_bound` at that clause. `cap_grant`'s message for the remaining
+  case (no clause, no parameter, no module `needs` line, nothing to fold into) names
+  all three.
+- The error tour's `14-main-no-grant` example is now `fn main() needs ()`;
+  `specs/lang/errors/cap_grant.md` and the threat model describe the grant as
+  `main`'s request.

@@ -31,8 +31,8 @@ type value =
   | VTuple  of value list
   | VRecord of (string * value) list
   | VCon    of string * value list      (** Constructor: tag + payload *)
-  | VClosure of env * string list * expr * string
-      (** Closure: captured env, param names, body, and the lexical
+  | VClosure of env * string list * expr * string * value option
+      (** Closure: captured env, param names, body, the lexical
           declaring-module-QUALIFYING prefix (e.g. "DcA.", "" at top level)
           in effect when this closure was CONSTRUCTED — see
           [effective_module_prefix]. Needed because [module_stack]/
@@ -47,7 +47,15 @@ type value =
           referenced inside the body (construction via [ECon], or a pattern
           via [match_pattern]'s [PatCon] arm) qualifies against the module
           it was LEXICALLY written in, not whatever module the CALLER
-          happens to be in. *)
+          happens to be in.
+
+          The 5th field is the authority (ocap phase 4: the slot's
+          [List(Authority.Layer)]) the closure was made under, which
+          [apply_inner] installs around its body (design §5: a function
+          value runs under its own authority, not its caller's).  [None]
+          captures nothing and runs under the caller's: a closure made by
+          module-level code (design §21), and the per-call closure of a
+          named fn. *)
   | VBuiltin of string * (value list -> value)
   | VPid    of int                      (** Actor process id *)
   | VTask         of int                 (** Task handle *)

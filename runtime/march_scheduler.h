@@ -484,6 +484,13 @@ typedef struct march_proc {
     _Atomic(uint32_t)           code_epoch;
     /* Owned by this green thread; follows it across scheduler migration. */
     void                      *code_frames;
+    /* ocap phase 4: the run-time authority in force on this green thread, a
+     * List(Authority.Layer) (stdlib/authority.march), NULL when none (the
+     * launch layers apply).  One reference owned by the proc: copied from
+     * the spawner with an incrc at spawn, released at the reap
+     * (march_cap_release).  Only the proc itself reads or writes it, through
+     * march_sched_auth_slot; per proc, never TLS: procs migrate. */
+    void                      *auth;
 #ifdef MARCH_ASAN_BUILD
     /* ASan fiber-switch bookkeeping: this proc's own "fake stack" handle,
      * threaded through __sanitizer_start_switch_fiber/finish_switch_fiber
@@ -644,6 +651,12 @@ typedef struct march_scheduler {
 
 /* Initialize the global scheduler.  Call once before any other sched fn. */
 void         march_sched_init(void);
+
+/* ocap phase 4: the address of the running green thread's authority slot
+ * (march_proc.auth), or of this OS thread's own slot outside a green thread
+ * (empty unless code there pushed one).  noinline: a migration barrier, like
+ * march_sched_frame_slot (see march_sched_yield's comment). */
+void **march_sched_auth_slot(void);
 
 /* Number of OS scheduler threads this process resolved at march_sched_init:
  * the MARCH_NUM_SCHEDULERS environment request when it is usable, otherwise

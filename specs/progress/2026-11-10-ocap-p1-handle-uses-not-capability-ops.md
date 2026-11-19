@@ -24,3 +24,9 @@ Removed from `builtin_cap_table` (and `Cap_symbols`, `Cap_infer`, `Cap_ops`):
 What remains for phase 1 (or whoever lands second): nothing to convert for these; when phase
 1's own tables are rebased, drop any row it still carries for one of them. Close this file
 once phase 1 has confirmed its tables agree.
+
+## Closed 2026-11-17 (ocap phase 4, Task 10)
+
+Confirmed: none of the builtins listed above has a row in `lib/caps/cap_ops.ml` (`Cap_ops.table`,
+which `Auth_rt` and the run-time check classify by) or in `builtin_cap_table`
+(`lib/typecheck/typecheck_builtins.ml`); a grep of both for every name above finds nothing.

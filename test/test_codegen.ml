@@ -1251,8 +1251,12 @@ let test_tco_nontail_fib_no_loop () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
+  (* Judged on fib's own body: println links Authority's policy, whose
+     tail-recursive helpers do get TCO loops elsewhere in the module. *)
+  let fib_ir = ir_define ir "fib" in
+  Alcotest.(check bool) "non-tail fib: body found" true (fib_ir <> "");
   Alcotest.(check bool) "non-tail fib: no TCO loop" false
-    (ir_contains ir "tco_loop");
+    (ir_contains fib_ir "tco_loop");
   Alcotest.(check bool) "non-tail fib: call instruction present" true
     (ir_contains ir "call i64 @fib")
 
@@ -4066,6 +4070,36 @@ let test_actor_snapshot () =
   March_eval.Eval.restore_actors snap;
   Alcotest.(check int) "restore_actors leaves registry empty" 0
     (Hashtbl.length March_eval.Eval.actor_registry)
+
+(* ocap phase 4, Task 6: a debugger snapshot/restore keeps an actor's
+   spawn-time authority; restoring it as the launch authority would widen an
+   actor spawned under a frame. *)
+let test_actor_snapshot_keeps_authority () =
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  Hashtbl.reset March_eval.Eval.actor_defs_tbl;
+  March_eval.Eval.next_pid := 1;
+  let auth =
+    March_eval.Eval_types.VCon ("Cons",
+      [ March_eval.Eval_types.VCon ("Layer",
+          [ March_eval.Eval_types.VCon ("ByFnNeeds", [ March_eval.Eval_types.VString "start" ]);
+            March_eval.Eval_types.VString "IO.FileRead(\"/srv/\")";
+            March_eval.Eval_types.VCon ("Nil", []) ]);
+        March_eval.Eval_types.VCon ("Nil", []) ]) in
+  Hashtbl.replace March_eval.Eval.actor_defs_tbl "W" (Test_helpers.dummy_actor_def, ref []);
+  let inst = { (Test_helpers.mk_actor_inst "W" true March_eval.Eval_types.VUnit)
+               with March_eval.Eval.ai_authority = auth } in
+  Hashtbl.replace March_eval.Eval.actor_registry 0 inst;
+  let snap = March_eval.Eval.snapshot_actors () in
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  March_eval.Eval.restore_actors snap;
+  (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
+   | Some r ->
+     Alcotest.(check bool) "the restored actor keeps its spawn-time authority" true
+       (r.March_eval.Eval.ai_authority == auth)
+   | None -> Alcotest.fail "the actor was not restored");
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  Hashtbl.reset March_eval.Eval.actor_defs_tbl;
+  March_eval.Eval.next_pid := 0
 
 (* ── Docstring tests ──────────────────────────────────────────────────────── *)
 
@@ -18591,7 +18625,22 @@ declare ptr    @ring_buf_drop(ptr %rb)
 declare double @march_unix_time()
 declare i64    @march_unix_time_ms()
 declare i64    @march_cap_check_raw(ptr %kind, ptr %target)
-declare ptr    @march_cap_launch_text()
+declare ptr    @march_cap_layers()
+declare void   @march_cap_set_launch(ptr %layers)
+declare ptr    @march_cap_save()
+declare void   @march_cap_restore(ptr %saved)
+declare ptr    @march_cap_push(ptr %layer)
+declare ptr    @march_cap_enter(ptr %auth)
+declare ptr    @march_cap_grant_text()
+declare ptr    @march_cap_cwd()
+declare void   @march_cap_launch_fail(ptr %text)
+declare ptr    @march_cap_rt_parse(ptr %text)
+declare i64    @march_cap_rt_admits(ptr %scopes, ptr %kind, ptr %target, ptr %cwd)
+declare i64    @march_cap_rt_subset(ptr %a, ptr %b)
+declare ptr    @march_cap_rt_frame_layer(ptr %name, ptr %text)
+declare void   @march_cap_rt_launch_init(ptr %request, i64 %scoped)
+declare ptr    @march_cap_rt_check_layers(ptr %kind, ptr %target, ptr %layers)
+declare ptr    @march_cap_rt_check_slow(ptr %kind, ptr %target, i64 %r)
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
 declare i64  @march_vault_live_tables()
@@ -21297,6 +21346,7 @@ let codegen_suites =
         Alcotest.test_case "debug continue"         `Quick test_debug_continue;
         Alcotest.test_case "trace overflow"         `Quick test_trace_overflow;
         Alcotest.test_case "actor snapshot"         `Quick test_actor_snapshot;
+        Alcotest.test_case "actor snapshot keeps its authority" `Quick test_actor_snapshot_keeps_authority;
       ];
       "docstrings", [
         Alcotest.test_case "parse fn doc"         `Quick test_doc_parse_fn;

@@ -32,7 +32,15 @@ let impure_builtins = [
   "unix_time"; "unix_time_ms"; "sys_uptime_ms";
   (* ocap phase 1: two checks must never be merged; the authority they read
      changes between them from phase 4 on. *)
-  "cap_check_raw"; "cap_launch_text";
+  "cap_check_raw";
+  (* ocap phase 4: the authority slot is mutable state; every read and write
+     is ordered against the others and against the checks. *)
+  "cap_layers"; "cap_set_launch"; "cap_save"; "cap_restore"; "cap_push";
+  "cap_enter"; "cap_grant_text"; "cap_cwd"; "cap_launch_fail";
+  (* Task 4b: the C policy reads the slot, the cwd and MARCH_GRANT, and
+     sets the launch layers. *)
+  "cap_rt_parse"; "cap_rt_admits"; "cap_rt_subset"; "cap_rt_frame_layer";
+  "cap_rt_launch_init"; "cap_rt_check_layers"; "cap_rt_check_slow";
   (* Actors / tasks / processes *)
   "send"; "kill"; "actor_stop"; "actor_pid_indices"; "spawn"; "receive";
   "dist_monitor_register"; "actor_terminal_reason"; "dist_monitor_pending"; "dist_monitor_ack"; "dist_monitor_forget_node";

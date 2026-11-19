@@ -1,0 +1,56 @@
+-- A panic that a catch (`__try_call_val`) stops does not leave the
+-- authority of what it unwound in force after the catch: every runtime
+-- puts back the authority the catch was entered under. Two directions:
+-- a framed function's narrower frame must not outlive it, and a captured
+-- function value's wider authority must not leak into the framed caller
+-- that caught its panic. A `try_finally` cleanup that runs after such a
+-- panic runs under the authority the `try_finally` was entered under.
+mod PanicCaughtRestoresAuthority do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(target : String) : String do
+    match Authority.check("IO.FileRead", target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn caught(r : Result(Int, String)) : String do
+    match r do
+    Ok(_) -> "ok"
+    Err(_) -> "caught"
+    end
+  end
+
+  fn narrow_boom(p : String) : Int needs IO.Console, IO.FileRead("/srv/") do
+    println("in frame: " ++ probe(p))
+    panic("boom")
+  end
+
+  fn narrow_catches(f : String -> Int, p : String) : String needs IO.Console, IO.FileRead("/srv/") do
+    let c = caught(__try_call_val(fn _ -> f(p)))
+    c ++ ", then in frame: " ++ probe(p)
+  end
+
+  fn with_cleanup(p : String) : Int do
+    try_finally(fn _ -> narrow_boom(p), fn _ -> println("cleanup: " ++ probe(p)))
+  end
+
+  -- Made under main's (the launch) authority, which it keeps.
+  fn make_wide() : String -> Int do
+    fn p ->
+      let _ = println("in value: " ++ probe(p))
+      panic("boom")
+  end
+
+  fn main() do
+    println("before: " ++ probe("/etc/hosts"))
+    println(caught(__try_call_val(fn _ -> narrow_boom("/etc/hosts"))))
+    println("after frame: " ++ probe("/etc/hosts"))
+    println(narrow_catches(make_wide(), "/etc/hosts"))
+    println("after value: " ++ probe("/etc/hosts"))
+    println(caught(__try_call_val(fn _ -> with_cleanup("/etc/hosts"))))
+    println("after cleanup: " ++ probe("/etc/hosts"))
+  end
+end

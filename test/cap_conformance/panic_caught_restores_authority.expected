@@ -1,0 +1,12 @@
+before: allowed /etc/hosts
+in frame: IO.FileRead("/etc/hosts") refused by function narrow_boom's needs (IO.Console, IO.FileRead("/srv/"))
+caught
+after frame: allowed /etc/hosts
+in value: allowed /etc/hosts
+caught, then in frame: IO.FileRead("/etc/hosts") refused by function narrow_catches's needs (IO.Console, IO.FileRead("/srv/"))
+after value: allowed /etc/hosts
+in frame: IO.FileRead("/etc/hosts") refused by function narrow_boom's needs (IO.Console, IO.FileRead("/srv/"))
+cleanup: allowed /etc/hosts
+caught
+after cleanup: allowed /etc/hosts
+exit 0

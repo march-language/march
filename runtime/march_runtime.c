@@ -2639,6 +2639,7 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len,
     jmp_buf **jslot = diag_jmp_slot();
     for (volatile int64_t k = 0; k < n; k++) {
         void *frame_mark = march_frame_mark();
+        void *auth_mark = march_cap_mark();
         jmp_buf jb;
         *jslot = &jb;
         if (setjmp(jb) == 0) {
@@ -2651,6 +2652,7 @@ static void diag_dispatch(int kind, const char *msg, size_t msg_len,
         /* else: the observer panicked; what it held is abandoned, like a
          * crashed actor's frames. */
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         *jslot = NULL;
     }
     march_test_in_test = saved_in_test;
@@ -3198,8 +3200,10 @@ void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
     march_test_in_test = 1;
     march_panic_handled = 1;   /* a failing test is not a crash to report */
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     int jmp_rc = setjmp(march_test_jmp_buf);
     march_frame_unwind(frame_mark);
+    march_cap_unwind(auth_mark);
     if (jmp_rc == 0) {
         fn();
         march_test_in_test = 0;
@@ -3942,6 +3946,7 @@ void march_assert_fail(void *meta, void *left, void *right) {
  */
 void *march_try_call(void *thunk) {
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -3967,6 +3972,7 @@ void *march_try_call(void *thunk) {
         ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
     } else {
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         panicked = 1;
     }
 
@@ -4118,6 +4124,7 @@ void *march_repl_guard_message(void) {
  */
 void *march_try_call_val(void *thunk) {
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
 
@@ -4141,6 +4148,7 @@ void *march_try_call_val(void *thunk) {
         ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
     } else {
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         panicked = 1;
     }
 
@@ -4206,6 +4214,7 @@ void *march_try_call_val(void *thunk) {
  */
 void *march_try_finally(void *action, void *cleanup) {
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     typedef int64_t (*apply_fn_t)(void *, int64_t);
     apply_fn_t apply_action  = *(apply_fn_t *)((char *)action + 16);
     apply_fn_t apply_cleanup = *(apply_fn_t *)((char *)cleanup + 16);
@@ -4226,6 +4235,7 @@ void *march_try_finally(void *action, void *cleanup) {
         result = apply_action(action, 1);   /* 1 = dummy Bool argument */
     } else {
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         panicked = 1;
     }
 
@@ -4244,6 +4254,7 @@ void *march_try_finally(void *action, void *cleanup) {
         (void)apply_cleanup(cleanup, 1);
     }
     march_frame_unwind(frame_mark);
+    march_cap_unwind(auth_mark);
     /* else: cleanup panicked — swallowed. */
 
     /* Restore the outer panic handler BEFORE re-raising, so the re-raise
@@ -4385,6 +4396,16 @@ typedef struct {
     char  **pending_names;
     int     pending_name_count;
     void   *pending_spawn_cap;
+    /* ocap phase 4: the run-time authority of this slot's FIRST spawn (the
+     * child's meta->auth at registration), an owned reference released with
+     * the supervisor's meta (meta_free).  Every restart of the slot runs its
+     * spawn thunk, and so the replacement, under it (design §7: a restart
+     * restores the authority of the child's first spawn), never under
+     * whatever happens to be in force where the restart runs: a crash
+     * longjmp leaves the dying handler's innermost frame in its proc's slot,
+     * a kill runs the restart on the killer's thread, and a delayed restart
+     * on a timer.  NULL is the launch authority. */
+    void   *first_auth;
 } march_sup_child;
 
 /* A supervisor compiled with --hot-reload keeps its state in a separate
@@ -4536,6 +4557,17 @@ typedef struct march_actor_meta {
      * ambient path. _Atomic for the same reason as green_thread: written on
      * the spawning thread, read on the actor's own. */
     _Atomic(void *)             spawn_cap;
+    /* ocap phase 4: the run-time authority this actor was spawned under (the
+     * spawner's slot at march_spawn_common, or a restart's first-spawn
+     * authority), an owned reference released by meta_free.  Installed on
+     * the actor's own green thread before its first handler
+     * (actor_install_auth) and again before its on_stop runs after a stop
+     * trap, so every handler runs under it (design §7: a worker spawned
+     * under a limit is limited for life).  NULL is the launch authority.
+     * Written before the actor is activated, read only on its own thread and
+     * by its supervisor's registration (both after the activation's
+     * publication), so it needs no atomics. */
+    void                       *auth;
     /* Phase 5: non-zero for actors compiled with --hot-reload.
      * Holds the dispatch-table NAME_ID of the actor's _dispatch function.
      * Used by actor_green_thread for dispatch-table lookup (enabling function
@@ -5423,8 +5455,10 @@ static void meta_free(void *p) {
         free(c->pending_names);
         /* The slot's owned reference (march_actor_register_child). */
         march_decrc(c->spawn_clo);
+        march_cap_release(c->first_auth);
     }
     free(m->sup_children);
+    march_cap_release(m->auth);
     free(m->sup_restart_ts);
     /* Both lists are detached at the death claim; a meta that never died (a
      * C-test stand-in) has nothing here that anything else still owns. */
@@ -6911,6 +6945,7 @@ static int hcr_on_stop_slot(uint32_t dispatch_slot, uint32_t *out) {
 static int actor_run_on_stop(march_proc *self, void *actor, void *clo,
                              void (*bare)(void *)) {
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     volatile int panicked = 0;
     jmp_buf on_stop_jmp;
     jmp_buf *saved_crash = self->crash_jmp;
@@ -6924,6 +6959,7 @@ static int actor_run_on_stop(march_proc *self, void *actor, void *clo,
         else { march_incrc(clo); fn(clo, actor); }
     } else {
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         panicked = 1;
         const char *m = self->crash_message ? self->crash_message : "panic";
         size_t mlen = self->crash_message ? self->crash_message_len
@@ -6941,6 +6977,23 @@ static int actor_run_on_stop(march_proc *self, void *actor, void *clo,
 static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
                                  void *actor, void *request);
 
+/* ocap phase 4: put the authority [meta] was spawned under in the running
+ * green thread's slot (the actor's own proc), releasing whatever was there.
+ * The proc inherits its activator's slot (sched_spawn_common), which is the
+ * spawner's for an ordinary spawn but not for a supervised child, activated
+ * by its supervisor's registration or by a restart on another thread; and a
+ * stop trap's longjmp out of a handler skips the frames' restores. */
+static void actor_install_auth(march_actor_meta *meta) {
+    void **slot = march_sched_auth_slot();
+    void *old = *slot;
+    if (old == meta->auth) return;
+    /* A non-NULL authority was made by a frame push, so the fast path's
+     * "frames ever" flag is already set. */
+    march_incrc(meta->auth);
+    *slot = meta->auth;
+    march_cap_release(old);
+}
+
 static void actor_green_thread(void *arg) {
     march_actor_meta *meta = (march_actor_meta *)arg;
     void *actor = meta->actor;
@@ -6957,6 +7010,7 @@ static void actor_green_thread(void *arg) {
     /* Publish the actor this proc is running, so `self` in a handler body can
      * find it (march_self, in march_scheduler.c). */
     if (self) self->actor = actor;
+    actor_install_auth(meta);
     /* [meta] is this thread's own: activate_actor_green_thread took the
      * reference it holds, released by the meta_put on each exit below. */
     jmp_buf crash_jmp;
@@ -6973,6 +7027,7 @@ static void actor_green_thread(void *arg) {
     /* Every nested code frame is owned by the proc; a catcher restores this
      * immutable watermark, including refs that nested calls never released. */
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
 
     /* The stop trap, for every actor: a nested `receive()` told to stop
      * lands here (march_actor_recv) and the actor dies the normal way.  The
@@ -6990,6 +7045,7 @@ static void actor_green_thread(void *arg) {
     if (self && setjmp(stop_jmp) != 0) {
         stopped_in_handler = 1;
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         goto stopped;
     }
     if (has_supervisor && self) {
@@ -7039,6 +7095,7 @@ static void actor_green_thread(void *arg) {
          * that a crash leaves the refcount untouched, so reintroducing a
          * clobber here fails a test instead of corrupting a heap. */
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
 
         char *crash_message = self->crash_message;
         size_t crash_message_len = self->crash_message_len;
@@ -7332,6 +7389,7 @@ static void actor_green_thread(void *arg) {
                  * callback's next receive, never lost. */
                 atomic_store_explicit(&self->stop_requested, 0,
                                       memory_order_seq_cst);
+                actor_install_auth(meta);
                 if (actor_alive_load(actor)
                         && actor_run_on_stop(self, actor, cb, bare_stop))
                     stopped_in_handler = 1;
@@ -7589,8 +7647,25 @@ static void *march_respawn_child(void *supervisor, march_actor_meta *sup_meta, i
      * thunk, D24 — and in a --test build when the child is itself a
      * supervisor whose spawn glue carries capabilities; see cap_passing.ml.) */
     march_incrc(child->spawn_clo);
+    /* ocap phase 4: the replacement's `init` and its whole life run under
+     * the slot's FIRST spawn's authority (march_sup_child.first_auth), not
+     * under whatever is in force on this thread.  The thunk is March code
+     * that can switch green threads; the slot belongs to this proc, so the
+     * accessor in march_cap_enter/restore finds it again wherever it runs.
+     *
+     * A panic in the replacement's `init` skips the restore, deliberately
+     * left so: march_panic either exits the process (no crash trap: the
+     * dying child's own trap is already disarmed, as is main's) or longjmps
+     * to the trap of the supervised actor that ran this restart (a kill from
+     * its handler), which then dies.  Either way the proc whose slot holds
+     * first_auth never runs March code again: its reap releases the slot,
+     * and only [auth_saved]'s one reference leaks, once per such double
+     * fault.  A replacement of that actor installs its own meta->auth
+     * (actor_install_auth), so nothing runs under the stale slot. */
+    void *auth_saved = march_cap_enter(child->first_auth);
     void *raw = fn_ptr(child->spawn_clo);
     void *new_child = march_spawn_supervised(raw);
+    march_cap_restore(auth_saved);
 
     /* Take what the dead incarnation stashed on this slot (its names and its
      * spawn-site capability; stash_child_for_restart). */
@@ -8934,6 +9009,17 @@ static void *march_spawn_common(void *actor, int defer_activation) {
      * ubuntu leg, test/native/actor_enumeration). A pid is a handle to a
      * running actor; the actor's lifetime is its own. */
     march_incrc(actor);
+    /* ocap phase 4: the authority the actor runs under for life — the
+     * spawner's (a restart enters the slot's first-spawn authority around
+     * this call; march_respawn_child).  Before the activation, which
+     * publishes the meta to the actor's own thread. */
+    {
+        void *auth = *march_sched_auth_slot();
+        march_incrc(auth);
+        void *old = meta->auth;
+        meta->auth = auth;
+        march_cap_release(old);
+    }
     if (!defer_activation) activate_actor_green_thread(meta);
     march_reclaim_exit();
     /* Start the scheduler in a background thread so actor green threads run
@@ -9548,6 +9634,7 @@ int64_t march_tasks_cancelled(void) {
 
 static void march_thunk_trampoline(void *arg) {
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     march_thunk_arg *wa = (march_thunk_arg *)arg;
     void *clo = wa->clo;
     int64_t *task = wa->task;
@@ -9575,6 +9662,7 @@ static void march_thunk_trampoline(void *arg) {
         result = apply(clo, (int64_t)0);
     } else {
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         cancelled = 1;
     }
     if (self) self->task_jmp = NULL;
@@ -10640,6 +10728,7 @@ static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
         return;
     }
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     jmp_buf jb;
     jmp_buf *saved_crash = self->crash_jmp;
     self->crash_jmp = &jb;
@@ -10654,6 +10743,7 @@ static void actor_answer_inspect(march_actor_meta *meta, march_proc *self,
         result = s ? mk_ok(s) : mk_err_cstr("the renderer produced nothing");
     } else {
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         /* The render panicked; the actor carries on.  The longjmp skips
          * every release in Name_inspect, so the actor record still owns its
          * fields (the loads moved nothing out of it that anything freed);
@@ -10794,6 +10884,7 @@ static void actor_answer_migrate_check(march_actor_meta *meta, march_proc *self,
     int64_t *a = (int64_t *)actor;
     void *state = (void *)(uintptr_t)a[4];
     void *frame_mark = march_frame_mark();
+    void *auth_mark = march_cap_mark();
     jmp_buf jb;
     jmp_buf *saved_crash = self->crash_jmp;
     self->crash_jmp = &jb;
@@ -10806,6 +10897,7 @@ static void actor_answer_migrate_check(march_actor_meta *meta, march_proc *self,
         /* The migration (or the contract) panicked on this state: a failed
          * check, not an unanswered one.  The copy's reference may leak. */
         march_frame_unwind(frame_mark);
+        march_cap_unwind(auth_mark);
         const char *m = self->crash_message ? self->crash_message : "panic";
         size_t mlen = self->crash_message ? self->crash_message_len : 5;
         char buf[256];
@@ -11030,6 +11122,422 @@ static void *make_cons(void *head, void *tail) {
     fp[0] = head;
     fp[1] = tail;
     return cons;
+}
+
+/* ── Run-time authority (ocap phase 4) ───────────────────────────────────
+ *
+ * specs/plans/2026-11-15-ocap-p4-runtime-plan.md, Task 1.  The current
+ * authority is a list of Authority.Layer values (stdlib/authority.march),
+ * innermost first, held in the running green thread's slot (march_proc.auth,
+ * read through the scheduler's noinline march_sched_auth_slot: procs migrate
+ * across OS threads, so the slot is never a _Thread_local of its own), else
+ * the launch layers, set once at startup.  NULL is "empty" in both places.
+ * The interpreter (lib/eval/eval_builtins.ml) and the JS runtime
+ * (runtime/march_runtime.mjs) implement the same builtins over the list value
+ * itself.
+ *
+ * march_cap_check_raw's fast path (runtime/march_extras.c) reads only the
+ * two globals below: with no launch layers and no frame ever pushed, no slot
+ * can be non-empty, so it answers 0 without touching TLS. */
+_Atomic(void *) march_cap_launch = NULL;
+_Atomic int march_cap_frames_ever = 0;
+static _Atomic int march_cap_launch_set = 0;
+
+/* A CapAuthRef is generic-RC to the compiler (no drop glue: it has no type
+ * declaration), and march_decrc frees a cell without releasing its fields.
+ * So the runtime releases the slot values IT drops (cap_restore's old slot, a
+ * dead proc's slot) structurally, by the shapes stdlib/authority.march
+ * declares:
+ *   List(Layer)    Nil = tag 0 | Cons(Layer, List(Layer)) = tag 1
+ *   Layer          Layer(CapLimit, String, List(Scope))   = tag 0
+ *   CapLimit       ByLaunch = 0 | ByFnNeeds .. ByGrant(String) = 1..4
+ *   Scope          Scope(String, Arg)                     = tag 0
+ *   Arg            Any = 0 | Paths(List(String)) = 1 | Hosts(String) = 2
+ *                  | Names(List(String), List(String))    = 3
+ *                  | HostAt(String, String, Bool, Int)    = 4
+ *                    (fields 2 and 3 are scalars: never followed)
+ *                  | PathsAt(List(String))                = 5
+ * A cell is descended into only when this reference is its last (rc 1: no
+ * other holder exists to race with), and only on a tag this table names.  A
+ * type whose short name collides with a user type takes a global tag from
+ * Llvm_builtins.collision_tag_base, far above these, so it is never misread:
+ * at worst its fields leak.  Change a constructor there, change this. */
+enum { CAP_K_LAYERS, CAP_K_LAYER, CAP_K_LIMIT, CAP_K_SCOPES, CAP_K_SCOPE,
+       CAP_K_ARG, CAP_K_STRINGS, CAP_K_STRING };
+
+static void march_cap_release_k(void *p, int k) {
+    while (IS_HEAP_PTR(p)) {
+        int64_t rc = march_rc_peek(p);
+        if (rc >= MARCH_RC_IMMORTAL) return;
+        void *next = NULL;
+        int next_k = k;
+        if (rc == 1) {
+            int32_t tag = ((march_hdr *)p)->tag;
+            void **f = (void **)((char *)p + 16);
+            switch (k) {
+            case CAP_K_LAYERS:
+            case CAP_K_SCOPES:
+            case CAP_K_STRINGS:
+                if (tag == 1) {
+                    march_cap_release_k(f[0], k == CAP_K_LAYERS ? CAP_K_LAYER
+                                            : k == CAP_K_SCOPES ? CAP_K_SCOPE
+                                            : CAP_K_STRING);
+                    next = f[1];   /* the tail: iterate, don't recurse */
+                }
+                break;
+            case CAP_K_LAYER:
+                if (tag == 0) {
+                    march_cap_release_k(f[0], CAP_K_LIMIT);
+                    march_cap_release_k(f[1], CAP_K_STRING);
+                    next = f[2]; next_k = CAP_K_SCOPES;
+                }
+                break;
+            case CAP_K_LIMIT:
+                if (tag >= 1 && tag <= 4) { next = f[0]; next_k = CAP_K_STRING; }
+                break;
+            case CAP_K_SCOPE:
+                if (tag == 0) {
+                    march_cap_release_k(f[0], CAP_K_STRING);
+                    next = f[1]; next_k = CAP_K_ARG;
+                }
+                break;
+            case CAP_K_ARG:
+                if (tag == 1) { next = f[0]; next_k = CAP_K_STRINGS; }
+                else if (tag == 2) { next = f[0]; next_k = CAP_K_STRING; }
+                else if (tag == 3) {
+                    march_cap_release_k(f[0], CAP_K_STRINGS);
+                    next = f[1]; next_k = CAP_K_STRINGS;
+                }
+                else if (tag == 4) {
+                    march_cap_release_k(f[0], CAP_K_STRING);
+                    next = f[1]; next_k = CAP_K_STRING;
+                }
+                else if (tag == 5) { next = f[0]; next_k = CAP_K_STRINGS; }
+                break;
+            default:
+                break;
+            }
+        }
+        march_decrc(p);
+        p = next;
+        k = next_k;
+    }
+}
+
+/* Releases one reference to a slot value (a List(Authority.Layer) or NULL). */
+void march_cap_release(void *layers) {
+    march_cap_release_k(layers, CAP_K_LAYERS);
+}
+
+/* Makes every cell of a value of shape [k] immortal, by the same table as
+ * march_cap_release_k.  A cell that is already immortal (a literal string, a
+ * static nullary constructor) is left alone, and so are its fields: nothing
+ * mortal hangs off an immortal cell here. */
+static void march_cap_immortalize_k(void *p, int k) {
+    while (IS_HEAP_PTR(p)) {
+        if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return;
+        __atomic_store_n(&((march_hdr *)p)->rc, MARCH_RC_IMMORTAL, __ATOMIC_RELAXED);
+        if (gc_trace_on()) gc_emit("immortal", p, 0, MARCH_RC_IMMORTAL, ((march_hdr *)p)->tag);
+        int32_t tag = ((march_hdr *)p)->tag;
+        void **f = (void **)((char *)p + 16);
+        void *next = NULL;
+        int next_k = k;
+        switch (k) {
+        case CAP_K_LAYERS:
+        case CAP_K_SCOPES:
+        case CAP_K_STRINGS:
+            if (tag == 1) {
+                march_cap_immortalize_k(f[0], k == CAP_K_LAYERS ? CAP_K_LAYER
+                                        : k == CAP_K_SCOPES ? CAP_K_SCOPE
+                                        : CAP_K_STRING);
+                next = f[1];
+            }
+            break;
+        case CAP_K_LAYER:
+            if (tag == 0) {
+                march_cap_immortalize_k(f[0], CAP_K_LIMIT);
+                march_cap_immortalize_k(f[1], CAP_K_STRING);
+                next = f[2]; next_k = CAP_K_SCOPES;
+            }
+            break;
+        case CAP_K_LIMIT:
+            if (tag >= 1 && tag <= 4) { next = f[0]; next_k = CAP_K_STRING; }
+            break;
+        case CAP_K_SCOPE:
+            if (tag == 0) {
+                march_cap_immortalize_k(f[0], CAP_K_STRING);
+                next = f[1]; next_k = CAP_K_ARG;
+            }
+            break;
+        case CAP_K_ARG:
+            if (tag == 1) { next = f[0]; next_k = CAP_K_STRINGS; }
+            else if (tag == 2) { next = f[0]; next_k = CAP_K_STRING; }
+            else if (tag == 3) {
+                march_cap_immortalize_k(f[0], CAP_K_STRINGS);
+                next = f[1]; next_k = CAP_K_STRINGS;
+            }
+            else if (tag == 4) {
+                march_cap_immortalize_k(f[0], CAP_K_STRING);
+                next = f[1]; next_k = CAP_K_STRING;
+            }
+            else if (tag == 5) { next = f[0]; next_k = CAP_K_STRINGS; }
+            break;
+        default:
+            break;
+        }
+        p = next;
+        k = next_k;
+    }
+}
+
+/* A framed function's layer, built once (ocap phase 4, lib/tir/auth_rt.ml).
+ * The compiler emits every call to a `<f>$auth_layer` function as a call of
+ * this, with a per-site cell: the first call runs [build]
+ * (Authority.frame_layer, which parses the needs clause), makes the result
+ * immortal and publishes it; every later call returns it without parsing,
+ * allocating or touching a count.  Immortal, so the frames of every thread
+ * can share it with no RC traffic, and cap_restore's walk stops at it.  Two
+ * threads racing on a cold cell both build; the loser's copy, already
+ * immortal (it must be before it is published: a reader treats the result
+ * as a reference it may drop), is left unreferenced, a bounded one-time
+ * cost. */
+void *march_cap_layer_once(void **cell, void *(*build)(void)) {
+    _Atomic(void *) *slot = (_Atomic(void *) *)cell;
+    void *cached = atomic_load_explicit(slot, memory_order_acquire);
+    if (cached) return cached;
+    void *layer = build();
+    march_cap_immortalize_k(layer, CAP_K_LAYER);
+    void *winner = NULL;
+    if (atomic_compare_exchange_strong_explicit(
+            slot, &winner, layer, memory_order_acq_rel, memory_order_acquire))
+        return layer;
+    return winner;
+}
+
+static int march_cap_is_nil(void *l) {
+    return !IS_HEAP_PTR(l) || ((march_hdr *)l)->tag == 0;
+}
+
+/* The slot of the running green thread (or of this OS thread, outside one). */
+static inline void **march_cap_slot(void) { return march_sched_auth_slot(); }
+
+/* Sets the "a frame was pushed" flag.  Loaded first: in a hot loop of
+ * frame entries and captured calls the flag is already set, and a plain
+ * store would keep writing a cache line every thread reads. */
+static inline void march_cap_note_frame(void) {
+    if (!atomic_load_explicit(&march_cap_frames_ever, memory_order_relaxed))
+        atomic_store_explicit(&march_cap_frames_ever, 1, memory_order_relaxed);
+}
+
+/* One shared, immortal Nil for "no layers" (Task 10b): cap_layers used to
+ * allocate a fresh Nil on every call made with an empty slot and no launch
+ * layers, i.e. on every frame entry from the launch authority (twice: once
+ * in Authority.enter_fn's decision-6 compare, once in cap_push).  Immortal,
+ * so a reader's drop is a no-op and nothing ever reuses it in place (an
+ * immortal cell is never unique).  Two threads racing on the first call
+ * both build one; the loser frees its own, never published. */
+static _Atomic(void *) march_cap_nil_cell = NULL;
+static void *march_cap_nil(void) {
+    void *nil = atomic_load_explicit(&march_cap_nil_cell, memory_order_acquire);
+    if (nil) return nil;
+    void *mine = make_nil();
+    __atomic_store_n(&((march_hdr *)mine)->rc, MARCH_RC_IMMORTAL, __ATOMIC_RELAXED);
+    if (gc_trace_on()) gc_emit("immortal", mine, 0, MARCH_RC_IMMORTAL, 0);
+    void *winner = NULL;
+    if (atomic_compare_exchange_strong_explicit(
+            &march_cap_nil_cell, &winner, mine, memory_order_acq_rel, memory_order_acquire))
+        return mine;
+    __atomic_store_n(&((march_hdr *)mine)->rc, 1, __ATOMIC_RELAXED);
+    march_decrc(mine);
+    return winner;
+}
+
+/* The layers in force under [cur] (a slot value): a new reference. */
+static inline void *march_cap_layers_of(void *cur) {
+    if (cur == NULL)
+        cur = atomic_load_explicit(&march_cap_launch, memory_order_acquire);
+    if (cur == NULL) return march_cap_nil();
+    march_incrc(cur);
+    return cur;
+}
+
+void *march_cap_layers(void) {
+    return march_cap_layers_of(*march_cap_slot());
+}
+
+/* Sets the launch layers, once: 1 (and [layers] released) when they were
+ * already set.  The C policy's launch (march_authority.c) calls this
+ * directly, so a printing binary does not link march_panic. */
+int march_cap_set_launch_once(void *layers) {
+    if (atomic_exchange_explicit(&march_cap_launch_set, 1, memory_order_acq_rel)) {
+        march_cap_release(layers);
+        return 1;
+    }
+    if (march_cap_is_nil(layers)) {   /* an empty launch keeps the fast path */
+        march_cap_release(layers);
+        return 0;
+    }
+    atomic_store_explicit(&march_cap_launch, layers, memory_order_release);
+    return 0;
+}
+
+void march_cap_set_launch(void *layers) {
+    if (march_cap_set_launch_once(layers))
+        march_panic(march_string_lit("cap_set_launch: the launch authority is already set", 51));
+}
+
+void *march_cap_save(void) {
+    void *cur = *march_cap_slot();
+    march_incrc(cur);
+    return cur;
+}
+
+/* What cap_enter returns when [auth] was already in force (Task 10b): the
+ * authority itself with bit 0 set.  Slot values are NULL or heap pointers
+ * (even), so the tag is unambiguous, and IS_HEAP_PTR rejects a tagged word:
+ * the compiler's own incrc/decrc/march_cap_release on a CapAuthRef, should
+ * it ever emit one on the saved value, is a no-op on it, as it must be (it
+ * carries no reference). */
+#define MARCH_CAP_SAME ((uintptr_t)1)
+
+/* Leaves a captured body or a frame.  A tagged [saved] (cap_enter changed
+ * nothing) is a no-op without even reading the slot: the body put back
+ * every authority it entered, because the only way out of a body that
+ * skips its restores is a panic, and every catcher that goes on running
+ * March code on the same green thread puts back the authority it was
+ * entered under (march_cap_unwind), before any enclosing restore can run. */
+void march_cap_restore(void *saved) {
+    if ((uintptr_t)saved & MARCH_CAP_SAME) return;
+    void **slot = march_cap_slot();
+    void *old = *slot;
+    *slot = saved;
+    march_cap_release(old);
+}
+
+/* The authority in force, for a panic catcher to put back with
+ * march_cap_unwind: no reference is taken (the slot keeps it). */
+void *march_cap_mark(void) {
+    return *march_cap_slot();
+}
+
+/* After a caught panic: [mark] (march_cap_mark() when the catcher was
+ * entered) in force again.  The panic longjmped past the restores of the
+ * frames and captured bodies it was inside, so the slot may still hold one
+ * of theirs, and the code after the catch would run under it (the
+ * interpreter restores on the way out, lib/eval/eval.ml's Fun.protect; this
+ * makes the compiled runtimes agree).  [mark] is alive: the slot's
+ * reference to it moved into the saved value of the first frame entered
+ * after the mark, whose restore never ran, so it was never released (the
+ * same one reference every skipped restore leaks). */
+void march_cap_unwind(void *mark) {
+    void **slot = march_cap_slot();
+    void *cur = *slot;
+    if (cur == mark) return;
+    march_incrc(mark);
+    *slot = mark;
+    march_cap_release(cur);
+}
+
+/* Frame entry from the launch authority (an empty slot) pushes
+ * Cons(layer, <launch layers or Nil>), the same value every time for one
+ * frame.  Task 10b caches it, immortal, in a small table keyed by the
+ * layer (immortal and per frame, from march_cap_layer_once, so its address
+ * is a stable key), instead of allocating it on entry and freeing it on
+ * leave.  An entry is written once (a CAS from empty) and never replaced,
+ * so at most MARCH_CAP_PUSH_CACHE cells are ever cached and a reader may
+ * keep using any cell it loaded.  A collision, a mortal layer or a
+ * non-empty slot (a frame inside a frame: its tail is the outer, mortal
+ * stack) takes the allocating path, as before. */
+#define MARCH_CAP_PUSH_CACHE 64
+static _Atomic(void *) march_cap_push_cache[MARCH_CAP_PUSH_CACHE];
+
+static void *march_cap_push_top(void *layer, void *cur) {
+    if (cur == NULL && IS_HEAP_PTR(layer) && march_rc_peek(layer) >= MARCH_RC_IMMORTAL) {
+        void *below = atomic_load_explicit(&march_cap_launch, memory_order_acquire);
+        if (below == NULL) below = march_cap_nil();
+        _Atomic(void *) *e =
+            &march_cap_push_cache[((uintptr_t)layer >> 4) & (MARCH_CAP_PUSH_CACHE - 1)];
+        void *hit = atomic_load_explicit(e, memory_order_acquire);
+        if (hit) {
+            void **f = (void **)((char *)hit + 16);
+            if (f[0] == layer && f[1] == below) return hit;
+            return make_cons(layer, march_cap_layers_of(NULL));
+        }
+        void *top = make_cons(layer, march_cap_layers_of(NULL));
+        if (((void **)((char *)top + 16))[1] != below)
+            return top;   /* the launch layers were set in between */
+        __atomic_store_n(&((march_hdr *)top)->rc, MARCH_RC_IMMORTAL, __ATOMIC_RELAXED);
+        if (gc_trace_on()) gc_emit("immortal", top, 0, MARCH_RC_IMMORTAL, 1);
+        void *expected = NULL;
+        if (atomic_compare_exchange_strong_explicit(
+                e, &expected, top, memory_order_acq_rel, memory_order_acquire))
+            return top;
+        /* Lost the race: [top] was never published, so it is still ours
+         * alone; use it as an ordinary pushed cell. */
+        __atomic_store_n(&((march_hdr *)top)->rc, 1, __ATOMIC_RELAXED);
+        return top;
+    }
+    return make_cons(layer, march_cap_layers_of(cur));
+}
+
+void *march_cap_push(void *layer) {
+    march_cap_note_frame();
+    void **slot = march_cap_slot();
+    void *old = *slot;
+    *slot = march_cap_push_top(layer, old);
+    return old;   /* the slot's reference moves to the caller */
+}
+
+/* A captured function value's entry: [auth] (borrowed) in force for its
+ * body.  When [auth] is already in force (the usual case: a value called
+ * under the authority it was made under) nothing is written and no count
+ * is touched; the tagged result tells cap_restore so. */
+void *march_cap_enter(void *auth) {
+    void **slot = march_cap_slot();
+    void *old = *slot;
+    if (old == auth) return (void *)((uintptr_t)auth | MARCH_CAP_SAME);
+    if (auth != NULL) march_cap_note_frame();
+    march_incrc(auth);
+    *slot = auth;
+    return old;
+}
+
+/* MARCH_GRANT, trimmed of spaces and tabs; "" when unset or blank. */
+void *march_cap_grant_text(void) {
+    const char *v = getenv("MARCH_GRANT");
+    if (v == NULL) v = "";
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+    size_t n = strlen(v);
+    while (n > 0 && (v[n - 1] == ' ' || v[n - 1] == '\t'
+                     || v[n - 1] == '\n' || v[n - 1] == '\r')) n--;
+    return march_string_lit(v, (int64_t)n);
+}
+
+/* The current directory, for Authority's path checks (cap_cwd). The same
+ * answer as march_process_cwd, under a symbol the capability symbol table
+ * does not attribute to IO.Process: every checked operation links it. */
+void *march_cap_cwd(void) {
+    char buf[4096];
+    if (getcwd(buf, sizeof(buf)) == NULL) return march_string_lit("", 0);
+    return march_string_lit(buf, (int64_t)strlen(buf));
+}
+
+/* Authority.launch_init's launch error (cap_launch_fail): the text verbatim
+ * on fd 2, then exit status 2. Its own symbol, deliberately absent from the
+ * capability symbol table (lib/caps/cap_symbols.ml). */
+void march_cap_launch_fail(void *text) {
+    fflush(stdout);
+    if (text != NULL) {
+        march_string *s = (march_string *)text;
+        const char *p = s->data;
+        size_t left = (size_t)s->len;
+        while (left > 0) {
+            ssize_t w = write(2, p, left);
+            if (w < 0) { if (errno == EINTR) continue; break; }
+            p += w; left -= (size_t)w;
+        }
+    }
+    _exit(2);
 }
 
 /* Helper: allocate a 2-element tuple (tag=0, 2 ptr fields). */
@@ -13504,6 +14012,8 @@ void march_actor_register_child(void *supervisor, void *child,
     sup_meta->sup_children[idx].pending_names = NULL;
     sup_meta->sup_children[idx].pending_name_count = 0;
     sup_meta->sup_children[idx].pending_spawn_cap = NULL;
+    march_incrc(child_meta->auth);
+    sup_meta->sup_children[idx].first_auth = child_meta->auth;
     __atomic_store_n(&sup_meta->sup_num_children, idx + 1, __ATOMIC_RELAXED);
     sup_slot_unlock(sup_meta);
     activate_actor_green_thread(child_meta);

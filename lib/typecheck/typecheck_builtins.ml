@@ -852,11 +852,30 @@ let builtin_bindings : (string * scheme) list =
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
-    (* ocap phase 1: the run-time capability check point and its test hook
+    (* ocap phase 1: the run-time capability check point
        (runtime/march_extras.c). Stdlib-only; user code calls Authority.check.
        Not capability operations themselves, so not in builtin_cap_table. *)
     ("cap_check_raw",   Mono (TArrow (t_string, TArrow (t_string, t_int))));
-    ("cap_launch_text", Mono (TArrow (t_unit,  t_string)));
+    (* ocap phase 4: the per-green-thread authority slot and the launch
+       layers (runtime/march_runtime.c; stdlib/authority.march declares
+       Layer). A CapAuthRef is a saved slot value: an erased pointer to the
+       slot's layer list, NULL when the slot is empty, generic RC only. *)
+    ("cap_layers",      Mono (TArrow (t_unit, t_list (TCon ("Authority.Layer", [])))));
+    ("cap_set_launch",  Mono (TArrow (t_list (TCon ("Authority.Layer", [])), t_unit)));
+    ("cap_save",        Mono (TArrow (t_unit, TCon ("CapAuthRef", []))));
+    ("cap_restore",     Mono (TArrow (TCon ("CapAuthRef", []), t_unit)));
+    ("cap_push",        Mono (TArrow (TCon ("Authority.Layer", []), TCon ("CapAuthRef", []))));
+    ("cap_enter",       Mono (TArrow (TCon ("CapAuthRef", []), TCon ("CapAuthRef", []))));
+    ("cap_grant_text",  Mono (TArrow (t_unit, t_string)));
+    (* The current directory, read by Authority.check_layers to resolve a
+       relative path target. Not process_cwd: that is an IO.Process
+       operation, and charging it would charge every checked operation. *)
+    ("cap_cwd",         Mono (TArrow (t_unit, t_string)));
+    (* Authority.launch_init's launch error: writes the text verbatim to fd 2
+       and exits with status 2; never returns. Unit is what its one call
+       site (a `()`-typed helper) needs. Not process_exit / print_stderr:
+       those are capability operations and their symbols are attributed. *)
+    ("cap_launch_fail", Mono (TArrow (t_string, t_unit)));
     (* peak_rss_bytes: process self-inspection (peak resident set size, in
        bytes, on both platforms). Deliberately NOT in the capability table
        below — it performs no IO and observes nothing outside this process,

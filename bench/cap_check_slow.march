@@ -1,0 +1,33 @@
+-- Capability check, slow path: 1_000_000 `Authority.check("IO.Console", "stdout")`
+-- calls inside a scoped frame, under a scoped launch request, so every check
+-- walks a two-layer authority (the frame's layer, then the launch layer).
+-- ns per check = wall time / 1e6 (ocap phase 4 budget: <= 1000 ns; see
+-- specs/plans/2026-11-15-ocap-p4-runtime-plan.md and specs/benchmarks.md).
+--
+-- `spin`'s `needs` clause carries a scope, so it runs in a run-time frame;
+-- its self tail call stays a loop (entering a frame already in force pushes
+-- nothing), so the frame is entered once. `main`'s request carries a scope
+-- too, so the launch layer is set and the runtime's fast path is off.
+--
+-- Usage: march --compile --opt 2 bench/cap_check_slow.march -o /tmp/cap_check_slow
+--        /tmp/cap_check_slow
+
+mod CapCheckSlow do
+  needs IO.Console
+  needs IO.FileRead
+
+pfn spin(i : Int, n : Int, ok : Int) : Int needs IO.Console, IO.FileRead("/srv/") do
+  if i >= n do ok
+  else
+    match Authority.check("IO.Console", "stdout") do
+    Ok(_) -> spin(i + 1, n, ok + 1)
+    Err(_) -> spin(i + 1, n, ok)
+    end
+  end
+end
+
+fn main() needs IO.Console, IO.FileRead("/srv/", "/etc/") do
+  println(int_to_string(spin(0, 1000000, 0)))
+end
+
+end

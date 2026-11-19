@@ -1,0 +1,27 @@
+-- A host scope on a function's needs clause is checked at run time against
+-- a `host:port` target computed there (design §8): the scoped host on any
+-- port is allowed, a subdomain is allowed under a `*.` wildcard, and any
+-- other host is refused by the function's needs.
+mod HostScopeComputedRefused do
+  needs IO.Console
+  needs IO.NetConnect
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn dial(host : String, port : Int) : String
+      needs IO.NetConnect("api.example.com"), IO.NetConnect("*.cdn.example.com") do
+    probe("IO.NetConnect", host ++ ":" ++ int_to_string(port))
+  end
+
+  fn main() do
+    println(dial("api.example.com", 443))
+    println(dial("img.cdn.example.com", 443))
+    println(dial("evil.example.com", 443))
+    println(dial("api.example.com.evil.net", 443))
+  end
+end

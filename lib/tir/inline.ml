@@ -26,6 +26,12 @@ let is_reloadable_name name =
       Hot_reload.needs_dispatch_to config name
   | None -> false
 
+(** A fn no inliner may inline: a reloadable boundary fn (above), or a
+    framed fn's layer builder ([Tir_names.is_auth_layer_fn]), whose call the
+    emitters turn into a build-once ([Auth_rt]); inlined, the needs clause
+    would be parsed on every frame entry. *)
+let never_inline name = is_reloadable_name name || Tir_names.is_auth_layer_fn name
+
 (** Count TIR nodes (approximate size). *)
 let rec node_count : Tir.expr -> int = function
   | Tir.EAtom _ | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _
@@ -441,7 +447,7 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
     let is_small    = node_count fd.Tir.fn_body <= inline_size_threshold in
     (* Hot Code Reload: a reloadable (boundary) function must never be inlined,
        or its call sites would be fixed into callers and could not be swapped. *)
-    let is_reloadable = is_reloadable_name fd.Tir.fn_name in
+    let is_reloadable = never_inline fd.Tir.fn_name in
     if is_pure && is_small && not is_reloadable then
       Hashtbl.add fn_env fd.Tir.fn_name fd
   ) m.Tir.tm_fns;

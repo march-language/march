@@ -1,0 +1,5 @@
+allowed sessions
+allowed cache_users
+IO.Mut("sessions_admin") refused by function open_table's needs (IO.Mut("sessions", prefix("cache_")))
+IO.Mut("secrets") refused by function open_table's needs (IO.Mut("sessions", prefix("cache_")))
+exit 0

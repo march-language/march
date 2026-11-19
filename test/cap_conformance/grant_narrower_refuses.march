@@ -1,0 +1,30 @@
+-- GRANT: IO.Console, IO.FileRead("/srv/")
+-- A launch grant narrower than main's request refuses at run time what it
+-- leaves out (design §11, §18): a path outside its scope and a requested
+-- kind it omits (a real environment read), each naming the grant; what it
+-- keeps is allowed.
+mod GrantNarrowerRefuses do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Process
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn env_verdict(name : String) : String do
+    match Process.env(name) do
+    Ok(_) -> "allowed " ++ name
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() needs IO.Console, IO.FileRead, IO.Process do
+    println(probe("IO.FileRead", "/srv/data.txt"))
+    println(probe("IO.FileRead", "/etc/hosts"))
+    println(env_verdict("HOME"))
+  end
+end

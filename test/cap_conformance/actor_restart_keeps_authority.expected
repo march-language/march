@@ -1,0 +1,7 @@
+first: IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn) / allowed
+restarted: true
+after crash: IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn) / allowed
+restarted again: true
+after kill: IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn) / allowed
+main: allowed
+exit 0

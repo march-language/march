@@ -14034,7 +14034,13 @@ let test_grant_absent_is_ambient () =
      error. The test is kept and INVERTED rather than deleted — it is the pin
      on the single semantic reversal in the whole R1 sequence, and a future
      change that quietly restored ambient IO would otherwise show up as a
-     green suite. *)
+     green suite.
+
+     Ocap phase 4 (decision 3) refines it without restoring ambient IO:
+     `main`'s request is its `needs` clause together with its `Cap`
+     parameters, and with neither it is the module's `needs` line, which is
+     a declaration, not ambience.  A module that declares nothing still
+     grants nothing. *)
   let ctx = typecheck {|mod GrantLegacy do
     needs IO.Console
     needs IO.FileWrite
@@ -14046,8 +14052,19 @@ let test_grant_absent_is_ambient () =
     end
   end|} in
   Alcotest.(check bool)
-    "a parameterless main is granted nothing, so its IO is an error"
-    true (has_error_with ctx "declares no grant")
+    "with no clause and no Cap parameter, the module's needs line is the grant"
+    false (has_errors ctx);
+  let ctx = typecheck {|mod GrantNone do
+    fn main() : () do
+      match file_write("/tmp/grant_l", "d") do
+        Ok(_) -> ()
+        Err(_) -> ()
+      end
+    end
+  end|} in
+  Alcotest.(check bool)
+    "a module that declares nothing grants main nothing, so its IO is an error"
+    true (has_error_with ctx "granted nothing")
 
 let test_grant_narrow_refuses_foreign () =
   let ctx = typecheck {|mod GrantForeign do
@@ -14522,15 +14539,16 @@ let test_main_foreign_under_console_still_refused () =
 (* ── the flip itself ────────────────────────────────────────────────────── *)
 
 let test_parameterless_main_doing_io_is_an_error () =
+  (* No `needs` anywhere: `main`'s request is empty (decision 3), so its IO
+     is an error, reported with the missing module `needs`. *)
   let ctx = typecheck {|mod StageDAmbient do
-    needs IO.Console
     fn main() : () do
       println("hi")
       ()
     end
   end|} in
   Alcotest.(check bool) "a parameterless main performing IO is rejected"
-    true (has_error_with ctx "declares no grant");
+    true (has_error_with ctx "granted nothing");
   Alcotest.(check bool) "the reached capability is named"
     true (has_error_with ctx "IO.Console")
 
@@ -14574,7 +14592,6 @@ let test_stage_d_with_stdlib_prepended () =
   let m = March_ast.Ast.{
     mod_name = { txt = "Main"; span = dummy_span };
     mod_decls = flattened @ (parse_and_desugar {|mod Main do
-      needs IO.Console
       fn main() : () do
         println("hi")
         ()
@@ -14584,21 +14601,32 @@ let test_stage_d_with_stdlib_prepended () =
   let (errors, _type_map, _env) = March_typecheck.Typecheck.check_module_core m in
   Alcotest.(check bool)
     "a prelude-mediated console use still trips the missing-grant error"
-    true (has_error_with errors "declares no grant")
+    true (has_error_with errors "granted nothing")
 
 (* R1 stage D, the migration half: the diagnostic carries a MECHANICAL fix.
    Under a hard flip this is the only mitigation code outside this repo gets —
    the grant is not a judgement call, it is `caps(main)`, which the compiler
    has already computed by the time it reports the error. Emitting it as a
    `FReplace` over the parameter list lets `forge fix` apply it. *)
+(* The grant's replace edit, from the first diagnostic whose fix carries one.
+   Since ocap phase 4 (decision 3) `main`'s grant is its request: its `needs`
+   clause and `Cap` parameters, or, with neither, the module's `needs` line.
+   So the replace fix lives on `fn main() needs ()`, the one shape whose
+   request is empty while the module says what it needs: it rewrites the
+   clause.  A module that declares nothing gets the missing-`needs` error,
+   whose fix is the `needs` line alone (pinned below). *)
 let stage_d_fix_of src =
   let ctx = typecheck src in
   List.fold_left
     (fun acc (d : March_errors.Errors.diagnostic) ->
        match acc, d.fix with
        | Some _, _ -> acc
-       | None, Some { March_errors.Errors.edit = March_errors.Errors.FReplace { text; span }; _ } -> Some (text, span)
-       | None, _ -> None)
+       | None, Some f ->
+         List.find_map (function
+             | March_errors.Errors.FReplace { text; span } -> Some (text, span)
+             | _ -> None)
+           (March_errors.Errors.fix_edits f.March_errors.Errors.edit)
+       | None, None -> None)
     None
     (List.rev ctx.March_errors.Errors.diagnostics)
 
@@ -14606,7 +14634,7 @@ let test_stage_d_emits_replace_fix () =
   match
     stage_d_fix_of {|mod StageDFix do
       needs IO.Console
-      fn main() : () do
+      fn main() : () needs () do
         println("hi")
         ()
       end
@@ -14615,18 +14643,16 @@ let test_stage_d_emits_replace_fix () =
   | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
   | Some (text, _) ->
     Alcotest.(check string)
-      "the fix is the parameter list the compiler computed"
-      "(_cap_console : Cap(IO.Console))" text
+      "the fix is the clause the compiler computed"
+      "needs IO.Console" text
 
 let test_stage_d_fix_spans_the_parameter_list () =
-  (* The span must cover `()` and NOTHING else. Replacing the function NAME
-     instead would produce `fn main(_cap_console : Cap(IO.Console))() : ()`,
-     which is why `fn_clause` had to grow a parameter-list span rather than
-     reuse one it already had. *)
+  (* The span must cover `needs ()` and NOTHING else: replacing more (the
+     return type, the `do`) would corrupt the signature. *)
   match
     stage_d_fix_of {|mod StageDFixSpan do
       needs IO.Console
-      fn main() : () do
+      fn main() : () needs () do
         println("hi")
         ()
       end
@@ -14636,15 +14662,14 @@ let test_stage_d_fix_spans_the_parameter_list () =
   | Some (_, span) ->
     Alcotest.(check int) "fix starts and ends on one line"
       span.March_ast.Ast.start_line span.March_ast.Ast.end_line;
-    Alcotest.(check int) "the replaced text is exactly `()`" 2
+    Alcotest.(check int) "the replaced text is exactly `needs ()`" 8
       (span.March_ast.Ast.end_col - span.March_ast.Ast.start_col)
 
 let test_stage_d_fix_covers_multiple_capabilities () =
   match
     stage_d_fix_of {|mod StageDFixMulti do
-      needs IO.Console
-      needs IO.FileWrite
-      fn main() : () do
+      needs IO.Console, IO.FileWrite
+      fn main() : () needs () do
         match file_write("/tmp/stage_d_fix", "d") do
           Ok(_) -> Authority.ignore(println("ok"))
           Err(_) -> Authority.ignore(println("e"))
@@ -14655,8 +14680,54 @@ let test_stage_d_fix_covers_multiple_capabilities () =
   | None -> Alcotest.fail "stage D diagnostic carried no fix payload"
   | Some (text, _) ->
     Alcotest.(check string)
-      "every reached capability appears in the generated parameter list"
-      "(_cap_console : Cap(IO.Console), _cap_filewrite : Cap(IO.FileWrite))" text
+      "every reached capability appears in the generated clause"
+      "needs IO.Console, IO.FileWrite" text
+
+let test_stage_d_needs_unit_reported_once () =
+  (* `fn main() needs ()` doing IO is one finding: [cap_grant], whose fix
+     rewrites the clause.  The function-bound check does not repeat it as a
+     [cap_bound] at the same clause. *)
+  let ctx = typecheck {|mod StageDOnce do
+      needs IO.Console
+      fn main() : () needs () do
+        println("hi")
+        ()
+      end
+    end|} in
+  let codes =
+    List.filter_map (fun (d : March_errors.Errors.diagnostic) ->
+        if d.severity = March_errors.Errors.Error
+        then Some (March_errors.Errors.Code.slug_of d.code) else None)
+      ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check (list string)) "exactly one error, cap_grant" ["cap_grant"] codes
+
+let test_stage_d_module_without_needs_fix_is_needs_line () =
+  (* A module that declares nothing: `main` (no clause, no `Cap` parameter)
+     requests the module's `needs` line, so the missing-`needs` error's fix,
+     the `needs` line, is the whole remedy.  It carries no edit to `main`'s
+     parameters any more. *)
+  let src = {|mod StageDNeedsLine do
+      fn main() : () do
+        println("hi")
+        ()
+      end
+    end|} in
+  Alcotest.(check bool) "no replace edit on main" true (stage_d_fix_of src = None);
+  let ctx = typecheck src in
+  let inserts =
+    List.concat_map (fun (d : March_errors.Errors.diagnostic) ->
+        match d.fix with
+        | Some f ->
+          List.filter_map (function
+              | March_errors.Errors.FInsert { text; _ } -> Some (String.trim text)
+              | _ -> None)
+            (March_errors.Errors.fix_edits f.March_errors.Errors.edit)
+        | None -> [])
+      ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "the fix inserts `needs IO.Console`" true
+    (List.mem "needs IO.Console" inserts);
+  Alcotest.(check bool) "and still says main is granted nothing" true
+    (has_error_with ctx "granted nothing")
 
 (* ── cap_infer: standalone refinecheck capability-inference hints ────────── *)
 
@@ -19413,8 +19484,210 @@ let handle_types_suite =
      Alcotest.test_case "handle_remote_actor" `Quick test_handle_remote_actor;
      Alcotest.test_case "handle_user_types_send" `Quick test_handle_user_types_send ])
 
+(* ── ocap phase 4: `main`'s launch request and scoped function `needs` ──
+   Decision 3: the request is `main`'s `needs` clause together with its
+   legacy `Cap(P)` parameters; with neither, the module's `needs` line. The
+   text is what the entry hands Authority.launch_init, so each entry is
+   printed as written. *)
+let launch_request_of src = March_typecheck.Typecheck.launch_request (parse_and_desugar src)
+
+let test_launch_request_scoped_needs () =
+  Alcotest.(check (pair string bool)) "main's needs clause, scoped"
+    ("IO.Console, IO.FileRead(\"/srv/\")", true)
+    (launch_request_of {|mod M do
+  needs IO.Console, IO.FileRead
+  fn main() : () needs IO.Console, IO.FileRead("/srv/") do println("x") end
+end|})
+
+let test_launch_request_cap_param () =
+  Alcotest.(check (pair string bool)) "a legacy Cap parameter"
+    ("IO.Console", false)
+    (launch_request_of {|mod M do
+  needs IO.Console
+  fn main(_c : Cap(IO.Console)) do println("x") end
+end|})
+
+let test_launch_request_module_needs () =
+  Alcotest.(check (pair string bool)) "neither: the module's needs line"
+    ("IO.Clock", false)
+    (launch_request_of {|mod M do
+  needs IO.Clock
+  fn main() do () end
+end|})
+
+let test_launch_request_union_and_options () =
+  (* Cap parameters first, then the needs clause (source order); an
+     option-carrying scope prints back in its one surface form. *)
+  Alcotest.(check (pair string bool)) "params then needs, options as written"
+    ("IO.Console, IO.NetConnect(\"api.x.com\", methods(get), no_redirects)", true)
+    (launch_request_of {|mod M do
+  needs IO.Console, IO.NetConnect
+  fn main(_c : Cap(IO.Console)) needs IO.NetConnect("api.x.com", methods(get), no_redirects) do println("x") end
+end|});
+  Alcotest.(check (pair string bool)) "no main, no needs: the empty request"
+    ("", false)
+    (launch_request_of {|mod M do
+  fn f() do 1 end
+end|})
+
+let test_launch_request_needs_unit_clause () =
+  (* `needs ()` is a clause: it requests nothing, and the module's needs
+     line is not consulted (decision 3). *)
+  Alcotest.(check (pair string bool)) "needs () requests nothing"
+    ("", false)
+    (launch_request_of {|mod M do
+  needs IO.Console
+  fn main() needs () do () end
+end|});
+  (* The static grant agrees: under `needs ()` main is granted nothing. *)
+  Alcotest.(check bool) "needs () grants nothing statically" true
+    (has_errors (typecheck {|mod M do
+  needs IO.Console
+  fn main() needs () do println("x") end
+end|}))
+
+let test_launch_request_nested_entry () =
+  (* The entry is a top-level main, else the last nested module's; its
+     request falls back to ITS module's needs line, not the outer one. *)
+  let m = parse_and_desugar {|mod Outer do
+  needs IO.Console, IO.Clock
+  mod App do
+    needs IO.Console
+    fn main() do println("hi") end
+  end
+end|} in
+  Alcotest.(check (option string)) "the entry is App.main" (Some "App.main")
+    (Option.map (fun (n, _, _) -> n) (March_ast.Cap_request.entry_main m));
+  Alcotest.(check (pair string bool)) "App's needs line" ("IO.Console", false)
+    (March_typecheck.Typecheck.launch_request m);
+  Alcotest.(check (option string)) "the TIR rule agrees" (Some "App.main")
+    (March_tir.Tir_names.entry_main_of_names [ "Lib.main"; "App.helper"; "App.main" ]);
+  Alcotest.(check (option string)) "a bare main wins" (Some "main")
+    (March_tir.Tir_names.entry_main_of_names [ "main"; "App.main" ])
+
+let test_launch_fails_closed () =
+  (* M2: with an Authority module present but no launch_init, a program
+     launch is an internal error, not a silent skip. *)
+  let m = parse_and_desugar {|mod M do
+  mod Authority do
+    fn other() : Int do 1 end
+  end
+  fn main() do () end
+end|} in
+  let raised =
+    try ignore (March_tir.Lower.lower_module ~launch:true m); false
+    with Failure msg ->
+      (try ignore (Str.search_forward (Str.regexp_string "launch_init") msg 0); true
+       with Not_found -> false) in
+  Alcotest.(check bool) "lower: missing launch_init is an internal error" true raised;
+  let raised_eval =
+    try
+      March_eval.Eval.launch_authority [ ("Authority.other", March_eval.Eval.VUnit) ] ("", false);
+      false
+    with Failure _ -> true in
+  Alcotest.(check bool) "interpreter: missing launch_init is an internal error" true raised_eval;
+  (* The genuine no-stdlib case (no Authority at all) is a no-op. *)
+  March_eval.Eval.launch_authority [] ("", false);
+  ignore (March_tir.Lower.lower_module ~launch:true
+            (parse_and_desugar {|mod M do
+  fn main() do () end
+end|}))
+
+let test_scoped_fn_needs_parses () =
+  let m = parse_module {|mod M do
+  needs IO.FileRead
+  fn f() needs IO.FileRead("/a/") do () end
+end|} in
+  let needs =
+    List.find_map (function
+        | March_ast.Ast.DFn (d, _) when d.March_ast.Ast.fn_name.txt = "f" -> d.fn_needs
+        | _ -> None) m.March_ast.Ast.mod_decls in
+  match needs with
+  | Some ([ (p, sc) ], _) ->
+    Alcotest.(check string) "path" "IO.FileRead" (March_ast.Cap_request.path_text p);
+    Alcotest.(check (option string)) "scope" (Some "/a/") sc
+  | _ -> Alcotest.fail "fn f's needs clause did not parse to one scoped entry"
+
+let test_scoped_fn_needs_typecheck () =
+  (* Accepted: a scoped function bound within the module's needs; scopes
+     are run-time limits, so statically the bound is its paths. *)
+  let ok = typecheck {|mod M do
+  needs IO.Console, IO.FileRead
+  fn f() needs IO.FileRead("/srv/") do () end
+  fn main() needs IO.Console do
+    f()
+    println("x")
+  end
+end|} in
+  Alcotest.(check bool) "a scoped fn bound typechecks" false (has_errors ok);
+  (* The scope is validated as a module needs scope is. *)
+  let bad = typecheck {|mod M do
+  needs IO.Console
+  fn f() needs IO.Console("x") do () end
+  fn main() needs IO.Console do println("x") end
+end|} in
+  Alcotest.(check bool) "IO.Console takes no scope" true
+    (List.exists (fun (d : March_errors.Errors.diagnostic) ->
+         d.March_errors.Errors.code = March_errors.Errors.Code.invalid_cap_scope)
+        (March_errors.Errors.sorted bad));
+  let rel = typecheck {|mod M do
+  needs IO.FileRead
+  fn f() needs IO.FileRead("data/") do () end
+  fn main() do f() end
+end|} in
+  Alcotest.(check bool) "a relative path scope is refused" true (has_errors rel)
+
+let test_main_needs_is_the_grant () =
+  (* Decision 3: `main`'s needs clause grants what it names, and with
+     neither a clause nor a Cap parameter the module's needs line does. *)
+  Alcotest.(check bool) "main needs IO.Console grants IO.Console" false
+    (has_errors (typecheck {|mod M do
+  needs IO.Console
+  fn main() needs IO.Console do println("x") end
+end|}));
+  Alcotest.(check bool) "the module's needs line grants it" false
+    (has_errors (typecheck {|mod M do
+  needs IO.Console
+  fn main() do println("x") end
+end|}));
+  Alcotest.(check bool) "main's needs clause is still a ceiling" true
+    (has_errors (typecheck {|mod M do
+  needs IO.Console, IO.Clock
+  fn main() needs IO.Clock do println("x") end
+end|}))
+
+let test_scoped_fn_needs_formats () =
+  let src = {|mod M do
+  needs IO.FileRead, IO.NetConnect
+
+  fn f() needs IO.FileRead("/srv/"), IO.NetConnect("api.x.com", methods(get)) do
+    ()
+  end
+end
+|} in
+  let out = March_format.Format.format_source ~filename:"m.march" src in
+  Alcotest.(check bool) "the scopes round-trip" true
+    (Str.string_match
+       (Str.regexp ".*needs IO.FileRead(\"/srv/\"), IO.NetConnect(\"api.x.com\", methods(get))")
+       (String.concat " " (String.split_on_char '\n' out)) 0)
+
+let launch_request_suite =
+  ( "launch_request",
+    [ Alcotest.test_case "main's scoped needs clause" `Quick test_launch_request_scoped_needs;
+      Alcotest.test_case "a legacy Cap parameter" `Quick test_launch_request_cap_param;
+      Alcotest.test_case "the module's needs line" `Quick test_launch_request_module_needs;
+      Alcotest.test_case "union order and options" `Quick test_launch_request_union_and_options;
+      Alcotest.test_case "needs () is a clause" `Quick test_launch_request_needs_unit_clause;
+      Alcotest.test_case "a nested entry main" `Quick test_launch_request_nested_entry;
+      Alcotest.test_case "a missing launch_init fails closed" `Quick test_launch_fails_closed;
+      Alcotest.test_case "a scoped fn needs parses" `Quick test_scoped_fn_needs_parses;
+      Alcotest.test_case "a scoped fn needs typechecks" `Quick test_scoped_fn_needs_typecheck;
+      Alcotest.test_case "main's needs clause is the grant" `Quick test_main_needs_is_the_grant;
+      Alcotest.test_case "a scoped fn needs formats" `Quick test_scoped_fn_needs_formats ] )
+
 let compiler_suites =
   [
+      launch_request_suite;
       handle_types_suite;
       sigil_interp_suite;
       csrf_suite;
@@ -20486,8 +20759,10 @@ let compiler_suites =
           Alcotest.test_case "module without main is not gated"    `Quick test_module_without_main_is_not_gated;
           Alcotest.test_case "real stdlib-prepended shape"         `Quick test_stage_d_with_stdlib_prepended;
           Alcotest.test_case "diagnostic carries a replace fix"     `Quick test_stage_d_emits_replace_fix;
-          Alcotest.test_case "fix span covers exactly `()`"         `Quick test_stage_d_fix_spans_the_parameter_list;
+          Alcotest.test_case "fix span covers exactly `needs ()`"   `Quick test_stage_d_fix_spans_the_parameter_list;
           Alcotest.test_case "fix lists every reached capability"   `Quick test_stage_d_fix_covers_multiple_capabilities;
+          Alcotest.test_case "needs () reported once, as cap_grant" `Quick test_stage_d_needs_unit_reported_once;
+          Alcotest.test_case "no-needs module: fix is the needs line" `Quick test_stage_d_module_without_needs_fix_is_needs_line;
         ] );
       ( "cap_infer", [
           Alcotest.test_case "cap hint shows chain from main"               `Quick test_cap_chain_from_main;

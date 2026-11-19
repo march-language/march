@@ -1,0 +1,7 @@
+allowed /srv/a/../b
+allowed /srv/./x
+IO.FileRead("/srv/../etc/hosts") refused by function in_srv's needs (IO.FileRead("/srv/"))
+IO.FileRead("/srvx/y") refused by function in_srv's needs (IO.FileRead("/srv/"))
+IO.FileRead("data/x") refused by function in_srv's needs (IO.FileRead("/srv/"))
+allowed ../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../srv/x
+exit 0

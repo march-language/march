@@ -22,4 +22,3 @@ mod DeriveVariantForge do
     println("codec generated over a capability position")
   end
 end
--- EXPECT-FIX-PARTIAL: the grant fix is right; the program also deserializes a capability (cap_deserialize), reported once it checks

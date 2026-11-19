@@ -303,7 +303,14 @@ let run_cmd =
                  reload socket under .forge/run/, so $(b,forge topology status) reports \
                  its code versions and epoch pins.")
   in
-  let run d c tgt fs p ff e hr =
+  let run_grant =
+    Arg.(value & opt (some string) None & info ["grant"] ~docv:"SCOPES"
+           ~doc:"Narrow the program's launch authority to $(docv), a scope list such as \
+                 $(b,'IO.Console, IO.FileRead(\"/srv/\")'), by setting $(b,MARCH_GRANT) for \
+                 the run. It must lie within what $(b,main) requests; otherwise the \
+                 program exits with status 2 before it starts.")
+  in
+  let run d c tgt fs p ff e hr g =
     (* The first positional is always the FILE; everything after it belongs to
        the program.  There is deliberately no spelling that passes arguments to
        the PROJECT entry: cmdliner records the positionals but not where `--`
@@ -315,10 +322,10 @@ let run_cmd =
       | f :: rest   -> (Some f, rest)
     in
     handle (Cmd_run.run ~dump_phases:d ~compiled:c ?target:tgt ?file ~args ~processes:p ~fail_fast:ff
-              ~hot_reload:hr ?env:e ())
+              ~hot_reload:hr ?env:e ?grant:g ())
   in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project, or a single file")
-    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env $ run_hot_reload)
+    Term.(const run $ dump_phases $ compiled $ target $ files $ processes $ fail_fast $ run_env $ run_hot_reload $ run_grant)
 
 (* ------------------------------------------------------------------ forge test *)
 

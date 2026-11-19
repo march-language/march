@@ -1,4 +1,4 @@
--- REFUSE: IO.Clock
+-- GRANT: IO.Console, IO.FileRead, IO.FileWrite
 -- File operations allowed: a missing file is Ok(Err(NotFound(_))), a written
 -- file reads back as Ok(Ok(text)).
 mod FileAllowed do

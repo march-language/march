@@ -1079,8 +1079,55 @@ let builtins : builtin list = [
   (* ocap phase 1 capability check point (runtime/march_extras.c). *)
   { march_name = "cap_check_raw"; c_name = Some "march_cap_check_raw"; ret_ty = Some Tir.TInt;
     in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_check_raw(ptr %kind, ptr %target)" };
-  { march_name = "cap_launch_text"; c_name = Some "march_cap_launch_text"; ret_ty = Some Tir.TString;
-    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_launch_text()" };
+  (* ocap phase 4: the per-green-thread authority slot and the launch layers
+     (runtime/march_runtime.c). A CapAuthRef is the slot's list pointer,
+     NULL when empty. *)
+  { march_name = "cap_layers"; c_name = Some "march_cap_layers";
+    ret_ty = Some (Tir.TCon ("List", [Tir.TCon ("Authority.Layer", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_layers()" };
+  { march_name = "cap_set_launch"; c_name = Some "march_cap_set_launch"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @march_cap_set_launch(ptr %layers)" };
+  { march_name = "cap_save"; c_name = Some "march_cap_save"; ret_ty = Some (Tir.TCon ("CapAuthRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_save()" };
+  { march_name = "cap_restore"; c_name = Some "march_cap_restore"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @march_cap_restore(ptr %saved)" };
+  { march_name = "cap_push"; c_name = Some "march_cap_push"; ret_ty = Some (Tir.TCon ("CapAuthRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_push(ptr %layer)" };
+  { march_name = "cap_enter"; c_name = Some "march_cap_enter"; ret_ty = Some (Tir.TCon ("CapAuthRef", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_enter(ptr %auth)" };
+  { march_name = "cap_grant_text"; c_name = Some "march_cap_grant_text"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_grant_text()" };
+  (* The current directory for Authority's path checks: process_cwd's
+     answer under a symbol cap_symbols does not attribute to IO.Process. *)
+  { march_name = "cap_cwd"; c_name = Some "march_cap_cwd"; ret_ty = Some Tir.TString;
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_cwd()" };
+  (* Authority.launch_init's launch error: the text on fd 2, exit 2. Its own
+     symbol, not attributed in cap_symbols (print_stderr / process_exit
+     would be, and launch_init is linked into every program). *)
+  { march_name = "cap_launch_fail"; c_name = Some "march_cap_launch_fail"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @march_cap_launch_fail(ptr %text)" };
+  (* ocap phase 4, Task 4b: the C runtime's copy of the Authority policy
+     (runtime/march_authority.c).  Never written in source: Auth_native
+     retargets direct calls of the Authority functions of the same names to
+     these in native and JIT programs. *)
+  { march_name = "cap_rt_parse"; c_name = Some "march_cap_rt_parse";
+    ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TCon ("Authority.Scope", [])]); Tir.TString]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_rt_parse(ptr %text)" };
+  { march_name = "cap_rt_admits"; c_name = Some "march_cap_rt_admits"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_rt_admits(ptr %scopes, ptr %kind, ptr %target, ptr %cwd)" };
+  { march_name = "cap_rt_subset"; c_name = Some "march_cap_rt_subset"; ret_ty = Some Tir.TBool;
+    in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_rt_subset(ptr %a, ptr %b)" };
+  { march_name = "cap_rt_frame_layer"; c_name = Some "march_cap_rt_frame_layer";
+    ret_ty = Some (Tir.TCon ("Authority.Layer", []));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_rt_frame_layer(ptr %name, ptr %text)" };
+  { march_name = "cap_rt_launch_init"; c_name = Some "march_cap_rt_launch_init"; ret_ty = Some Tir.TUnit;
+    in_is_builtin = true; declare_sig = Some "declare void   @march_cap_rt_launch_init(ptr %request, i64 %scoped)" };
+  { march_name = "cap_rt_check_layers"; c_name = Some "march_cap_rt_check_layers";
+    ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("CapError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_rt_check_layers(ptr %kind, ptr %target, ptr %layers)" };
+  { march_name = "cap_rt_check_slow"; c_name = Some "march_cap_rt_check_slow";
+    ret_ty = Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TCon ("CapError", [])]));
+    in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_rt_check_slow(ptr %kind, ptr %target, i64 %r)" };
   (* peak_rss_bytes: process self-inspection, not capability-gated (see
      typecheck.ml — deliberately absent from the capability table). *)
   { march_name = "peak_rss_bytes"; c_name = Some "march_peak_rss_bytes"; ret_ty = Some Tir.TInt;
@@ -2089,7 +2136,22 @@ let native_net_io_items : preamble_item list = [   (* native-only: TCP/TLS/File/
   PDeclare "march_unix_time";
   PDeclare "march_unix_time_ms";
   PDeclare "march_cap_check_raw";
-  PDeclare "march_cap_launch_text";
+  PDeclare "march_cap_layers";
+  PDeclare "march_cap_set_launch";
+  PDeclare "march_cap_save";
+  PDeclare "march_cap_restore";
+  PDeclare "march_cap_push";
+  PDeclare "march_cap_enter";
+  PDeclare "march_cap_grant_text";
+  PDeclare "march_cap_cwd";
+  PDeclare "march_cap_launch_fail";
+  PDeclare "march_cap_rt_parse";
+  PDeclare "march_cap_rt_admits";
+  PDeclare "march_cap_rt_subset";
+  PDeclare "march_cap_rt_frame_layer";
+  PDeclare "march_cap_rt_launch_init";
+  PDeclare "march_cap_rt_check_layers";
+  PDeclare "march_cap_rt_check_slow";
   PDeclare "march_peak_rss_bytes";
   PDeclare "march_live_allocs";
   PDeclare "march_vault_live_tables";

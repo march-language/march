@@ -64,11 +64,13 @@ default; `--no-cap-strict` turns off the emitted-code part (the `needs` check ab
 runs). `march --compile` runs the full check; `march --check` runs a subset of it that
 doesn't over-report.
 
-**`main`'s grant bounds the whole program.** `main`'s capability parameters are the
-program's grant. A program that reaches anything outside the grant fails to build
+**`main`'s grant bounds the whole program.** `main`'s request is the program's grant:
+its `needs` clause together with any `Cap` parameters, or, with neither, the module's
+`needs` line. A program that reaches anything outside the grant fails to build
 (`[cap_grant_exceeded]`), no matter
-what any module declares. A `main` with no capability parameter is granted nothing, so a
-program that performs IO without stating its grant does not compile
+what any module declares. A `main` whose request is empty (`needs ()`, or no clause, no
+`Cap` parameter and no module `needs` line) is granted nothing, so a program that performs
+IO without stating its grant does not compile
 ([`cap_grant`]({{ site.baseurl }}/docs/errors/cap_grant/)). `Cap(IO)` grants everything.
 Code that is never reached from `main` costs nothing against the grant.
 

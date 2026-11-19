@@ -508,8 +508,17 @@ let test_forge_fix_applies_capability_errors () =
   close_in ic;
   Alcotest.(check bool) "needs line inserted" true
     (has_deny content "needs IO.Console");
-  Alcotest.(check bool) "grant parameter inserted" true
-    (has_deny content "Cap(IO.Console)")
+  (* Decision 3 (ocap phase 4): main's launch request is its `needs` clause
+     plus its Cap parameters; with neither, the module's `needs` line is the
+     request. So the fix adds only the module `needs` line here: inserting a
+     Cap(IO.Console) parameter on main as well would be redundant. *)
+  Alcotest.(check bool) "no grant parameter inserted (needs line is main's request)"
+    false (has_deny content "Cap(IO.Console)");
+  let rc_build =
+    Sys.command
+      (Printf.sprintf "cd %s && forge build > /dev/null 2>&1" (Filename.quote dir))
+  in
+  Alcotest.(check int) "the fixed project builds" 0 rc_build
 
 let test_scaffolded_app_builds_clean () =
   let dir = Filename.concat (Filename.get_temp_dir_name ()) "forge_new_clean" in

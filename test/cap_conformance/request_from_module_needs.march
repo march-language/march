@@ -1,0 +1,20 @@
+-- A main with neither a needs clause nor Cap parameters requests what its
+-- module's needs lines say (design §11; ocap p4 decision 3): here a scoped
+-- file read, so a computed path outside it is refused by the launch, which
+-- names the module's lines as the request.
+mod RequestFromModuleNeeds do
+  needs IO.Console
+  needs IO.FileRead("/srv/")
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    println(probe("IO.FileRead", "/srv/" ++ "data.txt"))
+    println(probe("IO.FileRead", "/etc/" ++ "hosts"))
+  end
+end

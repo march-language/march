@@ -1,5 +1,6 @@
--- REFUSE: IO.Spawn, IO.Mut, IO.Signal
--- Spawning, opening a table by name and watching a signal refused, each
+-- GRANT: IO.Console
+-- Spawning, opening a table by name and watching a signal outside the
+-- launch grant are refused, each
 -- naming its target; the parallel List helpers compute the same result
 -- sequentially instead of failing.
 mod SpawnMutSignalRefused do

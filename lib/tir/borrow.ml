@@ -217,6 +217,23 @@ let extern_borrow_table : (string * bool list) list = [
   (* ── 2-arg string × string ──────────────────────────────────────────────── *)
   ("march_string_contains",      [true; true]);
   ("march_cap_check_raw",        [true; true]);
+  (* ocap phase 4 authority slot: set_launch, restore and push store their
+     argument (consume it); enter takes its own reference. *)
+  ("march_cap_set_launch",       [false]);
+  ("march_cap_restore",          [false]);
+  ("march_cap_push",             [false]);
+  ("march_cap_enter",            [true]);
+  (* cap_launch_fail writes its text to fd 2 and exits: it only reads it. *)
+  ("march_cap_launch_fail",      [true]);
+  (* Task 4b, runtime/march_authority.c: every argument is only read; a value
+     stored into a result is incref'd there. *)
+  ("march_cap_rt_parse",         [true]);
+  ("march_cap_rt_admits",        [true; true; true; true]);
+  ("march_cap_rt_subset",        [true; true]);
+  ("march_cap_rt_frame_layer",   [true; true]);
+  ("march_cap_rt_launch_init",   [true; true]);
+  ("march_cap_rt_check_layers",  [true; true; true]);
+  ("march_cap_rt_check_slow",    [true; true; true]);
   ("march_string_starts_with",   [true; true]);
   ("march_string_ends_with",     [true; true]);
   ("march_string_split",         [true; true]);
@@ -413,6 +430,18 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_reverse",       [true]);
   ("string_contains",      [true; true]);
   ("cap_check_raw",        [true; true]);
+  ("cap_set_launch",       [false]);
+  ("cap_restore",          [false]);
+  ("cap_push",             [false]);
+  ("cap_enter",            [true]);
+  ("cap_launch_fail",      [true]);
+  ("cap_rt_parse",         [true]);
+  ("cap_rt_admits",        [true; true; true; true]);
+  ("cap_rt_subset",        [true; true]);
+  ("cap_rt_frame_layer",   [true; true]);
+  ("cap_rt_launch_init",   [true; true]);
+  ("cap_rt_check_layers",  [true; true; true]);
+  ("cap_rt_check_slow",    [true; true; true]);
   ("string_starts_with",   [true; true]);
   ("string_ends_with",     [true; true]);
   ("string_split",         [true; true]);

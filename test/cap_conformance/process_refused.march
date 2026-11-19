@@ -1,5 +1,6 @@
--- REFUSE: IO.Process
--- Environment reads, process facts and spawns refused: each names its target
+-- GRANT: IO.Console
+-- Environment reads, process facts and spawns outside the launch grant are
+-- refused: each names its target
 -- (the variable, the program). A refused read is not the same value as an
 -- unset one, and Env's defaults are not substituted for a refusal.
 mod ProcessRefused do
