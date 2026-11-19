@@ -21,6 +21,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A Float `if` or `match` with a record field arm no longer allocates.** When one
+  branch was a field read such as `event.progress`, compiled code boxed the result of
+  every branch on the heap and freed it again at the join. The field read now counts
+  as a plain Float, so nothing is boxed. A city builder's 100,000-citizen replay went
+  from 28.1 to 30.4 frames per second. Programs behave the same.
 - **Releasing a shared record no longer reads its fields.** A compiled record or tuple
   that owns heap values is released by a generated helper. That helper used to load
   every heap field before it decremented the reference count, even when other
