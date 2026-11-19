@@ -10393,14 +10393,18 @@ let test_cap_pure_file_read_error () =
   end|} in
   Alcotest.(check bool) "cap pure + file_read (real builtin): error" true (has_errors ctx)
 
-(* `random_bytes : Int -> Bytes` — total, so `: Bytes` is type-correct. *)
+(* `random_bytes : Int -> Bytes` — total, so `: Bytes` is type-correct.
+   The raw builtin is stdlib-only since ocap phase 4, so the gate is lifted
+   here and the assertion names `cap pure`'s own call-level error (the gate's
+   `stdlib_internal` would satisfy a bare `has_errors`). *)
 let test_cap_pure_random_bytes_error () =
-  let ctx = typecheck {|mod Pure do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Pure do
   needs IO.Random
     cap pure
     fn gen() : Bytes do random_bytes(16) end
-  end|} in
-  Alcotest.(check bool) "cap pure + random_bytes (real builtin): error" true (has_errors ctx)
+  end|}) in
+  Alcotest.(check bool) "cap pure + random_bytes (real builtin): error" true
+    (has_error_with ctx "calls `random_bytes`, which has side effects")
 
 let test_cap_no_extern_regular_fn_ok () =
   let ctx = typecheck {|mod Safe do
@@ -11732,9 +11736,9 @@ let test_cap_body_missing_filewrite () =
 
 (* Module without `needs` that calls random_bytes — body-scan emits warning. *)
 let test_cap_body_missing_random () =
-  let ctx = typecheck {|mod Gen do
+  let ctx = with_raw_capability_builtins (fun () -> typecheck {|mod Gen do
     fn token() do random_bytes(16) end
-  end|} in
+  end|}) in
   Alcotest.(check bool) "random_bytes without needs: body-scan ERROR" true
     (has_error_with ctx "IO.Random")
 

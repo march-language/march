@@ -55,7 +55,9 @@ git log is authoritative for exact commits.
   walks the layers costs well under a microsecond; in a program with scoped functions, a
   captured call costs a few nanoseconds and entering a scoped function about 15 ns. A panic
   caught by `try_finally`, a property or a test puts back the authority that was in force
-  where it was caught. Not yet covered: authority across nodes. See
+  where it was caught. Not yet covered: authority across nodes, and the `IO.Registry`
+  operations (`Actor.register`, `unregister`, `whereis`, `registered`), which are checked
+  at compile time only. See
   [Capabilities](docs/capabilities.md#run-time-authority).
 - **`--grant` / `MARCH_GRANT` narrow what one run may do.** `MARCH_GRANT='IO.Console,
   IO.FileRead("/srv/")' ./prog`, `march --grant ... file.march`, `march repl --grant ...` and
@@ -675,20 +677,21 @@ git log is authoritative for exact commits.
 - **The raw capability builtins are stdlib-only.** A program can no longer call
   `print`, `print_line`, `print_stderr`, `io_read_line`, `file_read`, `file_write` and
   the other file and directory builtins, `dns_resolve`, the `process_*` operations,
-  `unix_time`, `unix_time_ms`, `uuid_v4`, `uuid_v7`, the signal operations, `task_spawn`
+  `unix_time`, `unix_time_ms`, `uuid_v4`, `uuid_v7`, `random_bytes`, the signal operations, `task_spawn`
   (and its `_link`, `_steal`, `_with_cancel` forms) or `vault_new` and the other Vault
   opens directly: a direct call skipped the capability check its stdlib entry point
   runs. The call is a `stdlib_internal` error naming what to call instead: `IO.write`,
   `IO.puts`, `IO.warn`, `IO.read_line`, `File.read`, `File.write`, `Dir.list`,
   `Dns.resolve`, `Process.env`, `Process.exit`, `System.now`, `System.now_ms`,
-  `UUID.v4`, `UUID.v7`, `Signal.watch`, `Task.async`, `Vault.new`, ... Each returns the
+  `UUID.v4`, `UUID.v7`, `Crypto.random_bytes`, `Signal.watch`, `Task.async`, `Vault.new`, ... Each returns the
   operation's `Result(T, CapError)`. Where the entry point is a drop-in the error
   carries the rewritten call as a fix that `forge fix` applies: `file_read(p)` becomes
   `Authority.must(File.read(p))` (which panics if the operation is refused) and
   `print(s)` becomes `Authority.ignore(IO.write(s))`. A clock read like
   `unix_time_ms(())` becomes `Authority.must(System.now_ms())`, and
-  `task_spawn(fn _ -> e)` becomes `Authority.must(Task.async(fn () -> e))`. `println`
-  and `random_bytes` are unchanged.
+  `task_spawn(fn _ -> e)` becomes `Authority.must(Task.async(fn () -> e))`, and
+  `random_bytes(n)` becomes `Authority.must(Crypto.random_bytes(n))`. `println` is
+  unchanged: it already resolves to the stdlib's checked `println`.
 - **New `Task.async_steal(pool, f)` and `Task.async_cancellable(f, token)`**, the checked
   forms of `task_spawn_steal` and `task_spawn_with_cancel`; like `Task.async` they take
   a zero-argument function.
@@ -707,8 +710,11 @@ git log is authoritative for exact commits.
   now return `Result((), CapError)`, `spawn_n` returns `Result(Int, CapError)`, and
   `Udp.resolve` returns the nested `Result(Result(UdpAddr, UdpError), CapError)`. Write
   `Authority.must(server |> HttpServer.listen())` to keep the old behaviour (a refusal
-  panics with its reason). The raw `http_server_listen` and `http_server_bind_host`
-  builtins are now stdlib-only, like the other HTTP server opens.
+  panics with its reason). An existing `server |> HttpServer.listen()` (or
+  `HttpServer.bind_host(...)`) written as a statement keeps compiling, and a refusal is
+  then silent: the discarded `Err` is not reported, so wrap it in `Authority.must(...)`.
+  The raw `http_server_listen` and `http_server_bind_host` builtins are now stdlib-only,
+  like the other HTTP server opens.
 
 - **A program that prints without any `needs` line is fixed by adding the `needs` line
   alone.** `main` with no `needs` clause and no `Cap` parameter is granted the module's

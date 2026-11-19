@@ -371,7 +371,7 @@ let task8_raw_builtins = [
     "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dns_resolve";
     "process_env"; "process_set_env"; "process_cwd"; "process_argv"; "process_pid";
     "process_exit"; "process_spawn_sync"; "process_spawn_lines";
-    "unix_time"; "unix_time_ms"; "uuid_v7"; "stdlib_random_bytes"; "uuid_v4";
+    "unix_time"; "unix_time_ms"; "uuid_v7"; "random_bytes"; "stdlib_random_bytes"; "uuid_v4";
     "signal_watch"; "signal_raise_self";
     "task_spawn"; "task_spawn_link"; "task_spawn_steal"; "task_spawn_with_cancel";
     "vault_new"; "vault_whereis"; "vault_ns_set"; "vault_ns_get"; "vault_ns_drop" ]
@@ -436,8 +436,8 @@ end|}) "`actor_whereis` is internal to the standard library; use `Actor.whereis(
 (* ocap phase 4 (Task 8): every gated capability operation is stdlib-only,
    so a program reaches it only through the stdlib entry point that runs
    [Authority.check] first. Pinned against [Cap_ops.gated] itself, not a copy:
-   a row added there is gated, or this fails. The two rows the stdlib shadows
-   stay callable, each suggestion names the row's first entry point, and a
+   a row added there is gated, or this fails. The one row the stdlib shadows
+   (`println`) stays callable, each suggestion names the row's first entry point, and a
    user call is refused (a value reference too). *)
 let test_raw_capability_builtins_gated () =
   let module C = March_caps.Cap_ops in
@@ -452,8 +452,8 @@ let test_raw_capability_builtins_gated () =
           (contains ~needle:("`" ^ List.hd entry) (List.assoc name !TB.stdlib_only))
       end)
     C.gated;
-  Alcotest.(check (list string)) "the shadowed rows are println and random_bytes"
-    [ "println"; "random_bytes" ] C.shadowed_by_stdlib;
+  Alcotest.(check (list string)) "the shadowed row is println"
+    [ "println" ] C.shadowed_by_stdlib;
   List.iter (fun (name, _) ->
       Alcotest.(check bool) (name ^ " (no rename) is a gated row") true
         (List.mem_assoc name C.gated))
@@ -468,6 +468,7 @@ let test_raw_capability_builtins_gated () =
     let e = process_env("HOME")
     let v : Vault(Int) = vault_new("t")
     print("x")
+    let r = random_bytes(4)
     t
   end
   fn as_value() do
@@ -478,11 +479,14 @@ end|} in
   refused "unix_time_ms"
     "`unix_time_ms` is internal to the standard library; use `System.now_ms`." ctx;
   refused "file_read" "`file_read` is internal to the standard library; use `File.read`." ctx;
-  refused "task_spawn" "`task_spawn` is internal to the standard library; use `Task.async`." ctx;
+  refused "task_spawn"
+    "`task_spawn` is internal to the standard library; use `Task.async` (`Task.async` takes a zero-argument function)." ctx;
   refused "process_env"
     "`process_env` is internal to the standard library; use `Process.env` (or `System.env`)." ctx;
   refused "vault_new" "`vault_new` is internal to the standard library; use `Vault.new`." ctx;
   refused "print" "`print` is internal to the standard library; use `IO.write`." ctx;
+  refused "random_bytes"
+    "`random_bytes` is internal to the standard library; use `Crypto.random_bytes`." ctx;
   refused "uuid_v4 (a value reference)"
     "`uuid_v4` is internal to the standard library; use `UUID.v4`." ctx;
   (* A module's own function of the same name is not the builtin. *)

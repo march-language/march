@@ -12404,6 +12404,10 @@ let check_module_core ?(errors = Err.create ()) ?seed_env (m : Ast.module_)
      seeding from an existing env — a seeded check re-walks the bodies it
      cares about and re-records what it finds. *)
   March_ast.Json_dispatch.reset ();
+  (* Likewise the callee -> call span map behind the [stdlib_internal] fix:
+     a span from an earlier check (an LSP re-check, a REPL fragment) must not
+     feed a replacement for this one. *)
+  Hashtbl.reset stdlib_only_call_spans;
   (* Colliding variant types' identities (`A.Note` / `B.Note`).  Recomputed
      per check, so per REPL fragment too: a fragment sees only its own
      declarations, and a user type with a reserved handle name (`Process`)

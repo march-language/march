@@ -15130,7 +15130,7 @@ let test_main_adapter_three_caps () =
   needs IO.Random
   fn main(_cap_console : Cap(IO.Console), _cap_clock : Cap(IO.Clock), _cap_random : Cap(IO.Random)) : () do
     let _t = Authority.must(System.now())
-    let _b = random_bytes(4)
+    let _b = Authority.must(Crypto.random_bytes(4))
     println("a3")
     ()
   end

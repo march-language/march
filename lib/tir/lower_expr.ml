@@ -112,11 +112,11 @@ let interpreter_only_builtin_reasons : (string * string) list = [
   ("App.stop",
    "stops the supervision tree of an `app` declaration, which only the \
     interpreter runs (a compiled program ignores `app`). A compiled program \
-    ends when `main` returns, or exits early with `process_exit(code)`.");
+    ends when `main` returns, or exits early with `Process.exit(code)`.");
   ("task_spawn_link",
    "links a task to an actor so the task fails if the actor dies, which only \
     the interpreter implements; the compiled task runtime has no task/actor \
-    link. Use `task_spawn` and watch the actor with `monitor` or `is_alive`.");
+    link. Use `Task.async` and watch the actor with `monitor` or `is_alive`.");
 ]
 
 let interpreter_only_builtins = List.map fst interpreter_only_builtin_reasons

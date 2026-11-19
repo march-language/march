@@ -1180,7 +1180,10 @@ let check_module_needs (env : env) (mod_name : Ast.name)
      (signature caps aside), so `march caps`, the hot-reload manifest's
      per-function `caps=` and the --cap-sandbox profile under-reported it.
      The diagnostic body scan ([body_cap_uses], [record_body_caps]) is left
-     as it was. *)
+     as it was, but the closures feed [cap_grant_exceeded], whose chain now
+     ends at the function that calls the entry point (`main -> slurp`, no
+     longer `main -> slurp -> File.read`; see
+     specs/todos/2026-11-17-ocap-merged-needs-report-at-entry-points.md). *)
   let entry_caps_of_expr ?(bound = []) (e : Ast.expr) : string list =
     List.filter_map
       (fun (call_name, _) -> List.assoc_opt call_name entry_cap_table)

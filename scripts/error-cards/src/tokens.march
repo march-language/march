@@ -3,7 +3,7 @@ mod CapErr do
   needs IO.Random
 
   fn make_token() : String do
-    Bytes.to_string(random_bytes(16))
+    Bytes.to_string(Authority.must(Crypto.random_bytes(16)))
   end
 
   fn issue() : String do

@@ -1,4 +1,8 @@
 -- EXPECT-ERROR: which has side effects
+-- (Since ocap phase 4 the raw builtin is stdlib-only, so this program also
+-- draws `stdlib_internal`; it pins the call-level rule, which stdlib-spanned
+-- code still reaches. A user program reaches the operation through
+-- `Crypto.random_bytes`, rejected by the module and grant checks.)
 -- Capabilities widening, Task 5 (F2 fix) -- `cap pure` (`check_pure_module`,
 -- `typecheck.ml:6581`), the REJECT side for the RNG source: a `cap pure`
 -- module whose body calls the REAL effectful builtin `random_bytes`

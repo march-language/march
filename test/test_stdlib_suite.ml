@@ -7474,7 +7474,7 @@ let test_crypto_hmac_sha256_bytes_typecheck () =
   let src = {|mod Test do
   needs IO.Random
     fn go() do
-      base64_encode(hmac_sha256_bytes(random_bytes(4), random_bytes(8)))
+      base64_encode(hmac_sha256_bytes(Authority.must(Crypto.random_bytes(4)), Authority.must(Crypto.random_bytes(8))))
     end
   end|} in
   let errors = typecheck src in
@@ -8590,7 +8590,7 @@ let test_crypto_stdlib_base64_roundtrip () =
   let env = eval_with_crypto {|mod Test do
   needs IO.Random
     fn f() do
-      let b = random_bytes(12)
+      let b = Authority.must(Crypto.random_bytes(12))
       let enc = Crypto.base64_encode(b)
       match Crypto.base64_decode(enc) do
       Ok(_)  -> "ok"
