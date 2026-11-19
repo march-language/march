@@ -1424,6 +1424,69 @@ let test_no_alloc_candidates_are_this_file_only () =
     (List.for_all (fun (_, (sp : Ast.span), _, _) -> sp.Ast.file = a.An.filename)
        a.An.no_alloc_candidates)
 
+(* A @[no_alloc] function calling a function from ANOTHER module of the same
+   forge project.  The TIR pass used to lower only the open file, so the
+   callee was an unknown external and the editor reported "calls through an
+   unknown closure" while `forge build` (whole program) accepted it.  Seen in
+   Strata (lib/strata/chunk.march `get` calling `Strata.Coord.index`). *)
+let noalloc_xmod_project ~(coord_body : string) : string * string * string =
+  let base = Filename.temp_file "march_lsp_noalloc_xmod_" "" in
+  Sys.remove base;
+  Sys.mkdir base 0o755;
+  Sys.mkdir (Filename.concat base "lib") 0o755;
+  let write rel content =
+    let oc = open_out (Filename.concat base rel) in
+    output_string oc content; close_out oc in
+  write "forge.toml" "[package]\nname=\"nax\"\nversion=\"0.1.0\"\ntype=\"lib\"\n[deps]\n";
+  write "lib/coord.march"
+    (Printf.sprintf "mod Coord do\n  fn index(x : Int, y : Int, z : Int) : Int do\n    %s\n  end\nend\n"
+       coord_body);
+  let chunk_src =
+    "mod Chunk do\n\
+    \  @[no_alloc]\n\
+    \  fn get(x : Int, y : Int, z : Int) : Int do\n\
+    \    Coord.index(x, y, z) + 1\n\
+    \  end\n\
+     end\n" in
+  let chunk = Filename.concat base "lib/chunk.march" in
+  write "lib/chunk.march" chunk_src;
+  (base, chunk, chunk_src)
+
+let no_alloc_msgs (a : An.t) =
+  List.filter_map (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.message with
+      | `String s when contains_sub s "no_alloc" -> Some s
+      | _ -> None) a.An.diagnostics
+
+let test_no_alloc_cross_module_call_holds () =
+  let (_root, chunk, src) =
+    noalloc_xmod_project ~coord_body:"x + y * 32 + z * 1024" in
+  let a = An.run_tir_pass (An.analyse ~filename:chunk ~src) in
+  (match no_alloc_msgs a with
+   | [] -> ()
+   | ms -> Alcotest.failf "contract holds (forge build accepts it), but the LSP \
+                           reported: %s" (String.concat " | " ms));
+  Alcotest.(check bool) "\xe2\x9c\x93 no_alloc lens present" true
+    (List.exists (fun (cl : An.code_lens_item) ->
+         contains_sub cl.An.cl_title "\xe2\x9c\x93 no_alloc") a.An.code_lens_items)
+
+(* The other direction, and the cache: the same open-file text, with the
+   imported callee now allocating, must be judged afresh (the TIR memo is not
+   keyed on the open file's text alone) and rejected, as the build rejects it. *)
+let test_no_alloc_cross_module_callee_change_rechecked () =
+  let (root, chunk, src) =
+    noalloc_xmod_project ~coord_body:"x + y * 32 + z * 1024" in
+  let a = An.run_tir_pass (An.analyse ~filename:chunk ~src) in
+  Alcotest.(check (list string)) "holds first" [] (no_alloc_msgs a);
+  let oc = open_out (Filename.concat root "lib/coord.march") in
+  output_string oc
+    "mod Coord do\n  fn index(x : Int, y : Int, z : Int) : Int do\n    \
+     List.length([x, y, z])\n  end\nend\n";
+  close_out oc;
+  let b = An.run_tir_pass (An.analyse ~filename:chunk ~src) in
+  Alcotest.(check bool) "allocating callee is now reported" true
+    (no_alloc_msgs b <> [])
+
 (* ------------------------------------------------------------------ *)
 (* Capability checks in the editor (ocap phase 3)                      *)
 (* ------------------------------------------------------------------ *)

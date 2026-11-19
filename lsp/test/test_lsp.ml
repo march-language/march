@@ -526,6 +526,8 @@ let () =
       "quick fix offered on a reusing fn",     `Quick, test_no_alloc_quickfix_offered_on_reuse;
       "quick fix not offered without reuse",   `Quick, test_no_alloc_quickfix_not_offered_without_reuse;
       "candidates are this file only",         `Quick, test_no_alloc_candidates_are_this_file_only;
+      "cross-module callee: contract holds",   `Quick, test_no_alloc_cross_module_call_holds;
+      "cross-module callee change rechecked",  `Quick, test_no_alloc_cross_module_callee_change_rechecked;
       "transient lens names the form",         `Quick, test_transient_lens_names_the_form;
       "transient diagnostic at name span",     `Quick, test_transient_diagnostic_at_name_span;
     ];
