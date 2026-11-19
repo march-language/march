@@ -75,7 +75,7 @@ connections, sessions in flight, and the warm process.
 | The change | How it ships |
 |---|---|
 | A function body, an actor handler, a nested module's function | Hot patch of just that function |
-| An actor's state shape | Hot patch plus a `migrate_state` (or a `@compat` annotation) |
+| An actor's state shape | Hot patch plus a `migrate_state`, written or derived (no `@compat` policy waives it) |
 | An actor's message type | Hot patch plus a `migrate_msg`, or old-format messages are dropped and counted; a message several such changes old goes through each deploy's `migrate_msg` in order |
 | A function's signature | Hot patch; every caller must be in the same batch, unless the server supports epoch-tagged dispatch |
 | A protocol a `choose` branch was added to | Hot patch, receivers of the choice before its chooser |
@@ -725,31 +725,32 @@ so a session started by patched code can crash the process
 
 ## Compatibility annotations
 
-Without a `migrate_state` function, `forge deploy hot` enforces strict compatibility: if the state schema changed, the deploy is rejected. You can relax this with `@compat`:
+A change to an actor's state fields always needs a migration: a `migrate_state` you wrote, or one the compiler [derived](#derived-migrations-adding-a-field-needs-no-migrate_state) (constant `init` values, a [`migrate` clause](#moving-data-the-migrate-clause), or [`--drop`](#dropping-a-field---drop)). `forge deploy hot` refuses one that has none, **under every `@compat` policy**, and the reload server refuses it too, whatever client sends it (`ERR migrate_missing`):
+
+```
+forge deploy hot: actor Counter — @compat(forward) does not waive a migration for a state change:
+  field added: label : String — the running actors would keep their old state while the new
+  handlers read the new layout; provide migrate_state, or let the compiler derive it
+  (not derived: the `init` value of label is not a constant)
+```
+
+With no migration, each running actor would keep its old state record while the new handlers read it with the new layout: an added field is read past the end of the record, and a removed or retyped one reads the wrong value. Until 2026-11-18 `@compat(forward)` (added fields) and `@compat(any)` (any change) let such a deploy through, and the actor crashed on its next message.
+
+The policies are still accepted:
 
 ```march
--- Default: any schema change requires migrate_state
-@compat(full)
+@compat(full)       -- the default
 actor Counter do ... end
 
--- Allow adding fields with no migration at all (prefer a derived or written migrate_state)
-@compat(forward)
+@compat(forward)    -- no longer waives a migration; same as full for state changes
 actor Counter do ... end
 
--- Skip schema checking entirely (dangerous — use only for rapid iteration)
-@compat(any)
+@compat(any)        -- no longer waives a migration; same as full for state changes
 actor Counter do ... end
 ```
 
-| Policy | What's allowed without `migrate_state` |
-|---|---|
-| `full` (default) | No changes; any change requires migration |
-| `forward` | Adding new fields |
-| `any` | Any change; no migration check |
+and [`@compat(simulation)`](#proving-a-deploy-is-a-simulation-compatsimulation) adds a law on top of `full`.
 
-A [derived migration](#derived-migrations-adding-a-field-needs-no-migrate_state) counts as a `migrate_state` under every policy: adding fields with constant `init` values deploys under `full` too, because the migration exists and was checked. `forward` and `any` matter only where nothing could be derived, and there they let the deploy through with **no** migration, so a running actor keeps its old-shaped state. Prefer a migration.
-
-For production deployments, `full` is safest: every state transition then has a migration, written or derived, that the compiler checked.
 
 ---
 

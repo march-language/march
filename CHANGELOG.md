@@ -21,6 +21,11 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A Float `if` or `match` with a record field arm no longer allocates.** When one
+  branch was a field read such as `event.progress`, compiled code boxed the result of
+  every branch on the heap and freed it again at the join. The field read now counts
+  as a plain Float, so nothing is boxed. A city builder's 100,000-citizen replay went
+  from 28.1 to 30.4 frames per second. Programs behave the same.
 - **Releasing a shared record no longer reads its fields.** A compiled record or tuple
   that owns heap values is released by a generated helper. That helper used to load
   every heap field before it decremented the reference count, even when other
@@ -28,6 +33,13 @@ git log is authoritative for exact commits.
   reads the fields only when it held the last reference. On a 48-field record
   released 30 million times while still shared, the run takes about 25% less CPU
   time (`bench/wide_record_shared_drop.march`). Programs behave the same.
+- **A function that only reads a record parameter no longer counts a reference to it.**
+  In compiled code every record parameter used to be owned: the caller added a
+  reference before the call and the function released it on return. A record
+  parameter the function only reads is now borrowed, so neither happens. A function
+  that keeps the record (returns it, stores it, captures it in a closure) or a
+  recursive loop that builds a new record each iteration still owns it. Tuple
+  parameters are unchanged. Programs behave the same.
 
 ### Added
 
@@ -1217,6 +1229,31 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **A hot deploy that changes an actor's state with no migration is refused under every
+  `@compat` policy.** `@compat(forward)` (added fields) and `@compat(any)` used to let such a
+  deploy through with no migration, so each running actor kept its old state record while the
+  new handlers read the new layout, and the actor crashed on its next message (reproduced: a
+  SIGSEGV reading an added field past the end of the record). `forge deploy hot` and
+  `forge deploy plan` now refuse it and say why nothing was derived, and the reload server
+  refuses it from any client (`ERR migrate_missing`). Most such changes still need no
+  hand-written code: added fields with constant `init` values, a `migrate` clause and `--drop`
+  derive the migration. `@compat(forward)` and `@compat(any)` remain valid spellings, but no
+  longer waive a migration.
+- **Three compiled-code memory bugs in dropping records and closures.** A record
+  field that is a single-constructor wrapper around a heap value
+  (`type Bag = Bag(Map(String, Int))`) could be released twice when the record was
+  the last holder, crashing the program. A named record with a field that is another
+  module's record sharing its short name with other types (`SwimDriver.State`) freed
+  that field without releasing what it owned, a leak. A call to a function that
+  returns a closure, with a record argument released after the call, crashed on the
+  first use of the closure.
+- **The editor no longer reports a false `@[no_alloc]` error on a call into another module of
+  the project.** A `@[no_alloc]` function calling a function from a sibling file in the same
+  forge project was flagged "calls through an unknown closure … I can't see what `Other.g`
+  does" by the language server, while `forge build` accepted it. The server's contract check
+  now lowers the open file together with its resolved imports and the stdlib, as the build
+  does, and re-checks when an imported file changes.
 
 - **A function value made at the interpreter REPL's prompt keeps the prompt's authority.**
   `let f = fn p -> File.read(p)` typed at the prompt was treated as module-level code and ran

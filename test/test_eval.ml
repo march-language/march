@@ -2934,12 +2934,11 @@ let test_perceus_to_string_borrowed_field_no_decrc () =
     fn acc(s : R) : String do "${s.content_dir}" end
   end|} in
   let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "acc") m.March_tir.Tir.tm_fns in
-  (* Asserted by the TYPE of what is released, not as "no EDecRC anywhere".
-     Since aggregates became owned parameters, `acc` legitimately contains
-     `dec_rc s` -- the record's own release, which is the whole point of that
-     change.  The bug this test guards is a dec of the extracted STRING field,
-     which the record owner is responsible for; that must still be absent, and
-     the escaping field must be dup'd instead. *)
+  (* Asserted by the TYPE of what is released.  The bug this test guards is
+     a dec of the extracted STRING field, which the record owner is
+     responsible for; that must be absent.  `acc` only reads `s`, so the
+     record parameter is borrowed and `acc` does not release it either
+     (specs/progress/2026-11-18-record-param-borrow.md). *)
   let decrc_tys fn =
     let acc = ref [] in
     let rec go = function
@@ -2959,7 +2958,7 @@ let test_perceus_to_string_borrowed_field_no_decrc () =
   let dropped = decrc_tys f in
   Alcotest.(check bool) "no EDecRC of a String (the extracted field)" false
     (List.exists (fun v -> v.March_tir.Tir.v_ty = March_tir.Tir.TString) dropped);
-  Alcotest.(check int) "the owned record parameter is released exactly once" 1
+  Alcotest.(check int) "the borrowed record parameter is not released" 0
     (List.length
        (List.filter (fun v -> String.equal v.March_tir.Tir.v_name "s") dropped))
 

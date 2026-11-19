@@ -9959,6 +9959,110 @@ let test_simd_load_borrows_array () =
         (March_tir.Borrow.is_extern_borrowed (Printf.sprintf "simd_%s_store" lane) 0))
     [ "f32x4"; "f64x2"; "i32x4"; "i64x2"; "u8x16" ]
 
+(* ── A record parameter the callee only reads is borrowed ─────────────────
+
+   Records were owned parameters from 5bedb1232 on ([Kind.borrowable_of]), so
+   every read-only helper released its record on each return path and every
+   caller retained it first.  These pin the three properties the borrowed
+   form has to keep, in the emitted IR and in the borrow map. *)
+
+let fn_ir ir name =
+  let start = Str.search_forward (Str.regexp_string ("@" ^ name ^ "(")) ir 0 in
+  let stop = Str.search_forward (Str.regexp_string "\n}\n") ir start in
+  String.sub ir start (stop - start)
+
+let record_param_src = {|mod Test do
+    fn weight(st : { total : Int, name : String }) : Int do
+      st.total + string_length(st.name)
+    end
+    fn total(st : { total : Int, name : String }, n : Int, acc : Int) : Int do
+      if n <= 0 do acc else total(st, n - 1, acc + weight(st)) end
+    end
+    fn name_of(st : { total : Int, name : String }) : String do
+      st.name
+    end
+    fn carried(st : { total : Int, name : String }, n : Int) : Int do
+      if n <= 0 do st.total else carried({ st with total: st.total + n }, n - 1) end
+    end
+    fn ping(st : { total : Int, name : String }, n : Int) : Int do
+      if n <= 0 do st.total else pong({ st with total: st.total + 1 }, n - 1) end
+    end
+    fn pong(st : { total : Int, name : String }, n : Int) : Int do
+      if n <= 0 do st.total else ping(st, n - 1) end
+    end
+    fn adder(st : { total : Int, name : String }) : Int -> Int do
+      fn x -> x + st.total
+    end
+    fn pair(t : (Int, String)) : Int do
+      match t do (n, s) -> n + string_length(s) end
+    end
+  end|}
+
+(** No release in the callee, no retain in the caller. *)
+let test_record_param_read_only_no_rc () =
+  let ir = emit_actor_ir record_param_src in
+  List.iter (fun name ->
+      let body = fn_ir ir name in
+      Alcotest.(check int) (name ^ ": no retain") 0 (ir_count body "incrc");
+      Alcotest.(check int) (name ^ ": no release") 0 (ir_count body "decrc");
+      Alcotest.(check int) (name ^ ": no record drop") 0 (ir_count body "__drop$R"))
+    [ "weight"; "total" ];
+  let bm = borrow_module record_param_src in
+  Alcotest.(check bool) "weight borrows its record" true
+    (March_tir.Borrow.is_borrowed bm "weight" 0);
+  Alcotest.(check bool) "total borrows the record it forwards unchanged" true
+    (March_tir.Borrow.is_borrowed bm "total" 0)
+
+(** A heap field that leaves the callee takes its own reference; the record
+    is still not released there. *)
+let test_record_param_escaping_field_retained () =
+  let ir = emit_actor_ir record_param_src in
+  let body = fn_ir ir "name_of" in
+  Alcotest.(check int) "the returned field is retained once" 1 (ir_count body "incrc");
+  Alcotest.(check int) "the record is not released" 0 (ir_count body "decrc");
+  Alcotest.(check int) "nor deep-dropped" 0 (ir_count body "__drop$R");
+  let m = perceus_module record_param_src in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "name_of") m.March_tir.Tir.tm_fns in
+  let rec incs = function
+    | March_tir.Tir.EIncRC (March_tir.Tir.AVar v)
+    | March_tir.Tir.EAtomicIncRC (March_tir.Tir.AVar v) -> [ v ]
+    | March_tir.Tir.ELet (_, a, b) | March_tir.Tir.ESeq (a, b) -> incs a @ incs b
+    | March_tir.Tir.ECase (_, brs, d) ->
+      List.concat_map (fun b -> incs b.March_tir.Tir.br_body) brs
+      @ (match d with Some e -> incs e | None -> [])
+    | _ -> []
+  in
+  Alcotest.(check bool) "what is retained is the String field, not the record" true
+    (match incs f.March_tir.Tir.fn_body with
+     | [ v ] -> v.March_tir.Tir.v_ty = March_tir.Tir.TString
+     | _ -> false)
+
+(** The cases that must stay owned: a loop that hands itself a new record
+    each iteration (constant space needs the callee to release the old one),
+    the same through mutual recursion, a capture, and tuples. *)
+let test_record_param_owned_cases () =
+  let bm = borrow_module record_param_src in
+  let owned name =
+    Alcotest.(check bool) (name ^ " owns its parameter") false
+      (March_tir.Borrow.is_borrowed bm name 0) in
+  owned "carried";
+  (* pong only forwards, but ping hands pong a new record on every round. *)
+  owned "ping"; owned "pong";
+  owned "adder";
+  owned "pair";
+  let ir = emit_actor_ir record_param_src in
+  Alcotest.(check bool) "the loop releases the record it was handed" true
+    (let body = fn_ir ir "carried" in
+     (* The deep-drop helper when the pipeline synthesises one, else a plain
+        release. *)
+     ir_count body "__drop$R" > 0 || ir_count body "decrc" > 0);
+  let open March_tir.Tir in
+  let t = March_tir.Kind.build ~collision_set:(Hashtbl.create 0) [] in
+  Alcotest.(check bool) "a record may be borrowed" true
+    (March_tir.Kind.of_ty t (TRecord [ ("n", TInt) ])).March_tir.Kind.borrowable;
+  Alcotest.(check bool) "a tuple may not" false
+    (March_tir.Kind.of_ty t (TTuple [ TInt; TString ])).March_tir.Kind.borrowable
+
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
 let test_cancel_token_new () =
@@ -12456,8 +12560,11 @@ end
    [float_join_fns] is one function per arm shape: a variable against a
    literal, a nested `else if` chain of arithmetic, a `match` whose arms are
    a user call, `/.`, a `let` chain and a builtin call, a native-array read,
-   a niche-encoded Option scrutinee (its own slot, [slot_ty_n]), and a
-   `panic` arm that must not spoil the prediction. *)
+   a niche-encoded Option scrutinee (its own slot, [slot_ty_n]), a `panic`
+   arm that must not spoil the prediction, and a record field read (a Float
+   field of a known record shape loads as a double; before
+   specs/progress/2026-11-19-float-join-record-field-arm.md it took the
+   `ptr` slot, and in Ur's `walk_progress` that box cost 7% of the frame). *)
 let float_join_fns = {|
   pfn half(x : Float) : Float do x *. 0.5 end
   pfn clamp(e : Float) : Float do
@@ -12499,13 +12606,21 @@ let float_join_fns = {|
     end
     c +. 1.0
   end
+  type Span = { lo : Float, hi : Float, k : Int }
+  pfn field(e : Span, x : Float) : Float do
+    let c = if x > e.lo do e.hi else (x -. e.lo) *. 0.5 end
+    c +. 1.0
+  end
+  pfn ftotal(i : Int, n : Int, e : Span, acc : Float) : Float do
+    if i >= n do acc else ftotal(i + 1, n, e, acc +. field(e, int_to_float(i) *. 0.2)) end
+  end
   pfn total(i : Int, n : Int, h : NativeF32Arr, acc : Float) : Float do
     if i >= n do acc
     else
       let x = int_to_float(i % 7) *. 0.5 -. 1.0
       let o = if i % 2 == 0 do Some("abc") else None end
       let s = clamp(x) +. chain(x) +. pick(i % 4, x) +. arr(h, i % 4) +. niche(o)
-              +. diverge(i % 2, x)
+              +. diverge(i % 2, x) +. ftotal(0, 3, { lo: 0.25, hi: x, k: i }, 0.0)
       total(i + 1, n, h, acc +. s)
     end
   end
@@ -21786,6 +21901,9 @@ let codegen_suites =
           Alcotest.test_case "narrow arr IR" `Quick (with_reset test_native_narrow_arr_ir);
           Alcotest.test_case "simd vector IR" `Quick (with_reset test_simd_vector_ir);
           Alcotest.test_case "simd load borrows its array" `Quick (with_reset test_simd_load_borrows_array);
+          Alcotest.test_case "record param: read-only is borrowed, no RC" `Quick (with_reset test_record_param_read_only_no_rc);
+          Alcotest.test_case "record param: escaping field is retained" `Quick (with_reset test_record_param_escaping_field_retained);
+          Alcotest.test_case "record param: loop-carried, captured and tuple stay owned" `Quick (with_reset test_record_param_owned_cases);
         ] );
       ( "tasks",
         [

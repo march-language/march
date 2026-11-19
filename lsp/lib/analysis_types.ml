@@ -280,6 +280,10 @@ type t = {
   cap_program : (Ast.module_ * Tc.env) option;
   (** The whole program (stdlib, dependencies, this file) and its typecheck
       env, for the TIR-side capability checks [run_tir_pass] runs. *)
+  deps_digest : string;
+  (** Content digest of the resolved cross-file imports in [cap_program]
+      ([""] when there are none).  [run_tir_pass] lowers them together with
+      this file, so its memo is keyed on this as well as on [src]. *)
   tir_fn_insights  : tir_fn_insight list;
   (** TIR-pipeline function-level insights: stack promotions, FBIP reuse, indirect calls. *)
   code_lens_items  : code_lens_item list;

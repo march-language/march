@@ -586,6 +586,20 @@ static void test_schema_baseline(void) {
     fd = connect_sock(SOCK_PATH);
     send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
     CHECK(strstr(resp, "Int") == NULL, "disconnect does not advance baseline");
+    /* The state changed (migrate bit 1) and the image has no __migrate_Counter:
+     * the live actors would keep their old record under the new handlers. */
+    activate5(fd, "Counter_dispatch", 1, resp, sizeof(resp));
+    CHECK(strcmp(resp, "ERR migrate_missing Counter_dispatch") == 0,
+          "a state change with no migration in the image is refused");
+    if (strcmp(resp, "ERR migrate_missing Counter_dispatch") != 0)
+        fprintf(stderr, "    got: %s\n", resp);
+    {
+        char line[4096]; last_audit_line(line, sizeof(line));
+        CHECK(strstr(line, "\"result\":\"err_migrate_missing\"") != NULL,
+              "audit: the refusal is recorded");
+    }
+    send_line(fd, "SCHEMAS"); read_resp(fd, resp, sizeof(resp));
+    CHECK(strstr(resp, "Int") == NULL, "a refused activation does not advance the baseline");
     activate5(fd, "Counter_dispatch", 0, resp, sizeof(resp));
     CHECK(strncmp(resp, "OK ", 3) == 0, "schema actor activated");
     {

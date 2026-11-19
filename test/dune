@@ -3276,6 +3276,48 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/builtin_borrow_leak_probe.expected native_builtin_borrow_leak_probe.out)))
 
+; ── A record parameter the callee only reads is borrowed. Fifteen legs, each
+; one way that could go wrong (a field returned, stored, passed on or matched
+; out of the record; `{ st with .. }`; a capture; one record at two parameters;
+; a loop that carries a new record each iteration, which must stay owned and
+; run in constant space), each checked by value and by live_allocs() being
+; flat. Run at the default level, where the helpers stay calls, and at
+; --opt 2, where they are inlined after Perceus placed its RC ops.
+; See specs/progress/2026-11-18-record-param-borrow.md.
+(rule
+ (targets native_record_param_borrow native_record_param_borrow.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_param_borrow.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_record_param_borrow
+        native/record_param_borrow.march)
+   (with-stdout-to native_record_param_borrow.out
+        (system "./native_record_param_borrow")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_param_borrow.expected native_record_param_borrow.out)))
+
+(rule
+ (targets native_record_param_borrow_o2 native_record_param_borrow_o2.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_param_borrow.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_param_borrow_o2
+        native/record_param_borrow.march)
+   (with-stdout-to native_record_param_borrow_o2.out
+        (system "./native_record_param_borrow_o2")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_param_borrow.expected native_record_param_borrow_o2.out)))
+
 ; ── A ~H hole must release the value it interpolates. html_escape_ctx and
 ; html_auto_escape were missing from borrow.ml's extern_borrow_table, so they
 ; defaulted to OWNED while the C escapers only read the value: every dynamic

@@ -301,10 +301,16 @@ let test_migration () =
   check_mech "blocked" (mech p "back") is_blocked;
   Alcotest.(check bool) "plan is blocked" true (P.blocked p);
   expect "render" (P.render p) [ "BLOCKED"; "@compat(full) violated"; "no counter_migrate_state" ];
-  (* @compat(any): no migrate_state needed *)
-  let new_s = [ ("Counter", schema ~compat:"any" [ ("n", "Int"); ("hist", "List(Int)") ]) ] in
-  let p = P.classify (input [ build ~old:(manifest base_fns) ~old_schemas:old_s ~new_schemas:new_s nw ]) in
-  check_mech "compat any" (mech p "back") (fun m -> m = P.Hot)
+  (* No policy waives the migration: with none, the live actors would keep
+     their old state under the new handlers (an added field is read past the
+     end of the record). @compat(forward) and @compat(any) used to plan Hot. *)
+  List.iter (fun compat ->
+      let new_s = [ ("Counter", schema ~compat [ ("n", "Int"); ("hist", "List(Int)") ]) ] in
+      let p = P.classify (input [ build ~old:(manifest base_fns) ~old_schemas:old_s ~new_schemas:new_s nw ]) in
+      check_mech ("compat " ^ compat) (mech p "back") is_blocked;
+      expect "render" (P.render p)
+        [ "BLOCKED"; "@compat(" ^ compat ^ ") does not waive a migration"; "no counter_migrate_state" ])
+    [ "forward"; "any" ]
 
 let test_message_types () =
   let old_h = [ ctor "Add" [ "Int" ]; ctor "Legacy" [ "Int" ] ] and new_h = [ ctor "Add" [ "Int" ] ] in

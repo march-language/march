@@ -2483,6 +2483,7 @@ let analyse ~filename ~src : t =
       perf_insights     = [];
       consume_modes     = [];
       cap_program       = None;
+      deps_digest       = "";
       tir_fn_insights   = [];
       code_lens_items   = [];
       decls             = [];
@@ -2576,8 +2577,15 @@ let analyse ~filename ~src : t =
         Ast.mod_decls =
           March_desugar.Desugar.link_program ~context:extra_decls desugared.Ast.mod_decls }
     in
+    (* Content digest of the resolved imports: keys the deps typecheck env
+       below AND the TIR-pass memo ([run_tir_pass]), which lowers these decls
+       together with this file and so must re-run when an imported file
+       changes even though this file's text did not. *)
+    let deps_digest =
+      if extra_decls = [] then "" else Typecheck_cache.deps_key extra_decls in
     let base      = Typecheck_cache.base_env () in
-    let with_deps = Typecheck_cache.deps_env base ~deps:extra_decls in
+    let with_deps =
+      Typecheck_cache.deps_env ~key:deps_digest base ~deps:extra_decls in
     let scratch   = Typecheck_cache.derive with_deps in
     let (errors, type_map, final_env) =
       Tc.check_module_with_env_full scratch desugared
@@ -3385,6 +3393,7 @@ let analyse ~filename ~src : t =
         Some ({ desugared with
                 Ast.mod_decls = stdlib_decls @ extra_decls @ desugared.Ast.mod_decls },
               final_env);
+      deps_digest;
       tir_fn_insights  = [];
       code_lens_items  = build_action_lenses ~filename user_decls;
       decls            = user_decls;
@@ -3471,7 +3480,11 @@ let run_tir_pass (a : t) : t =
      checking equality, which is why it went unnoticed. *)
   else if a.tir_fn_insights <> [] then a
   else
-    let cache_key = March_cas.Blake3.hash_string a.src in
+    (* Keyed on the open file AND the resolved imports: the pass lowers both
+       (see below), so an edit to an imported file must miss even when this
+       file's text is unchanged. *)
+    let cache_key =
+      March_cas.Blake3.hash_string (a.deps_digest ^ "\x00" ^ a.src) in
     (* Preserve the actionable Run/Debug lenses already built in [analyse]
        (those carry a command); the TIR pass only ADDS informational perf
        lenses, it must not drop the action lenses. *)
@@ -3489,15 +3502,29 @@ let run_tir_pass (a : t) : t =
                perf_insights = a.perf_insights @ tir_perf_insights }
     | None ->
     try
-      (* Re-lex and parse the original source to get a fresh Ast.module_.
-         (The Analysis.t record does not store the parsed AST itself.) *)
-      let lexbuf = Lexing.from_string a.src in
-      lexbuf.Lexing.lex_curr_p <-
-        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = a.filename };
-      let raw =
-        March_parser.Parse.module_of_lexbuf lexbuf
+      (* Lower the WHOLE program [analyse] typechecked — stdlib, the resolved
+         cross-file imports, and this file — as the build does
+         (bin/main.ml prepends stdlib to [link_program (imports @ entry)]).
+         Lowering this file alone left every call into another module of the
+         project an unknown external, so a @[no_alloc] function calling one
+         was reported as "calls through an unknown closure" while
+         `forge build` accepted it.  [a.type_map] already covers the stdlib
+         and import spans: [Typecheck_cache] seeds it from the cached stdlib
+         and deps envs.  Diagnostics, lenses and quick-fix candidates are
+         still filtered to spans in this file below.
+
+         Without a [cap_program] (only on the front-end-error path, which
+         returned above) fall back to re-parsing this file alone. *)
+      let desugared =
+        match a.cap_program with
+        | Some (program, _) -> program
+        | None ->
+          let lexbuf = Lexing.from_string a.src in
+          lexbuf.Lexing.lex_curr_p <-
+            { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = a.filename };
+          March_desugar.Desugar.desugar_module
+            (March_parser.Parse.module_of_lexbuf lexbuf)
       in
-      let desugared = March_desugar.Desugar.desugar_module raw in
       (* Run the SAME post-lower pipeline the build runs
          (lib/tir/contract_pipeline.ml: TRMC → mono → defun → known_call →
          … → perceus → drop → escape → opt → native_map_inline), so the
@@ -3505,12 +3532,34 @@ let run_tir_pass (a : t) : t =
          the TIR the compiled program is actually built from.  `forge build`
          never passes --no-opt, so opt is on; TRMC follows the global flag. *)
       let tir = March_tir.Lower.lower_module ~type_map:a.type_map desugared in
+      (* The interface-dispatch table lowering just built, which Mono needs
+         for interface calls in code that was polymorphic when lowered (the
+         build and [Contract_pipeline.check_contracts] pass it too). *)
+      let iface_methods = March_tir.Lower.get_iface_methods () in
+      (* The names THIS file declares.  [a.def_map] also indexes the stdlib
+         and the imports (cross-file go-to-definition), so keep only entries
+         whose definition span is in this file. *)
+      let file_names = Hashtbl.create 64 in
+      Hashtbl.iter (fun k (sp : Ast.span) ->
+          if sp.Ast.file = a.filename then Hashtbl.replace file_names k ())
+        a.def_map;
+      (* The TIR now carries stdlib and imported functions too; per-function
+         insights and consume modes describe this file's functions only (a
+         monomorphised clone maps back to its source name). *)
+      let is_file_fn name =
+        Hashtbl.mem file_names name
+        || Hashtbl.mem file_names
+             (March_tir.Tir_names.strip_specialization_suffix name)
+      in
       (* Root every declaration this file makes so the DCE inside Opt.run
          cannot prune a helper `main` never calls — its lens must still
          describe it.  A rooted function's body is optimised exactly as the
          build optimises it; only reachability differs.  Names are pre-Mono;
-         the pipeline expands them to their monomorphised clones. *)
-      let user_names = Hashtbl.fold (fun k _ acc -> k :: acc) a.def_map [] in
+         the pipeline expands them to their monomorphised clones.  Only this
+         file's names: rooting all of [a.def_map] would root the whole stdlib
+         and defeat the early DCE that keeps this pass cheap. *)
+      let user_names = Hashtbl.fold (fun k () acc -> k :: acc) file_names [] in
+      let contract_decls = March_tir.Alloc_contract.collect desugared in
       let borrow_snapshot = ref None in
       let pipe =
         March_tir.Contract_pipeline.run
@@ -3520,8 +3569,13 @@ let run_tir_pass (a : t) : t =
              rather than a re-derivation of it. *)
           ~before_perceus:(fun ~k_table pre ->
               borrow_snapshot := Some (March_tir.Borrow.infer_module ~k_table pre, pre, k_table))
-          ~extra_roots:user_names
-          ~decls:(March_tir.Alloc_contract.collect desugared)
+          ~extra_roots:user_names ~iface_methods
+          (* An analysis, not a build: when nothing this file declares
+             survives Mono (say its only function is polymorphic and
+             uncalled), the early DCE must keep nothing rather than fail
+             open and push the whole stdlib through the pipeline. *)
+          ~dce_fail_open:false
+          ~decls:contract_decls
           ~opt:true tir
       in
       let consume_modes =
@@ -3529,7 +3583,8 @@ let run_tir_pass (a : t) : t =
         | None -> []
         | Some (borrow_map, tir, k_table) ->
           List.filter_map (fun (fn : Tir.fn_def) ->
-                if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$' then None
+                if fn.Tir.fn_name = "" || fn.Tir.fn_name.[0] = '$'
+                   || not (is_file_fn fn.Tir.fn_name) then None
                 else
                   let consumes =
                     List.mapi (fun i (p : Tir.var) ->
@@ -3578,7 +3633,6 @@ let run_tir_pass (a : t) : t =
                      e.range = d.range && e.message = d.message) a.diagnostics)))
       in
       let contract_diags = contract_diags @ cap_diags in
-      let contract_decls = March_tir.Alloc_contract.collect desugared in
       let no_alloc_holds =
         let failing =
           List.map (fun (d : Err.diagnostic) -> d.Err.span)
@@ -3609,7 +3663,8 @@ let run_tir_pass (a : t) : t =
       let tir_fn_insights =
         List.filter_map (fun (fn : Tir.fn_def) ->
             (* Skip synthetic functions generated by lower.ml (prefixed with '$') *)
-            if fn.fn_name = "" || fn.fn_name.[0] = '$' then None
+            if fn.fn_name = "" || fn.fn_name.[0] = '$'
+               || not (is_file_fn fn.fn_name) then None
             else begin
               let (sa, ru, ic, ha) = tir_count_nodes fn.fn_body in
               if sa + ru + ic + ha = 0 then None

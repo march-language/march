@@ -1919,7 +1919,7 @@ let run ?(tunnel = true) ~ssh_host ~remote_socket ~signing_pubkey ~sk ~manifest 
             List.iter (fun (actor, msg) ->
               Printf.eprintf "forge deploy hot: actor %s — %s\n" actor msg
             ) compat_errors;
-            Printf.eprintf "Provide a migrate_state function or add @compat annotation.\n";
+            Printf.eprintf "Provide a migrate_state function (or a migrate clause, or --drop) so the live state is converted.\n";
             Unix.close fd;
             raise (Failure "compat violation — deploy aborted")
           end;
