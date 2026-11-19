@@ -85,7 +85,7 @@ mod TwoNodeRpc do
       Ok(fd) -> fd
       Err(e) -> panic("listen: " ++ e)
     end
-    let srv = task_spawn(fn _ -> node_b(listen_fd))
+    let srv = Authority.must(Task.async(fn -> node_b(listen_fd)))
 
     -- Node-A connects to node-b.
     let fd = match tcp_connect("127.0.0.1", port) do

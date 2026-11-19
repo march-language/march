@@ -13,7 +13,7 @@ mod App do
     needs IO.FileWrite
     fn handle(x : Int) : Int do
       println("handle v2 (now writes a file!)")
-      let _ = file_write("/tmp/capdemo_v2_wrote_this", "v2 was here")
+      Authority.ignore(File.write("/tmp/capdemo_v2_wrote_this", "v2 was here"))
       x + 2
     end
   end

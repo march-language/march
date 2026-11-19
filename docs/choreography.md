@@ -987,7 +987,7 @@ Two things stop a role from doing more than its line says. The first is the type
 granted body holds `Cap(IO.FileWrite)`, not `Cap(IO)`, and `Cap(IO.FileWrite)` does not
 unify with `Cap(IO)`, so it cannot hand its capability to anything that wants the wider
 one. The second is a walk, because a body that never touches its capability value can
-still call `file_write` through any helper. At every call of an entry point the compiler
+still call `File.write` through any helper. At every call of an entry point the compiler
 walks everything the callback reaches (helpers, functions passed as values, local closures
 it captures, actors it spawns; for a hosted role, `start`, `deliver`, `cancel` and the
 actor behind `host`) and requires every capability in that reach to sit under the role's
@@ -999,8 +999,8 @@ The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Cons
 `main`'s grant bounds the program.
 help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
 
-26 |     let _ = file_write("/tmp/n", int_to_string(n))
-                 ^^^^^^^^^^
+26 |     Authority.ignore(File.write("/tmp/n", int_to_string(n)))
+                      ^^^^^^^^^^
     the body calls `cons` here:            (line 38)
     `cons` calls `save` here:              (line 32)
     the body of role `Cons`, passed to `Stream_Run.run_Cons`

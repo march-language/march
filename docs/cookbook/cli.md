@@ -140,7 +140,7 @@ mod Cat do
 
   fn dump(path : String) do
     match Authority.must(File.read(path)) do
-      Ok(text) -> print(text)
+      Ok(text) -> Authority.ignore(IO.write(text))
       Err(_) ->
         IO.warn("cat: " ++ path ++ ": cannot read")
         Authority.ignore(System.exit(1))

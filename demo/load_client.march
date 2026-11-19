@@ -23,7 +23,7 @@ mod LoadClient do
   pfn square(n : Int) : Int do n * n end
 
   fn report_load(_tag : Int) : List(Int) do
-    ClusterLoad.to_ints(ClusterLoad.local("node", float_to_int(unix_time(()) *. 1000.0)))
+    ClusterLoad.to_ints(ClusterLoad.local("node", Authority.must(System.now_ms())))
   end
 
   pfn nth_str(xs : List(String), i : Int, dflt : String) : String do

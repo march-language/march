@@ -874,9 +874,9 @@ pfn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
   Node(l, r) ->
     if depth >= threshold do sum(l) + sum(r)
     else
-      let tl = task_spawn(fn () -> par_sum(l, depth + 1, threshold))
-      let tr = task_spawn(fn () -> par_sum(r, depth + 1, threshold))
-      task_await_unwrap(tl) + task_await_unwrap(tr)
+      let tl = Authority.must(Task.async(fn () -> par_sum(l, depth + 1, threshold)))
+      let tr = Authority.must(Task.async(fn () -> par_sum(r, depth + 1, threshold)))
+      Task.await_unwrap(tl) + Task.await_unwrap(tr)
     end
   end
 end

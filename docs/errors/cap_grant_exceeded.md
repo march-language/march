@@ -22,7 +22,7 @@ mod Main do
   needs IO.FileWrite
 
   fn save(n : Int) : () do
-    let _ = file_write("/tmp/count", int_to_string(n))
+    Authority.ignore(File.write("/tmp/count", int_to_string(n)))
     ()
   end
 
@@ -44,7 +44,7 @@ mod Main do
   needs IO.FileWrite
 
   fn save(n : Int) : () do
-    let _ = file_write("/tmp/count", int_to_string(n))
+    Authority.ignore(File.write("/tmp/count", int_to_string(n)))
     ()
   end
 

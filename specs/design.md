@@ -276,7 +276,7 @@ Cancellation tokens let external code stop a task before it runs:
 
 ```march
 let tok = task_cancel_token_new()
-let t   = task_spawn_with_cancel(fn _ -> heavy_work(), tok)
+let t   = Authority.must(Task.async_cancellable(fn () -> heavy_work(), tok))
 task_cancel(tok)             -- marks token; t returns Err("cancelled")
 ```
 

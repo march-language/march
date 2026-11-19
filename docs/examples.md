@@ -265,14 +265,14 @@ Three streaming patterns: print chunks as they arrive, byte counting without buf
 
 ```march
 fn print_chunk(chunk) do
-  print("[chunk " ++ String.from_int(String.byte_size(chunk)) ++ " bytes]")
-  print(chunk)
+  Authority.ignore(IO.write("[chunk " ++ String.from_int(String.byte_size(chunk)) ++ " bytes]"))
+  Authority.ignore(IO.write(chunk))
 end
 
 fn stream_demo(client) do
   match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) do
-  Ok((status, _, _)) -> print("Status: " ++ String.from_int(status))
-  Err(_)             -> print("Error!")
+  Ok((status, _, _)) -> Authority.ignore(IO.write("Status: " ++ String.from_int(status)))
+  Err(_)             -> Authority.ignore(IO.write("Error!"))
   end
 end
 ```

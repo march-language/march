@@ -161,7 +161,7 @@ Task.async_stream(xs, fn x -> f(x))    -- parallel map
 
 ```march
 let tok = task_cancel_token_new()
-let t   = task_spawn_with_cancel(fn _ -> heavy(), tok)
+let t   = Authority.must(Task.async_cancellable(fn () -> heavy(), tok))
 -- ... later ...
 task_cancel(tok)
 Task.await(t)    -- Err("cancelled")

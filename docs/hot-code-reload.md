@@ -1355,7 +1355,7 @@ Now a `v2` that adds a filesystem write to the same function:
     needs IO.FileWrite
     fn handle(x : Int) : Int do
       println("handle v2 (now writes a file!)")
-      let _ = file_write("/var/log/app-debug.log", "handled " ++ int_to_string(x))  -- needs IO.FileWrite
+      Authority.ignore(File.write("/var/log/app-debug.log", "handled " ++ int_to_string(x)))  -- needs IO.FileWrite
       x + 2
     end
   end

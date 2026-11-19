@@ -409,7 +409,7 @@ suggest a missing `needs` line. The walk described here is the actual check, use
 everywhere on this page.)
 
 `log` and `log_error` below take no `Cap` parameter at all, and the write still
-succeeds. The compiler follows the call graph down to `file_write` and finds that
+succeeds. The compiler follows the call graph down to `File.write` and finds that
 the *module* `Logger` declares `needs IO.FileWrite`:
 
 ```march
@@ -418,8 +418,7 @@ mod Logger do
   needs IO.FileWrite
 
   fn log(msg : String) : Unit do
-    let _ = file_write("/var/log/app.log", msg)
-    ()
+    Authority.ignore(File.write("/var/log/app.log", msg))
   end
 
   fn log_error(msg : String) : Unit do

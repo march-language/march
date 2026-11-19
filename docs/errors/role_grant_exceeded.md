@@ -33,7 +33,7 @@ mod Main do
     let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
       fn (s, con, st) ->
         Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
-          let _ = file_write("/tmp/n", int_to_string(n))
+          Authority.ignore(File.write("/tmp/n", int_to_string(n)))
           Stream_Cons.close(s, st1)))
     ()
   end
@@ -67,7 +67,7 @@ mod Main do
     let _ = Stream_Run.run_Cons(c, "cons", "secret", Stream_Run.addrs_from_env(),
       fn (s, con, fw, st) ->
         Stream_Cons.recv_Msg_Prod_Cons_1(s, st, fn (n, st1) ->
-          let _ = file_write("/tmp/n", int_to_string(n))
+          Authority.ignore(File.write("/tmp/n", int_to_string(n)))
           Stream_Cons.close(s, st1)))
     ()
   end
