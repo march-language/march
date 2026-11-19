@@ -915,8 +915,8 @@ static void write_audit_log(const char *fn, const char *impl_hash,
 
 /* Actor migration symbol: __migrate_<Actor>, from the ACTIVATE name
  * "<Actor>_dispatch" (dots in a module-qualified name become '_'). NULL if
- * the .so exports none (e.g. @compat(any) with schema changes and no
- * migrate_state fn): the actors still switch at their markers, unmigrated. */
+ * the .so exports none; for a deploy that says the state changed, the caller
+ * then refuses the activation (ERR migrate_missing). */
 typedef void *(*migrate_fn_t)(void *);
 static migrate_fn_t resolve_migrate_fn(void *handle, const char *name,
                                        uint32_t slot_id) {
@@ -948,7 +948,7 @@ static migrate_fn_t resolve_migrate_fn(void *handle, const char *name,
     } else {
         /* Log to stderr only — writing WARN before OK would desync the
          * client's response parser. */
-        fprintf(stderr, "[hcr] migrate: symbol not found: %s (proceeding without migration)\n",
+        fprintf(stderr, "[hcr] migrate: symbol not found: %s\n",
                 migrate_sym);
     }
     return migrate_fn;
@@ -1093,6 +1093,19 @@ static int activate_items(const act_item *it, int n, char *resp, size_t rsz) {
         u[i].msgs_changed   = (it[i].migrate & MIGRATE_MSGS) != 0;
         u[i].migrate_fn     = u[i].state_changed
                               ? resolve_migrate_fn(handle, it[i].name, slot_id) : NULL;
+        /* The deploy says the actor's state changed and the image has no
+         * migration: the live actors would keep their old record while the
+         * new handlers read the new layout (an added field is a read past its
+         * end).  Refuse, whatever the client: forge refuses this itself, so
+         * only an older forge or a hand-written request gets here
+         * (specs/progress/2026-11-18-compat-forward-unmigrated-state-refused.md). */
+        if (u[i].state_changed && !u[i].migrate_fn) {
+            write_audit_log(it[i].name, it[i].impl_hash, it[i].cas_hash, it[i].ac,
+                            "err_migrate_missing");
+            snprintf(resp, rsz, "ERR migrate_missing %.200s\n", it[i].name);
+            dlclose(handle);
+            goto fail;
+        }
         u[i].migrate_msg_fn = u[i].msgs_changed
                               ? resolve_migrate_msg_fn(handle, it[i].name, slot_id) : NULL;
         u[i].handle         = handle;

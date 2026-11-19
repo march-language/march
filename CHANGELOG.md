@@ -1188,6 +1188,16 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A hot deploy that changes an actor's state with no migration is refused under every
+  `@compat` policy.** `@compat(forward)` (added fields) and `@compat(any)` used to let such a
+  deploy through with no migration, so each running actor kept its old state record while the
+  new handlers read the new layout, and the actor crashed on its next message (reproduced: a
+  SIGSEGV reading an added field past the end of the record). `forge deploy hot` and
+  `forge deploy plan` now refuse it and say why nothing was derived, and the reload server
+  refuses it from any client (`ERR migrate_missing`). Most such changes still need no
+  hand-written code: added fields with constant `init` values, a `migrate` clause and `--drop`
+  derive the migration. `@compat(forward)` and `@compat(any)` remain valid spellings, but no
+  longer waive a migration.
 - **Three compiled-code memory bugs in dropping records and closures.** A record
   field that is a single-constructor wrapper around a heap value
   (`type Bag = Bag(Map(String, Int))`) could be released twice when the record was
