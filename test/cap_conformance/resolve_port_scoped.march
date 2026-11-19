@@ -1,0 +1,20 @@
+-- GRANT: IO.Console, IO.NetConnect("localhost:53")
+-- `Udp.resolve` checks `host:port`, the target `Udp.open` checks, so a
+-- launch grant scoped to a host and port allows resolving that host on that
+-- port and refuses it on any other port (ocap phase 4, Task 9 fix round 1).
+mod ResolvePortScoped do
+  needs IO.Console
+  needs IO.NetConnect
+
+  fn verdict(r : Result(a, CapError)) : String do
+    match r do
+    Ok(_) -> "allowed"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _n : Cap(IO.NetConnect)) do
+    println(verdict(Udp.resolve("localhost", 53)))
+    println(verdict(Udp.resolve("localhost", 54)))
+  end
+end

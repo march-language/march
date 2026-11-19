@@ -10,9 +10,9 @@
 -- Usage:
 --
 --   fn my_router() do
---     HttpServer.new(4000)
+--     Authority.must(HttpServer.new(4000)
 --     |> HttpServer.plug(ChannelSocket.plug_for(ChannelSocket.make_config("/socket", my_routes, connect_fn)))
---     |> HttpServer.listen()
+--     |> HttpServer.listen())
 --   end
 --
 --   -- NOTE: connect_fn is stored in the config but nothing in this module
@@ -316,9 +316,9 @@ mod ChannelSocket do
        active channel is sent `ChannelLeave("disconnect")`.
 
   Usage:
-    HttpServer.new(4000)
+    Authority.must(HttpServer.new(4000)
     |> HttpServer.plug(ChannelSocket.plug_for(cfg))
-    |> HttpServer.listen()
+    |> HttpServer.listen())
   """
   fn plug_for(cfg) do
     let socket_path = config_path(cfg)

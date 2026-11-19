@@ -43,8 +43,7 @@ git log is authoritative for exact commits.
   walks the layers costs well under a microsecond; in a program with scoped functions, a
   captured call costs a few nanoseconds and entering a scoped function about 15 ns. A panic
   caught by `try_finally`, a property or a test puts back the authority that was in force
-  where it was caught. Not yet covered: direct calls of raw
-  builtins, the `HttpServer` and `Udp.resolve` opens, and authority across nodes. See
+  where it was caught. Not yet covered: authority across nodes. See
   [Capabilities](docs/capabilities.md#run-time-authority).
 - **`--grant` / `MARCH_GRANT` narrow what one run may do.** `MARCH_GRANT='IO.Console,
   IO.FileRead("/srv/")' ./prog`, `march --grant ... file.march`, `march repl --grant ...` and
@@ -692,7 +691,7 @@ git log is authoritative for exact commits.
   operations, and return a `Result`.** `listen` and `spawn_n` check `IO.NetListen` on
   their port (and on a `plain_listener` port) before configuring or binding anything,
   `bind_host` checks it on the address, and `Udp.resolve` checks `IO.NetConnect` on its
-  host before looking it up. A refusal is a value, not a crash: `listen` and `bind_host`
+  `host:port` (the target `Udp.open` checks) before looking it up. A refusal is a value, not a crash: `listen` and `bind_host`
   now return `Result((), CapError)`, `spawn_n` returns `Result(Int, CapError)`, and
   `Udp.resolve` returns the nested `Result(Result(UdpAddr, UdpError), CapError)`. Write
   `Authority.must(server |> HttpServer.listen())` to keep the old behaviour (a refusal

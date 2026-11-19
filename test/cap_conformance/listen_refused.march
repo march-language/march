@@ -2,8 +2,10 @@
 -- The network opens outside the launch grant are refused before anything is
 -- bound or looked up (ocap phase 4, Task 9): `HttpServer.listen` and
 -- `spawn_n` on their port, `bind_host` on its address, and `Udp.resolve` on
--- its host. Each refusal is the outer Err; nothing listens, so `listen`
--- returns instead of serving forever.
+-- its `host:port`. Each refusal is the outer Err; nothing listens, so
+-- `listen` returns instead of serving forever. A server with a
+-- `plain_listener` is refused on its main port, checked first: IO.NetListen
+-- takes no scope, so the plain port's check cannot refuse on its own.
 mod ListenRefused do
   needs IO.Console
   needs IO.NetListen

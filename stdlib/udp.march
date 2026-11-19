@@ -254,16 +254,16 @@ mod Udp do
   Look up host and pair it with port. IPv4 is preferred when the host has
   both, so the address works from an IPv4 socket. Resolve once and reuse
   the UdpAddr: sends take it without another lookup. A capability
-  operation: `host` is checked as `IO.NetConnect` (target `host:0`), and a
-  refusal is the outer `Err(CapError(...))`, looking nothing up; a failed
-  lookup is `Ok(Err(ResolveFailed(msg)))`.
+  operation: `host:port` is checked as `IO.NetConnect` (the target `open`
+  checks), and a refusal is the outer `Err(CapError(...))`, looking nothing
+  up; a failed lookup is `Ok(Err(ResolveFailed(msg)))`.
 
   ## Examples
 
       let? dst = Authority.must(Udp.resolve("127.0.0.1", 9000))
   """
   fn resolve(host : String, port : {Int | _ >= 0 else "a port is at least 0" && _ <= 65535 else "a port is at most 65535"}) : Result(Result(UdpAddr, UdpError), CapError) do
-    let? _ = Authority.check("IO.NetConnect", host ++ ":0")
+    let? _ = Authority.check("IO.NetConnect", host ++ ":" ++ int_to_string(port))
     match udp_resolve(host, port) do
     Ok(a)    -> Ok(Ok(UdpAddr(a)))
     Err(msg) -> Ok(Err(ResolveFailed(msg)))

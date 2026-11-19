@@ -123,14 +123,14 @@ Design: `specs/2026-11-05-https-server-design.md`; it needs a compiled build
 (the interpreter refuses an HTTPS `listen` with a message saying so).
 
 ```march
-HttpServer.new(443)
+Authority.must(HttpServer.new(443)
 |> HttpServer.tls(HttpServer.TlsFiles(
      "/etc/letsencrypt/live/example.com/fullchain.pem",
      "/etc/letsencrypt/live/example.com/privkey.pem"))
 |> HttpServer.plain_listener(80, [HttpAcme.webroot("/var/www/acme"),
                                   HttpServer.redirect_to_https(443)])
 |> HttpServer.plug(router)
-|> HttpServer.listen()
+|> HttpServer.listen())
 ```
 
 - **Certificate source**: `TlsFiles(cert_path, key_path)` (PEM files: the full

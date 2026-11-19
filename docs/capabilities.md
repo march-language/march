@@ -880,7 +880,7 @@ and by each function `needs` clause it runs under; see
 checked open (`Udp.open`, `Tls.client_ctx`). `HttpServer.listen`, `spawn_n` and
 `bind_host` check `IO.NetListen` (on the port, a `plain_listener` port, the bind
 address) and return `Result((), CapError)` / `Result(Int, CapError)`;
-`Udp.resolve` checks `IO.NetConnect` on its host and returns
+`Udp.resolve` checks `IO.NetConnect` on its `host:port` and returns
 `Result(Result(UdpAddr, UdpError), CapError)`. `HttpClient` and `Tls.https_get`
 still return their old types, but dial through `Socket.connect`, so their
 target is checked like any connect and a refusal is folded into their error.

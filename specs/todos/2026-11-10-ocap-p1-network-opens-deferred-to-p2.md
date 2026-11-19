@@ -51,7 +51,9 @@ test/test_cap_check_coverage.ml lists them with this file as the reason; its
 allowlist rows go when they are done.
 
 Status after ocap phase 4 (2026-11-19): the `HttpServer` opens and
-`Udp.resolve` are checked operations with the nested result, and their
+`Udp.resolve` are checked operations returning `Result(T, CapError)`
+(nested, `Result(Result(UdpAddr, UdpError), CapError)`, only for
+`Udp.resolve`: the `HttpServer` opens had no inner error type), and their
 allowlist rows are gone (specs/progress/2026-11-19-ocap-p4-network-opens-checked.md).
 What stays open here is only the re-typing of the dials that already check:
 `HttpTransport.connect`/`request`/`simple_get` (so `HttpClient.*`, about 200

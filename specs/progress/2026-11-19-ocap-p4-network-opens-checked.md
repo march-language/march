@@ -16,7 +16,11 @@ What changed (stdlib/http_server.march, stdlib/udp.march):
 - `HttpServer.bind_host(host) : Result((), CapError)` checks `IO.NetListen` on
   `host ++ ":0"` before setting the bind address.
 - `Udp.resolve(host, port) : Result(Result(UdpAddr, UdpError), CapError)` checks
-  `IO.NetConnect` on `host ++ ":0"` before the lookup.
+  `IO.NetConnect` on `host ++ ":" ++ int_to_string(port)` before the lookup, the target
+  `Udp.open_with` and `Socket.connect` check, so a port-scoped grant
+  (`IO.NetConnect("dns.example.com:53")`) that admits opening the socket also admits
+  resolving its address (fix round 1; the first version checked `host:0`, which such a
+  grant refused).
 - `plain_listener` stays a builder (`Server -> Server`): it opens nothing, and its port
   is checked where it is bound.
 - The raw `http_server_listen` and `http_server_bind_host` builtins join the
@@ -44,5 +48,9 @@ Tests: `test/test_cap_check_coverage.ml` loses the five deferred rows
 (`HttpServer.configure_runtime`/`http_server_plain_listener`, `HttpServer.listen`,
 `HttpServer.spawn_n`, `HttpServer.bind_host`, `Udp.resolve`); the new conformance fixture
 `test/cap_conformance/listen_refused` (`-- GRANT: IO.Console`) shows every one refused by
-the launch grant with nothing bound; `test/test_stdlib_only.ml` pins the two new
-stdlib-only rows.
+the launch grant with nothing bound (its `plain_listener` line is refused on the main
+port, checked first: `IO.NetListen` takes no scope, so the plain port's check cannot
+refuse on its own); `test/cap_conformance/resolve_port_scoped`
+(`-- GRANT: IO.Console, IO.NetConnect("localhost:53")`) shows a port-scoped grant allows
+`Udp.resolve("localhost", 53)` and refuses port 54; `test/test_stdlib_only.ml` pins the
+two new stdlib-only rows.

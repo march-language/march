@@ -4,12 +4,12 @@
 -- Provides the Conn type, pipeline composition, and server startup.
 --
 -- Usage:
---   HttpServer.new(4000)
+--   Authority.must(HttpServer.new(4000)
 --   |> HttpServer.max_connections(500)
 --   |> HttpServer.idle_timeout(30)
 --   |> HttpServer.plug(logger)
 --   |> HttpServer.plug(router)
---   |> HttpServer.listen()
+--   |> HttpServer.listen())
 
 mod HttpServer do
   -- This module's listen/spawn_n/wait_for functions call the http_server_listen /
@@ -453,9 +453,9 @@ mod HttpServer do
 
   ## Examples
 
-      HttpServer.new(4000)
+      Authority.must(HttpServer.new(4000)
       |> HttpServer.plug(fn conn -> HttpServer.text(conn, 200, "ok"))
-      |> HttpServer.listen()
+      |> HttpServer.listen())
   """
   fn new(port) do
     Server(port, Nil, 1000, 60, ServerOpts(None, 10, 60, false, 30, 30, 0, Nil))
@@ -513,12 +513,12 @@ mod HttpServer do
 
   ## Examples
 
-      HttpServer.new(443)
+      Authority.must(HttpServer.new(443)
       |> HttpServer.tls(HttpServer.TlsFiles(
            "/etc/letsencrypt/live/example.com/fullchain.pem",
            "/etc/letsencrypt/live/example.com/privkey.pem"))
       |> HttpServer.plug(router)
-      |> HttpServer.listen()
+      |> HttpServer.listen())
   """
   fn tls(server, src) do
     match opts(server) do
@@ -611,12 +611,12 @@ mod HttpServer do
 
   ## Examples
 
-      HttpServer.new(443)
+      Authority.must(HttpServer.new(443)
       |> HttpServer.tls(HttpServer.TlsFiles(cert, key))
       |> HttpServer.plain_listener(80, [HttpAcme.webroot("/var/www/acme"),
                                         HttpServer.redirect_to_https(443)])
       |> HttpServer.plug(router)
-      |> HttpServer.listen()
+      |> HttpServer.listen())
   """
   fn plain_listener(server, port, plugs) do
     match opts(server) do
