@@ -3002,11 +3002,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (* A builtin typed with a qualified name (`Csv.CsvRow`) gets the same
             qualified->bare canonicalization [surface_ty] gives an annotation;
             the physical-equality check leaves a user binding that shadows
-            the builtin alone. *)
+            the builtin alone.  A cached (Marshalled) stdlib env loses that
+            identity, so a stdlib-only builtin no binding has rebound
+            ([env.gated_shadowed], the stdlib-only gate's own test) counts
+            too: the ocap phase 4 slot builtins (`Authority.Layer`). *)
          if StringSet.mem name.txt qualified_type_builtins
             && (match List.assoc_opt name.txt builtin_bindings with
-                | Some b -> b == sch | None -> false)
-         then canon_qualified_tcons env t
+                | Some b ->
+                  b == sch
+                  || (List.mem_assoc name.txt !stdlib_only
+                      && not (StringSet.mem name.txt env.gated_shadowed))
+                | None -> false)
+         then canon_builtin_sig env t
          else t
        | None     ->
          (* Try qualified module resolution: "Mod.func" *)
@@ -9544,77 +9551,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let scoped = List.map (fun (names, scope) ->
         (String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names), scope)
       ) caps in
-    (* A path scope is only meaningful on a filesystem capability, and only
-       when absolute.  Both are errors rather than warnings: the scope would
-       otherwise be kept and silently ignored (non-filesystem) or mean a
-       different directory per working directory (relative), and either reads
-       as enforcement that is not there.  Reported at the capability name. *)
-    List.iter2 (fun (names, _) (cap, scope) ->
-        match scope with
-        | None -> ()
-        | Some path ->
-          let span = match List.rev names with
-            | (n : Ast.name) :: _ -> n.span
-            | [] -> sp
-          in
-          let is_net_cap = March_caps.Cap_lattice.cap_subsumes "IO.Network" cap in
-          if not (March_caps.Cap_scope.is_scopable cap) then
-            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-              (if is_net_cap then
-                 Printf.sprintf
-                   "`%s` does not take a path scope or a host scope; only \
-                    `IO.NetConnect` takes a host, so `(\"%s\")` would be \
-                    ignored.\n\
-                    hint: scope the outbound capability instead, e.g. \
-                    `needs IO.NetConnect(\"%s\")`; it also bounds the TLS \
-                    connections built on it."
-                   cap path path
-               else
-                 Printf.sprintf
-                   "`%s` does not take a path scope; only filesystem \
-                    capabilities do (`IO.FileRead`, `IO.FileWrite`, \
-                    `IO.FileSystem`), so `(\"%s\")` would be ignored.\n\
-                    hint: remove the scope, or scope the filesystem capability \
-                    you mean, e.g. `needs IO.FileSystem(\"%s\")`."
-                   cap path path)
-          else if March_caps.Cap_scope.is_host_scopable cap then
-            (match March_caps.Host_scope.parse_decl (Some path) with
-             | Ok _ -> ()
-             | Error reason ->
-               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-                 (Printf.sprintf
-                    "The host scope `%s` on `%s` is not valid: %s.\n\
-                     hint: write a host, a host and port, or `*.domain`, \
-                     optionally followed by a path prefix, e.g. \
-                     `needs IO.NetConnect(\"api.example.com/v1/\")`."
-                    path cap reason))
-          else if March_caps.Cap_scope.is_name_scopable cap then
-            (match March_caps.Name_scope.parse path with
-             | Ok _ -> ()
-             | Error reason ->
-               Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-                 (Printf.sprintf
-                    "The name scope on `%s` is not valid: %s.\n\
-                     hint: give names as strings and prefixes as \
-                     `prefix(\"...\")`, e.g. \
-                     `needs %s(\"sessions\", prefix(\"cache.\"))`."
-                    cap reason cap))
-          else if snd (March_caps.Host_scope.split_options path) <> []
-          then
-            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-              (Printf.sprintf
-                 "`%s` takes no options; `no_redirects` and `methods(...)` \
-                  apply only to `IO.NetConnect`."
-                 cap)
-          else if not (March_caps.Cap_scope.is_absolute path) then
-            Err.error ~code:Err.Code.invalid_cap_scope env.errors ~span
-              (Printf.sprintf
-                 "The scope `%s` on `%s` is a relative path, so it would \
-                  name a different directory depending on the working \
-                  directory at run time.\n\
-                  hint: give an absolute path, one starting with `/`."
-                 path cap))
-      caps scoped;
+    validate_cap_scopes env.errors ~sp caps;
     let paths = List.map fst scoped in
     { env with mod_needs = paths @ env.mod_needs;
                mod_need_scopes = scoped @ env.mod_need_scopes }
@@ -10179,6 +10116,18 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
              Printf.sprintf "its own `needs %s`" shown )
        in
        let covered c = List.exists (fun b -> cap_subsumes b c) bound in
+       (* `fn main() needs ()` that performs IO: [check_main_grant] (run just
+          before this) already reported it as [cap_grant], naming the same
+          capabilities with a fix that replaces this very clause, so a second
+          [cap_bound] at the clause would only repeat it. *)
+       let reported_as_grant =
+         bound = [] && fb_origin = Fn_decl
+         && List.exists (fun (d : Err.diagnostic) ->
+                d.Err.severity = Err.Error
+                && Err.Code.slug_of d.Err.code = Err.Code.cap_grant
+                && span_within fb_span d.Err.span) env.errors.Err.diagnostics
+       in
+       if not reported_as_grant then begin
        if row.March_caps.Cap_rows.unknown && not (List.mem "IO" bound) then
          Err.error ~code:Err.Code.cap_bound env.errors ~span
            (Printf.sprintf
@@ -10218,7 +10167,8 @@ let check_fn_bounds ~(rows : (string, March_caps.Cap_rows.row) Hashtbl.t) (env :
               Err.error ~code:Err.Code.cap_bound env.errors ~span
                 (Printf.sprintf "%s is bounded by %s, but reaches `%s`%s.\n%s"
                    who by c via help))
-         (List.sort_uniq String.compare row.March_caps.Cap_rows.caps))
+         (List.sort_uniq String.compare row.March_caps.Cap_rows.caps)
+       end)
     env.fn_bound_points
 
 let span_within (inner : Ast.span) (outer : Ast.span) =
@@ -10474,6 +10424,38 @@ let refine_cap_mismatches (env : env) (decls : Ast.decl list) : unit =
       sites
   end
 
+(* `main`'s request (ocap phase 4, decision 3), statically: the kinds of its
+   legacy `Cap(P)` parameters together with the paths of its `needs` clause;
+   with neither, the paths of the module's `needs` line.  Scopes play no part
+   here (they are run-time limits); [launch_request] gives the text the
+   program entry hands to [Authority.launch_init].  [`Params] says the grant
+   is written only as `Cap` parameters, which is how the diagnostics below
+   show it. *)
+let main_request_caps (decls : Ast.decl list) (def : Ast.fn_def)
+    (params : string list) : string list * [ `Params | `Needs ] =
+  (* A clause, even `needs ()`, is the request; only with neither a clause
+     nor a `Cap` parameter is it the module's `needs` line. *)
+  match params, def.Ast.fn_needs with
+  | [], None ->
+    let module_needs =
+      List.concat_map
+        (function
+          | Ast.DNeeds (caps, _) ->
+            List.map (fun (p, _) -> March_ast.Cap_request.path_text p) caps
+          | _ -> [])
+        decls
+    in
+    (List.sort_uniq String.compare module_needs, `Needs)
+  | _, None -> (List.sort_uniq String.compare params, `Params)
+  | _, Some (caps, _) ->
+    let needs = List.map (fun (p, _) -> March_ast.Cap_request.path_text p) caps in
+    (List.sort_uniq String.compare (params @ needs), `Needs)
+
+(* `main`'s launch request as source text and whether it carries a scope
+   (decision 3); see [March_ast.Cap_request.launch_request]. *)
+let launch_request : Ast.module_ -> string * bool =
+  March_ast.Cap_request.launch_request
+
 let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
   (* [rows] lets the caller hand in an already-solved row table. Stage C made
      the flat closure a projection of that solve, and stage D added a second
@@ -10495,13 +10477,14 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
      [main_site] is found whether or not a grant is present, because stage D
      needs the span to report a MISSING grant — the case where [grants] is
      empty and the program is nonetheless not pure. *)
+  let grant_form = ref `Params in
   let main_site : (string list * Ast.span * Ast.span) option =
     List.find_map
       (function
         | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
           (match def.Ast.fn_clauses with
            | clause :: _ ->
-             let grants =
+             let params =
                List.concat_map
                  (fun p ->
                     match p with
@@ -10512,8 +10495,11 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
                     | Ast.FPPat _ -> [])
                  clause.Ast.fc_params
              in
-             Some (List.sort_uniq String.compare grants, clause.Ast.fc_span,
-                   clause.Ast.fc_params_span)
+             (* Decision 3: the grant is `main`'s request, not only its
+                `Cap` parameters. *)
+             let grants, form = main_request_caps decls def params in
+             grant_form := form;
+             Some (grants, clause.Ast.fc_span, clause.Ast.fc_params_span)
            | [] -> None)
         | _ -> None)
       decls
@@ -10593,9 +10579,38 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
             the body. That is why `fn_clause` grew the field. *)
          let grant_fix =
            Err.FReplace { span = params_span; text = Printf.sprintf "(%s)" suggested } in
+         (* `main`'s own `needs` clause, when it has one: with an empty
+            request that can only be `needs ()`. *)
+         let main_needs_span =
+           List.find_map
+             (function
+               | Ast.DFn (def, _) when def.Ast.fn_name.txt = "main" ->
+                 Option.map snd def.Ast.fn_needs
+               | _ -> None)
+             decls
+         in
+         match main_needs_span with
+         | Some needs_span ->
+           (* `fn main() needs ()`: the clause is the request (decision 3),
+              and it requests nothing.  The narrowest fix rewrites the clause
+              to name what the program reaches. *)
+           let needs_text = String.concat ", " named in
+           Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
+             ~fix:(Err.FReplace { span = needs_span;
+                                  text = Printf.sprintf "needs %s" needs_text })
+             (Printf.sprintf
+                "`main` performs IO but its grant is empty. The program reaches \
+                 %s; `main` is bounded by `needs ()`, which grants nothing.\n\
+                 help: name what `main` needs —\n\
+                \        fn main() needs %s\n\
+                 `forge fix` can apply this."
+                show_caps needs_text)
+         | None ->
          (* §X3: a module missing `needs X` for code `main` reaches, with
-            `main` granted nothing, is one missing authority: fold the grant
-            into that error (its label, its sentence, its hunk). *)
+            `main` declaring no grant of its own, is one missing authority.
+            The module's `needs` line is then `main`'s request (decision 3),
+            so adding it, as that error's hint and fix already do, is the
+            whole remedy: only say that `main` is granted nothing. *)
          match cap_diag_find env.errors (fun d ->
              is_use_needs_diag d
              && List.exists (fun c -> List.mem c named) (cap_code_caps d.Err.code)) with
@@ -10605,19 +10620,19 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
              { d with
                Err.message =
                  Printf.sprintf "%s, and `main` is granted nothing.%s\n\
-                                 and give `main` the grant —\n\
-                                \        fn main(%s) : ()"
-                   head rest suggested;
+                                 `main` declares no grant of its own, so the \
+                                 module's `needs` line is its grant."
+                   head rest;
                labels = d.Err.labels
                         @ [ { Err.lbl_span = params_span;
-                              lbl_message = "`main` is granted nothing here" } ];
-               fix = Err.merge_fixes [ d.Err.fix; Some (Err.fix grant_fix) ] }
+                              lbl_message = "`main` is granted nothing here" } ] }
          | None ->
          Err.error_with_fix ~code:Err.Code.cap_grant env.errors ~span
            ~fix:grant_fix
            (Printf.sprintf
               "`main` performs IO but declares no grant. The program reaches \
-               %s; a `main` with no capability parameter is granted nothing.\n\
+               %s; a `main` with no capability parameter, no `needs` clause \
+               and no module `needs` line is granted nothing.\n\
                help: declare the grant `main` actually needs —\n\
               \        fn main(%s) : ()\n\
                or grant everything with `fn main(cap : Cap(IO))`.\n\
@@ -10634,7 +10649,10 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
     in
     let covered c = List.exists (fun g -> cap_subsumes g c) grants in
     let show_grant =
-      String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
+      match !grant_form with
+      | `Params ->
+        String.concat " + " (List.map (fun g -> Printf.sprintf "`Cap(%s)`" g) grants)
+      | `Needs -> Printf.sprintf "`needs %s`" (String.concat ", " grants)
     in
     List.iter
       (fun c ->
@@ -10813,8 +10831,9 @@ let check_main_grant ?rows (env : env) (decls : Ast.decl list) : unit =
 
 let dump_role_authority : bool ref = ref false
 
-(* `main`'s declared grant, as [check_main_grant] reads it: [Some (caps,
-   span)] when there is a `main`, its caps possibly empty. *)
+(* `main`'s declared grant (its request, decision 3), as [check_main_grant]
+   reads it: [Some (caps, span)] when there is a `main`, its caps possibly
+   empty. *)
 let main_grant_of_decls (decls : Ast.decl list) : (string list * Ast.span) option =
   List.find_map
     (function
@@ -10831,7 +10850,7 @@ let main_grant_of_decls (decls : Ast.decl list) : (string list * Ast.span) optio
                 | Ast.FPPat _ -> [])
               clause.Ast.fc_params
           in
-          Some (List.sort_uniq String.compare grants, clause.Ast.fc_params_span)
+          Some (fst (main_request_caps decls def grants), clause.Ast.fc_params_span)
         | [] -> None)
       | _ -> None)
     decls

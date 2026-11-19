@@ -648,7 +648,7 @@ file", "the console capability".
 mod Main do
   needs IO.Console
 
-  fn main() do
+  fn main() needs () do
     println("hello")
   end
 end
@@ -657,27 +657,28 @@ end
 ```text
 -- CAPABILITY ----------------------- main-no-grant.march
 
-`main` performs IO but declares no grant. The program reaches `IO.Console`; a `main` with no capability parameter is granted nothing. [cap_grant]
-help: declare the grant `main` actually needs —
-        fn main(_cap_console : Cap(IO.Console)) : ()
-or grant everything with `fn main(cap : Cap(IO))`.
+`main` performs IO but its grant is empty. The program reaches `IO.Console`; `main` is bounded by `needs ()`, which grants nothing. [cap_grant]
+help: name what `main` needs —
+        fn main() needs IO.Console
 `forge fix` can apply this.
 
-4 |   fn main() do
-      ^^^^^^^^^^^^
+4 |   fn main() needs () do
+      ^^^^^^^^^^^^^^^^^^^^^
 
 
     fix (`forge fix` applies it):
 
-4 -   fn main() do
-4 +   fn main(_cap_console : Cap(IO.Console)) do
+4 -   fn main() needs () do
+4 +   fn main() needs IO.Console do
 
     run `march --explain cap_grant`
 ```
 <!-- /error-tour -->
 
-It works out which capability the program actually reaches and writes the narrowest
-signature for `main`. `forge fix` applies it.
+`main`'s grant is what it requests: its `needs` clause and any `Cap` parameters, or, with
+neither, the module's `needs` line. Here `needs ()` requests nothing. The compiler works
+out which capability the program actually reaches and writes the narrowest clause for
+`main`. `forge fix` applies it.
 <button class="ep-try" data-error-example="14-main-no-grant">Try it</button>
 
 <a id="missing-needs"></a>

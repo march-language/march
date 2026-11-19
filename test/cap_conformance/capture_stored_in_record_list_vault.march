@@ -1,0 +1,68 @@
+-- Stored function values keep their authority (design §5): a closure made
+-- inside a framed function and stored in a record, in a list and in a named
+-- table is still refused outside the frame's scope when main takes it out
+-- and calls it; one main made and stored the same way is not.
+mod CaptureStoredInRecordListVault do
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.Mut
+
+  type Holder = Holder(String -> String)
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn make_reader() : String -> String needs IO.FileRead("/srv/") do
+    fn p -> probe("IO.FileRead", p)
+  end
+
+  fn call_holder(h : Holder, p : String) : String do
+    match h do
+    Holder(f) -> f(p)
+    end
+  end
+
+  fn call_first(fs : List(String -> String), p : String) : String do
+    match fs do
+    Cons(f, _) -> f(p)
+    Nil -> "empty"
+    end
+  end
+
+  fn call_stored(name : String, p : String) : String do
+    match Vault.whereis(name) do
+    Ok(Some(t)) ->
+      match Vault.get(t, "reader") do
+      Some(f) -> f(p)
+      None -> "missing"
+      end
+    _ -> "no table"
+    end
+  end
+
+  fn store(name : String, f : String -> String) : String do
+    match Vault.new(name) do
+    Ok(t) ->
+      Vault.set(t, "reader", f)
+      "stored"
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() do
+    let narrow = make_reader()
+    let wide = fn p -> probe("IO.FileRead", p)
+    println("record: " ++ call_holder(Holder(narrow), "/etc/hosts"))
+    println("list: " ++ call_first([narrow, wide], "/etc/hosts"))
+    println(store("conformance_narrow", narrow))
+    println("table: " ++ call_stored("conformance_narrow", "/etc/hosts"))
+    println("record, main's: " ++ call_holder(Holder(wide), "/etc/hosts"))
+    println("list, main's: " ++ call_first([wide, narrow], "/etc/hosts"))
+    println(store("conformance_wide", wide))
+    println("table, main's: " ++ call_stored("conformance_wide", "/etc/hosts"))
+  end
+end

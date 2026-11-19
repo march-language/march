@@ -1,0 +1,5 @@
+allowed /srv/a/x
+IO.FileRead("/srv/b/x") refused by function inner's needs (IO.FileRead("/srv/a/", "/etc/", "/tmp/"))
+IO.FileRead("/etc/x") refused by function outer's needs (IO.FileRead("/srv/", "/tmp/"))
+IO.FileRead("/tmp/x") refused by the launch grant (IO.Console, IO.FileRead("/srv/", "/etc/"))
+exit 0

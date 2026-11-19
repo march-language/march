@@ -1,0 +1,5 @@
+allowed api.example.com:443
+allowed img.cdn.example.com:443
+IO.NetConnect("evil.example.com:443") refused by function dial's needs (IO.NetConnect("api.example.com"), IO.NetConnect("*.cdn.example.com"))
+IO.NetConnect("api.example.com.evil.net:443") refused by function dial's needs (IO.NetConnect("api.example.com"), IO.NetConnect("*.cdn.example.com"))
+exit 0

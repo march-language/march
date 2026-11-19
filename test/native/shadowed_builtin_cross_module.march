@@ -1,0 +1,38 @@
+-- Regression: an entry-module fn named like a name-dispatched builtin
+-- (`not`, `string_is_empty`) owns that name in the ENTRY FILE only.  The
+-- stdlib's own bare calls to the builtin must still reach the builtin.
+--
+-- The entry fn kept its bare TIR name, the same name as the builtin, so the
+-- backends could not tell the stdlib's `not(...)` from a call to the user's
+-- `fn not`: natively and on --target js, Topology.labels_of (a filter over
+-- `fn l -> not(String.is_empty(l))`, where String.is_empty calls the
+-- builtin `string_is_empty`) ran the user's fns and got the wrong answer,
+-- and on JS the Authority policy module's `not` calls ran it at launch,
+-- printing extra markers.  The interpreter scoped by file and was right.
+-- Lowering now gives the entry fn its own TIR name (`not$u`).
+--
+-- Each shadow prints a marker and returns what the builtin would not, so a
+-- stdlib call that reaches it shows up in the output.
+mod ShadowedBuiltinCrossModule do
+  needs IO.Console
+
+  fn not(b : Bool) : Bool do
+    println("user not")
+    b
+  end
+
+  fn string_is_empty(s : String) : Bool do
+    println("user string_is_empty " ++ s)
+    true
+  end
+
+  fn main() : () do
+    let labels = Topology.labels_of("db, , public")
+    println(int_to_string(List.length(labels)))
+    println(String.join(labels, "|"))
+    println(bool_to_string(String.is_empty("x")))
+    println(bool_to_string(not(true)))
+    println(bool_to_string(string_is_empty("y")))
+    ()
+  end
+end

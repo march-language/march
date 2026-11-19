@@ -147,7 +147,27 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
       | _ -> env
     ) env decls
   in
-  add_from tc_env stdlib_decls
+  (* Every stdlib [impl], registered up front as [check_module]'s pass 1 does
+     for a whole program.  The REPL folds [check_decl] over the stdlib one
+     module at a time, and a [DMod]'s own impls stay in that module's inner
+     env ([check_decl] exports its names, types and ctors, not its impls), so
+     without this the REPL knew no stdlib impl at all: `Some(1) == Some(1)`,
+     `[1] == [1]` and `Ok(1) == Ok(1)` were "does not implement interface
+     `Eq`" (2026-11-18, specs/progress/2026-11-18-native-repl-quirks.md).
+     After the types, which [register_impl_shape] consults to name an impl
+     head's declaring module. *)
+  let rec add_impls env decls =
+    List.fold_left (fun env d ->
+      match d with
+      | DMod (mname, _, inner, _) ->
+        let env = List.fold_left (fun e d -> match d with
+            | DImpl (idef, _) -> register_impl_shape e idef ~decl_module:mname.txt
+            | _ -> e) env inner in
+        add_impls env (List.filter (function DMod _ -> true | _ -> false) inner)
+      | _ -> env
+    ) env decls
+  in
+  add_impls (add_from tc_env stdlib_decls) stdlib_decls
 
 let load_decls_into_env env tc_env decls =
   let (env_final, tc_final) = List.fold_left (fun (e, tc) decl ->
@@ -341,6 +361,38 @@ let wrap_expr_as_module
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [main_decl] }
 
+(** The REPL's launch (ocap phase 4, design §21): the full authority of the
+    person at the terminal, the request ["IO"] unscoped, which MARCH_GRANT /
+    [--grant] narrows (a malformed or too-wide grant exits 2 here, before
+    the first prompt).  Both engines hold an authority, the interpreter's
+    and, under the JIT, the C runtime's, so each is launched; the C side
+    only when a grant is set, since an unscoped launch with no grant sets
+    nothing.  The JIT call is generated code, tagged like the control
+    wiring so it may name the [@[stdlib_internal]] [Authority.launch_init].
+    Returns the JIT context to keep using: [None] (the interpreter only) if
+    the JIT launch fails, so no expression runs unnarrowed. *)
+let launch_repl_authority env tc_env (jit_ctx : March_jit.Repl_jit.t option) =
+  March_eval.Eval.launch_authority env ("IO", false);
+  let grant = String.trim (Option.value (Sys.getenv_opt "MARCH_GRANT") ~default:"") in
+  match jit_ctx with
+  | Some jit when grant <> "" ->
+    let sp col =
+      { March_ast.Ast.file = March_typecheck.Typecheck_builtins.control_wiring_file;
+        start_line = 1; end_line = 1; start_col = col; end_col = col + 1 } in
+    let e =
+      March_ast.Ast.EApp
+        (March_ast.Ast.EVar { txt = "Authority.launch_init"; span = sp 1 },
+         [ March_ast.Ast.ELit (March_ast.Ast.LitString "IO", sp 2);
+           March_ast.Ast.ELit (March_ast.Ast.LitBool false, sp 3) ],
+         sp 4) in
+    (try
+       ignore (March_jit.Repl_jit.run_expr jit ~tc_env (wrap_expr_as_module e));
+       jit_ctx
+     with _ ->
+       Printf.eprintf "march: the JIT could not apply MARCH_GRANT; the REPL runs interpreted\n%!";
+       None)
+  | _ -> jit_ctx
+
 (** Wrap a REPL declaration in a synthetic module for TIR lowering. *)
 let wrap_decl_as_module
     (d : March_ast.Ast.decl) : March_ast.Ast.module_ =
@@ -490,6 +542,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let t_s4 = Unix.gettimeofday () in
   Printf.eprintf "[timing] precompile: %.3fs\n%!" (t_s4 -. t_s3);
+  let jit_ctx =
+    if initial_env = None && not is_debug then launch_repl_authority e0 tc0 jit_ctx
+    else jit_ctx in
   let env         = ref e0 in
   let tc_env      = ref tc0 in
   let result_h    = Result_vars.create () in
@@ -1053,7 +1108,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m
                          with Failure _ -> ());
                         (* Always update interpreter env (source of truth for value display) *)
-                        env := March_eval.Eval.eval_decl !env d';
+                        env := March_eval.Eval.eval_prompt_decl !env d';
                         March_eval.Eval.install_global_tail !env;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1063,7 +1118,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         in
                         if not scroll_mode then Printf.printf "val %s = %s\n%!" bind_name vstr
                       | _ ->
-                        env := March_eval.Eval.eval_decl !env d';
+                        env := March_eval.Eval.eval_prompt_decl !env d';
                         March_eval.Eval.install_global_tail !env;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1100,6 +1155,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | March_eval.Eval.Match_failure msg ->
                       March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "match failure: %s\n%!" msg
+                    | March_jit.Repl_jit.Fragment_panicked msg ->
+                      Printf.eprintf "runtime error: %s\n%!" msg
                     | Failure msg ->
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
@@ -1186,6 +1243,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | March_eval.Eval.Match_failure msg ->
                       March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "match failure: %s\n%!" msg
+                    | March_jit.Repl_jit.Fragment_panicked msg ->
+                      Printf.eprintf "runtime error: %s\n%!" msg
                     | Failure msg ->
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
@@ -1325,6 +1384,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          (e0, tc0))
   in
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
+  let jit_ctx =
+    if initial_env = None && not is_debug then launch_repl_authority e0 tc0 jit_ctx
+    else jit_ctx in
   let env      = ref e0 in
   let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in
@@ -1652,7 +1714,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              let m = wrap_expr_as_module bind_expr in
              (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m
               with Failure _ -> ());
-             env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             env := capture_stdout (fun () -> March_eval.Eval.eval_prompt_decl !env d');
              March_eval.Eval.install_global_tail !env;
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1662,7 +1724,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              in
              add_line Notty.A.empty (Printf.sprintf "val %s = %s" bind_name vstr)
            | _ ->
-             env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             env := capture_stdout (fun () -> March_eval.Eval.eval_prompt_decl !env d');
              March_eval.Eval.install_global_tail !env;
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };

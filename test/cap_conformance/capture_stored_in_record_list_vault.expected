@@ -1,0 +1,9 @@
+record: IO.FileRead("/etc/hosts") refused by function make_reader's needs (IO.FileRead("/srv/"))
+list: IO.FileRead("/etc/hosts") refused by function make_reader's needs (IO.FileRead("/srv/"))
+stored
+table: IO.FileRead("/etc/hosts") refused by function make_reader's needs (IO.FileRead("/srv/"))
+record, main's: allowed /etc/hosts
+list, main's: allowed /etc/hosts
+stored
+table, main's: allowed /etc/hosts
+exit 0

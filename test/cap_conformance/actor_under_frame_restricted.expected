@@ -1,0 +1,5 @@
+main's actor: allowed / allowed
+start's actor: IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn) / allowed
+start's actor again: IO.FileRead("/etc/hosts") refused by function start's needs (IO.Console, IO.FileRead("/srv/"), IO.Spawn) / allowed
+main: allowed
+exit 0

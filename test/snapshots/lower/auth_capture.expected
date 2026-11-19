@@ -1,0 +1,60 @@
+-- types (3) --
+type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
+type Authority.Scope = Scope(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(Scope))
+-- fns (7) --
+## apply_to
+fn apply_to(f : (String) -> (), s : String) : () =
+  f(s)
+
+## main
+fn main() : () =
+  let $auth_cap1 : CapAuthRef = cap_save() in
+let shout : (String) -> () = letrec [$lam0__top] in
+$lam0__top in
+let p : (String) -> () = letrec [$lam0_main] in
+$lam0_main in
+let inc : (Int) -> Int = letrec [$lam1_main] in
+$lam1_main in
+let $auth_body8 : (Int) -> Unit = letrec [$authbody0_main] in
+$authbody0_main in
+let loop_say : (Int) -> Unit = letrec [loop_say] in
+loop_say in
+p("a");
+let $auth_fnval10 : (String) -> () = letrec [$authlam0_main] in
+$authlam0_main in
+apply_to($auth_fnval10, "b");
+let $t1242 : Int = let $t1241 : Int = inc(1) in
+scoped($t1241) in
+loop_say($t1242);
+shout("c");
+let $t1243 : Result((), CapError) = probe() in
+case $t1243 of
+  Ok($f1244) -> ()
+  Err($f1245) -> ()
+  _ -> panic("non-exhaustive pattern match")
+
+## probe
+fn probe() : Result((), CapError) =
+  Authority.check("IO.FileRead", "/srv/x")
+
+## say
+fn say(s : String) : () =
+  println(s)
+
+## scoped
+fn scoped(n : Int) : Int =
+  let $auth_l : Layer = scoped$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = scoped$auth(n) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## scoped$auth
+fn scoped$auth(n : Int) : Int =
+  n
+
+## scoped$auth_layer
+fn scoped$auth_layer() : Layer =
+  Authority.frame_layer("scoped", "IO.FileRead(\"/srv/\")")
+

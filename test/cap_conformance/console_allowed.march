@@ -1,6 +1,6 @@
--- REFUSE: IO.Clock
--- With the console allowed, every console operation prints and returns
--- Ok(()); the refusal of another kind does not touch it.
+-- GRANT: IO.Console
+-- With the console granted, every console operation prints and returns
+-- Ok(()).
 mod ConsoleAllowed do
   needs IO.Console
 

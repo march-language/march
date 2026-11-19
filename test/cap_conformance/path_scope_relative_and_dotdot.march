@@ -1,0 +1,35 @@
+-- Path scopes compare whole segments, lexically, after resolving a relative
+-- target against the current directory and folding `.` and `..` (design §6,
+-- §8; carried over from the superseded design's path scopes): `/srv/a/../b`
+-- is inside `/srv/`, `/srv/../etc/hosts` and `/srvx/y` are not, a relative
+-- `data/x` resolves under the current directory (outside `/srv/`), and
+-- enough `..` from the current directory climbs to the root and back into
+-- `/srv/`.
+mod PathScopeRelativeAndDotdot do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn in_srv(p : String) : String needs IO.FileRead("/srv/") do
+    probe("IO.FileRead", p)
+  end
+
+  fn ups(n : Int) : String do
+    if n == 0 do "" else "../" ++ ups(n - 1) end
+  end
+
+  fn main() do
+    println(in_srv("/srv/a/../b"))
+    println(in_srv("/srv/./x"))
+    println(in_srv("/srv/../etc/hosts"))
+    println(in_srv("/srvx/y"))
+    println(in_srv("data/x"))
+    println(in_srv(ups(40) ++ "srv/x"))
+  end
+end

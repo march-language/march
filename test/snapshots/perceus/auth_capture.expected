@@ -1,0 +1,220 @@
+-- types (15) --
+type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
+type Authority.Scope = Scope(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(Scope))
+closure $Clo_$jp1_parse$0_Authority_parse(Ptr(Unit), '_)
+closure $Clo_$jp2_parse$1_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp3_parse$2_Authority_parse(Ptr(Unit), () -> '_)
+closure $Clo_$jp7_parse_option$0_Authority_parse_option(Ptr(Unit), '_, String)
+closure $Clo_$jp7_method_words$0_Authority_method_words(Ptr(Unit), '_, '_, List(String))
+closure $Clo_$jp3_method_words$1_Authority_method_words(Ptr(Unit))
+closure $Clo_$lam0__top$0_main(Ptr(Unit))
+closure $Clo_$lam0_main$1_main(Ptr(Unit), CapAuthRef)
+closure $Clo_$lam1_main$2_main(Ptr(Unit))
+closure $Clo_$authbody0_main$3_main(Ptr(Unit))
+closure $Clo_loop_say$4_main(Ptr(Unit), (Int) -> Unit, CapAuthRef)
+closure $Clo_$authlam0_main$5_main(Ptr(Unit), CapAuthRef)
+-- fns (19) --
+## $authbody0_main$apply$3_main
+fn $authbody0_main$apply$3_main($clo : Ptr(Unit), k : Int) : Unit =
+  let $authbody0_main : (Int) -> Unit = $clo in
+let $t1239 : Bool = ==(k, 0) in
+case $t1239 of
+  True() -> dec_rc $authbody0_main;
+()
+  _ -> println("k");
+let $t1240 : Int = -(k, 1) in
+call_ptr $authbody0_main($t1240)
+
+## $authlam0_main$apply$5_main
+fn $authlam0_main$apply$5_main($clo : Ptr(Unit), $auth_p11 : String) : () =
+  let $auth_cap1 : CapAuthRef = $clo.$fv1 in
+dec_rc $clo;
+let $auth_saved12 : CapAuthRef = cap_enter($auth_cap1) in
+let $auth_result13 : () = let $rc_141 : () = say($auth_p11) in
+dec_rc $auth_p11;
+$rc_141 in
+let $auth_unit14 : Unit = cap_restore($auth_saved12) in
+$auth_result13
+
+## $jp1_parse$apply$0_Authority_parse
+fn $jp1_parse$apply$0_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let toks : '_ = $clo.$fv1 in
+dec_rc $clo;
+let $t657 : '_ = alloc Nil() in
+inc_rc toks;
+Authority.parse_entries(toks, $t657)
+
+## $jp2_parse$apply$1_Authority_parse
+fn $jp2_parse$apply$1_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo663 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo663;
+call_ptr $jp_clo663()
+
+## $jp3_method_words$apply$1_Authority_method_words
+fn $jp3_method_words$apply$1_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  alloc Err("`methods(...)` is not closed")
+
+## $jp3_parse$apply$2_Authority_parse
+fn $jp3_parse$apply$2_Authority_parse($clo : Ptr(Unit)) : '_ =
+  let $jp_clo665 : () -> '_ = $clo.$fv1 in
+dec_rc $clo;
+inc_rc $jp_clo665;
+call_ptr $jp_clo665()
+
+## $jp7_method_words$apply$0_Authority_method_words
+fn $jp7_method_words$apply$0_Authority_method_words($clo : Ptr(Unit)) : '_ =
+  let $f938 : '_ = $clo.$fv1 in
+let $f939 : '_ = $clo.$fv2 in
+let acc : List(String) = $clo.$fv3 in
+dec_rc $clo;
+let $jp_clo947 : () -> '_ = alloc $Clo_$jp3_method_words$1_Authority_method_words($jp3_method_words$apply$1_Authority_method_words) in
+case $f939 of
+  Cons($f948, $f949) -> case $f948 of
+  ")"() -> dec_rc $jp_clo947;
+let rest : '_ = $f949 in
+let m : '_ = inc_rc $f938;
+$f938 in
+let $t933 : '_ = Authority.is_option_name(m) in
+case $t933 of
+  True() -> dec_rc $t933;
+let $t936 : '_ = let $t934 : '_ = inc_rc acc;
+alloc Cons(m, acc) in
+let $t935 : '_ = alloc Nil() in
+Authority.rev($t934, $t935) in
+let $t937 : ('_, '_) = inc_rc rest;
+($t936, rest) in
+alloc Ok($t937)
+  _ -> dec_rc $t933;
+dec_rc m;
+alloc Err("`methods(...)` takes HTTP method names")
+  _ -> call_ptr $jp_clo947()
+  _ -> call_ptr $jp_clo947()
+
+## $jp7_parse_option$apply$0_Authority_parse_option
+fn $jp7_parse_option$apply$0_Authority_parse_option($clo : Ptr(Unit)) : '_ =
+  let $f908 : '_ = $clo.$fv1 in
+let name : String = $clo.$fv2 in
+dec_rc $clo;
+let more : '_ = inc_rc $f908;
+$f908 in
+let $t891 : '_ = ==(name, "methods") in
+case $t891 of
+  True() -> dec_rc $t891;
+let $t893 : '_ = let $t892 : '_ = alloc Nil() in
+Authority.method_words(more, $t892) in
+case $t893 of
+  Err($f897) -> dec_rc $t893;
+let e : '_ = $f897 in
+alloc Err(e)
+  Ok($f898) -> dec_rc $t893;
+case $f898 of
+  $Tuple2($f899, $f900) -> dec_rc $f898;
+let rest : '_ = $f900 in
+let ms : '_ = $f899 in
+let $t895 : '_ = let $t894 : '_ = let $rc_138 : '_ = string_join(ms, ",") in
+dec_rc ms;
+$rc_138 in
+let $rc_137 : '_ = ++("methods=", $t894) in
+dec_rc $t894;
+$rc_137 in
+let $t896 : ('_, '_) = ($t895, rest) in
+alloc Ok($t896)
+  _ -> dec_rc $f898;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t893;
+panic("non-exhaustive pattern match")
+  _ -> dec_rc $t891;
+dec_rc more;
+let $t905 : '_ = string_concat3("`", name, "(...)` takes one quoted string") in
+alloc Err($t905)
+
+## $lam0__top$apply$0_main
+fn $lam0__top$apply$0_main($clo : Ptr(Unit), s : String) : () =
+  let $rc_139 : () = println(s) in
+dec_rc s;
+$rc_139
+
+## $lam0_main$apply$1_main
+fn $lam0_main$apply$1_main($clo : Ptr(Unit), s : String) : () =
+  let $auth_cap1 : CapAuthRef = $clo.$fv1 in
+dec_rc $clo;
+let $auth_saved2 : CapAuthRef = cap_enter($auth_cap1) in
+let $auth_result3 : () = let $rc_140 : () = println(s) in
+dec_rc s;
+$rc_140 in
+let $auth_unit4 : Unit = cap_restore($auth_saved2) in
+$auth_result3
+
+## $lam1_main$apply$2_main
+fn $lam1_main$apply$2_main($clo : Ptr(Unit), x : Int) : Int =
+  +(x, 1)
+
+## apply_to
+fn apply_to(f : (String) -> (), s : String) : () =
+  call_ptr f(s)
+
+## loop_say$apply$4_main
+fn loop_say$apply$4_main($clo : Ptr(Unit), $auth_p9 : Int) : Unit =
+  let $auth_body8 : (Int) -> Unit = $clo.$fv1 in
+let $auth_cap1 : CapAuthRef = $clo.$fv2 in
+dec_rc $clo;
+let $auth_saved5 : CapAuthRef = cap_enter($auth_cap1) in
+let $auth_result6 : Unit = inc_rc $auth_body8;
+call_ptr $auth_body8($auth_p9) in
+let $auth_unit7 : Unit = cap_restore($auth_saved5) in
+$auth_result6
+
+## main
+fn main() : () =
+  let $auth_cap1 : CapAuthRef = cap_save() in
+let shout : (String) -> () = alloc $Clo_$lam0__top$0_main($lam0__top$apply$0_main) in
+let p : (String) -> () = inc_rc $auth_cap1;
+alloc $Clo_$lam0_main$1_main($lam0_main$apply$1_main, $auth_cap1) in
+let inc : (Int) -> Int = alloc $Clo_$lam1_main$2_main($lam1_main$apply$2_main) in
+let $auth_body8 : (Int) -> Unit = alloc $Clo_$authbody0_main$3_main($authbody0_main$apply$3_main) in
+let loop_say : (Int) -> Unit = inc_rc $auth_cap1;
+alloc $Clo_loop_say$4_main(loop_say$apply$4_main, $auth_body8, $auth_cap1) in
+call_ptr p("a");
+let $auth_fnval10 : (String) -> () = alloc $Clo_$authlam0_main$5_main($authlam0_main$apply$5_main, $auth_cap1) in
+apply_to($auth_fnval10, "b");
+let $t1242 : Int = let $t1241 : Int = call_ptr inc(1) in
+scoped($t1241) in
+call_ptr loop_say($t1242);
+call_ptr shout("c");
+let $t1243 : Result((), CapError) = probe() in
+case $t1243 of
+  Ok($f1244) -> dec_rc $t1243;
+dec_rc $f1244;
+()
+  Err($f1245) -> dec_rc $t1243;
+dec_rc $f1245;
+()
+  _ -> dec_rc $t1243;
+panic("non-exhaustive pattern match")
+
+## probe
+fn probe() : Result((), CapError) =
+  Authority.check("IO.FileRead", "/srv/x")
+
+## say
+fn say(s : String) : () =
+  println(s)
+
+## scoped
+fn scoped(n : Int) : Int =
+  let $auth_l : Layer = scoped$auth_layer() in
+let $auth_saved : CapAuthRef = Authority.enter_fn($auth_l) in
+let $auth_result : Int = scoped$auth(n) in
+let $auth_unit : Unit = cap_restore($auth_saved) in
+$auth_result
+
+## scoped$auth
+fn scoped$auth(n : Int) : Int =
+  n
+
+## scoped$auth_layer
+fn scoped$auth_layer() : Layer =
+  Authority.frame_layer("scoped", "IO.FileRead(\"/srv/\")")
+

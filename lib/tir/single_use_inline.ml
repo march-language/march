@@ -377,7 +377,7 @@ let run ~changed (module_ : Tir.tir_module) : Tir.tir_module =
          && sole_direct_call
          && not (SSet.mem fn.Tir.fn_name recursive)
          && not (SSet.mem fn.Tir.fn_name roots)
-         && not (Inline.is_reloadable_name fn.Tir.fn_name)
+         && not (Inline.never_inline fn.Tir.fn_name)
       then Hashtbl.add candidates fn.Tir.fn_name fn)
     module_.Tir.tm_fns;
   { module_ with

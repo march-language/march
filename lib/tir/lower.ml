@@ -76,6 +76,14 @@ let _ensure_module_lowered = Lower_state._ensure_module_lowered
 let _iface_methods = Lower_state._iface_methods
 let _saved_iface_methods = Lower_state._saved_iface_methods
 let get_iface_methods = Lower_state.get_iface_methods
+
+type fn_needs = Lower_state.fn_needs = {
+  fnn_name : string;
+  fnn_text : string;
+  fnn_scoped : bool;
+}
+
+let fn_needs_tbl = Lower_state.fn_needs_tbl
 let _default_dispatch = Lower_state._default_dispatch
 let _alias_candidates = Lower_state._alias_candidates
 let _alias_reported = Lower_state._alias_reported
@@ -196,7 +204,7 @@ let note_migrate_msg ~prefix (def : Ast.fn_def) (fn : Tir.fn_def) =
 let _resume : (Ast.decl list -> Tir.fn_def list * Tir.type_def list) option ref = ref None
 
 (** Lower a module. *)
-let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=false) ?(hot_reload=false) ?(shadow_builtins=true) ?(resumable=false) ?(launch=false) (m : Ast.module_) : Tir.tir_module =
   _resume := None;
   reset_counter ();
   Lower_state.reset_hosts ();
@@ -265,6 +273,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   Migrate_msg_pins.reset ();
   _lowered_modules := Hashtbl.create 8;
   Hashtbl.reset Lower_state._fn_typed_module_lets;
+  Hashtbl.reset Lower_state.fn_needs_tbl;
   (* Entry-file top-level fns named like a builtin that has its own C symbol
      get a distinct TIR name (see [Lower_state._builtin_shadows]).  Only
      decls WRITTEN in the entry file count: [m.mod_decls] also carries the
@@ -309,9 +318,23 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
        in
        collect_iface_methods stdlib_context;
        collect_iface_methods m.mod_decls;
+       (* Every bare name the typechecker treats as a builtin.  The backends
+          and the TIR folds dispatch a builtin call on its callee's BARE name
+          (`not`, `negate`, `string_length`, `int_xor`, ...), with no C
+          symbol to collide on, so a user fn of such a name kept its bare TIR
+          name and became indistinguishable from the builtin: the stdlib's
+          own `not(...)` calls (Authority, Topology, VectorClock, ...) then
+          ran the entry module's `fn not` natively and on --target js, while
+          the interpreter (which scopes by file) ran the builtin.  Renaming
+          the definition here, where the scope is known, is the only place
+          the two can be told apart. *)
+       let builtin_names = Hashtbl.create 512 in
+       List.iter (fun n -> Hashtbl.replace builtin_names n ())
+         Typecheck.prelude_collision_builtin_names;
        List.iter (fun n ->
            if n <> "main"
-              && (Llvm_builtins.has_c_mapping n || Hashtbl.mem iface_methods n)
+              && (Llvm_builtins.has_c_mapping n || Hashtbl.mem iface_methods n
+                  || Hashtbl.mem builtin_names n)
               && not (has_defaults n)
            then Hashtbl.replace tbl n (Tir_names.builtin_shadow_name n))
          entry_fns;
@@ -858,6 +881,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | Ast.DFn (def, _) ->
         if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
           let fn = Lower_decls.lower_fn_def env def in   (* evaluate before reading !fns *)
+          Lower_state.note_fn_needs ~final:fn.fn_name ~display:def.fn_name.txt def;
           fns := fn :: !fns
         end
       | _ -> ()
@@ -896,6 +920,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             | None -> fn
           in
           note_migrate_msg ~prefix:"" def fn;
+          Lower_state.note_fn_needs ~final:fn.fn_name ~display:def.fn_name.txt def;
           if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
             Hot_reload.note_work_entry fn.fn_name;
           (* The entry file's own top-level fns, by provenance: they may be
@@ -924,7 +949,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                      | None -> ty_of_expr env b.bind_expr);
              v_lin = lower_linearity b.bind_lin;
            } in
-           top_lets := (v, rhs) :: !top_lets
+           top_lets := (v, rhs) :: !top_lets;
+           Lower_state._module_init_binders := v :: !Lower_state._module_init_binders
          | _ -> ())
       | Ast.DActor (_, name, actor_def, span) ->
         let (new_types, new_fns) = Lower_actor.lower_actor env ~hot_reload name.txt actor_def in
@@ -995,6 +1021,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 Provenance.rename ~old:fn.fn_name ~new_:qname;
                 let fn = { fn with fn_name = qname } in
                 note_migrate_msg ~prefix def fn;
+                Lower_state.note_fn_needs ~final:qname ~display:(prefix ^ def.fn_name.txt) def;
                 if Hot_reload.work_entry_source def.fn_name.txt def.fn_name.span.file then
                   Hot_reload.note_work_entry fn.fn_name;
                 fns := fn :: !fns
@@ -1291,6 +1318,76 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 Tir.ELet (v, rhs, body)) needed fn.fn_body in
             { fn with fn_body = body }
         ) all_fns
+  in
+  (* Ocap phase 4: the program entry sets the launch authority before any
+     user code runs, module-level lets included (they are folded into
+     [main]'s body just above, so the call goes in front of them).  A
+     program's entry is [main]; a test binary's is its setup_all block, which
+     every test runner (native and JS) calls once before the first test, so a
+     test file gets one when it has none.  The request is `main`'s
+     (decision 3), or the module's `needs` line for a test file.
+     [Authority.launch_init] returns at once for an unscoped request with
+     MARCH_GRANT unset, so an ordinary program pays one call.  Only with
+     [~launch:true], which the program pipelines pass (the native/JS build
+     and `--jit`); a REPL fragment, whose wrapper is also called `main`, the
+     static capability analyses and unit tests do not. *)
+  let all_fns =
+    if not launch then all_fns
+    else if not (List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.launch_init_fn)
+                   all_fns)
+    then begin
+      (* Fail closed: a program that links the stdlib must launch.  The one
+         genuine no-stdlib case is a module lowered without the stdlib at all
+         (no [Authority] module anywhere), which has nothing to call. *)
+      let rec has_authority = function
+        | [] -> false
+        | Ast.DMod (n, _, _, _) :: _ when n.txt = "Authority" -> true
+        | _ :: rest -> has_authority rest in
+      if has_authority m.mod_decls || has_authority stdlib_context then
+        failwith "internal compiler error: the stdlib is linked but \
+                  Authority.launch_init was not lowered, so the program \
+                  entry cannot set its launch authority"
+      else all_fns
+    end
+    else begin
+      let launch_call (text, scoped) =
+        Tir.EApp
+          ({ Tir.v_name = Tir_names.launch_init_fn;
+             v_ty = Tir.TFn ([ Tir.TString; Tir.TBool ], Tir.TUnit);
+             v_lin = Tir.Unr },
+           [ Tir.ALit (Ast.LitString text); Tir.ALit (Ast.LitBool scoped) ])
+      in
+      if !test_pairs = [] then begin
+        (* The entry is chosen by the rule every backend applies
+           ([Tir_names.entry_main_of_names]): a bare [main], else the last
+           [Mod.main]; its request comes from the same entry in the AST. *)
+        let req = March_typecheck.Typecheck.launch_request m in
+        match Tir_names.entry_main_of_names
+                (List.map (fun (fn : Tir.fn_def) -> fn.fn_name) all_fns) with
+        | None -> all_fns
+        | Some entry ->
+          List.map (fun (fn : Tir.fn_def) ->
+              if fn.fn_name = entry
+              then { fn with fn_body = Tir.ESeq (launch_call req, fn.fn_body) } else fn)
+            all_fns
+      end else begin
+        let req = March_ast.Cap_request.test_request m in
+        if List.exists (fun (fn : Tir.fn_def) -> fn.fn_name = Tir_names.setup_all_fn_name)
+            all_fns
+        then
+          List.map (fun (fn : Tir.fn_def) ->
+              if fn.fn_name = Tir_names.setup_all_fn_name
+              then { fn with fn_body = Tir.ESeq (launch_call req, fn.fn_body) } else fn)
+            all_fns
+        else
+          all_fns
+          @ [ { Tir.fn_name = Tir_names.setup_all_fn_name;
+                fn_params = [];
+                fn_ret_ty = Tir.TCon ("Unit", []);
+                fn_body = launch_call req;
+                fn_kind = Tir.FnNormal } ]
+      end
+    end
   in
   (* A reference to a function-typed module-level let calls it for the
      closure first (see [Lower_decls.call_fn_typed_module_lets]). *)

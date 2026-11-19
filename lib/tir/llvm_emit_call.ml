@@ -53,6 +53,12 @@ let emit_load_field = Llvm_data.emit_load_field
     earlier arm intercepted. *)
 let emit_generic_app ~emit_atom ctx (f : Tir.var) (args : Tir.atom list)
   : string * string =
+  if args = [] && Tir_names.is_auth_layer_fn f.Tir.v_name
+     && Hashtbl.mem ctx.top_fns f.Tir.v_name then
+    (* A framed fn's layer, built once ([Auth_rt], [Llvm_ctx.emit_auth_layer_once]). *)
+    ("ptr", Llvm_ctx.emit_auth_layer_once ctx
+              (Llvm_ctx.llvm_name (mangle_extern f.Tir.v_name)))
+  else
     (* Emit each arg once, collecting both type and value strings. *)
     let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
     let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in

@@ -1,4 +1,5 @@
--- Tests for the Authority stdlib module (ocap phase 1: refusals as values).
+-- Tests for the Authority stdlib module (ocap phase 1: refusals as values;
+-- phase 4: the run-time policy, parse/admits/subset/check_layers).
 -- Run with: scripts/run-tests.sh stdlib_march
 
 mod TestAuthority do
@@ -78,6 +79,181 @@ describe "Authority" do
 
     test "an unrefused kind is allowed" do
       assert (Authority.check("IO.Console", "stdout") == Ok(()))
+    end
+
+  end
+
+  describe "parse" do
+
+    test "kinds with and without a path scope" do
+      assert (Authority.parse("IO.Console, IO.FileRead(\"/srv/a/\")")
+        == Ok([Authority.Scope("IO.Console", Authority.Any),
+               Authority.Scope("IO.FileRead", Authority.PathsAt(["/srv/a"]))]))
+    end
+
+    test "() is the empty list" do
+      assert (Authority.parse("()") == Ok([]))
+    end
+
+    test "an unclosed scope is an error" do
+      assert (Result.is_err(Authority.parse("IO.Console(")))
+    end
+
+    test "a host scope keeps the packed spec, its pattern decoded once" do
+      assert (Authority.parse("IO.NetConnect(\"api.x.com/v1/\", methods(get))")
+        == Ok([Authority.Scope("IO.NetConnect",
+                 Authority.HostAt("api.x.com/v1/;methods=get", "api.x.com", false, 0))]))
+      assert (Authority.parse("IO.NetConnect(\"*.X.com:8443\")")
+        == Ok([Authority.Scope("IO.NetConnect", Authority.HostAt("*.X.com:8443", "x.com", true, 8443))]))
+      assert (Authority.parse("IO.NetConnect(no_redirects)")
+        == Ok([Authority.Scope("IO.NetConnect", Authority.HostAt(";no_redirects", "", false, 0))]))
+    end
+
+    test "a name scope splits names and prefixes" do
+      assert (Authority.parse("IO.Mut(\"a\", \"b\", prefix(\"w.\"))")
+        == Ok([Authority.Scope("IO.Mut", Authority.Names(["a", "b"], ["w."]))]))
+    end
+
+    test "a scope on an unscopable kind is an error" do
+      assert (Result.is_err(Authority.parse("IO.Clock(\"x\")")))
+    end
+
+    test "a relative path scope is an error" do
+      assert (Result.is_err(Authority.parse("IO.FileRead(\"data\")")))
+      assert (Result.is_err(Authority.parse("IO.FileSystem(\"/srv\", \"x/\")")))
+    end
+
+    test "a malformed host is an error" do
+      assert (Result.is_err(Authority.parse("IO.NetConnect(\"https://x.com\")")))
+    end
+
+  end
+
+  describe "admits" do
+
+    test "a path scope on an ancestor admits a path inside it" do
+      let s = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))]
+      assert (Authority.admits(s, "IO.FileRead", "/srv/x", "/"))
+      assert (not(Authority.admits(s, "IO.FileRead", "/srvx", "/")))
+      assert (not(Authority.admits(s, "IO.FileRead", "../x", "/srv")))
+      assert (Authority.admits(s, "IO.FileRead", "x/y", "/srv"))
+    end
+
+    test "a parsed (normalized) path scope admits what Paths does" do
+      let s = [Authority.Scope("IO.FileSystem", Authority.PathsAt(["/srv"]))]
+      assert (Authority.admits(s, "IO.FileRead", "/srv/x", "/"))
+      assert (Authority.admits(s, "IO.FileRead", "/srv", "/"))
+      assert (Authority.admits(s, "IO.FileRead", "/srv/./x//y", "/"))
+      assert (not(Authority.admits(s, "IO.FileRead", "/srvx", "/")))
+      assert (not(Authority.admits(s, "IO.FileRead", "/srv/../etc", "/")))
+      assert (not(Authority.admits(s, "IO.FileRead", "../x", "/srv")))
+      assert (Authority.admits(s, "IO.FileRead", "x/y", "/srv"))
+      assert (not(Authority.admits(s, "IO.FileRead", "x", "")))
+      let root = [Authority.Scope("IO.FileSystem", Authority.PathsAt(["/"]))]
+      assert (Authority.admits(root, "IO.FileWrite", "/anything/at/all", "/"))
+      let a = [Authority.Scope("IO.FileRead", Authority.PathsAt(["/srv/a"]))]
+      let b = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))]
+      assert (Authority.subset(a, b))
+      assert (not(Authority.subset(b, a)))
+    end
+
+    test "an unknown current directory refuses a relative target" do
+      let s = [Authority.Scope("IO.FileSystem", Authority.Paths(["/"]))]
+      assert (not(Authority.admits(s, "IO.FileRead", "srv/x", "")))
+      assert (Authority.admits(s, "IO.FileRead", "/srv/x", ""))
+    end
+
+    test "a host scope admits the host-neutral TLS setup" do
+      let h = [Authority.Scope("IO.NetConnect", Authority.Hosts("api.x.com"))]
+      assert (Authority.admits(h, "IO.NetConnect.TLS", "", "/"))
+      assert (not(Authority.admits(h, "IO.NetConnect.TLS", "evil.com:443", "/")))
+      assert (not(Authority.admits(h, "IO.NetConnect", "", "/")))
+    end
+
+    test "an unscoped ancestor admits every target" do
+      assert (Authority.admits([Authority.Scope("IO", Authority.Any)], "IO.Clock", "", "/"))
+    end
+
+    test "an unrelated kind is refused" do
+      assert (not(Authority.admits([Authority.Scope("IO.Console", Authority.Any)], "IO.Clock", "", "/")))
+    end
+
+    test "a decoded host scope admits what its packed spec does" do
+      let h = [Authority.Scope("IO.NetConnect", Authority.HostAt("*.x.com:443", "x.com", true, 443))]
+      assert (Authority.admits(h, "IO.NetConnect", "api.x.com:443", "/"))
+      assert (not(Authority.admits(h, "IO.NetConnect", "api.x.com:80", "/")))
+      assert (not(Authority.admits(h, "IO.NetConnect", "x.com:443", "/")))
+      assert (Authority.admits(h, "IO.NetConnect.TLS", "", "/"))
+      let any = [Authority.Scope("IO.NetConnect", Authority.HostAt(";no_redirects", "", false, 0))]
+      assert (Authority.admits(any, "IO.NetConnect", "anything.org:1", "/"))
+    end
+
+    test "hosts and names" do
+      let h = [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com:443"))]
+      assert (Authority.admits(h, "IO.NetConnect", "api.x.com:443", "/"))
+      assert (not(Authority.admits(h, "IO.NetConnect", "api.x.com:80", "/")))
+      assert (not(Authority.admits(h, "IO.NetConnect", "x.com:443", "/")))
+      let n = [Authority.Scope("IO.Mut", Authority.Names(["a"], ["w."]))]
+      assert (Authority.admits(n, "IO.Mut", "w.1", "/"))
+      assert (not(Authority.admits(n, "IO.Mut", "b", "/")))
+    end
+
+  end
+
+  describe "subset" do
+
+    test "a narrower path under an ancestor kind" do
+      let a = [Authority.Scope("IO.FileRead", Authority.Paths(["/srv/a"]))]
+      let b = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))]
+      assert (Authority.subset(a, b))
+      assert (not(Authority.subset(b, a)))
+    end
+
+    test "an unscoped entry is not under a scoped one" do
+      let a = [Authority.Scope("IO.FileRead", Authority.Any)]
+      let b = [Authority.Scope("IO.FileRead", Authority.Paths(["/srv"]))]
+      assert (not(Authority.subset(a, b)))
+      assert (Authority.subset(b, a))
+    end
+
+    test "a decoded host scope compares by its spec" do
+      let a = [Authority.Scope("IO.NetConnect", Authority.HostAt("api.x.com", "api.x.com", false, 0))]
+      let b = [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com"))]
+      assert (Authority.subset(a, b))
+      assert (not(Authority.subset(b, a)))
+    end
+
+  end
+
+  describe "frame_layer" do
+
+    test "parses a needs clause once into the frame's layer" do
+      assert (Authority.frame_layer("M.f", "IO.FileRead(\"/srv/\")")
+        == Authority.Layer(ByFnNeeds("M.f"), "IO.FileRead(\"/srv/\")",
+             [Authority.Scope("IO.FileRead", Authority.PathsAt(["/srv"]))]))
+    end
+
+  end
+
+  describe "check_layers" do
+
+    test "the innermost refusing layer names the limit" do
+      let inner = Authority.Layer(ByFnNeeds("f"), "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])
+      let outer = Authority.Layer(ByLaunch, "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])
+      assert (Authority.check_layers("IO.Clock", "", [inner, outer])
+        == Err(CapError("IO.Clock", "", ByFnNeeds("f"), "IO.Console")))
+    end
+
+    test "every layer admitting is Ok" do
+      let l = Authority.Layer(ByLaunch, "IO", [Authority.Scope("IO", Authority.Any)])
+      assert (Authority.check_layers("IO.Clock", "", [l]) == Ok(()))
+    end
+
+    test "an outer layer refuses what the inner admits" do
+      let inner = Authority.Layer(ByFnNeeds("f"), "IO", [Authority.Scope("IO", Authority.Any)])
+      let outer = Authority.Layer(ByLaunch, "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])
+      assert (Authority.check_layers("IO.Clock", "", [inner, outer])
+        == Err(CapError("IO.Clock", "", ByLaunch, "IO.Console")))
     end
 
   end

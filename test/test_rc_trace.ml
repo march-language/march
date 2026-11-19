@@ -166,8 +166,15 @@ let test_report_names_the_leaking_site () =
       (contains live_section ":march_incrc\n");
     Alcotest.(check bool) ("balanced_loop is not blamed for any live object:\n" ^ out) false
       (contains live_section "LIVE 0x" && contains live_section "allocated at balanced_loop#");
+    (* Seven static string-literal cells, every one made immortal by
+       march_string_lit_static: leak_loop's "leaked-", balanced_loop's
+       "fine-", main's "sum: " and "delta: ", println's capability-check
+       pair "IO.Console" and "stdout", and main's launch request "IO" (from its
+       Cap(IO) parameter; march_cap_rt_launch_init parses it; ocap p4).
+       Before p4 the count was 8: println's inlined check materialised its
+       pair twice on the fast path, and there was no launch request. *)
     Alcotest.(check bool) ("literal cells are immortal, not leaks:\n" ^ out) true
-      (contains out "immortal: 8");
+      (contains out "immortal: 7");
     Alcotest.(check bool) ("no inconsistent history:\n" ^ out) true
       (contains out "inconsistent: 0");
     Alcotest.(check bool) ("the report's exit status flags the leak:\n" ^ out) true

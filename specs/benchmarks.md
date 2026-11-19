@@ -1491,6 +1491,7 @@ to the features it exercises. Quick reference:
 | JsonStream / streaming JSON | `json_stream` (tiny-token), `json_stream_strings` (string-heavy) |
 | actor / mailbox / scheduler / supervision changes | `scripts/actor-load.sh` (all four scenarios: `fanin`, `churn`, `callstorm`, `crashloop`) |
 | interpreter (`lib/eval/eval.ml`) / REPL-JIT (`lib/jit/`) changes | `bench/run_interp_bench.sh` (interp vs. compiled vs. repl-clang vs. repl-orc A-B over `bench/interp/`) |
+| ocap run-time authority (`stdlib/authority.march`, `runtime/march_authority.c`, `march_cap_*` in the runtime, `lib/tir/auth_rt.ml`, `lib/tir/auth_native.ml`) | `println_loop clock_loop spawn_loop actor_ping cap_check_slow cap_capture_closures list_ops` |
 
 ## scripts/compile-time-bench.sh — compile-time scenarios (cold / warm / per-edit)
 
@@ -1534,6 +1535,33 @@ whose `fib(n-1) + fib(n-2)` is the worst case) after any change to Int arithmeti
 codegen. First measurement, base vs trap, interleaved on a loaded box (minimum of
 15): fib 420 → 499 ms, index_loop 651 → 690 ms, list_ops 42 → 41 ms. Detail in
 `specs/progress/2026-10-30-int-overflow-trap.md`.
+
+## bench/cap_check_slow.march and bench/cap_capture_closures.march — ocap run-time authority (2026-11-17)
+
+`cap_check_slow` runs 1,000,000 `Authority.check("IO.Console", "stdout")` calls inside a
+scoped frame under a scoped launch request, so every check walks two layers (the frame's,
+then the launch's). The phase-4 budget is at most 1 µs per check (wall / 1e6).
+`cap_capture_closures` is the `list_ops` pipeline with composed function values, each of
+which is captured (it calls a function value), in a program with one frame; read it against
+the same file with that frame removed (the `report` clause unscoped), which turns capture off.
+Run both, with `println_loop clock_loop spawn_loop actor_ping list_ops`, after any change to
+the run-time authority (see the table above).
+
+First measurement (macOS arm64, 14 cores, load average about 10, 21 interleaved runs,
+`--opt 2`, median): `cap_check_slow` 97 ms wall, about 75 ns per check above the same loop
+on the fast path (no scope, no frame: 27 ms); entering and leaving a frame from unframed code
+about 60 ns (a 10M-call loop of a scoped function against the same function unscoped: 640 ms
+against 27 ms); `cap_capture_closures` 112 ms against 71 ms with its frame removed (+60–70%
+cpu): about 9–10 ns per captured call, over 4,666,666 of them (per pipeline, 1M calls each of
+the composed map and filter functions and 333,333 of the fold's, the filter's survivors). Detail and the A/B against the merge base in
+`specs/progress/2026-11-15-ocap-p4-runtime.md`.
+
+After Task 10b (2026-11-17; same box, load about 9, 31 interleaved runs against the runtime
+before it, emitted IR unchanged): a captured call of a value under the authority it was made
+under no longer touches a count or writes the slot, and a frame entered from the launch
+authority pushes a cached, immortal cell instead of allocating one. `cap_capture_closures`
+74 → 59 ms cpu against 43 ms with its frame removed: about 6.5 → 3.5 ns per captured call;
+frame entry and leave about 47 → 15 ns; `cap_check_slow` and `list_ops` unchanged.
 
 ## bench/int_divmod.march — Int `/` and `%` zero-divisor check (2026-11-06)
 

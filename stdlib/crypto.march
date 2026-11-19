@@ -208,10 +208,13 @@ mod Crypto do
       false
 
   Returns `false` if the hash format is unrecognised (wrong prefix, wrong
-  number of fields, non-integer iteration count, or a salt that is not
-  even-length hex). The digest is compared as lowercase hex, so a stored
-  hash whose digest was uppercased does not verify. Panics if the stored
-  iteration count is zero or negative (the runtime PBKDF2 call fails).
+  number of fields, non-integer iteration count, an iteration count of zero
+  or below, or a salt that is not even-length hex). It never panics on a
+  malformed stored hash. The digest is compared as lowercase hex, so a stored
+  hash whose digest was uppercased does not verify.
+
+      march> Crypto.verify_password("hunter2", "pbkdf2:sha256:0:30313233343536373839616263646566:a63e13df90f6bf8b58982d6c4c9d72e6d70c00339db67406bee1e6c980d08768")
+      false
   """
   fn verify_password(plain, stored) do
     let parts = string_split(stored, ":")
@@ -228,6 +231,7 @@ mod Crypto do
           Ok(new_bytes) ->
             let new_hex = bytes_to_hex(new_bytes)
             secure_compare(new_hex, hash_hex)
+          Err(_) -> false
           end
         end
       end

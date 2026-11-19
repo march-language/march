@@ -158,15 +158,25 @@ let try_call_thunk (thunk : value) : value =
    http_server_bind_host sets it (mirrors march_http_bind_addr in the C runtime). *)
 let http_bind_addr = ref Unix.inet_addr_any
 
-(* ocap phase 1: the TEST-ONLY refusal hook read by [cap_check_raw] and
-   [cap_launch_text] below. MARCH_TEST_REFUSE is a comma-separated list of
-   capability kinds the launch refuses, matched exactly; read once. The
-   compiled twin is runtime/march_extras.c, the JS one march_runtime.mjs. *)
-let cap_test_refuse_text =
-  lazy (String.trim (Option.value (Sys.getenv_opt "MARCH_TEST_REFUSE") ~default:""))
-let cap_test_refuse_kinds =
-  lazy (String.split_on_char ',' (Lazy.force cap_test_refuse_text)
-        |> List.map String.trim |> List.filter (fun k -> k <> ""))
+(* ocap phase 4: the run-time authority (runtime/march_runtime.c has the
+   compiled twin, march_runtime.mjs the JS one). [cap_slot] is the current
+   green thread's slot (a [List(Authority.Layer)], [Nil] when empty);
+   [cap_launch] the launch layers, written once. A CapAuthRef is the list
+   value itself. *)
+let cap_nil = Eval_runtime.cap_nil
+let cap_slot : value ref = Eval_runtime.cap_slot
+let cap_launch : value option ref = ref None
+let cap_is_empty = function VCon ("Nil", []) -> true | _ -> false
+let cap_layers_now () =
+  if not (cap_is_empty !cap_slot) then !cap_slot
+  else match !cap_launch with Some l -> l | None -> cap_nil
+let cap_grant_text =
+  lazy (String.trim (Option.value (Sys.getenv_opt "MARCH_GRANT") ~default:""))
+
+(* A fresh program launch (ocap phase 4): no launch layers, an empty slot. *)
+let reset_cap_authority () =
+  cap_launch := None;
+  cap_slot := cap_nil
 
 (* Write streams opened by file_open_write.  The interpreter's file handles
    are channels passed around as the Int [Obj.magic chan] (file_open), and a
@@ -2607,8 +2617,13 @@ let base_env : env =
            | Ok pk, Ok msg, Ok sg -> VBool (March_pqc.Pqc.mldsa65_verify pk msg sg)
            | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "mldsa65_verify: %s" e)
         | _ -> eval_error "mldsa65_verify(pk: Bytes, msg: Bytes, sig: Bytes): Bool"))
-    (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
+    (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) | Err(String) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
+        | [_; _; VInt iters; VInt dklen]
+          when dklen <= 0 || dklen > 1024 || iters <= 0 ->
+          (* Same bounds and message as march_pbkdf2_sha256 in
+             runtime/march_extras.c, so both backends return the same Err. *)
+          VCon ("Err", [VString "pbkdf2_sha256: invalid parameters"])
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
           (match march_val_to_raw pwd_v, march_val_to_raw salt_v with
            | Ok password, Ok salt ->
@@ -2881,12 +2896,52 @@ let base_env : env =
     (* ---- ocap phase 1 capability check point (runtime/march_extras.c has the
        compiled twin; the rule must match it exactly) ---- *)
   ; ("cap_check_raw", VBuiltin ("cap_check_raw", function
-        | [VString kind; VString _target] ->
-          VInt (if List.mem kind (Lazy.force cap_test_refuse_kinds) then 1 else 0)
+        | [VString _kind; VString _target] ->
+          (* 0: nothing is in force (empty launch, empty slot);
+             1: Authority.check walks the layers. *)
+          VInt (if cap_is_empty (cap_layers_now ()) then 0 else 1)
         | _ -> eval_error "cap_check_raw: expected (String, String)"))
-  ; ("cap_launch_text", VBuiltin ("cap_launch_text", function
-        | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_test_refuse_text)
-        | _ -> eval_error "cap_launch_text: takes no arguments"))
+  ; ("cap_layers", VBuiltin ("cap_layers", function
+        | args when args = [] || args = [VUnit] -> cap_layers_now ()
+        | _ -> eval_error "cap_layers: takes no arguments"))
+  ; ("cap_set_launch", VBuiltin ("cap_set_launch", function
+        | [l] ->
+          (match !cap_launch with
+           | Some _ -> eval_error "panic: cap_set_launch: the launch authority is already set"
+           | None -> cap_launch := Some l; VUnit)
+        | _ -> eval_error "cap_set_launch: expected one List(Authority.Layer)"))
+  ; ("cap_save", VBuiltin ("cap_save", function
+        | args when args = [] || args = [VUnit] -> !cap_slot
+        | _ -> eval_error "cap_save: takes no arguments"))
+  ; ("cap_restore", VBuiltin ("cap_restore", function
+        | [r] -> cap_slot := r; VUnit
+        | _ -> eval_error "cap_restore: expected one CapAuthRef"))
+  ; ("cap_push", VBuiltin ("cap_push", function
+        | [l] ->
+          let old = !cap_slot in
+          cap_slot := VCon ("Cons", [l; cap_layers_now ()]);
+          old
+        | _ -> eval_error "cap_push: expected one Authority.Layer"))
+  ; ("cap_enter", VBuiltin ("cap_enter", function
+        | [r] -> let old = !cap_slot in cap_slot := r; old
+        | _ -> eval_error "cap_enter: expected one CapAuthRef"))
+  ; ("cap_grant_text", VBuiltin ("cap_grant_text", function
+        | args when args = [] || args = [VUnit] -> VString (Lazy.force cap_grant_text)
+        | _ -> eval_error "cap_grant_text: takes no arguments"))
+  ; ("cap_cwd", VBuiltin ("cap_cwd", function
+        (* "" when the directory cannot be read (every backend agrees):
+           Authority then refuses a relative path target. *)
+        | args when args = [] || args = [VUnit] ->
+          VString (try Sys.getcwd () with Sys_error _ -> "")
+        | _ -> eval_error "cap_cwd: takes no arguments"))
+  ; ("cap_launch_fail", VBuiltin ("cap_launch_fail", function
+        (* Authority.launch_init's launch error: the text verbatim on fd 2,
+           then exit status 2. *)
+        | [VString text] ->
+          flush stdout;
+          prerr_string text; flush stderr;
+          exit 2
+        | _ -> eval_error "cap_launch_fail: expected String"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:

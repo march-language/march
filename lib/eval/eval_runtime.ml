@@ -113,7 +113,10 @@ let rec value_to_string v =
   | VInt n    -> string_of_int n
   | VFloat f  ->
     string_of_float f
-  | VString s -> "\"" ^ String.escaped s ^ "\""
+  (* Not [String.escaped], which spelled every byte >= 0x80 as a decimal
+     escape ("caf\195\169"): the test report's quoting, which leaves UTF-8
+     text readable and escapes only quotes, backslashes and control bytes. *)
+  | VString s -> March_errors.Test_report.quote s
   | VBool b   -> string_of_bool b
   | VAtom a   -> ":" ^ a
   | VUnit     -> "()"
@@ -224,10 +227,38 @@ let rec value_to_string v =
 
 type monitor_down_reason = Normal | Killed | Crash of string
 
+(* ocap phase 4: the interpreter's authority slot ([Eval_builtins] re-exports
+   it, with the builtins over it).  Here so the actor machinery below can
+   run each actor's handlers, on_stop and restarts under the authority it
+   was spawned under ([with_actor_authority]). *)
+let cap_nil = VCon ("Nil", [])
+let cap_slot : value ref = ref cap_nil
+
+(** [k ()] with the slot set to [auth], restored afterwards (also when [k]
+    raises).  The interpreter runs every actor handler on the one OCaml
+    stack, nested inside whatever is in force (a send from main, an
+    Actor.call pumping the scheduler from inside a frame), so the authority
+    an actor runs under must be installed around each step: the compiled
+    runtime's per-proc slot (runtime/march_runtime.c, actor_install_auth). *)
+let with_actor_authority (auth : value) (k : unit -> 'a) : 'a =
+  let saved = !cap_slot in
+  if saved == auth then k ()
+  else begin
+    cap_slot := auth;
+    match k () with
+    | v -> cap_slot := saved; v
+    | exception e -> cap_slot := saved; raise e
+  end
+
 type actor_inst = {
   ai_name    : string;           (** Actor type name, e.g. "Counter" *)
   ai_def     : actor_def;
   ai_env_ref : env ref;         (** Module environment at spawn time *)
+  ai_authority : value;
+  (** ocap phase 4: the run-time authority this actor runs under for life
+      (design §7), the slot value in force where it was FIRST spawned
+      ([Nil]: the launch authority).  A restart copies it from the
+      incarnation it replaces, never from where the restart runs. *)
   ai_init_args : value list;
   (** The `init` arguments this incarnation was spawned with (D24), in
       declaration order; [] for an actor with the bare `init { … }`.  A
@@ -1012,8 +1043,19 @@ let spawn_child_actor ?(crashed_pid : int option = None) ?(init_args : value lis
          | None -> [])
       | None, None -> []
     in
+    (* The replacement runs under the authority of the slot's first spawn,
+       which each incarnation carries forward (design §7); a first spawn from
+       a child spec, under the authority in force here. *)
+    let authority = match crashed_pid with
+      | Some old_pid ->
+        (match Hashtbl.find_opt actor_registry old_pid with
+         | Some old_inst -> old_inst.ai_authority
+         | None -> !cap_slot)
+      | None -> !cap_slot
+    in
     let child_init_state =
-      eval_actor_init_state child_env_ref child_def child_actor_name init_args in
+      with_actor_authority authority (fun () ->
+          eval_actor_init_state child_env_ref child_def child_actor_name init_args) in
     let child_pid = !next_pid in
     next_pid := child_pid + 1;
     (* Inherit epoch from crashed actor + 1 for proper stale-cap detection. *)
@@ -1026,7 +1068,7 @@ let spawn_child_actor ?(crashed_pid : int option = None) ?(init_args : value lis
     in
     let child_inst = {
       ai_name = child_actor_name; ai_def = child_def;
-      ai_env_ref = child_env_ref; ai_init_args = init_args;
+      ai_env_ref = child_env_ref; ai_authority = authority; ai_init_args = init_args;
       ai_state = child_init_state; ai_alive = true;
       ai_terminal_reason = Normal;
       ai_monitors = []; ai_mailbox = Queue.create ();
@@ -1556,7 +1598,7 @@ and run_on_stop (pid : int) (inst : actor_inst) (deadline : float option) : unit
     let prev_pid = !current_pid in
     current_pid := Some pid;
     let env = [("state", inst.ai_state); ("self", VPid pid)] @ !(inst.ai_env_ref) in
-    (match !eval_expr_hook env h.ah_body with
+    (match with_actor_authority inst.ai_authority (fun () -> !eval_expr_hook env h.ah_body) with
      | _ -> ()
      | exception BlockedOnReceive ->
        (match deadline with

@@ -92,6 +92,8 @@ let corpus = [
   "record_branch_field_result",      "record_branch_field_result.march";
   "tuple_destructure_moved_fields",  "tuple_destructure_moved_fields.march";
   "nominal_record_actor_drops",      "nominal_record_actor_drops.march";
+  "auth_frame",                      "auth_frame.march";
+  "auth_capture",                    "auth_capture.march";
 ]
 
 (* ── Path resolution ────────────────────────────────────────────────────
@@ -133,8 +135,15 @@ let builtin_type_names = ["Option"; "Result"; "List"]
 let has_prefix p s =
   String.length s >= String.length p && String.sub s 0 (String.length p) = p
 
+(* Authority's run-time policy (stdlib/authority.march, ocap phase 4) is
+   linked into every program that performs a capability operation (println
+   -> Authority.check -> check_layers ...); its ~100 helpers would bury the
+   user code each snapshot pins, so they are filtered like the prelude
+   impls.  Its own shape is pinned by its tests, not by this corpus. *)
+let filtered_fn_prefixes = prelude_iface_prefixes @ [ "Authority." ]
+
 let is_prelude_fn (fn : March_tir.Tir.fn_def) =
-  List.exists (fun p -> has_prefix p fn.March_tir.Tir.fn_name) prelude_iface_prefixes
+  List.exists (fun p -> has_prefix p fn.March_tir.Tir.fn_name) filtered_fn_prefixes
 
 let is_builtin_type (td : March_tir.Tir.type_def) =
   match td with
@@ -219,8 +228,17 @@ let test_perceus_verifier_checks_rc_balance () =
     Alcotest.(check bool) "reports the RC over-release" true
       (Test_helpers.contains "rc-balance/over-release: `x`" message)
 
+(* Lowering as every pipeline runs it: [Lower.lower_module], then the
+   run-time frames of ocap phase 4 ([Auth_rt.frames]) and the capture of
+   authority by function values ([Auth_rt.captures]), which leave a module
+   with nothing to frame physically unchanged. *)
+let lower_framed src =
+  let tir = Test_helpers.lower_module_typed src in
+  let tir, has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  March_tir.Auth_rt.captures tir ~has_frames ~repl:false
+
 let dump_post_lower src =
-  render_module (verified "tir-lower" (Test_helpers.lower_module_typed src))
+  render_module (verified "tir-lower" (lower_framed src))
 
 let run_perceus tir =
   let k_table = March_tir.Kind.of_module tir in
@@ -236,7 +254,7 @@ let run_perceus tir =
    zero snapshot lines, which reads as "nothing changed" when it actually
    meant "nothing was looking". *)
 let dump_post_perceus src =
-  let tir = verified "tir-lower" (Test_helpers.lower_module_typed src) in
+  let tir = verified "tir-lower" (lower_framed src) in
   let tir = verified "tir-trmc" (March_tir.Trmc.transform_module tir) in
   let tir = verified "tir-mono" (March_tir.Mono.monomorphize tir) in
   let tir = verified "tir-defun" (March_tir.Defun.defunctionalize tir) in

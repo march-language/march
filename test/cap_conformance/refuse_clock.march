@@ -1,6 +1,6 @@
--- REFUSE: IO.Clock
--- One refused kind: a clock check is refused by the launch, with the hook's
--- text as the limit's scope; a console check still passes.
+-- GRANT: IO.Console
+-- One kind outside the launch grant: a clock check is refused by the launch,
+-- with the grant's text as the limit's scope; a console check still passes.
 mod RefuseClock do
   needs IO.Console
 

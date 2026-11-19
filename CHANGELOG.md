@@ -38,6 +38,36 @@ git log is authoritative for exact commits.
 
 ### Added
 
+- **Run-time authority (object capabilities, phase 4).** Every capability operation is now
+  also checked while the program runs, against the authority in force, in the interpreter,
+  `--jit`, the REPL, compiled binaries and `--target js` alike. A refusal is the operation's
+  `Err(CapError(...))`, naming the innermost limit that refused it (`ByLaunch` or
+  `ByFnNeeds(f)`) and that limit's scopes. A function value keeps the authority it was made
+  under wherever it is called; a value made by module-level code runs under its caller's.
+  An actor or task keeps its spawner's authority for life, and a supervisor restarts a child
+  under the authority of its first spawn. A program with no grant, no scoped request and no
+  scoped function pays two global loads per operation and one call at launch; a check that
+  walks the layers costs well under a microsecond; in a program with scoped functions, a
+  captured call costs a few nanoseconds and entering a scoped function about 15 ns. A panic
+  caught by `try_finally`, a property or a test puts back the authority that was in force
+  where it was caught. Not yet covered: direct calls of raw
+  builtins, the `HttpServer` and `Udp.resolve` opens, and authority across nodes. See
+  [Capabilities](docs/capabilities.md#run-time-authority).
+- **`--grant` / `MARCH_GRANT` narrow what one run may do.** `MARCH_GRANT='IO.Console,
+  IO.FileRead("/srv/")' ./prog`, `march --grant ... file.march`, `march repl --grant ...` and
+  `forge run --grant ...` start the program with that scope list instead of `main`'s full
+  request. A grant that does not parse, or that grants anything `main` does not request, is a
+  launch error: one line on stderr (`march: MARCH_GRANT grants IO.FileRead, which main does
+  not request (main requests: IO.Console)`) and exit status 2, before any of the program runs.
+  `()` grants nothing; an empty `MARCH_GRANT` is unset.
+- **`march repl FILE --grant G`.** The REPL with a preloaded file now takes `--grant`, which
+  narrows its launch as it already did without a file; it used to be read as a second file.
+- **Scoped function `needs`.** `fn read_conf(name : String) : String needs
+  IO.FileRead("/etc/myapp/") do ... end` limits everything the function reaches to those
+  paths (hosts, names) while it runs: `read_conf("../passwd")` is refused by `read_conf`'s
+  needs. Limits nest and intersect with the launch grant. The compiler checks the clause's
+  kinds; its scopes are checked at run time.
+
 - **Warnings for logical races.** March has no memory-level data races, but two kinds
   of race survive above the memory model, and the checker now names them:
   - `vault_check_then_act`: a function reads a Vault key and then writes it based on
@@ -638,6 +668,21 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A program that prints without any `needs` line is fixed by adding the `needs` line
+  alone.** `main` with no `needs` clause and no `Cap` parameter is granted the module's
+  `needs` line, so the missing-`needs` error's hint and `forge fix` no longer also give
+  `main` a `Cap(...)` parameter. A `main` bounded by `needs ()` that performs IO is
+  reported once, as `cap_grant`, with a fix that rewrites the clause to name what the
+  program reaches (for example `needs IO.Console`), instead of a `cap_bound` error plus a
+  `cap_grant` fix that added a `Cap` parameter and left the empty bound in place.
+  That same request (`main`'s `needs` clause and `Cap` parameters, else the module's `needs`
+  line; `needs ()` requests nothing) is what the program starts with at run time.
+- **The test-only `MARCH_TEST_REFUSE` hook is removed.** Use `MARCH_GRANT` (or `--grant`)
+  with a scope list that leaves the capability out.
+- **One rule picks the program entry everywhere.** A bare `main` is the entry, else the last
+  module-qualified `Mod.main`. Compiled code used to pick a later `Mod.main` over a bare
+  `main`; it now agrees with the other runtimes.
+
 - **Registering and finding actors by name needs the new `IO.Registry` capability;
   `forge fix` adds the line.** `Actor.register`, `Actor.unregister`, `Actor.whereis` and
   `Actor.registered` are charged `IO.Registry` (a child of `IO`, so `needs IO` still covers
@@ -690,7 +735,7 @@ git log is authoritative for exact commits.
   files outside a project. The new `Authority` module (`check`, `describe`, `must`, `ignore`)
   and the Prelude types `CapError`/`CapLimit` carry it. The parallel `List` helpers compute
   sequentially when spawning is refused; `IO.inspect`, `debug` and the Logger never fail.
-  Nothing refuses yet except the test-only `MARCH_TEST_REFUSE` hook; UDP, TLS contexts,
+  What refuses is the run-time authority (phase 4, under Added); UDP, TLS contexts,
   `HttpClient` and `HttpServer` follow in phase 2. The REPL does not echo the `Ok(())` of a
   console operation. Reading stdin is now charged to `IO.Console`.
 - **`forge fix` keeps a file's final newline**; it used to drop it from every file it fixed.
@@ -1152,6 +1197,38 @@ git log is authoritative for exact commits.
   returns a closure, with a record argument released after the call, crashed on the
   first use of the closure.
 
+- **A function value made at the interpreter REPL's prompt keeps the prompt's authority.**
+  `let f = fn p -> File.read(p)` typed at the prompt was treated as module-level code and ran
+  under whatever authority later called it.
+- **A polymorphic function declared at the JIT REPL's prompt no longer crashes on its first
+  call.** It now fails cleanly with ``jit error: no compiled body for `f` `` (the JIT never
+  instantiates it; `specs/todos/2026-11-11-repl-nested-fn-decl-jit-error-hd.md`).
+
+- **A function named like a builtin no longer captures the standard library's calls to that
+  builtin.** An entry-module `fn not` (or any other builtin name, such as `negate` or
+  `int_xor`) is the program's own function only in the file that defines it. Compiled natively
+  and under `--target js`, the standard library's own calls to the builtin ran the user's
+  function instead: `Topology.labels_of`, `VectorClock.compare` and others returned wrong
+  results, and on `--target js` the capability policy ran it at every launch. The interpreter
+  was already right.
+
+- **Several `march repl` bugs fixed:**
+  - `==` on a stdlib type (`Some(1) == Some(1)`, `[1] == [1]`, `Ok(1) == Ok(1)`) works again
+    in both REPLs. It was rejected with "does not implement interface `Eq`".
+  - The native REPL no longer gives a different answer the second time a session compares
+    values of the same type. `Vault.get(c, "h") == Some(1)` was `true` once, then `false`.
+  - Strings with non-ASCII text print as text: `"café"`, not `"caf\195\169"`. This applies
+    to the interpreter REPL too.
+  - A unit result prints `()`, not `1`.
+  - A panic is reported as `runtime error: panic: ...` and the session goes on. It used to
+    end the native REPL.
+- **`Crypto.verify_password` no longer crashes on a stored hash with an iteration count of
+  zero or below.** A compiled program panicked ("no pattern of this match matched") where the
+  interpreter returned `false`; both now return `false`, so one bad row in a password table
+  cannot crash the login path. The `pbkdf2_sha256` builtin now returns the same
+  `Err("pbkdf2_sha256: invalid parameters")` on both backends for an iteration count of zero or
+  below, or an output length outside 1 to 1024 bytes; the interpreter used to run one iteration
+  and return `Ok`.
 - **A function calling a helper defined below a `type` declaration got the wrong type.**
   The type checker orders a module's functions callee-first, but a `type` declaration
   between a caller and its helper ended that ordering, and the caller's result type was left

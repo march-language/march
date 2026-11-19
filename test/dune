@@ -53,7 +53,7 @@
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
 ; and alias both) from `dune runtest`, along with run_cap_conformance,
-; run_errors and test_jit, which CI runs in the `compiler` and `forge` shards. Unset --
+; run_errors and test_jit, which CI runs in the `forge` shard. Unset --
 ; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
@@ -79,6 +79,19 @@
  (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules run_compiler)
  (libraries march_test_compiler alcotest)
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
+ (action (run %{test} -e)))
+
+;; The run-time authority suites (ocap phase 4): every case compiles and runs
+;; programs in several runtimes, ~10-15 serial CI minutes. In run_compiler they
+;; took the `compiler` shard (~60 min on main) past its 75-minute step timeout,
+;; so they are their own runner: an ordinary stanza, which CI's `rest` shard
+;; runs beside the others under `dune runtest`. Their groups are not
+;; OS-sensitive, so the macOS job keeps none of them (keep_os_sensitive).
+(test
+ (name run_authority)
+ (modules run_authority test_cap_runtime_slot test_authority_differential test_auth_rt)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_tir march_caps yojson alcotest str unix threads.posix)
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (run %{test} -e)))
 
@@ -1137,6 +1150,44 @@
 (alias
  (name runtest)
  (deps (alias cap_lattice_check)))
+
+; ── cap lattice freshness (March) ─────────────────────────────────────────
+; The same anti-drift check for the March copy of the lattice: regenerates
+; stdlib/authority.march's generated block from lib/caps/cap_lattice.ml via
+; lib/caps/emit_march_lattice.ml and diffs the result against the committed
+; file.  Target it alone with `dune build --root . @test/cap_lattice_march_check`.
+(rule
+ (targets cap_lattice_fresh_authority.march)
+ (deps    ../stdlib/authority.march (file %{exe:../lib/caps/emit_march_lattice.exe}))
+ (action  (run %{exe:../lib/caps/emit_march_lattice.exe} ../stdlib/authority.march cap_lattice_fresh_authority.march)))
+
+(rule
+ (alias cap_lattice_march_check)
+ (deps  ../stdlib/authority.march cap_lattice_fresh_authority.march)
+ (action (diff ../stdlib/authority.march cap_lattice_fresh_authority.march)))
+
+(alias
+ (name runtest)
+ (deps (alias cap_lattice_march_check)))
+
+; ── authority tables freshness ───────────────────────────────────────────
+; Regenerates runtime/march_authority_tables.h (the C run-time authority's
+; lattice and scope-kind tables) from lib/caps via lib/caps/emit_c_lattice.ml
+; and diffs it against the committed copy.  Target it alone with
+; `dune build --root . @test/authority_tables_check`.
+(rule
+ (targets authority_tables_fresh.h)
+ (deps    (file %{exe:../lib/caps/emit_c_lattice.exe}))
+ (action  (run %{exe:../lib/caps/emit_c_lattice.exe} authority_tables_fresh.h)))
+
+(rule
+ (alias authority_tables_check)
+ (deps  ../runtime/march_authority_tables.h authority_tables_fresh.h)
+ (action (diff ../runtime/march_authority_tables.h authority_tables_fresh.h)))
+
+(alias
+ (name runtest)
+ (deps (alias authority_tables_check)))
 
 ; ── Distributed-OTP function-by-identity registry unit test ──────────────
 (rule
@@ -9034,6 +9085,60 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (alias runtest)
  (action (diff native/shadowed_negate_not.expected native_shadowed_negate_not.out)))
 
+; A builtin call in a NON-entry (stdlib) module stays the builtin even when the
+; entry module defines a fn of the same bare name (`not`, `string_is_empty`):
+; Topology.labels_of's `not(String.is_empty(l))` ran the user's `fn not`
+; natively and on --target js (and Authority's `not` calls ran it at launch on
+; JS).  Interpreter, native and JS must all print the same thing.
+(rule
+ (targets js_shadowed_builtin_cross_module.mjs)
+ (deps (file %{exe:../bin/main.exe}) (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_cross_module.march) march_runtime.mjs)
+ (action (run %{exe:../bin/main.exe} --target js --no-copy-runtime
+              -o js_shadowed_builtin_cross_module.mjs
+              native/shadowed_builtin_cross_module.march)))
+
+(rule
+ (targets js_shadowed_builtin_cross_module.out)
+ (deps js_shadowed_builtin_cross_module.mjs march_runtime.mjs)
+ (action (with-stdout-to js_shadowed_builtin_cross_module.out
+          (run node js_shadowed_builtin_cross_module.mjs))))
+
+(rule (alias runtest)
+ (action (diff native/shadowed_builtin_cross_module.expected
+               js_shadowed_builtin_cross_module.out)))
+
+(rule
+ (targets native_shadowed_builtin_cross_module native_shadowed_builtin_cross_module.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (glob_files ../stdlib/*.march)
+       (file native/shadowed_builtin_cross_module.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile -o native_shadowed_builtin_cross_module
+        native/shadowed_builtin_cross_module.march)
+   (with-stdout-to native_shadowed_builtin_cross_module.out
+        (system "./native_shadowed_builtin_cross_module")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/shadowed_builtin_cross_module.expected
+               native_shadowed_builtin_cross_module.out)))
+
+(rule
+ (targets interp_shadowed_builtin_cross_module.out)
+ (deps (file %{exe:../bin/main.exe})
+       (source_tree ../stdlib)
+       (file native/shadowed_builtin_cross_module.march))
+ (action
+  (with-stdout-to interp_shadowed_builtin_cross_module.out
+    (run %{exe:../bin/main.exe} native/shadowed_builtin_cross_module.march))))
+
+(rule (alias runtest)
+ (action (diff native/shadowed_builtin_cross_module.expected
+               interp_shadowed_builtin_cross_module.out)))
+
 ; The native shadowed-builtin witness on --target js: a user `fn int_mod`
 ; collided with the first-class `const int_mod = {...}` builtin wrapper.
 (rule
@@ -15299,19 +15404,21 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
  (action (run %{test} -e)))
 
 ; Capability refusal conformance (ocap phase 1, extended by phase 4): every
-; test/cap_conformance/*.march runs interpreted, through the JIT, compiled and
-; as JS under its `-- REFUSE:` MARCH_TEST_REFUSE value, and each backend's
-; stdout + exit code must equal <name>.expected. Regenerate with
+; test/cap_conformance/*.march runs interpreted, through the JIT, compiled, as
+; JS and in the REPL under its optional `-- GRANT:` (MARCH_GRANT) header, and
+; each runtime's stdout + exit code (with `-- EXIT-ONLY`: stderr's first line
+; + exit code) must equal <name>.expected. Regenerate with
 ; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
 (test
  (name run_cap_conformance)
- ; Runs in CI's `compiler` shard (ci.yml), not `rest`: four backends per
- ; fixture cost ~14 CPU-minutes there, which pushed `rest` past its timeout.
+ ; Runs in CI's `forge` shard (ci.yml), not `rest` or `compiler`: its five
+ ; runtimes per fixture (~8 min there) pushed `rest`, then `compiler`
+ ; (beside run_compiler), past the 75-minute step timeout.
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
  (modules run_cap_conformance)
- (libraries march_test_helpers alcotest unix)
+ (libraries march_test_helpers march_parser march_ast alcotest unix)
  (deps %{exe:../bin/main.exe} (source_tree ../stdlib)
        (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
        (glob_files ../runtime/*.mjs)

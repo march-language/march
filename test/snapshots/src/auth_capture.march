@@ -1,0 +1,49 @@
+-- Capture of authority by function values (ocap phase 4, Task 5,
+-- lib/tir/auth_rt.ml [captures]): the program has a frame (`scoped`), so
+-- `main` saves the authority once on entry, and each value that can depend
+-- on it enters it around its body: the lambda calling println, the eta
+-- lambda `say` becomes when passed as a value, and the self-recursive
+-- `loop_say`, whose body moves to an uncaptured lambda so its self tail
+-- call stays a loop.  The pure lambda and the module-level `shout` capture
+-- nothing.  `probe` makes the lowerer load Authority (this harness links no
+-- stdlib), so the frame's calls resolve.
+mod AuthCapture do
+  needs IO.Console
+  needs IO.FileRead
+  let shout = fn s -> println(s)
+
+  fn scoped(n : Int) : Int needs IO.FileRead("/srv/") do
+    n
+  end
+
+  fn probe() : Result((), CapError) do
+    Authority.check("IO.FileRead", "/srv/x")
+  end
+
+  fn say(s : String) : Unit do
+    println(s)
+  end
+
+  fn apply_to(f : String -> Unit, s : String) : Unit do
+    f(s)
+  end
+
+  fn main() needs IO.Console, IO.FileRead("/srv/") do
+    let p = fn s -> println(s)
+    let inc = fn x -> x + 1
+    fn loop_say(k : Int) : Unit do
+      if k == 0 do () else
+        println("k")
+        loop_say(k - 1)
+      end
+    end
+    p("a")
+    apply_to(say, "b")
+    loop_say(scoped(inc(1)))
+    shout("c")
+    match probe() do
+    Ok(_) -> ()
+    Err(_) -> ()
+    end
+  end
+end

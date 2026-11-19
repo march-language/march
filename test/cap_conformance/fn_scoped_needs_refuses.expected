@@ -1,0 +1,4 @@
+allowed /etc/myapp/passwd | IO.FileRead("/etc/passwd") refused by function read_conf's needs (IO.FileRead("/etc/myapp/"))
+true
+allowed /etc/passwd
+exit 0

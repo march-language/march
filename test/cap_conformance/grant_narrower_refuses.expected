@@ -1,0 +1,4 @@
+allowed /srv/data.txt
+IO.FileRead("/etc/hosts") refused by the launch grant (IO.Console, IO.FileRead("/srv/"))
+IO.Process("HOME") refused by the launch grant (IO.Console, IO.FileRead("/srv/"))
+exit 0
