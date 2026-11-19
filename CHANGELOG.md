@@ -1136,6 +1136,17 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A hot deploy that changes an actor's state with no migration is refused under every
+  `@compat` policy.** `@compat(forward)` (added fields) and `@compat(any)` used to let such a
+  deploy through with no migration, so each running actor kept its old state record while the
+  new handlers read the new layout, and the actor crashed on its next message (reproduced: a
+  SIGSEGV reading an added field past the end of the record). `forge deploy hot` and
+  `forge deploy plan` now refuse it and say why nothing was derived, and the reload server
+  refuses it from any client (`ERR migrate_missing`). Most such changes still need no
+  hand-written code: added fields with constant `init` values, a `migrate` clause and `--drop`
+  derive the migration. `@compat(forward)` and `@compat(any)` remain valid spellings, but no
+  longer waive a migration.
+
 - **Several `march repl` bugs fixed:**
   - `==` on a stdlib type (`Some(1) == Some(1)`, `[1] == [1]`, `Ok(1) == Ok(1)`) works again
     in both REPLs. It was rejected with "does not implement interface `Eq`".

@@ -1,0 +1,33 @@
+-- @compat(forward) does not waive a migration (specs/progress/
+-- 2026-11-18-compat-forward-unmigrated-state-refused.md).  v2 adds `label`,
+-- whose `init` value is a parameter, so nothing is derived, and marks Counter
+-- @compat(forward).  That deploy used to go through with no migration: the
+-- live Counter kept its one-field record, and v2's Report read `label` past
+-- its end (SIGSEGV, addr 0x8).  Now the deploy is refused, and this v1 keeps
+-- running: its last Report prints the count it had all along.
+mod Fwd do
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Clock
+
+  actor Counter do
+    state { count : {Int | _ >= 0} }
+    init { count: 0 }
+    on Tick() do { count: state.count + 1 } end
+    on Report() do
+      println("v1 count: " ++ int_to_string(state.count))
+      state
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _k : Cap(IO.Clock)) : Unit do
+    let counter = spawn(Counter)
+    List.each(List.range(0, 5), fn _ -> send(counter, Tick))
+    sleep_ms(300)
+    println("ready")
+    List.each(List.range(0, 150), fn _ -> sleep_ms(100))
+    send(counter, Tick)
+    send(counter, Report)
+    sleep_ms(500)
+  end
+end

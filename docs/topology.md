@@ -523,7 +523,7 @@ Per pool, the mechanism is the strongest that applies:
 
 | Mechanism | When |
 |---|---|
-| blocked | a state change with no `migrate_state` under its `@compat`, a `migrate_msg` for the wrong old type, a widening capability without `--grant-cap` |
+| blocked | a state change with no `migrate_state` (written or derived; no `@compat` policy waives it), a `migrate_msg` for the wrong old type, a widening capability without `--grant-cap` |
 | restart | nothing deployed yet; a pool hook changed (hooks run once, at start); the C runtime, HCR ABI or target changed; a binding, a new role or pool, hosts or labels changed; code the running base cannot swap; compaction |
 | hot patch + protocol drain | a protocol's wire fingerprint changed: its offers close and drain |
 | hot patch + migration | an actor's state changed and `migrate_state` exists |

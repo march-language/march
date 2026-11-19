@@ -226,33 +226,37 @@ let diff_actor (old_s : actor_schema) (new_s : actor_schema) : field_change list
       | _ -> None) old_map in
   removed @ added @ changed
 
-(** Check whether [changes] are compatible with [compat_policy].
-    Returns [Ok ()] or [Error msg] where msg explains the violation. *)
+(** Check whether [changes] can be deployed without a migration under
+    [compat].  Returns [Ok ()] or [Error msg] where msg explains the violation.
+
+    No policy waives a migration for a change to the state's fields: with no
+    [__migrate_<Actor>] in the patch the runtime keeps each live actor's old
+    state record, and the new handlers read it with the new layout (an added
+    field is a read past the end of the record; a removed or retyped one reads
+    the wrong word).  [@compat(forward)] and [@compat(any)] used to admit such
+    a deploy, and the actor crashed on its first message
+    (specs/progress/2026-11-18-compat-forward-unmigrated-state-refused.md).
+    A migration is still often free: the compiler derives one for added
+    fields with constant [init] values, for a [migrate] clause, and for
+    [--drop]ped fields. *)
 let check_compat (compat : string) (changes : field_change list) : (unit, string) result =
   if changes = [] then Ok ()
-  else match compat with
-  | "any" -> Ok ()
-  | "forward" ->
-    let bad = List.filter (function
-        | FieldAdded _ -> false
-        | FieldRemoved _ | FieldTypeChanged _ -> true) changes in
-    if bad = [] then Ok ()
-    else
-      let desc = List.filter_map (function
-          | FieldRemoved f -> Some (Printf.sprintf "field removed: %s" f.name)
-          | FieldTypeChanged c ->
-            Some (Printf.sprintf "type changed: %s (%s → %s)" c.name c.old_ty c.new_ty)
-          | FieldAdded _ -> None) bad in
-      Error (Printf.sprintf "@compat(forward) violated: %s" (String.concat ", " desc))
-  | _ (* "full" default *) ->
+  else
     let desc = List.map (function
         | FieldAdded f -> Printf.sprintf "field added: %s : %s" f.name f.ty
         | FieldRemoved f -> Printf.sprintf "field removed: %s" f.name
         | FieldTypeChanged c ->
           Printf.sprintf "type changed: %s (%s → %s)" c.name c.old_ty c.new_ty)
-      changes in
-    Error (Printf.sprintf "@compat(full) violated: %s — provide migrate_state or add @compat(any)"
-             (String.concat ", " desc))
+        changes |> String.concat ", " in
+    match compat with
+    | "forward" | "any" ->
+      Error (Printf.sprintf
+               "@compat(%s) does not waive a migration for a state change: %s — \
+                the running actors would keep their old state while the new handlers \
+                read the new layout; provide migrate_state, or let the compiler derive it"
+               compat desc)
+    | _ (* "full" default *) ->
+      Error (Printf.sprintf "@compat(full) violated: %s — provide migrate_state" desc)
 
 (** What to add to a refusal for a missing migrate_state: why the compiler
     did not derive one, when the new build's schema says. *)
