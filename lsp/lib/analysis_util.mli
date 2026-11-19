@@ -194,6 +194,7 @@ type t =
   consume_modes : consume_modes list;
   no_alloc_candidates : (string * Ast.span * Ast.span * string) list;
   cap_program : (Ast.module_ * Tc.env) option;
+  deps_digest : string;
   (** The whole program (stdlib, dependencies, this file) and its typecheck
       env, for the TIR-side capability checks [run_tir_pass] runs. *)
   tir_fn_insights : tir_fn_insight list;

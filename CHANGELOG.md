@@ -1206,6 +1206,12 @@ git log is authoritative for exact commits.
   that field without releasing what it owned, a leak. A call to a function that
   returns a closure, with a record argument released after the call, crashed on the
   first use of the closure.
+- **The editor no longer reports a false `@[no_alloc]` error on a call into another module of
+  the project.** A `@[no_alloc]` function calling a function from a sibling file in the same
+  forge project was flagged "calls through an unknown closure … I can't see what `Other.g`
+  does" by the language server, while `forge build` accepted it. The server's contract check
+  now lowers the open file together with its resolved imports and the stdlib, as the build
+  does, and re-checks when an imported file changes.
 
 - **A function value made at the interpreter REPL's prompt keeps the prompt's authority.**
   `let f = fn p -> File.read(p)` typed at the prompt was treated as module-level code and ran

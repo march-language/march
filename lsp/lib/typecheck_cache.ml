@@ -70,10 +70,11 @@ let deps_key (deps : Ast.decl list) : string =
 (* stdlib + deps env, memoized by dep content. Returns [base] unchanged when
    there are no deps. The cached env still has shared mutable state — callers
    must [derive] it before layering the user file. *)
-let deps_env (base : Tc.env) ~(deps : Ast.decl list) : Tc.env =
+let deps_env ?key (base : Tc.env) ~(deps : Ast.decl list) : Tc.env =
   if deps = [] then base
   else
-    let k = deps_key deps in
+    (* [key], when given, is [deps_key deps] already computed by the caller. *)
+    let k = match key with Some k -> k | None -> deps_key deps in
     match Hashtbl.find_opt deps_cache k with
     | Some env -> env
     | None ->
