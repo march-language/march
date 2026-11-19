@@ -29,6 +29,12 @@ as an opaque closure. The typecheck path in `analyse` had already resolved the i
 - DCE roots, per-function insights and consume modes use only the names THIS file declares.
   `a.def_map` also indexes stdlib and imports (12k names on Strata); rooting all of it kept
   the whole stdlib alive past the early DCE (5 s per pass instead of ~1 s).
+- The early DCE fails closed for the LSP (`Contract_pipeline.run ~dce_fail_open:false`; the
+  build keeps the default `true`). When nothing the file declares survives Mono (CI caught
+  it on `test_jsonrpc` "topology.toml: diagnostics": `serve_one(env, s, st)` is polymorphic
+  and uncalled), the pins were empty and the DCE failed open, keeping all ~7,400 stdlib
+  functions; that session went from 6 s to 16 s and hit its 60 s alarm on a loaded runner.
+  Now 7 s.
 - The memo key is now `deps_digest ^ src`: `analyse` computes `Typecheck_cache.deps_key`
   of the resolved imports once (reused for `deps_env ~key`) and stores it in the new
   `deps_digest` field, so editing an imported file re-runs the pass.

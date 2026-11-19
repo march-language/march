@@ -72,6 +72,7 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
     ?(before_opt = fun _ -> ()) ?(extra_roots = [])
     ?(wasm_island = false) ?(is_js = false) ?(hot_reload = None)
     ?iface_methods ?(decls = []) ?(stamp_metrics = false)
+    ?(dce_fail_open = true)
     ~opt (tir : Tir.tir_module) : result =
   (* A6: with [stamp_metrics] (the driver passes it under --timings) each
      stamp also carries the module's Tir_metrics counts at that point. *)
@@ -210,7 +211,11 @@ let run ?(snap = fun _ _ -> ()) ?opt_snap ?(stamp = fun _ -> ())
              || Hashtbl.mem wanted (Tir_names.strip_specialization_suffix n)
              || Alloc_contract.has_noalloc_policy fn
           then Some n else None) tir.Tir.tm_fns in
-      let pruned = Dce.prune_unreachable
+      (* [dce_fail_open:false] (the LSP's analysis): a program whose roots
+         are all gone, e.g. a file whose only function is polymorphic and
+         uncalled so Mono dropped it, reaches nothing.  Failing open there
+         would carry the whole prepended stdlib through every pass below. *)
+      let pruned = Dce.prune_unreachable ~fail_open:dce_fail_open
           { tir with Tir.tm_exports = tir.Tir.tm_exports @ pins } in
       { pruned with Tir.tm_exports = tir.Tir.tm_exports }
     end

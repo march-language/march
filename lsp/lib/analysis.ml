@@ -3570,6 +3570,11 @@ let run_tir_pass (a : t) : t =
           ~before_perceus:(fun ~k_table pre ->
               borrow_snapshot := Some (March_tir.Borrow.infer_module ~k_table pre, pre, k_table))
           ~extra_roots:user_names ~iface_methods
+          (* An analysis, not a build: when nothing this file declares
+             survives Mono (say its only function is polymorphic and
+             uncalled), the early DCE must keep nothing rather than fail
+             open and push the whole stdlib through the pipeline. *)
+          ~dce_fail_open:false
           ~decls:contract_decls
           ~opt:true tir
       in
