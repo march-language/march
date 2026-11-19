@@ -1,0 +1,17 @@
+read = 80000, flat: true
+returned = 38894, flat: true
+stored = 38894, flat: true
+passed = 20000, flat: true
+updated = 10000, flat: true
+captured = 50000, flat: true
+matched = 38922, flat: true
+nested = 38894, flat: true
+twice = 50043894, flat: true
+shared = 100127788, flat: true
+carried = 10000, flat: true
+mutual = 5000, flat: true
+relay = 10000, flat: true
+reread = 97788, flat: true
+moved = 25043894, flat: true
+closure = 68894, flat: true
+kept: 5 2 12

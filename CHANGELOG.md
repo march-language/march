@@ -28,6 +28,13 @@ git log is authoritative for exact commits.
   reads the fields only when it held the last reference. On a 48-field record
   released 30 million times while still shared, the run takes about 25% less CPU
   time (`bench/wide_record_shared_drop.march`). Programs behave the same.
+- **A function that only reads a record parameter no longer counts a reference to it.**
+  In compiled code every record parameter used to be owned: the caller added a
+  reference before the call and the function released it on return. A record
+  parameter the function only reads is now borrowed, so neither happens. A function
+  that keeps the record (returns it, stores it, captures it in a closure) or a
+  recursive loop that builds a new record each iteration still owns it. Tuple
+  parameters are unchanged. Programs behave the same.
 
 ### Added
 
@@ -1180,6 +1187,15 @@ git log is authoritative for exact commits.
   emitted program is unchanged.
 
 ### Fixed
+
+- **Three compiled-code memory bugs in dropping records and closures.** A record
+  field that is a single-constructor wrapper around a heap value
+  (`type Bag = Bag(Map(String, Int))`) could be released twice when the record was
+  the last holder, crashing the program. A named record with a field that is another
+  module's record sharing its short name with other types (`SwimDriver.State`) freed
+  that field without releasing what it owned, a leak. A call to a function that
+  returns a closure, with a record argument released after the call, crashed on the
+  first use of the closure.
 
 - **A function value made at the interpreter REPL's prompt keeps the prompt's authority.**
   `let f = fn p -> File.read(p)` typed at the prompt was treated as module-level code and ran

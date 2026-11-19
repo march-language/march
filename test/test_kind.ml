@@ -10,21 +10,23 @@ let empty_cs () : (string, string list) Hashtbl.t = Hashtbl.create 0
 
 (* ── needs_rc / borrowable truth table (moved from test_codegen.ml) ────
 
-   TTuple/TRecord diverge, but in the OPPOSITE direction from their history:
-   they used to be (needs_rc false, borrow_eligible true), and are now
-   (true, false).
+   TTuple diverges: (needs_rc true, borrow_eligible false).  TRecord is
+   (true, true).
 
    needs_rc true: aggregates own their fields and are deep-dropped at death like
    variants.  While it was false Perceus never decided an aggregate was dead, so
    every record and tuple cell leaked along with every heap value it owned.
 
-   borrow_eligible false: an aggregate parameter is OWNED.  A borrowed one
-   leaves the caller holding the release, and in a self-tail-recursive loop that
-   release is unreachable -- it sits after the tail call, llvm_tco folds the call
-   into a back-edge, and the dec is discarded -- so every iteration leaked its
-   aggregate.  Ownership lets each iteration release the aggregate it was handed
-   before jumping with a new one, which is also what makes
-   Perceus.insert_owned_aggregate_param_drops reachable at all. *)
+   borrow_eligible false for a tuple: a tuple parameter is OWNED.  A borrowed
+   one leaves the caller holding the release, and in a self-tail-recursive loop
+   that release sits after the tail call, so every iteration either leaked its
+   aggregate or (since the TCO deferred-drop list) kept it until the loop exits.
+
+   borrow_eligible true for a record: a record parameter the callee only reads
+   is borrowed.  The loop case is handled where it arises, by
+   Borrow.loop_carried_flips, which keeps a record parameter owned when a call
+   inside its own recursion passes it a new record
+   (specs/progress/2026-11-18-record-param-borrow.md). *)
 
 (* (label, ty, expected needs_rc, expected borrowable) *)
 let rc_truth_table : (string * Tir.ty * bool * bool) list =
@@ -38,8 +40,8 @@ let rc_truth_table : (string * Tir.ty * bool * bool) list =
     "TTuple []",           TTuple [],                   true,  false; (* diverges *)
     "TTuple [Int]",        TTuple [TInt],               true,  false; (* diverges *)
     "TTuple [String]",     TTuple [TString],            true,  false; (* diverges *)
-    "TRecord []",          TRecord [],                  true,  false; (* diverges *)
-    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       true,  false; (* diverges *)
+    "TRecord []",          TRecord [],                  true,  true;
+    "TRecord [(f,Int)]",   TRecord [("f", TInt)],       true,  true;
     "TCon (Atom,[])",      TCon ("Atom", []),           true,  true;   (* odd hash or payload cell *)
     "TCon (Foo,[])",       TCon ("Foo", []),            true,  true;
     "TCon (List,[Int])",   TCon ("List", [TInt]),       true,  true;
@@ -60,20 +62,20 @@ let test_truth_table () =
     rc_truth_table
 
 let test_divergence_set_exact () =
-  (* Exactly the {TFn, bare TVar, TTuple, TRecord} rows diverge — computed
+  (* Exactly the {TFn, bare TVar, TTuple} rows diverge — computed
      from the live table, compared against the constructor-classified
      expectation, so a new divergence (or a silently unified arm) fails
      loudly here even if the truth-table rows above were edited in sync. *)
   let expected_divergent (ty : Tir.ty) : bool =
     match ty with
-    | Tir.TFn _ | Tir.TTuple _ | Tir.TRecord _ -> true
+    | Tir.TFn _ | Tir.TTuple _ -> true
     | Tir.TVar "_" -> false
     | Tir.TVar _ -> true
     | _ -> false
   in
   List.iter (fun (label, ty, _, _) ->
       let k = Kind.of_ty Kind.empty ty in
-      Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar/TTuple/TRecord")
+      Alcotest.(check bool) (label ^ ": diverges iff TFn/bare-TVar/TTuple")
         (expected_divergent ty) (k.Kind.needs_rc <> k.Kind.borrowable))
     rc_truth_table
 
@@ -413,7 +415,7 @@ let test_resource_free () =
 let suites = [
   ( "kind", [
       Alcotest.test_case "needs_rc/borrowable truth table"        `Quick test_truth_table;
-      Alcotest.test_case "divergence set is exactly {TFn, bare TVar, TTuple, TRecord}" `Quick test_divergence_set_exact;
+      Alcotest.test_case "divergence set is exactly {TFn, bare TVar, TTuple}" `Quick test_divergence_set_exact;
       Alcotest.test_case "repr classification"                    `Quick test_repr_classification;
       Alcotest.test_case "colliding short names are forced Boxed" `Quick test_forced_boxed_by_collision;
       Alcotest.test_case "extern-crossing type stays Boxed"       `Quick test_extern_crossing_stays_boxed;

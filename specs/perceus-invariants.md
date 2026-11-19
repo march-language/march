@@ -45,7 +45,7 @@ The divergent set, exactly as `kind.ml` (formerly `rc_types.ml`) states it:
 |---|---|---|
 | `TFn _` | **true** | **false** |
 | bare `TVar _` | **true** | **false** |
-| `TTuple _` | true | true |
+| `TTuple _` | **true** | **false** |
 | `TRecord _` | true | true |
 
 Everything else agrees (atoms and scalars: both false; `TCon`/`TString`/
@@ -62,13 +62,38 @@ oversight:
   for the dec while Perceus's capture-site accounting still assumes
   ownership transfer — this is exactly the boundary the closure-FV fix
   lineage (§3) landed on.
-- **`TTuple`/`TRecord` — both true; these no longer diverge.** Aggregates
+- **`TTuple`/`TRecord` — `needs_rc` true for both; `borrow_eligible` true
+  for `TRecord` only.** Aggregates
   own their fields and are DEEP-dropped at death, exactly like variants.
   `borrowed_field_vars` (§4) still governs the *read* path — a field
-  extracted from a live aggregate is borrowed, and is dup'd if it escapes —
-  and record/tuple params stay borrow-*eligible* so the fixpoint can infer
-  `cfg:borrowed` for functions that only read fields via `EField` (the
-  toml-cluster fix, §5). What changed is the *death* path, which previously
+  extracted from a live aggregate is borrowed, and is dup'd if it escapes.
+  A record parameter is borrow-*eligible*, so the fixpoint infers
+  `cfg:borrowed` for a function that only reads fields via `EField`: the
+  callee emits no release and a caller whose record is still live emits no
+  retain. Two things keep that sound and cheap:
+
+  - **Loop-carried records stay owned** (`Borrow.loop_carried_flips`). When
+    a call inside a call-graph cycle (a self call or a mutual-recursion
+    partner) passes, at a record parameter, anything other than one of the
+    caller's own borrowed parameters, that parameter is owned. A borrowed
+    parameter leaves the release with the caller, and for
+    `loop({ st with .. }, n - 1)` the caller is the loop itself, after its
+    tail call: `Llvm_tco` can only defer that release to the loop's exit
+    (`march_tco_defer_push`), so the loop would hold one record per
+    iteration. Owned, each iteration releases the record it was handed
+    before jumping. A record forwarded unchanged (`sum(c, i - 1, ..)`) needs
+    no release and stays borrowed.
+  - **A borrowed argument is a read, not a consume**, in the per-path drop
+    placement (`path_counts`, `used_only_as_field_source ~borrowed`,
+    `drop_agg_at_tails`). These decide where an aggregate that is only read
+    gets its scope-end release; counting an argument at a borrowed position
+    as a hand-over left a record lent to a read-only helper and read again
+    afterwards with no release on any path.
+
+  Tuples are not borrow-eligible: they were excluded together with records
+  in `5bedb1232` (the self-tail-loop release that TCO then discarded, later
+  deferred) and the loop-carried rule does not follow the alias binding that
+  tuple destructuring lowers to. What changed is the *death* path, which previously
   did not exist: with `needs_rc` false, Perceus never decided an aggregate
   was dead, so every record and tuple cell leaked together with every heap
   value it owned (measured: a 200k-iteration loop rebuilding a
