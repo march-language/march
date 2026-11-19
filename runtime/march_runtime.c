@@ -627,6 +627,13 @@ static void march_run_resource_dtor_slow(void *p, int32_t tag) {
         /* A handle box releases its descriptor unless closed-and-released
          * or detached already (runtime/march_handle.c). */
         march_handle_dtor(p);
+    } else if (tag == MARCH_ATOM_TAG) {
+        /* A payload atom (`:ok(7)`, march_runtime.h): the cell owns one
+         * reference to each payload slot; march_decrc ignores an immediate
+         * (a tagged Int/Bool, a nullary atom's odd hash). */
+        int64_t *f = (int64_t *)((char *)p + 16);
+        int64_t n = f[1] & 0xFF;
+        for (int64_t i = 0; i < n; i++) march_decrc((void *)(intptr_t)f[2 + i]);
     } else if (tag == MARCH_TYPED_ARR_TAG) {
         /* Every slot owns one reference (each typed_array_ producer takes its
          * own); march_decrc ignores a tagged immediate. */
@@ -1247,6 +1254,63 @@ void march_rc_last_local(void *p, int64_t prev) {
     free(p);
 }
 
+/* Release one reference and report whether it was the LAST one, WITHOUT
+ * freeing the cell.  Returns 1 when the caller held the only reference: the
+ * count is now zero, no other thread can reach the cell, and the caller owns
+ * its storage outright.  It must read whatever it needs from the cell and then
+ * hand it to march_free_last.  Returns 0 when other references remain (the
+ * caller must not touch the cell again), for an immortal cell, and for a value
+ * that is not a heap pointer.
+ *
+ * This is what a synthesized deep drop (lib/tir/drop.ml) releases a record or
+ * tuple with.  march_decrc_freed frees the shell at the last decrement, so a
+ * drop built on it has to load every child field BEFORE it decrements, on the
+ * shared path too, where they are thrown away: a 105-field record paid 75
+ * loads and spills per shared release.  Deferring the free moves the loads
+ * behind the "was last" branch; the shared path is the header test and one
+ * atomic subtract.
+ *
+ * Unconditionally atomic, like march_decrc_freed, which it replaces at those
+ * sites: the count is decremented the same way at every site that touches the
+ * object (see march_decrc_local_freed above for what mixing policies costs).
+ * The trace event is the one march_decrc_freed emits ("free" at the last
+ * reference), so a gc trace is unchanged; march_free_last emits nothing. */
+int64_t march_decrc_last(void *p) {
+    if (!IS_HEAP_PTR(p)) return 0;
+    if (march_rc_peek(p) >= MARCH_RC_IMMORTAL) return 0;
+    int32_t tag  = ((march_hdr *)p)->tag;
+    int64_t prev = atomic_fetch_sub_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (gc_trace_on())
+        gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
+    if (prev == 1) return 1;
+    if (prev < 1) {
+        fprintf(stderr,
+                "march: RC underflow in march_decrc_last (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
+        march_abort(__func__);
+    }
+    return 0;
+}
+
+/* Free a cell whose count march_decrc_last just took to zero: the tail of a
+ * last-reference release (destructor / string stats for a reserved cell kind,
+ * the live gauge, the free), with no decrement and no trace event. */
+void march_free_last(void *p) {
+#ifdef MARCH_RC_CHECKS
+    /* Sanitizer builds: the count must be exactly zero here.  Anything else
+     * means the cell was resurrected or this is not the march_decrc_last
+     * owner, and the free below would pull it out from under a live holder. */
+    if (march_rc_peek(p) != 0) {
+        fprintf(stderr,
+                "march: march_free_last of a cell at %p whose count is %lld, not 0 — aborting\n",
+                p, (long long)march_rc_peek(p));
+        march_abort(__func__);
+    }
+#endif
+    march_rc_last_atomic(p, 1);
+}
+
 /* ── IOList hash ─────────────────────────────────────────────────────── */
 
 /* IOList variant tags (must match iolist.march stdlib):
@@ -1702,7 +1766,32 @@ int64_t march_poly_eq(void *a, void *b) {
      * for the exact lane-compare semantics (NaN != NaN, +0.0 == -0.0). */
     if (ta == MARCH_SIMD_TAG && tb == MARCH_SIMD_TAG)
         return march_simd_eq(a, b);
+    /* Two payload atoms (`:ok(7)`) reached through an erased slot. */
+    if (ta == MARCH_ATOM_TAG && tb == MARCH_ATOM_TAG)
+        return march_atom_eq(a, b);
     return 0;
+}
+
+/* Structural == on two Atom values (see march_runtime.h's payload-atom
+ * block).  Two nullary atoms are equal iff their hashes are; a nullary atom
+ * never equals a payload atom; two payload atoms are equal iff they have the
+ * same name, the same payload count and pairwise-equal payloads.  Payloads go
+ * through march_poly_eq (identical bits, strings by content, floats by value,
+ * atom cells back through here). */
+int64_t march_atom_eq(void *ap, void *bp) {
+    int64_t a = (int64_t)(intptr_t)ap, b = (int64_t)(intptr_t)bp;
+    if (a == b) return 1;
+    if (!march_atom_is_cell(a) || !march_atom_is_cell(b)) return 0;
+    int64_t *fa = march_atom_cell_slots(a), *fb = march_atom_cell_slots(b);
+    if (fa[0] != fb[0]) return 0;
+    int64_t n = fa[1] & 0xFF;
+    if (n != (fb[1] & 0xFF)) return 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t va = fa[2 + i], vb = fb[2 + i];
+        if (va == vb) continue;
+        if (!march_poly_eq((void *)(intptr_t)va, (void *)(intptr_t)vb)) return 0;
+    }
+    return 1;
 }
 
 /* Ordered generic compare for erased-slot operands (-1/0/1). See the header
@@ -3939,6 +4028,78 @@ void *march_try_call(void *thunk) {
 
 /* Strong counterpart to dispatch-only harnesses' weak cleanup hook. */
 void march_frame_drop_closure(void *closure) { march_clo_release(closure); }
+
+/* ── REPL/JIT: run one fragment entry with its panic caught ─────────────
+ *
+ * The native REPL (lib/jit/repl_jit.ml) calls each compiled input's entry
+ * point directly.  A panic there used to reach march_panic's unhandled path,
+ * which prints the report and exit(1)s: the whole session ended, where the
+ * interpreter REPL prints "runtime error: panic: ..." and reads the next
+ * input.  These run the entry under the same longjmp channel march_try_call
+ * uses (saved and restored, so they nest), and answer 1 if it panicked.
+ *
+ * Three entry ABIs, one per runner: a word (i64 / ptr) result, a double
+ * result, no result.  The result word (a double's bits) is read back with
+ * march_repl_guard_result, the "panic: <msg>" string with
+ * march_repl_guard_message (a fresh march_string the caller owns).
+ * Whatever the fragment allocated before it panicked is not released, as
+ * with any caught panic. */
+static int64_t march_repl_guard_word = 0;
+static void   *march_repl_guard_msg  = NULL;
+
+static int64_t march_repl_guarded(void *fptr, int kind) {
+    void *frame_mark = march_frame_mark();
+    jmp_buf saved_jmp;
+    char    saved_fail[sizeof(march_test_fail_buf)];
+    int     saved_in_test = march_test_in_test;
+    memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
+    memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
+    const char *saved_prefix = PANIC_PREFIX_GET();
+    int saved_handled = march_panic_handled;
+    march_test_fail_buf[0] = '\0';
+    march_test_in_test     = 1;
+    march_panic_handled    = 1;   /* the REPL's message is the handling */
+    PANIC_PREFIX_SET(NULL);
+
+    volatile int panicked = 0;
+    march_repl_guard_word = 0;
+    if (setjmp(march_test_jmp_buf) == 0) {
+        if (kind == 1) {
+            double d = ((double (*)(void))fptr)();
+            int64_t bits;
+            memcpy(&bits, &d, sizeof bits);
+            march_repl_guard_word = bits;
+        } else if (kind == 2) {
+            ((void (*)(void))fptr)();
+        } else {
+            march_repl_guard_word = ((int64_t (*)(void))fptr)();
+        }
+    } else {
+        march_frame_unwind(frame_mark);
+        panicked = 1;
+    }
+    if (panicked) {
+        if (march_repl_guard_msg) march_decrc(march_repl_guard_msg);
+        march_repl_guard_msg = march_caught_panic_message("panic");
+    }
+
+    memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
+    memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
+    march_test_in_test = saved_in_test;
+    march_panic_handled = saved_handled;
+    PANIC_PREFIX_SET(saved_prefix);
+    return panicked;
+}
+
+int64_t march_repl_guarded_word(void *fptr)  { return march_repl_guarded(fptr, 0); }
+int64_t march_repl_guarded_float(void *fptr) { return march_repl_guarded(fptr, 1); }
+int64_t march_repl_guarded_void(void *fptr)  { return march_repl_guarded(fptr, 2); }
+int64_t march_repl_guard_result(void) { return march_repl_guard_word; }
+void *march_repl_guard_message(void) {
+    void *m = march_repl_guard_msg;
+    march_repl_guard_msg = NULL;
+    return m;
+}
 
 /* ── __try_call_val (C: march_try_call_val) ─────────────────────────────── */
 /*
@@ -12677,9 +12838,9 @@ void *march_file_open(void *path_ptr) {
  * fclose. */
 static int64_t march_atom_of_name(const char *name);
 
-int64_t march_file_close(void *handle_ptr) {
+void *march_file_close(void *handle_ptr) {
     fh_close(handle_ptr);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* file_read_line / file_read_chunk : Int -> Option(String).
@@ -13650,9 +13811,9 @@ void *march_csv_open(void *path_ptr, void *delim_ptr, void *mode_ptr) {
     return mk_ok((void *)(intptr_t)h);
 }
 
-int64_t march_csv_close(void *handle_ptr) {
+void *march_csv_close(void *handle_ptr) {
     fh_close(handle_ptr);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* Returns Row(List(String)) or :eof (null) */
@@ -14075,7 +14236,9 @@ void march_register_resource(void *pid, void *name, void *cleanup) {
 
 /* Intern an atom name to its i64 value: FNV-1a 64-bit of the (colon-less)
  * name, with bit63 forced equal to bit62 so the value survives generic-slot
- * tag round-trips.  MUST match the compiler's Llvm_ctx.atom_hash exactly —
+ * tag round-trips, and bit0 forced to 1 so a nullary atom is always odd (a
+ * payload atom is an even heap-cell pointer of the same type; see
+ * march_atom_eq).  MUST match the compiler's Llvm_ctx.atom_hash exactly —
  * runtime-produced atoms (:ok / :error from the capability plane) compare
  * equal to the same atom literals in March source only through this hash. */
 static int64_t march_atom_of_name(const char *name) {
@@ -14085,7 +14248,7 @@ static int64_t march_atom_of_name(const char *name) {
         h *= UINT64_C(1099511628211);
     }
     uint64_t bit62 = (h >> 62) & 1;
-    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63);
+    h = (h & UINT64_C(0x7FFFFFFFFFFFFFFF)) | (bit62 << 63) | UINT64_C(1);
     return (int64_t)h;
 }
 
@@ -14168,11 +14331,11 @@ static void revoc_add(int64_t pid_index, int64_t epoch) {
  * (layout documented at march_get_cap) and returns the :ok atom, matching the
  * interpreter's `revoke_cap : Cap(a) -> Atom`.  A null/non-heap cap (e.g. the
  * root_cap null sentinel) is a no-op returning :error. */
-int64_t march_revoke_cap(void *cap) {
-    if (!cap || !IS_HEAP_PTR(cap)) return march_atom_of_name("error");
+void *march_revoke_cap(void *cap) {
+    if (!cap || !IS_HEAP_PTR(cap)) return (void *)(intptr_t)march_atom_of_name("error");
     int64_t *w = (int64_t *)cap;
     revoc_add(w[3], w[4]);
-    return march_atom_of_name("ok");
+    return (void *)(intptr_t)march_atom_of_name("ok");
 }
 
 /* Resolve a cap's (pid_index, epoch) to the meta of the incarnation it names,
@@ -14234,17 +14397,17 @@ int64_t march_is_cap_valid(void *cap) {
  * validation and the send act on the same record: under g_tbl_mu we take our
  * own reference on the live actor, so it cannot be freed before march_send
  * reads it. */
-int64_t march_send_checked(void *cap, void *msg) {
+void *march_send_checked(void *cap, void *msg) {
     if (!cap || !IS_HEAP_PTR(cap)) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     int64_t *cap_words = (int64_t *)cap;
     int64_t  pidx      = cap_words[3];
     int64_t  epoch     = cap_words[4];
     if (revoc_contains(pidx, epoch)) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     pthread_mutex_lock(&g_tbl_mu);
     march_actor_meta *meta = cap_live_meta_locked(pidx, epoch);
@@ -14253,7 +14416,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     pthread_mutex_unlock(&g_tbl_mu);
     if (!actor) {
         march_decrc(msg);
-        return march_atom_of_name("error");
+        return (void *)(intptr_t)march_atom_of_name("error");
     }
     /* march_send returns Option(Unit) as a boxed cell: Some(()) carries tag 1
      * at offset 8, None is a bare tag-0 header.  It consumes msg either way. */
@@ -14261,7 +14424,7 @@ int64_t march_send_checked(void *cap, void *msg) {
     int delivered = ((int32_t *)((char *)result + 8))[0] == 1;
     march_decrc(result);
     march_decrc(actor);
-    return march_atom_of_name(delivered ? "ok" : "error");
+    return (void *)(intptr_t)march_atom_of_name(delivered ? "ok" : "error");
 }
 
 /* march_pid_of_int(n) is an escape hatch: March code that stores a child's
@@ -14676,6 +14839,8 @@ void *march_value_to_string_mode(void *v, int repr) {
     /* Boxed SIMD vector in an erased slot: render lane-for-lane like
        impl Show(<Type>), not "#<tag:-4>" — see march_simd_to_string. */
     if (tag == MARCH_SIMD_TAG) return march_simd_to_string(v);
+    /* A payload atom (`:ok(7)`) in an erased slot. */
+    if (tag == MARCH_ATOM_TAG) return march_atom_value_to_string(v);
     /* A handle box (march_handle.c) in an erased slot: its type by kind, and
      * whether it is closed -- never the descriptor number. */
     if (tag == MARCH_HANDLE_TAG) {

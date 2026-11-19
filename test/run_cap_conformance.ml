@@ -254,27 +254,32 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
     (Filename.quote (Test_helpers.find_main_exe ()))));
   let results = Hashtbl.create 8 in
   let running = Hashtbl.create 8 in
-  List.iter (fun name ->
-      let tmp = Filename.temp_dir "march-cap-conformance" "" in
-      let src = read_file (Filename.concat (fixtures_dir ()) (name ^ ".march")) in
-      write_file (Filename.concat tmp (name ^ ".march")) src;
-      let hs = headers src in
-      let grant = List.assoc_opt "GRANT" hs in
-      let repl_grant =
-        if List.mem_assoc name repl_unsupported then None else repl_grant src grant in
-      if not (List.mem_assoc name repl_unsupported) then
-        (write_file (Filename.concat tmp "repl.in")
-           (String.concat "" (List.map (fun l -> l ^ "\n") (main_body src)));
-         Unix.mkdir (Filename.concat tmp "repl") 0o755;
-         write_file (Filename.concat tmp (Filename.concat "repl" (name ^ ".march")))
-           (without_main src));
-      let pid =
-        Unix.create_process "/bin/sh"
-          [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~grant ~repl_grant |]
-          Unix.stdin Unix.stdout Unix.stderr in
-      Hashtbl.replace running pid (name, tmp))
-    names;
-  while Hashtbl.length running > 0 do
+  (* At most [Test_helpers.test_jobs ()] fixtures at once. Each fixture runs
+     five runtimes, one of them a clang compile; starting all 37 together
+     starved CI's 4-core `compiler` runner (also running run_compiler) until
+     GitHub lost contact with it. *)
+  let jobs = Test_helpers.test_jobs () in
+  let start name =
+    let tmp = Filename.temp_dir "march-cap-conformance" "" in
+    let src = read_file (Filename.concat (fixtures_dir ()) (name ^ ".march")) in
+    write_file (Filename.concat tmp (name ^ ".march")) src;
+    let hs = headers src in
+    let grant = List.assoc_opt "GRANT" hs in
+    let repl_grant =
+      if List.mem_assoc name repl_unsupported then None else repl_grant src grant in
+    if not (List.mem_assoc name repl_unsupported) then
+      (write_file (Filename.concat tmp "repl.in")
+         (String.concat "" (List.map (fun l -> l ^ "\n") (main_body src)));
+       Unix.mkdir (Filename.concat tmp "repl") 0o755;
+       write_file (Filename.concat tmp (Filename.concat "repl" (name ^ ".march")))
+         (without_main src));
+    let pid =
+      Unix.create_process "/bin/sh"
+        [| "/bin/sh"; "-c"; script ~dir:tmp ~name ~grant ~repl_grant |]
+        Unix.stdin Unix.stdout Unix.stderr in
+    Hashtbl.replace running pid (name, tmp)
+  in
+  let reap () =
     let (pid, _) = Unix.wait () in
     match Hashtbl.find_opt running pid with
     | None -> ()
@@ -292,7 +297,12 @@ let run_all (names : string list) : (string, (string * run) list) Hashtbl.t =
              (m, { out; err; code = int_of_string (String.trim (f (m ^ ".code"))) }))
             modes);
       (try rm_rf tmp with _ -> ())
-  done;
+  in
+  List.iter (fun name ->
+      while Hashtbl.length running >= jobs do reap () done;
+      start name)
+    names;
+  while Hashtbl.length running > 0 do reap () done;
   results
 
 let fixtures () =

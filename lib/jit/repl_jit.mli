@@ -22,6 +22,10 @@ val set_backend_for_tests : backend -> unit
     REPL treats as "fall back to the interpreter". *)
 exception Typecheck_failed of string
 
+(** A REPL input panicked at run time ([run_expr], or a [let]'s
+    [run_decl]); carries "panic: <msg>".  The session goes on. *)
+exception Fragment_panicked of string
+
 (** Create a JIT context.
     [runtime_so] is the path to the pre-compiled march_runtime.so.
     [clang] is the clang binary path (default "clang"). *)

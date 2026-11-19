@@ -143,11 +143,10 @@ let rec field_token ctx (ty : Tir.ty) : string =
   | Tir.TUnit | Tir.TTuple [] | Tir.TCon ("Unit", []) -> "u"
   | Tir.TFloat -> "f"
   | Tir.TString -> "s"
-  (* An Atom is a raw i64 hash in its slot and the runtime keeps no
-     hash -> name registry, so its name is simply not recoverable at run time.
-     'p' (generic) is what it already got; making that worse is not this
-     change's business. *)
-  | Tir.TCon ("Atom", []) -> "p"
+  (* An Atom field: a nullary atom's odd hash or a payload-atom cell, both
+     raw in the slot.  'a' renders it through the runtime's registered atom
+     name tables (march_extras.c's atom_render), as `:name` / `name(p, ...)`. *)
+  | Tir.TCon ("Atom", []) -> "a"
   | Tir.TCon _ | Tir.TRecord _ ->
     (match id_for_ty ctx ty with Some id -> Printf.sprintf "A%d" id | None -> "p")
   (* A tuple in a field.  Only here, not at a top-level [id_for]: a top-level

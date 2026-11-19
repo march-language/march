@@ -695,6 +695,10 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     t = "true" || t = "false"
     || int_of_string_opt t <> None
     || (String.length t > 0 && t.[0] = ':')
+    (* A payload-atom arm ([:ok(n)], tag "$Atom.ok"): the scrutinee is an Atom
+       value, never a constructor cell, so it takes the immediate path; the
+       switch below decodes a payload-atom cell itself. *)
+    || Tir_names.atom_payload_tag_name t <> None
   in
   let all_imm_lit_tags =
     branches <> [] &&
@@ -729,7 +733,14 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
      bits are the tagged immediate (n<<1)|1.  Switch labels must be tagged
      the same way (comparing tagged-vs-tagged is exact; untagging via ashr
      would lose bit 63 of 64-bit atom hashes). *)
-  let scrut_is_tagged_imm = all_imm_lit_tags && scrut_ty = "ptr" in
+  let scrut_is_tagged_imm =
+    all_imm_lit_tags && scrut_ty = "ptr"
+    (* An Atom is a ptr whose bits ARE the atom, in every slot (Kind): its
+       switch reads them with a plain ptrtoint and untagged labels. *)
+    && not (List.exists (fun br ->
+        let t = br.Tir.br_tag in
+        (String.length t > 0 && t.[0] = ':')
+        || Tir_names.atom_payload_tag_name t <> None) branches) in
 
   (* Defensive invariant: a branch that binds constructor fields requires the
      heap-pointer path — field loads only happen under [is_ptr_scrut].  An ADT
@@ -817,9 +828,15 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
     ) branches in
 
   (* Detect atom case: br_tag starts with ':' — emit switch on i64 FNV1a hashes *)
-  let is_atom_case = List.exists (fun br ->
+  let is_payload_atom_case = List.exists (fun br ->
+      Tir_names.atom_payload_tag_name br.Tir.br_tag <> None) branches in
+  let is_atom_case = is_payload_atom_case || List.exists (fun br ->
       String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = ':'
     ) branches in
+  (* The scrutinee as a raw Atom value (odd = nullary, even = payload cell),
+     set by the payload-atom switch below; the payload arms read their fields
+     from it.  Computed before the switch, so it dominates every arm. *)
+  let atom_raw = ref "" in
 
   (* Detect float-literal case: br_tag starts with '#' (lower.ml's
      pat_tag_and_subs encoding for [Ast.LitFloat], "#<hex-float>" via "%h" —
@@ -967,6 +984,60 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
       (* Determine switch discriminant (tag or scalar) *)
       let (sw_ty, sw_val) =
         if is_ptr_scrut then ("i32", Llvm_data.emit_load_tag ctx scrut_val)
+        else if is_atom_case && not is_payload_atom_case then begin
+          (* Nullary atoms only: an Atom is a ptr whose bits are the atom's
+             hash (Kind), so switch on them directly.  A payload atom reaching
+             this switch is an even cell pointer, which no (odd) label equals:
+             it takes the default arm, as it should. *)
+          if scrut_ty = "ptr" then begin
+            let bits = Llvm_ctx.fresh ctx "atom_bits" in
+            Llvm_ctx.emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" bits scrut_val);
+            ("i64", bits)
+          end else ("i64", Llvm_ctx.coerce ctx scrut_ty scrut_val "i64")
+        end
+        else if is_payload_atom_case then begin
+          (* A payload-atom match ([Tir_names.atom_cell_ctor]).  The scrutinee
+             is an Atom, a ptr whose bits are the atom.  Switch on a KEY: the
+             atom itself when it is odd (nullary), else the cell's name hash
+             with bit 0 cleared, so a payload arm's label (hash - 1, even) can
+             never equal a nullary arm's (odd) and [:ok] never matches
+             [:ok(n)]. *)
+          let raw =
+            if scrut_ty = "ptr" then begin
+              let bits = Llvm_ctx.fresh ctx "pa_raw" in
+              Llvm_ctx.emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" bits scrut_val);
+              bits
+            end else Llvm_ctx.coerce ctx scrut_ty scrut_val "i64"
+          in
+          atom_raw := raw;
+          let low = Llvm_ctx.fresh ctx "pa_low" in
+          Llvm_ctx.emit ctx (Printf.sprintf "%s = and i64 %s, 1" low raw);
+          let even = Llvm_ctx.fresh ctx "pa_even" in
+          Llvm_ctx.emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 0" even low);
+          let nz = Llvm_ctx.fresh ctx "pa_nz" in
+          Llvm_ctx.emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" nz raw);
+          let is_cell = Llvm_ctx.fresh ctx "pa_cell" in
+          Llvm_ctx.emit ctx (Printf.sprintf "%s = and i1 %s, %s" is_cell even nz);
+          let cell_lbl = Llvm_ctx.fresh_block ctx "pa_cellk" in
+          let imm_lbl = Llvm_ctx.fresh_block ctx "pa_immk" in
+          let key_lbl = Llvm_ctx.fresh_block ctx "pa_key" in
+          Llvm_ctx.emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                                    is_cell cell_lbl imm_lbl);
+          Llvm_ctx.emit_label ctx cell_lbl;
+          let cp = Llvm_ctx.fresh ctx "pa_cp" in
+          Llvm_ctx.emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" cp raw);
+          let h = Llvm_data.emit_load_field ctx cp 0 "i64" in
+          let ck = Llvm_ctx.fresh ctx "pa_ckey" in
+          Llvm_ctx.emit ctx (Printf.sprintf "%s = xor i64 %s, 1" ck h);
+          Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" key_lbl);
+          Llvm_ctx.emit_label ctx imm_lbl;
+          Llvm_ctx.emit_term ctx (Printf.sprintf "br label %%%s" key_lbl);
+          Llvm_ctx.emit_label ctx key_lbl;
+          let key = Llvm_ctx.fresh ctx "pa_k" in
+          Llvm_ctx.emit ctx (Printf.sprintf "%s = phi i64 [ %s, %%%s ], [ %s, %%%s ]"
+                               key ck cell_lbl raw imm_lbl);
+          ("i64", key)
+        end
         else if scrut_is_tagged_imm then begin
           (* ptr-typed tagged immediate: switch on the raw bits *)
           let raw = Llvm_ctx.fresh ctx "ti" in
@@ -989,15 +1060,20 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
             else begin
               let v =
                 if is_atom_case then begin
-                  (* Atom tags are ":NAME" — must match emit_atom's interning. *)
-                  let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
+                  (* Atom tags are ":NAME" — must match emit_atom's interning —
+                     or "$Atom.NAME" for a payload arm, whose key is the hash
+                     with bit 0 cleared (see the discriminant above). *)
+                  let payload_name = Tir_names.atom_payload_tag_name br.Tir.br_tag in
+                  let name = match payload_name with
+                    | Some n -> n
+                    | None -> String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
                   let h = Llvm_ctx.atom_hash name in
                   (* Also register match-arm atoms in the show reverse table:
                      an atom named only as a pattern tag (e.g. a `:get` from
                      Http.method matched but never written as a value literal)
                      must still render as `:get` if later shown. *)
                   Hashtbl.replace ctx.Llvm_ctx.atom_names h name;
-                  h
+                  if payload_name <> None then Int64.logxor h 1L else h
                 end else
                   match Int64.of_string_opt br.Tir.br_tag with
                   | Some n -> n
@@ -1006,7 +1082,7 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
               (* Tagged-immediate scrutinee: tag the label the same way the
                  store tagged the value — (v << 1) | 1. *)
               let v =
-                if scrut_is_tagged_imm
+                if scrut_is_tagged_imm && not is_atom_case
                 then Int64.logor (Int64.shift_left v 1) 1L
                 else v
               in
@@ -1186,6 +1262,54 @@ let emit_case ~emit_expr ~emit_atom ctx scrut_atom branches default_opt =
              is "boxes the cell owns and the binder does not". *)
           boxed_float_field_vals := fv :: !boxed_float_field_vals
       ) br.Tir.br_vars
+    end else if Tir_names.atom_payload_tag_name br.Tir.br_tag <> None then begin
+      (* A payload-atom arm: the switch only reaches it for a cell, so
+         [atom_raw] is a cell pointer.  Payload slot i holds the value in
+         uniform form; bind it as the binder's type would read it from any
+         erased slot (a Float is copied out of its box, an unboxed aggregate
+         out of its box, everything else stays the uniform ptr its uses
+         untag).
+
+         Ownership.  When the arm CONSUMES the scrutinee, Perceus starts its
+         body with the scrutinee's release and treats the binders as owned.
+         An atom cell's destructor (MARCH_ATOM_TAG, march_runtime.c) releases
+         the payload itself whenever the cell is freed, so the hand-over is:
+         every binder takes its own reference here, before the body's release
+         runs; if that release frees the cell, the destructor drops the cell's
+         references and the binders' are the ones left.  Correct whether the
+         cell was unique or shared, with no rc test.  When the scrutinee is
+         BORROWED (live after the match) the binders are borrowed too and take
+         nothing.  Perceus never reuses an atom cell in place (see
+         [Perceus_core]'s scrutinee free), so there is no EReuse case. *)
+      let owns_fields = match scrut_atom with
+        | Tir.AVar sv -> strip_scrut_decrc sv.Tir.v_name br.Tir.br_body <> None
+        | _ -> false
+      in
+      let cp = Llvm_ctx.fresh ctx "pa_arm" in
+      Llvm_ctx.emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" cp !atom_raw);
+      List.iteri (fun i (v : Tir.var) ->
+          let fv = Llvm_data.emit_load_field ctx cp
+              (Tir_names.atom_cell_payload_slot i) "ptr" in
+          let want = Llvm_ctx.llvm_ty ctx v.Tir.v_ty in
+          let (bind_ty, bind_val) =
+            if want = "double" then begin
+              let d = Llvm_ctx.fresh ctx "pa_f" in
+              Llvm_ctx.emit ctx
+                (Printf.sprintf "%s = call double @march_unbox_float(ptr %s)" d fv);
+              ("double", d)
+            end else if Kind.unboxed_of_llvm_ty ctx.Llvm_ctx.k_table want <> None then
+              (want, Llvm_ctx.coerce ctx "ptr" fv want)
+            else begin
+              if owns_fields then
+                Llvm_ctx.emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv);
+              ("ptr", fv)
+            end
+          in
+          let slot = Llvm_ctx.alloca_name ctx (Llvm_ctx.llvm_name v.Tir.v_name) in
+          Llvm_ctx.emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot bind_ty);
+          Llvm_ctx.emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" bind_ty bind_val slot);
+          Hashtbl.replace ctx.Llvm_ctx.var_llvm_ty slot bind_ty)
+        br.Tir.br_vars
     end;
     (* Hand the reuse emitters the boxes this branch's binders copied out of a
        cell its body takes over (FBIP).  Binding a copy and releasing the box

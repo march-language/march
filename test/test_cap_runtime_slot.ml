@@ -337,6 +337,9 @@ let test_fast_paths_no_leak () =
    cycles under a frame (an actor spawned and killed, a task spawned and
    awaited, and every tenth cycle a supervisor with one child, spawned and
    killed), compiled with [--rc-trace] and run with [MARCH_TRACE_GC=1].
+   [cycle] is entered from inside [run]'s frame, not from the launch
+   authority: entering from launch reuses a cached immortal cell (Task 10b),
+   which would leave nothing mortal for the spawned actors to hold.
 
    The verdict is computed from the trace per ADDRESS, not by
    scripts/gc-trace-report.py's per-object fold: every scheduler thread
@@ -373,7 +376,7 @@ let spawn_leak_src = {|mod CapSpawnLeak do
       W child
     end
   end
-  fn cycle(i : Int) : Int needs IO.FileRead("/srv/"), IO.Spawn do
+  fn cycle(i : Int) : Int needs IO.FileRead("/srv/data/"), IO.Spawn do
     let w = spawn(W)
     send(w, Ping())
     kill(w)
@@ -394,15 +397,19 @@ let spawn_leak_src = {|mod CapSpawnLeak do
   fn spin(i : Int, n : Int, acc : Int) : Int do
     if i == n do acc else spin(i + 1, n, acc + cycle(i) - i) end
   end
+  fn run(n : Int) : Int needs IO.FileRead("/srv/"), IO.Spawn do
+    spin(0, n, 0)
+  end
   fn main() do
-    let k = spin(0, 10000, 0)
+    let k = run(10000)
     run_until_idle()
     println(int_to_string(k))
   end
 end
 |}
 
-(* (authority-touched non-immortal addresses, those that do not balance). *)
+(* (events at authority sites on non-immortal addresses, those addresses
+   that do not balance). *)
 let unbalanced_cap_addresses (trace_dir : string) : int * (string * int) list =
   let sites =
     match Yojson.Safe.from_file (Filename.concat trace_dir "sites.json") with
@@ -416,7 +423,7 @@ let unbalanced_cap_addresses (trace_dir : string) : int * (string * int) list =
         let rec at i = i + m <= n && (String.sub s i m = p || at (i + 1)) in
         at 0) in
   let bal : (string, int) Hashtbl.t = Hashtbl.create 4096 in
-  let touched : (string, unit) Hashtbl.t = Hashtbl.create 4096 in
+  let touched : (string, int) Hashtbl.t = Hashtbl.create 4096 in
   let immortal : (string, unit) Hashtbl.t = Hashtbl.create 64 in
   let ic = open_in_bin (Filename.concat trace_dir "gc.jsonl") in
   (try
@@ -428,7 +435,9 @@ let unbalanced_cap_addresses (trace_dir : string) : int * (string * int) list =
            let str k = match List.assoc_opt k kv with Some (`String s) -> s | _ -> "" in
            let int k = match List.assoc_opt k kv with Some (`Int i) -> i | _ -> -1 in
            let addr = str "addr" in
-           if is_cap (int "site") then Hashtbl.replace touched addr ();
+           if is_cap (int "site") then
+             Hashtbl.replace touched addr
+               (1 + Option.value ~default:0 (Hashtbl.find_opt touched addr));
            let d = match str "event" with
              | "alloc" | "inc_ref" -> 1
              | "dec_ref" | "free" -> -1
@@ -440,11 +449,11 @@ let unbalanced_cap_addresses (trace_dir : string) : int * (string * int) list =
    with End_of_file -> ());
   close_in ic;
   Hashtbl.fold
-    (fun addr () (n, bad) ->
+    (fun addr events (n, bad) ->
        if Hashtbl.mem immortal addr then (n, bad)
        else
          let b = Option.value ~default:0 (Hashtbl.find_opt bal addr) in
-         (n + 1, if b <> 0 then (addr, b) :: bad else bad))
+         (n + events, if b <> 0 then (addr, b) :: bad else bad))
     touched (0, [])
 
 let test_spawn_cycles_no_leak () =
@@ -458,10 +467,13 @@ let test_spawn_cycles_no_leak () =
       Alcotest.(check string) "the program ran" "10000\n"
         (sh ~dir ~env:"export MARCH_TRACE_GC=1;" "./prog");
       let n, bad = unbalanced_cap_addresses (Filename.concat dir "trace/gc") in
-      Alcotest.(check bool) "the trace saw the authority's cells" true (n > 1000);
+      (* Events, not distinct addresses: how many addresses 10,000 cells
+         occupy is up to the allocator's reuse (1,776 on macOS; under 1,000
+         with glibc). *)
+      Alcotest.(check bool) "the trace saw the authority's cells" true (n > 10000);
       if List.length bad > 16 then
-        Alcotest.failf "%d of %d authority-touched addresses still hold a reference \
-                        (e.g. %s)" (List.length bad) n
+        Alcotest.failf "%d authority-touched addresses (%d events) still hold a \
+                        reference (e.g. %s)" (List.length bad) n
           (String.concat ", "
              (List.map (fun (a, b) -> Printf.sprintf "%s:%+d" a b)
                 (List.filteri (fun i _ -> i < 5) bad))))

@@ -585,6 +585,7 @@ let mutating_prefixes = [ "march_logger_" ]
 let rc_bookkeeping_syms = [
   "march_incrc"; "march_decrc"; "march_incrc_local"; "march_decrc_local";
   "march_decrc_freed"; "march_decrc_local_freed";
+  "march_decrc_last"; "march_free_last";
 ]
 
 let is_mutating_sym (s : string) : bool =

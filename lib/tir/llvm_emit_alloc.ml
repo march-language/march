@@ -90,9 +90,77 @@ let emit_static_closure ctx (tcon_name : string) (fn_ptr_atom : Tir.atom)
     in
     ("ptr", Llvm_ctx.intern_static_closure ctx (llvm_name tcon_name) apply_sym)
 
+(** The runtime's header tag for a payload-atom cell (MARCH_ATOM_TAG). *)
+let atom_cell_tag = -11
+
+(** A payload field's static kind, as recorded in a payload-atom cell's
+    metadata slot for the runtime's show/== (MARCH_ATOM_FIELD_* in
+    march_runtime.h): the payload itself is stored uniform, where an Int and a
+    Bool look like the same tagged immediate, and an Atom (a ptr, stored raw)
+    like an Int whenever it is a nullary atom's odd hash. *)
+let atom_cell_field_kind (a : Tir.atom) : int64 =
+  let ty = match a with
+    | Tir.AVar v -> v.Tir.v_ty
+    | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
+    | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
+    | Tir.ALit (March_ast.Ast.LitAtom _) -> Tir.TCon ("Atom", [])
+    | _ -> Tir.TUnit
+  in
+  match ty with
+  | Tir.TInt -> 1L
+  | Tir.TBool -> 2L
+  | Tir.TCon ("Atom", []) -> 3L
+  | _ -> 0L
+
+(** A payload atom ([:ok(7)]): see [Tir_names.atom_cell_ctor] for the layout.
+    [args] are the TIR arguments, [name :: count :: payload]; the count
+    placeholder is replaced by the metadata word computed here from the
+    payload's post-mono types.  The value is an even pointer, which is how
+    every [Atom] consumer tells it from an (odd) nullary atom. *)
+let emit_atom_cell ~emit_atom ctx ~(stack : bool) (args : Tir.atom list)
+  : string * string =
+  match args with
+  | name :: _count :: payload ->
+    let n = List.length payload in
+    if n > 255 then
+      failwith (Printf.sprintf
+        "LLVM emit: a payload atom carries %d values; at most 255 are supported" n);
+    let ptr =
+      if stack then begin
+        let p = emit_stack_alloc ctx (n + 2) in
+        emit_store_tag ctx p atom_cell_tag 0;
+        p
+      end else emit_heap_alloc ctx atom_cell_tag (n + 2) 0
+    in
+    (match name with
+     | Tir.ALit (March_ast.Ast.LitAtom nm) ->
+       let h = Llvm_ctx.atom_hash nm in
+       Hashtbl.replace ctx.Llvm_ctx.atom_names h nm;
+       emit_store_field ctx ptr 0 "i64" (Int64.to_string h)
+     | _ -> failwith "LLVM emit: a payload-atom allocation's first argument must be its name");
+    let meta =
+      List.fold_left (fun (i, acc) a ->
+          let k = if i < 14 then Int64.shift_left (atom_cell_field_kind a) (8 + 4 * i)
+                  else 0L in
+          (i + 1, Int64.logor acc k))
+        (0, Int64.of_int n) payload
+      |> snd
+    in
+    emit_store_field ctx ptr 1 "i64" (Int64.to_string meta);
+    List.iteri (fun i atom ->
+        let (ty, v) = emit_atom ctx atom in
+        let vp = coerce ctx ty v "ptr" in
+        emit_store_field ctx ptr (Tir_names.atom_cell_payload_slot i) "ptr" vp)
+      payload;
+    ("ptr", ptr)
+  | _ ->
+    failwith "LLVM emit: a payload-atom allocation needs its name and count arguments"
+
 (** Body of the [EAlloc] constructor arm: the general heap allocation. *)
 let emit_alloc_ctor ~emit_atom ctx (ctor : string)
   (alloc_params : Tir.ty list) (args : Tir.atom list) : string * string =
+  if Tir_names.is_atom_cell ctor then emit_atom_cell ~emit_atom ctx ~stack:false args
+  else
     (* EAlloc ctor key is "TypeName.CtorName"; repr_of_ty needs the TypeName. *)
     let alloc_type_name = match String.rindex_opt ctor '.' with
       | Some i -> String.sub ctor 0 i
@@ -529,6 +597,8 @@ let emit_alloc_hole ~emit_atom ctx (tok : Tir.atom option)
 (** Body of the [EStackAlloc] constructor arm. *)
 let emit_stack_alloc_ctor ~emit_atom ctx (ctor : string)
   (args : Tir.atom list) : string * string =
+  if Tir_names.is_atom_cell ctor then emit_atom_cell ~emit_atom ctx ~stack:true args
+  else
     (* Repr guard (slice-7 L7): this arm builds a BOXED stack cell
        unconditionally, so it must never receive a Newtype- or Niche-repr
        type — those "allocs" are erased immediates, and every consumer
@@ -587,6 +657,9 @@ let emit_stack_alloc_uniform ~emit_atom ctx (args : Tir.atom list)
     RC=1, falling back to a fresh allocation. *)
 let emit_reuse_ctor ~emit_atom ctx (reuse_atom : Tir.atom) (ctor : string)
   (args : Tir.atom list) : string * string =
+    if Tir_names.is_atom_cell ctor then
+      failwith "LLVM emit: EReuse into a payload-atom cell (Perceus_fbip.reusable_alloc \
+                must refuse atom-cell allocations)";
     if ctx.owned_closure <> None then begin
       let (ty, value) = emit_atom ctx reuse_atom in
       if ty = "ptr" then Llvm_ctx.disown_closure_value ctx value

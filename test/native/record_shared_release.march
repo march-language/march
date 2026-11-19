@@ -1,0 +1,117 @@
+-- A record's synthesized drop releases the record FIRST and reads its fields
+-- only when that was the last reference (march_decrc_last / march_free_last,
+-- lib/tir/drop.ml build_aggregate_drop_fn).  It used to load every heap field
+-- before the decrement, on the shared path too, where they were thrown away
+-- (specs/progress/2026-11-17-wide-record-shared-drop-fast-path.md).
+--
+-- Each leg pins one way that reordering could go wrong:
+--   shared      a held record is released 2000 times through a short-lived
+--               Holder; its fields must still be readable afterwards (a shared
+--               release that touched the children is a use-after-free) and
+--               nothing may be freed or leaked.
+--   final       a fresh record per iteration, dropped by its only owner: the
+--               shell AND every String and List cell it owned must go.
+--   two owners  a record in two Holders, both dropped: the first release is
+--               shared, the second is the last one.
+--   tasks       the record is captured by 8 tasks while its creator drops its
+--               own reference at once, so the releases race across scheduler
+--               threads and the LAST one (the release that reads the fields
+--               and frees the shell) lands on whichever thread loses.
+-- Every "growth" is live_allocs() across the leg and must be 0.
+mod RecordSharedRelease do
+  needs IO.Console
+  needs IO.Spawn
+
+  type Wide = {
+    a : String, b : String, c : String, d : String, e : String, f : String,
+    g : String, h : String, tags : List(String), n : Int, m : Int, k : Int
+  }
+
+  type Holder = Holder(Wide, Int)
+
+  fn make(seed : Int) : Wide do
+    { a: "a" ++ int_to_string(seed), b: "b" ++ int_to_string(seed),
+      c: "c" ++ int_to_string(seed), d: "d" ++ int_to_string(seed),
+      e: "e" ++ int_to_string(seed), f: "f" ++ int_to_string(seed),
+      g: "g" ++ int_to_string(seed), h: "h" ++ int_to_string(seed),
+      tags: Cons("t" ++ int_to_string(seed), Cons("u" ++ int_to_string(seed), Nil)),
+      n: seed, m: seed + 1, k: seed + 2 }
+  end
+
+  fn hold(w : Wide, i : Int) : Holder do
+    Holder(w, i)
+  end
+
+  fn peek(hd : Holder) : Int do
+    match hd do
+      Holder(w, i) -> i + w.n + string_length(w.h)
+    end
+  end
+
+  fn weigh(w : Wide) : Int do
+    string_length(w.a) + string_length(w.b) + string_length(w.c) + string_length(w.d)
+      + string_length(w.e) + string_length(w.f) + string_length(w.g) + string_length(w.h)
+      + List.length(w.tags) + w.n + w.m + w.k
+  end
+
+  fn churn(w : Wide, i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else churn(w, i - 1, acc + peek(hold(w, i)))
+    end
+  end
+
+  fn shared(rounds : Int) : Int do
+    let w = make(1000)
+    let total = churn(w, rounds, 0)
+    total + weigh(w)
+  end
+
+  fn final(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else final(i - 1, acc + weigh(make(i)))
+    end
+  end
+
+  fn two_owners(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let w = make(i)
+      let x = hold(w, 1)
+      let y = hold(w, 2)
+      two_owners(i - 1, acc + peek(x) + peek(y))
+    end
+  end
+
+  fn spawn_all(seed : Int, rounds : Int) do
+    let w = make(seed)
+    List.map(List.range(0, 8), fn j -> task_spawn(fn _ -> churn(w, rounds, j) + weigh(w)))
+  end
+
+  fn tasks(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let ts = spawn_all(i, 300)
+      let got = List.fold_left(ts, 0, fn (s, t) -> s + task_await_unwrap(t))
+      tasks(i - 1, acc + got)
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _cap_spawn : Cap(IO.Spawn)) : Unit do
+    let warm = shared(5) + final(5, 0) + two_owners(5, 0) + tasks(3, 0)
+    let a0 = live_allocs()
+    let s = shared(2000)
+    let a1 = live_allocs()
+    let f = final(200, 0)
+    let a2 = live_allocs()
+    let t = two_owners(200, 0)
+    let a3 = live_allocs()
+    let k = tasks(40, 0)
+    let a4 = live_allocs()
+    println("warmup " ++ int_to_string(warm))
+    println("shared: total " ++ int_to_string(s) ++ ", growth " ++ int_to_string(a1 - a0))
+    println("final: total " ++ int_to_string(f) ++ ", growth " ++ int_to_string(a2 - a1))
+    println("two owners: total " ++ int_to_string(t) ++ ", growth " ++ int_to_string(a3 - a2))
+    println("tasks: total " ++ int_to_string(k) ++ ", growth " ++ int_to_string(a4 - a3))
+    ()
+  end
+end

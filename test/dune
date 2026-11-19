@@ -11,7 +11,7 @@
 (library
  (name march_test_compiler)
  (wrapped false)
- (modules test_compiler test_deprecated test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_ops test_cap_check_coverage test_cap_markers test_cap_package test_cap_scope test_host_scope test_cap_net_scope test_cap_fn_bounds test_cap_ceiling test_cap_mode_parity test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple test_cap_runtime_slot test_authority_differential test_auth_rt)
+ (modules test_compiler test_deprecated test_stdlib_only test_link_deps test_static_link test_hcr_stdlib_actors test_check_cas_cap_strict test_repl_cache test_tcenv_cli_cache test_cap_strip test_cap_symbols test_cap_ops test_cap_check_coverage test_cap_markers test_cap_package test_cap_scope test_host_scope test_cap_net_scope test_cap_fn_bounds test_cap_ceiling test_cap_mode_parity test_cap_unforgeable test_cap_dict test_endpoints test_cap_attrib_agreement test_cap_sandbox_profile test_cap_sandbox_runtime test_hcr_closure_codegen test_ctxesc test_prog_argv test_compile_ll_race test_post_tir_cache test_cas_report_bypass test_cas_b7 test_alloc_contract test_portable test_builtin_borrow_classification test_builtin_compiled_lowering test_topology_flag test_march_query test_shell_ident test_shell_line test_shell_triple)
  (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_refinecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas march_caps march_format march_ctxesc march_modules march_resolver march_forge march_lint march_jit yojson alcotest str unix threads.posix))
 
 (library
@@ -53,7 +53,7 @@
 ; (`dune build @test/runtest-run_codegen`, ...) and runs everything else with
 ; MARCH_CI_RUNTEST_SPLIT=1 set, which drops exactly these three stanzas (exe
 ; and alias both) from `dune runtest`, along with run_cap_conformance,
-; run_errors and test_jit, which CI runs in the `compiler` and `forge` shards. Unset --
+; run_errors and test_jit, which CI runs in the `forge` shard. Unset --
 ; every local run -- nothing
 ; changes. Do not set it outside that CI job: a local `dune runtest` with it
 ; set runs none of the three and still reports success.
@@ -79,6 +79,19 @@
  (enabled_if (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1))
  (modules run_compiler)
  (libraries march_test_compiler alcotest)
+ (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
+ (action (run %{test} -e)))
+
+;; The run-time authority suites (ocap phase 4): every case compiles and runs
+;; programs in several runtimes, ~10-15 serial CI minutes. In run_compiler they
+;; took the `compiler` shard (~60 min on main) past its 75-minute step timeout,
+;; so they are their own runner: an ordinary stanza, which CI's `rest` shard
+;; runs beside the others under `dune runtest`. Their groups are not
+;; OS-sensitive, so the macOS job keeps none of them (keep_os_sensitive).
+(test
+ (name run_authority)
+ (modules run_authority test_cap_runtime_slot test_authority_differential test_auth_rt)
+ (libraries march_test_helpers march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_tir march_caps yojson alcotest str unix threads.posix)
  (deps %{exe:../bin/main.exe} (source_tree ../runtime) (source_tree ../stdlib))
  (action (run %{test} -e)))
 
@@ -15356,9 +15369,9 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 ; UPDATE_CAP_CONFORMANCE=1 ./_build/default/test/run_cap_conformance.exe -e
 (test
  (name run_cap_conformance)
- ; Runs in CI's `compiler` shard (ci.yml), not `rest`: the runtimes per
- ; fixture cost ~14 CPU-minutes there (four of them, before the REPL mode),
- ; which pushed `rest` past its timeout.
+ ; Runs in CI's `forge` shard (ci.yml), not `rest` or `compiler`: its five
+ ; runtimes per fixture (~8 min there) pushed `rest`, then `compiler`
+ ; (beside run_compiler), past the 75-minute step timeout.
  (enabled_if
   (and (<> %{env:MARCH_CI_RUNTEST_SPLIT=} 1)
        (<> %{env:MARCH_CI_SKIP_OS_INDEPENDENT=} 1)))   ; see "CI sharding" above
@@ -16069,3 +16082,26 @@ printf 'mod CsHelper do\\n\\n  fn double(x : Int) : Int do\\n    x * 2\\n  end\\
 (alias
  (name runtest)
  (deps (alias hcr-metadata)))
+
+; ── A record's deep drop releases the record first and reads its fields only
+; when that was the last reference (march_decrc_last / march_free_last).
+; Shared releases, final releases, a shared-then-final pair, and releases
+; racing across scheduler threads: every leg must leave live_allocs() where it
+; found it and the surviving reference readable.
+; specs/progress/2026-11-17-wide-record-shared-drop-fast-path.md
+(rule
+ (targets native_record_shared_release native_record_shared_release.out)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files ../runtime/*.c) (glob_files ../runtime/*.h)
+       (source_tree ../stdlib)
+       (file native/record_shared_release.march))
+ (action
+  (progn
+   (run %{exe:../bin/main.exe} --compile --opt 2 -o native_record_shared_release
+        native/record_shared_release.march)
+   (with-stdout-to native_record_shared_release.out
+        (system "./native_record_shared_release")))))
+
+(rule
+ (alias runtest)
+ (action (diff native/record_shared_release.expected native_record_shared_release.out)))

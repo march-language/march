@@ -124,6 +124,10 @@ void  march_decrc(void *p);
 /* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
    Used when pattern-matching to conditionally IncRC extracted child pointers. */
 int64_t march_decrc_freed(void *p);
+/* Release one reference; 1 iff it was the last, with the cell NOT freed: the
+ * caller reads what it needs and then calls march_free_last. */
+int64_t march_decrc_last(void *p);
+void    march_free_last(void *p);
 /* Release a closure value; when this frees it, first release its captures
    through the drop registered for its apply function (march_runtime.c). */
 void march_clo_release(void *p);
@@ -257,6 +261,27 @@ void    march_set_atom_namer(void *fn);
 void    march_unset_atom_namer(void *fn);
 void   *march_atom_name_registered(int64_t h);
 int64_t march_atom_name_cstr(int64_t h, char *buf, int64_t cap);
+/* Payload atoms (`:ok(7)`).  An Atom value is a pointer-sized word that is
+ * either a nullary atom, its odd name hash (march_atom_of_name forces bit 0;
+ * every RC entry point skips an odd value), or a payload atom, an even pointer
+ * to a reference-counted cell laid out by the compiler
+ * (Tir_names.atom_cell_ctor):
+ *   [rc][tag=MARCH_ATOM_TAG][pad] [hash@16] [meta@24] [payload@32 ...]
+ * meta holds the payload count in its low 8 bits, then 4 bits per field (the
+ * first 14) naming the field's static kind: MARCH_ATOM_FIELD_*.  The payload
+ * is in uniform (erased-slot) form: an Int or Bool is tagged (v<<1)|1, an
+ * Atom or any heap value is stored raw.  The cell owns one reference to each
+ * payload slot, released by its destructor (march_run_resource_dtor_slow). */
+#define MARCH_ATOM_TAG ((int32_t)-11)
+#define MARCH_ATOM_FIELD_ANY  0
+#define MARCH_ATOM_FIELD_INT  1
+#define MARCH_ATOM_FIELD_BOOL 2
+#define MARCH_ATOM_FIELD_ATOM 3
+/* Structural equality of two Atom values (== on Atom, compiled). */
+int64_t march_atom_eq(void *a, void *b);
+/* show/to_string of an Atom value: ":name" for a nullary atom, "name(p, ...)"
+ * for a payload atom, as the interpreter prints them. */
+void   *march_atom_value_to_string(void *a);
 void   *march_logger_remove_appender(void *name);
 void   *march_logger_clear_appenders(void);
 void   *march_logger_appender_names(void);
@@ -497,6 +522,18 @@ void    march_timer_cancel(void *tok);
  *      lower canonical half (bit 47 clear on x86-64, bit 48 on AArch64). */
 #define IS_HEAP_PTR(p) \
     (((uintptr_t)(p) & 1u) == 0 && (uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
+
+/* Payload-atom cell accessors (the layout is described above, beside
+ * MARCH_ATOM_TAG); here because they need IS_HEAP_PTR. */
+static inline int march_atom_is_cell(int64_t a) {
+    return (a & 1) == 0 && a != 0 && IS_HEAP_PTR((void *)(intptr_t)a);
+}
+static inline int64_t *march_atom_cell_slots(int64_t a) {
+    return (int64_t *)((char *)(intptr_t)a + 16);
+}
+static inline int march_atom_field_kind(int64_t meta, int64_t i) {
+    return i < 14 ? (int)((meta >> (8 + 4 * i)) & 0xF) : MARCH_ATOM_FIELD_ANY;
+}
 
 /* ── The closure-call convention, from C ──────────────────────────────────
  *
@@ -1131,7 +1168,8 @@ void *march_list_sort_by_int_key(void *lst, void *key);
 int64_t march_file_exists(void *s);
 int64_t march_dir_exists(void *s);
 void   *march_file_open(void *path);
-int64_t march_file_close(void *handle);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_file_close(void *handle);
 void   *march_file_read(void *path);
 void   *march_file_read_line(void *handle);
 void   *march_file_read_chunk(void *handle, int64_t size);
@@ -1170,7 +1208,8 @@ void   *march_file_stat(void *path);
 /* CSV builtins. */
 void   *march_csv_open(void *path, void *delim, void *mode);
 void   *march_csv_next_row(void *handle);
-int64_t march_csv_close(void *handle);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_csv_close(void *handle);
 
 /* Resource ownership. */
 void    march_own(void *pid, void *value);
@@ -1181,13 +1220,15 @@ void    march_own(void *pid, void *value);
 /* Explicitly revoke a capability.  After this call, march_send_checked and
  * march_is_cap_valid reject the cap.  Idempotent.  Returns the :ok atom
  * (:error for a null/non-heap cap such as the root_cap sentinel). */
-int64_t march_revoke_cap(void *cap);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_revoke_cap(void *cap);
 /* Check whether cap is still valid:
  * returns 1 if valid (actor alive, epoch matches, not revoked), 0 otherwise. */
 int64_t march_is_cap_valid(void *cap);
 /* Capability-checked send: validates liveness, epoch, and revocation before
  * enqueuing msg.  Returns the :ok atom on delivery, :error otherwise. */
-int64_t march_send_checked(void *cap, void *msg);
+/* returns an Atom (odd hash) as a ptr-typed value */
+void *march_send_checked(void *cap, void *msg);
 
 /* Value pretty-printing.  Two conventions, differing ONLY in how a string
  * NESTED inside a rendered constructor is printed (a top-level String is

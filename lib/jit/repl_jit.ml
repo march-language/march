@@ -146,6 +146,42 @@ let get_orc ctx =
 let atom_lits : (int64, string) Hashtbl.t = Hashtbl.create 64
 let atom_name_fn : nativeint ref = ref Nativeint.zero
 
+(** A REPL input's entry point panicked; carries the runtime's
+    "panic: <msg>".  Raised instead of letting the runtime print its report
+    and exit(1), which ended the whole session. *)
+exception Fragment_panicked of string
+
+type repl_guard = {
+  g_word : nativeint; g_float : nativeint; g_void : nativeint;
+  g_result : nativeint; g_message : nativeint; g_decrc : nativeint;
+}
+
+(* march_repl_guarded_* (runtime/march_runtime.c), resolved in [create]. *)
+let repl_guard : repl_guard option ref = ref None
+
+(** Call a REPL input's entry point [fptr] with its panic caught: the
+    result word ([`Float]: the double's bits; [`Void]: 0), or
+    [Fragment_panicked].  An unguarded call when the runtime has no guard. *)
+let guarded_call (kind : [ `Word | `Float | `Void ]) (fptr : nativeint) : int64 =
+  match !repl_guard with
+  | None ->
+    (match kind with
+     | `Word -> Jit.call_void_to_int fptr
+     | `Float -> Int64.bits_of_float (Jit.call_void_to_float fptr)
+     | `Void -> Jit.call_void_to_void fptr; 0L)
+  | Some g ->
+    let entry = match kind with
+      | `Word -> g.g_word | `Float -> g.g_float | `Void -> g.g_void in
+    if Jit.call_ptr_to_ptr entry fptr <> Nativeint.zero then begin
+      let m = Jit.call_void_to_ptr g.g_message in
+      let msg = if m = Nativeint.zero then "panic" else begin
+          let s = Jit.read_march_string m in
+          ignore (Jit.call_ptr_to_ptr g.g_decrc m);
+          s
+        end in
+      raise (Fragment_panicked msg)
+    end else Jit.call_void_to_int g.g_result
+
 let create ~runtime_so ?(clang="clang") () =
   (* Per-process artifact dir.  A single shared "march_jit" dir raced when
      several JIT sessions ran concurrently (dune executes the test runners in
@@ -200,6 +236,18 @@ let create ~runtime_so ?(clang="clang") () =
      too old to export it just leaves the printer on its own table. *)
   (try atom_name_fn := Jit.dlsym rt_handle "march_atom_name_cstr"
    with Failure _ -> ());
+  (* The panic guard [guarded_call] runs REPL inputs under; [None] with a
+     runtime too old to export it (inputs then run unguarded, as before). *)
+  (try
+     let f = Jit.dlsym rt_handle in
+     repl_guard := Some {
+         g_word = f "march_repl_guarded_word";
+         g_float = f "march_repl_guarded_float";
+         g_void = f "march_repl_guarded_void";
+         g_result = f "march_repl_guard_result";
+         g_message = f "march_repl_guard_message";
+         g_decrc = f "march_decrc" }
+   with Failure _ -> repl_guard := None);
   let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
   (* Only macOS needs the explicit two-level runtime binding; Linux resolves
      RTLD_GLOBAL symbols correctly, so keep its link line unchanged. *)
@@ -889,6 +937,12 @@ let atom_name (h : int64) : string =
       else Jit.call_atom_name !atom_name_fn h in
     Option.value from_runtime ~default:":<atom>"
 
+(** A String value as the REPL prints it: the interpreter REPL's spelling
+    ([Eval_runtime.value_to_string]), which is the test report's: quotes,
+    a backslash and control characters escaped, UTF-8 left as it is.  OCaml's
+    [%S] escaped every byte >= 0x80, so "café" printed as "caf\195\169". *)
+let quote_string = March_errors.Test_report.quote
+
 (** Pretty-print a March heap value given its TIR type.
     [type_defs] provides user-declared TDVariant/TDRecord lookups for
     non-builtin TCon names.  Recursion is bounded to depth 64. *)
@@ -902,8 +956,8 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
      the recursive calls re-entering here cost only a hash hit. *)
   let ty = qualify_ty ~type_defs ty in
   match ty with
-  (* An atom is the raw (untagged) i64 hash, not a cell — see [pp_word]. *)
-  | TCon ("Atom", []) -> atom_name (Int64.of_nativeint ptr)
+  (* An atom is a raw word: a nullary atom's hash, or a payload-atom cell. *)
+  | TCon ("Atom", []) -> pp_atom ~depth ~type_defs ~ctor_tags ptr
   (* Niche / newtype types are NOT heap cells: [ptr] is the raw payload word
      (or 0 for a niche's nullary ctor), so these must be decoded before the
      null guard and before any tag read. *)
@@ -947,7 +1001,7 @@ let rec pp_heap_value ?(depth=0) ~type_defs ~ctor_tags (ty : March_tir.Tir.ty) (
   match ty with
   | TString ->
     (* march_string layout: {rc:i64, tag:i32, pad:i32, len:i64, data:char[]} *)
-    Printf.sprintf "%S" (Jit.read_march_string ptr)
+    quote_string (Jit.read_march_string ptr)
   | TCon ("List", [elem_ty]) ->
     pp_list ~depth ~type_defs ~ctor_tags elem_ty ptr
   | TCon ("Option", [inner_ty]) ->
@@ -1057,13 +1111,9 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
   | TUnit -> "()"
   | TFloat -> pp_float_word ~erased:tagged w
   | TCon ("Atom", []) ->
-    (* An atom is an i64 hash, never a heap cell (until 2026-10-14 this fell
-       through to [pp_heap_value], which read a "tag" at the hash: Err(:x)
-       segfaulted the REPL).  In an erased slot it is low-bit tagged; the
-       ARITHMETIC shift restores bit 63, which [atom_hash] mints equal to
-       bit 62 precisely so the hash survives that round trip. *)
-    let h = Int64.of_nativeint w in
-    atom_name (if tagged then Int64.shift_right h 1 else h)
+    (* An atom is a ptr-typed word stored raw in every slot, erased or not
+       (Kind): a nullary atom's odd hash or a payload atom's cell. *)
+    pp_atom ~depth ~type_defs ~ctor_tags w
   | TVar _ ->
     (* Erased slot: a scalar is low-bit tagged, a heap value is an aligned
        pointer.  Decide from the word itself — dereferencing a tagged scalar
@@ -1080,6 +1130,53 @@ and pp_word ?(depth=0) ~type_defs ~ctor_tags ~tagged (ty : March_tir.Tir.ty) (w 
     (match pp_heap_value ~depth:(depth + 1) ~type_defs ~ctor_tags ty w with
      | "#<null>" -> "null"
      | s -> s)
+
+(** An Atom word: a nullary atom (odd, its name hash) prints `:name`; a
+    payload atom (an even cell, [Tir_names.atom_cell_ctor]) prints
+    `name(p, ...)` as the interpreter does, each payload slot read by the kind
+    the cell's metadata word records (MARCH_ATOM_FIELD_* in march_runtime.h). *)
+and pp_atom ?(depth=0) ~type_defs ~ctor_tags (w : nativeint) : string =
+  if Nativeint.logand w 1n = 1n || w = Nativeint.zero then
+    atom_name (Int64.of_nativeint w)
+  else if depth > 64 then "#<...>"
+  else begin
+    let name =
+      let s = atom_name (Jit.read_i64_at w 16) in
+      if String.length s > 1 && s.[0] = ':' then String.sub s 1 (String.length s - 1)
+      else s in
+    let meta = Jit.read_i64_at w 24 in
+    let n = Int64.to_int (Int64.logand meta 0xFFL) in
+    let field i =
+      let raw = Jit.read_ptr_at w (32 + i * 8) in
+      let kind =
+        if i < 14 then Int64.to_int (Int64.logand (Int64.shift_right_logical meta (8 + 4 * i)) 0xFL)
+        else 0 in
+      let open March_tir.Tir in
+      match kind with
+      | 1 -> pp_word ~depth:(depth + 1) ~type_defs ~ctor_tags ~tagged:true TInt raw
+      | 2 -> pp_word ~depth:(depth + 1) ~type_defs ~ctor_tags ~tagged:true TBool raw
+      | 3 -> pp_atom ~depth:(depth + 1) ~type_defs ~ctor_tags raw
+      | _ ->
+        (* No static kind: classify the word the way the runtime's renderer
+           does.  An inline string (bit 63 set, bit 0 clear) packs its length
+           in bits 59..62 and its bytes from bit 3 up; a heap string or a
+           nested payload atom names itself by its header tag. *)
+        let even = Nativeint.logand raw 1n = 0n in
+        if even && Nativeint.compare raw 0n < 0 then begin
+          let bits = Int64.of_nativeint raw in
+          let len = Int64.to_int (Int64.logand (Int64.shift_right_logical bits 59) 0xFL) in
+          let body = Int64.shift_right_logical bits 3 in
+          let s = String.init len (fun i ->
+              Char.chr (Int64.to_int (Int64.logand (Int64.shift_right_logical body (8 * i)) 0xFFL))) in
+          quote_string s
+        end else if even && Nativeint.compare raw 4096n >= 0 && heap_tag raw = -1 then
+          quote_string (Jit.read_march_string raw)
+        else if even && Nativeint.compare raw 4096n >= 0 && heap_tag raw = -11 then
+          pp_atom ~depth:(depth + 1) ~type_defs ~ctor_tags raw
+        else pp_word ~depth:(depth + 1) ~type_defs ~ctor_tags ~tagged:true (TVar "_") raw
+    in
+    name ^ "(" ^ String.concat ", " (List.init n field) ^ ")"
+  end
 
 (** True when a value of [ty] is NOT a heap pointer but the raw payload word
     of a niche/newtype representation — the two cases where the "small word =
@@ -1474,19 +1571,27 @@ let run_expr ctx ~tc_env m =
   let fptr = lookup_sym ctx handle sym_name in
   let result_str = match ret_ty with
     | March_tir.Tir.TInt ->
-      let v = Jit.call_void_to_int fptr in
+      let v = guarded_call `Word fptr in
       Int64.to_string v
     | March_tir.Tir.TFloat ->
-      let v = Jit.call_void_to_float fptr in
+      let v = Int64.float_of_bits (guarded_call `Float fptr) in
       Printf.sprintf "%g" v
     | March_tir.Tir.TBool ->
-      let v = Jit.call_void_to_int fptr in
+      let v = guarded_call `Word fptr in
       if v = 0L then "false" else "true"
     | March_tir.Tir.TUnit ->
-      Jit.call_void_to_void fptr;
+      ignore (guarded_call `Void fptr);
+      "()"
+    | March_tir.Tir.TTuple [] ->
+      (* Unit lowered as the empty tuple (`()`, a `Vault.set` result): the
+         fragment returns a word (the scalar 0, tagged 1), which the generic
+         small-word fallback below printed as `1`.  Call it for its effects
+         and print the value. *)
+      ignore (Int64.to_nativeint (guarded_call `Word fptr));
       "()"
     | March_tir.Tir.TCon ("Atom", []) ->
-      atom_name (Jit.call_void_to_int fptr)
+      pp_atom ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx)
+        (Int64.to_nativeint (guarded_call `Word fptr))
     | March_tir.Tir.TVar _ ->
       (* Unresolved type var — try to recover the actual type.  Walk the fn body
          into the tail position, recursing through ELet, ESeq, and ECase branches.
@@ -1513,12 +1618,12 @@ let run_expr ctx ~tc_env m =
       let stored_ty = find_retty main_fn.fn_body in
       (match stored_ty with
        | Some TBool ->
-         let v = Jit.call_void_to_int fptr in
+         let v = guarded_call `Word fptr in
          if v = 0L then "false" else "true"
        | Some TInt ->
-         Int64.to_string (Jit.call_void_to_int fptr)
+         Int64.to_string (guarded_call `Word fptr)
        | Some ty ->
-         let ptr = Jit.call_void_to_ptr fptr in
+         let ptr = Int64.to_nativeint (guarded_call `Word fptr) in
          if is_raw_word_ty ~type_defs:ctx.global_type_defs ty then
            pp_heap_value ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx) ty ptr
          else if ptr = Nativeint.zero then "null"
@@ -1527,7 +1632,7 @@ let run_expr ctx ~tc_env m =
          (* No type information — call as ptr (safer than int for heap objects).
             Small values that fit in a tagged integer are displayed as integers;
             everything else shown as an opaque address. *)
-         let ptr = Jit.call_void_to_ptr fptr in
+         let ptr = Int64.to_nativeint (guarded_call `Word fptr) in
          let raw = Int64.of_nativeint ptr in
          if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
            Int64.to_string raw
@@ -1537,9 +1642,9 @@ let run_expr ctx ~tc_env m =
       (* Niche/newtype: the returned word IS the value (0 = nullary ctor),
          so neither the null check nor the small-integer fallback applies. *)
       pp_heap_value ~type_defs:ctx.global_type_defs ~ctor_tags:(ctor_tags_of ctx) ty
-        (Jit.call_void_to_ptr fptr)
+        (Int64.to_nativeint (guarded_call `Word fptr))
     | ty ->
-      let ptr = Jit.call_void_to_ptr fptr in
+      let ptr = Int64.to_nativeint (guarded_call `Word fptr) in
       if ptr = Nativeint.zero then "null"
       else
         let raw = Int64.of_nativeint ptr in
@@ -1720,7 +1825,8 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     commit_wraps ctx sw;
     let init_name = Printf.sprintf "repl_%d_init" n in
     let fptr = lookup_sym ctx handle init_name in
-    Jit.call_void_to_void fptr;
+    (* A panic leaves [bind_name] unbound, as the interpreter does. *)
+    ignore (guarded_call `Void fptr);
     (* Register slot for future references to bind_name. *)
     ctx.var_slots <- (bind_name, slot, main_fn.fn_ret_ty) ::
       List.filter (fun (b, _, _) -> b <> bind_name) ctx.var_slots;

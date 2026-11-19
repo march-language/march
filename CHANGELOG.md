@@ -19,6 +19,16 @@ git log is authoritative for exact commits.
 
 ## [Unreleased]
 
+### Changed
+
+- **Releasing a shared record no longer reads its fields.** A compiled record or tuple
+  that owns heap values is released by a generated helper. That helper used to load
+  every heap field before it decremented the reference count, even when other
+  references remained and the fields were not needed. It now decrements first and
+  reads the fields only when it held the last reference. On a 48-field record
+  released 30 million times while still shared, the run takes about 25% less CPU
+  time (`bench/wide_record_shared_drop.march`). Programs behave the same.
+
 ### Added
 
 - **Run-time authority (object capabilities, phase 4).** Every capability operation is now
@@ -1213,6 +1223,36 @@ git log is authoritative for exact commits.
   function instead: `Topology.labels_of`, `VectorClock.compare` and others returned wrong
   results, and on `--target js` the capability policy ran it at every launch. The interpreter
   was already right.
+
+- **Several `march repl` bugs fixed:**
+  - `==` on a stdlib type (`Some(1) == Some(1)`, `[1] == [1]`, `Ok(1) == Ok(1)`) works again
+    in both REPLs. It was rejected with "does not implement interface `Eq`".
+  - The native REPL no longer gives a different answer the second time a session compares
+    values of the same type. `Vault.get(c, "h") == Some(1)` was `true` once, then `false`.
+  - Strings with non-ASCII text print as text: `"café"`, not `"caf\195\169"`. This applies
+    to the interpreter REPL too.
+  - A unit result prints `()`, not `1`.
+  - A panic is reported as `runtime error: panic: ...` and the session goes on. It used to
+    end the native REPL.
+- **`Crypto.verify_password` no longer crashes on a stored hash with an iteration count of
+  zero or below.** A compiled program panicked ("no pattern of this match matched") where the
+  interpreter returned `false`; both now return `false`, so one bad row in a password table
+  cannot crash the login path. The `pbkdf2_sha256` builtin now returns the same
+  `Err("pbkdf2_sha256: invalid parameters")` on both backends for an iteration count of zero or
+  below, or an output length outside 1 to 1024 bytes; the interpreter used to run one iteration
+  and return `Ok`.
+- **A function calling a helper defined below a `type` declaration got the wrong type.**
+  The type checker orders a module's functions callee-first, but a `type` declaration
+  between a caller and its helper ended that ordering, and the caller's result type was left
+  free. `let s : String = count(xs)` was accepted when `count` returns an `Int`. In the stdlib
+  this hit `Presence.entry_count`: the REPL printed its result as the tagged word (`5` for 2),
+  and reading a `let` of it crashed the REPL.
+- **Payload atoms (`:ok(7)`) work compiled.** Matching one that arrived through a function
+  parameter (`fn describe(t) do match t do :ok(n) -> n ... end end`) was an internal compiler
+  error. `to_string(:ok(7))` printed `:<atom>` and `:ok(7) == :ok(7)` was `false`. All three now
+  agree with the interpreter. The match also works with `--target js`, where it had matched
+  nothing. Payload atoms are freed when their last use ends; `Atom` is now reference counted like
+  `String`. A nullary atom's compiled value changes (bit 0 is now always set).
 
 - **`Map.int_cmp` and `Map.str_cmp` work as values in `march repl`.** `Map.get(m, 1, Map.int_cmp)`
   killed the REPL (bus error or SIGSEGV) whenever the key was present. A curried stdlib function

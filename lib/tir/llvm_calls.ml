@@ -115,7 +115,7 @@ let emit_raises_wrapper ctx ~fname ~ret_tir ~arg_pairs : string * string =
   (* Ok: convert the bare payload to a march_value, then Ok(payload) *)
   Llvm_ctx.emit_label ctx ok_lbl;
   let okval = (match t_ok with
-    | Tir.TInt | Tir.TBool | Tir.TUnit | Tir.TCon ("Atom", []) ->
+    | Tir.TInt | Tir.TBool | Tir.TUnit ->
       (* tag a raw scalar into a march_value: (v << 1) | 1 -- a plain shl,
          see [Llvm_ctx.emit_tag_scalar] *)
       let sh = Llvm_ctx.fresh ctx "oksh" in

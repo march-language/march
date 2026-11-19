@@ -2617,8 +2617,13 @@ let base_env : env =
            | Ok pk, Ok msg, Ok sg -> VBool (March_pqc.Pqc.mldsa65_verify pk msg sg)
            | Error e, _, _ | _, Error e, _ | _, _, Error e -> eval_error "mldsa65_verify: %s" e)
         | _ -> eval_error "mldsa65_verify(pk: Bytes, msg: Bytes, sig: Bytes): Bool"))
-    (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
+    (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) | Err(String) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
+        | [_; _; VInt iters; VInt dklen]
+          when dklen <= 0 || dklen > 1024 || iters <= 0 ->
+          (* Same bounds and message as march_pbkdf2_sha256 in
+             runtime/march_extras.c, so both backends return the same Err. *)
+          VCon ("Err", [VString "pbkdf2_sha256: invalid parameters"])
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
           (match march_val_to_raw pwd_v, march_val_to_raw salt_v with
            | Ok password, Ok salt ->

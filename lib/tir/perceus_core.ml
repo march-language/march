@@ -1915,6 +1915,12 @@ let rec insert_rc_expr (env : env) (e : Tir.expr) (live_after : live_set)
            leave the type untouched so [same_arity] returns false,
            suppressing FBIP conservatively. *)
         let ctor_v = match v.Tir.v_ty with
+          (* An atom scrutinee's cell (Tir_names.atom_cell_ctor) is not reused
+             in place: its destructor releases the payload, which the arm's
+             binders have each taken their own reference to (Llvm_case), so an
+             in-place reuse would orphan the cell's references.  Leaving the
+             type unencoded makes [same_arity] refuse it. *)
+          | Tir.TCon ("Atom", []) -> v
           | Tir.TCon (type_name, _) ->
             let encoded_tag =
               fbip_arity_marker ^ type_name ^ "." ^ ctor_tag in

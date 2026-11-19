@@ -821,7 +821,7 @@ let _scalar_only : (string, unit) Hashtbl.t = Hashtbl.create 16
 
 let is_scalar_field_ty : Tir.ty -> bool = function
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit -> true
-  | Tir.TCon ("Atom", []) -> true
+  (* Not Atom: a payload atom (`:ok(s)`) is a refcounted cell. *)
   | _ -> false
 
 let set_scalar_only_types (type_defs : Tir.type_def list) : unit =

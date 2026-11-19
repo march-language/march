@@ -1677,6 +1677,68 @@ let test_deep_drop_of_borrowed_container () =
     "deep drop: walks the spine as a TCO loop, not C-stack recursion (a 150K-element list must not overflow)"
     true (ir_contains drop_ir "br label %tco_loop")
 
+(** A record's deep drop releases the record FIRST and loads its fields only
+    on the path where that was the last reference.  It used to load every heap
+    field and then call [march_decrc_freed] (which frees the shell, so the
+    loads had to come first): a shared release of a 105-field record read and
+    spilled 75 fields it then threw away, a third of the main thread's samples
+    in the program that showed it
+    (specs/progress/2026-11-17-wide-record-shared-drop-fast-path.md).
+
+    Pinned on the emitted helper: [march_decrc_last] precedes every field
+    load, the shell is freed with [march_free_last] after the last load and
+    before the first child release, and [march_decrc_freed] is gone (it would
+    free the shell ahead of the loads). *)
+let test_record_drop_releases_before_loading_fields () =
+  let ir = emit_tco_opt_ir {|mod Test do
+  needs IO.Console
+    type Wide = { a : String, b : String, c : List(String), n : Int }
+    type Holder = Holder(Wide, Int)
+    fn make(i : Int) : Wide do
+      { a: int_to_string(i), b: int_to_string(i + 1), c: Cons(int_to_string(i), Nil), n: i }
+    end
+    fn peek(h : Holder) : Int do
+      match h do
+        Holder(w, i) -> i + w.n
+      end
+    end
+    fn main(_cap_console : Cap(IO.Console)) : Unit do
+      let w = make(3)
+      let x = peek(Holder(w, 1))
+      Authority.ignore(println(int_to_string(x + string_length(w.a))))
+    end
+  end|} in
+  let drop_ir =
+    let rec find from =
+      let start = Str.search_forward (Str.regexp "define [^\n]*@__drop\\$[^\n]*{") ir from in
+      let stop = Str.search_forward (Str.regexp "\n}") ir start in
+      let body = String.sub ir start (stop - start) in
+      if ir_contains body "@march_decrc_last(" then body else find stop
+    in
+    try find 0 with Not_found ->
+      Alcotest.fail "no synthesized record drop calls march_decrc_last"
+  in
+  let pos pat = try Some (Str.search_forward (Str.regexp_string pat) drop_ir 0)
+    with Not_found -> None in
+  let re_pos re = try Some (Str.search_forward (Str.regexp re) drop_ir 0)
+    with Not_found -> None in
+  let last_pos pat = try Some (Str.search_backward (Str.regexp_string pat) drop_ir
+                                 (String.length drop_ir - 1))
+    with Not_found -> None in
+  let before a b = match a, b with Some a, Some b -> a < b | _ -> false in
+  Alcotest.(check bool)
+    "record drop: the release precedes every field load (a shared release reads only the header)"
+    true (before (pos "@march_decrc_last(") (pos "getelementptr"));
+  Alcotest.(check bool)
+    "record drop: the shell is freed after the last field load"
+    true (before (last_pos "getelementptr") (pos "@march_free_last("));
+  Alcotest.(check bool)
+    "record drop: the children are released after the shell is freed"
+    true (before (pos "@march_free_last(") (re_pos "call void @\\(march_decrc\\|__drop\\)"));
+  Alcotest.(check bool)
+    "record drop: does not use march_decrc_freed, which frees the shell before the fields are read"
+    false (ir_contains drop_ir "@march_decrc_freed")
+
 (** Drop glue for a type with a residual type variable is named by the
     variable's POSITION ([__drop$List_V0]), not by its typechecker id
     ([__drop$List_V_53272]).  The id comes from a global fresh-variable
@@ -14358,6 +14420,189 @@ let test_builtin_named_user_type_compiled () =
           (builtin_named_user_type_expected ^ "\nEXIT:0") run_out)
     [0; 2]
 
+(* ── Payload atoms (`:ok(n)`) compiled ─────────────────────────────────────
+   Every atom has the one type `Atom`, but a payload atom (`:ok(7)`) is a heap
+   cell while a nullary atom (`:none`) is an immediate.  Codegen treated every
+   `Atom` as an immediate, so a match on a payload atom that arrived through a
+   parameter was an internal compiler error ("constructor pattern ok(..)
+   destructures a non-pointer scrutinee"), `show` printed `:<atom>` and `==`
+   compared cell addresses.  Nullary atoms are now odd immediates and a payload
+   atom an even cell pointer, so every consumer can tell them apart.
+   (specs/progress/2026-11-17-compiled-payload-atom-match.md) *)
+let payload_atom_src = {|mod PayloadAtoms do
+  needs IO.Console
+  fn describe(tagged) do
+    match tagged do
+      :ok(n) -> n * 10
+      :error(_msg) -> -1
+      :none -> -2
+      _ -> 0
+    end
+  end
+  fn label(a : Atom) : String do
+    match a do
+      :named(s) -> "named " ++ s
+      :pair(x, y) -> "pair " ++ int_to_string(x + y)
+      :wrap(inner) ->
+        match inner do
+          :plain -> "wrap plain"
+          :wrap(_) -> "wrap wrap"
+          _ -> "wrap other"
+        end
+      :plain -> "plain"
+      _ -> "other"
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    println(int_to_string(describe(:ok(7))))
+    println(int_to_string(describe(:error("bad"))))
+    println(int_to_string(describe(:none)))
+    println(int_to_string(describe(:other)))
+    let n = :named("x" ++ int_to_string(1))
+    println(label(n))
+    println(label(n))
+    println(label(:pair(2, 3)))
+    println(label(:wrap(:wrap(:plain))))
+    println(label(:wrap(:plain)))
+    println(label(:plain))
+    println(label(:unknown(1)))
+    println(to_string(:error("bad")))
+    println(to_string(:pair(1, true)))
+    println(to_string(:wrap(:inner(2))))
+    println(to_string([:ok, :err(1)]))
+    println(to_string(:a(1) == :a(1)))
+    println(to_string(:a(1) == :a(2)))
+    println(to_string(:a(1) == :b(1)))
+    println(to_string(:a(1) == :a))
+    println(to_string(:s("x") == :s("x")))
+    println(to_string(:w(:i(1)) == :w(:i(1))))
+  end
+end
+|}
+
+let payload_atom_expected =
+  "70\n-1\n-2\n0\nnamed x1\nnamed x1\npair 5\nwrap wrap\nwrap plain\nplain\nother\n\
+   error(\"bad\")\npair(1, true)\nwrap(inner(2))\n[:ok, err(1)]\n\
+   true\nfalse\nfalse\nfalse\ntrue\ntrue"
+
+let test_payload_atom_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_payload_atom" payload_atom_src in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+      (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreter baseline" payload_atom_expected interp_out;
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "payload_atom_o%d" opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_VERIFY_TIR=1 " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string)
+          (Printf.sprintf "--opt %d: payload atoms match, show and compare like \
+                           the interpreter" opt)
+          (payload_atom_expected ^ "\nEXIT:0") run_out)
+    [0; 2];
+  (* --target js: the match half of the program (the JS case chain compared a
+     payload atom's object with `===` and matched nothing).  JS has no atom
+     `show` yet and compares payload atoms by identity
+     (specs/todos/2026-11-17-js-payload-atom-show-and-eq.md), so the
+     to_string lines are left out. *)
+  if Sys.command "command -v node >/dev/null 2>&1" <> 0 then
+    print_endline "  SKIP: node not on PATH (JS payload-atom match)"
+  else begin
+    let keep l = not (ir_contains l "println(to_string(") in
+    let js_src = String.concat "\n" (List.filter keep (String.split_on_char '\n' payload_atom_src)) in
+    let js_expected =
+      String.concat "\n"
+        (List.filteri (fun i _ -> i < 11) (String.split_on_char '\n' payload_atom_expected)) in
+    let (project_root, main_exe, src, tmp) =
+      write_march_source ~name:"march_payload_atom_js" js_src in
+    let mjs = Filename.concat tmp "payload_atom.mjs" in
+    let (crc, cout) = run_capture (Printf.sprintf "cd %s && %s --target js -o %s %s 2>&1"
+        (Filename.quote project_root) (Filename.quote main_exe)
+        (Filename.quote mjs) (Filename.quote src)) in
+    if crc <> 0 then Alcotest.failf "payload atoms: --target js compile failed (rc=%d):\n%s" crc cout;
+    let (_, js_out) = run_capture (Printf.sprintf "node %s 2>&1; echo EXIT:$?"
+        (Filename.quote mjs)) in
+    Alcotest.(check string) "--target js: payload atoms match like the interpreter"
+      (js_expected ^ "\nEXIT:0\n") js_out
+  end
+
+(* ── Payload atoms are released ───────────────────────────────────────────
+   A payload atom (`:item(s, n)`) is a heap cell; until `Atom` was reference
+   counted it was never freed, nor was anything it held.  2,000 iterations
+   build payload atoms that escape: returned, matched twice while still live,
+   kept in a list, nested in another payload atom and held in a record field.
+   [live_allocs] (the runtime's live-cell count) must come back to where it
+   started; a leaking build grows by 13 cells per iteration.
+   (specs/progress/2026-11-17-payload-atom-cells-leak.md) *)
+let payload_atom_leak_src = {|mod AtomLeak do
+  needs IO.Console
+  type Holder = Holder(Atom, Int)
+  fn mk(i : Int) : Atom do :item(int_to_string(i), i) end
+  fn score(a : Atom) : Int do
+    match a do
+      :item(s, n) -> String.byte_size(s) + n
+      :wrap(inner) -> score(inner)
+      _ -> 0
+    end
+  end
+  fn twice(a : Atom) : Int do score(a) + score(a) end
+  fn list_of(i : Int, acc : List(Atom)) : List(Atom) do
+    if i == 0 do acc else list_of(i - 1, Cons(mk(i), acc)) end
+  end
+  fn sum(xs : List(Atom), acc : Int) : Int do
+    match xs do
+      Nil -> acc
+      Cons(x, rest) -> sum(rest, acc + score(x))
+    end
+  end
+  fn holder_score(h : Holder) : Int do
+    match h do
+      Holder(a, k) -> score(a) + k
+    end
+  end
+  fn loop(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let a = mk(i)
+      let b = :wrap(mk(i))
+      let h = Holder(mk(i), 1)
+      loop(i - 1, acc + twice(a) + score(b) + holder_score(h) + sum(list_of(3, Nil), 0))
+    end
+  end
+  fn main(_c : Cap(IO.Console)) do
+    let r0 = loop(10, 0)
+    let before = live_allocs()
+    let r = loop(2000, 0)
+    let after = live_allocs()
+    println(int_to_string(r0 + r))
+    let grew = after - before
+    println(if grew < 100 do "bounded" else "leaked " ++ int_to_string(grew) end)
+  end
+end
+|}
+
+let test_payload_atom_cells_released () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"march_payload_atom_leak" payload_atom_leak_src in
+  List.iter (fun opt ->
+      let bin = Filename.concat tmp (Printf.sprintf "payload_atom_leak_o%d" opt) in
+      match compile_march_or_skip
+              ~cmd_prefix:(Printf.sprintf "cd %s && MARCH_VERIFY_TIR=1 " (Filename.quote project_root))
+              ~extra_args:(Printf.sprintf "--opt %d" opt) ~main_exe ~bin ~src () with
+      | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+      | Some bin ->
+        let run_out = read_cmd_output
+            (Printf.sprintf "%s 2>&1; echo EXIT:$?" (Filename.quote bin)) in
+        Alcotest.(check string)
+          (Printf.sprintf "--opt %d: payload atoms are freed" opt)
+          "8051936\nbounded\nEXIT:0" run_out)
+    [0; 2]
+
 (* ── Nested-fn name collision with a top-level fn (mono shadowing) ─────────
    A user top-level `pfn go` that reverses a list via `Cons(h, acc)` collides
    with the MANY stdlib helpers that use a conventionally-named nested
@@ -17852,6 +18097,8 @@ declare noalias nonnull ptr @march_alloc(i64 %sz) allocsize(0)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
 declare i64  @march_decrc_freed(ptr %p)
+declare i64  @march_decrc_last(ptr %p)
+declare void @march_free_last(ptr %p)
 declare void @march_incrc_local(ptr %p)
 declare void @march_decrc_local(ptr %p)
 declare i64  @march_decrc_local_freed(ptr %p)
@@ -17931,6 +18178,7 @@ declare i64    @march_checked_shr(i64 %a, i64 %n)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 declare i64  @march_poly_eq(ptr %a, ptr %b)
+declare i64  @march_atom_eq(ptr %a, ptr %b)
 ; Ord / Hash builtins
 declare i64    @march_compare_int(i64 %x, i64 %y)
 declare i64    @march_compare_float(double %x, double %y)
@@ -18217,7 +18465,7 @@ declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
 declare i64  @march_file_exists(ptr %s)
 declare i64  @march_dir_exists(ptr %s)
 declare ptr  @march_file_open(ptr %path)
-declare i64  @march_file_close(ptr %handle)
+declare ptr  @march_file_close(ptr %handle)
 declare ptr  @march_file_read(ptr %path)
 declare ptr  @march_file_read_line(ptr %handle)
 declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
@@ -18414,7 +18662,7 @@ declare ptr  @march_http_fetch(ptr %method, ptr %url, ptr %headers, ptr %body)
 ; CSV builtins
 declare ptr  @march_csv_open(ptr %path, ptr %delim, ptr %mode)
 declare ptr  @march_csv_next_row(ptr %handle)
-declare i64  @march_csv_close(ptr %handle)
+declare ptr  @march_csv_close(ptr %handle)
 ; Resource ownership
 declare void @march_own(ptr %pid, ptr %value)
 ; Capability builtins
@@ -18456,8 +18704,8 @@ declare void @march_sched_delivery_origin_set(i64 %conn, i64 %seq)
 declare void @march_sched_delivery_origin_clear()
 declare void @march_delivery_failed_watch(ptr %clo)
 declare ptr  @march_get_cap(ptr %pid)
-declare i64  @march_send_checked(ptr %cap, ptr %msg)
-declare i64  @march_revoke_cap(ptr %cap)
+declare ptr  @march_send_checked(ptr %cap, ptr %msg)
+declare ptr  @march_revoke_cap(ptr %cap)
 declare i64  @march_is_cap_valid(ptr %cap)
 declare ptr  @march_self()
 declare ptr  @march_pid_of_int(i64 %n)
@@ -21020,6 +21268,8 @@ let codegen_suites =
             `Quick test_tco_self_dup_arg_decref_on_live_path;
           Alcotest.test_case "deep drop: never-destructured container releases its children"
             `Quick test_deep_drop_of_borrowed_container;
+          Alcotest.test_case "deep drop: a record is released before its fields are loaded"
+            `Quick test_record_drop_releases_before_loading_fields;
           Alcotest.test_case "drop glue: name spells a residual type variable by position"
             `Quick test_drop_glue_name_is_structural;
           Alcotest.test_case "final-review: non-tail dec-chain-wrapped group call rejected"
@@ -21765,6 +22015,12 @@ let codegen_suites =
       ( "builtin_named_user_type_codegen", [
           Alcotest.test_case "user type named like a builtin ADT keeps its identity" `Quick
             test_builtin_named_user_type_compiled;
+        ] );
+      ( "payload_atom_codegen", [
+          Alcotest.test_case "payload atoms match, show and compare compiled" `Quick
+            test_payload_atom_compiled;
+          Alcotest.test_case "payload-atom cells are released" `Quick
+            test_payload_atom_cells_released;
         ] );
       ( "nonentry_newtype_repr_codegen", [
           Alcotest.test_case "non-entry single-field ADT: construct/destructure repr agree (tuple-nested)" `Quick

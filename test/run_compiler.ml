@@ -14,9 +14,7 @@ let () =
   Alcotest.run "march-compiler"
     (Test_helpers.keep_os_sensitive
        (Test_compiler.compiler_suites @ Test_ctxesc.tests @ Test_stdlib_only.tests
-        @ Test_hcr_stdlib_actors.tests @ Test_check_cas_cap_strict.tests
-        @ Test_cap_runtime_slot.tests @ Test_authority_differential.tests
-        @ Test_auth_rt.tests)
+        @ Test_hcr_stdlib_actors.tests @ Test_check_cas_cap_strict.tests)
        ~groups:
          [ "link_deps"; "static_link"; "cap_sandbox_runtime"; "cap_sandbox_profile";
            "cap_strip"; "cap_markers"; "compile_ll_race"; "hcr_closure_codegen";

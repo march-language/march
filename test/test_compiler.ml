@@ -11072,6 +11072,55 @@ let test_nested_fwdref_int_as_string () =
     "forward-ref nested id launders Int into String param: error"
     true (has_errors ctx)
 
+(* A type declaration between a caller and the helper it calls must not end
+   the dependency-ordered fn run: the caller was checked against the helper's
+   pass-1 placeholder and generalized over it, so an Int result passed for a
+   String (stdlib/presence.march's [entry_count] above [type PresenceState]
+   and [list_len_pr] below it; specs/progress/2026-11-11-repl-int-result-printed-tagged.md). *)
+let test_fwdref_across_type_decl_result () =
+  let ctx = typecheck {|mod T do
+    fn count(l) do len3(l) end
+    type S = S(Int)
+    pfn len3(lst) do
+      match lst do
+        Nil -> 0
+        Cons(_, t) -> 1 + len3(t)
+      end
+    end
+    fn use_it() : String do count([1, 2]) end
+  end|} in
+  Alcotest.(check bool)
+    "forward ref across a type decl: Int result used as String is an error"
+    true (has_errors ctx)
+
+let test_fwdref_across_type_decl_launder () =
+  let ctx = typecheck {|mod T do
+    fn need_str(s : String) : Int do string_length(s) end
+    fn attack() : Int do need_str(id(42)) end
+    type S = S(Int)
+    fn id(x) do x end
+  end|} in
+  Alcotest.(check bool)
+    "forward ref across a type decl: id launders Int into String: error"
+    true (has_errors ctx)
+
+let test_fwdref_across_type_decl_accepts () =
+  let ctx = typecheck {|mod T do
+    fn count(l) do len3(l) end
+    type S = S(Int)
+    pfn len3(lst) do
+      match lst do
+        Nil -> 0
+        Cons(_, t) -> 1 + len3(t)
+      end
+    end
+    fn use_it() : Int do count([1, 2]) + mk(3) end
+    fn mk(n : Int) : Int do match S(n) do S(k) -> k end end
+  end|} in
+  Alcotest.(check bool)
+    "forward ref across a type decl: well-typed program is accepted"
+    false (has_errors ctx)
+
 (* C1 forward-ref, Box(String) -> Box(Int). *)
 let test_nested_fwdref_box () =
   let ctx = typecheck {|mod T do
@@ -20487,6 +20536,9 @@ let compiler_suites =
           Alcotest.test_case "nested PRIVATE (pfn) id still rejects forge: error"    `Quick test_nested_launder_private_id_still_rejected;
           (* Round 2 — residual erasures (RED on 10249488, GREEN after). *)
           Alcotest.test_case "C1 forward-ref id launders Int->String: error"        `Quick test_nested_fwdref_int_as_string;
+          Alcotest.test_case "forward ref across a type decl: Int result as String"  `Quick test_fwdref_across_type_decl_result;
+          Alcotest.test_case "forward ref across a type decl: id launder"             `Quick test_fwdref_across_type_decl_launder;
+          Alcotest.test_case "forward ref across a type decl: accepted"               `Quick test_fwdref_across_type_decl_accepts;
           Alcotest.test_case "C1 forward-ref id launders Box(String)->Box(Int): error" `Quick test_nested_fwdref_box;
           Alcotest.test_case "C1 forward-ref id launders Cap(IO)->Cap(Db.P): error" `Quick test_nested_fwdref_proof_cap;
           Alcotest.test_case "C2 distinct-tvar launder erases Int->String: error"    `Quick test_nested_distinct_tvar_int_as_string;

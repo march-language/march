@@ -78,6 +78,9 @@ expect dune "@test/bench_gate" -- test/test_bench_gate.ml
 # Test modules resolve to the stanza that lists them in test/dune.
 expect suites "codegen" -- test/test_trmc.ml
 expect suites "compiler" -- test/test_cap_scope.ml
+expect suites "authority" -- test/test_auth_rt.ml
+expect suites "authority" -- test/run_authority.ml
+expect suites "authority" -- runtime/march_runtime.c
 expect suites "test_jit" -- test/test_jit.ml
 
 # The FULL fallback: no rule, shared helpers, test wiring, the language corpus.
