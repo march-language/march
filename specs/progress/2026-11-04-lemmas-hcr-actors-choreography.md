@@ -1,4 +1,4 @@
-`[P2]` Lemmas for hot code reload, actors and choreography: build the plan
+`[P2]` Lemmas for hot code reload, actors and choreography: build the plan (done; residuals split out)
 
 Design: `specs/2026-11-04-lemmas-hcr-actors-choreography-design.md` (plan only, filed
 2026-11-04 on `b86c86a63`). Ordered for app developers first: a user states an invariant,
@@ -71,4 +71,18 @@ Phases (design §7):
   Residuals are in each progress file; the user-facing `<Actor>.step` for hand-written
   lemmas and `proved (inductive)` stay in `2026-11-06-actor-inductive-invariants`.
 
-Move this file to `specs/progress/` when phase F lands, or split it per phase as phases land.
+## Resolution (2026-11-18)
+
+Phase F landed 2026-11-08 (`feat/hcr-phase-f`), and its follow-ups landed after it: derived
+field renames and conversions (PR #1278, progress `2026-11-15-hcr-derive-field-rename`) and
+consented drops with the rename suggestion (PR #1280, progress
+`2026-11-16-hcr-deploy-drop-consent`, `2026-11-16-hcr-migrate-clause-suggestion`). Every phase's open work
+now lives in its own todo, so this umbrella moves to progress:
+
+- `2026-11-06-actor-inductive-invariants`: handlers reflected as `<Actor>.step`, an
+  `@invariant` proved for every message, `proved (inductive)` (phase F residual).
+- `2026-11-06-actor-theory-runtime-tests`: the A3 runtime fixture, A4 RC fixtures and
+  trace-driven conformance (phase D).
+- `2026-11-06-session-theory-loops-crash`: C3-C5 beyond the fragment (phase C).
+- `2026-11-04-actor-call-reply-untyped`: typed replies, then reply covariance at deploy
+  (phase A0's deferred H2 half).
