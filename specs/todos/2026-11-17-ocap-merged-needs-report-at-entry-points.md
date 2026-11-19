@@ -32,3 +32,16 @@ program's diagnostics, so it wants its own change and review. Ban lists by name
 in `cap pure` / `cap deterministic` (`Typecheck_modcaps.pure_banned`) would need
 the same entries for the call-level report, which the `needs` half
 (issue #1180) currently stands in for.
+
+Added 2026-11-19 (PR B final review):
+
+- The `cap_grant_exceeded` chain also lost its last hop: test/errors/cap_grant_exceeded_2
+  went from `main → slurp → File.read` to `main → slurp` with the source unchanged,
+  because the per-function closures (which feed `cap_grant_exceeded`) now charge the
+  entry-point call to the function that makes it (comment at the `entry_caps_of_expr`
+  definition in lib/typecheck/typecheck_caps.ml).
+- The real size of this item: the call-site reports of diagnostics plan F1/X3 are now
+  reachable only from stdlib-spanned code, so `test/errors/cap_needs_10` and
+  `role_grant_exceeded_1` pin output that no user program can produce. Restoring them
+  for user code means charging entry-point calls at the call (see above), not a wording
+  change.

@@ -10,7 +10,7 @@ Every capability operation (printing, reading the clock, an environment
 variable, a file, opening a connection, spawning a task) returns
 `Result(T, CapError)`: `Err` when the authority the code runs under refuses
 it. This error reports a place that wants the `T` itself, for example a
-function declared `: ()` whose last line is a `println`, or `unix_time_ms()`
+function declared `: ()` whose last line is a `println`, or `System.now_ms()`
 used in arithmetic. The fix, which `forge fix` applies, follows from the
 position: a line `()` after a unit result on a line of its own,
 `Authority.ignore(...)` around a unit result anywhere else, and

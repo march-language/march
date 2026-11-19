@@ -994,24 +994,21 @@ actor behind `host`) and requires every capability in that reach to sit under th
 grant, exactly as `main`'s grant bounds the program:
 
 ```
-The body of role `Cons` writes a file, but the role is granted only `Cap(IO.Console)`
-(`role Cons needs IO.Console`). A role's grant bounds everything its code reaches, as
-`main`'s grant bounds the program.
-help: add `IO.FileWrite` to `role Cons needs ...` in protocol `Stream`, or remove the use.
+-- CAPABILITY -------------------------------- gbad.march
 
-26 |     Authority.ignore(File.write("/tmp/n", int_to_string(n)))
-                      ^^^^^^^^^^
-    the body calls `cons` here:            (line 38)
-    `cons` calls `save` here:              (line 32)
-    the body of role `Cons`, passed to `Stream_Run.run_Cons`
-    role `Cons` is granted only `Cap(IO.Console)` here:  role Cons needs IO.Console
+Role `Stream.Cons` is granted `Cap(IO.Console)` (`role Cons needs IO.Console`), but the body passed to `Stream_Run.run_Cons` reaches `IO.FileWrite` (reached from the body: body → cons → save). A role's grant bounds everything its code reaches, as `main`'s grant bounds the program. [role_grant_exceeded]
+help: add `IO.FileWrite` to the grant in protocol `Stream`: `role Cons needs IO.Console, IO.FileWrite`. The body then takes one `Cap` per granted capability, in the grant's order, between the session capability and the state, so it gains a parameter: `fn (s, cap_console, cap_file_write, st) -> ...`. Pass `cap_file_write` on to any function the body hands its capabilities to. Or remove the use.
+
+28 |     let _ = Stream_Run.run_Cons(c, "n", "s", Stream_Run.addrs_from_env(), fn (s, con, st) -> cons(s, con, st))
+                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
 
-The error points at the call that needs the authority and labels each call on the way
-to it; its fix adds the capability to the role's `needs` line. When the chain passes
-through a value the walk cannot place in the source (a body bound with `let`, say), the
-error stays on the callback and names the chain in prose instead (`(reached from the
-body: body → wipe)`).
+Here `cons` calls a helper `save` that writes through `File.write`. The error points at
+the body passed to the entry point and names the chain from the body to the function that
+needs the authority (`body → cons → save`); its fix adds the capability to the role's
+`needs` line. The chain is followed through anything that flows into the body parameter:
+a lambda, a named function, a body bound with `let` (`(reached from the body: body →
+wipe)`).
 
 The root of the walk is the *value* that reaches the body parameter, not the expression
 at the call. A body bound with `let` in the calling function, a body passed in through a

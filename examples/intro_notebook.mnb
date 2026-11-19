@@ -9,13 +9,13 @@ Let's start with some simple values and printing.
 
 ```march
 let greeting = "Hello, March notebooks!"
-print(greeting)
+println(greeting)
 ```
 
 ```march
 let x = 42
 let y = x * 2 + 1
-print(to_string(y))
+println(to_string(y))
 ```
 
 ## Working with Lists
@@ -25,17 +25,17 @@ March has built-in list support with a rich standard library.
 ```march
 let nums = [1, 2, 3, 4, 5]
 let doubled = List.map(nums, fn n -> n * 2)
-print(to_string(doubled))
+println(to_string(doubled))
 ```
 
 ```march
 let total = List.fold_left(0, nums, fn (acc, n) -> acc + n)
-print(to_string(total))
+println(to_string(total))
 ```
 
 ```march
 let evens = List.filter(nums, fn n -> n % 2 == 0)
-print(to_string(evens))
+println(to_string(evens))
 ```
 
 ## Functions
@@ -55,7 +55,7 @@ end
 
 ```march
 let result = sum_of_squares([1, 2, 3, 4, 5])
-print(to_string(result))
+println(to_string(result))
 ```
 
 ## Pattern Matching
@@ -71,9 +71,9 @@ fn classify(n) do
   end
 end
 
-print(classify(-5))
-print(classify(0))
-print(classify(42))
+println(classify(-5))
+println(classify(0))
+println(classify(42))
 ```
 
 ## String Operations
@@ -81,7 +81,7 @@ print(classify(42))
 ```march
 let words = ["march", "notebooks", "are", "great"]
 let sentence = String.join(words, " ")
-print(sentence)
+println(sentence)
 ```
 
 ---

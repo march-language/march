@@ -79,8 +79,11 @@ end
 |}
     needs
 
-(* A builtin passed as a value: `--compile`'s ceiling rejects it, the
-   typecheck-side subset under `--check` does not (measured 2026-11-10). *)
+(* A stdlib entry point reached through a lambda passed as a value
+   (`fn p -> File.read(p)`). This used to pass the raw `file_read` builtin as
+   the value; since ocap phase 4 that builtin is stdlib-only, so the
+   function-as-value route under `--compile` is pinned nowhere now
+   (specs/todos/2026-11-17-ocap-tir-ceiling-misses-function-values.md). *)
 let ceiling_value needs =
   Printf.sprintf
     {|mod Main do

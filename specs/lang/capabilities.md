@@ -894,8 +894,9 @@ launch narrowed by whoever starts the program, a function value called far from 
 was made. So every running program also has a **current authority**, and each capability
 operation is checked against it. It works the same in the interpreter, `--jit`, the
 REPL, a compiled binary and `--target js` (the JS target has no tasks or actors);
-`test/cap_conformance/` runs every rule below in each of the five where it applies (the
-JS target skips those that need tasks or actors).
+`test/cap_conformance/` runs each of its fixtures in every one of the five that can run
+it (the JS target skips those that need tasks or actors). Not every rule below has a
+fixture yet.
 
 **The launch.** A program starts with `main`'s request (see [The grant](#grant)): its
 `needs` clause and `Cap(...)` parameters, or the module's `needs` line when it has
@@ -946,6 +947,9 @@ intersection), checked from the innermost out, and a refusal names the innermost
 refused (`ByFnNeeds(f)` with `f`'s clause, or `ByLaunch` with the grant text). A function
 already running under its own frame (its self-recursive calls) enters nothing again, so a
 self tail call stays a loop. When the function returns, the caller's authority is back.
+A panic that unwinds out of a function and is caught (by a supervisor, a task join, a test
+runner) restores the authority in force where the catch was entered, so the unwound
+function's clause is not left in force.
 
 Path scopes compare whole segments lexically: a relative target is resolved against the
 current directory, `.` and `..` are folded, and `/srvx/y` is not inside `/srv/`. Symlinks
@@ -981,8 +985,10 @@ but only in a program that has at least one frame.
 **Raw builtins are stdlib-only.** A program cannot call a raw capability builtin
 (`file_read(p)`, `unix_time_ms(())`, `task_spawn(f)`) directly: the reference is a
 `stdlib_internal` error that names the stdlib entry point to call instead (`File.read`,
-`System.now_ms`, `Task.async`), which runs the run-time check first. Where the entry point
-takes the same arguments, the error carries the rename as its fix.
+`System.now_ms`, `Task.async`, `Crypto.random_bytes`), which runs the run-time check
+first. Where the entry point takes the same arguments, the error carries the whole
+replacement call as its fix: `file_read(p)` becomes `Authority.must(File.read(p))`, which
+panics on a refusal.
 
 **Not yet enforced at run time.** Authority does not travel with a remote child
 started on another node: the receiving node runs it under its own launch authority
@@ -1705,7 +1711,7 @@ intercepted behaves exactly as it does today.
 | Not interceptable | Why |
 |---|---|
 | Polymorphic builtins — all of `vault_*`, so `IO.Mut` entirely | A dictionary field would need rank-2 types |
-| `println`, `random_bytes` | Shadowed by a stdlib March function, so the builtin is dead — intercept the `print_line` it delegates to |
+| `println`, `random_bytes` | A program reaches these through a stdlib March function (`Prelude.println`, `Crypto.random_bytes`), not through the builtin, and the stdlib is not elaborated; `println` can be intercepted through the `print_line` it delegates to |
 | An actor whose handlers reach **more than one** capability | The capability is captured at the spawn site onto the actor's runtime metadata, and that carries one. An actor reaching two would need a record of them captured instead — additive, not yet built |
 | Functions used as values rather than called directly | Their arity cannot change |
 

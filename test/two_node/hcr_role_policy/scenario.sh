@@ -18,8 +18,9 @@
 #              socket, as `forge deploy hot` sends it                407
 #   v3         n * 1000 + the mark, as a release through the control
 #              plane (the Agent relays it to the same gate)          4007
-#   v4         answers n, and widens Back.audit (a direct File.write, so
-#              it is the function's own cap; reached by no role, so
+#   v4         answers n, and widens Back.audit (its own call of the
+#              File.write entry point, which the per-function capability
+#              closure charges to audit itself; reached by no role, so
 #              the compiler's grant check cannot see it) to IO.FileWrite,
 #              which the operator grants (--grant-cap) but the node's
 #              policy does not: ERR cap_policy IO.FileWrite, and the

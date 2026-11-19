@@ -79,7 +79,7 @@ mod SteadyStateRing do
 
   -- ── Steady-state loop ───────────────────────────────────────────────────
   -- Each op times one request (process the request through the kernel) and
-  -- folds its latency into the threaded histogram. unix_time() allocates
+  -- folds its latency into the threaded histogram. System.now() allocates
   -- transient boxed Floats every iteration; RC frees them immediately, which
   -- is exactly claim (1): a high per-op allocation rate with a flat live set.
   pfn drive(i : Int, n : Int, work : Int, mn : Int, mx : Int, sum : Int,

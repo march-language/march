@@ -69,8 +69,10 @@ task spawns and the five Vault opens.
   (`File.read`, `File.open`, `Csv.read_all`, `Dir.list`, ...) to it, so the literal
   path-scope check fires on `File.read("/etc/hosts")` under
   `needs IO.FileRead("/srv/data")` (it fired only on the raw builtin before).
-- **Corpus.** 678 direct calls in 229 files (test/, bench/, examples/,
-  specs/lang/, docs/assets/, forge/test/): `forge fix` applied the renames and
+- **Corpus.** 623 direct calls in 202 `.march` files (test/, bench/, examples/,
+  specs/lang/, docs/assets/, forge/test/; the task report's count, which an
+  earlier draft of this entry gave as 678 in 229; fix round 2 then migrated
+  the callers CI found outside these): `forge fix` applied the renames and
   the `cap_result_unhandled` wraps (this ran with the bare-rename fix, so every
   site whose result was matched was re-checked and wrapped by hand); a script
   renamed the forms with no fix
@@ -88,5 +90,8 @@ Tests: `test_stdlib_only` `raw_capability_builtins_gated` (pinned against
 `Cap_ops.gated` itself); `test/errors/stdlib_internal_4` (the rename fix,
 verified machine-applicable).
 
-Follow-ups filed: specs/todos/2026-11-17-ocap-raw-random-bytes-ungated.md,
-specs/todos/2026-11-17-ocap-merged-needs-report-at-entry-points.md.
+Follow-ups filed: specs/todos/2026-11-17-ocap-raw-random-bytes-ungated.md
+(since done: specs/progress/2026-11-17-ocap-raw-random-bytes-ungated.md, so
+`println` is the one row left out),
+specs/todos/2026-11-17-ocap-merged-needs-report-at-entry-points.md,
+specs/todos/2026-11-17-ocap-tir-ceiling-misses-function-values.md.
