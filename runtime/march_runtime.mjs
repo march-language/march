@@ -643,9 +643,11 @@ export function march_panic_error(prefix, msg) {
  * that is async (it awaits a JS-module extern) is not supported: its panic
  * would reject a Promise this cannot wait for. */
 export function march_try_call(thunk) {
+  const capMark = marchCapSlot;
   try {
     return { $: "Ok", _0: thunk._0(thunk, true) };
   } catch (e) {
+    marchCapUnwind(capMark);
     let msg;
     if (e instanceof RangeError && /call stack/i.test(e.message)) msg = "stack overflow";
     else if (e instanceof Error) msg = (e.marchPanicPrefix || "") + e.message;
@@ -666,6 +668,7 @@ export function march_process_cwd() {
 export function march_process_pid() {
   return (typeof process !== "undefined" && typeof process.pid === "number") ? process.pid : 0;
 }
+
 
 /* Int `/` and `%` by zero panic with the operator messages the interpreter
  * and native code use (march_checked_div_op / march_checked_mod_op in
@@ -753,28 +756,87 @@ export function march_unix_time() {
   return Date.now() / 1000;
 }
 
-/* ocap phase 1 capability check point; runtime/march_extras.c has the native
- * twin and test/run_cap_conformance.ml pins that they agree. Nothing refuses
- * except the TEST-ONLY hook MARCH_TEST_REFUSE (comma-separated kinds, matched
- * exactly), read once; a page with no `process` allows everything. */
-let marchCapHook = null;
-function marchCapHookInit() {
-  if (marchCapHook !== null) return marchCapHook;
-  const raw = (typeof process !== "undefined" && process.env && process.env.MARCH_TEST_REFUSE) || "";
-  const text = raw.trim();
-  const kinds = text.split(",").map((k) => k.trim()).filter((k) => k !== "");
-  marchCapHook = { text, kinds };
-  return marchCapHook;
+/* ocap phase 4: the run-time authority. The JS target has one thread of
+ * control and no tasks, so the slot is one module variable. Empty is `null`;
+ * a CapAuthRef is the slot's list value itself. */
+let marchCapSlot = null;
+let marchCapLaunch = null;
+let marchCapLaunchSet = false;
+const marchCapNil = () => ({ $: "Nil" });
+const marchCapEmpty = (l) => l === null || l === undefined || l.$ === "Nil";
+
+/** The capability check point; runtime/march_extras.c has the native twin
+ * and test/run_cap_conformance.ml pins that they agree. 0 when nothing is in
+ * force (an empty launch and an empty slot); else 1 (Authority.check walks
+ * the layers). */
+export function march_cap_check_raw(_kind, _target) {
+  return marchCapEmpty(marchCapSlot) && marchCapEmpty(marchCapLaunch) ? 0 : 1;
 }
 
-/** 0 when the launch admits an operation of `kind` on `target`, else 1. */
-export function march_cap_check_raw(kind, _target) {
-  return marchCapHookInit().kinds.includes(kind) ? 1 : 0;
+/** The layers in force: the slot, else the launch, else Nil. */
+export function march_cap_layers() {
+  if (!marchCapEmpty(marchCapSlot)) return marchCapSlot;
+  if (!marchCapEmpty(marchCapLaunch)) return marchCapLaunch;
+  return marchCapNil();
 }
 
-/** The test hook's trimmed value, the refusing limit's scope text. */
-export function march_cap_launch_text() {
-  return marchCapHookInit().text;
+/** Sets the launch layers, once. */
+export function march_cap_set_launch(l) {
+  if (marchCapLaunchSet) throw march_panic_error("panic: ", "cap_set_launch: the launch authority is already set");
+  marchCapLaunchSet = true;
+  marchCapLaunch = marchCapEmpty(l) ? null : l;
+}
+
+export function march_cap_save() { return marchCapSlot; }
+
+/* After a caught panic: the slot the catcher was entered under, in force
+ * again (the throw skipped the restores of the frames it left; the native
+ * twin is march_cap_unwind, the interpreter's a Fun.protect). */
+function marchCapUnwind(mark) { marchCapSlot = mark; }
+
+export function march_cap_restore(r) { marchCapSlot = marchCapEmpty(r) ? null : r; }
+
+/** Pushes `layer` over the layers in force; returns the old slot. */
+export function march_cap_push(layer) {
+  const old = marchCapSlot;
+  marchCapSlot = { $: "Cons", _0: layer, _1: march_cap_layers() };
+  return old;
+}
+
+/** Sets the slot to `r`; returns the old slot. */
+export function march_cap_enter(r) {
+  const old = marchCapSlot;
+  marchCapSlot = marchCapEmpty(r) ? null : r;
+  return old;
+}
+
+/** MARCH_GRANT, trimmed; "" when unset or blank (or with no `process`). */
+export function march_cap_grant_text() {
+  const raw = (typeof process !== "undefined" && process.env && process.env.MARCH_GRANT) || "";
+  return raw.trim();
+}
+
+/** The current directory, for Authority's path checks; "" when it cannot be
+ *  read (no `process`, or a removed directory), as in every backend:
+ *  Authority then refuses a relative path target. */
+export function march_cap_cwd() {
+  try {
+    return (typeof process !== "undefined" && process.cwd) ? process.cwd() : "";
+  } catch (_e) {
+    return "";
+  }
+}
+
+/** Authority.launch_init's launch error: the text verbatim on fd 2
+ *  (synchronously, so the exit cannot truncate it), then exit status 2. */
+export function march_cap_launch_fail(text) {
+  if (typeof process !== "undefined" && process.exit) {
+    const fs = process.getBuiltinModule ? process.getBuiltinModule("fs") : null;
+    if (fs && fs.writeSync) fs.writeSync(2, text);
+    else if (process.stderr) process.stderr.write(text);
+    process.exit(2);
+  }
+  throw new Error(text);
 }
 
 /** Milliseconds since the Unix epoch as an Int (mirrors `unix_time_ms`). */
@@ -995,10 +1057,12 @@ export function march_panic_err(msg) {
  * march_runtime.c).  Both closures take one ignored argument.  An action
  * that returns a promise (an async closure) is cleaned up when it settles. */
 export function march_try_finally(action, cleanup) {
+  const capMark = marchCapSlot;
   let r;
   try {
     r = action._0(action, undefined);
   } catch (e) {
+    marchCapUnwind(capMark);
     cleanup._0(cleanup, undefined);
     throw e;
   }
@@ -1023,7 +1087,8 @@ export async function march_diag_unhandled(e) {
     for (const [, cb] of snapshot) {
       const report = { $: "DiagCrash", _0: 0, _1: msg, _2: { $: "Nil" }, _3: -1, _4: 0,
                        _5: ctx, _6: site[0], _7: site[1] };
-      try { await cb._0(cb, report); } catch (_) { /* swallowed */ }
+      const capMark = marchCapSlot;
+      try { await cb._0(cb, report); } catch (_) { marchCapUnwind(capMark); /* swallowed */ }
     }
   } finally {
     march_diag_dispatching = false;
@@ -1089,7 +1154,8 @@ export async function march_test_run(fn, name, setup) {
   if (setup) await setup();
   march_test_cur_header = null;
   let err = null, failed = false;
-  try { await fn(); } catch (e) { err = e; failed = true; }
+  const capMark = marchCapSlot;
+  try { await fn(); } catch (e) { err = e; failed = true; marchCapUnwind(capMark); }
   if (!failed) {
     march_test_out(march_test_verbose ? `  ✓ ${name}\n` : ".");
   } else {

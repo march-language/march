@@ -1,0 +1,37 @@
+-- A function's scoped needs clause is a limit around everything it reaches
+-- by direct calls (design §3, §4): a computed path outside it is refused
+-- with ByFnNeeds naming the function and its clause, also from a helper it
+-- calls; inside it is allowed; and main's own authority is untouched once
+-- the function returns.
+mod FnScopedNeedsRefuses do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn helper(p : String) : String do
+    probe("IO.FileRead", p)
+  end
+
+  fn read_conf(name : String) : String needs IO.FileRead("/etc/myapp/") do
+    probe("IO.FileRead", "/etc/myapp/" ++ name) ++ " | " ++ helper("/etc/" ++ name)
+  end
+
+  fn is_refused_by_fn(name : String) : Bool needs IO.FileRead("/etc/myapp/") do
+    match Authority.check("IO.FileRead", name) do
+    Err(CapError("IO.FileRead", t, ByFnNeeds("is_refused_by_fn"), _)) -> t == name
+    _ -> false
+    end
+  end
+
+  fn main() do
+    println(read_conf("passwd"))
+    println(is_refused_by_fn("/etc/passwd"))
+    println(probe("IO.FileRead", "/etc/passwd"))
+  end
+end

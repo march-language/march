@@ -314,13 +314,44 @@ let record_fields_short (k_table : table) (n : string)
        (ASAN: __drop$CnState then __drop$HEntry_String_Entry on one cell).
        The structural record a use site carries spells them bare, so do the
        same here. *)
+    (* Two or more types (records or variants) end in [short]: the bare name
+       is ambiguous and resolves to nothing. *)
+    let short_name_shared (short : string) : bool =
+      let sfx = "." ^ short in
+      let sl = String.length sfx in
+      let ends q =
+        let ql = String.length q in
+        String.equal q short
+        || (ql > sl && String.equal (String.sub q (ql - sl) sl) sfx) in
+      List.length (List.filter (function
+          | Tir.TDRecord (q, _) | Tir.TDVariant (q, _) -> ends q
+          | _ -> false) defs) > 1 in
     let rec bare (t : Tir.ty) : Tir.ty =
       match t with
       | Tir.TCon (q, args) ->
         let short = match String.rindex_opt q '.' with
           | Some i -> String.sub q (i + 1) (String.length q - i - 1)
           | None -> q in
-        Tir.TCon (short, List.map bare args)
+        (* A field that is another module's RECORD whose short name several
+           types share ([driver : SwimDriver.State], with Swim.State and
+           DistSupervisor.State also declared): the bare [State] resolves to
+           nothing, so the field was released shallowly and everything the
+           inner record owned leaked (ClusterNode's old SWIM driver, one per
+           tick, once the actor handler rather than an owning callee dropped
+           the state).  A record has one layout under either spelling, so
+           name it by its structure, which is also what a use site carries. *)
+        let ambiguous_record =
+          if args <> [] || String.equal short q then None
+          else match record_fields k_table q with
+            | Some fs when record_fields k_table short = None
+                           && short_name_shared short -> Some fs
+            | _ -> None in
+        (match ambiguous_record with
+         | Some fs ->
+           Tir.TRecord
+             (List.sort (fun (x, _) (y, _) -> String.compare x y)
+                (List.map (fun (k, v) -> (k, bare v)) fs))
+         | None -> Tir.TCon (short, List.map bare args))
       | Tir.TFn (ps, r) -> Tir.TFn (List.map bare ps, bare r)
       | Tir.TTuple ts -> Tir.TTuple (List.map bare ts)
       | Tir.TRecord fs -> Tir.TRecord (List.map (fun (k, v) -> (k, bare v)) fs)
@@ -590,7 +621,7 @@ let niche_repr_of_concrete (t : table) (name0 : string) : repr option =
       TVar "_"             true       true             (lower.ml placeholder)
       TVar _             ★ true       false
       TFn _              ★ true       false
-      TTuple _             true       true
+      TTuple _           ★ true       false
       TRecord _            true       true
       TInt TFloat
       TBool TUnit          false      false
@@ -631,7 +662,8 @@ let niche_repr_of_concrete (t : table) (name0 : string) : repr option =
     If you flip needs_rc (TFn _ | TVar _) to false, expect the Map.fold
     crash and the Gate.cast UAF class to return.
 
-    ── TTuple / TRecord: both TRUE (they no longer diverge) ──
+    ── TTuple / TRecord: needs_rc TRUE for both; borrow_eligible TRUE for
+       TRecord only ──
 
     Aggregates own their fields and are DEEP-dropped at death, exactly like
     variants: Drop.aggregate_fields gives them a synthesized __drop$R/__drop$T
@@ -670,7 +702,10 @@ let niche_repr_of_concrete (t : table) (name0 : string) : repr option =
         well frees the consumer's cell (seen as a SIGBUS on
         `alloc Box.Box(n, r); dec_rc r`).
 
-    Borrow side (true): record/tuple params must be ELIGIBLE for borrow
+    Borrow side (TRecord true, TTuple false -- see [borrowable_of] for the
+    history: both true, both false from 5bedb1232, records true again once
+    [Borrow.loop_carried_flips] covered the loop-carried case): record params
+    must be ELIGIBLE for borrow
     inference so the fixpoint can mark functions that only read fields via
     EField as "cfg:borrowed" (0b52510d). With borrow_eligible (TRecord _) =
     false, such functions were inferred cfg:own, Perceus dec'd the
@@ -758,20 +793,42 @@ let borrowable_of (t : table) : Tir.ty -> bool = fun ty ->
     (* copied at every boundary; no reference, so no ownership — module doc *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively heap-carrying *)
-  | Tir.TRecord _ | Tir.TTuple _ -> false
-    (* Aggregates are OWNED parameters, not borrowed ones.  A borrowed
+  | Tir.TRecord _ -> true
+    (* A record parameter the callee only READS is borrowed: the callee emits
+       no release and a caller whose record is still live emits no retain.
+       Owned, every small read-only helper released its record on each return
+       path and every caller retained it first: two atomic RC ops per call,
+       ~6% of the main thread in a program passing a 105-field record to many
+       helpers.  A field read out of a borrowed record is dup'd where it
+       escapes ([borrowed_field_vars], perceus_core.ml), so the record's
+       children stay the record's.
+
+       The parameter stays OWNED where borrowing would cost constant space:
+       [Borrow.loop_carried_flips] pins a record parameter that a recursive
+       call hands a DIFFERENT record (loop-carried state).  That is the hazard
+       this arm was false for from 5bedb1232 (2026-09-04) on -- see the
+       TTuple arm below, which still carries it. *)
+  | Tir.TTuple _ -> false
+    (* Tuples are OWNED parameters, not borrowed ones.  A borrowed
        aggregate parameter leaves the caller responsible for the release, and
-       in a SELF-TAIL-RECURSIVE loop that release is unreachable: it sits after
-       the tail call, llvm_tco folds the call into a back-edge, and the dec is
-       discarded (llvm_tco.ml's has_self_tail_call says so outright -- "the
-       EDecRC lands in dead code after TCO emits the back-edge").  Every
-       iteration then leaks its aggregate.  It cannot simply be emitted before
+       in a SELF-TAIL-RECURSIVE loop that release has no place to run: it sits
+       after the tail call, which llvm_tco folds into a back-edge.  When this
+       arm was written the dec was simply discarded and every iteration leaked
+       its aggregate; since 86333560e (2026-09-26) the back-edge defers it to
+       the loop's exit ([march_tco_defer_push]), which is leak-free but grows
+       by one pending aggregate per iteration.  It cannot be emitted before
        the back-edge either: that would free the cell the next iteration reads.
 
        Ownership fixes it uniformly -- each iteration releases the aggregate it
        was handed before jumping with a new one, so the loop runs in constant
        space -- and it is what makes the parameter drop site in
        [Perceus.insert_owned_aggregate_param_drops] reachable at all.
+
+       Records get the same guarantee from [Borrow.loop_carried_flips] rather
+       than from a blanket exclusion.  Tuples keep the exclusion: destructuring
+       lowers to an alias binding ([let linear $p = t in let n = $p.$fv0 ..]),
+       a shape that pass does not follow, and a tuple is seldom a large
+       long-lived value passed to many readers.
 
        The historical reason this was true (0b52510d, the record-liveness
        multi-call bug) was about a field EXTRACTED from the record being dec'd

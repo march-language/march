@@ -135,6 +135,20 @@ let rec branch_leads_with_dec (name : string) (e : Tir.expr) : bool =
     String.equal v.Tir.v_name name || branch_leads_with_dec name rest
   | _ -> false
 
+(** True iff [let v : a = y : b] views one value under two different nominal
+    types.  The drop pass writes exactly that for a newtype's payload
+    ([let $dp : Map(..) = bag], [bag : Bag], [type Bag = Bag(Map(..))]): the
+    two share a pointer but not a layout.  Codegen destructures a [case] by
+    its scrutinee's static type, so replacing [$dp] with [bag] made
+    [case bag of HamtMap(n)] take the newtype path, bind [n] to the map cell
+    itself, and release that cell twice (heap-use-after-free in
+    test/native/perceus_three_deep_field_borrow once the record's drop held
+    the last reference).  Such a binding is a cast, not a copy. *)
+let retypes_nominal (a : Tir.ty) (b : Tir.ty) : bool =
+  match a, b with
+  | Tir.TCon (n1, _), Tir.TCon (n2, _) -> not (String.equal n1 n2)
+  | _ -> false
+
 (** Propagate literals, variable aliases, and record-field knowledge.
     [env]  maps variable names to their literal values.
     [avar] maps variable names to their aliased variables (P12).
@@ -180,7 +194,8 @@ let rec cprop_expr ~changed (env : env) (avar : avar_env) (fenv : field_env)
     in
     (* P12: extend avar_env when RHS is a non-closure variable alias. *)
     let avar' = match rhs' with
-      | Tir.EAtom (Tir.AVar y) when not (is_indirect_callable_ty y.Tir.v_ty) ->
+      | Tir.EAtom (Tir.AVar y) when not (is_indirect_callable_ty y.Tir.v_ty)
+                                    && not (retypes_nominal v.Tir.v_ty y.Tir.v_ty) ->
         avar_add name y avar0
       | _ -> avar0
     in

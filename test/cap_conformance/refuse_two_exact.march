@@ -1,9 +1,13 @@
--- REFUSE: IO.FileRead, IO.Spawn
--- Two refused kinds, matched exactly: IO.FileRead and IO.Spawn are refused
--- (the target is named), while IO.FileWrite and IO.FileSystem are not (the
--- test hook does not walk the capability lattice).
+-- GRANT: IO.Console, IO.FileWrite
+-- Two requested kinds left out of the launch grant: IO.FileRead and
+-- IO.Spawn are refused (the target is named), IO.FileWrite is granted, and
+-- IO.FileSystem is refused too: a grant of a child kind does not admit its
+-- lattice parent (the old test hook matched kinds exactly; a grant walks the
+-- lattice).
 mod RefuseTwoExact do
   needs IO.Console
+  needs IO.FileSystem
+  needs IO.Spawn
 
   fn show_check(kind : String, target : String) : String do
     match Authority.check(kind, target) do
@@ -12,7 +16,7 @@ mod RefuseTwoExact do
     end
   end
 
-  fn main(_c : Cap(IO.Console)) do
+  fn main(_c : Cap(IO.Console), _fs : Cap(IO.FileSystem), _s : Cap(IO.Spawn)) do
     println(show_check("IO.FileRead", "/etc/passwd"))
     println(show_check("IO.Spawn", ""))
     println(show_check("IO.FileWrite", "/tmp/x"))

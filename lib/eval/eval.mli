@@ -36,7 +36,7 @@ type value =
   | VTuple of value list
   | VRecord of (string * value) list
   | VCon of string * value list
-  | VClosure of env * string list * March_ast.Ast.expr * string
+  | VClosure of env * string list * March_ast.Ast.expr * string * value option
   | VBuiltin of string * (value list -> value)
   | VPid of int
   | VTask of int
@@ -131,6 +131,7 @@ type actor_inst =
   ai_name : string;
   ai_def : March_ast.Ast.actor_def;
   ai_env_ref : Eval_types.env ref;
+  ai_authority : Eval_types.value;
   ai_init_args : Eval_types.value list;
   mutable ai_state : Eval_types.value;
   mutable ai_alive : bool;
@@ -248,6 +249,7 @@ type actor_inst_snapshot = {
   ais_state : value;
   ais_alive : bool;
   ais_terminal_reason : monitor_down_reason;
+  ais_authority : value;
 }
 type actor_state_snapshot = {
   ass_defs : (string * (March_ast.Ast.actor_def * env ref)) list;
@@ -351,7 +353,25 @@ val task_builtins : env
 val eval_with_reduction_tracking : value -> value * int
 type stub = { mutable sv : value; }
 val eval_decl : env -> March_ast.Ast.decl -> env
-val eval_module_env : March_ast.Ast.module_ -> env
+
+(** A declaration typed at the REPL prompt: as [eval_decl], except that a
+    `let` is not module-level code, so a function value it makes captures
+    the current authority (ocap phase 4, design §21). *)
+val eval_prompt_decl : env -> March_ast.Ast.decl -> env
+
+(** [launch_authority env (text, scoped)]: a program launch (ocap phase 4):
+    reset the run-time authority, then run [Authority.launch_init] from
+    [env].  Fails closed ([Failure]) when [env] holds the [Authority] module
+    but no [launch_init]; a no-op only when [env] has no [Authority] at all
+    (a bare module evaluated without the stdlib). *)
+val launch_authority : env -> string * bool -> unit
+
+(** [launch]: the program's request ([March_ast.Cap_request.launch_request],
+    or [test_request]); when given, [Authority.launch_init] runs right after
+    the stdlib's `mod Authority` is evaluated, before every later top-level
+    declaration (ocap phase 4). *)
+val eval_module_env : ?launch:string * bool -> March_ast.Ast.module_ -> env
+
 val eval_stdlib_decls : March_ast.Ast.decl list -> unit
 val letstar_repl_bind :
   env ->

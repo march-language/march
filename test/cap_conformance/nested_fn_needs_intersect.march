@@ -1,0 +1,32 @@
+-- GRANT: IO.Console, IO.FileRead("/srv/", "/etc/")
+-- Nested limits intersect (design §3): the launch grant, an outer
+-- function's needs and an inner one's are all in force inside the inner
+-- function, checked innermost first. Each layer refuses one target the
+-- others admit, so each refusal names a different limit; a target all three
+-- admit is allowed.
+mod NestedFnNeedsIntersect do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn inner(p : String) : String needs IO.FileRead("/srv/a/", "/etc/", "/tmp/") do
+    probe("IO.FileRead", p)
+  end
+
+  fn outer(p : String) : String needs IO.FileRead("/srv/", "/tmp/") do
+    inner(p)
+  end
+
+  fn main() needs IO.Console, IO.FileRead do
+    println(outer("/srv/a/x"))
+    println(outer("/srv/b/x"))
+    println(outer("/etc/x"))
+    println(outer("/tmp/x"))
+  end
+end

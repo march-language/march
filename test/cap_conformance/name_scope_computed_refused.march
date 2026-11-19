@@ -1,0 +1,26 @@
+-- A name scope on a function's needs clause is checked at run time against
+-- a name computed there (design §6: a lookup by name is an open): a listed
+-- name and a name under a listed prefix are allowed, any other name is
+-- refused by the function's needs.
+mod NameScopeComputedRefused do
+  needs IO.Console
+  needs IO.Mut
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn open_table(user : String) : String needs IO.Mut("sessions", prefix("cache_")) do
+    probe("IO.Mut", user)
+  end
+
+  fn main() do
+    println(open_table("sessions"))
+    println(open_table("cache_" ++ "users"))
+    println(open_table("sess" ++ "ions_admin"))
+    println(open_table("secrets"))
+  end
+end

@@ -18,6 +18,34 @@
 
 mod Authority do
 
+  -- The run-time authority (ocap phase 4, specs/plans/2026-11-15-ocap-p4-
+  -- runtime-plan.md). The current authority is a stack of layers, innermost
+  -- first, held in the running green thread's slot (the builtins `cap_save`,
+  -- `cap_push`, `cap_enter`, `cap_restore`), else the launch layers
+  -- (`cap_set_launch`); `cap_layers()` reads whichever is in force. A layer
+  -- is the limit that set it, that limit's scope list as written, and the
+  -- list parsed once into scopes. `Any` admits every target of its kind.
+  --
+  -- The C runtime releases a dropped slot value structurally
+  -- (march_cap_release in runtime/march_runtime.c walks exactly these
+  -- shapes): change a constructor here and change it there.  Constructors
+  -- are only ever APPENDED: the C walk reads them by tag.
+  --
+  -- `HostAt(spec, host, wildcard, port)` is what `parse` makes of a host
+  -- scope: the packed spec (as `Hosts` holds it, for `subset` and for
+  -- writing the scope back), and its pattern decoded once, so a check
+  -- compares instead of re-parsing.  `host` is "" when the spec names no
+  -- host (`IO.NetConnect(no_redirects)`): any host is admitted.
+  -- `PathsAt(paths)` is what `parse` makes of a path scope: the paths
+  -- normalized once (absolute, no `.`/`..`/empty segment, no trailing `/`),
+  -- so a check compares the normalized target with each path as a string
+  -- instead of splitting the path.  `Hosts` and `Paths` stay for values
+  -- built by hand (a `Paths` entry need not be normalized).
+  type Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String))
+           | HostAt(String, String, Bool, Int) | PathsAt(List(String))
+  type Scope = Scope(String, Arg)
+  type Layer = Layer(CapLimit, String, List(Scope))
+
   doc """
   A one-line description of a refusal: the refused operation written as a
   scope, the limit that refused it, and that limit's scope list.
@@ -30,10 +58,10 @@ mod Authority do
   fn describe(e : CapError) : String do
     match e do
     CapError(kind, target, limit, scope) ->
-      let op = if target == "" do kind else kind ++ "(\"" ++ target ++ "\")" end
+      let o_pre = if target == "" do kind else kind ++ "(\"" ++ target ++ "\")" end
       let who = limit_text(limit)
       let allowed = if scope == "" do "nothing" else scope end
-      op ++ " refused by " ++ who ++ " (" ++ allowed ++ ")"
+      o_pre ++ " refused by " ++ who ++ " (" ++ allowed ++ ")"
     end
   end
 
@@ -90,14 +118,1122 @@ mod Authority do
   refused it. Every stdlib entry point that performs a capability operation
   calls this first.
 
+  With no launch scopes, no narrowed launch and no frame ever entered, the
+  runtime answers at once and none of the policy below runs.
+
   ## Examples
 
       march> Authority.check("IO.Console", "stdout")
       Ok(())
   """
   fn check(kind : String, target : String) : Result((), CapError) do
-    if cap_check_raw(kind, target) == 0 do Ok(())
-    else Err(CapError(kind, target, ByLaunch, cap_launch_text())) end
+    let r = cap_check_raw(kind, target)
+    if r == 0 do Ok(()) else check_slow(kind, target, r) end
+  end
+
+  -- `check` once the runtime has not answered at once (`r` is 1: the
+  -- current layers decide; `r` is kept for the C twin's signature).  A
+  -- native or JIT program calls the C runtime's copy of this and of
+  -- `parse`, `admits`, `subset`, `frame_layer`, `launch_init` and
+  -- `check_layers` instead (runtime/march_authority.c, retargeted by
+  -- lib/tir/auth_native.ml), so it links none of the policy below; the
+  -- interpreter and JS run it.
+  pfn check_slow(kind : String, target : String, _r : Int) : Result((), CapError) do
+    check_layers(kind, target, cap_layers())
+  end
+
+  doc """
+  The layered check behind `check`: `Err(CapError(kind, target, limit,
+  text))` for the first layer (innermost first) whose scopes do not admit
+  `(kind, target)`, else `Ok(())`. A relative path target is resolved
+  against the current directory (and refused when that cannot be read).
+
+  ## Examples
+
+      march> Authority.check_layers("IO.Clock", "", [Authority.Layer(ByFnNeeds("f"), "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])])
+      Err(CapError("IO.Clock", "", ByFnNeeds("f"), "IO.Console"))
+  """
+  fn check_layers(kind : String, target : String, layers : List(Layer)) : Result((), CapError) do
+    let cwd = if path_kind(kind) && not(string_starts_with(target, "/")) do cap_cwd() else "/" end
+    first_refusal(kind, kind_chain(kind), target, cwd, layers)
+  end
+
+  -- `chain` is `kind_chain(kind)`, walked once per check, not per scope.
+  pfn first_refusal(kind : String, chain : List(String), target : String, cwd : String, layers : List(Layer)) : Result((), CapError) do
+    match layers do
+    Nil -> Ok(())
+    Cons(Layer(limit, text, scopes), rest) ->
+      if admits_in(scopes, chain, kind, target, cwd) do first_refusal(kind, chain, target, cwd, rest)
+      else Err(CapError(kind, target, limit, text)) end
+    end
+  end
+
+  -- ── Launch and frames (called by compiler-generated code) ─────────────
+
+  doc """
+  Sets the launch authority before any module-level code runs. `request`
+  is `main`'s request as a scope list; `scoped` whether it carries a scope.
+  An unscoped request with `MARCH_GRANT` unset sets nothing, so the runtime
+  keeps its fast path. A malformed `MARCH_GRANT`, or one granting what
+  `main` does not request, prints one line to stderr and exits with status 2.
+  """
+  @[stdlib_internal]
+  fn launch_init(request : String, scoped : Bool) : () do
+    let grant = cap_grant_text()
+    if not(scoped) && grant == "" do ()
+    else
+      match parse(request) do
+      Err(e) -> panic("internal: main's request is not a scope list: " ++ e)
+      Ok(req) ->
+        if grant == "" do cap_set_launch([Layer(ByLaunch, request, req)])
+        else
+          match parse(grant) do
+          Err(e) -> launch_error("march: MARCH_GRANT is not a scope list: " ++ e)
+          Ok(g) ->
+            match first_outside(g, req) do
+            Some(s) ->
+              launch_error("march: MARCH_GRANT grants " ++ scope_text(s)
+                ++ ", which main does not request (main requests: " ++ request ++ ")")
+            None -> cap_set_launch([Layer(ByLaunch, grant, g)])
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- One line on fd 2, then exit status 2 (cap_launch_fail: an internal
+  -- builtin, so the launch code links neither print_stderr nor
+  -- process_exit, which would attribute IO.Console / IO.Process to every
+  -- binary).
+  pfn launch_error(msg : String) : () do
+    cap_launch_fail(msg ++ "\n")
+  end
+
+  -- The first entry of `a` that no entry of `b` covers.
+  pfn first_outside(a : List(Scope), b : List(Scope)) : Option(Scope) do
+    match a do
+    Nil -> None
+    Cons(s, rest) -> if covered(s, b) do first_outside(rest, b) else Some(s) end
+    end
+  end
+
+  doc """
+  The layer of function `name`'s frame, whose `needs` clause is
+  `needs_text`: the clause parsed into scopes. The compiler calls it once
+  per framed function and keeps the result (lib/tir/auth_rt.ml); the
+  interpreter once per definition.
+
+  ## Examples
+
+      march> Authority.frame_layer("f", "IO.Console")
+      Layer(ByFnNeeds("f"), "IO.Console", [Scope("IO.Console", Any)])
+  """
+  fn frame_layer(name : String, needs_text : String) : Layer do
+    match parse(needs_text) do
+    Ok(scopes) -> Layer(ByFnNeeds(name), needs_text, scopes)
+    Err(e) -> panic("internal: the needs clause of " ++ name ++ " is not a scope list: " ++ e)
+    end
+  end
+
+  doc """
+  Enters a function's frame (`layer`, from `frame_layer`) and returns the
+  authority to restore on leaving it. A frame already in force (the top
+  layer has the same limit and scope text) is not pushed again: two string
+  comparisons, no parsing.
+  """
+  @[stdlib_internal]
+  -- The result is a CapAuthRef (the builtins' opaque type, which has no
+  -- declaration to name in an annotation).
+  fn enter_fn(layer : Layer) do
+    if top_is_frame(cap_layers(), layer) do cap_save()
+    else cap_push(layer) end
+  end
+
+  pfn top_is_frame(layers : List(Layer), layer : Layer) : Bool do
+    match layers do
+    Cons(Layer(ByFnNeeds(n), t, _), _) ->
+      match layer do
+      Layer(ByFnNeeds(name), text, _) -> n == name && t == text
+      _ -> false
+      end
+    _ -> false
+    end
+  end
+
+  -- ── Matching ─────────────────────────────────────────────────────────
+
+  doc """
+  Whether a scope list admits an operation of capability `kind` on
+  `target`. An entry admits when its capability is `kind` or a lattice
+  ancestor of it, and it is unscoped, or `kind` takes its kind of scope and
+  `target` matches: a path (a relative one resolved against `cwd`, then
+  compared by whole segments; refused when `cwd` is `""`, unknown), a
+  `host:port`, or a name. A host scope also admits the host-neutral
+  operations (target `""`) of the capabilities under `IO.NetConnect`, such
+  as building a TLS context: the connections they serve are still bounded
+  by the scope.
+
+  ## Examples
+
+      march> Authority.admits([Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))], "IO.FileRead", "/srv/x", "/")
+      true
+      march> Authority.admits([Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))], "IO.FileRead", "/srvx", "/")
+      false
+  """
+  fn admits(scopes : List(Scope), kind : String, target : String, cwd : String) : Bool do
+    admits_in(scopes, kind_chain(kind), kind, target, cwd)
+  end
+
+  -- An entry's capability subsumes `kind` when it is in `chain`
+  -- (`kind_chain(kind)`): a membership test per entry instead of a lattice
+  -- walk per entry.
+  pfn admits_in(scopes : List(Scope), chain : List(String), kind : String, target : String, cwd : String) : Bool do
+    match scopes do
+    Nil -> false
+    Cons(Scope(k, arg), rest) ->
+      (member(chain, k) && arg_admits(arg, kind, target, cwd))
+        || admits_in(rest, chain, kind, target, cwd)
+    end
+  end
+
+  pfn arg_admits(arg : Arg, kind : String, target : String, cwd : String) : Bool do
+    match arg do
+    Any -> true
+    Paths(ps) ->
+      if not(path_kind(kind)) do false
+      else if cwd == "" && not(string_starts_with(target, "/")) do false
+      else any_within(ps, resolve(cwd, target)) end end
+    Hosts(spec) -> if host_kind(kind) do host_permits(spec, target) else target == "" end
+    Names(ns, pre) -> name_kind(kind) && name_admits(ns, pre, target)
+    HostAt(_, h, wild, port) ->
+      if host_kind(kind) do
+        if h == "" do true
+        else
+          match split_target(target) do
+          (th, tp) -> host_matches(h, wild, port, th, tp)
+          end
+        end
+      else target == "" end
+    PathsAt(ps) ->
+      if not(path_kind(kind)) do false
+      else if cwd == "" && not(string_starts_with(target, "/")) do false
+      else any_normal_within(ps, normalize(resolve(cwd, target))) end end
+    end
+  end
+
+  -- `n` is a normalized absolute path, each of `ps` too (PathsAt): `n` is
+  -- within `p` when it is `p`, or `p` followed by `/`, or `p` is the root.
+  -- The same answer as path_within, by string comparison.
+  pfn any_normal_within(ps : List(String), n : String) : Bool do
+    match ps do
+    Nil -> false
+    Cons(p, rest) ->
+      p == "/" || n == p
+        || (string_starts_with(n, p) && string_slice(n, string_byte_length(p), 1) == "/")
+        || any_normal_within(rest, n)
+    end
+  end
+
+  -- The target's segments are computed once, not once per scope path.
+  pfn any_within(ps : List(String), p : String) : Bool do
+    any_within_segs(ps, string_starts_with(p, "/"), segments(p))
+  end
+
+  pfn any_within_segs(ps : List(String), abs : Bool, segs : List(String)) : Bool do
+    match ps do
+    Nil -> false
+    Cons(s, rest) ->
+      (string_starts_with(s, "/") == abs && segs_prefix(segments(s), segs))
+        || any_within_segs(rest, abs, segs)
+    end
+  end
+
+  doc """
+  Whether every entry of `a` is covered by some entry of `b`: one whose
+  capability is the same or a lattice ancestor and whose scope contains
+  `a`'s (paths within, names and prefixes subsumed, hosts the same or
+  under the wildcard with path within and methods a subset).
+
+  ## Examples
+
+      march> Authority.subset([Authority.Scope("IO.FileRead", Authority.Paths(["/srv/a"]))], [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))])
+      true
+  """
+  fn subset(a : List(Scope), b : List(Scope)) : Bool do
+    match first_outside(a, b) do
+    None -> true
+    Some(_) -> false
+    end
+  end
+
+  pfn covered(s : Scope, b : List(Scope)) : Bool do
+    match b do
+    Nil -> false
+    Cons(Scope(k, outer), rest) ->
+      match s do
+      Scope(ik, inner) -> (kind_subsumes(k, ik) && arg_subsumes(outer, inner)) || covered(s, rest)
+      end
+    end
+  end
+
+  pfn arg_subsumes(outer : Arg, inner : Arg) : Bool do
+    match outer do
+    Any -> true
+    Paths(o_paths) ->
+      match path_list(inner) do
+      Some(i_paths) -> all_paths_within(i_paths, o_paths)
+      None -> false
+      end
+    PathsAt(o_paths) ->
+      match path_list(inner) do
+      Some(i_paths) -> all_paths_within(i_paths, o_paths)
+      None -> false
+      end
+    Names(o_names, o_pre) ->
+      match inner do
+      Names(i_names, i_pre) -> all_names_admitted(i_names, o_names, o_pre) && all_prefixes_under(i_pre, o_pre)
+      _ -> false
+      end
+    Hosts(o) ->
+      match host_spec(inner) do
+      Some(i) -> host_subsumes(o, i)
+      None -> false
+      end
+    HostAt(o, _, _, _) ->
+      match host_spec(inner) do
+      Some(i) -> host_subsumes(o, i)
+      None -> false
+      end
+    end
+  end
+
+  -- The paths of a path scope, either form.
+  pfn path_list(a : Arg) : Option(List(String)) do
+    match a do
+    Paths(ps) -> Some(ps)
+    PathsAt(ps) -> Some(ps)
+    _ -> None
+    end
+  end
+
+  -- The packed spec of a host scope, either form.
+  pfn host_spec(a : Arg) : Option(String) do
+    match a do
+    Hosts(s) -> Some(s)
+    HostAt(s, _, _, _) -> Some(s)
+    _ -> None
+    end
+  end
+
+  pfn all_paths_within(i_paths : List(String), o_paths : List(String)) : Bool do
+    match i_paths do
+    Nil -> true
+    Cons(p, rest) -> path_in_any(p, o_paths) && all_paths_within(rest, o_paths)
+    end
+  end
+
+  pfn path_in_any(p : String, o_paths : List(String)) : Bool do
+    match o_paths do
+    Nil -> false
+    Cons(o, rest) -> path_within(o, p) || path_in_any(p, rest)
+    end
+  end
+
+  pfn all_names_admitted(ns : List(String), o_names : List(String), o_pre : List(String)) : Bool do
+    match ns do
+    Nil -> true
+    Cons(n, rest) -> name_admits(o_names, o_pre, n) && all_names_admitted(rest, o_names, o_pre)
+    end
+  end
+
+  pfn all_prefixes_under(i_pre : List(String), o_pre : List(String)) : Bool do
+    match i_pre do
+    Nil -> true
+    Cons(p, rest) -> starts_with_any(p, o_pre) && all_prefixes_under(rest, o_pre)
+    end
+  end
+
+  -- ── The lattice and which kinds take which scope ─────────────────────
+
+  -- `kind` and its lattice ancestors, innermost first: `parent` subsumes
+  -- `kind` exactly when it is a member (kind_subsumes).
+  pfn kind_chain(kind : String) : List(String) do
+    let p = lattice_parent(kind)
+    if p == "" do Cons(kind, Nil) else Cons(kind, kind_chain(p)) end
+  end
+
+  -- Whether `parent` is `child` or a lattice ancestor of it
+  -- (Cap_lattice.cap_subsumes).
+  pfn kind_subsumes(parent : String, child : String) : Bool do
+    if parent == child do true
+    else do
+      let p = lattice_parent(child)
+      if p == "" do false else kind_subsumes(parent, p) end
+    end
+    end
+  end
+
+  -- Cap_scope.is_scopable, split by the kind of scope.
+  pfn path_kind(k : String) : Bool do
+    k == "IO.FileRead" || k == "IO.FileWrite" || k == "IO.FileSystem"
+  end
+
+  pfn host_kind(k : String) : Bool do k == "IO.NetConnect" end
+
+  pfn name_kind(k : String) : Bool do k == "IO.Mut" || k == "IO.Registry" end
+
+  -- BEGIN GENERATED capability lattice: written by lib/caps/emit_march_lattice.ml
+  -- from lib/caps/cap_lattice.ml; do not edit by hand. Regenerate with
+  --   dune build --root . lib/caps/emit_march_lattice.exe
+  --   ./_build/default/lib/caps/emit_march_lattice.exe stdlib/authority.march stdlib/authority.march
+  -- A capability's parent in the lattice, "" for a root (and for a
+  -- capability outside the table, such as an FFI root: its own root).
+  pfn lattice_parent(kind : String) : String do
+    match kind do
+    "IO.Console" -> "IO"
+    "IO.FileSystem" -> "IO"
+    "IO.FileRead" -> "IO.FileSystem"
+    "IO.FileWrite" -> "IO.FileSystem"
+    "IO.Network" -> "IO"
+    "IO.NetConnect" -> "IO.Network"
+    "IO.NetListen" -> "IO.Network"
+    "IO.Process" -> "IO"
+    "IO.Clock" -> "IO"
+    "IO.Random" -> "IO"
+    "IO.Signal" -> "IO"
+    "IO.Database" -> "IO.NetConnect"
+    "IO.Spawn" -> "IO"
+    "IO.Mut" -> "IO"
+    "IO.Telemetry" -> "IO"
+    "IO.NetConnect.TLS" -> "IO.NetConnect"
+    "IO.WebSocket" -> "IO.NetConnect"
+    "IO.Foreign" -> "IO"
+    "IO.Foreign.Blocking" -> "IO.Foreign"
+    "IO.Registry" -> "IO"
+    _ -> ""
+    end
+  end
+  -- END GENERATED capability lattice
+
+  -- ── Paths (Cap_scope: lexical, whole segments) ───────────────────────
+
+  pfn resolve(cwd : String, p : String) : String do
+    if string_starts_with(p, "/") do p else cwd ++ "/" ++ p end
+  end
+
+  -- The segments of a path with `.` and empty ones dropped and `..` folded
+  -- away; a `..` at the root is dropped.
+  pfn segments(p : String) : List(String) do
+    rev(fold_segments(string_split(p, "/"), Nil), Nil)
+  end
+
+  pfn fold_segments(parts : List(String), acc : List(String)) : List(String) do
+    match parts do
+    Nil -> acc
+    Cons(s, rest) ->
+      if s == "" || s == "." do fold_segments(rest, acc)
+      else if s == ".." do
+        match acc do
+        Nil -> fold_segments(rest, Nil)
+        Cons(_, up) -> fold_segments(rest, up)
+        end
+      else fold_segments(rest, Cons(s, acc)) end end
+    end
+  end
+
+  pfn normalize(p : String) : String do
+    let body = string_join(segments(p), "/")
+    if string_starts_with(p, "/") do "/" ++ body else body end
+  end
+
+  pfn path_within(scope : String, p : String) : Bool do
+    string_starts_with(scope, "/") == string_starts_with(p, "/")
+      && segs_prefix(segments(scope), segments(p))
+  end
+
+  pfn segs_prefix(pre : List(String), segs : List(String)) : Bool do
+    match pre do
+    Nil -> true
+    Cons(a, pt) ->
+      match segs do
+      Nil -> false
+      Cons(b, st) -> a == b && segs_prefix(pt, st)
+      end
+    end
+  end
+
+  -- ── Names (Name_scope) ───────────────────────────────────────────────
+
+  pfn name_admits(ns : List(String), pre : List(String), n : String) : Bool do
+    member(ns, n) || starts_with_any(n, pre)
+  end
+
+  pfn starts_with_any(n : String, pre : List(String)) : Bool do
+    match pre do
+    Nil -> false
+    Cons(p, rest) -> string_starts_with(n, p) || starts_with_any(n, rest)
+    end
+  end
+
+  -- ── Hosts (Host_scope) ───────────────────────────────────────────────
+  -- A host spec is the scope string the parser packs: `pattern;option;...`
+  -- (`api.x.com/v1/;methods=get`, `;no_redirects`). A pattern is
+  -- (host, wildcard, port or 0, path segments).
+
+  -- Host_scope.permits for one declaration: `target` is `host:port`, split
+  -- at the last `:` (no port, or a bad one, reads as 0).
+  pfn host_permits(spec : String, target : String) : Bool do
+    let raw = spec_pattern(spec)
+    if raw == "" do true
+    else
+      match parse_host_pattern(raw) do
+      Err(_) -> false
+      Ok((h, wild, port, _)) ->
+        match split_target(target) do
+        (th, tp) -> host_matches(h, wild, port, th, tp)
+        end
+      end
+    end
+  end
+
+  pfn spec_pattern(spec : String) : String do
+    match string_index_of(spec, ";") do
+    None -> spec
+    Some(i) -> string_slice(spec, 0, i)
+    end
+  end
+
+  pfn split_target(t : String) : (String, Int) do
+    match string_last_index_of(t, ":") do
+    None -> (t, 0)
+    Some(i) ->
+      (string_slice(t, 0, i),
+       port_or_zero(string_slice(t, i + 1, string_byte_length(t) - i - 1)))
+    end
+  end
+
+  pfn host_matches(h : String, wild : Bool, port : Int, host : String, tport : Int) : Bool do
+    let th = normalize_host(host)
+    if port != 0 && port != tport do false
+    else if wild do
+      let suffix = "." ++ h
+      string_byte_length(th) > string_byte_length(suffix) && string_ends_with(th, suffix)
+    else th == h end end
+  end
+
+  pfn normalize_host(h : String) : String do
+    let l = string_to_lowercase(h)
+    if string_ends_with(l, ".") do string_slice(l, 0, string_byte_length(l) - 1) else l end
+  end
+
+  -- A port 1-65535 written in at most 5 digits, else 0.
+  pfn port_or_zero(s : String) : Int do
+    if s == "" || string_byte_length(s) > 5 || not(all_chars(s, "0123456789", 0)) do 0
+    else
+      match string_to_int(s) do
+      Some(n) -> if n >= 1 && n <= 65535 do n else 0 end
+      None -> 0
+      end
+    end
+  end
+
+  pfn all_chars(s : String, allowed : String, i : Int) : Bool do
+    if i >= string_byte_length(s) do true
+    else if string_contains(allowed, string_slice(s, i, 1)) do all_chars(s, allowed, i + 1)
+    else false end end
+  end
+
+  -- Host_scope.parse_pattern.
+  pfn parse_host_pattern(raw : String) : Result((String, Bool, Int, Option(List(String))), String) do
+    if raw == "" do Err("a host scope cannot be empty")
+    else if string_contains(raw, "://") do
+      Err("a host scope names a host, not a URL: drop the scheme (`https://`)")
+    else
+      let (host_raw, path_r) = match string_index_of(raw, "/") do
+        None -> (raw, Ok(None))
+        Some(i) -> (string_slice(raw, 0, i),
+                    parse_scope_path(string_slice(raw, i, string_byte_length(raw) - i)))
+        end
+      match path_r do
+      Err(e) -> Err(e)
+      Ok(path) -> host_part_pattern(string_to_lowercase(host_raw), path)
+      end
+    end end
+  end
+
+  pfn host_part_pattern(s : String, path : Option(List(String))) : Result((String, Bool, Int, Option(List(String))), String) do
+    if s == "" do Err("a host scope needs a host before its path")
+    else if string_contains(s, "@") do Err("a host scope cannot carry userinfo (`user@`)")
+    else
+      let (host_part, port_text) = split_host_port(s)
+      let port = if port_text == "" do 0 else port_or_zero(port_text) end
+      if port_text != "" && port == 0 do
+        Err("`" ++ port_text ++ "` is not a port (1-65535)")
+      else if string_starts_with(host_part, "[") do
+        let n = string_byte_length(host_part)
+        if n >= 2 && string_ends_with(host_part, "]")
+           && ipv6_body_ok(string_slice(host_part, 1, n - 2)) do
+          Ok((host_part, false, port, path))
+        else Err("`" ++ host_part ++ "` is not an IPv6 literal") end
+      else
+        let wild = string_byte_length(host_part) >= 2 && string_starts_with(host_part, "*.")
+        let name = normalize_host(if wild do string_slice(host_part, 2, string_byte_length(host_part) - 2) else host_part end)
+        if string_contains(name, "*") || host_part == "*" do
+          Err("a wildcard must be the whole leftmost label (`*.example.com`)")
+        else if not(valid_host_name(name)) do
+          Err("`" ++ host_part ++ "` is not a host name: labels are letters, digits and `-`, separated by single dots")
+        else Ok((name, wild, port, path)) end end
+      end end
+    end end
+  end
+
+  -- The host and port text of `host[:port]` / `[v6][:port]` ("" for none).
+  pfn split_host_port(s : String) : (String, String) do
+    if string_starts_with(s, "[") do
+      match string_index_of(s, "]") do
+      None -> (s, "")
+      Some(i) ->
+        let rest = string_slice(s, i + 1, string_byte_length(s) - i - 1)
+        if rest == "" do (string_slice(s, 0, i + 1), "")
+        else if string_starts_with(rest, ":") do
+          (string_slice(s, 0, i + 1), port_text_of(string_slice(rest, 1, string_byte_length(rest) - 1)))
+        else (s, "") end end
+      end
+    else
+      match string_last_index_of(s, ":") do
+      None -> (s, "")
+      Some(i) -> (string_slice(s, 0, i), port_text_of(string_slice(s, i + 1, string_byte_length(s) - i - 1)))
+      end
+    end
+  end
+
+  -- An empty port after `:` is still a bad port, not "no port".
+  pfn port_text_of(p : String) : String do if p == "" do ":" else p end end
+
+  pfn ipv6_body_ok(b : String) : Bool do
+    b != "" && all_chars(b, "0123456789abcdef:.", 0)
+  end
+
+  pfn valid_host_name(h : String) : Bool do
+    h != "" && labels_ok(string_split(h, "."))
+  end
+
+  pfn labels_ok(ls : List(String)) : Bool do
+    match ls do
+    Nil -> true
+    Cons(l, rest) ->
+      l != "" && all_chars(l, "abcdefghijklmnopqrstuvwxyz0123456789-", 0) && labels_ok(rest)
+    end
+  end
+
+  -- Host_scope.parse_scope_path: `/v1/weather/` as its segments.
+  pfn parse_scope_path(p : String) : Result(Option(List(String)), String) do
+    let parts = drop_last_empty(drop_first(string_split(p, "/")))
+    match bad_scope_segment(parts) do
+    None -> Ok(Some(parts))
+    Some("") -> Err("a path scope cannot contain `//`")
+    Some(seg) ->
+      if seg == "." || seg == ".." do Err("a path scope cannot contain a `" ++ seg ++ "` segment")
+      else Err("the path segment `" ++ seg ++ "` may contain only letters, digits, `-`, `_`, `.` and `~` (no `%`, `?`, `#` or `\\`)") end
+    end
+  end
+
+  pfn drop_first(l : List(String)) : List(String) do
+    match l do
+    Cons(_, rest) -> rest
+    Nil -> Nil
+    end
+  end
+
+  pfn drop_last_empty(l : List(String)) : List(String) do
+    match rev(l, Nil) do
+    Cons("", r) -> rev(r, Nil)
+    _ -> l
+    end
+  end
+
+  pfn bad_scope_segment(segs : List(String)) : Option(String) do
+    match segs do
+    Nil -> None
+    Cons(s, rest) ->
+      if s == "" || s == "." || s == ".."
+         || not(all_chars(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~", 0)) do
+        Some(s)
+      else bad_scope_segment(rest) end
+    end
+  end
+
+  -- Host_scope.parse_decl's options: `no_redirects`, `methods=m,m`.
+  -- (no_redirects, methods given, methods).
+  pfn host_options(opts : List(String), nr : Bool, mg : Bool, ms : List(String)) : Result((Bool, Bool, List(String)), String) do
+    match opts do
+    Nil -> Ok((nr, mg, ms))
+    Cons(o, rest) ->
+      if o == "no_redirects" do
+        if nr do Err("`no_redirects` is given twice") else host_options(rest, true, mg, ms) end
+      else if string_starts_with(o, "methods=") do
+        if mg do Err("`methods(...)` is given twice")
+        else
+          let v = string_slice(o, 8, string_byte_length(o) - 8)
+          match bad_method(string_split(v, ",")) do
+          None -> if v == "" do Err("`methods(...)` needs at least one method")
+                  else host_options(rest, nr, true, string_split(v, ",")) end
+          Some(m) -> Err("`" ++ m ++ "` is not an HTTP method a scope can name; use `get`, `head`, `post`, `put`, `patch`, `delete`, `options`")
+          end
+        end
+      else Err("unknown option `" ++ o ++ "`: the options are `no_redirects` and `methods(...)`") end end
+    end
+  end
+
+  pfn bad_method(ms : List(String)) : Option(String) do
+    match ms do
+    Nil -> None
+    Cons(m, rest) ->
+      if member(["get", "head", "post", "put", "patch", "delete", "options"], m) do bad_method(rest)
+      else Some(m) end
+    end
+  end
+
+  -- A host spec as (pattern text, no_redirects, methods given, methods).
+  pfn host_decl(spec : String) : Result((String, Bool, Bool, List(String)), String) do
+    match string_split(spec, ";") do
+    Nil -> Err("a host scope cannot be empty")
+    Cons(p, opts) ->
+      if p == "" && is_nil(opts) do Err("a host scope cannot be empty")
+      else
+        let pat_ok = if p == "" do Ok(()) else
+          match parse_host_pattern(p) do
+          Ok(_) -> Ok(())
+          Err(e) -> Err(e)
+          end
+        end
+        match pat_ok do
+        Err(e) -> Err(e)
+        Ok(_) ->
+          match host_options(opts, false, false, Nil) do
+          Err(e) -> Err(e)
+          Ok((nr, mg, ms)) -> Ok((p, nr, mg, ms))
+          end
+        end
+      end
+    end
+  end
+
+  -- Whether host spec `o` permits everything spec `i` does.
+  pfn host_subsumes(o : String, i : String) : Bool do
+    match (host_decl(o), host_decl(i)) do
+    (Ok((o_pre, onr, omg, oms)), Ok((i_pre, inr, img, ims))) ->
+      (not(onr) || inr)
+        && (not(omg) || (img && all_member(ims, oms)))
+        && (o_pre == "" || (i_pre != "" && pattern_subsumes(o_pre, i_pre)))
+    _ -> false
+    end
+  end
+
+  pfn pattern_subsumes(o : String, i : String) : Bool do
+    match (parse_host_pattern(o), parse_host_pattern(i)) do
+    (Ok((oh, ow, oport, opath)), Ok((ih, iw, iport, ipath))) ->
+      let host_ok = if ow do (iw && ih == oh) || string_ends_with(ih, "." ++ oh)
+                    else not(iw) && ih == oh end
+      let port_ok = oport == 0 || oport == iport
+      let path_ok = match opath do
+        None -> true
+        Some(o_paths) ->
+          match ipath do
+          None -> false
+          Some(i_paths) -> segs_prefix(o_paths, i_paths)
+          end
+        end
+      host_ok && port_ok && path_ok
+    _ -> false
+    end
+  end
+
+  -- ── The scope parser (the `needs` surface grammar) ───────────────────
+  --
+  --   list  := "()" | entry ("," entry)*
+  --   entry := Kind | Kind "(" item ("," item)* ")"
+  --   item  := "string" | option | option "(" "string" ")" | methods "(" m ("," m)* ")"
+  --
+  -- A path kind takes paths; IO.NetConnect a host spec packed as the
+  -- compiler's parser packs it (`host/path/;methods=get;no_redirects`); a
+  -- name kind names and `prefix("...")`; any other kind no scope.
+
+  doc """
+  Parses a scope list written as a `needs` clause (`IO.Console,
+  IO.FileRead("/srv/")`; `()` is the empty list) into scopes, or the reason
+  it is not one.
+
+  ## Examples
+
+      march> Authority.parse("()")
+      Ok([])
+  """
+  fn parse(text : String) : Result(List(Scope), String) do
+    match tokenize(text, 0, string_byte_length(text), Nil) do
+    Err(e) -> Err(e)
+    Ok(toks) ->
+      match toks do
+      Nil -> Ok(Nil)
+      Cons("(", Cons(")", Nil)) -> Ok(Nil)
+      _ -> parse_entries(toks, Nil)
+      end
+    end
+  end
+
+  -- Tokens: "(", ")", ",", a word (letters, digits, `_`, `.`), and a
+  -- string, kept as `"` followed by its decoded contents.
+  pfn tokenize(s : String, i : Int, n : Int, acc : List(String)) : Result(List(String), String) do
+    if i >= n do Ok(rev(acc, Nil))
+    else do
+      let c = string_slice(s, i, 1)
+      if c == " " || c == "\t" || c == "\n" || c == "\r" do tokenize(s, i + 1, n, acc)
+      else if c == "(" || c == ")" || c == "," do tokenize(s, i + 1, n, Cons(c, acc))
+      else if c == "\"" do
+        match read_string(s, i + 1, n, "") do
+        Err(e) -> Err(e)
+        Ok((str, j)) -> tokenize(s, j, n, Cons("\"" ++ str, acc))
+        end
+      else if is_word_char(c) do
+        let j = word_end(s, i, n)
+        tokenize(s, j, n, Cons(string_slice(s, i, j - i), acc))
+      else Err("unexpected `" ++ c ++ "`") end end end end
+    end
+    end
+  end
+
+  pfn is_word_char(c : String) : Bool do
+    c != "" && string_contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.", c)
+  end
+
+  pfn word_end(s : String, i : Int, n : Int) : Int do
+    if i < n && is_word_char(string_slice(s, i, 1)) do word_end(s, i + 1, n) else i end
+  end
+
+  pfn read_string(s : String, i : Int, n : Int, acc : String) : Result((String, Int), String) do
+    if i >= n do Err("a string is not closed")
+    else do
+      let c = string_slice(s, i, 1)
+      if c == "\"" do Ok((acc, i + 1))
+      else if c == "\\" do
+        if i + 1 >= n do Err("a string is not closed")
+        else do
+          let e = string_slice(s, i + 1, 1)
+          let d = if e == "n" do "\n" else if e == "t" do "\t" else if e == "r" do "\r" else e end end end
+          read_string(s, i + 2, n, acc ++ d)
+        end
+        end
+      else read_string(s, i + 1, n, acc ++ c) end end
+    end
+    end
+  end
+
+  pfn is_string_tok(t : String) : Bool do string_starts_with(t, "\"") end
+
+  pfn string_tok_text(t : String) : String do string_slice(t, 1, string_byte_length(t) - 1) end
+
+  pfn describe_tok(t : String) : String do
+    if is_string_tok(t) do "a string" else "`" ++ t ++ "`" end
+  end
+
+  pfn parse_entries(toks : List(String), acc : List(Scope)) : Result(List(Scope), String) do
+    match parse_entry(toks) do
+    Err(e) -> Err(e)
+    Ok((scope, rest)) ->
+      match rest do
+      Nil -> Ok(rev_scopes(Cons(scope, acc), Nil))
+      Cons(",", more) -> parse_entries(more, Cons(scope, acc))
+      Cons(t, _) -> Err("expected `,` between capabilities, found " ++ describe_tok(t))
+      end
+    end
+  end
+
+  pfn parse_entry(toks : List(String)) : Result((Scope, List(String)), String) do
+    match toks do
+    Nil -> Err("expected a capability at the end")
+    Cons(k, rest) ->
+      if not(is_kind(k)) do Err("expected a capability such as `IO.Console`, found " ++ describe_tok(k))
+      else
+        match rest do
+        Cons("(", after) ->
+          match after do
+          Cons(")", _) -> Err("`" ++ k ++ "()` names no scope: write `" ++ k ++ "` for any target")
+          _ ->
+            match parse_items(after, Nil, Nil) do
+            Err(e) -> Err(e)
+            Ok((strs, opts, more)) ->
+              match scope_arg(k, strs, opts) do
+              Err(e) -> Err(e)
+              Ok(arg) -> Ok((Scope(k, arg), more))
+              end
+            end
+          end
+        _ -> Ok((Scope(k, Any), rest))
+        end
+      end
+    end
+  end
+
+  -- Dot-separated names, each starting with an upper-case letter.
+  pfn is_kind(w : String) : Bool do
+    not(is_string_tok(w)) && w != "(" && w != ")" && w != "," && kind_parts_ok(string_split(w, "."))
+  end
+
+  pfn kind_parts_ok(ps : List(String)) : Bool do
+    match ps do
+    Nil -> true
+    Cons(p, rest) ->
+      p != "" && string_contains("ABCDEFGHIJKLMNOPQRSTUVWXYZ", string_slice(p, 0, 1)) && kind_parts_ok(rest)
+    end
+  end
+
+  pfn is_option_name(w : String) : Bool do
+    w != "" && all_chars(w, "abcdefghijklmnopqrstuvwxyz_", 0)
+  end
+
+  -- The items of a scope up to its `)`: strings (rev), options (rev) as
+  -- `name`, `name=value` or `methods=a,b`, and the tokens after the `)`.
+  pfn parse_items(toks : List(String), strs : List(String), opts : List(String)) : Result((List(String), List(String), List(String)), String) do
+    match toks do
+    Nil -> Err("a scope is not closed: expected `)`")
+    Cons(t, rest) ->
+      let item = if is_string_tok(t) do
+        if is_nil(opts) do Ok((Cons(string_tok_text(t), strs), opts, rest))
+        else Err("a string cannot follow an option in a scope") end
+      else if is_option_name(t) do
+        match parse_option(t, rest) do
+        Err(e) -> Err(e)
+        Ok((o, more)) -> Ok((strs, Cons(o, opts), more))
+        end
+      else Err("expected a string or an option in a scope, found " ++ describe_tok(t)) end end
+      match item do
+      Err(e) -> Err(e)
+      Ok((s2, o2, more)) ->
+        match more do
+        Cons(")", after) -> Ok((rev(s2, Nil), rev(o2, Nil), after))
+        Cons(",", after) -> parse_items(after, s2, o2)
+        Cons(x, _) -> Err("expected `,` or `)` in a scope, found " ++ describe_tok(x))
+        Nil -> Err("a scope is not closed: expected `)`")
+        end
+      end
+    end
+  end
+
+  -- `name`, `name("value")` as `name=value`, `methods(a, b)` as `methods=a,b`.
+  pfn parse_option(name : String, toks : List(String)) : Result((String, List(String)), String) do
+    match toks do
+    Cons("(", Cons(v, Cons(")", rest))) ->
+      if is_string_tok(v) do
+        if name == "methods" do Err("`methods(...)` takes HTTP method names, not a string")
+        else Ok((name ++ "=" ++ string_tok_text(v), rest)) end
+      else if name == "methods" && is_option_name(v) do Ok(("methods=" ++ v, rest))
+      else Err("`" ++ name ++ "(...)` takes a quoted string") end end
+    Cons("(", more) ->
+      if name == "methods" do
+        match method_words(more, Nil) do
+        Err(e) -> Err(e)
+        Ok((ms, rest)) -> Ok(("methods=" ++ string_join(ms, ","), rest))
+        end
+      else Err("`" ++ name ++ "(...)` takes one quoted string") end
+    _ -> Ok((name, toks))
+    end
+  end
+
+  pfn method_words(toks : List(String), acc : List(String)) : Result((List(String), List(String)), String) do
+    match toks do
+    Cons(m, Cons(",", rest)) ->
+      if is_option_name(m) do method_words(rest, Cons(m, acc))
+      else Err("`methods(...)` takes HTTP method names") end
+    Cons(m, Cons(")", rest)) ->
+      if is_option_name(m) do Ok((rev(Cons(m, acc), Nil), rest))
+      else Err("`methods(...)` takes HTTP method names") end
+    _ -> Err("`methods(...)` is not closed")
+    end
+  end
+
+  pfn scope_arg(k : String, strs : List(String), opts : List(String)) : Result(Arg, String) do
+    if path_kind(k) do
+      if not(is_nil(opts)) do Err("a path scope on `" ++ k ++ "` takes only paths")
+      else if member(strs, "") do Err("a path scope cannot be empty")
+      else match first_relative(strs) do
+        Some(p) -> Err("the scope `" ++ p ++ "` on `" ++ k ++ "` is a relative path; give an absolute path, one starting with `/`")
+        None -> Ok(PathsAt(map_normalize(strs)))
+        end
+      end end
+    else if host_kind(k) do
+      let spec = match strs do
+        Nil -> ";" ++ string_join(opts, ";")
+        Cons(first, more) -> string_join(Cons(first, append(prefix_all(more, "name="), opts)), ";")
+        end
+      match host_decl(spec) do
+      Err(e) -> Err(e)
+      Ok((p, _, _, _)) ->
+        if p == "" do Ok(HostAt(spec, "", false, 0))
+        else
+          match parse_host_pattern(p) do
+          Ok((h, wild, port, _)) -> Ok(HostAt(spec, h, wild, port))
+          Err(e) -> Err(e)
+          end
+        end
+      end
+    else if name_kind(k) do
+      match name_options(opts, Nil) do
+      Err(e) -> Err(e)
+      Ok(prefixes) ->
+        match bad_name_text(strs, "a name") do
+        Some(e) -> Err(e)
+        None ->
+          match bad_name_text(prefixes, "a prefix") do
+          Some(e) -> Err(e)
+          None -> Ok(Names(strs, prefixes))
+          end
+        end
+      end
+    else Err("`" ++ k ++ "` takes no scope") end end end
+  end
+
+  pfn first_relative(ps : List(String)) : Option(String) do
+    match ps do
+    Nil -> None
+    Cons(p, rest) -> if string_starts_with(p, "/") do first_relative(rest) else Some(p) end
+    end
+  end
+
+  pfn name_options(opts : List(String), acc : List(String)) : Result(List(String), String) do
+    match opts do
+    Nil -> Ok(rev(acc, Nil))
+    Cons(o, rest) ->
+      if string_starts_with(o, "prefix=") do
+        name_options(rest, Cons(string_slice(o, 7, string_byte_length(o) - 7), acc))
+      else Err("`" ++ o ++ "` is not an option a name scope takes; it takes names and `prefix(\"...\")`") end
+    end
+  end
+
+  -- Name_scope.check_text: not empty, and no `;`, `=` or `,`.
+  pfn bad_name_text(ns : List(String), what : String) : Option(String) do
+    match ns do
+    Nil -> None
+    Cons(n, rest) ->
+      if n == "" do Some(what ++ " cannot be empty")
+      else if string_contains(n, ";") || string_contains(n, "=") || string_contains(n, ",") do
+        Some(what ++ " `" ++ n ++ "` contains `;`, `=` or `,`")
+      else bad_name_text(rest, what) end end
+    end
+  end
+
+  -- ── Writing a scope back as text (for launch errors) ─────────────────
+
+  pfn scope_text(s : Scope) : String do
+    match s do
+    Scope(k, Any) -> k
+    Scope(k, Paths(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
+    Scope(k, PathsAt(ps)) -> k ++ "(" ++ string_join(quote_all(ps), ", ") ++ ")"
+    Scope(k, Names(ns, pre)) ->
+      k ++ "(" ++ string_join(append(quote_all(ns), wrap_all(quote_all(pre), "prefix(")), ", ") ++ ")"
+    Scope(k, Hosts(spec)) -> host_scope_text(k, spec)
+    Scope(k, HostAt(spec, _, _, _)) -> host_scope_text(k, spec)
+    end
+  end
+
+  pfn host_scope_text(k : String, spec : String) : String do
+    match string_split(spec, ";") do
+    Nil -> k
+    Cons(first, opts) ->
+      let head = if first == "" do Nil else Cons(quote(first), Nil) end
+      k ++ "(" ++ string_join(append(head, option_texts(opts)), ", ") ++ ")"
+    end
+  end
+
+  pfn option_texts(opts : List(String)) : List(String) do
+    match opts do
+    Nil -> Nil
+    Cons(o, rest) ->
+      let t = match string_index_of(o, "=") do
+        None -> o
+        Some(i) ->
+          let name = string_slice(o, 0, i)
+          let v = string_slice(o, i + 1, string_byte_length(o) - i - 1)
+          if name == "name" do quote(v)
+          else if name == "methods" do "methods(" ++ string_join(string_split(v, ","), ", ") ++ ")"
+          else name ++ "(" ++ quote(v) ++ ")" end end
+        end
+      Cons(t, option_texts(rest))
+    end
+  end
+
+  pfn quote(s : String) : String do
+    "\"" ++ string_replace_all(string_replace_all(s, "\\", "\\\\"), "\"", "\\\"") ++ "\""
+  end
+
+  pfn quote_all(l : List(String)) : List(String) do
+    match l do
+    Nil -> Nil
+    Cons(x, rest) -> Cons(quote(x), quote_all(rest))
+    end
+  end
+
+  pfn wrap_all(l : List(String), pre : String) : List(String) do
+    match l do
+    Nil -> Nil
+    Cons(x, rest) -> Cons(pre ++ x ++ ")", wrap_all(rest, pre))
+    end
+  end
+
+  -- ── List helpers (Authority loads before List) ───────────────────────
+
+  -- Monomorphic on purpose: a named type variable on a stdlib helper here
+  -- survives monomorphisation (the TIR verifier rejects it).
+  pfn rev(l : List(String), acc : List(String)) : List(String) do
+    match l do
+    Nil -> acc
+    Cons(x, rest) -> rev(rest, Cons(x, acc))
+    end
+  end
+
+  pfn rev_scopes(l : List(Scope), acc : List(Scope)) : List(Scope) do
+    match l do
+    Nil -> acc
+    Cons(x, rest) -> rev_scopes(rest, Cons(x, acc))
+    end
+  end
+
+  pfn append(a : List(String), b : List(String)) : List(String) do rev(rev(a, Nil), b) end
+
+  -- By match, not `==`: List's Eq is not in scope everywhere Authority loads.
+  pfn is_nil(l : List(String)) : Bool do
+    match l do
+    Nil -> true
+    _ -> false
+    end
+  end
+
+  pfn member(l : List(String), x : String) : Bool do
+    match l do
+    Nil -> false
+    Cons(y, rest) -> y == x || member(rest, x)
+    end
+  end
+
+  pfn all_member(xs : List(String), l : List(String)) : Bool do
+    match xs do
+    Nil -> true
+    Cons(x, rest) -> member(l, x) && all_member(rest, l)
+    end
+  end
+
+  pfn prefix_all(l : List(String), pre : String) : List(String) do
+    match l do
+    Nil -> Nil
+    Cons(x, rest) -> Cons(pre ++ x, prefix_all(rest, pre))
+    end
+  end
+
+  pfn map_normalize(l : List(String)) : List(String) do
+    match l do
+    Nil -> Nil
+    Cons(x, rest) -> Cons(normalize(x), map_normalize(rest))
+    end
   end
 
 end

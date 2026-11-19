@@ -1,0 +1,12 @@
+-- GRANT: IO.Console; IO.Clock
+-- EXIT-ONLY
+-- A launch grant that is not a scope list is an error at launch (design
+-- §11): one line on stderr naming what is wrong, and exit status 2, before
+-- any of the program runs.
+mod GrantMalformedLaunchError do
+  needs IO.Console
+
+  fn main() needs IO.Console do
+    println("main ran")
+  end
+end

@@ -572,6 +572,59 @@ let effective_module_prefix () =
   | Some p -> p
   | None -> current_doc_prefix ()
 
+(** Ocap phase 4, capture (lib/tir/auth_rt.ml [captures] is the compiled
+    twin): a function value runs under the authority it was made under.
+    [module_init] is true while a module-level declaration's initialiser
+    runs (not inside a function it calls: [apply_inner] clears it), where a
+    function value captures nothing (design §21). *)
+let module_init : bool ref = ref false
+
+let in_module_init (k : unit -> 'a) : 'a =
+  let saved = !module_init in
+  module_init := true;
+  Fun.protect ~finally:(fun () -> module_init := saved) k
+
+(** The authority a function value made here captures. *)
+let current_capture () : value option =
+  if !module_init then None else Some !Eval_builtins.cap_slot
+
+(** Run [k] under the authority [a] (no write when it is already in force). *)
+let with_authority (a : value) (k : unit -> 'a) : 'a =
+  if a == !Eval_builtins.cap_slot then k ()
+  else begin
+    let saved = !Eval_builtins.cap_slot in
+    Eval_builtins.cap_slot := a;
+    Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved) k
+  end
+
+(** [v], the value of the variable [name] read outside callee position:
+    when it is a named fn ([<rec:NAME/ARITY>], the closure every [DFn]
+    binds) or a builtin read by its own name, a copy that runs under the
+    authority in force here.  Anything else as it is: a lambda captured
+    when it was made, a module-level value captures nothing. *)
+let capture_named_value (name : string) (v : value) : value =
+  match v with
+  | VBuiltin (bname, f) when not !module_init ->
+    let named =
+      if String.starts_with ~prefix:"<rec:" bname then
+        match String.rindex_opt bname '/' with
+        | Some slash ->
+          let fname = String.sub bname 5 (slash - 5) in
+          name = fname || String.ends_with ~suffix:("." ^ fname) name
+        | None -> false
+      else bname = name
+    in
+    if not named then v
+    else
+      let a = !Eval_builtins.cap_slot in
+      VBuiltin (bname, fun args -> with_authority a (fun () -> f args))
+  | _ -> v
+
+(** Set by [EApp] just before it evaluates an [EVar] callee, so the [EVar]
+    arm reads it bare (a direct call runs under the caller's authority);
+    consumed at once. *)
+let callee_var : bool ref = ref false
+
 (* =================================================================
    §2  Tap bus — thread-safe value inspector (Clojure tap> model)
    ================================================================= *)
@@ -706,6 +759,9 @@ type actor_inst_snapshot = {
   ais_state : value;
   ais_alive : bool;
   ais_terminal_reason : monitor_down_reason;
+  ais_authority : value;
+  (** ocap phase 4: the instance's [ai_authority], so a restored actor keeps
+      the authority it was spawned under (nothing ever widens). *)
 }
 
 type actor_state_snapshot = {
@@ -772,7 +828,8 @@ let snapshot_actors () : actor_state_snapshot =
       let snap = { ais_name  = inst.ai_name;
                    ais_state = inst.ai_state;
                    ais_alive = inst.ai_alive;
-                   ais_terminal_reason = inst.ai_terminal_reason } in
+                   ais_terminal_reason = inst.ai_terminal_reason;
+                   ais_authority = inst.ai_authority } in
       (pid, snap) :: acc
     ) actor_registry [] in
   { ass_defs = defs; ass_instances = instances; ass_next_pid = !next_pid }
@@ -791,6 +848,9 @@ let restore_actors (snap : actor_state_snapshot) : unit =
         let inst = { ai_name     = s.ais_name;
                      ai_def      = def;
                      ai_env_ref  = env_r;
+                     (* The authority it was spawned under, never the
+                        launch's: a restore must not widen it. *)
+                     ai_authority = s.ais_authority;
                      (* A snapshot does not carry init arguments (D24): a
                         restored instance restarts under its supervisor with
                         none, which is the pre-D24 behaviour for every actor
@@ -1938,9 +1998,10 @@ let rec eval_block (env : env) (es : expr list) : value =
     (* Captured NOW (this ELetFn's own construction point), not inside the
        `fun args -> …` below — see [VClosure]'s doc comment. *)
     let defn_prefix = effective_module_prefix () in
+    let cap = current_capture () in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
-      apply (VClosure (call_env, param_names, body, defn_prefix)) args) in
+      apply (VClosure (call_env, param_names, body, defn_prefix, cap)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     eval_block env' rest
@@ -1951,7 +2012,7 @@ let rec eval_block (env : env) (es : expr list) : value =
 (** Apply a callable value to a list of argument values. *)
 and apply_inner (fn_val : value) (args : value list) : value =
   match fn_val with
-  | VClosure (closure_env, params, body, defn_prefix) ->
+  | VClosure (closure_env, params, body, defn_prefix, cap) ->
     if List.length params <> List.length args then
       eval_error "arity mismatch: expected %d args, got %d"
         (List.length params) (List.length args);
@@ -1972,13 +2033,33 @@ and apply_inner (fn_val : value) (args : value list) : value =
        this hot path. *)
     let saved = !closure_prefix_override in
     closure_prefix_override := Some defn_prefix;
+    (* A function body is not module-initialiser code, even when a module
+       let's initialiser called it ([module_init]). *)
+    let saved_init = !module_init in
+    if saved_init then module_init := false;
+    (* The authority the closure was made under, around its body; [None]
+       runs under the caller's ([VClosure]'s doc comment).  Allocates (the
+       [Some]) only when it swaps: nothing for [None] or for an authority
+       physically already in force. *)
+    let saved_cap =
+      match cap with
+      | Some a when a != !Eval_builtins.cap_slot ->
+        let s = !Eval_builtins.cap_slot in
+        Eval_builtins.cap_slot := a;
+        Some s
+      | _ -> None
+    in
     (* [call_return_hook] is a no-op natively; in the browser REPL it is the
        stack bounce on the return path (see [Eval_prim.call_return_hook]).
        It runs in [~finally] so an exception unwinding a deep recursion (a
        March panic 20000 calls down) is bounced too, not only a normal
        return. *)
     Fun.protect
-      ~finally:(fun () -> closure_prefix_override := saved; !call_return_hook ())
+      ~finally:(fun () ->
+          closure_prefix_override := saved;
+          if saved_init then module_init := true;
+          (match saved_cap with Some s -> Eval_builtins.cap_slot := s | None -> ());
+          !call_return_hook ())
       (fun () -> eval_expr env' body)
 
   | VBuiltin (name, f) ->
@@ -2042,7 +2123,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
   | ELit (LitBool b, _)   -> VBool b    (* E-Lit — core-march.md §4.2 *)
   | ELit (LitAtom a, _)   -> VAtom a    (* E-Lit — core-march.md §4.2 *)
 
-  | EVar n -> lookup n.txt env  (* E-Var — core-march.md §4.2 *)
+  | EVar n ->  (* E-Var — core-march.md §4.2 *)
+    let v = lookup n.txt env in
+    if !callee_var then (callee_var := false; v)
+    else (match v with VBuiltin _ -> capture_named_value n.txt v | _ -> v)
 
   | EHole (name, _) ->
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
@@ -2173,7 +2257,17 @@ and eval_expr_inner (env : env) (e : expr) : value =
     in
     let fn_val = match dispatched with
       | Some v -> v
-      | None -> eval_expr env f
+      | None ->
+        (match f with
+         | EVar _ ->
+           (* The [EVar] arm clears the flag as it reads it; an exception on
+              the way (an unbound name) must not leave it set.  No closure:
+              this is the interpreter's hottest path. *)
+           callee_var := true;
+           (match eval_expr env f with
+            | v -> v
+            | exception e -> callee_var := false; raise e)
+         | _ -> eval_expr env f)
     in
     let arg_vals = List.map (eval_expr env) args in
     march_stack_push fn_name sp;
@@ -2240,7 +2334,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | ELam (params, body, _) ->  (* E-Lam — core-march.md §4.2 *)
     let param_names = List.map (fun p -> p.param_name.txt) params in
-    VClosure (env, param_names, body, effective_module_prefix ())
+    VClosure (env, param_names, body, effective_module_prefix (), current_capture ())
 
   | EBlock (es, _) -> eval_block env es
     (* E-Blk-Last / E-Blk-Let / E-LetFn / E-Blk-Seq — core-march.md §4.2, see eval_block below *)
@@ -2451,13 +2545,16 @@ and eval_expr_inner (env : env) (e : expr) : value =
                   evaluated once here and kept on the instance so a restart
                   re-supplies them. *)
                let child_args = List.map (eval_expr init_env) sf.sf_init_args in
+               (* Spawned here, by the supervisor's spawn: under the
+                  authority in force at it, which every restart restores. *)
                let child_init_state =
                  eval_actor_init_state child_env_ref child_def child_actor_name child_args in
                let child_pid = !next_pid in
                next_pid := child_pid + 1;
                let child_inst = {
                  ai_name = child_actor_name; ai_def = child_def;
-                 ai_env_ref = child_env_ref; ai_init_args = child_args;
+                 ai_env_ref = child_env_ref; ai_authority = !Eval_builtins.cap_slot;
+                 ai_init_args = child_args;
                  ai_state = child_init_state; ai_alive = true;
                  ai_terminal_reason = Normal;
                  ai_monitors = []; ai_mailbox = Queue.create ();
@@ -2493,6 +2590,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
               base_state)
        in
        let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
+                    (* ocap phase 4: the spawner's authority, for life. *)
+                    ai_authority = !Eval_builtins.cap_slot;
                     ai_init_args = init_args;
                     ai_state    = init_state; ai_alive = true;
                     ai_terminal_reason = Normal;
@@ -2567,9 +2666,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let param_names = List.map (fun p -> p.param_name.txt) params in
     let env_ref = ref env in
     let defn_prefix = effective_module_prefix () in
+    let cap = current_capture () in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
-      apply (VClosure (call_env, param_names, body, defn_prefix)) args) in
+      apply (VClosure (call_env, param_names, body, defn_prefix, cap)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     rec_v
@@ -2888,7 +2988,7 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
         | Some handler ->
           (try
              ignore (match handler with
-               | VClosure (_, [], _, _) -> apply handler []
+               | VClosure (_, [], _, _, _) -> apply handler []
                | _                   -> apply handler [VUnit])
            with exn ->
              Printf.eprintf "signal watcher (code %d) raised: %s\n%!"
@@ -2994,7 +3094,11 @@ let run_scheduler () = Eval_prim.with_shutdown_consumer @@ fun () ->
                let stack_base = List.length (get_march_stack ()) in
                (match Fun.protect
                         ~finally:(fun () -> Hashtbl.remove busy_actors pid)
-                        (fun () -> !eval_expr_hook handler_env handler.ah_body)
+                        (fun () ->
+                           (* Under the actor's own authority, not the
+                              pass's caller's (ocap phase 4, design §7). *)
+                           Eval_runtime.with_actor_authority inst.ai_authority
+                             (fun () -> !eval_expr_hook handler_env handler.ah_body))
                 with
                 | new_state ->
                   inst.ai_state <- new_state;
@@ -3552,7 +3656,8 @@ let shutdown_actor_pid (pid : int) : unit =
               [("state", inst.ai_state)] @ param_bindings
               @ [("self", VPid pid)] @ !(inst.ai_env_ref)
             in
-            (match !eval_expr_hook handler_env handler.ah_body with
+            (match Eval_runtime.with_actor_authority inst.ai_authority
+                     (fun () -> !eval_expr_hook handler_env handler.ah_body) with
              | new_state -> inst.ai_state <- new_state
              | exception _ -> ());
             current_pid := prev_pid
@@ -3612,6 +3717,7 @@ let spawn_from_spec (spec : value) : unit =
               let init_state = eval_actor_init_state env_ref def actor_name [] in
               let inst = {
                 ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
+                ai_authority = !Eval_builtins.cap_slot;
                 ai_init_args = [];
                 ai_state = init_state; ai_alive = true;
                 ai_terminal_reason = Normal;
@@ -3668,6 +3774,35 @@ let forward_stub (scope_ref : (string * value) list ref) (name : string) : value
       | Some v -> apply v args
       | None -> eval_error "stub %s called before initialisation" name)
 
+(** Ocap phase 4: the call of a fn with a `needs` clause runs in a frame of
+    that clause (lib/tir/auth_rt.ml is the compiled twin, which frames only
+    the clauses the static checker cannot discharge; the interpreter frames
+    them all).  [call] is the fn's plain call; [env_ref] resolves
+    [Authority.*] at call time.  The layer is parsed once per definition
+    ([Authority.frame_layer]); entering is [Authority.enter_fn]; leaving
+    restores the slot even when the body raises.  When this definition's
+    layer is already on top (a self call) nothing is entered, so the call
+    stays a tail call.  [main] gets no frame: its clause is the launch
+    request.  The frame reports the fn's module-qualified source name, the
+    name the compiled frame uses ([Lower_state.fn_needs]). *)
+let framed_call (def : fn_def) (defn_prefix : string) (env_ref : env ref)
+    (call : value list -> value) : value list -> value =
+  match def.fn_needs with
+  | Some (entries, _) when def.fn_name.txt <> "main" ->
+    let text, _ = March_ast.Cap_request.request_of_entries entries in
+    let name = defn_prefix ^ def.fn_name.txt in
+    let layer = lazy (apply (lookup "Authority.frame_layer" !env_ref)
+                        [ VString name; VString text ]) in
+    fun args ->
+      let l = Lazy.force layer in
+      (match !Eval_builtins.cap_slot with
+       | VCon ("Cons", [ top; _ ]) when top == l -> call args
+       | _ ->
+         let saved = apply (lookup "Authority.enter_fn" !env_ref) [ l ] in
+         Fun.protect ~finally:(fun () -> Eval_builtins.cap_slot := saved)
+           (fun () -> call args))
+  | _ -> call
+
 (** Evaluate a single declaration, extending [env].
     Returns the updated environment. *)
 let rec eval_decl (env : env) (d : decl) : env =
@@ -3693,17 +3828,17 @@ let rec eval_decl (env : env) (d : decl) : env =
        correct here) — see [VClosure]'s doc comment. *)
     let defn_prefix = effective_module_prefix () in
     let rec_closure = VBuiltin (rec_name,
-                                fun args ->
+                                framed_call def defn_prefix env_ref (fun args ->
                                   let call_env = !env_ref in
-                                  let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-                                  apply fn_v args) in
+                                  let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
+                                  apply fn_v args)) in
     let env' = (def.fn_name.txt, rec_closure)
                :: List.remove_assoc def.fn_name.txt env in
     env_ref := env';
     env'
 
   | DLet (_, b, _) ->
-    let v = eval_expr env b.bind_expr in
+    let v = in_module_init (fun () -> eval_expr env b.bind_expr) in
     (match match_pattern v b.bind_pat with
      | Some bs -> bs @ env
      | None    -> eval_error "top-level let binding pattern failed")
@@ -3781,10 +3916,10 @@ let rec eval_decl (env : env) (d : decl) : env =
            point in the walk) — see [VClosure]'s doc comment. *)
         let defn_prefix = effective_module_prefix () in
         let rec_closure = VBuiltin (rec_name,
-                                    fun args ->
+                                    framed_call def defn_prefix inner_ref (fun args ->
                                       let call_env = !inner_ref in
-                                      let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-                                      apply fn_v args) in
+                                      let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
+                                      apply fn_v args)) in
         let parse_rec_arity n =
           match String.rindex_opt n '/' with
           | None -> None
@@ -4045,14 +4180,14 @@ let rec eval_decl (env : env) (d : decl) : env =
             (* Plain closure: method name in body → builtin dispatch, not self. *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
-            let clo = VClosure (env, params, clause.fc_body, effective_module_prefix ()) in
+            let clo = VClosure (env, params, clause.fc_body, effective_module_prefix (), None) in
             (mname.txt, clo) :: env
           | _ when is_general_iface ->
             (* Plain closure over [env_for_body]: method name in body →
                dispatcher, not self (see comment above). *)
             let clause = List.hd fn_def.fn_clauses in
             let params = clause_params clause in
-            let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix ()) in
+            let clo = VClosure (env_for_body, params, clause.fc_body, effective_module_prefix (), None) in
             (mname.txt, clo) :: env
           | _ ->
             eval_decl env (DFn (fn_def, sp))
@@ -4296,7 +4431,49 @@ let top_level_file_runs (decls : decl list) : decl list list =
   in
   go [] None [] decls
 
-let eval_module_env (m : module_) : env =
+(** A declaration typed at the REPL prompt.  A prompt `let` is not
+    module-level code: it runs with the authority of the person at the
+    terminal (design §21), so a function value it makes captures that
+    authority, as one made in `main`'s body does.  A module's own top-level
+    lets (a preloaded or `:load`ed file) go through [eval_decl] and capture
+    nothing. *)
+let eval_prompt_decl (env : env) (d : decl) : env =
+  match d with
+  | DLet (_, b, _) ->
+    let v = eval_expr env b.bind_expr in
+    (match match_pattern v b.bind_pat with
+     | Some bs -> bs @ env
+     | None    -> eval_error "top-level let binding pattern failed")
+  | _ -> eval_decl env d
+
+(* Ocap phase 4: a program launch.  [Authority.launch_init(text, scoped)]
+   sets the launch authority (or, for an unscoped request with MARCH_GRANT
+   unset, returns at once); a malformed or too-wide MARCH_GRANT exits 2 from
+   inside it.  The authority state is reset first: each launch is a fresh
+   program, and the interpreter's run_eval suite and `march test` over
+   several files run many in one process.  Fails closed: an [env] that holds
+   the [Authority] module but no [launch_init] is an internal error.  The one
+   genuine no-stdlib case, an [env] with no [Authority] at all (an in-process
+   unit test evaluating a bare module, or a REPL started without the
+   stdlib), has nothing to call and is skipped. *)
+let launch_authority (env : env) ((text, scoped) : string * bool) : unit =
+  match List.assoc_opt "Authority.launch_init" env with
+  | Some f ->
+    Eval_builtins.reset_cap_authority ();
+    ignore (apply f [ VString text; VBool scoped ])
+  | None ->
+    if List.exists (fun (k, _) -> String.starts_with ~prefix:"Authority." k) env then
+      failwith "internal error: the stdlib is loaded but Authority.launch_init is not \
+                bound, so the program cannot set its launch authority"
+
+let eval_module_env ?launch (m : module_) : env =
+  (* The launch happens as soon as [Authority] is defined: right after the
+     stdlib's `mod Authority` is evaluated (stdlib/authority.march, second in
+     the stdlib manifest), so before every later stdlib, MARCH_LIB_PATH and
+     entry-file top-level let; only prelude.march's constants run earlier.
+     The stdlib and library modules share one source-file run, so this is
+     done at that declaration, not between runs. *)
+  let pending = ref launch in
   (* Reset global actor and task state for this module run *)
   closure_prefix_override := None;
   module_stack := [];
@@ -4368,10 +4545,10 @@ let eval_module_env (m : module_) : env =
       let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
       let defn_prefix = effective_module_prefix () in
       let rec_closure = VBuiltin (rec_name,
-                                  fun args ->
+                                  framed_call def defn_prefix env_ref (fun args ->
                                     let call_env = !env_ref in
-                                    let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-                                    apply fn_v args) in
+                                    let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
+                                    apply fn_v args)) in
       (* Support default-arg overloading: if a same-named fn already has a real
          closure (VMultiarity or a previous single-arity VBuiltin), combine into
          VMultiarity so both arities are callable. *)
@@ -4421,7 +4598,7 @@ let eval_module_env (m : module_) : env =
       make_recursive_env env_ref rest env''
 
     | DLet (_, b, _) :: rest ->
-      let v = eval_expr env b.bind_expr in
+      let v = in_module_init (fun () -> eval_expr env b.bind_expr) in
       let env' = match match_pattern v b.bind_pat with
         | Some bs -> bs @ env
         | None    -> eval_error "top-level let pattern failed"
@@ -4439,12 +4616,17 @@ let eval_module_env (m : module_) : env =
         Hashtbl.replace actor_defs_tbl qual (def, env_ref);
       make_recursive_env env_ref rest env
 
-    | DMod _ as d :: rest ->
+    | DMod (mname, _, _, _) as d :: rest ->
       (* Evaluate nested module via eval_decl (which handles module_stack push/pop
          and exposes prefixed bindings). Docs inside nested modules are registered
          as a side effect of eval_decl recursing into the module body. *)
       let env' = eval_decl env d in
       env_ref := env';
+      (match !pending with
+       | Some req when mname.txt = "Authority" && !module_stack = [] ->
+         pending := None;
+         launch_authority env' req
+       | _ -> ());
       make_recursive_env env_ref rest env'
 
     | DImpl _ as d :: rest ->
@@ -4500,6 +4682,7 @@ let eval_module_env (m : module_) : env =
      module) never sees a later run's top-level bindings, while a later run
      sees everything before it. *)
   scope_tails := [];
+  let runs = top_level_file_runs m.mod_decls in
   let run_envs, final_env =
     List.fold_left (fun (acc, env) run ->
         let scope_ref = ref env in
@@ -4510,8 +4693,13 @@ let eval_module_env (m : module_) : env =
             (fun () -> make_recursive_env scope_ref run !scope_ref) in
         scope_ref := run_env;
         (run_env :: acc, run_env))
-      ([], task_builtins @ base_env) (top_level_file_runs m.mod_decls)
+      ([], task_builtins @ base_env) runs
   in
+  (* Never launched: no [Authority] was defined (or [launch_authority]
+     fails closed on a half-defined one). *)
+  (match !pending with
+   | Some req -> launch_authority final_env req
+   | None -> ());
   install_global_tail final_env;
   install_scope_tails
     (match run_envs with _last :: earlier -> earlier | [] -> []);
@@ -4552,10 +4740,10 @@ let eval_stdlib_decls (decls : decl list) : unit =
           let params = clause_params clause in
           let defn_prefix = effective_module_prefix () in
           let rec_clo = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
-            fun args ->
+            framed_call def defn_prefix inner_ref (fun args ->
               let call_env = !inner_ref in
-              let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix) in
-              apply fn_v args) in
+              let fn_v = VClosure (call_env, params, clause.fc_body, defn_prefix, None) in
+              apply fn_v args)) in
           let e' = (def.fn_name.txt, rec_clo) :: List.remove_assoc def.fn_name.txt e in
           inner_ref := e';
           eval_inner r e'
@@ -4683,7 +4871,7 @@ let run_module (m : module_) : unit =
   Array.fill signal_watchers 0 5 None;
   Array.fill signal_pending  0 5 false;
   Array.fill signal_seen     0 5 false;
-  let env = eval_module_env m in
+  let env = eval_module_env ~launch:(March_ast.Cap_request.launch_request m) m in
   (* Install SIGTERM/SIGINT handlers: graceful shutdown by default, or (once a
      Signal.watch watcher is registered) deferred dispatch with a
      second-delivery shutdown escape hatch. *)
@@ -4722,7 +4910,13 @@ let run_module (m : module_) : unit =
     (* 5. Call on_stop hook (after tree is down) *)
     call_hook_opt on_stop_opt)
   | None ->
-    match List.assoc_opt "main" env with
+    (* The entry: a top-level `main`, else the last nested module's
+       (`App.main`), the rule every compiled backend applies
+       ([March_ast.Cap_request.entry_main]). *)
+    let entry = March_ast.Cap_request.entry_main m in
+    match (match entry with
+           | Some (name, _, _) -> List.assoc_opt name env
+           | None -> None) with
     | None   -> ()
     | Some v ->
       (* [main] may be declared 0-arity or take ANY NUMBER of [Cap(P)]
@@ -4746,13 +4940,13 @@ let run_module (m : module_) : unit =
          the [DFn] case of [eval_decl], the "<rec:name/arity>" closure), not
          directly to a [VClosure], so arity can't be read off [v] itself —
          read it from the entry module's own AST instead. *)
-      let main_arity = List.find_map (function
-          | DFn (def, _) when def.fn_name.txt = "main" ->
-            (match def.fn_clauses with
-             | [clause] -> Some (List.length (clause_params clause))
-             | _ -> None)
-          | _ -> None
-        ) m.mod_decls
+      let main_arity =
+        match entry with
+        | Some (_, def, _) ->
+          (match def.fn_clauses with
+           | [clause] -> Some (List.length (clause_params clause))
+           | _ -> None)
+        | None -> None
       in
       let args = match main_arity with
         | Some n when n > 0 -> List.init n (fun _ -> VUnit)
@@ -4817,8 +5011,9 @@ let collect_test_decls (m : module_) :
     include it in the failure message if the test fails.  Opt-in via @capture_io
     in the test source. *)
 let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?(capture_io=false) (m : module_) : int * int * (string * string) list =
-  (* Build the module environment (registers all fns, lets, etc.) *)
-  let env = eval_module_env m in
+  (* Build the module environment (registers all fns, lets, etc.).  The
+     launch request of a test file is its module's `needs` line. *)
+  let env = eval_module_env ~launch:(March_ast.Cap_request.test_request m) m in
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
   (* Apply filter *)
   let tests = if filter = "" then tests
@@ -4954,8 +5149,12 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
 let run_doctests ?(verbose=false) ?(quiet=false) ?(filter="")
     ~(parse_expr : string -> expr)
     (m : module_) : int * int * (string * string) list =
-  (* Build the module environment *)
-  let env = eval_module_env m in
+  (* Build the module environment.  Doctests belong to every documented
+     function in the merged module (the stdlib's included), not to the test
+     file, so they launch as the REPL does: the full authority, narrowed by
+     MARCH_GRANT / --grant (ocap phase 4).  A fresh launch also drops the
+     test file's own authority, which [run_tests] set in this process. *)
+  let env = eval_module_env ~launch:("IO", false) m in
   (* Collect (qualified_fn_name, doc_string) pairs, walking nested mods *)
   let rec collect_docs prefix decls =
     List.concat_map (fun decl ->

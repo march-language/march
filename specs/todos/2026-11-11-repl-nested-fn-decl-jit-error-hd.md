@@ -25,3 +25,8 @@ Actual (REPL): `jit error: hd`, then "I cannot find `len2`".
 
 Source: declaration fragments in lib/jit/repl_jit.ml. Found while re-verifying the 2026-10-18 doc
 sweep claims on 2026-11-11, a7110f95f.
+
+Update 2026-11-17 (ocap p4 Task 7): the message is now `jit error: no compiled body for `len2``.
+A polymorphic fn declared at the prompt hits the same path (no instantiated body); before the
+fix, on the ocap p4 branch, `run_decl` bound a lifted Authority-policy lambda to the name and the
+first call crashed (SIGSEGV).

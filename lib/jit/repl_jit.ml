@@ -577,7 +577,7 @@ let verify_repl ?(repl_vars = []) stage tir =
       tir;
   tir
 
-let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) ?(fragment = true) (m : March_ast.Ast.module_) =
+let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) ?(fragment = true) ?(launch = false) (m : March_ast.Ast.module_) =
   (* [~shadow_builtins:false]: fragments bind fns by bare name through closure
      slots, and [is_c_runtime_fn] already keeps a runtime-defined name out of
      a fragment; renaming here would desynchronise the two. *)
@@ -587,7 +587,21 @@ let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(re
   end;
   let tir =
     Fun.protect ~finally:(fun () -> March_tir.Lower_state.set_fragment_scope "")
-      (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false m) in
+      (fun () -> March_tir.Lower.lower_module ~type_map ~stdlib_context ~shadow_builtins:false ~launch m) in
+  (* Run-time frames for function `needs` clauses, as the native pipeline
+     (bin/main.ml) adds them right after lowering. *)
+  let tir, has_frames = March_tir.Auth_rt.frames tir ~needs:March_tir.Lower.fn_needs_tbl in
+  (* Function values capture the authority they are made under (Task 5).
+     A REPL fragment always runs the pass: its lambda can be called by a
+     later fragment's framed fn, which this fragment's [has_frames] cannot
+     see.  The precompiled stdlib ([~fragment:false]) only when it has a
+     frame itself: its shared object registers no closure drops, so a
+     captured self-recursive helper's environment would leak there
+     (specs/todos/2026-11-16-ocap-p4-capture-gaps.md). *)
+  let tir = March_tir.Auth_rt.captures tir ~has_frames ~repl:fragment in
+  (* ...and judges capability operations with the C runtime's policy
+     (lib/tir/auth_native.ml), as a native binary does. *)
+  let tir = March_tir.Auth_native.retarget tir in
   (* Match the compiled pipeline: bin/main.ml runs Trmc.transform_module
      immediately post-lower (pre-mono), and without it a function behaves
      differently in the REPL than when compiled.  The position matters as much
@@ -1388,7 +1402,8 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
        long-lived, reused environment. *)
     refs = ref []; current_decl = ref "" } in
   let type_map = checked_type_map (March_typecheck.Typecheck.check_module_with_env env m) in
-  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
+  (* A whole program: its `main` launches the authority (ocap phase 4). *)
+  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~launch:true m in
   (* Prune functions unreachable from `main`, exactly as the ahead-of-time
      pipeline does immediately before LLVM emit (see [Dce.prune_unreachable]'s
      call in bin/main.ml).  This is a LINKABILITY requirement here, not an
@@ -1413,14 +1428,14 @@ let run_program ctx ~tc_env (m : March_ast.Ast.module_) : unit =
   let all_types = ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types in
   (* Same entry-point rule as [Llvm_toplevel.emit_module]: a bare `main` or a
      module-qualified `Mod.main`. *)
-  let is_main (f : March_tir.Tir.fn_def) =
-    f.March_tir.Tir.fn_name = "main"
-    || String.ends_with ~suffix:".main" f.March_tir.Tir.fn_name in
   let main_fn =
-    match List.find_opt (fun f -> f.March_tir.Tir.fn_name = "main")
-            tir.March_tir.Tir.tm_fns with
-    | Some f -> Some f
-    | None -> List.find_opt is_main tir.March_tir.Tir.tm_fns in
+    match March_tir.Tir_names.entry_main_of_names
+            (List.map (fun (f : March_tir.Tir.fn_def) -> f.March_tir.Tir.fn_name)
+               tir.March_tir.Tir.tm_fns) with
+    | None -> None
+    | Some n ->
+      List.find_opt (fun (f : March_tir.Tir.fn_def) -> f.March_tir.Tir.fn_name = n)
+        tir.March_tir.Tir.tm_fns in
   match main_fn with
   | None ->
     (* A library module with no entry point: there is nothing to run.  Mirrors
@@ -1732,7 +1747,13 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
         f.fn_name = emit_name) user_fns with
       | Some f -> f
-      | None -> List.hd user_fns
+      | None ->
+        (* No body under the declared name: a polymorphic fn the fragment
+           never instantiates (specs/todos/2026-11-11-repl-nested-fn-decl-jit-error-hd.md).
+           Fail rather than bind another fn to the name: the fragment also
+           carries lifted stdlib lambdas (the Authority policy's, since ocap
+           phase 4), and binding the first of them crashed the first call. *)
+        failwith (Printf.sprintf "no compiled body for `%s`" bind_name)
     in
     let helper_fns = List.filter
       (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> primary_fn.fn_name)

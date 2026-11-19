@@ -217,6 +217,23 @@ let extern_borrow_table : (string * bool list) list = [
   (* ── 2-arg string × string ──────────────────────────────────────────────── *)
   ("march_string_contains",      [true; true]);
   ("march_cap_check_raw",        [true; true]);
+  (* ocap phase 4 authority slot: set_launch, restore and push store their
+     argument (consume it); enter takes its own reference. *)
+  ("march_cap_set_launch",       [false]);
+  ("march_cap_restore",          [false]);
+  ("march_cap_push",             [false]);
+  ("march_cap_enter",            [true]);
+  (* cap_launch_fail writes its text to fd 2 and exits: it only reads it. *)
+  ("march_cap_launch_fail",      [true]);
+  (* Task 4b, runtime/march_authority.c: every argument is only read; a value
+     stored into a result is incref'd there. *)
+  ("march_cap_rt_parse",         [true]);
+  ("march_cap_rt_admits",        [true; true; true; true]);
+  ("march_cap_rt_subset",        [true; true]);
+  ("march_cap_rt_frame_layer",   [true; true]);
+  ("march_cap_rt_launch_init",   [true; true]);
+  ("march_cap_rt_check_layers",  [true; true; true]);
+  ("march_cap_rt_check_slow",    [true; true; true]);
   ("march_string_starts_with",   [true; true]);
   ("march_string_ends_with",     [true; true]);
   ("march_string_split",         [true; true]);
@@ -413,6 +430,18 @@ let extern_borrow_table : (string * bool list) list = [
   ("string_reverse",       [true]);
   ("string_contains",      [true; true]);
   ("cap_check_raw",        [true; true]);
+  ("cap_set_launch",       [false]);
+  ("cap_restore",          [false]);
+  ("cap_push",             [false]);
+  ("cap_enter",            [true]);
+  ("cap_launch_fail",      [true]);
+  ("cap_rt_parse",         [true]);
+  ("cap_rt_admits",        [true; true; true; true]);
+  ("cap_rt_subset",        [true; true]);
+  ("cap_rt_frame_layer",   [true; true]);
+  ("cap_rt_launch_init",   [true; true]);
+  ("cap_rt_check_layers",  [true; true; true]);
+  ("cap_rt_check_slow",    [true; true; true]);
   ("string_starts_with",   [true; true]);
   ("string_ends_with",     [true; true]);
   ("string_split",         [true; true]);
@@ -1250,6 +1279,168 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
 
 (* ── Fixpoint inference ───────────────────────────────────────────────────── *)
 
+(* ── Loop-carried record parameters ────────────────────────────────────────
+
+   A record parameter that is only read is borrowed ([Kind.borrowable_of]).
+   One shape must stay OWNED even though every use of it is a read:
+
+     fn loop(st, n) do
+       if n == 0 do st.total else loop({ st with total: st.total + n }, n - 1) end
+     end
+
+   Borrowed, [st] is released by whoever called [loop] -- and for the record
+   built on each iteration that caller is [loop] itself, after its tail call.
+   [Llvm_tco] turns the tail call into a back-edge, where "after the call"
+   does not exist: the release is pushed on the loop's pending-drop list and
+   runs when the loop returns ([march_tco_defer_push]).  Nothing leaks, but
+   the loop holds every iteration's record until it exits: memory linear in
+   the iteration count, unbounded for a loop that never returns (an actor or
+   game loop).  Owned, each iteration releases the record it was handed
+   before jumping with the next, in constant space.  (Before the pending-drop
+   list existed the release was discarded outright; that leak is why records
+   were excluded from borrowing altogether from 5bedb1232 until this rule.)
+
+   The rule: when a call from [f] to a function [g] in the same call-graph
+   cycle -- [f] itself, or a mutual-recursion partner -- passes at a record
+   parameter of [g] anything other than one of [f]'s own BORROWED parameters,
+   that parameter of [g] is owned.  A borrowed parameter forwarded unchanged
+   ([sum(c, i - 1, acc + c.n)]) needs no release anywhere, so it keeps the
+   loop a loop and stays borrowed; that is the read-only-helper shape this
+   exists to keep cheap.  Every call position is considered, not only tail
+   calls: tail position is decided after Perceus has run, and
+   over-approximating costs a retain/release pair, never correctness.
+
+   Cycles are the strongly connected components of the direct-call graph.
+   Calls through a closure are not edges; a loop through one is not flattened
+   by [Llvm_tco] either. *)
+
+(** Direct callees ([EApp]) of an expression, with their arguments, each
+    paired with the names that are still the enclosing function's parameters
+    at that point (a binder of the same name hides one). *)
+let rec iter_calls (scope : (string, unit) Hashtbl.t)
+    (k : Tir.var -> Tir.atom list -> unit) (e : Tir.expr) : unit =
+  let under (names : string list) (body : Tir.expr) =
+    let hidden = List.filter (Hashtbl.mem scope) names in
+    List.iter (Hashtbl.remove scope) hidden;
+    iter_calls scope k body;
+    List.iter (fun n -> Hashtbl.replace scope n ()) hidden
+  in
+  match e with
+  | Tir.EApp (f, args) -> k f args
+  | Tir.ELet (v, e1, e2) ->
+    iter_calls scope k e1; under [v.Tir.v_name] e2
+  | Tir.ESeq (e1, e2) -> iter_calls scope k e1; iter_calls scope k e2
+  | Tir.ECase (_, branches, default) ->
+    List.iter (fun br ->
+        under (List.map (fun v -> v.Tir.v_name) br.Tir.br_vars) br.Tir.br_body)
+      branches;
+    Option.iter (iter_calls scope k) default
+  | Tir.ELetRec (fns, body) ->
+    let names = List.map (fun fn -> fn.Tir.fn_name) fns in
+    List.iter (fun fn ->
+        under (names @ List.map (fun p -> p.Tir.v_name) fn.Tir.fn_params)
+          fn.Tir.fn_body) fns;
+    under names body
+  | _ -> ()
+
+(** Strongly connected components of the module's direct-call graph:
+    function name -> component id (Tarjan). *)
+let call_sccs (fns : Tir.fn_def list) : (string, int) Hashtbl.t =
+  let defined = Hashtbl.create 256 in
+  List.iter (fun fn -> Hashtbl.replace defined fn.Tir.fn_name fn) fns;
+  let succs (fn : Tir.fn_def) : string list =
+    let out = ref [] in
+    iter_calls (Hashtbl.create 1)
+      (fun f _ ->
+         if Hashtbl.mem defined f.Tir.v_name then out := f.Tir.v_name :: !out)
+      fn.Tir.fn_body;
+    !out
+  in
+  let index = Hashtbl.create 256 and low = Hashtbl.create 256 in
+  let on_stack = Hashtbl.create 256 and comp = Hashtbl.create 256 in
+  let stack = ref [] and next = ref 0 and next_comp = ref 0 in
+  (* Iterative: a module's call chains can be deeper than the OCaml stack
+     is comfortable with. *)
+  let visit (root : string) =
+    let frames = ref [] in
+    let enter n =
+      Hashtbl.replace index n !next; Hashtbl.replace low n !next; incr next;
+      stack := n :: !stack; Hashtbl.replace on_stack n ();
+      frames := (n, ref (succs (Hashtbl.find defined n))) :: !frames
+    in
+    enter root;
+    while !frames <> [] do
+      let (n, rest) = List.hd !frames in
+      match !rest with
+      | m :: tl ->
+        rest := tl;
+        if not (Hashtbl.mem index m) then enter m
+        else if Hashtbl.mem on_stack m then
+          Hashtbl.replace low n (min (Hashtbl.find low n) (Hashtbl.find index m))
+      | [] ->
+        frames := List.tl !frames;
+        (match !frames with
+         | (parent, _) :: _ ->
+           Hashtbl.replace low parent
+             (min (Hashtbl.find low parent) (Hashtbl.find low n))
+         | [] -> ());
+        if Hashtbl.find low n = Hashtbl.find index n then begin
+          let rec pop () =
+            match !stack with
+            | m :: tl ->
+              stack := tl; Hashtbl.remove on_stack m;
+              Hashtbl.replace comp m !next_comp;
+              if not (String.equal m n) then pop ()
+            | [] -> ()
+          in
+          pop (); incr next_comp
+        end
+    done
+  in
+  List.iter (fun fn ->
+      if not (Hashtbl.mem index fn.Tir.fn_name) then visit fn.Tir.fn_name) fns;
+  comp
+
+(** The (function, parameter index) pairs the loop-carried rule makes owned
+    under the current map [bm] -- see the section comment.  Only positions
+    still borrowed are reported, so an empty answer means no change. *)
+let loop_carried_flips (k_table : Kind.table) (sccs : (string, int) Hashtbl.t)
+    (fns : Tir.fn_def list) (bm : borrow_map) : (string * int) list =
+  let by_name = Hashtbl.create 256 in
+  List.iter (fun fn -> Hashtbl.replace by_name fn.Tir.fn_name fn) fns;
+  let is_record ty =
+    match Kind.canonical_ty k_table ty with Tir.TRecord _ -> true | _ -> false in
+  let flips = ref [] in
+  List.iter (fun (f : Tir.fn_def) ->
+      match Hashtbl.find_opt sccs f.Tir.fn_name with
+      | None -> ()
+      | Some cf ->
+        let scope = Hashtbl.create 8 in
+        List.iteri (fun j p ->
+            if is_borrowed bm f.Tir.fn_name j then
+              Hashtbl.replace scope p.Tir.v_name ())
+          f.Tir.fn_params;
+        iter_calls scope (fun g args ->
+            match Hashtbl.find_opt sccs g.Tir.v_name,
+                  Hashtbl.find_opt by_name g.Tir.v_name with
+            | Some cg, Some gdef when cg = cf ->
+              List.iteri (fun i a ->
+                  match List.nth_opt gdef.Tir.fn_params i with
+                  | Some p when is_record p.Tir.v_ty
+                                && is_borrowed bm g.Tir.v_name i ->
+                    let forwarded = match a with
+                      | Tir.AVar v -> Hashtbl.mem scope v.Tir.v_name
+                      | _ -> false in
+                    if not forwarded then
+                      flips := (g.Tir.v_name, i) :: !flips
+                  | _ -> ())
+                args
+            | _ -> ())
+          f.Tir.fn_body)
+    fns;
+  !flips
+
+
 (** Infer the borrow map for all functions in [m].
 
     Algorithm:
@@ -1359,6 +1550,7 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
       StringMap.add fn.Tir.fn_name modes acc
     ) StringMap.empty m.Tir.tm_fns
   in
+  let sccs = call_sccs m.Tir.tm_fns in
   (* Fixpoint loop *)
   let rec iterate (bm : borrow_map) : borrow_map =
     let changed = ref false in
@@ -1381,6 +1573,18 @@ let infer_module ?(k_table : Kind.table option) (m : Tir.tir_module) : borrow_ma
         ) fn.Tir.fn_params;
         StringMap.add fn.Tir.fn_name modes acc
       ) bm m.Tir.tm_fns
+    in
+    (* Loop-carried record parameters are owned -- see [loop_carried_flips]. *)
+    let bm' =
+      List.fold_left (fun acc (g, i) ->
+          match StringMap.find_opt g acc with
+          | Some modes when i < Array.length modes && modes.(i) ->
+            let modes = Array.copy modes in
+            modes.(i) <- false;
+            changed := true;
+            StringMap.add g modes acc
+          | _ -> acc)
+        bm' (loop_carried_flips k_table sccs m.Tir.tm_fns bm')
     in
     if !changed then iterate bm' else bm'
   in

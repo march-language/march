@@ -68,9 +68,34 @@ let set_fragment_scope (s : string) = _fragment_scope := s
 let _current_host : string option ref = ref None
 let _nested_ordinals : (string * string, int) Hashtbl.t = Hashtbl.create 64
 
+(* Ocap phase 4 ([Auth_rt.captures]): what module-initialiser code makes.
+   A function value made there captures no authority (it runs under its
+   caller's), so the capture pass must tell it apart, and by TIR time an
+   entry-module let is folded into the fns that use it.  Recorded here as
+   lowering meets them; reset with the hosts, per [lower_module].
+   - [_module_init_lambdas]: the TIR names of lambdas lowered outside any
+     function (a module-level let's initialiser);
+   - [_module_init_binders]: the entry module's top-level let binders, the
+     very [Tir.var] records [lower_module] folds into fn bodies (matched
+     physically, so a local of the same name is never mistaken for one);
+   - [_module_init_fns]: the zero-arg fns other modules' lets lower to. *)
+let _module_init_lambdas : (string, unit) Hashtbl.t = Hashtbl.create 8
+let _module_init_binders : Tir.var list ref = ref []
+let _module_init_fns : (string, unit) Hashtbl.t = Hashtbl.create 8
+
 let reset_hosts () =
   _current_host := None;
-  Hashtbl.reset _nested_ordinals
+  Hashtbl.reset _nested_ordinals;
+  Hashtbl.reset _module_init_lambdas;
+  _module_init_binders := [];
+  Hashtbl.reset _module_init_fns
+
+(** Whether lowering is outside any function body (module-initialiser code). *)
+let at_module_level () = !_current_host = None
+
+let is_module_init_lambda (name : string) = Hashtbl.mem _module_init_lambdas name
+let is_module_init_binder (v : Tir.var) = List.memq v !_module_init_binders
+let is_module_init_fn (name : string) = Hashtbl.mem _module_init_fns name
 
 (** The host name for a top-level fn [fn] of the module with [mod_prefix]
     (["Mod."] or [""]). *)
@@ -113,9 +138,37 @@ let _fn_typed_module_lets : (string, Tir.ty) Hashtbl.t = Hashtbl.create 8
 
 (** Record a module-level let lowered to the zero-arg fn [fn]. *)
 let note_module_let (fn : Tir.fn_def) : unit =
+  Hashtbl.replace _module_init_fns fn.fn_name ();
   match fn.fn_ret_ty with
   | Tir.TFn _ -> Hashtbl.replace _fn_typed_module_lets fn.fn_name fn.fn_ret_ty
   | _ -> ()
+
+(** A function's `needs` clause, for the run-time frames of ocap phase 4
+    ([Auth_rt]): the name the frame reports (the fn's source name qualified
+    by its module path, as the interpreter spells it: [f] in the entry
+    module, [Inner.f] in a nested one, [Mod.f] in a library), the clause as
+    canonical scope text ([March_ast.Cap_request.request_of_entries], the
+    printer the launch request uses) and whether it carries a scope. *)
+type fn_needs = {
+  fnn_name : string;
+  fnn_text : string;
+  fnn_scoped : bool;
+}
+
+(** Lowered (final TIR) fn name -> its `needs` clause, for every fn that has
+    one.  Filled where each fn gets its final name; reset per
+    [lower_module]. *)
+let fn_needs_tbl : (string, fn_needs) Hashtbl.t = Hashtbl.create 8
+
+(** Record [def]'s `needs` clause (if any) under the TIR name [final]; the
+    frame reports [display]. *)
+let note_fn_needs ~(final : string) ~(display : string) (def : Ast.fn_def) : unit =
+  match def.Ast.fn_needs with
+  | None -> ()
+  | Some (entries, _) ->
+    let text, scoped = March_ast.Cap_request.request_of_entries entries in
+    Hashtbl.replace fn_needs_tbl final
+      { fnn_name = display; fnn_text = text; fnn_scoped = scoped }
 
 (** Emit a runtime panic for a non-exhaustive match that the typechecker
     missed.  Returning [LitInt 0] here would silently reinterpret a value of

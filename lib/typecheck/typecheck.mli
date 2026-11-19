@@ -360,6 +360,16 @@ val cap_strict_ceiling : bool ref
     set by the driver. *)
 val dump_role_authority : bool ref
 
+(** `main`'s launch request (ocap phase 4, decision 3) as the program entry
+    hands it to [Authority.launch_init]: the canonical text (`main`'s `Cap`
+    parameter kinds, then its `needs` entries, each printed as written,
+    joined by [", "]; with neither, the module's `needs` line) and whether
+    any entry carries a scope.  A module with no `main` asks for its
+    `needs` line.  A test file does not use this: its request is
+    [March_ast.Cap_request.test_request], its `needs` line whatever `main`
+    it declares. *)
+val launch_request : Ast.module_ -> string * bool
+
 (** Per-role FULL capability closures for the hot-deploy manifest's
     [ROLE <Proto.Role> caps=...] lines (distributed-deploys build step 10):
     [(proto.role, normalized sorted IO caps, per-cap reach chain)], one entry

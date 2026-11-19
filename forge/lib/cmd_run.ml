@@ -138,7 +138,11 @@ let exec_output ~target ~args output =
     "[compiled] and [file] is somehow [None] after all" arm to fill with a
     placeholder; the impossible case simply isn't expressible. *)
 let run ?(dump_phases = false) ?(compiled = false) ?target ?file ?(args = [])
-    ?(processes = false) ?(fail_fast = false) ?(hot_reload = false) ?env () =
+    ?(processes = false) ?(fail_fast = false) ?(hot_reload = false) ?env ?grant () =
+  (* [--grant SCOPES] (ocap phase 4): narrow the program's launch authority
+     by setting MARCH_GRANT, which every child this run starts inherits (the
+     interpreter, a compiled binary, node, each topology process). *)
+  Option.iter (fun g -> Unix.putenv "MARCH_GRANT" g) grant;
   (* A project with a topology.toml (and no single FILE named) is a topology
      app: its `main` is generated, so it always runs compiled, and
      --processes runs one process per pool (Topology_run, build step 3). *)

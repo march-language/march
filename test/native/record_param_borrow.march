@@ -1,0 +1,287 @@
+-- A record parameter the callee only reads is BORROWED: the callee does not
+-- release it and a caller that still needs the record does not retain it.
+--
+-- Until this guard every record parameter was owned (lib/tir/kind.ml's
+-- borrowable_of, false for TRecord since 5bedb1232), so each read-only helper
+-- released its record on every return path and each caller retained it first.
+-- Each leg below is one way a borrowed record could go wrong, run 10,000
+-- times and checked two ways: the value it computes, and live_allocs() being
+-- flat across the loop (a missing release grows it, an extra release aborts
+-- with an RC underflow or reads freed memory).
+--
+--   read       fields read, record forwarded unchanged through the loop
+--   returned   a heap field is returned, then the record dies
+--   stored     a heap field is stored in a new cell, then the record dies
+--   passed     a heap field goes to an owned parameter of another function
+--   updated    `{ st with .. }` on a borrowed record; both stay usable
+--   captured   a closure captures the record and outlives the call
+--   matched    a heap field of the record is matched and its payload escapes
+--   nested     a field of a field escapes
+--   twice      one record at two parameters of one call
+--   shared     one record held twice by a list, read through a helper
+--   carried    a loop that passes a NEW record each iteration stays owned:
+--              the base case sees a flat heap, not one record per iteration
+--   mutual     the same through a pair of mutually recursive functions
+--   relay      an OWNED (loop-carried) record is lent to a borrowing helper
+--              on every iteration and still released once
+--   reread     a local record is lent to a borrowing helper, then read again
+--   moved      one arm returns the record itself, so the parameter is owned
+--   closure    a borrowing helper returns a closure over a scalar field and
+--              another over heap fields; the temporary record is released
+--              after the call and the closure is still callable
+--
+-- `result` is printed so no loop is dead-code eliminated.
+mod Main do
+  needs IO.Console
+
+  type Wrap = Wrap(String)
+  type Pair = Pair(List(Int), Int)
+
+  pfn fresh(n : Int) : { total : Int, name : String, items : List(Int), tag : Option(String) } do
+    { total: n, name: int_to_string(n), items: [n, n + 1], tag: Some(int_to_string(n + 7)) }
+  end
+
+  -- read: nothing escapes.
+  pfn weight(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Int do
+    st.total + string_length(st.name) + List.length(st.items)
+  end
+  pfn leg_read(st : { total : Int, name : String, items : List(Int), tag : Option(String) }, n : Int, acc : Int) : Int do
+    if n <= 0 do acc else leg_read(st, n - 1, acc + weight(st)) end
+  end
+
+  -- returned
+  pfn name_of(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : String do
+    st.name
+  end
+  pfn leg_returned(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let s = name_of(fresh(n))
+      leg_returned(n - 1, acc + string_length(s))
+    end
+  end
+
+  -- stored
+  pfn wrap(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Wrap do
+    Wrap(st.name)
+  end
+  pfn leg_stored(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      match wrap(fresh(n)) do
+        Wrap(s) -> leg_stored(n - 1, acc + string_length(s))
+      end
+    end
+  end
+
+  -- passed: own_list returns its argument, so its parameter is owned.
+  pfn own_list(xs : List(Int)) : List(Int) do xs end
+  pfn extended(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : List(Int) do
+    own_list(st.items)
+  end
+  pfn leg_passed(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else leg_passed(n - 1, acc + List.length(extended(fresh(n)))) end
+  end
+
+  -- updated
+  pfn bump(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : { total : Int, name : String, items : List(Int), tag : Option(String) } do
+    { st with total: st.total + 1 }
+  end
+  pfn leg_updated(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let a = fresh(n)
+      let b = bump(a)
+      leg_updated(n - 1, acc + (b.total - a.total) + string_length(a.name) - string_length(b.name))
+    end
+  end
+
+  -- captured
+  pfn adder(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Int -> Int do
+    fn x -> x + st.total + string_length(st.name)
+  end
+  pfn leg_captured(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = adder(fresh(3))
+      leg_captured(n - 1, acc + f(1))
+    end
+  end
+
+  -- matched
+  pfn tag_of(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : String do
+    match st.tag do
+      Some(s) -> s
+      None -> ""
+    end
+  end
+  pfn leg_matched(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else leg_matched(n - 1, acc + string_length(tag_of(fresh(n)))) end
+  end
+
+  -- nested
+  pfn inner_name(o : { inner : { total : Int, name : String, items : List(Int), tag : Option(String) }, k : Int }) : String do
+    o.inner.name
+  end
+  pfn leg_nested(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let o = { inner: fresh(n), k: n }
+      leg_nested(n - 1, acc + string_length(inner_name(o)))
+    end
+  end
+
+  -- twice
+  pfn both(a : { total : Int, name : String, items : List(Int), tag : Option(String) },
+           b : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Int do
+    a.total + string_length(b.name)
+  end
+  pfn leg_twice(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let st = fresh(n)
+      leg_twice(n - 1, acc + both(st, st))
+    end
+  end
+
+  -- shared
+  pfn sum_weights(xs : List({ total : Int, name : String, items : List(Int), tag : Option(String) }), acc : Int) : Int do
+    match xs do
+      Nil -> acc
+      Cons(st, rest) -> sum_weights(rest, acc + weight(st))
+    end
+  end
+  pfn leg_shared(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let st = fresh(n)
+      leg_shared(n - 1, acc + sum_weights([st, st], 0))
+    end
+  end
+
+  -- carried: the heap seen from the base case.
+  pfn carried(st : { total : Int, name : String, items : List(Int), tag : Option(String) }, n : Int, base : Int) : Int do
+    if n <= 0 do
+      (if live_allocs() - base < 100 do st.total else 0 - 1 end)
+    else
+      carried({ st with total: st.total + 1 }, n - 1, base)
+    end
+  end
+
+  -- mutual
+  pfn ping(st : { total : Int, name : String, items : List(Int), tag : Option(String) }, n : Int, base : Int) : Int do
+    if n <= 0 do
+      (if live_allocs() - base < 100 do st.total else 0 - 1 end)
+    else
+      pong({ st with total: st.total + 1 }, n - 1, base)
+    end
+  end
+  pfn pong(st : { total : Int, name : String, items : List(Int), tag : Option(String) }, n : Int, base : Int) : Int do
+    if n <= 0 do
+      (if live_allocs() - base < 100 do st.total else 0 - 1 end)
+    else
+      ping({ st with name: st.name }, n - 1, base)
+    end
+  end
+
+  -- relay
+  pfn relay(st : { total : Int, name : String, items : List(Int), tag : Option(String) }, n : Int, base : Int) : Int do
+    if n <= 0 do
+      (if live_allocs() - base < 100 do st.total else 0 - 1 end)
+    else
+      relay({ st with total: st.total + weight(st) - weight(st) + 1 }, n - 1, base)
+    end
+  end
+
+  -- reread
+  pfn leg_reread(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let a = fresh(n)
+      let w = weight(a)
+      leg_reread(n - 1, acc + w - a.total + string_length(a.name))
+    end
+  end
+
+  -- moved
+  pfn pick(st : { total : Int, name : String, items : List(Int), tag : Option(String) }, keep : Bool) : { total : Int, name : String, items : List(Int), tag : Option(String) } do
+    if keep do st else { st with total: 0 } end
+  end
+  pfn leg_moved(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let a = pick(fresh(n), n % 2 == 0)
+      leg_moved(n - 1, acc + a.total + string_length(a.name))
+    end
+  end
+
+  -- closure
+  pfn scalar_clo(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Int -> Int do
+    let t = st.total
+    fn x -> x + t
+  end
+  pfn heap_clo(st : { total : Int, name : String, items : List(Int), tag : Option(String) }) : Int -> Int do
+    let nm = st.name
+    let xs = st.items
+    fn x -> x + string_length(nm) + List.length(xs)
+  end
+  pfn leg_closure(n : Int, acc : Int) : Int do
+    if n <= 0 do acc else
+      let f = scalar_clo(fresh(n))
+      let g = heap_clo(fresh(n))
+      leg_closure(n - 1, acc + f(1) - n + g(0))
+    end
+  end
+
+  pfn flat(label : String, before : Int, result : Int) : () do
+    let grew = live_allocs() - before
+    println(label ++ " = " ++ int_to_string(result) ++ ", flat: " ++ bool_to_string(grew < 100 && grew > 0 - 100))
+    ()
+  end
+
+  fn main(_c : Cap(IO.Console)) do
+    let n = 10000
+    let keep = fresh(5)
+    let a = live_allocs()
+    let r_a = leg_read(keep, n, 0)
+    flat("read", a, r_a)
+    let b = live_allocs()
+    let r_b = leg_returned(n, 0)
+    flat("returned", b, r_b)
+    let c = live_allocs()
+    let r_c = leg_stored(n, 0)
+    flat("stored", c, r_c)
+    let d = live_allocs()
+    let r_d = leg_passed(n, 0)
+    flat("passed", d, r_d)
+    let e = live_allocs()
+    let r_e = leg_updated(n, 0)
+    flat("updated", e, r_e)
+    let f = live_allocs()
+    let r_f = leg_captured(n, 0)
+    flat("captured", f, r_f)
+    let g = live_allocs()
+    let r_g = leg_matched(n, 0)
+    flat("matched", g, r_g)
+    let h = live_allocs()
+    let r_h = leg_nested(n, 0)
+    flat("nested", h, r_h)
+    let i = live_allocs()
+    let r_i = leg_twice(n, 0)
+    flat("twice", i, r_i)
+    let j = live_allocs()
+    let r_j = leg_shared(n, 0)
+    flat("shared", j, r_j)
+    let k = live_allocs()
+    let r_k = carried(fresh(0), n, live_allocs())
+    flat("carried", k, r_k)
+    let l = live_allocs()
+    let r_l = ping(fresh(0), n, live_allocs())
+    flat("mutual", l, r_l)
+    let m = live_allocs()
+    let r_m = relay(fresh(0), n, live_allocs())
+    flat("relay", m, r_m)
+    let o = live_allocs()
+    let r_o = leg_reread(n, 0)
+    flat("reread", o, r_o)
+    let q = live_allocs()
+    let r_q = leg_moved(n, 0)
+    flat("moved", q, r_q)
+    let u = live_allocs()
+    let r_u = leg_closure(n, 0)
+    flat("closure", u, r_u)
+    -- The record handed to the read loop is still whole.
+    println("kept: " ++ keep.name ++ " " ++ int_to_string(List.length(keep.items)) ++ " " ++ tag_of(keep))
+  end
+end

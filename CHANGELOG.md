@@ -28,8 +28,45 @@ git log is authoritative for exact commits.
   reads the fields only when it held the last reference. On a 48-field record
   released 30 million times while still shared, the run takes about 25% less CPU
   time (`bench/wide_record_shared_drop.march`). Programs behave the same.
+- **A function that only reads a record parameter no longer counts a reference to it.**
+  In compiled code every record parameter used to be owned: the caller added a
+  reference before the call and the function released it on return. A record
+  parameter the function only reads is now borrowed, so neither happens. A function
+  that keeps the record (returns it, stores it, captures it in a closure) or a
+  recursive loop that builds a new record each iteration still owns it. Tuple
+  parameters are unchanged. Programs behave the same.
 
 ### Added
+
+- **Run-time authority (object capabilities, phase 4).** Every capability operation is now
+  also checked while the program runs, against the authority in force, in the interpreter,
+  `--jit`, the REPL, compiled binaries and `--target js` alike. A refusal is the operation's
+  `Err(CapError(...))`, naming the innermost limit that refused it (`ByLaunch` or
+  `ByFnNeeds(f)`) and that limit's scopes. A function value keeps the authority it was made
+  under wherever it is called; a value made by module-level code runs under its caller's.
+  An actor or task keeps its spawner's authority for life, and a supervisor restarts a child
+  under the authority of its first spawn. A program with no grant, no scoped request and no
+  scoped function pays two global loads per operation and one call at launch; a check that
+  walks the layers costs well under a microsecond; in a program with scoped functions, a
+  captured call costs a few nanoseconds and entering a scoped function about 15 ns. A panic
+  caught by `try_finally`, a property or a test puts back the authority that was in force
+  where it was caught. Not yet covered: direct calls of raw
+  builtins, the `HttpServer` and `Udp.resolve` opens, and authority across nodes. See
+  [Capabilities](docs/capabilities.md#run-time-authority).
+- **`--grant` / `MARCH_GRANT` narrow what one run may do.** `MARCH_GRANT='IO.Console,
+  IO.FileRead("/srv/")' ./prog`, `march --grant ... file.march`, `march repl --grant ...` and
+  `forge run --grant ...` start the program with that scope list instead of `main`'s full
+  request. A grant that does not parse, or that grants anything `main` does not request, is a
+  launch error: one line on stderr (`march: MARCH_GRANT grants IO.FileRead, which main does
+  not request (main requests: IO.Console)`) and exit status 2, before any of the program runs.
+  `()` grants nothing; an empty `MARCH_GRANT` is unset.
+- **`march repl FILE --grant G`.** The REPL with a preloaded file now takes `--grant`, which
+  narrows its launch as it already did without a file; it used to be read as a second file.
+- **Scoped function `needs`.** `fn read_conf(name : String) : String needs
+  IO.FileRead("/etc/myapp/") do ... end` limits everything the function reaches to those
+  paths (hosts, names) while it runs: `read_conf("../passwd")` is refused by `read_conf`'s
+  needs. Limits nest and intersect with the launch grant. The compiler checks the clause's
+  kinds; its scopes are checked at run time.
 
 - **Warnings for logical races.** March has no memory-level data races, but two kinds
   of race survive above the memory model, and the checker now names them:
@@ -631,6 +668,21 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **A program that prints without any `needs` line is fixed by adding the `needs` line
+  alone.** `main` with no `needs` clause and no `Cap` parameter is granted the module's
+  `needs` line, so the missing-`needs` error's hint and `forge fix` no longer also give
+  `main` a `Cap(...)` parameter. A `main` bounded by `needs ()` that performs IO is
+  reported once, as `cap_grant`, with a fix that rewrites the clause to name what the
+  program reaches (for example `needs IO.Console`), instead of a `cap_bound` error plus a
+  `cap_grant` fix that added a `Cap` parameter and left the empty bound in place.
+  That same request (`main`'s `needs` clause and `Cap` parameters, else the module's `needs`
+  line; `needs ()` requests nothing) is what the program starts with at run time.
+- **The test-only `MARCH_TEST_REFUSE` hook is removed.** Use `MARCH_GRANT` (or `--grant`)
+  with a scope list that leaves the capability out.
+- **One rule picks the program entry everywhere.** A bare `main` is the entry, else the last
+  module-qualified `Mod.main`. Compiled code used to pick a later `Mod.main` over a bare
+  `main`; it now agrees with the other runtimes.
+
 - **Registering and finding actors by name needs the new `IO.Registry` capability;
   `forge fix` adds the line.** `Actor.register`, `Actor.unregister`, `Actor.whereis` and
   `Actor.registered` are charged `IO.Registry` (a child of `IO`, so `needs IO` still covers
@@ -683,7 +735,7 @@ git log is authoritative for exact commits.
   files outside a project. The new `Authority` module (`check`, `describe`, `must`, `ignore`)
   and the Prelude types `CapError`/`CapLimit` carry it. The parallel `List` helpers compute
   sequentially when spawning is refused; `IO.inspect`, `debug` and the Logger never fail.
-  Nothing refuses yet except the test-only `MARCH_TEST_REFUSE` hook; UDP, TLS contexts,
+  What refuses is the run-time authority (phase 4, under Added); UDP, TLS contexts,
   `HttpClient` and `HttpServer` follow in phase 2. The REPL does not echo the `Ok(())` of a
   console operation. Reading stdin is now charged to `IO.Console`.
 - **`forge fix` keeps a file's final newline**; it used to drop it from every file it fixed.
@@ -1146,6 +1198,29 @@ git log is authoritative for exact commits.
   hand-written code: added fields with constant `init` values, a `migrate` clause and `--drop`
   derive the migration. `@compat(forward)` and `@compat(any)` remain valid spellings, but no
   longer waive a migration.
+- **Three compiled-code memory bugs in dropping records and closures.** A record
+  field that is a single-constructor wrapper around a heap value
+  (`type Bag = Bag(Map(String, Int))`) could be released twice when the record was
+  the last holder, crashing the program. A named record with a field that is another
+  module's record sharing its short name with other types (`SwimDriver.State`) freed
+  that field without releasing what it owned, a leak. A call to a function that
+  returns a closure, with a record argument released after the call, crashed on the
+  first use of the closure.
+
+- **A function value made at the interpreter REPL's prompt keeps the prompt's authority.**
+  `let f = fn p -> File.read(p)` typed at the prompt was treated as module-level code and ran
+  under whatever authority later called it.
+- **A polymorphic function declared at the JIT REPL's prompt no longer crashes on its first
+  call.** It now fails cleanly with ``jit error: no compiled body for `f` `` (the JIT never
+  instantiates it; `specs/todos/2026-11-11-repl-nested-fn-decl-jit-error-hd.md`).
+
+- **A function named like a builtin no longer captures the standard library's calls to that
+  builtin.** An entry-module `fn not` (or any other builtin name, such as `negate` or
+  `int_xor`) is the program's own function only in the file that defines it. Compiled natively
+  and under `--target js`, the standard library's own calls to the builtin ran the user's
+  function instead: `Topology.labels_of`, `VectorClock.compare` and others returned wrong
+  results, and on `--target js` the capability policy ran it at every launch. The interpreter
+  was already right.
 
 - **Several `march repl` bugs fixed:**
   - `==` on a stdlib type (`Some(1) == Some(1)`, `[1] == [1]`, `Ok(1) == Ok(1)`) works again

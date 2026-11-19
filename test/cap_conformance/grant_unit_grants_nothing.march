@@ -1,0 +1,16 @@
+-- GRANT: ()
+-- The grant `()` grants nothing (design §8: `()` is the empty scope list):
+-- even the console is refused, naming the grant as its limit. Stdout is the
+-- channel under test, so a granted println shows up in the output; a
+-- refusal of the wrong shape panics.
+mod GrantUnitGrantsNothing do
+  needs IO.Console
+
+  fn main() needs IO.Console do
+    let r = println("the console was granted")
+    match r do
+    Err(CapError("IO.Console", "stdout", ByLaunch, "()")) -> ()
+    _ -> panic("expected the console refused by the launch grant ()")
+    end
+  end
+end

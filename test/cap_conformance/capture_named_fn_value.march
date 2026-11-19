@@ -1,0 +1,38 @@
+-- A named function used as a value captures the authority where the name
+-- is used as a value, and runs under it narrowed by its own needs (design
+-- §5: it behaves as `fn p -> probe_read(p)` would). Read as a value inside a
+-- framed function, it stays narrowed when main calls it; read as a value in
+-- main and called inside the frame, it is not; and its own scoped needs
+-- still applies wherever it runs.
+mod CaptureNamedFnValue do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe_read(p : String) : String do
+    match Authority.check("IO.FileRead", p) do
+    Ok(_) -> "allowed " ++ p
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn etc_only(p : String) : String needs IO.FileRead("/etc/") do
+    probe_read(p)
+  end
+
+  fn value_inside() : String -> String needs IO.FileRead("/srv/") do
+    probe_read
+  end
+
+  fn call_inside(f : String -> String, p : String) : String needs IO.FileRead("/srv/") do
+    f(p)
+  end
+
+  fn main() do
+    let narrow = value_inside()
+    println(narrow("/srv/x"))
+    println(narrow("/etc/hosts"))
+    println(call_inside(probe_read, "/etc/hosts"))
+    println(call_inside(etc_only, "/etc/hosts"))
+    println(call_inside(etc_only, "/srv/x"))
+  end
+end

@@ -1826,6 +1826,15 @@ __attribute__((noinline)) void **march_sched_frame_slot(void) {
     return p ? &p->code_frames : &foreign_code_frames;
 }
 
+/* ocap phase 4: same shape as march_sched_frame_slot, for march_proc.auth.
+ * Code outside a green thread (the main OS thread before the scheduler runs,
+ * a listener thread) gets a per-OS-thread slot that starts empty. */
+static _Thread_local void *foreign_auth;
+__attribute__((noinline)) void **march_sched_auth_slot(void) {
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
+    return p ? &p->auth : &foreign_auth;
+}
+
 void march_sched_hold_next_spawn(void) {
     march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (p) atomic_store_explicit(&p->hold_next_spawn, 1, memory_order_relaxed);
@@ -1867,6 +1876,11 @@ static uint32_t spawn_code_epoch(int from_parent) {
 static sigset_t   g_sched_sigmask;
 static _Atomic int g_sched_sigmask_set;
 static _Atomic int g_sched_sigmask_claim;   /* sched_loop: who records it */
+
+/* march_runtime.c (STRONG; WEAK no-op fallbacks for the standalone scheduler
+ * tests below, beside march_signal_drain's). */
+void march_incrc(void *p);
+void march_cap_release(void *layers);
 
 static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
                                       int is_daemon, int pinned,
@@ -1976,6 +1990,16 @@ static march_proc *sched_spawn_common(void (*fn)(void *), void *arg,
         }
     } else entry_epoch = follow_current == 1 ? 0u : spawn_code_epoch(follow_current == 0);
     atomic_init(&p->code_epoch, entry_epoch);
+    /* ocap phase 4: the child starts under its spawner's authority (design
+     * §7: a worker spawned under a limit is limited for life).  Its own
+     * reference, released at the reap. */
+    {
+        void *auth = *march_sched_auth_slot();
+        if (auth) {
+            march_incrc(auth);
+            p->auth = auth;
+        }
+    }
     /* A spawn the spawner asked to start held (march_sched_hold_next_spawn):
      * the hold is on the child before it can run, so its spawn marker, if
      * any, is deferred like any other. */
@@ -2098,6 +2122,10 @@ __attribute__((weak)) void march_signal_drain(void) { }
  * can take the reference it hands out without the scheduler harnesses
  * failing to link. */
 __attribute__((weak)) void march_incrc(void *p) { (void)p; }
+
+/* Releases one reference to an authority slot value (march_runtime.c,
+ * STRONG); the same standalone-unit-test fallback as above. */
+__attribute__((weak)) void march_cap_release(void *layers) { (void)layers; }
 
 /* Releases a dead proc's Diagnostics crash context (march_runtime.c, STRONG);
  * the same standalone-unit-test fallback as above. */
@@ -2502,6 +2530,12 @@ static void sched_loop(march_scheduler *sched) {
             atomic_store_explicit(&p->hold_next_spawn, 0, memory_order_relaxed);
             registry_remove(p);
             march_frame_clear(&p->code_frames);
+            /* ocap phase 4: the proc's reference to its authority. */
+            if (p->auth) {
+                void *auth = p->auth;
+                p->auth = NULL;
+                march_cap_release(auth);
+            }
             /* The epoch pin taken at spawn (or moved there by an advance):
              * dropped exactly once, here.  The PROC_DEAD release store
              * orders the proc's last code_epoch write before this read. */

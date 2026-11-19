@@ -1,0 +1,25 @@
+-- A function value made outside a framed function and handed in keeps its
+-- outside authority when the framed function calls it (design §5: the
+-- caller's authority plays no part). The framed function's own check of
+-- the same target is refused by its needs.
+mod CaptureOutsideCalledInside do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn run_inside(f : String -> String, p : String) : String needs IO.FileRead("/srv/") do
+    "handed in: " ++ f(p) ++ " | own: " ++ probe("IO.FileRead", p)
+  end
+
+  fn main() do
+    let wide = fn p -> probe("IO.FileRead", p)
+    println(run_inside(wide, "/etc/hosts"))
+    println(run_inside(wide, "/srv/x"))
+  end
+end

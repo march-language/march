@@ -7,7 +7,7 @@ Task 5, deferred). Phase 1 put every check in the stdlib entry points
 bypasses the check and gets the old, never-refused type.
 
 Today that bypasses nothing: no limit refuses at run time until ocap phase 4
-(only the test hook `MARCH_TEST_REFUSE` does). It becomes a hole the moment
+(only the test hook `MARCH_TEST_REFUSE` did; ocap p4 Task 7 removed it). It becomes a hole the moment
 phase 4 lands, so the gate belongs with phase 4 (or phase 2 for the handle
 builtins it re-types).
 

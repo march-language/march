@@ -1,5 +1,5 @@
--- REFUSE: IO.Console
--- With the console refused, every console operation returns the refusal and
+-- GRANT: IO.Process
+-- With the console outside the launch grant, every console operation returns the refusal and
 -- (IO.read_byte is in console_read_byte.)
 -- prints nothing; IO.inspect and debug are pass-throughs and still return.
 -- Stdout is the channel under test, so the verdict is the exit code: 0 when
@@ -10,7 +10,7 @@ mod ConsoleRefused do
 
   fn refused(r : Result(a, CapError), target : String) : Bool do
     match r do
-    Err(CapError("IO.Console", t, ByLaunch, "IO.Console")) -> t == target
+    Err(CapError("IO.Console", t, ByLaunch, "IO.Process")) -> t == target
     _ -> false
     end
   end

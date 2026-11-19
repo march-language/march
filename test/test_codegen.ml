@@ -1251,8 +1251,12 @@ let test_tco_nontail_fib_no_loop () =
     end
     fn main(_cap_console : Cap(IO.Console)) : Unit do Authority.ignore(println(int_to_string(fib(10)))) end
   end|} in
+  (* Judged on fib's own body: println links Authority's policy, whose
+     tail-recursive helpers do get TCO loops elsewhere in the module. *)
+  let fib_ir = ir_define ir "fib" in
+  Alcotest.(check bool) "non-tail fib: body found" true (fib_ir <> "");
   Alcotest.(check bool) "non-tail fib: no TCO loop" false
-    (ir_contains ir "tco_loop");
+    (ir_contains fib_ir "tco_loop");
   Alcotest.(check bool) "non-tail fib: call instruction present" true
     (ir_contains ir "call i64 @fib")
 
@@ -4066,6 +4070,36 @@ let test_actor_snapshot () =
   March_eval.Eval.restore_actors snap;
   Alcotest.(check int) "restore_actors leaves registry empty" 0
     (Hashtbl.length March_eval.Eval.actor_registry)
+
+(* ocap phase 4, Task 6: a debugger snapshot/restore keeps an actor's
+   spawn-time authority; restoring it as the launch authority would widen an
+   actor spawned under a frame. *)
+let test_actor_snapshot_keeps_authority () =
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  Hashtbl.reset March_eval.Eval.actor_defs_tbl;
+  March_eval.Eval.next_pid := 1;
+  let auth =
+    March_eval.Eval_types.VCon ("Cons",
+      [ March_eval.Eval_types.VCon ("Layer",
+          [ March_eval.Eval_types.VCon ("ByFnNeeds", [ March_eval.Eval_types.VString "start" ]);
+            March_eval.Eval_types.VString "IO.FileRead(\"/srv/\")";
+            March_eval.Eval_types.VCon ("Nil", []) ]);
+        March_eval.Eval_types.VCon ("Nil", []) ]) in
+  Hashtbl.replace March_eval.Eval.actor_defs_tbl "W" (Test_helpers.dummy_actor_def, ref []);
+  let inst = { (Test_helpers.mk_actor_inst "W" true March_eval.Eval_types.VUnit)
+               with March_eval.Eval.ai_authority = auth } in
+  Hashtbl.replace March_eval.Eval.actor_registry 0 inst;
+  let snap = March_eval.Eval.snapshot_actors () in
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  March_eval.Eval.restore_actors snap;
+  (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
+   | Some r ->
+     Alcotest.(check bool) "the restored actor keeps its spawn-time authority" true
+       (r.March_eval.Eval.ai_authority == auth)
+   | None -> Alcotest.fail "the actor was not restored");
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  Hashtbl.reset March_eval.Eval.actor_defs_tbl;
+  March_eval.Eval.next_pid := 0
 
 (* ── Docstring tests ──────────────────────────────────────────────────────── *)
 
@@ -9924,6 +9958,110 @@ let test_simd_load_borrows_array () =
       Alcotest.(check bool) (Printf.sprintf "simd_%s_store owns its array" lane) false
         (March_tir.Borrow.is_extern_borrowed (Printf.sprintf "simd_%s_store" lane) 0))
     [ "f32x4"; "f64x2"; "i32x4"; "i64x2"; "u8x16" ]
+
+(* ── A record parameter the callee only reads is borrowed ─────────────────
+
+   Records were owned parameters from 5bedb1232 on ([Kind.borrowable_of]), so
+   every read-only helper released its record on each return path and every
+   caller retained it first.  These pin the three properties the borrowed
+   form has to keep, in the emitted IR and in the borrow map. *)
+
+let fn_ir ir name =
+  let start = Str.search_forward (Str.regexp_string ("@" ^ name ^ "(")) ir 0 in
+  let stop = Str.search_forward (Str.regexp_string "\n}\n") ir start in
+  String.sub ir start (stop - start)
+
+let record_param_src = {|mod Test do
+    fn weight(st : { total : Int, name : String }) : Int do
+      st.total + string_length(st.name)
+    end
+    fn total(st : { total : Int, name : String }, n : Int, acc : Int) : Int do
+      if n <= 0 do acc else total(st, n - 1, acc + weight(st)) end
+    end
+    fn name_of(st : { total : Int, name : String }) : String do
+      st.name
+    end
+    fn carried(st : { total : Int, name : String }, n : Int) : Int do
+      if n <= 0 do st.total else carried({ st with total: st.total + n }, n - 1) end
+    end
+    fn ping(st : { total : Int, name : String }, n : Int) : Int do
+      if n <= 0 do st.total else pong({ st with total: st.total + 1 }, n - 1) end
+    end
+    fn pong(st : { total : Int, name : String }, n : Int) : Int do
+      if n <= 0 do st.total else ping(st, n - 1) end
+    end
+    fn adder(st : { total : Int, name : String }) : Int -> Int do
+      fn x -> x + st.total
+    end
+    fn pair(t : (Int, String)) : Int do
+      match t do (n, s) -> n + string_length(s) end
+    end
+  end|}
+
+(** No release in the callee, no retain in the caller. *)
+let test_record_param_read_only_no_rc () =
+  let ir = emit_actor_ir record_param_src in
+  List.iter (fun name ->
+      let body = fn_ir ir name in
+      Alcotest.(check int) (name ^ ": no retain") 0 (ir_count body "incrc");
+      Alcotest.(check int) (name ^ ": no release") 0 (ir_count body "decrc");
+      Alcotest.(check int) (name ^ ": no record drop") 0 (ir_count body "__drop$R"))
+    [ "weight"; "total" ];
+  let bm = borrow_module record_param_src in
+  Alcotest.(check bool) "weight borrows its record" true
+    (March_tir.Borrow.is_borrowed bm "weight" 0);
+  Alcotest.(check bool) "total borrows the record it forwards unchanged" true
+    (March_tir.Borrow.is_borrowed bm "total" 0)
+
+(** A heap field that leaves the callee takes its own reference; the record
+    is still not released there. *)
+let test_record_param_escaping_field_retained () =
+  let ir = emit_actor_ir record_param_src in
+  let body = fn_ir ir "name_of" in
+  Alcotest.(check int) "the returned field is retained once" 1 (ir_count body "incrc");
+  Alcotest.(check int) "the record is not released" 0 (ir_count body "decrc");
+  Alcotest.(check int) "nor deep-dropped" 0 (ir_count body "__drop$R");
+  let m = perceus_module record_param_src in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "name_of") m.March_tir.Tir.tm_fns in
+  let rec incs = function
+    | March_tir.Tir.EIncRC (March_tir.Tir.AVar v)
+    | March_tir.Tir.EAtomicIncRC (March_tir.Tir.AVar v) -> [ v ]
+    | March_tir.Tir.ELet (_, a, b) | March_tir.Tir.ESeq (a, b) -> incs a @ incs b
+    | March_tir.Tir.ECase (_, brs, d) ->
+      List.concat_map (fun b -> incs b.March_tir.Tir.br_body) brs
+      @ (match d with Some e -> incs e | None -> [])
+    | _ -> []
+  in
+  Alcotest.(check bool) "what is retained is the String field, not the record" true
+    (match incs f.March_tir.Tir.fn_body with
+     | [ v ] -> v.March_tir.Tir.v_ty = March_tir.Tir.TString
+     | _ -> false)
+
+(** The cases that must stay owned: a loop that hands itself a new record
+    each iteration (constant space needs the callee to release the old one),
+    the same through mutual recursion, a capture, and tuples. *)
+let test_record_param_owned_cases () =
+  let bm = borrow_module record_param_src in
+  let owned name =
+    Alcotest.(check bool) (name ^ " owns its parameter") false
+      (March_tir.Borrow.is_borrowed bm name 0) in
+  owned "carried";
+  (* pong only forwards, but ping hands pong a new record on every round. *)
+  owned "ping"; owned "pong";
+  owned "adder";
+  owned "pair";
+  let ir = emit_actor_ir record_param_src in
+  Alcotest.(check bool) "the loop releases the record it was handed" true
+    (let body = fn_ir ir "carried" in
+     (* The deep-drop helper when the pipeline synthesises one, else a plain
+        release. *)
+     ir_count body "__drop$R" > 0 || ir_count body "decrc" > 0);
+  let open March_tir.Tir in
+  let t = March_tir.Kind.build ~collision_set:(Hashtbl.create 0) [] in
+  Alcotest.(check bool) "a record may be borrowed" true
+    (March_tir.Kind.of_ty t (TRecord [ ("n", TInt) ])).March_tir.Kind.borrowable;
+  Alcotest.(check bool) "a tuple may not" false
+    (March_tir.Kind.of_ty t (TTuple [ TInt; TString ])).March_tir.Kind.borrowable
 
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
@@ -18591,7 +18729,22 @@ declare ptr    @ring_buf_drop(ptr %rb)
 declare double @march_unix_time()
 declare i64    @march_unix_time_ms()
 declare i64    @march_cap_check_raw(ptr %kind, ptr %target)
-declare ptr    @march_cap_launch_text()
+declare ptr    @march_cap_layers()
+declare void   @march_cap_set_launch(ptr %layers)
+declare ptr    @march_cap_save()
+declare void   @march_cap_restore(ptr %saved)
+declare ptr    @march_cap_push(ptr %layer)
+declare ptr    @march_cap_enter(ptr %auth)
+declare ptr    @march_cap_grant_text()
+declare ptr    @march_cap_cwd()
+declare void   @march_cap_launch_fail(ptr %text)
+declare ptr    @march_cap_rt_parse(ptr %text)
+declare i64    @march_cap_rt_admits(ptr %scopes, ptr %kind, ptr %target, ptr %cwd)
+declare i64    @march_cap_rt_subset(ptr %a, ptr %b)
+declare ptr    @march_cap_rt_frame_layer(ptr %name, ptr %text)
+declare void   @march_cap_rt_launch_init(ptr %request, i64 %scoped)
+declare ptr    @march_cap_rt_check_layers(ptr %kind, ptr %target, ptr %layers)
+declare ptr    @march_cap_rt_check_slow(ptr %kind, ptr %target, i64 %r)
 declare i64  @march_peak_rss_bytes()
 declare i64  @march_live_allocs()
 declare i64  @march_vault_live_tables()
@@ -21297,6 +21450,7 @@ let codegen_suites =
         Alcotest.test_case "debug continue"         `Quick test_debug_continue;
         Alcotest.test_case "trace overflow"         `Quick test_trace_overflow;
         Alcotest.test_case "actor snapshot"         `Quick test_actor_snapshot;
+        Alcotest.test_case "actor snapshot keeps its authority" `Quick test_actor_snapshot_keeps_authority;
       ];
       "docstrings", [
         Alcotest.test_case "parse fn doc"         `Quick test_doc_parse_fn;
@@ -21724,6 +21878,9 @@ let codegen_suites =
           Alcotest.test_case "narrow arr IR" `Quick (with_reset test_native_narrow_arr_ir);
           Alcotest.test_case "simd vector IR" `Quick (with_reset test_simd_vector_ir);
           Alcotest.test_case "simd load borrows its array" `Quick (with_reset test_simd_load_borrows_array);
+          Alcotest.test_case "record param: read-only is borrowed, no RC" `Quick (with_reset test_record_param_read_only_no_rc);
+          Alcotest.test_case "record param: escaping field is retained" `Quick (with_reset test_record_param_escaping_field_retained);
+          Alcotest.test_case "record param: loop-carried, captured and tuple stay owned" `Quick (with_reset test_record_param_owned_cases);
         ] );
       ( "tasks",
         [

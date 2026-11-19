@@ -2831,18 +2831,20 @@ intentionally **disagree** on two constructor families:
 
 ```
   needs_rc(TFn _) = true       borrow_eligible(TFn _) = false     -- closures: Perceus-only
-  needs_rc(TTuple/TRecord) = false   borrow_eligible(TTuple/TRecord) = true  -- fields reconciled individually
+  needs_rc(TTuple _) = true    borrow_eligible(TTuple _) = false  -- tuples: owned parameters
 ```
 
 Closures are always heap-allocated post-defun (`llvm_ty (TFn _) = "ptr"`), so
 Perceus must track their lifetime, but letting the borrow fixpoint
 reclassify a closure parameter as borrowed would leave capture-site
 accounting and call-site accounting disagreeing about who owns the closure
-and its captured free variables. Tuples/records get the opposite treatment:
-Perceus never emits an *aggregate*-level `dup`/`drop` for a tuple or record
-cell (ownership is reconciled per-field via `borrowed_field_vars`), but the
-aggregate parameter itself must still be borrow-*eligible* so the fixpoint
-can infer a function that only reads fields as fully borrowed.
+and its captured free variables. Records and tuples are released as a
+whole when they die (a generated deep drop, like a variant's), and a field
+read out of a live one is borrowed and dup'd where it escapes
+(`borrowed_field_vars`). A record parameter that is only read is borrowed;
+one that a recursive call replaces with a new record on each iteration stays
+owned, so the loop releases each record as it goes
+(`Borrow.loop_carried_flips`). Tuple parameters are always owned.
 
 **The owned/borrowed call-boundary contract and the dual-position invariant
 (B1).** `lib/tir/borrow.ml`'s fixpoint classifies each function parameter

@@ -250,7 +250,7 @@ let scalar_builtins = [
      reaches a caller with a heap value.  The message is a literal (a global
      constant), and the match fall-through lower_match inserts calls `panic_`
      — without this entry every `match` would fail its contract. *)
-  "panic"; "panic_"; "todo_"; "unreachable_"; "process_exit";
+  "panic"; "panic_"; "todo_"; "unreachable_"; "process_exit"; "cap_launch_fail";
   (* Stores a literal's address and a line on the proc; allocates nothing. *)
   "__panic_site";
   (* A failed assert's report: it allocates only on its way to a panic, and

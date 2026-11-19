@@ -1192,9 +1192,15 @@ and emit_val_impl ctx expr =
       | "cap_check_raw", [k; t] ->
         use_runtime ctx "march_cap_check_raw";
         emit ctx "march_cap_check_raw("; emit_atom ctx k; emit ctx ", "; emit_atom ctx t; emit ctx ")"
-      | "cap_launch_text", _ ->
-        use_runtime ctx "march_cap_launch_text";
-        emit ctx "march_cap_launch_text()"
+      (* ocap phase 4 authority slot; zero-arg ones take March's Unit *)
+      | ("cap_layers" | "cap_save" | "cap_grant_text" | "cap_cwd"), _ ->
+        let f = "march_" ^ name in
+        use_runtime ctx f;
+        emit ctx (f ^ "()")
+      | ("cap_set_launch" | "cap_restore" | "cap_push" | "cap_enter" | "cap_launch_fail"), [a] ->
+        let f = "march_" ^ name in
+        use_runtime ctx f;
+        emit ctx (f ^ "("); emit_atom ctx a; emit ctx ")"
       (* General call — route externs through emit_extern_call seam *)
       | _, _ ->
         (match Hashtbl.find_opt ctx.extern_fns name with
@@ -1699,6 +1705,16 @@ and emit_fn_decl_impl ctx (fn : Tir.fn_def) =
   ctx.tco <- saved_tco;
   emit_indent ctx;
   emit ctx "}\n";
+  (* A framed fn's layer builder runs once ([Auth_rt]): later calls return
+     the first result (a promise, for an async builder, which awaits to the
+     same layer). *)
+  if Tir_names.is_auth_layer_fn fn.Tir.fn_name then begin
+    let fname = mangle fn.Tir.fn_name in
+    emit_indent ctx;
+    emit ctx (Printf.sprintf
+                "%s = ((build) => { let once; return function () { return once ??= build(); }; })(%s);\n"
+                fname fname)
+  end;
   emit_clo_wrapper ctx fn
 
 (* `[async] function NAME(P0, P1, ...) {` with a source-map segment. *)
@@ -2197,7 +2213,7 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
   let preamble = runtime_import ^ extern_imports ^ builtin_wrappers ^ runtime_wrappers ^ extern_consts ^ raises_helper in
   (* Build ES exports and call main() *)
   let export_buf = Buffer.create 256 in
-  let has_main = List.exists (fun fn -> fn.Tir.fn_name = "main") m.Tir.tm_fns in
+  let entry = Tir_names.entry_main_of_names (List.map (fun fn -> fn.Tir.fn_name) m.Tir.tm_fns) in
   let has_fn n = List.exists (fun fn -> fn.Tir.fn_name = n) m.Tir.tm_fns in
   if m.Tir.tm_tests <> [] then begin
     (* --test (issue #1176): run every test as the native test binary does
@@ -2219,10 +2235,16 @@ let emit_module ?(source_file="") ?(fn_lines=[]) ?(int_check=false) (m : Tir.tir
              (mangle fn_name) (js_string_lit display) setup))
       m.Tir.tm_tests;
     Buffer.add_string export_buf "march_test_report();\n"
-  end else if has_main then begin
-    Buffer.add_string export_buf "export { main };\n";
+  end else if entry <> None then begin
+    let entry = Option.get entry in
     let call =
-      if Hashtbl.mem ctx.async_fns "main" then "await main();" else "main();" in
+      if entry = "main" then begin
+        Buffer.add_string export_buf "export { main };\n";
+        if Hashtbl.mem ctx.async_fns "main" then "await main();" else "main();"
+      end else
+        (* A module-qualified entry ([App.main]), as the native backend
+           runs it ([Tir_names.entry_main_of_names]). *)
+        (if Hashtbl.mem ctx.async_fns entry then "await " else "") ^ mangle entry ^ "();" in
     (* A program that registers a crash observer reports an error escaping
        main to it, then rethrows (Node prints it and exits 1 as before). *)
     if Hashtbl.mem ctx.runtime_uses "march_diag_observe" then

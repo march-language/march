@@ -1999,19 +1999,12 @@ let emit_module ~emit_expr
     Buffer.contents b
   in
 
-  (* Find a main function: either top-level "main" or "ModName.main".
-     Use fold_left (last match wins) so that when multiple modules define
-     fn main(), the entry file's module takes precedence.  The entry file's
-     declarations are injected last into mod_decls, so its functions appear
-     last in tm_fns — fold_left keeps the last match. *)
-  let main_fn_name = List.fold_left (fun acc (fn : Tir.fn_def) ->
-      if fn.Tir.fn_name = "main" then Some "main"
-      else if String.length fn.Tir.fn_name > 5 &&
-              String.sub fn.Tir.fn_name
-                (String.length fn.Tir.fn_name - 5) 5 = ".main"
-      then Some fn.Tir.fn_name
-      else acc
-    ) None m.Tir.tm_fns in
+  (* Find the entry: a bare "main", else the last "ModName.main" (the entry
+     file's declarations are injected last into mod_decls, so its functions
+     appear last in tm_fns).  [Tir_names.entry_main_of_names] is the one rule
+     every backend and [Lower]'s launch call use. *)
+  let main_fn_name =
+    Tir_names.entry_main_of_names (List.map (fun (fn : Tir.fn_def) -> fn.Tir.fn_name) m.Tir.tm_fns) in
 
   (* Entry point: for native targets emit @main calling march_main + scheduler;
      for WASM browser target (Wasm32Unknown), emit exported island entry points

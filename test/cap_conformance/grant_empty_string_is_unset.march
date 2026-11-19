@@ -1,0 +1,21 @@
+-- GRANT:
+-- An empty MARCH_GRANT is the same as an unset one (design §11): the launch
+-- holds main's request in full, not nothing. The console prints, a path
+-- inside the request's scope is allowed, and one outside it is refused by
+-- the request.
+mod GrantEmptyStringIsUnset do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn main() needs IO.Console, IO.FileRead("/srv/") do
+    println(probe("IO.FileRead", "/srv/data.txt"))
+    println(probe("IO.FileRead", "/etc/hosts"))
+  end
+end

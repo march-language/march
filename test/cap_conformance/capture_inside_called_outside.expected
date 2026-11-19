@@ -1,0 +1,5 @@
+allowed /srv/x
+IO.FileRead("/etc/hosts") refused by function make_reader's needs (IO.FileRead("/srv/"))
+IO.FileRead("/etc/hosts") refused by function make_reader's needs (IO.FileRead("/srv/"))
+allowed /etc/hosts
+exit 0

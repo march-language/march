@@ -793,6 +793,39 @@ let setup_fn_name = "__march_setup__"
 (** Fixed synthetic fn name for a module's `setup_all` block. *)
 let setup_all_fn_name = "__march_setup_all__"
 
+(** The stdlib function every program entry calls first (ocap phase 4):
+    [Authority.launch_init(request, scoped)], inserted by [Lower] at the
+    front of [main] (or of a test binary's setup_all block). *)
+let launch_init_fn = "Authority.launch_init"
+
+(** Run-time frames for function `needs` clauses (ocap phase 4,
+    [Auth_rt]).  A framed fn [f] keeps its name as the wrapper that enters
+    the frame; its body moves to [f ^ auth_body_suffix], and the frame's
+    layer is built by the zero-arg [f ^ auth_layer_suffix], whose every call
+    the LLVM emitter routes through [march_cap_layer_once] (built once, then
+    shared) and the JS emitter memoises.  The inliners leave the layer fn
+    alone ([is_auth_layer_fn]) so that call survives to codegen. *)
+let auth_body_suffix = "$auth"
+let auth_layer_suffix = "$auth_layer"
+let enter_fn_name = "Authority.enter_fn"
+let frame_layer_fn_name = "Authority.frame_layer"
+
+let is_auth_layer_fn (name : string) : bool =
+  String.ends_with ~suffix:auth_layer_suffix name
+
+(** The program entry among a module's fn names (in [tm_fns] order): a bare
+    [main] if there is one, otherwise the last module-qualified [Mod.main].
+    The one rule every backend applies (native, [--jit], JS) and that [Lower]
+    uses to place the launch call; [March_ast.Cap_request.entry_main] is its
+    AST twin, which the interpreter and the launch request use. *)
+let entry_main_of_names (names : string list) : string option =
+  if List.mem "main" names then Some "main"
+  else
+    List.fold_left
+      (fun acc n ->
+         if String.length n > 5 && String.ends_with ~suffix:".main" n then Some n else acc)
+      None names
+
 (* ── C-runtime extern prefix: "march_" ──────────────────────────────────
    Producer: lib/tir/lower.ml injects C-runtime extern calls (e.g.
    march_compare_int, march_hash_int) with this fixed prefix when

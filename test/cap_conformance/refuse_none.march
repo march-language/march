@@ -1,5 +1,4 @@
--- REFUSE:
--- No hook: every check passes.
+-- No grant and an unscoped request: no launch layer, so every check passes.
 mod RefuseNone do
   needs IO.Console
 

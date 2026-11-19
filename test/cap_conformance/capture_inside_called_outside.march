@@ -1,0 +1,31 @@
+-- A function value made inside a framed function keeps that authority after
+-- the function returns (design §5): called from main, which holds the
+-- launch authority, it is still refused outside the frame's scope. A lambda
+-- made by main and called in the same place is not.
+mod CaptureInsideCalledOutside do
+  needs IO.Console
+  needs IO.FileRead
+
+  fn probe(kind : String, target : String) : String do
+    match Authority.check(kind, target) do
+    Ok(_) -> "allowed " ++ target
+    Err(e) -> Authority.describe(e)
+    end
+  end
+
+  fn make_reader() : String -> String needs IO.FileRead("/srv/") do
+    fn p -> probe("IO.FileRead", p)
+  end
+
+  fn call_with(f : String -> String, p : String) : String do
+    f(p)
+  end
+
+  fn main() do
+    let narrow = make_reader()
+    println(narrow("/srv/x"))
+    println(narrow("/etc/hosts"))
+    println(call_with(narrow, "/etc/hosts"))
+    println(call_with(fn p -> probe("IO.FileRead", p), "/etc/hosts"))
+  end
+end

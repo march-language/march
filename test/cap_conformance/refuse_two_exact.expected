@@ -1,5 +1,5 @@
-IO.FileRead("/etc/passwd") refused by the launch grant (IO.FileRead, IO.Spawn)
-IO.Spawn refused by the launch grant (IO.FileRead, IO.Spawn)
+IO.FileRead("/etc/passwd") refused by the launch grant (IO.Console, IO.FileWrite)
+IO.Spawn refused by the launch grant (IO.Console, IO.FileWrite)
 IO.FileWrite allowed
-IO.FileSystem allowed
+IO.FileSystem("/tmp/x") refused by the launch grant (IO.Console, IO.FileWrite)
 exit 0

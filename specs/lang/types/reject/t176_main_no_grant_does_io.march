@@ -1,19 +1,16 @@
--- EXPECT-ERROR: performs IO but declares no grant
+-- EXPECT-ERROR: and `main` is granted nothing
 mod Main do
   -- R1 stage D reject witness (2026-08-10) — the end of ambient IO.
   --
   -- Stages A–C made a DECLARED grant enforceable, and left the default
-  -- ambient: a `main` with no capability parameter performed IO freely. That
-  -- adoption contract is what let the grant check ship without breaking a
-  -- single program, and it is also what kept the honest claim down to "a
-  -- program that STATES its grant cannot exceed it".
+  -- ambient: a `main` with no capability parameter performed IO freely.
+  -- Stage D ended that: a program must say what authority it runs under.
   --
-  -- Here every `needs` line is truthful and every earlier check passes. The
-  -- program is rejected because it never says what authority it runs under.
-  -- Accept companion t176 adds exactly that, and nothing else.
-  needs IO.Console
-  needs IO.FileWrite
-
+  -- Ocap phase 4 (decision 3) says where it may say it: `main`'s `needs`
+  -- clause, its `Cap` parameters, or, with neither, the module's `needs`
+  -- line, which is `main`'s request.  This program says none of them, so
+  -- `main` is granted nothing and its IO is rejected.  Accept companion
+  -- t176 states the grant as `Cap` parameters.
   fn main() : () do
     match file_write("/tmp/t176_out", "d") do
       Ok(_)  -> Authority.ignore(println("ok"))
