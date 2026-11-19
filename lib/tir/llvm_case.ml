@@ -168,6 +168,14 @@ and predicted_unboxed_tail ctx (e : Tir.expr) : string option =
     Some "i64"
   | Tir.EAtom (Tir.ALit (March_ast.Ast.LitFloat _)) -> Some "double"
   | Tir.EAtom (Tir.AVar v) -> scalar_reg_ty v.Tir.v_ty
+  (* A field of a statically known record shape: [Llvm_emit_data.emit_field]
+     loads it at the field's own type, so a Float field is a double.  The
+     dynamic-shape and TVar-field paths return a generic slot ([ptr]); both
+     have no known record fields or a TVar field type, so they stay [None]. *)
+  | Tir.EField (Tir.AVar v, field_name)
+    when not (Tir_names.is_fv_field field_name)
+         && Llvm_data.get_record_fields ctx v.Tir.v_ty <> [] ->
+    scalar_reg_ty (snd (Llvm_data.field_index_for ctx v.Tir.v_ty field_name))
   (* The overloaded arithmetic operators carry no useful return type in
      [v_ty] (they are Int-or-Float); the operand says which.  A comparison
      or boolean connective is a Bool whatever its operands. *)

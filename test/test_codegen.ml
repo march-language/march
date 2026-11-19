@@ -12560,8 +12560,11 @@ end
    [float_join_fns] is one function per arm shape: a variable against a
    literal, a nested `else if` chain of arithmetic, a `match` whose arms are
    a user call, `/.`, a `let` chain and a builtin call, a native-array read,
-   a niche-encoded Option scrutinee (its own slot, [slot_ty_n]), and a
-   `panic` arm that must not spoil the prediction. *)
+   a niche-encoded Option scrutinee (its own slot, [slot_ty_n]), a `panic`
+   arm that must not spoil the prediction, and a record field read (a Float
+   field of a known record shape loads as a double; before
+   specs/progress/2026-11-19-float-join-record-field-arm.md it took the
+   `ptr` slot, and in Ur's `walk_progress` that box cost 7% of the frame). *)
 let float_join_fns = {|
   pfn half(x : Float) : Float do x *. 0.5 end
   pfn clamp(e : Float) : Float do
@@ -12603,13 +12606,21 @@ let float_join_fns = {|
     end
     c +. 1.0
   end
+  type Span = { lo : Float, hi : Float, k : Int }
+  pfn field(e : Span, x : Float) : Float do
+    let c = if x > e.lo do e.hi else (x -. e.lo) *. 0.5 end
+    c +. 1.0
+  end
+  pfn ftotal(i : Int, n : Int, e : Span, acc : Float) : Float do
+    if i >= n do acc else ftotal(i + 1, n, e, acc +. field(e, int_to_float(i) *. 0.2)) end
+  end
   pfn total(i : Int, n : Int, h : NativeF32Arr, acc : Float) : Float do
     if i >= n do acc
     else
       let x = int_to_float(i % 7) *. 0.5 -. 1.0
       let o = if i % 2 == 0 do Some("abc") else None end
       let s = clamp(x) +. chain(x) +. pick(i % 4, x) +. arr(h, i % 4) +. niche(o)
-              +. diverge(i % 2, x)
+              +. diverge(i % 2, x) +. ftotal(0, 3, { lo: 0.25, hi: x, k: i }, 0.0)
       total(i + 1, n, h, acc +. s)
     end
   end
