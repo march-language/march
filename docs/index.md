@@ -387,4 +387,5 @@ end
 
 | Guide | What it covers |
 |-------|---------------|
+| [Upgrading to 0.7.0](upgrading-to-0-7-0.md) | The changes from 0.6.x to 0.7.0: Int overflow panics, `cap no_panic`, pure `Show`/`Eq`/`Ord`/`Hash` impls |
 | [Upgrading to 0.6.0](upgrading-to-0-6-0.md) | The changes from 0.5.x to 0.6.0 |
