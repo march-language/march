@@ -218,6 +218,7 @@ let rec children (e : expr) : expr list =
   | ERecordUpdate (b, fs, _) -> b :: List.map snd fs
   | EField (x, _, _) | EAnnot (x, _, _) | ESpawn (x, _) | EAssert (x, _) | ESigil (_, x, _) | EDbg (Some x, _) -> [ x ]
   | EIf (c, t, f, _) -> [ c; t; f ]
+  | ERestrict (es, b, _) -> es @ [ b ]
   | ECond (arms, _) -> List.concat_map (fun (c, b) -> [ c; b ]) arms
   | ERefineMsg (x, _, _) -> [ x ]
   | EProof (p, _) -> proof_children p
@@ -673,6 +674,7 @@ let rec erase_expr (sigs : sigs) ~(file : string) (locals : SS.t) (e : expr) : e
   | ERecordUpdate (b, fs, sp) -> ERecordUpdate (ex b, List.map (fun (n, x) -> (n, ex x)) fs, sp)
   | EField (x, n, sp) -> EField (ex x, n, sp)
   | EIf (c, t, f, sp) -> EIf (ex c, ex t, ex f, sp)
+  | ERestrict (es, b, sp) -> ERestrict (List.map ex es, ex b, sp)
   | ECond (arms, sp) -> ECond (List.map (fun (c, b) -> (ex c, ex b)) arms, sp)
   | EPipe (l, r, sp) -> EPipe (ex l, ex r, sp)
   | EAnnot (x, t, sp) -> EAnnot (ex x, t, sp)

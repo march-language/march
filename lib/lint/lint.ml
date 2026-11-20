@@ -166,6 +166,7 @@ let collect_call_names expr =
       walk s;
       List.iter (fun a -> walk a.Ast.branch_body) arms
     | Ast.EIf (c, t, e, _)   -> walk c; walk t; walk e
+    | Ast.ERestrict (es, b, _) -> List.iter walk es; walk b
     | Ast.ECond (arms, _)    ->
       List.iter (fun (c, e) -> walk c; walk e) arms
     | Ast.EPipe (l, r, _)    -> walk l; walk r
@@ -462,6 +463,7 @@ let check_safety ~config ~file ~acc ~type_map decls =
       walk_expr s;
       List.iter (fun a -> walk_expr a.Ast.branch_body) arms
     | Ast.EIf (c, t, e, _)     -> walk_expr c; walk_expr t; walk_expr e
+    | Ast.ERestrict (es, b, _) -> List.iter walk_expr es; walk_expr b
     | Ast.EPipe (l, r, _)       -> walk_expr l; walk_expr r
     | Ast.ETuple (xs, _)        -> List.iter walk_expr xs
     | Ast.EField (e, _, _)      -> walk_expr e
@@ -518,6 +520,7 @@ let check_dead_code ~config ~file ~acc ~type_map decls =
       walk_expr s;
       List.iter (fun a -> walk_expr a.Ast.branch_body) arms
     | Ast.EIf (c, t, e, _)   -> walk_expr c; walk_expr t; walk_expr e
+    | Ast.ERestrict (es, b, _) -> List.iter walk_expr es; walk_expr b
     | Ast.EPipe (l, r, _)     -> walk_expr l; walk_expr r
     | Ast.ETuple (xs, _)      -> List.iter walk_expr xs
     | Ast.EField (e, _, _)    -> walk_expr e

@@ -186,6 +186,7 @@ and respan_expr (e : expr) : expr =
                    fresh_synthetic_span ())
   | EField (e, n, _)     -> EField (respan_expr e, respan_name n, fresh_synthetic_span ())
   | EIf (c, t, f, _)     -> EIf (respan_expr c, respan_expr t, respan_expr f, fresh_synthetic_span ())
+  | ERestrict (es, b, _) -> ERestrict (List.map respan_expr es, respan_expr b, fresh_synthetic_span ())
   | ECond (arms, _)      ->
     ECond (List.map (fun (c, b) -> (respan_expr c, respan_expr b)) arms, fresh_synthetic_span ())
   | EPipe (a, b, _)      -> EPipe (respan_expr a, respan_expr b, fresh_synthetic_span ())

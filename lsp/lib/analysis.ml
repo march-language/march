@@ -396,6 +396,10 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
   | Ast.ESpawn (e, _) ->
     collect_expr ~def_map ~use_map ~calls e
 
+  | Ast.ERestrict (es, b, _) ->
+    List.iter (collect_expr ~def_map ~use_map ~calls) es;
+    collect_expr ~def_map ~use_map ~calls b
+
   | Ast.EIf (cond, e1, e2, _) ->
     collect_expr ~def_map ~use_map ~calls cond;
     collect_expr ~def_map ~use_map ~calls e1;
@@ -570,6 +574,7 @@ let collect_scoped (decls : Ast.decl list) : scoped_syms =
     | Ast.EField (base, _, _) -> walk scope base
     | Ast.EAnnot (e, _, _) | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) -> walk scope e
     | Ast.EIf (c, e1, e2, _) -> walk scope c; walk scope e1; walk scope e2
+    | Ast.ERestrict (es, b, _) -> List.iter (walk scope) es; walk scope b
     | Ast.ECond (arms, _) ->
       List.iter (fun (ce, be) -> walk scope ce; walk scope be) arms
     | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) -> walk scope e1; walk scope e2

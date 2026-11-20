@@ -235,23 +235,23 @@ mod Session.Theory do
   end
 
   doc "Role `x`'s part of `l`: the actions with peer `x`, peers erased (two parties, so the peer is implied), and a choice whose branches then all look alike is no choice."
-  fn restrict(l : SessionLocal, x : Int) : SessionLocal do
+  fn restrict_role(l : SessionLocal, x : Int) : SessionLocal do
     match l do
       LEnd -> LEnd
-      LSend(p, t, k) -> if p == x do LSend(0, t, restrict(k, x)) else restrict(k, x) end
-      LRecv(p, t, k) -> if p == x do LRecv(0, t, restrict(k, x)) else restrict(k, x) end
+      LSend(p, t, k) -> if p == x do LSend(0, t, restrict_role(k, x)) else restrict_role(k, x) end
+      LRecv(p, t, k) -> if p == x do LRecv(0, t, restrict_role(k, x)) else restrict_role(k, x) end
       LChoose(bs) -> collapse(restrict_bs(bs, x), true)
       LOffer(bs) -> collapse(restrict_bs(bs, x), false)
-      LRec(k) -> LRec(restrict(k, x))
+      LRec(k) -> LRec(restrict_role(k, x))
       LVar(i) -> LVar(i)
     end
   end
 
-  doc "`restrict` on every branch."
+  doc "`restrict_role` on every branch."
   fn restrict_bs(bs : SessionLBranches, x : Int) : SessionLBranches do
     match bs do
       LBNil -> LBNil
-      LBCons(lab, k, rest) -> LBCons(lab, restrict(k, x), restrict_bs(rest, x))
+      LBCons(lab, k, rest) -> LBCons(lab, restrict_role(k, x), restrict_bs(rest, x))
     end
   end
 
@@ -1239,12 +1239,12 @@ mod Session.Theory do
   doc "Restricting keeps branches alike."
   @[lemma]
   fn restrict_all_same(rest : SessionLBranches, first : SessionLocal, x : Int)
-    : {Unit | !all_same(rest, first) || all_same(restrict_bs(rest, x), restrict(first, x))} do
+    : {Unit | !all_same(rest, first) || all_same(restrict_bs(rest, x), restrict_role(first, x))} do
     match rest do
       LBNil -> ()
       LBCons(_, k, more) ->
         same_eq(k, first)
-        same_eq(restrict(k, x), restrict(first, x))
+        same_eq(restrict_role(k, x), restrict_role(first, x))
         restrict_all_same(more, first, x)
     end
   end
@@ -1252,7 +1252,7 @@ mod Session.Theory do
   doc "Restricting keeps a choice merged, and commutes with taking its first branch."
   @[lemma]
   fn merged_restrict(pbs : SessionLBranches, x : Int)
-    : {Unit | !merged(pbs) || (merged(restrict_bs(pbs, x)) && lhead(restrict_bs(pbs, x)) == restrict(lhead(pbs), x))} do
+    : {Unit | !merged(pbs) || (merged(restrict_bs(pbs, x)) && lhead(restrict_bs(pbs, x)) == restrict_role(lhead(pbs), x))} do
     match pbs do
       LBNil -> ()
       LBCons(_, first, rest) -> restrict_all_same(rest, first, x)
@@ -1262,19 +1262,19 @@ mod Session.Theory do
   doc "A role's part of a choice, restricted to a peer: its branches restricted and collapsed, a choice for the chooser and an offer for anyone else."
   @[lemma]
   fn restrict_choice(c : Int, bs : SessionGBranches, r : Int, x : Int, multiparty : Bool)
-    : {Unit | restrict(project(GChoice(c, bs), r, multiparty), x)
+    : {Unit | restrict_role(project(GChoice(c, bs), r, multiparty), x)
               == collapse(restrict_bs(project_bs(bs, r, multiparty), x), r == c)} do
     let pbs = project_bs(bs, r, multiparty)
     let rb = restrict_bs(pbs, x)
     if r == c do
       assert project(GChoice(c, bs), r, multiparty) == LChoose(pbs)
-      assert restrict(LChoose(pbs), x) == collapse(rb, true)
+      assert restrict_role(LChoose(pbs), x) == collapse(rb, true)
     else
       assert project(GChoice(c, bs), r, multiparty) == merge(pbs, multiparty)
       merge_cases(pbs, multiparty)
       merged_restrict(pbs, x)
       collapse_merged(rb, false)
-      assert restrict(LOffer(pbs), x) == collapse(rb, false)
+      assert restrict_role(LOffer(pbs), x) == collapse(rb, false)
     end
   end
 
@@ -1293,7 +1293,7 @@ mod Session.Theory do
   fn pairwise_choice(c : Int, bs : SessionGBranches, rs : SessionRoles, multiparty : Bool, p : Int, q : {Int | _ != p})
     : {Unit | !(in_fragment(GChoice(c, bs), rs, multiparty) && has(rs, p) && has(rs, q))
               || restrict_bs(project_bs(bs, p, multiparty), q) != dual_bs(restrict_bs(project_bs(bs, q, multiparty), p))
-              || restrict(project(GChoice(c, bs), p, multiparty), q) == dual(restrict(project(GChoice(c, bs), q, multiparty), p))} do
+              || restrict_role(project(GChoice(c, bs), p, multiparty), q) == dual(restrict_role(project(GChoice(c, bs), q, multiparty), p))} do
     let pbp = project_bs(bs, p, multiparty)
     let pbq = project_bs(bs, q, multiparty)
     let rbp = restrict_bs(pbp, q)
@@ -1315,7 +1315,7 @@ mod Session.Theory do
   @[lemma]
   fn pairwise(g : SessionGlobal, rs : SessionRoles, multiparty : Bool, p : Int, q : {Int | _ != p})
     : {Unit | !(in_fragment(g, rs, multiparty) && has(rs, p) && has(rs, q))
-              || restrict(project(g, p, multiparty), q) == dual(restrict(project(g, q, multiparty), p))} do
+              || restrict_role(project(g, p, multiparty), q) == dual(restrict_role(project(g, q, multiparty), p))} do
     match g do
       GEnd -> ()
       GVar(_) -> ()
@@ -1325,38 +1325,38 @@ mod Session.Theory do
         assert !in_fragment(GMsg(f, t, pay, k), rs, multiparty) || in_fragment(k, rs, multiparty)
         let pk = project(k, p, multiparty)
         let qk = project(k, q, multiparty)
-        let rp = restrict(pk, q)
-        let rq = restrict(qk, p)
+        let rp = restrict_role(pk, q)
+        let rq = restrict_role(qk, p)
         if p == f do
           assert project(GMsg(f, t, pay, k), p, multiparty) == LSend(t, pay, pk)
           if q == t do
             assert project(GMsg(f, t, pay, k), q, multiparty) == LRecv(f, pay, qk)
-            assert restrict(LSend(t, pay, pk), q) == LSend(0, pay, rp)
-            assert restrict(LRecv(f, pay, qk), p) == LRecv(0, pay, rq)
+            assert restrict_role(LSend(t, pay, pk), q) == LSend(0, pay, rp)
+            assert restrict_role(LRecv(f, pay, qk), p) == LRecv(0, pay, rq)
             assert dual(LRecv(0, pay, rq)) == LSend(0, pay, dual(rq))
           else
             assert project(GMsg(f, t, pay, k), q, multiparty) == qk
-            assert restrict(LSend(t, pay, pk), q) == rp
+            assert restrict_role(LSend(t, pay, pk), q) == rp
           end
         else if p == t do
           assert project(GMsg(f, t, pay, k), p, multiparty) == LRecv(f, pay, pk)
           if q == f do
             assert project(GMsg(f, t, pay, k), q, multiparty) == LSend(t, pay, qk)
-            assert restrict(LRecv(f, pay, pk), q) == LRecv(0, pay, rp)
-            assert restrict(LSend(t, pay, qk), p) == LSend(0, pay, rq)
+            assert restrict_role(LRecv(f, pay, pk), q) == LRecv(0, pay, rp)
+            assert restrict_role(LSend(t, pay, qk), p) == LSend(0, pay, rq)
             assert dual(LSend(0, pay, rq)) == LRecv(0, pay, dual(rq))
           else
             assert project(GMsg(f, t, pay, k), q, multiparty) == qk
-            assert restrict(LRecv(f, pay, pk), q) == rp
+            assert restrict_role(LRecv(f, pay, pk), q) == rp
           end
         else
           assert project(GMsg(f, t, pay, k), p, multiparty) == pk
           if q == f do
             assert project(GMsg(f, t, pay, k), q, multiparty) == LSend(t, pay, qk)
-            assert restrict(LSend(t, pay, qk), p) == rq
+            assert restrict_role(LSend(t, pay, qk), p) == rq
           else if q == t do
             assert project(GMsg(f, t, pay, k), q, multiparty) == LRecv(f, pay, qk)
-            assert restrict(LRecv(f, pay, qk), p) == rq
+            assert restrict_role(LRecv(f, pay, qk), p) == rq
           else
             assert project(GMsg(f, t, pay, k), q, multiparty) == qk
           end end

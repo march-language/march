@@ -466,6 +466,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ERecordUpdate (_, _, sp) -> sp
   | Ast.EField (_, _, sp)       -> sp
   | Ast.EIf   (_, _, _, sp)     -> sp
+  | Ast.ERestrict (_, _, sp)    -> sp
   | Ast.ECond (_, sp)           -> sp
   | Ast.EPipe (_, _, sp)        -> sp
   | Ast.EAnnot (_, _, sp)       -> sp
@@ -562,6 +563,8 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
     free_vars_expr bound base @
     List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
   | Ast.EField (ex, _, _) -> free_vars_expr bound ex
+  | Ast.ERestrict (es, b, _) ->
+    List.concat_map (free_vars_expr bound) (es @ [ b ])
   | Ast.EIf (c, t, f, _) ->
     free_vars_expr bound c @ free_vars_expr bound t @ free_vars_expr bound f
   | Ast.ECond (arms, _) ->

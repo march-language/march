@@ -1956,7 +1956,7 @@ let span_of_expr (e : expr) : span =
   | ELam (_, _, sp) | EBlock (_, sp) | ELet (_, sp)
   | EMatch (_, _, sp) | ETuple (_, sp) | ERecord (_, sp)
   | ERecordUpdate (_, _, sp) | EField (_, _, sp)
-  | EIf (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
+  | EIf (_, _, _, sp) | ERestrict (_, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
@@ -2434,6 +2434,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
            | Some v -> v
            | None -> eval_error "no member '%s' in module '%s'" field.txt mod_name))
      | _ -> eval_error "field access on non-record value"))
+
+  | ERestrict _ ->
+    (* Task 5 of the ocap phase 5 plan implements restrict in the interpreter. *)
+    eval_error "restrict is not yet implemented in the interpreter"
 
   | EIf (cond, then_, else_, sp) ->
     (match eval_expr env cond with

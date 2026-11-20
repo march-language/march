@@ -480,7 +480,7 @@
 %token <string> ATOM
 %token <string> LOWER_IDENT
 %token <string> UPPER_IDENT
-%token FN LET DO END IF THEN ELSE MATCH WITH WHEN
+%token FN LET DO END IF THEN ELSE MATCH WITH WHEN RESTRICT
 (* Minted by the token filter only, for the D4 pitfall productions:
    `module Name` (MODULE_KW) and `elif`/`elsif` (ELIF). Neither is a
    lexer keyword, so both words stay usable as identifiers. *)
@@ -2096,6 +2096,8 @@ expr:
         $startpos($3) }
   | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END
     { EIf (cond, t, f, mk_span ($loc)) }
+  | RESTRICT; es = separated_nonempty_list(COMMA, expr); DO; b = block_body; END
+    { ERestrict (es, b, mk_span ($loc)) }
   | IF; _c = expr; DO; _t = block_body; ELSE; _f = block_body; error
     { error_raise
         "I was expecting `end` to close the if expression here:"
@@ -2310,6 +2312,8 @@ expr_no_bare_lambda:
   | p = proof_stmt { p }
   | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END
     { EIf (cond, t, f, mk_span ($loc)) }
+  | RESTRICT; es = separated_nonempty_list(COMMA, expr); DO; b = block_body; END
+    { ERestrict (es, b, mk_span ($loc)) }
   | IF; cond = expr; THEN; t = expr; ELSE; f = expr
     { EIf (cond, t, f, mk_span ($loc)) }
   | IF; _c = expr; DO; _t = block_body; ELSE; _f = block_body; error

@@ -46,7 +46,7 @@ let rec span_of (e : Ast.expr) : Ast.span =
   | Ast.ELit (_, sp) | Ast.EApp (_, _, sp) | Ast.ECon (_, _, sp) | Ast.ELam (_, _, sp)
   | Ast.EBlock (_, sp) | Ast.ELet (_, sp) | Ast.EMatch (_, _, sp) | Ast.ETuple (_, sp)
   | Ast.ERecord (_, sp) | Ast.ERecordUpdate (_, _, sp) | Ast.EField (_, _, sp)
-  | Ast.EIf (_, _, _, sp) | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp)
+  | Ast.EIf (_, _, _, sp) | Ast.ERestrict (_, _, sp) | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp)
   | Ast.EAnnot (_, _, sp) | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp)
   | Ast.ESend (_, _, sp) | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp)
   | Ast.ELetFn (_, _, _, _, sp) | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)

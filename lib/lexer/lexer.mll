@@ -53,6 +53,7 @@ let () =
       ("do", DO);
       ("end", END);
       ("if", IF);
+      ("restrict", RESTRICT);
       ("then", THEN);
       ("else", ELSE);
       ("match", MATCH);

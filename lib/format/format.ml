@@ -476,7 +476,7 @@ let is_stmt_form = function
 let rec level_of e =
   if March_ast.Bounded_pred.view e <> None then lv_expr else
   match e with
-  | EIf _ | EMatch _ | ECond _ | ELam _ | EAssert _ | EProof _ -> lv_expr
+  | EIf _ | ERestrict _ | EMatch _ | ECond _ | ELam _ | EAssert _ | EProof _ -> lv_expr
   | EPipe _ -> lv_pipe
   | EBlock ([x], _) -> level_of x
   | EApp (EVar { txt = "++"; _ }, [_; _], _) when try_collect_interp e <> None -> lv_atom
@@ -518,6 +518,7 @@ let children e =
   | EAssert (x, _) | ESigil (_, x, _) | ERefineMsg (x, _, _) -> [x]
   | EProof (p, _) -> proof_children p
   | EIf (c, t, f, _) -> [c; t; f]
+  | ERestrict (es, b, _) -> es @ [b]
   | ECond (arms, _) -> List.concat_map (fun (c, b) -> [c; b]) arms
   | EPipe (a, b, _) | ESend (a, b, _) -> [a; b]
   | ELetQ (_, r, c, _) | ELetStar (_, r, c, _) -> [r; c]
@@ -708,6 +709,12 @@ and render_raw ind e =
       sub_block ind (fun cx -> emit_if_lines cx c t f)
     else
       Printf.sprintf "if %s do %s else %s end" (r lv_pipe c) (r lv_expr t) (r lv_expr f)
+  | ERestrict (es, b, _)        ->
+    if needs_break b || List.exists needs_break es then
+      sub_block ind (fun cx -> emit_restrict_lines cx es b)
+    else
+      Printf.sprintf "restrict %s do %s end"
+        (String.concat ", " (List.map (r lv_pipe) es)) (r lv_expr b)
   | EPipe (a, b, _)             -> Printf.sprintf "%s |> %s" (r lv_pipe a) (r lv_or b)
   | EAnnot (x, t, _)            -> Printf.sprintf "(%s : %s)" (r lv_pipe x) (fmt_ty t)
   | EHole (None, _)             -> "?"
@@ -775,6 +782,9 @@ and emit_stmt ctx e =
 
   | EIf (c, t, e, _) ->
     emit_if ctx c t e
+
+  | ERestrict (es, b, _) ->
+    emit_restrict ctx es b
 
   | EPipe _ ->
     emit_pipe_chain ctx e
@@ -1019,6 +1029,24 @@ and emit_if ctx cond then_ else_ =
     else
       emit_if_lines ctx cond then_ else_
   end
+
+and emit_restrict ctx es body =
+  if List.exists is_multiline es || is_multiline body then
+    emit_restrict_lines ctx es body
+  else begin
+    let ess = String.concat ", " (List.map (render ctx.indent lv_pipe) es) in
+    let bs = render ctx.indent lv_expr body in
+    if ctx.indent * 2 + 9 + String.length ess + 4 + String.length bs + 4 <= 80 then
+      line ctx (Printf.sprintf "restrict %s do %s end" ess bs)
+    else
+      emit_restrict_lines ctx es body
+  end
+
+and emit_restrict_lines ctx es body =
+  line ctx (Printf.sprintf "restrict %s do"
+    (String.concat ", " (List.map (render ctx.indent lv_pipe) es)));
+  indented ctx (fun () -> emit_body ctx body);
+  line ctx "end"
 
 and emit_if_lines ctx cond then_ else_ =
   line ctx (Printf.sprintf "if %s do" (render ctx.indent lv_pipe cond));

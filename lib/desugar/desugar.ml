@@ -745,6 +745,7 @@ let rec flatten_pred_quals (e : expr) : expr =
   | ETuple (es, sp)         -> ETuple (List.map go es, sp)
   | EAtom (a, args, sp)     -> EAtom (a, List.map go args, sp)
   | EIf (c, t, f, sp)       -> EIf (go c, go t, go f, sp)
+  | ERestrict (es, b, sp)   -> ERestrict (List.map go es, go b, sp)
   | ECond (arms, sp)        ->
     ECond (List.map (fun (c, b) -> (go c, go b)) arms, sp)
   | EAnnot (ex, ty, sp)     -> EAnnot (go ex, ty, sp)
@@ -1256,6 +1257,8 @@ let rec desugar_expr (e : expr) : expr =
 
   | EIf (cond, t, f, sp) ->
     EIf (desugar_expr cond, desugar_expr t, desugar_expr f, sp)
+  | ERestrict (es, b, sp) ->
+    ERestrict (List.map desugar_expr es, desugar_expr b, sp)
 
   | ECond (arms, sp) ->
     ECond (List.map (fun (cond_e, body) -> (desugar_expr cond_e, desugar_expr body)) arms, sp)
@@ -2275,6 +2278,7 @@ let make_qualifier (prefix : string) (own_names : string list) =
       ERecordUpdate (go bound b, List.map (fun (n, ex) -> (n, go bound ex)) fs, sp)
     | EField (ex, n, sp)        -> EField (go bound ex, n, sp)
     | EIf (c, t, f, sp)         -> EIf (go bound c, go bound t, go bound f, sp)
+    | ERestrict (es, b, sp)     -> ERestrict (List.map (go bound) es, go bound b, sp)
     | ECond (arms, sp)          -> ECond (List.map (fun (c, b) -> (go bound c, go bound b)) arms, sp)
     | EPipe (l, r, sp)          -> EPipe (go bound l, go bound r, sp)
     | EAnnot (ex, ty, sp)       -> EAnnot (go bound ex, ty, sp)
@@ -2477,6 +2481,7 @@ let strip_entry_self_qual ?(members_of : decl list option) (mod_name : string)
       ERecordUpdate (rw b, List.map (fun (n, ex) -> (n, rw ex)) fs, sp)
     | EField (ex, n, sp)        -> EField (rw ex, n, sp)
     | EIf (c, t, f, sp)         -> EIf (rw c, rw t, rw f, sp)
+    | ERestrict (es, b, sp)     -> ERestrict (List.map rw es, rw b, sp)
     | ECond (arms, sp)          -> ECond (List.map (fun (c, b) -> (rw c, rw b)) arms, sp)
     | EPipe (l, r, sp)          -> EPipe (rw l, rw r, sp)
     | EAnnot (ex, ty, sp)       -> EAnnot (rw ex, ty, sp)

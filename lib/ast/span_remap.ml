@@ -106,6 +106,8 @@ let rec remap_expr tbl = function
     Ast.EField (remap_expr tbl e, remap_name tbl n, remap_span tbl sp)
   | Ast.EIf (c, t, f, sp) ->
     Ast.EIf (remap_expr tbl c, remap_expr tbl t, remap_expr tbl f, remap_span tbl sp)
+  | Ast.ERestrict (es, b, sp) ->
+    Ast.ERestrict (List.map (remap_expr tbl) es, remap_expr tbl b, remap_span tbl sp)
   | Ast.ECond (arms, sp) ->
     Ast.ECond (List.map (fun (c, b) -> (remap_expr tbl c, remap_expr tbl b)) arms, remap_span tbl sp)
   | Ast.EPipe (l, r, sp) ->

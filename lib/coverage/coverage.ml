@@ -70,7 +70,7 @@ let span_of_expr (e : expr) : span =
   | ELam (_, _, sp) | EBlock (_, sp) | ELet (_, sp)
   | EMatch (_, _, sp) | ETuple (_, sp) | ERecord (_, sp)
   | ERecordUpdate (_, _, sp) | EField (_, _, sp)
-  | EIf (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
+  | EIf (_, _, _, sp) | ERestrict (_, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | ELetQ (_, _, _, sp) | ELetStar (_, _, _, sp) -> sp
@@ -116,6 +116,9 @@ let rec walk_expr ~file (acc_e : (string, unit) Hashtbl.t)
     walk_expr ~file acc_e acc_b cond;
     walk_expr ~file acc_e acc_b then_;
     walk_expr ~file acc_e acc_b else_
+  | ERestrict (es, body, _) ->
+    List.iter (walk_expr ~file acc_e acc_b) es;
+    walk_expr ~file acc_e acc_b body
   | ECond (arms, _) ->
     List.iter (fun (ce, be) ->
       walk_expr ~file acc_e acc_b ce;

@@ -29,6 +29,8 @@ let rec find_uses name (e : Ast.expr) acc =
     List.fold_left (fun a e -> find_uses name e a) acc es
   | Ast.EIf (c, t, f, _) ->
     find_uses name c (find_uses name t (find_uses name f acc))
+  | Ast.ERestrict (es, b, _) ->
+    List.fold_left (fun a e -> find_uses name e a) (find_uses name b acc) es
   | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) ->
     find_uses name a (find_uses name b acc)
   | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
@@ -47,7 +49,7 @@ let span_of_expr = function
   | Ast.ELam (_, _, sp) | Ast.EBlock (_, sp) | Ast.ELet (_, sp)
   | Ast.EMatch (_, _, sp) | Ast.ETuple (_, sp) | Ast.ERecord (_, sp)
   | Ast.ERecordUpdate (_, _, sp) | Ast.EField (_, _, sp)
-  | Ast.EIf (_, _, _, sp) | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
+  | Ast.EIf (_, _, _, sp) | Ast.ERestrict (_, _, sp) | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.ELetQ (_, _, _, sp) | Ast.ELetStar (_, _, _, sp)
@@ -95,6 +97,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) =
   | Ast.ECond (arms, _) ->
     List.iter (fun (c, b) -> iter_expr f c; iter_expr f b) arms
   | Ast.EIf (c, t, el, _) -> iter_expr f c; iter_expr f t; iter_expr f el
+  | Ast.ERestrict (es, b, _) -> List.iter (iter_expr f) es; iter_expr f b
   | Ast.EPipe (l, r, _) | Ast.ESend (l, r, _) -> iter_expr f l; iter_expr f r
   | Ast.ERecord (fs, _) -> List.iter (fun (_, e2) -> iter_expr f e2) fs
   | Ast.ERecordUpdate (e2, fs, _) ->

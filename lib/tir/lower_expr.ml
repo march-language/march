@@ -638,6 +638,10 @@ and lower_expr (env : env) (e : Ast.expr) : Tir.expr =
     let body = lower_expr env (Ast.EBlock (rest, sp)) in
     Tir.ESeq (e', body)
 
+  (* --- restrict: lowered by Task 4 of the ocap phase 5 plan --- *)
+  | Ast.ERestrict _ ->
+    failwith "restrict is not yet implemented in lowering (ocap phase 5, task 4)"
+
   (* --- If → ECase on bool (CPS for condition) --- *)
   | Ast.EIf (cond, then_e, else_e, _) ->
     lower_to_atom_k env cond (fun cond_atom ->

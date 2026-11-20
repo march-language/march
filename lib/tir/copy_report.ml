@@ -209,6 +209,7 @@ let rec iter_expr (f : A.expr -> unit) (e : A.expr) : unit =
   | A.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
   | A.EField (ex, _, _) -> go ex
   | A.EIf (c, t, e, _) -> go c; go t; go e
+  | A.ERestrict (es, b, _) -> List.iter go es; go b
   | A.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | A.EAnnot (ex, _, _) | A.ESpawn (ex, _) | A.EAssert (ex, _) | A.ESigil (_, ex, _)
   | A.ERefineMsg (ex, _, _) -> go ex

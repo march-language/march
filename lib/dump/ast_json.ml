@@ -405,6 +405,14 @@ let rec expr_to_json (e : expr) : string =
       ("span", span_to_json span);
       rty;
     ]
+  | ERestrict (entries, body, span) ->
+    Dump.json_obj [
+      ("kind", Dump.json_string "ERestrict");
+      ("entries", Dump.json_list (List.map expr_to_json entries));
+      ("body", expr_to_json body);
+      ("span", span_to_json span);
+      rty;
+    ]
   | ECond (arms, span) ->
     Dump.json_obj [
       ("kind", Dump.json_string "ECond");

@@ -825,7 +825,7 @@ type open_state = {
 }
 
 let opener_keyword = function
-  | Parser.IF -> Some "if" | Parser.FN -> Some "fn" | Parser.PFN -> Some "pfn"
+  | Parser.IF -> Some "if" | Parser.RESTRICT -> Some "restrict" | Parser.FN -> Some "fn" | Parser.PFN -> Some "pfn"
   | Parser.MATCH -> Some "match" | Parser.MOD -> Some "mod"
   | Parser.ACTOR -> Some "actor" | Parser.APP -> Some "app"
   | Parser.WITH -> Some "with" | Parser.TEST -> Some "test"

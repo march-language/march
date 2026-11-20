@@ -1283,6 +1283,7 @@ let rec path_diverges (e : Ast.expr) =
   | Ast.EBlock (es, _) ->
     (match List.rev es with last :: _ -> path_diverges last | [] -> false)
   | Ast.EIf (_, t, f, _) -> path_diverges t && path_diverges f
+  | Ast.ERestrict (_, b, _) -> path_diverges b
   | Ast.EMatch (_, brs, _) ->
     brs <> [] && List.for_all (fun (br : Ast.branch) -> path_diverges br.branch_body) brs
   | Ast.ECond (arms, _) ->
@@ -4781,6 +4782,15 @@ let rec infer_expr env (e : Ast.expr) : ty =
             TError))
       (* close the None branch of mod_access match *)
       )
+
+    (* ── restrict ... do ... end ──────────────────────────────────────
+       Task 1 of the ocap phase 5 plan only parses it. Until Task 3 gives
+       the entries their scope types and checks the block's reach, the block
+       has its body's type and the entries are not inferred (a scope
+       expression such as `IO.Console` is not a constructor the checker
+       knows yet). Eval and lowering refuse the node, so nothing runs. *)
+    | Ast.ERestrict (_, body, _) ->
+      infer_expr env body
 
     (* ── if/do/else/end ───────────────────────────────────────────── *)
     | Ast.EIf (cond, then_, else_, _sp) ->
@@ -10956,6 +10966,7 @@ let rec iter_expr (f : Ast.expr -> unit) (e : Ast.expr) : unit =
   | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
+  | Ast.ERestrict (es, b, _) -> List.iter go es; go b
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)
@@ -11033,6 +11044,7 @@ let rec iter_expr_scoped (f : local_scope -> Ast.expr -> unit) (scope : local_sc
   | Ast.ERecordUpdate (base, fields, _) -> go base; List.iter (fun (_, ex) -> go ex) fields
   | Ast.EField (ex, _, _) -> go ex
   | Ast.EIf (c, t, e, _) -> go c; go t; go e
+  | Ast.ERestrict (es, b, _) -> List.iter go es; go b
   | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> go c; go b) arms
   | Ast.EAnnot (ex, _, _) | Ast.ESpawn (ex, _) | Ast.EAssert (ex, _) | Ast.ESigil (_, ex, _) | Ast.ERefineMsg (ex, _, _) -> go ex
   | Ast.EProof (pr, _) -> List.iter go (Ast.proof_children pr)

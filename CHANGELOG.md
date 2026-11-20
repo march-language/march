@@ -21,6 +21,10 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- `restrict` is now a keyword (the `restrict ... do ... end` block of the object-capability work; the
+  block parses, but is not yet type-checked or run). `SessionTheory.restrict` is renamed
+  `SessionTheory.restrict_role`; any other program that names a function or variable `restrict` must rename it.
+
 - **A Float `if` or `match` with a record field arm no longer allocates.** When one
   branch was a field read such as `event.progress`, compiled code boxed the result of
   every branch on the heap and freed it again at the join. The field read now counts

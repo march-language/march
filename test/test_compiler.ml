@@ -18818,6 +18818,61 @@ let csrf_suite =
     identifier unless the next token is one of the three policy words, so both
     spellings coexist. This test pins the identifier half; the supervise-child
     test below pins the keyword half. *)
+(* ---- restrict: the block form (ocap phase 5) ---- *)
+(* Parse [src] as the body of a function, the way real code reaches it. *)
+let parse_restrict_expr_of src =
+  let m = March_parser.Parse.module_of_lexbuf
+      (Lexing.from_string ("mod T do\nfn f(tools) do\n" ^ src ^ "\nend\nend")) in
+  (* Desugar, as the checker sees it: `IO.Console` is then `ECon "IO.Console"`. *)
+  let errors = March_errors.Errors.create () in
+  let m = March_desugar.Desugar.desugar_module ~errors m in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.March_ast.Ast.fn_clauses with
+     | [c] ->
+       (match c.March_ast.Ast.fc_body with
+        | March_ast.Ast.EBlock ([e], _) -> e
+        | e -> e)
+     | _ -> Alcotest.fail "expected one clause")
+  | _ -> Alcotest.fail "expected one fn"
+
+let test_parse_restrict_literal () =
+  match parse_restrict_expr_of "restrict IO.Console, IO.FileRead(\"/srv/\") do f() end" with
+  | March_ast.Ast.ERestrict ([March_ast.Ast.ECon (_, [], _); March_ast.Ast.ECon (_, [_], _)], _, _) -> ()
+  | March_ast.Ast.ERestrict (es, _, _) ->
+    Alcotest.fail ("entries: " ^ String.concat "; " (List.map March_ast.Ast.show_expr es))
+  | e -> Alcotest.fail ("expected ERestrict, got " ^ March_ast.Ast.show_expr e)
+
+let test_parse_restrict_unit () =
+  match parse_restrict_expr_of "restrict () do 1 end" with
+  | March_ast.Ast.ERestrict ([March_ast.Ast.ETuple ([], _)], _, _) -> ()
+  | _ -> Alcotest.fail "expected ERestrict with one entry"
+
+let test_parse_restrict_expr () =
+  match parse_restrict_expr_of "restrict tools do 1 end" with
+  | March_ast.Ast.ERestrict ([March_ast.Ast.EVar n], _, _) ->
+    Alcotest.(check string) "entry" "tools" n.txt
+  | _ -> Alcotest.fail "expected ERestrict ([EVar tools], _, _), not a call with a block"
+
+let test_parse_restrict_nested () =
+  match parse_restrict_expr_of "restrict IO.Console do restrict () do 1 end end" with
+  | March_ast.Ast.ERestrict ([_], March_ast.Ast.ERestrict ([_], _, _), _) -> ()
+  | March_ast.Ast.ERestrict ([_], March_ast.Ast.EBlock ([March_ast.Ast.ERestrict _], _), _) -> ()
+  | _ -> Alcotest.fail "expected a nested ERestrict as the body"
+
+let test_restrict_is_expression () =
+  let src = "mod T do\n  fn f() do\n    let x = restrict () do 1 end\n    x\n  end\nend" in
+  let m = March_parser.Parse.module_of_lexbuf (Lexing.from_string src) in
+  match m.mod_decls with
+  | [March_ast.Ast.DFn _] -> ()
+  | _ -> Alcotest.fail "expected one fn"
+
+let test_restrict_span_starts_at_keyword () =
+  match parse_restrict_expr_of "restrict () do 1 end" with
+  | March_ast.Ast.ERestrict (_, _, sp) ->
+    Alcotest.(check int) "start col" 0 sp.March_ast.Ast.start_col
+  | _ -> Alcotest.fail "expected ERestrict"
+
 let test_restart_still_usable_as_identifier () =
   let src = {|mod Test do
     type Policy = Always | Never
@@ -21002,6 +21057,12 @@ let compiler_suites =
           Alcotest.test_case "dependency mod, structural recursion: no error"       `Quick test_tce_non_entry_structural_recursion_no_error;
           Alcotest.test_case "supervise child restart types"                       `Quick test_parse_supervise_child_restart_types;
           Alcotest.test_case "restart usable as identifier"                       `Quick test_restart_still_usable_as_identifier;
+          Alcotest.test_case "parse restrict literal"   `Quick test_parse_restrict_literal;
+          Alcotest.test_case "parse restrict unit"      `Quick test_parse_restrict_unit;
+          Alcotest.test_case "parse restrict expr"      `Quick test_parse_restrict_expr;
+          Alcotest.test_case "parse restrict nested"    `Quick test_parse_restrict_nested;
+          Alcotest.test_case "restrict is an expression" `Quick test_restrict_is_expression;
+          Alcotest.test_case "restrict span at keyword" `Quick test_restrict_span_starts_at_keyword;
         ] );
       ( "sha256_builtin_type", [
           Alcotest.test_case "sha256(Bytes) : String, not Bytes"               `Quick test_sha256_builtin_returns_string;

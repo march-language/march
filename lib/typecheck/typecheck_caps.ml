@@ -168,6 +168,8 @@ let rec cap_annots_in_expr (acc : (string * Ast.span) list) (e : Ast.expr)
     let acc = cap_annots_in_expr acc base in
     List.fold_left (fun a (_, ex) -> cap_annots_in_expr a ex) acc fields
   | Ast.EField (inner, _, _) -> cap_annots_in_expr acc inner
+  | Ast.ERestrict (es, b, _) ->
+    List.fold_left cap_annots_in_expr acc (es @ [ b ])
   | Ast.EIf (cond, then_, else_, _) ->
     cap_annots_in_expr (cap_annots_in_expr (cap_annots_in_expr acc cond) then_) else_
   | Ast.ECond (arms, _) ->
@@ -377,6 +379,8 @@ let rec literal_path_uses (acc : (string * string * Ast.span) list)
   | Ast.EMatch (sc, brs, _) ->
     let acc = literal_path_uses acc sc in
     List.fold_left (fun a br -> literal_path_uses a br.Ast.branch_body) acc brs
+  | Ast.ERestrict (es, b, _) ->
+    List.fold_left literal_path_uses acc (es @ [ b ])
   | Ast.EIf (c, t, f, _) ->
     literal_path_uses (literal_path_uses (literal_path_uses acc c) t) f
   | Ast.EPipe (x, y, _) | Ast.ESend (x, y, _) ->
@@ -525,6 +529,7 @@ let rec name_uses ?(resolve = Fun.id) (acc : name_use list) (e : Ast.expr)
     List.fold_left (fun a (_, ex) -> go a ex) (go acc base) fields
   | Ast.EField (inner, _, _) -> go acc inner
   | Ast.EIf (c, t, f, _) -> go (go (go acc c) t) f
+  | Ast.ERestrict (es, b, _) -> go (List.fold_left go acc es) b
   | Ast.ECond (arms, _) -> List.fold_left (fun a (c, b) -> go (go a c) b) acc arms
   | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go (go acc a) b
   | Ast.ELetQ (_, a, b, _) | Ast.ELetStar (_, a, b, _) -> go (go acc a) b
