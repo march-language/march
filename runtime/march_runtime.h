@@ -367,6 +367,11 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; int64_t len; char data[];
  * binding returned to the caller — ordinary RC, no leak, no cancel-after-
  * fire UAF (the object only dies once BOTH release it). */
 #define MARCH_TIMER_TOKEN_TAG ((int32_t)-5)
+/* task_cancel_token_new's CancelToken: the same shape and the same reason as
+ * the TimerRef token above -- [rc][tag][pad][cancelled@16], march_alloc'd and
+ * RC'd like any March value (struct march_cancel_token, march_scheduler.h).
+ * It owns nothing, so no free path needs a case for it. */
+#define MARCH_CANCEL_TOKEN_TAG ((int32_t)-12)
 /* Native arrays (NativeU8Arr and friends) carry their own sentinel so a
  * generic walker can tell a flat byte/word buffer from an ADT cell. Without
  * it every walker fell through to the ADT case, read n_fields out of
