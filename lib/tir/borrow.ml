@@ -1061,6 +1061,33 @@ let rec closure_escapes (clo : string) (e : Tir.expr) : bool =
   | Tir.ESeq (e1, e2) -> closure_escapes clo e1 || closure_escapes clo e2
   | _ -> false
 
+(** A native array: its set and sort builtins write in place when they hold
+    the only reference ([march_native_*_arr_set]: rc==1 stores in place and
+    hands the same array back; rc>1 copies). *)
+let is_native_array_ty (ty : Tir.ty) : bool =
+  match ty with
+  | Tir.TCon (("NativeIntArr" | "NativeFloatArr" | "NativeF32Arr" | "NativeI32Arr" | "NativeU8Arr"), []) -> true
+  | _ -> false
+
+(** Whether [e] hands a native array to a call: a variable of native-array
+    type as a call argument (the set/sort builtins and their stdlib wrappers
+    consume it).  See Perceus's [dup_owned_field] and
+    [insert_owned_aggregate_param_drops]'s early release. *)
+let rec consumes_native_array (e : Tir.expr) : bool =
+  let arr = function
+    | Tir.AVar w -> is_native_array_ty w.Tir.v_ty
+    | _ -> false in
+  match e with
+  | Tir.EApp (_, args) -> List.exists arr args
+  | Tir.ECallPtr (_, args) -> List.exists arr args
+  | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) -> consumes_native_array e1 || consumes_native_array e2
+  | Tir.ECase (_, brs, def) ->
+    List.exists (fun (br : Tir.branch) -> consumes_native_array br.Tir.br_body) brs
+    || Option.fold ~none:false ~some:consumes_native_array def
+  | Tir.ELetRec (fns, body) ->
+    consumes_native_array body || List.exists (fun f -> consumes_native_array f.Tir.fn_body) fns
+  | _ -> false
+
 (** Returns true iff [name] has at least one *owning* use in [e].
 
     An owning use is any position where the value is stored, returned, or
@@ -1072,6 +1099,19 @@ let rec closure_escapes (clo : string) (e : Tir.expr) : bool =
     procedural queries; it improves across fixpoint iterations. *)
 let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
   match e with
+  (* A native-array field read out of [name] and then consumed
+     ([let lanes = r.lanes in .. set_int(lanes, i, v) ..]) makes [name]
+     owned.  Borrowed, the caller keeps [r] and so a second reference to
+     the array, and every set copies the whole array.  Owned, Perceus gives
+     the field its own reference and releases [r] after its last read, so a
+     record the caller handed over whole leaves the array with one reference
+     and the set writes in place (Perceus [dup_owned_field]). *)
+  | Tir.ELet (v, Tir.EField (Tir.AVar src, _), e2)
+    when String.equal src.Tir.v_name name
+         && not (String.equal v.Tir.v_name name)
+         && is_native_array_ty v.Tir.v_ty
+         && owned_in v.Tir.v_name bm e2 ->
+    true
 
   (* ── Atoms ────────────────────────────────────────────────────────────── *)
   | Tir.EAtom (Tir.AVar v) ->
