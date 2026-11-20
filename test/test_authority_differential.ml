@@ -362,12 +362,12 @@ let render_program () =
     Authority.PathsAt(ps) -> "PathsAt[" ++ String.join(ps, "|") ++ "]"
     end
   end
-  fn scope_text(s : Authority.Scope) : String do
+  fn scope_text(s : Authority.CapEntry) : String do
     match s do
-    Authority.Scope(k, a) -> k ++ "=" ++ arg_text(a)
+    Authority.CapEntry(k, a) -> k ++ "=" ++ arg_text(a)
     end
   end
-  fn parsed(text : String) : List(Authority.Scope) do
+  fn parsed(text : String) : List(Authority.CapEntry) do
     match Authority.parse(text) do
     Ok(s) -> s
     Err(_) -> Nil
@@ -382,31 +382,31 @@ let render_program () =
   fn sub(a : String, b : String) : () do
     Authority.ignore(println(if Authority.subset(parsed(a), parsed(b)) do "subset" else "not" end))
   end
-  fn adm(ss : List(Authority.Scope), kind : String, target : String, cwd : String) : () do
+  fn adm(ss : List(Authority.CapEntry), kind : String, target : String, cwd : String) : () do
     Authority.ignore(println(if Authority.admits(ss, kind, target, cwd) do "admits" else "refuses" end))
   end
   fn main() do
 %s
 %s
-    let paths = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv/./a/", "rel/x"]))]
+    let paths = [Authority.CapEntry("IO.FileSystem", Authority.Paths(["/srv/./a/", "rel/x"]))]
     adm(paths, "IO.FileRead", "/srv/a/b", "/")
     adm(paths, "IO.FileRead", "/srv/ab", "/")
     adm(paths, "IO.FileRead", "rel/x/y", "/")
     adm(paths, "IO.FileRead", "x/y", "/home")
     adm(paths, "IO.FileRead", "x/y", "")
     adm(paths, "IO.Console", "", "/")
-    let hosts = [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com:443/v1/;methods=get"))]
+    let hosts = [Authority.CapEntry("IO.NetConnect", Authority.Hosts("*.x.com:443/v1/;methods=get"))]
     adm(hosts, "IO.NetConnect", "a.x.com:443", "/")
     adm(hosts, "IO.NetConnect", "a.x.com:80", "/")
     adm(hosts, "IO.NetConnect", "x.com:443", "/")
     adm(hosts, "IO.NetConnect.TLS", "", "/")
     adm(hosts, "IO.Database", "a.x.com:443", "/")
-    adm([Authority.Scope("IO.NetConnect", Authority.Hosts(";no_redirects"))], "IO.NetConnect", "e.org:1", "/")
-    adm([Authority.Scope("IO.NetConnect", Authority.Hosts("bad host"))], "IO.NetConnect", "e.org:1", "/")
+    adm([Authority.CapEntry("IO.NetConnect", Authority.Hosts(";no_redirects"))], "IO.NetConnect", "e.org:1", "/")
+    adm([Authority.CapEntry("IO.NetConnect", Authority.Hosts("bad host"))], "IO.NetConnect", "e.org:1", "/")
     sub("IO.FileRead(\"/srv/a\")", "IO.FileRead(\"/srv\")")
-    Authority.ignore(println(if Authority.subset([Authority.Scope("IO.FileRead", Authority.Paths(["/srv/a/../b"]))], [Authority.Scope("IO.FileRead", Authority.Paths(["/srv/b"]))]) do "subset" else "not" end))
-    Authority.ignore(println(if Authority.subset([Authority.Scope("IO.NetConnect", Authority.Hosts("a.x.com"))], [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com"))]) do "subset" else "not" end))
-    Authority.ignore(println(if Authority.subset([Authority.Scope("IO.NetConnect", Authority.Hosts(""))], [Authority.Scope("IO.NetConnect", Authority.Hosts(""))]) do "subset" else "not" end))
+    Authority.ignore(println(if Authority.subset([Authority.CapEntry("IO.FileRead", Authority.Paths(["/srv/a/../b"]))], [Authority.CapEntry("IO.FileRead", Authority.Paths(["/srv/b"]))]) do "subset" else "not" end))
+    Authority.ignore(println(if Authority.subset([Authority.CapEntry("IO.NetConnect", Authority.Hosts("a.x.com"))], [Authority.CapEntry("IO.NetConnect", Authority.Hosts("*.x.com"))]) do "subset" else "not" end))
+    Authority.ignore(println(if Authority.subset([Authority.CapEntry("IO.NetConnect", Authority.Hosts(""))], [Authority.CapEntry("IO.NetConnect", Authority.Hosts(""))]) do "subset" else "not" end))
   end
 end
 |}

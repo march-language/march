@@ -1111,7 +1111,7 @@ let builtins : builtin list = [
      retargets direct calls of the Authority functions of the same names to
      these in native and JIT programs. *)
   { march_name = "cap_rt_parse"; c_name = Some "march_cap_rt_parse";
-    ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TCon ("Authority.Scope", [])]); Tir.TString]));
+    ret_ty = Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TCon ("Authority.CapEntry", [])]); Tir.TString]));
     in_is_builtin = true; declare_sig = Some "declare ptr    @march_cap_rt_parse(ptr %text)" };
   { march_name = "cap_rt_admits"; c_name = Some "march_cap_rt_admits"; ret_ty = Some Tir.TBool;
     in_is_builtin = true; declare_sig = Some "declare i64    @march_cap_rt_admits(ptr %scopes, ptr %kind, ptr %target, ptr %cwd)" };

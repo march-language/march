@@ -12,7 +12,7 @@
    not the parser and matcher.
 
    The C code builds and reads the March values of [Authority.Layer],
-   [Authority.Scope], [Authority.Arg], [CapLimit], [CapError], [Result] and
+   [Authority.CapEntry], [Authority.Arg], [CapLimit], [CapError], [Result] and
    [List] by their declared constructor tags.  A program that declares a
    type with the same short name as one of them makes that name collide
    (both declarations take global constructor tags, [Collision_set]); such a
@@ -32,7 +32,7 @@ let table : (string * string) list =
 let builtins : string list = List.map snd table
 
 (* The short type names whose constructor tags the C code relies on. *)
-let shapes = [ "Layer"; "Scope"; "Arg"; "CapLimit"; "CapError"; "Result"; "List" ]
+let shapes = [ "Layer"; "CapEntry"; "Arg"; "CapLimit"; "CapError"; "Result"; "List" ]
 
 let rec map_expr (e : Tir.expr) : Tir.expr =
   match e with

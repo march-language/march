@@ -1,7 +1,7 @@
 -- types (3) --
 type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
-type Authority.Scope = Scope(String, Arg)
-type Authority.Layer = Layer(CapLimit, String, List(Scope))
+type Authority.CapEntry = CapEntry(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(CapEntry))
 -- fns (7) --
 ## apply_to
 fn apply_to(f : (String) -> (), s : String) : () =
@@ -24,14 +24,14 @@ p("a");
 let $auth_fnval10 : (String) -> () = letrec [$authlam0_main] in
 $authlam0_main in
 apply_to($auth_fnval10, "b");
-let $t1242 : Int = let $t1241 : Int = inc(1) in
-scoped($t1241) in
-loop_say($t1242);
+let $t1253 : Int = let $t1252 : Int = inc(1) in
+scoped($t1252) in
+loop_say($t1253);
 shout("c");
-let $t1243 : Result((), CapError) = probe() in
-case $t1243 of
-  Ok($f1244) -> ()
-  Err($f1245) -> ()
+let $t1254 : Result((), CapError) = probe() in
+case $t1254 of
+  Ok($f1255) -> ()
+  Err($f1256) -> ()
   _ -> panic("non-exhaustive pattern match")
 
 ## probe

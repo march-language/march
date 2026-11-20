@@ -9,5 +9,5 @@
 let () =
   Alcotest.run "march-authority"
     (Test_helpers.keep_os_sensitive
-       (Test_cap_runtime_slot.tests @ Test_authority_differential.tests @ Test_auth_rt.tests)
+       (Test_cap_runtime_slot.tests @ Test_scope_value.tests @ Test_authority_differential.tests @ Test_auth_rt.tests)
        ~groups:[])

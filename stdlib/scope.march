@@ -1,0 +1,126 @@
+-- Scope: a capability scope as a value (ocap phase 5).
+--
+-- A `Scope` is an opaque box around a scope list's canonical text
+-- (`IO.Console, IO.FileRead("/srv/")`; `()` is the empty scope). It grants
+-- nothing: its only use is as the argument of `restrict`. A literal scope
+-- expression is built by `literal`, a computed one by `build`, and `+` (the
+-- union) by `union`. The text is parsed again by `Authority.parse` where a
+-- `restrict` enters, so a value that was not validated cannot narrow wrongly.
+--
+-- This module has no `needs` line.
+
+mod Scope do
+
+  opaque type Scope = ScopeText(String)
+
+  doc """
+  The union of two scopes: their entries together. The empty scope `()` adds
+  nothing.
+
+  ## Examples
+
+      march> Scope.to_string(Scope.union(Scope.literal("IO.Console"), Scope.literal("IO.Clock")))
+      "IO.Console, IO.Clock"
+  """
+  fn union(a : Scope, b : Scope) : Scope do
+    match a do
+    ScopeText(x) ->
+      match b do
+      ScopeText(y) ->
+        if x == "()" do ScopeText(y)
+        else if y == "()" do ScopeText(x)
+        else ScopeText(x ++ ", " ++ y) end end
+      end
+    end
+  end
+
+  doc """
+  The scope written as source: `IO.FileRead("/srv/")`.
+
+  ## Examples
+
+      march> Scope.to_string(Scope.literal("IO.Console"))
+      "IO.Console"
+  """
+  fn to_string(s : Scope) : String do
+    match s do
+    ScopeText(t) -> t
+    end
+  end
+
+  impl Show(Scope) do
+    fn show(s) do to_string(s) end
+  end
+
+  doc """
+  The scope a literal scope expression stands for. The compiler already
+  validated `text`.
+  """
+  @[stdlib_internal]
+  fn literal(text : String) : Scope do ScopeText(text) end
+
+  doc """
+  The canonical text of a scope (what `restrict` parses on entry).
+  """
+  @[stdlib_internal]
+  fn text(s : Scope) : String do
+    match s do
+    ScopeText(t) -> t
+    end
+  end
+
+  doc """
+  The scope a computed scope expression stands for: capability `kind` with
+  the string arguments `strings` and the literal options `options`, checked.
+  A string must be non-empty in the first position and hold none of `"` `;`
+  `,` `=`; the text built from them must then be a scope list
+  (`Authority.parse`: no `..` path segment, a well-formed host, ...).
+
+  ## Examples
+
+      march> show(Scope.build("IO.FileRead", ["/srv/x"], []))
+      "Ok(IO.FileRead(\"/srv/x\"))"
+  """
+  @[stdlib_internal]
+  fn build(kind : String, strings : List(String), options : List(String)) : Result(Scope, ScopeError) do
+    match bad_string(strings, true) do
+    Some(reason) -> Err(ScopeError(kind ++ ": " ++ reason))
+    None ->
+      let text = entry_text(kind, strings, options)
+      match Authority.parse(text) do
+      Ok(_) -> Ok(ScopeText(text))
+      Err(e) -> Err(ScopeError(kind ++ ": " ++ e))
+      end
+    end
+  end
+
+  pfn bad_string(ss : List(String), first : Bool) : Option(String) do
+    match ss do
+    Nil -> None
+    Cons(s, rest) ->
+      if first && s == "" do Some("the first string is empty")
+      else
+        match bad_char(s, ["\"", ";", ",", "="]) do
+        Some(c) -> Some("the string \"" ++ s ++ "\" contains " ++ c)
+        None -> bad_string(rest, false)
+        end
+      end
+    end
+  end
+
+  pfn bad_char(s : String, cs : List(String)) : Option(String) do
+    match cs do
+    Nil -> None
+    Cons(c, rest) -> if string_contains(s, c) do Some(c) else bad_char(s, rest) end
+    end
+  end
+
+  pfn entry_text(kind : String, strings : List(String), options : List(String)) : String do
+    let quoted = List.map(strings, fn s -> "\"" ++ s ++ "\"")
+    match List.append(quoted, options) do
+    Nil -> kind
+    items -> kind ++ "(" ++ string_join(items, ", ") ++ ")"
+    end
+  end
+
+end

@@ -155,7 +155,7 @@ let leak_src = {|mod CapSlotLeak do
     if n == 0 do ()
     else
       let old = cap_push(Authority.Layer(ByFnNeeds("f"), "IO.FileRead(\"/srv/\")",
-                  Cons(Authority.Scope("IO.FileRead", Authority.Paths(Cons("/srv/", Nil))), Nil)))
+                  Cons(Authority.CapEntry("IO.FileRead", Authority.Paths(Cons("/srv/", Nil))), Nil)))
       let r = cap_check_raw("IO.FileRead", "/srv/x")
       cap_restore(old)
       spin(n - 1 + r - 1)
@@ -183,7 +183,7 @@ let drop_src = {|mod CapSlotDrop do
   needs IO.Console
   fn hold(n : Int) : Int do
     let old = cap_push(Authority.Layer(ByFnNeeds("f"), "IO.FileRead(\"/srv/\")",
-                Cons(Authority.Scope("IO.FileRead", Authority.Paths(Cons("/srv/", Nil))), Nil)))
+                Cons(Authority.CapEntry("IO.FileRead", Authority.Paths(Cons("/srv/", Nil))), Nil)))
     let r = cap_save()
     cap_restore(old)
     n + 1

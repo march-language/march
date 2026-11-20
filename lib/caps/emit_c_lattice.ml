@@ -87,7 +87,7 @@ let header (hierarchy : (string * string option) list) : string =
   p " * \"What the header pad word means\"). */\n";
   List.iter (fun (macro, name) -> p "#define %s (%d) /* %s */\n" macro (type_id_of_name name) name)
     [ ("MARCH_AUTH_TID_LIST", "List"); ("MARCH_AUTH_TID_RESULT", "Result");
-      ("MARCH_AUTH_TID_LAYER", "Authority.Layer"); ("MARCH_AUTH_TID_SCOPE", "Authority.Scope");
+      ("MARCH_AUTH_TID_LAYER", "Authority.Layer"); ("MARCH_AUTH_TID_SCOPE", "Authority.CapEntry");
       ("MARCH_AUTH_TID_ARG", "Authority.Arg"); ("MARCH_AUTH_TID_LIMIT", "CapLimit");
       ("MARCH_AUTH_TID_CAPERR", "CapError") ];
   p "\n#endif /* MARCH_AUTHORITY_TABLES_H */\n";

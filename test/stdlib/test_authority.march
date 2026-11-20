@@ -87,8 +87,8 @@ describe "Authority" do
 
     test "kinds with and without a path scope" do
       assert (Authority.parse("IO.Console, IO.FileRead(\"/srv/a/\")")
-        == Ok([Authority.Scope("IO.Console", Authority.Any),
-               Authority.Scope("IO.FileRead", Authority.PathsAt(["/srv/a"]))]))
+        == Ok([Authority.CapEntry("IO.Console", Authority.Any),
+               Authority.CapEntry("IO.FileRead", Authority.PathsAt(["/srv/a"]))]))
     end
 
     test "() is the empty list" do
@@ -101,17 +101,17 @@ describe "Authority" do
 
     test "a host scope keeps the packed spec, its pattern decoded once" do
       assert (Authority.parse("IO.NetConnect(\"api.x.com/v1/\", methods(get))")
-        == Ok([Authority.Scope("IO.NetConnect",
+        == Ok([Authority.CapEntry("IO.NetConnect",
                  Authority.HostAt("api.x.com/v1/;methods=get", "api.x.com", false, 0))]))
       assert (Authority.parse("IO.NetConnect(\"*.X.com:8443\")")
-        == Ok([Authority.Scope("IO.NetConnect", Authority.HostAt("*.X.com:8443", "x.com", true, 8443))]))
+        == Ok([Authority.CapEntry("IO.NetConnect", Authority.HostAt("*.X.com:8443", "x.com", true, 8443))]))
       assert (Authority.parse("IO.NetConnect(no_redirects)")
-        == Ok([Authority.Scope("IO.NetConnect", Authority.HostAt(";no_redirects", "", false, 0))]))
+        == Ok([Authority.CapEntry("IO.NetConnect", Authority.HostAt(";no_redirects", "", false, 0))]))
     end
 
     test "a name scope splits names and prefixes" do
       assert (Authority.parse("IO.Mut(\"a\", \"b\", prefix(\"w.\"))")
-        == Ok([Authority.Scope("IO.Mut", Authority.Names(["a", "b"], ["w."]))]))
+        == Ok([Authority.CapEntry("IO.Mut", Authority.Names(["a", "b"], ["w."]))]))
     end
 
     test "a scope on an unscopable kind is an error" do
@@ -132,7 +132,7 @@ describe "Authority" do
   describe "admits" do
 
     test "a path scope on an ancestor admits a path inside it" do
-      let s = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))]
+      let s = [Authority.CapEntry("IO.FileSystem", Authority.Paths(["/srv"]))]
       assert (Authority.admits(s, "IO.FileRead", "/srv/x", "/"))
       assert (not(Authority.admits(s, "IO.FileRead", "/srvx", "/")))
       assert (not(Authority.admits(s, "IO.FileRead", "../x", "/srv")))
@@ -140,7 +140,7 @@ describe "Authority" do
     end
 
     test "a parsed (normalized) path scope admits what Paths does" do
-      let s = [Authority.Scope("IO.FileSystem", Authority.PathsAt(["/srv"]))]
+      let s = [Authority.CapEntry("IO.FileSystem", Authority.PathsAt(["/srv"]))]
       assert (Authority.admits(s, "IO.FileRead", "/srv/x", "/"))
       assert (Authority.admits(s, "IO.FileRead", "/srv", "/"))
       assert (Authority.admits(s, "IO.FileRead", "/srv/./x//y", "/"))
@@ -149,51 +149,51 @@ describe "Authority" do
       assert (not(Authority.admits(s, "IO.FileRead", "../x", "/srv")))
       assert (Authority.admits(s, "IO.FileRead", "x/y", "/srv"))
       assert (not(Authority.admits(s, "IO.FileRead", "x", "")))
-      let root = [Authority.Scope("IO.FileSystem", Authority.PathsAt(["/"]))]
+      let root = [Authority.CapEntry("IO.FileSystem", Authority.PathsAt(["/"]))]
       assert (Authority.admits(root, "IO.FileWrite", "/anything/at/all", "/"))
-      let a = [Authority.Scope("IO.FileRead", Authority.PathsAt(["/srv/a"]))]
-      let b = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))]
+      let a = [Authority.CapEntry("IO.FileRead", Authority.PathsAt(["/srv/a"]))]
+      let b = [Authority.CapEntry("IO.FileSystem", Authority.Paths(["/srv"]))]
       assert (Authority.subset(a, b))
       assert (not(Authority.subset(b, a)))
     end
 
     test "an unknown current directory refuses a relative target" do
-      let s = [Authority.Scope("IO.FileSystem", Authority.Paths(["/"]))]
+      let s = [Authority.CapEntry("IO.FileSystem", Authority.Paths(["/"]))]
       assert (not(Authority.admits(s, "IO.FileRead", "srv/x", "")))
       assert (Authority.admits(s, "IO.FileRead", "/srv/x", ""))
     end
 
     test "a host scope admits the host-neutral TLS setup" do
-      let h = [Authority.Scope("IO.NetConnect", Authority.Hosts("api.x.com"))]
+      let h = [Authority.CapEntry("IO.NetConnect", Authority.Hosts("api.x.com"))]
       assert (Authority.admits(h, "IO.NetConnect.TLS", "", "/"))
       assert (not(Authority.admits(h, "IO.NetConnect.TLS", "evil.com:443", "/")))
       assert (not(Authority.admits(h, "IO.NetConnect", "", "/")))
     end
 
     test "an unscoped ancestor admits every target" do
-      assert (Authority.admits([Authority.Scope("IO", Authority.Any)], "IO.Clock", "", "/"))
+      assert (Authority.admits([Authority.CapEntry("IO", Authority.Any)], "IO.Clock", "", "/"))
     end
 
     test "an unrelated kind is refused" do
-      assert (not(Authority.admits([Authority.Scope("IO.Console", Authority.Any)], "IO.Clock", "", "/")))
+      assert (not(Authority.admits([Authority.CapEntry("IO.Console", Authority.Any)], "IO.Clock", "", "/")))
     end
 
     test "a decoded host scope admits what its packed spec does" do
-      let h = [Authority.Scope("IO.NetConnect", Authority.HostAt("*.x.com:443", "x.com", true, 443))]
+      let h = [Authority.CapEntry("IO.NetConnect", Authority.HostAt("*.x.com:443", "x.com", true, 443))]
       assert (Authority.admits(h, "IO.NetConnect", "api.x.com:443", "/"))
       assert (not(Authority.admits(h, "IO.NetConnect", "api.x.com:80", "/")))
       assert (not(Authority.admits(h, "IO.NetConnect", "x.com:443", "/")))
       assert (Authority.admits(h, "IO.NetConnect.TLS", "", "/"))
-      let any = [Authority.Scope("IO.NetConnect", Authority.HostAt(";no_redirects", "", false, 0))]
+      let any = [Authority.CapEntry("IO.NetConnect", Authority.HostAt(";no_redirects", "", false, 0))]
       assert (Authority.admits(any, "IO.NetConnect", "anything.org:1", "/"))
     end
 
     test "hosts and names" do
-      let h = [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com:443"))]
+      let h = [Authority.CapEntry("IO.NetConnect", Authority.Hosts("*.x.com:443"))]
       assert (Authority.admits(h, "IO.NetConnect", "api.x.com:443", "/"))
       assert (not(Authority.admits(h, "IO.NetConnect", "api.x.com:80", "/")))
       assert (not(Authority.admits(h, "IO.NetConnect", "x.com:443", "/")))
-      let n = [Authority.Scope("IO.Mut", Authority.Names(["a"], ["w."]))]
+      let n = [Authority.CapEntry("IO.Mut", Authority.Names(["a"], ["w."]))]
       assert (Authority.admits(n, "IO.Mut", "w.1", "/"))
       assert (not(Authority.admits(n, "IO.Mut", "b", "/")))
     end
@@ -203,22 +203,22 @@ describe "Authority" do
   describe "subset" do
 
     test "a narrower path under an ancestor kind" do
-      let a = [Authority.Scope("IO.FileRead", Authority.Paths(["/srv/a"]))]
-      let b = [Authority.Scope("IO.FileSystem", Authority.Paths(["/srv"]))]
+      let a = [Authority.CapEntry("IO.FileRead", Authority.Paths(["/srv/a"]))]
+      let b = [Authority.CapEntry("IO.FileSystem", Authority.Paths(["/srv"]))]
       assert (Authority.subset(a, b))
       assert (not(Authority.subset(b, a)))
     end
 
     test "an unscoped entry is not under a scoped one" do
-      let a = [Authority.Scope("IO.FileRead", Authority.Any)]
-      let b = [Authority.Scope("IO.FileRead", Authority.Paths(["/srv"]))]
+      let a = [Authority.CapEntry("IO.FileRead", Authority.Any)]
+      let b = [Authority.CapEntry("IO.FileRead", Authority.Paths(["/srv"]))]
       assert (not(Authority.subset(a, b)))
       assert (Authority.subset(b, a))
     end
 
     test "a decoded host scope compares by its spec" do
-      let a = [Authority.Scope("IO.NetConnect", Authority.HostAt("api.x.com", "api.x.com", false, 0))]
-      let b = [Authority.Scope("IO.NetConnect", Authority.Hosts("*.x.com"))]
+      let a = [Authority.CapEntry("IO.NetConnect", Authority.HostAt("api.x.com", "api.x.com", false, 0))]
+      let b = [Authority.CapEntry("IO.NetConnect", Authority.Hosts("*.x.com"))]
       assert (Authority.subset(a, b))
       assert (not(Authority.subset(b, a)))
     end
@@ -230,7 +230,7 @@ describe "Authority" do
     test "parses a needs clause once into the frame's layer" do
       assert (Authority.frame_layer("M.f", "IO.FileRead(\"/srv/\")")
         == Authority.Layer(ByFnNeeds("M.f"), "IO.FileRead(\"/srv/\")",
-             [Authority.Scope("IO.FileRead", Authority.PathsAt(["/srv"]))]))
+             [Authority.CapEntry("IO.FileRead", Authority.PathsAt(["/srv"]))]))
     end
 
   end
@@ -238,20 +238,20 @@ describe "Authority" do
   describe "check_layers" do
 
     test "the innermost refusing layer names the limit" do
-      let inner = Authority.Layer(ByFnNeeds("f"), "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])
-      let outer = Authority.Layer(ByLaunch, "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])
+      let inner = Authority.Layer(ByFnNeeds("f"), "IO.Console", [Authority.CapEntry("IO.Console", Authority.Any)])
+      let outer = Authority.Layer(ByLaunch, "IO.Console", [Authority.CapEntry("IO.Console", Authority.Any)])
       assert (Authority.check_layers("IO.Clock", "", [inner, outer])
         == Err(CapError("IO.Clock", "", ByFnNeeds("f"), "IO.Console")))
     end
 
     test "every layer admitting is Ok" do
-      let l = Authority.Layer(ByLaunch, "IO", [Authority.Scope("IO", Authority.Any)])
+      let l = Authority.Layer(ByLaunch, "IO", [Authority.CapEntry("IO", Authority.Any)])
       assert (Authority.check_layers("IO.Clock", "", [l]) == Ok(()))
     end
 
     test "an outer layer refuses what the inner admits" do
-      let inner = Authority.Layer(ByFnNeeds("f"), "IO", [Authority.Scope("IO", Authority.Any)])
-      let outer = Authority.Layer(ByLaunch, "IO.Console", [Authority.Scope("IO.Console", Authority.Any)])
+      let inner = Authority.Layer(ByFnNeeds("f"), "IO", [Authority.CapEntry("IO", Authority.Any)])
+      let outer = Authority.Layer(ByLaunch, "IO.Console", [Authority.CapEntry("IO.Console", Authority.Any)])
       assert (Authority.check_layers("IO.Clock", "", [inner, outer])
         == Err(CapError("IO.Clock", "", ByLaunch, "IO.Console")))
     end

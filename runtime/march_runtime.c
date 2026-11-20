@@ -11149,9 +11149,9 @@ static _Atomic int march_cap_launch_set = 0;
  * dead proc's slot) structurally, by the shapes stdlib/authority.march
  * declares:
  *   List(Layer)    Nil = tag 0 | Cons(Layer, List(Layer)) = tag 1
- *   Layer          Layer(CapLimit, String, List(Scope))   = tag 0
+ *   Layer          Layer(CapLimit, String, List(CapEntry))   = tag 0
  *   CapLimit       ByLaunch = 0 | ByFnNeeds .. ByGrant(String) = 1..4
- *   Scope          Scope(String, Arg)                     = tag 0
+ *   CapEntry       CapEntry(String, Arg)                   = tag 0
  *   Arg            Any = 0 | Paths(List(String)) = 1 | Hosts(String) = 2
  *                  | Names(List(String), List(String))    = 3
  *                  | HostAt(String, String, Bool, Int)    = 4

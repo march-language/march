@@ -1,7 +1,7 @@
 -- types (3) --
 type Authority.Arg = Any | Paths(List(String)) | Hosts(String) | Names(List(String), List(String)) | HostAt(String, String, Bool, Int) | PathsAt(List(String))
-type Authority.Scope = Scope(String, Arg)
-type Authority.Layer = Layer(CapLimit, String, List(Scope))
+type Authority.CapEntry = CapEntry(String, Arg)
+type Authority.Layer = Layer(CapLimit, String, List(CapEntry))
 -- fns (5) --
 ## count_in
 fn count_in(n : Int, acc : Int) : Int =
@@ -26,11 +26,11 @@ fn count_in$auth_layer() : Layer =
 
 ## main
 fn main() : () =
-  let $t1239 : Result((), CapError) = probe() in
-case $t1239 of
-  Ok($f1241) -> let $t1240 : Int = count_in(5, 0) in
-println($t1240)
-  Err($f1242) -> println(0)
+  let $t1250 : Result((), CapError) = probe() in
+case $t1250 of
+  Ok($f1252) -> let $t1251 : Int = count_in(5, 0) in
+println($t1251)
+  Err($f1253) -> println(0)
   _ -> panic("non-exhaustive pattern match")
 
 ## probe
