@@ -11043,6 +11043,52 @@ let write_march_source ~name src_text =
   close_out oc;
   (project_root, main_exe, src, tmp)
 
+(* ── CancelToken is a real RC'd cell (2026-11-11 todo, P2) ──────────────
+   The runtime's cancel token was a malloc'd {int cancelled; int refcount},
+   but a CancelToken is a March value, so Perceus's inc_rc on a token used
+   twice added 1 to word 0 -- the [cancelled] flag.  Compiled,
+   `task_is_cancelled(b)` answered true before `task_cancel(b)`, and a task
+   spawned with a fresh token saw it as already cancelled.  Run interpreted
+   and compiled and require the same, expected, output. *)
+let cancel_token_rc_src = {|mod CancelTok do
+  needs IO.Console
+  needs IO.Spawn
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) do
+    let b = task_cancel_token_new()
+    println(to_string(task_is_cancelled(b)))
+    println(to_string(task_is_cancelled(b)))
+    task_cancel(b)
+    println(to_string(task_is_cancelled(b)))
+    println(to_string(task_is_cancelled(b)))
+    let other = task_cancel_token_new()
+    let t = task_spawn_with_cancel(fn _ -> 42, other)
+    println(to_string(task_is_cancelled(other)))
+    println(to_string(task_await(t)))
+    println(to_string(task_is_cancelled(other)))
+    println(to_string(task_is_cancelled(b)))
+  end
+end
+|}
+
+let test_cancel_token_rc_compiled () =
+  let (project_root, main_exe, src, tmp) =
+    write_march_source ~name:"cancel_tok" cancel_token_rc_src in
+  let expected = "false\nfalse\ntrue\ntrue\nfalse\nOk(42)\nfalse\ntrue" in
+  let interp_out = read_cmd_output (Printf.sprintf "cd %s && %s %s 2>&1"
+    (Filename.quote project_root) (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check string) "interpreted" expected interp_out;
+  let bin = Filename.concat tmp "cancel_tok_bin" in
+  match compile_march_or_skip ~cmd_prefix:(Printf.sprintf "cd %s && " (Filename.quote project_root))
+          ~main_exe ~bin ~src () with
+  | None -> ()  (* legitimate, counted skip: no clang on PATH *)
+  | Some bin ->
+    (* Bounded: with the bug the spawned task skipped its body (its token
+       read as cancelled) and task_await never returned. *)
+    let run_out = read_cmd_output (Printf.sprintf
+      "perl -e 'alarm 30; exec @ARGV' %s 2>&1" (Filename.quote bin)) in
+    Alcotest.(check string) "compiled matches the interpreter" expected run_out
+
 (* ── HTTP request-line / header injection (2026-11-09 todo, P1) ──────────
    `http_serialize_request` used to copy the method, host, path, query and
    headers into the request verbatim, so a CR/LF/space in any of them
@@ -22005,6 +22051,10 @@ let codegen_suites =
             test_guard_exhaustion_panics_compiled;
           Alcotest.test_case "compiled guarded 3-arm match parity (shared-JP bloat fix)" `Quick
             test_compiled_guarded_match_parity;
+        ] );
+      ( "cancel_token_codegen", [
+          Alcotest.test_case "compiled CancelToken is a real RC'd cell" `Quick
+            test_cancel_token_rc_compiled;
         ] );
       ( "check_diagnostic_determinism", [
           Alcotest.test_case "repeated --check has byte-identical diagnostics" `Quick

@@ -1287,32 +1287,46 @@ void march_sched_preempt_stop(void);
  * and the tasks spawned within it.  When cancelled, tasks check
  * march_cancel_token_is_cancelled() at yield points and exit early.
  *
- * Tokens are heap-allocated and reference-counted (march_cancel_token_ref /
- * march_cancel_token_unref).  The initial refcount is 1. */
+ * A token is an ordinary march_alloc'd, RC'd March heap cell, laid out
+ * [rc][tag][pad][cancelled@16] (24 bytes, tag MARCH_CANCEL_TOKEN_TAG in
+ * march_runtime.h), exactly like send_after's TimerRef token.  It has to be:
+ * a CancelToken is a March value (TCon "CancelToken"), so Perceus inserts
+ * inc_rc/dec_rc on it like on any other heap value, and those operate on
+ * word 0.  It used to be a bespoke malloc'd {int cancelled; int refcount},
+ * so the first inc_rc of a token used twice (`task_is_cancelled(t)` and then
+ * `task_cancel(t)`) added 1 to `cancelled`: compiled code answered `true`
+ * before any cancel, and a spawned task saw its token as already cancelled
+ * (specs/progress/2026-11-11-compiled-task-is-cancelled-true-before-cancel.md).
+ *
+ * march_cancel_token_new lives in march_runtime.c (it needs march_alloc);
+ * march_cancel_token_ref/_unref are march_incrc/march_decrc on the cell. */
 typedef struct march_cancel_token {
-    _Atomic int   cancelled;  /* 0 = active, 1 = cancelled            */
-    _Atomic int   refcount;   /* reference count                       */
+    int64_t          rc;         /* march_hdr.rc                          */
+    int32_t          tag;        /* MARCH_CANCEL_TOKEN_TAG                */
+    int32_t          pad;
+    _Atomic int64_t  cancelled;  /* 0 = active, 1 = cancelled             */
 } march_cancel_token;
 
-/* Allocate a new cancel token (refcount=1, cancelled=0). */
+/* Allocate a new cancel token (rc=1, cancelled=0).  march_runtime.c. */
 march_cancel_token *march_cancel_token_new(void);
 
 /* Atomically cancel the token.  All tasks holding a reference will see
- * march_cancel_token_is_cancelled() return 1 at their next check. */
+ * march_cancel_token_is_cancelled() return 1 at their next check.
+ * Borrows tok (lib/tir/borrow.ml extern_borrow_table). */
 void march_cancel_token_cancel(march_cancel_token *tok);
 
-/* Return 1 if the token has been cancelled, 0 otherwise. */
+/* Return 1 if the token has been cancelled, 0 otherwise.  Borrows tok. */
 int64_t march_cancel_token_is_cancelled(march_cancel_token *tok);
 
 /* Increment reference count (for task spawn that copies the token pointer). */
 void march_cancel_token_ref(march_cancel_token *tok);
 
-/* Decrement reference count; frees the token when it reaches zero. */
+/* Decrement reference count (march_decrc); frees the cell at zero. */
 void march_cancel_token_unref(march_cancel_token *tok);
 
-/* Spawn a green thread with an associated cancel token.  The process stores a
- * reference to tok; the runtime checks the token at every yield point and
- * calls march_sched_exit() if it has been cancelled.
+/* Spawn a green thread with an associated cancel token.  The process holds
+ * its own reference to tok until it first runs: it checks the token once,
+ * releases that reference, and skips fn if the token was cancelled.
  * Returns the new process, or NULL on failure. */
 march_proc *march_sched_spawn_with_cancel(void (*fn)(void *), void *arg,
                                           march_cancel_token *tok);

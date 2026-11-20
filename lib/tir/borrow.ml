@@ -187,6 +187,19 @@ let extern_borrow_table : (string * bool list) list = [
      refcount traffic. *)
   ("task_poll", [true]);
   ("march_task_poll", [true]);
+  (* A CancelToken is a march_alloc'd cell (march_cancel_token_new).
+     march_cancel_token_cancel / _is_cancelled only read or write its
+     [cancelled] word; march_task_spawn_with_cancel_thunk takes its OWN
+     reference for the spawned task (march_cancel_token_ref) and releases it
+     when the task ends.  None stores or frees the caller's reference, so the
+     token is borrowed by all three; the closure of task_spawn_with_cancel is
+     stored, so it stays owned.  Unlisted (these are emitter arms, not
+     [in_is_builtin] rows, so test_builtin_borrow_classification never asked)
+     they defaulted to owned and every call leaked one reference to the token
+     (specs/progress/2026-11-11-compiled-task-is-cancelled-true-before-cancel.md). *)
+  ("task_cancel", [true]);
+  ("task_is_cancelled", [true]);
+  ("task_spawn_with_cancel", [false; true]);
   ("pid_to_int",        [true]);
   ("pid_index_of",      [true]);
   ("march_pid_index_of", [true]);

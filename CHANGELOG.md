@@ -1255,6 +1255,13 @@ git log is authoritative for exact commits.
 
 ### Fixed
 
+- **A compiled cancel token no longer reads as cancelled before it is cancelled.** Using a
+  `task_cancel_token_new()` token more than once (`task_is_cancelled(t)` and then
+  `task_cancel(t)`) made compiled code answer `true` to the first query, and a task spawned
+  with `task_spawn_with_cancel` on a fresh token was skipped as if cancelled, so its
+  `task_await` never returned. The interpreter was right. Tokens are now released correctly
+  as well: each `task_cancel`, `task_is_cancelled` and `task_spawn_with_cancel` call used to
+  leak a reference to its token.
 - **A hot deploy that changes an actor's state with no migration is refused under every
   `@compat` policy.** `@compat(forward)` (added fields) and `@compat(any)` used to let such a
   deploy through with no migration, so each running actor kept its old state record while the
