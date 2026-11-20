@@ -23,6 +23,7 @@ let src = {|mod ScopeFixture do
     show_build(Scope.build("IO.FileRead", ["../etc"], []))
     show_build(Scope.build("IO.FileRead", ["a\"b"], []))
     show_build(Scope.build("IO.FileRead", ["a;b"], []))
+    show_build(Scope.build("IO.FileRead", ["/srv/a\\b"], []))
     show_build(Scope.build("IO.FileRead", [""], []))
     show_build(Scope.build("IO.NetConnect", ["bad host!"], []))
     let l = Authority.restrict_layer("t.march:3", "IO.Console")
@@ -50,6 +51,7 @@ let expected = String.concat "\n" [
   "Err(IO.FileRead: the scope `../etc` on `IO.FileRead` is a relative path; give an absolute path, one starting with `/`)";
   "Err(IO.FileRead: the string \"a\"b\" contains \")";
   "Err(IO.FileRead: the string \"a;b\" contains ;)";
+  "Ok(IO.FileRead(\"/srv/a\\\\b\"))";
   "Err(IO.FileRead: the first string is empty)";
   "Err(IO.NetConnect: `bad host!` is not a host name: labels are letters, digits and `-`, separated by single dots)";
   "IO.Clock refused by the restrict at t.march:3 (IO.Console)";

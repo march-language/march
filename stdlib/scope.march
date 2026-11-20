@@ -116,7 +116,7 @@ mod Scope do
   end
 
   pfn entry_text(kind : String, strings : List(String), options : List(String)) : String do
-    let quoted = List.map(strings, fn s -> "\"" ++ s ++ "\"")
+    let quoted = List.map(strings, fn s -> "\"" ++ string_replace_all(s, "\\", "\\\\") ++ "\"")
     match List.append(quoted, options) do
     Nil -> kind
     items -> kind ++ "(" ++ string_join(items, ", ") ++ ")"
