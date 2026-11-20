@@ -12770,6 +12770,69 @@ let test_float_case_join_mixed_arms_keep_ptr_slot () =
   Alcotest.(check bool) "the merge unboxes its box and frees it" true
     (match Str.search_forward re fn_ir 0 with _ -> true | exception Not_found -> false)
 
+(* A record whose native array field is read out and set copied the whole
+   array on every set: borrow inference left [lane_set]'s record borrowed (it
+   is only ever projected), so the caller still held it, and the array had a
+   second reference when [native_int_arr_set] ran.  Owned, with every field
+   read taking its own reference, the record is released before the set and
+   a record the caller handed over whole leaves the array one reference, so
+   the set writes in place
+   (specs/progress/2026-11-20-array-field-set-in-place.md). *)
+let array_field_fns = {|
+  type Occ = { name : String, lanes : NativeIntArr, tags : List(Int), tick : Int }
+  pfn lane_set(o : Occ, i : Int, v : Int) : Occ do
+    let lanes = o.lanes
+    let name = o.name
+    let tags = o.tags
+    let tick = o.tick
+    { name: name, lanes: NativeArray.set_int(lanes, i, v), tags: tags, tick: tick + 1 }
+  end
+  pfn step(o : Occ, i : Int, n : Int) : Occ do
+    if i >= n do o else
+      let o = lane_set(o, i % 100, i)
+      step(lane_set(o, i, NativeArray.get_int(o.lanes, i % 100) + String.byte_size(o.name)), i + 1, n)
+    end
+  end
+|}
+
+let array_field_main = {|
+  fn main(_cap_console : Cap(IO.Console)) : Unit do
+    let o = step({ name: "walkers", lanes: NativeArray.make_int(2000, 0), tags: [1, 2, 3], tick: 0 }, 0, 1500)
+    println(o.name ++ " " ++ int_to_string(o.tick) ++ " " ++ int_to_string(NativeArray.get_int(o.lanes, 1499))
+      ++ " " ++ int_to_string(NativeArray.sum_int(o.lanes)) ++ " " ++ int_to_string(List.length(o.tags)))
+    ()
+  end
+|}
+
+let test_array_field_set_releases_record_first () =
+  let (project_root, main_exe, src, _tmp) = write_march_source ~name:"march_arrayfield_ir"
+    (float_join_src ~name:"ArrayFieldIr" ~needs:"" array_field_fns array_field_main)
+  in
+  let fn_ir = ir_define (float_join_cli_ir ~project_root ~main_exe ~src) "lane_set" in
+  Alcotest.(check bool) "lane_set is in the IR" true (fn_ir <> "");
+  let at pat = try Some (Str.search_forward (Str.regexp_string pat) fn_ir 0) with Not_found -> None in
+  match at "call void @__drop$R4_", at "native_int_arr_set" with
+  | None, _ -> Alcotest.fail "lane_set never releases its record (borrowed: the set copies the array)"
+  | _, None -> Alcotest.fail "lane_set has no array set"
+  | Some drop, Some set ->
+    Alcotest.(check bool) "the record is released before the array set" true (drop < set)
+
+let test_array_field_set_matches_interpreter_compiled () =
+  let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_arrayfield_parity"
+    (float_join_src ~name:"ArrayFieldParity" ~needs:"" array_field_fns array_field_main)
+  in
+  let cd = Printf.sprintf "cd %s && " (Filename.quote project_root) in
+  let interp = read_cmd_output (Printf.sprintf "%s%s %s 2>&1" cd
+      (Filename.quote main_exe) (Filename.quote src)) in
+  Alcotest.(check bool) "the interpreter printed the result" true
+    (ir_contains interp "walkers 3000" && not (ir_contains interp "rror"));
+  let bin = Filename.concat tmp "arrayfieldparitybin" in
+  match compile_march_or_skip ~cmd_prefix:cd ~main_exe ~bin ~src () with
+  | None -> ()
+  | Some bin ->
+    Alcotest.(check string) "compiled output equals the interpreter's" interp
+      (read_cmd_output (Printf.sprintf "%s 2>&1" (Filename.quote bin)))
+
 let test_float_case_join_matches_interpreter_compiled () =
   let (project_root, main_exe, src, tmp) = write_march_source ~name:"march_floatjoin_parity"
     (float_join_src ~name:"FloatJoinParity" ~needs:""
@@ -21486,6 +21549,10 @@ let codegen_suites =
             test_float_case_join_matches_interpreter_compiled;
           Alcotest.test_case "compiled Float-valued join loop does not leak" `Slow
             test_float_case_join_no_leak_compiled;
+          Alcotest.test_case "a record's array field set releases the record first" `Quick
+            test_array_field_set_releases_record_first;
+          Alcotest.test_case "compiled array field sets equal the interpreter" `Slow
+            test_array_field_set_matches_interpreter_compiled;
           Alcotest.test_case "a type in an extern signature stays boxed" `Quick test_unboxed_aggregate_ffi_type_stays_boxed;
           Alcotest.test_case "module-declared aggregate is unboxed" `Quick test_module_unboxed_aggregate;
           Alcotest.test_case "C-built module aggregate stays boxed" `Quick test_module_unboxed_c_built_stays_boxed;

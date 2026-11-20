@@ -720,7 +720,28 @@ let insert_owned_aggregate_param_drops (env : env) (borrowed : StringSet.t)
             Tir.ELet (v, push v.Tir.v_ty push_set aliases e1,
                       push_same live_e2 aliases' e2)
           else
-            Tir.ELet (v, e1, push_same live_e2 aliases' e2)
+            (* A candidate [e2] no longer mentions, through itself or an
+               alias into it, is released right here rather than at the
+               path's end -- when [e2] consumes a native array.  That array
+               is typically a field of the candidate that Perceus dup'd
+               ([dup_owned_field]): released at the end, the candidate still
+               holds a second reference when the set runs and the set copies
+               the whole array; released here, a candidate the caller handed
+               over whole leaves the field one reference and the set writes
+               in place ([{ r with lanes: set_int(r.lanes, i, v) }]).  Kept
+               to that case so every other function's drops stay where they
+               were. *)
+            let early =
+              List.filter (fun p -> not (Perceus_liveness.name_free_in p.Tir.v_name e2)) live_e2 in
+            if early <> []
+               && Borrow.consumes_native_array e2
+               && not (StringSet.exists
+                         (fun a -> Perceus_liveness.name_free_in a e2) aliases') then
+              Tir.ELet (v, e1,
+                drop_ops early
+                  (push_same (List.filter (fun p -> not (List.memq p early)) live_e2) aliases' e2))
+            else
+              Tir.ELet (v, e1, push_same live_e2 aliases' e2)
       | Tir.ESeq ((Tir.EIncRC (Tir.AVar w) | Tir.EAtomicIncRC (Tir.AVar w)
                    as e1), e2) ->
         Tir.ESeq (e1, push_same live (StringSet.remove w.Tir.v_name aliases) e2)

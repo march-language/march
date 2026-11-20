@@ -21,6 +21,14 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **Setting a native array kept in a record writes in place.** A function that reads an
+  array field out of a record and sets it (`let lanes = r.lanes` ... `{ ..., lanes:
+  NativeArray.set_int(lanes, i, v) }`) copied the whole array on every set: the record
+  still held a second reference. The record is now released after its last read, so a
+  record handed over whole leaves the array one reference and the set writes in place
+  (Ur's lane updates: 1.67 s to 0.19 s on a 200,000-element array). The
+  `{ r with lanes: set_int(r.lanes, ...) }` form still copies, since the update reads
+  `r` after the set; read the fields out first.
 - **`forge test FILE` runs only the files you name.** The compiled runner put all of
   `test/` on the library path, and the compiler loads every file there, so naming one
   test file compiled and ran the whole suite. Naming part of the suite now compiles
