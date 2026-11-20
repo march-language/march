@@ -2833,6 +2833,40 @@ let test_resolve_entry_directory_is_rejected () =
     Alcotest.(check bool) "error explains it is not a file" true
       (contains msg "not a file")
 
+(* `forge test test/one_test.march` compiled every test module in test/ and ran
+   them all: test/ went on MARCH_LIB_PATH whole.  Naming part of the suite now
+   stages just those files plus test/'s helpers. *)
+let test_stage_selected_tests () =
+  let root = Filename.temp_dir "stage_tests_" "" in
+  let test_dir = Filename.concat root "test" in
+  let stage_dir = Filename.concat root "stage" in
+  let write rel =
+    let path = Filename.concat test_dir rel in
+    let rec mkdirs d = if not (Sys.file_exists d) then (mkdirs (Filename.dirname d); Unix.mkdir d 0o755) in
+    mkdirs (Filename.dirname path);
+    let oc = open_out path in output_string oc "mod M do end\n"; close_out oc; path
+  in
+  let a = write "a_test.march" and b = write "b_test.march" in
+  let _ = write "fixture.march" and _ = write "nested/shared.march" in
+  let staged rel = Sys.file_exists (Filename.concat stage_dir rel) in
+  Fun.protect
+    ~finally:(fun () -> ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote root))))
+    (fun () ->
+       (match Cmd_test.stage_selected_tests ~test_dir ~stage_dir [ a ] with
+        | None -> Alcotest.fail "one of two test files should be staged"
+        | Some entry ->
+          Alcotest.(check string) "entry is the staged file" (Filename.concat stage_dir "a_test.march") entry;
+          Alcotest.(check bool) "requested test staged" true (staged "a_test.march");
+          Alcotest.(check bool) "other test left out" false (staged "b_test.march");
+          Alcotest.(check bool) "helper staged" true (staged "fixture.march");
+          Alcotest.(check bool) "nested helper staged" true (staged "nested/shared.march"));
+       Alcotest.(check bool) "the whole suite runs test/ as is" true
+         (Cmd_test.stage_selected_tests ~test_dir ~stage_dir [ a; b ] = None);
+       let outside = Filename.concat root "elsewhere_test.march" in
+       let oc = open_out outside in output_string oc "mod M do end\n"; close_out oc;
+       Alcotest.(check bool) "a file outside test/ runs test/ as is" true
+         (Cmd_test.stage_selected_tests ~test_dir ~stage_dir [ outside ] = None))
+
 let test_resolve_entry_outside_a_project_runs_bare () =
   (* Outside a project there is no forge.toml to read, so the file runs with no
      MARCH_LIB_PATH and no FFI flags — the same fallback Cmd_test.run_files
@@ -3701,6 +3735,8 @@ let () =
         test_resolve_entry_directory_is_rejected;
       Alcotest.test_case "a FILE outside a project runs bare" `Quick
         test_resolve_entry_outside_a_project_runs_bare;
+      Alcotest.test_case "forge test FILE stages only the named test files" `Quick
+        test_stage_selected_tests;
       Alcotest.test_case "interpreted FILE run with no args: argv excludes march" `Quick
         test_interpreted_file_run_argv_excludes_compiler;
       Alcotest.test_case "forge interactive puts ffi flags after the entry" `Quick

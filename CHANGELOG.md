@@ -21,6 +21,12 @@ git log is authoritative for exact commits.
 
 ### Changed
 
+- **`forge test FILE` runs only the files you name.** The compiled runner put all of
+  `test/` on the library path, and the compiler loads every file there, so naming one
+  test file compiled and ran the whole suite. Naming part of the suite now compiles
+  just those files plus `test/`'s helper modules (any non-test `.march` file).
+  `forge test` with no arguments, or naming every test file, runs the suite as before.
+
 - **A Float `if` or `match` with a record field arm no longer allocates.** When one
   branch was a field read such as `event.progress`, compiled code boxed the result of
   every branch on the heap and freed it again at the join. The field read now counts
